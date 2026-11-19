@@ -8,12 +8,14 @@ Status: early development. See [docs/work-order.md](docs/work-order.md) for prog
 
 ## Quick start
 
-Requires Docker and a Rust toolchain. Run `make` to see every target.
+Requires Docker with Compose and a Rust toolchain. Run `make` to see every
+target. Start the stack in one terminal and run the health check in another.
+Use Ctrl-C to stop watching for changes before shutting down the stack.
 
 ```sh
-make dev      # start the server stack in Docker (available from W02)
-make client   # run the desktop client against it (available from W04)
-make test     # run the tests
+make dev
+curl -fsS --cacert .dev/tls/cert.pem https://127.0.0.1:8443/v1/health
+make down
 ```
 
 ## Docs

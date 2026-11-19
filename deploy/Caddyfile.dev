@@ -1,0 +1,22 @@
+{
+	admin off
+	persist_config off
+	auto_https off
+	default_sni localhost
+	servers {
+		protocols h1 h2
+	}
+	log {
+		output stdout
+		format json
+	}
+}
+
+https://:8443 {
+	tls /dev-data/tls/cert.pem /dev-data/tls/key.pem
+	route {
+		reverse_proxy /v1/* api:8080
+		reverse_proxy /rtc* livekit:7880
+		respond 404
+	}
+}
