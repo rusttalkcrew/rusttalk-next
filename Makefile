@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help dev bot logs down reset lint fmt test
+.PHONY: help dev client bot logs down reset lint fmt test
 
 DEV_COMPOSE := docker compose -f deploy/compose.dev.yml -p rusttalk-dev
 CARGO_SCOPE ?= --workspace
@@ -25,6 +25,15 @@ dev: ## Start the Docker stack and rebuild the API on changes
 		x509 -in /dev-data/tls/cert.pem -noout -sha256 -fingerprint) && \
 		printf '\033[1;34m==> https://127.0.0.1:8443\n==> LAN wss://%s:8443\n==> TLS %s\033[0m\n' "$$NODE_IP" "$$fingerprint"
 	$(DEV_COMPOSE) watch --no-up api
+
+client: ## Run the native client, optionally with PROFILE=a to z
+	@case "$${PROFILE+x}:$$PROFILE" in \
+		:) unset RUSTTALK_PROFILE ;; \
+		x:[abcdefghijklmnopqrstuvwxyz]) export RUSTTALK_PROFILE="$$PROFILE" ;; \
+		*) printf '\033[1;31mPROFILE must be one lowercase letter (a-z).\033[0m\n' >&2; exit 1 ;; \
+	esac; \
+	printf '\033[1;34m==> Starting native client\033[0m\n'; \
+	cargo run --locked -p rusttalk-client
 
 bot: export CARGO_TARGET_DIR ?= target
 bot: ## Join the dev room as bot-a and bot-b
