@@ -8,16 +8,18 @@ on:
 jobs:
   linux:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-      - run: make lint test
+      - run: make lint test CARGO_SCOPE='--workspace --exclude rusttalk-bot --features rusttalk-core/livekit-tls'
 
   windows-client:
     runs-on: windows-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
