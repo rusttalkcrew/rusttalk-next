@@ -6,12 +6,21 @@ No telemetry, analytics, crash reporting or tracking.
 
 Written in W06; exact list of plaintext fields.
 
+## What the desktop client stores
+
+The device signing secret, device agreement secret, sync key, person ID and
+public device certificate live in Windows Credential Manager or Linux Secret
+Service. Development profiles use separate entries. The client logs the
+person fingerprint locally. The first launch displays the recovery words in
+the terminal. The client never stores or logs the words or the root signing key.
+
 ## Outbound connections
 
 - **Bot:** Only the configured RustTalk stack. Signaling and failure-path
   validation use Caddy on 8443/TCP. WebRTC uses the advertised LiveKit node on
   7882/UDP or 7881/TCP. The bot mints its dev token locally.
-- **Desktop client, API and index:** No outbound connections in W03.
+- **Desktop client, API and index:** No outbound connections in W04. On Linux the
+  client accesses Secret Service over the local session bus.
 - **Caddy:** Proxies requests to the API on 8080/TCP and to LiveKit on
   7880/TCP, using Docker's internal DNS. Dev TLS uses a local certificate.
 - **LiveKit:** Replies to Caddy and to room participants over their WebRTC

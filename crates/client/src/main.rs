@@ -1,16 +1,39 @@
-#![cfg_attr(windows, windows_subsystem = "windows")]
-
+mod keystore;
 mod log_file;
 
-use std::{fs, sync::Mutex};
+use std::{env, fs, path::PathBuf, process::ExitCode, sync::Mutex};
 
+use anyhow::{Context, Result, bail};
 use etcetera::{BaseStrategy, base_strategy::choose_native_strategy};
+use rusttalk_core::identity::fingerprint;
 use tracing::Level;
 use tracing_subscriber::{filter::Targets, prelude::*};
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = choose_native_strategy()?.config_dir().join("RustTalk");
-    fs::create_dir_all(&config)?;
+fn main() -> ExitCode {
+    if let Err(error) = run() {
+        tracing::error!(error = %format_args!("{error:#}"), "client startup failed");
+        eprintln!("RustTalk client startup failed: {error:#}");
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
+}
+
+fn run() -> Result<()> {
+    let (config, service) = match env::var_os("RUSTTALK_PROFILE") {
+        None => (
+            choose_native_strategy()?.config_dir().join("RustTalk"),
+            "RustTalk".to_owned(),
+        ),
+        Some(profile) => {
+            let [letter @ b'a'..=b'z'] = profile.as_encoded_bytes() else {
+                bail!("RUSTTALK_PROFILE must be one lowercase letter (a-z)");
+            };
+            let service = format!("RustTalk-dev-{}", char::from(*letter));
+            let config = PathBuf::from(".dev/profiles").join(profile);
+            (config, service)
+        }
+    };
+    fs::create_dir_all(&config).context("create client config directory")?;
 
     tracing_subscriber::registry()
         .with(
@@ -28,6 +51,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
-    tracing::info!("RustTalk client started");
+    let identity = keystore::load_or_create(&config, &service)?;
+    tracing::info!(
+        fingerprint = %fingerprint(identity.certificate.person_id()),
+        "RustTalk client started"
+    );
     Ok(())
 }

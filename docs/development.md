@@ -41,6 +41,24 @@ On Linux, building the bot requires Clang 21 or later, `pkg-config` and
 GLib development headers. The SDK downloads prebuilt WebRTC during the
 first build.
 
+## Native client
+
+Run `make client` in the repository root to build and start the native client.
+It uses the platform config directory and the OS keystore (Windows Credential
+Manager or an unlocked Linux Secret Service session).
+
+Run `make client PROFILE=a` for an isolated identity. A profile is exactly
+one lowercase letter from `a` to `z`. For profile `a`, the settings and data
+directory is `.dev/profiles/a`, which holds `rusttalk.log` and the startup
+lock. The keystore service is `RustTalk-dev-a`. `make reset` removes the
+directory and leaves OS keystore entries in place.
+
+On the first successful start, the client prints its recovery words to the
+terminal and saves the device identity. Each successful start logs the person
+fingerprint to `rusttalk.log`. The client currently opens a console on Windows
+so the first-run words are visible there too. Recovery-word confirmation is
+available in core for the UI.
+
 ## Checks
 
 - `make lint`: clippy with warnings as errors, plus `rustfmt --check`.
