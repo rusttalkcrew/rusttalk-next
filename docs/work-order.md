@@ -24,7 +24,7 @@ content on the server, not even temporarily.
   verified (`docs/privacy.md`). Gate: that bot join works on the dev stack.
 
 **2. Identity**
-- [ ] **W04 Identity.** 24 words, root key, device keys and certificates, revocation,
+- [x] **W04 Identity.** 24 words, root key, device keys and certificates, revocation,
   keystore, dev profiles (`make client PROFILE=a`). Gate: unit tests incl. bad
   signatures and revoked devices.
 - [ ] **W05 Sign-in and membership.** Server key, pinning, challenge sign-in, session
