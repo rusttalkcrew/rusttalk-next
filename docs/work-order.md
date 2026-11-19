@@ -12,7 +12,7 @@ docs it touches are updated, and its gate holds. No item ever stores readable
 content on the server, not even temporarily.
 
 **1. Foundation**
-- [ ] **W01 Repository and Makefile.** Workspace layout (section 3), colorized
+- [x] **W01 Repository and Makefile.** Workspace layout (section 3), colorized
   self-documenting Makefile, README, `docs/` outline, `docs/work-order.md`, CI.
   Gate: `make` prints the help; CI runs.
 - [ ] **W02 Dev stack and logging.** `deploy/compose.dev.yml` with api, livekit, caddy;
