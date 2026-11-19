@@ -9,6 +9,12 @@ them, so clients can pin the SHA-256 certificate fingerprint printed by
 `make dev`. Resetting the stack replaces that certificate and invalidates
 its pin.
 
+The bot can pin the same certificate at the host LAN IP. Keep 8443/TCP
+reachable for TLS signaling and 7882/UDP plus 7881/TCP reachable at LiveKit's
+advertised `NODE_IP` for media. The IP must be reachable even when a bot
+uses loopback for signaling. LiveKit's signaling port 7880 stays on the
+Compose network. See [LiveKit privacy settings](privacy.md#livekit).
+
 ## Logs and health
 
 Check the API through Caddy with:

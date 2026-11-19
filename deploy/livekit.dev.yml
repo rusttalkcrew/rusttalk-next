@@ -3,6 +3,7 @@ rtc:
   tcp_port: 7881
   udp_port: 7882
   use_external_ip: false
+  use_ice_lite: true
 logging:
   json: true
 keys:
