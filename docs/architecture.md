@@ -16,4 +16,7 @@ docs/            this documentation
 
 ## Request routing
 
-Written in W02.
+Caddy terminates TLS. It sends `/v1/*` to the API on port 8080 and `/rtc*`
+to LiveKit signaling on port 7880, including WebSocket upgrades. LiveKit
+media bypasses Caddy and goes directly to LiveKit on port 7882/UDP or the
+7881/TCP fallback.
