@@ -19,7 +19,7 @@ content on the server, not even temporarily.
   `make dev`, `make logs`, `make down`, `make reset`; client log file and JSON
   service logs with session-close reasons. Gate: `make dev` from a clean checkout
   serves `/v1/health` over TLS by IP address, without a domain.
-- [ ] **W03 LiveKit by IP, no telemetry.** A bot joins a LiveKit room through caddy
+- [x] **W03 LiveKit by IP, no telemetry.** A bot joins a LiveKit room through caddy
   with a pinned self-signed certificate; all LiveKit outbound reporting is off and
   verified (`docs/privacy.md`). Gate: that bot join works on the dev stack.
 
