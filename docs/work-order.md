@@ -15,7 +15,7 @@ content on the server, not even temporarily.
 - [x] **W01 Repository and Makefile.** Workspace layout (section 3), colorized
   self-documenting Makefile, README, `docs/` outline, `docs/work-order.md`, CI.
   Gate: `make` prints the help; CI runs.
-- [ ] **W02 Dev stack and logging.** `deploy/compose.dev.yml` with api, livekit, caddy;
+- [x] **W02 Dev stack and logging.** `deploy/compose.dev.yml` with api, livekit, caddy;
   `make dev`, `make logs`, `make down`, `make reset`; client log file and JSON
   service logs with session-close reasons. Gate: `make dev` from a clean checkout
   serves `/v1/health` over TLS by IP address, without a domain.
