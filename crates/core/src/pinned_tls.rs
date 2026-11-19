@@ -35,6 +35,7 @@ pub fn fingerprint(der: &[u8]) -> Fingerprint {
 }
 
 /// Install the SDK's process-wide transports for one self-hosted server at startup.
+// shortcut: one pinned server per process, upgrade to a host-to-pin map for the multi-server client (W15).
 pub fn register(
     server: &Url,
     pin: Option<Fingerprint>,
