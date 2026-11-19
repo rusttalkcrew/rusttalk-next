@@ -301,7 +301,7 @@ impl WordConfirmation {
 }
 
 fn parse_words(words: &str) -> Result<Mnemonic, IdentityError> {
-    let mnemonic = Mnemonic::parse_in_normalized(Language::English, words)
+    let mnemonic = Mnemonic::parse_in_normalized(Language::English, &words.to_lowercase())
         .map_err(|_| IdentityError::InvalidWords)?;
     if mnemonic.word_count() != WORD_COUNT {
         return Err(IdentityError::InvalidWords);

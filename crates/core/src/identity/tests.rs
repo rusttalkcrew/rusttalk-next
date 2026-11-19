@@ -51,7 +51,8 @@ fn known_words_derive_the_same_person_and_sync_key_on_fresh_devices() {
 fn generated_words_restore_and_bad_recovery_phrases_fail() {
     let (words, identity) = DeviceIdentity::create("Desktop").unwrap();
     assert_eq!(words.split_whitespace().count(), 24);
-    let restored = DeviceIdentity::add_device(&words, "New Desktop").unwrap();
+    let typed = format!("  {}\n", words.to_uppercase());
+    let restored = DeviceIdentity::add_device(&typed, "New Desktop").unwrap();
     assert_eq!(
         identity.certificate.person_id(),
         restored.certificate.person_id()

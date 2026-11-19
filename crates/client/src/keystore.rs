@@ -53,14 +53,14 @@ fn create(entry: &Entry) -> Result<DeviceIdentity> {
     secret.extend_from_slice(identity.certificate.person_id());
     secret.extend_from_slice(&certificate);
 
+    // Save first: words shown for an identity that was never stored would be useless.
+    entry
+        .set_secret(&secret)
+        .context("save identity to OS keystore")?;
     // shortcut: words printed to terminal until the client UI exists
     let mut stdout = io::stdout().lock();
     writeln!(stdout, "Recovery words (shown once):\n{}", words.as_str())
         .and_then(|()| stdout.flush())
         .context("display recovery words")?;
-    drop(words);
-    entry
-        .set_secret(&secret)
-        .context("save identity to OS keystore")?;
     Ok(identity)
 }
