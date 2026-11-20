@@ -512,3 +512,8 @@ back by serving an older blob.
 Apply pending local edits after merging and publish the next version to all
 current peers. A failed peer is reported separately and can catch up after
 reconnect. A restored device needs a verified member server as a starting point.
+The desktop client syncs on each connect and after each local change.
+A device restored from the words joins one server by invite and then picks
+up the rest of the list from that server's blob.
+There is no leave route: leaving a server in the client removes it from the
+person's devices, and the membership stays until a moderator removes it.

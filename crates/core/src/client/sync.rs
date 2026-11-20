@@ -79,11 +79,13 @@ pub struct VersionConflict(pub i64);
 pub async fn load<'a>(peers: &[Peer<'a>], key: &[u8; 32]) -> (Option<Snapshot>, Failures<'a>) {
     let mut newest: Option<(&Server, Snapshot)> = None;
     let mut failures = Vec::new();
-    let mut replies =
-        stream::iter(peers.iter().map(|&(server, session)| async move {
-            (server, load_one(server, session, key).await)
-        }))
-        .buffer_unordered(8);
+    // Futures built in a loop, not a closure, so callers can spawn this:
+    // a closure here makes the future not provably `Send`.
+    let mut requests = Vec::new();
+    for &(server, session) in peers {
+        requests.push(async move { (server, load_one(server, session, key).await) });
+    }
+    let mut replies = stream::iter(requests).buffer_unordered(8);
     while let Some((server, result)) = replies.next().await {
         match result {
             Ok(Some(snapshot)) => {
@@ -167,11 +169,12 @@ pub async fn push_all<'a>(
         .checked_add(1)
         .context("sync version exhausted")?;
     let body = seal(key, version, &local.state)?;
-    let mut replies = stream::iter(peers.iter().map(|&(server, session)| {
+    let mut requests = Vec::new();
+    for &(server, session) in peers {
         let body = &body;
-        async move { (server, push_one(server, session, body.clone()).await) }
-    }))
-    .buffer_unordered(8);
+        requests.push(async move { (server, push_one(server, session, body.clone()).await) });
+    }
+    let mut replies = stream::iter(requests).buffer_unordered(8);
     let mut failures = Vec::new();
     while let Some((server, result)) = replies.next().await {
         match result {

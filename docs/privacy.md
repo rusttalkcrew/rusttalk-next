@@ -110,10 +110,15 @@ person fingerprint locally. Creating an account shows the recovery words once
 in the app window. The client never stores or logs the words or the root
 signing key. "Sign out of this device" deletes the keystore entry.
 
-Next to the settings, `servers.json` and `joined.json` hold each joined
-server's address, server ID and TLS fingerprint. `voice.json` holds the
+Next to the settings, `servers.json` holds each server's address, server ID
+and TLS fingerprint. `sync.json` holds the last merged device sync snapshot
+with its version: joined servers with their pins, servers left, synced
+settings, and local edits not yet uploaded. `voice.json` holds the
 chosen audio devices, voice options, and the chosen camera's name,
-resolution and frame rate. Decrypted names, messages and pictures stay in
+resolution and frame rate. Of these, only the voice options (push to talk
+and its key, activation level, echo cancellation, noise suppression, auto
+gain) and the camera resolution and frame rate sync to the person's other
+devices; the chosen microphone, speakers and camera stay on this device. Decrypted names, messages and pictures stay in
 memory only; the log never contains them, file names or invite links. A
 downloaded file is written only where the person picks in the save dialog,
 through a temporary file in that folder that is removed if the download fails.

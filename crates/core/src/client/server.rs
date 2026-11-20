@@ -15,6 +15,7 @@ use reqwest::{Client, RequestBuilder, Response};
 use url::Url;
 
 /// A verified RustTalk HTTPS origin and its pinned transport.
+#[derive(Clone)]
 pub struct Server {
     http: Client,
     server: KnownServer,

@@ -5,9 +5,9 @@
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    io::{self, Read, Write},
+    io::{Read, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, mpsc},
+    sync::{Arc, mpsc},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -22,7 +22,7 @@ use rusttalk_core::{
     camera::CameraOptions,
     client::{
         Attachment, BlobRef, Catalog, Event, KeyClient, MessageBody, MessageError, MessageRecord,
-        Server as Api, UploadRejected, decode_image, decode_thumbnail, invite_name, save_json,
+        Server as Api, UploadRejected, decode_image, decode_thumbnail, invite_name,
         voice::{
             ConnectionState, LiveFileEvent, NativeVideoSource, RoomEvent, TrackSid, TrackSource,
             VoiceRoom, VoiceRoster, VoiceState,
@@ -42,6 +42,7 @@ use url::Url;
 
 use crate::{
     audio::Audio,
+    device_sync::{DeviceSync, Edit, Synced},
     screen::{self, Video},
     server::{
         Body, CallState, Category, Channel, Device, Directory, Dm, Id, Member, Msg, Peer, Perms,
@@ -175,6 +176,8 @@ pub enum Update {
     LiveProgress(Id, LiveFileEvent),
     /// This device may not send files in the call.
     NoFiles(Url, Id),
+    /// The joined servers and synced settings after a device sync.
+    Synced(Box<Synced>),
     Failed(String),
 }
 
@@ -192,6 +195,7 @@ struct Ctx {
     data: Arc<Path>,
     audio: Audio,
     video: Video,
+    sync: Arc<DeviceSync>,
 }
 
 impl Ctx {
@@ -217,6 +221,7 @@ impl Net {
             .build()
             .context("start network runtime")?;
         let (updates, receiver) = mpsc::channel();
+        let sync = Arc::new(DeviceSync::open(&data)?);
         Ok(Self {
             runtime: Some(runtime),
             ctx: Ctx {
@@ -226,6 +231,7 @@ impl Net {
                 data: data.into(),
                 audio,
                 video,
+                sync,
             },
             updates: receiver,
         })
@@ -233,10 +239,7 @@ impl Net {
 
     /// Servers this profile joined earlier, to reconnect at start.
     pub fn joined(&self) -> Vec<KnownServer> {
-        load_joined(&self.ctx.data).unwrap_or_else(|error| {
-            tracing::error!(error = %format_args!("{error:#}"), "reading joined servers failed");
-            Vec::new()
-        })
+        self.ctx.sync.servers()
     }
 
     /// Check an invite's server and read its name, without joining yet.
@@ -262,13 +265,19 @@ impl Net {
         commands
     }
 
-    /// Drop a server from the saved list.
-    pub fn forget(&self, address: &Url) {
-        if let Err(error) = edit_joined(&self.ctx.data, |list| {
-            list.retain(|s| &s.address != address)
-        }) {
-            tracing::error!(error = %format_args!("{error:#}"), "removing a server failed");
-        }
+    /// Publish local edits to this person's other devices.
+    pub fn sync(&self, edits: Vec<Edit>) {
+        let ctx = self.ctx.clone();
+        self.spawn(async move { sync(&ctx, edits).await });
+    }
+
+    /// Leave a server on all devices. Its connection stays until the leave is published there.
+    pub fn leave(&self, address: Url, commands: UnboundedSender<Command>) {
+        let ctx = self.ctx.clone();
+        self.spawn(async move {
+            sync(&ctx, vec![Edit::Leave(address)]).await;
+            drop(commands);
+        });
     }
 
     /// The network runtime, for LiveKit objects created off it (camera sources).
@@ -437,10 +446,8 @@ async fn run(
             Ok((api, session)) => {
                 if invite.take().is_some() {
                     tracing::info!(server = %fingerprint(&server.server_id), "joined server");
-                    if let Err(error) = edit_joined(&ctx.data, |list| {
-                        list.retain(|s| s.address != server.address);
-                        list.push(server.clone());
-                    }) {
+                    let joined = vec![Edit::Join(api.known_server().clone())];
+                    if let Err(error) = ctx.sync.edit(&ctx.data, joined).await {
                         tracing::error!(error = %format_args!("{error:#}"), "saving joined server failed");
                     }
                 }
@@ -449,7 +456,9 @@ async fn run(
                         delay = 1;
                         tracing::info!(server = %fingerprint(&server.server_id), "connected to server");
                         ctx.send(Update::Status(url.clone(), Status::Online));
-                        match serve(&ctx, &url, &mut client, &mut state, &mut commands).await {
+                        let end = serve(&ctx, &url, &mut client, &mut state, &mut commands).await;
+                        ctx.sync.set_peer(&url, None);
+                        match end {
                             End::Quit => return,
                             End::Closed(Some(reason))
                                 if matches!(reason.as_str(), "kicked" | "banned" | "revoked") =>
@@ -696,7 +705,31 @@ async fn resume(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, state: &mut St
         }
     }
     sync_voice_key(client, state);
+    // Also after each token refresh, which picks up changes from other devices twice a day.
+    let (api, session) = client.sync_peer();
+    ctx.sync.set_peer(url, Some((api.clone(), session.clone())));
+    let ctx = ctx.clone();
+    tokio::spawn(async move { sync(&ctx, Vec::new()).await });
     Ok(())
+}
+
+/// Merge with this person's other devices and show the result.
+async fn sync(ctx: &Ctx, edits: Vec<Edit>) {
+    let result = ctx
+        .sync
+        .run(&ctx.data, &ctx.identity.sync_key, edits, |synced| {
+            for address in &synced.conflicts {
+                let server = address.host_str().unwrap_or("a server");
+                ctx.send(Update::Failed(format!(
+                    "Your other device trusts a different key for {server}. Check with the server owner."
+                )));
+            }
+            ctx.send(Update::Synced(Box::new(synced)));
+        })
+        .await;
+    if let Err(error) = result {
+        tracing::error!(error = %format_args!("{error:#}"), "device sync failed");
+    }
 }
 
 async fn on_event(
@@ -1743,26 +1776,6 @@ fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs() as i64)
-}
-
-/// Serializes edits of joined.json across server tasks.
-static JOINED: Mutex<()> = Mutex::new(());
-
-fn load_joined(data: &Path) -> Result<Vec<KnownServer>> {
-    match fs::read(data.join("joined.json")) {
-        Ok(bytes) => serde_json::from_slice(&bytes).context("read joined servers"),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(error) => Err(error).context("open joined servers"),
-    }
-}
-
-fn edit_joined(data: &Path, edit: impl FnOnce(&mut Vec<KnownServer>)) -> Result<()> {
-    let _guard = JOINED
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let mut list = load_joined(data)?;
-    edit(&mut list);
-    save_json(data, &data.join("joined.json"), &list).context("save joined servers")
 }
 
 /// Connect to a voice channel and publish the microphone when allowed to talk.
