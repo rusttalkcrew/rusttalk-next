@@ -182,3 +182,18 @@ fn invite_key_binds_server_and_hides_epoch() {
     assert!(open_invite(&server, &random_key().unwrap(), &ct).is_err());
     assert!(open_invite(&server, &link, &ct[..INVITE_BYTES - 1]).is_err());
 }
+
+#[test]
+fn image_plaintext_limit_matches_ciphertext_limit() {
+    let key = random_key().unwrap();
+    let largest = vec![7; IMAGE_PLAINTEXT];
+    let ct = Metadata::Avatar
+        .seal(&[1; 32], b"person", 1, &key, &largest)
+        .unwrap();
+    assert_eq!(ct.len(), IMAGE_CIPHERTEXT);
+    assert!(
+        Metadata::Avatar
+            .seal(&[1; 32], b"person", 1, &key, &[7; IMAGE_PLAINTEXT + 1])
+            .is_err()
+    );
+}

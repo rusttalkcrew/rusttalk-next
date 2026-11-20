@@ -84,7 +84,8 @@ All endpoints below require `Authorization: Bearer <token>`.
 
 | Method and path | Body | Permission and success |
 | --- | --- | --- |
-| GET `/v1/me` | Empty | Any member. 200, `{person_id, device_id, joined_at, role_ids}` |
+| GET `/v1/me` | Empty | Any member. 200, `{person_id, device_id, joined_at, role_ids, status}`; `status` is the caller’s own presence choice |
+| PUT `/v1/me/status` | `{status}`, one of `online`, `away`, `invisible` | Any member. 204. Stored and applied to the member’s event sockets |
 | POST `/v1/me/revocations` | `{record}`, a W04 root-signed revocation for the caller's person | Any member. 204, affected device loses its token |
 | POST `/v1/invites` | `{uses, ttl_seconds, space_key_ct, name_ct?}` | `invite`. 201, `{id, code, expires_at}` |
 | DELETE `/v1/invites/{id}` | Empty | `invite`. 204 |
@@ -105,10 +106,10 @@ All endpoints below require `Authorization: Bearer <token>`.
 
 A role has `{id, kind, rank, permissions, name_ct}`. A member's permissions
 are the union of their role flags, and their highest rank is used for
-hierarchy. Owner (1000) and Admin (100) have all seven flags. Moderator (50)
+hierarchy. Owner (1000) and Admin (100) have all eight flags. Moderator (50)
 has `kick`, `ban`, and `delete_messages`. Member (0) has no flags and starts
-as the default. The other flags are `invite`, `manage_roles`, and
-`view_audit_log`, and `manage_channels`. Built-in role IDs
+as the default. The other flags are `invite`, `manage_roles`,
+`view_audit_log`, `manage_channels`, and `manage_server`. Built-in role IDs
 match their kinds. Custom roles have opaque IDs and ranks from 1 to 999,
 strictly below their creator. They can only receive flags that the creator
 has. `name_ct` is null or a metadata ciphertext of at most 512 bytes
@@ -185,8 +186,8 @@ in a state response indicating that the first epoch is still pending.
 | POST `/v1/keys/reject` | `{scope, epoch, sender, envelope}` | A reader of the scope. 204. Deletes a matching envelope addressed to the caller's device |
 | POST `/v1/keys/epochs` | `{scope, epoch, commitment, envelope}` | A reader of a rotating scope, or the owner for the initial space epoch. 201. The envelope is addressed to the caller's device |
 | GET `/v1/space` | Empty | Any member. 200, `{name_ct, description_ct, icon_ct}` |
-| PUT `/v1/space` | `{name_ct?, description_ct?, icon_ct?}` | Owner. 204 |
-| GET `/v1/members` | Empty | Any member. 200, `[{person_id, display_name_ct, avatar_ct, role_ids}]` |
+| PUT `/v1/space` | `{name_ct?, description_ct?, icon_ct?}` | `manage_server`. 204 |
+| GET `/v1/members` | Empty | Any member. 200, `[{person_id, display_name_ct, avatar_ct, role_ids, presence}]` |
 | PUT `/v1/me/profile` | `{display_name_ct?, avatar_ct?}` | Updates the authenticated member's own profile. 204 |
 | POST `/v1/invite-preview` | `{code}` | No bearer. 200, `{space_key_ct, name_ct}`. Missing, expired, spent or unpreviewable invite returns 404 |
 
@@ -202,8 +203,9 @@ person from uploading to that slot while they remain a member. A stale
 rejection leaves the current envelope in place.
 See [Crypto](crypto.md) for the binary envelope and metadata formats.
 
-Metadata PUTs replace the supplied record. Omitted or null optional fields
-clear existing values. Metadata writes require the current space epoch.
+Space and profile PUTs update the supplied fields. Omitted fields keep their
+values and explicit null clears a field. Metadata writes require the current
+space epoch.
 During space rotation, the API returns `409 space_key_unavailable`.
 A ciphertext from a different epoch returns `409 metadata_epoch_changed`.
 Server names, descriptions, channel names and topics, category names and
@@ -396,19 +398,28 @@ session validity before pushing updates.
 | `keys_needed` | `scope`, `epoch`, `device`. Reconcile pending wraps and delivered keys. Completion also wakes the recipient |
 | `rotate_needed` | `scope`. Fetch the current epoch and try to publish its successor |
 | `member_changed` | `person`, optional `device`. Refresh the member and device directory and catalog, and surface fingerprints |
+| `presence_changed` | `person_id`, `status`. Sent to members when visible presence changes |
 | `channel_changed` | None. Refresh the catalog |
 | `voice_changed` | `channel`. Fetch current voice participants. Sent to current channel readers on signed LiveKit join, leave and room-end notices |
 | `dm_created` | `channel`. Refresh the catalog and reconcile keys |
 | `message_created` | `channel`, `id`. Fetch the ciphertext record |
 | `message_deleted` | `channel`, `id`. Remove the record and hide edits that reference it |
-| `live_file_accepted` | `channel`, accepting `device`, signed `acceptance` object. Sent only to the offering device while it has channel read access |
-| `resync` | None. The socket fell behind. Fetch current state, including keys, catalog, member devices and visible message history |
+| `live_file_accepted` | `channel`, accepting `device`, signed `acceptance` object, optional `data` (true for data-room acceptances). Sent only to the offering device while it has channel read access |
+| `resync` | None. The socket fell behind. Fetch current state, including keys, catalog, member presence and devices, and visible message history |
 
 The API closes the socket when the token expires or ends, including kick,
 ban and device revocation. Close reasons are fixed strings and logged.
 The server keeps lagging sockets open and recomputes the outstanding
 key work. DM, message and voice notices are sent only to current channel readers.
 Fetch the roster when loading a channel list and after `resync`.
+A member’s first event socket announces their stored choice, which starts as
+`online`; an `invisible` member is not announced. The choice applies across
+sockets and devices and survives reconnects and server restarts. The directory
+and notices use `offline` for invisibility and for disconnected members. The
+last socket closing starts a one-second reconnect grace period before visible
+presence goes offline. Notices for one member are coalesced to at most one per
+second; the latest choice wins, and a choice reverted within that second sends
+nothing.
 
 ## Files
 
@@ -469,8 +480,8 @@ the next sweep.
 
 ### Live transfer
 
-A live offer is an original signed, encrypted chat message in the voice
-channel with flag bit 2 set and the offer as the last
+A live offer is an original signed, encrypted chat message in any readable
+and writable channel or DM with flag bit 2 set and the offer as the last
 [plaintext field](crypto.md#messages). The offer in order is a random
 32-byte transfer ID, a random 32-byte file key, the plaintext length
 (u64, at most 2 GiB), the chunk size (u32, 65,536), the file name byte
@@ -482,19 +493,39 @@ sender guesses the MIME type from the extension and uses
 receiver never derives a save path from it.
 
 The receiver chooses a destination and explicitly accepts an offer from a
-currently verified device in the same voice room. It sends
-`POST /v1/voice/{channel}/live-file` with a bearer header and JSON
-`{recipient, transfer, nonce, cancel, signature}`. This route requires
-voice channel `read` and returns 204 after queuing a volatile
-`live_file_accepted` event. `recipient` is the offerer's Ed25519 public
-key. The transfer ID and receiver-generated random 16-byte nonce are
-encoded in base64url without padding, as are the recipient and signature.
-`cancel` is false to accept and true to cancel that acceptance.
-Both the API and offerer verify the acceptance signature. The API checks
-that both devices are active in the LiveKit room before relaying an
-acceptance. Each offer can serve each accepting device once
-and accepts new recipients for ten minutes or until the sender cancels
-or leaves the room.
+currently verified device. For a transfer outside a call, each participant
+uses `POST /v1/channels/{channel}/live-file/token/{nonce}` with a bearer token
+and an empty body. The route requires a text channel or DM the caller can read,
+otherwise `400 not_a_chat_channel` or `403 channel_read_denied`, and returns
+`{token}`. DM participants can read and write their DM. The token allows
+joining for 60 seconds and is scoped to the `file-{channel}` LiveKit room.
+It allows subscribing, and publishing data only with write access, so a
+reader without write can receive but not send. Media publication is disabled,
+including for members with voice privileges. The client disables automatic
+track subscription and connects the receiver when they choose Save. The
+sender connects on a verified acceptance. The participant identity is the
+usual opaque LiveKit device identity followed by a dot and the acceptance
+nonce. Each acceptance has its own connection, which closes after success,
+failure or cancellation.
+
+After joining, the receiver sends `POST /v1/channels/{channel}/live-file`
+with a bearer header and JSON `{recipient, transfer, nonce, cancel, signature}`.
+To accept, the accepting device must read the channel and be in the data
+room, and the offering device must be allowed to write. Membership checks
+remove a data-room participant who loses read access, and a sender who loses
+write access. The API returns 204 after queuing a volatile
+`live_file_accepted` event to the offering device. In-call transfers also
+support the existing `POST /v1/voice/{channel}/live-file` route with the same
+body. It requires voice channel read access and both devices active in the
+voice room. A cancellation can be relayed without an active room connection.
+
+`recipient` is the offerer's Ed25519 public key. The transfer ID and
+receiver-generated random 16-byte nonce are encoded in base64url without
+padding, as are the recipient and signature. `cancel` is false to accept
+and true to cancel that acceptance. Both the API and offerer verify the
+acceptance signature. Each offer can serve each accepting device once and
+accepts new recipients for ten minutes or until the sender cancels it or
+ends the in-call transfer session.
 
 The sender opens an incremental LiveKit byte stream on topic
 `rusttalk.file`, with a singleton `destination_identities` list for

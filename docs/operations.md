@@ -57,11 +57,13 @@ Keep LiveKit's `logging.level` at `warn` or higher to
 suppress RoomService access logs that include the API key identifier.
 [LiveKit RoomService logging](https://github.com/livekit/livekit/blob/v1.13.11/pkg/service/twirp.go#L101-L145)
 
-A LiveKit token expires ten minutes after issue and authorizes room
-entry. Kick, ban and device revocation end API access, trigger rotation
-for readers and remove the device from every voice room. Losing `speak`
+A LiveKit voice token authorizes room entry for ten minutes after issue.
+A data-only transfer token authorizes entry for one minute. Kick, ban and
+device revocation end API access, trigger rotation for readers and remove
+the device from voice and data rooms. Losing `speak`
 revokes microphone and app audio publishing. Losing `video` revokes camera
-and screen publishing. Losing `write` revokes data publishing. The API
+and screen publishing. Losing `write` revokes data publishing in voice
+rooms and removes the affected devices from data rooms. The API
 also checks each join, because a token
 can outlive the session that requested it. An excluded device that
 reaches the relay lacks the new media key, and peers drop its frames

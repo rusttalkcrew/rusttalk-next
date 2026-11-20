@@ -15,6 +15,7 @@ pub mod messages;
 pub mod pinned_tls;
 #[cfg(all(target_os = "linux", any(feature = "capture", feature = "voice")))]
 mod pipewire_helper;
+pub mod presence;
 #[cfg(feature = "voice")]
 pub mod screen;
 pub mod sync;

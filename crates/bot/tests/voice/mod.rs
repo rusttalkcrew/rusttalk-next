@@ -83,6 +83,8 @@ pub async fn exercise(
     .await?;
     let mut c = KeyClient::connect(server, &c_device, &c_session).await?;
 
+    live_file::data_only(a, &mut b, &mut c, text, voice).await?;
+
     // Only A (owner) and B (admin) may speak. C keeps read access.
     a.request(
         Method::PUT,

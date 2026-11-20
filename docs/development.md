@@ -269,9 +269,23 @@ disconnect or API session closure. The API builds core without the
 For a new address, use `Server::probe` and show the observed server fingerprint
 for confirmation before connecting with that expected pin. Invite links
 already specify the expected pins. Use `KeyClient::next_event` while online
-to drive key delivery and refresh before `KeyClient::expires_at`.
+to drive key delivery and refresh before `KeyClient::expires_at`. Use
+`KeyClient::next_update` to receive those events alongside presence
+changes, and `KeyClient::set_status` to set the member’s status.
 
-For live files, use `VoiceRoom::offer_live_file` to post the offer and
+Use `KeyClient::set_avatar` and `KeyClient::set_server_icon` to validate
+and encrypt images for upload. After decrypting an avatar or icon with
+`KeyClient::decrypt_metadata`, use `decode_profile_image` to get RGBA
+frames and their delays.
+
+For live files in any readable and writable channel or DM, create
+`DataLiveFiles::new(&client, channel_id)` and keep it for the lifetime of local
+offers. Use its `offer_live_file` and forward API events to
+`handle_live_file_event`. Call `accept_live_file` when the receiver chooses a
+new destination. The returned download pumps its own room events and closes
+the data connection when it finishes or is dropped.
+
+For in-call transfers, use `VoiceRoom::offer_live_file` to post the offer and
 `accept_live_file` with a verified message record and a new destination
 path. Call `handle_live_file_event` for API events while polling
 `VoiceRoom::next_event` for LiveKit events. The returned `LiveDownload`

@@ -598,6 +598,7 @@ mod tests {
             db,
             key: std::sync::Arc::new(ed25519_dalek::SigningKey::from_bytes(&[7; 32])),
             changes: tokio::sync::broadcast::channel(128).0,
+            presence: Default::default(),
             voice: None,
             listing_changed: tokio::sync::watch::channel(()).0,
         };
