@@ -67,7 +67,7 @@ content on the server, not even temporarily.
 **9. The rest**
 - [x] **W14 Device sync.** Encrypted sync blob on every member server. Gate: two
   profiles of one person sync settings and server list.
-- [ ] **W15 Moderation polish and multi-server client.** Gate: one client on two dev
+- [x] **W15 Moderation polish and multi-server client.** Gate: one client on two dev
   servers at once.
 - [ ] **W16 Index server.** Gate: a dev server registers, a client finds it.
 - [ ] **W17 Updates and packaging.** Signed releases, verified client updates,
