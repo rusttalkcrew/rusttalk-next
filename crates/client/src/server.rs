@@ -32,6 +32,8 @@ pub struct Peer {
     pub connecting: bool,
     /// A device the server couldn't match to a member; `person` is all zeros.
     pub unknown: bool,
+    /// Names of the apps they share, only known inside the room.
+    pub apps: Vec<String>,
 }
 
 impl Peer {
@@ -76,6 +78,8 @@ pub struct TrackStats {
     pub person: Id,
     /// Sent by this device, rather than received.
     pub mine: bool,
+    /// The shared app, for an app track.
+    pub app: Option<String>,
     pub kbps: f64,
 }
 

@@ -9,6 +9,7 @@ mod keystore;
 mod log_file;
 mod net;
 mod server;
+mod share;
 
 use std::{env, fs, path::PathBuf, process::ExitCode, sync::Mutex};
 
