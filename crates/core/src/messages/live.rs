@@ -102,6 +102,11 @@ mod attachment {
         pub(crate) key: Key,
     }
 
+    /// Bidirectional formatting characters can disguise a name's extension when displayed.
+    fn is_bidi(c: char) -> bool {
+        matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+    }
+
     impl LiveAttachment {
         pub(crate) fn validate(&self) -> Result<(), MessageError> {
             if self.size > MAX_LIVE_FILE_SIZE
@@ -110,7 +115,7 @@ mod attachment {
                 || self
                     .name
                     .chars()
-                    .any(|c| c.is_control() || matches!(c, '/' | '\\' | ':'))
+                    .any(|c| c.is_control() || matches!(c, '/' | '\\' | ':') || is_bidi(c))
                 || matches!(self.name.as_str(), "." | "..")
                 || !(1..=MAX_TYPE).contains(&self.mime_type.len())
                 || !self.mime_type.bytes().all(|b| b.is_ascii_graphic())
@@ -201,5 +206,38 @@ mod tests {
         assert!(request.verify(&server, &channel, key).is_err());
         request.sign(&device, &server, &channel);
         assert!(request.verify(&server, &channel, key).is_ok());
+    }
+
+    #[test]
+    fn attachment_names_reject_paths_controls_and_bidi_overrides() {
+        let file = |name: &str| LiveAttachment {
+            id: [1; 32],
+            key: crate::keys::Key::new([2; 32]),
+            name: name.to_owned(),
+            mime_type: "application/octet-stream".to_owned(),
+            size: 1,
+            chunk_size: LIVE_CHUNK_SIZE as u32,
+        };
+        for name in ["report.pdf", "...", "naïve 文件.txt", &"a".repeat(MAX_NAME)] {
+            assert!(file(name).validate().is_ok(), "{name}");
+        }
+        let long = "a".repeat(MAX_NAME + 1);
+        for name in [
+            "",
+            ".",
+            "..",
+            "../x",
+            "a/b",
+            "a\\b",
+            "C:x",
+            "a\nb",
+            "a\0b",
+            "invoice\u{202e}fdp.exe",
+            "x\u{2066}y",
+            "x\u{200f}y",
+            &long,
+        ] {
+            assert!(file(name).validate().is_err(), "{name:?}");
+        }
     }
 }

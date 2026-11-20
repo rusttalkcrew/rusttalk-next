@@ -391,6 +391,10 @@ the filename byte length (u16) followed by the UTF-8 basename (1–1,024
 bytes), and the MIME type byte length (u8) followed by the ASCII type
 (1–127 bytes). Integers are big endian. The sender guesses the MIME type
 from the extension and uses `application/octet-stream` when unknown.
+Receivers reject a name that is `.` or `..` or contains `/`, `\`, `:`,
+control characters or bidirectional formatting characters (U+061C,
+U+200E, U+200F, U+202A to U+202E, U+2066 to U+2069). The name is only
+displayed. The receiver never derives a save path from it.
 Messages with zero attachments retain their original encoding.
 
 The receiver chooses a destination and explicitly accepts an offer from a
