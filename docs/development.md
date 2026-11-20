@@ -152,13 +152,14 @@ Debug builds open a console on Windows; release builds do not, so check
   `rusttalk_e2e_<pid>` null sink created with `pactl load-module module-null-sink`.
   The receiving bot verifies two encrypted names and track sources, both
   frequencies, and a quarter-scale gain on one track. The test unloads the
-  sink and stops both players on exit. It skips app audio with a message
-  when the host has no PipeWire or pipewire-pulse session. The screen scenario
+  sink and stops both players on exit. It fails when the host has no PipeWire
+  or pipewire-pulse session. The screen scenario
   decodes a synthetic 320×180 red-and-blue pattern and its encrypted name,
   verifies an idle viewer receives no video, and checks that a subscribed
   viewer with the wrong key gets no decoded frames and can decode the
-  pattern after installing the correct key on the same subscription. Set `E2E_FEATURES=` to run membership, keys and chat
-  without WebRTC.
+  pattern after installing the correct key on the same subscription. Set
+  `E2E_FEATURES=` to run the membership, keys and chat harness without WebRTC,
+  voice, app audio or screen sharing.
 
 For a manual app-audio check, build with
 `cargo build --locked -p rusttalk-bot -p rusttalk-pipewire` and run both

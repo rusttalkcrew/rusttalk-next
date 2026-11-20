@@ -88,6 +88,18 @@ mod tests {
         );
         assert_eq!(decrypt(&keys, APP_AUDIO, name), None);
         assert_eq!(decrypt(&keys, APP_AUDIO, &wire[2..]), None);
+        let sealed = keys::seal(&old, &aad(APP_AUDIO, 3), "x".repeat(400).as_bytes()).unwrap();
+        let oversized = format!("3.{}", auth::encode(&sealed));
+        assert!(oversized.len() > MAX_WIRE_BYTES);
+        assert_eq!(decrypt(&keys, APP_AUDIO, &oversized), None);
+        assert_eq!(
+            decrypt(
+                &keys,
+                APP_AUDIO,
+                &encrypt(&old, APP_AUDIO, 3, "   ").unwrap()
+            ),
+            None
+        );
         let long = "♫".repeat(100);
         let wire = encrypt(&new, APP_AUDIO, i64::MIN, &long).unwrap();
         let keys = HashMap::from([(i64::MIN, new)]);

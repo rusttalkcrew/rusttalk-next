@@ -19,12 +19,13 @@ use super::{App, Capture, FRAME_SAMPLES, deliver};
 pub fn list_apps() -> Result<Vec<App>> {
     let output = Command::new(pipewire_helper()?)
         .arg("list")
-        .stderr(Stdio::inherit())
+        .stderr(Stdio::piped())
         .output()
         .context("start PipeWire app audio helper")?;
     ensure!(
         output.status.success(),
-        "could not list PipeWire playback streams"
+        "could not list PipeWire playback streams: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
     );
     serde_json::from_slice(&output.stdout).context("read PipeWire app list")
 }
@@ -40,9 +41,11 @@ pub fn capture(app: &App, mut sink: impl FnMut(&[i16]) + Send + 'static) -> Resu
         .arg(format!("{cookie}:{serial}"))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .context("start PipeWire app audio helper")?;
     let mut pcm = BufReader::new(child.stdout.take().expect("piped PCM"));
+    let mut stderr = child.stderr.take().expect("piped stderr");
     let child = Arc::new(Mutex::new(child));
     let child_for_worker = child.clone();
     let stopped = Arc::new(AtomicBool::new(false));
@@ -65,6 +68,12 @@ pub fn capture(app: &App, mut sink: impl FnMut(&[i16]) + Send + 'static) -> Resu
         let _ = child.kill();
         if let Err(error) = child.wait() {
             tracing::warn!(%error, "could not reap PipeWire capture helper");
+        }
+        drop(child);
+        let mut reason = String::new();
+        let _ = stderr.read_to_string(&mut reason);
+        if !reason.trim().is_empty() {
+            tracing::warn!(reason = reason.trim(), "PipeWire capture helper stopped");
         }
     });
     let capture = Capture {

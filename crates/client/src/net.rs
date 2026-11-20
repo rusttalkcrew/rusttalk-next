@@ -108,6 +108,8 @@ pub enum Update {
     Invite(Url, String),
     /// The call in a voice channel changed state; `None` when it ended.
     Call(Url, Id, Option<CallState>),
+    /// This device joined the call without permission to talk.
+    Listening(Url, Id),
     /// Everyone in one voice channel.
     Room(Url, Id, Vec<Peer>),
     /// Sharing this app stopped or never started.
@@ -304,6 +306,8 @@ struct Live {
     channel: Id,
     /// Apps this device shares, each with its own track.
     shares: Vec<Share>,
+    /// Decrypted names of subscribed remote app tracks.
+    apps: HashMap<TrackSid, String>,
 }
 
 struct Share {
@@ -406,6 +410,22 @@ async fn run(
                         if let Some(live) = state.voice.take() {
                             tokio::spawn(leave_room(live.room));
                         }
+                    }
+                    // The voice room outlives the API connection, so its shares can still stop.
+                    Some(Command::StopApp(id)) => {
+                        if let Some(live) = &mut state.voice
+                            && let Some(at) = live.shares.iter().position(|share| share.app.id == id)
+                        {
+                            let share = live.shares.remove(at);
+                            tracing::info!("stopped sharing app audio");
+                            if let Err(error) = live.room.unpublish_audio(&share.sid).await {
+                                tracing::warn!(error = %format_args!("{error:#}"), "stopping app audio failed");
+                            }
+                        }
+                    }
+                    Some(Command::ShareApp(app)) => {
+                        ctx.send(Update::AppStopped(app.id));
+                        ctx.send(Update::Failed(OFFLINE.into()));
                     }
                     Some(command) => {
                         if let Command::JoinVoice(channel) = command {
@@ -722,16 +742,21 @@ async fn on_command(
                 }
             };
             tracing::info!(server = %fingerprint(&state.server_id), "joined voice");
+            let listening = !room.can_publish();
             state.voice = Some(Live {
                 room,
                 channel,
                 shares: Vec::new(),
+                apps: HashMap::new(),
             });
             ctx.send(Update::Call(
                 url.clone(),
                 channel,
                 Some(CallState::Connected),
             ));
+            if listening {
+                ctx.send(Update::Listening(url.clone(), channel));
+            }
             send_room(ctx, url, client, state, channel);
         }
         Command::LeaveVoice => leave_voice(ctx, url, client, state),
@@ -746,7 +771,7 @@ async fn on_command(
                 // this server's loop meanwhile; move it to its own task if that gets noticed.
                 let (capture, source) =
                     tokio::task::spawn_blocking(move || share::capture(&target)).await??;
-                let sid = share::publish(&live.room, &app, source).await?;
+                let sid = live.room.publish_app_audio(&app.name, source).await?.sid();
                 anyhow::Ok((capture, sid))
             };
             match started.await {
@@ -1264,29 +1289,29 @@ fn send_room(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &State, channe
         Some(live) => {
             let ids = identities(client, &state.server_id);
             let mut live_people: HashMap<Id, bool> = HashMap::new();
-            let mut apps: HashMap<Id, Vec<String>> = HashMap::new();
+            let mut apps: HashMap<Id, Vec<(TrackSid, String)>> = HashMap::new();
             for (participant, voice) in live.room.participants() {
                 if let Some(person) = ids.get(participant.identity().as_str()) {
                     *live_people.entry(*person).or_default() |= voice == VoiceState::Connected;
                     apps.entry(*person).or_default().extend(
                         participant
                             .track_publications()
-                            .values()
-                            .filter_map(|publication| match publication.track()? {
-                                RemoteTrack::Audio(track) => share::app_name(&live.room, &track),
-                                RemoteTrack::Video(_) => None,
+                            .into_keys()
+                            .filter_map(|sid| {
+                                let name = live.apps.get(&sid)?.clone();
+                                Some((sid, name))
                             }),
                     );
                 }
             }
             for names in apps.values_mut() {
-                names.sort();
+                names.sort_by(|a, b| a.1.cmp(&b.1));
             }
             apps.insert(
                 me,
                 live.shares
                     .iter()
-                    .map(|share| share.app.name.clone())
+                    .map(|share| (share.sid.clone(), share.app.name.clone()))
                     .collect(),
             );
             people.extend(live_people.keys().copied());
@@ -1350,15 +1375,24 @@ fn on_voice(
             if person.is_none() {
                 tracing::warn!("voice track from a device this client doesn't know yet");
             }
-            let app = state
-                .voice
-                .as_ref()
-                .and_then(|live| share::app_name(&live.room, &track));
-            let sid = track.sid().to_string();
-            ctx.audio
-                .add_track(sid, (person.unwrap_or_default(), app), track.rtc_track());
+            let sid = track.sid();
+            let mut app = None;
+            if let Some(live) = &mut state.voice
+                && let Some(name) = live.room.app_audio_name(&track)
+            {
+                live.apps.insert(sid.clone(), name);
+                app = Some(sid.clone());
+            }
+            ctx.audio.add_track(
+                sid.to_string(),
+                (person.unwrap_or_default(), app),
+                track.rtc_track(),
+            );
         }
         RoomEvent::TrackUnsubscribed { track, .. } => {
+            if let Some(live) = &mut state.voice {
+                live.apps.remove(&track.sid());
+            }
             ctx.audio.remove_track(track.sid().as_str());
         }
         RoomEvent::Reconnecting => {
@@ -1427,16 +1461,6 @@ async fn voice_stats(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &mut S
     };
     let ids = identities(client, &state.server_id);
     let me = *ctx.identity.certificate.person_id();
-    let mut apps: HashMap<TrackSid, String> = live
-        .shares
-        .iter()
-        .map(|share| (share.sid.clone(), share.app.name.clone()))
-        .collect();
-    for (_, sid, track) in live.room.remote_audio_tracks() {
-        if let Some(name) = share::app_name(&live.room, &track) {
-            apps.insert(sid, name);
-        }
-    }
     let (sent, received): (Vec<_>, Vec<_>) = snapshot.tracks.iter().partition(|t| t.outbound);
     let lost = |tracks: &[&rusttalk_core::client::voice::TrackStats]| {
         tracks
@@ -1460,7 +1484,14 @@ async fn voice_stats(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &mut S
                         *ids.get(t.participant.as_str())?
                     },
                     mine: t.outbound,
-                    app: apps.get(&t.sid).cloned(),
+                    app: live
+                        .apps
+                        .get(&t.sid)
+                        .or_else(|| {
+                            let share = live.shares.iter().find(|share| share.sid == t.sid)?;
+                            Some(&share.app.name)
+                        })
+                        .cloned(),
                     kbps: t.bitrate_bps? / 1000.0,
                 })
             })

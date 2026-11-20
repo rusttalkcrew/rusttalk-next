@@ -92,8 +92,9 @@ test: ## Run unit and integration tests
 	cargo test $(CARGO_SCOPE) --locked
 
 e2e: ## Run the Docker membership, keys, encrypted chat, voice, app audio and screen sharing scenarios
-	@printf '\033[1;34m==> Docker membership, keys, encrypted chat, voice, app audio and screen sharing\033[0m\n'
-	$(if $(and $(PIPEWIRE_HELPER),$(findstring media,$(E2E_FEATURES))),if pw-cli info 0 >/dev/null 2>&1; then cargo build --locked $(PIPEWIRE_HELPER); fi)
+	@printf '[1;34m==> Docker membership, keys, encrypted chat, voice, app audio and screen sharing[0m
+'
+	$(if $(and $(PIPEWIRE_HELPER),$(findstring media,$(E2E_FEATURES))),cargo build --locked $(PIPEWIRE_HELPER))
 	@set -eu; \
 		export RUSTTALK_E2E_PROJECT=rusttalk-e2e-$$$$; \
 		export RUSTTALK_DEV_DATA=$$(mktemp -d); \
