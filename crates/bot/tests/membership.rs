@@ -1,17 +1,21 @@
-use std::{env, path::Path, process::Command};
+use std::{env, path::Path, process::Command, time::Duration};
 
 use anyhow::{Context, Result, ensure};
 use reqwest::{Method, Response, StatusCode};
 use rustls_pki_types::{CertificateDer, pem::PemObject};
-use rusttalk_bot::membership::Bot;
+use rusttalk_bot::{
+    keys::{KeyClient, invite_name},
+    membership::Bot,
+};
 use rusttalk_core::{
-    auth::{InviteCode, InviteLink, KnownServer, ProtocolError, Session, decode, encode},
+    auth::{InviteLink, KnownServer, ProtocolError, Session, decode, encode},
     identity::{DeviceIdentity, revoke_device},
+    keys::{self, EnvelopeContext, Event, KeyState, Metadata, Scope},
     pinned_tls::fingerprint,
 };
 use serde_json::{Value, json};
 
-fn compose(project: &str, args: &[&str]) -> Result<String> {
+fn compose_bytes(project: &str, args: &[&str]) -> Result<Vec<u8>> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let output = Command::new("docker")
         .current_dir(root)
@@ -24,7 +28,13 @@ fn compose(project: &str, args: &[&str]) -> Result<String> {
         args[0],
         String::from_utf8_lossy(&output.stderr)
     );
-    Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+    Ok(output.stdout)
+}
+
+fn compose(project: &str, args: &[&str]) -> Result<String> {
+    Ok(String::from_utf8(compose_bytes(project, args)?)?
+        .trim()
+        .to_owned())
 }
 
 async fn rejected(reply: Response, status: StatusCode, code: &str) -> Result<()> {
@@ -42,27 +52,15 @@ async fn session(reply: Response, secrets: &mut Vec<String>) -> Result<Session> 
 }
 
 async fn invite(
-    bot: &Bot,
-    owner: &Session,
+    owner: &mut KeyClient<'_>,
     secrets: &mut Vec<String>,
-) -> Result<(String, InviteCode)> {
-    let reply = bot
-        .request(Method::POST, "/v1/invites")
-        .bearer_auth(&owner.token)
-        .json(&json!({"uses": 1, "ttl_seconds": 300}))
-        .send()
-        .await?;
-    assert_eq!(reply.status(), StatusCode::CREATED);
-    let invite: Value = reply.json().await?;
-    let code = invite["code"].as_str().context("invite code missing")?;
-    secrets.push(code.to_owned());
-    Ok((
-        invite["id"]
-            .as_str()
-            .context("invite ID missing")?
-            .to_owned(),
-        decode(code)?,
-    ))
+) -> Result<(String, InviteLink)> {
+    let (id, link) = owner.invite(1, 300).await?;
+    secrets.push(encode(&link.code));
+    secrets.push(encode(
+        link.link_key.as_ref().context("missing link key")?.as_ref(),
+    ));
+    Ok((id, InviteLink::parse(&link.to_string())?))
 }
 
 async fn check_me(bot: &Bot, session: &Session, status: StatusCode) -> Result<()> {
@@ -72,6 +70,378 @@ async fn check_me(bot: &Bot, session: &Session, status: StatusCode) -> Result<()
         .send()
         .await?;
     assert_eq!(reply.status(), status);
+    Ok(())
+}
+
+const SERVER_NAME: &[u8] = b"W06 Lapis Private Server";
+const CATEGORY_NAME: &[u8] = b"W06 Fern Private Category";
+const CHANNEL_NAME: &[u8] = b"W06 Topaz Private Channel";
+const TOPIC: &[u8] = b"W06 Saffron Private Topic";
+const DISPLAY_NAME: &[u8] = b"W06 Garnet Private Display Name";
+const ROLE_NAME: &[u8] = b"W06 Agate Private Role";
+const DEVICE_NAME: &str = "W06 Aster Private Device";
+const HISTORY_ID: &[u8] = b"w06 local history probe";
+
+async fn receive_key(client: &mut KeyClient<'_>, scope: Scope, epoch: i64) -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while client.key(scope, epoch).is_none() {
+            ensure!(
+                client.next_event().await?.is_some(),
+                "socket closed waiting for key"
+            );
+        }
+        Ok(())
+    })
+    .await
+    .context("waiting for envelope delivery")?
+}
+
+async fn wait_for_device(client: &mut KeyClient<'_>, device: &str) -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match client.next_event().await? {
+                Some(Event::KeysNeeded(need)) if need.device == device => return Ok(()),
+                Some(Event::MemberChanged {
+                    device: Some(changed),
+                    ..
+                }) if changed == device => return Ok(()),
+                Some(_) => (),
+                None => anyhow::bail!("socket closed waiting for a wrap request"),
+            }
+        }
+    })
+    .await
+    .context("waiting for the keys_needed event")?
+}
+
+async fn expect_close(client: &mut KeyClient<'_>, reason: &str) -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while client.next_event().await?.is_some() {}
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .context("waiting for event socket closure")??;
+    assert_eq!(client.close_reason.as_deref(), Some(reason));
+    Ok(())
+}
+
+async fn docker_keys(
+    project: &str,
+    bot: &Bot,
+    a: &mut KeyClient<'_>,
+    secrets: &mut Vec<String>,
+) -> Result<()> {
+    let space = a.space();
+    a.set_server_name(SERVER_NAME).await?;
+    a.set_display_name(DISPLAY_NAME).await?;
+    let role_name = a.encrypt_metadata(Metadata::RoleName, b"member", ROLE_NAME)?;
+    a.request(Method::PUT, "/v1/roles/member/name")
+        .json(&json!({"name_ct": role_name}))
+        .send()
+        .await?
+        .error_for_status()?;
+    let category = a.create_category(CATEGORY_NAME).await?;
+    let channel = a
+        .create_channel(&category, "text", CHANNEL_NAME, TOPIC)
+        .await?;
+    let history = Metadata::ChannelTopic.seal(
+        &space.id,
+        HISTORY_ID,
+        1,
+        a.key(channel, 1).context("no channel key")?,
+        b"old history",
+    )?;
+    println!("W06 owner uploaded encrypted server, category, channel, topic and display names");
+
+    let (_, link) = invite(a, secrets).await?;
+    assert_eq!(invite_name(bot, &link).await?.as_deref(), Some(SERVER_NAME));
+    println!("W06 B decrypted the server name from its invite before sign-in");
+
+    let (_, b_identity) = DeviceIdentity::create(DEVICE_NAME)?;
+    let b_token = session(bot.sign_in(&b_identity, Some(&link.code)).await?, secrets).await?;
+    let mut b = KeyClient::connect(bot, &b_identity, &b_token).await?;
+    wait_for_device(a, &encode(b_identity.certificate.signing_key().as_bytes())).await?;
+    receive_key(&mut b, channel, 1).await?;
+    receive_key(&mut b, space, 1).await?;
+    assert_eq!(
+        Metadata::ChannelTopic.open(&space.id, HISTORY_ID, b.key(channel, 1).unwrap(), &history)?,
+        b"old history"
+    );
+    let data: Value = b
+        .request(Method::GET, "/v1/catalog")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let entry = &data["channels"][0];
+    assert!(entry["id"] == encode(&channel.id));
+    for (kind, id, ct, expected) in [
+        (
+            Metadata::ChannelName,
+            channel.id,
+            &entry["name_ct"],
+            CHANNEL_NAME,
+        ),
+        (
+            Metadata::ChannelTopic,
+            channel.id,
+            &entry["topic_ct"],
+            TOPIC,
+        ),
+        (
+            Metadata::CategoryName,
+            category,
+            &data["categories"][0]["name_ct"],
+            CATEGORY_NAME,
+        ),
+    ] {
+        assert_eq!(
+            b.decrypt_metadata(kind, &id, ct.as_str().context("missing encrypted name")?)?,
+            expected
+        );
+    }
+    let members: Vec<Value> = b
+        .request(Method::GET, "/v1/members")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let owner = a.identity.certificate.person_id();
+    let profile = members
+        .iter()
+        .find(|row| row["person_id"] == encode(owner))
+        .context("missing owner profile")?;
+    assert_eq!(
+        b.decrypt_metadata(
+            Metadata::DisplayName,
+            owner,
+            profile["display_name_ct"]
+                .as_str()
+                .context("missing display name")?
+        )?,
+        DISPLAY_NAME,
+    );
+    rejected(
+        b.request(Method::GET, "/v1/channels").send().await?,
+        StatusCode::FORBIDDEN,
+        "permission_denied",
+    )
+    .await?;
+    println!("W06 B decrypted channel metadata, the owner's display name and epoch 1 history");
+
+    let (_, link) = invite(a, secrets).await?;
+    let (c_words, c_identity) = DeviceIdentity::create("W06 C")?;
+    let c_token = session(bot.sign_in(&c_identity, Some(&link.code)).await?, secrets).await?;
+    let c_device = encode(c_identity.certificate.signing_key().as_bytes());
+    let context = EnvelopeContext::new(space.id, channel, 1, b.key(channel, 1).unwrap());
+    let bad = encode(&context.wrap(&keys::random_key()?, &c_identity.certificate, &b_identity)?);
+    let upload = || {
+        b.request(Method::POST, "/v1/keys")
+            .json(&json!({"scope": channel, "epoch": 1, "device": c_device, "envelope": bad}))
+    };
+    upload().send().await?.error_for_status()?;
+    let poisoned: KeyState = bot
+        .request(Method::GET, "/v1/keys")
+        .bearer_auth(&c_token.token)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert!(poisoned.envelopes.iter().any(|row| row.envelope == bad));
+    let mut c = KeyClient::connect(bot, &c_identity, &c_token).await?;
+    assert!(c.key(channel, 1).is_none());
+    upload().send().await?.error_for_status()?;
+    wait_for_device(a, &c_device).await?;
+    receive_key(&mut c, channel, 1).await?;
+    assert!(c.key(channel, 1) == a.key(channel, 1));
+    println!("W06 C rejected B's bad first wrap and received the real key");
+    receive_key(&mut c, space, 1).await?;
+    let channel_path = format!("/v1/channels/{}/permissions", encode(&channel.id));
+    let b_person = encode(b_identity.certificate.person_id());
+    a.request(Method::PUT, &format!("/v1/members/{b_person}/roles"))
+        .json(&json!({"role_ids": ["admin", "member"]}))
+        .send()
+        .await?
+        .error_for_status()?;
+    for role in ["admin", "owner"] {
+        let reply = b
+            .request(Method::PUT, &format!("{channel_path}/{role}"))
+            .json(&json!({"flags": 0}))
+            .send()
+            .await?;
+        rejected(reply, StatusCode::FORBIDDEN, "role_hierarchy").await?;
+    }
+    let reply = a
+        .request(Method::PUT, &format!("{channel_path}/member"))
+        .json(&json!({"flags": 2}))
+        .send()
+        .await?;
+    rejected(reply, StatusCode::BAD_REQUEST, "invalid_channel_flags").await?;
+
+    a.request(Method::DELETE, &format!("/v1/members/{b_person}"))
+        .send()
+        .await?
+        .error_for_status()?;
+    let reply = a.request(Method::PUT, "/v1/space").json(&json!({
+        "name_ct": encode(&Metadata::ServerName.seal(&space.id, &space.id, 1, a.key(space, 1).unwrap(), SERVER_NAME)?),
+    })).send().await?;
+    rejected(reply, StatusCode::CONFLICT, "space_key_unavailable").await?;
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while a.key(channel, 2).is_none() {
+            match a.next_event().await? {
+                Some(Event::RotateNeeded { scope }) if scope == channel => return Ok(()),
+                Some(_) => (),
+                None => anyhow::bail!("owner socket closed"),
+            }
+        }
+        Ok(())
+    })
+    .await
+    .context("waiting for the rotate_needed event")??;
+    receive_key(&mut c, channel, 2).await?;
+    receive_key(&mut c, space, 2).await?;
+    expect_close(&mut b, "kicked").await?;
+    rejected(
+        b.request(Method::GET, "/v1/keys").send().await?,
+        StatusCode::UNAUTHORIZED,
+        "invalid_session",
+    )
+    .await?;
+    rejected(
+        bot.sign_in(&b_identity, None).await?,
+        StatusCode::FORBIDDEN,
+        "invite_required",
+    )
+    .await?;
+
+    let key = c.key(channel, 2).context("C missing epoch 2")?;
+    let context = EnvelopeContext::new(space.id, channel, 2, key);
+    let for_b = context.wrap(key, &b_identity.certificate, &c_identity)?;
+    let reply = c.request(Method::POST, "/v1/keys")
+        .json(&json!({"scope": channel, "epoch": 2, "device": encode(b_identity.certificate.signing_key().as_bytes()), "envelope": encode(&for_b)}))
+        .send().await?;
+    rejected(reply, StatusCode::FORBIDDEN, "recipient_read_denied").await?;
+    let state: KeyState = c
+        .request(Method::GET, "/v1/keys")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert!(
+        state
+            .envelopes
+            .iter()
+            .all(|e| e.need.device == encode(c_identity.certificate.signing_key().as_bytes()))
+    );
+    let after = Metadata::ChannelTopic.seal(&space.id, HISTORY_ID, 2, key, b"after kick")?;
+    assert_eq!(
+        Metadata::ChannelTopic.open(&space.id, HISTORY_ID, key, &after)?,
+        b"after kick"
+    );
+    assert!(
+        Metadata::ChannelTopic
+            .open(&space.id, HISTORY_ID, b.key(channel, 1).unwrap(), &after)
+            .is_err()
+    );
+    assert!(b.key(channel, 2).is_none() && b.key(space, 2).is_none());
+    let stale = context.wrap(key, &c_identity.certificate, &c_identity)?;
+    let reply = c
+        .request(Method::POST, "/v1/keys/epochs")
+        .json(&json!({"scope": channel, "epoch": 2, "commitment": encode(&context.commitment), "envelope": encode(&stale)}))
+        .send()
+        .await?;
+    rejected(reply, StatusCode::CONFLICT, "epoch_changed").await?;
+    println!("W06 kick closed B's socket, blocked B's epoch 2 envelopes, and C decrypted epoch 2");
+
+    let sibling = DeviceIdentity::add_device(&c_words, "W06 C second device")?;
+    let sibling_token = session(bot.sign_in(&sibling, None).await?, secrets).await?;
+    let mut sibling_keys = KeyClient::connect(bot, &sibling, &sibling_token).await?;
+    wait_for_device(a, &encode(sibling.certificate.signing_key().as_bytes())).await?;
+    for scope in [space, channel] {
+        for epoch in [1, 2] {
+            receive_key(&mut sibling_keys, scope, epoch).await?;
+            assert!(sibling_keys.key(scope, epoch) == c.key(scope, epoch));
+        }
+    }
+    let revoked = revoke_device(&c_words, sibling.certificate.signing_key().to_bytes())?;
+    c.request(Method::POST, "/v1/me/revocations")
+        .json(&json!({"record": encode(&revoked.to_bytes())}))
+        .send()
+        .await?
+        .error_for_status()?;
+    expect_close(&mut sibling_keys, "revoked").await?;
+    receive_key(a, space, 3).await?;
+    receive_key(a, channel, 3).await?;
+    receive_key(&mut c, channel, 3).await?;
+    assert!(sibling_keys.key(channel, 3).is_none());
+    println!(
+        "W06 a new device received both historical epochs, then revocation closed its socket and rotated keys"
+    );
+
+    a.request(
+        Method::PUT,
+        &format!("/v1/channels/{}/permissions/member", encode(&channel.id)),
+    )
+    .json(&json!({"flags": 0}))
+    .send()
+    .await?
+    .error_for_status()?;
+    receive_key(a, channel, 4).await?;
+    let state: KeyState = c
+        .request(Method::GET, "/v1/keys")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert!(
+        state
+            .scopes
+            .iter()
+            .all(|s| s.scope == space && s.epoch == 3 && !s.rotate)
+    );
+    assert!(!state.scopes.is_empty() && state.envelopes.iter().all(|e| e.need.scope == space));
+    println!("W06 losing channel read permission hid its envelopes and rotated only the channel");
+
+    let raw = compose_bytes(
+        project,
+        &[
+            "exec",
+            "-T",
+            "api",
+            "sh",
+            "-ec",
+            "cat /data/rusttalk.sqlite3 /data/rusttalk.sqlite3-wal",
+        ],
+    )?;
+    let logs = compose_bytes(project, &["logs", "--no-color"])?;
+    for bytes in [raw, logs] {
+        let folded = bytes.to_ascii_lowercase();
+        for secret in [
+            SERVER_NAME,
+            CATEGORY_NAME,
+            CHANNEL_NAME,
+            TOPIC,
+            DISPLAY_NAME,
+            ROLE_NAME,
+            DEVICE_NAME.as_bytes(),
+        ] {
+            let encoded = encode(secret);
+            for needle in [secret, encoded.as_bytes()] {
+                let needle = needle.to_ascii_lowercase();
+                assert!(
+                    !folded.windows(needle.len()).any(|window| window == needle),
+                    "a test name or topic leaked"
+                );
+            }
+        }
+    }
+    println!("W06 SQLite database, WAL and stack logs contained none of the test names or topics");
     Ok(())
 }
 
@@ -121,14 +491,11 @@ async fn docker_membership() -> Result<()> {
     assert!(cli("owner-invite")?.is_empty());
     println!("owner claimed via CLI invite; the previous invite and further issuance were refused");
 
-    let (_, first_invite) = invite(&owner_bot, &owner, &mut secrets).await?;
-    let link = InviteLink::parse(
-        &InviteLink {
-            server: known.clone(),
-            code: first_invite,
-        }
-        .to_string(),
-    )?;
+    let mut owner_keys = KeyClient::connect(&owner_bot, &owner_id, &owner).await?;
+    docker_keys(&project, &owner_bot, &mut owner_keys, &mut secrets).await?;
+
+    let (_, link) = invite(&mut owner_keys, &mut secrets).await?;
+    let first_invite = link.code;
     let member_bot = Bot::connect(
         link.server.address.clone(),
         link.server.tls_fingerprint,
@@ -182,9 +549,11 @@ async fn docker_membership() -> Result<()> {
     .await?;
     println!("kick dropped bot B's token and required an unused invite");
 
-    let (_, second_invite) = invite(&owner_bot, &owner, &mut secrets).await?;
+    let (_, second_invite) = invite(&mut owner_keys, &mut secrets).await?;
     let rejoined = session(
-        member_bot.sign_in(&member_id, Some(&second_invite)).await?,
+        member_bot
+            .sign_in(&member_id, Some(&second_invite.code))
+            .await?,
         &mut secrets,
     )
     .await?;
@@ -205,9 +574,11 @@ async fn docker_membership() -> Result<()> {
         .await?;
     assert_eq!(reply.status(), StatusCode::NO_CONTENT);
     check_me(&member_bot, &rejoined, StatusCode::UNAUTHORIZED).await?;
-    let (_, third_invite) = invite(&owner_bot, &owner, &mut secrets).await?;
+    let (_, third_invite) = invite(&mut owner_keys, &mut secrets).await?;
     rejected(
-        member_bot.sign_in(&member_id, Some(&third_invite)).await?,
+        member_bot
+            .sign_in(&member_id, Some(&third_invite.code))
+            .await?,
         StatusCode::FORBIDDEN,
         "person_banned",
     )
@@ -221,14 +592,16 @@ async fn docker_membership() -> Result<()> {
         .await?;
     assert_eq!(reply.status(), StatusCode::NO_CONTENT);
     let unbanned = session(
-        member_bot.sign_in(&member_id, Some(&third_invite)).await?,
+        member_bot
+            .sign_in(&member_id, Some(&third_invite.code))
+            .await?,
         &mut secrets,
     )
     .await?;
     check_me(&member_bot, &unbanned, StatusCode::OK).await?;
     println!("unban let bot B redeem the same invite and sign in again");
 
-    let (invite_id, withdrawn) = invite(&owner_bot, &owner, &mut secrets).await?;
+    let (invite_id, withdrawn) = invite(&mut owner_keys, &mut secrets).await?;
     let reply = owner_bot
         .request(Method::DELETE, &format!("/v1/invites/{invite_id}"))
         .bearer_auth(&owner.token)
@@ -237,7 +610,7 @@ async fn docker_membership() -> Result<()> {
     assert_eq!(reply.status(), StatusCode::NO_CONTENT);
     let (_, outsider) = DeviceIdentity::create("Outsider")?;
     rejected(
-        member_bot.sign_in(&outsider, Some(&withdrawn)).await?,
+        member_bot.sign_in(&outsider, Some(&withdrawn.code)).await?,
         StatusCode::FORBIDDEN,
         "invalid_invite",
     )

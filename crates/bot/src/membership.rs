@@ -78,7 +78,7 @@ impl Bot {
     ) -> Result<Response> {
         let proof = challenge(&self.http, &self.server.address).await?;
         let challenge = proof.verify(&self.server.server_id)?;
-        let request = SignIn::signed(identity, &challenge, &self.server.server_id, invite);
+        let request = SignIn::signed(identity, &challenge, &self.server.server_id, invite)?;
         self.request(reqwest::Method::POST, "/v1/auth/sign-in")
             .json(&request)
             .send()

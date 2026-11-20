@@ -14,37 +14,22 @@ use serde::Deserialize;
 use sqlx::{Sqlite, SqliteConnection, SqlitePool, Transaction, query, query_as, query_scalar};
 
 use crate::{
-    ApiError, ApiResult, App, payload,
+    ApiError, ApiResult, App, keys, payload,
     store::{audit, hash, log_closed, now, random, write},
 };
 
-const CHALLENGE_LIMIT: i64 = 256;
-const CHALLENGES_PER_IP: i64 = 8;
+const PUBLIC_LIMIT: i64 = 256;
+const PUBLIC_LIMIT_PER_IP: i64 = 8;
 const SESSIONS_PER_PERSON: i64 = 16;
 const REVOCATIONS_PER_PERSON: i64 = 64;
 const CHALLENGE_TTL: i64 = 60;
 const SESSION_TTL: i64 = Duration::from_hours(12).as_secs() as i64;
 
 pub async fn challenge(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Challenge>> {
-    let ip = limit_key(&client_ip(&headers)?);
+    let ip = client_ip(&headers)?;
     let mut tx = write(&app.db).await?;
     let at = now()?;
-    query("DELETE FROM challenges WHERE expires_at <= ?")
-        .bind(at)
-        .execute(&mut *tx)
-        .await?;
-    // The per-IP cap keeps one client from using up the global backstop for everyone.
-    let (total, from_ip): (i64, i64) =
-        query_as("SELECT COUNT(*), COUNT(*) FILTER (WHERE ip = ?) FROM challenges")
-            .bind(&ip)
-            .fetch_one(&mut *tx)
-            .await?;
-    if total >= CHALLENGE_LIMIT || from_ip >= CHALLENGES_PER_IP {
-        return Err(ApiError::new(
-            StatusCode::TOO_MANY_REQUESTS,
-            "challenge_limit",
-        ));
-    }
+    let ip = check_public_limit(&mut tx, &ip, at, PublicLimit::Challenge).await?;
     let challenge = random::<32>()?;
     query("INSERT INTO challenges (nonce, ip, expires_at) VALUES (?, ?, ?)")
         .bind(challenge.as_slice())
@@ -106,10 +91,17 @@ pub async fn sign_in(
         redeem(&mut tx, person, invite, at).await?;
     }
 
+    keys::init_space(&mut tx, &server_id).await?;
+    let added = keys::register_device(&mut tx, &cert).await?;
     let closed = remove_device_sessions(&mut tx, person, device).await?;
     let session = issue_session(&mut tx, person, device, &ip, at).await?;
     tx.commit().await?;
     log_closed(closed, at, "replaced");
+    if added {
+        keys::changed(&app, person, Some(device));
+    } else {
+        app.notify(None);
+    }
     Ok(Json(session))
 }
 
@@ -118,7 +110,7 @@ fn verify_device(
     challenge: &[u8; 32],
     server_id: &[u8; 32],
 ) -> ApiResult<DeviceCertificate> {
-    let cert = DeviceCertificate::verify(
+    let cert = DeviceCertificate::verify_public(
         decode(&request.person_id)?,
         &decode_bytes(&request.certificate)?,
     )
@@ -146,7 +138,7 @@ async fn check_revoked(db: &mut SqliteConnection, person: &[u8], device: &[u8]) 
     Ok(())
 }
 
-fn client_ip(headers: &HeaderMap) -> ApiResult<String> {
+pub fn client_ip(headers: &HeaderMap) -> ApiResult<String> {
     let mut values = headers.get_all("x-forwarded-for").iter();
     let ip = values
         .next()
@@ -165,6 +157,38 @@ fn limit_key(ip: &str) -> String {
         }
         _ => ip.to_owned(),
     }
+}
+
+pub enum PublicLimit {
+    Challenge,
+    InvitePreview,
+}
+
+pub async fn check_public_limit(
+    db: &mut SqliteConnection,
+    ip: &str,
+    at: i64,
+    limit: PublicLimit,
+) -> ApiResult<String> {
+    let (table, code) = match limit {
+        PublicLimit::Challenge => ("challenges", "challenge_limit"),
+        PublicLimit::InvitePreview => ("invite_previews", "invite_preview_limit"),
+    };
+    let ip = limit_key(ip);
+    query(&format!("DELETE FROM {table} WHERE expires_at <= ?"))
+        .bind(at)
+        .execute(&mut *db)
+        .await?;
+    let (total, from_ip): (i64, i64) = query_as(&format!(
+        "SELECT COUNT(*), COUNT(*) FILTER (WHERE ip = ?) FROM {table}"
+    ))
+    .bind(&ip)
+    .fetch_one(db)
+    .await?;
+    if total >= PUBLIC_LIMIT || from_ip >= PUBLIC_LIMIT_PER_IP {
+        return Err(ApiError::new(StatusCode::TOO_MANY_REQUESTS, code));
+    }
+    Ok(ip)
 }
 
 async fn check_ip(db: &mut SqliteConnection, ip: &str, person: &[u8]) -> ApiResult<()> {
@@ -326,6 +350,8 @@ pub struct Actor {
     pub device: Vec<u8>,
     pub ip: String,
     pub at: i64,
+    pub token_hash: [u8; 32],
+    pub expires_at: i64,
 }
 
 pub async fn authenticate(
@@ -339,17 +365,18 @@ pub async fn authenticate(
         .and_then(|value| decode::<32>(value).ok())
         .ok_or(ApiError::unauthorized("invalid_session"))?;
     let ip = client_ip(headers)?;
+    let token_hash = hash(&token);
     let mut tx = write(&app.db).await?;
     let at = now()?;
     let (person, device, expires_at): (Vec<u8>, Vec<u8>, i64) =
         query_as("SELECT person_id, device_id, expires_at FROM sessions WHERE token_hash = ?")
-            .bind(hash(&token).as_slice())
+            .bind(token_hash.as_slice())
             .fetch_optional(&mut *tx)
             .await?
             .ok_or(ApiError::unauthorized("invalid_session"))?;
     if expires_at <= at {
         query("DELETE FROM sessions WHERE token_hash = ?")
-            .bind(hash(&token).as_slice())
+            .bind(token_hash.as_slice())
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
@@ -367,6 +394,8 @@ pub async fn authenticate(
             device,
             ip,
             at,
+            token_hash,
+            expires_at,
         },
     ))
 }
@@ -377,6 +406,7 @@ pub async fn refresh(State(app): State<App>, headers: HeaderMap) -> ApiResult<Js
     let session = issue_session(&mut tx, &actor.person, &actor.device, &actor.ip, actor.at).await?;
     tx.commit().await?;
     log_closed(closed, actor.at, "refreshed");
+    app.notify(None);
     Ok(Json(session))
 }
 
@@ -413,6 +443,15 @@ pub async fn revoke(
     .await?;
     let closed = remove_device_sessions(&mut tx, &actor.person, device).await?;
     if added.rows_affected() != 0 {
+        let removed = query("DELETE FROM member_devices WHERE person_id = ? AND device_id = ?")
+            .bind(actor.person.as_slice())
+            .bind(device)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        if removed != 0 {
+            keys::member_removed(&app, &mut tx, &actor.person).await?;
+        }
         audit(
             &mut tx,
             &actor.person,
@@ -425,6 +464,7 @@ pub async fn revoke(
     }
     tx.commit().await?;
     log_closed(closed, actor.at, "revoked");
+    keys::changed(&app, &actor.person, Some(device));
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -438,7 +478,7 @@ mod tests {
         let (_, identity) = DeviceIdentity::create("test").unwrap();
         let challenge = [3; 32];
         let server_id = [4; 32];
-        let mut proof = SignIn::signed(&identity, &challenge, &server_id, None);
+        let mut proof = SignIn::signed(&identity, &challenge, &server_id, None).unwrap();
         let expected = [challenge.as_slice(), &server_id, b"rusttalk-auth-v1"].concat();
         let signature = Signature::from_bytes(&decode(&proof.signature).unwrap());
         identity
@@ -453,7 +493,7 @@ mod tests {
         ] {
             assert_eq!(result.unwrap_err().code, "invalid_device_signature");
         }
-        let mut cert = identity.certificate.to_bytes();
+        let mut cert = identity.certificate.public_bytes().unwrap().to_vec();
         cert[30] ^= 1;
         proof.certificate = encode(&cert);
         assert_eq!(
@@ -470,22 +510,23 @@ mod tests {
         let app = crate::App {
             db: crate::store::open(dir.path()).await.unwrap(),
             key: std::sync::Arc::new(ed25519_dalek::SigningKey::from_bytes(&[7; 32])),
+            changes: tokio::sync::broadcast::channel(128).0,
         };
         let from = |ip: &str| {
             let mut headers = HeaderMap::new();
             headers.insert("x-forwarded-for", ip.parse().unwrap());
             headers
         };
-        for _ in 0..CHALLENGES_PER_IP {
+        for _ in 0..PUBLIC_LIMIT_PER_IP {
             assert!(
-                challenge(State(app.clone()), from("192.0.2.1"))
+                challenge(State(app.clone()), from("2001:db8:1:2::1"))
                     .await
                     .is_ok()
             );
         }
-        let refused = challenge(State(app.clone()), from("192.0.2.1")).await;
+        let refused = challenge(State(app.clone()), from("2001:db8:1:2::2")).await;
         assert_eq!(refused.err().unwrap().code, "challenge_limit");
-        assert!(challenge(State(app), from("192.0.2.2")).await.is_ok());
+        assert!(challenge(State(app), from("2001:db8:1:3::1")).await.is_ok());
         assert_eq!(limit_key("2001:db8:1:2:3:4:5:6"), "2001:db8:1:2::");
         assert_eq!(limit_key("192.0.2.1"), "192.0.2.1");
     }

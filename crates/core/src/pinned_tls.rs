@@ -69,6 +69,33 @@ pub fn api_client(
     https_client(pin.map(pinned_config).transpose()?)
 }
 
+/// Connect to the event stream using the same trust decision as the HTTPS API.
+pub async fn events_socket(
+    server: &crate::auth::KnownServer,
+    token: &str,
+) -> Result<Socket, Box<dyn std::error::Error + Send + Sync>> {
+    let mut url = server.address.join("v1/events")?;
+    url.set_scheme("wss").map_err(|_| "invalid event origin")?;
+    let mut request = url.as_str().into_client_request()?;
+    request
+        .headers_mut()
+        .insert("authorization", format!("Bearer {token}").parse()?);
+    let connector = server
+        .tls_fingerprint
+        .map(pinned_config)
+        .transpose()?
+        .map(|config| Connector::Rustls(Arc::new(config)));
+    let limits = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+        .max_message_size(Some(4096))
+        .max_frame_size(Some(4096));
+    let (socket, _) = tokio::time::timeout(
+        Duration::from_secs(10),
+        connect_async_tls_with_config(request, Some(limits), false, connector),
+    )
+    .await??;
+    Ok(socket)
+}
+
 fn pinned_config(pin: Fingerprint) -> Result<ClientConfig, rustls::Error> {
     let provider = ring::default_provider();
     let verifier = Arc::new(PinnedCertificate {

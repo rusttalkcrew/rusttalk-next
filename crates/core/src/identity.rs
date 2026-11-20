@@ -16,6 +16,9 @@ use zeroize::Zeroizing;
 const WORD_COUNT: usize = 24;
 const MAX_DEVICE_NAME_BYTES: usize = 64;
 const CERT_DOMAIN: &[u8] = b"rusttalk-device-cert-v1";
+const PUBLIC_CERT_DOMAIN: &[u8] = b"rusttalk-device-cert-v2";
+const LOCAL_CERT_DOMAIN: &[u8] = b"rusttalk-device-local-v2";
+const PUBLIC_CERT_LEN: usize = PUBLIC_CERT_DOMAIN.len() + 32 + 32 + 8 + 32 + 64;
 const REVOCATION_DOMAIN: &[u8] = b"rusttalk-device-revocation-v1";
 
 pub type PersonId = [u8; 32];
@@ -30,9 +33,11 @@ pub enum IdentityError {
     Clock(#[from] SystemTimeError),
     #[error("device name must be 1 to 64 UTF-8 bytes")]
     InvalidDeviceName,
+    #[error("legacy certificate: add this device again using the recovery words")]
+    LegacyCertificate,
     #[error("invalid identity record encoding")]
     InvalidEncoding,
-    #[error("invalid Ed25519 public key")]
+    #[error("invalid device or root public key")]
     InvalidPublicKey,
     #[error("invalid root signature")]
     InvalidSignature,
@@ -77,16 +82,19 @@ impl DeviceIdentity {
         let device_signing_key = signing_key.verifying_key();
         let device_agreement_key = AgreementPublicKey::from(&agreement_key).to_bytes();
         let created_at = unix_seconds()?;
-        let payload =
-            certificate_payload(&device_signing_key, &device_agreement_key, created_at, name);
-        let certificate = DeviceCertificate {
-            person_id: root.verifying_key().to_bytes(),
-            device_signing_key,
-            device_agreement_key,
+        let mut salt = [0; 32];
+        random_bytes(&mut salt)?;
+        let mut public = public_certificate_payload(
+            &device_signing_key,
+            &device_agreement_key,
             created_at,
-            name: name.to_owned(),
-            signature: root.sign(&payload),
-        };
+            &name_commitment(&salt, name),
+        );
+        public.extend_from_slice(&root.sign(&public).to_bytes());
+        let mut certificate =
+            DeviceCertificate::verify_public(root.verifying_key().to_bytes(), &public)?;
+        certificate.name = name.to_owned();
+        certificate.salt = Some(salt);
         Ok(Self {
             signing_key,
             agreement_key,
@@ -127,6 +135,8 @@ pub struct DeviceCertificate {
     created_at: u64,
     name: String,
     signature: Signature,
+    public: Option<Vec<u8>>,
+    salt: Option<[u8; 32]>,
 }
 
 impl DeviceCertificate {
@@ -150,7 +160,55 @@ impl DeviceCertificate {
         &self.name
     }
 
+    pub fn public_bytes(&self) -> Result<&[u8], IdentityError> {
+        self.public
+            .as_deref()
+            .ok_or(IdentityError::LegacyCertificate)
+    }
+
+    pub fn verify_public(person_id: PersonId, bytes: &[u8]) -> Result<Self, IdentityError> {
+        if bytes.len() != PUBLIC_CERT_LEN {
+            return Err(IdentityError::InvalidEncoding);
+        }
+        let (payload, signature) = bytes
+            .split_last_chunk()
+            .ok_or(IdentityError::InvalidEncoding)?;
+        let fields = payload
+            .strip_prefix(PUBLIC_CERT_DOMAIN)
+            .ok_or(IdentityError::InvalidEncoding)?;
+        let (signing, fields) = fields
+            .split_first_chunk()
+            .ok_or(IdentityError::InvalidEncoding)?;
+        let (agreement, fields) = fields
+            .split_first_chunk()
+            .ok_or(IdentityError::InvalidEncoding)?;
+        let (created_at, _) = fields
+            .split_first_chunk()
+            .ok_or(IdentityError::InvalidEncoding)?;
+        let signature = Signature::from_bytes(signature);
+        verify_signature(&person_id, payload, &signature)?;
+        if x25519_dalek::x25519([1; 32], *agreement) == [0; 32] {
+            return Err(IdentityError::InvalidPublicKey);
+        }
+        Ok(Self {
+            person_id,
+            device_signing_key: public_key(signing)?,
+            device_agreement_key: *agreement,
+            created_at: u64::from_be_bytes(*created_at),
+            name: String::new(),
+            signature,
+            public: Some(bytes.to_vec()),
+            salt: None,
+        })
+    }
+
     pub fn to_bytes(&self) -> Vec<u8> {
+        if let Some(public) = &self.public {
+            return match self.salt {
+                Some(salt) => [LOCAL_CERT_DOMAIN, public, &salt, self.name.as_bytes()].concat(),
+                None => public.clone(),
+            };
+        }
         let mut bytes = certificate_payload(
             &self.device_signing_key,
             &self.device_agreement_key,
@@ -162,6 +220,28 @@ impl DeviceCertificate {
     }
 
     pub fn verify(person_id: PersonId, bytes: &[u8]) -> Result<Self, IdentityError> {
+        if let Some(fields) = bytes.strip_prefix(LOCAL_CERT_DOMAIN) {
+            let (public, opening) = fields
+                .split_first_chunk::<PUBLIC_CERT_LEN>()
+                .ok_or(IdentityError::InvalidEncoding)?;
+            let (salt, name) = opening
+                .split_first_chunk()
+                .ok_or(IdentityError::InvalidEncoding)?;
+            if !(1..=MAX_DEVICE_NAME_BYTES).contains(&name.len()) {
+                return Err(IdentityError::InvalidEncoding);
+            }
+            let name = std::str::from_utf8(name).map_err(|_| IdentityError::InvalidEncoding)?;
+            let mut certificate = Self::verify_public(person_id, public)?;
+            if public[PUBLIC_CERT_LEN - 96..PUBLIC_CERT_LEN - 64] != name_commitment(salt, name) {
+                return Err(IdentityError::InvalidSignature);
+            }
+            certificate.name = name.to_owned();
+            certificate.salt = Some(*salt);
+            return Ok(certificate);
+        }
+        if bytes.starts_with(PUBLIC_CERT_DOMAIN) {
+            return Self::verify_public(person_id, bytes);
+        }
         let (payload, signature) = bytes
             .split_last_chunk()
             .ok_or(IdentityError::InvalidEncoding)?;
@@ -195,6 +275,8 @@ impl DeviceCertificate {
             created_at: u64::from_be_bytes(*created_at),
             name: name.to_owned(),
             signature,
+            public: None,
+            salt: None,
         })
     }
 
@@ -333,6 +415,30 @@ pub fn random_bytes(bytes: &mut [u8]) -> Result<(), IdentityError> {
 
 fn unix_seconds() -> Result<u64, SystemTimeError> {
     Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
+}
+
+fn name_commitment(salt: &[u8; 32], name: &str) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update(b"rusttalk-device-name-v2");
+    hash.update(salt);
+    hash.update(name.as_bytes());
+    hash.finalize().into()
+}
+
+fn public_certificate_payload(
+    signing: &VerifyingKey,
+    agreement: &[u8; 32],
+    created_at: u64,
+    name_commitment: &[u8; 32],
+) -> Vec<u8> {
+    [
+        PUBLIC_CERT_DOMAIN,
+        signing.as_bytes(),
+        agreement,
+        &created_at.to_be_bytes(),
+        name_commitment,
+    ]
+    .concat()
 }
 
 fn certificate_payload(

@@ -68,11 +68,22 @@ available in core for the UI.
 - `make lint`: clippy with warnings as errors, plus `rustfmt --check`.
 - `make fmt`: format all code.
 - `make test`: unit and integration tests without Docker.
-- `make e2e`: starts the stack detached, tests W05 with two bots, and removes
-  the test containers, TLS directory and API volume on exit. Run it when
-  the regular dev stack has released ports 8443, 7881 and 7882. It checks
-  owner bootstrap, invite use, kick, ban, unban, key pinning and API log
-  redaction. E2E runs locally and stays out of CI for now.
+- `make e2e` starts a disposable stack and runs W05 membership and W06
+  key distribution with headless bots. It checks pre-sign-in invite
+  previews, historical key delivery, epoch rotation after kick, revocation and loss of
+  channel read access, WebSocket closure and redaction in SQLite, its WAL and stack logs. It also
+  checks owner bootstrap, invite use, kick, ban, unban, revocation and
+  server key pinning. It removes its containers, TLS directory and API
+  volume on exit. Run it with ports 8443, 7881 and 7882 free. E2E runs
+  locally and stays out of CI for now.
+
+The membership gate uses the bot library's `KeyClient` through the same
+pinned TLS origin for HTTPS and live events. It holds keys only in memory.
+For an upgraded W05 stack the owner initializes the first space epoch
+after signing in with a W06 device. Existing W05 devices can use the same
+recovery words to enroll public W06 certificates. Profiles, server
+metadata and any replacement role labels are encrypted on the client
+before upload.
 
 Linux CI runs `make lint test` with the bot excluded and `rusttalk-core/livekit-tls`
 enabled, so it checks pinning and ICE filtering without the native WebRTC

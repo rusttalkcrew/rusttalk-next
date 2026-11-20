@@ -85,8 +85,8 @@ test: ## Run unit and integration tests
 	@printf '\033[1;34m==> tests\033[0m\n'
 	cargo test $(CARGO_SCOPE) --locked
 
-e2e: ## Run the Docker sign-in and membership scenario
-	@printf '\033[1;34m==> Docker membership scenario\033[0m\n'
+e2e: ## Run the Docker membership and key rotation scenarios
+	@printf '\033[1;34m==> Docker membership and keys\033[0m\n'
 	@set -eu; \
 		export RUSTTALK_E2E_PROJECT=rusttalk-e2e-$$$$; \
 		export RUSTTALK_DEV_DATA=$$(mktemp -d); \

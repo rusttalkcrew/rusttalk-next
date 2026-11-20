@@ -1,5 +1,9 @@
 mod auth;
+mod channels;
+mod events;
+mod keys;
 mod members;
+mod metadata;
 mod roles;
 mod store;
 
@@ -21,13 +25,14 @@ use axum::{
     routing::{delete, get, post, put},
 };
 use ed25519_dalek::SigningKey;
+use rusttalk_core::keys::Event;
 use rusttalk_core::{
     auth::{ProtocolError, encode},
     identity::fingerprint,
 };
 use serde_json::json;
 use sqlx::SqlitePool;
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, sync::broadcast};
 use tower_http::{
     limit::RequestBodyLimitLayer,
     request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
@@ -39,6 +44,13 @@ use tracing_subscriber::{filter::Targets, prelude::*};
 struct App {
     db: SqlitePool,
     key: Arc<SigningKey>,
+    changes: broadcast::Sender<Option<Event>>,
+}
+
+impl App {
+    fn notify(&self, event: Option<Event>) {
+        let _ = self.changes.send(event);
+    }
 }
 
 type ApiResult<T> = Result<T, ApiError>;
@@ -150,6 +162,7 @@ async fn run() -> Result<()> {
             serve(App {
                 db,
                 key: Arc::new(key),
+                changes: broadcast::channel(128).0,
             })
             .await?;
         }
@@ -181,6 +194,35 @@ async fn serve(app: App) -> io::Result<()> {
         .route("/v1/auth/sign-in", post(auth::sign_in))
         .route("/v1/auth/refresh", post(auth::refresh))
         .route("/v1/me", get(members::me))
+        .route("/v1/space", get(metadata::space))
+        .route("/v1/members", get(metadata::members))
+        .route("/v1/events", get(events::upgrade))
+        .route("/v1/keys", get(keys::state).post(keys::upload))
+        .route("/v1/keys/epochs", post(keys::new_epoch))
+        .route("/v1/keys/reject", post(keys::reject))
+        .route("/v1/member-devices", get(keys::devices))
+        .route("/v1/invite-preview", post(members::preview))
+        .route("/v1/catalog", get(channels::catalog))
+        .route(
+            "/v1/channels",
+            get(channels::list_channels).post(channels::create_channel),
+        )
+        .route(
+            "/v1/channels/{id}",
+            put(channels::update_channel).delete(channels::delete_channel),
+        )
+        .route(
+            "/v1/channels/{id}/permissions/{role}",
+            put(channels::permissions),
+        )
+        .route(
+            "/v1/categories",
+            get(channels::list_categories).post(channels::create_category),
+        )
+        .route(
+            "/v1/categories/{id}",
+            put(channels::update_category).delete(channels::delete_category),
+        )
         .route("/v1/me/revocations", post(auth::revoke))
         .route("/v1/invites", post(members::invite))
         .route("/v1/invites/{id}", delete(members::revoke_invite))
@@ -193,10 +235,17 @@ async fn serve(app: App) -> io::Result<()> {
         .route("/v1/roles", get(roles::list).post(roles::create))
         .route("/v1/roles/default", put(roles::set_default))
         .route("/v1/roles/{id}", delete(roles::delete))
+        .route("/v1/roles/{id}/name", put(roles::rename))
         .route("/v1/owner", put(roles::transfer))
         .route("/v1/audit", get(members::audit_log))
-        .with_state(app)
         .layer(RequestBodyLimitLayer::new(4096))
+        .merge(
+            Router::new()
+                .route("/v1/space", put(metadata::update_space))
+                .route("/v1/me/profile", put(metadata::update_profile))
+                .layer(RequestBodyLimitLayer::new(metadata::IMAGE_BODY_LIMIT)),
+        )
+        .with_state(app)
         .layer(middleware::from_fn(log_request))
         .layer(PropagateRequestIdLayer::x_request_id())
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))

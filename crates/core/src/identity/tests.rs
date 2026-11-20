@@ -91,7 +91,10 @@ fn certificate_round_trips_and_rejects_untrusted_input() {
         DeviceCertificate::verify(wrong_person.to_bytes(), &bytes),
         Err(IdentityError::InvalidSignature)
     ));
-    for i in [bytes.len() - 1, CERT_DOMAIN.len() + 64] {
+    for i in [
+        bytes.len() - 2,
+        LOCAL_CERT_DOMAIN.len() + PUBLIC_CERT_DOMAIN.len() + 64,
+    ] {
         let mut tampered = bytes.clone();
         tampered[i] ^= 1;
         assert!(matches!(
@@ -109,7 +112,7 @@ fn certificate_round_trips_and_rejects_untrusted_input() {
     assert!(DeviceCertificate::verify(person, &vec![0; bytes.len()]).is_err());
 
     let (root, _) = derive_keys(&parse_words(&known_words()).unwrap());
-    let too_long = name + "x";
+    let too_long = format!("{name}x");
     assert!(matches!(
         DeviceIdentity::add_device(&known_words(), &too_long),
         Err(IdentityError::InvalidDeviceName)
@@ -126,13 +129,28 @@ fn certificate_round_trips_and_rejects_untrusted_input() {
         Err(IdentityError::InvalidEncoding)
     ));
 
-    let mut invalid_utf8 = bytes[..bytes.len() - 64].to_vec();
-    *invalid_utf8.last_mut().unwrap() = 0xff;
-    invalid_utf8.extend_from_slice(&root.sign(&invalid_utf8).to_bytes());
-    assert!(matches!(
-        DeviceCertificate::verify(person, &invalid_utf8),
-        Err(IdentityError::InvalidEncoding)
-    ));
+    let mut legacy = certificate_payload(
+        cert.signing_key(),
+        cert.agreement_key(),
+        cert.created_at(),
+        "Legacy",
+    );
+    legacy.extend_from_slice(&root.sign(&legacy).to_bytes());
+    let legacy_cert = DeviceCertificate::verify(person, &legacy).unwrap();
+    assert_eq!(legacy_cert.name(), "Legacy");
+    assert!(legacy_cert.public_bytes().is_err());
+    assert!(DeviceCertificate::verify_public(person, &legacy).is_err());
+
+    let public = cert.public_bytes().unwrap();
+    assert!(
+        !public
+            .windows(name.len())
+            .any(|window| window == name.as_bytes())
+    );
+    assert!(DeviceCertificate::verify_public(person, public).is_ok());
+    for len in 0..public.len() {
+        assert!(DeviceCertificate::verify_public(person, &public[..len]).is_err());
+    }
 }
 
 #[test]

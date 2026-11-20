@@ -1,0 +1,184 @@
+use super::*;
+
+#[test]
+fn envelopes_bind_context_and_both_devices() {
+    let (_, sender) = DeviceIdentity::create("Sender").unwrap();
+    let (_, recipient) = DeviceIdentity::create("Recipient").unwrap();
+    let (_, other) = DeviceIdentity::create("Other").unwrap();
+    let scope = Scope {
+        kind: Kind::Channel,
+        id: [4; 32],
+    };
+    let key = random_key().unwrap();
+    let context = EnvelopeContext::new([3; 32], scope, 1, &key);
+    let bytes = context.wrap(&key, &recipient.certificate, &sender).unwrap();
+    let open = |context: EnvelopeContext, bytes: &[u8]| {
+        context.unwrap(&recipient, &sender.certificate, bytes)
+    };
+    assert!(open(context, &bytes).unwrap() == key);
+    assert!(context.unwrap(&other, &sender.certificate, &bytes).is_err());
+    assert!(
+        context
+            .unwrap(&recipient, &other.certificate, &bytes)
+            .is_err()
+    );
+    assert!(
+        open(
+            EnvelopeContext {
+                commitment: [0; 32],
+                ..context
+            },
+            &bytes
+        )
+        .is_err()
+    );
+    let mut wrong_agreement = DeviceIdentity::from_key_bytes(
+        recipient.signing_key.as_bytes(),
+        recipient.agreement_key.as_bytes(),
+        &recipient.sync_key,
+        DeviceCertificate::verify_public(
+            *recipient.certificate.person_id(),
+            recipient.certificate.public_bytes().unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    wrong_agreement.agreement_key = other.agreement_key;
+    assert!(matches!(
+        context.unwrap(&wrong_agreement, &sender.certificate, &bytes),
+        Err(KeyError::Authentication)
+    ));
+    for other in [
+        EnvelopeContext {
+            epoch: 2,
+            ..context
+        },
+        EnvelopeContext {
+            server_id: [5; 32],
+            ..context
+        },
+        EnvelopeContext {
+            scope: Scope {
+                id: [5; 32],
+                ..scope
+            },
+            ..context
+        },
+        EnvelopeContext {
+            scope: Scope {
+                kind: Kind::Space,
+                ..scope
+            },
+            ..context
+        },
+    ] {
+        let mut resigned = bytes[..80].to_vec();
+        let info = other.info(recipient.certificate.signing_key().as_bytes());
+        resigned.extend_from_slice(
+            &sender
+                .signing_key
+                .sign(&[&info[..], &context.commitment, &resigned].concat())
+                .to_bytes(),
+        );
+        assert!(open(other, &bytes).is_err());
+        assert!(matches!(
+            open(other, &resigned),
+            Err(KeyError::Authentication)
+        ));
+    }
+    for index in [32, 143] {
+        let mut tampered = bytes.clone();
+        tampered[index] ^= 1;
+        assert!(
+            context
+                .verify(
+                    wrong_agreement.certificate.signing_key().as_bytes(),
+                    &sender.certificate,
+                    &tampered
+                )
+                .is_err()
+        );
+    }
+    assert!(
+        context
+            .verify(
+                wrong_agreement.certificate.signing_key().as_bytes(),
+                &sender.certificate,
+                &bytes[..143]
+            )
+            .is_err()
+    );
+    let mut oversized = bytes;
+    oversized.push(0);
+    assert!(
+        context
+            .verify(
+                wrong_agreement.certificate.signing_key().as_bytes(),
+                &sender.certificate,
+                &oversized
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn signed_envelope_must_open_to_the_committed_key() {
+    let (_, device) = DeviceIdentity::create("Device").unwrap();
+    let server = [3; 32];
+    let scope = Scope {
+        kind: Kind::Channel,
+        id: [4; 32],
+    };
+    let context = EnvelopeContext::new(server, scope, 1, &Key::new([5; 32]));
+    let wrong = Key::new([6; 32]);
+    let bytes = context.wrap(&wrong, &device.certificate, &device).unwrap();
+    assert!(
+        context
+            .verify(
+                device.certificate.signing_key().as_bytes(),
+                &device.certificate,
+                &bytes
+            )
+            .is_ok()
+    );
+    assert!(matches!(
+        context.unwrap(&device, &device.certificate, &bytes),
+        Err(KeyError::Commitment)
+    ));
+}
+
+#[test]
+fn metadata_binds_object_epoch_and_key() {
+    let key = random_key().unwrap();
+    let id = b"channel";
+    let server = [3; 32];
+    let kind = Metadata::ChannelName;
+    let mut ct = kind.seal(&server, id, 1, &key, b"secret").unwrap();
+    assert_eq!(kind.open(&server, id, &key, &ct).unwrap(), b"secret");
+    assert!(kind.open(&[4; 32], id, &key, &ct).is_err());
+    assert!(kind.open(&server, b"other", &key, &ct).is_err());
+    assert!(Metadata::ChannelTopic.open(&server, id, &key, &ct).is_err());
+    assert!(kind.open(&server, id, &random_key().unwrap(), &ct).is_err());
+    ct[7] = 2;
+    assert!(kind.open(&server, id, &key, &ct).is_err());
+    ct[7] = 1;
+    ct[40] ^= 1;
+    assert!(kind.open(&server, id, &key, &ct).is_err());
+    assert!(
+        kind.seal(&server, id, 1, &key, &[0; SMALL_METADATA + 1])
+            .is_err()
+    );
+    assert!(kind.open(&server, id, &key, &ct[..39]).is_err());
+}
+
+#[test]
+fn invite_key_binds_server_and_hides_epoch() {
+    let space = random_key().unwrap();
+    let link = random_key().unwrap();
+    let server = [3; 32];
+    let ct = seal_invite(&server, 2, &space, &link).unwrap();
+    assert!(open_invite(&server, &link, &ct).unwrap() == (2, space));
+    assert!(open_invite(&[4; 32], &link, &ct).is_err());
+    assert!(open_invite(&server, &random_key().unwrap(), &ct).is_err());
+    assert!(open_invite(&server, &link, &ct[..INVITE_BYTES - 1]).is_err());
+}

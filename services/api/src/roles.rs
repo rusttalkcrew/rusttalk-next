@@ -3,14 +3,17 @@ use axum::{
     extract::{Path, State, rejection::JsonRejection},
     http::{HeaderMap, StatusCode},
 };
-use rusttalk_core::auth::{decode, decode_bytes, encode};
+use rusttalk_core::{
+    auth::{decode, encode},
+    keys::Metadata,
+};
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, SqliteConnection, query, query_as, query_scalar};
 
 use crate::{
     ApiError, ApiResult, App,
     auth::authenticate,
-    payload,
+    keys, metadata, payload,
     store::{audit, random},
 };
 
@@ -25,15 +28,17 @@ pub enum Permission {
     ManageRoles = 8,
     ViewAuditLog = 16,
     DeleteMessages = 32,
+    ManageChannels = 64,
 }
 
-const PERMISSIONS: [Permission; 6] = [
+const PERMISSIONS: [Permission; 7] = [
     Permission::Invite,
     Permission::Kick,
     Permission::Ban,
     Permission::ManageRoles,
     Permission::ViewAuditLog,
     Permission::DeleteMessages,
+    Permission::ManageChannels,
 ];
 
 #[derive(FromRow)]
@@ -89,6 +94,13 @@ impl Authority {
         Ok(())
     }
 
+    pub fn can_set_channel_flags(&self, role: Role) -> ApiResult<()> {
+        if self.rank == OWNER_RANK && role.rank == OWNER_RANK {
+            return Ok(());
+        }
+        self.can_grant(role.rank, 0)
+    }
+
     fn can_grant(&self, rank: i64, permissions: i64) -> ApiResult<()> {
         self.outrank(&Authority { rank, permissions })?;
         if permissions & !self.permissions != 0 {
@@ -119,7 +131,7 @@ pub async fn authority(db: &mut SqliteConnection, person: &[u8]) -> ApiResult<Au
     })
 }
 
-async fn by_id(db: &mut SqliteConnection, id: &str) -> ApiResult<Role> {
+pub async fn by_id(db: &mut SqliteConnection, id: &str) -> ApiResult<Role> {
     query_as("SELECT id, kind, rank, permissions, name_ct FROM roles WHERE id = ?")
         .bind(id)
         .fetch_optional(db)
@@ -155,6 +167,7 @@ pub async fn list(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<
 
 #[derive(Deserialize)]
 pub struct NewRole {
+    id: Option<String>,
     rank: i64,
     permissions: Vec<Permission>,
     name_ct: Option<String>,
@@ -166,16 +179,13 @@ pub async fn create(
     body: Result<Json<NewRole>, JsonRejection>,
 ) -> ApiResult<(StatusCode, Json<RoleView>)> {
     let NewRole {
+        id,
         rank,
         permissions,
         name_ct,
     } = payload(body)?;
     if !(1..OWNER_RANK).contains(&rank) {
         return Err(ApiError::bad_request("invalid_role_rank"));
-    }
-    let name_ct = name_ct.as_deref().map(decode_bytes).transpose()?;
-    if name_ct.as_ref().is_some_and(|name| name.len() > 512) {
-        return Err(ApiError::bad_request("role_name_too_large"));
     }
     let permissions = permissions
         .into_iter()
@@ -191,14 +201,35 @@ pub async fn create(
     if count >= 128 {
         return Err(ApiError::new(StatusCode::CONFLICT, "role_limit"));
     }
-    let id = encode(&random::<16>()?);
-    query("INSERT INTO roles (id, kind, rank, permissions, name_ct) VALUES (?, 'custom', ?, ?, ?)")
-        .bind(&id)
-        .bind(rank)
-        .bind(permissions)
-        .bind(&name_ct)
-        .execute(&mut *tx)
-        .await?;
+    let id = match id {
+        Some(id) => {
+            decode::<16>(&id)?;
+            id
+        }
+        None if name_ct.is_none() => encode(&random::<16>()?),
+        None => return Err(ApiError::bad_request("role_id_required")),
+    };
+    let name_ct = match name_ct {
+        Some(name) => {
+            let epoch = keys::space_epoch(&mut tx, &app).await?;
+            Some(metadata::checked(Metadata::RoleName, epoch, name)?)
+        }
+        None => None,
+    };
+    let inserted = query(
+        "INSERT INTO roles (id, kind, rank, permissions, name_ct) VALUES (?, 'custom', ?, ?, ?)
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .bind(&id)
+    .bind(rank)
+    .bind(permissions)
+    .bind(&name_ct)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if inserted == 0 {
+        return Err(keys::conflict("role_exists"));
+    }
     audit(
         &mut tx,
         &actor.person,
@@ -222,6 +253,44 @@ pub async fn create(
             .into(),
         ),
     ))
+}
+
+#[derive(Deserialize)]
+pub struct RoleName {
+    name_ct: Option<String>,
+}
+
+pub async fn rename(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: Result<Json<RoleName>, JsonRejection>,
+) -> ApiResult<StatusCode> {
+    let (mut tx, actor) = authenticate(&app, &headers).await?;
+    let auth = authority(&mut tx, &actor.person).await?;
+    auth.require(Permission::ManageRoles)?;
+    let role = by_id(&mut tx, &id).await?;
+    if role.kind == "custom" {
+        auth.can_grant(role.rank, role.permissions)?;
+    }
+    let epoch = keys::space_epoch(&mut tx, &app).await?;
+    let name = metadata::optional(Metadata::RoleName, epoch, payload(body)?.name_ct)?;
+    query("UPDATE roles SET name_ct = ? WHERE id = ?")
+        .bind(name)
+        .bind(&id)
+        .execute(&mut *tx)
+        .await?;
+    audit(
+        &mut tx,
+        &actor.person,
+        "role_renamed",
+        None,
+        Some(&id),
+        actor.at,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn delete(
@@ -323,6 +392,7 @@ pub async fn assign(
         let role = by_id(&mut tx, id).await?;
         auth.can_grant(role.rank, role.permissions)?;
     }
+    let before = keys::readable_channels(&mut tx, &person).await?;
     query("DELETE FROM member_roles WHERE person_id = ?")
         .bind(person.as_slice())
         .execute(&mut *tx)
@@ -334,6 +404,7 @@ pub async fn assign(
             .execute(&mut *tx)
             .await?;
     }
+    keys::lost_channels(&mut tx, &person, before).await?;
     audit(
         &mut tx,
         &actor.person,
@@ -344,6 +415,7 @@ pub async fn assign(
     )
     .await?;
     tx.commit().await?;
+    keys::changed(&app, &person, None);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -369,10 +441,12 @@ pub async fn transfer(
     if target.rank < 0 {
         return Err(ApiError::not_found("member_not_found"));
     }
+    let before = keys::readable_channels(&mut tx, &actor.person).await?;
     query("UPDATE server_settings SET owner_person_id = ? WHERE id = 1")
         .bind(person.as_slice())
         .execute(&mut *tx)
         .await?;
+    keys::lost_channels(&mut tx, &actor.person, before).await?;
     audit(
         &mut tx,
         &actor.person,
@@ -383,6 +457,8 @@ pub async fn transfer(
     )
     .await?;
     tx.commit().await?;
+    keys::changed(&app, &actor.person, None);
+    keys::changed(&app, &person, None);
     Ok(StatusCode::NO_CONTENT)
 }
 

@@ -2,5 +2,6 @@
 
 pub mod auth;
 pub mod identity;
+pub mod keys;
 #[cfg(feature = "livekit-tls")]
 pub mod pinned_tls;

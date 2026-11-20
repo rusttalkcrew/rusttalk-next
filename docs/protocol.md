@@ -1,7 +1,7 @@
 # Protocol
 
 The API runs over HTTPS. Requests with JSON bodies use `Content-Type: application/json`.
-Each request body is limited to 4096 bytes. Binary fields use canonical unpadded
+The default request body limit is 4096 bytes. Binary fields use canonical unpadded
 base64url. Times are Unix seconds. Auth and membership responses carry
 `Cache-Control: no-store`.
 
@@ -23,7 +23,7 @@ challenge (32 bytes) || server_id (32 bytes) || "rusttalk-auth-v1" (16 ASCII byt
 ```
 
 Domain strings have no trailing terminator. Signatures are 64 bytes. The
-certificate uses the W04 format described in [Crypto](crypto.md). Use a fresh
+certificate uses the public W06 format described in [Crypto](crypto.md). Use a fresh
 challenge per attempt. The server consumes a recognized challenge before
 verifying the device proof, and rejects challenges after 60 seconds. At most
 256 challenges are outstanding across the server.
@@ -33,22 +33,27 @@ code as the optional `invite` field. Invite redemption, membership and session
 creation are atomic. Each person and device pair can have one current session.
 Successful sign-in replaces any previous token for the device. A refresh
 rotates the bearer token and extends expiry to 12 hours from the refresh.
+A person may register up to ten devices. At the cap, sign-in from a new
+device returns `409 device_limit`. Revoking a device frees a slot.
 
 ## Invite links and server pins
 
 ```text
-rusttalk://<host>[:port]/i/<code>#<server_id>[.<tls_sha256>]
+rusttalk://<host>[:port]/i/<code>#<server_id>[.<tls_sha256>][.k~<link_key>]
 ```
 
 Use a hostname, IPv4 address or bracketed IPv6 address. Port defaults to 443.
 The code is 16 random bytes. The fragment carries the full 32-byte Ed25519
 server ID, followed in self-signed mode by the 32-byte SHA-256 hash of the DER
 leaf certificate. Public CA mode omits the TLS field and uses normal TLS
-verification. W06 can extend the fragment with another dot-separated field
-for the space-key data. W05 clients accept only the fields above.
+verification. The optional `.k~` field holds the 32-byte invite link key.
+Owner bootstrap links and pre-W06 links omit it. Pass the invite code in
+`POST /v1/invite-preview` before sign-in. The API returns the encrypted
+space key and name snapshot. The client reads the link key from the fragment,
+checks the server and TLS pins, and decrypts locally.
 
 Pass a link through a trusted channel and give the HTTPS API only its code,
-inside the sign-in body. Clients pin the verified server ID and any explicit
+inside the sign-in or invite-preview body. Clients pin the verified server ID and any explicit
 TLS fingerprint against the canonical HTTPS origin. A mismatch at a known
 origin is a hard failure. For first use by address, the desktop UI will show
 the server fingerprint for comparison. Dev bots use the local TLS certificate
@@ -62,13 +67,14 @@ All endpoints below require `Authorization: Bearer <token>`.
 | --- | --- | --- |
 | GET `/v1/me` | Empty | Any member. 200, `{person_id, device_id, joined_at, role_ids}` |
 | POST `/v1/me/revocations` | `{record}`, a W04 root-signed revocation for the caller's person | Any member. 204, affected device loses its token |
-| POST `/v1/invites` | `{uses, ttl_seconds}` | `invite`. 201, `{id, code, expires_at}` |
+| POST `/v1/invites` | `{uses, ttl_seconds, space_key_ct, name_ct?}` | `invite`. 201, `{id, code, expires_at}` |
 | DELETE `/v1/invites/{id}` | Empty | `invite`. 204 |
 | DELETE `/v1/members/{person}` | Empty | `kick`. 204 |
 | PUT `/v1/bans/{person}` | `{ban_ip?}`, default false | `ban`. 204 |
 | DELETE `/v1/bans/{person}` | Empty | `ban`. 204 |
 | GET `/v1/roles` | Empty | Any member. 200, `{default_role_id, roles}` |
-| POST `/v1/roles` | `{rank, permissions, name_ct?}` | `manage_roles`. 201, the created role |
+| POST `/v1/roles` | `{id?, rank, permissions, name_ct?}` | `manage_roles`. 201, the created role |
+| PUT `/v1/roles/{id}/name` | `{name_ct?}` | `manage_roles`. 204 |
 | DELETE `/v1/roles/{id}` | Empty | `manage_roles`. 204 |
 | PUT `/v1/roles/default` | `{role_id}` | `manage_roles`. 204 |
 | PUT `/v1/members/{person}/roles` | `{role_ids}` | `manage_roles`. 204, replaces assigned roles |
@@ -77,14 +83,19 @@ All endpoints below require `Authorization: Bearer <token>`.
 
 A role has `{id, kind, rank, permissions, name_ct}`. A member's permissions
 are the union of their role flags, and their highest rank is used for
-hierarchy. Owner (1000) and Admin (100) have all six flags. Moderator (50)
+hierarchy. Owner (1000) and Admin (100) have all seven flags. Moderator (50)
 has `kick`, `ban`, and `delete_messages`. Member (0) has no flags and starts
 as the default. The other flags are `invite`, `manage_roles`, and
-`view_audit_log`. `delete_messages` is reserved for W07. Built-in role IDs
+`view_audit_log`, and `manage_channels`. `delete_messages` is reserved for W07. Built-in role IDs
 match their kinds. Custom roles have opaque IDs and ranks from 1 to 999,
 strictly below their creator. They can only receive flags that the creator
-has. `name_ct` is null or at most 512 bytes of opaque ciphertext after
-decoding. The server allows up to 128 roles including built-ins.
+has. `name_ct` is null or a metadata ciphertext of at most 512 bytes
+after decoding. Supply a client-generated 16-byte ID when setting an
+initial name. The server can assign the ID for an unnamed role. Use the
+role ID's UTF-8 bytes as the metadata object ID, including for built-ins.
+W05 role label blobs had no epoch or required encoding. The upgrade clears
+those labels and preserves the roles and assignments. The server allows
+up to 128 roles including built-ins.
 Deleting a custom role requires clearing its assignments and replacing it
 as the default first. Changing the default affects future joins.
 
@@ -95,7 +106,12 @@ owner role comes from a singleton ownership record and can only move via
 the transfer endpoint. The prior owner keeps their assigned roles.
 
 Invite uses may be 1–1000, with lifetimes from 1 second to 30 days. The
-bootstrap invite is single-use and expires after a day. Kick and ban
+bootstrap invite is single-use and expires after a day. For a regular
+invite, supply the encrypted space key and, if the server has a name,
+a separately encrypted copy of that name. Encrypt the copy using the
+current space epoch even if the server's stored metadata uses an older
+epoch. An invite issued before rotation can still preview the snapshot
+from issuance. Kick and ban
 remove membership and drop all its sessions. Unban clears the person ban
 and any linked IPs. The former member needs an invite to join again. When
 `ban_ip` is true, the server adds the target's IPs from active sessions.
@@ -125,9 +141,103 @@ errors may have an empty body. The API logs a request ID, status and reason.
 | 429 | `challenge_limit` |
 | 500 | `database_error`, `database_pool_timeout`, `database_busy`, `clock_error`, `randomness_error`, `invalid_stored_person` |
 
-## Channels and messages
+## Keys and encrypted metadata
 
-Written in W06 and W07.
+All routes in the table require a bearer header except invite preview.
+A scope is `{kind, id}` where kind is `space` or `channel` and the ID is
+the server ID or the channel ID. Epochs are positive integers, with 0
+in a state response indicating that the first epoch is still pending.
+
+| Method and path | Body | Permission and success |
+| --- | --- | --- |
+| GET `/v1/member-devices` | Empty | Any member. 200, `[{person, certificate}]` of current devices |
+| GET `/v1/keys` | Empty | Any member. 200, `{scopes, envelopes, pending}` |
+| POST `/v1/keys` | `{scope, epoch, device, envelope}` | A reader of the scope. 204. The recipient must also be a current device of a reader |
+| POST `/v1/keys/reject` | `{scope, epoch, sender, envelope}` | A reader of the scope. 204. Deletes a matching envelope addressed to the caller's device |
+| POST `/v1/keys/epochs` | `{scope, epoch, commitment, envelope}` | A reader of a rotating scope, or the owner for the initial space epoch. 201. The envelope is addressed to the caller's device |
+| GET `/v1/space` | Empty | Any member. 200, `{name_ct, description_ct, icon_ct}` |
+| PUT `/v1/space` | `{name_ct?, description_ct?, icon_ct?}` | Owner. 204 |
+| GET `/v1/members` | Empty | Any member. 200, `[{person_id, display_name_ct, avatar_ct}]` |
+| PUT `/v1/me/profile` | `{display_name_ct?, avatar_ct?}` | Updates the authenticated member's own profile. 204 |
+| POST `/v1/invite-preview` | `{code}` | No bearer. 200, `{space_key_ct, name_ct}`. Missing, expired, spent or unpreviewable invite returns 404 |
+
+Scope state entries have `{scope, epoch, rotate}`. Pending entries have
+`{scope, epoch, device}`. Envelope entries add `sender`, `commitment` and `envelope`
+to those fields. Each response exposes envelopes only for its authenticated
+device and readable scopes. Pending wraps include all epochs, and include
+records whose sender device is no longer current. Each new epoch is
+created in one transaction with its first envelope. A client that loses
+the epoch race receives `409 epoch_changed` and fetches state again.
+Rejecting a matching envelope reopens its slot and prevents the sender's
+person from uploading to that slot while they remain a member. A stale
+rejection leaves the current envelope in place.
+See [Crypto](crypto.md) for the binary envelope and metadata formats.
+
+Metadata PUTs replace the supplied record. Omitted or null optional fields
+clear existing values. Metadata writes require the current space epoch.
+During space rotation, the API returns `409 space_key_unavailable`.
+A ciphertext from a different epoch returns `409 metadata_epoch_changed`.
+Server names, descriptions, channel names and topics, category names and
+display names allow 1024 plaintext bytes each. Icon and avatar ciphertext
+blobs allow 256 KiB each. The two metadata PUT routes that accept images
+allow 356 KiB JSON bodies to account for base64url and accompanying fields.
+Invite preview permits eight lookups per IPv4 address or IPv6 /64 and
+256 server-wide in 60 seconds. Invalid codes that pass base64url parsing also count.
+
+## Channels and categories
+
+All routes require a bearer header. Channel kind is `text` or `voice`.
+Channel and category IDs are client-generated random 32-byte values.
+`position` is an integer used for ordering with ID as the tiebreaker.
+Every channel has one category. Channel kind is fixed at creation.
+
+| Method and path | Body | Permission and success |
+| --- | --- | --- |
+| GET `/v1/catalog` | Empty | Any member. 200, `{channels, categories}` filtered to channels they can read and their categories |
+| GET `/v1/channels` | Empty | `manage_channels`. 200, channel list |
+| POST `/v1/channels` | `{id, kind, category_id, position, name_ct, topic_ct?, commitment, envelope}` | `manage_channels`. 201. Envelope initializes epoch 1 for the caller |
+| PUT `/v1/channels/{id}` | `{category_id, position, name_ct, topic_ct?}` | `manage_channels`. 204 |
+| DELETE `/v1/channels/{id}` | Empty | `manage_channels`. 204 |
+| PUT `/v1/channels/{id}/permissions/{role}` | `{flags}` | `manage_channels` and a lower-ranked target role. The Owner can also change the Owner role. 204 |
+| GET `/v1/categories` | Empty | `manage_channels`. 200, category list |
+| POST `/v1/categories` | `{id, position, name_ct}` | `manage_channels`. 201 |
+| PUT `/v1/categories/{id}` | `{position, name_ct}` | `manage_channels`. 204 |
+| DELETE `/v1/categories/{id}` | Empty | `manage_channels`. 204 if empty, 409 if in use |
+
+Channel responses have `{id, kind, category_id, position, name_ct, topic_ct, flags}`.
+A category has `{id, position, name_ct}`. Each channel's flags are
+`[{role_id, flags}]` with read (1), write (2), speak (4), and video (8).
+Flags accumulate across assigned roles, including the owner role while
+held. The owner always reads every channel, so the Owner role's read flag
+never removes the owner's access. A zero mask removes a role's entry.
+Write, speak and video each require read in the same mask. An invalid
+mask returns `400 invalid_channel_flags`. Owner, Admin and Member start
+with all four flags on new channels. If a custom-role creator would
+otherwise lack read access, its highest-ranked assigned role with
+`manage_channels` also starts with all four flags. Losing the read flag
+through any assignment or permission change requests a channel rotation.
+Channel names and topics use space keys, while channel keys protect
+the channel's content.
+
+## Live events
+
+Open one `GET /v1/events` WebSocket per connection with the bearer
+Authorization header. Use a query-less URL. The server sends JSON text
+frames. It sends the outstanding key work at connection time and checks
+session validity before pushing updates.
+
+| Type | Other fields |
+| --- | --- |
+| `keys_needed` | `scope`, `epoch`, `device`. Reconcile pending wraps and delivered keys. Completion also wakes the recipient |
+| `rotate_needed` | `scope`. Fetch the current epoch and try to publish its successor |
+| `member_changed` | `person`, optional `device`. Refresh the member and device directory and surface fingerprints |
+| `channel_changed` | None. Refresh the catalog |
+| `resync` | None. The socket fell behind. Fetch current state, including keys, catalog and member devices |
+
+The API closes the socket when the token expires or ends, including kick,
+ban and device revocation. Close reasons are fixed strings and logged.
+The server keeps lagging sockets open and recomputes the outstanding
+key work. Message events are specified in W07.
 
 ## Files
 
