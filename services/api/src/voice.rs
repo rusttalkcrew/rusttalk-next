@@ -380,17 +380,24 @@ pub fn close_rooms(app: &App, channel: String, voice: bool) {
     });
 }
 
+fn room_channel(room: &str) -> Option<(&str, bool)> {
+    if decode::<32>(room).is_ok() {
+        return Some((room, false));
+    }
+    let channel = room.strip_prefix(DATA_PREFIX)?;
+    decode::<32>(channel).ok()?;
+    Some((channel, true))
+}
+
 async fn enforce_rooms(app: &App, livekit: &LiveKit, room: Option<String>) -> ApiResult<()> {
     let rooms = match room {
         Some(channel) => vec![format!("{DATA_PREFIX}{channel}"), channel],
         None => livekit.rooms().await?,
     };
     for room in rooms {
-        let data = room.starts_with(DATA_PREFIX);
-        let channel = room.strip_prefix(DATA_PREFIX).unwrap_or(&room);
-        if decode::<32>(channel).is_err() {
+        let Some((channel, data)) = room_channel(&room) else {
             continue;
-        }
+        };
         let participants = match livekit.list(&room).await {
             Ok(participants) => participants,
             Err(error) => {
@@ -592,18 +599,29 @@ pub async fn webhook(
         event.event.as_str(),
         "participant_joined" | "participant_left" | "room_finished"
     ) && let Some(room) = event.room
+        && let Some((channel, data)) = room_channel(&room.name)
     {
-        let data = room.name.strip_prefix(DATA_PREFIX);
-        let channel = data.unwrap_or(&room.name);
-        if decode::<32>(channel).is_ok() {
-            if event.event == "participant_joined" {
-                // A LiveKit token outlives the session that requested it.
-                enforce(&app, Some(channel.to_owned()));
-            }
-            if data.is_none() {
-                app.notify(Some(Event::VoiceChanged { channel: room.name }));
-            }
+        if event.event == "participant_joined" {
+            // A LiveKit token outlives the session that requested it.
+            enforce(&app, Some(channel.to_owned()));
+        }
+        if !data {
+            app.notify(Some(Event::VoiceChanged { channel: room.name }));
         }
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn voice_room_ids_can_start_with_the_data_prefix() {
+        let channel = format!("{DATA_PREFIX}{}", "A".repeat(38));
+        let data_room = format!("{DATA_PREFIX}{channel}");
+        assert_eq!(room_channel(&channel), Some((channel.as_str(), false)));
+        assert_eq!(room_channel(&data_room), Some((channel.as_str(), true)));
+        assert_eq!(room_channel(DATA_PREFIX), None);
+    }
 }

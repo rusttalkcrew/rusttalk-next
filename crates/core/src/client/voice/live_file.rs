@@ -446,14 +446,36 @@ impl LiveFiles {
                 nonce,
                 tokio::spawn(async move {
                     let result = async {
-                        let data_room;
-                        let room = if let Some(room) = room {
-                            room
-                        } else {
-                            (data_room, _) = connect_data(&server, request).await?;
-                            data_room.0.clone()
-                        };
-                        upload(room, destination, file, prefix, nonce, &path).await
+                        if let Some(room) = room {
+                            return upload(room, destination, file, prefix, nonce, &path).await;
+                        }
+                        let (room, mut events) = connect_data(&server, request).await?;
+                        upload(
+                            room.0.clone(),
+                            destination.clone(),
+                            file,
+                            prefix,
+                            nonce,
+                            &path,
+                        )
+                        .await?;
+                        // Closing as soon as the SDK queues the trailer can drop data still in flight.
+                        timeout(IDLE, async {
+                            while let Some(event) = events.recv().await {
+                                match event {
+                                    RoomEvent::ParticipantDisconnected(peer)
+                                        if peer.identity() == destination =>
+                                    {
+                                        break;
+                                    }
+                                    RoomEvent::Disconnected { .. } => break,
+                                    _ => (),
+                                }
+                            }
+                        })
+                        .await
+                        .context("receiver did not leave the data room")?;
+                        Ok(())
                     }
                     .await;
                     if let Err(error) = result {

@@ -212,6 +212,15 @@ pub(super) async fn data_only(
     )
     .await?;
 
+    super::set_flags(a, &encode(&text.id), "member", 1).await?;
+    super::rejected(
+        data_token(text).send().await?,
+        reqwest::StatusCode::FORBIDDEN,
+        "channel_write_denied",
+    )
+    .await?;
+    super::set_flags(a, &encode(&text.id), "member", 15).await?;
+
     // Verify media grants even on the data room for a channel with voice permissions.
     let request = data_token(voice);
     let mut url = request
