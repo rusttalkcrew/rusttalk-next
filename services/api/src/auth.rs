@@ -26,7 +26,7 @@ const CHALLENGE_TTL: i64 = 60;
 const SESSION_TTL: i64 = Duration::from_hours(12).as_secs() as i64;
 
 pub async fn challenge(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Challenge>> {
-    let ip = client_ip(&headers)?;
+    let ip = limit_key(&client_ip(&headers)?);
     let mut tx = write(&app.db).await?;
     let at = now()?;
     query("DELETE FROM challenges WHERE expires_at <= ?")
@@ -157,6 +157,16 @@ fn client_ip(headers: &HeaderMap) -> ApiResult<String> {
     Ok(ip.to_canonical().to_string())
 }
 
+/// One IPv6 user owns a whole /64, so rate limits count that prefix as one address.
+fn limit_key(ip: &str) -> String {
+    match ip.parse() {
+        Ok(IpAddr::V6(v6)) => {
+            std::net::Ipv6Addr::from(u128::from(v6) & !(u128::MAX >> 64)).to_string()
+        }
+        _ => ip.to_owned(),
+    }
+}
+
 async fn check_ip(db: &mut SqliteConnection, ip: &str, person: &[u8]) -> ApiResult<()> {
     let banned: bool = query_scalar(
         "SELECT EXISTS (SELECT 1 FROM ban_ips WHERE ip = ?)
@@ -279,9 +289,10 @@ async fn issue_session(
     let expires_at = at + SESSION_TTL;
     // Device certificates are free to mint, so bound sessions per person by dropping the oldest.
     let dropped: Vec<i64> = query_scalar(
-        "DELETE FROM sessions WHERE token_hash IN (SELECT token_hash FROM sessions
-         WHERE person_id = ? ORDER BY expires_at DESC LIMIT -1 OFFSET ?) RETURNING expires_at",
+        "DELETE FROM sessions WHERE person_id = ? AND token_hash NOT IN (SELECT token_hash
+         FROM sessions WHERE person_id = ? ORDER BY expires_at DESC LIMIT ?) RETURNING expires_at",
     )
+    .bind(person)
     .bind(person)
     .bind(SESSIONS_PER_PERSON - 1)
     .fetch_all(&mut *db)
@@ -475,6 +486,65 @@ mod tests {
         let refused = challenge(State(app.clone()), from("192.0.2.1")).await;
         assert_eq!(refused.err().unwrap().code, "challenge_limit");
         assert!(challenge(State(app), from("192.0.2.2")).await.is_ok());
+        assert_eq!(limit_key("2001:db8:1:2:3:4:5:6"), "2001:db8:1:2::");
+        assert_eq!(limit_key("192.0.2.1"), "192.0.2.1");
+    }
+
+    #[tokio::test]
+    async fn ip_bans_block_members_but_never_the_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::store::open(dir.path()).await.unwrap();
+        let mut conn = db.acquire().await.unwrap();
+        for sql in [
+            "INSERT INTO members (person_id, joined_at) VALUES (x'01', 0), (x'02', 0), (x'03', 0)",
+            "UPDATE server_settings SET owner_person_id = x'01'",
+            "INSERT INTO bans (person_id) VALUES (x'03')",
+            "INSERT INTO ban_ips (person_id, ip) VALUES (x'03', '192.0.2.9')",
+        ] {
+            query(sql).execute(&mut *conn).await.unwrap();
+        }
+        let banned = check_ip(&mut conn, "192.0.2.9", &[2]).await;
+        assert_eq!(banned.unwrap_err().code, "ip_banned");
+        assert!(check_ip(&mut conn, "192.0.2.9", &[1]).await.is_ok());
+        assert!(check_ip(&mut conn, "192.0.2.8", &[2]).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn sessions_per_person_keep_the_newest() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::store::open(dir.path()).await.unwrap();
+        let mut conn = db.acquire().await.unwrap();
+        let person = |id: u8| [id; 32];
+        for id in [1, 2] {
+            query("INSERT INTO members (person_id, joined_at) VALUES (?, 0)")
+                .bind(person(id).as_slice())
+                .execute(&mut *conn)
+                .await
+                .unwrap();
+        }
+        for at in 0..=SESSIONS_PER_PERSON {
+            issue_session(&mut conn, &[1; 32], &[at as u8; 32], "192.0.2.1", at)
+                .await
+                .unwrap();
+        }
+        issue_session(&mut conn, &[2; 32], &[0; 32], "192.0.2.1", 0)
+            .await
+            .unwrap();
+        let rows: Vec<(Vec<u8>, i64)> =
+            query_as("SELECT person_id, MIN(expires_at) FROM sessions GROUP BY person_id")
+                .fetch_all(&mut *conn)
+                .await
+                .unwrap();
+        let count: i64 = query_scalar("SELECT COUNT(*) FROM sessions WHERE person_id = ?")
+            .bind([1u8; 32].as_slice())
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+        assert_eq!(count, SESSIONS_PER_PERSON);
+        assert_eq!(
+            rows,
+            vec![(vec![1; 32], 1 + SESSION_TTL), (vec![2; 32], SESSION_TTL)]
+        );
     }
 
     #[tokio::test]
