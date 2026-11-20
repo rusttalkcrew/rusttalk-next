@@ -392,7 +392,8 @@ The upload rejects a blob below 16 bytes and caps the bytes as they arrive,
 including when the request has no Content-Length. The configured limits count
 ciphertext bytes, including tags and thumbnail blobs. Upload errors include
 `413 file_too_large`, `413 file_member_quota`, `413 file_server_quota`,
-`409 file_exists`, `408 file_upload_timeout` and `503 file_upload_busy`.
+`409 file_exists`, `408 file_upload_timeout` and `503 file_upload_busy`. The
+API stages at most four uploads at once and at most two per member.
 A missing or expired blob returns `404 file_not_found`. A download without a
 valid session also returns 404. A member without channel access gets
 `403 channel_read_denied`. Only the upload route uses the file body limit.

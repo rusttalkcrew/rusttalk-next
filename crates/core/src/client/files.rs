@@ -37,21 +37,10 @@ impl KeyClient<'_> {
             thumbnail: None,
         };
         attachment.validate()?;
-        let format = image::guess_format(bytes).ok();
-        let thumbnail = if media_type.to_ascii_lowercase().starts_with("image/")
-            || matches!(format, Some(ImageFormat::Png | ImageFormat::Jpeg))
-        {
-            let image = decode_image(bytes)?;
-            let mut png = Cursor::new(Vec::new());
-            DynamicImage::ImageRgba8(image.thumbnail(THUMBNAIL_EDGE, THUMBNAIL_EDGE).into_rgba8())
-                .write_to(&mut png, ImageFormat::Png)?;
-            let png = png.into_inner();
-            ensure!(png.len() <= MAX_THUMBNAIL_BYTES, "thumbnail too large");
+        let thumbnail = make_thumbnail(bytes);
+        if let Some(png) = &thumbnail {
             attachment.thumbnail = Some(blob_ref(png.len())?);
-            Some(png)
-        } else {
-            None
-        };
+        }
         self.upload_blob(channel, &attachment.file, bytes).await?;
         if let (Some(reference), Some(bytes)) = (&attachment.thumbnail, thumbnail)
             && let Err(error) = self.upload_blob(channel, reference, &bytes).await
@@ -126,19 +115,49 @@ impl KeyClient<'_> {
 
 /// Decode only JPEG or PNG, with dimension and allocation limits for hostile input.
 pub fn decode_image(bytes: &[u8]) -> Result<DynamicImage> {
+    decode_limited(
+        bytes,
+        &[ImageFormat::Png, ImageFormat::Jpeg],
+        4096,
+        64 * 1024 * 1024,
+    )
+}
+
+/// Decode a received thumbnail: only the PNG this client makes, at most 320 pixels per edge.
+pub fn decode_thumbnail(bytes: &[u8]) -> Result<DynamicImage> {
+    ensure!(bytes.len() <= MAX_THUMBNAIL_BYTES, "thumbnail too large");
+    let edge = THUMBNAIL_EDGE as u64;
+    decode_limited(bytes, &[ImageFormat::Png], THUMBNAIL_EDGE, edge * edge * 8)
+}
+
+fn decode_limited(
+    bytes: &[u8],
+    formats: &[ImageFormat],
+    edge: u32,
+    alloc: u64,
+) -> Result<DynamicImage> {
     ensure!(bytes.len() <= MAX_CIPHERTEXT, "image input too large");
     let format = image::guess_format(bytes).context("unknown image format")?;
-    ensure!(
-        matches!(format, ImageFormat::Png | ImageFormat::Jpeg),
-        "unsupported image format"
-    );
+    ensure!(formats.contains(&format), "unsupported image format");
     let mut reader = ImageReader::with_format(Cursor::new(bytes), format);
     let mut limits = Limits::default();
-    limits.max_image_width = Some(4096);
-    limits.max_image_height = Some(4096);
-    limits.max_alloc = Some(64 * 1024 * 1024);
+    limits.max_image_width = Some(edge);
+    limits.max_image_height = Some(edge);
+    limits.max_alloc = Some(alloc);
     reader.limits(limits);
     Ok(reader.decode()?)
+}
+
+/// A PNG thumbnail for a decodable PNG or JPEG. Anything else, including images
+/// over the decode limits, is still sent, just without a thumbnail.
+fn make_thumbnail(bytes: &[u8]) -> Option<Vec<u8>> {
+    let image = decode_image(bytes).ok()?;
+    let mut png = Cursor::new(Vec::new());
+    DynamicImage::ImageRgba8(image.thumbnail(THUMBNAIL_EDGE, THUMBNAIL_EDGE).into_rgba8())
+        .write_to(&mut png, ImageFormat::Png)
+        .ok()?;
+    let png = png.into_inner();
+    (png.len() <= MAX_THUMBNAIL_BYTES).then_some(png)
 }
 
 fn file_path(id: &[u8; 32]) -> String {
@@ -283,6 +302,32 @@ mod tests {
             .unwrap()
             .downcast::<image::ImageError>()?;
         assert!(matches!(error, image::ImageError::Limits(_)));
+        Ok(())
+    }
+
+    fn png(width: u32, height: u32) -> Result<Vec<u8>> {
+        let mut png = Cursor::new(Vec::new());
+        DynamicImage::new_rgb8(width, height).write_to(&mut png, ImageFormat::Png)?;
+        Ok(png.into_inner())
+    }
+
+    #[test]
+    fn thumbnails_are_best_effort_and_bounded() -> Result<()> {
+        let thumbnail = make_thumbnail(&png(640, 240)?).context("missing thumbnail")?;
+        let decoded = decode_thumbnail(&thumbnail)?;
+        assert_eq!((decoded.width(), decoded.height()), (320, 120));
+        let mut jpeg = Cursor::new(Vec::new());
+        DynamicImage::new_rgb8(64, 64).write_to(&mut jpeg, ImageFormat::Jpeg)?;
+        assert!(make_thumbnail(jpeg.get_ref()).is_some());
+        // Unsupported, oversized or broken images are uploaded without a thumbnail.
+        assert!(make_thumbnail(b"GIF89a\x01\x00\x01\x00").is_none());
+        assert!(make_thumbnail(&png(4097, 1)?).is_none());
+        assert!(make_thumbnail(&png(64, 64)?[..40]).is_none());
+
+        // Received thumbnails are only small PNGs.
+        assert!(decode_thumbnail(&png(321, 1)?).is_err());
+        assert!(decode_thumbnail(jpeg.get_ref()).is_err());
+        assert!(decode_thumbnail(&vec![0; MAX_THUMBNAIL_BYTES + 1]).is_err());
         Ok(())
     }
 }
