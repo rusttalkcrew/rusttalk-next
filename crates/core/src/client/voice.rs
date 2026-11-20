@@ -65,6 +65,20 @@ pub enum VoiceState {
     Disconnected,
 }
 
+/// People in a voice room, plus devices the server could not match to a current reader.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct VoiceRoster {
+    pub people: Vec<[u8; 32]>,
+    /// Show these as "unknown device".
+    pub unknown: usize,
+}
+
+#[derive(Deserialize)]
+struct Roster {
+    people: Vec<String>,
+    unknown: usize,
+}
+
 #[derive(Deserialize)]
 struct Token {
     token: String,
@@ -127,9 +141,9 @@ impl KeyClient<'_> {
         })
     }
 
-    /// Fetch unique person IDs currently in a voice channel.
-    pub async fn voice_participants(&self, channel: &[u8; 32]) -> Result<Vec<[u8; 32]>> {
-        let people: Vec<String> = self
+    /// Fetch who is currently in a voice channel.
+    pub async fn voice_participants(&self, channel: &[u8; 32]) -> Result<VoiceRoster> {
+        let roster: Roster = self
             .request(
                 Method::GET,
                 &format!("/v1/voice/{}/participants", encode(channel)),
@@ -139,27 +153,28 @@ impl KeyClient<'_> {
             .error_for_status()?
             .json()
             .await?;
-        Ok(people
-            .iter()
-            .map(|id| decode(id))
-            .collect::<Result<_, _>>()?)
+        Ok(VoiceRoster {
+            people: roster
+                .people
+                .iter()
+                .map(|id| decode(id))
+                .collect::<Result<_, _>>()?,
+            unknown: roster.unknown,
+        })
     }
 }
 
-// SDK senders start at index zero, including auto-republished senders on full reconnect.
-// Keep that slot current so such a sender can never emit frames under a retired key.
+// Every slot holds the current key. Frames stamped with a retired epoch's slot then fail
+// decryption, so a removed sender cannot be heard, and new SDK senders (index zero) start
+// on the current key. The primary slot is written last because the provider tracks it.
 fn install_key(provider: &KeyProvider, key: &Key, epoch: i64) -> Result<()> {
     let index = key_index(epoch);
-    if index != 0 {
+    for slot in (0..16).filter(|slot| *slot != index).chain([index]) {
         ensure!(
-            provider.set_shared_key(key.to_vec(), 0),
-            "LiveKit rejected fallback key slot"
+            provider.set_shared_key(key.to_vec(), slot),
+            "LiveKit rejected media key slot {slot}"
         );
     }
-    ensure!(
-        provider.set_shared_key(key.to_vec(), index),
-        "LiveKit rejected media key"
-    );
     Ok(())
 }
 
@@ -224,6 +239,13 @@ impl VoiceRoom {
         while let Some(event) = self.events.recv().await {
             match &event {
                 RoomEvent::TokenRefreshed { .. } => continue,
+                // Data channel payloads are not frame-encrypted; tokens deny publishing them.
+                RoomEvent::DataReceived { .. }
+                | RoomEvent::ChatMessage { .. }
+                | RoomEvent::TranscriptionReceived { .. }
+                | RoomEvent::SipDTMFReceived { .. }
+                | RoomEvent::ByteStreamOpened { .. }
+                | RoomEvent::TextStreamOpened { .. } => continue,
                 RoomEvent::TrackSubscribed { publication, .. }
                     if publication.encryption_type() != EncryptionType::Gcm =>
                 {
@@ -348,6 +370,22 @@ mod tests {
         assert_ne!(expected, media_key(&channel_key, &[5; 32], &[2; 32], 3));
         assert_ne!(expected, media_key(&channel_key, &[1; 32], &[5; 32], 3));
         assert_ne!(expected, media_key(&channel_key, &[1; 32], &[2; 32], 4));
+    }
+
+    #[test]
+    fn installing_an_epoch_retires_every_other_slot() {
+        let provider = KeyProvider::with_shared_key(
+            KeyProviderOptions {
+                ratchet_window_size: 0,
+                ..Default::default()
+            },
+            vec![1; 32],
+        );
+        install_key(&provider, &Zeroizing::new([1; 32]), 1).unwrap();
+        install_key(&provider, &Zeroizing::new([2; 32]), 2).unwrap();
+        for slot in 0..16 {
+            assert_eq!(provider.get_shared_key(slot), Some(vec![2; 32]));
+        }
     }
 
     #[test]

@@ -237,11 +237,15 @@ epoch (8 bytes, positive signed integer, big endian)
 The SDK uses AES-GCM frame encryption from the start of the room session.
 The primary key slot is `epoch mod 16` and the SDK's automatic ratchet is
 disabled. Each device reconciles the normal channel-key events, installs
-the newer derived key and switches every local sender to its slot. Slot
-zero also holds the current key so the SDK's new or automatically
-republished senders start on the current key before RustTalk sets their
-index. Receivers use each frame's stamped slot. A peer missing the new
-epoch drops those frames until its envelope arrives. LiveKit never
+the newer derived key and switches every local sender to its slot.
+Installing an epoch writes its key into all 16 slots, which retires
+every older key. Frames stamped with an older epoch's slot then fail
+decryption and are dropped, so a removed sender that kept its old key is
+not heard. The SDK's new or automatically republished senders start at
+slot zero, which also holds the current key. Receivers use each frame's
+stamped slot. A peer missing the new epoch drops those frames until its
+envelope arrives, and a sender that has not installed the new epoch is
+briefly silent to peers that have. LiveKit never
 receives the media key. The LiveKit JWT authorizes signaling and does
 not carry the media key.
 

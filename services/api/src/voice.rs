@@ -1,4 +1,9 @@
-use std::{collections::BTreeSet, env, time::Duration};
+use std::{
+    collections::{BTreeSet, HashMap},
+    env,
+    sync::Mutex,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, ensure};
 use axum::{
@@ -21,11 +26,15 @@ use zeroize::Zeroizing;
 
 use crate::{ApiError, ApiResult, App, auth::authenticate, channels};
 
+const DEV_SECRET: &str = "dev-only-livekit-secret-do-not-deploy";
+const ROSTER_TTL: Duration = Duration::from_secs(1);
+
 pub struct LiveKit {
     api_key: String,
     api_secret: Zeroizing<String>,
     webhook: WebhookReceiver,
     http: reqwest::Client,
+    rosters: Mutex<HashMap<String, (Instant, BTreeSet<String>)>>,
 }
 
 impl LiveKit {
@@ -40,6 +49,10 @@ impl LiveKit {
             !api_key.is_empty() && !api_secret.is_empty(),
             "empty LiveKit credentials"
         );
+        ensure!(
+            *api_secret != DEV_SECRET || env::var("RUSTTALK_DEV").as_deref() == Ok("1"),
+            "refusing the public development LiveKit secret; set a private LIVEKIT_API_SECRET"
+        );
         Ok(Some(Self {
             webhook: WebhookReceiver::new(TokenVerifier::with_api_key(&api_key, &api_secret)),
             api_key,
@@ -49,7 +62,85 @@ impl LiveKit {
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(Duration::from_secs(3))
                 .build()?,
+            rosters: Mutex::default(),
         }))
+    }
+
+    async fn room_service(
+        &self,
+        method: &str,
+        room: &str,
+        body: serde_json::Value,
+    ) -> ApiResult<reqwest::Response> {
+        let token = self.sign(
+            "rusttalk-api",
+            VideoGrants {
+                room: room.into(),
+                room_admin: true,
+                ..Default::default()
+            },
+            Duration::from_secs(30),
+        )?;
+        self.http
+            .post(format!(
+                "http://livekit:7880/twirp/livekit.RoomService/{method}"
+            ))
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|_| ApiError::new(StatusCode::BAD_GATEWAY, "livekit_unreachable"))
+    }
+
+    async fn list(&self, room: &str) -> ApiResult<Vec<Participant>> {
+        let unavailable = || ApiError::new(StatusCode::BAD_GATEWAY, "livekit_roster_unavailable");
+        let response = self
+            .room_service("ListParticipants", room, json!({ "room": room }))
+            .await
+            .map_err(|_| unavailable())?;
+        match response.status() {
+            StatusCode::OK => Ok(response
+                .json::<Roster>()
+                .await
+                .map_err(|_| unavailable())?
+                .participants),
+            StatusCode::NOT_FOUND => Ok(Vec::new()),
+            _ => Err(unavailable()),
+        }
+    }
+
+    async fn active(&self, room: &str) -> ApiResult<BTreeSet<String>> {
+        if let Some((at, active)) = self.rosters.lock().expect("roster cache").get(room)
+            && at.elapsed() < ROSTER_TTL
+        {
+            return Ok(active.clone());
+        }
+        let active: BTreeSet<_> = self
+            .list(room)
+            .await?
+            .into_iter()
+            .filter(|participant| participant.state == "ACTIVE")
+            .map(|participant| participant.identity)
+            .collect();
+        self.rosters
+            .lock()
+            .expect("roster cache")
+            .insert(room.into(), (Instant::now(), active.clone()));
+        Ok(active)
+    }
+
+    async fn moderate(&self, room: &str, method: &str, body: serde_json::Value) {
+        let reason = match self.room_service(method, room, body).await {
+            Ok(response) if response.status().is_success() => {
+                tracing::info!(method, "removed voice access");
+                return;
+            }
+            // The participant left on its own in the meantime.
+            Ok(response) if response.status() == StatusCode::NOT_FOUND => return,
+            Ok(_) => "livekit_rejected",
+            Err(error) => error.code,
+        };
+        tracing::warn!(method, reason, "could not remove voice access");
     }
 
     fn sign(&self, identity: &str, grants: VideoGrants, ttl: Duration) -> ApiResult<String> {
@@ -109,7 +200,8 @@ pub async fn token(
             room: channel,
             room_join: true,
             can_publish: Some(speak),
-            can_publish_data: Some(true),
+            // Data channel payloads bypass frame encryption. Live transfer (W12) revisits this.
+            can_publish_data: Some(false),
             can_subscribe: Some(true),
             can_publish_sources: if speak {
                 vec!["microphone".into()]
@@ -129,6 +221,14 @@ struct Participant {
     identity: String,
     #[serde(default)]
     state: String,
+    #[serde(default)]
+    permission: Grants,
+}
+
+#[derive(Default, Deserialize)]
+struct Grants {
+    #[serde(default, alias = "canPublish")]
+    can_publish: bool,
 }
 
 #[derive(Deserialize)]
@@ -137,71 +237,131 @@ struct Roster {
     participants: Vec<Participant>,
 }
 
-pub async fn participants(
-    State(app): State<App>,
-    headers: HeaderMap,
-    Path(channel): Path<String>,
-) -> ApiResult<Json<BTreeSet<String>>> {
-    let (mut tx, actor) = authenticate(&app, &headers).await?;
-    require_voice_read(&mut tx, &channel, &actor.person).await?;
-    tx.commit().await?;
+#[derive(Serialize)]
+pub struct Presence {
+    people: BTreeSet<String>,
+    unknown: usize,
+}
 
-    let livekit = configured(&app)?;
-    let token = livekit.sign(
-        "rusttalk-api",
-        VideoGrants {
-            room: channel.clone(),
-            room_admin: true,
-            ..Default::default()
-        },
-        Duration::from_secs(30),
-    )?;
-    let unavailable = || ApiError::new(StatusCode::BAD_GATEWAY, "livekit_roster_unavailable");
-    let response = livekit
-        .http
-        .post("http://livekit:7880/twirp/livekit.RoomService/ListParticipants")
-        .bearer_auth(token)
-        .json(&json!({ "room": channel }))
-        .send()
-        .await
-        .map_err(|_| unavailable())?;
-    let roster = match response.status() {
-        StatusCode::OK => {
-            response
-                .json::<Roster>()
-                .await
-                .map_err(|_| unavailable())?
-                .participants
-        }
-        StatusCode::NOT_FOUND => Vec::new(),
-        _ => return Err(unavailable()),
-    };
-    let active: BTreeSet<_> = roster
-        .into_iter()
-        .filter(|participant| participant.state == "ACTIVE")
-        .map(|participant| participant.identity)
-        .collect();
-
-    // Recheck access after the network call, which can overlap a kick or permission change.
-    let (mut tx, _) = authenticate(&app, &headers).await?;
-    require_voice_read(&mut tx, &channel, &actor.person).await?;
+/// Map reader devices of a channel to their LiveKit identities.
+async fn reader_identities(
+    app: &App,
+    db: &mut SqliteConnection,
+    channel: &str,
+) -> ApiResult<HashMap<String, Vec<u8>>> {
     let devices: Vec<(Vec<u8>, Vec<u8>)> = query_as(
         "SELECT d.device_id, d.person_id FROM channel_readers r
          JOIN member_devices d ON d.person_id = r.person_id
          WHERE r.channel_id = ?",
     )
-    .bind(&channel)
-    .fetch_all(&mut *tx)
+    .bind(channel)
+    .fetch_all(db)
     .await?;
-    tx.commit().await?;
     let server = app.key.verifying_key();
-    Ok(Json(
-        devices
-            .into_iter()
-            .filter(|(device, _)| active.contains(&voice_identity(server.as_bytes(), device)))
-            .map(|(_, person)| encode(&person))
-            .collect(),
-    ))
+    Ok(devices
+        .into_iter()
+        .map(|(device, person)| (voice_identity(server.as_bytes(), &device), person))
+        .collect())
+}
+
+pub async fn participants(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path(channel): Path<String>,
+) -> ApiResult<Json<Presence>> {
+    let (mut tx, actor) = authenticate(&app, &headers).await?;
+    require_voice_read(&mut tx, &channel, &actor.person).await?;
+    tx.commit().await?;
+    let active = configured(&app)?.active(&channel).await?;
+
+    // Recheck access after the network call, which can overlap a kick or permission change.
+    let (mut tx, _) = authenticate(&app, &headers).await?;
+    require_voice_read(&mut tx, &channel, &actor.person).await?;
+    let readers = reader_identities(&app, &mut tx, &channel).await?;
+    tx.commit().await?;
+    let mut presence = Presence {
+        people: BTreeSet::new(),
+        unknown: 0,
+    };
+    for identity in active {
+        match readers.get(&identity) {
+            Some(person) => {
+                presence.people.insert(encode(person));
+            }
+            None => presence.unknown += 1,
+        }
+    }
+    Ok(Json(presence))
+}
+
+/// Disconnect devices that lost read access and revoke publishing from those that lost `speak`.
+/// Runs after the change commits and never blocks it; LiveKit keeps the grants a device
+/// joined with, and refreshes its token with them, until told otherwise.
+pub fn enforce(app: &App, room: Option<String>) {
+    let Some(livekit) = app.voice.clone() else {
+        return;
+    };
+    let app = app.clone();
+    tokio::spawn(async move {
+        if let Err(error) = enforce_rooms(&app, &livekit, room).await {
+            tracing::warn!(reason = error.code, "could not check voice access");
+        }
+    });
+}
+
+async fn enforce_rooms(app: &App, livekit: &LiveKit, room: Option<String>) -> ApiResult<()> {
+    let rooms = match room {
+        Some(room) => vec![room],
+        None => {
+            query_scalar("SELECT id FROM channels WHERE kind = 'voice'")
+                .fetch_all(&app.db)
+                .await?
+        }
+    };
+    for room in rooms {
+        let participants = match livekit.list(&room).await {
+            Ok(participants) => participants,
+            Err(error) => {
+                tracing::warn!(reason = error.code, "could not check voice access");
+                continue;
+            }
+        };
+        if participants.is_empty() {
+            continue;
+        }
+        // Decide first so no pooled connection is held across LiveKit calls.
+        let (mut remove, mut mute) = (Vec::new(), Vec::new());
+        {
+            let mut db = app.db.acquire().await?;
+            let readers = reader_identities(app, &mut db, &room).await?;
+            for participant in participants {
+                match readers.get(&participant.identity) {
+                    None => remove.push(participant.identity),
+                    Some(person)
+                        if participant.permission.can_publish
+                            && !channels::has_flag(&mut db, &room, person, channels::SPEAK)
+                                .await? =>
+                    {
+                        mute.push(participant.identity);
+                    }
+                    Some(_) => (),
+                }
+            }
+        }
+        for identity in remove {
+            let body = json!({ "room": room, "identity": identity });
+            livekit.moderate(&room, "RemoveParticipant", body).await;
+        }
+        for identity in mute {
+            let body = json!({
+                "room": room,
+                "identity": identity,
+                "permission": { "can_subscribe": true, "can_publish": false, "can_publish_data": false },
+            });
+            livekit.moderate(&room, "UpdateParticipant", body).await;
+        }
+    }
+    Ok(())
 }
 
 pub async fn webhook(
@@ -224,6 +384,10 @@ pub async fn webhook(
     ) && let Some(room) = event.room
         && decode::<32>(&room.name).is_ok()
     {
+        if event.event == "participant_joined" {
+            // A LiveKit token outlives the session that requested it.
+            enforce(&app, Some(room.name.clone()));
+        }
         app.notify(Some(Event::VoiceChanged { channel: room.name }));
     }
     Ok(StatusCode::NO_CONTENT)
