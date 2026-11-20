@@ -66,8 +66,9 @@ pub async fn presence<'a>(
     presence_is(a, &person, Presence::Away).await?;
     drop(b);
     presence_is(a, &person, Presence::Offline).await?;
+    // The stored choice is announced on reconnect.
     let b = KeyClient::connect(bot, identity, token).await?;
-    presence_is(a, &person, Presence::Online).await?;
+    presence_is(a, &person, Presence::Away).await?;
 
     // The choice outlives the socket, so an invisible member reconnects unannounced.
     b.set_status(Status::Invisible).await?;
@@ -102,7 +103,7 @@ pub async fn presence<'a>(
     b.set_status(Status::Online).await?;
     presence_is(a, &person, Presence::Online).await?;
     println!(
-        "B2 bot saw online, away, invisible as offline, offline on the last socket closing, and no notice for an invisible reconnect"
+        "B2 bot saw online, away, invisible as offline, offline on the last socket closing, the stored choice on reconnect, and no notice for an invisible reconnect"
     );
     Ok(b)
 }
