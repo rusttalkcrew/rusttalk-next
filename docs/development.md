@@ -160,9 +160,13 @@ Debug builds open a console on Windows; release builds do not, so check
   pattern after installing the correct key on the same subscription. The
   camera scenario publishes the same pattern as a simulcast camera track,
   decodes it on a second bot, and checks that a member who may speak but
-  not share video gets a token LiveKit refuses a camera for. Set
-  `E2E_FEATURES=` to run the membership, keys and chat harness without WebRTC,
-  voice, app audio, screen sharing or camera.
+  not share video gets a token LiveKit refuses a camera for. The live file
+  scenario revokes data publishing by taking `write`, transfers a 20 MiB
+  file to that read-only bot, verifies its SHA-256, watches a third bot's
+  raw events for unwanted streams, and searches SQLite, WAL and stack logs
+  for the filename and a plaintext marker. Set `E2E_FEATURES=` to run the
+  membership, keys and chat harness without WebRTC, voice, app audio,
+  screen sharing, camera or live files.
 
 For a manual app-audio check, build with
 `cargo build --locked -p rusttalk-bot -p rusttalk-pipewire` and run both
@@ -257,6 +261,13 @@ For a new address, use `Server::probe` and show the observed server fingerprint
 for confirmation before connecting with that expected pin. Invite links
 already specify the expected pins. Use `KeyClient::next_event` while online
 to drive key delivery and refresh before `KeyClient::expires_at`.
+
+For live files, use `VoiceRoom::offer_live_file` to post the offer and
+`accept_live_file` with a verified message record and a new destination
+path. Call `handle_live_file_event` for API events while polling
+`VoiceRoom::next_event` for LiveKit events. The returned `LiveDownload`
+emits progress and a terminal event through `next_event`. Cancel it with
+`cancel`, or cancel a local offer by transfer ID with `cancel_live_offer`.
 
 Use `message_page` for history and `message` for a live record, then call
 `open_message` before rendering. Preserve the oldest raw record ID for paging

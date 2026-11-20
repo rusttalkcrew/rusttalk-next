@@ -211,6 +211,7 @@ async fn serve(app: App) -> io::Result<()> {
         .route("/v1/catalog", get(channels::catalog))
         .route("/v1/voice/{id}/token", post(voice::token))
         .route("/v1/voice/{id}/participants", get(voice::participants))
+        .route("/v1/voice/{id}/live-file", post(voice::live_file))
         .route("/v1/dms", post(dms::create))
         .route(
             "/v1/channels/{id}/message-devices/{device}/{person}",

@@ -59,7 +59,7 @@ The API can see who is in which voice room by matching opaque LiveKit
 device identities to current channel readers. Readers see unmatched
 devices only as a count. After a kick, ban, revocation or permission
 change the API asks LiveKit to remove devices that lost access and to
-revoke any audio or video publication rights they lost. It keeps the active
+revoke any audio, video or data publication rights they lost. It keeps the active
 roster in memory for one second per room. It keeps no voice roster or
 LiveKit join tokens in SQLite. LiveKit sees opaque room and device IDs,
 track IDs and source kinds, viewer subscriptions, routing and timing
@@ -74,6 +74,20 @@ publication epoch and name length. The chosen monitor or window name,
 its pixels, app names, camera pictures and audio are encrypted on the
 sender. Capture target IDs, enumerated sources and cameras, and Linux
 portal restore tokens stay on the sender's device.
+
+For live files, only the encrypted offer is retained as a chat message.
+The API sees its normal message metadata plus the live routing notice's
+opaque transfer ID, offering and accepting device IDs, nonce, signature,
+timing and whether the receiver accepted or cancelled. It relays that
+notice in memory. LiveKit sees the file topic, opaque stream and transfer
+IDs, nonce, sender and accepting device, ciphertext length and timing.
+It relays encrypted chunks and keeps no file. The filename, MIME type
+and file key are inside the encrypted message. File bytes never pass
+through the API. Channel readers can decrypt the offer's metadata and
+key, including from history. Only accepting devices receive the stream
+from the relay. Receivers keep verified data in a local temporary file
+during the transfer, remove it on failure or cancellation, and save the
+complete file to the path chosen by the user.
 
 The dev TLS certificate and private key live in `.dev/tls/`. Bot data under
 `.dev/bots/` holds only saved origins, server IDs and TLS fingerprints.

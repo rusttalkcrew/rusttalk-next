@@ -13,7 +13,12 @@ const TAG: usize = 16;
 const SIGNATURE: usize = 64;
 const HEADER: usize = 1 + NONCE + 2;
 const MIN_PLAINTEXT: usize = 4;
-const MAX_PLAINTEXT: usize = MIN_PLAINTEXT + 2 * 32 + MAX_TEXT_CHARS * 4;
+const MAX_PLAINTEXT: usize = MIN_PLAINTEXT + 2 * 32 + MAX_TEXT_CHARS * 4 + live::MAX_ATTACHMENT;
+
+mod live;
+#[cfg(any(feature = "client", test))]
+pub use live::LiveAttachment;
+pub use live::{LIVE_CHUNK_SIZE, LiveFileAcceptance, MAX_LIVE_FILE_SIZE};
 
 /// Maximum message length in Unicode scalar values.
 pub const MAX_TEXT_CHARS: usize = 2_000;

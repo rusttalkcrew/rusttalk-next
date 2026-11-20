@@ -191,7 +191,9 @@ epochs through the normal envelope flow.
 The plaintext contains a one-byte bit mask (bit 0 for reply-to, bit 1 for
 edit-of), a two-byte big-endian UTF-8 byte length, the UTF-8 text, the optional
 32-byte reply ID, the optional 32-byte original ID, and a one-byte attachment
-count of zero. This version requires all other flag bits to be clear, valid
+count. A count of zero has no payload. A count of one is followed by the
+live attachment described in [the protocol](protocol.md#live-transfer).
+This version requires all other flag bits to be clear, valid
 UTF-8 with at most 2,000 Unicode scalar values, and exact lengths. Spaces
 and line breaks are preserved.
 
@@ -287,3 +289,40 @@ dual-licensed MIT/Apache-2.0.
 ### What the server challenge signature does not cover
 
 The server's signature over the challenge proves the server holds the pinned key, but it is not bound to the TLS connection and the client adds no nonce of its own. In self-signed mode the TLS certificate pin stops a relay. In CA mode (public domain, no certificate pin), an attacker holding a valid certificate for the domain could relay a sign-in to the real server. Binding the device signature to a TLS exporter value would close this; it is not done yet.
+
+
+## Live files
+
+Use a fresh random 32-byte XChaCha20-Poly1305 key for each offered file.
+The key is inside the signed chat ciphertext. For each recipient, take
+the first 16 bytes of SHA-256 over
+`"rusttalk-file-nonce-v1" || recipient_device_Ed25519 || acceptance_nonce`,
+using the raw 32-byte device public key and raw 16-byte nonce. Append the
+chunk index as a big-endian u64 to form the 24-byte AEAD nonce. Each
+device can accept a given offer at most once, so retries require a fresh
+offer and file key.
+
+Authenticate this associated data on each chunk.
+
+```text
+"rusttalk-file-chunk-v1" || transfer_id (32 bytes) ||
+chunk_index (8 bytes, big endian) || final (one byte, 0 or 1)
+```
+
+The receiver derives the expected count and exact final length from the
+signed offer. It rejects a missing or unauthenticated final chunk, a
+reordered or spliced chunk, and any bytes after the final chunk. Chunk
+authentication is independent of LiveKit's data encryption.
+
+The accepting device signs the following with its Ed25519 device key.
+
+```text
+"rusttalk-file-accept-v1" || server_id (32 raw bytes) || channel_id (32 raw bytes) ||
+recipient (43 ASCII bytes) || transfer (43 ASCII bytes) || nonce (22 ASCII bytes) ||
+cancel (one byte, 0 or 1)
+```
+
+The recipient, transfer and nonce fields use their base64url wire
+strings. The offering device verifies with the accepting device's
+current root-certified public key. It uses the room identity derived
+from that same key as the only stream destination.
