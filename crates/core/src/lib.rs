@@ -1,6 +1,8 @@
 //! Identity, crypto and protocol types shared by client, bot and api.
 
 pub mod auth;
+#[cfg(feature = "voice")]
+pub mod camera;
 #[cfg(feature = "capture")]
 pub mod capture;
 #[cfg(feature = "client")]

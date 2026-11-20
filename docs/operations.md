@@ -36,8 +36,8 @@ suppress RoomService access logs that include the API key identifier.
 A LiveKit token expires ten minutes after issue and authorizes room
 entry. Kick, ban and device revocation end API access, trigger rotation
 for readers and remove the device from every voice room. Losing `speak`
-revokes microphone and app audio publishing. Losing `video` revokes screen
-publishing. The API also checks each join, because a token
+revokes microphone and app audio publishing. Losing `video` revokes camera
+and screen publishing. The API also checks each join, because a token
 can outlive the session that requested it. An excluded device that
 reaches the relay lacks the new media key, and peers drop its frames
 under retired keys. Removal failures appear in API logs as `could not

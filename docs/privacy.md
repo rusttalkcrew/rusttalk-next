@@ -61,13 +61,15 @@ LiveKit join tokens in SQLite. LiveKit sees opaque room and device IDs,
 track IDs and source kinds, viewer subscriptions, routing and timing
 information, negotiated video codec, dimensions and simulcast layers,
 ciphertext sizes, and encrypted media. It can tell that a device shared
-a screen or an app audio track and see its encrypted track label. Labels
+a screen, a camera or an app audio track and see its encrypted track
+label. Camera tracks carry the fixed label `camera`, never the device
+name. Labels
 use separate HKDF derivations from the room media key for app audio and
 screen video, with a fresh nonce for each publication. They expose the
 publication epoch and name length. The chosen monitor or window name,
-its pixels, app names, and audio are encrypted on the sender. Capture
-target IDs, enumerated sources and Linux portal restore tokens stay
-on the sender's device.
+its pixels, app names, camera pictures and audio are encrypted on the
+sender. Capture target IDs, enumerated sources and cameras, and Linux
+portal restore tokens stay on the sender's device.
 
 The dev TLS certificate and private key live in `.dev/tls/`. Bot data under
 `.dev/bots/` holds only saved origins, server IDs and TLS fingerprints.
@@ -82,7 +84,9 @@ in the app window. The client never stores or logs the words or the root
 signing key. "Sign out of this device" deletes the keystore entry.
 
 Next to the settings, `servers.json` and `joined.json` hold each joined
-server's address, server ID and TLS fingerprint. Decrypted names and
+server's address, server ID and TLS fingerprint. `voice.json` holds the
+chosen audio devices, voice options, and the chosen camera's name,
+resolution and frame rate. Decrypted names and
 messages stay in memory only; the log never contains them or invite links.
 
 ## Outbound connections

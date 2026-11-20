@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 use livekit::webrtc::{
-    native::yuv_helper::{argb_to_i420, i420_to_abgr},
+    native::yuv_helper::{abgr_to_i420, argb_to_i420, i420_to_abgr},
     video_frame::{I420Buffer, VideoBuffer, VideoFrame, VideoRotation},
     video_source::{VideoResolution, native::NativeVideoSource},
 };
@@ -96,21 +96,22 @@ fn frame_bytes(width: u32, height: u32) -> Result<usize> {
     Ok((width * height * 4) as usize)
 }
 
-/// Convert tightly packed BGRA/BGRx to I420 and optionally scale down.
-pub fn bgra_to_i420(
+type PackedToI420 = fn(&[u8], u32, &mut [u8], u32, &mut [u8], u32, &mut [u8], u32, i32, i32);
+
+fn packed_to_i420(
     width: u32,
     height: u32,
     pixels: &[u8],
-    max_height: Option<u32>,
+    convert: PackedToI420,
 ) -> Result<I420Buffer> {
     ensure!(
         pixels.len() == frame_bytes(width, height)?,
-        "invalid BGRA frame length"
+        "invalid packed frame length"
     );
     let mut frame = I420Buffer::new(width, height);
     let (ys, us, vs) = frame.strides();
     let (y, u, v) = frame.data_mut();
-    argb_to_i420(
+    convert(
         pixels,
         width * 4,
         y,
@@ -122,6 +123,23 @@ pub fn bgra_to_i420(
         width as i32,
         height as i32,
     );
+    Ok(frame)
+}
+
+/// Convert tightly packed RGBA (R, G, B, A in memory) to I420.
+pub(crate) fn rgba_to_i420(width: u32, height: u32, pixels: &[u8]) -> Result<I420Buffer> {
+    // Libyuv names formats by word order: ABGR is R, G, B, A in memory.
+    packed_to_i420(width, height, pixels, abgr_to_i420)
+}
+
+/// Convert tightly packed BGRA/BGRx to I420 and optionally scale down.
+pub fn bgra_to_i420(
+    width: u32,
+    height: u32,
+    pixels: &[u8],
+    max_height: Option<u32>,
+) -> Result<I420Buffer> {
+    let mut frame = packed_to_i420(width, height, pixels, argb_to_i420)?;
     if let Some(cap) = max_height.filter(|cap| *cap < height) {
         ensure!(cap > 0, "invalid screen resolution cap");
         let scaled_width = (width * cap / height).max(1);
@@ -276,6 +294,10 @@ mod tests {
         let rgba = frame_to_rgba(&frame).unwrap();
         assert_eq!(rgba.len(), 5 * 3 * 4);
         assert!(rgba[0] > 200 && rgba[1] < 50 && rgba[2] < 50);
+        // The same red read back through the RGBA path used for cameras.
+        let again = frame_to_rgba(&rgba_to_i420(5, 3, &rgba).unwrap()).unwrap();
+        assert!(again[0] > 200 && again[1] < 50 && again[2] < 50);
+        assert!(rgba_to_i420(5, 3, &rgba[4..]).is_err());
         let scaled = bgra_to_i420(5, 3, &pixels, Some(1)).unwrap();
         assert_eq!((scaled.width(), scaled.height()), (1, 1));
         assert_eq!(frame_to_rgba(&scaled).unwrap().len(), 4);

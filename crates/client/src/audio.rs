@@ -73,6 +73,10 @@ pub struct Settings {
     pub echo_cancellation: bool,
     pub noise_suppression: bool,
     pub auto_gain: bool,
+    /// Camera name; `None` uses the first camera.
+    pub camera: Option<String>,
+    pub camera_height: u32,
+    pub camera_fps: u32,
 }
 
 impl Default for Settings {
@@ -86,6 +90,9 @@ impl Default for Settings {
             echo_cancellation: true,
             noise_suppression: true,
             auto_gain: true,
+            camera: None,
+            camera_height: 720,
+            camera_fps: 30,
         }
     }
 }
