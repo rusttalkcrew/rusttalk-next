@@ -118,7 +118,7 @@ pub fn room_list(ui: &mut Ui, home: &Home, server: &Server, channel: &Id) {
         return;
     };
     for peer in peers {
-        let name = server.member_name(&peer.person);
+        let name = peer.name(server);
         let row = ui.horizontal(|ui| {
             ui.add_space(22.0);
             let face = avatar(ui, &peer.person, &name, 22.0);
@@ -131,7 +131,7 @@ pub fn room_list(ui: &mut Ui, home: &Home, server: &Server, channel: &Id) {
             }
         });
         let row = row.response.interact(Sense::click());
-        if peer.person != server.dir.me && home.voice.in_call(server, channel) {
+        if peer.person != server.dir.me && !peer.unknown && home.voice.in_call(server, channel) {
             Popup::context_menu(&row).show(|ui| person_menu(ui, &home.voice.audio, &peer.person));
         }
     }
@@ -275,7 +275,7 @@ pub fn room(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
     }
     ui.horizontal_wrapped(|ui| {
         for peer in &peers {
-            let name = server.member_name(&peer.person);
+            let name = peer.name(server);
             let me = peer.person == server.dir.me;
             let tile = Frame::new()
                 .fill(palette(ui).side)
@@ -303,7 +303,7 @@ pub fn room(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
                     });
                 });
             let tile = tile.response.interact(Sense::click());
-            if !me && joined {
+            if !me && !peer.unknown && joined {
                 Popup::context_menu(&tile)
                     .show(|ui| person_menu(ui, &home.voice.audio, &peer.person));
             }

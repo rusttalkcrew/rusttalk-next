@@ -21,7 +21,7 @@ use rusttalk_core::{
     client::{
         Catalog, Event, KeyClient, MessageBody, MessageError, MessageRecord, Server as Api,
         invite_name, save_json,
-        voice::{ConnectionState, RoomEvent, VoiceRoom, VoiceState},
+        voice::{ConnectionState, RoomEvent, VoiceRoom, VoiceRoster, VoiceState},
     },
     identity::{DeviceIdentity, fingerprint},
     keys::Metadata,
@@ -287,7 +287,7 @@ struct State {
     notices: u64,
     server_id: Id,
     /// Who the server says is in each voice channel.
-    rooms: HashMap<Id, Vec<Id>>,
+    rooms: HashMap<Id, VoiceRoster>,
     voice: Option<Live>,
 }
 
@@ -1157,12 +1157,14 @@ async fn room_changed(
 /// with "connecting" for anyone whose audio isn't flowing in our room.
 fn send_room(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &State, channel: Id) {
     let me = *ctx.identity.certificate.person_id();
-    let mut people = state.rooms.get(&channel).cloned().unwrap_or_default();
+    let roster = state.rooms.get(&channel).cloned().unwrap_or_default();
+    let mut people = roster.people;
     let mut peers = Vec::new();
     match state.voice.as_ref().filter(|live| live.channel == channel) {
         None => peers.extend(people.into_iter().map(|person| Peer {
             person,
             connecting: false,
+            unknown: false,
         })),
         Some(live) => {
             let ids = identities(client, &state.server_id);
@@ -1186,10 +1188,16 @@ fn send_room(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &State, channe
                 peers.push(Peer {
                     person,
                     connecting: !ok,
+                    unknown: false,
                 });
             }
         }
     }
+    peers.extend((0..roster.unknown).map(|_| Peer {
+        person: [0; 32],
+        connecting: false,
+        unknown: true,
+    }));
     ctx.send(Update::Room(url.clone(), channel, peers));
 }
 

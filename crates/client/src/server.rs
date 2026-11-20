@@ -30,6 +30,18 @@ pub struct Peer {
     pub person: Id,
     /// In the room on the server, but their audio isn't flowing (yet or again).
     pub connecting: bool,
+    /// A device the server couldn't match to a member; `person` is all zeros.
+    pub unknown: bool,
+}
+
+impl Peer {
+    pub fn name(&self, server: &Server) -> String {
+        if self.unknown {
+            "Unknown device".into()
+        } else {
+            server.member_name(&self.person)
+        }
+    }
 }
 
 /// The voice room this device is in.
