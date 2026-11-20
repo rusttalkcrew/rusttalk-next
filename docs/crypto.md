@@ -179,7 +179,8 @@ epochs through the normal envelope flow.
 The plaintext contains a one-byte bit mask (bit 0 for reply-to, bit 1 for
 edit-of), a two-byte big-endian UTF-8 byte length, the UTF-8 text, the optional
 32-byte reply ID, the optional 32-byte original ID, and a one-byte attachment
-count of zero. This version requires all other flag bits to be clear, valid
+count followed by the [attachment references](protocol.md#files). This version
+requires all other flag bits to be clear, valid
 UTF-8 with at most 2,000 Unicode scalar values, and exact lengths. Spaces
 and line breaks are preserved.
 
@@ -222,6 +223,34 @@ store such a back-dated record from a stolen, revoked device. Clients cannot
 detect this, because the API also controls the device directory and does not
 expose root-signed revocation records to other members. A removal epoch
 reported by the API would add no protection under the same assumption.
+
+## Server-stored file encryption
+
+The sender generates a fresh random 32-byte key and independent random 32-byte
+ID for each blob. PNG and JPEG files get a separate encrypted PNG thumbnail
+with a longest edge of at most 320 pixels. Thumbnail bytes have their own key
+and ID. Keys, names, media types and plaintext framing travel in the signed,
+encrypted message.
+
+The sender splits the plaintext into 64 KiB chunks with a possibly shorter last
+chunk. An empty file has one empty final chunk. Each chunk is independently
+sealed with XChaCha20-Poly1305. Its 24-byte nonce is 16 zero bytes followed by
+the zero-based chunk index as a big-endian unsigned 64-bit integer. The key is
+used for exactly one blob, so every nonce under it is distinct. The associated
+data is the following concatenation.
+
+```text
+"rusttalk-file-chunk-v1" || file_id (32 bytes) || index (8 bytes, big endian) ||
+final (1 byte, 1 for the last chunk and 0 otherwise)
+```
+
+The blob concatenates each ciphertext and its 16-byte tag without headers.
+The recipient uses the authenticated plaintext size and chunk size to enforce
+the exact ciphertext length and framing. It verifies every tag before
+returning bytes to the caller, so substitution, tampering, reordering and
+truncation fail. The image decoder checks actual bytes and accepts only
+pure-Rust PNG and JPEG decoding. It caps compressed input at 32 MiB and
+sets `image::Limits` to 4,096 pixels per axis and a 64 MiB allocation budget.
 
 ## Media encryption
 

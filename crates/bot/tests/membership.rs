@@ -1,4 +1,5 @@
 mod chat;
+mod files;
 #[cfg(feature = "media")]
 mod voice;
 
@@ -261,6 +262,7 @@ async fn docker_keys(
     println!("W06 C rejected B's bad first wrap and received the real key");
     receive_key(&mut c, space, 1).await?;
     let (dm, history_message) = chat::scenario(a, &mut b, &mut c, channel).await?;
+    files::scenario(project, bot, a, &mut b, &c, &category).await?;
     let channel_path = format!("/v1/channels/{}/permissions", encode(&channel.id));
     let b_person = encode(b_identity.certificate.person_id());
     a.request(Method::PUT, &format!("/v1/members/{b_person}/roles"))

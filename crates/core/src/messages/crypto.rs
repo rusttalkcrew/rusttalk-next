@@ -11,12 +11,13 @@ use crate::{
     keys::Key,
 };
 
-/// Decrypted W07 message text and references. The wire attachment list is empty until W12.
+/// Decrypted message text and references.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct MessageBody {
     pub text: String,
     pub reply_to: Option<[u8; 32]>,
     pub edit_of: Option<[u8; 32]>,
+    pub attachments: Vec<Attachment>,
 }
 
 impl MessageBody {
@@ -24,14 +25,25 @@ impl MessageBody {
         if self.text.len() > MAX_TEXT_CHARS * 4 || self.text.chars().count() > MAX_TEXT_CHARS {
             return Err(MessageError::TextLimit);
         }
+        if self.attachments.len() > MAX_ATTACHMENTS {
+            return Err(MessageError::Attachment);
+        }
         let flags = u8::from(self.reply_to.is_some()) | (u8::from(self.edit_of.is_some()) << 1);
-        let mut body = Zeroizing::new(Vec::with_capacity(MIN_PLAINTEXT + 2 * 32 + self.text.len()));
+        let mut body = Zeroizing::new(Vec::with_capacity(
+            MIN_PLAINTEXT
+                + 2 * 32
+                + self.text.len()
+                + self.attachments.len() * MAX_ATTACHMENT_BYTES,
+        ));
         body.push(flags);
         body.extend_from_slice(&(self.text.len() as u16).to_be_bytes());
         body.extend_from_slice(self.text.as_bytes());
         body.extend(self.reply_to.iter().flatten());
         body.extend(self.edit_of.iter().flatten());
-        body.push(0);
+        body.push(self.attachments.len() as u8);
+        for attachment in &self.attachments {
+            attachment.encode(&mut body)?;
+        }
         Ok(body)
     }
 
@@ -55,7 +67,14 @@ impl MessageBody {
         };
         let reply_to = reference(1)?;
         let edit_of = reference(2)?;
-        if tail != [0] {
+        let (&count, mut tail) = tail.split_first().ok_or(MessageError::Encoding)?;
+        if count as usize > MAX_ATTACHMENTS {
+            return Err(MessageError::Attachment);
+        }
+        let attachments = (0..count)
+            .map(|_| Attachment::decode(&mut tail))
+            .collect::<Result<_, _>>()?;
+        if !tail.is_empty() {
             return Err(MessageError::Encoding);
         }
         let text = std::str::from_utf8(text).map_err(|_| MessageError::Encoding)?;
@@ -66,6 +85,7 @@ impl MessageBody {
             text: text.to_owned(),
             reply_to,
             edit_of,
+            attachments,
         })
     }
 }
@@ -160,9 +180,13 @@ mod tests {
             text: "🦀".repeat(MAX_TEXT_CHARS),
             reply_to: Some([5; 32]),
             edit_of: Some([6; 32]),
+            attachments: Vec::new(),
         };
         let envelope = context.seal(&key, &sender, &body).unwrap();
-        assert_eq!(envelope.len(), MAX_MESSAGE_BYTES);
+        assert_eq!(
+            envelope.len(),
+            MAX_MESSAGE_BYTES - MAX_ATTACHMENTS * MAX_ATTACHMENT_BYTES
+        );
         assert!(context.open(&key, &sender.certificate, &envelope).unwrap() == body);
         for changed in [
             MessageContext {
@@ -243,12 +267,61 @@ mod tests {
     }
 
     #[test]
+    fn attachment_references_are_bounded() {
+        let file = BlobRef {
+            id: [1; 32],
+            key: Key::new([2; 32]),
+            size: 42,
+            chunk_size: 65536,
+        };
+        let thumbnail = BlobRef {
+            id: [3; 32],
+            ..file.clone()
+        };
+        let attachment = Attachment {
+            file,
+            name: "a".repeat(255),
+            media_type: "b".repeat(127),
+            thumbnail: Some(thumbnail),
+        };
+        let mut body = MessageBody {
+            text: "🦀".repeat(MAX_TEXT_CHARS),
+            reply_to: Some([5; 32]),
+            edit_of: Some([6; 32]),
+            attachments: vec![attachment; MAX_ATTACHMENTS],
+        };
+        let encoded = body.encode().unwrap();
+        assert_eq!(encoded.len(), MAX_PLAINTEXT);
+        assert!(MessageBody::decode(&encoded).unwrap() == body);
+        assert!(MessageBody::decode(&encoded[..encoded.len() - 1]).is_err());
+        body.attachments.push(body.attachments[0].clone());
+        assert_eq!(body.encode().err(), Some(MessageError::Attachment));
+        assert_eq!(
+            MessageBody::decode(&[0, 0, 0, 5]).err(),
+            Some(MessageError::Attachment)
+        );
+
+        let attachment = encoded.len() - MAX_ATTACHMENT_BYTES;
+        for (offset, byte) in [
+            (64, 255),  // Oversized file.
+            (69, 0),    // Zero chunk size.
+            (73, 255),  // Invalid UTF-8.
+            (328, 128), // Oversized media type.
+            (456, 2),   // Unknown thumbnail flag.
+            (521, 255), // Oversized thumbnail.
+        ] {
+            let mut invalid = encoded.to_vec();
+            invalid[attachment + offset] = byte;
+            assert!(MessageBody::decode(&invalid).is_err(), "offset {offset}");
+        }
+    }
+
+    #[test]
     fn plaintext_framing_rejects_bad_lengths_flags_and_text() {
         for bad in [
             &[0, 0, 1, 0][..],
             &[0, 0, 0, 0, 0],
             &[4, 0, 0, 0],
-            &[0, 0, 0, 1],
             &[0, 0, 1, 255, 0],
             &[1, 0, 0, 0],
         ] {

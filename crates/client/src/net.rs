@@ -764,6 +764,7 @@ async fn on_command(
                 text,
                 reply_to,
                 edit_of,
+                ..Default::default()
             };
             let record = client.send_message(&channel, &body).await?;
             send_messages(ctx, url, channel, vec![to_msg(&record, &body)], false, None);

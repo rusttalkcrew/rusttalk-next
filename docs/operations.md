@@ -58,17 +58,43 @@ a new owner can still claim the server. Treat either form as a secret.
 The service logs one instruction on first start.
 
 The named `api-data` volume holds `/data/rusttalk.sqlite3` in WAL mode and
-`/data/server.key` with mode 0600. Keep this volume and `.dev/tls/` across
-normal restarts. To back up a dev stack, stop the API and back up the whole
-volume, including any SQLite WAL files, plus the TLS certificate and key.
-Restrict access to these backups. Restore the server key and mode with the
-database so returning clients recognize the server. Replacing either pinned
-key or certificate requires clients to explicitly re-establish trust.
+`/data/server.key` with mode 0600. It also holds encrypted attachment blobs
+in `/data/files/`. Keep this volume and `.dev/tls/` across normal restarts.
+Stop the API and back up the whole volume, including any SQLite WAL files
+and `files/`, plus the TLS certificate and key. Restrict access to these
+backups and restore the database and blob directory from the same backup.
+Restore the server key and its mode so returning clients recognize the server.
+Replacing either pinned key or certificate requires clients to explicitly
+re-establish trust.
 
 Keep port 8080 internal to the Compose network. Caddy strips incoming
 `X-Forwarded-For` and sets the single source IP that the API uses for bans.
 Keep the API behind this trusted edge.
 [Caddy proxy headers](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy#defaults).
+
+## Stored file limits
+
+Set these positive integer environment variables on the API. The dev Compose
+file passes them through, and `make e2e` applies smaller quota and lifetime
+values to its disposable stack.
+
+| Variable | Default |
+| --- | --- |
+| `RUSTTALK_FILE_MAX_BYTES` | 33,554,432 (32 MiB per blob) |
+| `RUSTTALK_FILE_MEMBER_BYTES` | 524,288,000 (500 MiB per uploader) |
+| `RUSTTALK_FILE_SERVER_BYTES` | 5,368,709,120 (5 GiB per server) |
+| `RUSTTALK_FILE_TTL_SECS` | 2,592,000 (30 days from successful upload) |
+
+Quotas count committed ciphertext, including tags and thumbnails. At the
+default upload limit, 64 KiB chunks leave up to 32 MiB minus 8 KiB for file
+plaintext. The current client enforces a 32 MiB ciphertext limit even on a
+server configured to accept more. Allow disk space for the database, WAL and
+up to four concurrent staging blobs in addition to the quota. The API refuses
+downloads at expiry and sweeps eligible blobs and their rows at least every
+30 seconds while idle, in batches of 64. Expired blobs count toward quotas
+until swept. Changing the lifetime applies to new uploads. Run one API
+instance per volume. On startup it removes leftover staging blobs and
+uncommitted blobs.
 
 ## Logs and health
 
