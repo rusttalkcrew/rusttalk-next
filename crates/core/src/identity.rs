@@ -215,6 +215,10 @@ pub struct Revocation {
 }
 
 impl Revocation {
+    pub fn device_signing_key(&self) -> &[u8; 32] {
+        &self.device_signing_key
+    }
+
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = revocation_payload(&self.device_signing_key, self.revoked_at);
         bytes.extend_from_slice(&self.signature.to_bytes());
@@ -321,7 +325,7 @@ fn derive_keys(mnemonic: &Mnemonic) -> (SigningKey, Zeroizing<[u8; 32]>) {
     (SigningKey::from_bytes(&root), sync)
 }
 
-fn random_bytes(bytes: &mut [u8]) -> Result<(), IdentityError> {
+pub fn random_bytes(bytes: &mut [u8]) -> Result<(), IdentityError> {
     SysRng
         .try_fill_bytes(bytes)
         .map_err(|_| IdentityError::Randomness)

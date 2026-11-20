@@ -15,6 +15,33 @@ advertised `NODE_IP` for media. The IP must be reachable even when a bot
 uses loopback for signaling. LiveKit's signaling port 7880 stays on the
 Compose network. See [LiveKit privacy settings](privacy.md#livekit).
 
+## Ownership and backups
+
+In the dev project, issue the bootstrap code from an operator terminal:
+
+```sh
+docker compose -f deploy/compose.dev.yml -p rusttalk-dev exec api rusttalk-api owner-invite
+```
+
+The command writes a single-use code to that terminal. Before the owner
+claims it, running the command again replaces the old code. After ownership
+exists it emits no code. `make dev` prints the complete bootstrap link if
+a new owner can still claim the server. Treat either form as a secret.
+The service logs one instruction on first start.
+
+The named `api-data` volume holds `/data/rusttalk.sqlite3` in WAL mode and
+`/data/server.key` with mode 0600. Keep this volume and `.dev/tls/` across
+normal restarts. To back up a dev stack, stop the API and back up the whole
+volume, including any SQLite WAL files, plus the TLS certificate and key.
+Restrict access to these backups. Restore the server key and mode with the
+database so returning clients recognize the server. Replacing either pinned
+key or certificate requires clients to explicitly re-establish trust.
+
+Keep port 8080 internal to the Compose network. Caddy strips incoming
+`X-Forwarded-For` and sets the single source IP that the API uses for bans.
+Keep the API behind this trusted edge.
+[Caddy proxy headers](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy#defaults).
+
 ## Logs and health
 
 Check the API through Caddy with:
@@ -32,8 +59,10 @@ header `X-Request-Id`. The API logs at `info` for RustTalk code and `warn` for
 libraries. Headers, URLs and bodies are omitted from API request logs. Caddy
 and LiveKit also use JSON logging.
 
-Once sessions exist, every closed session will log its reason (client left,
-token expired, kicked, banned, revoked, or error kind).
+The API emits one JSON session-close event per invalidated token. Reasons
+include `token_expired`, `kicked`, `banned`, `revoked`, `refreshed` and
+`replaced`. Failed requests log static error kinds. A TCP disconnect
+leaves its bearer token valid until expiry or invalidation.
 
 The desktop client writes `rusttalk.log` next to its settings in the platform
 config directory. It rotates at 5 MiB, keeping one backup (`rusttalk.log.1`),

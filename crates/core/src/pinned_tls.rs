@@ -28,7 +28,7 @@ use tokio_tungstenite::{
 };
 use url::Url;
 
-pub type Fingerprint = [u8; 32];
+pub use crate::auth::Fingerprint;
 
 pub fn fingerprint(der: &[u8]) -> Fingerprint {
     Sha256::digest(der).into()
@@ -45,22 +45,8 @@ pub fn register(
         return Err("the pinned LiveKit server must use wss".into());
     }
 
-    let provider = ring::default_provider();
-    let verifier = Arc::new(PinnedCertificate {
-        pin,
-        algorithms: provider.signature_verification_algorithms,
-    });
-    let tls = ClientConfig::builder_with_provider(Arc::new(provider))
-        .with_safe_default_protocol_versions()?
-        .dangerous()
-        .with_custom_certificate_verifier(verifier)
-        .with_no_client_auth();
-    let http = reqwest::Client::builder()
-        .use_preconfigured_tls(tls.clone())
-        .https_only(true)
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()?;
+    let tls = pinned_config(pin)?;
+    let http = https_client(Some(tls.clone()))?;
     let transport = Arc::new(PinnedTransport {
         server: server.clone(),
         tls: Arc::new(tls),
@@ -75,6 +61,38 @@ pub fn register(
     livekit_net::set_ws_client(transport.clone());
     livekit_net::set_http_client(transport);
     Ok(())
+}
+
+pub fn api_client(
+    pin: Option<Fingerprint>,
+) -> Result<reqwest::Client, Box<dyn std::error::Error + Send + Sync>> {
+    https_client(pin.map(pinned_config).transpose()?)
+}
+
+fn pinned_config(pin: Fingerprint) -> Result<ClientConfig, rustls::Error> {
+    let provider = ring::default_provider();
+    let verifier = Arc::new(PinnedCertificate {
+        pin,
+        algorithms: provider.signature_verification_algorithms,
+    });
+    Ok(ClientConfig::builder_with_provider(Arc::new(provider))
+        .with_safe_default_protocol_versions()?
+        .dangerous()
+        .with_custom_certificate_verifier(verifier)
+        .with_no_client_auth())
+}
+
+fn https_client(
+    tls: Option<ClientConfig>,
+) -> Result<reqwest::Client, Box<dyn std::error::Error + Send + Sync>> {
+    let mut builder = reqwest::Client::builder()
+        .https_only(true)
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none());
+    if let Some(tls) = tls {
+        builder = builder.use_preconfigured_tls(tls);
+    }
+    Ok(builder.build()?)
 }
 
 #[derive(Debug)]

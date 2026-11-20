@@ -1,7 +1,8 @@
 .DEFAULT_GOAL := help
-.PHONY: help dev client bot logs down reset lint fmt test
+.PHONY: help dev client bot logs down reset lint fmt test e2e
 
 DEV_COMPOSE := docker compose -f deploy/compose.dev.yml -p rusttalk-dev
+export RUSTTALK_DEV_USER := $(shell id -u):$(shell id -g)
 CARGO_SCOPE ?= --workspace
 
 ##@ Help
@@ -9,12 +10,11 @@ CARGO_SCOPE ?= --workspace
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*## "} \
 		/^##@/ {printf "\n\033[1;33m%s\033[0m\n", substr($$0, 5)} \
-		/^[a-zA-Z_-]+:.*##/ {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+		/^[a-zA-Z0-9_-]+:.*##/ {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 	@echo
 
 ##@ Dev
 
-dev: export RUSTTALK_DEV_USER = $(shell id -u):$(shell id -g)
 dev: export NODE_IP ?= $(shell ip -4 route get 1.1.1.1 2>/dev/null | awk '{ for (i = 1; i < NF; i++) if ($$i == "src") { print $$(i + 1); exit } }')
 dev: ## Start the Docker stack and rebuild the API on changes
 	@test -n "$$NODE_IP" || { printf '\033[1;31mSet NODE_IP to the host LAN IPv4 address.\033[0m\n' >&2; exit 1; }
@@ -24,6 +24,15 @@ dev: ## Start the Docker stack and rebuild the API on changes
 	@fingerprint=$$($(DEV_COMPOSE) run --rm --no-deps -T --entrypoint openssl cert \
 		x509 -in /dev-data/tls/cert.pem -noout -sha256 -fingerprint) && \
 		printf '\033[1;34m==> https://127.0.0.1:8443\n==> LAN wss://%s:8443\n==> TLS %s\033[0m\n' "$$NODE_IP" "$$fingerprint"
+	@server=$$($(DEV_COMPOSE) exec -T api rusttalk-api server-fingerprint) && \
+		printf '\033[1;34m==> Server fingerprint %s\033[0m\n' "$$server"
+	@invite=$$($(DEV_COMPOSE) exec -T api rusttalk-api owner-invite) && \
+		if [ -n "$$invite" ]; then \
+			server_id=$$($(DEV_COMPOSE) exec -T api rusttalk-api server-id) && \
+			tls_pin=$$($(DEV_COMPOSE) run --rm --no-deps -T --entrypoint /bin/sh cert -ec \
+				'set -o pipefail; openssl x509 -in /dev-data/tls/cert.pem -outform DER | openssl dgst -sha256 -binary | openssl base64 -A | tr "/+" "_-" | tr -d "="') && \
+			printf '\033[1;34m==> Owner invite rusttalk://127.0.0.1:8443/i/%s#%s.%s\033[0m\n' "$$invite" "$$server_id" "$$tls_pin"; \
+		fi
 	$(DEV_COMPOSE) watch --no-up api
 
 client: ## Run the native client, optionally with PROFILE=a to z
@@ -75,3 +84,18 @@ fmt: ## Format all code
 test: ## Run unit and integration tests
 	@printf '\033[1;34m==> tests\033[0m\n'
 	cargo test $(CARGO_SCOPE) --locked
+
+e2e: ## Run the Docker sign-in and membership scenario
+	@printf '\033[1;34m==> Docker membership scenario\033[0m\n'
+	@set -eu; \
+		export RUSTTALK_E2E_PROJECT=rusttalk-e2e-$$$$; \
+		export RUSTTALK_DEV_DATA=$$(mktemp -d); \
+		compose() { docker compose -f deploy/compose.dev.yml -p "$$RUSTTALK_E2E_PROJECT" "$$@"; }; \
+		cleanup() { \
+			status=$$?; trap - EXIT; \
+			compose down --volumes --rmi local || status=1; \
+			rm -rf "$$RUSTTALK_DEV_DATA"; exit "$$status"; \
+		}; \
+		trap cleanup EXIT; trap 'exit 130' INT; trap 'exit 143' TERM; \
+		compose up --build --wait --wait-timeout 60; \
+		cargo test --locked -p rusttalk-bot --test membership -- --nocapture

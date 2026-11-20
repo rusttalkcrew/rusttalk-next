@@ -8,7 +8,8 @@ Use Docker with Compose 2.32 or later for file watch.
 
 - `make dev` builds and starts the stack, waits for health, then prints
   `https://127.0.0.1:8443`, the LAN signaling URL and the SHA-256 fingerprint
-  of its TLS certificate.
+  of its TLS certificate, the server identity fingerprint, and a fresh owner
+  invite link while the server is unclaimed.
   Leave it running to rebuild the API when `services/api`, `crates/core` or
   root `Cargo.*` files change. Ctrl-C stops the watcher.
 - `make dev NODE_IP=192.168.1.10` overrides the IPv4 address that LiveKit
@@ -20,7 +21,8 @@ Use Docker with Compose 2.32 or later for file watch.
 - `make logs` follows all service logs in another terminal.
 - `make down` stops the stack and keeps local data.
 - `make reset` stops the stack and deletes its volumes and `.dev/` after you
-  type `reset`. The next start generates a different TLS certificate.
+  type `reset`. The next start generates a different TLS certificate and
+  server key.
 
 Published ports are 8443/TCP for HTTPS, 7881/TCP for LiveKit media fallback,
 and 7882/UDP for LiveKit media. The API's port 8080 and LiveKit's signaling
@@ -33,7 +35,9 @@ cargo run --locked -p rusttalk-bot -- --server wss://192.168.1.10:8443 --identit
 ```
 
 The bot hashes `.dev/tls/cert.pem` by default. Pass `--fingerprint` to use
-the hex fingerprint from `make dev`, with or without colons. The default
+the hex fingerprint from `make dev`, with or without colons. The bot also
+checks the application server key and saves its pins in `.dev/bots/servers.json`.
+The default
 dev credentials match `deploy/livekit.dev.yml`. Set
 `LIVEKIT_API_KEY` and `LIVEKIT_API_SECRET` to override them.
 
@@ -63,7 +67,12 @@ available in core for the UI.
 
 - `make lint`: clippy with warnings as errors, plus `rustfmt --check`.
 - `make fmt`: format all code.
-- `make test`: unit and integration tests.
+- `make test`: unit and integration tests without Docker.
+- `make e2e`: starts the stack detached, tests W05 with two bots, and removes
+  the test containers, TLS directory and API volume on exit. Run it when
+  the regular dev stack has released ports 8443, 7881 and 7882. It checks
+  owner bootstrap, invite use, kick, ban, unban, key pinning and API log
+  redaction. E2E runs locally and stays out of CI for now.
 
 Linux CI runs `make lint test` with the bot excluded and `rusttalk-core/livekit-tls`
 enabled, so it checks pinning and ICE filtering without the native WebRTC

@@ -1,10 +1,15 @@
-use std::{path::Path, process::ExitCode, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    process::ExitCode,
+    time::Duration,
+};
 
 use anyhow::{Context, Result, ensure};
 use clap::Parser;
 use livekit::{DataPacket, Room, RoomEvent, RoomOptions};
 use livekit_api::access_token::{AccessToken, VideoGrants};
 use rustls_pki_types::{CertificateDer, pem::PemObject};
+use rusttalk_bot::membership::Bot;
 use rusttalk_core::pinned_tls::{self, Fingerprint};
 use tracing::Level;
 use tracing_subscriber::{filter::Targets, prelude::*};
@@ -22,6 +27,9 @@ struct Args {
     room: String,
     #[arg(long)]
     identity: String,
+    /// Location of the bot's saved server pins.
+    #[arg(long, default_value = ".dev/bots")]
+    data_dir: PathBuf,
     #[arg(long, env = "LIVEKIT_API_KEY", default_value = "rusttalk-dev")]
     api_key: String,
     #[arg(
@@ -79,6 +87,11 @@ async fn run(args: Args) -> Result<()> {
             pinned_tls::fingerprint(cert.as_ref())
         }
     };
+    let api = Url::parse(&format!(
+        "https://{}",
+        &args.server[url::Position::BeforeHost..]
+    ))?;
+    Bot::connect(api, Some(pin), None, &args.data_dir).await?;
     pinned_tls::register(&args.server, Some(pin)).map_err(anyhow::Error::from_boxed)?;
 
     // shortcut: local dev token, replaced by api-minted tokens in W08
