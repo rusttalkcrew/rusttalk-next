@@ -4,8 +4,6 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    fs,
-    io::{Read, Write},
     path::{Path, PathBuf},
     sync::{Arc, mpsc},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -13,24 +11,17 @@ use std::{
 
 use anyhow::{Context, Result};
 use eframe::egui;
-use livekit::prelude::{Participant, RemoteTrack};
-use reqwest::{Method, StatusCode};
+use livekit::prelude::Participant;
+use reqwest::StatusCode;
 use rusttalk_core::{
-    auth::{
-        InviteCode, InviteLink, KnownServer, ProtocolError, Session, decode, encode, voice_identity,
-    },
+    auth::{Fingerprint, InviteCode, InviteLink, KnownServer, ProtocolError, Session, decode},
     camera::CameraOptions,
     client::{
-        Attachment, BlobRef, Catalog, Event, KeyClient, MessageBody, MessageError, MessageRecord,
-        Server as Api, UploadRejected, decode_image, decode_thumbnail, invite_name,
-        voice::{
-            ConnectionState, LiveFileEvent, NativeVideoSource, RoomEvent, TrackSid, TrackSource,
-            VoiceRoom, VoiceRoster, VoiceState,
-        },
+        BlobRef, Event, KeyClient, MessageBody, MessageError, MessageRecord, Server as Api,
+        invite_name,
+        voice::{LiveFileEvent, NativeVideoSource, RoomEvent, VoiceRoster},
     },
     identity::{DeviceIdentity, fingerprint},
-    keys::Metadata,
-    messages::fit_file_name,
 };
 use serde_json::Value;
 use tokio::{
@@ -43,24 +34,29 @@ use crate::{
     audio::Audio,
     device_sync::{DeviceSync, Edit, Synced},
     screen::{self, Video},
-    server::{
-        Body, CallState, Category, Channel, Device, Directory, Dm, Id, Member, Msg, Peer, Perms,
-        Screen, Stats, Status, TrackStats, member_name,
-    },
-    share::{self, App, Capture},
+    server::{Body, CallState, Directory, Id, Msg, Peer, Stats, Status},
+    share::App,
+};
+
+mod admin;
+mod directory;
+mod files;
+mod find;
+mod voice;
+
+pub use admin::{Admin, AdminUpdate, AuditEntry, Ban, PublicListing};
+use directory::{directory, get};
+pub use files::{MAX_FILE, file_name};
+pub use find::{Listed, PAGE_SIZE};
+use voice::{
+    Live, Next, leave_voice, next_voice, on_voice, room_changed, send_room, share_screen,
+    stop_finished_shares, stop_lost_video, sync_voice_key, voice_command, voice_only, voice_stats,
 };
 
 const PAGE: u32 = 50;
 const CHANGED: &str = "This server changed. Don't continue unless the owner told you it would.";
 const OFFLINE: &str = "You're offline. Try again in a moment.";
 const FAILED: &str = "That didn't work. Try again.";
-/// The largest file that still fits the server's 32 MiB blob limit with its
-/// 16-byte tag per 64 KiB chunk.
-pub const MAX_FILE: u64 = 32 * 1024 * 1024 - 8 * 1024;
-const _: () = assert!(MAX_FILE + MAX_FILE.div_ceil(64 * 1024) * 16 <= 32 * 1024 * 1024);
-/// Invites made from the UI.
-const INVITE_USES: u32 = 10;
-const INVITE_SECONDS: u32 = 7 * 24 * 60 * 60;
 
 pub enum Command {
     /// Load the newest page and follow live messages.
@@ -98,7 +94,9 @@ pub enum Command {
     SetServerName(String),
     SetDisplayName(String),
     OpenDm(Id),
-    Invite,
+    /// Make an invite link: uses and lifetime in seconds.
+    Invite(u32, u32),
+    Admin(Admin),
     JoinVoice(Id),
     LeaveVoice,
     ShareApp(App),
@@ -123,15 +121,30 @@ pub struct LiveOffer {
 }
 
 pub struct Preview {
-    pub link: InviteLink,
+    pub server: KnownServer,
+    /// The invite to join with; `None` when it expired but the server lets anyone join.
+    pub invite: Option<InviteCode>,
     /// The server name from the invite, when the invite carries one.
     pub name: Option<String>,
     /// This profile has connected to this address before.
     pub known: bool,
+    /// The server lets people join without an invite.
+    pub open: bool,
+}
+
+/// How a new member gets in the first time.
+pub enum Admission {
+    Invite(InviteCode),
+    /// The server lets anyone join.
+    Open,
 }
 
 pub enum Update {
     Preview(Result<Box<Preview>, String>),
+    /// A page of directory results, by page number.
+    Found(u32, Result<Vec<Listed>, String>),
+    /// A server picked from the directory, checked; errors show in the directory.
+    Listed(Result<Box<Preview>, String>),
     Status(Url, Status),
     Directory(Url, Box<Directory>),
     Messages {
@@ -145,7 +158,9 @@ pub enum Update {
     Deleted(Url, Id, Id),
     Notice(Url, Id, Msg),
     DmReady(Url, Id),
-    Invite(Url, String),
+    /// A new invite: its ID (to revoke it) and link.
+    Invite(Url, String, String),
+    Admin(Url, AdminUpdate),
     /// The call in a voice channel changed state; `None` when it ended.
     Call(Url, Id, Option<CallState>),
     /// This device joined the call without permission to talk.
@@ -245,22 +260,39 @@ impl Net {
     pub fn preview(&self, link: InviteLink) {
         let ctx = self.ctx.clone();
         self.spawn(async move {
-            let result = preview(&ctx, &link).await;
-            let update = result.map(|(name, known)| Box::new(Preview { link, name, known }));
+            let update = preview(&ctx, &link).await.map(Box::new);
             ctx.send(Update::Preview(update));
         });
     }
 
-    /// Connect to a server (signing in with `invite` the first time) and keep it connected.
+    /// Search the server directory. Only called while the person has "Find servers" open.
+    pub fn search(&self, index: Url, pin: Option<Fingerprint>, query: String, page: u32) {
+        let ctx = self.ctx.clone();
+        self.spawn(async move {
+            let found = find::search(&index, pin, &query, page).await;
+            ctx.send(Update::Found(page, found));
+        });
+    }
+
+    /// Check a server picked from the directory, without joining yet.
+    pub fn check_listed(&self, listed: Listed) {
+        let ctx = self.ctx.clone();
+        self.spawn(async move {
+            let update = find::preview(&ctx, listed).await.map(Box::new);
+            ctx.send(Update::Listed(update));
+        });
+    }
+
+    /// Connect to a server (joining with `admission` the first time) and keep it connected.
     pub fn start(
         &self,
         server: KnownServer,
-        invite: Option<InviteCode>,
+        admission: Option<Admission>,
         display_name: Option<String>,
     ) -> UnboundedSender<Command> {
         let (commands, receiver) = unbounded_channel();
         let ctx = self.ctx.clone();
-        self.spawn(run(ctx, server, invite, display_name, receiver));
+        self.spawn(run(ctx, server, admission, display_name, receiver));
         commands
     }
 
@@ -304,7 +336,7 @@ impl Drop for Net {
     }
 }
 
-async fn preview(ctx: &Ctx, link: &InviteLink) -> Result<(Option<String>, bool), String> {
+async fn preview(ctx: &Ctx, link: &InviteLink) -> Result<Preview, String> {
     let known = Api::pinned(&ctx.data, &link.server.address).map_err(|error| {
         tracing::error!(error = %format_args!("{error:#}"), "reading server pins failed");
         "Couldn't read your saved servers.".to_owned()
@@ -321,19 +353,46 @@ async fn preview(ctx: &Ctx, link: &InviteLink) -> Result<(Option<String>, bool),
         tracing::warn!("invite pins differ from the server");
         return Err(mismatch(known.is_some()));
     }
+    let open = open_joining(&api).await;
+    let mut invite = Some(link.code);
     let name = match &link.link_key {
         // Owner invites from the server console carry no name.
         None => None,
-        Some(_) => invite_name(&api, link)
-            .await
-            .map_err(|error| {
+        Some(_) => match invite_name(&api, link).await {
+            Ok(name) => name.map(|name| String::from_utf8_lossy(&name).into_owned()),
+            // A used-up invite still names the server, which may let anyone join.
+            Err(error) if open => {
+                tracing::info!(error = %format_args!("{error:#}"), "invite spent, server is open");
+                invite = None;
+                None
+            }
+            Err(error) => {
                 tracing::warn!(error = %format_args!("{error:#}"), "invite preview failed");
-                "This invite has expired or was already used. Ask for a new one.".to_owned()
-            })?
-            .map(|name| String::from_utf8_lossy(&name).into_owned()),
+                return Err(
+                    "This invite has expired or was already used. Ask for a new one.".into(),
+                );
+            }
+        },
     };
-    tracing::info!(server = %fingerprint(&link.server.server_id), known = known.is_some(), "invite checked");
-    Ok((name, known.is_some()))
+    tracing::info!(server = %fingerprint(&link.server.server_id), known = known.is_some(), open, "invite checked");
+    Ok(Preview {
+        server: link.server.clone(),
+        invite,
+        name,
+        known: known.is_some(),
+        open,
+    })
+}
+
+/// Whether the server lets anyone join; `false` when it can't tell.
+async fn open_joining(api: &Api) -> bool {
+    match api.info().await {
+        Ok(info) => info.open_joining,
+        Err(error) => {
+            tracing::warn!(error = %format_args!("{error:#}"), "reading open joining failed");
+            false
+        }
+    }
 }
 
 fn explain(error: &anyhow::Error, known: bool) -> String {
@@ -380,36 +439,6 @@ struct State {
     voice: Option<Live>,
 }
 
-/// The voice room this device is in, on this server.
-struct Live {
-    room: VoiceRoom,
-    channel: Id,
-    /// Apps this device shares, each with its own track.
-    shares: Vec<Share>,
-    /// Decrypted names of subscribed remote app tracks.
-    apps: HashMap<TrackSid, String>,
-    /// A capture waiting for the person to pick (Linux) or for its first frame.
-    starting: Option<tokio::task::JoinHandle<Result<(screen::Capture, screen::Options)>>>,
-    screen: Option<(TrackSid, screen::Capture)>,
-    /// The published camera; the UI owns its capture.
-    camera: Option<TrackSid>,
-    /// Screen and camera tracks this device receives; others are unsubscribed.
-    watched: HashSet<String>,
-    /// Live files offered to us, by transfer ID, until accepted.
-    offers: HashMap<Id, MessageRecord>,
-    /// Our own live file offers.
-    mine: HashSet<Id>,
-    /// Live files being received; aborting one cancels it.
-    downloads: HashMap<Id, tokio::task::JoinHandle<()>>,
-}
-
-struct Share {
-    app: App,
-    sid: TrackSid,
-    /// Stops capturing when dropped.
-    capture: Capture,
-}
-
 enum Failure {
     Retry,
     Stop(String),
@@ -424,7 +453,7 @@ enum End {
 async fn run(
     ctx: Ctx,
     server: KnownServer,
-    mut invite: Option<InviteCode>,
+    mut admission: Option<Admission>,
     display_name: Option<String>,
     mut commands: UnboundedReceiver<Command>,
 ) {
@@ -441,9 +470,9 @@ async fn run(
     let mut api = None;
     loop {
         ctx.send(Update::Status(url.clone(), Status::Connecting));
-        match session(&ctx, &server, &mut api, invite.as_ref()).await {
+        match session(&ctx, &server, &mut api, admission.as_ref()).await {
             Ok((api, session)) => {
-                if invite.take().is_some() {
+                if admission.take().is_some() {
                     tracing::info!(server = %fingerprint(&server.server_id), "joined server");
                     let joined = vec![Edit::Join(api.known_server().clone())];
                     if let Err(error) = ctx.sync.edit(&ctx.data, joined).await {
@@ -517,6 +546,9 @@ async fn run(
                         ctx.send(Update::CameraStopped);
                         ctx.send(Update::Failed(OFFLINE.into()));
                     }
+                    Some(Command::Admin(_)) => {
+                        ctx.send(Update::Admin(url.clone(), AdminUpdate::Failed(OFFLINE.into())));
+                    }
                     Some(Command::Image(file, _)) => ctx.send(Update::Image(file.id, Err(false))),
                     Some(Command::Save(file, _)) => ctx.send(Update::Saved(file.id, Err(false))),
                     Some(Command::AcceptFile(id, _)) => {
@@ -540,7 +572,7 @@ async fn session<'a>(
     ctx: &Ctx,
     server: &KnownServer,
     api: &'a mut Option<Api>,
-    invite: Option<&InviteCode>,
+    admission: Option<&Admission>,
 ) -> Result<(&'a Api, Session), Failure> {
     let stop_or_retry = |error: anyhow::Error| {
         if pin_changed(&error) {
@@ -563,10 +595,12 @@ async fn session<'a>(
         *api = Some(verified);
     }
     let api = api.as_ref().expect("set above");
-    let reply = api
-        .sign_in(&ctx.identity, invite)
-        .await
-        .map_err(stop_or_retry)?;
+    let reply = match admission {
+        Some(Admission::Open) => api.join_open(&ctx.identity).await,
+        Some(Admission::Invite(code)) => api.sign_in(&ctx.identity, Some(code)).await,
+        None => api.sign_in(&ctx.identity, None).await,
+    }
+    .map_err(stop_or_retry)?;
     let status = reply.status();
     if status.is_success() {
         let session = reply
@@ -583,13 +617,22 @@ async fn session<'a>(
         .unwrap_or_default();
     tracing::warn!(%status, code, "sign-in refused");
     Err(match code.as_str() {
-        "invite_required" if invite.is_none() => {
+        "invite_required" if admission.is_none() => {
             Failure::Stop("You're no longer a member of this server.".into())
         }
         "invite_required" | "invalid_invite" | "invite_not_found" => {
             Failure::Stop("This invite has expired or was already used. Ask for a new one.".into())
         }
         "person_banned" | "ip_banned" => Failure::Stop("You're banned from this server.".into()),
+        "open_joining_disabled" => {
+            Failure::Stop("This server needs an invite now. Ask someone for one.".into())
+        }
+        "member_cap_reached" => {
+            Failure::Stop("This server is full. Ask someone there for an invite.".into())
+        }
+        "open_join_limit" => Failure::Stop(
+            "Too many people joined this server recently. Try again in an hour.".into(),
+        ),
         "device_revoked" => Failure::Stop("This device was removed from your account.".into()),
         "device_limit" => Failure::Stop(
             "Your account already has 10 devices on this server. Remove one first.".into(),
@@ -794,25 +837,7 @@ async fn on_event(
         Event::VoiceChanged { channel } => {
             room_changed(ctx, url, client, state, decode(&channel)?).await?;
         }
-        Event::LiveFileAccepted {
-            ref device,
-            ref acceptance,
-            ..
-        } => {
-            if let Some(voice) = &mut state.voice {
-                voice.room.handle_live_file_event(client, &event)?;
-                let transfer = decode(&acceptance.transfer)?;
-                let person = client
-                    .devices()
-                    .find(|cert| encode(cert.signing_key().as_bytes()) == *device)
-                    .map(|cert| *cert.person_id());
-                if let Some(person) = person
-                    && voice.mine.contains(&transfer)
-                {
-                    ctx.send(Update::LiveReceiver(transfer, person, !acceptance.cancel));
-                }
-            }
-        }
+        Event::LiveFileAccepted { .. } => voice::live_file_accepted(ctx, client, state, &event)?,
         Event::RotateNeeded { .. } => {}
     }
     Ok(())
@@ -840,142 +865,22 @@ async fn on_command(
             edit_of,
             files,
         } => {
-            let mut body = MessageBody {
+            let body = MessageBody {
                 text,
                 reply_to,
                 edit_of,
                 attachments: Vec::new(),
                 live: None,
             };
-            if let Some(first) = files.first() {
-                let label = match files.len() {
-                    1 => file_name(first),
-                    count => format!("{count} files"),
-                };
-                // shortcut: uploads run inside this server's loop, so its events wait until they
-                // finish (at most 4 × 32 MiB); give them their own task if that gets noticed.
-                ctx.send(Update::Uploading(url.clone(), channel, Some(label)));
-                let uploaded = upload(client, &channel, files, &mut body.attachments).await;
-                ctx.send(Update::Uploading(url.clone(), channel, None));
-                if let Err(error) = uploaded {
-                    tracing::warn!(error = %format_args!("{error:#}"), "uploading a file failed");
-                    discard(client, &body.attachments).await;
-                    ctx.send(Update::Failed(upload_problem(&error).into()));
-                    return Ok(());
-                }
-            }
-            let record = match client.send_message(&channel, &body).await {
-                Ok(record) => record,
-                Err(error) => {
-                    discard(client, &body.attachments).await;
-                    return Err(error);
-                }
-            };
-            send_messages(ctx, url, channel, vec![to_msg(&record, &body)], false, None);
+            files::send(ctx, url, client, channel, body, files).await?;
         }
-        Command::Delete(channel, id, sender, files) => {
-            client.delete_message(&channel, &id).await?;
-            ctx.send(Update::Deleted(url.clone(), channel, id));
-            for file in files {
-                if let Err(error) = client.delete_message_file(&file, &sender).await
-                    && !gone(&error)
-                {
-                    tracing::warn!(error = %format_args!("{error:#}"), "deleting a stored file failed");
-                }
-            }
+        Command::Delete(channel, id, sender, blobs) => {
+            files::delete(ctx, url, client, (channel, id, sender), blobs).await?;
         }
-        Command::Image(file, full) => {
-            let id = file.id;
-            let image = async {
-                let bytes = client.download_file(&file).await?;
-                // Received pictures are hostile: decode with limits, off the async workers.
-                tokio::task::spawn_blocking(move || {
-                    let image = if full {
-                        decode_image(&bytes)
-                    } else {
-                        decode_thumbnail(&bytes)
-                    }?
-                    .into_rgba8();
-                    let size = [image.width() as usize, image.height() as usize];
-                    anyhow::Ok(egui::ColorImage::from_rgba_unmultiplied(
-                        size,
-                        image.as_raw(),
-                    ))
-                })
-                .await?
-            };
-            let image = image.await.map_err(|error| {
-                tracing::warn!(error = %format_args!("{error:#}"), "loading a picture failed");
-                gone(&error)
-            });
-            ctx.send(Update::Image(id, image));
-        }
-        Command::Save(file, path) => {
-            let id = file.id;
-            let saved = async {
-                let bytes = client.download_file(&file).await?;
-                tokio::task::spawn_blocking(move || save_file(&path, &bytes)).await?
-            };
-            let saved = saved.await.map_err(|error| {
-                tracing::warn!(error = %format_args!("{error:#}"), "saving a file failed");
-                gone(&error)
-            });
-            ctx.send(Update::Saved(id, saved));
-        }
-        Command::OfferFile(path) => {
-            let Some(live) = &mut state.voice else {
-                return Ok(());
-            };
-            let record = live.room.offer_live_file(client, &path).await?;
-            let file = client
-                .open_message(&live.channel, &record)
-                .await?
-                .live
-                .context("offer without a file")?;
-            tracing::info!("offered a live file");
-            live.mine.insert(file.id);
-            ctx.send(Update::LiveOffer(LiveOffer {
-                id: file.id,
-                from: None,
-                name: file.name,
-                size: file.size,
-            }));
-        }
-        Command::AcceptFile(id, path) => {
-            let Some(live) = &mut state.voice else {
-                return Ok(());
-            };
-            let Some(record) = live.offers.remove(&id) else {
-                return Ok(());
-            };
-            let mut download = match live.room.accept_live_file(client, &record, &path).await {
-                Ok(download) => download,
-                Err(error) => {
-                    let reason = format!("{error:#}");
-                    ctx.send(Update::LiveProgress(id, LiveFileEvent::Failed { reason }));
-                    return Err(error);
-                }
-            };
-            tracing::info!("receiving a live file");
-            let ctx = ctx.clone();
-            live.downloads.insert(
-                id,
-                tokio::spawn(async move {
-                    let mut shown = std::time::Instant::now();
-                    while let Some(event) = download.next_event().await {
-                        let end = !matches!(event, LiveFileEvent::Progress { .. });
-                        // Progress comes per chunk; a few updates a second are enough to draw.
-                        if end || shown.elapsed() > Duration::from_millis(150) {
-                            shown = std::time::Instant::now();
-                            ctx.send(Update::LiveProgress(id, event));
-                        }
-                        if end {
-                            break;
-                        }
-                    }
-                }),
-            );
-        }
+        Command::Image(file, full) => files::image(ctx, client, file, full).await,
+        Command::Save(file, path) => files::save(ctx, client, file, path).await,
+        Command::OfferFile(path) => voice::offer_file(ctx, client, state, path).await?,
+        Command::AcceptFile(id, path) => voice::accept_file(ctx, client, state, id, path).await?,
         Command::CreateChannel {
             category,
             new_category,
@@ -1021,118 +926,21 @@ async fn on_command(
             };
             ctx.send(Update::DmReady(url.clone(), channel));
         }
-        Command::Invite => {
-            let (_, link) = client.invite(INVITE_USES, INVITE_SECONDS).await?;
-            ctx.send(Update::Invite(url.clone(), link.to_string()));
+        Command::Invite(uses, seconds) => {
+            let (id, link) = client.invite(uses, seconds).await?;
+            ctx.send(Update::Invite(url.clone(), id, link.to_string()));
         }
-        Command::JoinVoice(channel) => {
-            leave_voice(ctx, url, client, state);
-            let room = match join_voice(ctx, client, &channel).await {
-                Ok(room) => room,
-                Err(error) => {
-                    ctx.send(Update::Call(url.clone(), channel, None));
-                    return Err(error);
-                }
-            };
-            tracing::info!(server = %fingerprint(&state.server_id), "joined voice");
-            let listening = !room.can_publish();
-            let no_video = !room.can_use_camera();
-            let no_files = !room.can_publish_data();
-            state.voice = Some(Live {
-                room,
-                channel,
-                shares: Vec::new(),
-                apps: HashMap::new(),
-                starting: None,
-                screen: None,
-                camera: None,
-                watched: HashSet::new(),
-                offers: HashMap::new(),
-                mine: HashSet::new(),
-                downloads: HashMap::new(),
-            });
-            ctx.send(Update::Call(
-                url.clone(),
-                channel,
-                Some(CallState::Connected),
-            ));
-            if listening {
-                ctx.send(Update::Listening(url.clone(), channel));
-            }
-            if no_video {
-                ctx.send(Update::NoVideo(url.clone(), channel));
-            }
-            if no_files {
-                ctx.send(Update::NoFiles(url.clone(), channel));
-            }
-            send_room(ctx, url, client, state, channel);
-        }
+        Command::Admin(request) => admin::run(ctx, url, client, state, request).await,
+        Command::JoinVoice(channel) => voice::start_call(ctx, url, client, state, channel).await?,
         command if voice_only(&command) => {
             if let Some(channel) = voice_command(ctx, state, command).await? {
                 send_room(ctx, url, client, state, channel);
             }
         }
-        Command::ShareApp(app) => {
-            let Some(live) = &mut state.voice else {
-                ctx.send(Update::AppStopped(app.id));
-                return Ok(());
-            };
-            let started = async {
-                let target = app.clone();
-                // shortcut: starting waits for the app's first audio (up to seconds) and holds
-                // this server's loop meanwhile; move it to its own task if that gets noticed.
-                let (capture, source) =
-                    tokio::task::spawn_blocking(move || share::capture(&target)).await??;
-                let sid = live.room.publish_app_audio(&app.name, source).await?.sid();
-                anyhow::Ok((capture, sid))
-            };
-            match started.await {
-                Ok((capture, sid)) => {
-                    tracing::info!("sharing app audio");
-                    live.shares.push(Share { app, sid, capture });
-                    let channel = live.channel;
-                    send_room(ctx, url, client, state, channel);
-                }
-                Err(error) => {
-                    tracing::warn!(error = %format_args!("{error:#}"), "sharing app audio failed");
-                    let text = format!("Couldn't share {}. Is it still playing?", app.name);
-                    ctx.send(Update::AppStopped(app.id));
-                    ctx.send(Update::Failed(text));
-                }
-            }
-        }
-        Command::ShareScreen(target, options) => {
-            let Some(live) = state.voice.as_mut().filter(|live| live.screen.is_none()) else {
-                ctx.send(Update::Sharing(false));
-                return Ok(());
-            };
-            // The system picker waits for the person; keep the server loop running meanwhile.
-            live.starting = Some(tokio::spawn(async move {
-                // shortcut: always opens a fresh picker; keep the portal's restore token
-                // if people ask to skip it when sharing the same screen again.
-                let capture = screen::start(target, options, &mut None).await?;
-                Ok((capture, options))
-            }));
-        }
+        Command::ShareApp(app) => voice::share_app(ctx, url, client, state, app).await?,
+        Command::ShareScreen(target, options) => voice::pick_screen(ctx, state, target, options)?,
         Command::ShareCamera(source, options) => {
-            let Some(live) = &mut state.voice else {
-                ctx.send(Update::CameraStopped);
-                return Ok(());
-            };
-            stop_camera(live).await;
-            match live.room.publish_camera(options, source).await {
-                Ok(publication) => {
-                    tracing::info!("sharing camera");
-                    live.camera = Some(publication.sid());
-                }
-                Err(error) => {
-                    tracing::warn!(error = %format_args!("{error:#}"), "sharing camera failed");
-                    ctx.send(Update::CameraStopped);
-                    ctx.send(Update::Failed("Couldn't turn on your camera.".into()));
-                }
-            }
-            let channel = live.channel;
-            send_room(ctx, url, client, state, channel);
+            voice::share_camera(ctx, url, client, state, source, options).await?;
         }
         Command::LeaveVoice
         | Command::StopApp(_)
@@ -1142,156 +950,6 @@ async fn on_command(
         | Command::CancelFile(_) => unreachable!("handled by voice_command"),
     }
     Ok(())
-}
-
-/// Commands that only need the voice room, which outlives the API connection.
-fn voice_only(command: &Command) -> bool {
-    matches!(
-        command,
-        Command::LeaveVoice
-            | Command::StopApp(_)
-            | Command::StopScreen
-            | Command::Watch(..)
-            | Command::StopCamera
-            | Command::CancelFile(_)
-    )
-}
-
-/// Run a `voice_only` command. Returns the call's channel when its roster changed.
-async fn voice_command(ctx: &Ctx, state: &mut State, command: Command) -> Result<Option<Id>> {
-    if let Command::LeaveVoice = command {
-        return Ok(state.voice.take().map(|live| close(ctx, live)));
-    }
-    let Some(live) = &mut state.voice else {
-        return Ok(None);
-    };
-    let changed = match command {
-        Command::StopApp(id) => {
-            let Some(at) = live.shares.iter().position(|share| share.app.id == id) else {
-                return Ok(None);
-            };
-            let share = live.shares.remove(at);
-            tracing::info!("stopped sharing app audio");
-            if let Err(error) = live.room.unpublish_audio(&share.sid).await {
-                tracing::warn!(error = %format_args!("{error:#}"), "stopping app audio failed");
-            }
-            true
-        }
-        Command::StopScreen => stop_screen(live).await,
-        Command::Watch(sid, on) => {
-            watch(ctx, live, sid, on)?;
-            false
-        }
-        Command::StopCamera => {
-            stop_camera(live).await;
-            true
-        }
-        Command::CancelFile(id) => {
-            cancel_file(live, &id);
-            false
-        }
-        _ => false,
-    };
-    Ok(changed.then_some(live.channel))
-}
-
-/// Stop the screen share, closing a system picker that is still open. True if a share stopped.
-async fn stop_screen(live: &mut Live) -> bool {
-    if let Some(starting) = live.starting.take() {
-        starting.abort();
-    }
-    let Some((sid, _capture)) = live.screen.take() else {
-        return false;
-    };
-    tracing::info!("stopped sharing screen");
-    if let Err(error) = live.room.unpublish_video(&sid).await {
-        tracing::warn!(error = %format_args!("{error:#}"), "stopping screen failed");
-    }
-    true
-}
-
-/// Stop offering our file, or stop receiving one; dropping a download removes its partial file.
-fn cancel_file(live: &mut Live, id: &Id) {
-    if live.mine.remove(id) {
-        tracing::info!("stopped offering a live file");
-        live.room.cancel_live_offer(id);
-    } else if let Some(download) = live.downloads.remove(id) {
-        tracing::info!("cancelled a live file download");
-        download.abort();
-    }
-}
-
-async fn stop_camera(live: &mut Live) {
-    if let Some(sid) = live.camera.take() {
-        tracing::info!("stopped sharing camera");
-        if let Err(error) = live.room.unpublish_video(&sid).await {
-            tracing::warn!(error = %format_args!("{error:#}"), "stopping camera failed");
-        }
-    }
-}
-
-/// Start or stop receiving a screen or camera track.
-fn watch(ctx: &Ctx, live: &mut Live, sid: String, on: bool) -> Result<()> {
-    if on {
-        live.watched.insert(sid.clone());
-    } else {
-        live.watched.remove(&sid);
-        ctx.video.remove_track(&sid);
-    }
-    let Some(video) = live
-        .room
-        .remote_video_tracks()
-        .into_iter()
-        .find(|video| video.sid.as_str() == sid)
-    else {
-        return Ok(());
-    };
-    live.room.set_subscribed(&video.sid, on)?;
-    // Already subscribed: no new event will come.
-    if let (true, Some(track)) = (on, video.track) {
-        ctx.video.add_track(sid, track.rtc_track());
-    }
-    Ok(())
-}
-
-/// Publish a capture that started, or report why it didn't.
-async fn share_screen(
-    ctx: &Ctx,
-    url: &Url,
-    client: &KeyClient<'_>,
-    state: &mut State,
-    capture: Result<(screen::Capture, screen::Options)>,
-) {
-    let Some(live) = &mut state.voice else {
-        return;
-    };
-    live.starting = None;
-    let published = match capture {
-        Ok((capture, options)) => live
-            .room
-            .publish_screen(&capture.name, options, capture.source.clone())
-            .await
-            .map(|publication| (publication.sid(), capture)),
-        Err(error) => Err(error),
-    };
-    match published {
-        Ok(screen) => {
-            tracing::info!("sharing screen");
-            live.screen = Some(screen);
-            ctx.send(Update::Sharing(true));
-            let channel = live.channel;
-            send_room(ctx, url, client, state, channel);
-        }
-        Err(error) if error.is::<screen::Cancelled>() => {
-            tracing::info!("screen picker cancelled");
-            ctx.send(Update::Sharing(false));
-        }
-        Err(error) => {
-            tracing::warn!(error = %format_args!("{error:#}"), "sharing screen failed");
-            ctx.send(Update::Sharing(false));
-            ctx.send(Update::Failed("Couldn't share your screen.".into()));
-        }
-    }
 }
 
 /// Load one page, newest first on the wire, and send it oldest first.
@@ -1358,112 +1016,6 @@ fn to_msg(record: &MessageRecord, body: &MessageBody) -> Msg {
     }
 }
 
-/// Encrypt and upload each file, adding it to `out` so a failure can remove the earlier ones.
-async fn upload(
-    client: &KeyClient<'_>,
-    channel: &Id,
-    files: Vec<PathBuf>,
-    out: &mut Vec<Attachment>,
-) -> Result<()> {
-    for path in files {
-        let name = file_name(&path);
-        let media_type = media_type(&path);
-        let bytes = tokio::task::spawn_blocking(move || {
-            let mut bytes = Vec::new();
-            fs::File::open(&path)?
-                .take(MAX_FILE + 1)
-                .read_to_end(&mut bytes)?;
-            anyhow::ensure!(bytes.len() as u64 <= MAX_FILE, "file too large");
-            Ok(bytes)
-        })
-        .await??;
-        out.push(
-            client
-                .upload_file(channel, &name, media_type, &bytes)
-                .await?,
-        );
-    }
-    Ok(())
-}
-
-/// Remove uploaded files that will not be sent after all.
-async fn discard(client: &KeyClient<'_>, files: &[Attachment]) {
-    for file in files {
-        for blob in std::iter::once(&file.file).chain(&file.thumbnail) {
-            if let Err(error) = client.delete_file(&blob.id).await {
-                tracing::warn!(error = %format_args!("{error:#}"), "removing an unsent file failed");
-            }
-        }
-    }
-}
-
-pub fn file_name(path: &Path) -> String {
-    path.file_name().map_or_else(
-        || "file".into(),
-        |name| fit_file_name(&name.to_string_lossy()),
-    )
-}
-
-/// Only a hint for the receiver; images are recognised by their contents.
-fn media_type(path: &Path) -> &'static str {
-    let extension = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(str::to_ascii_lowercase);
-    match extension.as_deref() {
-        Some("png") => "image/png",
-        Some("jpg" | "jpeg") => "image/jpeg",
-        Some("gif") => "image/gif",
-        Some("webp") => "image/webp",
-        Some("pdf") => "application/pdf",
-        _ => "application/octet-stream",
-    }
-}
-
-fn status(error: &anyhow::Error) -> Option<StatusCode> {
-    error
-        .downcast_ref::<UploadRejected>()
-        .map(|rejected| rejected.status)
-        .or_else(|| {
-            error
-                .downcast_ref::<reqwest::Error>()
-                .and_then(reqwest::Error::status)
-        })
-}
-
-/// The server no longer has this file: it expired or was deleted.
-fn gone(error: &anyhow::Error) -> bool {
-    status(error) == Some(StatusCode::NOT_FOUND)
-}
-
-fn upload_problem(error: &anyhow::Error) -> &'static str {
-    let code = error
-        .downcast_ref::<UploadRejected>()
-        .map(|r| r.code.as_str());
-    match (status(error), code) {
-        (_, Some("file_too_large")) => "File too large.",
-        (_, Some("file_member_quota")) => "You reached your storage limit.",
-        (_, Some("file_server_quota")) => "This server is full.",
-        (Some(StatusCode::PAYLOAD_TOO_LARGE), _) => {
-            "There's no room for this file. You or this server reached the storage limit."
-        }
-        (Some(StatusCode::SERVICE_UNAVAILABLE), _) => {
-            "Too many uploads right now. Try again in a moment."
-        }
-        (Some(StatusCode::FORBIDDEN), _) => "You can't send files here.",
-        _ => "Couldn't send the file. Try again.",
-    }
-}
-
-/// Write next to the target first, so a failed download leaves no partial file.
-fn save_file(path: &Path, bytes: &[u8]) -> Result<()> {
-    let folder = path.parent().context("no folder to save in")?;
-    let mut file = tempfile::NamedTempFile::new_in(folder)?;
-    file.write_all(bytes)?;
-    file.persist(path)?;
-    Ok(())
-}
-
 fn send_messages(
     ctx: &Ctx,
     url: &Url,
@@ -1506,791 +1058,8 @@ async fn set_display_name(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, stat
     }
 }
 
-async fn get(client: &KeyClient<'_>, path: &str) -> Result<Value> {
-    Ok(client
-        .request(Method::GET, path)
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?)
-}
-
-/// Fetch and decrypt names, channels, members and permissions, and report member changes.
-async fn directory(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &mut State) -> Result<()> {
-    let catalog = client.catalog().await?;
-    let members = get(client, "/v1/members").await?;
-    let me = get(client, "/v1/me").await?;
-    let roles = get(client, "/v1/roles").await?;
-    let space = get(client, "/v1/space").await?;
-    let dir = build(client, &catalog, &members, &me, &roles, &space)?;
-    if let Some(before) = &state.last {
-        for (person, action, detail) in changes(before, &dir) {
-            let name = member_name(&dir, &person);
-            let name = if dir.members.iter().any(|m| m.person == person) {
-                name
-            } else {
-                member_name(before, &person)
-            };
-            state.notices += 1;
-            let mut id = [0xff; 32];
-            id[..8].copy_from_slice(&state.notices.to_be_bytes());
-            let msg = Msg {
-                id,
-                person,
-                at: now(),
-                reply_to: None,
-                edit_of: None,
-                body: Body::Notice {
-                    name,
-                    action,
-                    detail,
-                },
-                files: Vec::new(),
-            };
-            ctx.send(Update::Notice(url.clone(), person, msg));
-        }
-    }
-    let joined = state.voice.as_ref().map(|live| live.channel);
-    let deleted = joined.filter(|joined| {
-        !dir.categories
-            .iter()
-            .flat_map(|category| &category.channels)
-            .any(|channel| channel.id == *joined)
-    });
-    state.last = Some(dir.clone());
-    state.named = client.has_space_key();
-    ctx.send(Update::Directory(url.clone(), Box::new(dir)));
-    if let Some(channel) = deleted {
-        leave_voice(ctx, url, client, state);
-        ctx.send(Update::Call(url.clone(), channel, None));
-    }
-    Ok(())
-}
-
-fn build(
-    client: &KeyClient<'_>,
-    catalog: &Catalog,
-    members: &Value,
-    me: &Value,
-    roles: &Value,
-    space: &Value,
-) -> Result<Directory> {
-    let text = |kind: Metadata, id: &[u8], ct: Option<&str>| {
-        let plain = client.decrypt_metadata(kind, id, ct?);
-        if let Err(error) = &plain {
-            tracing::warn!(error = %format_args!("{error:#}"), "name could not be decrypted");
-        }
-        Some(String::from_utf8_lossy(&plain.ok()?).into_owned())
-    };
-    let strings = |value: &Value| -> Vec<String> {
-        value
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|item| item.as_str().map(str::to_owned))
-            .collect()
-    };
-    let my_roles = strings(&me["role_ids"]);
-    let mut perms = Perms {
-        owner: my_roles.iter().any(|role| role == "owner"),
-        ..Perms::default()
-    };
-    for role in roles["roles"].as_array().into_iter().flatten() {
-        if role["id"]
-            .as_str()
-            .is_some_and(|id| my_roles.iter().any(|mine| mine == id))
-        {
-            for permission in strings(&role["permissions"]) {
-                match permission.as_str() {
-                    "manage_channels" => perms.manage_channels = true,
-                    "invite" => perms.invite = true,
-                    "delete_messages" => perms.delete_messages = true,
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    let mut categories: Vec<_> = catalog.categories.iter().collect();
-    categories.sort_by_key(|category| (category.position, category.id));
-    let mut categories: Vec<Category> = categories
-        .into_iter()
-        .map(|category| Category {
-            id: Some(category.id),
-            name: text(
-                Metadata::CategoryName,
-                &category.id,
-                Some(&category.name_ct),
-            )
-            .unwrap_or_else(|| "Channels".into()),
-            channels: Vec::new(),
-        })
-        .collect();
-    let mut loose = Vec::new();
-    let mut dms = Vec::new();
-    let mut channels: Vec<_> = catalog.channels.iter().collect();
-    channels.sort_by_key(|channel| (channel.position, channel.id));
-    for channel in channels {
-        if channel.kind == "dm" {
-            if let Some(peer) = channel.peer.as_deref() {
-                dms.push(Dm {
-                    channel: channel.id,
-                    peer: decode(peer)?,
-                });
-            }
-            continue;
-        }
-        let entry = Channel {
-            id: channel.id,
-            name: text(
-                Metadata::ChannelName,
-                &channel.id,
-                channel.name_ct.as_deref(),
-            )
-            .unwrap_or_else(|| "channel".into()),
-            voice: channel.kind == "voice",
-        };
-        let category = categories.iter_mut().find(|category| {
-            category
-                .id
-                .is_some_and(|id| channel.category_id.as_deref() == Some(encode(&id).as_str()))
-        });
-        match category {
-            Some(category) => category.channels.push(entry),
-            None => loose.push(entry),
-        }
-    }
-    // Text channels first, then voice, like other chat apps.
-    loose.sort_by_key(|channel| channel.voice);
-    for category in &mut categories {
-        category.channels.sort_by_key(|channel| channel.voice);
-    }
-    // Stable, so voice-only categories follow the rest in server order.
-    categories.sort_by_key(|c| !c.channels.is_empty() && c.channels.iter().all(|ch| ch.voice));
-    if !loose.is_empty() {
-        categories.insert(
-            0,
-            Category {
-                id: None,
-                name: String::new(),
-                channels: loose,
-            },
-        );
-    }
-
-    let mut list = Vec::new();
-    for row in members.as_array().into_iter().flatten() {
-        let person: Id = decode(row["person_id"].as_str().context("member without ID")?)?;
-        let devices = client
-            .devices()
-            .filter(|device| device.person_id() == &person)
-            .map(|device| Device {
-                name: device.name().to_owned(),
-                fingerprint: fingerprint(device.signing_key().as_bytes()),
-            })
-            .collect();
-        list.push(Member {
-            person,
-            name: text(
-                Metadata::DisplayName,
-                &person,
-                row["display_name_ct"].as_str(),
-            ),
-            devices,
-        });
-    }
-    list.sort_by_cached_key(|member| {
-        (
-            member.name.is_none(),
-            member.name.as_ref().map(|n| n.to_lowercase()),
-        )
-    });
-    let server_id = client.space().id;
-    Ok(Directory {
-        name: text(Metadata::ServerName, &server_id, space["name_ct"].as_str()),
-        me: *client.identity.certificate.person_id(),
-        perms,
-        categories,
-        members: list,
-        dms,
-    })
-}
-
-/// Member and device changes between two directory loads: (person, action, details).
-fn changes(before: &Directory, after: &Directory) -> Vec<(Id, &'static str, String)> {
-    let mut out = Vec::new();
-    for member in &after.members {
-        let id = format!("ID {}", fingerprint(&member.person));
-        let Some(old) = before
-            .members
-            .iter()
-            .find(|old| old.person == member.person)
-        else {
-            out.push((member.person, "joined", id));
-            continue;
-        };
-        // A new member's first device arrives just after the join; that is not news.
-        if old.devices.is_empty() {
-            continue;
-        }
-        for device in &member.devices {
-            if old
-                .devices
-                .iter()
-                .all(|d| d.fingerprint != device.fingerprint)
-            {
-                let detail = format!("{id}\nNew device {} ({})", device.fingerprint, device.name);
-                out.push((member.person, "added a new device", detail));
-            }
-        }
-        for device in &old.devices {
-            if member
-                .devices
-                .iter()
-                .all(|d| d.fingerprint != device.fingerprint)
-            {
-                let detail = format!(
-                    "{id}\nRemoved device {} ({})",
-                    device.fingerprint, device.name
-                );
-                out.push((member.person, "removed a device", detail));
-            }
-        }
-    }
-    for old in &before.members {
-        if after
-            .members
-            .iter()
-            .all(|member| member.person != old.person)
-        {
-            let id = format!("ID {}", fingerprint(&old.person));
-            out.push((old.person, "left", id));
-        }
-    }
-    out
-}
-
 fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs() as i64)
-}
-
-/// Connect to a voice channel and publish the microphone when allowed to talk.
-async fn join_voice(ctx: &Ctx, client: &mut KeyClient<'_>, channel: &Id) -> Result<VoiceRoom> {
-    let room = client.join_voice(channel).await?;
-    if room.can_publish() {
-        if let Err(error) = room.publish_audio(ctx.audio.source()).await {
-            leave_room(room).await;
-            return Err(error);
-        }
-    } else {
-        ctx.send(Update::Failed("You can listen here, but not talk.".into()));
-    }
-    Ok(room)
-}
-
-fn leave_voice(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &mut State) {
-    if let Some(live) = state.voice.take() {
-        let channel = close(ctx, live);
-        send_room(ctx, url, client, state, channel);
-    }
-}
-
-/// Leave a call: stop showing its videos, close a system picker that is still open,
-/// and close the room. Returns the call's channel.
-fn close(ctx: &Ctx, live: Live) -> Id {
-    for sid in &live.watched {
-        ctx.video.remove_track(sid);
-    }
-    if let Some(starting) = &live.starting {
-        starting.abort();
-    }
-    // Closing waits for the media server; nothing here needs to wait for it.
-    tokio::spawn(leave_room(live.room));
-    live.channel
-}
-
-async fn leave_room(room: VoiceRoom) {
-    tracing::info!("left voice");
-    if let Err(error) = room.leave().await {
-        tracing::warn!(error = %format_args!("{error:#}"), "leaving voice failed");
-    }
-}
-
-/// Install a newer media key after key work for the voice channel.
-fn sync_voice_key(client: &KeyClient<'_>, state: &mut State) {
-    if let Some(live) = &mut state.voice
-        && let Err(error) = live.room.sync_key(client)
-    {
-        tracing::warn!(error = %format_args!("{error:#}"), "voice key rotation failed");
-    }
-}
-
-// Lives only between a select and its handler.
-#[allow(clippy::large_enum_variant)]
-enum Next {
-    Event(Option<RoomEvent>),
-    /// A screen capture finished starting; clear `starting` before polling again.
-    Capture(Result<(screen::Capture, screen::Options)>),
-}
-
-async fn next_voice(voice: &mut Option<Live>) -> Next {
-    let Some(live) = voice else {
-        return std::future::pending().await;
-    };
-    let starting = async {
-        match live.starting.as_mut() {
-            Some(starting) => starting.await,
-            None => std::future::pending().await,
-        }
-    };
-    tokio::select! {
-        event = live.room.next_event() => Next::Event(event),
-        capture = starting => Next::Capture(capture.map_err(anyhow::Error::from).and_then(|c| c)),
-    }
-}
-
-/// LiveKit identity of every known device, to find the person behind a voice participant.
-fn identities(client: &KeyClient<'_>, server: &Id) -> HashMap<String, Id> {
-    client
-        .devices()
-        .map(|device| {
-            let id = voice_identity(server, device.signing_key().as_bytes());
-            (id, *device.person_id())
-        })
-        .collect()
-}
-
-async fn room_changed(
-    ctx: &Ctx,
-    url: &Url,
-    client: &mut KeyClient<'_>,
-    state: &mut State,
-    channel: Id,
-) -> Result<()> {
-    let people = client.voice_participants(&channel).await?;
-    state.rooms.insert(channel, people);
-    send_room(ctx, url, client, state, channel);
-    Ok(())
-}
-
-/// The server's roster for a voice channel, plus who the room itself shows,
-/// with "connecting" for anyone whose audio isn't flowing in our room.
-fn send_room(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &State, channel: Id) {
-    let me = *ctx.identity.certificate.person_id();
-    let roster = state.rooms.get(&channel).cloned().unwrap_or_default();
-    let mut people = roster.people;
-    let mut peers = Vec::new();
-    match state.voice.as_ref().filter(|live| live.channel == channel) {
-        None => peers.extend(people.into_iter().map(|person| Peer {
-            person,
-            connecting: false,
-            unknown: false,
-            apps: Vec::new(),
-            screens: Vec::new(),
-            camera: None,
-        })),
-        Some(live) => {
-            let ids = identities(client, &state.server_id);
-            let mut live_people: HashMap<Id, bool> = HashMap::new();
-            let mut apps: HashMap<Id, Vec<(TrackSid, String)>> = HashMap::new();
-            let mut screens: HashMap<Id, Vec<Screen>> = HashMap::new();
-            let mut cameras: HashMap<Id, String> = HashMap::new();
-            for (participant, voice) in live.room.participants() {
-                if let Some(person) = ids.get(participant.identity().as_str()) {
-                    *live_people.entry(*person).or_default() |= voice == VoiceState::Connected;
-                    apps.entry(*person).or_default().extend(
-                        participant
-                            .track_publications()
-                            .into_keys()
-                            .filter_map(|sid| {
-                                let name = live.apps.get(&sid)?.clone();
-                                Some((sid, name))
-                            }),
-                    );
-                }
-            }
-            for names in apps.values_mut() {
-                names.sort_by(|a, b| a.1.cmp(&b.1));
-            }
-            apps.insert(
-                me,
-                live.shares
-                    .iter()
-                    .map(|share| (share.sid.clone(), share.app.name.clone()))
-                    .collect(),
-            );
-            for video in live.room.remote_video_tracks() {
-                let Some(person) = ids.get(video.participant.as_str()) else {
-                    continue;
-                };
-                match video.source {
-                    TrackSource::Screenshare => screens.entry(*person).or_default().push(Screen {
-                        sid: video.sid.to_string(),
-                        name: video.name,
-                    }),
-                    // One per person: a second device's camera shows after the first stops.
-                    TrackSource::Camera => {
-                        cameras.entry(*person).or_insert(video.sid.to_string());
-                    }
-                    _ => {}
-                }
-            }
-            if let Some(sid) = &live.camera {
-                cameras.insert(me, sid.to_string());
-            }
-            if let Some((sid, _)) = &live.screen {
-                screens.insert(
-                    me,
-                    vec![Screen {
-                        sid: sid.to_string(),
-                        name: "Your screen".into(),
-                    }],
-                );
-            }
-            people.extend(live_people.keys().copied());
-            people.push(me);
-            people.sort();
-            people.dedup();
-            let connected = live.room.connection_state() == ConnectionState::Connected;
-            for person in people {
-                let ok = if person == me {
-                    connected
-                } else {
-                    live_people.get(&person) == Some(&true)
-                };
-                peers.push(Peer {
-                    person,
-                    connecting: !ok,
-                    unknown: false,
-                    apps: apps.remove(&person).unwrap_or_default(),
-                    screens: screens.remove(&person).unwrap_or_default(),
-                    camera: cameras.remove(&person),
-                });
-            }
-        }
-    }
-    peers.extend((0..roster.unknown).map(|_| Peer {
-        person: [0; 32],
-        connecting: false,
-        unknown: true,
-        apps: Vec::new(),
-        screens: Vec::new(),
-        camera: None,
-    }));
-    ctx.send(Update::Room(url.clone(), channel, peers));
-}
-
-fn on_voice(
-    ctx: &Ctx,
-    url: &Url,
-    client: &KeyClient<'_>,
-    state: &mut State,
-    event: Option<RoomEvent>,
-) {
-    let Some(channel) = state.voice.as_ref().map(|live| live.channel) else {
-        return;
-    };
-    let end = |state: &mut State, text: &str| {
-        if let Some(live) = state.voice.take() {
-            close(ctx, live);
-        }
-        ctx.send(Update::Call(url.clone(), channel, None));
-        ctx.send(Update::Failed(text.into()));
-    };
-    let Some(event) = event else {
-        tracing::warn!("voice room closed");
-        end(state, "Voice disconnected.");
-        send_room(ctx, url, client, state, channel);
-        return;
-    };
-    match event {
-        RoomEvent::TrackSubscribed {
-            track: RemoteTrack::Audio(track),
-            participant,
-            ..
-        } => {
-            let ids = identities(client, &state.server_id);
-            let person = ids.get(participant.identity().as_str()).copied();
-            if person.is_none() {
-                tracing::warn!("voice track from a device this client doesn't know yet");
-            }
-            let sid = track.sid();
-            let mut app = None;
-            if let Some(live) = &mut state.voice
-                && let Some(name) = live.room.app_audio_name(&track)
-            {
-                live.apps.insert(sid.clone(), name);
-                app = Some(sid.clone());
-            }
-            ctx.audio.add_track(
-                sid.to_string(),
-                (person.unwrap_or_default(), app),
-                track.rtc_track(),
-            );
-        }
-        RoomEvent::TrackSubscribed {
-            track: RemoteTrack::Video(track),
-            publication,
-            ..
-        } => {
-            let sid = track.sid().to_string();
-            match state.voice.as_ref() {
-                Some(live) if live.watched.contains(&sid) => {
-                    ctx.video.add_track(sid, track.rtc_track());
-                }
-                // Watching stopped while subscribing.
-                Some(live) => {
-                    if let Err(error) = live.room.set_subscribed(&publication.sid(), false) {
-                        tracing::warn!(error = %format_args!("{error:#}"), "unsubscribing a video failed");
-                    }
-                }
-                None => {}
-            }
-        }
-        RoomEvent::TrackUnsubscribed { track, .. } => {
-            if let Some(live) = &mut state.voice {
-                live.apps.remove(&track.sid());
-            }
-            ctx.audio.remove_track(track.sid().as_str());
-            ctx.video.remove_track(track.sid().as_str());
-        }
-        RoomEvent::Reconnecting => {
-            tracing::info!("voice reconnecting");
-            ctx.send(Update::Call(
-                url.clone(),
-                channel,
-                Some(CallState::Reconnecting),
-            ));
-        }
-        RoomEvent::Reconnected => {
-            tracing::info!("voice reconnected");
-            ctx.send(Update::Call(
-                url.clone(),
-                channel,
-                Some(CallState::Connected),
-            ));
-        }
-        RoomEvent::Disconnected { reason } => {
-            tracing::info!(?reason, "voice disconnected");
-            end(state, "Voice disconnected.");
-        }
-        RoomEvent::ParticipantConnected(_)
-        | RoomEvent::ParticipantActive(_)
-        | RoomEvent::TrackPublished { .. }
-        | RoomEvent::TrackUnpublished { .. }
-        | RoomEvent::ParticipantDisconnected(_)
-        | RoomEvent::ConnectionStateChanged(_) => {}
-        _ => return,
-    }
-    send_room(ctx, url, client, state, channel);
-}
-
-/// Stop the camera and screen once LiveKit no longer carries them: `video` was removed
-/// mid-call (LiveKit drops the grant) or the SDK unpublished the track itself.
-async fn stop_lost_video(
-    ctx: &Ctx,
-    url: &Url,
-    client: &KeyClient<'_>,
-    state: &mut State,
-    unpublished: Option<TrackSid>,
-) {
-    let Some(live) = &mut state.voice else {
-        return;
-    };
-    let (camera, screen) = (live.room.can_use_camera(), live.room.can_share_screen());
-    let gone = |sid: &TrackSid, allowed: bool| !allowed || unpublished.as_ref() == Some(sid);
-    let mut changed = false;
-    if live.camera.as_ref().is_some_and(|sid| gone(sid, camera)) {
-        stop_camera(live).await;
-        ctx.send(Update::CameraStopped);
-        changed = true;
-    }
-    // A picker still open (`starting`) never has a published screen beside it.
-    if live
-        .screen
-        .as_ref()
-        .is_some_and(|(sid, _)| gone(sid, screen))
-        || !screen && live.starting.is_some()
-    {
-        changed |= stop_screen(live).await;
-        ctx.send(Update::Sharing(false));
-    }
-    let channel = live.channel;
-    if unpublished.is_none() && !(camera && screen) {
-        ctx.send(Update::NoVideo(url.clone(), channel));
-    }
-    if changed {
-        send_room(ctx, url, client, state, channel);
-    }
-}
-
-/// Stop sharing apps that closed or whose capture stopped by itself.
-async fn stop_finished_shares(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &mut State) {
-    let Some(live) = &mut state.voice else {
-        return;
-    };
-    let (ended, kept): (Vec<Share>, _) = std::mem::take(&mut live.shares)
-        .into_iter()
-        .partition(|share| share.capture.is_finished());
-    live.shares = kept;
-    if live
-        .screen
-        .as_ref()
-        .is_some_and(|(_, capture)| capture.is_finished())
-    {
-        tracing::info!("screen capture ended");
-        stop_screen(live).await;
-        ctx.send(Update::Sharing(false));
-    } else if ended.is_empty() {
-        return;
-    }
-    for share in &ended {
-        tracing::info!("app audio capture ended");
-        if let Err(error) = live.room.unpublish_audio(&share.sid).await {
-            tracing::warn!(error = %format_args!("{error:#}"), "stopping app audio failed");
-        }
-        ctx.send(Update::AppStopped(share.app.id.clone()));
-    }
-    let channel = live.channel;
-    send_room(ctx, url, client, state, channel);
-}
-
-/// The connection panel's numbers, from the SDK's WebRTC stats.
-async fn voice_stats(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &mut State) {
-    let Some(live) = &mut state.voice else {
-        return;
-    };
-    let snapshot = match live.room.stats().await {
-        Ok(snapshot) => snapshot,
-        Err(error) => {
-            tracing::warn!(error = %format_args!("{error:#}"), "reading voice stats failed");
-            return;
-        }
-    };
-    let ids = identities(client, &state.server_id);
-    let me = *ctx.identity.certificate.person_id();
-    let screens: HashMap<TrackSid, String> = live
-        .screen
-        .iter()
-        .map(|(sid, _)| (sid.clone(), "Screen".into()))
-        .chain(live.camera.iter().map(|sid| (sid.clone(), "Camera".into())))
-        .chain(
-            live.room
-                .remote_video_tracks()
-                .into_iter()
-                .map(|video| (video.sid, video.name)),
-        )
-        .collect();
-    let (sent, received): (Vec<_>, Vec<_>) = snapshot.tracks.iter().partition(|t| t.outbound);
-    let lost = |tracks: &[&rusttalk_core::client::voice::TrackStats]| {
-        tracks
-            .iter()
-            .filter_map(|t| t.packets_lost)
-            .reduce(|a, b| a + b)
-    };
-    let stats = Stats {
-        ping_ms: snapshot.ping_ms,
-        jitter_ms: received.iter().filter_map(|t| t.jitter_ms).reduce(f64::max),
-        lost_in: lost(&received),
-        lost_out: lost(&sent),
-        tracks: snapshot
-            .tracks
-            .iter()
-            .filter_map(|t| {
-                Some(TrackStats {
-                    person: if t.outbound {
-                        me
-                    } else {
-                        *ids.get(t.participant.as_str())?
-                    },
-                    mine: t.outbound,
-                    app: live
-                        .apps
-                        .get(&t.sid)
-                        .or_else(|| screens.get(&t.sid))
-                        .or_else(|| {
-                            let share = live.shares.iter().find(|share| share.sid == t.sid)?;
-                            Some(&share.app.name)
-                        })
-                        .cloned(),
-                    kbps: t.bitrate_bps? / 1000.0,
-                })
-            })
-            .collect(),
-    };
-    ctx.send(Update::Stats(url.clone(), stats));
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn upload_problems_name_the_limit_that_was_hit() {
-        let rejected = |status, code: &str| {
-            anyhow::Error::from(UploadRejected {
-                status,
-                code: code.into(),
-            })
-        };
-        let full = StatusCode::PAYLOAD_TOO_LARGE;
-        assert_eq!(
-            upload_problem(&rejected(full, "file_too_large")),
-            "File too large."
-        );
-        assert_eq!(
-            upload_problem(&rejected(full, "file_member_quota")),
-            "You reached your storage limit."
-        );
-        assert_eq!(
-            upload_problem(&rejected(full, "file_server_quota")),
-            "This server is full."
-        );
-        assert_eq!(
-            upload_problem(&rejected(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "file_upload_busy"
-            )),
-            "Too many uploads right now. Try again in a moment."
-        );
-    }
-
-    fn member(person: u8, devices: &[&str]) -> Member {
-        Member {
-            person: [person; 32],
-            name: Some(format!("P{person}")),
-            devices: devices
-                .iter()
-                .map(|fp| Device {
-                    name: "Desktop".into(),
-                    fingerprint: (*fp).into(),
-                })
-                .collect(),
-        }
-    }
-
-    #[test]
-    fn reports_joins_leaves_and_device_changes_but_not_a_first_device() {
-        let dir = |members| Directory {
-            members,
-            ..Directory::default()
-        };
-        let before = dir(vec![member(1, &["a"]), member(2, &[]), member(3, &["c"])]);
-        let after = dir(vec![
-            member(1, &["a", "b"]),
-            member(2, &["d"]),
-            member(4, &[]),
-        ]);
-        let lines: Vec<_> = changes(&before, &after)
-            .into_iter()
-            .map(|(person, action, _)| (person[0], action))
-            .collect();
-        assert_eq!(
-            lines,
-            [(1, "added a new device"), (4, "joined"), (3, "left")]
-        );
-    }
 }

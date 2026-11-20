@@ -15,19 +15,21 @@ use eframe::egui::{
     ecolor::Hsva,
 };
 use rusttalk_core::{
-    auth::InviteLink,
+    auth::{Fingerprint, InviteLink, decode},
     client::{MAX_TEXT_CHARS, voice::LiveFileEvent},
     identity::{DeviceIdentity, fingerprint},
+    index::https_url,
 };
 
 use crate::{
+    admin,
     app::{Action, error_text, primary, secondary, submitted},
     audio::Audio,
     call::{self, LiveFile, LiveState, Voice},
     camera,
     device_sync::{self, Edit},
     files::{self, Ask, Files},
-    net::{Command, Net, Preview, Update},
+    net::{Admin, AdminUpdate, Admission, Command, Listed, Net, PAGE_SIZE, Preview, Update},
     screen::Video,
     server::{Body, Chat, Directory, Id, Msg, Server, Status, member_name},
 };
@@ -36,6 +38,7 @@ use crate::{
 const NEW_SERVER: &str = "New server";
 /// Show the character count once a message gets this long.
 const COUNT_FROM: usize = 1_800;
+const DAY: u32 = 24 * 60 * 60;
 
 pub struct Home {
     pub identity: Arc<DeviceIdentity>,
@@ -44,6 +47,7 @@ pub struct Home {
     view: View,
     invite: String,
     join: Join,
+    find: Find,
     dialog: Option<Dialog>,
     pub toast: Option<(String, f64)>,
     pub settings: Option<Tab>,
@@ -51,6 +55,7 @@ pub struct Home {
     pub files: Files,
     pub confirm_sign_out: bool,
     pub error: Option<String>,
+    pub server_settings: Option<admin::Settings>,
     /// The synced voice and video settings as last published or received.
     synced: BTreeMap<String, serde_json::Value>,
     /// Servers left in this session, so a sync that started before can't bring them back.
@@ -60,9 +65,25 @@ pub struct Home {
 #[derive(Clone, Copy, PartialEq)]
 enum View {
     Join,
+    /// The public server directory.
+    Find,
     /// A DM: server index and channel.
     Direct(Option<(usize, Id)>),
     Server(usize),
+}
+
+/// The "Find servers" page.
+#[derive(Default)]
+struct Find {
+    query: String,
+    results: Vec<Listed>,
+    /// The last page loaded, and whether there may be more.
+    page: u32,
+    more: bool,
+    searching: bool,
+    /// Checking a picked server.
+    checking: bool,
+    error: Option<String>,
 }
 
 enum Join {
@@ -83,10 +104,20 @@ enum Dialog {
         category: Option<Id>,
         new_category: String,
     },
-    Invite(usize, Option<String>),
+    Invite(Invite),
     Member(usize, Id),
     Delete(usize, Id, Id),
     Leave(usize),
+}
+
+struct Invite {
+    server: usize,
+    uses: u32,
+    seconds: u32,
+    /// Waiting for the link.
+    making: bool,
+    /// The invite's ID and link.
+    link: Option<(String, String)>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -94,6 +125,7 @@ pub enum Tab {
     Profile,
     Voice,
     Video,
+    Privacy,
     Devices,
 }
 
@@ -133,6 +165,7 @@ impl Home {
             servers,
             invite: String::new(),
             join: Join::Idle(None),
+            find: Find::default(),
             dialog: None,
             toast: None,
             settings: None,
@@ -140,6 +173,7 @@ impl Home {
             files: Files::default(),
             confirm_sign_out: false,
             error: None,
+            server_settings: None,
             synced,
             left: HashSet::new(),
         })
@@ -156,6 +190,7 @@ impl Home {
             call::leave(self);
         }
         self.dialog = None;
+        self.server_settings = None;
         let server = self.servers.remove(index);
         self.view = match self.view {
             View::Server(i) | View::Direct(Some((i, _))) if i == index => {
@@ -210,6 +245,35 @@ impl Home {
                     Err(error) => Join::Idle(Some(error)),
                 }
             }
+            Update::Found(page, found) => {
+                let find = &mut self.find;
+                find.searching = false;
+                match found {
+                    Ok(results) => {
+                        find.more = results.len() == PAGE_SIZE;
+                        find.page = page;
+                        if page == 1 {
+                            find.results = results;
+                        } else {
+                            find.results.extend(results);
+                        }
+                    }
+                    Err(error) => find.error = Some(error),
+                }
+            }
+            Update::Listed(checked) => {
+                self.find.checking = false;
+                match checked {
+                    Ok(preview) => {
+                        self.join = Join::Preview {
+                            preview,
+                            name: String::new(),
+                        };
+                        self.view = View::Join;
+                    }
+                    Err(error) => self.find.error = Some(error),
+                }
+            }
             Update::Status(address, status) => {
                 let Some(index) = self.index(&address) else {
                     return;
@@ -251,7 +315,13 @@ impl Home {
             }
             Update::Directory(address, dir) => {
                 if let Some(index) = self.index(&address) {
-                    self.servers[index].dir = *dir;
+                    let server = &mut self.servers[index];
+                    for member in &dir.members {
+                        if let Some(name) = &member.name {
+                            server.names.insert(member.person, name.clone());
+                        }
+                    }
+                    server.dir = *dir;
                 }
             }
             Update::Messages {
@@ -306,13 +376,24 @@ impl Home {
                     self.view = View::Direct(Some((index, channel)));
                 }
             }
-            Update::Invite(address, link) => {
-                if let Some(Dialog::Invite(index, slot)) = &mut self.dialog
-                    && self.servers[*index].address == address
+            Update::Invite(address, id, link) => {
+                if let Some(Dialog::Invite(invite)) = &mut self.dialog
+                    && self.servers[invite.server].address == address
                 {
-                    *slot = Some(link);
+                    invite.making = false;
+                    invite.link = Some((id, link));
                 }
             }
+            Update::Admin(address, update) => match &mut self.server_settings {
+                Some(settings) if self.servers[settings.server].address == address => {
+                    settings.apply(update);
+                }
+                _ => {
+                    if let AdminUpdate::Failed(text) = update {
+                        self.toast = Some((text, now + 6.0));
+                    }
+                }
+            },
             Update::Call(address, channel, state) => {
                 let Some(call) = &mut self.voice.call else {
                     return;
@@ -445,8 +526,8 @@ impl Home {
                 audio.set_settings(adopted);
             }
             Update::Failed(error) => {
-                if matches!(self.dialog, Some(Dialog::Invite(_, None))) {
-                    self.dialog = None;
+                if let Some(Dialog::Invite(invite)) = &mut self.dialog {
+                    invite.making = false;
                 }
                 self.toast = Some((error, now + 6.0));
             }
@@ -598,6 +679,7 @@ pub fn show(ui: &mut Ui, home: &mut Home, updates: &mut crate::update::Updater) 
         )
         .show(ui, |ui| match home.view {
             View::Join => join(ui, home),
+            View::Find => find(ui, home),
             View::Direct(None) => empty(
                 ui,
                 "Direct messages",
@@ -626,6 +708,7 @@ pub fn show(ui: &mut Ui, home: &mut Home, updates: &mut crate::update::Updater) 
             },
         });
     dialogs(ui.ctx(), home);
+    admin::window(ui.ctx(), home);
     files::viewer(ui.ctx(), &mut home.files);
     call::stats_window(ui.ctx(), home);
     call::screen_dialog(ui.ctx(), home);
@@ -681,9 +764,16 @@ fn server_rail(ui: &mut Ui, home: &mut Home) {
                 home.view = View::Server(index);
             }
         }
-        if rail_button(ui, "+", "Add a server", home.view == View::Join).clicked() {
-            home.view = View::Join;
-        }
+        let adding = matches!(home.view, View::Join | View::Find);
+        let plus = rail_button(ui, "+", "Add a server", adding);
+        Popup::menu(&plus).show(|ui| {
+            if ui.button("Join with an invite").clicked() {
+                home.view = View::Join;
+            }
+            if ui.button("Find servers").clicked() {
+                home.view = View::Find;
+            }
+        });
     });
 }
 
@@ -766,8 +856,16 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
     Popup::menu(&header).show(|ui| {
         ui.set_min_width(200.0);
         if perms.invite && ui.button("Invite people").clicked() {
-            home.servers[index].send(Command::Invite);
-            home.dialog = Some(Dialog::Invite(index, None));
+            home.dialog = Some(Dialog::Invite(Invite {
+                server: index,
+                uses: 10,
+                seconds: DAY * 7,
+                making: false,
+                link: None,
+            }));
+        }
+        if perms.settings() && ui.button("Server settings").clicked() {
+            admin::open(home, index, admin::Tab::Members);
         }
         if perms.manage_channels {
             if ui.button("Create channel").clicked() {
@@ -830,6 +928,7 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
     let mut pick = None;
     let mut add = None;
     let mut talk = None;
+    let mut configure = None;
     ScrollArea::vertical().show(ui, |ui| {
         for category in &server.dir.categories {
             if !category.name.is_empty() {
@@ -858,8 +957,16 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
                     let selected = server.open == Some(channel.id);
                     let button = Button::selectable(selected, format!("🔊  {}", channel.name))
                         .min_size(Vec2::new(width, 0.0));
-                    if ui.add_enabled(online, button).clicked() {
+                    let button = ui.add_enabled(online, button);
+                    if button.clicked() {
                         talk = Some(channel.id);
+                    }
+                    if perms.manage_channels {
+                        button.context_menu(|ui| {
+                            if ui.button("Channel settings").clicked() {
+                                configure = Some(channel.id);
+                            }
+                        });
                     }
                     call::room_list(ui, home, server, &channel.id);
                     continue;
@@ -867,12 +974,23 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
                 let selected = server.open == Some(channel.id);
                 let button = Button::selectable(selected, format!("#  {}", channel.name))
                     .min_size(Vec2::new(width, 0.0));
-                if ui.add(button).clicked() {
+                let button = ui.add(button);
+                if button.clicked() {
                     pick = Some(channel.id);
+                }
+                if perms.manage_channels {
+                    button.context_menu(|ui| {
+                        if ui.button("Channel settings").clicked() {
+                            configure = Some(channel.id);
+                        }
+                    });
                 }
             }
         }
     });
+    if let Some(channel) = configure {
+        admin::open(home, index, admin::Tab::Channel(channel));
+    }
     if let Some(channel) = pick {
         home.servers[index].open = Some(channel);
     }
@@ -930,7 +1048,9 @@ fn member_list(ui: &mut Ui, home: &mut Home, index: usize) {
     let server = &home.servers[index];
     ui.add_space(6.0);
     section(ui, &format!("Members — {}", server.dir.members.len()));
+    let perms = server.dir.perms;
     let mut action = None;
+    let (mut manage, mut moderate) = (None, None);
     ScrollArea::vertical().show(ui, |ui| {
         for member in &server.dir.members {
             let name = server.member_name(&member.person);
@@ -961,11 +1081,19 @@ fn member_list(ui: &mut Ui, home: &mut Home, index: usize) {
                     ui.separator();
                     call::stream_menu(ui, &home.voice.audio, &(member.person, None));
                 }
+                if !me && (perms.kick || perms.ban || perms.manage_roles) {
+                    ui.separator();
+                    manage = Some(member.person);
+                    admin::member_menu(ui, &mut moderate, perms);
+                }
             });
         }
     });
     if let Some(command) = action {
         home.servers[index].send(command);
+    }
+    if let (Some(person), Some(choice)) = (manage, moderate) {
+        admin::moderate(home, index, person, choice);
     }
 }
 
@@ -1016,7 +1144,7 @@ fn join(ui: &mut Ui, home: &mut Home) {
                 ui.label("Joining…");
             }
             Join::Preview { preview, name } => {
-                let address = preview.link.server.address.clone();
+                let address = preview.server.address.clone();
                 if let Some(index) = home.servers.iter().position(|s| s.address == address) {
                     ui.heading("You're already in this server");
                     if primary(ui, "Open it").clicked() {
@@ -1040,26 +1168,39 @@ fn join(ui: &mut Ui, home: &mut Home) {
                     )
                     .labelled_by(label.id);
                 ui.add_space(8.0);
-                if !preview.known {
+                if preview.invite.is_none() && !preview.open {
+                    ui.label("This server needs an invite. Ask someone there for a link.");
+                    if secondary(ui, "Back").clicked() {
+                        home.join = Join::Idle(None);
+                    }
+                    return;
+                }
+                if preview.invite.is_none() {
+                    ui.label("Anyone can join this server, no invite needed.");
+                } else if !preview.known {
                     ui.label("First time here. Your invite confirms this is the right server.");
                 }
                 CollapsingHeader::new("Details").show(ui, |ui| {
+                    ui.label(format!("Address  {address}"));
                     ui.label(format!(
                         "Server ID  {}",
-                        fingerprint(&preview.link.server.server_id)
+                        fingerprint(&preview.server.server_id)
                     ));
-                    if let Some(tls) = &preview.link.server.tls_fingerprint {
+                    if let Some(tls) = &preview.server.tls_fingerprint {
                         ui.label(format!("Certificate  {}", fingerprint(tls)));
                     }
                     ui.weak("RustTalk remembers these and stops if they ever change.");
                 });
                 ui.add_space(8.0);
                 if primary(ui, "Join").clicked() || submitted(ui, &field) {
-                    let link = &preview.link;
                     let name = name.trim();
+                    let admission = match preview.invite {
+                        Some(code) => Admission::Invite(code),
+                        None => Admission::Open,
+                    };
                     let commands = home.net.start(
-                        link.server.clone(),
-                        Some(link.code),
+                        preview.server.clone(),
+                        Some(admission),
                         (!name.is_empty()).then(|| name.to_owned()),
                     );
                     let label = preview.name.as_deref().unwrap_or(NEW_SERVER);
@@ -1070,6 +1211,143 @@ fn join(ui: &mut Ui, home: &mut Home) {
                 } else if secondary(ui, "Cancel").clicked() {
                     home.join = Join::Idle(None);
                 }
+            }
+        }
+    });
+}
+
+fn privacy_tab(ui: &mut Ui, home: &mut Home) {
+    let audio = home.voice.audio.clone();
+    let mut settings = audio.settings();
+    section(ui, "Server directory");
+    ui.label("A directory lists public servers you can find and join.");
+    ui.weak("RustTalk only contacts it while you have Find servers open.");
+    let label = ui.label("Directory address");
+    ui.add(
+        TextEdit::singleline(&mut settings.index_url)
+            .hint_text("https://…")
+            .desired_width(f32::INFINITY),
+    )
+    .labelled_by(label.id);
+    CollapsingHeader::new("Details").show(ui, |ui| {
+        let label = ui.label("Certificate fingerprint, only for a directory without a domain");
+        ui.add(TextEdit::singleline(&mut settings.index_fingerprint).desired_width(f32::INFINITY))
+            .labelled_by(label.id);
+    });
+    if !settings.index_url.trim().is_empty()
+        && let Err(problem) = directory(&settings)
+    {
+        error_text(ui, Some(&problem));
+    }
+    audio.set_settings(settings);
+}
+
+/// The configured directory and its optional certificate pin.
+fn directory(settings: &crate::audio::Settings) -> Result<(url::Url, Option<Fingerprint>), String> {
+    let url =
+        https_url(settings.index_url.trim()).ok_or("Use an address that starts with https://.")?;
+    let pin = settings.index_fingerprint.trim();
+    let pin = (!pin.is_empty())
+        .then(|| decode(pin).map_err(|_| "That certificate fingerprint isn't right."))
+        .transpose()?;
+    Ok((url, pin))
+}
+
+fn find(ui: &mut Ui, home: &mut Home) {
+    ui.vertical_centered(|ui| {
+        ui.add_space(24.0);
+        ui.set_max_width(640.0);
+        ui.heading("Find servers");
+        let settings = home.voice.audio.settings();
+        if settings.index_url.trim().is_empty() {
+            ui.label("Add a server directory in your settings first.");
+            ui.weak("RustTalk only contacts it while you're on this page.");
+            if primary(ui, "Open privacy settings").clicked() {
+                home.settings = Some(Tab::Privacy);
+            }
+            return;
+        }
+        let find = &mut home.find;
+        let mut page = None;
+        ui.horizontal(|ui| {
+            let field = ui.add(
+                TextEdit::singleline(&mut find.query)
+                    .hint_text("Search by name or description")
+                    .desired_width(ui.available_width() - 90.0),
+            );
+            field.widget_info(|| WidgetInfo::labeled(Role::TextInput, true, "Search"));
+            if primary_small(ui, "Search").clicked() || submitted(ui, &field) {
+                page = Some(1);
+            }
+        });
+        error_text(ui, find.error.as_deref());
+        if find.searching || find.checking {
+            ui.spinner();
+        } else if find.results.is_empty() && find.page > 0 {
+            ui.weak("No servers found.");
+        }
+        let mut pick = None;
+        ScrollArea::vertical().show(ui, |ui| {
+            ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                for listed in &find.results {
+                    Frame::group(ui.style()).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(&listed.name).strong().size(16.0));
+                            if listed.open {
+                                ui.label(
+                                    RichText::new(" Open joining ")
+                                        .small()
+                                        .background_color(ui.visuals().selection.bg_fill),
+                                );
+                            }
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                let join = Button::new("Join").fill(ui.visuals().selection.bg_fill);
+                                let join = ui.add_enabled(!find.checking, join);
+                                join.widget_info(|| {
+                                    WidgetInfo::labeled(
+                                        Role::Button,
+                                        true,
+                                        format!("Join {}", listed.name),
+                                    )
+                                });
+                                if join.clicked() {
+                                    pick = Some(listed.clone());
+                                }
+                            });
+                        });
+                        if !listed.description.is_empty() {
+                            ui.add(Label::new(&listed.description).wrap());
+                        }
+                        let members = match listed.members {
+                            1 => "1 member".to_owned(),
+                            count => format!("{count} members"),
+                        };
+                        ui.weak(members);
+                    });
+                }
+                if find.more && !find.searching && ui.button("Show more").clicked() {
+                    page = Some(find.page + 1);
+                }
+            });
+        });
+        if let Some(listed) = pick {
+            find.checking = true;
+            find.error = None;
+            home.net.check_listed(listed);
+        }
+        if let Some(page) = page {
+            match directory(&settings) {
+                Ok((url, pin)) => {
+                    find.searching = true;
+                    find.error = None;
+                    if page == 1 {
+                        find.results.clear();
+                    }
+                    home.net
+                        .search(url, pin, find.query.trim().to_owned(), page);
+                }
+                Err(problem) => find.error = Some(problem),
             }
         }
     });
@@ -1088,6 +1366,7 @@ fn new_server(
         chats: HashMap::new(),
         open: None,
         voice: HashMap::new(),
+        names: HashMap::new(),
         commands,
     }
 }
@@ -1652,24 +1931,54 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
                     ));
                 }
             }
-            Dialog::Invite(index, link) => {
-                ui.heading(format!("Invite people to {}", home.servers[*index].name()));
-                match link {
+            Dialog::Invite(invite) => {
+                let server = &home.servers[invite.server];
+                ui.heading(format!("Invite people to {}", server.name()));
+                match &invite.link {
                     None => {
-                        ui.spinner();
+                        let uses = [(1, "1 person"), (10, "10 people"), (1000, "Unlimited")];
+                        let times = [
+                            (60 * 60, "1 hour"),
+                            (DAY, "1 day"),
+                            (DAY * 7, "7 days"),
+                            (DAY * 30, "30 days"),
+                        ];
+                        ui.label("Who can use it");
+                        ui.horizontal(|ui| {
+                            for (value, label) in uses {
+                                ui.selectable_value(&mut invite.uses, value, label);
+                            }
+                        });
+                        ui.label("Stops working after");
+                        ui.horizontal(|ui| {
+                            for (value, label) in times {
+                                ui.selectable_value(&mut invite.seconds, value, label);
+                            }
+                        });
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            if invite.making {
+                                ui.spinner();
+                            } else if primary_small(ui, "Create link").clicked() {
+                                invite.making = true;
+                                server.send(Command::Invite(invite.uses, invite.seconds));
+                            }
+                            close |= ui.button("Cancel").clicked();
+                        });
                     }
-                    Some(link) => {
-                        ui.label(
-                            "Send this link to a friend. It works for 7 days and up to 10 people.",
-                        );
-                        ui.add(
-                            TextEdit::singleline(link)
-                                .desired_width(f32::INFINITY)
-                                .interactive(true),
-                        );
+                    Some((id, link)) => {
+                        ui.label("Send this link to a friend.");
+                        let mut shown = link.as_str();
+                        ui.add(TextEdit::singleline(&mut shown).desired_width(f32::INFINITY));
                         ui.horizontal(|ui| {
                             if primary_small(ui, "Copy link").clicked() {
                                 ui.ctx().copy_text(link.clone());
+                            }
+                            if ui.button("Stop this link").clicked() {
+                                command = Some((
+                                    invite.server,
+                                    Command::Admin(Admin::RevokeInvite(id.clone())),
+                                ));
                             }
                             close |= ui.button("Done").clicked();
                         });
@@ -1781,6 +2090,7 @@ fn settings(
             ui.selectable_value(&mut tab, Tab::Profile, "Profile");
             ui.selectable_value(&mut tab, Tab::Voice, "Voice");
             ui.selectable_value(&mut tab, Tab::Video, "Video");
+            ui.selectable_value(&mut tab, Tab::Privacy, "Privacy");
             ui.selectable_value(&mut tab, Tab::Devices, "Devices");
         });
         ui.separator();
@@ -1802,6 +2112,7 @@ fn settings(
                 camera::settings_tab(ui, &mut home.voice.camera, &mut s);
                 audio.set_settings(s);
             }
+            Tab::Privacy => privacy_tab(ui, home),
             Tab::Devices => {
                 ui.label(format!("This device: {}", home.identity.certificate.name()));
             }

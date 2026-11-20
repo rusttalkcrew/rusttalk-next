@@ -25,6 +25,8 @@ pub struct Server {
     pub open: Option<Id>,
     /// Who is in each voice channel.
     pub voice: HashMap<Id, Vec<Peer>>,
+    /// Every member name seen this session, for people who have left (bans, audit log).
+    pub names: HashMap<Id, String>,
     pub commands: UnboundedSender<Command>,
 }
 
@@ -119,7 +121,10 @@ impl Server {
     }
 
     pub fn member_name(&self, person: &Id) -> String {
-        member_name(&self.dir, person)
+        match self.names.get(person) {
+            Some(name) if !self.dir.members.iter().any(|m| m.person == *person) => name.clone(),
+            _ => member_name(&self.dir, person),
+        }
     }
 
     pub fn send(&self, command: Command) {
@@ -165,14 +170,55 @@ pub struct Directory {
     pub categories: Vec<Category>,
     pub members: Vec<Member>,
     pub dms: Vec<Dm>,
+    /// Highest rank first.
+    pub roles: Vec<Role>,
+    /// The role new members get.
+    pub default_role: String,
 }
 
 #[derive(Clone, Copy, Default)]
 pub struct Perms {
     pub owner: bool,
+    /// Has the built-in Admin role (or is the owner): may change who can join.
+    pub admin: bool,
     pub manage_channels: bool,
     pub invite: bool,
     pub delete_messages: bool,
+    pub kick: bool,
+    pub ban: bool,
+    pub manage_roles: bool,
+    pub audit: bool,
+    /// This person's highest role rank; they can only manage people and roles below it.
+    pub rank: i64,
+}
+
+impl Perms {
+    /// May open the server settings window.
+    pub fn settings(&self) -> bool {
+        self.admin || self.kick || self.ban || self.manage_roles || self.audit
+    }
+}
+
+/// The permissions a role can grant, as the API names them, with their labels.
+pub const PERMISSIONS: [(&str, &str); 7] = [
+    ("invite", "Invite people"),
+    ("kick", "Kick"),
+    ("ban", "Ban"),
+    ("manage_roles", "Manage roles"),
+    ("view_audit_log", "See audit log"),
+    ("delete_messages", "Delete messages"),
+    ("manage_channels", "Manage channels"),
+];
+
+#[derive(Clone)]
+pub struct Role {
+    pub id: String,
+    pub name: String,
+    pub rank: i64,
+    /// API permission names, see `PERMISSIONS`.
+    pub permissions: Vec<String>,
+    /// Made by people, not one of the four built-in roles.
+    pub custom: bool,
 }
 
 /// Channels without a category go in a category without an ID or name.
@@ -188,6 +234,8 @@ pub struct Channel {
     pub id: Id,
     pub name: String,
     pub voice: bool,
+    /// Per role: read (1), write (2), speak (4) and video (8).
+    pub flags: Vec<(String, u8)>,
 }
 
 #[derive(Clone)]
@@ -195,6 +243,7 @@ pub struct Member {
     pub person: Id,
     pub name: Option<String>,
     pub devices: Vec<Device>,
+    pub roles: Vec<String>,
 }
 
 #[derive(Clone)]

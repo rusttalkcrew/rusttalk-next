@@ -1,6 +1,7 @@
 // Release builds open no console window on Windows; startup errors go to the log.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod admin;
 mod app;
 mod audio;
 mod call;
