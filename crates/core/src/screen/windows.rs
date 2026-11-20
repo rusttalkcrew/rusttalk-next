@@ -14,7 +14,7 @@ use windows_capture::{
 
 use super::{BgraFrame, ScreenOptions, ScreenSource, ScreenSourceKind, frame_bytes};
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Target {
     Monitor(Monitor),
     Window(Window),
@@ -142,7 +142,7 @@ pub async fn open(
 }
 
 fn start(
-    item: impl TryInto<GraphicsCaptureItemType>,
+    item: impl TryInto<GraphicsCaptureItemType> + Send + 'static,
     cursor: CursorCaptureSettings,
     interval: MinimumUpdateIntervalSettings,
     output: watch::Sender<Option<BgraFrame>>,

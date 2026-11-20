@@ -201,16 +201,8 @@ pub async fn exercise(
         println!("W09 skipped: PipeWire and its pipewire-pulse null sink are required on the host");
     }
 
-    let mut listener = screen::exercise(
-        &room_a,
-        &mut room_b,
-        listener,
-        server,
-        &mut c,
-        &channel,
-        &voice.id,
-    )
-    .await?;
+    let mut listener =
+        screen::exercise(&room_a, &mut room_b, listener, server, &mut c, &voice.id).await?;
 
     let stats = room_a.stats().await?;
     assert!(

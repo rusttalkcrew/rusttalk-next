@@ -27,7 +27,7 @@ pub enum ScreenSourceKind {
     Window,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ScreenSource {
     pub name: String,
     pub kind: ScreenSourceKind,
@@ -130,11 +130,18 @@ pub fn bgra_to_i420(
     Ok(frame)
 }
 
-/// Convert a decoded I420 frame into tightly packed RGBA for display.
+/// Convert a decoded frame into tightly packed RGBA for display.
 pub fn frame_to_rgba(frame: &dyn VideoBuffer) -> Result<Vec<u8>> {
-    let frame = frame.as_i420().context("expected an I420 video frame")?;
     let (width, height) = (frame.width(), frame.height());
-    let mut rgba = vec![0; frame_bytes(width, height)?];
+    let size = frame_bytes(width, height)?;
+    let converted;
+    let frame = if let Some(i420) = frame.as_i420() {
+        i420
+    } else {
+        converted = frame.to_i420();
+        &converted
+    };
+    let mut rgba = vec![0; size];
     let (ys, us, vs) = frame.strides();
     let (y, u, v) = frame.data();
     // Libyuv names formats by word order: ABGR is R, G, B, A in memory.
