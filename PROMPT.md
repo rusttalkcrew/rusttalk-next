@@ -10,8 +10,7 @@ ponytail mode: invoke `/ponytail` at the start of every session and task (use th
 slash command, not the skill tool). Prefer a proven library over our own
 implementation, and our own small code over a large framework.
 
-License: closed source for now (all rights reserved; no license file yet). It will
-become MIT later, so add no dependency whose license is incompatible with MIT.
+License: MIT (`LICENSE`). Add no dependency whose license is incompatible with MIT.
 
 ## 1. Principles (binding)
 
