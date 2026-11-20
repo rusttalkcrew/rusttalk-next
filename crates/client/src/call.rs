@@ -17,7 +17,7 @@ use crate::{
     home::{Home, Tab, avatar, palette, section},
     net::Command,
     server::{Call, CallState, Id, Server, Stats},
-    share::{self, App, Support},
+    share::{self, App},
 };
 
 const GREEN: Color32 = Color32::from_rgb(0x23, 0xa5, 0x5a);
@@ -36,7 +36,7 @@ pub struct Voice {
     pub shares: Vec<App>,
     /// Apps playing sound when the picker opened, filled by a listing thread.
     apps: Arc<Mutex<Apps>>,
-    support: Support,
+    supported: bool,
     calibration: Option<Calibration>,
     picking_key: bool,
 }
@@ -62,7 +62,7 @@ impl Voice {
             show_stats: false,
             shares: Vec::new(),
             apps: Arc::new(Mutex::new(Apps::Loading)),
-            support: share::support(),
+            supported: share::supported(),
             calibration: None,
             picking_key: false,
         }
@@ -97,6 +97,7 @@ pub fn join(home: &mut Home, index: usize, channel: Id) {
         channel,
         state: CallState::Connecting,
         stats: Stats::default(),
+        can_talk: true,
     });
     home.voice.audio.set_voice(true);
 }
@@ -157,8 +158,8 @@ pub fn room_list(ui: &mut Ui, home: &Home, server: &Server, channel: &Id) {
             Popup::context_menu(&row)
                 .show(|ui| stream_menu(ui, &home.voice.audio, &(peer.person, None)));
         }
-        for app in &peer.apps {
-            let stream = (peer.person, Some(app.clone()));
+        for (sid, app) in &peer.apps {
+            let stream = (peer.person, Some(sid.clone()));
             let row = ui.horizontal(|ui| {
                 ui.add_space(52.0);
                 ui.label(RichText::new(format!("🎵 {app}")).small());
@@ -224,6 +225,7 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
     };
     let audio = home.voice.audio.clone();
     let connected = call.state == CallState::Connected;
+    let can_talk = call.can_talk;
     let mut leave_now = false;
     let mut share = None;
     let mut stop = None;
@@ -279,9 +281,14 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
                     leave_now = hang.clicked();
                 });
             });
-            if home.voice.support != Support::No {
-                share_picker(ui, &mut home.voice, connected, &mut share, &mut stop);
-            }
+            share_picker(
+                ui,
+                &mut home.voice,
+                connected,
+                can_talk,
+                &mut share,
+                &mut stop,
+            );
         });
     let server = home
         .voice
@@ -311,13 +318,17 @@ fn share_picker(
     ui: &mut Ui,
     voice: &mut Voice,
     connected: bool,
+    can_talk: bool,
     share: &mut Option<(App, bool)>,
     stop: &mut Option<String>,
 ) {
     let button = Button::new("🎵  Share app audio").min_size(Vec2::new(ui.available_width(), 28.0));
-    let button = if voice.support == Support::NeedsWindows11 {
+    let button = if !voice.supported {
         ui.add_enabled(false, button)
             .on_disabled_hover_text("Needs Windows 11")
+    } else if !can_talk {
+        ui.add_enabled(false, button)
+            .on_disabled_hover_text("You can't talk here")
     } else {
         ui.add_enabled(connected, button)
     };
@@ -450,7 +461,7 @@ pub fn room(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
             }
         }
     });
-    if peers.iter().any(|peer| !peer.apps.is_empty()) {
+    if peers.iter().any(|peer| !peer.apps.is_empty()) || joined && !home.voice.shares.is_empty() {
         ui.add_space(12.0);
         section(ui, "Shared audio");
         let mut stop = None;
@@ -459,28 +470,28 @@ pub fn room(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
             .spacing(Vec2::new(12.0, 6.0))
             .show(ui, |ui| {
                 for peer in &peers {
-                    let me = peer.person == server.dir.me;
-                    let name = if me { "You".into() } else { peer.name(server) };
-                    for app in &peer.apps {
+                    if peer.person == server.dir.me {
+                        continue;
+                    }
+                    let name = peer.name(server);
+                    for (sid, app) in &peer.apps {
                         ui.label(format!("{name} · {app}"));
-                        if me {
-                            if ui.button("Stop sharing").clicked() {
-                                stop = home
-                                    .voice
-                                    .shares
-                                    .iter()
-                                    .find(|s| s.name == *app)
-                                    .map(|s| s.id.clone());
-                            }
-                            ui.label("");
-                        } else {
-                            stream_row(
-                                ui,
-                                &home.voice.audio,
-                                (peer.person, Some(app.clone())),
-                                &format!("{name} · {app}"),
-                            );
+                        stream_row(
+                            ui,
+                            &home.voice.audio,
+                            (peer.person, Some(sid.clone())),
+                            &format!("{name} · {app}"),
+                        );
+                        ui.end_row();
+                    }
+                }
+                if joined {
+                    for app in &home.voice.shares {
+                        ui.label(format!("You · {}", app.name));
+                        if ui.button("Stop sharing").clicked() {
+                            stop = Some(app.id.clone());
                         }
+                        ui.label("");
                         ui.end_row();
                     }
                 }

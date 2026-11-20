@@ -189,15 +189,15 @@ pub async fn exercise(
         "W08 encrypted voice both ways, voice_changed and room presence, subscribe-only audio, and automatic signal reconnect"
     );
 
-    if app_audio::available() {
-        let capture = app_audio::share(&room_a).await?;
-        timeout(LIMIT, app_audio::hear(&mut room_b, Some(&a_id)))
-            .await
-            .context("waiting for two per-app tracks")??;
-        capture.stop(&room_a).await?;
-    } else {
-        println!("W09 skipped: PipeWire and its pipewire-pulse null sink are required on the host");
-    }
+    ensure!(
+        app_audio::available(),
+        "W09 app audio needs PipeWire with pipewire-pulse on the host; set E2E_FEATURES= to skip media"
+    );
+    let capture = app_audio::share(&room_a).await?;
+    timeout(LIMIT, app_audio::hear(&mut room_b, Some(&a_id)))
+        .await
+        .context("waiting for two per-app tracks")??;
+    capture.stop(&room_a).await?;
 
     let stats = room_a.stats().await?;
     assert!(

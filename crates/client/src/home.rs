@@ -258,6 +258,14 @@ impl Home {
                     }
                 }
             }
+            Update::Listening(address, channel) => {
+                if let Some(call) = &mut self.voice.call
+                    && call.server == address
+                    && call.channel == channel
+                {
+                    call.can_talk = false;
+                }
+            }
             Update::Room(address, channel, peers) => {
                 if let Some(index) = self.index(&address) {
                     let rooms = &mut self.servers[index].voice;
