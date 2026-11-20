@@ -90,14 +90,7 @@ pub async fn exercise(
     .send()
     .await?
     .error_for_status()?;
-    a.request(
-        Method::PUT,
-        &format!("/v1/channels/{channel}/permissions/member"),
-    )
-    .json(&json!({ "flags": 1 }))
-    .send()
-    .await?
-    .error_for_status()?;
+    set_flags(a, &channel, "member", 1).await?;
     a.sync().await?;
     receive_key(&mut b, voice, 1).await?;
     receive_key(&mut c, voice, 1).await?;
@@ -132,7 +125,9 @@ pub async fn exercise(
     let pitch = a_pitch.clone();
     senders.spawn(send_tone(a_source, move || pitch.load(Ordering::Relaxed)));
     let pitch = b_pitch.clone();
-    senders.spawn(send_tone(b_source, move || pitch.load(Ordering::Relaxed)));
+    senders.spawn(send_tone(b_source.clone(), move || {
+        pitch.load(Ordering::Relaxed)
+    }));
     let a_id = room_a.identity();
     let flow = async {
         timeout(LIMIT, both_ways(&mut room_a, &mut room_b, A_HZ, B_HZ))
@@ -212,8 +207,29 @@ pub async fn exercise(
             .any(|track| !track.outbound && track.packets_lost.is_some())
     );
 
-    // Kick speaker B while its tone keeps playing.
+    // Taking `speak` from B's role must make LiveKit stop forwarding B's audio.
     let b_id = room_b.identity();
+    set_flags(a, &channel, "admin", 11).await?;
+    timeout(LIMIT, async {
+        while let Ok(Ok(())) = timeout(
+            Duration::from_secs(1),
+            hear_tone(&mut room_a, Some(&b_id), 780),
+        )
+        .await
+        {}
+    })
+    .await
+    .context("B was still audible after losing speak")?;
+    set_flags(a, &channel, "admin", 15).await?;
+    let _ = room_b.leave().await;
+    room_b = b.join_voice(&voice.id).await?;
+    room_b.publish_audio(b_source).await?;
+    timeout(LIMIT, both_ways(&mut room_a, &mut room_b, A_HZ, 780))
+        .await
+        .context("duplex after speak returned")??;
+    println!("W08 removing speak stopped the speaker's audio, and rejoining restored it");
+
+    // Kick speaker B while its tone keeps playing.
     b_pitch.store(1100, Ordering::Relaxed);
     a.request(
         Method::DELETE,
@@ -270,6 +286,18 @@ pub async fn exercise(
     let _ = room_b.leave().await;
     tokio::try_join!(room_a.leave(), listener.leave())?;
     roster(a, &voice.id, 0).await
+}
+
+async fn set_flags(a: &KeyClient<'_>, channel: &str, role: &str, flags: u8) -> Result<()> {
+    a.request(
+        Method::PUT,
+        &format!("/v1/channels/{channel}/permissions/{role}"),
+    )
+    .json(&json!({ "flags": flags }))
+    .send()
+    .await?
+    .error_for_status()?;
+    Ok(())
 }
 
 /// Wait out the API's short roster cache until only `people` known people remain.

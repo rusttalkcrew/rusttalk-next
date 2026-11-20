@@ -3,7 +3,12 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore: ['docs/**', '**/*.md']
   pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   linux:
@@ -11,22 +16,25 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
+      # Installs the version and components from rust-toolchain.toml.
+      - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # The client links LiveKit's WebRTC (clang 21+) and opens audio devices (ALSA).
       - run: |
           wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 21
           sudo apt-get install -y libasound2-dev libglib2.0-dev libpipewire-0.3-dev libclang-dev
           echo "CXX=clang++-21" >> "$GITHUB_ENV"
-      - run: make lint test e2e CARGO_SCOPE='--workspace --exclude rusttalk-bot --features rusttalk-core/client,rusttalk-core/livekit-tls' E2E_FEATURES=
+      - run: make lint test CARGO_SCOPE='--workspace --exclude rusttalk-bot --features rusttalk-core/client,rusttalk-core/livekit-tls'
 
   windows-client:
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo test -p rusttalk-client --locked

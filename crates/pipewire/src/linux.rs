@@ -2,7 +2,9 @@ use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
     io::{self, Cursor, Write},
+    os::unix::process::parent_id,
     rc::Rc,
+    sync::OnceLock,
     time::{Duration, Instant},
 };
 
@@ -34,8 +36,10 @@ struct App {
 }
 
 const STARTUP: Duration = Duration::from_secs(3);
+static PARENT: OnceLock<u32> = OnceLock::new();
 
 pub fn run() -> Result<()> {
+    PARENT.get_or_init(parent_id);
     pw::init();
     let loop_ = MainLoopRc::new(None)?;
     let context = pw::context::ContextRc::new(&loop_, None)?;
@@ -167,6 +171,11 @@ fn list_apps(loop_: &MainLoop, core: &CoreRc) -> Result<Vec<App>> {
 }
 
 fn iterate(loop_: &MainLoop) -> Result<()> {
+    // A paused stream writes nothing, so a broken pipe alone would not end an orphaned capture.
+    ensure!(
+        PARENT.get() == Some(&parent_id()),
+        "RustTalk exited, stopping app audio capture"
+    );
     let result = loop_
         .loop_()
         .iterate(Timeout::Finite(Duration::from_millis(100)));

@@ -25,6 +25,7 @@ use rusttalk_core::{
     },
     identity::{DeviceIdentity, fingerprint},
     keys::Metadata,
+    pinned_tls::PinnedElsewhere,
 };
 use serde_json::Value;
 use tokio::{
@@ -401,6 +402,11 @@ async fn run(
                 () = &mut wait => break,
                 command = commands.recv() => match command {
                     None => return,
+                    Some(Command::LeaveVoice) => {
+                        if let Some(live) = state.voice.take() {
+                            tokio::spawn(leave_room(live.room));
+                        }
+                    }
                     Some(command) => {
                         if let Command::JoinVoice(channel) = command {
                             ctx.send(Update::Call(url.clone(), channel, None));
@@ -519,6 +525,10 @@ async fn serve(
                     tracing::warn!(error = %format_args!("{error:#}"), "server request failed");
                     let text = match error.downcast_ref::<MessageError>() {
                         Some(MessageError::TextLimit) => "Messages can be up to 2,000 characters.",
+                        // shortcut: one LiveKit server per process until multi-server voice (W15).
+                        _ if error.is::<PinnedElsewhere>() => {
+                            "Restart RustTalk to use voice on another server."
+                        }
                         _ => FAILED,
                     };
                     ctx.send(Update::Failed(text.into()));
@@ -921,9 +931,20 @@ async fn directory(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &mut Sta
             ctx.send(Update::Notice(url.clone(), person, msg));
         }
     }
+    let joined = state.voice.as_ref().map(|live| live.channel);
+    let deleted = joined.filter(|joined| {
+        !dir.categories
+            .iter()
+            .flat_map(|category| &category.channels)
+            .any(|channel| channel.id == *joined)
+    });
     state.last = Some(dir.clone());
     state.named = client.has_space_key();
     ctx.send(Update::Directory(url.clone(), Box::new(dir)));
+    if let Some(channel) = deleted {
+        leave_voice(ctx, url, client, state);
+        ctx.send(Update::Call(url.clone(), channel, None));
+    }
     Ok(())
 }
 
@@ -1160,7 +1181,10 @@ fn edit_joined(data: &Path, edit: impl FnOnce(&mut Vec<KnownServer>)) -> Result<
 async fn join_voice(ctx: &Ctx, client: &mut KeyClient<'_>, channel: &Id) -> Result<VoiceRoom> {
     let room = client.join_voice(channel).await?;
     if room.can_publish() {
-        room.publish_audio(ctx.audio.source()).await?;
+        if let Err(error) = room.publish_audio(ctx.audio.source()).await {
+            leave_room(room).await;
+            return Err(error);
+        }
     } else {
         ctx.send(Update::Failed("You can listen here, but not talk.".into()));
     }
@@ -1171,14 +1195,16 @@ fn leave_voice(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &mut State) 
     let Some(live) = state.voice.take() else {
         return;
     };
-    tracing::info!("left voice");
     // Closing waits for the media server; nothing here needs to wait for it.
-    tokio::spawn(async move {
-        if let Err(error) = live.room.leave().await {
-            tracing::warn!(error = %format_args!("{error:#}"), "leaving voice failed");
-        }
-    });
+    tokio::spawn(leave_room(live.room));
     send_room(ctx, url, client, state, live.channel);
+}
+
+async fn leave_room(room: VoiceRoom) {
+    tracing::info!("left voice");
+    if let Err(error) = room.leave().await {
+        tracing::warn!(error = %format_args!("{error:#}"), "leaving voice failed");
+    }
 }
 
 /// Install a newer media key after key work for the voice channel.

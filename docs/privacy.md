@@ -61,7 +61,8 @@ LiveKit join tokens in SQLite. LiveKit sees opaque room and device IDs,
 routing and timing information, track IDs and source kinds, ciphertext
 sizes, and encrypted media. It can tell that a device shared an app track
 and see its encrypted track label. That label uses the room's media key
-via a separate HKDF derivation and a fresh nonce for each publication.
+via a separate HKDF derivation and a fresh nonce for each publication,
+and shows the key epoch and the name's length.
 App names and profile metadata never reach LiveKit in plaintext. The
 capture target ID and local list of playing applications stay on the
 sender's device.

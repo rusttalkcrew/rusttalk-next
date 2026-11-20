@@ -116,6 +116,14 @@ impl<'a> KeyClient<'a> {
         self.keys.get(&(scope, epoch)).map(|(key, _)| key)
     }
 
+    /// Every verified epoch key held for a scope.
+    pub(super) fn epoch_keys(&self, scope: Scope) -> impl Iterator<Item = (i64, &Key)> {
+        self.keys
+            .iter()
+            .filter(move |((held, _), _)| *held == scope)
+            .map(|((_, epoch), (key, _))| (*epoch, key))
+    }
+
     /// Seal metadata with the current space key and return base64url ciphertext.
     pub fn encrypt_metadata(&self, kind: Metadata, id: &[u8], plaintext: &[u8]) -> Result<String> {
         let (epoch, key) = self.current_space()?;
