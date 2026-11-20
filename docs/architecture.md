@@ -47,3 +47,20 @@ shadowing libpipewire entry points. The helper reports the running playback
 nodes as JSON and sends PCM on a private stdout pipe. It adds a capture
 stream targeting the selected PipeWire object serial, with target fallback
 and moving disabled. The playback stream keeps its existing output.
+
+## Public index
+
+The index runs as a separate optional axum service with its own SQLite
+database in WAL mode. An owner chooses the public listing text, advertised
+HTTPS server address and HTTPS index URL. The API signs the listing with its
+server key on enable, on startup and every hour while enabled. The index
+checks the signature against the listed server ID and expires stale records
+after three hours. The private, space-encrypted server metadata stays on the
+chat server. Directory clients search over HTTPS and check the listed server
+ID against the signed challenge at the advertised address before sending a
+device credential.
+
+In development Caddy strips the `/index` prefix and proxies to the index on
+port 8080. Both the index and chat API use the dev TLS certificate on port
+8443. A standalone index can expose its own HTTPS origin with the same
+`/v1/*` routes.

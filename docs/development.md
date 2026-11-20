@@ -171,8 +171,10 @@ Debug builds open a console on Windows; release builds do not, so check
   scenario revokes data publishing by taking `write`, transfers a 20 MiB
   file to that read-only bot, verifies its SHA-256, watches a third bot's
   raw events for unwanted streams, and searches SQLite, WAL and stack logs
-  for the filename and a plaintext marker. Set `E2E_FEATURES=` to run the
-  membership, keys and chat harness without WebRTC, voice, app audio,
+  for the filename and a plaintext marker. The index scenario checks
+  owner opt-in, pinned HTTPS search, server ID verification, expiry after
+  opt-out with an eight-second test lease, and forged signature rejection.
+  Set `E2E_FEATURES=` to run the membership, keys, chat and index harness without WebRTC, voice, app audio,
   screen sharing, camera or live files.
 
 For a manual app-audio check, build with

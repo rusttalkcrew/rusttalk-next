@@ -1,5 +1,6 @@
 mod chat;
 mod files;
+mod index;
 mod multi_server;
 mod sync;
 #[cfg(feature = "media")]
@@ -23,7 +24,15 @@ fn compose_bytes(project: &str, args: &[&str]) -> Result<Vec<u8>> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let output = Command::new("docker")
         .current_dir(root)
-        .args(["compose", "-f", "deploy/compose.dev.yml", "-p", project])
+        .args([
+            "compose",
+            "-f",
+            "deploy/compose.dev.yml",
+            "--profile",
+            "index",
+            "-p",
+            project,
+        ])
         .args(args)
         .output()?;
     ensure!(
@@ -511,6 +520,8 @@ async fn docker_membership() -> Result<()> {
     assert!(cli("owner-invite")?.is_empty());
     println!("owner claimed via CLI invite; the previous invite and further issuance were refused");
 
+    index::exercise(&project, &owner_bot, &owner).await?;
+
     let mut owner_keys = KeyClient::connect(&owner_bot, &owner_id, &owner).await?;
     docker_keys(&project, &owner_bot, &mut owner_keys, &mut secrets).await?;
     if let Ok(second_project) = env::var("RUSTTALK_E2E_SECOND_PROJECT") {
@@ -543,6 +554,17 @@ async fn docker_membership() -> Result<()> {
     )
     .await?;
     check_me(&member_bot, &initial, StatusCode::OK).await?;
+    rejected(
+        member_bot
+            .request(Method::PUT, index::SETTINGS)
+            .bearer_auth(&initial.token)
+            .json(&json!({"enabled": false}))
+            .send()
+            .await?,
+        StatusCode::FORBIDDEN,
+        "owner_required",
+    )
+    .await?;
     let initial = {
         let reply = member_bot
             .request(Method::POST, "/v1/auth/refresh")
