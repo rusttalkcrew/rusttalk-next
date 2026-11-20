@@ -108,6 +108,7 @@ pub fn open(home: &mut Home, index: usize, mut tab: Tab) {
     server.send(Command::Admin(Admin::Load {
         joining: perms.admin,
         audit: perms.audit,
+        bans: perms.ban,
     }));
     home.server_settings = Some(Settings {
         server: index,
@@ -217,6 +218,7 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
                             Tab::Bans => Some(Admin::Load {
                                 joining: false,
                                 audit: false,
+                                bans: true,
                             }),
                             Tab::Listing => Some(Admin::LoadListing),
                             _ => None,

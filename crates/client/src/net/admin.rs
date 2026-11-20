@@ -14,10 +14,11 @@ use super::{Ctx, State, Update, directory, get, now};
 use crate::server::Id;
 
 pub enum Admin {
-    /// Bans, the joining settings (owner or admin) and the audit log (with permission).
+    /// What the window shows, as far as this person may see it.
     Load {
         joining: bool,
         audit: bool,
+        bans: bool,
     },
     Kick(Id),
     /// Ban a person, and (`true`) the networks they use.
@@ -97,8 +98,12 @@ pub(super) async fn run(
     let send = |update| ctx.send(Update::Admin(url.clone(), update));
     let bans_changed = matches!(request, Admin::Ban(..) | Admin::Unban(_));
     let result = match request {
-        Admin::Load { joining, audit } => {
-            match load(client, joining, audit).await {
+        Admin::Load {
+            joining,
+            audit,
+            bans,
+        } => {
+            match load(client, joining, audit, bans).await {
                 Ok(updates) => updates.into_iter().for_each(send),
                 Err(text) => send(AdminUpdate::Failed(text)),
             }
@@ -255,6 +260,7 @@ async fn load(
     client: &KeyClient<'_>,
     joining: bool,
     audit: bool,
+    banned: bool,
 ) -> Result<Vec<AdminUpdate>, String> {
     let mut out = Vec::new();
     if joining {
@@ -269,9 +275,8 @@ async fn load(
     if audit {
         out.push(AdminUpdate::Audit(audit_log(client, None).await?));
     }
-    // Bans need the ban permission; without it the list just stays empty.
-    if let Ok(list) = bans(client).await {
-        out.push(AdminUpdate::Bans(list));
+    if banned {
+        out.push(AdminUpdate::Bans(bans(client).await?));
     }
     Ok(out)
 }
