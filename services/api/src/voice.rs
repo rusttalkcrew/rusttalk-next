@@ -77,6 +77,7 @@ impl LiveKit {
             VideoGrants {
                 room: room.into(),
                 room_admin: true,
+                room_create: method == "DeleteRoom",
                 ..Default::default()
             },
             Duration::from_secs(30),
@@ -132,15 +133,15 @@ impl LiveKit {
     async fn moderate(&self, room: &str, method: &str, body: serde_json::Value) {
         let reason = match self.room_service(method, room, body).await {
             Ok(response) if response.status().is_success() => {
-                tracing::info!(method, "removed voice access");
+                tracing::info!(method, "changed voice room");
                 return;
             }
-            // The participant left on its own in the meantime.
+            // The participant left, or the room closed, on its own in the meantime.
             Ok(response) if response.status() == StatusCode::NOT_FOUND => return,
             Ok(_) => "livekit_rejected",
             Err(error) => error.code,
         };
-        tracing::warn!(method, reason, "could not remove voice access");
+        tracing::warn!(method, reason, "could not change voice room");
     }
 
     fn sign(&self, identity: &str, grants: VideoGrants, ttl: Duration) -> ApiResult<String> {
@@ -306,6 +307,18 @@ pub fn enforce(app: &App, room: Option<String>) {
         if let Err(error) = enforce_rooms(&app, &livekit, room).await {
             tracing::warn!(reason = error.code, "could not check voice access");
         }
+    });
+}
+
+/// End the LiveKit room of a deleted voice channel, which `enforce` no longer visits.
+/// Runs after the delete commits and never blocks it.
+pub fn close_room(app: &App, room: String) {
+    let Some(livekit) = app.voice.clone() else {
+        return;
+    };
+    tokio::spawn(async move {
+        let body = json!({ "room": room });
+        livekit.moderate(&room, "DeleteRoom", body).await;
     });
 }
 

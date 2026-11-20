@@ -1,0 +1,4 @@
+# Keep in step with the rust image in services/api/Dockerfile.
+[toolchain]
+channel = "1.99.0"
+components = ["clippy", "rustfmt"]
