@@ -8,9 +8,7 @@ use std::{
 use anyhow::{Context, Result, ensure};
 use reqwest::{Client, RequestBuilder, Response};
 use rusttalk_core::{
-    auth::{
-        Challenge, Fingerprint, InviteCode, KnownServer, ProtocolError, SignIn, check_pin, decode,
-    },
+    auth::{Challenge, Fingerprint, InviteCode, KnownServer, SignIn, check_pin, decode},
     identity::{DeviceIdentity, fingerprint},
     pinned_tls,
 };
@@ -46,9 +44,6 @@ impl Bot {
             check_pin(Some(known), expected)?;
         }
         let trusted = known.as_ref().or(expected);
-        if trusted.is_some_and(|entry| entry.tls_fingerprint != tls_fingerprint) {
-            return Err(ProtocolError::TlsChanged.into());
-        }
 
         let http = pinned_tls::api_client(tls_fingerprint).map_err(anyhow::Error::from_boxed)?;
         let proof = challenge(&http, &address).await?;
