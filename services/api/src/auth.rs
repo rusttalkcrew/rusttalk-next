@@ -467,6 +467,7 @@ pub async fn revoke(
     tx.commit().await?;
     log_closed(closed, actor.at, "revoked");
     keys::changed(&app, &actor.person, Some(device));
+    crate::voice::enforce(&app, None);
     Ok(StatusCode::NO_CONTENT)
 }
 

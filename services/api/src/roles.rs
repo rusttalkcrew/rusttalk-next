@@ -416,6 +416,7 @@ pub async fn assign(
     .await?;
     tx.commit().await?;
     keys::changed(&app, &person, None);
+    crate::voice::enforce(&app, None);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -459,6 +460,7 @@ pub async fn transfer(
     tx.commit().await?;
     keys::changed(&app, &actor.person, None);
     keys::changed(&app, &person, None);
+    crate::voice::enforce(&app, None);
     Ok(StatusCode::NO_CONTENT)
 }
 

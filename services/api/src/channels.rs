@@ -415,6 +415,7 @@ pub async fn permissions(
     )
     .await?;
     tx.commit().await?;
+    crate::voice::enforce(&app, Some(id));
     app.notify(Some(Event::ChannelChanged));
     Ok(StatusCode::NO_CONTENT)
 }

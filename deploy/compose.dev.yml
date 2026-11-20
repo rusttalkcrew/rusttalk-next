@@ -6,6 +6,7 @@ services:
     environment:
       LIVEKIT_API_KEY: rusttalk-dev
       LIVEKIT_API_SECRET: dev-only-livekit-secret-do-not-deploy
+      RUSTTALK_DEV: "1"
     volumes:
       - api-data:/data
     develop:

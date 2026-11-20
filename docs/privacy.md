@@ -52,7 +52,11 @@ Public sender certificates and audit IDs are retained for history and
 accountability.
 SQLite backups and old WAL pages can retain past database contents.
 The API can see who is in which voice room by matching opaque LiveKit
-device identities to current channel readers. It keeps no voice roster or
+device identities to current channel readers. Readers see unmatched
+devices only as a count. After a kick, ban, revocation or permission
+change the API asks LiveKit to remove devices that lost access and to
+stop publishing for devices that lost `speak`. It keeps the active
+roster in memory for one second per room. It keeps no voice roster or
 LiveKit join tokens in SQLite. LiveKit sees opaque room and device IDs,
 routing and timing information, ciphertext frame sizes and encrypted
 media. RustTalk sends no names or profile metadata to LiveKit.

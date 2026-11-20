@@ -7,14 +7,13 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
-use livekit::webrtc::native::frame_cryptor::EncryptionState;
 use reqwest::{Method, StatusCode};
 use rusttalk_bot::voice::{hear_tone, send_tone, source};
 use rusttalk_core::{
     auth::encode,
     client::{
         Event, KeyClient, Server,
-        voice::{RoomEvent, VoiceRoom},
+        voice::{RoomEvent, VoiceRoom, VoiceRoster},
     },
     identity::DeviceIdentity,
 };
@@ -99,7 +98,10 @@ pub async fn exercise(
     a.sync().await?;
     receive_key(&mut b, voice, 1).await?;
     receive_key(&mut c, voice, 1).await?;
-    assert!(a.voice_participants(&voice.id).await?.is_empty());
+    assert_eq!(
+        a.voice_participants(&voice.id).await?,
+        VoiceRoster::default()
+    );
 
     let (mut room_a, mut room_b, mut listener) = tokio::try_join!(
         a.join_voice(&voice.id),
@@ -141,8 +143,8 @@ pub async fn exercise(
                     .context("missing voice_changed notice")?;
                 if matches!(event, Event::VoiceChanged { channel: id } if id == channel) {
                     let roster = a.voice_participants(&voice.id).await?;
-                    if roster.len() == 3 {
-                        return Ok::<_, anyhow::Error>(roster);
+                    if roster.people.len() == 3 {
+                        return Ok::<_, anyhow::Error>(roster.people);
                     }
                 }
             }
@@ -189,53 +191,6 @@ pub async fn exercise(
         "W08 encrypted voice both ways, voice_changed and room presence, subscribe-only audio, and automatic signal reconnect"
     );
 
-    a.request(
-        Method::DELETE,
-        &format!("/v1/members/{}", encode(c_device.certificate.person_id())),
-    )
-    .send()
-    .await?
-    .error_for_status()?;
-    a.sync().await?;
-    receive_key(a, voice, 2).await?;
-    receive_key(&mut b, voice, 2).await?;
-    assert!(room_a.sync_key(a)? && room_b.sync_key(&b)?);
-    assert_eq!((room_a.epoch(), room_b.epoch()), (2, 2));
-    // A new tone separates post-rotation media from the jitter buffer's concealed audio.
-    a_pitch.store(880, Ordering::Relaxed);
-    b_pitch.store(1100, Ordering::Relaxed);
-    timeout(LIMIT, both_ways(&mut room_a, &mut room_b, 880, 1100))
-        .await
-        .context("duplex after key rotation")??;
-    timeout(LIMIT, async {
-        while let Some(event) = listener.next_event().await {
-            if let RoomEvent::E2eeStateChanged {
-                participant,
-                state: EncryptionState::MissingKey,
-            } = event
-                && participant.identity() == a_id
-            {
-                return Ok(());
-            }
-        }
-        anyhow::bail!("listener disconnected before checking encryption")
-    })
-    .await
-    .context("excluded listener did not report a missing media key")??;
-    let old_key_result = timeout(
-        Duration::from_secs(1),
-        hear_tone(&mut listener, Some(&a_id), 880),
-    )
-    .await;
-    assert!(
-        old_key_result.is_err(),
-        "excluded listener received new audio or lost its track"
-    );
-    assert_eq!(a.voice_participants(&voice.id).await?.len(), 2);
-    println!(
-        "W08 key rotation preserved duplex audio and the kicked listener could no longer hear it"
-    );
-
     let stats = room_a.stats().await?;
     assert!(
         stats
@@ -243,13 +198,78 @@ pub async fn exercise(
             .iter()
             .any(|track| !track.outbound && track.packets_lost.is_some())
     );
+
+    // Kick speaker B while its tone keeps playing.
+    let b_id = room_b.identity();
+    b_pitch.store(1100, Ordering::Relaxed);
+    a.request(
+        Method::DELETE,
+        &format!("/v1/members/{}", encode(b_device.certificate.person_id())),
+    )
+    .send()
+    .await?
+    .error_for_status()?;
+    timeout(LIMIT, async {
+        while let Some(event) = room_b.next_event().await {
+            if let RoomEvent::Disconnected { .. } = event {
+                return Ok(());
+            }
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .context("LiveKit did not remove the kicked speaker")??;
+    a.sync().await?;
+    receive_key(a, voice, 2).await?;
+    receive_key(&mut c, voice, 2).await?;
+    assert!(room_a.sync_key(a)? && listener.sync_key(&c)?);
+    assert_eq!((room_a.epoch(), listener.epoch()), (2, 2));
+    // A new tone separates post-rotation media from the jitter buffer's concealed audio.
+    a_pitch.store(880, Ordering::Relaxed);
+    timeout(LIMIT, hear_tone(&mut listener, Some(&a_id), 880))
+        .await
+        .context("listener after key rotation")??;
+    for room in [&mut room_a, &mut listener] {
+        assert!(
+            room.participants()
+                .iter()
+                .all(|(peer, _)| peer.identity() != b_id),
+            "kicked speaker still in the room"
+        );
+        let heard = timeout(Duration::from_secs(1), hear_tone(room, Some(&b_id), 1100)).await;
+        assert!(
+            !matches!(heard, Ok(Ok(()))),
+            "kicked speaker was still audible"
+        );
+    }
+    roster(a, &voice.id, 2).await?;
+    println!(
+        "W08 kick removed the speaking device from the room, rotation kept the listener hearing, and nobody heard the kicked speaker"
+    );
+
     senders.abort_all();
     while let Some(result) = senders.join_next().await {
         if let Ok(result) = result {
             result?;
         }
     }
-    tokio::try_join!(room_a.leave(), room_b.leave(), listener.leave())?;
-    assert!(a.voice_participants(&voice.id).await?.is_empty());
-    Ok(())
+    // LiveKit already closed B's session.
+    let _ = room_b.leave().await;
+    tokio::try_join!(room_a.leave(), listener.leave())?;
+    roster(a, &voice.id, 0).await
+}
+
+/// Wait out the API's short roster cache until only `people` known people remain.
+async fn roster(a: &KeyClient<'_>, voice: &[u8; 32], people: usize) -> Result<()> {
+    timeout(LIMIT, async {
+        loop {
+            let roster = a.voice_participants(voice).await?;
+            if roster.people.len() == people && roster.unknown == 0 {
+                return Ok::<_, anyhow::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    })
+    .await
+    .context("voice roster did not settle")?
 }
