@@ -9,19 +9,22 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 use futures_util::StreamExt;
-use livekit::data_stream::api::{ByteStreamReader, StreamByteOptions, StreamReader, StreamWriter};
+use livekit::{
+    Room, RoomDataStreamOptions, RoomEvent, RoomOptions,
+    data_stream::api::{ByteStreamReader, StreamByteOptions, StreamReader, StreamWriter},
+};
 use reqwest::{Method, RequestBuilder};
 use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncWriteExt},
-    sync::{oneshot, watch},
+    sync::{mpsc, oneshot, watch},
     task::JoinHandle,
     time::timeout,
 };
 use zeroize::Zeroizing;
 
 use crate::{
-    auth::{decode, encode, voice_identity},
+    auth::{KnownServer, decode, encode, live_file_identity, voice_identity},
     identity::random_bytes,
     keys::{Event, random_key},
     messages::{
@@ -30,7 +33,7 @@ use crate::{
     },
 };
 
-use super::{ConnectionState, KeyClient, ParticipantIdentity, VoiceRoom};
+use super::{ConnectionState, KeyClient, ParticipantIdentity, Token, VoiceRoom, signaling_url};
 use crypto::{FileCipher, TAG_SIZE, wire_size};
 
 const TOPIC: &str = "rusttalk.file";
@@ -146,10 +149,7 @@ impl LiveFiles {
 impl VoiceRoom {
     /// Whether the active LiveKit grant allows sending live files.
     pub fn can_publish_data(&self) -> bool {
-        self.room
-            .local_participant()
-            .permission()
-            .is_some_and(|p| p.can_publish_data)
+        can_publish_data(&self.room)
     }
 
     /// Post a signed and encrypted offer for a local file. Pump room and API events while it is open.
@@ -160,6 +160,157 @@ impl VoiceRoom {
     ) -> Result<MessageRecord> {
         self.check_file_client(client)?;
         ensure!(self.can_publish_data(), "live file publishing is denied");
+        self.files.offer(client, &self.channel, path).await
+    }
+
+    /// Verify the offer's current sender, accept it, and download to a user-chosen path.
+    pub async fn accept_live_file(
+        &mut self,
+        client: &mut KeyClient<'_>,
+        record: &MessageRecord,
+        save_path: &Path,
+    ) -> Result<LiveDownload> {
+        self.check_file_client(client)?;
+        let (acceptance, _) =
+            prepare_accept(client, &self.channel, record, save_path, false).await?;
+        let (reader_tx, reader_rx) = oneshot::channel();
+        self.files.arm(&acceptance, reader_tx);
+        Ok(start_download(
+            acceptance,
+            save_path,
+            async move { reader_rx.await.context("file stream no longer accepted") },
+            Some(self.files.disconnect.subscribe()),
+            None,
+        ))
+    }
+
+    /// Stop every upload for this offer and refuse further acceptances.
+    pub fn cancel_live_offer(&mut self, transfer: &[u8; 32]) {
+        self.files.offers.remove(transfer);
+    }
+
+    /// Dispatch a KeyClient API event. Verified acceptances start one targeted stream per device.
+    pub fn handle_live_file_event(&mut self, client: &KeyClient<'_>, event: &Event) -> Result<()> {
+        if matches!(event, Event::LiveFileAccepted { channel, data: false, .. } if *channel == encode(&self.channel))
+        {
+            self.check_file_client(client)?;
+            self.files
+                .handle(client, &self.channel, event, Some(&self.room))?;
+        }
+        Ok(())
+    }
+
+    fn check_file_client(&self, client: &KeyClient<'_>) -> Result<()> {
+        ensure!(
+            &self.server == client.server.known_server()
+                && self.identity().as_str()
+                    == voice_identity(
+                        &self.server.server_id,
+                        client.identity.certificate.signing_key().as_bytes(),
+                    ),
+            "key client belongs to a different voice session"
+        );
+        ensure!(
+            self.connection_state() == ConnectionState::Connected,
+            "voice room is disconnected"
+        );
+        Ok(())
+    }
+}
+
+/// Local offers for one channel. Dispatch API events to start uploads.
+pub struct DataLiveFiles {
+    server: [u8; 32],
+    device: [u8; 32],
+    channel: [u8; 32],
+    files: LiveFiles,
+}
+
+impl DataLiveFiles {
+    pub fn new(client: &KeyClient<'_>, channel: [u8; 32]) -> Self {
+        Self {
+            server: client.space().id,
+            device: client.identity.certificate.signing_key().to_bytes(),
+            channel,
+            files: LiveFiles::default(),
+        }
+    }
+
+    fn check_client(&self, client: &KeyClient<'_>) -> Result<()> {
+        ensure!(
+            self.server == client.space().id
+                && &self.device == client.identity.certificate.signing_key().as_bytes(),
+            "key client belongs to a different live file session"
+        );
+        Ok(())
+    }
+
+    /// Post an encrypted offer. The sender only connects after a verified acceptance.
+    pub async fn offer_live_file(
+        &mut self,
+        client: &mut KeyClient<'_>,
+        path: &Path,
+    ) -> Result<MessageRecord> {
+        self.check_client(client)?;
+        self.files.offer(client, &self.channel, path).await
+    }
+
+    /// Join the data room, send the signed acceptance and download to a chosen path.
+    /// The download task leaves the room on completion, failure or cancellation.
+    pub async fn accept_live_file(
+        &self,
+        client: &mut KeyClient<'_>,
+        record: &MessageRecord,
+        save_path: &Path,
+    ) -> Result<LiveDownload> {
+        self.check_client(client)?;
+        let (acceptance, room) =
+            prepare_accept(client, &self.channel, record, save_path, true).await?;
+        let (room, mut room_events) = room.context("missing data connection")?;
+        let mut files = LiveFiles::default();
+        let (reader_tx, mut reader_rx) = oneshot::channel();
+        files.arm(&acceptance, reader_tx);
+        Ok(start_download(
+            acceptance,
+            save_path,
+            async move {
+                loop {
+                    tokio::select! {
+                        result = &mut reader_rx => return result.context("file stream no longer accepted"),
+                        event = room_events.recv() => match event {
+                            Some(RoomEvent::ByteStreamOpened { reader, participant_identity, .. }) => {
+                                if let Some(reader) = reader.take() {
+                                    files.receive(&participant_identity, reader);
+                                }
+                            }
+                            Some(RoomEvent::Disconnected { .. }) | None => anyhow::bail!("data room disconnected"),
+                            _ => (),
+                        }
+                    }
+                }
+            },
+            None,
+            Some(room),
+        ))
+    }
+
+    pub fn cancel_live_offer(&mut self, transfer: &[u8; 32]) {
+        self.files.offers.remove(transfer);
+    }
+
+    pub fn handle_live_file_event(&mut self, client: &KeyClient<'_>, event: &Event) -> Result<()> {
+        self.check_client(client)?;
+        self.files.handle(client, &self.channel, event, None)
+    }
+}
+
+impl LiveFiles {
+    async fn offer(
+        &mut self,
+        client: &mut KeyClient<'_>,
+        channel: &[u8; 32],
+        path: &Path,
+    ) -> Result<MessageRecord> {
         let metadata = tokio::fs::metadata(path)
             .await
             .context("inspect offered file")?;
@@ -186,7 +337,7 @@ impl VoiceRoom {
         };
         let record = client
             .send_message(
-                &self.channel,
+                channel,
                 &MessageBody {
                     live: Some(file.clone()),
                     ..Default::default()
@@ -194,14 +345,14 @@ impl VoiceRoom {
             )
             .await
             .context("post live file offer")?;
-        self.files.offers.retain(|_, offer| {
+        self.offers.retain(|_, offer| {
             offer.created.elapsed() < OFFER_LIFETIME
                 || offer
                     .recipients
                     .values()
                     .any(|(_, task)| !task.is_finished())
         });
-        self.files.offers.insert(
+        self.offers.insert(
             file.id,
             Upload {
                 file,
@@ -213,134 +364,38 @@ impl VoiceRoom {
         Ok(record)
     }
 
-    /// Verify the offer's current sender, accept it, and download to a user-chosen path.
-    pub async fn accept_live_file(
-        &mut self,
-        client: &mut KeyClient<'_>,
-        record: &MessageRecord,
-        save_path: &Path,
-    ) -> Result<LiveDownload> {
-        self.check_file_client(client)?;
-        let body = client
-            .open_message(&self.channel, record)
-            .await
-            .context("verify live file offer")?;
-        let file = body.live.context("message has no live file offer")?;
-        ensure!(
-            body.edit_of.is_none(),
-            "live file offer must be an original message"
-        );
-        let sender = client
-            .devices
-            .get(&encode(&record.sender_device))
-            .filter(|cert| cert.person_id() == &record.person)
-            .context("live file sender has no current verified device")?;
-        let sender = ParticipantIdentity::from(voice_identity(
-            &self.server.server_id,
-            sender.signing_key().as_bytes(),
-        ));
-        ensure!(
-            !tokio::fs::try_exists(save_path)
-                .await
-                .context("check download destination")?,
-            "download destination already exists"
-        );
-        let mut nonce = [0; 16];
-        random_bytes(&mut nonce)?;
-        let device = client.identity.certificate.signing_key();
-        let prefix = crypto::nonce_prefix(device.as_bytes(), &nonce);
-        let mut request = LiveFileAcceptance::signed(
-            client.identity,
-            &self.server.server_id,
-            &self.channel,
-            &record.sender_device,
-            &file.id,
-            &nonce,
-        );
-        let endpoint = format!("/v1/voice/{}/live-file", encode(&self.channel));
-        let post = client.request(Method::POST, &endpoint);
-        submit(
-            post.try_clone()
-                .context("build file acceptance")?
-                .json(&request),
-        )
-        .await?;
-        request.cancel = true;
-        request.sign(client.identity, &self.server.server_id, &self.channel);
-        let cancel_post = post.json(&request);
-
-        let (reader_tx, reader_rx) = oneshot::channel();
-        self.files
-            .accepted
+    fn arm(&mut self, acceptance: &DownloadSetup, reader: oneshot::Sender<ByteStreamReader>) {
+        self.accepted
             .retain(|_, accepted| !accepted.reader.is_closed());
-        self.files.accepted.insert(
-            (file.id, nonce),
+        self.accepted.insert(
+            (acceptance.file.id, acceptance.nonce),
             Accepted {
-                sender,
-                wire_size: wire_size(file.size),
-                reader: reader_tx,
+                sender: acceptance.sender.clone(),
+                wire_size: wire_size(acceptance.file.size),
+                reader,
             },
         );
-        let (events, mut updates) = watch::channel(LiveFileEvent::Progress {
-            bytes: 0,
-            total: file.size,
-        });
-        updates.mark_changed();
-        let (cancel, mut cancelled) = oneshot::channel();
-        let mut disconnect = self.files.disconnect.subscribe();
-        let path = save_path.to_owned();
-        tokio::spawn(async move {
-            let result = tokio::select! {
-                biased;
-                _ = &mut cancelled => Err(anyhow::anyhow!("download cancelled")),
-                _ = disconnect.changed() => Err(anyhow::anyhow!("voice room disconnected")),
-                result = async {
-                    let reader = timeout(IDLE, reader_rx).await.context("file stream did not arrive")?
-                        .context("file stream no longer accepted")?;
-                    download(file, prefix, reader, &path, &events).await
-                } => result,
-            };
-            match result {
-                Ok(()) => {
-                    events.send_replace(LiveFileEvent::Done);
-                }
-                Err(error) => {
-                    tracing::warn!(reason = %error, "live file download stopped");
-                    events.send_replace(LiveFileEvent::Failed {
-                        reason: error.to_string(),
-                    });
-                    drop(events);
-                    if let Err(error) = submit(cancel_post).await {
-                        tracing::warn!(reason = %error, "could not send live file cancellation");
-                    }
-                }
-            }
-        });
-        Ok(LiveDownload {
-            events: updates,
-            _cancel: cancel,
-        })
     }
 
-    /// Stop every upload for this offer and refuse further acceptances.
-    pub fn cancel_live_offer(&mut self, transfer: &[u8; 32]) {
-        self.files.offers.remove(transfer);
-    }
-
-    /// Dispatch a KeyClient API event. Verified acceptances start one targeted stream per device.
-    pub fn handle_live_file_event(&mut self, client: &KeyClient<'_>, event: &Event) -> Result<()> {
+    fn handle(
+        &mut self,
+        client: &KeyClient<'_>,
+        channel_id: &[u8; 32],
+        event: &Event,
+        room: Option<&Arc<Room>>,
+    ) -> Result<()> {
         let Event::LiveFileAccepted {
             channel,
             device,
             acceptance,
+            data,
         } = event
         else {
             return Ok(());
         };
-        if *channel != encode(&self.channel) {
+        if *channel != encode(channel_id) || *data != room.is_none() {
             return Ok(());
         }
-        self.check_file_client(client)?;
         let local = client.identity.certificate.signing_key();
         ensure!(
             acceptance.recipient == encode(local.as_bytes()),
@@ -352,12 +407,12 @@ impl VoiceRoom {
             .context("file acceptance has unknown device")?
             .signing_key();
         acceptance
-            .verify(&self.server.server_id, &self.channel, peer)
+            .verify(&client.space().id, channel_id, peer)
             .context("invalid signed file acceptance")?;
         let transfer = decode(&acceptance.transfer)?;
         let nonce = decode(&acceptance.nonce)?;
         // A cancelled offer or another session of this device may have received the notice.
-        let Some(offer) = self.files.offers.get_mut(&transfer) else {
+        let Some(offer) = self.offers.get_mut(&transfer) else {
             return Ok(());
         };
         if acceptance.cancel {
@@ -372,24 +427,36 @@ impl VoiceRoom {
             offer.created.elapsed() < OFFER_LIFETIME,
             "live file offer expired"
         );
-        let destination =
-            ParticipantIdentity::from(voice_identity(&self.server.server_id, peer.as_bytes()));
-        ensure!(self.can_publish_data(), "live file publishing is denied");
-        let offer = self
-            .files
-            .offers
-            .get_mut(&transfer)
-            .expect("offer still open");
         if let Entry::Vacant(entry) = offer.recipients.entry(peer.to_bytes()) {
-            let room = self.room.clone();
+            let server = client.server.known_server().clone();
+            let destination = ParticipantIdentity::from(if *data {
+                live_file_identity(&server.server_id, peer.as_bytes(), &nonce)
+            } else {
+                voice_identity(&server.server_id, peer.as_bytes())
+            });
+            let request = data_request(client, channel_id, &nonce);
+            let room = room.cloned();
             let file = offer.file.clone();
             let path = offer.path.clone();
             let prefix = crypto::nonce_prefix(peer.as_bytes(), &nonce);
+            if let Some(room) = &room {
+                ensure!(can_publish_data(room), "live file publishing is denied");
+            }
             entry.insert((
                 nonce,
                 tokio::spawn(async move {
-                    if let Err(error) = upload(room, destination, file, prefix, nonce, &path).await
-                    {
+                    let result = async {
+                        let data_room;
+                        let room = if let Some(room) = room {
+                            room
+                        } else {
+                            (data_room, _) = connect_data(&server, request).await?;
+                            data_room.0.clone()
+                        };
+                        upload(room, destination, file, prefix, nonce, &path).await
+                    }
+                    .await;
+                    if let Err(error) = result {
                         tracing::warn!(reason = %error, "live file upload stopped");
                     }
                 }),
@@ -397,22 +464,201 @@ impl VoiceRoom {
         }
         Ok(())
     }
+}
 
-    fn check_file_client(&self, client: &KeyClient<'_>) -> Result<()> {
-        ensure!(
-            &self.server == client.server.known_server()
-                && self.identity().as_str()
-                    == voice_identity(
-                        &self.server.server_id,
-                        client.identity.certificate.signing_key().as_bytes(),
-                    ),
-            "key client belongs to a different voice session"
-        );
-        ensure!(
-            self.connection_state() == ConnectionState::Connected,
-            "voice room is disconnected"
-        );
-        Ok(())
+struct DataConnection(Arc<Room>);
+
+impl Drop for DataConnection {
+    fn drop(&mut self) {
+        let room = self.0.clone();
+        tokio::spawn(async move {
+            if let Err(error) = room.close().await {
+                tracing::warn!(reason = %error, "could not close live file data room");
+            }
+        });
+    }
+}
+
+fn data_request(client: &KeyClient<'_>, channel: &[u8; 32], nonce: &[u8; 16]) -> RequestBuilder {
+    client.request(
+        Method::POST,
+        &format!(
+            "/v1/channels/{}/live-file/token/{}",
+            encode(channel),
+            encode(nonce)
+        ),
+    )
+}
+
+async fn connect_data(server: &KnownServer, request: RequestBuilder) -> Result<ConnectedData> {
+    let token: Token = request
+        .timeout(IDLE)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let mut options = RoomOptions::default();
+    options.auto_subscribe = false;
+    options.join_retries = 0;
+    options.data_stream =
+        RoomDataStreamOptions::default().with_max_payload_byte_length(RECEIVE_CAP);
+    let url = signaling_url(server)?;
+    let (room, events) = Room::connect(url.as_str(), &token.token, options)
+        .await
+        .context("connect to pinned LiveKit data room")?;
+    Ok((DataConnection(Arc::new(room)), events))
+}
+
+fn can_publish_data(room: &Room) -> bool {
+    room.local_participant()
+        .permission()
+        .is_some_and(|p| p.can_publish_data)
+}
+
+struct DownloadSetup {
+    sender: ParticipantIdentity,
+    file: LiveAttachment,
+    nonce: [u8; 16],
+    prefix: [u8; 16],
+    cancel_post: RequestBuilder,
+}
+
+type ConnectedData = (DataConnection, mpsc::UnboundedReceiver<RoomEvent>);
+
+async fn prepare_accept(
+    client: &mut KeyClient<'_>,
+    channel: &[u8; 32],
+    record: &MessageRecord,
+    save_path: &Path,
+    data: bool,
+) -> Result<(DownloadSetup, Option<ConnectedData>)> {
+    let body = client
+        .open_message(channel, record)
+        .await
+        .context("verify live file offer")?;
+    let file = body.live.context("message has no live file offer")?;
+    ensure!(
+        body.edit_of.is_none(),
+        "live file offer must be an original message"
+    );
+    let sender = client
+        .devices
+        .get(&encode(&record.sender_device))
+        .filter(|cert| cert.person_id() == &record.person)
+        .context("live file sender has no current verified device")?;
+    let mut nonce = [0; 16];
+    random_bytes(&mut nonce)?;
+    let sender = ParticipantIdentity::from(if data {
+        live_file_identity(&client.space().id, sender.signing_key().as_bytes(), &nonce)
+    } else {
+        voice_identity(&client.space().id, sender.signing_key().as_bytes())
+    });
+    ensure!(
+        !tokio::fs::try_exists(save_path)
+            .await
+            .context("check download destination")?,
+        "download destination already exists"
+    );
+    let prefix = crypto::nonce_prefix(client.identity.certificate.signing_key().as_bytes(), &nonce);
+    let mut request = LiveFileAcceptance::signed(
+        client.identity,
+        &client.space().id,
+        channel,
+        &record.sender_device,
+        &file.id,
+        &nonce,
+    );
+    let room = if data {
+        Some(
+            connect_data(
+                client.server.known_server(),
+                data_request(client, channel, &nonce),
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    let route = if data { "channels" } else { "voice" };
+    let endpoint = format!("/v1/{route}/{}/live-file", encode(channel));
+    let post = client.request(Method::POST, &endpoint);
+    submit(
+        post.try_clone()
+            .context("build file acceptance")?
+            .json(&request),
+    )
+    .await?;
+    request.cancel = true;
+    request.sign(client.identity, &client.space().id, channel);
+    let cancel_post = post.json(&request);
+    Ok((
+        DownloadSetup {
+            sender,
+            file,
+            nonce,
+            prefix,
+            cancel_post,
+        },
+        room,
+    ))
+}
+
+fn start_download(
+    setup: DownloadSetup,
+    save_path: &Path,
+    reader: impl Future<Output = Result<ByteStreamReader>> + Send + 'static,
+    disconnect: Option<watch::Receiver<()>>,
+    room: Option<DataConnection>,
+) -> LiveDownload {
+    let DownloadSetup {
+        file,
+        prefix,
+        cancel_post,
+        ..
+    } = setup;
+    let (events, mut updates) = watch::channel(LiveFileEvent::Progress {
+        bytes: 0,
+        total: file.size,
+    });
+    updates.mark_changed();
+    let (cancel, mut cancelled) = oneshot::channel();
+    let path = save_path.to_owned();
+    tokio::spawn(async move {
+        let result = tokio::select! {
+            biased;
+            _ = &mut cancelled => Err(anyhow::anyhow!("download cancelled")),
+            _ = async move {
+                match disconnect {
+                    Some(mut disconnect) => { let _ = disconnect.changed().await; }
+                    None => std::future::pending().await,
+                }
+            } => Err(anyhow::anyhow!("voice room disconnected")),
+            result = async {
+                let reader = timeout(IDLE, reader).await.context("file stream did not arrive")??;
+                download(file, prefix, reader, &path, &events).await
+            } => result,
+        };
+        drop(room);
+        match result {
+            Ok(()) => {
+                events.send_replace(LiveFileEvent::Done);
+            }
+            Err(error) => {
+                tracing::warn!(reason = %error, "live file download stopped");
+                events.send_replace(LiveFileEvent::Failed {
+                    reason: error.to_string(),
+                });
+                drop(events);
+                if let Err(error) = submit(cancel_post).await {
+                    tracing::warn!(reason = %error, "could not send live file cancellation");
+                }
+            }
+        }
+    });
+    LiveDownload {
+        events: updates,
+        _cancel: cancel,
     }
 }
 

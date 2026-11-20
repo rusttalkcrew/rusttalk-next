@@ -266,7 +266,14 @@ for confirmation before connecting with that expected pin. Invite links
 already specify the expected pins. Use `KeyClient::next_event` while online
 to drive key delivery and refresh before `KeyClient::expires_at`.
 
-For live files, use `VoiceRoom::offer_live_file` to post the offer and
+For live files in any readable and writable channel or DM, create
+`DataLiveFiles::new(&client, channel_id)` and keep it for the lifetime of local
+offers. Use its `offer_live_file` and forward API events to
+`handle_live_file_event`. Call `accept_live_file` when the receiver chooses a
+new destination. The returned download pumps its own room events and closes
+the data connection when it finishes or is dropped.
+
+For in-call transfers, use `VoiceRoom::offer_live_file` to post the offer and
 `accept_live_file` with a verified message record and a new destination
 path. Call `handle_live_file_event` for API events while polling
 `VoiceRoom::next_event` for LiveKit events. The returned `LiveDownload`

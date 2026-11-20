@@ -43,7 +43,7 @@ use crate::{
 };
 
 use super::KeyClient;
-pub use live_file::{LiveDownload, LiveFileEvent};
+pub use live_file::{DataLiveFiles, LiveDownload, LiveFileEvent};
 pub use screen::{NativeVideoSource, NativeVideoStream, RemoteVideo, RemoteVideoTrack};
 pub use stats::{TrackStats, VoiceStats};
 
@@ -99,6 +99,20 @@ fn scope(id: &[u8; 32]) -> Scope {
     }
 }
 
+fn signaling_url(server: &KnownServer) -> Result<reqwest::Url> {
+    let mut url = server.address.clone();
+    url.set_scheme("wss")
+        .map_err(|_| anyhow::anyhow!("invalid LiveKit signaling origin"))?;
+    // Unbox so callers can downcast to `PinnedElsewhere`.
+    pinned_tls::register(&url, server.tls_fingerprint).map_err(|error| {
+        match error.downcast::<pinned_tls::PinnedElsewhere>() {
+            Ok(error) => anyhow::Error::new(*error),
+            Err(error) => anyhow::Error::from_boxed(error),
+        }
+    })?;
+    Ok(url)
+}
+
 impl KeyClient<'_> {
     /// Reconcile keys, request a scoped token, and connect with the current epoch.
     pub async fn join_voice(&mut self, channel: &[u8; 32]) -> Result<VoiceRoom> {
@@ -116,16 +130,7 @@ impl KeyClient<'_> {
             .await?;
 
         let server = self.server.known_server();
-        let mut url = server.address.clone();
-        url.set_scheme("wss")
-            .map_err(|_| anyhow::anyhow!("invalid LiveKit signaling origin"))?;
-        // Unbox so callers can downcast to `PinnedElsewhere`.
-        pinned_tls::register(&url, server.tls_fingerprint).map_err(|error| {
-            match error.downcast::<pinned_tls::PinnedElsewhere>() {
-                Ok(error) => anyhow::Error::new(*error),
-                Err(error) => anyhow::Error::from_boxed(error),
-            }
-        })?;
+        let url = signaling_url(server)?;
         let name_keys = self.name_keys(channel, track_name::APP_AUDIO);
         let screen_names = self.name_keys(channel, track_name::SCREEN);
         let key = media_key(key, &server.server_id, channel, epoch);

@@ -137,6 +137,8 @@ pub enum Event {
         channel: String,
         device: String,
         acceptance: crate::messages::LiveFileAcceptance,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        data: bool,
     },
     Resync,
 }

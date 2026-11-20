@@ -1,3 +1,4 @@
+mod bonus;
 mod chat;
 mod files;
 mod sync;
@@ -162,10 +163,10 @@ async fn docker_keys(
 
     let (_, b_identity) = DeviceIdentity::create(DEVICE_NAME)?;
     let b_token = session(bot.sign_in(&b_identity, Some(&link.code)).await?, secrets).await?;
-    let mut b = KeyClient::connect(bot, &b_identity, &b_token).await?;
-    wait_for_device(a, &encode(b_identity.certificate.signing_key().as_bytes())).await?;
+    let mut b = bonus::presence(a, bot, &b_identity, &b_token).await?;
     receive_key(&mut b, channel, 1).await?;
     receive_key(&mut b, space, 1).await?;
+    bonus::icons(a, &b).await?;
     assert_eq!(
         Metadata::ChannelTopic.open(&space.id, HISTORY_ID, b.key(channel, 1).unwrap(), &history)?,
         b"old history"

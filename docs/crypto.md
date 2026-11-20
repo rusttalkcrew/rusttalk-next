@@ -172,7 +172,10 @@ space epoch held by the client, and the API accepts writes only when
 that epoch is current and the scope is ready. A removed member who
 colludes with the server can forge metadata under any old space key
 they held. Clients prefer metadata from the newest epoch and re-encrypt
-their own display name after a space rotation.
+their own display name after a space rotation. Avatar and icon ciphertext is
+capped at 256 KiB including the 48-byte encryption framing and tag. Clients
+decode PNG, JPEG and GIF with pure Rust decoders, a 512×512 canvas limit,
+up to 100 GIF frames and a 32 MiB limit on retained RGBA frame pixels.
 
 ### Invite previews
 
@@ -369,4 +372,6 @@ cancel (one byte, 0 or 1)
 The recipient, transfer and nonce fields use their base64url wire
 strings. The offering device verifies with the accepting device's
 current root-certified public key. It uses the room identity derived
-from that same key as the only stream destination.
+from that same key as the only stream destination. In a data-only room both
+participant identities also include the acceptance nonce. The file encryption
+and signed acceptance are the same for in-call and data-only transfers.

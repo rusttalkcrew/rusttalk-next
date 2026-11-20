@@ -196,7 +196,7 @@ pub fn decode_thumbnail(bytes: &[u8]) -> Result<DynamicImage> {
     decode_limited(bytes, &[ImageFormat::Png], THUMBNAIL_EDGE, edge * edge * 8)
 }
 
-fn decode_limited(
+pub(super) fn decode_limited(
     bytes: &[u8],
     formats: &[ImageFormat],
     edge: u32,

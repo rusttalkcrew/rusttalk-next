@@ -18,7 +18,7 @@ use livekit_api::{
 };
 use livekit_protocol::{ParticipantPermission, TrackSource};
 use rusttalk_core::{
-    auth::{decode, encode, voice_identity},
+    auth::{decode, encode, live_file_identity, voice_identity},
     keys::Event,
     messages::LiveFileAcceptance,
 };
@@ -27,9 +27,10 @@ use serde_json::json;
 use sqlx::{SqliteConnection, query_as, query_scalar};
 use zeroize::Zeroizing;
 
-use crate::{ApiError, ApiResult, App, auth::authenticate, channels, payload};
+use crate::{ApiError, ApiResult, App, auth::authenticate, channels, messages, payload};
 
 const DEV_SECRET: &str = "dev-only-livekit-secret-do-not-deploy";
+const DATA_PREFIX: &str = "file-";
 const ROSTER_TTL: Duration = Duration::from_secs(1);
 
 pub struct LiveKit {
@@ -79,7 +80,8 @@ impl LiveKit {
             "rusttalk-api",
             VideoGrants {
                 room: room.into(),
-                room_admin: true,
+                room_admin: method != "ListRooms",
+                room_list: method == "ListRooms",
                 room_create: method == "DeleteRoom",
                 ..Default::default()
             },
@@ -94,6 +96,26 @@ impl LiveKit {
             .send()
             .await
             .map_err(|_| ApiError::new(StatusCode::BAD_GATEWAY, "livekit_unreachable"))
+    }
+
+    async fn rooms(&self) -> ApiResult<Vec<String>> {
+        #[derive(Deserialize)]
+        struct Rooms {
+            #[serde(default)]
+            rooms: Vec<Room>,
+        }
+        #[derive(Deserialize)]
+        struct Room {
+            name: String,
+        }
+        let unavailable = |_| ApiError::new(StatusCode::BAD_GATEWAY, "livekit_rooms_unavailable");
+        let response = self
+            .room_service("ListRooms", "", json!({}))
+            .await?
+            .error_for_status()
+            .map_err(unavailable)?;
+        let result: Rooms = response.json().await.map_err(unavailable)?;
+        Ok(result.rooms.into_iter().map(|room| room.name).collect())
     }
 
     async fn list(&self, room: &str) -> ApiResult<Vec<Participant>> {
@@ -169,15 +191,7 @@ async fn require_voice_read(
     person: &[u8],
 ) -> ApiResult<()> {
     decode::<32>(channel)?;
-    let kind: String = query_scalar(
-        "SELECT c.kind FROM channels c JOIN channel_readers r ON r.channel_id = c.id
-         WHERE c.id = ? AND r.person_id = ?",
-    )
-    .bind(channel)
-    .bind(person)
-    .fetch_optional(db)
-    .await?
-    .ok_or(ApiError::forbidden("channel_read_denied"))?;
+    let kind = messages::readable_kind(db, channel, person).await?;
     if kind != "voice" {
         return Err(ApiError::bad_request("not_a_voice_channel"));
     }
@@ -215,6 +229,31 @@ pub async fn token(
             ..Default::default()
         },
         Duration::from_secs(600),
+    )?;
+    tx.commit().await?;
+    Ok(Json(Token { token }))
+}
+
+pub async fn data_token(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path((channel, nonce)): Path<(String, String)>,
+) -> ApiResult<Json<Token>> {
+    let nonce = decode(&nonce)?;
+    let (mut tx, actor) = authenticate(&app, &headers).await?;
+    messages::require_write(&mut tx, &actor, &channel).await?;
+    let identity = live_file_identity(app.key.verifying_key().as_bytes(), &actor.device, &nonce);
+    let token = configured(&app)?.sign(
+        &identity,
+        VideoGrants {
+            room: format!("{DATA_PREFIX}{channel}"),
+            room_join: true,
+            can_publish: Some(false),
+            can_publish_data: Some(true),
+            can_subscribe: Some(true),
+            ..Default::default()
+        },
+        Duration::from_secs(60),
     )?;
     tx.commit().await?;
     Ok(Json(Token { token }))
@@ -324,26 +363,34 @@ pub fn enforce(app: &App, room: Option<String>) {
 
 /// End the LiveKit room of a deleted voice channel, which `enforce` no longer visits.
 /// Runs after the delete commits and never blocks it.
-pub fn close_room(app: &App, room: String) {
+pub fn close_rooms(app: &App, channel: String, voice: bool) {
     let Some(livekit) = app.voice.clone() else {
         return;
     };
     tokio::spawn(async move {
-        let body = json!({ "room": room });
-        livekit.moderate(&room, "DeleteRoom", body).await;
+        let data = format!("{DATA_PREFIX}{channel}");
+        livekit
+            .moderate(&data, "DeleteRoom", json!({ "room": data }))
+            .await;
+        if voice {
+            livekit
+                .moderate(&channel, "DeleteRoom", json!({ "room": channel }))
+                .await;
+        }
     });
 }
 
 async fn enforce_rooms(app: &App, livekit: &LiveKit, room: Option<String>) -> ApiResult<()> {
     let rooms = match room {
-        Some(room) => vec![room],
-        None => {
-            query_scalar("SELECT id FROM channels WHERE kind = 'voice'")
-                .fetch_all(&app.db)
-                .await?
-        }
+        Some(channel) => vec![format!("{DATA_PREFIX}{channel}"), channel],
+        None => livekit.rooms().await?,
     };
     for room in rooms {
+        let data = room.starts_with(DATA_PREFIX);
+        let channel = room.strip_prefix(DATA_PREFIX).unwrap_or(&room);
+        if decode::<32>(channel).is_err() {
+            continue;
+        }
         let participants = match livekit.list(&room).await {
             Ok(participants) => participants,
             Err(error) => {
@@ -358,21 +405,41 @@ async fn enforce_rooms(app: &App, livekit: &LiveKit, room: Option<String>) -> Ap
         let (mut remove, mut restrict) = (Vec::new(), Vec::new());
         {
             let mut db = app.db.acquire().await?;
-            let readers = reader_identities(app, &mut db, &room).await?;
+            let readers = reader_identities(app, &mut db, channel).await?;
+            let kind: Option<String> = query_scalar("SELECT kind FROM channels WHERE id = ?")
+                .bind(channel)
+                .fetch_optional(&mut *db)
+                .await?;
             for participant in participants {
-                let Some(person) = readers.get(&participant.identity) else {
+                let device = if data {
+                    participant
+                        .identity
+                        .split_once('.')
+                        .map_or("", |(device, _)| device)
+                } else {
+                    &participant.identity
+                };
+                let Some(person) = readers.get(device) else {
                     remove.push(participant.identity);
                     continue;
                 };
+                if data {
+                    if !messages::can_write(&mut db, channel, person, kind.as_deref().unwrap_or(""))
+                        .await?
+                    {
+                        remove.push(participant.identity);
+                    }
+                    continue;
+                }
                 let mut permission = participant.permission;
                 let revoke_data = permission.can_publish_data
-                    && !channels::has_flag(&mut db, &room, person, channels::WRITE).await?;
+                    && !channels::has_flag(&mut db, channel, person, channels::WRITE).await?;
                 let mut changed = revoke_data;
                 if revoke_data {
                     permission.can_publish_data = false;
                 }
                 if permission.can_publish {
-                    let allowed = publish_sources(&mut db, &room, person).await?;
+                    let allowed = publish_sources(&mut db, channel, person).await?;
                     let granted = &mut permission.can_publish_sources;
                     let before = granted.len();
                     if before == 0 {
@@ -416,9 +483,36 @@ pub async fn live_file(
     Path(channel): Path<String>,
     body: Result<Json<LiveFileAcceptance>, JsonRejection>,
 ) -> ApiResult<StatusCode> {
-    let acceptance = payload(body)?;
-    let (mut tx, actor) = authenticate(&app, &headers).await?;
-    require_voice_read(&mut tx, &channel, &actor.person).await?;
+    relay_acceptance(&app, &headers, channel, payload(body)?, false).await
+}
+
+pub async fn data_accept(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path(channel): Path<String>,
+    body: Result<Json<LiveFileAcceptance>, JsonRejection>,
+) -> ApiResult<StatusCode> {
+    relay_acceptance(&app, &headers, channel, payload(body)?, true).await
+}
+
+async fn relay_acceptance(
+    app: &App,
+    headers: &HeaderMap,
+    channel: String,
+    acceptance: LiveFileAcceptance,
+    data: bool,
+) -> ApiResult<StatusCode> {
+    let (mut tx, actor) = authenticate(app, headers).await?;
+    if data {
+        decode::<32>(&channel)?;
+        if acceptance.cancel {
+            messages::readable_kind(&mut tx, &channel, &actor.person).await?;
+        } else {
+            messages::require_writer(&mut tx, &channel, &actor.person).await?;
+        }
+    } else {
+        require_voice_read(&mut tx, &channel, &actor.person).await?;
+    }
     let device = actor
         .device
         .as_slice()
@@ -433,20 +527,41 @@ pub async fn live_file(
             &device,
         )
         .map_err(|_| ApiError::bad_request("invalid_file_acceptance"))?;
+    let recipient = decode::<32>(&acceptance.recipient)?;
+    if recipient.as_slice() == actor.device {
+        return Err(ApiError::forbidden("live_file_peer_not_in_room"));
+    }
+    if data && !acceptance.cancel {
+        let person: Vec<u8> =
+            query_scalar("SELECT person_id FROM member_devices WHERE device_id = ?")
+                .bind(recipient.as_slice())
+                .fetch_optional(&mut *tx)
+                .await?
+                .ok_or(ApiError::forbidden("channel_read_denied"))?;
+        messages::require_writer(&mut tx, &channel, &person).await?;
+    }
     tx.commit().await?;
     if !acceptance.cancel {
-        // A receive-only participant need not be visible in the SDK's remote participant map.
         let server = app.key.verifying_key();
-        let receiver = voice_identity(server.as_bytes(), &actor.device);
-        let offerer = voice_identity(server.as_bytes(), &decode::<32>(&acceptance.recipient)?);
-        let participants = configured(&app)?.list(&channel).await?;
-        if receiver == offerer
-            || [receiver, offerer].iter().any(|identity| {
-                !participants
-                    .iter()
-                    .any(|p| &p.identity == identity && p.state == "ACTIVE")
-            })
-        {
+        let (participants, required) = if data {
+            let nonce = decode(&acceptance.nonce)?;
+            let receiver = live_file_identity(server.as_bytes(), &actor.device, &nonce);
+            let room = format!("{DATA_PREFIX}{channel}");
+            (configured(app)?.list(&room).await?, vec![receiver])
+        } else {
+            // Receive-only participants need not appear in the SDK’s remote participant map.
+            let receiver = voice_identity(server.as_bytes(), &actor.device);
+            let offerer = voice_identity(server.as_bytes(), &recipient);
+            (
+                configured(app)?.list(&channel).await?,
+                vec![receiver, offerer],
+            )
+        };
+        if required.iter().any(|identity| {
+            !participants
+                .iter()
+                .any(|p| &p.identity == identity && p.state == "ACTIVE")
+        }) {
             return Err(ApiError::forbidden("live_file_peer_not_in_room"));
         }
     }
@@ -454,6 +569,7 @@ pub async fn live_file(
         channel,
         device: encode(&actor.device),
         acceptance,
+        data,
     }));
     Ok(StatusCode::NO_CONTENT)
 }
@@ -476,13 +592,18 @@ pub async fn webhook(
         event.event.as_str(),
         "participant_joined" | "participant_left" | "room_finished"
     ) && let Some(room) = event.room
-        && decode::<32>(&room.name).is_ok()
     {
-        if event.event == "participant_joined" {
-            // A LiveKit token outlives the session that requested it.
-            enforce(&app, Some(room.name.clone()));
+        let data = room.name.strip_prefix(DATA_PREFIX);
+        let channel = data.unwrap_or(&room.name);
+        if decode::<32>(channel).is_ok() {
+            if event.event == "participant_joined" {
+                // A LiveKit token outlives the session that requested it.
+                enforce(&app, Some(channel.to_owned()));
+            }
+            if data.is_none() {
+                app.notify(Some(Event::VoiceChanged { channel: room.name }));
+            }
         }
-        app.notify(Some(Event::VoiceChanged { channel: room.name }));
     }
     Ok(StatusCode::NO_CONTENT)
 }

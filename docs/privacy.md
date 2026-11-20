@@ -10,7 +10,7 @@ tables in SQLite (WAL). IDs and digests are binary unless indicated. The `_ct` s
 | Table | Columns |
 | --- | --- |
 | `members` | `person_id` (root public key), `joined_at` (Unix seconds), nullable `display_name_ct`, nullable `avatar_ct` |
-| `roles` | `id` (text), `kind` (built-in kind or custom), `rank`, `permissions` (seven-bit mask), nullable `name_ct` (opaque ciphertext) |
+| `roles` | `id` (text), `kind` (built-in kind or custom), `rank`, `permissions` (eight-bit mask), nullable `name_ct` (opaque ciphertext) |
 | `server_settings` | Singleton `id`, nullable `owner_person_id`, `default_role_id`, nullable `name_ct`, nullable `description_ct`, nullable `icon_ct` |
 | `member_roles` | `person_id`, `role_id` |
 | `invites` | `id` (opaque text), `code_hash` (SHA-256), `is_owner`, `remaining_uses`, `expires_at`, nullable `space_key_ct` and `name_ct` for preview |
@@ -64,12 +64,21 @@ membership. Settings, joined origins and pins, and contacts are encrypted
 on the device before upload. The sync key stays on the person's devices.
 SQLite backups and old WAL pages can retain past
 database contents, and volume backups can retain expired ciphertext.
+The API knows which authenticated member and device have an open event socket,
+including when a member chooses to appear offline. It keeps per-person socket
+counts and the chosen status in memory. One second after the last socket
+closes, it removes that state. A reconnect during the grace period preserves
+the choice. Members see only the person ID and visible status (online, away
+or offline). There is no persistent presence choice, last-seen timestamp or
+presence event history. The existing session and connection-close logging
+still applies.
+
 The API can see who is in which voice room by matching opaque LiveKit
 device identities to current channel readers. Readers see unmatched
 devices only as a count. After a kick, ban, revocation or permission
 change the API asks LiveKit to remove devices that lost access and to
 revoke any audio, video or data publication rights they lost. It keeps the active
-roster in memory for one second per room. It keeps no voice roster or
+voice roster in memory for one second per room. It keeps no voice roster or
 LiveKit join tokens in SQLite. LiveKit sees opaque room and device IDs,
 track IDs and source kinds, viewer subscriptions, routing and timing
 information, negotiated video codec, dimensions and simulcast layers,
@@ -88,8 +97,12 @@ For live files, only the encrypted offer is retained as a chat message.
 The API sees its normal message metadata plus the live routing notice's
 opaque transfer ID, offering and accepting device IDs, nonce, signature,
 timing and whether the receiver accepted or cancelled. It relays that
-notice in memory. LiveKit sees the file topic, opaque stream and transfer
-IDs, nonce, sender and accepting device, ciphertext length and timing.
+notice in memory. Outside a call, the API can match short-lived data-room
+participants back to authorized devices. LiveKit sees the channel's opaque
+room ID, the file topic, opaque stream and transfer IDs, nonce, sender and
+accepting device, ciphertext length and timing. The same access changes
+that affect voice rooms remove data-room participants who lose read or
+write access.
 It relays encrypted chunks and keeps no file. The filename, MIME type
 and file key are inside the encrypted message. File bytes never pass
 through the API. Channel readers can decrypt the offer's metadata and
