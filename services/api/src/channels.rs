@@ -5,7 +5,7 @@ use axum::{
 };
 use rusttalk_core::{
     auth::{decode, encode},
-    keys::{Event, Kind, Metadata, Scope},
+    keys::{EnvelopeContext, Event, Kind, Metadata, Scope},
 };
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, SqliteConnection, query, query_as, query_scalar};
@@ -37,6 +37,7 @@ pub struct ChannelFields {
 pub struct NewChannel {
     id: String,
     kind: ChannelKind,
+    commitment: String,
     envelope: String,
     #[serde(flatten)]
     fields: ChannelFields,
@@ -205,6 +206,7 @@ pub async fn create_channel(
     let NewChannel {
         id,
         kind,
+        commitment,
         envelope,
         fields,
     } = payload(body)?;
@@ -256,7 +258,13 @@ pub async fn create_channel(
         .bind(&id)
         .execute(&mut *tx)
         .await?;
-    keys::start_epoch(&mut tx, &actor, scope, 1, &envelope).await?;
+    let context = EnvelopeContext {
+        server_id: keys::space(&app).id,
+        scope,
+        epoch: 1,
+        commitment: decode(&commitment)?,
+    };
+    keys::start_epoch(&mut tx, &actor, context, &envelope).await?;
     audit(
         &mut tx,
         &actor.person,
@@ -327,31 +335,20 @@ pub async fn permissions(
 ) -> ApiResult<StatusCode> {
     decode::<32>(&id)?;
     let flags = payload(body)?.flags;
-    if flags > 15 {
+    if flags > 15 || (flags != 0 && flags & 1 == 0) {
         return Err(ApiError::bad_request("invalid_channel_flags"));
     }
     let (mut tx, actor) = authenticate(&app, &headers).await?;
-    manage(&mut tx, &actor).await?;
-    for (statement, value, error) in [
-        (
-            "SELECT EXISTS (SELECT 1 FROM channels WHERE id = ?)",
-            &id,
-            "channel_not_found",
-        ),
-        (
-            "SELECT EXISTS (SELECT 1 FROM roles WHERE id = ?)",
-            &role,
-            "role_not_found",
-        ),
-    ] {
-        if !query_scalar::<_, bool>(statement)
-            .bind(value)
-            .fetch_one(&mut *tx)
-            .await?
-        {
-            return Err(ApiError::not_found(error));
-        }
+    let authority = roles::authority(&mut tx, &actor.person).await?;
+    authority.require(Permission::ManageChannels)?;
+    let exists: bool = query_scalar("SELECT EXISTS (SELECT 1 FROM channels WHERE id = ?)")
+        .bind(&id)
+        .fetch_one(&mut *tx)
+        .await?;
+    if !exists {
+        return Err(ApiError::not_found("channel_not_found"));
     }
+    authority.can_set_channel_flags(roles::by_id(&mut tx, &role).await?)?;
     let before = readers(&mut tx, &id).await?;
     if flags == 0 {
         query("DELETE FROM channel_permissions WHERE channel_id = ? AND role_id = ?")

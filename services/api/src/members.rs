@@ -12,7 +12,7 @@ use sqlx::{FromRow, SqliteConnection, query, query_as, query_scalar};
 
 use crate::{
     ApiError, ApiResult, App,
-    auth::{authenticate, client_ip, create_invite},
+    auth::{PublicLimit, authenticate, check_public_limit, client_ip, create_invite},
     keys, metadata, payload,
     roles::{self, Permission},
     store::{audit, hash, log_closed, now, write},
@@ -141,21 +141,7 @@ pub async fn preview(
     let ip = client_ip(&headers)?;
     let mut tx = write(&app.db).await?;
     let at = now()?;
-    query("DELETE FROM invite_previews WHERE expires_at <= ?")
-        .bind(at)
-        .execute(&mut *tx)
-        .await?;
-    let (total, from_ip): (i64, i64) =
-        query_as("SELECT COUNT(*), COUNT(*) FILTER (WHERE ip = ?) FROM invite_previews")
-            .bind(&ip)
-            .fetch_one(&mut *tx)
-            .await?;
-    if total >= 256 || from_ip >= 8 {
-        return Err(ApiError::new(
-            StatusCode::TOO_MANY_REQUESTS,
-            "invite_preview_limit",
-        ));
-    }
+    let ip = check_public_limit(&mut tx, &ip, at, PublicLimit::InvitePreview).await?;
     query("INSERT INTO invite_previews (ip, expires_at) VALUES (?, ?)")
         .bind(ip)
         .bind(at + 60)

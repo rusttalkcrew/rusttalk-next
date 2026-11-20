@@ -94,6 +94,13 @@ impl Authority {
         Ok(())
     }
 
+    pub fn can_set_channel_flags(&self, role: Role) -> ApiResult<()> {
+        if self.rank == OWNER_RANK && role.rank == OWNER_RANK {
+            return Ok(());
+        }
+        self.can_grant(role.rank, 0)
+    }
+
     fn can_grant(&self, rank: i64, permissions: i64) -> ApiResult<()> {
         self.outrank(&Authority { rank, permissions })?;
         if permissions & !self.permissions != 0 {
@@ -124,7 +131,7 @@ pub async fn authority(db: &mut SqliteConnection, person: &[u8]) -> ApiResult<Au
     })
 }
 
-async fn by_id(db: &mut SqliteConnection, id: &str) -> ApiResult<Role> {
+pub async fn by_id(db: &mut SqliteConnection, id: &str) -> ApiResult<Role> {
     query_as("SELECT id, kind, rank, permissions, name_ct FROM roles WHERE id = ?")
         .bind(id)
         .fetch_optional(db)

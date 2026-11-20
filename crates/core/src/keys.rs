@@ -5,12 +5,14 @@ use chacha20poly1305::{
     aead::{Aead, Payload},
 };
 use ed25519_dalek::{Signature, Signer};
+use hkdf::hmac::{Hmac, Mac};
 use hpke::{
     Deserializable, Kem, OpModeR, OpModeS, Serializable, aead::ChaCha20Poly1305, kdf::HkdfSha256,
     kem::X25519HkdfSha256, single_shot_open, single_shot_seal_with_rng,
 };
 use rand::{SeedableRng, rngs::StdRng};
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use thiserror::Error;
 use zeroize::Zeroizing;
 
@@ -36,6 +38,8 @@ pub enum KeyError {
     Signature,
     #[error("key encryption or authentication failed")]
     Authentication,
+    #[error("key does not match the epoch commitment")]
+    Commitment,
     #[error(transparent)]
     Randomness(#[from] IdentityError),
 }
@@ -84,6 +88,8 @@ pub struct WrappedKey {
     #[serde(flatten)]
     pub need: KeyNeed,
     pub sender: String,
+    #[serde(with = "wire_id")]
+    pub commitment: [u8; 32],
     pub envelope: String,
 }
 
@@ -113,6 +119,7 @@ pub enum Event {
         device: Option<String>,
     },
     ChannelChanged,
+    Resync,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -121,94 +128,129 @@ pub struct MemberDevice {
     pub certificate: String,
 }
 
-fn envelope_info(scope: Scope, epoch: i64, recipient: &[u8; 32]) -> Vec<u8> {
-    [
-        b"rusttalk-envelope-v1".as_slice(),
-        &[scope.kind as u8],
-        &scope.id,
-        &epoch.to_be_bytes(),
-        recipient,
-    ]
-    .concat()
+#[derive(Clone, Copy)]
+pub struct EnvelopeContext {
+    pub server_id: [u8; 32],
+    pub scope: Scope,
+    pub epoch: i64,
+    pub commitment: [u8; 32],
 }
 
-pub fn wrap(
-    scope: Scope,
-    epoch: i64,
-    key: &Key,
-    recipient: &DeviceCertificate,
-    sender: &DeviceIdentity,
-) -> Result<Vec<u8>, KeyError> {
-    if epoch <= 0 {
-        return Err(KeyError::Encoding);
+impl EnvelopeContext {
+    pub fn new(server_id: [u8; 32], scope: Scope, epoch: i64, key: &Key) -> Self {
+        let mut context = Self {
+            server_id,
+            scope,
+            epoch,
+            commitment: [0; 32],
+        };
+        context.commitment = context.key_mac(key).finalize().into_bytes().into();
+        context
     }
-    let info = envelope_info(scope, epoch, recipient.signing_key().as_bytes());
-    let public = <Dh as Kem>::PublicKey::from_bytes(recipient.agreement_key())
-        .map_err(|_| KeyError::Encoding)?;
-    let mut rng = StdRng::from_seed(*random_key()?);
-    let (enc, ciphertext) = single_shot_seal_with_rng::<ChaCha20Poly1305, HkdfSha256, Dh>(
-        &OpModeS::Base,
-        &public,
-        &info,
-        key.as_ref(),
-        &[],
-        &mut rng,
-    )
-    .map_err(|_| KeyError::Authentication)?;
-    let mut bytes = [enc.to_bytes().as_slice(), ciphertext.as_slice()].concat();
-    let signature = sender.signing_key.sign(&[info.as_slice(), &bytes].concat());
-    bytes.extend_from_slice(&signature.to_bytes());
-    Ok(bytes)
-}
 
-pub fn verify_envelope(
-    scope: Scope,
-    epoch: i64,
-    recipient: &[u8; 32],
-    sender: &DeviceCertificate,
-    bytes: &[u8],
-) -> Result<(), KeyError> {
-    if epoch <= 0 || bytes.len() != 32 + 32 + TAG + 64 {
-        return Err(KeyError::Encoding);
+    fn key_mac(&self, key: &Key) -> Hmac<Sha256> {
+        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key.as_ref())
+            .expect("HMAC accepts any key length");
+        mac.update(b"rusttalk-key-commit-v1");
+        mac.update(&self.server_id);
+        mac.update(&[self.scope.kind as u8]);
+        mac.update(&self.scope.id);
+        mac.update(&self.epoch.to_be_bytes());
+        mac
     }
-    let (sealed, signature) = bytes.split_last_chunk().ok_or(KeyError::Encoding)?;
-    let info = envelope_info(scope, epoch, recipient);
-    sender
-        .signing_key()
-        .verify_strict(
-            &[info.as_slice(), sealed].concat(),
-            &Signature::from_bytes(signature),
-        )
-        .map_err(|_| KeyError::Signature)
-}
 
-pub fn unwrap(
-    scope: Scope,
-    epoch: i64,
-    recipient: &DeviceIdentity,
-    sender: &DeviceCertificate,
-    bytes: &[u8],
-) -> Result<Key, KeyError> {
-    let device = recipient.certificate.signing_key().as_bytes();
-    verify_envelope(scope, epoch, device, sender, bytes)?;
-    let info = envelope_info(scope, epoch, device);
-    let secret = <Dh as Kem>::PrivateKey::from_bytes(recipient.agreement_key.as_bytes())
-        .map_err(|_| KeyError::Encoding)?;
-    let enc = <Dh as Kem>::EncappedKey::from_bytes(&bytes[..32]).map_err(|_| KeyError::Encoding)?;
-    let key = Zeroizing::new(
-        single_shot_open::<ChaCha20Poly1305, HkdfSha256, Dh>(
-            &OpModeR::Base,
-            &secret,
-            &enc,
+    fn info(&self, recipient: &[u8; 32]) -> Vec<u8> {
+        [
+            b"rusttalk-envelope-v1".as_slice(),
+            &self.server_id,
+            &[self.scope.kind as u8],
+            &self.scope.id,
+            &self.epoch.to_be_bytes(),
+            recipient,
+        ]
+        .concat()
+    }
+
+    pub fn wrap(
+        &self,
+        key: &Key,
+        recipient: &DeviceCertificate,
+        sender: &DeviceIdentity,
+    ) -> Result<Vec<u8>, KeyError> {
+        if self.epoch <= 0 {
+            return Err(KeyError::Encoding);
+        }
+        let info = self.info(recipient.signing_key().as_bytes());
+        let public = <Dh as Kem>::PublicKey::from_bytes(recipient.agreement_key())
+            .map_err(|_| KeyError::Encoding)?;
+        let mut rng = StdRng::from_seed(*random_key()?);
+        let (enc, ciphertext) = single_shot_seal_with_rng::<ChaCha20Poly1305, HkdfSha256, Dh>(
+            &OpModeS::Base,
+            &public,
             &info,
-            &bytes[32..80],
+            key.as_ref(),
             &[],
+            &mut rng,
         )
-        .map_err(|_| KeyError::Authentication)?,
-    );
-    Ok(Key::new(
-        key.as_slice().try_into().map_err(|_| KeyError::Encoding)?,
-    ))
+        .map_err(|_| KeyError::Authentication)?;
+        let mut bytes = [enc.to_bytes().as_slice(), ciphertext.as_slice()].concat();
+        let signature = sender
+            .signing_key
+            .sign(&[info.as_slice(), &self.commitment, &bytes].concat());
+        bytes.extend_from_slice(&signature.to_bytes());
+        Ok(bytes)
+    }
+
+    pub fn verify(
+        &self,
+        recipient: &[u8; 32],
+        sender: &DeviceCertificate,
+        bytes: &[u8],
+    ) -> Result<(), KeyError> {
+        if self.epoch <= 0 || bytes.len() != 32 + 32 + TAG + 64 {
+            return Err(KeyError::Encoding);
+        }
+        let (sealed, signature) = bytes.split_last_chunk().ok_or(KeyError::Encoding)?;
+        let info = self.info(recipient);
+        sender
+            .signing_key()
+            .verify_strict(
+                &[info.as_slice(), &self.commitment, sealed].concat(),
+                &Signature::from_bytes(signature),
+            )
+            .map_err(|_| KeyError::Signature)
+    }
+
+    pub fn unwrap(
+        &self,
+        recipient: &DeviceIdentity,
+        sender: &DeviceCertificate,
+        bytes: &[u8],
+    ) -> Result<Key, KeyError> {
+        let device = recipient.certificate.signing_key().as_bytes();
+        self.verify(device, sender, bytes)?;
+        let info = self.info(device);
+        let secret = <Dh as Kem>::PrivateKey::from_bytes(recipient.agreement_key.as_bytes())
+            .map_err(|_| KeyError::Encoding)?;
+        let enc =
+            <Dh as Kem>::EncappedKey::from_bytes(&bytes[..32]).map_err(|_| KeyError::Encoding)?;
+        let key = Zeroizing::new(
+            single_shot_open::<ChaCha20Poly1305, HkdfSha256, Dh>(
+                &OpModeR::Base,
+                &secret,
+                &enc,
+                &info,
+                &bytes[32..80],
+                &[],
+            )
+            .map_err(|_| KeyError::Authentication)?,
+        );
+        let key = Key::new(key.as_slice().try_into().map_err(|_| KeyError::Encoding)?);
+        self.key_mac(&key)
+            .verify_slice(&self.commitment)
+            .map_err(|_| KeyError::Commitment)?;
+        Ok(key)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -234,13 +276,14 @@ impl Metadata {
         }
     }
 
-    fn aad(self, id: &[u8], epoch: i64) -> Result<Vec<u8>, KeyError> {
+    fn aad(self, server_id: &[u8; 32], id: &[u8], epoch: i64) -> Result<Vec<u8>, KeyError> {
         let len = u8::try_from(id.len()).map_err(|_| KeyError::Encoding)?;
         if len == 0 || epoch <= 0 {
             return Err(KeyError::Encoding);
         }
         Ok([
             b"rusttalk-meta-v1".as_slice(),
+            server_id,
             &[self as u8, len],
             id,
             &epoch.to_be_bytes(),
@@ -259,17 +302,30 @@ impl Metadata {
         Ok(epoch)
     }
 
-    pub fn seal(self, id: &[u8], epoch: i64, key: &Key, clear: &[u8]) -> Result<Vec<u8>, KeyError> {
+    pub fn seal(
+        self,
+        server_id: &[u8; 32],
+        id: &[u8],
+        epoch: i64,
+        key: &Key,
+        clear: &[u8],
+    ) -> Result<Vec<u8>, KeyError> {
         if clear.len() > self.limit() - HEADER - TAG {
             return Err(KeyError::Encoding);
         }
-        let ciphertext = seal(key, &self.aad(id, epoch)?, clear)?;
+        let ciphertext = seal(key, &self.aad(server_id, id, epoch)?, clear)?;
         Ok([epoch.to_be_bytes().as_slice(), &ciphertext].concat())
     }
 
-    pub fn open(self, id: &[u8], key: &Key, bytes: &[u8]) -> Result<Vec<u8>, KeyError> {
+    pub fn open(
+        self,
+        server_id: &[u8; 32],
+        id: &[u8],
+        key: &Key,
+        bytes: &[u8],
+    ) -> Result<Vec<u8>, KeyError> {
         let epoch = self.epoch(bytes)?;
-        open(key, &self.aad(id, epoch)?, &bytes[8..])
+        open(key, &self.aad(server_id, id, epoch)?, &bytes[8..])
     }
 }
 

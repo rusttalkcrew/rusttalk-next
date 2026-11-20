@@ -6,7 +6,10 @@ use reqwest::{Method, RequestBuilder, Response, StatusCode};
 use rusttalk_core::{
     auth::{InviteLink, Session, decode, decode_bytes, encode},
     identity::{DeviceCertificate, DeviceIdentity, fingerprint},
-    keys::{self, Event, Key, KeyState, Kind, MemberDevice, Metadata, Scope, ScopeState},
+    keys::{
+        self, EnvelopeContext, Event, Key, KeyState, Kind, MemberDevice, Metadata, Scope,
+        ScopeState,
+    },
     pinned_tls,
 };
 use serde_json::{Value, json};
@@ -21,7 +24,7 @@ pub struct KeyClient<'a> {
     events: tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,
-    keys: HashMap<(Scope, i64), Key>,
+    keys: HashMap<(Scope, i64), (Key, String)>,
     devices: HashMap<String, DeviceCertificate>,
     scopes: Vec<ScopeState>,
     pub close_reason: Option<String>,
@@ -64,12 +67,18 @@ impl<'a> KeyClient<'a> {
     }
 
     pub fn key(&self, scope: Scope, epoch: i64) -> Option<&Key> {
-        self.keys.get(&(scope, epoch))
+        self.keys.get(&(scope, epoch)).map(|(key, _)| key)
     }
 
     pub fn encrypt_metadata(&self, kind: Metadata, id: &[u8], plaintext: &[u8]) -> Result<String> {
         let (epoch, key) = self.current_space()?;
-        Ok(encode(&kind.seal(id, epoch, key, plaintext)?))
+        Ok(encode(&kind.seal(
+            &self.bot.server.server_id,
+            id,
+            epoch,
+            key,
+            plaintext,
+        )?))
     }
 
     pub fn decrypt_metadata(&self, kind: Metadata, id: &[u8], encoded: &str) -> Result<Vec<u8>> {
@@ -78,7 +87,7 @@ impl<'a> KeyClient<'a> {
         let key = self
             .key(self.space(), epoch)
             .context("missing metadata key")?;
-        Ok(kind.open(id, key, &bytes)?)
+        Ok(kind.open(&self.bot.server.server_id, id, key, &bytes)?)
     }
 
     fn current_space(&self) -> Result<(i64, &Key)> {
@@ -104,30 +113,49 @@ impl<'a> KeyClient<'a> {
                 .json()
                 .await?;
             self.sync_devices().await?;
+            let mut refetch = false;
             for wrapped in state.envelopes {
                 let Some(sender) = self.devices.get(&wrapped.sender) else {
                     // A directory change can overtake the key-state request.
                     continue;
                 };
                 let slot = (wrapped.need.scope, wrapped.need.epoch);
-                if let std::collections::hash_map::Entry::Vacant(entry) = self.keys.entry(slot) {
-                    match keys::unwrap(
-                        slot.0,
-                        slot.1,
-                        self.identity,
-                        sender,
-                        &decode_bytes(&wrapped.envelope)?,
-                    ) {
-                        Ok(key) => {
-                            entry.insert(key);
-                        }
-                        Err(error) => tracing::warn!(reason = %error, "rejected key envelope"),
+                if self
+                    .keys
+                    .get(&slot)
+                    .is_some_and(|(_, envelope)| *envelope == wrapped.envelope)
+                {
+                    continue;
+                }
+                let context = EnvelopeContext {
+                    server_id: self.bot.server.server_id,
+                    scope: slot.0,
+                    epoch: slot.1,
+                    commitment: wrapped.commitment,
+                };
+                let opened = decode_bytes(&wrapped.envelope)
+                    .map_err(|_| keys::KeyError::Encoding)
+                    .and_then(|bytes| context.unwrap(self.identity, sender, &bytes));
+                match opened {
+                    Ok(key) => {
+                        self.keys.insert(slot, (key, wrapped.envelope));
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            reason = %error,
+                            device = %fingerprint(sender.signing_key().as_bytes()),
+                            "rejected key envelope"
+                        );
+                        let reply = self.request(Method::POST, "/v1/keys/reject")
+                            .json(&json!({"scope": slot.0, "epoch": slot.1, "sender": wrapped.sender, "envelope": wrapped.envelope}))
+                            .send().await?;
+                        key_state_raced(reply).await?;
+                        refetch = true;
                     }
                 }
             }
             self.scopes = state.scopes;
 
-            let mut refetch = false;
             for scope in &self.scopes {
                 if scope.rotate || (scope.epoch == 0 && self.is_owner().await?) {
                     self.publish_epoch(
@@ -146,7 +174,9 @@ impl<'a> KeyClient<'a> {
                 ) else {
                     continue;
                 };
-                let envelope = keys::wrap(need.scope, need.epoch, key, device, self.identity)?;
+                let context =
+                    EnvelopeContext::new(self.bot.server.server_id, need.scope, need.epoch, key);
+                let envelope = context.wrap(key, device, self.identity)?;
                 tracing::info!(
                     person = %fingerprint(device.person_id()),
                     device = %fingerprint(device.signing_key().as_bytes()),
@@ -180,24 +210,25 @@ impl<'a> KeyClient<'a> {
 
     async fn publish_epoch(&self, scope: Scope, epoch: i64) -> Result<()> {
         let key = keys::random_key()?;
-        let envelope = self.wrap_for_self(scope, epoch, &key)?;
+        let context = EnvelopeContext::new(self.bot.server.server_id, scope, epoch, &key);
+        let envelope = self.wrap_for_self(context, &key)?;
         let reply = self
             .request(Method::POST, "/v1/keys/epochs")
-            .json(&json!({"scope": scope, "epoch": epoch, "envelope": envelope}))
+            .json(&json!({"scope": scope, "epoch": epoch, "commitment": encode(&context.commitment), "envelope": envelope}))
             .send()
             .await?;
         key_state_raced(reply).await?;
         Ok(())
     }
 
-    fn wrap_for_self(&self, scope: Scope, epoch: i64, key: &Key) -> Result<String> {
+    fn wrap_for_self(&self, context: EnvelopeContext, key: &Key) -> Result<String> {
         let cert = &self.identity.certificate;
         tracing::info!(
             person = %fingerprint(cert.person_id()),
             device = %fingerprint(cert.signing_key().as_bytes()),
             "wrapping key for device"
         );
-        Ok(encode(&keys::wrap(scope, epoch, key, cert, self.identity)?))
+        Ok(encode(&context.wrap(key, cert, self.identity)?))
     }
 
     async fn sync_devices(&mut self) -> Result<()> {
@@ -326,16 +357,17 @@ impl<'a> KeyClient<'a> {
         let name_ct = self.encrypt_metadata(Metadata::ChannelName, &id, name)?;
         let topic_ct = self.encrypt_metadata(Metadata::ChannelTopic, &id, topic)?;
         let key = keys::random_key()?;
-        let envelope = self.wrap_for_self(scope, 1, &key)?;
+        let context = EnvelopeContext::new(self.bot.server.server_id, scope, 1, &key);
+        let envelope = self.wrap_for_self(context, &key)?;
         self.request(Method::POST, "/v1/channels")
             .json(&json!({
                 "id": encode(&id), "kind": kind, "category_id": encode(category), "position": 0,
-                "name_ct": name_ct, "topic_ct": topic_ct, "envelope": envelope,
+                "name_ct": name_ct, "topic_ct": topic_ct, "commitment": encode(&context.commitment), "envelope": envelope,
             }))
             .send()
             .await?
             .error_for_status()?;
-        self.keys.insert((scope, 1), key);
+        self.keys.insert((scope, 1), (key, envelope));
         Ok(scope)
     }
 
@@ -429,7 +461,12 @@ pub async fn invite_name(bot: &Bot, link: &InviteLink) -> Result<Option<Vec<u8>>
                 Metadata::ServerName.epoch(&ct)? == epoch,
                 "invite metadata epoch differs"
             );
-            Ok(Metadata::ServerName.open(&link.server.server_id, &space, &ct)?)
+            Ok(Metadata::ServerName.open(
+                &link.server.server_id,
+                &link.server.server_id,
+                &space,
+                &ct,
+            )?)
         })
         .transpose()
 }

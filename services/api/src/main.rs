@@ -199,6 +199,7 @@ async fn serve(app: App) -> io::Result<()> {
         .route("/v1/events", get(events::upgrade))
         .route("/v1/keys", get(keys::state).post(keys::upload))
         .route("/v1/keys/epochs", post(keys::new_epoch))
+        .route("/v1/keys/reject", post(keys::reject))
         .route("/v1/member-devices", get(keys::devices))
         .route("/v1/invite-preview", post(members::preview))
         .route("/v1/catalog", get(channels::catalog))

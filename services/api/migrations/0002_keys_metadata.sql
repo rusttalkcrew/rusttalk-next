@@ -40,7 +40,7 @@ CREATE TABLE channels (
 CREATE TABLE channel_permissions (
     channel_id TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
     role_id TEXT NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
-    flags INTEGER NOT NULL CHECK (flags BETWEEN 1 AND 15),
+    flags INTEGER NOT NULL CHECK (flags BETWEEN 1 AND 15 AND (flags & 1) = 1),
     PRIMARY KEY (channel_id, role_id)
 );
 
@@ -49,9 +49,10 @@ CREATE VIEW channel_readers AS
     FROM channel_permissions p JOIN member_roles m ON p.role_id = m.role_id
     WHERE (p.flags & 1) <> 0
     UNION
-    SELECT p.channel_id, s.owner_person_id
-    FROM channel_permissions p CROSS JOIN server_settings s
-    WHERE p.role_id = 'owner' AND (p.flags & 1) <> 0 AND s.owner_person_id IS NOT NULL;
+    -- The owner always reads every channel, whatever the Owner role's flags say.
+    SELECT c.id, s.owner_person_id
+    FROM channels c CROSS JOIN server_settings s
+    WHERE s.owner_person_id IS NOT NULL;
 
 CREATE TABLE key_scopes (
     id TEXT NOT NULL PRIMARY KEY,
@@ -69,6 +70,7 @@ CREATE VIEW scope_readers AS
 CREATE TABLE key_epochs (
     scope_id TEXT NOT NULL REFERENCES key_scopes(id) ON DELETE CASCADE,
     epoch BIGINT NOT NULL CHECK (epoch > 0),
+    commitment BLOB NOT NULL CHECK (length(commitment) = 32),
     PRIMARY KEY (scope_id, epoch)
 );
 
@@ -82,6 +84,15 @@ CREATE TABLE key_envelopes (
     FOREIGN KEY (scope_id, epoch) REFERENCES key_epochs(scope_id, epoch) ON DELETE CASCADE
 );
 CREATE INDEX key_envelopes_recipient ON key_envelopes (recipient_device);
+
+CREATE TABLE key_envelope_rejections (
+    scope_id TEXT NOT NULL,
+    epoch BIGINT NOT NULL,
+    recipient_device BLOB NOT NULL REFERENCES member_devices(device_id) ON DELETE CASCADE,
+    sender_person BLOB NOT NULL REFERENCES members(person_id) ON DELETE CASCADE,
+    PRIMARY KEY (scope_id, epoch, recipient_device, sender_person),
+    FOREIGN KEY (scope_id, epoch) REFERENCES key_epochs(scope_id, epoch) ON DELETE CASCADE
+);
 
 -- Channel IDs are chosen before encryption and can only be used once.
 CREATE TABLE channel_ids (id TEXT NOT NULL PRIMARY KEY);

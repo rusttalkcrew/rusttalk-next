@@ -77,7 +77,8 @@ device binding and expiry. The client sends the encoded token in the HTTPS
 Authorization header. Refresh replaces the token inside a transaction. An
 invite code is 16 random bytes, hashed with SHA-256 before storage. The API
 records the verified public device certificate on sign-in so clients can
-wrap keys for the device even if it goes offline.
+wrap keys for the device even if it goes offline. Each person can register
+up to ten devices per server. Revoking a device frees its slot.
 
 ## Channel and space keys
 
@@ -88,6 +89,14 @@ envelope. A channel creator creates channel epoch 1 and uploads its
 self-addressed envelope with channel creation. The identity sync key is
 separate and reserved for device sync in W14.
 
+The epoch creator stores a 32-byte commitment with the epoch. It computes
+HMAC-SHA256 keyed by the epoch key over these bytes.
+
+```text
+"rusttalk-key-commit-v1" || server_id (32 bytes) || kind (1 byte) ||
+scope_id (32 bytes) || epoch (8 bytes, big endian)
+```
+
 ### Envelopes
 
 Use [RFC 9180](https://www.rfc-editor.org/rfc/rfc9180.html) base mode
@@ -97,17 +106,23 @@ in its verified device certificate. Use empty HPKE AAD. HPKE info is the
 following fixed-length concatenation.
 
 ```text
-"rusttalk-envelope-v1" || kind (1 byte: space=1, channel=2) ||
+"rusttalk-envelope-v1" || server_id (32 bytes) || kind (1 byte: space=1, channel=2) ||
 scope_id (32 bytes) || epoch (8 bytes, big endian) || recipient_Ed25519 (32 bytes)
 ```
 
 The 144-byte envelope is the 32-byte HPKE encapsulated public key, a
 48-byte HPKE ciphertext and a 64-byte Ed25519 signature. The sender
-signs the HPKE info followed by the encapsulated key and ciphertext.
+signs the HPKE info followed by the epoch commitment, encapsulated key
+and ciphertext. This signature binds the commitment when the API creates
+the epoch and verifies later envelopes against the stored commitment.
 The API checks signature, record size and sender and recipient access
 before accepting an envelope. On receipt, clients verify the sender's
 root-signed certificate in the current member directory and verify
-the contextual envelope signature before opening it.
+the contextual envelope signature before opening it. They verify the opened
+key against the commitment before using it. A device can reject a bad
+envelope to reopen its slot. The API excludes that sender's person from
+refilling the same recipient's slot for that scope and epoch while the
+sender remains a member.
 
 Clients holding a key respond to pending wraps for every eligible
 device and epoch. Space keys go to all member devices. Channel keys
@@ -131,7 +146,8 @@ ciphertext (including the 16-byte tag). Epochs are positive signed
 concatenation.
 
 ```text
-"rusttalk-meta-v1" || object_type (1 byte) || object_id_length (1 byte) ||
+"rusttalk-meta-v1" || server_id (32 bytes) || object_type (1 byte) ||
+object_id_length (1 byte) ||
 object_id || epoch (8 bytes, big endian)
 ```
 
@@ -141,7 +157,10 @@ name (8), and avatar (9). Server objects use the raw server ID. Channels
 and categories use their raw 32-byte IDs. Members use the raw person ID.
 Role names use the role ID's UTF-8 bytes. New metadata uses the newest
 space epoch held by the client, and the API accepts writes only when
-that epoch is current and the scope is ready.
+that epoch is current and the scope is ready. A removed member who
+colludes with the server can forge metadata under any old space key
+they held. Clients prefer metadata from the newest epoch and re-encrypt
+their own display name after a space rotation.
 
 ### Invite previews
 
@@ -174,7 +193,11 @@ change with person and device fingerprints. The bot also logs the person
 and device fingerprints for every wrap. The API never receives the
 decryption keys from an honest client. Former readers retain anything
 they already decrypted or saved. Rotation excludes them from subsequent
-epochs until server membership or read access is granted again.
+epochs while access is denied. A re-invited member receives the full
+history for scopes they can read, including epochs created to exclude
+them. Each commitment attests to the key chosen by the epoch creator.
+If that creator publishes an unusable key, recovering requires a new
+epoch.
 
 The selected [hpke crate](https://github.com/rozbb/rust-hpke#security)
 uses the RFC 9180 construction and is dual-licensed MIT/Apache-2.0.

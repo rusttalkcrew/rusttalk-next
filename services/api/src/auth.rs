@@ -18,33 +18,18 @@ use crate::{
     store::{audit, hash, log_closed, now, random, write},
 };
 
-const CHALLENGE_LIMIT: i64 = 256;
-const CHALLENGES_PER_IP: i64 = 8;
+const PUBLIC_LIMIT: i64 = 256;
+const PUBLIC_LIMIT_PER_IP: i64 = 8;
 const SESSIONS_PER_PERSON: i64 = 16;
 const REVOCATIONS_PER_PERSON: i64 = 64;
 const CHALLENGE_TTL: i64 = 60;
 const SESSION_TTL: i64 = Duration::from_hours(12).as_secs() as i64;
 
 pub async fn challenge(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Challenge>> {
-    let ip = limit_key(&client_ip(&headers)?);
+    let ip = client_ip(&headers)?;
     let mut tx = write(&app.db).await?;
     let at = now()?;
-    query("DELETE FROM challenges WHERE expires_at <= ?")
-        .bind(at)
-        .execute(&mut *tx)
-        .await?;
-    // The per-IP cap keeps one client from using up the global backstop for everyone.
-    let (total, from_ip): (i64, i64) =
-        query_as("SELECT COUNT(*), COUNT(*) FILTER (WHERE ip = ?) FROM challenges")
-            .bind(&ip)
-            .fetch_one(&mut *tx)
-            .await?;
-    if total >= CHALLENGE_LIMIT || from_ip >= CHALLENGES_PER_IP {
-        return Err(ApiError::new(
-            StatusCode::TOO_MANY_REQUESTS,
-            "challenge_limit",
-        ));
-    }
+    let ip = check_public_limit(&mut tx, &ip, at, PublicLimit::Challenge).await?;
     let challenge = random::<32>()?;
     query("INSERT INTO challenges (nonce, ip, expires_at) VALUES (?, ?, ?)")
         .bind(challenge.as_slice())
@@ -172,6 +157,38 @@ fn limit_key(ip: &str) -> String {
         }
         _ => ip.to_owned(),
     }
+}
+
+pub enum PublicLimit {
+    Challenge,
+    InvitePreview,
+}
+
+pub async fn check_public_limit(
+    db: &mut SqliteConnection,
+    ip: &str,
+    at: i64,
+    limit: PublicLimit,
+) -> ApiResult<String> {
+    let (table, code) = match limit {
+        PublicLimit::Challenge => ("challenges", "challenge_limit"),
+        PublicLimit::InvitePreview => ("invite_previews", "invite_preview_limit"),
+    };
+    let ip = limit_key(ip);
+    query(&format!("DELETE FROM {table} WHERE expires_at <= ?"))
+        .bind(at)
+        .execute(&mut *db)
+        .await?;
+    let (total, from_ip): (i64, i64) = query_as(&format!(
+        "SELECT COUNT(*), COUNT(*) FILTER (WHERE ip = ?) FROM {table}"
+    ))
+    .bind(&ip)
+    .fetch_one(db)
+    .await?;
+    if total >= PUBLIC_LIMIT || from_ip >= PUBLIC_LIMIT_PER_IP {
+        return Err(ApiError::new(StatusCode::TOO_MANY_REQUESTS, code));
+    }
+    Ok(ip)
 }
 
 async fn check_ip(db: &mut SqliteConnection, ip: &str, person: &[u8]) -> ApiResult<()> {
@@ -500,16 +517,16 @@ mod tests {
             headers.insert("x-forwarded-for", ip.parse().unwrap());
             headers
         };
-        for _ in 0..CHALLENGES_PER_IP {
+        for _ in 0..PUBLIC_LIMIT_PER_IP {
             assert!(
-                challenge(State(app.clone()), from("192.0.2.1"))
+                challenge(State(app.clone()), from("2001:db8:1:2::1"))
                     .await
                     .is_ok()
             );
         }
-        let refused = challenge(State(app.clone()), from("192.0.2.1")).await;
+        let refused = challenge(State(app.clone()), from("2001:db8:1:2::2")).await;
         assert_eq!(refused.err().unwrap().code, "challenge_limit");
-        assert!(challenge(State(app), from("192.0.2.2")).await.is_ok());
+        assert!(challenge(State(app), from("2001:db8:1:3::1")).await.is_ok());
         assert_eq!(limit_key("2001:db8:1:2:3:4:5:6"), "2001:db8:1:2::");
         assert_eq!(limit_key("192.0.2.1"), "192.0.2.1");
     }

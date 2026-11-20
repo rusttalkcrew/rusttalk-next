@@ -33,6 +33,8 @@ code as the optional `invite` field. Invite redemption, membership and session
 creation are atomic. Each person and device pair can have one current session.
 Successful sign-in replaces any previous token for the device. A refresh
 rotates the bearer token and extends expiry to 12 hours from the refresh.
+A person may register up to ten devices. At the cap, sign-in from a new
+device returns `409 device_limit`. Revoking a device frees a slot.
 
 ## Invite links and server pins
 
@@ -151,7 +153,8 @@ in a state response indicating that the first epoch is still pending.
 | GET `/v1/member-devices` | Empty | Any member. 200, `[{person, certificate}]` of current devices |
 | GET `/v1/keys` | Empty | Any member. 200, `{scopes, envelopes, pending}` |
 | POST `/v1/keys` | `{scope, epoch, device, envelope}` | A reader of the scope. 204. The recipient must also be a current device of a reader |
-| POST `/v1/keys/epochs` | `{scope, epoch, envelope}` | A reader of a rotating scope, or the owner for the initial space epoch. 201. The envelope is addressed to the caller's device |
+| POST `/v1/keys/reject` | `{scope, epoch, sender, envelope}` | A reader of the scope. 204. Deletes a matching envelope addressed to the caller's device |
+| POST `/v1/keys/epochs` | `{scope, epoch, commitment, envelope}` | A reader of a rotating scope, or the owner for the initial space epoch. 201. The envelope is addressed to the caller's device |
 | GET `/v1/space` | Empty | Any member. 200, `{name_ct, description_ct, icon_ct}` |
 | PUT `/v1/space` | `{name_ct?, description_ct?, icon_ct?}` | Owner. 204 |
 | GET `/v1/members` | Empty | Any member. 200, `[{person_id, display_name_ct, avatar_ct}]` |
@@ -159,12 +162,15 @@ in a state response indicating that the first epoch is still pending.
 | POST `/v1/invite-preview` | `{code}` | No bearer. 200, `{space_key_ct, name_ct}`. Missing, expired, spent or unpreviewable invite returns 404 |
 
 Scope state entries have `{scope, epoch, rotate}`. Pending entries have
-`{scope, epoch, device}`. Envelope entries add `sender` and `envelope`
+`{scope, epoch, device}`. Envelope entries add `sender`, `commitment` and `envelope`
 to those fields. Each response exposes envelopes only for its authenticated
 device and readable scopes. Pending wraps include all epochs, and include
 records whose sender device is no longer current. Each new epoch is
 created in one transaction with its first envelope. A client that loses
 the epoch race receives `409 epoch_changed` and fetches state again.
+Rejecting a matching envelope reopens its slot and prevents the sender's
+person from uploading to that slot while they remain a member. A stale
+rejection leaves the current envelope in place.
 See [Crypto](crypto.md) for the binary envelope and metadata formats.
 
 Metadata PUTs replace the supplied record. Omitted or null optional fields
@@ -175,8 +181,8 @@ Server names, descriptions, channel names and topics, category names and
 display names allow 1024 plaintext bytes each. Icon and avatar ciphertext
 blobs allow 256 KiB each. The two metadata PUT routes that accept images
 allow 356 KiB JSON bodies to account for base64url and accompanying fields.
-Invite preview permits eight lookups per IP and 256 server-wide in 60
-seconds. Invalid codes that pass base64url parsing also count.
+Invite preview permits eight lookups per IPv4 address or IPv6 /64 and
+256 server-wide in 60 seconds. Invalid codes that pass base64url parsing also count.
 
 ## Channels and categories
 
@@ -189,10 +195,10 @@ Every channel has one category. Channel kind is fixed at creation.
 | --- | --- | --- |
 | GET `/v1/catalog` | Empty | Any member. 200, `{channels, categories}` filtered to channels they can read and their categories |
 | GET `/v1/channels` | Empty | `manage_channels`. 200, channel list |
-| POST `/v1/channels` | `{id, kind, category_id, position, name_ct, topic_ct?, envelope}` | `manage_channels`. 201. Envelope initializes epoch 1 for the caller |
+| POST `/v1/channels` | `{id, kind, category_id, position, name_ct, topic_ct?, commitment, envelope}` | `manage_channels`. 201. Envelope initializes epoch 1 for the caller |
 | PUT `/v1/channels/{id}` | `{category_id, position, name_ct, topic_ct?}` | `manage_channels`. 204 |
 | DELETE `/v1/channels/{id}` | Empty | `manage_channels`. 204 |
-| PUT `/v1/channels/{id}/permissions/{role}` | `{flags}` | `manage_channels`. 204 |
+| PUT `/v1/channels/{id}/permissions/{role}` | `{flags}` | `manage_channels` and a lower-ranked target role. The Owner can also change the Owner role. 204 |
 | GET `/v1/categories` | Empty | `manage_channels`. 200, category list |
 | POST `/v1/categories` | `{id, position, name_ct}` | `manage_channels`. 201 |
 | PUT `/v1/categories/{id}` | `{position, name_ct}` | `manage_channels`. 204 |
@@ -202,7 +208,10 @@ Channel responses have `{id, kind, category_id, position, name_ct, topic_ct, fla
 A category has `{id, position, name_ct}`. Each channel's flags are
 `[{role_id, flags}]` with read (1), write (2), speak (4), and video (8).
 Flags accumulate across assigned roles, including the owner role while
-held. A zero mask removes a role's entry. Owner, Admin and Member start
+held. The owner always reads every channel, so the Owner role's read flag
+never removes the owner's access. A zero mask removes a role's entry.
+Write, speak and video each require read in the same mask. An invalid
+mask returns `400 invalid_channel_flags`. Owner, Admin and Member start
 with all four flags on new channels. If a custom-role creator would
 otherwise lack read access, its highest-ranked assigned role with
 `manage_channels` also starts with all four flags. Losing the read flag
@@ -223,11 +232,12 @@ session validity before pushing updates.
 | `rotate_needed` | `scope`. Fetch the current epoch and try to publish its successor |
 | `member_changed` | `person`, optional `device`. Refresh the member and device directory and surface fingerprints |
 | `channel_changed` | None. Refresh the catalog |
+| `resync` | None. The socket fell behind. Fetch current state, including keys, catalog and member devices |
 
 The API closes the socket when the token expires or ends, including kick,
 ban and device revocation. Close reasons are fixed strings and logged.
-A client reconnects and fetches current state if it falls behind. Message
-events are specified in W07.
+The server keeps lagging sockets open and recomputes the outstanding
+key work. Message events are specified in W07.
 
 ## Files
 

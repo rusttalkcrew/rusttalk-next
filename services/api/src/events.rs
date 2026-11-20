@@ -20,7 +20,7 @@ use crate::{
     ApiError, ApiResult, App,
     auth::{Actor, authenticate},
     keys,
-    store::{now, write},
+    store::now,
 };
 
 pub async fn upgrade(
@@ -73,9 +73,20 @@ async fn stream(
     tokio::pin!(expires);
     let mut pending: HashSet<KeyNeed> = HashSet::new();
     let mut rotations: HashSet<(Scope, i64)> = HashSet::new();
-    let mut event = None;
+    let mut notices = Vec::new();
+    let mut lagged = false;
     loop {
-        let mut tx = write(&app.db).await?;
+        // Bound the drain to the broadcast backlog so a busy stream still makes progress.
+        for _ in 0..=app.changes.len() {
+            use broadcast::error::TryRecvError;
+            match changes.try_recv() {
+                Ok(notice) => notices.extend(notice),
+                Err(TryRecvError::Lagged(_)) => lagged = true,
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Closed) => return Ok("server_closed"),
+            }
+        }
+        let mut tx = app.db.begin().await?;
         if let Some(reason) = session_end(&mut tx, actor).await? {
             return Ok(reason);
         }
@@ -88,12 +99,26 @@ async fn stream(
             .collect();
         tx.commit().await?;
 
-        if let Some(notice) = event.take() {
-            // A completed wrap is only of interest to its recipient.
-            if !matches!(&notice, Event::KeysNeeded(need) if need.device != rusttalk_core::auth::encode(&actor.device))
-            {
-                send(socket, notice).await?;
+        if lagged {
+            send(socket, Event::Resync).await?;
+            pending.clear();
+            rotations.clear();
+            lagged = false;
+        }
+        let device = rusttalk_core::auth::encode(&actor.device);
+        for notice in notices.drain(..) {
+            if let Event::KeysNeeded(need) = &notice {
+                // A rejected slot can reopen within this batch and still need a wrap.
+                if next_pending.contains(need) {
+                    pending.remove(need);
+                    continue;
+                }
+                // A completed wrap only wakes its recipient.
+                if need.device != device {
+                    continue;
+                }
             }
+            send(socket, notice).await?;
         }
         for need in next_pending.difference(&pending) {
             send(socket, Event::KeysNeeded(need.clone())).await?;
@@ -104,7 +129,7 @@ async fn stream(
         pending = next_pending;
         rotations = next_rotations;
 
-        event = loop {
+        loop {
             tokio::select! {
                 _ = &mut expires => return Ok("token_expired"),
                 incoming = socket.recv() => match incoming {
@@ -113,13 +138,16 @@ async fn stream(
                     Some(Ok(_)) => return Ok("unexpected_client_message"),
                     Some(Err(_)) => return Ok("socket_io_error"),
                 },
-                update = changes.recv() => break match update {
-                    Ok(notice) => notice,
-                    Err(broadcast::error::RecvError::Lagged(_)) => return Ok("event_lagged"),
-                    Err(broadcast::error::RecvError::Closed) => return Ok("server_closed"),
+                update = changes.recv() => {
+                    match update {
+                        Ok(notice) => notices.extend(notice),
+                        Err(broadcast::error::RecvError::Lagged(_)) => lagged = true,
+                        Err(broadcast::error::RecvError::Closed) => return Ok("server_closed"),
+                    }
+                    break;
                 },
             }
-        };
+        }
     }
 }
 

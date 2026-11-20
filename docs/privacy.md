@@ -14,21 +14,22 @@ tables in SQLite (WAL). IDs and digests are binary unless indicated. The `_ct` s
 | `server_settings` | Singleton `id`, nullable `owner_person_id`, `default_role_id`, nullable `name_ct`, nullable `description_ct`, nullable `icon_ct` |
 | `member_roles` | `person_id`, `role_id` |
 | `invites` | `id` (opaque text), `code_hash` (SHA-256), `is_owner`, `remaining_uses`, `expires_at`, nullable `space_key_ct` and `name_ct` for preview |
-| `challenges` | `nonce` (32 random bytes), `ip`, `expires_at` |
+| `challenges` | `nonce` (32 random bytes), `ip` (IPv4 address or IPv6 /64), `expires_at` |
 | `sessions` | `token_hash` (SHA-256), `person_id`, `device_id` (Ed25519 public key), `ip` (canonical source IP at issuance), `expires_at` |
 | `revocations` | `person_id`, `device_id`, `record` (W04 signature, device public key and revocation timestamp) |
 | `bans` | `person_id` |
 | `ban_ips` | `person_id`, `ip` (only for an explicitly requested IP ban) |
 | `audit_log` | `id` (sequence), `actor_person_id`, `action` (fixed event kind), nullable `target_person_id`, nullable `target_id` (role, invite or device ID), `at` (Unix seconds) |
-| `invite_previews` | `ip`, `expires_at` (60-second rate limit) |
+| `invite_previews` | `ip` (IPv4 address or IPv6 /64), `expires_at` (60-second rate limit) |
 | `member_devices` | `device_id` (Ed25519 public key), `person_id`, `certificate` (public keys, timestamp, salted name commitment, root signature and format prefix) |
 | `categories` | `id` (text), `position`, `name_ct` |
 | `channels` | `id` (text), `kind` (text or voice), `category_id`, `position`, `name_ct`, nullable `topic_ct` |
 | `channel_ids` | `id` (text, including deleted channel IDs to prevent reuse) |
 | `channel_permissions` | `channel_id`, `role_id`, `flags` (four-bit mask) |
 | `key_scopes` | `id` (text), `kind` (space or channel), nullable `channel_id`, `rotate` |
-| `key_epochs` | `scope_id`, `epoch` |
+| `key_epochs` | `scope_id`, `epoch`, `commitment` (HMAC of the epoch context keyed by the epoch key) |
 | `key_envelopes` | `scope_id`, `epoch`, `recipient_device`, `sender_device`, `envelope` (HPKE ciphertext, encapsulation and signature) |
+| `key_envelope_rejections` | `scope_id`, `epoch`, `recipient_device`, `sender_person` |
 | `_sqlx_migrations` | `version`, `description`, `installed_on`, `success`, `checksum`, `execution_time` (migration bookkeeping) |
 
 Caddy supplies the source IP directly. Session IPs are retained with the active

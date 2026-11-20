@@ -10,7 +10,7 @@ use rusttalk_bot::{
 use rusttalk_core::{
     auth::{InviteLink, KnownServer, ProtocolError, Session, decode, encode},
     identity::{DeviceIdentity, revoke_device},
-    keys::{self, Event, KeyState, Metadata, Scope},
+    keys::{self, EnvelopeContext, Event, KeyState, Metadata, Scope},
     pinned_tls::fingerprint,
 };
 use serde_json::{Value, json};
@@ -145,6 +145,7 @@ async fn docker_keys(
         .create_channel(&category, "text", CHANNEL_NAME, TOPIC)
         .await?;
     let history = Metadata::ChannelTopic.seal(
+        &space.id,
         HISTORY_ID,
         1,
         a.key(channel, 1).context("no channel key")?,
@@ -163,7 +164,7 @@ async fn docker_keys(
     receive_key(&mut b, channel, 1).await?;
     receive_key(&mut b, space, 1).await?;
     assert_eq!(
-        Metadata::ChannelTopic.open(HISTORY_ID, b.key(channel, 1).unwrap(), &history)?,
+        Metadata::ChannelTopic.open(&space.id, HISTORY_ID, b.key(channel, 1).unwrap(), &history)?,
         b"old history"
     );
     let data: Value = b
@@ -233,17 +234,59 @@ async fn docker_keys(
     let (_, link) = invite(a, secrets).await?;
     let (c_words, c_identity) = DeviceIdentity::create("W06 C")?;
     let c_token = session(bot.sign_in(&c_identity, Some(&link.code)).await?, secrets).await?;
+    let c_device = encode(c_identity.certificate.signing_key().as_bytes());
+    let context = EnvelopeContext::new(space.id, channel, 1, b.key(channel, 1).unwrap());
+    let bad = encode(&context.wrap(&keys::random_key()?, &c_identity.certificate, &b_identity)?);
+    let upload = || {
+        b.request(Method::POST, "/v1/keys")
+            .json(&json!({"scope": channel, "epoch": 1, "device": c_device, "envelope": bad}))
+    };
+    upload().send().await?.error_for_status()?;
+    let poisoned: KeyState = bot
+        .request(Method::GET, "/v1/keys")
+        .bearer_auth(&c_token.token)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert!(poisoned.envelopes.iter().any(|row| row.envelope == bad));
     let mut c = KeyClient::connect(bot, &c_identity, &c_token).await?;
-    wait_for_device(a, &encode(c_identity.certificate.signing_key().as_bytes())).await?;
+    assert!(c.key(channel, 1).is_none());
+    upload().send().await?.error_for_status()?;
+    wait_for_device(a, &c_device).await?;
     receive_key(&mut c, channel, 1).await?;
+    assert!(c.key(channel, 1) == a.key(channel, 1));
+    println!("W06 C rejected B's bad first wrap and received the real key");
     receive_key(&mut c, space, 1).await?;
+    let channel_path = format!("/v1/channels/{}/permissions", encode(&channel.id));
     let b_person = encode(b_identity.certificate.person_id());
+    a.request(Method::PUT, &format!("/v1/members/{b_person}/roles"))
+        .json(&json!({"role_ids": ["admin", "member"]}))
+        .send()
+        .await?
+        .error_for_status()?;
+    for role in ["admin", "owner"] {
+        let reply = b
+            .request(Method::PUT, &format!("{channel_path}/{role}"))
+            .json(&json!({"flags": 0}))
+            .send()
+            .await?;
+        rejected(reply, StatusCode::FORBIDDEN, "role_hierarchy").await?;
+    }
+    let reply = a
+        .request(Method::PUT, &format!("{channel_path}/member"))
+        .json(&json!({"flags": 2}))
+        .send()
+        .await?;
+    rejected(reply, StatusCode::BAD_REQUEST, "invalid_channel_flags").await?;
+
     a.request(Method::DELETE, &format!("/v1/members/{b_person}"))
         .send()
         .await?
         .error_for_status()?;
     let reply = a.request(Method::PUT, "/v1/space").json(&json!({
-        "name_ct": encode(&Metadata::ServerName.seal(&space.id, 1, a.key(space, 1).unwrap(), SERVER_NAME)?),
+        "name_ct": encode(&Metadata::ServerName.seal(&space.id, &space.id, 1, a.key(space, 1).unwrap(), SERVER_NAME)?),
     })).send().await?;
     rejected(reply, StatusCode::CONFLICT, "space_key_unavailable").await?;
 
@@ -276,7 +319,8 @@ async fn docker_keys(
     .await?;
 
     let key = c.key(channel, 2).context("C missing epoch 2")?;
-    let for_b = keys::wrap(channel, 2, key, &b_identity.certificate, &c_identity)?;
+    let context = EnvelopeContext::new(space.id, channel, 2, key);
+    let for_b = context.wrap(key, &b_identity.certificate, &c_identity)?;
     let reply = c.request(Method::POST, "/v1/keys")
         .json(&json!({"scope": channel, "epoch": 2, "device": encode(b_identity.certificate.signing_key().as_bytes()), "envelope": encode(&for_b)}))
         .send().await?;
@@ -294,21 +338,21 @@ async fn docker_keys(
             .iter()
             .all(|e| e.need.device == encode(c_identity.certificate.signing_key().as_bytes()))
     );
-    let after = Metadata::ChannelTopic.seal(HISTORY_ID, 2, key, b"after kick")?;
+    let after = Metadata::ChannelTopic.seal(&space.id, HISTORY_ID, 2, key, b"after kick")?;
     assert_eq!(
-        Metadata::ChannelTopic.open(HISTORY_ID, key, &after)?,
+        Metadata::ChannelTopic.open(&space.id, HISTORY_ID, key, &after)?,
         b"after kick"
     );
     assert!(
         Metadata::ChannelTopic
-            .open(HISTORY_ID, b.key(channel, 1).unwrap(), &after)
+            .open(&space.id, HISTORY_ID, b.key(channel, 1).unwrap(), &after)
             .is_err()
     );
     assert!(b.key(channel, 2).is_none() && b.key(space, 2).is_none());
-    let stale = keys::wrap(channel, 2, key, &c_identity.certificate, &c_identity)?;
+    let stale = context.wrap(key, &c_identity.certificate, &c_identity)?;
     let reply = c
         .request(Method::POST, "/v1/keys/epochs")
-        .json(&json!({"scope": channel, "epoch": 2, "envelope": encode(&stale)}))
+        .json(&json!({"scope": channel, "epoch": 2, "commitment": encode(&context.commitment), "envelope": encode(&stale)}))
         .send()
         .await?;
     rejected(reply, StatusCode::CONFLICT, "epoch_changed").await?;
