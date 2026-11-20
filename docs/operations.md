@@ -13,7 +13,9 @@ the `deploy/` directory of a checkout of the release you deploy.
    Encrypt certificate. Leave it empty for IP-only mode.
 2. Load the signed release images with `docker load -i rusttalk-api-<version>.tar`
    (and the index archive if used) and set `RUSTTALK_VERSION` to that version.
-   If the images are missing, Compose builds them from the checkout.
+   Or set `RUSTTALK_IMAGE_PREFIX=ghcr.io/vleeuwenmenno/` and run
+   `docker compose pull`. If the images are missing, Compose builds them from
+   the checkout.
 3. Open 443/TCP for HTTPS, 7881/TCP and 7882/UDP for LiveKit media, and
    80/TCP for Let's Encrypt in domain mode.
 4. `docker compose up -d --wait`.
@@ -292,8 +294,8 @@ cannot update themselves.
 The update replaces the AppImage atomically and offers **Restart now**.
 
 The release command builds and tags `rusttalk-api:<version>` and
-`rusttalk-index:<version>`. To publish to a chosen registry, tag and push
-each image. Record its registry digest. The same versioned images can
+`rusttalk-index:<version>`. To publish to a registry such as
+`ghcr.io/vleeuwenmenno`, tag and push each image. Record its registry digest. The same versioned images can
 be distributed as the signed Docker archives and loaded with `docker load`.
 
 ```sh
