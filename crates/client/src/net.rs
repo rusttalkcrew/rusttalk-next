@@ -14,7 +14,7 @@ use eframe::egui;
 use livekit::prelude::Participant;
 use reqwest::StatusCode;
 use rusttalk_core::{
-    auth::{InviteCode, InviteLink, KnownServer, ProtocolError, Session, decode},
+    auth::{Fingerprint, InviteCode, InviteLink, KnownServer, ProtocolError, Session, decode},
     camera::CameraOptions,
     client::{
         BlobRef, Event, KeyClient, MessageBody, MessageError, MessageRecord, Server as Api,
@@ -41,11 +41,13 @@ use crate::{
 mod admin;
 mod directory;
 mod files;
+mod find;
 mod voice;
 
-pub use admin::{Admin, AdminUpdate, AuditEntry, Ban};
+pub use admin::{Admin, AdminUpdate, AuditEntry, Ban, PublicListing};
 use directory::{directory, get};
 pub use files::{MAX_FILE, file_name};
+pub use find::{Listed, PAGE_SIZE};
 use voice::{
     Live, Next, leave_voice, next_voice, on_voice, room_changed, send_room, share_screen,
     stop_finished_shares, stop_lost_video, sync_voice_key, voice_command, voice_only, voice_stats,
@@ -139,6 +141,10 @@ pub enum Admission {
 
 pub enum Update {
     Preview(Result<Box<Preview>, String>),
+    /// A page of directory results, by page number.
+    Found(u32, Result<Vec<Listed>, String>),
+    /// A server picked from the directory, checked; errors show in the directory.
+    Listed(Result<Box<Preview>, String>),
     Status(Url, Status),
     Directory(Url, Box<Directory>),
     Messages {
@@ -259,6 +265,24 @@ impl Net {
         });
     }
 
+    /// Search the server directory. Only called while the person has "Find servers" open.
+    pub fn search(&self, index: Url, pin: Option<Fingerprint>, query: String, page: u32) {
+        let ctx = self.ctx.clone();
+        self.spawn(async move {
+            let found = find::search(&index, pin, &query, page).await;
+            ctx.send(Update::Found(page, found));
+        });
+    }
+
+    /// Check a server picked from the directory, without joining yet.
+    pub fn check_listed(&self, listed: Listed) {
+        let ctx = self.ctx.clone();
+        self.spawn(async move {
+            let update = find::preview(&ctx, listed).await.map(Box::new);
+            ctx.send(Update::Listed(update));
+        });
+    }
+
     /// Connect to a server (joining with `admission` the first time) and keep it connected.
     pub fn start(
         &self,
@@ -329,13 +353,7 @@ async fn preview(ctx: &Ctx, link: &InviteLink) -> Result<Preview, String> {
         tracing::warn!("invite pins differ from the server");
         return Err(mismatch(known.is_some()));
     }
-    let open = match api.info().await {
-        Ok(info) => info.open_joining,
-        Err(error) => {
-            tracing::warn!(error = %format_args!("{error:#}"), "reading open joining failed");
-            false
-        }
-    };
+    let open = open_joining(&api).await;
     let mut invite = Some(link.code);
     let name = match &link.link_key {
         // Owner invites from the server console carry no name.
@@ -364,6 +382,17 @@ async fn preview(ctx: &Ctx, link: &InviteLink) -> Result<Preview, String> {
         known: known.is_some(),
         open,
     })
+}
+
+/// Whether the server lets anyone join; `false` when it can't tell.
+async fn open_joining(api: &Api) -> bool {
+    match api.info().await {
+        Ok(info) => info.open_joining,
+        Err(error) => {
+            tracing::warn!(error = %format_args!("{error:#}"), "reading open joining failed");
+            false
+        }
+    }
 }
 
 fn explain(error: &anyhow::Error, known: bool) -> String {

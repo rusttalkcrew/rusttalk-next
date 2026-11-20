@@ -39,6 +39,22 @@ pub enum Admin {
     /// Open joining on or off, with a member limit.
     Joining(bool, u32),
     RevokeInvite(String),
+    /// The owner's public listing setting.
+    LoadListing,
+    /// List the server publicly with these details, or stop (`None`).
+    SaveListing(Option<PublicListing>),
+}
+
+/// What the owner publishes in a server directory. Unlike everything else, in plain text.
+#[derive(Clone, Default)]
+pub struct PublicListing {
+    pub name: String,
+    pub description: String,
+    /// This server's HTTPS address, as people should reach it.
+    pub address: String,
+    pub index_url: String,
+    /// The directory's certificate pin as base64url, or empty to use normal trust.
+    pub index_fingerprint: String,
 }
 
 pub struct Ban {
@@ -60,6 +76,8 @@ pub enum AdminUpdate {
     /// Newest first.
     Audit(Vec<AuditEntry>),
     Joining(bool, u32),
+    /// Whether the server is listed, and the saved details.
+    Listing(bool, Option<PublicListing>),
     /// A change went through; the text says what happened.
     Done(&'static str),
     Failed(String),
@@ -83,6 +101,13 @@ pub(super) async fn run(
             match load(client, joining, audit).await {
                 Ok(updates) => updates.into_iter().for_each(send),
                 Err(text) => send(AdminUpdate::Failed(text)),
+            }
+            return;
+        }
+        Admin::LoadListing => {
+            match get(client, "/v1/settings/public-listing").await {
+                Ok(value) => send(listing(&value)),
+                Err(error) => send(AdminUpdate::Failed(failed(&error))),
             }
             return;
         }
@@ -164,6 +189,30 @@ pub(super) async fn run(
                 .await
                 .map(|()| "Joining settings saved.")
         }
+        Admin::SaveListing(listing) => {
+            let body = match listing {
+                None => json!({"enabled": false}),
+                Some(listing) => json!({
+                    "enabled": true,
+                    "listing": {
+                        "name": listing.name,
+                        "description": listing.description,
+                        "address": listing.address,
+                        "index_url": listing.index_url,
+                        "index_tls_fingerprint":
+                            Some(listing.index_fingerprint).filter(|pin| !pin.is_empty()),
+                    }
+                }),
+            };
+            call(
+                client,
+                Method::PUT,
+                "/v1/settings/public-listing",
+                Some(body),
+            )
+            .await
+            .map(|()| "Listing saved. It shows up in the directory within a minute.")
+        }
         Admin::RevokeInvite(id) => call(client, Method::DELETE, &format!("/v1/invites/{id}"), None)
             .await
             .map(|()| "That invite link no longer works."),
@@ -183,6 +232,23 @@ pub(super) async fn run(
         }
         Err(text) => send(AdminUpdate::Failed(text)),
     }
+}
+
+fn listing(value: &Value) -> AdminUpdate {
+    let text = |key: &str| {
+        value["listing"][key]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let saved = value["listing"].is_object().then(|| PublicListing {
+        name: text("name"),
+        description: text("description"),
+        address: text("address"),
+        index_url: text("index_url"),
+        index_fingerprint: text("index_tls_fingerprint"),
+    });
+    AdminUpdate::Listing(value["enabled"].as_bool().unwrap_or_default(), saved)
 }
 
 async fn load(
@@ -355,6 +421,11 @@ fn problem(code: &str) -> &'static str {
         "ban_not_found" => "They aren't banned anymore.",
         "invite_not_found" => "That invite link already stopped working.",
         "invalid_member_cap" => "The member limit must be 1 or more.",
+        "invalid_listing" | "invalid_listing_settings" => {
+            "Check the listing: a name, a description of up to 1,000 characters, and an https:// address."
+        }
+        "invalid_index_url" => "The directory address must start with https://.",
+        "invalid_index_tls_fingerprint" => "That certificate fingerprint isn't right.",
         "invalid_channel_flags" => "Write, Speak and Video also need Read.",
         "invalid_role_count" => "Everyone needs at least one role.",
         "space_key_unavailable" | "metadata_epoch_changed" => {

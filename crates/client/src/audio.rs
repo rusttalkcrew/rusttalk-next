@@ -77,6 +77,10 @@ pub struct Settings {
     pub camera: Option<String>,
     pub camera_height: u32,
     pub camera_fps: u32,
+    /// The server directory for "Find servers"; empty until the person sets one.
+    pub index_url: String,
+    /// Its certificate pin (base64url), for a directory without a public certificate.
+    pub index_fingerprint: String,
 }
 
 impl Default for Settings {
@@ -93,6 +97,8 @@ impl Default for Settings {
             camera: None,
             camera_height: 720,
             camera_fps: 30,
+            index_url: String::new(),
+            index_fingerprint: String::new(),
         }
     }
 }

@@ -7,10 +7,15 @@ use eframe::egui::{
     ScrollArea, TextEdit, Ui,
 };
 
+use rusttalk_core::{
+    auth::decode,
+    index::{https_url, validate_details},
+};
+
 use crate::{
     app::error_text,
     home::{Home, avatar, section},
-    net::{Admin, AdminUpdate, AuditEntry, Ban, Command},
+    net::{Admin, AdminUpdate, AuditEntry, Ban, Command, PublicListing},
     server::{Id, PERMISSIONS, Perms, Server},
 };
 
@@ -36,6 +41,8 @@ pub enum Tab {
     Bans,
     Audit,
     Joining,
+    /// The owner's public listing.
+    Listing,
     /// The settings of one channel.
     Channel(Id),
 }
@@ -55,6 +62,8 @@ pub struct Settings {
     audit_filter: Option<&'static str>,
     /// Open joining and member limit, once loaded (owners and admins).
     joining: Option<(bool, u32)>,
+    /// Whether the server is listed and the details, once loaded (owner).
+    listing: Option<(bool, PublicListing)>,
     member: Option<(Id, MemberAction)>,
     new_role: String,
     new_permissions: Vec<&'static str>,
@@ -72,6 +81,9 @@ impl Settings {
                 self.audit_shown = AUDIT_PAGE;
             }
             AdminUpdate::Joining(open, cap) => self.joining = Some((open, cap)),
+            AdminUpdate::Listing(on, saved) => {
+                self.listing = Some((on, saved.unwrap_or_default()));
+            }
             AdminUpdate::Done(text) => {
                 self.member = None;
                 self.renaming = None;
@@ -105,6 +117,7 @@ pub fn open(home: &mut Home, index: usize, mut tab: Tab) {
         audit_shown: AUDIT_PAGE,
         audit_filter: None,
         joining: None,
+        listing: None,
         member: None,
         new_role: String::new(),
         new_permissions: Vec::new(),
@@ -191,6 +204,7 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
                     (Tab::Bans, "Bans", perms.ban),
                     (Tab::Audit, "Audit log", perms.audit),
                     (Tab::Joining, "Joining", perms.admin),
+                    (Tab::Listing, "Public listing", perms.owner),
                 ];
                 for (tab, label, allowed) in tabs {
                     if allowed && ui.selectable_value(&mut settings.tab, tab, label).clicked() {
@@ -204,6 +218,7 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
                                 joining: false,
                                 audit: false,
                             }),
+                            Tab::Listing => Some(Admin::LoadListing),
                             _ => None,
                         };
                     }
@@ -216,6 +231,7 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
                 Tab::Bans => bans_tab(ui, server, settings),
                 Tab::Audit => audit_tab(ui, server, settings),
                 Tab::Joining => joining_tab(ui, settings),
+                Tab::Listing => listing_tab(ui, server, settings),
                 Tab::Channel(_) => None,
             };
             request = request.take().or(changed);
@@ -552,6 +568,94 @@ fn joining_tab(ui: &mut Ui, settings: &mut Settings) -> Option<Admin> {
     ui.button("Save")
         .clicked()
         .then_some(Admin::Joining(*open, *cap))
+}
+
+fn listing_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Option<Admin> {
+    let Some((on, listing)) = &mut settings.listing else {
+        ui.spinner();
+        return None;
+    };
+    ui.checkbox(on, "List this server publicly");
+    if !*on {
+        ui.weak("Off: this server doesn't appear in any directory.");
+        return ui
+            .button("Save")
+            .clicked()
+            .then_some(Admin::SaveListing(None));
+    }
+    // Start from what people already see.
+    if listing.name.is_empty() && listing.address.is_empty() {
+        listing.name = server.dir.name.clone().unwrap_or_default();
+        listing.address = server.address.to_string();
+    }
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.label(
+            RichText::new("Anyone can see this name and description in the directory, even people who aren't members.")
+                .strong(),
+        );
+        ui.label("Everything else in this server stays private and encrypted.");
+    });
+    let field = |ui: &mut Ui, label: &str, text: &mut String, limit: usize, lines: bool| {
+        let label = ui.label(label);
+        let edit = if lines {
+            TextEdit::multiline(text).desired_rows(3)
+        } else {
+            TextEdit::singleline(text)
+        };
+        ui.add(edit.char_limit(limit).desired_width(f32::INFINITY))
+            .labelled_by(label.id);
+    };
+    field(ui, "Public name", &mut listing.name, 100, false);
+    field(
+        ui,
+        "Public description",
+        &mut listing.description,
+        1_000,
+        true,
+    );
+    field(ui, "Server address", &mut listing.address, 512, false);
+    field(ui, "Directory address", &mut listing.index_url, 512, false);
+    CollapsingHeader::new("Details").show(ui, |ui| {
+        field(
+            ui,
+            "Directory certificate fingerprint, only for a directory without a domain",
+            &mut listing.index_fingerprint,
+            64,
+            false,
+        );
+    });
+    if !ui.button("Save").clicked() {
+        return None;
+    }
+    match check_listing(listing) {
+        Ok(()) => Some(Admin::SaveListing(Some(listing.clone()))),
+        Err(problem) => {
+            settings.message = Some((problem.into(), true));
+            None
+        }
+    }
+}
+
+/// The same checks the directory makes, so mistakes show before saving.
+fn check_listing(listing: &mut PublicListing) -> Result<(), &'static str> {
+    for text in [
+        &mut listing.name,
+        &mut listing.address,
+        &mut listing.index_url,
+        &mut listing.index_fingerprint,
+    ] {
+        *text = text.trim().to_owned();
+    }
+    validate_details(&listing.name, &listing.description, &listing.address).map_err(|_| {
+        "Use a name of up to 100 characters, a description of up to 1,000, no hidden or \
+         control characters, and an https:// server address."
+    })?;
+    https_url(&listing.index_url).ok_or("The directory address must start with https://.")?;
+    if !listing.index_fingerprint.is_empty() && decode::<32>(&listing.index_fingerprint).is_err() {
+        return Err("That certificate fingerprint isn't right.");
+    }
+    Ok(())
 }
 
 /// Read, write, speak and video per role. Changes save right away.

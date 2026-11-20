@@ -15,9 +15,10 @@ use eframe::egui::{
     ecolor::Hsva,
 };
 use rusttalk_core::{
-    auth::InviteLink,
+    auth::{Fingerprint, InviteLink, decode},
     client::{MAX_TEXT_CHARS, voice::LiveFileEvent},
     identity::{DeviceIdentity, fingerprint},
+    index::https_url,
 };
 
 use crate::{
@@ -28,7 +29,7 @@ use crate::{
     camera,
     device_sync::{self, Edit},
     files::{self, Ask, Files},
-    net::{Admin, AdminUpdate, Admission, Command, Net, Preview, Update},
+    net::{Admin, AdminUpdate, Admission, Command, Listed, Net, PAGE_SIZE, Preview, Update},
     screen::Video,
     server::{Body, Chat, Directory, Id, Msg, Server, Status, member_name},
 };
@@ -46,6 +47,7 @@ pub struct Home {
     view: View,
     invite: String,
     join: Join,
+    find: Find,
     dialog: Option<Dialog>,
     pub toast: Option<(String, f64)>,
     pub settings: Option<Tab>,
@@ -63,9 +65,25 @@ pub struct Home {
 #[derive(Clone, Copy, PartialEq)]
 enum View {
     Join,
+    /// The public server directory.
+    Find,
     /// A DM: server index and channel.
     Direct(Option<(usize, Id)>),
     Server(usize),
+}
+
+/// The "Find servers" page.
+#[derive(Default)]
+struct Find {
+    query: String,
+    results: Vec<Listed>,
+    /// The last page loaded, and whether there may be more.
+    page: u32,
+    more: bool,
+    searching: bool,
+    /// Checking a picked server.
+    checking: bool,
+    error: Option<String>,
 }
 
 enum Join {
@@ -107,6 +125,7 @@ pub enum Tab {
     Profile,
     Voice,
     Video,
+    Privacy,
     Devices,
 }
 
@@ -146,6 +165,7 @@ impl Home {
             servers,
             invite: String::new(),
             join: Join::Idle(None),
+            find: Find::default(),
             dialog: None,
             toast: None,
             settings: None,
@@ -223,6 +243,35 @@ impl Home {
                         name: String::new(),
                     },
                     Err(error) => Join::Idle(Some(error)),
+                }
+            }
+            Update::Found(page, found) => {
+                let find = &mut self.find;
+                find.searching = false;
+                match found {
+                    Ok(results) => {
+                        find.more = results.len() == PAGE_SIZE;
+                        find.page = page;
+                        if page == 1 {
+                            find.results = results;
+                        } else {
+                            find.results.extend(results);
+                        }
+                    }
+                    Err(error) => find.error = Some(error),
+                }
+            }
+            Update::Listed(checked) => {
+                self.find.checking = false;
+                match checked {
+                    Ok(preview) => {
+                        self.join = Join::Preview {
+                            preview,
+                            name: String::new(),
+                        };
+                        self.view = View::Join;
+                    }
+                    Err(error) => self.find.error = Some(error),
                 }
             }
             Update::Status(address, status) => {
@@ -630,6 +679,7 @@ pub fn show(ui: &mut Ui, home: &mut Home) -> Option<Action> {
         )
         .show(ui, |ui| match home.view {
             View::Join => join(ui, home),
+            View::Find => find(ui, home),
             View::Direct(None) => empty(
                 ui,
                 "Direct messages",
@@ -714,9 +764,16 @@ fn server_rail(ui: &mut Ui, home: &mut Home) {
                 home.view = View::Server(index);
             }
         }
-        if rail_button(ui, "+", "Add a server", home.view == View::Join).clicked() {
-            home.view = View::Join;
-        }
+        let adding = matches!(home.view, View::Join | View::Find);
+        let plus = rail_button(ui, "+", "Add a server", adding);
+        Popup::menu(&plus).show(|ui| {
+            if ui.button("Join with an invite").clicked() {
+                home.view = View::Join;
+            }
+            if ui.button("Find servers").clicked() {
+                home.view = View::Find;
+            }
+        });
     });
 }
 
@@ -1119,6 +1176,7 @@ fn join(ui: &mut Ui, home: &mut Home) {
                     ui.label("First time here. Your invite confirms this is the right server.");
                 }
                 CollapsingHeader::new("Details").show(ui, |ui| {
+                    ui.label(format!("Address  {address}"));
                     ui.label(format!(
                         "Server ID  {}",
                         fingerprint(&preview.server.server_id)
@@ -1148,6 +1206,143 @@ fn join(ui: &mut Ui, home: &mut Home) {
                 } else if secondary(ui, "Cancel").clicked() {
                     home.join = Join::Idle(None);
                 }
+            }
+        }
+    });
+}
+
+fn privacy_tab(ui: &mut Ui, home: &mut Home) {
+    let audio = home.voice.audio.clone();
+    let mut settings = audio.settings();
+    section(ui, "Server directory");
+    ui.label("A directory lists public servers you can find and join.");
+    ui.weak("RustTalk only contacts it while you have Find servers open.");
+    let label = ui.label("Directory address");
+    ui.add(
+        TextEdit::singleline(&mut settings.index_url)
+            .hint_text("https://…")
+            .desired_width(f32::INFINITY),
+    )
+    .labelled_by(label.id);
+    CollapsingHeader::new("Details").show(ui, |ui| {
+        let label = ui.label("Certificate fingerprint, only for a directory without a domain");
+        ui.add(TextEdit::singleline(&mut settings.index_fingerprint).desired_width(f32::INFINITY))
+            .labelled_by(label.id);
+    });
+    if !settings.index_url.trim().is_empty()
+        && let Err(problem) = directory(&settings)
+    {
+        error_text(ui, Some(&problem));
+    }
+    audio.set_settings(settings);
+}
+
+/// The configured directory and its optional certificate pin.
+fn directory(settings: &crate::audio::Settings) -> Result<(url::Url, Option<Fingerprint>), String> {
+    let url =
+        https_url(settings.index_url.trim()).ok_or("Use an address that starts with https://.")?;
+    let pin = settings.index_fingerprint.trim();
+    let pin = (!pin.is_empty())
+        .then(|| decode(pin).map_err(|_| "That certificate fingerprint isn't right."))
+        .transpose()?;
+    Ok((url, pin))
+}
+
+fn find(ui: &mut Ui, home: &mut Home) {
+    ui.vertical_centered(|ui| {
+        ui.add_space(24.0);
+        ui.set_max_width(640.0);
+        ui.heading("Find servers");
+        let settings = home.voice.audio.settings();
+        if settings.index_url.trim().is_empty() {
+            ui.label("Add a server directory in your settings first.");
+            ui.weak("RustTalk only contacts it while you're on this page.");
+            if primary(ui, "Open privacy settings").clicked() {
+                home.settings = Some(Tab::Privacy);
+            }
+            return;
+        }
+        let find = &mut home.find;
+        let mut page = None;
+        ui.horizontal(|ui| {
+            let field = ui.add(
+                TextEdit::singleline(&mut find.query)
+                    .hint_text("Search by name or description")
+                    .desired_width(ui.available_width() - 90.0),
+            );
+            field.widget_info(|| WidgetInfo::labeled(Role::TextInput, true, "Search"));
+            if primary_small(ui, "Search").clicked() || submitted(ui, &field) {
+                page = Some(1);
+            }
+        });
+        error_text(ui, find.error.as_deref());
+        if find.searching || find.checking {
+            ui.spinner();
+        } else if find.results.is_empty() && find.page > 0 {
+            ui.weak("No servers found.");
+        }
+        let mut pick = None;
+        ScrollArea::vertical().show(ui, |ui| {
+            ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                for listed in &find.results {
+                    Frame::group(ui.style()).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(&listed.name).strong().size(16.0));
+                            if listed.open {
+                                ui.label(
+                                    RichText::new(" Open joining ")
+                                        .small()
+                                        .background_color(ui.visuals().selection.bg_fill),
+                                );
+                            }
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                let join = Button::new("Join").fill(ui.visuals().selection.bg_fill);
+                                let join = ui.add_enabled(!find.checking, join);
+                                join.widget_info(|| {
+                                    WidgetInfo::labeled(
+                                        Role::Button,
+                                        true,
+                                        format!("Join {}", listed.name),
+                                    )
+                                });
+                                if join.clicked() {
+                                    pick = Some(listed.clone());
+                                }
+                            });
+                        });
+                        if !listed.description.is_empty() {
+                            ui.add(Label::new(&listed.description).wrap());
+                        }
+                        let members = match listed.members {
+                            1 => "1 member".to_owned(),
+                            count => format!("{count} members"),
+                        };
+                        ui.weak(members);
+                    });
+                }
+                if find.more && !find.searching && ui.button("Show more").clicked() {
+                    page = Some(find.page + 1);
+                }
+            });
+        });
+        if let Some(listed) = pick {
+            find.checking = true;
+            find.error = None;
+            home.net.check_listed(listed);
+        }
+        if let Some(page) = page {
+            match directory(&settings) {
+                Ok((url, pin)) => {
+                    find.searching = true;
+                    find.error = None;
+                    if page == 1 {
+                        find.results.clear();
+                    }
+                    home.net
+                        .search(url, pin, find.query.trim().to_owned(), page);
+                }
+                Err(problem) => find.error = Some(problem),
             }
         }
     });
@@ -1886,6 +2081,7 @@ fn settings(ctx: &egui::Context, home: &mut Home) -> Option<Action> {
             ui.selectable_value(&mut tab, Tab::Profile, "Profile");
             ui.selectable_value(&mut tab, Tab::Voice, "Voice");
             ui.selectable_value(&mut tab, Tab::Video, "Video");
+            ui.selectable_value(&mut tab, Tab::Privacy, "Privacy");
             ui.selectable_value(&mut tab, Tab::Devices, "Devices");
         });
         ui.separator();
@@ -1905,6 +2101,7 @@ fn settings(ctx: &egui::Context, home: &mut Home) -> Option<Action> {
                 camera::settings_tab(ui, &mut home.voice.camera, &mut s);
                 audio.set_settings(s);
             }
+            Tab::Privacy => privacy_tab(ui, home),
             Tab::Devices => {
                 ui.label(format!("This device: {}", home.identity.certificate.name()));
             }
