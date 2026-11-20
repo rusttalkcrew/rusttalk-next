@@ -163,6 +163,16 @@ fn load_pins(file: &Path) -> Result<Vec<KnownServer>> {
     }
 }
 
+/// Replace `file` in `dir` with JSON so a crash leaves the old or new contents, never a torn file.
+pub fn save_json(dir: &Path, file: &Path, value: &impl serde::Serialize) -> Result<()> {
+    let mut temporary = tempfile::NamedTempFile::new_in(dir)?;
+    serde_json::to_writer(&mut temporary, value)?;
+    temporary.flush()?;
+    temporary.as_file().sync_all()?;
+    temporary.persist(file)?;
+    Ok(())
+}
+
 fn save_pin(data: &Path, pins: &Path, observed: &KnownServer) -> Result<()> {
     fs::create_dir_all(data)?;
     let lock = File::options()
@@ -179,11 +189,7 @@ fn save_pin(data: &Path, pins: &Path, observed: &KnownServer) -> Result<()> {
         check_pin(Some(known), observed)?;
     } else {
         entries.push(observed.clone());
-        let mut file = tempfile::NamedTempFile::new_in(data)?;
-        serde_json::to_writer(&mut file, &entries)?;
-        file.flush()?;
-        file.as_file().sync_all()?;
-        file.persist(pins).context("save server pin")?;
+        save_json(data, pins, &entries).context("save server pin")?;
         tracing::info!(fingerprint = %fingerprint(&observed.server_id), "server pinned");
     }
     Ok(())
