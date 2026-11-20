@@ -8,14 +8,14 @@ Status: early development. See [docs/work-order.md](docs/work-order.md) for prog
 
 ## Download
 
-[![Windows x64](https://img.shields.io/badge/Windows-x64-0078D4?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/vleeuwenmenno/RustTalk-cleanroom/releases/latest/download/RustTalk-windows-x86_64.exe)
-[![Windows ARM64](https://img.shields.io/badge/Windows-ARM64-0078D4?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/vleeuwenmenno/RustTalk-cleanroom/releases/latest/download/RustTalk-windows-aarch64.exe)
-[![Linux x64](https://img.shields.io/badge/Linux-x64-FCC624?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/vleeuwenmenno/RustTalk-cleanroom/releases/latest/download/RustTalk-linux-x86_64.AppImage)
-[![Linux ARM64](https://img.shields.io/badge/Linux-ARM64-FCC624?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/vleeuwenmenno/RustTalk-cleanroom/releases/latest/download/RustTalk-linux-aarch64.AppImage)
+[![Windows x64](https://img.shields.io/badge/Windows-x64-0078D4?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/rusttalkcrew/rusttalk-next/releases/latest/download/RustTalk-windows-x86_64.exe)
+[![Windows ARM64](https://img.shields.io/badge/Windows-ARM64-0078D4?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/rusttalkcrew/rusttalk-next/releases/latest/download/RustTalk-windows-aarch64.exe)
+[![Linux x64](https://img.shields.io/badge/Linux-x64-FCC624?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/rusttalkcrew/rusttalk-next/releases/latest/download/RustTalk-linux-x86_64.AppImage)
+[![Linux ARM64](https://img.shields.io/badge/Linux-ARM64-FCC624?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/rusttalkcrew/rusttalk-next/releases/latest/download/RustTalk-linux-aarch64.AppImage)
 
 Windows installs per user without admin rights. On Linux, make the AppImage
 executable (`chmod +x RustTalk-*.AppImage`) and run it. Both update themselves.
-All releases: [GitHub releases](https://github.com/vleeuwenmenno/RustTalk-cleanroom/releases).
+All releases: [GitHub releases](https://github.com/rusttalkcrew/rusttalk-next/releases).
 
 ## Quick start
 
@@ -35,8 +35,8 @@ On a Linux host with Docker, a public IPv4 address and ports 443/tcp,
 7881/tcp and 7882/udp open:
 
 ```sh
-git clone https://github.com/vleeuwenmenno/RustTalk-cleanroom.git
-cd RustTalk-cleanroom/deploy
+git clone https://github.com/rusttalkcrew/rusttalk-next.git
+cd rusttalk-next/deploy
 cp .env.example .env    # set RUSTTALK_IP, LIVEKIT_API_SECRET, optionally RUSTTALK_DOMAIN
 docker compose pull && docker compose up -d --wait
 ```

@@ -13,7 +13,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     install "target/release/rusttalk-${SERVICE}" "/usr/local/bin/rusttalk-${SERVICE}"
 
 FROM debian:trixie-slim AS runtime
-LABEL org.opencontainers.image.source=https://github.com/vleeuwenmenno/RustTalk-cleanroom
+LABEL org.opencontainers.image.source=https://github.com/rusttalkcrew/rusttalk-next
 ARG SERVICE=api
 COPY --from=build /usr/local/bin/rusttalk-${SERVICE} /usr/local/bin/
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/

@@ -140,4 +140,4 @@ release: ## Tag origin/main as v<Cargo.toml version> and push it; CI builds, sig
 		git fetch -q origin main; test "$$(git rev-parse HEAD)" = "$$(git rev-parse origin/main)" || { printf '\033[1;31mCheck out the latest origin/main first.\033[0m\n' >&2; exit 1; }; \
 		printf '\033[1;34m==> Tagging v%s\033[0m\n' "$$version"; \
 		git tag -s "v$$version" -m "RustTalk $$version"; git push origin "v$$version"; \
-		printf '\033[1;34m==> Building in CI: https://github.com/vleeuwenmenno/RustTalk-cleanroom/actions/workflows/release.yml\033[0m\n'
+		printf '\033[1;34m==> Building in CI: https://github.com/rusttalkcrew/rusttalk-next/actions/workflows/release.yml\033[0m\n'

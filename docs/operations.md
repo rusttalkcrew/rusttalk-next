@@ -12,7 +12,7 @@ the `deploy/` directory of a checkout of the release you deploy.
    Set `RUSTTALK_DOMAIN` to a domain that resolves to that IP for a Let's
    Encrypt certificate. Leave it empty for IP-only mode.
 2. Set `RUSTTALK_VERSION` to the release version and
-   `RUSTTALK_IMAGE_PREFIX=ghcr.io/vleeuwenmenno/`, then `docker compose pull`.
+   `RUSTTALK_IMAGE_PREFIX=ghcr.io/rusttalkcrew/`, then `docker compose pull`.
    Without the prefix, Compose builds the images from the checkout.
 3. Open 443/TCP for HTTPS, 7881/TCP and 7882/UDP for LiveKit media, and
    80/TCP for Let's Encrypt in domain mode.
@@ -273,7 +273,7 @@ It signs and pushes the tag `v<version>`. The
 
 1. builds the Linux AppImage (x86_64, aarch64) and the Windows installer
    (x86_64, aarch64) on native GitHub runners;
-2. pushes `ghcr.io/vleeuwenmenno/rusttalk-api` and `rusttalk-index` as
+2. pushes `ghcr.io/rusttalkcrew/rusttalk-api` and `rusttalk-index` as
    `<version>`, `<major>.<minor>` and `latest` for amd64 and arm64;
 3. writes `latest.json` (size and SHA-256 of every installer, and the image
    digests) and signs it with the release key;
@@ -305,7 +305,7 @@ openssl pkeyutl -verify -pubin -inkey rusttalk-release-public.pem \
 ### Updates
 
 Release builds check
-`https://github.com/vleeuwenmenno/RustTalk-cleanroom/releases/latest/download/`
+`https://github.com/rusttalkcrew/rusttalk-next/releases/latest/download/`
 by default; **Settings → Profile** can point at another HTTPS directory
 holding `latest.json`, `latest.json.sig` and the installers. **Check now**
 checks once. The automatic option checks once at startup and is off by
