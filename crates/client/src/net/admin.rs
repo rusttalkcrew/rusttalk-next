@@ -321,8 +321,13 @@ async fn audit_log(
         }
         let page = get(client, &path).await.map_err(|error| failed(&error))?;
         let rows = page.as_array().cloned().unwrap_or_default();
+        // A row without a growing ID would page forever; stop after this page.
+        let mut stuck = false;
         for row in &rows {
-            after = row["id"].as_i64().unwrap_or(after);
+            match row["id"].as_i64() {
+                Some(id) if id > after => after = id,
+                _ => stuck = true,
+            }
             let person = |key: &str| row[key].as_str().and_then(|id| decode(id).ok());
             let Some(actor) = person("actor_person_id") else {
                 continue;
@@ -334,7 +339,7 @@ async fn audit_log(
                 at: row["at"].as_i64().unwrap_or_else(now),
             });
         }
-        if rows.len() < 100 {
+        if stuck || rows.len() < 100 {
             break;
         }
     }

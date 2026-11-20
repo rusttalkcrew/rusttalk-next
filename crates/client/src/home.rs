@@ -33,7 +33,7 @@ use crate::{
     files::{self, Ask, Files},
     net::{Admin, AdminUpdate, Admission, Command, Draft, Listed, Net, PAGE_SIZE, Preview, Update},
     screen::Video,
-    server::{Body, Chat, Directory, Id, Msg, Picture, Server, Status, member_name},
+    server::{Body, Chat, Directory, Id, Member, Msg, Picture, Server, Status, member_name},
 };
 
 /// The name shown until a server has one, or until its key arrives.
@@ -1288,6 +1288,18 @@ pub fn face(
     dot: bool,
 ) -> Response {
     let member = dir.members.iter().find(|m| m.person == *person);
+    member_face(ui, member, person, name, size, dot)
+}
+
+/// `face` for a member already looked up (`None` when not a member).
+fn member_face(
+    ui: &mut Ui,
+    member: Option<&Member>,
+    person: &Id,
+    name: &str,
+    size: f32,
+    dot: bool,
+) -> Response {
     let response = match member.and_then(|m| m.avatar.as_ref()) {
         Some(picture) => ui.add(
             egui::Image::new(&frame(ui, picture))
@@ -1320,11 +1332,11 @@ fn member_list(ui: &mut Ui, home: &mut Home, index: usize) {
     let (mut manage, mut moderate) = (None, None);
     ScrollArea::vertical().show(ui, |ui| {
         for member in &server.dir.members {
-            let name = server.member_name(&member.person);
+            let name = member.display_name();
             let me = member.person == server.dir.me;
             let row = ui
                 .horizontal(|ui| {
-                    face(ui, &server.dir, &member.person, &name, 30.0, true);
+                    member_face(ui, Some(member), &member.person, &name, 30.0, true);
                     let label = if me {
                         format!("{name} (you)")
                     } else {

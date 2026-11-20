@@ -162,11 +162,10 @@ impl Server {
 }
 
 pub fn member_name(dir: &Directory, person: &Id) -> String {
-    dir.members
-        .iter()
-        .find(|member| member.person == *person)
-        .and_then(|member| member.name.clone())
-        .unwrap_or_else(|| format!("Member {}", &fingerprint(person)[..4]))
+    match dir.members.iter().find(|member| member.person == *person) {
+        Some(member) => member.display_name(),
+        None => format!("Member {}", &fingerprint(person)[..4]),
+    }
 }
 
 #[derive(Clone, Default)]
@@ -258,6 +257,13 @@ pub struct Member {
     pub roles: Vec<String>,
     pub avatar: Option<Picture>,
     pub presence: Presence,
+}
+
+impl Member {
+    /// Their chosen name, or a placeholder from their fingerprint.
+    pub fn display_name(&self) -> String {
+        (self.name.clone()).unwrap_or_else(|| format!("Member {}", &fingerprint(&self.person)[..4]))
+    }
 }
 
 /// A decoded profile picture or server icon: each frame and how long it shows, in ms.
