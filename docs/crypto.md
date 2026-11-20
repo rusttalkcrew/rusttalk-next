@@ -202,11 +202,26 @@ prevents a certificate under a different root from relabeling a signed post.
 Recipients find the sender in the current verified device directory or the
 channel's archived sender directory for retained history. They verify the
 root certificate, the matching device and person IDs, the device signature,
-and the AEAD tag before accepting the plaintext. A client remembers accepted
-IDs in memory across socket reconnects and token refreshes and rejects
-duplicates. To accept an edit it independently authenticates and opens the
+and the AEAD tag before accepting the plaintext. A client keeps the opened
+bodies of the newest 10,000 IDs per channel in memory across socket
+reconnects and token refreshes. Opening the same record again returns the
+cached body, so scroll-back and resync work. A different record under a
+cached ID is rejected as a replay. To accept an edit it independently authenticates and opens the
 original in the same channel and checks that it has the same person ID.
 The server supplies delivery timestamps and order.
+
+An archived sender is a device that is no longer in the current directory,
+for example after revocation or removal of its person. Clients accept its
+root-signed certificate for any epoch of retained history. Removal and
+revocation rotate every affected scope, and honest clients wrap later epoch
+keys only to current directory devices. A removed device therefore cannot
+encrypt a valid message for a later epoch. It can still sign records for
+epochs whose keys it held. An honest API refuses them because the device has
+no session and the API accepts only the current epoch. A malicious API could
+store such a back-dated record from a stolen, revoked device. Clients cannot
+detect this, because the API also controls the device directory and does not
+expose root-signed revocation records to other members. A removal epoch
+reported by the API would add no protection under the same assumption.
 
 ## Media encryption
 

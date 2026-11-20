@@ -160,10 +160,11 @@ pub async fn create(
     .bind(certificate)
     .execute(&mut *tx)
     .await?;
+    reserve(&mut tx, &id).await?;
     let size = envelope_bytes.len();
-    let inserted = query(
+    query(
         "INSERT INTO messages (id, channel_id, epoch, sender_device, sender_person, at, size, envelope)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(&channel)
@@ -174,11 +175,7 @@ pub async fn create(
     .bind(size as i64)
     .bind(envelope_bytes)
     .execute(&mut *tx)
-    .await?
-    .rows_affected();
-    if inserted == 0 {
-        return Err(keys::conflict("message_exists"));
-    }
+    .await?;
     let dropped = prune(&mut tx, &channel).await?;
     tx.commit().await?;
     for id in dropped {
@@ -200,6 +197,18 @@ pub async fn create(
             envelope,
         }),
     ))
+}
+
+async fn reserve(db: &mut SqliteConnection, id: &str) -> ApiResult<()> {
+    let fresh = query("INSERT INTO message_ids (id) VALUES (?) ON CONFLICT (id) DO NOTHING")
+        .bind(id)
+        .execute(db)
+        .await?
+        .rows_affected();
+    if fresh == 0 {
+        return Err(keys::conflict("message_exists"));
+    }
+    Ok(())
 }
 
 async fn prune(db: &mut SqliteConnection, channel: &str) -> ApiResult<Vec<String>> {
@@ -394,6 +403,34 @@ mod tests {
         .await?;
         assert_eq!(counts, [("a".into(), RETAIN), ("b".into(), 1)]);
         assert!(prune(&mut tx, "a").await?.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn removed_ids_stay_reserved_and_dm_audit_survives_the_dm() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let pool = crate::store::open(dir.path()).await?;
+        let mut tx = crate::store::write(&pool).await?;
+        reserve(&mut tx, "m").await?;
+        assert_eq!(
+            reserve(&mut tx, "m").await.unwrap_err().code,
+            "message_exists"
+        );
+        sqlx::raw_sql(
+            "INSERT INTO members (person_id, joined_at) VALUES (X'01', 0), (X'02', 0);
+             INSERT INTO channels (id, kind, position, dm_first, dm_second)
+                 VALUES ('dm', 'dm', 0, X'01', X'02');
+             INSERT INTO audit_log (id, actor_person_id, action, target_id, at, dm_channel_id)
+                 VALUES (1, X'01', 'message_deleted', 'm', 0, 'dm');
+             DELETE FROM channels WHERE id = 'dm';",
+        )
+        .execute(&mut *tx)
+        .await?;
+        assert!(reserve(&mut tx, "m").await.is_err());
+        let dm: Option<String> = query_scalar("SELECT dm_channel_id FROM audit_log WHERE id = 1")
+            .fetch_one(&mut *tx)
+            .await?;
+        assert_eq!(dm, None);
         Ok(())
     }
 }

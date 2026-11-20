@@ -76,36 +76,47 @@ async fn stream(
     tokio::pin!(expires);
     let mut pending: HashSet<KeyNeed> = HashSet::new();
     let mut rotations: HashSet<(Scope, i64)> = HashSet::new();
+    let mut readable: HashSet<String> = HashSet::new();
     let mut notices = Vec::new();
     let mut lagged = false;
+    let mut refresh = true;
     loop {
         // Bound the drain to the broadcast backlog so a busy stream still makes progress.
         for _ in 0..=app.changes.len() {
             use broadcast::error::TryRecvError;
             match changes.try_recv() {
-                Ok(notice) => notices.extend(notice),
+                Ok(notice) => refresh |= queue(&mut notices, notice),
                 Err(TryRecvError::Lagged(_)) => lagged = true,
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Closed) => return Ok("server_closed"),
             }
         }
-        let mut tx = app.db.begin().await?;
-        if let Some(reason) = session_end(&mut tx, actor).await? {
-            return Ok(reason);
-        }
-        let next_pending: HashSet<_> = keys::pending(&mut tx, actor).await?.into_iter().collect();
-        let scopes = keys::scopes(&mut tx, actor).await?;
-        let readable: HashSet<_> = scopes
-            .iter()
-            .filter(|state| state.scope.kind == Kind::Channel)
-            .map(|state| encode(&state.scope.id))
-            .collect();
-        let next_rotations: HashSet<_> = scopes
-            .iter()
-            .filter(|state| state.rotate)
-            .map(|state| (state.scope, state.epoch))
-            .collect();
-        tx.commit().await?;
+        refresh |= lagged;
+        // Message notices never change sessions, access or key work, so they reuse the last state.
+        let next = if refresh {
+            refresh = false;
+            let mut tx = app.db.begin().await?;
+            if let Some(reason) = session_end(&mut tx, actor).await? {
+                return Ok(reason);
+            }
+            let next_pending: HashSet<_> =
+                keys::pending(&mut tx, actor).await?.into_iter().collect();
+            let scopes = keys::scopes(&mut tx, actor).await?;
+            readable = scopes
+                .iter()
+                .filter(|state| state.scope.kind == Kind::Channel)
+                .map(|state| encode(&state.scope.id))
+                .collect();
+            let next_rotations: HashSet<_> = scopes
+                .iter()
+                .filter(|state| state.rotate)
+                .map(|state| (state.scope, state.epoch))
+                .collect();
+            tx.commit().await?;
+            Some((next_pending, next_rotations))
+        } else {
+            None
+        };
 
         if lagged {
             send(socket, Event::Resync).await?;
@@ -117,7 +128,9 @@ async fn stream(
         for notice in notices.drain(..) {
             if let Event::KeysNeeded(need) = &notice {
                 // A rejected slot can reopen within this batch and still need a wrap.
-                if next_pending.contains(need) {
+                if let Some((next_pending, _)) = &next
+                    && next_pending.contains(need)
+                {
                     pending.remove(need);
                     continue;
                 }
@@ -139,14 +152,16 @@ async fn stream(
                 send(socket, notice).await?;
             }
         }
-        for need in next_pending.difference(&pending) {
-            send(socket, Event::KeysNeeded(need.clone())).await?;
+        if let Some((next_pending, next_rotations)) = next {
+            for need in next_pending.difference(&pending) {
+                send(socket, Event::KeysNeeded(need.clone())).await?;
+            }
+            for &(scope, _) in next_rotations.difference(&rotations) {
+                send(socket, Event::RotateNeeded { scope }).await?;
+            }
+            pending = next_pending;
+            rotations = next_rotations;
         }
-        for &(scope, _) in next_rotations.difference(&rotations) {
-            send(socket, Event::RotateNeeded { scope }).await?;
-        }
-        pending = next_pending;
-        rotations = next_rotations;
 
         loop {
             tokio::select! {
@@ -159,7 +174,7 @@ async fn stream(
                 },
                 update = changes.recv() => {
                     match update {
-                        Ok(notice) => notices.extend(notice),
+                        Ok(notice) => refresh |= queue(&mut notices, notice),
                         Err(broadcast::error::RecvError::Lagged(_)) => lagged = true,
                         Err(broadcast::error::RecvError::Closed) => return Ok("server_closed"),
                     }
@@ -168,6 +183,16 @@ async fn stream(
             }
         }
     }
+}
+
+/// Queue a notice and report whether it can change session, access or key state.
+fn queue(notices: &mut Vec<Event>, notice: Option<Event>) -> bool {
+    let refresh = !matches!(
+        notice,
+        Some(Event::MessageCreated { .. } | Event::MessageDeleted { .. })
+    );
+    notices.extend(notice);
+    refresh
 }
 
 async fn send(socket: &mut WebSocket, notice: Event) -> ApiResult<()> {
