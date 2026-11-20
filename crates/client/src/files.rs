@@ -26,6 +26,8 @@ use crate::{
 /// Files per message, as the message format allows.
 const MAX_FILES: usize = 4;
 const THUMBNAIL: f32 = 320.0;
+/// Pictures kept before the cache is emptied; shown ones load again on demand.
+const MAX_PICTURES: usize = 200;
 
 /// Tests answer file dialogs here instead of opening one: given the suggested
 /// name when saving (`None` when opening), return the chosen paths.
@@ -215,6 +217,13 @@ pub fn attachments(
             card(ui, files, address, file);
             continue;
         };
+        if files.images.len() > MAX_PICTURES {
+            let open = files.viewer.as_ref().map(|(_, file)| file.file.id);
+            // Loading entries stay so their pending answers still land.
+            files
+                .images
+                .retain(|id, picture| Some(*id) == open || matches!(picture, Picture::Loading));
+        }
         let picture = files.images.entry(thumb.id).or_insert_with(|| {
             let _ = commands.send(Command::Image(thumb.clone(), false));
             Picture::Loading

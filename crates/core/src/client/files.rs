@@ -1,13 +1,22 @@
-use std::{io::Cursor, time::Duration};
+use std::{
+    io::{self, Cursor},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use anyhow::{Context, Result, ensure};
 use chacha20poly1305::{
     KeyInit, XChaCha20Poly1305, XNonce,
     aead::{Aead, Payload},
 };
+use futures_util::stream;
 use image::{DynamicImage, ImageFormat, ImageReader, Limits};
-use reqwest::{Method, StatusCode, header::CONTENT_TYPE};
+use reqwest::{Body, Method, StatusCode, header::CONTENT_TYPE};
 use serde::Deserialize;
+use tokio::time;
 use zeroize::Zeroizing;
 
 use crate::{
@@ -18,7 +27,12 @@ use crate::{
 
 use super::KeyClient;
 
-const TRANSFER_TIMEOUT: Duration = Duration::from_secs(120);
+/// A transfer fails when no bytes move for this long, so slow links still finish.
+const TRANSFER_IDLE: Duration = Duration::from_secs(30);
+/// The longest one file transfer may take.
+const TRANSFER_LIMIT: Duration = Duration::from_secs(15 * 60);
+/// Upload body piece size; each piece taken by the connection counts as progress.
+const UPLOAD_PIECE: usize = 64 * 1024;
 
 /// The API refused an upload. `code` is its error code, such as `file_member_quota`.
 #[derive(Debug, thiserror::Error)]
@@ -77,14 +91,31 @@ impl KeyClient<'_> {
         struct Problem {
             error: String,
         }
-        let response = self
+        let taken = Arc::new(AtomicUsize::new(0));
+        let pieces = {
+            let taken = taken.clone();
+            let ends = (UPLOAD_PIECE..ciphertext.len() + UPLOAD_PIECE).step_by(UPLOAD_PIECE);
+            stream::iter(ends.map(move |end| {
+                let start = end - UPLOAD_PIECE;
+                taken.fetch_add(1, Ordering::Relaxed);
+                Ok::<_, io::Error>(ciphertext[start..end.min(ciphertext.len())].to_vec())
+            }))
+        };
+        let send = self
             .request(Method::POST, "/v1/files")
             .query(&[("channel", encode(channel)), ("id", encode(&reference.id))])
             .header(CONTENT_TYPE, "application/octet-stream")
-            .timeout(TRANSFER_TIMEOUT)
-            .body(ciphertext)
-            .send()
-            .await?;
+            .timeout(TRANSFER_LIMIT)
+            .body(Body::wrap_stream(pieces))
+            .send();
+        let mut send = std::pin::pin!(send);
+        let response = loop {
+            let before = taken.load(Ordering::Relaxed);
+            match time::timeout(TRANSFER_IDLE, &mut send).await {
+                Ok(response) => break response?,
+                Err(_) => ensure!(taken.load(Ordering::Relaxed) != before, "upload stalled"),
+            }
+        };
         let status = response.status();
         if !status.is_success() {
             let code = response.json::<Problem>().await.map(|p| p.error);
@@ -105,14 +136,19 @@ impl KeyClient<'_> {
     /// Download a file or thumbnail and return bytes only after authenticating the entire blob.
     pub async fn download_file(&self, reference: &BlobRef) -> Result<Vec<u8>> {
         let expected = reference.ciphertext_len()?;
-        let mut response = self
+        let request = self
             .request(Method::GET, &file_path(&reference.id))
-            .timeout(TRANSFER_TIMEOUT)
-            .send()
-            .await?
+            .timeout(TRANSFER_LIMIT)
+            .send();
+        let mut response = time::timeout(TRANSFER_IDLE, request)
+            .await
+            .context("download stalled")??
             .error_for_status()?;
         let mut ciphertext = Vec::new();
-        while let Some(chunk) = response.chunk().await? {
+        while let Some(chunk) = time::timeout(TRANSFER_IDLE, response.chunk())
+            .await
+            .context("download stalled")??
+        {
             ensure!(
                 chunk.len() <= expected - ciphertext.len(),
                 "oversized ciphertext"
@@ -125,6 +161,17 @@ impl KeyClient<'_> {
     /// Remove an uploaded file or thumbnail by its ID.
     pub async fn delete_file(&self, id: &[u8; 32]) -> Result<()> {
         self.request(Method::DELETE, &file_path(id))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// Remove a file attached to a deleted message. `uploader` is the message's sender; a
+    /// moderator's request fails with 404 when the file belongs to anyone else.
+    pub async fn delete_message_file(&self, id: &[u8; 32], uploader: &[u8; 32]) -> Result<()> {
+        self.request(Method::DELETE, &file_path(id))
+            .query(&[("uploader", encode(uploader))])
             .send()
             .await?
             .error_for_status()?;

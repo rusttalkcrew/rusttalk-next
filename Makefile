@@ -81,6 +81,7 @@ reset: ## Delete dev data and volumes after confirmation
 lint: ## Run clippy (warnings are errors) and check formatting
 	@printf '\033[1;34m==> clippy\033[0m\n'
 	cargo clippy $(CARGO_SCOPE) --all-targets --locked -- -D warnings
+	cargo clippy --locked -p rusttalk-bot --no-default-features --all-targets -- -D warnings
 	@printf '\033[1;34m==> rustfmt --check\033[0m\n'
 	cargo fmt --all --check
 

@@ -122,6 +122,7 @@ impl<'a> KeyClient<'a> {
     }
 
     /// Every verified epoch key held for a scope.
+    #[cfg(feature = "voice")]
     pub(super) fn epoch_keys(&self, scope: Scope) -> impl Iterator<Item = (i64, &Key)> {
         self.keys
             .iter()

@@ -393,14 +393,19 @@ quota charge and expiry. DMs grant read and write to both participants.
 | --- | --- | --- |
 | POST `/v1/files?channel={channel}&id={id}` | Stream of raw ciphertext with `application/octet-stream` | Channel `write`. 201, `{id}` |
 | GET `/v1/files/{id}` | Empty | Channel `read`. 200, streamed ciphertext with `Content-Type: application/octet-stream` and `Content-Length` |
-| DELETE `/v1/files/{id}` | Empty | Uploader or a channel reader with `delete_messages`. 204 |
+| DELETE `/v1/files/{id}?uploader={person}` | Empty | Uploader, or a channel reader with `delete_messages` when `uploader` names the file's uploader. 204 |
 
 The upload rejects a blob below 16 bytes and caps the bytes as they arrive,
 including when the request has no Content-Length. The configured limits count
 ciphertext bytes, including tags and thumbnail blobs. Upload errors include
 `413 file_too_large`, `413 file_member_quota`, `413 file_server_quota`,
 `409 file_exists`, `408 file_upload_timeout` and `503 file_upload_busy`. The
-API stages at most four uploads at once and at most two per member.
+API stages at most four uploads at once and at most two per member. An upload
+fails with 408 when no bytes arrive for 30 seconds or it takes over 15 minutes.
+A moderator deleting a message passes its sender as `uploader`; the
+optional parameter is ignored for the uploader's own files. When it is
+missing or names someone else, a moderator gets `404 file_not_found`, so a
+message that references another member's file cannot get it removed.
 A missing or expired blob returns `404 file_not_found`. A download without a
 valid session also returns 404. A member without channel access gets
 `403 channel_read_denied`. Only the upload route uses the file body limit.

@@ -77,7 +77,7 @@ pub enum Command {
         files: Vec<PathBuf>,
     },
     /// Channel, message, and the IDs of its stored files to remove too.
-    Delete(Id, Id, Vec<Id>),
+    Delete(Id, Id, Id, Vec<Id>),
     /// Download and decode a picture: a thumbnail, or the full image (`true`).
     Image(BlobRef, bool),
     /// Download a file and save it here.
@@ -520,6 +520,10 @@ async fn run(
                     }
                     Some(Command::Image(file, _)) => ctx.send(Update::Image(file.id, Err(false))),
                     Some(Command::Save(file, _)) => ctx.send(Update::Saved(file.id, Err(false))),
+                    Some(Command::AcceptFile(id, _)) => {
+                        let reason = OFFLINE.into();
+                        ctx.send(Update::LiveProgress(id, LiveFileEvent::Failed { reason }));
+                    }
                     Some(command) => {
                         if let Command::JoinVoice(channel) = command {
                             ctx.send(Update::Call(url.clone(), channel, None));
@@ -874,11 +878,11 @@ async fn on_command(
             };
             send_messages(ctx, url, channel, vec![to_msg(&record, &body)], false, None);
         }
-        Command::Delete(channel, id, files) => {
+        Command::Delete(channel, id, sender, files) => {
             client.delete_message(&channel, &id).await?;
             ctx.send(Update::Deleted(url.clone(), channel, id));
             for file in files {
-                if let Err(error) = client.delete_file(&file).await
+                if let Err(error) = client.delete_message_file(&file, &sender).await
                     && !gone(&error)
                 {
                     tracing::warn!(error = %format_args!("{error:#}"), "deleting a stored file failed");

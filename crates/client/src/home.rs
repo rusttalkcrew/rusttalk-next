@@ -1694,16 +1694,18 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
                         .add(Button::new("Delete").fill(ui.visuals().error_fg_color))
                         .clicked()
                     {
-                        let files = home.servers[*index]
+                        let msg = home.servers[*index]
                             .chats
                             .get(channel)
-                            .and_then(|chat| chat.messages.iter().find(|msg| msg.id == *id))
+                            .and_then(|chat| chat.messages.iter().find(|msg| msg.id == *id));
+                        let files = msg
                             .into_iter()
                             .flat_map(|msg| &msg.files)
                             .flat_map(|file| std::iter::once(&file.file).chain(&file.thumbnail))
                             .map(|blob| blob.id)
                             .collect();
-                        command = Some((*index, Command::Delete(*channel, *id, files)));
+                        let sender = msg.map_or([0; 32], |msg| msg.person);
+                        command = Some((*index, Command::Delete(*channel, *id, sender, files)));
                     }
                     close |= ui.button("Cancel").clicked();
                 });
