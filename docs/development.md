@@ -267,7 +267,14 @@ disconnect or API session closure. The API builds core without the
 For a new address, use `Server::probe` and show the observed server fingerprint
 for confirmation before connecting with that expected pin. Invite links
 already specify the expected pins. Use `KeyClient::next_event` while online
-to drive key delivery and refresh before `KeyClient::expires_at`.
+to drive key delivery and refresh before `KeyClient::expires_at`. Use
+`KeyClient::next_update` to receive those events alongside presence
+changes, and `KeyClient::set_status` to set the member’s status.
+
+Use `KeyClient::set_avatar` and `KeyClient::set_server_icon` to validate
+and encrypt images for upload. After decrypting an avatar or icon with
+`KeyClient::decrypt_metadata`, use `decode_profile_image` to get RGBA
+frames and their delays.
 
 For live files in any readable and writable channel or DM, create
 `DataLiveFiles::new(&client, channel_id)` and keep it for the lifetime of local
