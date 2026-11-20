@@ -27,7 +27,7 @@ content on the server, not even temporarily.
 - [x] **W04 Identity.** 24 words, root key, device keys and certificates, revocation,
   keystore, dev profiles (`make client PROFILE=a`). Gate: unit tests incl. bad
   signatures and revoked devices.
-- [ ] **W05 Sign-in and membership.** Server key, pinning, challenge sign-in, session
+- [x] **W05 Sign-in and membership.** Server key, pinning, challenge sign-in, session
   tokens, owner invite printed once, invites, roles, kick, ban, audit log. Gate: e2e
   invite, join, kick, ban; a changed server key is refused.
 
