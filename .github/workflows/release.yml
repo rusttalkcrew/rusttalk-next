@@ -138,4 +138,10 @@ jobs:
           trap 'rm -f "$key"' EXIT
           printf '%s\n' "$KEY" > "$key"
           RUSTTALK_RELEASE_KEY="$key" python3 deploy/release/release.py sign dist
-      - run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes --title "RustTalk $VERSION"
+      # Version-free copies give the README stable releases/latest/download links.
+      - name: Publish
+        run: |
+          for file in dist/rusttalk-$VERSION-*; do
+            cp "$file" "dist/RustTalk-${file#dist/rusttalk-$VERSION-}"
+          done
+          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes --title "RustTalk $VERSION"
