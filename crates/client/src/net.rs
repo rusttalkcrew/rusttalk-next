@@ -12,17 +12,19 @@ use std::{
 
 use anyhow::{Context, Result};
 use eframe::egui;
-use livekit::prelude::RemoteTrack;
+use livekit::prelude::{Participant, RemoteTrack};
 use reqwest::{Method, StatusCode};
 use rusttalk_core::{
     auth::{
         InviteCode, InviteLink, KnownServer, ProtocolError, Session, decode, encode, voice_identity,
     },
+    camera::CameraOptions,
     client::{
         Catalog, Event, KeyClient, MessageBody, MessageError, MessageRecord, Server as Api,
         invite_name, save_json,
         voice::{
-            ConnectionState, RoomEvent, TrackSid, TrackSource, VoiceRoom, VoiceRoster, VoiceState,
+            ConnectionState, NativeVideoSource, RoomEvent, TrackSid, TrackSource, VoiceRoom,
+            VoiceRoster, VoiceState,
         },
     },
     identity::{DeviceIdentity, fingerprint},
@@ -86,8 +88,11 @@ pub enum Command {
     /// Share a screen or window, or open the system picker (Linux).
     ShareScreen(screen::Target, screen::Options),
     StopScreen,
-    /// Start or stop receiving a screen share, by track.
+    /// Start or stop receiving a screen or camera, by track.
     Watch(String, bool),
+    /// Publish a running camera, replacing an earlier one.
+    ShareCamera(NativeVideoSource, CameraOptions),
+    StopCamera,
 }
 
 pub struct Preview {
@@ -118,14 +123,16 @@ pub enum Update {
     Call(Url, Id, Option<CallState>),
     /// This device joined the call without permission to talk.
     Listening(Url, Id),
-    /// This device may not share its screen in the call.
-    NoScreen(Url, Id),
+    /// This device may not share its screen or camera in the call.
+    NoVideo(Url, Id),
     /// Everyone in one voice channel.
     Room(Url, Id, Vec<Peer>),
     /// Sharing this app stopped or never started.
     AppStopped(String),
     /// This device's screen share went live (`true`), or stopped or never started.
     Sharing(bool),
+    /// This device's camera stopped publishing or never started.
+    CameraStopped,
     Stats(Url, Stats),
     Failed(String),
 }
@@ -221,6 +228,15 @@ impl Net {
         }) {
             tracing::error!(error = %format_args!("{error:#}"), "removing a server failed");
         }
+    }
+
+    /// The network runtime, for LiveKit objects created off it (camera sources).
+    pub fn handle(&self) -> tokio::runtime::Handle {
+        self.runtime
+            .as_ref()
+            .expect("runtime until drop")
+            .handle()
+            .clone()
     }
 
     fn spawn(&self, task: impl Future<Output = ()> + Send + 'static) {
@@ -326,7 +342,9 @@ struct Live {
     /// A capture waiting for the person to pick (Linux) or for its first frame.
     starting: Option<tokio::task::JoinHandle<Result<(screen::Capture, screen::Options)>>>,
     screen: Option<(TrackSid, screen::Capture)>,
-    /// Screen tracks this device receives; others are unsubscribed.
+    /// The published camera; the UI owns its capture.
+    camera: Option<TrackSid>,
+    /// Screen and camera tracks this device receives; others are unsubscribed.
     watched: HashSet<String>,
 }
 
@@ -454,7 +472,7 @@ async fn run(
                             }
                             if let Some((sid, _capture)) = live.screen.take() {
                                 tracing::info!("stopped sharing screen");
-                                if let Err(error) = live.room.unpublish_screen(&sid).await {
+                                if let Err(error) = live.room.unpublish_video(&sid).await {
                                     tracing::warn!(error = %format_args!("{error:#}"), "stopping screen failed");
                                 }
                             }
@@ -463,6 +481,15 @@ async fn run(
                     Some(Command::ShareScreen(..)) => {
                         ctx.send(Update::Sharing(false));
                         ctx.send(Update::Failed(OFFLINE.into()));
+                    }
+                    Some(Command::ShareCamera(..)) => {
+                        ctx.send(Update::CameraStopped);
+                        ctx.send(Update::Failed(OFFLINE.into()));
+                    }
+                    Some(Command::StopCamera) => {
+                        if let Some(live) = &mut state.voice {
+                            stop_camera(live).await;
+                        }
                     }
                     Some(Command::Watch(sid, on)) => {
                         if let Some(live) = &mut state.voice
@@ -609,7 +636,22 @@ async fn serve(
                 }
             }
             next = next_voice(&mut state.voice) => match next {
-                Next::Event(event) => on_voice(ctx, url, client, state, event),
+                Next::Event(event) => {
+                    let lost = match &event {
+                        Some(RoomEvent::ParticipantPermissionChanged {
+                            participant: Participant::Local(_),
+                            ..
+                        }) => Some(None),
+                        Some(RoomEvent::LocalTrackUnpublished { publication, .. }) => {
+                            Some(Some(publication.sid()))
+                        }
+                        _ => None,
+                    };
+                    on_voice(ctx, url, client, state, event);
+                    if let Some(unpublished) = lost {
+                        stop_lost_video(ctx, url, client, state, unpublished).await;
+                    }
+                }
                 Next::Capture(capture) => share_screen(ctx, url, client, state, capture).await,
             },
             _ = stats.tick(), if state.voice.is_some() => {
@@ -796,7 +838,7 @@ async fn on_command(
             };
             tracing::info!(server = %fingerprint(&state.server_id), "joined voice");
             let listening = !room.can_publish();
-            let no_screen = !room.can_share_screen();
+            let no_video = !room.can_use_camera();
             state.voice = Some(Live {
                 room,
                 channel,
@@ -804,6 +846,7 @@ async fn on_command(
                 apps: HashMap::new(),
                 starting: None,
                 screen: None,
+                camera: None,
                 watched: HashSet::new(),
             });
             ctx.send(Update::Call(
@@ -814,8 +857,8 @@ async fn on_command(
             if listening {
                 ctx.send(Update::Listening(url.clone(), channel));
             }
-            if no_screen {
-                ctx.send(Update::NoScreen(url.clone(), channel));
+            if no_video {
+                ctx.send(Update::NoVideo(url.clone(), channel));
             }
             send_room(ctx, url, client, state, channel);
         }
@@ -891,7 +934,7 @@ async fn on_command(
             let channel = live.channel;
             send_room(ctx, url, client, state, channel);
             if let Some(live) = &mut state.voice {
-                live.room.unpublish_screen(&sid).await?;
+                live.room.unpublish_video(&sid).await?;
             }
         }
         Command::Watch(sid, on) => {
@@ -899,11 +942,47 @@ async fn on_command(
                 watch(ctx, live, sid, on)?;
             }
         }
+        Command::ShareCamera(source, options) => {
+            let Some(live) = &mut state.voice else {
+                ctx.send(Update::CameraStopped);
+                return Ok(());
+            };
+            stop_camera(live).await;
+            match live.room.publish_camera(options, source).await {
+                Ok(publication) => {
+                    tracing::info!("sharing camera");
+                    live.camera = Some(publication.sid());
+                }
+                Err(error) => {
+                    tracing::warn!(error = %format_args!("{error:#}"), "sharing camera failed");
+                    ctx.send(Update::CameraStopped);
+                    ctx.send(Update::Failed("Couldn't turn on your camera.".into()));
+                }
+            }
+            let channel = live.channel;
+            send_room(ctx, url, client, state, channel);
+        }
+        Command::StopCamera => {
+            if let Some(live) = &mut state.voice {
+                stop_camera(live).await;
+                let channel = live.channel;
+                send_room(ctx, url, client, state, channel);
+            }
+        }
     }
     Ok(())
 }
 
-/// Start or stop receiving a screen track.
+async fn stop_camera(live: &mut Live) {
+    if let Some(sid) = live.camera.take() {
+        tracing::info!("stopped sharing camera");
+        if let Err(error) = live.room.unpublish_video(&sid).await {
+            tracing::warn!(error = %format_args!("{error:#}"), "stopping camera failed");
+        }
+    }
+}
+
+/// Start or stop receiving a screen or camera track.
 fn watch(ctx: &Ctx, live: &mut Live, sid: String, on: bool) -> Result<()> {
     if on {
         live.watched.insert(sid.clone());
@@ -1465,12 +1544,14 @@ fn send_room(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &State, channe
             unknown: false,
             apps: Vec::new(),
             screens: Vec::new(),
+            camera: None,
         })),
         Some(live) => {
             let ids = identities(client, &state.server_id);
             let mut live_people: HashMap<Id, bool> = HashMap::new();
             let mut apps: HashMap<Id, Vec<(TrackSid, String)>> = HashMap::new();
             let mut screens: HashMap<Id, Vec<Screen>> = HashMap::new();
+            let mut cameras: HashMap<Id, String> = HashMap::new();
             for (participant, voice) in live.room.participants() {
                 if let Some(person) = ids.get(participant.identity().as_str()) {
                     *live_people.entry(*person).or_default() |= voice == VoiceState::Connected;
@@ -1496,14 +1577,23 @@ fn send_room(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &State, channe
                     .collect(),
             );
             for video in live.room.remote_video_tracks() {
-                if video.source == TrackSource::Screenshare
-                    && let Some(person) = ids.get(video.participant.as_str())
-                {
-                    screens.entry(*person).or_default().push(Screen {
+                let Some(person) = ids.get(video.participant.as_str()) else {
+                    continue;
+                };
+                match video.source {
+                    TrackSource::Screenshare => screens.entry(*person).or_default().push(Screen {
                         sid: video.sid.to_string(),
                         name: video.name,
-                    });
+                    }),
+                    // One per person: a second device's camera shows after the first stops.
+                    TrackSource::Camera => {
+                        cameras.entry(*person).or_insert(video.sid.to_string());
+                    }
+                    _ => {}
                 }
+            }
+            if let Some(sid) = &live.camera {
+                cameras.insert(me, sid.to_string());
             }
             if let Some((sid, _)) = &live.screen {
                 screens.insert(
@@ -1531,6 +1621,7 @@ fn send_room(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &State, channe
                     unknown: false,
                     apps: apps.remove(&person).unwrap_or_default(),
                     screens: screens.remove(&person).unwrap_or_default(),
+                    camera: cameras.remove(&person),
                 });
             }
         }
@@ -1541,6 +1632,7 @@ fn send_room(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &State, channe
         unknown: true,
         apps: Vec::new(),
         screens: Vec::new(),
+        camera: None,
     }));
     ctx.send(Update::Room(url.clone(), channel, peers));
 }
@@ -1608,7 +1700,7 @@ fn on_voice(
                 // Watching stopped while subscribing.
                 Some(live) => {
                     if let Err(error) = live.room.set_subscribed(&publication.sid(), false) {
-                        tracing::warn!(error = %format_args!("{error:#}"), "unsubscribing a screen failed");
+                        tracing::warn!(error = %format_args!("{error:#}"), "unsubscribing a video failed");
                     }
                 }
                 None => {}
@@ -1652,6 +1744,52 @@ fn on_voice(
     send_room(ctx, url, client, state, channel);
 }
 
+/// Stop the camera and screen once LiveKit no longer carries them: `video` was removed
+/// mid-call (LiveKit drops the grant) or the SDK unpublished the track itself.
+async fn stop_lost_video(
+    ctx: &Ctx,
+    url: &Url,
+    client: &KeyClient<'_>,
+    state: &mut State,
+    unpublished: Option<TrackSid>,
+) {
+    let Some(live) = &mut state.voice else {
+        return;
+    };
+    let (camera, screen) = (live.room.can_use_camera(), live.room.can_share_screen());
+    let gone = |sid: &TrackSid, allowed: bool| !allowed || unpublished.as_ref() == Some(sid);
+    let mut changed = false;
+    if live.camera.as_ref().is_some_and(|sid| gone(sid, camera)) {
+        stop_camera(live).await;
+        ctx.send(Update::CameraStopped);
+        changed = true;
+    }
+    if !screen && let Some(starting) = live.starting.take() {
+        starting.abort();
+        ctx.send(Update::Sharing(false));
+    }
+    if live
+        .screen
+        .as_ref()
+        .is_some_and(|(sid, _)| gone(sid, screen))
+    {
+        let (sid, _capture) = live.screen.take().expect("checked above");
+        tracing::info!("stopped sharing screen");
+        if let Err(error) = live.room.unpublish_video(&sid).await {
+            tracing::warn!(error = %format_args!("{error:#}"), "stopping screen failed");
+        }
+        ctx.send(Update::Sharing(false));
+        changed = true;
+    }
+    let channel = live.channel;
+    if unpublished.is_none() && !(camera && screen) {
+        ctx.send(Update::NoVideo(url.clone(), channel));
+    }
+    if changed {
+        send_room(ctx, url, client, state, channel);
+    }
+}
+
 /// Stop sharing apps that closed or whose capture stopped by itself.
 async fn stop_finished_shares(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &mut State) {
     let Some(live) = &mut state.voice else {
@@ -1668,7 +1806,7 @@ async fn stop_finished_shares(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, stat
     {
         let (sid, _) = live.screen.take().expect("checked above");
         tracing::info!("screen capture ended");
-        if let Err(error) = live.room.unpublish_screen(&sid).await {
+        if let Err(error) = live.room.unpublish_video(&sid).await {
             tracing::warn!(error = %format_args!("{error:#}"), "stopping screen share failed");
         }
         ctx.send(Update::Sharing(false));
@@ -1704,6 +1842,7 @@ async fn voice_stats(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &mut S
         .screen
         .iter()
         .map(|(sid, _)| (sid.clone(), "Screen".into()))
+        .chain(live.camera.iter().map(|sid| (sid.clone(), "Camera".into())))
         .chain(
             live.room
                 .remote_video_tracks()

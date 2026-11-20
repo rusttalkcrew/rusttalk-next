@@ -230,7 +230,7 @@ async fn publish_sources(
         sources.extend([TrackSource::Microphone, TrackSource::ScreenShareAudio]);
     }
     if channels::has_flag(db, channel, person, channels::VIDEO).await? {
-        sources.push(TrackSource::ScreenShare);
+        sources.extend([TrackSource::Camera, TrackSource::ScreenShare]);
     }
     Ok(sources)
 }

@@ -36,6 +36,8 @@ pub struct Peer {
     pub apps: Vec<(TrackSid, String)>,
     /// Screens they share, only known inside the room.
     pub screens: Vec<Screen>,
+    /// Their camera track, only known inside the room.
+    pub camera: Option<String>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -63,8 +65,8 @@ pub struct Call {
     pub stats: Stats,
     /// False when this device may only listen.
     pub can_talk: bool,
-    /// False when this device may not publish a screen.
-    pub can_share_screen: bool,
+    /// False when this device may not publish a screen or camera.
+    pub can_share_video: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]

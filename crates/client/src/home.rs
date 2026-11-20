@@ -20,6 +20,7 @@ use crate::{
     app::{Action, error_text, primary, secondary, submitted},
     audio::Audio,
     call::{self, Voice},
+    camera,
     net::{Command, Net, Preview, Update},
     screen::Video,
     server::{Body, Chat, Directory, Id, Msg, Server, Status, member_name},
@@ -38,7 +39,7 @@ pub struct Home {
     invite: String,
     join: Join,
     dialog: Option<Dialog>,
-    toast: Option<(String, f64)>,
+    pub toast: Option<(String, f64)>,
     pub settings: Option<Tab>,
     pub voice: Voice,
     pub confirm_sign_out: bool,
@@ -80,6 +81,7 @@ enum Dialog {
 pub enum Tab {
     Profile,
     Voice,
+    Video,
     Devices,
 }
 
@@ -109,6 +111,7 @@ impl Home {
                 commands: net.start(known, None, None),
             })
             .collect();
+        let runtime = net.handle();
         Ok(Self {
             identity,
             net,
@@ -123,7 +126,7 @@ impl Home {
             dialog: None,
             toast: None,
             settings: None,
-            voice: Voice::new(audio, video),
+            voice: Voice::new(audio, video, runtime),
             confirm_sign_out: false,
             error: None,
         })
@@ -275,14 +278,15 @@ impl Home {
                     call.can_talk = false;
                 }
             }
-            Update::NoScreen(address, channel) => {
+            Update::NoVideo(address, channel) => {
                 if let Some(call) = &mut self.voice.call
                     && call.server == address
                     && call.channel == channel
                 {
-                    call.can_share_screen = false;
+                    call.can_share_video = false;
                 }
             }
+            Update::CameraStopped => self.voice.camera.reset(),
             Update::Room(address, channel, peers) => {
                 if let Some(index) = self.index(&address) {
                     let rooms = &mut self.servers[index].voice;
@@ -1470,6 +1474,7 @@ fn settings(ctx: &egui::Context, home: &mut Home) -> Option<Action> {
         ui.horizontal(|ui| {
             ui.selectable_value(&mut tab, Tab::Profile, "Profile");
             ui.selectable_value(&mut tab, Tab::Voice, "Voice");
+            ui.selectable_value(&mut tab, Tab::Video, "Video");
             ui.selectable_value(&mut tab, Tab::Devices, "Devices");
         });
         ui.separator();
@@ -1483,6 +1488,12 @@ fn settings(ctx: &egui::Context, home: &mut Home) -> Option<Action> {
                 });
             }
             Tab::Voice => call::settings_tab(ui, &mut home.voice),
+            Tab::Video => {
+                let audio = home.voice.audio.clone();
+                let mut s = audio.settings();
+                camera::settings_tab(ui, &mut home.voice.camera, &mut s);
+                audio.set_settings(s);
+            }
             Tab::Devices => {
                 ui.label(format!("This device: {}", home.identity.certificate.name()));
             }

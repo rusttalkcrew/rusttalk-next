@@ -158,11 +158,15 @@ Debug builds open a console on Windows; release builds do not, so check
   verifies an idle viewer receives no video, and checks that a subscribed
   viewer with the wrong key gets no decoded frames and can decode the
   pattern after installing the correct key on the same subscription. The
-  live file scenario revokes data publishing by taking `write`, transfers
-  a 20 MiB file to that read-only bot, verifies its SHA-256, watches a third
-  bot's raw events for unwanted streams, and searches SQLite, WAL and stack
-  logs for the filename and a plaintext marker. Set `E2E_FEATURES=` to
-  run the membership, keys and chat harness without WebRTC or media tests.
+  camera scenario publishes the same pattern as a simulcast camera track,
+  decodes it on a second bot, and checks that a member who may speak but
+  not share video gets a token LiveKit refuses a camera for. The live file
+  scenario revokes data publishing by taking `write`, transfers a 20 MiB
+  file to that read-only bot, verifies its SHA-256, watches a third bot's
+  raw events for unwanted streams, and searches SQLite, WAL and stack logs
+  for the filename and a plaintext marker. Set `E2E_FEATURES=` to run the
+  membership, keys and chat harness without WebRTC, voice, app audio,
+  screen sharing, camera or live files.
 
 For a manual app-audio check, build with
 `cargo build --locked -p rusttalk-bot -p rusttalk-pipewire` and run both
@@ -224,6 +228,22 @@ On Windows, enumerate and capture in the logged-in user's interactive
 session. A disconnected RDP session can enumerate sources without
 delivering frames. Use an interactive scheduled task for an SSH-driven
 smoke test and remove it afterwards.
+
+### Camera
+
+Cameras use `nokhwa`: V4L2 on Linux, Media Foundation on Windows. MJPEG
+frames decode in pure Rust (`image`), other formats through nokhwa, then
+convert to I420. Bot A can publish `--share-camera synthetic` (the screen
+pattern) or `--share-camera device` (the first camera at 720p30), and bot B
+can verify the synthetic pattern with `--expect-camera --once`. In code,
+`camera::start` blocks for up to 8 seconds and must run off the UI thread
+inside a Tokio runtime context, because LiveKit's video source spawns a task.
+
+Without a webcam on Linux, an existing `v4l2loopback` device can stand in:
+feed it with
+`ffmpeg -re -f lavfi -i testsrc2=size=1280x720:rate=30 -pix_fmt yuyv422 -f v4l2 /dev/videoN`
+and pick it in Settings → Video or with `--share-camera device`. Stop
+ffmpeg afterwards.
 
 Bots and the desktop client use `rusttalk-core` with the `client` feature.
 `client::Server` verifies pins and handles sign-in, and `client::KeyClient`

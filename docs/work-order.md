@@ -53,7 +53,7 @@ content on the server, not even temporarily.
 
 **6. Screen sharing and camera**
 - [x] **W10 Screen and window sharing** (Windows and Linux). Gate: e2e screen track.
-- [ ] **W11 Camera.** Gate: e2e camera track.
+- [x] **W11 Camera.** Gate: e2e camera track.
 
 **7. File sharing, live**
 - [ ] **W12 Live transfer** through LiveKit data streams, encrypted, nothing stored,

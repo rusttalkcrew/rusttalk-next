@@ -2,6 +2,7 @@
 //! the connection panel and Settings → Voice.
 
 use std::{
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
@@ -15,6 +16,7 @@ use eframe::egui::{
 
 use crate::{
     audio::{self, Audio, Settings, StreamId},
+    camera::{Camera, Change},
     home::{Home, Tab, avatar, palette, section},
     net::Command,
     screen::{self, Kind, Options, Target, Video},
@@ -29,6 +31,8 @@ const RED: Color32 = Color32::from_rgb(0xda, 0x37, 0x3c);
 const FLOOR: f32 = -70.0;
 const CEILING: f32 = -10.0;
 const METER_WIDTH: f32 = 360.0;
+/// Width of a person's tile while it shows their camera.
+const VIDEO_WIDTH: f32 = 240.0;
 
 pub struct Voice {
     pub audio: Audio,
@@ -48,9 +52,16 @@ pub struct Voice {
     /// Screens and windows to pick from (Windows), filled by a listing thread.
     targets: Arc<Mutex<Listing<Target>>>,
     pub watching: Option<Watching>,
+    pub camera: Camera,
+    /// People whose camera this device chose not to receive.
+    hidden: HashSet<Id>,
+    /// Camera tracks this device receives, with their newest picture.
+    cameras: HashMap<String, Option<TextureHandle>>,
+    /// Camera tracks drawn this frame; only these stay subscribed.
+    shown: HashSet<String>,
 }
 
-enum Listing<T> {
+pub enum Listing<T> {
     Loading,
     Failed,
     Found(Vec<T>),
@@ -82,7 +93,7 @@ enum Calibration {
 }
 
 impl Voice {
-    pub fn new(audio: Audio, video: Video) -> Self {
+    pub fn new(audio: Audio, video: Video, runtime: tokio::runtime::Handle) -> Self {
         Self {
             audio,
             call: None,
@@ -97,14 +108,20 @@ impl Voice {
             share_screen: None,
             targets: Arc::new(Mutex::new(Listing::Loading)),
             watching: None,
+            camera: Camera::new(runtime),
+            hidden: HashSet::new(),
+            cameras: HashMap::new(),
+            shown: HashSet::new(),
         }
     }
 
-    /// Forget this call's screens: ours and the one being watched.
+    /// Forget this call's video: our screen and camera, and what we watch.
     pub fn clear_screens(&mut self) {
         self.sharing = Sharing::Off;
         self.share_screen = None;
         self.watching = None;
+        self.camera.reset();
+        self.cameras.clear();
     }
 
     fn in_call(&self, server: &Server, channel: &Id) -> bool {
@@ -137,7 +154,7 @@ pub fn join(home: &mut Home, index: usize, channel: Id) {
         state: CallState::Connecting,
         stats: Stats::default(),
         can_talk: true,
-        can_share_screen: true,
+        can_share_video: true,
     });
     home.voice.audio.set_voice(true);
 }
@@ -185,6 +202,46 @@ pub fn frame(ctx: &egui::Context, home: &mut Home) {
         if !shared {
             stop_watching(home);
         }
+    }
+    let can_video = home
+        .voice
+        .call
+        .as_ref()
+        .is_some_and(|call| call.can_share_video);
+    let preview = home.settings == Some(Tab::Video);
+    let change = home.voice.camera.update(ctx, &settings, can_video, preview);
+    if let Some(text) = home.voice.camera.problem.take() {
+        home.toast = Some((text, ctx.input(|input| input.time) + 6.0));
+    }
+    // Field by field, so the camera state stays writable below.
+    let Some(server) = (home.voice.call.as_ref())
+        .and_then(|call| home.servers.iter().find(|s| s.address == call.server))
+    else {
+        return;
+    };
+    match change {
+        Some(Change::Publish(source, options)) => {
+            server.send(Command::ShareCamera(source, options))
+        }
+        Some(Change::Stop) => server.send(Command::StopCamera),
+        None => {}
+    }
+    // Receive the cameras drawn last frame, and only those.
+    let shown = std::mem::take(&mut home.voice.shown);
+    for sid in &shown {
+        if !home.voice.cameras.contains_key(sid) {
+            server.send(Command::Watch(sid.clone(), true));
+        }
+    }
+    home.voice.cameras.retain(|sid, _| {
+        let keep = shown.contains(sid);
+        if !keep {
+            server.send(Command::Watch(sid.clone(), false));
+        }
+        keep
+    });
+    for sid in shown {
+        home.voice.cameras.entry(sid).or_default();
     }
 }
 
@@ -310,7 +367,7 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
     let audio = home.voice.audio.clone();
     let connected = call.state == CallState::Connected;
     let can_talk = call.can_talk;
-    let can_share_screen = call.can_share_screen;
+    let can_share_video = call.can_share_video;
     let mut leave_now = false;
     let mut share = None;
     let mut stop = None;
@@ -375,8 +432,9 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
                 &mut share,
                 &mut stop,
             );
+            camera_button(ui, &mut home.voice.camera, connected, can_share_video);
             if screen::SUPPORTED {
-                stop_screen = screen_button(ui, &mut home.voice, connected, can_share_screen);
+                stop_screen = screen_button(ui, &mut home.voice, connected, can_share_video);
             }
         });
     let server = home
@@ -403,6 +461,28 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
     }
     if leave_now {
         leave(home);
+    }
+}
+
+/// Turns the camera on or off in the call.
+fn camera_button(ui: &mut Ui, camera: &mut Camera, connected: bool, allowed: bool) {
+    let text = if camera.on {
+        "📷  Turn off camera"
+    } else {
+        "📷  Turn on camera"
+    };
+    let mut button = Button::new(text).min_size(Vec2::new(ui.available_width(), 28.0));
+    if camera.on {
+        button = button.fill(ui.visuals().selection.bg_fill);
+    }
+    let button = ui.add_enabled(connected && allowed, button);
+    let button = if allowed {
+        button
+    } else {
+        button.on_disabled_hover_text("You can't share video here")
+    };
+    if button.clicked() {
+        camera.on ^= true;
     }
 }
 
@@ -749,20 +829,47 @@ pub fn room(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
             });
         });
     }
+    let mut hide = None;
     ui.horizontal_wrapped(|ui| {
         for peer in &peers {
             let name = peer.name(server);
             let me = peer.person == server.dir.me;
+            let picture = match &peer.camera {
+                _ if !joined => None,
+                Some(_) if me => home.voice.camera.self_view(ui, VIDEO_WIDTH),
+                Some(sid) if !home.voice.hidden.contains(&peer.person) => {
+                    home.voice.shown.insert(sid.clone());
+                    camera_picture(ui, &mut home.voice, sid)
+                }
+                _ => None,
+            };
             let tile = Frame::new()
                 .fill(palette(ui).side)
                 .corner_radius(8)
                 .inner_margin(Margin::same(12))
                 .show(ui, |ui| {
-                    ui.set_width(150.0);
+                    ui.set_width(if picture.is_some() {
+                        VIDEO_WIDTH
+                    } else {
+                        150.0
+                    });
                     ui.vertical_centered(|ui| {
-                        let face = avatar(ui, &peer.person, &name, 64.0);
+                        let video = picture.is_some();
+                        let face = match picture {
+                            Some(picture) => ui.add(picture),
+                            None => avatar(ui, &peer.person, &name, 64.0),
+                        };
                         if home.voice.speaking(server, &peer.person) {
-                            ring(ui, face.rect);
+                            if video {
+                                ui.painter().rect_stroke(
+                                    face.rect,
+                                    4.0,
+                                    Stroke::new(2.0, GREEN),
+                                    egui::StrokeKind::Outside,
+                                );
+                            } else {
+                                ring(ui, face.rect);
+                            }
                         }
                         ui.label(RichText::new(&name).strong());
                         if !peer.screens.is_empty() {
@@ -792,11 +899,27 @@ pub fn room(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
                 }
             }
             if !me && !peer.unknown && joined {
-                Popup::context_menu(&tile)
-                    .show(|ui| stream_menu(ui, &home.voice.audio, &(peer.person, None)));
+                Popup::context_menu(&tile).show(|ui| {
+                    stream_menu(ui, &home.voice.audio, &(peer.person, None));
+                    if peer.camera.is_some() {
+                        let mut show = !home.voice.hidden.contains(&peer.person);
+                        if ui.checkbox(&mut show, "Show video").changed() {
+                            hide = Some((peer.person, !show));
+                        }
+                    }
+                });
             }
         }
     });
+    match hide {
+        Some((person, true)) => {
+            home.voice.hidden.insert(person);
+        }
+        Some((person, false)) => {
+            home.voice.hidden.remove(&person);
+        }
+        None => {}
+    }
     if peers.iter().any(|peer| !peer.apps.is_empty()) || joined && !home.voice.shares.is_empty() {
         ui.add_space(12.0);
         section(ui, "Shared audio");
@@ -846,6 +969,23 @@ pub fn room(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
             join(home, index, channel);
         }
     }
+}
+
+/// A watched camera's newest picture, once one arrived.
+fn camera_picture(ui: &Ui, voice: &mut Voice, sid: &str) -> Option<Image<'static>> {
+    let slot = voice.cameras.get_mut(sid)?;
+    if let Some(image) = voice.video.take(sid) {
+        match slot {
+            Some(texture) => texture.set(image, TextureOptions::LINEAR),
+            None => *slot = Some(ui.ctx().load_texture(sid, image, TextureOptions::LINEAR)),
+        }
+    }
+    let size = slot.as_ref()?.size_vec2();
+    let texture = slot.as_ref()?.id();
+    Some(Image::new((
+        texture,
+        Vec2::new(VIDEO_WIDTH, VIDEO_WIDTH * size.y / size.x),
+    )))
 }
 
 /// Volume slider and mute button for one stream, in a grid row.

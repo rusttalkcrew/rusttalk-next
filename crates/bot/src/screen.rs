@@ -5,6 +5,7 @@ use livekit::webrtc::{
     video_source::VideoResolution,
 };
 use rusttalk_core::{
+    camera::CameraOptions,
     client::voice::{NativeVideoSource, NativeVideoStream, RemoteVideo, TrackSource, VoiceRoom},
     screen::{ScreenOptions, bgra_to_i420, frame_to_rgba},
 };
@@ -53,31 +54,38 @@ pub async fn send(source: NativeVideoSource) -> Result<()> {
     }
 }
 
-pub async fn find(room: &mut VoiceRoom) -> Result<RemoteVideo> {
+/// Camera tracks carry the same bars as the synthetic screen.
+pub fn camera_options() -> CameraOptions {
+    CameraOptions {
+        height: 480,
+        fps: options().fps,
+    }
+}
+
+/// The synthetic screen share, or any camera.
+pub async fn find(room: &mut VoiceRoom, kind: TrackSource) -> Result<RemoteVideo> {
     loop {
-        if let Some(video) = room
-            .remote_video_tracks()
-            .into_iter()
-            .find(|video| video.source == TrackSource::Screenshare && video.name == NAME)
-        {
+        if let Some(video) = room.remote_video_tracks().into_iter().find(|video| {
+            video.source == kind && (kind != TrackSource::Screenshare || video.name == NAME)
+        }) {
             return Ok(video);
         }
         room.next_event()
             .await
-            .context("room closed waiting for synthetic screen share")?;
+            .context("room closed waiting for synthetic video")?;
     }
 }
 
-pub async fn hear(room: &mut VoiceRoom) -> Result<()> {
-    let share = find(room).await?;
+pub async fn hear(room: &mut VoiceRoom, kind: TrackSource) -> Result<()> {
+    let share = find(room, kind).await?;
     room.set_subscribed(&share.sid, true)?;
     let track = loop {
-        if let Some(track) = find(room).await?.track {
+        if let Some(track) = find(room, kind).await?.track {
             break track;
         }
         room.next_event()
             .await
-            .context("room closed waiting for screen subscription")?;
+            .context("room closed waiting for video subscription")?;
     };
     anyhow::ensure!(
         track.name() != NAME,
@@ -104,5 +112,5 @@ pub async fn verify(stream: &mut NativeVideoStream) -> Result<()> {
             return Ok(());
         }
     }
-    anyhow::bail!("screen track ended before receiving 320x180 red and blue bars")
+    anyhow::bail!("video track ended before receiving 320x180 red and blue bars")
 }
