@@ -68,8 +68,41 @@ pub async fn presence<'a>(
     presence_is(a, &person, Presence::Offline).await?;
     let b = KeyClient::connect(bot, identity, token).await?;
     presence_is(a, &person, Presence::Online).await?;
+
+    // The choice outlives the socket, so an invisible member reconnects unannounced.
+    b.set_status(Status::Invisible).await?;
+    presence_is(a, &person, Presence::Offline).await?;
+    drop(b);
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let b = KeyClient::connect(bot, identity, token).await?;
+    let leaked = timeout(Duration::from_millis(1500), async {
+        loop {
+            let update = a.next_update().await?.context("presence socket closed")?;
+            if let Update::Presence(PresenceEvent::PresenceChanged { person_id, .. }) = update
+                && person_id == person
+            {
+                return Ok::<_, anyhow::Error>(());
+            }
+        }
+    })
+    .await;
+    assert!(
+        leaked.is_err(),
+        "invisible member was announced on reconnect"
+    );
+    assert_eq!(member(a, &person).await?["presence"], "offline");
+    let me: Value = b
+        .request(Method::GET, "/v1/me")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(me["status"], "invisible");
+    b.set_status(Status::Online).await?;
+    presence_is(a, &person, Presence::Online).await?;
     println!(
-        "B2 bot saw online, away, invisible as offline, and offline on the last socket closing"
+        "B2 bot saw online, away, invisible as offline, offline on the last socket closing, and no notice for an invisible reconnect"
     );
     Ok(b)
 }

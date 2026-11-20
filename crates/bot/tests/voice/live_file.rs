@@ -212,17 +212,17 @@ pub(super) async fn data_only(
     )
     .await?;
 
-    super::set_flags(a, &encode(&text.id), "member", 1).await?;
+    // A voice channel has no data room, so voice permissions never reach one.
     super::rejected(
-        data_token(text).send().await?,
-        reqwest::StatusCode::FORBIDDEN,
-        "channel_write_denied",
+        data_token(voice).send().await?,
+        reqwest::StatusCode::BAD_REQUEST,
+        "not_a_chat_channel",
     )
     .await?;
-    super::set_flags(a, &encode(&text.id), "member", 15).await?;
 
-    // Verify media grants even on the data room for a channel with voice permissions.
-    let request = data_token(voice);
+    // A reader without write may join to receive but never to send.
+    super::set_flags(a, &encode(&text.id), "member", 1).await?;
+    let request = data_token(text);
     let mut url = request
         .try_clone()
         .context("build observer request")?
@@ -247,9 +247,10 @@ pub(super) async fn data_only(
         .local_participant()
         .permission()
         .context("missing data grant")?;
-    assert!(grant.can_publish_data && grant.can_subscribe && !grant.can_publish);
+    assert!(!grant.can_publish_data && grant.can_subscribe && !grant.can_publish);
     assert!(a.voice_participants(&voice.id).await?.people.is_empty());
     grant_room.close().await?;
+    super::set_flags(a, &encode(&text.id), "member", 15).await?;
 
     let reply: serde_json::Value = data_token(text)
         .send()

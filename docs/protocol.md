@@ -84,8 +84,8 @@ All endpoints below require `Authorization: Bearer <token>`.
 
 | Method and path | Body | Permission and success |
 | --- | --- | --- |
-| GET `/v1/me` | Empty | Any member. 200, `{person_id, device_id, joined_at, role_ids}` |
-| PUT `/v1/me/status` | `{status}`, one of `online`, `away`, `invisible` | Any member. 204. Applies to the member’s current event sockets |
+| GET `/v1/me` | Empty | Any member. 200, `{person_id, device_id, joined_at, role_ids, status}`; `status` is the caller’s own presence choice |
+| PUT `/v1/me/status` | `{status}`, one of `online`, `away`, `invisible` | Any member. 204. Stored and applied to the member’s event sockets |
 | POST `/v1/me/revocations` | `{record}`, a W04 root-signed revocation for the caller's person | Any member. 204, affected device loses its token |
 | POST `/v1/invites` | `{uses, ttl_seconds, space_key_ct, name_ct?}` | `invite`. 201, `{id, code, expires_at}` |
 | DELETE `/v1/invites/{id}` | Empty | `invite`. 204 |
@@ -412,12 +412,14 @@ ban and device revocation. Close reasons are fixed strings and logged.
 The server keeps lagging sockets open and recomputes the outstanding
 key work. DM, message and voice notices are sent only to current channel readers.
 Fetch the roster when loading a channel list and after `resync`.
-Members start `online` on their first event socket. A chosen `away` or
-`invisible` status applies across sockets. The directory and notices use
-`offline` for invisibility and for disconnected members. The last socket
-closing starts a one-second reconnect grace period before visible presence
-goes offline and the choice is cleared. A status request with no open event
-socket has no effect.
+A member’s first event socket announces their stored choice, which starts as
+`online`; an `invisible` member is not announced. The choice applies across
+sockets and devices and survives reconnects and server restarts. The directory
+and notices use `offline` for invisibility and for disconnected members. The
+last socket closing starts a one-second reconnect grace period before visible
+presence goes offline. Notices for one member are coalesced to at most one per
+second; the latest choice wins, and a choice reverted within that second sends
+nothing.
 
 ## Files
 
@@ -493,10 +495,12 @@ receiver never derives a save path from it.
 The receiver chooses a destination and explicitly accepts an offer from a
 currently verified device. For a transfer outside a call, each participant
 uses `POST /v1/channels/{channel}/live-file/token/{nonce}` with a bearer token
-and an empty body. The route requires channel read and write access and returns
+and an empty body. The route requires a text channel or DM the caller can read,
+otherwise `400 not_a_chat_channel` or `403 channel_read_denied`, and returns
 `{token}`. DM participants can read and write their DM. The token allows
 joining for 60 seconds and is scoped to the `file-{channel}` LiveKit room.
-It allows publishing data and subscribing. Media publication is disabled,
+It allows subscribing, and publishing data only with write access, so a
+reader without write can receive but not send. Media publication is disabled,
 including for members with voice privileges. The client disables automatic
 track subscription and connects the receiver when they choose Save. The
 sender connects on a verified acceptance. The participant identity is the
@@ -506,8 +510,10 @@ failure or cancellation.
 
 After joining, the receiver sends `POST /v1/channels/{channel}/live-file`
 with a bearer header and JSON `{recipient, transfer, nonce, cancel, signature}`.
-To accept, both devices must be allowed to write and the accepting device
-must be in the data room. The API returns 204 after queuing a volatile
+To accept, the accepting device must read the channel and be in the data
+room, and the offering device must be allowed to write. Membership checks
+remove a data-room participant who loses read access, and a sender who loses
+write access. The API returns 204 after queuing a volatile
 `live_file_accepted` event to the offering device. In-call transfers also
 support the existing `POST /v1/voice/{channel}/live-file` route with the same
 body. It requires voice channel read access and both devices active in the

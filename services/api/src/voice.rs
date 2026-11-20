@@ -241,7 +241,7 @@ pub async fn data_token(
 ) -> ApiResult<Json<Token>> {
     let nonce = decode(&nonce)?;
     let (mut tx, actor) = authenticate(&app, &headers).await?;
-    messages::require_write(&mut tx, &actor, &channel).await?;
+    let can_publish_data = require_chat_read(&mut tx, &channel, &actor.person).await?;
     let identity = live_file_identity(app.key.verifying_key().as_bytes(), &actor.device, &nonce);
     let token = configured(&app)?.sign(
         &identity,
@@ -249,7 +249,7 @@ pub async fn data_token(
             room: format!("{DATA_PREFIX}{channel}"),
             room_join: true,
             can_publish: Some(false),
-            can_publish_data: Some(true),
+            can_publish_data: Some(can_publish_data),
             can_subscribe: Some(true),
             ..Default::default()
         },
@@ -257,6 +257,21 @@ pub async fn data_token(
     )?;
     tx.commit().await?;
     Ok(Json(Token { token }))
+}
+
+/// Data rooms exist only for text channels and DMs. Readers may receive; only
+/// writers may send. Returns whether this person may publish data.
+async fn require_chat_read(
+    db: &mut SqliteConnection,
+    channel: &str,
+    person: &[u8],
+) -> ApiResult<bool> {
+    decode::<32>(channel)?;
+    let kind = messages::readable_kind(db, channel, person).await?;
+    if !matches!(kind.as_str(), "text" | "dm") {
+        return Err(ApiError::bad_request("not_a_chat_channel"));
+    }
+    messages::can_write(db, channel, person, &kind).await
 }
 
 async fn publish_sources(
@@ -431,7 +446,14 @@ async fn enforce_rooms(app: &App, livekit: &LiveKit, room: Option<String>) -> Ap
                     continue;
                 };
                 if data {
-                    if !messages::can_write(&mut db, channel, person, kind.as_deref().unwrap_or(""))
+                    // Readers stay to receive; a sender that lost write leaves.
+                    if participant.permission.can_publish_data
+                        && !messages::can_write(
+                            &mut db,
+                            channel,
+                            person,
+                            kind.as_deref().unwrap_or(""),
+                        )
                         .await?
                     {
                         remove.push(participant.identity);
@@ -511,12 +533,7 @@ async fn relay_acceptance(
 ) -> ApiResult<StatusCode> {
     let (mut tx, actor) = authenticate(app, headers).await?;
     if data {
-        decode::<32>(&channel)?;
-        if acceptance.cancel {
-            messages::readable_kind(&mut tx, &channel, &actor.person).await?;
-        } else {
-            messages::require_writer(&mut tx, &channel, &actor.person).await?;
-        }
+        require_chat_read(&mut tx, &channel, &actor.person).await?;
     } else {
         require_voice_read(&mut tx, &channel, &actor.person).await?;
     }

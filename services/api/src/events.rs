@@ -114,8 +114,15 @@ async fn stream(
                 .filter(|state| state.rotate)
                 .map(|state| (state.scope, state.epoch))
                 .collect();
+            let status = if presence.is_none() {
+                Some(presence::stored(&mut tx, &actor.person).await?)
+            } else {
+                None
+            };
             tx.commit().await?;
-            presence.get_or_insert_with(|| presence::open(app, encode(&actor.person)));
+            if let Some(status) = status {
+                presence = Some(presence::open(app, encode(&actor.person), status));
+            }
             Some((next_pending, next_rotations))
         } else {
             None

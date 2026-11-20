@@ -5,7 +5,7 @@ use image::{AnimationDecoder, Frame, ImageDecoder, ImageFormat, Limits, codecs::
 use reqwest::Method;
 use serde_json::json;
 
-use crate::keys::{IMAGE_CIPHERTEXT, Metadata};
+use crate::keys::{IMAGE_PLAINTEXT, Metadata};
 
 use super::{KeyClient, files::decode_limited};
 
@@ -46,8 +46,8 @@ impl KeyClient<'_> {
 /// Decode a PNG, JPEG or animated GIF into RGBA frames with their frame delays.
 pub fn decode_profile_image(bytes: &[u8]) -> Result<Vec<Frame>> {
     ensure!(
-        bytes.len() <= IMAGE_CIPHERTEXT,
-        "encoded image exceeds 256 KiB"
+        bytes.len() <= IMAGE_PLAINTEXT,
+        "encoded image must fit in 256 KiB once encrypted"
     );
     let format = image::guess_format(bytes).context("unknown image format")?;
     if format != ImageFormat::Gif {
@@ -110,6 +110,9 @@ mod tests {
         assert!(decode_profile_image(&gif(1, 1, MAX_FRAMES + 1)?).is_err());
         assert!(decode_profile_image(&gif(EDGE, EDGE, 33)?).is_err());
         assert!(decode_profile_image(b"not an image").is_err());
+        let mut oversized = gif(1, 1, 1)?;
+        oversized.resize(IMAGE_PLAINTEXT + 1, 0);
+        assert!(decode_profile_image(&oversized).is_err());
         Ok(())
     }
 

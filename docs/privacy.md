@@ -70,11 +70,13 @@ SQLite backups and old WAL pages can retain past
 database contents, and volume backups can retain expired ciphertext.
 The API knows which authenticated member and device have an open event socket,
 including when a member chooses to appear offline. It keeps per-person socket
-counts and the chosen status in memory. One second after the last socket
-closes, it removes that state. A reconnect during the grace period preserves
-the choice. Members see only the person ID and visible status (online, away
-or offline). There is no persistent presence choice, last-seen timestamp or
-presence event history. The existing session and connection-close logging
+counts in memory and removes them one second after the last socket closes.
+The current status choice (online, away or invisible) is stored with the
+member row so an invisible member is never announced online when they
+reconnect, use another device or the server restarts. Only the latest choice
+is kept, and it is returned only to that member. Members see only the person
+ID and visible status (online, away or offline). There is no last-seen
+timestamp or presence event history. The existing session and connection-close logging
 still applies.
 
 The API can see who is in which voice room by matching opaque LiveKit
