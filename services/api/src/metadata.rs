@@ -5,7 +5,7 @@ use axum::{
 };
 use rusttalk_core::{
     auth::{decode_bytes, encode},
-    keys::Metadata,
+    keys::{Event, Metadata},
 };
 use serde::{Deserialize, Serialize};
 use sqlx::query_as;
@@ -89,6 +89,7 @@ pub async fn update_space(
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
+    app.notify(Some(Event::ChannelChanged));
     Ok(StatusCode::NO_CONTENT)
 }
 
