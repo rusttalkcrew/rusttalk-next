@@ -15,7 +15,7 @@ use eframe::egui::{
     self, Align, Color32, Frame, Id as UiId, Image, Layout, Margin, Modal, Rect, Response,
     RichText, Role, ScrollArea, Sense, TextureHandle, TextureOptions, Ui, Vec2, WidgetInfo,
 };
-use rusttalk_core::client::Attachment;
+use rusttalk_core::client::{Attachment, save_json};
 use tokio::sync::mpsc::UnboundedSender;
 use url::Url;
 
@@ -107,19 +107,14 @@ pub type Answer = (Ask, Vec<PathBuf>);
 impl Files {
     pub fn new(data: &Path) -> Self {
         let saved = data.join(SAVED);
-        let paths = match fs::read(&saved) {
-            Ok(bytes) => serde_json::from_slice::<HashMap<String, PathBuf>>(&bytes)
-                .inspect_err(|error| tracing::warn!(%error, "reading saved file places failed"))
-                .unwrap_or_default()
-                .into_iter()
-                .filter_map(|(id, path)| Some((hex::decode(id).ok()?.try_into().ok()?, path)))
-                .collect(),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => HashMap::new(),
-            Err(error) => {
-                tracing::warn!(%error, "reading saved file places failed");
-                HashMap::new()
-            }
-        };
+        let paths = crate::load_json::<HashMap<String, PathBuf>>(&saved)
+            .inspect_err(|error| {
+                tracing::warn!(error = %format_args!("{error:#}"), "reading saved file places failed");
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(id, path)| Some((hex::decode(id).ok()?.try_into().ok()?, path)))
+            .collect();
         Self {
             images: HashMap::new(),
             saves: HashMap::new(),
@@ -178,11 +173,8 @@ impl Files {
         let paths: HashMap<String, &PathBuf> = (self.paths.iter())
             .map(|(id, path)| (hex::encode(id), path))
             .collect();
-        let written = serde_json::to_vec(&paths)
-            .map_err(io::Error::other)
-            .and_then(|bytes| fs::write(self.data.join(SAVED), bytes));
-        if let Err(error) = written {
-            tracing::warn!(%error, "saving where files were saved failed");
+        if let Err(error) = save_json(&self.data, &self.data.join(SAVED), &paths) {
+            tracing::warn!(error = %format_args!("{error:#}"), "saving where files were saved failed");
         }
     }
 

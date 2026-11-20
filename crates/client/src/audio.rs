@@ -10,7 +10,6 @@
 use std::{
     borrow::Cow,
     collections::{HashMap, VecDeque},
-    fs,
     path::{Path, PathBuf},
     pin::pin,
     sync::{
@@ -40,6 +39,7 @@ use livekit::{
         prelude::RtcAudioTrack,
     },
 };
+use rusttalk_core::client::save_json;
 use serde::{Deserialize, Serialize};
 use tokio::runtime::Runtime;
 
@@ -226,13 +226,10 @@ impl Audio {
             .build()
             .context("start playback runtime")?;
         let file = data.join("voice.json");
-        let settings = match fs::read(&file) {
-            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|error| {
-                tracing::warn!(%error, "voice settings unreadable, using defaults");
-                Settings::default()
-            }),
-            Err(_) => Settings::default(),
-        };
+        let settings = crate::load_json(&file).unwrap_or_else(|error| {
+            tracing::warn!(error = %format_args!("{error:#}"), "voice settings unreadable, using defaults");
+            Settings::default()
+        });
         let off = AudioSourceOptions {
             echo_cancellation: false,
             noise_suppression: false,
@@ -564,10 +561,8 @@ fn devices(
 }
 
 fn save(shared: &Shared) {
-    let result = serde_json::to_vec_pretty(&shared.settings())
-        .map_err(anyhow::Error::from)
-        .and_then(|bytes| Ok(fs::write(&shared.file, bytes)?));
-    if let Err(error) = result {
+    let dir = shared.file.parent().unwrap_or(Path::new("."));
+    if let Err(error) = save_json(dir, &shared.file, &shared.settings()) {
         tracing::error!(error = %format_args!("{error:#}"), "saving voice settings failed");
     }
 }

@@ -3,7 +3,6 @@
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    fs, io,
     path::Path,
     sync::{Mutex, PoisonError},
 };
@@ -84,11 +83,7 @@ pub struct Synced {
 
 impl DeviceSync {
     pub fn open(data: &Path) -> Result<Self> {
-        let saved = match fs::read(data.join("sync.json")) {
-            Ok(bytes) => serde_json::from_slice(&bytes).context("read sync state")?,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Saved::default(),
-            Err(error) => return Err(error).context("open sync state"),
-        };
+        let saved = crate::load_json(&data.join("sync.json")).context("load sync state")?;
         Ok(Self {
             saved: tokio::sync::Mutex::new(saved),
             peers: Mutex::default(),
