@@ -14,7 +14,8 @@ use rusttalk_core::{
 
 use crate::{
     app::error_text,
-    home::{Home, avatar, section},
+    files::Ask,
+    home::{Home, face, frame, section},
     net::{Admin, AdminUpdate, AuditEntry, Ban, Command, PublicListing},
     server::{Id, PERMISSIONS, Perms, Server},
 };
@@ -23,10 +24,11 @@ use crate::{
 const AUDIT_PAGE: usize = 50;
 
 /// Audit log filters: API action and label.
-const FILTERS: [(&str, &str); 8] = [
+const FILTERS: [(&str, &str); 9] = [
     ("member_banned", "Bans"),
     ("member_unbanned", "Unbans"),
     ("member_kicked", "Kicks"),
+    ("left", "Leaves"),
     ("member_roles_changed", "Role changes"),
     ("joined", "Joins without an invite"),
     ("message_deleted", "Deleted messages"),
@@ -36,6 +38,8 @@ const FILTERS: [(&str, &str); 8] = [
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Tab {
+    /// The server icon.
+    Overview,
     Members,
     Roles,
     Bans,
@@ -99,7 +103,9 @@ pub fn open(home: &mut Home, index: usize, mut tab: Tab) {
     let server = &home.servers[index];
     let perms = server.dir.perms;
     if tab == Tab::Members && !(perms.kick || perms.ban || perms.manage_roles) {
-        tab = if perms.audit {
+        tab = if perms.manage_server {
+            Tab::Overview
+        } else if perms.audit {
             Tab::Audit
         } else {
             Tab::Joining
@@ -187,6 +193,7 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
     };
     let mut close = false;
     let mut request = None;
+    let mut icon = false;
     let modal = Modal::new(UiId::unique("server-settings")).show(ctx, |ui| {
         ui.set_width(560.0);
         let perms = server.dir.perms;
@@ -196,6 +203,7 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
             ui.heading(format!("{} settings", server.name()));
             ui.horizontal(|ui| {
                 let tabs = [
+                    (Tab::Overview, "Overview", perms.manage_server),
                     (
                         Tab::Members,
                         "Members",
@@ -228,6 +236,10 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
             });
             ui.separator();
             let changed = match settings.tab {
+                Tab::Overview => {
+                    icon = overview_tab(ui, server);
+                    None
+                }
                 Tab::Members => members_tab(ui, server, settings),
                 Tab::Roles => roles_tab(ui, server, settings),
                 Tab::Bans => bans_tab(ui, server, settings),
@@ -252,9 +264,40 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
         settings.message = None;
         server.send(Command::Admin(request));
     }
+    if icon {
+        settings.message = None;
+        home.files.ask(ctx, Ask::Icon(server.address.clone()));
+    }
     if close || modal.should_close() {
         home.server_settings = None;
     }
+}
+
+/// The server icon, for people who may manage the server. True when "Change icon" was clicked.
+fn overview_tab(ui: &mut Ui, server: &Server) -> bool {
+    section(ui, "Server icon");
+    ui.horizontal(|ui| {
+        match &server.dir.icon {
+            Some(icon) => {
+                ui.add(
+                    egui::Image::new(&frame(ui, icon))
+                        .fit_to_exact_size(egui::Vec2::splat(64.0))
+                        .corner_radius(16),
+                );
+            }
+            None => {
+                ui.weak("No icon yet. The server's initials show instead.");
+            }
+        }
+        ui.vertical(|ui| {
+            ui.label("Shown in everyone's server list.");
+            ui.button("Change icon")
+                .on_hover_text("PNG, JPG or GIF. GIFs play.")
+                .clicked()
+        })
+        .inner
+    })
+    .inner
 }
 
 fn role_names(server: &Server, roles: &[String]) -> String {
@@ -339,7 +382,7 @@ fn members_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Option<
             let name = server.member_name(&member.person);
             let row = ui
                 .horizontal(|ui| {
-                    avatar(ui, &member.person, &name, 28.0);
+                    face(ui, &server.dir, &member.person, &name, 28.0, false);
                     ui.vertical(|ui| {
                         let row = ui.add(
                             Button::selectable(false, &name)
@@ -533,6 +576,7 @@ fn sentence(server: &Server, entry: &AuditEntry) -> String {
         "member_banned" => format!("{actor} banned {target}"),
         "member_unbanned" => format!("{actor} unbanned {target}"),
         "member_kicked" => format!("{actor} kicked {target}"),
+        "left" => format!("{actor} left"),
         "member_roles_changed" => format!("{actor} changed {target}'s roles"),
         "ownership_transferred" => format!("{actor} made {target} the owner"),
         "joined" => format!("{actor} joined"),

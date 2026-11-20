@@ -4,6 +4,7 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     path::PathBuf,
     sync::Arc,
+    time::Duration,
 };
 
 use anyhow::Result;
@@ -11,27 +12,28 @@ use chrono::{DateTime, Local};
 use eframe::egui::{
     self, Align, Align2, Button, CentralPanel, CollapsingHeader, Color32, FontId, Frame,
     Id as UiId, Key, KeyboardShortcut, Label, Layout, Margin, Modal, Modifiers, Panel, Popup, Rect,
-    Response, RichText, Role, ScrollArea, Sense, Shape, TextEdit, Ui, UiBuilder, Vec2, WidgetInfo,
-    ecolor::Hsva,
+    Response, RichText, Role, ScrollArea, Sense, Shape, TextEdit, TextureHandle, TextureOptions,
+    Ui, UiBuilder, Vec2, WidgetInfo, ecolor::Hsva,
 };
 use rusttalk_core::{
     auth::{Fingerprint, InviteLink, decode},
     client::{MAX_TEXT_CHARS, voice::LiveFileEvent},
     identity::{DeviceIdentity, fingerprint},
     index::https_url,
+    presence::{Presence, Status as Choice},
 };
 
 use crate::{
     admin,
     app::{Action, error_text, primary, secondary, submitted},
     audio::Audio,
-    call::{self, LiveFile, LiveState, Voice},
+    call::{self, LiveAction, LiveFile, LiveState, Voice},
     camera,
     device_sync::{self, Edit},
     files::{self, Ask, Files},
     net::{Admin, AdminUpdate, Admission, Command, Listed, Net, PAGE_SIZE, Preview, Update},
     screen::Video,
-    server::{Body, Chat, Directory, Id, Msg, Server, Status, member_name},
+    server::{Body, Chat, Directory, Id, Msg, Picture, Server, Status, member_name},
 };
 
 /// The name shown until a server has one, or until its key arrives.
@@ -39,6 +41,11 @@ const NEW_SERVER: &str = "New server";
 /// Show the character count once a message gets this long.
 const COUNT_FROM: usize = 1_800;
 const DAY: u32 = 24 * 60 * 60;
+/// Seconds without any input before "Online" turns into "Away" by itself.
+const AWAY_AFTER: f64 = 10.0 * 60.0;
+const ONLINE: Color32 = Color32::from_rgb(0x23, 0xa5, 0x5a);
+const AWAY: Color32 = Color32::from_rgb(0xf0, 0xb2, 0x32);
+const OFFLINE: Color32 = Color32::from_rgb(0x80, 0x84, 0x8e);
 
 pub struct Home {
     pub identity: Arc<DeviceIdentity>,
@@ -60,6 +67,12 @@ pub struct Home {
     synced: BTreeMap<String, serde_json::Value>,
     /// Servers left in this session, so a sync that started before can't bring them back.
     left: HashSet<url::Url>,
+    /// This person's status on every server; `None` until a server reports it.
+    pub status: Option<Choice>,
+    /// "Away" was set by itself after no input, so input sets "Online" again.
+    auto_away: bool,
+    /// When the person last used the window, in egui time.
+    active_at: f64,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -107,7 +120,8 @@ enum Dialog {
     Invite(Invite),
     Member(usize, Id),
     Delete(usize, Id, Id),
-    Leave(usize),
+    /// Leave a server, with the reason it didn't work.
+    Leave(usize, Option<String>),
 }
 
 struct Invite {
@@ -132,6 +146,7 @@ pub enum Tab {
 impl Home {
     pub fn new(identity: DeviceIdentity, ctx: &egui::Context, data: PathBuf) -> Result<Self> {
         let identity = Arc::new(identity);
+        let data_dir = data.clone();
         let audio = Audio::new(&data)?;
         let video = Video::new(ctx.clone());
         let net = Net::new(
@@ -170,13 +185,41 @@ impl Home {
             toast: None,
             settings: None,
             voice: Voice::new(audio, video, runtime),
-            files: Files::default(),
+            files: Files::new(&data_dir),
             confirm_sign_out: false,
             error: None,
             server_settings: None,
             synced,
             left: HashSet::new(),
+            status: None,
+            auto_away: false,
+            active_at: 0.0,
         })
+    }
+
+    /// Choose a status on every server.
+    fn set_status(&mut self, choice: Choice) {
+        self.status = Some(choice);
+        for server in &self.servers {
+            server.send(Command::SetStatus(choice));
+        }
+    }
+
+    /// Turn "Online" into "Away" after a while without input, and back once used again.
+    fn track_activity(&mut self, ui: &Ui) {
+        let (now, active) = ui.input(|input| (input.time, !input.events.is_empty()));
+        if active {
+            self.active_at = now;
+            if self.auto_away {
+                self.auto_away = false;
+                self.set_status(Choice::Online);
+            }
+        } else if self.status == Some(Choice::Online) && now - self.active_at > AWAY_AFTER {
+            self.auto_away = true;
+            self.set_status(Choice::Away);
+        }
+        // Without input egui stops drawing; wake up to notice the time passing.
+        ui.ctx().request_repaint_after(Duration::from_secs(30));
     }
 
     /// Stop showing a server, and leave its call and any dialog that points into the list.
@@ -321,9 +364,37 @@ impl Home {
                             server.names.insert(member.person, name.clone());
                         }
                     }
+                    // Every server gets the same status; one that differs is told the current one.
+                    match (self.status, dir.status) {
+                        (None, Some(Choice::Away)) => {
+                            // shortcut: a stored "Away" counts as automatic and ends with input,
+                            // since whether it was picked isn't stored; keep the pick locally if missed.
+                            self.status = Some(Choice::Away);
+                            self.auto_away = true;
+                        }
+                        (None, stored) => self.status = stored,
+                        (Some(mine), Some(theirs)) if mine != theirs => {
+                            server.send(Command::SetStatus(mine));
+                        }
+                        _ => {}
+                    }
                     server.dir = *dir;
                 }
             }
+            Update::Left(address) => {
+                if let Some(index) = self.index(&address) {
+                    self.leave_server(index);
+                }
+            }
+            Update::Presence(address, person, presence) => {
+                if let Some(index) = self.index(&address)
+                    && let Some(member) =
+                        (self.servers[index].dir.members.iter_mut()).find(|m| m.person == person)
+                {
+                    member.presence = presence;
+                }
+            }
+            Update::SaveProgress(id, done) => self.files.progress(id, done),
             Update::Messages {
                 server,
                 channel,
@@ -432,6 +503,7 @@ impl Home {
             }
             Update::LiveOffer(offer) => self.voice.live_files.push(LiveFile {
                 id: offer.id,
+                chat: offer.chat,
                 state: if offer.from.is_some() {
                     LiveState::Offered
                 } else {
@@ -526,8 +598,13 @@ impl Home {
                 audio.set_settings(adopted);
             }
             Update::Failed(error) => {
-                if let Some(Dialog::Invite(invite)) = &mut self.dialog {
-                    invite.making = false;
+                match &mut self.dialog {
+                    Some(Dialog::Invite(invite)) => invite.making = false,
+                    Some(Dialog::Leave(_, shown)) => {
+                        *shown = Some(error);
+                        return;
+                    }
+                    _ => {}
                 }
                 self.toast = Some((error, now + 6.0));
             }
@@ -590,11 +667,30 @@ pub fn show(ui: &mut Ui, home: &mut Home, updates: &mut crate::update::Updater) 
     while let Ok(update) = home.net.updates.try_recv() {
         home.apply(ui.ctx(), update, now);
     }
+    home.track_activity(ui);
     for (ask, paths) in home.files.answers() {
+        if let Ask::Picture = ask {
+            if let Some(path) = paths.into_iter().next() {
+                match read_picture(&path) {
+                    Ok(bytes) => {
+                        for server in &home.servers {
+                            server.send(Command::SetAvatar(bytes.clone()));
+                        }
+                    }
+                    Err(problem) => home.error = Some(problem.into()),
+                }
+            }
+            continue;
+        }
         let (Ask::Attach(address, _)
         | Ask::Save(address, _)
         | Ask::Offer(address)
-        | Ask::Accept(address, ..)) = &ask;
+        | Ask::Live(address, _)
+        | Ask::Icon(address)
+        | Ask::Accept(address, ..)) = &ask
+        else {
+            continue;
+        };
         let Some(index) = home.index(address) else {
             continue;
         };
@@ -611,17 +707,34 @@ pub fn show(ui: &mut Ui, home: &mut Home, updates: &mut crate::update::Updater) 
                     home.files.save(&server.commands, &file, path);
                 }
             }
-            Ask::Offer(_) => {
+            Ask::Icon(_) => {
+                let Some(path) = paths.into_iter().next() else {
+                    continue;
+                };
+                let problem = match read_picture(&path) {
+                    Ok(bytes) => {
+                        server.send(Command::Admin(Admin::SetIcon(bytes)));
+                        continue;
+                    }
+                    Err(problem) => problem,
+                };
+                if let Some(settings) = &mut home.server_settings {
+                    settings.apply(AdminUpdate::Failed(problem.into()));
+                }
+            }
+            Ask::Offer(_) | Ask::Live(..) => {
                 let Some(path) = paths.into_iter().next() else {
                     continue;
                 };
                 if std::fs::metadata(&path).is_ok_and(|meta| meta.len() > call::MAX_LIVE_FILE) {
-                    home.toast =
-                        Some(("Files sent in a call can be up to 2 GB.".into(), now + 6.0));
+                    home.toast = Some(("Live files can be up to 2 GB.".into(), now + 6.0));
+                } else if let Ask::Live(_, channel) = ask {
+                    server.send(Command::SendLive(channel, path));
                 } else {
                     server.send(Command::OfferFile(path));
                 }
             }
+            Ask::Picture => {}
             Ask::Accept(_, id, _) => {
                 let Some(path) = paths.into_iter().next() else {
                     continue;
@@ -760,7 +873,20 @@ fn server_rail(ui: &mut Ui, home: &mut Home) {
         for index in 0..home.servers.len() {
             let server = &home.servers[index];
             let selected = home.view == View::Server(index);
-            if rail_button(ui, &initials(server.name()), server.name(), selected).clicked() {
+            let button = match &server.dir.icon {
+                Some(icon) => {
+                    let image = egui::Image::new(&frame(ui, icon))
+                        .fit_to_exact_size(Vec2::splat(48.0))
+                        .corner_radius(if selected { 16 } else { 24 })
+                        .sense(Sense::click());
+                    let button = ui.add(image).on_hover_text(server.name());
+                    let name = server.name().to_owned();
+                    button.widget_info(|| WidgetInfo::labeled(Role::Button, true, &name));
+                    button
+                }
+                None => rail_button(ui, &initials(server.name()), server.name(), selected),
+            };
+            if button.clicked() {
                 home.view = View::Server(index);
             }
         }
@@ -782,6 +908,7 @@ fn sidebar(ui: &mut Ui, home: &mut Home, update_available: bool) {
         .frame(Frame::new().inner_margin(Margin::symmetric(0, 6)))
         .show(ui, |ui| {
             call::call_bar(ui, home);
+            status_menu(ui, home);
             let settings = if update_available {
                 "⚙  Settings · Update available"
             } else {
@@ -795,6 +922,92 @@ fn sidebar(ui: &mut Ui, home: &mut Home, update_available: bool) {
         View::Server(index) => channel_list(ui, home, index),
         _ => dm_list(ui, home),
     }
+}
+
+/// Your status, and a menu to pick another.
+fn status_menu(ui: &mut Ui, home: &mut Home) {
+    let current = home.status.unwrap_or(Choice::Online);
+    let (color, label) = status_look(current);
+    let button = ui.add(
+        Button::new(RichText::new(format!("●  {label}  ⏷")).color(color))
+            .frame_when_inactive(false),
+    );
+    button.widget_info(|| WidgetInfo::labeled(Role::Button, true, "Status"));
+    let mut picked = None;
+    Popup::menu(&button).show(|ui| {
+        for choice in [Choice::Online, Choice::Away, Choice::Invisible] {
+            let (color, label) = status_look(choice);
+            let item = ui.add(Button::selectable(
+                choice == current,
+                RichText::new(format!("●  {label}")).color(color),
+            ));
+            item.widget_info(|| WidgetInfo::labeled(Role::Button, true, label));
+            if item.clicked() {
+                picked = Some(choice);
+            }
+        }
+        ui.weak("Invisible: you look offline but can use everything.");
+    });
+    if let Some(choice) = picked {
+        home.auto_away = false;
+        home.set_status(choice);
+    }
+}
+
+fn status_look(choice: Choice) -> (Color32, &'static str) {
+    match choice {
+        Choice::Online => (ONLINE, "Online"),
+        Choice::Away => (AWAY, "Away"),
+        Choice::Invisible => (OFFLINE, "Invisible"),
+    }
+}
+
+/// Read a picture to use as a profile picture or server icon; the error is for people.
+fn read_picture(path: &std::path::Path) -> Result<Vec<u8>, &'static str> {
+    let bad = "Pick a PNG, JPG or GIF of at most 250 KB and 512 × 512 pixels.";
+    let bytes = std::fs::read(path).map_err(|error| {
+        tracing::warn!(%error, "reading a picture failed");
+        "Couldn't open that file."
+    })?;
+    // Checked here too, so the reason can be shown.
+    rusttalk_core::client::decode_profile_image(&bytes).map_err(|error| {
+        tracing::info!(error = %format_args!("{error:#}"), "picture refused");
+        bad
+    })?;
+    Ok(bytes)
+}
+
+/// The texture for a picture's current frame, so animated GIFs play.
+// shortcut: textures stay in egui's memory until restart; evict them if people change pictures often.
+pub fn frame(ui: &Ui, picture: &Picture) -> TextureHandle {
+    let id = UiId::unique(("picture", picture.key));
+    let textures = ui.data(|data| data.get_temp::<Arc<Vec<TextureHandle>>>(id));
+    let textures = textures.unwrap_or_else(|| {
+        let made: Arc<Vec<_>> = Arc::new(
+            (picture.frames.iter())
+                .map(|(image, _)| {
+                    ui.ctx()
+                        .load_texture("picture", image.clone(), TextureOptions::LINEAR)
+                })
+                .collect(),
+        );
+        ui.data_mut(|data| data.insert_temp(id, made.clone()));
+        made
+    });
+    let total: u64 = picture.frames.iter().map(|(_, ms)| u64::from(*ms)).sum();
+    if textures.len() > 1 && total > 0 {
+        let mut at = (ui.input(|input| input.time) * 1000.0) as u64 % total;
+        for (texture, (_, ms)) in textures.iter().zip(picture.frames.iter()) {
+            let ms = u64::from(*ms);
+            if at < ms {
+                ui.ctx()
+                    .request_repaint_after(Duration::from_millis(ms - at));
+                return texture.clone();
+            }
+            at -= ms;
+        }
+    }
+    textures[0].clone()
 }
 
 pub fn section(ui: &mut Ui, text: &str) {
@@ -815,7 +1028,7 @@ fn dm_list(ui: &mut Ui, home: &mut Home) {
                 let name = server.member_name(&dm.peer);
                 let row = ui
                     .horizontal(|ui| {
-                        avatar(ui, &dm.peer, &name, 28.0);
+                        face(ui, &server.dir, &dm.peer, &name, 28.0, true);
                         ui.vertical(|ui| {
                             ui.add(
                                 Button::selectable(selected, name.as_str())
@@ -875,7 +1088,7 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
                 home.dialog = Some(Dialog::Category(index, String::new()));
             }
         }
-        if perms.owner && ui.button("Rename server").clicked() {
+        if perms.manage_server && ui.button("Rename server").clicked() {
             let name = home.servers[index].dir.name.clone().unwrap_or_default();
             home.dialog = Some(Dialog::ServerName(index, name));
         }
@@ -892,7 +1105,7 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
             ));
         }
         if ui.button("Leave server").clicked() {
-            home.dialog = Some(Dialog::Leave(index));
+            home.dialog = Some(Dialog::Leave(index, None));
         }
     });
     let server = &home.servers[index];
@@ -1044,6 +1257,39 @@ pub fn avatar(ui: &mut Ui, person: &Id, name: &str, size: f32) -> Response {
     response
 }
 
+/// A member's picture (or initials) and, with `dot`, their presence: green, yellow or grey.
+pub fn face(
+    ui: &mut Ui,
+    dir: &Directory,
+    person: &Id,
+    name: &str,
+    size: f32,
+    dot: bool,
+) -> Response {
+    let member = dir.members.iter().find(|m| m.person == *person);
+    let response = match member.and_then(|m| m.avatar.as_ref()) {
+        Some(picture) => ui.add(
+            egui::Image::new(&frame(ui, picture))
+                .fit_to_exact_size(Vec2::splat(size))
+                .corner_radius(size / 2.0)
+                .sense(Sense::click()),
+        ),
+        None => avatar(ui, person, name, size),
+    };
+    if dot {
+        let color = match member.map_or(Presence::Offline, |m| m.presence) {
+            Presence::Online => ONLINE,
+            Presence::Away => AWAY,
+            Presence::Offline => OFFLINE,
+        };
+        let radius = (size * 0.16).max(4.0);
+        let center = response.rect.right_bottom() - Vec2::splat(radius * 0.8);
+        ui.painter()
+            .circle(center, radius, color, (2.0, palette(ui).side));
+    }
+    response
+}
+
 fn member_list(ui: &mut Ui, home: &mut Home, index: usize) {
     let server = &home.servers[index];
     ui.add_space(6.0);
@@ -1057,7 +1303,7 @@ fn member_list(ui: &mut Ui, home: &mut Home, index: usize) {
             let me = member.person == server.dir.me;
             let row = ui
                 .horizontal(|ui| {
-                    avatar(ui, &member.person, &name, 30.0);
+                    face(ui, &server.dir, &member.person, &name, 30.0, true);
                     let label = if me {
                         format!("{name} (you)")
                     } else {
@@ -1411,8 +1657,10 @@ fn chat_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
         toast,
         dialog,
         files,
+        voice,
         ..
     } = home;
+    let server = &mut servers[index];
     let Server {
         address,
         chats,
@@ -1420,7 +1668,7 @@ fn chat_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
         status,
         commands,
         ..
-    } = &mut servers[index];
+    } = server;
     let chat = chats.entry(channel).or_insert_with(|| {
         // First look at this channel: load it, then follow live updates.
         let _ = commands.send(Command::Open(channel));
@@ -1456,8 +1704,10 @@ fn chat_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
             attach
         })
         .inner;
-    if attach {
-        files.ask(ui.ctx(), Ask::Attach(address.clone(), channel));
+    match attach {
+        Some(false) => files.ask(ui.ctx(), Ask::Attach(address.clone(), channel)),
+        Some(true) => files.ask(ui.ctx(), Ask::Live(address.clone(), channel)),
+        None => {}
     }
     if online && hovered {
         let rect = ui.max_rect();
@@ -1483,6 +1733,7 @@ fn chat_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
         area = area.vertical_scroll_offset(offset);
     }
     let mut pick = None;
+    let mut live = None;
     let output = area.show(ui, |ui| {
         ui.set_width(ui.available_width());
         if chat.at_start {
@@ -1506,6 +1757,11 @@ fn chat_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
             });
             let shown = message(ui, chat, msg, start, dir, can_moderate, |ui| {
                 files::attachments(ui, files, address, commands, &msg.files);
+                // The server isn't borrowed whole here, so look the offer up by its parts.
+                if msg.live.is_some() {
+                    let action = call::chat_live(ui, &voice.live_files, dir, msg);
+                    live = action.or(live.take());
+                }
             });
             if let Some(chosen) = shown {
                 pick = Some(chosen);
@@ -1538,6 +1794,45 @@ fn chat_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
             chat.loading = true;
             let _ = commands.send(Command::Older(channel, oldest.id));
         }
+    }
+    match live {
+        Some(LiveAction::Save(id, name)) => {
+            if !voice.live_files.iter().any(|file| file.id == id)
+                && let Some(msg) = chat
+                    .messages
+                    .iter()
+                    .find(|m| m.live.as_ref().is_some_and(|l| l.0 == id))
+            {
+                voice.live_files.push(LiveFile {
+                    id,
+                    chat: true,
+                    from: Some(msg.person),
+                    name: name.clone(),
+                    size: msg.live.as_ref().map_or(0, |l| l.2),
+                    state: LiveState::Offered,
+                    receivers: Vec::new(),
+                });
+            }
+            files.ask(ui.ctx(), Ask::Accept(address.clone(), id, name));
+        }
+        Some(LiveAction::Remove(id, stop)) => {
+            if stop {
+                let _ = commands.send(Command::CancelFile(id));
+            }
+            match voice.live_files.iter_mut().find(|file| file.id == id) {
+                Some(file) => file.state = LiveState::Ended,
+                None => voice.live_files.push(LiveFile {
+                    id,
+                    chat: true,
+                    from: None,
+                    name: String::new(),
+                    size: 0,
+                    state: LiveState::Ended,
+                    receivers: Vec::new(),
+                }),
+            }
+        }
+        _ => {}
     }
     match pick {
         Some(Pick::Reply(id)) => {
@@ -1582,7 +1877,7 @@ pub fn toast_line(ui: &mut Ui, toast: &mut Option<(String, f64)>) {
     }
 }
 
-/// Returns a message to send, and whether "Attach files" was clicked.
+/// Returns a message to send, and whether a file was chosen to attach: stored (`false`) or live.
 fn composer(
     ui: &mut Ui,
     chat: &mut Chat,
@@ -1591,7 +1886,7 @@ fn composer(
     toast: &mut Option<(String, f64)>,
     channel: Id,
     title: &str,
-) -> (Option<Command>, bool) {
+) -> (Option<Command>, Option<bool>) {
     toast_line(ui, toast);
     let mut cancel = false;
     if let Some(reply) = chat.reply_to {
@@ -1611,15 +1906,19 @@ fn composer(
             cancel = ui.small_button("×").on_hover_text("Cancel edit").clicked();
         });
     }
-    if let Some(what) = &chat.uploading {
+    if let Some((what, done)) = &chat.uploading {
         ui.horizontal(|ui| {
-            ui.spinner();
-            ui.weak(format!("Uploading {what}…"));
+            ui.weak(format!("Uploading {what}"));
+            ui.add(
+                egui::ProgressBar::new(*done)
+                    .show_percentage()
+                    .desired_width(200.0),
+            );
         });
     }
     files::staged(ui, chat);
     let input = palette(ui).input;
-    let mut attach = false;
+    let mut attach = None;
     let field = ui
         .horizontal_top(|ui| {
             let plus = ui
@@ -1627,9 +1926,24 @@ fn composer(
                     online && chat.editing.is_none(),
                     Button::new(RichText::new("➕").size(16.0)).min_size(Vec2::splat(34.0)),
                 )
-                .on_hover_text("Attach files (up to 32 MB each)");
+                .on_hover_text("Attach files");
             plus.widget_info(|| WidgetInfo::labeled(Role::Button, plus.enabled(), "Attach files"));
-            attach = plus.clicked();
+            Popup::menu(&plus).show(|ui| {
+                if ui
+                    .button("📎  Upload a file")
+                    .on_hover_text("Stored on the server, up to 32 MB.")
+                    .clicked()
+                {
+                    attach = Some(false);
+                }
+                if ui
+                    .button("📡  Send file live")
+                    .on_hover_text(call::DIRECT_CHAT)
+                    .clicked()
+                {
+                    attach = Some(true);
+                }
+            });
             ScrollArea::vertical()
                 .id_salt("composer-scroll")
                 .max_height(180.0)
@@ -1653,13 +1967,34 @@ fn composer(
                 .inner
         })
         .inner;
-    let (enter, escape) = ui.input(|input| {
+    let (enter, escape, up) = ui.input(|input| {
         (
             input.key_pressed(Key::Enter) && !input.modifiers.shift,
             input.key_pressed(Key::Escape),
+            input.key_pressed(Key::ArrowUp) && input.modifiers.is_none(),
         )
     });
     let focused = field.has_focus() || field.lost_focus();
+    // Up in an empty box edits your last message here, like other chat apps.
+    if field.has_focus() && up && chat.draft.is_empty() && chat.editing.is_none() {
+        let last = chat.messages.iter().rev().find_map(|msg| match &msg.body {
+            Body::Text(text) if msg.person == dir.me && msg.live.is_none() => {
+                Some((msg.id, text.clone()))
+            }
+            _ => None,
+        });
+        if let Some((id, text)) = last {
+            chat.editing = Some(id);
+            chat.reply_to = None;
+            let end = text.chars().count();
+            chat.draft = text;
+            if let Some(mut state) = TextEdit::load_state(ui.ctx(), field.id) {
+                let cursor = egui::text::CCursorRange::one(egui::text::CCursor::new(end));
+                state.cursor.set_char_range(Some(cursor));
+                state.store(ui.ctx(), field.id);
+            }
+        }
+    }
     if cancel || (focused && escape) {
         chat.reply_to = None;
         if chat.editing.take().is_some() {
@@ -1746,7 +2081,7 @@ fn message(
     }
     let row = ui.horizontal_top(|ui| {
         if start {
-            avatar(ui, &msg.person, &name, 38.0);
+            face(ui, dir, &msg.person, &name, 38.0, false);
         } else {
             ui.add_space(38.0);
         }
@@ -1847,7 +2182,6 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
     };
     let mut close = false;
     let mut command = None;
-    let mut leave = None;
     let modal = Modal::new(UiId::unique("dialog")).show(ctx, |ui| {
         ui.set_width(400.0);
         match dialog {
@@ -2024,27 +2358,26 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
                     close |= ui.button("Cancel").clicked();
                 });
             }
-            Dialog::Leave(index) => {
+            Dialog::Leave(index, error) => {
                 ui.heading(format!("Leave {}?", home.servers[*index].name()));
                 ui.label(
                     "It's removed from all your devices. To come back, you need a new invite.",
                 );
+                error_text(ui, error.as_deref());
                 ui.horizontal(|ui| {
                     if ui
                         .add(Button::new("Leave").fill(ui.visuals().error_fg_color))
                         .clicked()
                     {
-                        leave = Some(*index);
+                        // Stays open until the server confirms; then the server is removed.
+                        *error = None;
+                        home.servers[*index].send(Command::Leave);
                     }
                     close |= ui.button("Cancel").clicked();
                 });
             }
         }
     });
-    if let Some(index) = leave {
-        home.leave_server(index);
-        return;
-    }
     if let Some((index, command)) = command {
         home.servers[index].send(command);
         close = true;
@@ -2096,6 +2429,26 @@ fn settings(
         ui.separator();
         match tab {
             Tab::Profile => {
+                ui.horizontal(|ui| {
+                    let me = home.identity.certificate.person_id();
+                    // The picture is the same everywhere; show it from any server that has it.
+                    let none = Directory::default();
+                    let dir = (home.servers.iter())
+                        .find(|s| s.member(me).is_some_and(|m| m.avatar.is_some()))
+                        .map_or(&none, |s| &s.dir);
+                    face(ui, dir, me, "?", 56.0, false);
+                    ui.vertical(|ui| {
+                        ui.label("Your picture, on all your servers.");
+                        let change = ui
+                            .add_enabled(!home.servers.is_empty(), Button::new("Change picture"))
+                            .on_hover_text("PNG, JPG or GIF. GIFs play.");
+                        if change.clicked() {
+                            home.error = None;
+                            home.files.ask(ui.ctx(), Ask::Picture);
+                        }
+                    });
+                });
+                ui.add_space(6.0);
                 ui.label("You pick your name on each server. Change it from the server's menu.");
                 CollapsingHeader::new("Details").show(ui, |ui| {
                     ui.label("Your ID");

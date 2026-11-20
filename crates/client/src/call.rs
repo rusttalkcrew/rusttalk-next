@@ -18,7 +18,7 @@ use crate::{
     audio::{self, Audio, Settings, StreamId},
     camera::{Camera, Change},
     files::{self, Ask},
-    home::{Home, Tab, avatar, palette, section, toast_line},
+    home::{Home, Tab, face, palette, section, toast_line},
     net::Command,
     screen::{self, Kind, Options, Target, Video},
     server::{Call, CallState, Id, Screen, Server, Stats},
@@ -37,6 +37,9 @@ const VIDEO_WIDTH: f32 = 240.0;
 /// The live transfer limit.
 pub const MAX_LIVE_FILE: u64 = rusttalk_core::messages::MAX_LIVE_FILE_SIZE;
 const DIRECT: &str = "Sent directly through the call. Nothing is stored.";
+pub const DIRECT_CHAT: &str = "Sent directly to people online now. Nothing is stored.";
+/// How long a live offer can be accepted.
+const OFFER_SECONDS: i64 = 10 * 60;
 
 pub struct Voice {
     pub audio: Audio,
@@ -67,9 +70,11 @@ pub struct Voice {
     pub live_files: Vec<LiveFile>,
 }
 
-/// A file sent through the call, shown in the call bar.
+/// A file sent live, shown in the call bar or, when `chat`, in a chat.
 pub struct LiveFile {
     pub id: Id,
+    /// Offered in a text channel or DM rather than in the call.
+    pub chat: bool,
     /// Who offers it; `None` for ours.
     pub from: Option<Id>,
     pub name: String,
@@ -87,9 +92,11 @@ pub enum LiveState {
     Saved,
     Failed,
     Sending,
+    /// Stopped, cancelled or declined in a chat.
+    Ended,
 }
 
-enum LiveAction {
+pub enum LiveAction {
     Send,
     Save(Id, String),
     /// Hide it here; for ours or a download, also stop it.
@@ -162,7 +169,7 @@ impl Voice {
 
     /// Forget this call's video and files: our screen and camera, and what we watch.
     pub fn clear_screens(&mut self) {
-        self.live_files.clear();
+        self.live_files.retain(|file| file.chat);
         self.sharing = Sharing::Off;
         self.share_screen = None;
         self.watching = None;
@@ -324,7 +331,7 @@ pub fn room_list(ui: &mut Ui, home: &Home, server: &Server, channel: &Id) {
         let name = peer.name(server);
         let row = ui.horizontal(|ui| {
             ui.add_space(22.0);
-            let face = avatar(ui, &peer.person, &name, 22.0);
+            let face = face(ui, &server.dir, &peer.person, &name, 22.0, true);
             if home.voice.speaking(server, &peer.person) {
                 ring(ui, face.rect);
             }
@@ -553,7 +560,7 @@ fn live_files(
         action = Some(LiveAction::Send);
     }
     let name = |person: &Id| server.map_or_else(String::new, |s| s.member_name(person));
-    for file in list {
+    for file in list.iter().filter(|file| !file.chat) {
         let size = files::size(file.size);
         Frame::new()
             .fill(ui.visuals().faint_bg_color)
@@ -617,6 +624,87 @@ fn live_files(
                 }
             });
     }
+    action
+}
+
+/// A live file offered in a text channel or DM, inside its message.
+pub fn chat_live(
+    ui: &mut Ui,
+    list: &[LiveFile],
+    dir: &crate::server::Directory,
+    msg: &crate::server::Msg,
+) -> Option<LiveAction> {
+    let (id, name, size) = msg.live.as_ref()?;
+    let entry = list.iter().find(|file| file.id == *id);
+    let mine = msg.person == dir.me;
+    let fresh = chrono::Utc::now().timestamp() - msg.at < OFFER_SECONDS;
+    let mut action = None;
+    Frame::new()
+        .fill(ui.visuals().faint_bg_color)
+        .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+        .corner_radius(6)
+        .inner_margin(Margin::same(8))
+        .show(ui, |ui| {
+            ui.set_max_width(360.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("📡").size(22.0))
+                    .on_hover_text(DIRECT_CHAT);
+                ui.vertical(|ui| {
+                    ui.label(RichText::new(name).strong());
+                    ui.weak(format!("{} · Live", files::size(*size)))
+                        .on_hover_text(DIRECT_CHAT);
+                    let state = entry.map(|file| &file.state);
+                    match (mine, state) {
+                        (true, Some(LiveState::Sending)) => {
+                            let file = entry.expect("matched a state");
+                            let who: Vec<_> = (file.receivers.iter())
+                                .map(|p| crate::server::member_name(dir, p))
+                                .collect();
+                            ui.label(
+                                RichText::new(match who.len() {
+                                    0 => "Waiting for someone to save it".to_owned(),
+                                    _ => format!("{} receiving", who.join(", ")),
+                                })
+                                .small()
+                                .weak(),
+                            );
+                            if ui.small_button("Stop sending").clicked() {
+                                action = Some(LiveAction::Remove(*id, true));
+                            }
+                        }
+                        (_, Some(LiveState::Saving(bytes))) => {
+                            let done = *bytes as f32 / (*size).max(1) as f32;
+                            ui.add(egui::ProgressBar::new(done).show_percentage());
+                            if ui.small_button("Cancel").clicked() {
+                                action = Some(LiveAction::Remove(*id, true));
+                            }
+                        }
+                        (_, Some(LiveState::Saved)) => {
+                            ui.weak("Saved");
+                        }
+                        (_, Some(LiveState::Failed)) => {
+                            ui.colored_label(ui.visuals().error_fg_color, "Didn't arrive.");
+                        }
+                        (false, None | Some(LiveState::Offered)) if fresh => {
+                            ui.horizontal(|ui| {
+                                if ui.small_button("Save").clicked() {
+                                    action = Some(LiveAction::Save(*id, name.clone()));
+                                }
+                                if ui.small_button("Decline").clicked() {
+                                    action = Some(LiveAction::Remove(*id, false));
+                                }
+                            });
+                        }
+                        (_, Some(LiveState::Ended)) => {
+                            ui.weak("Stopped");
+                        }
+                        _ => {
+                            ui.weak("No longer available");
+                        }
+                    }
+                });
+            });
+        });
     action
 }
 
@@ -1016,7 +1104,7 @@ pub fn room(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
                         let video = picture.is_some();
                         let face = match picture {
                             Some(picture) => ui.add(picture),
-                            None => avatar(ui, &peer.person, &name, 64.0),
+                            None => face(ui, &server.dir, &peer.person, &name, 64.0, false),
                         };
                         if home.voice.speaking(server, &peer.person) {
                             if video {

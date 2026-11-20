@@ -1,11 +1,14 @@
 //! What the UI shows for each server. The network task in net.rs decrypts the
 //! server's metadata and messages and sends these; the UI only reads and merges them.
 
-use std::{collections::HashMap, path::PathBuf};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
+
+use eframe::egui::ColorImage;
 
 use rusttalk_core::{
     client::{Attachment, voice::TrackSid},
     identity::fingerprint,
+    presence::{Presence, Status as Choice},
 };
 use tokio::sync::mpsc::UnboundedSender;
 use url::Url;
@@ -127,6 +130,10 @@ impl Server {
         }
     }
 
+    pub fn member(&self, person: &Id) -> Option<&Member> {
+        self.dir.members.iter().find(|m| m.person == *person)
+    }
+
     pub fn send(&self, command: Command) {
         // The task only ends after the UI drops this sender or the server stopped for good.
         let _ = self.commands.send(command);
@@ -165,6 +172,9 @@ pub fn member_name(dir: &Directory, person: &Id) -> String {
 #[derive(Clone, Default)]
 pub struct Directory {
     pub name: Option<String>,
+    pub icon: Option<Picture>,
+    /// This person's presence choice here.
+    pub status: Option<Choice>,
     pub me: Id,
     pub perms: Perms,
     pub categories: Vec<Category>,
@@ -188,6 +198,7 @@ pub struct Perms {
     pub ban: bool,
     pub manage_roles: bool,
     pub audit: bool,
+    pub manage_server: bool,
     /// This person's highest role rank; they can only manage people and roles below it.
     pub rank: i64,
 }
@@ -195,12 +206,12 @@ pub struct Perms {
 impl Perms {
     /// May open the server settings window.
     pub fn settings(&self) -> bool {
-        self.admin || self.kick || self.ban || self.manage_roles || self.audit
+        self.admin || self.kick || self.ban || self.manage_roles || self.audit || self.manage_server
     }
 }
 
 /// The permissions a role can grant, as the API names them, with their labels.
-pub const PERMISSIONS: [(&str, &str); 7] = [
+pub const PERMISSIONS: [(&str, &str); 8] = [
     ("invite", "Invite people"),
     ("kick", "Kick"),
     ("ban", "Ban"),
@@ -208,6 +219,7 @@ pub const PERMISSIONS: [(&str, &str); 7] = [
     ("view_audit_log", "See audit log"),
     ("delete_messages", "Delete messages"),
     ("manage_channels", "Manage channels"),
+    ("manage_server", "Manage server"),
 ];
 
 #[derive(Clone)]
@@ -244,6 +256,16 @@ pub struct Member {
     pub name: Option<String>,
     pub devices: Vec<Device>,
     pub roles: Vec<String>,
+    pub avatar: Option<Picture>,
+    pub presence: Presence,
+}
+
+/// A decoded profile picture or server icon: each frame and how long it shows, in ms.
+#[derive(Clone)]
+pub struct Picture {
+    /// A hash of the image file, to keep its textures.
+    pub key: [u8; 32],
+    pub frames: Arc<Vec<(ColorImage, u32)>>,
 }
 
 #[derive(Clone)]
@@ -268,6 +290,8 @@ pub struct Msg {
     pub body: Body,
     /// Server-stored files; edits never change them.
     pub files: Vec<Attachment>,
+    /// A file offered live: transfer ID, name and size.
+    pub live: Option<(Id, String, u64)>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -305,8 +329,8 @@ pub struct Chat {
     pub editing: Option<Id>,
     /// Files picked or dropped, sent with the next message.
     pub staged: Vec<Staged>,
-    /// What is uploading now, shown under the messages.
-    pub uploading: Option<String>,
+    /// What is uploading now and how far (0 to 1), shown above the composer.
+    pub uploading: Option<(String, f32)>,
     /// Content height last frame, and before older messages were added,
     /// so the view stays in place when a page is added above it.
     pub content_height: f32,
@@ -381,6 +405,7 @@ mod tests {
             edit_of: edit_of.map(|id| [id; 32]),
             body: Body::Text(text.into()),
             files: Vec::new(),
+            live: None,
         }
     }
 

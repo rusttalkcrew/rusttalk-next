@@ -12,16 +12,17 @@ use std::{
 use anyhow::{Context, Result};
 use eframe::egui;
 use livekit::prelude::Participant;
-use reqwest::StatusCode;
+use reqwest::{Method, StatusCode};
 use rusttalk_core::{
     auth::{Fingerprint, InviteCode, InviteLink, KnownServer, ProtocolError, Session, decode},
     camera::CameraOptions,
     client::{
         BlobRef, Event, KeyClient, MessageBody, MessageError, MessageRecord, Server as Api,
         invite_name,
-        voice::{LiveFileEvent, NativeVideoSource, RoomEvent, VoiceRoster},
+        voice::{DataLiveFiles, LiveFileEvent, NativeVideoSource, RoomEvent, VoiceRoster},
     },
     identity::{DeviceIdentity, fingerprint},
+    presence::{Presence, PresenceEvent, Status as Choice, Update as Pushed},
 };
 use serde_json::Value;
 use tokio::{
@@ -34,7 +35,7 @@ use crate::{
     audio::Audio,
     device_sync::{DeviceSync, Edit, Synced},
     screen::{self, Video},
-    server::{Body, CallState, Directory, Id, Msg, Peer, Stats, Status},
+    server::{Body, CallState, Directory, Id, Msg, Peer, Picture, Stats, Status},
     share::App,
 };
 
@@ -93,6 +94,14 @@ pub enum Command {
     CreateCategory(String),
     SetServerName(String),
     SetDisplayName(String),
+    /// Set this person's picture (PNG, JPEG or GIF bytes).
+    SetAvatar(Vec<u8>),
+    /// Online, away or invisible.
+    SetStatus(Choice),
+    /// Leave this server for good, on the server too.
+    Leave,
+    /// Offer a file live to whoever is online in a text channel or DM.
+    SendLive(Id, PathBuf),
     OpenDm(Id),
     /// Make an invite link: uses and lifetime in seconds.
     Invite(u32, u32),
@@ -118,6 +127,8 @@ pub struct LiveOffer {
     pub from: Option<Id>,
     pub name: String,
     pub size: u64,
+    /// Offered in a text channel or DM, rather than in the call.
+    pub chat: bool,
 }
 
 pub struct Preview {
@@ -156,6 +167,10 @@ pub enum Update {
         at_start: Option<bool>,
     },
     Deleted(Url, Id, Id),
+    /// This person left the server; remove it here too.
+    Left(Url),
+    /// A member came online, went away or offline.
+    Presence(Url, Id, Presence),
     Notice(Url, Id, Msg),
     DmReady(Url, Id),
     /// A new invite: its ID (to revoke it) and link.
@@ -176,8 +191,10 @@ pub enum Update {
     /// This device's camera stopped publishing or never started.
     CameraStopped,
     Stats(Url, Stats),
-    /// A file upload in a channel started (with what to show) or ended.
-    Uploading(Url, Id, Option<String>),
+    /// A file upload in a channel started or went on (what to show, and how far), or ended.
+    Uploading(Url, Id, Option<(String, f32)>),
+    /// How far saving a stored file got (0 to 1), by blob ID.
+    SaveProgress(Id, f32),
     /// A picture by blob ID, or why not: `true` when it expired or was deleted.
     Image(Id, Result<egui::ColorImage, bool>),
     /// A file by blob ID was saved, or why not: `true` when it expired or was deleted.
@@ -437,6 +454,14 @@ struct State {
     /// Who the server says is in each voice channel.
     rooms: HashMap<Id, VoiceRoster>,
     voice: Option<Live>,
+    /// Live file offers seen in text channels and DMs, by transfer: channel and record.
+    chat_offers: HashMap<Id, (Id, MessageRecord)>,
+    /// Live files in text channels and DMs, by channel: our offers, and accepting others'.
+    chat_files: HashMap<Id, DataLiveFiles>,
+    /// Live files being received in chats; aborting one cancels it.
+    chat_downloads: HashMap<Id, tokio::task::JoinHandle<()>>,
+    /// Decoded pictures in the last directory, by hash.
+    pictures: HashMap<[u8; 32], Picture>,
 }
 
 enum Failure {
@@ -529,6 +554,8 @@ async fn run(
                 command = commands.recv() => match command {
                     None => return,
                     // The voice room outlives the API connection, so its shares can still stop.
+                    // The status is sent again once connected, when it differs.
+                    Some(Command::SetStatus(_)) => {}
                     Some(command) if voice_only(&command) => {
                         if let Err(error) = voice_command(&ctx, &mut state, command).await {
                             tracing::warn!(error = %format_args!("{error:#}"), "voice request failed");
@@ -663,8 +690,14 @@ async fn serve(
         // Refresh ten minutes before the 12-hour token expires.
         let refresh = Duration::from_secs((client.expires_at() - 600 - now()).max(0) as u64);
         tokio::select! {
-            event = client.next_event() => match event {
-                Ok(Some(event)) => {
+            event = client.next_update() => match event {
+                Ok(Some(Pushed::Presence(PresenceEvent::PresenceChanged { person_id, status }))) => {
+                    match decode(&person_id) {
+                        Ok(person) => ctx.send(Update::Presence(url.clone(), person, status)),
+                        Err(error) => tracing::warn!(%error, "presence for a bad person ID"),
+                    }
+                }
+                Ok(Some(Pushed::Event(event))) => {
                     if let Err(error) = on_event(ctx, url, client, state, event).await {
                         tracing::warn!(error = %format_args!("{error:#}"), "handling a server event failed");
                     }
@@ -801,6 +834,7 @@ async fn on_event(
                         from: Some(record.person),
                         name: file.name,
                         size: file.size,
+                        chat: false,
                     }));
                 }
             }
@@ -880,6 +914,12 @@ async fn on_command(
         Command::Image(file, full) => files::image(ctx, client, file, full).await,
         Command::Save(file, path) => files::save(ctx, client, file, path).await,
         Command::OfferFile(path) => voice::offer_file(ctx, client, state, path).await?,
+        Command::SendLive(channel, path) => {
+            voice::offer_chat_file(ctx, url, client, state, channel, path).await?;
+        }
+        Command::AcceptFile(id, path) if state.chat_offers.contains_key(&id) => {
+            voice::accept_chat_file(ctx, client, state, id, path).await?;
+        }
         Command::AcceptFile(id, path) => voice::accept_file(ctx, client, state, id, path).await?,
         Command::CreateChannel {
             category,
@@ -908,6 +948,30 @@ async fn on_command(
         Command::SetDisplayName(name) => {
             state.display_name = Some(name);
             set_display_name(ctx, url, client, state).await;
+        }
+        Command::SetAvatar(bytes) => {
+            if let Err(error) = client.set_avatar(&bytes).await {
+                tracing::warn!(error = %format_args!("{error:#}"), "setting picture failed");
+                ctx.send(Update::Failed(
+                    "Couldn't change your picture. Try again.".into(),
+                ));
+                return Ok(());
+            }
+            directory(ctx, url, client, state).await?;
+        }
+        Command::SetStatus(choice) => client.set_status(choice).await?,
+        Command::Leave => {
+            let reply = client
+                .request(Method::DELETE, "/v1/me/membership")
+                .send()
+                .await?;
+            if reply.status() == StatusCode::CONFLICT {
+                ctx.send(Update::Failed("Make someone else the owner first.".into()));
+                return Ok(());
+            }
+            reply.error_for_status()?;
+            tracing::info!(server = %fingerprint(&state.server_id), "left server");
+            ctx.send(Update::Left(url.clone()));
         }
         Command::OpenDm(peer) => {
             let existing = state
@@ -985,7 +1049,14 @@ async fn open(
     record: &MessageRecord,
 ) -> Msg {
     match client.open_message(channel, record).await {
-        Ok(body) => to_msg(record, &body),
+        Ok(body) => {
+            if let Some(file) = &body.live {
+                state
+                    .chat_offers
+                    .insert(file.id, (*channel, record.clone()));
+            }
+            to_msg(record, &body)
+        }
         Err(error) => {
             if error.downcast_ref::<MessageError>() == Some(&MessageError::MissingKey) {
                 state.waiting.entry(*channel).or_default().insert(record.id);
@@ -999,6 +1070,7 @@ async fn open(
                 edit_of: None,
                 body: Body::Unreadable,
                 files: Vec::new(),
+                live: None,
             }
         }
     }
@@ -1013,6 +1085,7 @@ fn to_msg(record: &MessageRecord, body: &MessageBody) -> Msg {
         edit_of: body.edit_of,
         body: Body::Text(body.text.clone()),
         files: body.attachments.clone(),
+        live: (body.live.as_ref()).map(|file| (file.id, file.name.clone(), file.size)),
     }
 }
 
