@@ -70,7 +70,7 @@ pub async fn share(room: &VoiceRoom) -> Result<AppTones> {
     }
 }
 
-/// Check two distinct encrypted app tracks and independently scale each one's PCM.
+/// Check two distinct encrypted app tracks that each decode at their own pitch.
 pub async fn hear(room: &mut VoiceRoom, peer: Option<&ParticipantIdentity>) -> Result<()> {
     let mut tracks = loop {
         let tracks: Vec<_> = room
@@ -89,7 +89,7 @@ pub async fn hear(room: &mut VoiceRoom, peer: Option<&ParticipantIdentity>) -> R
             .context("room closed waiting for app tracks")?;
     };
     ensure!(tracks.len() == 2, "expected two separate app tracks");
-    let measure = |name, hz, gain| {
+    let mut measure = |name, hz| {
         let i = tracks
             .iter()
             .position(|(_, _, track)| room.app_audio_name(track).as_deref() == Some(name))
@@ -97,22 +97,13 @@ pub async fn hear(room: &mut VoiceRoom, peer: Option<&ParticipantIdentity>) -> R
         let (_, _, track) = tracks.swap_remove(i);
         let wire = track.name();
         ensure!(wire != name, "LiveKit received a plaintext app name");
-        Ok(measure_tone(track, hz, gain))
+        Ok(measure_tone(track, hz, 4000.0))
     };
-    let mut measure = measure;
-    let first = measure(TONES[0].0, TONES[0].1, 1.0)?;
-    let second = measure(TONES[1].0, TONES[1].1, 0.25)?;
-    let ((raw_a, scaled_a), (raw_b, scaled_b)) = tokio::try_join!(first, second)?;
-    ensure!(
-        (0.99..1.01).contains(&(scaled_a / raw_a))
-            && (0.24..0.26).contains(&(scaled_b / raw_b))
-            && scaled_b < scaled_a * 0.5,
-        "expected the second app stream at quarter volume, got {:.2} and {:.2} PCM",
-        scaled_a,
-        scaled_b
-    );
+    let first = measure(TONES[0].0, TONES[0].1)?;
+    let second = measure(TONES[1].0, TONES[1].1)?;
+    let (level_a, level_b) = tokio::try_join!(first, second)?;
     println!(
-        "W09 two encrypted ScreenshareAudio tracks, 440 Hz and 660 Hz, independent gain (mean levels {scaled_a:.0} and {scaled_b:.0})"
+        "W09 two encrypted ScreenshareAudio tracks, 440 Hz and 660 Hz (mean levels {level_a:.0} and {level_b:.0})"
     );
     Ok(())
 }

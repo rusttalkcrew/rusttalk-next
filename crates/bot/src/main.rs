@@ -42,7 +42,7 @@ struct Args {
     /// Publish two PipeWire tone players on separate app audio tracks (Linux).
     #[arg(long)]
     share_app_audio: bool,
-    /// Verify two separate received app tone tracks with independent gain.
+    /// Verify two separate received app tone tracks at their own pitch.
     #[arg(long)]
     expect_app_audio: bool,
     /// Publish a synthetic pattern or a Linux desktop portal capture.

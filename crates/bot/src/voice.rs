@@ -55,15 +55,12 @@ pub async fn hear_tone(
             .await
             .context("room closed waiting for remote audio")?;
     };
-    measure_tone(track, hz, 1.0).await?;
+    measure_tone(track, hz, 500.0).await?;
     Ok(())
 }
 
-pub(crate) async fn measure_tone(
-    track: RemoteAudioTrack,
-    hz: u32,
-    gain: f32,
-) -> Result<(f32, f32)> {
+/// Wait for a 100 ms window near `hz` with a mean absolute level above `min_level`.
+pub(crate) async fn measure_tone(track: RemoteAudioTrack, hz: u32, min_level: f32) -> Result<f32> {
     let mut stream = NativeAudioStream::new(track.rtc_track(), RATE as i32, 1);
     let mut window = Vec::with_capacity(RATE as usize / 10);
     while let Some(frame) = stream.next().await {
@@ -75,13 +72,8 @@ pub(crate) async fn measure_tone(
         let frequency = crossings as f32 * RATE as f32 / window.len() as f32;
         let mean_abs =
             window.iter().map(|x| f32::from(*x).abs()).sum::<f32>() / window.len() as f32;
-        if mean_abs > 500.0 && (frequency - hz as f32).abs() <= 25.0 {
-            let scaled = window
-                .iter()
-                .map(|x| (f32::from(*x) * gain).abs())
-                .sum::<f32>()
-                / window.len() as f32;
-            return Ok((mean_abs, scaled));
+        if mean_abs > min_level && (frequency - hz as f32).abs() <= 25.0 {
+            return Ok(mean_abs);
         }
         window.clear();
     }
