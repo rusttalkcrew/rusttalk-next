@@ -66,6 +66,10 @@ pub enum Ask {
     Attach(Url, Id),
     /// Save a stored file.
     Save(Url, Attachment),
+    /// Offer a file in the voice room.
+    Offer(Url),
+    /// Save a live file: transfer ID and suggested name.
+    Accept(Url, Id, String),
 }
 
 pub type Answer = (Ask, Vec<PathBuf>);
@@ -105,7 +109,8 @@ impl Files {
         thread::spawn(move || {
             let name = match &ask {
                 Ask::Save(_, file) => Some(file.name.replace(['/', '\\'], "_")),
-                Ask::Attach(..) => None,
+                Ask::Accept(_, _, name) => Some(name.replace(['/', '\\'], "_")),
+                Ask::Attach(..) | Ask::Offer(_) => None,
             };
             let test = *TEST_ANSWER.lock().unwrap_or_else(|e| e.into_inner());
             let paths = match (test, name) {

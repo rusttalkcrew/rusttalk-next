@@ -12,14 +12,14 @@ use eframe::egui::{
 };
 use rusttalk_core::{
     auth::InviteLink,
-    client::MAX_TEXT_CHARS,
+    client::{MAX_TEXT_CHARS, voice::LiveFileEvent},
     identity::{DeviceIdentity, fingerprint},
 };
 
 use crate::{
     app::{Action, error_text, primary, secondary, submitted},
     audio::Audio,
-    call::{self, Voice},
+    call::{self, LiveFile, LiveState, Voice},
     camera,
     files::{self, Ask, Files},
     net::{Command, Net, Preview, Update},
@@ -283,6 +283,43 @@ impl Home {
                     call.can_share_video = false;
                 }
             }
+            Update::NoFiles(address, channel) => {
+                if let Some(call) = &mut self.voice.call
+                    && call.server == address
+                    && call.channel == channel
+                {
+                    call.can_send_files = false;
+                }
+            }
+            Update::LiveOffer(offer) => self.voice.live_files.push(LiveFile {
+                id: offer.id,
+                state: if offer.from.is_some() {
+                    LiveState::Offered
+                } else {
+                    LiveState::Sending
+                },
+                from: offer.from,
+                name: offer.name,
+                size: offer.size,
+                receivers: Vec::new(),
+            }),
+            Update::LiveReceiver(id, person, on) => {
+                if let Some(file) = self.voice.live_files.iter_mut().find(|f| f.id == id) {
+                    file.receivers.retain(|p| *p != person);
+                    if on {
+                        file.receivers.push(person);
+                    }
+                }
+            }
+            Update::LiveProgress(id, event) => {
+                if let Some(file) = self.voice.live_files.iter_mut().find(|f| f.id == id) {
+                    file.state = match event {
+                        LiveFileEvent::Progress { bytes, .. } => LiveState::Saving(bytes),
+                        LiveFileEvent::Done => LiveState::Saved,
+                        LiveFileEvent::Failed { .. } => LiveState::Failed,
+                    };
+                }
+            }
             Update::CameraStopped => self.voice.camera.reset(),
             Update::Room(address, channel, peers) => {
                 if let Some(index) = self.index(&address) {
@@ -389,7 +426,10 @@ pub fn show(ui: &mut Ui, home: &mut Home) -> Option<Action> {
         home.apply(ui.ctx(), update, now);
     }
     for (ask, paths) in home.files.answers() {
-        let (Ask::Attach(address, _) | Ask::Save(address, _)) = &ask;
+        let (Ask::Attach(address, _)
+        | Ask::Save(address, _)
+        | Ask::Offer(address)
+        | Ask::Accept(address, ..)) = &ask;
         let Some(index) = home.index(address) else {
             continue;
         };
@@ -404,6 +444,34 @@ pub fn show(ui: &mut Ui, home: &mut Home) -> Option<Action> {
             Ask::Save(_, file) => {
                 if let Some(path) = paths.into_iter().next() {
                     home.files.save(&server.commands, &file, path);
+                }
+            }
+            Ask::Offer(_) => {
+                let Some(path) = paths.into_iter().next() else {
+                    continue;
+                };
+                if std::fs::metadata(&path).is_ok_and(|meta| meta.len() > call::MAX_LIVE_FILE) {
+                    home.toast =
+                        Some(("Files sent in a call can be up to 2 GB.".into(), now + 6.0));
+                } else {
+                    server.send(Command::OfferFile(path));
+                }
+            }
+            Ask::Accept(_, id, _) => {
+                let Some(path) = paths.into_iter().next() else {
+                    continue;
+                };
+                // Receiving never replaces a file, even one the dialog offered to overwrite.
+                if path.exists() {
+                    home.toast = Some((
+                        "That file already exists. Pick a new name.".into(),
+                        now + 6.0,
+                    ));
+                    continue;
+                }
+                if let Some(file) = home.voice.live_files.iter_mut().find(|f| f.id == id) {
+                    file.state = LiveState::Saving(0);
+                    server.send(Command::AcceptFile(id, path));
                 }
             }
         }

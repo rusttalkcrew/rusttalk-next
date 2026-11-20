@@ -6,7 +6,7 @@ use chacha20poly1305::{
     aead::{Aead, Payload},
 };
 use image::{DynamicImage, ImageFormat, ImageReader, Limits};
-use reqwest::{Method, header::CONTENT_TYPE};
+use reqwest::{Method, StatusCode, header::CONTENT_TYPE};
 use serde::Deserialize;
 use zeroize::Zeroizing;
 
@@ -19,6 +19,14 @@ use crate::{
 use super::KeyClient;
 
 const TRANSFER_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// The API refused an upload. `code` is its error code, such as `file_member_quota`.
+#[derive(Debug, thiserror::Error)]
+#[error("upload rejected with {status}: {code}")]
+pub struct UploadRejected {
+    pub status: StatusCode,
+    pub code: String,
+}
 const THUMBNAIL_EDGE: u32 = 320;
 
 impl KeyClient<'_> {
@@ -65,17 +73,28 @@ impl KeyClient<'_> {
             id: String,
         }
         let ciphertext = seal(reference, bytes)?;
-        let uploaded: Uploaded = self
+        #[derive(Deserialize)]
+        struct Problem {
+            error: String,
+        }
+        let response = self
             .request(Method::POST, "/v1/files")
             .query(&[("channel", encode(channel)), ("id", encode(&reference.id))])
             .header(CONTENT_TYPE, "application/octet-stream")
             .timeout(TRANSFER_TIMEOUT)
             .body(ciphertext)
             .send()
-            .await?
-            .error_for_status()?
-            .json()
             .await?;
+        let status = response.status();
+        if !status.is_success() {
+            let code = response.json::<Problem>().await.map(|p| p.error);
+            return Err(UploadRejected {
+                status,
+                code: code.unwrap_or_default(),
+            }
+            .into());
+        }
+        let uploaded: Uploaded = response.json().await?;
         ensure!(
             decode::<32>(&uploaded.id)? == reference.id,
             "wrong uploaded file ID"
