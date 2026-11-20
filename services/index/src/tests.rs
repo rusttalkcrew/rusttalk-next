@@ -48,6 +48,22 @@ fn rejects_oversized_fields_and_non_origin_addresses() {
     let mut record = signed();
     record.listing.description = "😀".repeat(1_001);
     assert_eq!(record.verify(NOW), Err(RegistrationError::Fields));
+    for text in [
+        "evil\u{202E}gnp.exe",
+        "Clo\u{200B}ver",
+        "\u{2066}Clover\u{2069}",
+    ] {
+        let mut record = signed();
+        record.listing.name = text.into();
+        assert_eq!(record.verify(NOW), Err(RegistrationError::Fields));
+        let mut record = signed();
+        record.listing.description = text.into();
+        assert_eq!(record.verify(NOW), Err(RegistrationError::Fields));
+    }
+    let mut record = signed();
+    record.listing.description = "שלום\u{200F} line\r\n\tnext".into();
+    record = Registration::signed(record.listing, NOW, &key).unwrap();
+    assert_eq!(record.verify(NOW), Ok(()));
     for address in [
         "http://example.org",
         "https://me@example.org",
@@ -69,8 +85,12 @@ async fn search_hides_expired_entries_and_refresh_rejects_replays() {
     let key = SigningKey::from_bytes(&[1; 32]);
     let signed = |timestamp| Registration::signed(listing(&key), timestamp, &key).unwrap();
     let ttl = 8_000;
-    save(&db, signed(NOW), NOW, ttl).await.unwrap();
-    save(&db, signed(NOW + 1), NOW + 1, ttl).await.unwrap();
+    save(&db, signed(NOW), NOW, ttl, MAX_LISTINGS)
+        .await
+        .unwrap();
+    save(&db, signed(NOW + 1), NOW + 1, ttl, MAX_LISTINGS)
+        .await
+        .unwrap();
     assert_eq!(list(&db, "%", 1, NOW + ttl).await.unwrap().len(), 1);
     assert_eq!(list(&db, "welcome", 1, NOW + ttl).await.unwrap().len(), 1);
     assert!(list(&db, "_", 1, NOW).await.unwrap().is_empty());
@@ -80,7 +100,7 @@ async fn search_hides_expired_entries_and_refresh_rejects_replays() {
     prune_expired(&db, expired).await.unwrap();
     for timestamp in [NOW, NOW + 1] {
         assert_eq!(
-            save(&db, signed(timestamp), expired, ttl).await,
+            save(&db, signed(timestamp), expired, ttl, MAX_LISTINGS).await,
             Err(IndexError(StatusCode::CONFLICT, "replayed_registration"))
         );
     }
@@ -92,9 +112,35 @@ async fn search_hides_expired_entries_and_refresh_rejects_replays() {
         .unwrap();
     assert_eq!(count, 0);
     assert_eq!(
-        save(&db, signed(NOW + 1), stale, ttl).await,
+        save(&db, signed(NOW + 1), stale, ttl, MAX_LISTINGS).await,
         Err(IndexError(StatusCode::BAD_REQUEST, "stale_registration"))
     );
+}
+
+#[tokio::test]
+async fn new_servers_are_refused_at_the_listing_cap_but_refreshes_continue() {
+    let db = open("sqlite::memory:".parse().unwrap()).await.unwrap();
+    let first = SigningKey::from_bytes(&[1; 32]);
+    let second = SigningKey::from_bytes(&[2; 32]);
+    let signed =
+        |key: &SigningKey, timestamp| Registration::signed(listing(key), timestamp, key).unwrap();
+    save(&db, signed(&first, NOW), NOW, 8_000, 1).await.unwrap();
+    assert_eq!(
+        save(&db, signed(&second, NOW), NOW, 8_000, 1).await,
+        Err(IndexError(StatusCode::SERVICE_UNAVAILABLE, "index_full"))
+    );
+    save(&db, signed(&first, NOW + 1), NOW + 1, 8_000, 1)
+        .await
+        .unwrap();
+    assert_eq!(
+        save(&db, signed(&first, NOW + 1), NOW + 1, 8_000, 1).await,
+        Err(IndexError(StatusCode::CONFLICT, "replayed_registration"))
+    );
+    let later = NOW + CLOCK_SKEW_MS + 8_002;
+    prune_expired(&db, later).await.unwrap();
+    save(&db, signed(&second, later), later, 8_000, 1)
+        .await
+        .unwrap();
 }
 
 #[test]

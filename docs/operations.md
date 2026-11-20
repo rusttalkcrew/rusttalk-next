@@ -144,7 +144,11 @@ client address, set `RUSTTALK_INDEX_TRUST_PROXY=1` and keep 8080 accessible
 only to that edge. Otherwise the index limits registrations by the direct
 TCP peer. Keep request URL and header logging disabled at the edge to
 avoid recording searches and credentials. The default lease is three hours.
-`RUSTTALK_INDEX_TTL_SECONDS` can shorten it for testing. Keep system
+`RUSTTALK_INDEX_TTL_SECONDS` can shorten it for testing.
+`RUSTTALK_INDEX_MAX_LISTINGS` (default 10,000) caps the stored rows, expired
+ones included until the minute prune; new server IDs then get `503 index_full`
+while listed servers keep refreshing. Registration rate limits track at most
+4,096 addresses per minute and refuse new addresses beyond that. Keep system
 clocks synchronized so registrations fall within the one-minute window.
 
 `make dev` and `make e2e` enable the Compose `index` profile. To run the dev

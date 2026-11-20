@@ -23,7 +23,7 @@ use rusttalk_core::index::{
 use serde::Deserialize;
 use serde_json::json;
 use sqlx::{
-    SqlitePool, query, query_as,
+    SqlitePool, query, query_as, query_scalar,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
 };
 use tokio::net::TcpListener;
@@ -32,11 +32,13 @@ use tracing::{Instrument, Level};
 use tracing_subscriber::{filter::Targets, prelude::*};
 
 const MAX_TTL: i64 = 3 * 60 * 60;
+const MAX_LISTINGS: i64 = 10_000;
 
 #[derive(Clone)]
 struct App {
     db: SqlitePool,
     ttl_ms: i64,
+    max_listings: i64,
     trust_proxy: bool,
     rate_limit: Arc<Mutex<RateLimit>>,
 }
@@ -114,6 +116,10 @@ async fn run() -> Result<()> {
         .map_or(Ok(MAX_TTL), |value| value.parse())
         .context("invalid listing TTL")?;
     ensure!((1..=MAX_TTL).contains(&ttl), "invalid listing TTL");
+    let max_listings = env::var("RUSTTALK_INDEX_MAX_LISTINGS")
+        .map_or(Ok(MAX_LISTINGS), |value| value.parse())
+        .context("invalid listing limit")?;
+    ensure!(max_listings >= 1, "invalid listing limit");
     let db = open(SqliteConnectOptions::new().filename(data.join("index.sqlite3")))
         .await
         .context("open index database")?;
@@ -124,6 +130,7 @@ async fn run() -> Result<()> {
     let app = App {
         db,
         ttl_ms: ttl * 1_000,
+        max_listings,
         trust_proxy: env::var("RUSTTALK_INDEX_TRUST_PROXY").as_deref() == Ok("1"),
         rate_limit: Arc::new(Mutex::new(RateLimit {
             started: Instant::now(),
@@ -258,11 +265,17 @@ async fn register(
             _ => IndexError(StatusCode::BAD_REQUEST, "invalid_json"),
         }
     })?;
-    save(&app.db, record, clock()?, app.ttl_ms).await?;
+    save(&app.db, record, clock()?, app.ttl_ms, app.max_listings).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn save(db: &SqlitePool, record: Registration, now: i64, ttl_ms: i64) -> IndexResult<()> {
+async fn save(
+    db: &SqlitePool,
+    record: Registration,
+    now: i64,
+    ttl_ms: i64,
+    max_listings: i64,
+) -> IndexResult<()> {
     record.verify(now).map_err(|error| match error {
         RegistrationError::Fields => IndexError(StatusCode::BAD_REQUEST, "invalid_listing"),
         RegistrationError::Timestamp => IndexError(StatusCode::BAD_REQUEST, "stale_registration"),
@@ -276,15 +289,19 @@ async fn save(db: &SqlitePool, record: Registration, now: i64, ttl_ms: i64) -> I
         member_count,
         open_joining,
     } = record.listing;
+    // Refreshes always fit; a new server ID needs room under the row cap, which also
+    // counts expired rows until pruning so the table size stays bounded.
     let saved = query(
         "INSERT INTO listings (server_id, name, description, address, member_count, open_joining, timestamp, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8
+         WHERE EXISTS (SELECT 1 FROM listings WHERE server_id = ?1)
+             OR (SELECT COUNT(*) FROM listings) < ?9
          ON CONFLICT (server_id) DO UPDATE SET name = excluded.name, description = excluded.description,
              address = excluded.address, member_count = excluded.member_count, open_joining = excluded.open_joining,
              timestamp = excluded.timestamp, expires_at = excluded.expires_at
          WHERE excluded.timestamp > listings.timestamp",
     )
-    .bind(server_id)
+    .bind(&server_id)
     .bind(name)
     .bind(description)
     .bind(address)
@@ -292,10 +309,20 @@ async fn save(db: &SqlitePool, record: Registration, now: i64, ttl_ms: i64) -> I
     .bind(open_joining)
     .bind(record.timestamp)
     .bind(now + ttl_ms)
+    .bind(max_listings)
     .execute(db)
     .await?;
     if saved.rows_affected() == 0 {
-        return Err(IndexError(StatusCode::CONFLICT, "replayed_registration"));
+        let known: bool =
+            query_scalar("SELECT EXISTS (SELECT 1 FROM listings WHERE server_id = ?)")
+                .bind(&server_id)
+                .fetch_one(db)
+                .await?;
+        return Err(if known {
+            IndexError(StatusCode::CONFLICT, "replayed_registration")
+        } else {
+            IndexError(StatusCode::SERVICE_UNAVAILABLE, "index_full")
+        });
     }
     Ok(())
 }

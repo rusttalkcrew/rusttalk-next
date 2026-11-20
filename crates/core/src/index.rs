@@ -106,11 +106,11 @@ pub fn validate_details(
 ) -> Result<(), RegistrationError> {
     if name.trim().is_empty()
         || name.chars().count() > 100
-        || name.chars().any(char::is_control)
+        || name.chars().any(|ch| ch.is_control() || hidden_format(ch))
         || description.chars().count() > 1_000
         || description
             .chars()
-            .any(|ch| ch.is_control() && !matches!(ch, '\n' | '\r' | '\t'))
+            .any(|ch| (ch.is_control() && !matches!(ch, '\n' | '\r' | '\t')) || hidden_format(ch))
         || !https_url(address).is_some_and(|url| url.path() == "/")
         || address
             .strip_prefix("https://")
@@ -120,6 +120,15 @@ pub fn validate_details(
         return Err(RegistrationError::Fields);
     }
     Ok(())
+}
+
+/// Bidi overrides, embeddings and isolates can make a listing display as different text,
+/// and invisible separators can make two names look identical.
+fn hidden_format(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{200B}' | '\u{202A}'..='\u{202E}' | '\u{2060}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}'
+    )
 }
 
 pub fn https_url(raw: &str) -> Option<Url> {

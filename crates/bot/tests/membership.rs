@@ -1,6 +1,6 @@
 mod chat;
-mod index;
 mod files;
+mod index;
 #[cfg(feature = "media")]
 mod voice;
 

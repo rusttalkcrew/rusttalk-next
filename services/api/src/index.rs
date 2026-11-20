@@ -103,6 +103,9 @@ async fn settings(app: &App, db: &mut SqliteConnection) -> ApiResult<Option<Sett
         .transpose()
 }
 
+const REFRESH: Duration = Duration::from_secs(3_600);
+const RETRY: Duration = Duration::from_secs(300);
+
 pub async fn refresh(app: App, mut changed: watch::Receiver<()>) {
     let mut last_timestamp = 0;
     loop {
@@ -114,10 +117,15 @@ pub async fn refresh(app: App, mut changed: watch::Receiver<()>) {
                 }
             }
             () = async {
-                if let Err(error) = publish(&app, &mut last_timestamp).await {
-                    tracing::warn!(reason = error.code, "index registration failed");
-                }
-                tokio::time::sleep(Duration::from_secs(3_600)).await;
+                // A failed attempt retries sooner so a short outage does not use up the lease.
+                let delay = match publish(&app, &mut last_timestamp).await {
+                    Ok(()) => REFRESH,
+                    Err(error) => {
+                        tracing::warn!(reason = error.code, "index registration failed");
+                        RETRY
+                    }
+                };
+                tokio::time::sleep(delay).await;
             } => {}
         }
     }
@@ -153,13 +161,77 @@ async fn publish(app: &App, last_timestamp: &mut i64) -> ApiResult<()> {
         .timeout(Duration::from_secs(10))
         .send()
         .await
-        .map_err(|_| ApiError::internal("index_request_failed"))?;
-    if response.status() != StatusCode::NO_CONTENT {
-        tracing::warn!(
-            status = response.status().as_u16(),
-            reason = "index_rejected_registration",
-            "index registration failed"
-        );
+        .map_err(|error| {
+            ApiError::internal(if error.is_timeout() {
+                "index_timeout"
+            } else if error.is_connect() {
+                "index_unreachable"
+            } else {
+                "index_request_failed"
+            })
+        })?;
+    let status = response.status();
+    if status == StatusCode::NO_CONTENT {
+        return Ok(());
     }
-    Ok(())
+    let mut response = response;
+    let mut body = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(5), async {
+        while let Ok(Some(chunk)) = response.chunk().await {
+            body.extend_from_slice(&chunk);
+            if body.len() > 1_024 {
+                body.clear();
+                break;
+            }
+        }
+    })
+    .await;
+    tracing::warn!(
+        status = status.as_u16(),
+        index_error = index_error(&body),
+        "index rejected the registration"
+    );
+    Err(ApiError::internal("index_rejected_registration"))
+}
+
+/// Extract the index's short error code, ignoring anything that is not a plain code.
+fn index_error(body: &[u8]) -> &str {
+    #[derive(Deserialize)]
+    struct Body<'a> {
+        error: &'a str,
+    }
+    serde_json::from_slice::<Body>(body)
+        .ok()
+        .map(|body| body.error)
+        .filter(|code| {
+            (1..=64).contains(&code.len())
+                && code
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+        })
+        .unwrap_or("unknown")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::index_error;
+
+    #[test]
+    fn index_error_codes_are_short_plain_codes() {
+        assert_eq!(
+            index_error(br#"{"error":"stale_registration"}"#),
+            "stale_registration"
+        );
+        for body in [
+            &br#"{"error":"x\ny"}"#[..],
+            br#"{"error":"Bearer abc"}"#,
+            br#"{"error":""}"#,
+            b"<html>",
+            b"",
+        ] {
+            assert_eq!(index_error(body), "unknown");
+        }
+        let long = format!(r#"{{"error":"{}"}}"#, "a".repeat(65));
+        assert_eq!(index_error(long.as_bytes()), "unknown");
+    }
 }

@@ -515,6 +515,10 @@ The optional `index_tls_fingerprint` is the 32-byte SHA-256 fingerprint
 of the index's DER leaf certificate encoded as unpadded base64url. Omitting
 it uses the API container's CA bundle. The publisher follows no redirects.
 
+The API registers again every hour and retries after five minutes when a
+registration fails. It logs failures with a short reason and, when the index
+rejects the registration, the index's error code.
+
 Send `{"enabled":false}` to clear the configured publication and stop renewals.
 The existing listing remains visible until its lease expires. Changing the
 directory URL also lets the old lease expire. Public text is supplied
@@ -536,6 +540,8 @@ open_joining}`. The name must contain a non-whitespace character and
 have at most 100 Unicode scalar values. The description may be empty
 and has at most 1,000 scalar values. The name permits no control
 characters and the description permits tab, carriage return and newline.
+Neither permits bidi embeddings, overrides or isolates (U+202A to U+202E,
+U+2066 to U+2069) or the invisible U+200B, U+2060 and U+FEFF.
 The address is an HTTPS origin of up to 512 bytes with an optional trailing
 slash. IPv6 hosts use brackets. `member_count` is an unsigned 32-bit integer
 and `open_joining` is a JSON boolean. The POST and owner PUT limits are
@@ -568,5 +574,7 @@ direction, and requires each accepted timestamp to exceed the last one for
 that server ID. Expiry is three hours from acceptance. Registration allows
 16 attempts per minute per IPv4 address or IPv6 /64. Registration errors use
 `400 invalid_listing`, `400 stale_registration`, `401 invalid_signature`,
-`409 replayed_registration` or `429 registration_limit`. Invalid search
+`409 replayed_registration`, `429 registration_limit` or
+`503 index_full` when a new server ID would exceed the index's listing cap
+(refreshes of an existing listing are still accepted). Invalid search
 parameters return `400 invalid_query`.
