@@ -1,4 +1,5 @@
 mod camera;
+mod live_file;
 mod screen;
 
 use std::{
@@ -42,6 +43,7 @@ async fn both_ways(a: &mut VoiceRoom, b: &mut VoiceRoom, a_hz: u32, b_hz: u32) -
 }
 
 pub async fn exercise(
+    project: &str,
     server: &Server,
     a: &mut KeyClient<'_>,
     secrets: &mut Vec<String>,
@@ -102,11 +104,10 @@ pub async fn exercise(
         VoiceRoster::default()
     );
 
-    let (mut room_a, mut room_b, mut listener) = tokio::try_join!(
-        a.join_voice(&voice.id),
-        b.join_voice(&voice.id),
-        c.join_voice(&voice.id),
-    )?;
+    let (mut room_a, mut room_b) =
+        tokio::try_join!(a.join_voice(&voice.id), b.join_voice(&voice.id))?;
+    live_file::exercise(project, a, &mut b, &c, &mut room_a, &mut room_b, voice).await?;
+    let mut listener = c.join_voice(&voice.id).await?;
     assert_eq!(
         (
             room_a.can_publish(),

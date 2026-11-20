@@ -734,6 +734,11 @@ async fn on_event(
         Event::VoiceChanged { channel } => {
             room_changed(ctx, url, client, state, decode(&channel)?).await?;
         }
+        Event::LiveFileAccepted { .. } => {
+            if let Some(voice) = &mut state.voice {
+                voice.room.handle_live_file_event(client, &event)?;
+            }
+        }
         Event::RotateNeeded { .. } => {}
     }
     Ok(())
@@ -764,6 +769,7 @@ async fn on_command(
                 text,
                 reply_to,
                 edit_of,
+                live: None,
             };
             let record = client.send_message(&channel, &body).await?;
             send_messages(ctx, url, channel, vec![to_msg(&record, &body)], false, None);
