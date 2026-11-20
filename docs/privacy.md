@@ -142,7 +142,10 @@ public device certificate live in Windows Credential Manager or Linux Secret
 Service. Development profiles use separate entries. The client logs the
 person fingerprint locally. Creating an account shows the recovery words once
 in the app window. The client never stores or logs the words or the root
-signing key. "Sign out of this device" deletes the keystore entry.
+signing key. "Sign out of this device" deletes the keystore entry and the
+profile's `sync.json`, `servers.json` and `saved.json`, so the next person
+on that profile starts without the servers, pins or saved file places.
+Device settings (`voice.json`, `updates.json`) stay.
 
 Next to the settings, `servers.json` holds each server's address, server ID
 and TLS fingerprint. `sync.json` holds the last merged device sync snapshot
@@ -156,6 +159,11 @@ devices; the chosen microphone, speakers and camera stay on this device. Decrypt
 memory only; the log never contains them, file names or invite links. A
 downloaded file is written only where the person picks in the save dialog,
 through a temporary file in that folder that is removed if the download fails.
+`saved.json` maps each downloaded file's opaque blob ID to where it was saved,
+so "Show in folder" and "Open" work later; it never leaves this device.
+"Open in default app" in the picture viewer, for a picture not saved yet,
+writes it to a `rusttalk-<id>` folder in the system temporary directory and
+hands it to the system's default app.
 `updates.json` holds the chosen release directory URL and the automatic
 check preference on this device.
 
