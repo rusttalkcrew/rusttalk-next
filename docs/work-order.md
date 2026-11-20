@@ -42,7 +42,7 @@ content on the server, not even temporarily.
   database.
 
 **4. Voice**
-- [ ] **W08 Voice.** Rooms, tokens, end-to-end media keys from the channel epoch,
+- [x] **W08 Voice.** Rooms, tokens, end-to-end media keys from the channel epoch,
   push-to-talk and voice activation with calibration, audio processing, per-person
   volume, stats panel, non-blocking reconnects. Gate: e2e voice both ways with
   encryption on, and a forced reconnect recovers by itself.
