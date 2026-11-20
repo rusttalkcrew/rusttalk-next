@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=RustTalk
+Exec=rusttalk-client
+Icon=rusttalk
+Categories=Network;Chat;
+Terminal=false

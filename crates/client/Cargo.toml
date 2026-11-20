@@ -10,18 +10,22 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # The PulseAudio protocol (also served by PipeWire) gives real device names on Linux;
 # ALSA stays the fallback. Not cpal's PipeWire host: WebRTC's own PipeWire stubs shadow it.
 cpal = { version = "0.18", features = ["pulseaudio"] }
+ed25519-dalek = { version = "2.2", default-features = false, features = ["fast"] }
 eframe = "0.37"
 # Bundled emoji glyphs, so icons and chat emoji render without system fonts.
 egui = { version = "0.37", default-features = false, features = ["monochrome_emoji_fonts"] }
 etcetera = "0.11"
 futures-util = "0.3"
+hex = "0.4"
 keyring = { version = "4.2", default-features = false, features = ["v1"] }
 livekit = "=0.11.0"
 rfd = { version = "0.18", default-features = false, features = ["xdg-portal"] }
-reqwest = { version = "0.12", default-features = false, features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 rusttalk-core = { path = "../core", features = ["client", "voice", "capture"] }
+semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tracing = "0.1"

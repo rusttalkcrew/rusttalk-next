@@ -127,3 +127,80 @@ as the API and works on Windows with the console disabled.
 ### IP bans
 
 IP bans match one exact address (IPv6 included), so a person with an IPv6 /64 can move to another address. The api only sees real client addresses when Docker forwards the original source IP to Caddy (the default bridge networking with iptables does; rootless Docker or a userland proxy shows every client as the gateway IP, and an IP ban would then hit everyone). Abuse limits: 32 open sign-in challenges per IP (256 in total), 16 sessions and 64 stored revocations per person.
+
+## Releases and updates
+
+Use one Ed25519 release key. Generate the production private key with
+`openssl genpkey -algorithm Ed25519 -out /offline/rusttalk-release.pem` on an
+offline signing system and keep an offline backup. Keep this file out of
+Git, build VMs, Docker contexts and published artifacts. Give the release command its path through `RUSTTALK_RELEASE_KEY` on the
+offline release workstation. Cache Cargo and build inputs and import the
+Docker base images before attaching the signing key. Derive the public PEM
+and hex key with the commands below.
+
+```sh
+export RUSTTALK_RELEASE_KEY=/offline/rusttalk-release.pem
+openssl pkey -in "$RUSTTALK_RELEASE_KEY" -pubout -out rusttalk-release-public.pem
+python3 deploy/release/release.py public-key
+```
+
+The last command prints the 32-byte public key as hex. Set
+`RUSTTALK_RELEASE_PUBLIC_KEY` to that output on the Windows build VM. Build
+both platforms from the same commit and key. The Linux build derives the
+public key from the signing key. The clients compile the public key in.
+Changing keys requires distributing a new client through a trusted channel.
+
+Build the Windows x64 installer first with
+`powershell -ExecutionPolicy Bypass -File deploy/release/windows.ps1 -Iscc <path-to-ISCC.exe>`
+from an x64 MSVC developer shell. Use a current-user Inno Setup 6 installation.
+Copy the resulting `dist/rusttalk-<version>-windows-x86_64.exe` to `dist/` on
+the Linux release workstation. The installer installs under the user's
+local application directory, requires no elevation and restarts RustTalk
+after an in-app update.
+
+On Linux x86_64, run `make release` with Python 3.11+, OpenSSL 3, Docker
+with BuildKit, the client build dependencies and `appimagetool` on PATH.
+Use a build host with the oldest glibc you intend to support. The AppImage
+uses the host's desktop stack, ALSA and PipeWire libraries. The package
+contains the RustTalk client and its PipeWire helper side by side.
+Set `RUSTTALK_APPIMAGE_RUNTIME` to a verified, locally staged x86_64
+AppImage runtime for offline builds. Keep the source and license notices
+for the exact runtime with the publication. `--appimage-license` displays the runtime's
+component notices.
+[AppImage packager](https://github.com/AppImage/appimagetool/releases)
+[AppImage runtime](https://github.com/AppImage/type2-runtime)
+
+The signed release lives at `dist/<version>/`. Its version comes from the
+workspace's `Cargo.toml` and uses three numeric components. It contains the
+AppImage, the Windows installer, two Docker archives and `latest.json`
+with a detached, raw 64-byte Ed25519 signature in `latest.json.sig`.
+The manifest lists the base file name, byte count and lowercase SHA-256
+for each artifact. Verify the exact manifest bytes with a public PEM obtained from a trusted
+source. Compare each artifact's size and SHA-256 to its signed entry.
+
+```sh
+openssl pkeyutl -verify -pubin -inkey rusttalk-release-public.pem \
+  -rawin -in latest.json -sigfile latest.json.sig
+```
+
+Upload the versioned artifacts to a single HTTPS directory on the release
+host, then publish `latest.json` and its signature together. Keep the
+artifacts listed by any manifest still in use. Enter the directory URL
+under **Settings → Profile**. **Check now** checks once. The automatic
+option checks once at startup and is off by default. A verified newer
+release offers **Install**. On Linux the AppImage directory must allow the
+current user to create and rename files.
+The update replaces the AppImage atomically and offers **Restart now**.
+
+The release command builds and tags `rusttalk-api:<version>` and
+`rusttalk-index:<version>`. To publish to a chosen registry, tag and push
+each image. Record its registry digest. The same versioned images can
+be distributed as the signed Docker archives and loaded with `docker load`.
+
+```sh
+for service in api index; do
+  image="rusttalk-$service:$VERSION"
+  docker tag "$image" "$REGISTRY/$image"
+  docker push "$REGISTRY/$image"
+done
+```
