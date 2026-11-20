@@ -94,8 +94,7 @@ test: ## Run unit and integration tests
 	cargo test $(CARGO_SCOPE) --locked
 
 e2e: ## Run the two-stack membership, keys, chat, stored files, voice, app audio, screen, camera, live file and device sync scenarios
-	@printf '[1;34m==> Two-stack membership, keys, chat, stored files, voice, app audio, screen, camera, live file and device sync[0m
-'
+	@printf '\033[1;34m==> Two-stack membership, keys, chat, stored files, voice, app audio, screen, camera, live file and device sync\033[0m\n'
 	$(if $(and $(PIPEWIRE_HELPER),$(findstring media,$(E2E_FEATURES))),cargo build --locked $(PIPEWIRE_HELPER))
 	@set -eu; \
 		export RUSTTALK_E2E_PROJECT=rusttalk-e2e-$$$$; \
