@@ -128,6 +128,11 @@ impl<'a> KeyClient<'a> {
         Ok(kind.open(&self.server.known_server().server_id, id, key, &bytes)?)
     }
 
+    /// Whether the current space key is here, so names can be encrypted.
+    pub fn has_space_key(&self) -> bool {
+        self.current_space().is_ok()
+    }
+
     fn current_space(&self) -> Result<(i64, &Key)> {
         self.current_key(self.space())
     }

@@ -47,11 +47,23 @@ impl Server {
         })
     }
 
-    /// Verify a first-use server proof without saving a pin or sending device credentials.
-    pub async fn probe(address: Url, tls_fingerprint: Option<Fingerprint>) -> Result<KnownServer> {
+    /// Verify a server proof against `trusted` pins without saving them or sending device credentials.
+    pub async fn probe(
+        address: Url,
+        tls_fingerprint: Option<Fingerprint>,
+        trusted: Option<&KnownServer>,
+    ) -> Result<Self> {
         validate_origin(&address)?;
         let http = pinned_tls::api_client(tls_fingerprint).map_err(anyhow::Error::from_boxed)?;
-        verified_server(&http, address, tls_fingerprint, None).await
+        let server = verified_server(&http, address, tls_fingerprint, trusted).await?;
+        Ok(Self { http, server })
+    }
+
+    /// Return the saved pins for an origin, if this data folder has connected to it before.
+    pub fn pinned(data: &Path, address: &Url) -> Result<Option<KnownServer>> {
+        Ok(load_pins(&data.join("servers.json"))?
+            .into_iter()
+            .find(|entry| &entry.address == address))
     }
 
     /// Return the verified origin, server ID and optional TLS fingerprint.

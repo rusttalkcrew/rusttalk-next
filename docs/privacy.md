@@ -64,6 +64,10 @@ person fingerprint locally. Creating an account shows the recovery words once
 in the app window. The client never stores or logs the words or the root
 signing key. "Sign out of this device" deletes the keystore entry.
 
+Next to the settings, `servers.json` and `joined.json` hold each joined
+server's address, server ID and TLS fingerprint. Decrypted names and
+messages stay in memory only; the log never contains them or invite links.
+
 ## Outbound connections
 
 - **Bot:** Only the configured RustTalk stack. Membership, key events, encrypted chat, signaling and failure-path

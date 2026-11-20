@@ -64,14 +64,28 @@ Later starts load the identity from the keystore and open the main window:
 server rail, channel list, chat pane and member list. Settings has the
 short person fingerprint under Profile > Details, this device's name under
 Devices, and "Sign out of this device", which deletes the keystore entry
-after a confirmation. Joining a server is not wired up yet: the app checks
-a pasted invite link and says so. Recovery words and keys never reach the
-log or the terminal.
+after a confirmation. Recovery words and keys never reach the log or the
+terminal.
+
+To try chat locally, paste the owner invite that `make dev` prints into
+"Add a server" in one profile. That profile claims the fresh dev server and
+gets the owner menu (click the server name): name the server, create
+channels and categories, and make invite links. Paste such a link into a
+second profile to join. The join screen shows the server name from the
+invite and its fingerprints under "Details". A different server ID or TLS
+certificate at a saved address stops the join or reconnect.
+
+Network work runs on a tokio runtime off the UI thread (`crates/client/src/net.rs`).
+Each joined server has one task that signs in, keeps the event socket open,
+refreshes the token ten minutes before expiry and reconnects with backoff.
+The window shows "Connecting…" or "Offline" per server meanwhile. Voice
+channels are listed but join in W08.
 
 Run `make client PROFILE=a` for an isolated identity. A profile is exactly
 one lowercase letter from `a` to `z`. For profile `a`, the settings and data
-directory is `.dev/profiles/a`, which holds `rusttalk.log` and the startup
-lock. The keystore service is `RustTalk-dev-a`. `make reset` removes the
+directory is `.dev/profiles/a`, which holds `rusttalk.log`, the startup
+lock, `servers.json` (pins per address) and `joined.json` (servers to
+reconnect at start). The keystore service is `RustTalk-dev-a`. `make reset` removes the
 directory and leaves OS keystore entries in place; remove one with
 `secret-tool clear service RustTalk-dev-a username identity-v1` on Linux.
 

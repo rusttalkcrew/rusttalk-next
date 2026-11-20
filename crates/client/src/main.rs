@@ -2,8 +2,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod home;
 mod keystore;
 mod log_file;
+mod net;
 mod server;
 
 use std::{env, fs, path::PathBuf, process::ExitCode, sync::Mutex};
@@ -82,7 +84,7 @@ fn run() -> Result<()> {
     eframe::run_native(
         "RustTalk",
         options,
-        Box::new(|cc| Ok(Box::new(app::App::new(cc, opened)))),
+        Box::new(|cc| Ok(Box::new(app::App::new(cc, opened, config)))),
     )
     .map_err(|error| anyhow!("run window: {error}"))
 }

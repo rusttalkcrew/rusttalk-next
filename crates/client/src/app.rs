@@ -1,15 +1,14 @@
+use std::path::PathBuf;
+
 use anyhow::Result;
 use eframe::egui::{
-    self, Button, CentralPanel, CollapsingHeader, Frame, Grid, Id, Key, Modal, Panel, Response,
-    RichText, Role, ScrollArea, TextEdit, TextStyle, Ui, Vec2, WidgetInfo,
+    self, Button, CentralPanel, CollapsingHeader, Frame, Grid, Key, Response, RichText, ScrollArea,
+    TextEdit, TextStyle, Ui, Vec2,
 };
-use rusttalk_core::{
-    auth::InviteLink,
-    identity::{DeviceIdentity, IdentityError, WordConfirmation, fingerprint},
-};
+use rusttalk_core::identity::{DeviceIdentity, IdentityError, WordConfirmation};
 use zeroize::Zeroizing;
 
-use crate::{keystore::Keystore, server::Server};
+use crate::{home::Home, keystore::Keystore};
 
 const DEVICE_NAME: &str = "Desktop";
 const CARD_WIDTH: f32 = 560.0;
@@ -18,6 +17,9 @@ pub struct App {
     /// `None` only when startup failed and the problem screen is showing.
     keystore: Option<Keystore>,
     screen: Screen,
+    ctx: egui::Context,
+    /// The profile folder, for saved servers.
+    data: PathBuf,
 }
 
 enum Screen {
@@ -41,7 +43,7 @@ enum Screen {
     Home(Box<Home>),
 }
 
-enum Action {
+pub enum Action {
     Create,
     Restore,
     StartOver,
@@ -49,51 +51,11 @@ enum Action {
     SignOut,
 }
 
-struct Home {
-    identity: DeviceIdentity,
-    servers: Vec<Server>,
-    view: View,
-    invite: String,
-    invite_note: Option<String>,
-    settings: Option<Tab>,
-    confirm_sign_out: bool,
-    error: Option<String>,
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum View {
-    Join,
-    Direct,
-    Server(usize),
-    /// Server, category and channel index.
-    Channel(usize, usize, usize),
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum Tab {
-    Profile,
-    Devices,
-}
-
-impl Home {
-    fn new(identity: DeviceIdentity) -> Self {
-        Self {
-            identity,
-            servers: Vec::new(),
-            view: View::Join,
-            invite: String::new(),
-            invite_note: None,
-            settings: None,
-            confirm_sign_out: false,
-            error: None,
-        }
-    }
-}
-
 impl App {
     pub fn new(
         cc: &eframe::CreationContext,
         opened: Result<(Keystore, Option<DeviceIdentity>)>,
+        data: PathBuf,
     ) -> Self {
         cc.egui_ctx.all_styles_mut(|style| {
             for (text_style, font) in &mut style.text_styles {
@@ -106,17 +68,38 @@ impl App {
             style.spacing.item_spacing = Vec2::new(8.0, 8.0);
             style.spacing.button_padding = Vec2::new(10.0, 6.0);
         });
+        // Brighter body text, so chat reads easily.
+        cc.egui_ctx.style_mut_of(egui::Theme::Dark, |style| {
+            style.visuals.widgets.noninteractive.fg_stroke.color = egui::Color32::from_gray(215);
+        });
+        cc.egui_ctx.style_mut_of(egui::Theme::Light, |style| {
+            style.visuals.widgets.noninteractive.fg_stroke.color = egui::Color32::from_gray(35);
+        });
+        let mut app = Self {
+            keystore: None,
+            screen: Screen::Welcome,
+            ctx: cc.egui_ctx.clone(),
+            data,
+        };
         match opened {
-            Ok((keystore, identity)) => Self {
-                keystore: Some(keystore),
-                screen: identity.map_or(Screen::Welcome, |identity| {
-                    Screen::Home(Box::new(Home::new(identity)))
-                }),
-            },
-            Err(error) => Self {
-                keystore: None,
-                screen: Screen::Problem(format!("{error:#}")),
-            },
+            Ok((keystore, identity)) => {
+                app.keystore = Some(keystore);
+                if let Some(identity) = identity {
+                    app.screen = app.home(identity);
+                }
+            }
+            Err(error) => app.screen = Screen::Problem(format!("{error:#}")),
+        }
+        app
+    }
+
+    fn home(&self, identity: DeviceIdentity) -> Screen {
+        match Home::new(identity, &self.ctx, self.data.clone()) {
+            Ok(home) => Screen::Home(Box::new(home)),
+            Err(error) => {
+                tracing::error!(error = %format_args!("{error:#}"), "starting the network failed");
+                Screen::Problem(format!("{error:#}"))
+            }
         }
     }
 
@@ -163,7 +146,7 @@ impl App {
                     Some("Those words don't match your list. Check them and try again.".into())
                 };
                 match error {
-                    None => Screen::Home(Box::new(Home::new(identity))),
+                    None => self.home(identity),
                     error => Screen::Confirm {
                         words,
                         identity,
@@ -178,7 +161,7 @@ impl App {
                     Ok(identity) => match save(keystore, &identity) {
                         None => {
                             tracing::info!("added this device to an existing account");
-                            self.screen = Screen::Home(Box::new(Home::new(identity)));
+                            self.screen = self.home(identity);
                             return;
                         }
                         error => error,
@@ -241,7 +224,7 @@ impl eframe::App for App {
                 ..
             } => card(ui, |ui| confirm(ui, check, answers, error.as_deref())),
             Screen::Restore { words, error } => card(ui, |ui| restore(ui, words, error.as_deref())),
-            Screen::Home(home) => home_ui(ui, home),
+            Screen::Home(home) => crate::home::show(ui, home),
         };
         if let Some(action) = action {
             self.apply(action);
@@ -272,7 +255,7 @@ fn card(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> Option<Action>) -> Option<Acti
         .inner
 }
 
-fn primary(ui: &mut Ui, text: &str) -> Response {
+pub fn primary(ui: &mut Ui, text: &str) -> Response {
     ui.add(
         Button::new(RichText::new(text).size(16.0))
             .fill(ui.visuals().selection.bg_fill)
@@ -280,17 +263,17 @@ fn primary(ui: &mut Ui, text: &str) -> Response {
     )
 }
 
-fn secondary(ui: &mut Ui, text: &str) -> Response {
+pub fn secondary(ui: &mut Ui, text: &str) -> Response {
     ui.add(Button::new(RichText::new(text).size(16.0)).min_size(Vec2::new(240.0, 40.0)))
 }
 
-fn error_text(ui: &mut Ui, error: Option<&str>) {
+pub fn error_text(ui: &mut Ui, error: Option<&str>) {
     if let Some(error) = error {
         ui.colored_label(ui.visuals().error_fg_color, error);
     }
 }
 
-fn submitted(ui: &Ui, field: &Response) -> bool {
+pub fn submitted(ui: &Ui, field: &Response) -> bool {
     field.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter))
 }
 
@@ -382,234 +365,4 @@ fn restore(ui: &mut Ui, words: &mut Zeroizing<String>, error: Option<&str>) -> O
         return Some(Action::Continue);
     }
     secondary(ui, "Back").clicked().then_some(Action::StartOver)
-}
-
-fn home_ui(ui: &mut Ui, home: &mut Home) -> Option<Action> {
-    Panel::left("servers")
-        .resizable(false)
-        .exact_size(72.0)
-        .show(ui, |ui| server_rail(ui, home));
-    Panel::left("channels")
-        .resizable(false)
-        .exact_size(240.0)
-        .show(ui, |ui| channel_list(ui, home));
-    if let View::Server(server) | View::Channel(server, ..) = home.view {
-        Panel::right("members")
-            .resizable(false)
-            .exact_size(220.0)
-            .show(ui, |ui| member_list(ui, &home.servers[server]));
-    }
-    CentralPanel::default().show(ui, |ui| main_pane(ui, home));
-    settings(ui.ctx(), home)
-}
-
-fn round_button(ui: &mut Ui, text: &str, label: &str, selected: bool) -> Response {
-    let response = ui
-        .add(
-            Button::new(RichText::new(text).size(20.0))
-                .min_size(Vec2::splat(48.0))
-                .corner_radius(if selected { 16 } else { 24 })
-                .selected(selected),
-        )
-        .on_hover_text(label);
-    response.widget_info(|| WidgetInfo::labeled(Role::Button, true, label));
-    response
-}
-
-fn server_rail(ui: &mut Ui, home: &mut Home) {
-    ui.vertical_centered(|ui| {
-        ui.add_space(8.0);
-        for (index, server) in home.servers.iter().enumerate() {
-            let selected =
-                matches!(home.view, View::Server(s) | View::Channel(s, ..) if s == index);
-            let initial = server
-                .name
-                .chars()
-                .next()
-                .map(|c| c.to_uppercase().to_string())
-                .unwrap_or_default();
-            if round_button(ui, &initial, &server.name, selected).clicked() {
-                home.view = View::Server(index);
-            }
-        }
-        if !home.servers.is_empty() {
-            ui.separator();
-        }
-        if round_button(ui, "+", "Add a server", home.view == View::Join).clicked() {
-            home.view = View::Join;
-        }
-    });
-}
-
-fn channel_list(ui: &mut Ui, home: &mut Home) {
-    Panel::bottom("you").show(ui, |ui| {
-        ui.add_space(6.0);
-        if ui.button("⚙  Settings").clicked() {
-            home.settings = Some(Tab::Profile);
-        }
-        ui.add_space(2.0);
-    });
-    ui.add_space(8.0);
-    if ui
-        .selectable_label(home.view == View::Direct, "Direct messages")
-        .clicked()
-    {
-        home.view = View::Direct;
-    }
-    let (View::Server(index) | View::Channel(index, ..)) = home.view else {
-        return;
-    };
-    ui.separator();
-    ui.heading(&home.servers[index].name);
-    ScrollArea::vertical().show(ui, |ui| {
-        for (c, category) in home.servers[index].categories.iter().enumerate() {
-            if !category.name.is_empty() {
-                ui.add_space(8.0);
-                ui.label(RichText::new(category.name.to_uppercase()).small().weak());
-            }
-            for (n, channel) in category.channels.iter().enumerate() {
-                let icon = if channel.voice { "🔊" } else { "#" };
-                let view = View::Channel(index, c, n);
-                if ui
-                    .selectable_label(home.view == view, format!("{icon} {}", channel.name))
-                    .clicked()
-                {
-                    home.view = view;
-                }
-            }
-        }
-    });
-}
-
-fn member_list(ui: &mut Ui, server: &Server) {
-    ui.add_space(8.0);
-    ui.label(
-        RichText::new(format!("MEMBERS — {}", server.members.len()))
-            .small()
-            .weak(),
-    );
-    ScrollArea::vertical().show(ui, |ui| {
-        for member in &server.members {
-            ui.label(member);
-        }
-    });
-}
-
-fn main_pane(ui: &mut Ui, home: &mut Home) {
-    match home.view {
-        View::Join => join(ui, home),
-        View::Direct => {
-            ui.heading("Direct messages");
-            ui.separator();
-            ui.weak("No messages yet.");
-        }
-        View::Server(server) => {
-            ui.heading(&home.servers[server].name);
-            ui.separator();
-            ui.weak("Pick a channel on the left.");
-        }
-        View::Channel(server, category, channel) => {
-            let channel = &home.servers[server].categories[category].channels[channel];
-            let icon = if channel.voice { "🔊" } else { "#" };
-            ui.heading(format!("{icon} {}", channel.name));
-            ui.separator();
-        }
-    }
-}
-
-fn join(ui: &mut Ui, home: &mut Home) {
-    ui.vertical_centered(|ui| {
-        ui.add_space(ui.available_height() * 0.2);
-        ui.heading(if home.servers.is_empty() {
-            "No servers yet"
-        } else {
-            "Join a server"
-        });
-        ui.label("Paste an invite link from a friend.");
-        ui.add_space(12.0);
-        let label = ui.label("Invite link");
-        let field = ui
-            .add(
-                TextEdit::singleline(&mut home.invite)
-                    .hint_text("rusttalk://…")
-                    .desired_width(400.0),
-            )
-            .labelled_by(label.id);
-        if primary(ui, "Join a server").clicked() || submitted(ui, &field) {
-            home.invite_note = Some(match InviteLink::parse(home.invite.trim()) {
-                Ok(invite) => format!(
-                    "Found the server at {}. Joining isn't ready in this version yet.",
-                    invite.server.address.host_str().unwrap_or_default()
-                ),
-                Err(error) => {
-                    tracing::warn!(%error, "invite link rejected");
-                    "That isn't an invite link. Ask your friend to send it again.".into()
-                }
-            });
-        }
-        if let Some(note) = &home.invite_note {
-            ui.label(note.as_str());
-        }
-    });
-}
-
-fn settings(ctx: &egui::Context, home: &mut Home) -> Option<Action> {
-    let mut tab = home.settings?;
-    let mut close = false;
-    let modal = Modal::new(Id::unique("settings")).show(ctx, |ui| {
-        ui.set_width(440.0);
-        ui.heading("Settings");
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut tab, Tab::Profile, "Profile");
-            ui.selectable_value(&mut tab, Tab::Devices, "Devices");
-        });
-        ui.separator();
-        match tab {
-            Tab::Profile => {
-                ui.label("You pick your name on each server when you join it.");
-                CollapsingHeader::new("Details").show(ui, |ui| {
-                    ui.label("Your ID");
-                    ui.monospace(fingerprint(home.identity.certificate.person_id()));
-                    ui.weak("Friends can compare this to make sure it's really you.");
-                });
-            }
-            Tab::Devices => {
-                ui.label(format!("This device: {}", home.identity.certificate.name()));
-            }
-        }
-        error_text(ui, home.error.as_deref());
-        ui.separator();
-        ui.horizontal(|ui| {
-            if ui.button("Sign out of this device").clicked() {
-                home.confirm_sign_out = true;
-            }
-            close = ui.button("Close").clicked();
-        });
-    });
-    home.settings = Some(tab);
-    if close || (modal.should_close() && !home.confirm_sign_out) {
-        home.settings = None;
-        home.error = None;
-    }
-
-    if !home.confirm_sign_out {
-        return None;
-    }
-    let mut action = None;
-    let mut cancel = false;
-    let modal = Modal::new(Id::unique("sign-out")).show(ctx, |ui| {
-        ui.set_width(380.0);
-        ui.heading("Sign out of this device?");
-        ui.label("This removes your account from this computer. To sign in again, you need your 24 recovery words.");
-        ui.horizontal(|ui| {
-            if ui.button("Sign out").clicked() {
-                action = Some(Action::SignOut);
-            }
-            cancel = ui.button("Cancel").clicked();
-        });
-    });
-    if cancel || modal.should_close() {
-        home.confirm_sign_out = false;
-    }
-    action
 }
