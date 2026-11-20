@@ -31,7 +31,7 @@ use crate::{
     camera,
     device_sync::{self, Edit},
     files::{self, Ask, Files},
-    net::{Admin, AdminUpdate, Admission, Command, Listed, Net, PAGE_SIZE, Preview, Update},
+    net::{Admin, AdminUpdate, Admission, Command, Draft, Listed, Net, PAGE_SIZE, Preview, Update},
     screen::Video,
     server::{Body, Chat, Directory, Id, Msg, Picture, Server, Status, member_name},
 };
@@ -330,7 +330,7 @@ impl Home {
                     }
                     (Status::Stopped(error), true) => {
                         self.join = Join::Idle(Some(error.clone()));
-                        self.servers.remove(index);
+                        self.remove_server(index);
                         self.view = View::Join;
                         return;
                     }
@@ -596,6 +596,19 @@ impl Home {
                 let adopted = device_sync::adopt(&audio.settings(), &synced.settings);
                 self.synced = device_sync::synced(&adopted);
                 audio.set_settings(adopted);
+            }
+            Update::Unsent(address, draft) => {
+                let Some(index) = self.index(&address) else {
+                    return;
+                };
+                let chat = self.servers[index].chats.entry(draft.channel).or_default();
+                // Only when nothing new was typed or picked meanwhile.
+                if chat.draft.is_empty() && chat.staged.is_empty() {
+                    chat.draft = draft.text;
+                    chat.reply_to = draft.reply_to;
+                    chat.editing = draft.edit_of;
+                    files::stage(chat, draft.files);
+                }
             }
             Update::Failed(error) => {
                 match &mut self.dialog {
@@ -2032,13 +2045,13 @@ fn composer(
     } else {
         chat.staged.drain(..).map(|file| file.path).collect()
     };
-    let command = Command::Send {
+    let command = Command::Send(Draft {
         channel,
         text: text.to_owned(),
         reply_to: chat.reply_to.take(),
         edit_of: chat.editing.take(),
         files,
-    };
+    });
     chat.draft.clear();
     field.request_focus();
     (Some(command), attach)

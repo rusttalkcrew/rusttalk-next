@@ -64,14 +64,7 @@ pub enum Command {
     Open(Id),
     /// Load the page before a message: channel, oldest loaded message.
     Older(Id, Id),
-    Send {
-        channel: Id,
-        text: String,
-        reply_to: Option<Id>,
-        edit_of: Option<Id>,
-        /// Uploaded first, then sent with the message.
-        files: Vec<PathBuf>,
-    },
+    Send(Draft),
     /// Channel, message, and the IDs of its stored files to remove too.
     Delete(Id, Id, Id, Vec<Id>),
     /// Download and decode a picture: a thumbnail, or the full image (`true`).
@@ -119,6 +112,16 @@ pub enum Command {
     /// Publish a running camera, replacing an earlier one.
     ShareCamera(NativeVideoSource, CameraOptions),
     StopCamera,
+}
+
+/// A message to send, and what goes back to the composer when sending fails.
+pub struct Draft {
+    pub channel: Id,
+    pub text: String,
+    pub reply_to: Option<Id>,
+    pub edit_of: Option<Id>,
+    /// Uploaded first, then sent with the message.
+    pub files: Vec<PathBuf>,
 }
 
 pub struct LiveOffer {
@@ -209,6 +212,8 @@ pub enum Update {
     NoFiles(Url, Id),
     /// The joined servers and synced settings after a device sync.
     Synced(Box<Synced>),
+    /// Sending this message failed; put it back in the composer.
+    Unsent(Url, Draft),
     Failed(String),
 }
 
@@ -576,6 +581,10 @@ async fn run(
                     Some(Command::Admin(_)) => {
                         ctx.send(Update::Admin(url.clone(), AdminUpdate::Failed(OFFLINE.into())));
                     }
+                    Some(Command::Send(draft)) => {
+                        ctx.send(Update::Unsent(url.clone(), draft));
+                        ctx.send(Update::Failed(OFFLINE.into()));
+                    }
                     Some(Command::Image(file, _)) => ctx.send(Update::Image(file.id, Err(false))),
                     Some(Command::Save(file, _)) => ctx.send(Update::Saved(file.id, Err(false))),
                     Some(Command::AcceptFile(id, _)) => {
@@ -892,21 +901,20 @@ async fn on_command(
         Command::Older(channel, before) => {
             page(ctx, url, client, state, channel, Some(before)).await;
         }
-        Command::Send {
-            channel,
-            text,
-            reply_to,
-            edit_of,
-            files,
-        } => {
+        Command::Send(draft) => {
             let body = MessageBody {
-                text,
-                reply_to,
-                edit_of,
+                text: draft.text.clone(),
+                reply_to: draft.reply_to,
+                edit_of: draft.edit_of,
                 attachments: Vec::new(),
                 live: None,
             };
-            files::send(ctx, url, client, channel, body, files).await?;
+            let sent =
+                files::send(ctx, url, client, draft.channel, body, draft.files.clone()).await;
+            if !matches!(sent, Ok(true)) {
+                ctx.send(Update::Unsent(url.clone(), draft));
+            }
+            sent?;
         }
         Command::Delete(channel, id, sender, blobs) => {
             files::delete(ctx, url, client, (channel, id, sender), blobs).await?;
