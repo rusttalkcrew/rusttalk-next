@@ -2,7 +2,7 @@
 
 ## Production
 
-`deploy/compose.yml` runs the API, LiveKit and Caddy with restart policies,
+`deploy/docker-compose.yml` runs the API, LiveKit and Caddy with restart policies,
 named volumes and health checks. The optional directory runs with
 `--profile index`. All settings live in `deploy/.env`. Run the commands from
 the `deploy/` directory of a checkout of the release you deploy.
