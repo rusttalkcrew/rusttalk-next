@@ -1,6 +1,5 @@
 use std::{
     io::{BufReader, Read},
-    path::PathBuf,
     process::{Command, Stdio},
     sync::{
         Arc, Mutex,
@@ -13,24 +12,12 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 
+use crate::pipewire_helper::pipewire_helper;
+
 use super::{App, Capture, FRAME_SAMPLES, deliver};
 
-fn helper() -> Result<PathBuf> {
-    let exe = std::env::current_exe()?;
-    let dir = exe.parent().context("locate application executable")?;
-    // Cargo integration tests live one level below the desktop and bot executables.
-    let dir = if dir.ends_with("deps") {
-        dir.parent().context("locate Cargo target directory")?
-    } else {
-        dir
-    };
-    let helper = dir.join("rusttalk-pipewire");
-    ensure!(helper.is_file(), "PipeWire app audio helper is missing");
-    Ok(helper)
-}
-
 pub fn list_apps() -> Result<Vec<App>> {
-    let output = Command::new(helper()?)
+    let output = Command::new(pipewire_helper()?)
         .arg("list")
         .stderr(Stdio::piped())
         .output()
@@ -50,7 +37,7 @@ pub fn capture(app: &App, mut sink: impl FnMut(&[i16]) + Send + 'static) -> Resu
         .context("invalid PipeWire stream ID")?;
     let cookie: u32 = cookie.parse().context("invalid PipeWire daemon cookie")?;
     let serial: u64 = serial.parse().context("invalid PipeWire object serial")?;
-    let mut child = Command::new(helper()?)
+    let mut child = Command::new(pipewire_helper()?)
         .arg(format!("{cookie}:{serial}"))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

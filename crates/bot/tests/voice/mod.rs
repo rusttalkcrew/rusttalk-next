@@ -1,3 +1,5 @@
+mod screen;
+
 use std::{
     sync::{
         Arc,
@@ -198,6 +200,9 @@ pub async fn exercise(
         .await
         .context("waiting for two per-app tracks")??;
     capture.stop(&room_a).await?;
+
+    let mut listener =
+        screen::exercise(&room_a, &mut room_b, listener, server, &mut c, &voice.id).await?;
 
     let stats = room_a.stats().await?;
     assert!(

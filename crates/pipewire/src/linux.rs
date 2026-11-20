@@ -40,15 +40,18 @@ static PARENT: OnceLock<u32> = OnceLock::new();
 
 pub fn run() -> Result<()> {
     PARENT.get_or_init(parent_id);
+    let arg = std::env::args()
+        .nth(1)
+        .context("expected list, screen or a stream ID")?;
+    if arg == "screen" {
+        return crate::screen::run();
+    }
     pw::init();
     let loop_ = MainLoopRc::new(None)?;
     let context = pw::context::ContextRc::new(&loop_, None)?;
     let core = context
         .connect_rc(None)
         .context("connect to the local PipeWire daemon")?;
-    let arg = std::env::args()
-        .nth(1)
-        .context("expected list or a stream ID")?;
     if arg == "list" {
         serde_json::to_writer(io::stdout().lock(), &list_apps(&loop_, &core)?)?;
         return Ok(());
@@ -170,12 +173,17 @@ fn list_apps(loop_: &MainLoop, core: &CoreRc) -> Result<Vec<App>> {
     Ok(apps)
 }
 
-fn iterate(loop_: &MainLoop) -> Result<()> {
-    // A paused stream writes nothing, so a broken pipe alone would not end an orphaned capture.
+pub(crate) fn check_parent() -> Result<()> {
     ensure!(
         PARENT.get() == Some(&parent_id()),
-        "RustTalk exited, stopping app audio capture"
+        "RustTalk exited, stopping capture"
     );
+    Ok(())
+}
+
+pub(crate) fn iterate(loop_: &MainLoop) -> Result<()> {
+    // A paused stream writes nothing, so a broken pipe alone would not end an orphaned capture.
+    check_parent()?;
     let result = loop_
         .loop_()
         .iterate(Timeout::Finite(Duration::from_millis(100)));

@@ -34,6 +34,15 @@ pub struct Peer {
     pub unknown: bool,
     /// Track and name of each app they share, only known inside the room.
     pub apps: Vec<(TrackSid, String)>,
+    /// Screens they share, only known inside the room.
+    pub screens: Vec<Screen>,
+}
+
+#[derive(Clone, PartialEq)]
+pub struct Screen {
+    /// The track, to watch it.
+    pub sid: String,
+    pub name: String,
 }
 
 impl Peer {
@@ -54,6 +63,8 @@ pub struct Call {
     pub stats: Stats,
     /// False when this device may only listen.
     pub can_talk: bool,
+    /// False when this device may not publish a screen.
+    pub can_share_screen: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]

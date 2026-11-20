@@ -1,5 +1,6 @@
 //! Pinned, end-to-end encrypted voice sessions and caller-owned audio I/O.
 
+mod screen;
 mod stats;
 mod track_name;
 
@@ -15,7 +16,7 @@ use livekit::{
     },
     options::TrackPublishOptions,
     participant::ParticipantState,
-    prelude::{LocalTrack, RemoteTrack},
+    prelude::{LocalTrack, RemoteTrack, RemoteTrackPublication, TrackKind},
     rtc_engine::SimulateScenario,
     webrtc::audio_source::RtcAudioSource,
 };
@@ -41,6 +42,7 @@ use crate::{
 };
 
 use super::KeyClient;
+pub use screen::{NativeVideoSource, NativeVideoStream, RemoteVideo, RemoteVideoTrack};
 pub use stats::{TrackStats, VoiceStats};
 
 /// Derive a 32-byte media key for one server, channel and channel-key epoch.
@@ -122,7 +124,8 @@ impl KeyClient<'_> {
                 Err(error) => anyhow::Error::from_boxed(error),
             }
         })?;
-        let name_keys = self.name_keys(channel);
+        let name_keys = self.name_keys(channel, track_name::APP_AUDIO);
+        let screen_names = self.name_keys(channel, track_name::SCREEN);
         let key = media_key(key, &server.server_id, channel, epoch);
         let provider = KeyProvider::with_shared_key(
             KeyProviderOptions {
@@ -138,9 +141,15 @@ impl KeyClient<'_> {
             encryption_type: EncryptionType::Gcm,
         });
         options.join_retries = 0;
+        options.auto_subscribe = false;
         let (room, events) = Room::connect(url.as_str(), &reply.token, options)
             .await
             .context("connect to pinned LiveKit room")?;
+        for participant in room.remote_participants().into_values() {
+            for publication in participant.track_publications().into_values() {
+                subscribe_audio(&publication);
+            }
+        }
         Ok(VoiceRoom {
             room,
             events,
@@ -149,17 +158,18 @@ impl KeyClient<'_> {
             epoch,
             provider,
             name_keys,
+            screen_names,
             stats: stats::Sampler::default(),
         })
     }
 
     // Name keys for every held epoch, so app names published before a rotation still decrypt.
-    fn name_keys(&self, channel: &[u8; 32]) -> HashMap<i64, Key> {
+    fn name_keys(&self, channel: &[u8; 32], label: &[u8]) -> HashMap<i64, Key> {
         let server = &self.server.known_server().server_id;
         self.epoch_keys(scope(channel))
             .map(|(epoch, key)| {
                 let media = media_key(key, server, channel, epoch);
-                (epoch, track_name::derive(&media))
+                (epoch, track_name::derive(&media, label))
             })
             .collect()
     }
@@ -210,7 +220,17 @@ pub struct VoiceRoom {
     epoch: i64,
     provider: KeyProvider,
     name_keys: HashMap<i64, Key>,
+    screen_names: HashMap<i64, Key>,
     stats: stats::Sampler,
+}
+
+fn subscribe_audio(publication: &RemoteTrackPublication) {
+    if publication.kind() == TrackKind::Audio
+        && publication.encryption_type() == EncryptionType::Gcm
+        && !publication.is_desired()
+    {
+        publication.set_subscribed(true);
+    }
 }
 
 impl VoiceRoom {
@@ -226,10 +246,15 @@ impl VoiceRoom {
 
     /// Whether this device's LiveKit grant allows microphone publication.
     pub fn can_publish(&self) -> bool {
-        self.room
-            .local_participant()
-            .permission()
-            .is_some_and(|p| p.can_publish)
+        self.can_publish_source(livekit_protocol::TrackSource::Microphone)
+    }
+
+    fn can_publish_source(&self, source: livekit_protocol::TrackSource) -> bool {
+        self.room.local_participant().permission().is_some_and(|p| {
+            p.can_publish
+                && (p.can_publish_sources.is_empty()
+                    || p.can_publish_sources.contains(&(source as i32)))
+        })
     }
 
     /// Install a newer verified channel key after KeyClient reconciles an API event.
@@ -239,7 +264,8 @@ impl VoiceRoom {
             "key client belongs to a different server"
         );
         let (epoch, key) = keys.current_key(scope(&self.channel))?;
-        self.name_keys = keys.name_keys(&self.channel);
+        self.name_keys = keys.name_keys(&self.channel, track_name::APP_AUDIO);
+        self.screen_names = keys.name_keys(&self.channel, track_name::SCREEN);
         if epoch <= self.epoch {
             return Ok(false);
         }
@@ -278,6 +304,7 @@ impl VoiceRoom {
                     tracing::warn!("refused unencrypted voice track");
                     continue;
                 }
+                RoomEvent::TrackPublished { publication, .. } => subscribe_audio(publication),
                 RoomEvent::LocalTrackPublished { .. } | RoomEvent::LocalTrackRepublished { .. } => {
                     self.switch_senders();
                 }
@@ -350,7 +377,7 @@ impl VoiceRoom {
             .name_keys
             .get(&self.epoch)
             .context("missing current media key")?;
-        let name = track_name::encrypt(key, self.epoch, name)?;
+        let name = track_name::encrypt(key, track_name::APP_AUDIO, self.epoch, name)?;
         self.publish_audio_track(&name, source, TrackSource::ScreenshareAudio)
             .await
     }
@@ -361,10 +388,11 @@ impl VoiceRoom {
             return None;
         }
         Some(
-            track_name::decrypt(&self.name_keys, &track.name()).unwrap_or_else(|| {
-                tracing::warn!("could not decrypt shared audio track name");
-                "Shared audio".into()
-            }),
+            track_name::decrypt(&self.name_keys, track_name::APP_AUDIO, &track.name())
+                .unwrap_or_else(|| {
+                    tracing::warn!("could not decrypt shared audio track name");
+                    "Shared audio".into()
+                }),
         )
     }
 
@@ -401,9 +429,7 @@ impl VoiceRoom {
 
     /// Poll WebRTC reports. Track bitrate is available after two samples.
     pub async fn stats(&mut self) -> Result<VoiceStats> {
-        self.stats
-            .snapshot(&self.room, self.remote_audio_tracks())
-            .await
+        self.stats.snapshot(&self.room).await
     }
 
     /// Exercise the SDK's automatic signaling reconnect (headless e2e).

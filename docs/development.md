@@ -153,8 +153,13 @@ Debug builds open a console on Windows; release builds do not, so check
   The receiving bot verifies two encrypted names and track sources, both
   frequencies, and a quarter-scale gain on one track. The test unloads the
   sink and stops both players on exit. It fails when the host has no PipeWire
-  or pipewire-pulse session. Set `E2E_FEATURES=` to run the membership, keys
-  and chat harness without WebRTC, voice or app audio.
+  or pipewire-pulse session. The screen scenario
+  decodes a synthetic 320×180 red-and-blue pattern and its encrypted name,
+  verifies an idle viewer receives no video, and checks that a subscribed
+  viewer with the wrong key gets no decoded frames and can decode the
+  pattern after installing the correct key on the same subscription. Set
+  `E2E_FEATURES=` to run the membership, keys and chat harness without WebRTC,
+  voice, app audio or screen sharing.
 
 For a manual app-audio check, build with
 `cargo build --locked -p rusttalk-bot -p rusttalk-pipewire` and run both
@@ -163,6 +168,59 @@ bots in the same voice channel with the invite setup above. Bot A uses
 `--tone 660 --expect-app-audio`. Bot A plays its tones for up to 25 seconds.
 On Windows app audio requires build 20348 or newer. Test enumeration and
 capture in the logged-on user's audio session.
+
+### Screen capture
+
+Build the bot and sibling helper with
+`cargo build --locked -p rusttalk-bot -p rusttalk-pipewire`.
+Bot A can publish `--share-screen synthetic` and bot B can verify it
+with `--expect-screen --once`. Use the same voice channel and invite setup
+as for tone bots. Synthetic frames go through the same BGRA conversion
+and LiveKit publication as a captured screen.
+
+On Linux, run the helper beside the client or bot. The ScreenCast portal
+owns the picker and remote PipeWire connection. Keep the new restore token
+locally after each grant and use it only to restore that same selection.
+On Hyprland, if the portal only supplies DMA-BUF, add
+`screencopy { force_shm = true }` to
+`~/.config/hypr/xdph.conf` and restart the Hyprland portal. RustTalk uses
+shared-memory BGRx/BGRA buffers.
+[Hyprland portal capture source](https://github.com/hyprwm/xdg-desktop-portal-hyprland/blob/master/src/portals/Screencopy.cpp)
+
+For a real headless Linux smoke test, use Sway with a headless-capable
+wlroots build, PipeWire, WirePlumber, xdg-desktop-portal,
+xdg-desktop-portal-wlr, and a Wayland test client to draw a known pattern.
+Use a disposable `XDG_RUNTIME_DIR` and `XDG_CONFIG_HOME` inside
+`dbus-run-session`. Set `XDG_CURRENT_DESKTOP=sway`, start PipeWire and
+WirePlumber in that runtime directory, and launch Sway with
+`WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1` and a minimal config
+with a single 1280×720 headless output. Export that compositor's
+`WAYLAND_DISPLAY` to the private bus with
+`dbus-update-activation-environment WAYLAND_DISPLAY XDG_CURRENT_DESKTOP`.
+Set `[preferred]` and `org.freedesktop.impl.portal.ScreenCast=wlr` in
+`$XDG_CONFIG_HOME/xdg-desktop-portal/sway-portals.conf`.
+Before starting the portal, put this in
+`$XDG_CONFIG_HOME/xdg-desktop-portal-wlr/sway` with the actual output name.
+
+```ini
+[screencast]
+chooser_type=none
+output_name=HEADLESS-1
+```
+
+Alternatively, set `chooser_type=simple` with a `chooser_cmd` that prints
+`Monitor: HEADLESS-1` on stdout. Start the portals and draw the test
+pattern on the private compositor, then publish with
+`--share-screen portal` in that session to exercise the real backend.
+This mode publishes the portal output under its normal share label. The
+automated pattern receiver expects the synthetic label and dimensions.
+Stop the private session and its children after the smoke test.
+[Portal chooser settings](https://github.com/emersion/xdg-desktop-portal-wlr/blob/master/xdg-desktop-portal-wlr.5.scd)
+
+On Windows, enumerate and capture in the logged-in user's interactive
+session. A disconnected RDP session can enumerate sources without
+delivering frames. Use an interactive scheduled task for an SSH-driven
+smoke test and remove it afterwards.
 
 Bots and the desktop client use `rusttalk-core` with the `client` feature.
 `client::Server` verifies pins and handles sign-in, and `client::KeyClient`

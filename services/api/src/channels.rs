@@ -114,6 +114,7 @@ async fn manage(db: &mut SqliteConnection, actor: &Actor) -> ApiResult<()> {
 
 pub const WRITE: u8 = 2;
 pub const SPEAK: u8 = 4;
+pub const VIDEO: u8 = 8;
 
 pub async fn has_flag(
     db: &mut SqliteConnection,

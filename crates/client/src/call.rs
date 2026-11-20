@@ -8,15 +8,17 @@ use std::{
 };
 
 use eframe::egui::{
-    self, Align, Button, Color32, ComboBox, Event, Frame, Grid, Key, Layout, Margin, Popup,
-    PopupCloseBehavior, RichText, Role, Sense, Slider, Stroke, Ui, Vec2, Window,
+    self, Align, Button, Color32, ComboBox, Event, Frame, Grid, Image, Key, Layout, Margin, Modal,
+    Popup, PopupCloseBehavior, RichText, Role, Sense, Slider, Stroke, TextureHandle,
+    TextureOptions, Ui, Vec2, Window,
 };
 
 use crate::{
     audio::{self, Audio, Settings, StreamId},
     home::{Home, Tab, avatar, palette, section},
     net::Command,
-    server::{Call, CallState, Id, Server, Stats},
+    screen::{self, Kind, Options, Target, Video},
+    server::{Call, CallState, Id, Screen, Server, Stats},
     share::{self, App},
 };
 
@@ -35,16 +37,41 @@ pub struct Voice {
     /// Apps this device shares in the call.
     pub shares: Vec<App>,
     /// Apps playing sound when the picker opened, filled by a listing thread.
-    apps: Arc<Mutex<Apps>>,
+    apps: Arc<Mutex<Listing<App>>>,
     supported: bool,
     calibration: Option<Calibration>,
     picking_key: bool,
+    pub video: Video,
+    pub sharing: Sharing,
+    /// The dialog's choices: options and the picked entry of `targets`.
+    share_screen: Option<(Options, Option<usize>)>,
+    /// Screens and windows to pick from (Windows), filled by a listing thread.
+    targets: Arc<Mutex<Listing<Target>>>,
+    pub watching: Option<Watching>,
 }
 
-enum Apps {
+enum Listing<T> {
     Loading,
     Failed,
-    Found(Vec<App>),
+    Found(Vec<T>),
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum Sharing {
+    Off,
+    /// Waiting for the system picker or the first frame.
+    Starting,
+    On,
+}
+
+/// The screen shown large in the room view.
+pub struct Watching {
+    pub sid: String,
+    /// Whose screen, for the title.
+    title: String,
+    texture: Option<TextureHandle>,
+    /// Covers the whole window.
+    pub full: bool,
 }
 
 enum Calibration {
@@ -55,17 +82,29 @@ enum Calibration {
 }
 
 impl Voice {
-    pub fn new(audio: Audio) -> Self {
+    pub fn new(audio: Audio, video: Video) -> Self {
         Self {
             audio,
             call: None,
             show_stats: false,
             shares: Vec::new(),
-            apps: Arc::new(Mutex::new(Apps::Loading)),
+            apps: Arc::new(Mutex::new(Listing::Loading)),
             supported: share::supported(),
             calibration: None,
             picking_key: false,
+            video,
+            sharing: Sharing::Off,
+            share_screen: None,
+            targets: Arc::new(Mutex::new(Listing::Loading)),
+            watching: None,
         }
+    }
+
+    /// Forget this call's screens: ours and the one being watched.
+    pub fn clear_screens(&mut self) {
+        self.sharing = Sharing::Off;
+        self.share_screen = None;
+        self.watching = None;
     }
 
     fn in_call(&self, server: &Server, channel: &Id) -> bool {
@@ -98,6 +137,7 @@ pub fn join(home: &mut Home, index: usize, channel: Id) {
         state: CallState::Connecting,
         stats: Stats::default(),
         can_talk: true,
+        can_share_screen: true,
     });
     home.voice.audio.set_voice(true);
 }
@@ -109,6 +149,7 @@ pub fn leave(home: &mut Home) {
     home.voice.audio.set_voice(false);
     home.voice.show_stats = false;
     home.voice.shares.clear();
+    home.voice.clear_screens();
     if let Some(server) = home.servers.iter().find(|s| s.address == call.server) {
         server.send(Command::LeaveVoice);
     }
@@ -131,6 +172,46 @@ pub fn frame(ctx: &egui::Context, home: &mut Home) {
     if testing || voice.call.is_some() {
         ctx.request_repaint_after(Duration::from_millis(100));
     }
+    // Stop watching a screen once it is no longer shared.
+    if let Some(watching) = &home.voice.watching {
+        let shared = call_server(home)
+            .zip(home.voice.call.as_ref())
+            .and_then(|(server, call)| server.voice.get(&call.channel))
+            .is_some_and(|peers| {
+                peers
+                    .iter()
+                    .any(|peer| peer.screens.iter().any(|s| s.sid == watching.sid))
+            });
+        if !shared {
+            stop_watching(home);
+        }
+    }
+}
+
+fn call_server(home: &Home) -> Option<&Server> {
+    let call = home.voice.call.as_ref()?;
+    home.servers.iter().find(|s| s.address == call.server)
+}
+
+fn watch(home: &mut Home, screen: &Screen, title: String) {
+    stop_watching(home);
+    if let Some(server) = call_server(home) {
+        server.send(Command::Watch(screen.sid.clone(), true));
+        home.voice.watching = Some(Watching {
+            sid: screen.sid.clone(),
+            title,
+            texture: None,
+            full: false,
+        });
+    }
+}
+
+fn stop_watching(home: &mut Home) {
+    if let Some(watching) = home.voice.watching.take()
+        && let Some(server) = call_server(home)
+    {
+        server.send(Command::Watch(watching.sid, false));
+    }
 }
 
 /// The people in a voice channel, under its name in the channel list.
@@ -149,6 +230,9 @@ pub fn room_list(ui: &mut Ui, home: &Home, server: &Server, channel: &Id) {
             ui.label(RichText::new(&name).small());
             if peer.connecting {
                 ui.label(RichText::new("Connecting…").small().weak());
+            }
+            if !peer.screens.is_empty() {
+                live_badge(ui);
             }
         });
         let row = row.response.interact(Sense::click());
@@ -226,9 +310,11 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
     let audio = home.voice.audio.clone();
     let connected = call.state == CallState::Connected;
     let can_talk = call.can_talk;
+    let can_share_screen = call.can_share_screen;
     let mut leave_now = false;
     let mut share = None;
     let mut stop = None;
+    let mut stop_screen = false;
     Frame::new()
         .fill(ui.visuals().extreme_bg_color)
         .corner_radius(6)
@@ -289,6 +375,9 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
                 &mut share,
                 &mut stop,
             );
+            if screen::SUPPORTED {
+                stop_screen = screen_button(ui, &mut home.voice, connected, can_share_screen);
+            }
         });
     let server = home
         .voice
@@ -308,8 +397,234 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
         home.voice.shares.retain(|shared| shared.id != id);
         server.send(Command::StopApp(id));
     }
+    if let (Some(server), true) = (server, stop_screen) {
+        home.voice.sharing = Sharing::Off;
+        server.send(Command::StopScreen);
+    }
     if leave_now {
         leave(home);
+    }
+}
+
+/// "Share screen", or while sharing a chip with Stop. True when Stop was clicked.
+fn screen_button(ui: &mut Ui, voice: &mut Voice, connected: bool, allowed: bool) -> bool {
+    let text = match voice.sharing {
+        Sharing::Off => {
+            let button =
+                Button::new("🖥  Share screen").min_size(Vec2::new(ui.available_width(), 28.0));
+            let button = if allowed {
+                ui.add_enabled(connected, button)
+            } else {
+                ui.add_enabled(false, button)
+                    .on_disabled_hover_text("You can't share your screen here")
+            };
+            if button.clicked() {
+                voice.share_screen = Some((Options::default(), None));
+                list_targets(ui.ctx(), voice);
+            }
+            return false;
+        }
+        Sharing::Starting => "Starting your screen…",
+        Sharing::On => "You're sharing your screen",
+    };
+    let mut stop = false;
+    Frame::new()
+        .fill(GREEN.gamma_multiply(0.25))
+        .corner_radius(4)
+        .inner_margin(Margin::symmetric(6, 4))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(text).small());
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    stop = ui.small_button("Stop").clicked();
+                });
+            });
+        });
+    stop
+}
+
+fn list_targets(ctx: &egui::Context, voice: &Voice) {
+    *audio::lock(&voice.targets) = Listing::Loading;
+    let slot = voice.targets.clone();
+    let ctx = ctx.clone();
+    thread::spawn(move || {
+        let found = match screen::targets() {
+            Ok(found) => Listing::Found(found),
+            Err(error) => {
+                tracing::warn!(error = %format_args!("{error:#}"), "listing screens failed");
+                Listing::Failed
+            }
+        };
+        *audio::lock(&slot) = found;
+        ctx.request_repaint();
+    });
+}
+
+/// The "Share your screen" dialog: what to share (Windows), quality, frame rate, cursor.
+pub fn screen_dialog(ctx: &egui::Context, home: &mut Home) {
+    let voice = &mut home.voice;
+    let Some((options, picked)) = &mut voice.share_screen else {
+        return;
+    };
+    let mut close = false;
+    let mut share = None;
+    let modal = Modal::new(egui::Id::unique("share screen")).show(ctx, |ui| {
+        ui.set_width(400.0);
+        ui.heading("Share your screen");
+        let targets = audio::lock(&voice.targets);
+        // Linux lists one entry that opens the system's own picker.
+        let portal = match &*targets {
+            Listing::Loading => {
+                ui.spinner();
+                None
+            }
+            Listing::Failed => {
+                ui.weak("Couldn't look for screens. Try again.");
+                None
+            }
+            Listing::Found(found) => {
+                let portal = found.iter().position(|t| t.kind == Kind::Portal);
+                if portal.is_none() {
+                    for (heading, kind) in [("Screens", Kind::Monitor), ("Windows", Kind::Window)] {
+                        section(ui, heading);
+                        egui::ScrollArea::vertical()
+                            .id_salt(heading)
+                            .max_height(160.0)
+                            .show(ui, |ui| {
+                                for (at, item) in found.iter().enumerate() {
+                                    if item.kind == kind
+                                        && ui
+                                            .selectable_label(*picked == Some(at), &item.name)
+                                            .clicked()
+                                    {
+                                        *picked = Some(at);
+                                    }
+                                }
+                            });
+                    }
+                }
+                portal
+            }
+        };
+        section(ui, "Quality");
+        ui.horizontal(|ui| {
+            for (height, label) in [(Some(720), "720p"), (Some(1080), "1080p"), (None, "Native")] {
+                ui.selectable_value(&mut options.max_height, height, label);
+            }
+        });
+        section(ui, "Frame rate");
+        ui.horizontal(|ui| {
+            for fps in [15, 30, 60] {
+                ui.selectable_value(&mut options.fps, fps, fps.to_string());
+            }
+        });
+        ui.add_space(6.0);
+        ui.checkbox(&mut options.cursor, "Show my cursor");
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            let label = if portal.is_some() {
+                "Choose what to share"
+            } else {
+                "Share"
+            };
+            let target = match &*targets {
+                Listing::Found(found) => portal.or(*picked).and_then(|at| found.get(at)),
+                _ => None,
+            };
+            let button = Button::new(label).fill(ui.visuals().selection.bg_fill);
+            if ui.add_enabled(target.is_some(), button).clicked() {
+                share = target.cloned();
+            }
+            close |= ui.button("Cancel").clicked();
+        });
+    });
+    if let Some(target) = share {
+        let command = Command::ShareScreen(target, *options);
+        if let Some(server) = call_server(home) {
+            server.send(command);
+            home.voice.sharing = Sharing::Starting;
+        }
+        close = true;
+    }
+    if close || modal.should_close() {
+        home.voice.share_screen = None;
+    }
+}
+
+/// A red "LIVE" tag for someone sharing their screen.
+fn live_badge(ui: &mut Ui) {
+    ui.label(
+        RichText::new(" LIVE ")
+            .small()
+            .strong()
+            .color(Color32::WHITE)
+            .background_color(RED),
+    );
+}
+
+/// The watched screen: title, full window toggle, Stop watching, and the picture.
+pub fn screen_view(ui: &mut Ui, home: &mut Home) {
+    let voice = &mut home.voice;
+    let Some(watching) = &mut voice.watching else {
+        return;
+    };
+    // Upload only the newest converted frame.
+    if let Some(image) = voice.video.take(&watching.sid) {
+        match &mut watching.texture {
+            Some(texture) => texture.set(image, TextureOptions::LINEAR),
+            None => {
+                watching.texture = Some(ui.ctx().load_texture(
+                    "screen",
+                    image,
+                    TextureOptions::LINEAR,
+                ));
+            }
+        }
+    }
+    let mut stop = false;
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(&watching.title).strong());
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            stop = ui.button("Stop watching").clicked();
+            let label = if watching.full {
+                "Exit full window"
+            } else {
+                "Full window"
+            };
+            if ui.button(label).clicked() {
+                watching.full ^= true;
+            }
+        });
+    });
+    if watching.full && ui.input(|input| input.key_pressed(Key::Escape)) {
+        watching.full = false;
+    }
+    let height = if watching.full {
+        ui.available_height()
+    } else {
+        ui.available_height() * 0.6
+    };
+    let area = Vec2::new(ui.available_width(), height.max(120.0));
+    match &watching.texture {
+        Some(texture) => {
+            let size = texture.size_vec2();
+            let scale = (area.x / size.x).min(area.y / size.y);
+            ui.vertical_centered(|ui| ui.add(Image::new((texture.id(), size * scale))));
+        }
+        None => {
+            ui.allocate_ui(area, |ui| {
+                ui.centered_and_justified(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.weak("Waiting for the picture…");
+                    });
+                });
+            });
+        }
+    }
+    if stop {
+        stop_watching(home);
     }
 }
 
@@ -333,16 +648,16 @@ fn share_picker(
         ui.add_enabled(connected, button)
     };
     if button.clicked() {
-        *audio::lock(&voice.apps) = Apps::Loading;
+        *audio::lock(&voice.apps) = Listing::Loading;
         let slot = voice.apps.clone();
         let ctx = ui.ctx().clone();
         // Listing starts a helper process on Linux; keep it off the UI thread.
         thread::spawn(move || {
             let found = match share::list() {
-                Ok(found) => Apps::Found(found),
+                Ok(found) => Listing::Found(found),
                 Err(error) => {
                     tracing::warn!(error = %format_args!("{error:#}"), "listing apps failed");
-                    Apps::Failed
+                    Listing::Failed
                 }
             };
             *audio::lock(&slot) = found;
@@ -355,16 +670,16 @@ fn share_picker(
             ui.set_min_width(200.0);
             ui.label(RichText::new("Pick apps to share").strong());
             match &*audio::lock(&voice.apps) {
-                Apps::Loading => {
+                Listing::Loading => {
                     ui.spinner();
                 }
-                Apps::Failed => {
+                Listing::Failed => {
                     ui.weak("Couldn't look for apps. Try again.");
                 }
-                Apps::Found(apps) if apps.is_empty() => {
+                Listing::Found(apps) if apps.is_empty() => {
                     ui.weak("No apps are playing sound.");
                 }
-                Apps::Found(apps) => {
+                Listing::Found(apps) => {
                     for app in apps {
                         let was = voice.shares.iter().any(|shared| shared.id == app.id);
                         let mut on = was;
@@ -376,6 +691,9 @@ fn share_picker(
                 }
             }
         });
+    if voice.shares.is_empty() {
+        return;
+    }
     ui.horizontal_wrapped(|ui| {
         for app in &voice.shares {
             let chip = ui
@@ -415,6 +733,12 @@ pub fn room(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
     ui.label(RichText::new(format!("🔊 {title}")).strong().size(17.0));
     ui.separator();
     let peers = server.voice.get(&channel).cloned().unwrap_or_default();
+    if joined && home.voice.watching.is_some() {
+        screen_view(ui, home);
+        ui.add_space(8.0);
+    }
+    let server = &home.servers[index];
+    let mut watch_now = None;
     if peers.is_empty() {
         ui.vertical_centered(|ui| {
             ui.add_space(ui.available_height() * 0.3);
@@ -441,6 +765,9 @@ pub fn room(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
                             ring(ui, face.rect);
                         }
                         ui.label(RichText::new(&name).strong());
+                        if !peer.screens.is_empty() {
+                            live_badge(ui);
+                        }
                         if peer.connecting {
                             ui.weak("Connecting…");
                         } else if me && home.voice.audio.deafened() {
@@ -455,6 +782,15 @@ pub fn room(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
                     });
                 });
             let tile = tile.response.interact(Sense::click());
+            // Click a live person's tile to watch their screen.
+            if let Some(screen) = peer.screens.first().filter(|_| !me && joined) {
+                let title = format!("{name}'s screen");
+                let label = format!("Watch {title}");
+                tile.widget_info(|| egui::WidgetInfo::labeled(Role::Button, true, &label));
+                if tile.clone().on_hover_text("Watch").clicked() {
+                    watch_now = Some((screen.clone(), title));
+                }
+            }
             if !me && !peer.unknown && joined {
                 Popup::context_menu(&tile)
                     .show(|ui| stream_menu(ui, &home.voice.audio, &(peer.person, None)));
@@ -500,6 +836,9 @@ pub fn room(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
             home.voice.shares.retain(|shared| shared.id != id);
             home.servers[index].send(Command::StopApp(id));
         }
+    }
+    if let Some((screen, title)) = watch_now {
+        watch(home, &screen, title);
     }
     if !joined {
         ui.add_space(12.0);
