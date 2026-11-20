@@ -928,23 +928,26 @@ fn sidebar(ui: &mut Ui, home: &mut Home, update_available: bool) {
 fn status_menu(ui: &mut Ui, home: &mut Home) {
     let current = home.status.unwrap_or(Choice::Online);
     let (color, label) = status_look(current);
-    let button = ui.add(
-        Button::new(RichText::new(format!("●  {label}  ⏷")).color(color))
-            .frame_when_inactive(false),
-    );
+    let button = ui
+        .horizontal(|ui| {
+            dot(ui, color);
+            ui.add(Button::new(format!("{label}  ⏷")).frame_when_inactive(false))
+        })
+        .inner;
     button.widget_info(|| WidgetInfo::labeled(Role::Button, true, "Status"));
     let mut picked = None;
     Popup::menu(&button).show(|ui| {
         for choice in [Choice::Online, Choice::Away, Choice::Invisible] {
             let (color, label) = status_look(choice);
-            let item = ui.add(Button::selectable(
-                choice == current,
-                RichText::new(format!("●  {label}")).color(color),
-            ));
-            item.widget_info(|| WidgetInfo::labeled(Role::Button, true, label));
-            if item.clicked() {
-                picked = Some(choice);
-            }
+            ui.horizontal(|ui| {
+                dot(ui, color);
+                if ui
+                    .add(Button::selectable(choice == current, label))
+                    .clicked()
+                {
+                    picked = Some(choice);
+                }
+            });
         }
         ui.weak("Invisible: you look offline but can use everything.");
     });
@@ -952,6 +955,11 @@ fn status_menu(ui: &mut Ui, home: &mut Home) {
         home.auto_away = false;
         home.set_status(choice);
     }
+}
+
+fn dot(ui: &mut Ui, color: Color32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+    ui.painter().circle_filled(rect.center(), 5.0, color);
 }
 
 fn status_look(choice: Choice) -> (Color32, &'static str) {

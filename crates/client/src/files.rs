@@ -536,14 +536,14 @@ pub fn viewer(ctx: &egui::Context, files: &mut Files) {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(&file.name).strong().color(Color32::WHITE));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        close = tool(ui, "✕", "Close").clicked();
+                        close = tool(ui, "×", "Close").clicked();
                         ui.add_space(12.0);
                         open_it = tool(ui, "↗", "Open in default app").clicked();
                         if tool(ui, "⬇", "Save").clicked() {
                             files.ask(ui.ctx(), Ask::Save(address.clone(), file.clone()));
                         }
                         let view = files.viewer.as_mut().expect("checked above");
-                        if tool(ui, "⟳", "Rotate").clicked() {
+                        if tool(ui, "🔄", "Rotate").clicked() {
                             view.turns = (view.turns + 1) % 4;
                         }
                         if tool(ui, "➖", "Zoom out").clicked() {
