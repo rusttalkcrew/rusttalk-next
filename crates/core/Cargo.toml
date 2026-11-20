@@ -45,7 +45,7 @@ windows-capture = { version = "=2.0.1", optional = true }
 windows = { version = "0.62.2", features = ["Wdk_System_SystemServices", "Win32_System_Com", "Win32_System_Threading", "Win32_System_SystemInformation"], optional = true }
 
 [features]
-client = ["dep:anyhow", "dep:image", "dep:futures-util", "dep:reqwest", "reqwest/json", "dep:rustls", "dep:serde_json", "dep:tempfile", "dep:tokio", "dep:tokio-tungstenite", "dep:tracing"]
+client = ["dep:anyhow", "dep:image", "dep:futures-util", "dep:reqwest", "reqwest/json", "reqwest/stream", "dep:rustls", "dep:serde_json", "dep:tempfile", "dep:tokio", "dep:tokio-tungstenite", "dep:tracing"]
 livekit-tls = ["dep:async-trait", "dep:futures-util", "dep:livekit-net", "dep:livekit-protocol", "dep:prost", "dep:reqwest", "dep:rustls", "dep:tokio", "dep:tokio-tungstenite"]
 capture = ["dep:anyhow", "dep:serde_json", "dep:tracing", "dep:wasapi", "dep:windows"]
 voice = ["client", "livekit-tls", "dep:image", "dep:livekit", "dep:mime_guess", "dep:nokhwa", "dep:windows", "dep:windows-capture", "tokio/fs", "tokio/io-util", "tokio/process", "tokio/rt"]
