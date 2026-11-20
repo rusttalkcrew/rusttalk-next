@@ -1,9 +1,9 @@
 use std::{collections::HashMap, time::Instant};
 
 use anyhow::Result;
-use livekit::{Room, webrtc::stats::RtcStats};
+use livekit::{Room, e2ee::EncryptionType, webrtc::stats::RtcStats};
 
-use super::{ParticipantIdentity, RemoteAudioTrack, TrackSid};
+use super::{ParticipantIdentity, TrackSid};
 
 /// A WebRTC snapshot. RTT and jitter are milliseconds.
 pub struct VoiceStats {
@@ -11,7 +11,7 @@ pub struct VoiceStats {
     pub tracks: Vec<TrackStats>,
 }
 
-/// One published or subscribed audio track. Loss counters are cumulative.
+/// One published or subscribed media track. Loss counters are cumulative.
 pub struct TrackStats {
     pub participant: ParticipantIdentity,
     pub sid: TrackSid,
@@ -27,11 +27,7 @@ pub(super) struct Sampler {
 }
 
 impl Sampler {
-    pub async fn snapshot(
-        &mut self,
-        room: &Room,
-        remote: Vec<(ParticipantIdentity, TrackSid, RemoteAudioTrack)>,
-    ) -> Result<VoiceStats> {
+    pub async fn snapshot(&mut self, room: &Room) -> Result<VoiceStats> {
         let session = room.get_stats().await?;
         let ping_ms = ping(&session.subscriber_stats).or_else(|| ping(&session.publisher_stats));
         let mut snapshot = VoiceStats {
@@ -52,11 +48,21 @@ impl Sampler {
                 ));
             }
         }
-        for (identity, sid, track) in remote {
-            let report = track.get_stats().await?;
-            snapshot
-                .tracks
-                .push(self.track(identity, sid, false, &report, &mut samples));
+        for participant in room.remote_participants().into_values() {
+            for (sid, publication) in participant.track_publications() {
+                if publication.encryption_type() == EncryptionType::Gcm
+                    && let Some(track) = publication.track()
+                {
+                    let report = track.get_stats().await?;
+                    snapshot.tracks.push(self.track(
+                        participant.identity(),
+                        sid,
+                        false,
+                        &report,
+                        &mut samples,
+                    ));
+                }
+            }
         }
         self.previous = samples;
         Ok(snapshot)

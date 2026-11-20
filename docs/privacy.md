@@ -55,17 +55,19 @@ The API can see who is in which voice room by matching opaque LiveKit
 device identities to current channel readers. Readers see unmatched
 devices only as a count. After a kick, ban, revocation or permission
 change the API asks LiveKit to remove devices that lost access and to
-stop publishing for devices that lost `speak`. It keeps the active
+revoke any audio or video publication rights they lost. It keeps the active
 roster in memory for one second per room. It keeps no voice roster or
 LiveKit join tokens in SQLite. LiveKit sees opaque room and device IDs,
-routing and timing information, track IDs and source kinds, ciphertext
-sizes, and encrypted media. It can tell that a device shared an app track
-and see its encrypted track label. That label uses the room's media key
-via a separate HKDF derivation and a fresh nonce for each publication,
-and shows the key epoch and the name's length.
-App names and profile metadata never reach LiveKit in plaintext. The
-capture target ID and local list of playing applications stay on the
-sender's device.
+track IDs and source kinds, viewer subscriptions, routing and timing
+information, negotiated video codec, dimensions and simulcast layers,
+ciphertext sizes, and encrypted media. It can tell that a device shared
+a screen or an app audio track and see its encrypted track label. Labels
+use separate HKDF derivations from the room media key for app audio and
+screen video, with a fresh nonce for each publication. They expose the
+publication epoch and name length. The chosen monitor or window name,
+its pixels, app names, and audio are encrypted on the sender. Capture
+target IDs, enumerated sources and Linux portal restore tokens stay
+on the sender's device.
 
 The dev TLS certificate and private key live in `.dev/tls/`. Bot data under
 `.dev/bots/` holds only saved origins, server IDs and TLS fingerprints.
