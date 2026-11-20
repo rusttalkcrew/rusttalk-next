@@ -489,4 +489,36 @@ path must be new.
 
 ## Sync
 
-Written in W14.
+Both routes require a member bearer token. The API selects the row using the
+session's person ID.
+
+| Method | Request body | Response |
+| --- | --- | --- |
+| GET `/v1/me/sync` | Empty | 200 with the latest blob, or 204 if absent |
+| PUT `/v1/me/sync` | Sync blob | 204 if stored, or 409 with the current version if the submitted version is equal or lower |
+
+A blob is an eight-byte, positive signed integer version in big-endian order
+followed by the encrypted payload (24-byte nonce, ciphertext, 16-byte tag).
+The payload limit is 256 KiB including the nonce and tag. The PUT body limit
+is 256 KiB plus eight bytes. Malformed framing returns 400 and an oversized
+body returns 413. Successful GET and conflict responses use
+`application/octet-stream`. The conflict body is exactly the eight-byte
+version field. A device reloads and merges before retrying a conflict.
+
+Core takes the highest authenticated version from the member servers it can
+reach, breaking ties between replicas by lexicographically greatest origin.
+Merge works per origin and per field: the newer snapshot wins for anything
+both sides mention, local wins ties, and entries present on only one side are
+retained. Leaving a server records its origin in `left`, and removing a
+setting or contact sets it to `null`, so an older or replayed blob cannot bring
+it back. Pin conflicts are reported and never adopted; local and saved pins
+stay. Devices persist their snapshot and version so a server cannot roll them
+back by serving an older blob.
+Apply pending local edits after merging and publish the next version to all
+current peers. A failed peer is reported separately and can catch up after
+reconnect. A restored device needs a verified member server as a starting point.
+The desktop client syncs on each connect and after each local change.
+A device restored from the words joins one server by invite and then picks
+up the rest of the list from that server's blob.
+There is no leave route: leaving a server in the client removes it from the
+person's devices, and the membership stays until a moderator removes it.

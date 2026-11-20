@@ -34,6 +34,7 @@ tables in SQLite (WAL). IDs and digests are binary unless indicated. The `_ct` s
 | `messages` | `sequence` (insertion order), `id` and `channel_id` (text), `epoch`, `sender_device`, `sender_person`, `at` (Unix seconds), `size` (binary envelope length), `envelope` (public framing, nonce, ciphertext with tag, and signature) |
 | `message_ids` | `id` (opaque text, including deleted message IDs to prevent reuse) |
 | `files` | `id` and `channel_id` (opaque text), `uploader` (person public key), `size` (ciphertext bytes), `created_at`, `expires_at` (Unix seconds) |
+| `device_sync` | `person_id`, `version`, `ciphertext` (nonce and encrypted payload with tag), `size` (ciphertext bytes), `at` (Unix seconds) |
 | `_sqlx_migrations` | `version`, `description`, `installed_on`, `success`, `checksum`, `execution_time` (migration bookkeeping) |
 
 Caddy supplies the source IP directly. Session IPs are retained with the active
@@ -57,7 +58,11 @@ as ciphertext under opaque disk names. Committed blobs are named only by their
 random IDs. File names, types, keys, plaintext lengths and references linking
 thumbnails to originals are inside the encrypted message. File operation logs
 carry the opaque ID and ciphertext size. The expiry sweep unlinks blobs and
-removes their metadata. SQLite backups and old WAL pages can retain past
+removes their metadata.
+Each member has at most one current sync row per server. It is removed with
+membership. Settings, joined origins and pins, and contacts are encrypted
+on the device before upload. The sync key stays on the person's devices.
+SQLite backups and old WAL pages can retain past
 database contents, and volume backups can retain expired ciphertext.
 The API can see who is in which voice room by matching opaque LiveKit
 device identities to current channel readers. Readers see unmatched
@@ -105,18 +110,24 @@ person fingerprint locally. Creating an account shows the recovery words once
 in the app window. The client never stores or logs the words or the root
 signing key. "Sign out of this device" deletes the keystore entry.
 
-Next to the settings, `servers.json` and `joined.json` hold each joined
-server's address, server ID and TLS fingerprint. `voice.json` holds the
+Next to the settings, `servers.json` holds each server's address, server ID
+and TLS fingerprint. `sync.json` holds the last merged device sync snapshot
+with its version: joined servers with their pins, servers left, synced
+settings, and local edits not yet uploaded. `voice.json` holds the
 chosen audio devices, voice options, and the chosen camera's name,
-resolution and frame rate. Decrypted names, messages and pictures stay in
+resolution and frame rate. Of these, only the voice options (push to talk
+and its key, activation level, echo cancellation, noise suppression, auto
+gain) and the camera resolution and frame rate sync to the person's other
+devices; the chosen microphone, speakers and camera stay on this device. Decrypted names, messages and pictures stay in
 memory only; the log never contains them, file names or invite links. A
 downloaded file is written only where the person picks in the save dialog,
 through a temporary file in that folder that is removed if the download fails.
 
 ## Outbound connections
 
-- **Bot:** Only the configured RustTalk stack. Membership, key events, encrypted chat, signaling and failure-path
-  validation use Caddy on 8443/TCP. WebRTC uses the advertised LiveKit node on
+- **Bot:** Only the configured RustTalk stack. Membership, key events, encrypted
+  chat, device sync, signaling and failure-path validation use Caddy on 8443/TCP.
+  WebRTC uses the advertised LiveKit node on
   7882/UDP or 7881/TCP. The bot requests a voice token from the pinned API.
 - **Desktop client:** Configured RustTalk origins for pinned HTTPS and WebSocket
   connections. Voice uses the same pinned signaling path and advertised

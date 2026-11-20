@@ -103,6 +103,11 @@ impl<'a> KeyClient<'a> {
             .bearer_auth(&self.session.token)
     }
 
+    /// Borrow this pinned server and its current session for device sync.
+    pub fn sync_peer(&self) -> super::sync::Peer<'_> {
+        (self.server, &self.session)
+    }
+
     /// Return this server’s space scope.
     pub fn space(&self) -> Scope {
         Scope {
