@@ -8,7 +8,7 @@ mod server;
 pub mod voice;
 
 pub use crate::keys::Event;
-pub use crate::messages::{Attachment, BlobRef, MessageError};
+pub use crate::messages::{Attachment, BlobRef, LiveAttachment, MessageError};
 pub use chat::{Catalog, Category, Channel, MAX_TEXT_CHARS, MessageBody, MessageRecord, RoleFlags};
 pub use files::{decode_image, decode_thumbnail};
 pub use keys::{KeyClient, invite_name};

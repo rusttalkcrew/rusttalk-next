@@ -40,14 +40,14 @@ pub(super) async fn exercise(
         let speaker = c.join_voice(channel_id).await?;
         let refused = async {
             ensure!(speaker.can_publish() && !speaker.can_use_camera());
-            // LiveKit discards a denied AddTrack request. The SDK reports its own error.
+            // Refused before LiveKit is asked, which would only time out a denied AddTrack.
             let published = tokio::time::timeout(
-                Duration::from_secs(12),
+                Duration::from_secs(2),
                 speaker.publish_camera(screen::camera_options(), screen::source()),
             )
             .await
-            .context("waiting for LiveKit camera publication result")?;
-            ensure!(published.is_err(), "LiveKit allowed a camera without video");
+            .context("a refused camera publication did not fail at once")?;
+            ensure!(published.is_err(), "allowed a camera without video");
             Ok(())
         }
         .await;

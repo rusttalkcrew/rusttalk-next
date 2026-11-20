@@ -242,7 +242,7 @@ remain on their devices.
 
 ## Messages
 
-These routes require a bearer header and apply to text channels and DMs.
+These routes require a bearer header and apply to text channels, voice channels and DMs.
 IDs are random 32-byte client-generated values. A page is newest first by
 insertion order. Pass the last record ID as `before` for the next page. If
 that cursor was pruned or deleted, the API returns `404 message_not_found`
@@ -260,16 +260,15 @@ A message record has `{id, epoch, person, sender_device, at, size, envelope}`.
 `at` is the server's Unix timestamp. `size` is the binary envelope length.
 `envelope` carries a one-byte version, 24-byte nonce, two-byte big-endian
 ciphertext length, ciphertext including its authentication tag, and 64-byte
-device signature. The POST limit is 16 KiB of JSON. Messages with zero attachments retain
-their existing encoding. Clients need W13 attachment support to open messages
-with stored files. The API verifies the
+device signature. The version is `2`. The envelope is at most 10,751 bytes
+(see [the plaintext format](crypto.md#messages)). The POST limit is
+14,847 bytes of JSON: the unpadded base64url envelope plus 512 bytes. The API verifies the
 envelope against the authenticated person and device and requires the current
 channel epoch. Rotation or a stale epoch returns `409 epoch_changed`, a
 duplicate retained ID returns `409 message_exists`, and malformed framing or
 signature returns `400 invalid_message`. IDs stay reserved after a delete or retention drop, and reusing one also returns
 `409 message_exists`. Access failures use
-`403 channel_read_denied` or `403 channel_write_denied`. Voice channels
-return `400 not_a_chat_channel`.
+`403 channel_read_denied` or `403 channel_write_denied`.
 
 The API keeps the newest 10,000 records per channel. Explicit deletes remove
 the ciphertext and add a `message_deleted` audit entry with actor, message ID
@@ -298,9 +297,10 @@ to voice channels only.
 The room name is the encoded channel ID. The token's identity is
 base64url of SHA-256 over `"rusttalk-voice-device-v1" || server_id ||
 device_signing_public_key`, with each ID as 32 raw bytes. It carries
-no display name or metadata. It permits subscription. It denies data
-publication, because data channel payloads bypass frame encryption, and
-clients drop received data channel events. Track publication requires
+no display name or metadata. It permits subscription. Data publication
+requires channel `write`. Clients consume byte streams only through the
+independently authenticated live file protocol and drop other data events.
+Track publication requires
 the relevant flag from at least one assigned role. The `speak` grant
 allows `microphone` and `screen_share_audio`. The independent `video`
 grant allows `camera` and `screen_share`.
@@ -347,8 +347,8 @@ channel readers. Multiple devices for one person produce one entry in
 After a kick, ban, device revocation, role assignment, ownership
 transfer or channel permission change, and on each LiveKit join notice,
 the API removes devices without read access from every voice room with
-RoomService `RemoveParticipant`, and removes the publication sources
-that devices lost with `UpdateParticipant`. An existing room session
+RoomService `RemoveParticipant`. It uses `UpdateParticipant` to revoke
+lost audio, video and data grants. An existing room session
 keeps its other publication rights. Rejoin to pick up a new grant. These calls run after the change
 commits. A failure is logged with a reason and never undoes the change.
 Errors include `403 channel_read_denied`, `400 not_a_voice_channel`,
@@ -372,6 +372,7 @@ session validity before pushing updates.
 | `dm_created` | `channel`. Refresh the catalog and reconcile keys |
 | `message_created` | `channel`, `id`. Fetch the ciphertext record |
 | `message_deleted` | `channel`, `id`. Remove the record and hide edits that reference it |
+| `live_file_accepted` | `channel`, accepting `device`, signed `acceptance` object. Sent only to the offering device while it has channel read access |
 | `resync` | None. The socket fell behind. Fetch current state, including keys, catalog, member devices and visible message history |
 
 The API closes the socket when the token expires or ends, including kick,
@@ -407,13 +408,14 @@ The default JSON cap is 4 KiB, with the existing scoped chat and encrypted
 profile/space metadata limits.
 
 The encrypted and signed [message plaintext](crypto.md#messages) has a
-one-byte attachment count from 0 to 4, followed by that many references.
+one-byte attachment count from 0 to 4, followed by that many references
+of at most 529 bytes each.
 Each reference is encoded in this order.
 
 | Field | Encoding |
 | --- | --- |
 | File | A blob reference |
-| Name | One-byte length, then 1–255 UTF-8 bytes with no control characters |
+| Name | One-byte length, then a [file name](crypto.md#messages) |
 | Media type | One-byte length, then 1–127 printable ASCII bytes excluding spaces |
 | Thumbnail present | Byte 0 or 1 |
 | Thumbnail | Blob reference when present. Plaintext at most 512 KiB and ID distinct from the file ID |
@@ -430,6 +432,55 @@ list to the API. When deleting a message, the client calls DELETE for its
 attachment IDs, including thumbnail IDs, while it still has the references.
 Unreferenced blobs expire on schedule. Deleting a channel marks its blobs for
 the next sweep.
+
+### Live transfer
+
+A live offer is an original signed, encrypted chat message in the voice
+channel with flag bit 2 set and the offer as the last
+[plaintext field](crypto.md#messages). The offer in order is a random
+32-byte transfer ID, a random 32-byte file key, the plaintext length
+(u64, at most 2 GiB), the chunk size (u32, 65,536), the file name byte
+length (u8) followed by the UTF-8 [file name](crypto.md#messages), and
+the MIME type byte length (u8) followed by the ASCII type (1–127
+printable bytes). It is at most 460 bytes. Integers are big endian. The
+sender guesses the MIME type from the extension and uses
+`application/octet-stream` when unknown. The name is only displayed. The
+receiver never derives a save path from it.
+
+The receiver chooses a destination and explicitly accepts an offer from a
+currently verified device in the same voice room. It sends
+`POST /v1/voice/{channel}/live-file` with a bearer header and JSON
+`{recipient, transfer, nonce, cancel, signature}`. This route requires
+voice channel `read` and returns 204 after queuing a volatile
+`live_file_accepted` event. `recipient` is the offerer's Ed25519 public
+key. The transfer ID and receiver-generated random 16-byte nonce are
+encoded in base64url without padding, as are the recipient and signature.
+`cancel` is false to accept and true to cancel that acceptance.
+Both the API and offerer verify the acceptance signature. The API checks
+that both devices are active in the LiveKit room before relaying an
+acceptance. Each offer can serve each accepting device once
+and accepts new recipients for ten minutes or until the sender cancels
+or leaves the room.
+
+The sender opens an incremental LiveKit byte stream on topic
+`rusttalk.file`, with a singleton `destination_identities` list for
+that accepting device. The header has `transfer` and `acceptance`
+attributes containing the encoded transfer ID and acceptance nonce. It
+declares the ciphertext size and carries neither the file's name nor
+its MIME type. The receiver matches the topic, both attributes, declared
+size and LiveKit sender identity against its pending acceptance before
+writing anything.
+
+The stream body is the concatenation of sealed chunks in zero-based
+index order, without compression. Each chunk is the ciphertext of the
+next 65,536 plaintext bytes (or the remaining bytes for the last chunk)
+followed by a 16-byte tag. An empty file has one authenticated empty
+final chunk. Chunk boundaries, indices and the final flag are derived
+from the authenticated offer size. With the 2 GiB plaintext limit the
+maximum ciphertext size is 2 GiB plus 512 KiB. Clients reject missing
+chunks and extra bytes and only publish a temporary download to its
+chosen path after verifying the final chunk and stream end. The chosen
+path must be new.
 
 ## Sync
 

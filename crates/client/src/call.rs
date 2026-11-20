@@ -9,8 +9,8 @@ use std::{
 };
 
 use eframe::egui::{
-    self, Align, Button, Color32, ComboBox, Event, Frame, Grid, Image, Key, Layout, Margin, Modal,
-    Popup, PopupCloseBehavior, RichText, Role, Sense, Slider, Stroke, TextureHandle,
+    self, Align, Button, Color32, ColorImage, ComboBox, Event, Frame, Grid, Image, Key, Layout,
+    Margin, Modal, Popup, PopupCloseBehavior, RichText, Role, Sense, Slider, Stroke, TextureHandle,
     TextureOptions, Ui, Vec2, Window,
 };
 
@@ -115,6 +115,15 @@ impl Voice {
         }
     }
 
+    /// The call ended or was left: stop sending audio and forget its shares and video.
+    pub fn end_call(&mut self) {
+        self.call = None;
+        self.audio.set_voice(false);
+        self.show_stats = false;
+        self.shares.clear();
+        self.clear_screens();
+    }
+
     /// Forget this call's video: our screen and camera, and what we watch.
     pub fn clear_screens(&mut self) {
         self.sharing = Sharing::Off;
@@ -163,10 +172,7 @@ pub fn leave(home: &mut Home) {
     let Some(call) = home.voice.call.take() else {
         return;
     };
-    home.voice.audio.set_voice(false);
-    home.voice.show_stats = false;
-    home.voice.shares.clear();
-    home.voice.clear_screens();
+    home.voice.end_call();
     if let Some(server) = home.servers.iter().find(|s| s.address == call.server) {
         server.send(Command::LeaveVoice);
     }
@@ -527,20 +533,43 @@ fn screen_button(ui: &mut Ui, voice: &mut Voice, connected: bool, allowed: bool)
 }
 
 fn list_targets(ctx: &egui::Context, voice: &Voice) {
-    *audio::lock(&voice.targets) = Listing::Loading;
-    let slot = voice.targets.clone();
+    fill(ctx, &voice.targets, "screens", screen::targets);
+}
+
+/// List `what` on its own thread into `slot`, then repaint.
+pub fn fill<T: Send + 'static>(
+    ctx: &egui::Context,
+    slot: &Arc<Mutex<Listing<T>>>,
+    what: &'static str,
+    list: impl FnOnce() -> anyhow::Result<Vec<T>> + Send + 'static,
+) {
+    *audio::lock(slot) = Listing::Loading;
+    let slot = slot.clone();
     let ctx = ctx.clone();
     thread::spawn(move || {
-        let found = match screen::targets() {
+        let found = match list() {
             Ok(found) => Listing::Found(found),
             Err(error) => {
-                tracing::warn!(error = %format_args!("{error:#}"), "listing screens failed");
+                tracing::warn!(error = %format_args!("{error:#}"), "listing {what} failed");
                 Listing::Failed
             }
         };
         *audio::lock(&slot) = found;
         ctx.request_repaint();
     });
+}
+
+/// Show `image` in the texture in `slot`, creating it on first use.
+pub fn upload(
+    ctx: &egui::Context,
+    slot: &mut Option<TextureHandle>,
+    name: &str,
+    image: ColorImage,
+) {
+    match slot {
+        Some(texture) => texture.set(image, TextureOptions::LINEAR),
+        None => *slot = Some(ctx.load_texture(name, image, TextureOptions::LINEAR)),
+    }
 }
 
 /// The "Share your screen" dialog: what to share (Windows), quality, frame rate, cursor.
@@ -653,16 +682,7 @@ pub fn screen_view(ui: &mut Ui, home: &mut Home) {
     };
     // Upload only the newest converted frame.
     if let Some(image) = voice.video.take(&watching.sid) {
-        match &mut watching.texture {
-            Some(texture) => texture.set(image, TextureOptions::LINEAR),
-            None => {
-                watching.texture = Some(ui.ctx().load_texture(
-                    "screen",
-                    image,
-                    TextureOptions::LINEAR,
-                ));
-            }
-        }
+        upload(ui.ctx(), &mut watching.texture, "screen", image);
     }
     let mut stop = false;
     ui.horizontal(|ui| {
@@ -730,21 +750,8 @@ fn share_picker(
         ui.add_enabled(connected, button)
     };
     if button.clicked() {
-        *audio::lock(&voice.apps) = Listing::Loading;
-        let slot = voice.apps.clone();
-        let ctx = ui.ctx().clone();
         // Listing starts a helper process on Linux; keep it off the UI thread.
-        thread::spawn(move || {
-            let found = match share::list() {
-                Ok(found) => Listing::Found(found),
-                Err(error) => {
-                    tracing::warn!(error = %format_args!("{error:#}"), "listing apps failed");
-                    Listing::Failed
-                }
-            };
-            *audio::lock(&slot) = found;
-            ctx.request_repaint();
-        });
+        fill(ui.ctx(), &voice.apps, "apps", share::list);
     }
     Popup::menu(&button)
         .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
@@ -979,10 +986,7 @@ pub fn room(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
 fn camera_picture(ui: &Ui, voice: &mut Voice, sid: &str) -> Option<Image<'static>> {
     let slot = voice.cameras.get_mut(sid)?;
     if let Some(image) = voice.video.take(sid) {
-        match slot {
-            Some(texture) => texture.set(image, TextureOptions::LINEAR),
-            None => *slot = Some(ui.ctx().load_texture(sid, image, TextureOptions::LINEAR)),
-        }
+        upload(ui.ctx(), slot, sid, image);
     }
     let size = slot.as_ref()?.size_vec2();
     let texture = slot.as_ref()?.id();

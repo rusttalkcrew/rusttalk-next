@@ -18,23 +18,27 @@ pub struct MessageBody {
     pub reply_to: Option<[u8; 32]>,
     pub edit_of: Option<[u8; 32]>,
     pub attachments: Vec<Attachment>,
+    pub live: Option<LiveAttachment>,
 }
 
+const REPLY: u8 = 1;
+const EDIT: u8 = 2;
+const LIVE: u8 = 4;
+
 impl MessageBody {
+    /// Format version 2: flags, text, references, stored attachments, then the live offer.
     fn encode(&self) -> Result<Zeroizing<Vec<u8>>, MessageError> {
-        if self.text.len() > MAX_TEXT_CHARS * 4 || self.text.chars().count() > MAX_TEXT_CHARS {
+        if self.text.len() > MAX_TEXT_BYTES || self.text.chars().count() > MAX_TEXT_CHARS {
             return Err(MessageError::TextLimit);
         }
         if self.attachments.len() > MAX_ATTACHMENTS {
             return Err(MessageError::Attachment);
         }
-        let flags = u8::from(self.reply_to.is_some()) | (u8::from(self.edit_of.is_some()) << 1);
-        let mut body = Zeroizing::new(Vec::with_capacity(
-            MIN_PLAINTEXT
-                + 2 * 32
-                + self.text.len()
-                + self.attachments.len() * MAX_ATTACHMENT_BYTES,
-        ));
+        let flags = if self.reply_to.is_some() { REPLY } else { 0 }
+            | if self.edit_of.is_some() { EDIT } else { 0 }
+            | if self.live.is_some() { LIVE } else { 0 };
+        // Full capacity up front, so no plaintext copy is left behind by a reallocation.
+        let mut body = Zeroizing::new(Vec::with_capacity(MAX_PLAINTEXT));
         body.push(flags);
         body.extend_from_slice(&(self.text.len() as u16).to_be_bytes());
         body.extend_from_slice(self.text.as_bytes());
@@ -44,15 +48,25 @@ impl MessageBody {
         for attachment in &self.attachments {
             attachment.encode(&mut body)?;
         }
+        if let Some(live) = &self.live {
+            live.encode(&mut body)?;
+        }
+        debug_assert!(body.len() <= MAX_PLAINTEXT);
         Ok(body)
     }
 
     fn decode(bytes: &[u8]) -> Result<Self, MessageError> {
+        if bytes.len() > MAX_PLAINTEXT {
+            return Err(MessageError::Encoding);
+        }
         let ([flags, high, low], rest) = bytes.split_first_chunk().ok_or(MessageError::Encoding)?;
-        if flags & !3 != 0 {
+        if flags & !(REPLY | EDIT | LIVE) != 0 {
             return Err(MessageError::Encoding);
         }
         let length = u16::from_be_bytes([*high, *low]) as usize;
+        if length > MAX_TEXT_BYTES {
+            return Err(MessageError::TextLimit);
+        }
         let (text, mut tail) = rest
             .split_at_checked(length)
             .ok_or(MessageError::Encoding)?;
@@ -65,8 +79,8 @@ impl MessageBody {
                 Ok(None)
             }
         };
-        let reply_to = reference(1)?;
-        let edit_of = reference(2)?;
+        let reply_to = reference(REPLY)?;
+        let edit_of = reference(EDIT)?;
         let (&count, mut tail) = tail.split_first().ok_or(MessageError::Encoding)?;
         if count as usize > MAX_ATTACHMENTS {
             return Err(MessageError::Attachment);
@@ -74,6 +88,11 @@ impl MessageBody {
         let attachments = (0..count)
             .map(|_| Attachment::decode(&mut tail))
             .collect::<Result<_, _>>()?;
+        let live = if flags & LIVE != 0 {
+            Some(LiveAttachment::decode(&mut tail)?)
+        } else {
+            None
+        };
         if !tail.is_empty() {
             return Err(MessageError::Encoding);
         }
@@ -86,6 +105,7 @@ impl MessageBody {
             reply_to,
             edit_of,
             attachments,
+            live,
         })
     }
 }
@@ -181,11 +201,12 @@ mod tests {
             reply_to: Some([5; 32]),
             edit_of: Some([6; 32]),
             attachments: Vec::new(),
+            live: None,
         };
         let envelope = context.seal(&key, &sender, &body).unwrap();
         assert_eq!(
             envelope.len(),
-            MAX_MESSAGE_BYTES - MAX_ATTACHMENTS * MAX_ATTACHMENT_BYTES
+            MAX_MESSAGE_BYTES - MAX_ATTACHMENTS * MAX_ATTACHMENT_BYTES - live::MAX_ATTACHMENT
         );
         assert!(context.open(&key, &sender.certificate, &envelope).unwrap() == body);
         for changed in [
@@ -289,9 +310,10 @@ mod tests {
             reply_to: Some([5; 32]),
             edit_of: Some([6; 32]),
             attachments: vec![attachment; MAX_ATTACHMENTS],
+            live: None,
         };
         let encoded = body.encode().unwrap();
-        assert_eq!(encoded.len(), MAX_PLAINTEXT);
+        assert_eq!(encoded.len(), MAX_PLAINTEXT - live::MAX_ATTACHMENT);
         assert!(MessageBody::decode(&encoded).unwrap() == body);
         assert!(MessageBody::decode(&encoded[..encoded.len() - 1]).is_err());
         body.attachments.push(body.attachments[0].clone());
@@ -317,11 +339,127 @@ mod tests {
     }
 
     #[test]
+    fn live_attachment_framing_checks_bounds() {
+        use crate::messages::{LIVE_CHUNK_SIZE, MAX_LIVE_FILE_SIZE};
+
+        let mut body = MessageBody {
+            live: Some(LiveAttachment {
+                id: [1; 32],
+                key: Key::new([2; 32]),
+                name: "crab.txt".into(),
+                mime_type: "text/plain".into(),
+                size: MAX_LIVE_FILE_SIZE,
+                chunk_size: LIVE_CHUNK_SIZE as u32,
+            }),
+            ..Default::default()
+        };
+        let encoded = body.encode().unwrap();
+        assert!(MessageBody::decode(&encoded).unwrap() == body);
+        assert!(MessageBody::decode(&encoded[..encoded.len() - 1]).is_err());
+
+        let size_at = MIN_PLAINTEXT + 32 + 32;
+        let mut oversized = encoded.to_vec();
+        oversized[size_at..size_at + 8].copy_from_slice(&(MAX_LIVE_FILE_SIZE + 1).to_be_bytes());
+        assert!(MessageBody::decode(&oversized).is_err());
+
+        body.live.as_mut().unwrap().name = "../crab.txt".into();
+        assert!(body.encode().is_err());
+    }
+
+    /// The largest message every field allows still seals, opens and fits the envelope limit.
+    #[test]
+    fn combined_worst_case_fits_and_one_more_byte_fails() {
+        let (_, sender) = DeviceIdentity::create("sender").unwrap();
+        let key = Key::new([1; 32]);
+        let context = MessageContext {
+            server_id: [2; 32],
+            channel_id: [3; 32],
+            epoch: 1,
+            id: [4; 32],
+            sender_device: sender.certificate.signing_key().to_bytes(),
+            person: *sender.certificate.person_id(),
+        };
+        let blob = |id| BlobRef {
+            id: [id; 32],
+            key: Key::new([2; 32]),
+            size: 1,
+            chunk_size: 65536,
+        };
+        let stored = Attachment {
+            file: blob(7),
+            name: "é".repeat(MAX_FILE_NAME / 2) + "a",
+            media_type: "b".repeat(MAX_MEDIA_TYPE),
+            thumbnail: Some(blob(8)),
+        };
+        let mut body = MessageBody {
+            text: "🦀".repeat(MAX_TEXT_CHARS),
+            reply_to: Some([5; 32]),
+            edit_of: Some([6; 32]),
+            attachments: vec![stored; MAX_ATTACHMENTS],
+            live: Some(LiveAttachment {
+                id: [9; 32],
+                key: Key::new([10; 32]),
+                name: "z".repeat(MAX_FILE_NAME),
+                mime_type: "c".repeat(MAX_MEDIA_TYPE),
+                size: MAX_LIVE_FILE_SIZE,
+                chunk_size: LIVE_CHUNK_SIZE as u32,
+            }),
+        };
+        let encoded = body.encode().unwrap();
+        assert_eq!(encoded.len(), MAX_PLAINTEXT);
+        assert!(MessageBody::decode(&encoded).unwrap() == body);
+        assert!(MessageBody::decode(&[&encoded[..], &[0]].concat()).is_err());
+        assert!(MessageBody::decode(&encoded[..encoded.len() - 1]).is_err());
+
+        let envelope = context.seal(&key, &sender, &body).unwrap();
+        assert_eq!(envelope.len(), MAX_MESSAGE_BYTES);
+        assert!(context.open(&key, &sender.certificate, &envelope).unwrap() == body);
+        assert_eq!(
+            context
+                .verify(
+                    sender.certificate.signing_key(),
+                    &[&envelope[..], &[0]].concat()
+                )
+                .err(),
+            Some(MessageError::Encoding)
+        );
+        let mut old = envelope.clone();
+        old[0] = 1;
+        assert_eq!(
+            context.open(&key, &sender.certificate, &old).err(),
+            Some(MessageError::Encoding)
+        );
+
+        let live = body.live.as_mut().unwrap();
+        live.name.push('z');
+        assert_eq!(body.encode().err(), Some(MessageError::Encoding));
+        body.live.as_mut().unwrap().name.pop();
+        body.attachments[0].name.push('a');
+        assert_eq!(body.encode().err(), Some(MessageError::Attachment));
+        body.attachments[0].name.pop();
+        body.text.push('a');
+        assert_eq!(body.encode().err(), Some(MessageError::TextLimit));
+    }
+
+    #[test]
+    fn file_names_are_fitted_for_messages() {
+        assert_eq!(fit_file_name("report.pdf"), "report.pdf");
+        assert_eq!(fit_file_name("12:30 a/b\u{202e}.png"), "12_30 a_b_.png");
+        assert_eq!(fit_file_name(".."), "file");
+        assert_eq!(fit_file_name(""), "file");
+        let long = fit_file_name(&format!("{}.tar.gz", "文".repeat(200)));
+        assert!(valid_file_name(&long));
+        assert!(long.ends_with(".gz") && long.len() <= MAX_FILE_NAME);
+        assert!(valid_file_name(&fit_file_name(&"x".repeat(1000))));
+    }
+
+    #[test]
     fn plaintext_framing_rejects_bad_lengths_flags_and_text() {
         for bad in [
             &[0, 0, 1, 0][..],
             &[0, 0, 0, 0, 0],
             &[4, 0, 0, 0],
+            &[8, 0, 0, 0],
             &[0, 0, 1, 255, 0],
             &[1, 0, 0, 0],
         ] {

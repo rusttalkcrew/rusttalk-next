@@ -9,7 +9,7 @@ use tokio::{
     task::JoinHandle,
 };
 
-use super::{BgraFrame, ScreenOptions, ScreenSource, ScreenSourceKind, frame_bytes};
+use super::{BgraFrame, Cancelled, ScreenOptions, ScreenSource, ScreenSourceKind, frame_bytes};
 use crate::pipewire_helper::pipewire_helper;
 
 pub fn list_sources() -> Result<Vec<ScreenSource>> {
@@ -21,8 +21,12 @@ pub fn list_sources() -> Result<Vec<ScreenSource>> {
 
 #[derive(Deserialize)]
 struct Selection {
+    #[serde(default)]
     name: String,
     restore_token: Option<String>,
+    /// The person closed the picker.
+    #[serde(default)]
+    cancelled: bool,
 }
 
 pub struct Backend(JoinHandle<()>);
@@ -72,6 +76,9 @@ pub async fn open(
     );
     let selection: Selection =
         serde_json::from_str(&selection).context("read desktop portal selection")?;
+    if selection.cancelled {
+        return Err(Cancelled.into());
+    }
     *restore_token = selection.restore_token;
 
     let (output, frames) = watch::channel(None);

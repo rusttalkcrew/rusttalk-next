@@ -511,7 +511,7 @@ async fn docker_membership() -> Result<()> {
     let mut owner_keys = KeyClient::connect(&owner_bot, &owner_id, &owner).await?;
     docker_keys(&project, &owner_bot, &mut owner_keys, &mut secrets).await?;
     #[cfg(feature = "media")]
-    voice::exercise(&owner_bot, &mut owner_keys, &mut secrets).await?;
+    voice::exercise(&project, &owner_bot, &mut owner_keys, &mut secrets).await?;
 
     let (_, link) = invite(&mut owner_keys, &mut secrets).await?;
     let first_invite = link.code;

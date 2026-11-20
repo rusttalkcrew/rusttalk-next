@@ -7,22 +7,79 @@ use thiserror::Error;
 use crate::keys::wire_id;
 
 const DOMAIN: &[u8] = b"rusttalk-message-v1";
-const VERSION: u8 = 1;
+/// Envelope and plaintext format version. Version 2 carries stored and live attachments.
+const VERSION: u8 = 2;
 const NONCE: usize = 24;
 const TAG: usize = 16;
 const SIGNATURE: usize = 64;
 const HEADER: usize = 1 + NONCE + 2;
-const MIN_PLAINTEXT: usize = 4;
-const MAX_PLAINTEXT: usize =
-    MIN_PLAINTEXT + 2 * 32 + MAX_TEXT_CHARS * 4 + MAX_ATTACHMENTS * MAX_ATTACHMENT_BYTES;
+/// Flags, text length and attachment count.
+const MIN_PLAINTEXT: usize = 1 + 2 + 1;
+const MAX_TEXT_BYTES: usize = MAX_TEXT_CHARS * 4;
+/// Every field at its maximum: text, both references, four stored files and a live offer.
+const MAX_PLAINTEXT: usize = MIN_PLAINTEXT
+    + MAX_TEXT_BYTES
+    + 2 * 32
+    + MAX_ATTACHMENTS * MAX_ATTACHMENT_BYTES
+    + live::MAX_ATTACHMENT;
 
+/// Stored files per message.
 const MAX_ATTACHMENTS: usize = 4;
 const MAX_ATTACHMENT_BYTES: usize = 529;
+/// File name length in UTF-8 bytes, for stored and live files.
+const MAX_FILE_NAME: usize = 255;
+/// Media type length in ASCII bytes, for stored and live files.
+const MAX_MEDIA_TYPE: usize = 127;
+
+const _: () = assert!(MAX_PLAINTEXT == 10_644);
+const _: () = assert!(MAX_MESSAGE_BYTES == 10_751);
+
+mod live;
+#[cfg(any(feature = "client", test))]
+pub use live::LiveAttachment;
+pub use live::{LIVE_CHUNK_SIZE, LiveFileAcceptance, MAX_LIVE_FILE_SIZE};
 
 /// Maximum message length in Unicode scalar values.
 pub const MAX_TEXT_CHARS: usize = 2_000;
 /// Maximum signed binary envelope length.
 pub const MAX_MESSAGE_BYTES: usize = HEADER + MAX_PLAINTEXT + TAG + SIGNATURE;
+
+/// Whether a file name is safe to show: no paths, control or bidirectional formatting characters.
+pub fn valid_file_name(name: &str) -> bool {
+    (1..=MAX_FILE_NAME).contains(&name.len())
+        && !matches!(name, "." | "..")
+        && !name.chars().any(unsafe_name_char)
+}
+
+/// Make a local file name valid for a message: replace unsafe characters and shorten it,
+/// keeping a short extension.
+pub fn fit_file_name(name: &str) -> String {
+    let name: String = name
+        .chars()
+        .map(|c| if unsafe_name_char(c) { '_' } else { c })
+        .collect();
+    if name.is_empty() || matches!(name.as_str(), "." | "..") {
+        return "file".into();
+    }
+    if name.len() <= MAX_FILE_NAME {
+        return name;
+    }
+    let extension = name
+        .rfind('.')
+        .map(|at| &name[at..])
+        .filter(|extension| extension.len() <= 16)
+        .unwrap_or("");
+    let stem = &name[..name.len() - extension.len()];
+    let stem = &stem[..stem.floor_char_boundary(MAX_FILE_NAME - extension.len())];
+    format!("{stem}{extension}")
+}
+
+/// Bidirectional formatting characters can disguise a name's extension when displayed.
+fn unsafe_name_char(c: char) -> bool {
+    c.is_control()
+        || matches!(c, '/' | '\\' | ':')
+        || matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+}
 
 /// A message that could not be authenticated or decoded.
 #[derive(Debug, Error, PartialEq, Eq)]

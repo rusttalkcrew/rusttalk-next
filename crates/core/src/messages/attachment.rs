@@ -1,9 +1,7 @@
 use crate::keys::Key;
 
-use super::MessageError;
+use super::{MAX_FILE_NAME as MAX_NAME, MAX_MEDIA_TYPE as MAX_TYPE, MessageError, valid_file_name};
 
-const MAX_NAME: usize = 255;
-const MAX_TYPE: usize = 127;
 const BLOB_BYTES: usize = 32 + 32 + 4 + 4;
 const _: () = assert!(super::MAX_ATTACHMENT_BYTES == 2 * BLOB_BYTES + 3 + MAX_NAME + MAX_TYPE);
 pub(crate) const TAG_BYTES: usize = 16;
@@ -75,8 +73,7 @@ pub struct Attachment {
 impl Attachment {
     pub(crate) fn validate(&self) -> Result<()> {
         self.file.ciphertext_len()?;
-        if !(1..=MAX_NAME).contains(&self.name.len())
-            || self.name.chars().any(char::is_control)
+        if !valid_file_name(&self.name)
             || !(1..=MAX_TYPE).contains(&self.media_type.len())
             || !self.media_type.bytes().all(|byte| byte.is_ascii_graphic())
         {

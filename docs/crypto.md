@@ -176,13 +176,27 @@ epochs through the normal envelope flow.
 
 ## Messages
 
-The plaintext contains a one-byte bit mask (bit 0 for reply-to, bit 1 for
-edit-of), a two-byte big-endian UTF-8 byte length, the UTF-8 text, the optional
-32-byte reply ID, the optional 32-byte original ID, and a one-byte attachment
-count followed by the [attachment references](protocol.md#files). This version
-requires all other flag bits to be clear, valid
-UTF-8 with at most 2,000 Unicode scalar values, and exact lengths. Spaces
-and line breaks are preserved.
+Format version 2 (the envelope's first byte) has this plaintext, in order.
+
+| Field | Encoding | Maximum bytes |
+| --- | --- | --- |
+| Flags | Bit 0 reply-to, bit 1 edit-of, bit 2 live offer. Other bits clear | 1 |
+| Text | Two-byte big-endian UTF-8 length, then text of at most 2,000 Unicode scalar values | 2 + 8,000 |
+| Reply ID | 32 bytes, present with bit 0 | 32 |
+| Original ID | 32 bytes, present with bit 1 | 32 |
+| Stored files | One-byte count 0–4, then that many [references](protocol.md#files) of at most 529 bytes | 1 + 2,116 |
+| Live offer | Present with bit 2, [offer fields](protocol.md#live-transfer) | 460 |
+
+Nothing may follow the last field. The largest plaintext is 10,644 bytes
+and the largest envelope is 10,751 bytes. Every length is checked against
+its field maximum before reading. Readers reject version 1 envelopes.
+Spaces and line breaks are preserved.
+
+File names, for stored and live files, are 1–255 UTF-8 bytes. They are not
+`.` or `..` and contain no `/`, `\`, `:`, control characters or
+bidirectional formatting characters (U+061C, U+200E, U+200F, U+202A to
+U+202E, U+2066 to U+2069). Senders replace such characters with `_` and
+shorten longer names, keeping a short extension.
 
 Use XChaCha20-Poly1305 with the current channel epoch key and an independent,
 random 24-byte nonce. Associated data is the following concatenation.
@@ -193,7 +207,7 @@ epoch (8 bytes, positive signed integer, big endian) || message_id (32 bytes) ||
 sender_device_Ed25519 (32 bytes) || sender_person (32 bytes)
 ```
 
-The sender signs the associated data followed by byte `1`, the nonce, the
+The sender signs the associated data followed by byte `2`, the nonce, the
 two-byte big-endian ciphertext length, and the ciphertext including the
 16-byte authentication tag. The signature is the final 64 bytes of the
 envelope. Integer fields and lengths are fixed-width. The API verifies the
@@ -307,3 +321,40 @@ dual-licensed MIT/Apache-2.0.
 ### What the server challenge signature does not cover
 
 The server's signature over the challenge proves the server holds the pinned key, but it is not bound to the TLS connection and the client adds no nonce of its own. In self-signed mode the TLS certificate pin stops a relay. In CA mode (public domain, no certificate pin), an attacker holding a valid certificate for the domain could relay a sign-in to the real server. Binding the device signature to a TLS exporter value would close this; it is not done yet.
+
+
+## Live files
+
+Use a fresh random 32-byte XChaCha20-Poly1305 key for each offered file.
+The key is inside the signed chat ciphertext. For each recipient, take
+the first 16 bytes of SHA-256 over
+`"rusttalk-file-nonce-v1" || recipient_device_Ed25519 || acceptance_nonce`,
+using the raw 32-byte device public key and raw 16-byte nonce. Append the
+chunk index as a big-endian u64 to form the 24-byte AEAD nonce. Each
+device can accept a given offer at most once, so retries require a fresh
+offer and file key.
+
+Authenticate this associated data on each chunk.
+
+```text
+"rusttalk-file-chunk-v1" || transfer_id (32 bytes) ||
+chunk_index (8 bytes, big endian) || final (one byte, 0 or 1)
+```
+
+The receiver derives the expected count and exact final length from the
+signed offer. It rejects a missing or unauthenticated final chunk, a
+reordered or spliced chunk, and any bytes after the final chunk. Chunk
+authentication is independent of LiveKit's data encryption.
+
+The accepting device signs the following with its Ed25519 device key.
+
+```text
+"rusttalk-file-accept-v1" || server_id (32 raw bytes) || channel_id (32 raw bytes) ||
+recipient (43 ASCII bytes) || transfer (43 ASCII bytes) || nonce (22 ASCII bytes) ||
+cancel (one byte, 0 or 1)
+```
+
+The recipient, transfer and nonce fields use their base64url wire
+strings. The offering device verifies with the accepting device's
+current root-certified public key. It uses the room identity derived
+from that same key as the only stream destination.

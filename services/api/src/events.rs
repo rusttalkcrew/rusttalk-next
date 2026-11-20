@@ -139,9 +139,15 @@ async fn stream(
                     continue;
                 }
             }
+            if let Event::LiveFileAccepted { acceptance, .. } = &notice
+                && acceptance.recipient != device
+            {
+                continue;
+            }
             let channel = match &notice {
                 Event::DmCreated { channel }
                 | Event::VoiceChanged { channel }
+                | Event::LiveFileAccepted { channel, .. }
                 | Event::MessageCreated { channel, .. }
                 | Event::MessageDeleted { channel, .. } => Some(channel.clone()),
                 Event::KeysNeeded(need) if need.scope.kind == Kind::Channel => {
@@ -194,6 +200,7 @@ fn queue(notices: &mut Vec<Event>, notice: Option<Event>) -> bool {
             Event::MessageCreated { .. }
                 | Event::MessageDeleted { .. }
                 | Event::VoiceChanged { .. }
+                | Event::LiveFileAccepted { .. }
         )
     );
     notices.extend(notice);
