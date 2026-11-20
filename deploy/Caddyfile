@@ -1,0 +1,30 @@
+{
+	admin off
+	persist_config off
+	servers {
+		protocols h1 h2
+	}
+	log {
+		output stdout
+		format filter {
+			wrap json
+			request>uri delete
+			request>headers delete
+		}
+	}
+}
+
+# RUSTTALK_SITE is the domain (Let's Encrypt) or :443 (self-signed, IP only).
+{$RUSTTALK_SITE} {
+	# Written by the cert service: the self-signed certificate, or empty.
+	import /data/rusttalk-tls.caddy
+	route {
+		request_header -X-Forwarded-For
+		handle_path /index/* {
+			reverse_proxy index:8080
+		}
+		reverse_proxy /v1/* api:8080
+		reverse_proxy /rtc* livekit:7880
+		respond 404
+	}
+}

@@ -1,5 +1,69 @@
 # Operations
 
+## Production
+
+`deploy/compose.yml` runs the API, LiveKit and Caddy with restart policies,
+named volumes and health checks. The optional directory runs with
+`--profile index`. All settings live in `deploy/.env`. Run the commands from
+the `deploy/` directory of a checkout of the release you deploy.
+
+1. `cp .env.example .env`, then set `RUSTTALK_IP` to the host's public IPv4
+   address and `LIVEKIT_API_SECRET` to the output of `openssl rand -hex 32`.
+   Set `RUSTTALK_DOMAIN` to a domain that resolves to that IP for a Let's
+   Encrypt certificate. Leave it empty for IP-only mode.
+2. Load the signed release images with `docker load -i rusttalk-api-<version>.tar`
+   (and the index archive if used) and set `RUSTTALK_VERSION` to that version.
+   If the images are missing, Compose builds them from the checkout.
+3. Open 443/TCP for HTTPS, 7881/TCP and 7882/UDP for LiveKit media, and
+   80/TCP for Let's Encrypt in domain mode.
+4. `docker compose up -d --wait`.
+5. Print the owner invite and send it to the owner over a private channel:
+
+   ```sh
+   code=$(docker compose exec -T api rusttalk-api owner-invite)
+   id=$(docker compose exec -T api rusttalk-api server-id)
+   pin=$(docker compose logs --no-log-prefix cert | sed -n 's/^TLS pin: //p' | tail -1)
+   echo "rusttalk://<ip>/i/$code#$id.$pin"   # IP-only mode
+   echo "rusttalk://<domain>/i/$code#$id"    # domain mode
+   ```
+
+   Add `:<port>` after the address if `RUSTTALK_HTTPS_PORT` is not 443.
+
+The owner invite exists only as the output of `owner-invite`. The API logs
+the command, never the code. Running the command again replaces the
+unclaimed code. After the owner claims the server it prints nothing.
+
+In IP-only mode the `cert` service creates a self-signed certificate for
+`RUSTTALK_IP` on first start. The certificate is valid for 100 years and lives
+in the `caddy-data` volume. Each start logs its SHA-256 fingerprint and the
+base64url pin used in invites (`docker compose logs cert`). The pin changes only
+if that volume is lost. In domain mode Caddy keeps its Let's Encrypt account
+and certificates in the same volume and renews them itself. Switching modes
+needs only a changed `RUSTTALK_DOMAIN` and `docker compose up -d`, but
+clients that pinned the self-signed certificate must re-establish trust.
+
+The API and LiveKit share the key ID `rusttalk` and `LIVEKIT_API_SECRET`.
+LiveKit's webhook goes to the API on the stack network. `RUSTTALK_DEV` is never
+set, so the API refuses the public development secret. Ports 8080 and 7880 stay
+on the stack network. `.env.example` lists the optional port and stored file
+limit settings.
+
+Back up the `api-data` volume (database, WAL, `server.key`, encrypted files)
+and the `caddy-data` volume (TLS certificate and key) as described under
+[Ownership and backups](#ownership-and-backups). Stop the API first:
+
+```sh
+docker compose stop api
+docker run --rm -v rusttalk_api-data:/data:ro -v rusttalk_caddy-data:/caddy:ro \
+  -v "$PWD":/backup alpine tar czf /backup/rusttalk-backup.tgz /data /caddy
+docker compose start api
+```
+
+To upgrade, load the new images, set `RUSTTALK_VERSION` to the new version in
+`.env`, check out the matching release and run `docker compose up -d --wait`.
+The volumes, server key and TLS pin carry over. To roll back, set the previous
+version again. Back up first, because a newer API may migrate the database.
+
 ## TLS without a domain
 
 `make dev` generates a self-signed certificate valid for ten years. Caddy
