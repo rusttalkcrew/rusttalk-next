@@ -445,14 +445,12 @@ pub async fn delete_channel(
     decode::<32>(&id)?;
     let (mut tx, actor) = authenticate(&app, &headers).await?;
     manage(&mut tx, &actor).await?;
-    let deleted = query("DELETE FROM channels WHERE id = ? AND kind <> 'dm'")
-        .bind(&id)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
-    if deleted == 0 {
-        return Err(ApiError::not_found("channel_not_found"));
-    }
+    let kind: String =
+        query_scalar("DELETE FROM channels WHERE id = ? AND kind <> 'dm' RETURNING kind")
+            .bind(&id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| ApiError::not_found("channel_not_found"))?;
     audit(
         &mut tx,
         &actor.person,
@@ -463,6 +461,9 @@ pub async fn delete_channel(
     )
     .await?;
     tx.commit().await?;
+    if kind == "voice" {
+        crate::voice::close_room(&app, id);
+    }
     app.notify(Some(Event::ChannelChanged));
     Ok(StatusCode::NO_CONTENT)
 }

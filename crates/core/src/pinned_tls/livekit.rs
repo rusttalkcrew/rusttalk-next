@@ -41,7 +41,7 @@ pub fn register(
         return if origin == server && *fingerprint == pin {
             Ok(())
         } else {
-            Err("LiveKit transport already pinned to a different origin or certificate".into())
+            Err(Box::new(PinnedElsewhere))
         };
     }
     if livekit_net::has_ws_client() || livekit_net::has_http_client() {
@@ -61,6 +61,18 @@ pub fn register(
     *registered = Some((server.clone(), pin));
     Ok(())
 }
+
+/// The process already uses LiveKit with another server.
+#[derive(Debug)]
+pub struct PinnedElsewhere;
+
+impl std::fmt::Display for PinnedElsewhere {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("LiveKit transport already pinned to a different origin or certificate")
+    }
+}
+
+impl std::error::Error for PinnedElsewhere {}
 
 struct PinnedTransport {
     server: Url,

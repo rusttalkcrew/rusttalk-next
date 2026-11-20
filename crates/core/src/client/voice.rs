@@ -113,7 +113,13 @@ impl KeyClient<'_> {
         let mut url = server.address.clone();
         url.set_scheme("wss")
             .map_err(|_| anyhow::anyhow!("invalid LiveKit signaling origin"))?;
-        pinned_tls::register(&url, server.tls_fingerprint).map_err(anyhow::Error::from_boxed)?;
+        // Unbox so callers can downcast to `PinnedElsewhere`.
+        pinned_tls::register(&url, server.tls_fingerprint).map_err(|error| {
+            match error.downcast::<pinned_tls::PinnedElsewhere>() {
+                Ok(error) => anyhow::Error::new(*error),
+                Err(error) => anyhow::Error::from_boxed(error),
+            }
+        })?;
         let key = media_key(key, &server.server_id, channel, epoch);
         let provider = KeyProvider::with_shared_key(
             KeyProviderOptions {
@@ -372,12 +378,6 @@ impl VoiceRoom {
             .await?;
         self.switch_senders();
         Ok(publication)
-    }
-
-    /// Stop an audio publication while keeping the voice session open.
-    pub async fn unpublish_audio(&self, sid: &TrackSid) -> Result<()> {
-        self.room.local_participant().unpublish_track(sid).await?;
-        Ok(())
     }
 
     /// Poll WebRTC reports. Track bitrate is available after two samples.

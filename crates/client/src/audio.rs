@@ -15,7 +15,7 @@ use std::{
     sync::{
         Arc, Mutex, MutexGuard,
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed},
-        mpsc::{self, Receiver, RecvTimeoutError, Sender},
+        mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender},
     },
     task::{Context, Poll, Waker},
     thread,
@@ -52,6 +52,8 @@ const HOLD_FRAMES: u32 = 40;
 const PRIME: usize = 3 * FRAME;
 const CAP: usize = 20 * FRAME;
 const SPEAKING_MS: u64 = 300;
+/// Mic thread backlog in messages of up to 10 ms each; audio callbacks drop what doesn't fit.
+const MIC_QUEUE: usize = 64;
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -166,11 +168,16 @@ struct Track {
 
 type Filter = Box<dyn FnMut(&mut [i16])>;
 
+/// Fixed-size messages, so audio callbacks never allocate.
 enum Mic {
-    /// Captured mono samples at the device rate.
-    Near(Vec<i16>, u32),
+    /// The first `len` samples are captured mono at the device rate.
+    Near {
+        samples: [i16; FRAME],
+        len: usize,
+        rate: u32,
+    },
     /// 10 ms of what the speakers play, at 48 kHz.
-    Far(Vec<i16>),
+    Far([i16; FRAME]),
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -233,7 +240,7 @@ impl Audio {
             start: Instant::now(),
         });
         let (control, commands) = mpsc::channel();
-        let (mic, frames) = mpsc::channel();
+        let (mic, frames) = mpsc::sync_channel(MIC_QUEUE);
         {
             let shared = shared.clone();
             let control = control.clone();
@@ -378,7 +385,7 @@ impl Audio {
                 Track {
                     serial,
                     person,
-                    queue: VecDeque::new(),
+                    queue: VecDeque::with_capacity(CAP + FRAME),
                     primed: false,
                     loud: 0,
                 },
@@ -399,8 +406,7 @@ impl Audio {
                     return;
                 };
                 track.queue.extend(frame.data.iter());
-                // shortcut: clock drift between WebRTC and the sound card is fixed by dropping
-                // or starving samples; add adaptive resampling if people hear clicks.
+                // Backstop after a stall; `mix` corrects normal clock drift.
                 if track.queue.len() > CAP {
                     let extra = track.queue.len() - PRIME;
                     track.queue.drain(..extra);
@@ -452,7 +458,7 @@ fn devices(
     shared: &Arc<Shared>,
     commands: &Receiver<Control>,
     control: &Sender<Control>,
-    mic: &Sender<Mic>,
+    mic: &SyncSender<Mic>,
 ) {
     let host = cpal::default_host();
     let (lost, lost_rx) = mpsc::channel::<()>();
@@ -639,7 +645,7 @@ fn open_input(
     host: &Host,
     shared: &Arc<Shared>,
     id: Option<&str>,
-    mic: Sender<Mic>,
+    mic: SyncSender<Mic>,
     error: impl FnMut(cpal::Error) + Send + 'static,
 ) -> Result<Stream> {
     let device = pick(host, id, true)?;
@@ -666,7 +672,7 @@ fn capture<T: SizedSample>(
     device: &Device,
     config: StreamConfig,
     shared: &Arc<Shared>,
-    mic: Sender<Mic>,
+    mic: SyncSender<Mic>,
     error: impl FnMut(cpal::Error) + Send + 'static,
 ) -> Result<Stream>
 where
@@ -681,14 +687,15 @@ where
             let at = info.timestamp();
             let delay = at.callback.duration_since(at.capture).as_millis() as u32;
             shared.input_delay.store(delay, Relaxed);
-            let mono = data
-                .chunks(channels)
-                .map(|frame| {
+            for block in data.chunks(FRAME * channels) {
+                let mut samples = [0; FRAME];
+                for (slot, frame) in samples.iter_mut().zip(block.chunks(channels)) {
                     let sum: i32 = frame.iter().map(|&s| i32::from(i16::from_sample(s))).sum();
-                    (sum / channels as i32) as i16
-                })
-                .collect();
-            let _ = mic.send(Mic::Near(mono, rate));
+                    *slot = (sum / channels as i32) as i16;
+                }
+                let len = block.len() / channels;
+                let _ = mic.try_send(Mic::Near { samples, len, rate });
+            }
         },
         error,
         None,
@@ -699,7 +706,7 @@ fn open_output(
     host: &Host,
     shared: &Arc<Shared>,
     id: Option<&str>,
-    mic: Sender<Mic>,
+    mic: SyncSender<Mic>,
     error: impl FnMut(cpal::Error) + Send + 'static,
 ) -> Result<Stream> {
     let device = pick(host, id, false)?;
@@ -726,7 +733,7 @@ fn play<T: SizedSample + FromSample<i16>>(
     device: &Device,
     config: StreamConfig,
     shared: &Arc<Shared>,
-    mic: Sender<Mic>,
+    mic: SyncSender<Mic>,
     error: impl FnMut(cpal::Error) + Send + 'static,
 ) -> Result<Stream> {
     let channels = usize::from(config.channels);
@@ -755,7 +762,7 @@ fn play<T: SizedSample + FromSample<i16>>(
                         rate,
                     ));
                 }
-                let _ = mic.send(Mic::Far(chunk));
+                let _ = mic.try_send(Mic::Far(chunk));
             }
             for (frame, sample) in data.chunks_mut(channels).zip(ready.drain(..frames)) {
                 frame.fill(T::from_sample(sample));
@@ -767,7 +774,7 @@ fn play<T: SizedSample + FromSample<i16>>(
 }
 
 /// 10 ms of all tracks at their people's volumes.
-fn mix(shared: &Shared) -> Vec<i16> {
+fn mix(shared: &Shared) -> [i16; FRAME] {
     let mut sum = [0f32; FRAME];
     let deafened = shared.deafened.load(Relaxed);
     let mut mixer = lock(&shared.mixer);
@@ -779,6 +786,16 @@ fn mix(shared: &Shared) -> Vec<i16> {
         if !track.primed {
             continue;
         }
+        // The sender's clock and the sound card's drift apart: drop or repeat one sample
+        // per 10 ms to keep the queue near PRIME, too small a step to hear.
+        if track.queue.len() > PRIME + FRAME {
+            track.queue.pop_front();
+        } else if track.queue.len() < 2 * FRAME
+            && let Some(&last) = track.queue.back()
+        {
+            // Less than a frame would remain after this one.
+            track.queue.push_back(last);
+        }
         for slot in &mut sum {
             let Some(sample) = track.queue.pop_front() else {
                 track.primed = false;
@@ -787,9 +804,7 @@ fn mix(shared: &Shared) -> Vec<i16> {
             *slot += f32::from(sample) * gain;
         }
     }
-    sum.iter()
-        .map(|&s| s.clamp(-32768.0, 32767.0) as i16)
-        .collect()
+    sum.map(|s| s.clamp(-32768.0, 32767.0) as i16)
 }
 
 /// The microphone thread: resample, process, gate, and hand frames to the source.
@@ -823,9 +838,9 @@ fn process(shared: &Shared, frames: &Receiver<Mic>) {
                 }
                 continue;
             }
-            Mic::Near(samples, rate) => {
+            Mic::Near { samples, len, rate } => {
                 let step = rate as usize / 100;
-                pending.extend(samples);
+                pending.extend_from_slice(&samples[..len]);
                 while pending.len() >= step {
                     let chunk: Vec<_> = pending.drain(..step).collect();
                     if rate == RATE {

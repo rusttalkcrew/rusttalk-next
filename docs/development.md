@@ -146,7 +146,8 @@ Debug builds open a console on Windows; release builds do not, so check
   volume on exit. Run it with ports 8443, 7881 and 7882 free. The voice
   scenario checks duplex PCM tones, signed presence notices, a refused
   listen-only publish, recovery after a forced reconnect, and new audio
-  after a key rotation that excludes a kicked reader. The app-audio check
+  after a key rotation that excludes a kicked reader. It also checks that
+  taking `speak` from a role stops that speaker's audio. The app-audio check
   uses two `pw-play` processes at 440 and 660 Hz on a disposable
   `rusttalk_e2e_<pid>` null sink created with `pactl load-module module-null-sink`.
   The receiving bot verifies two encrypted names and track sources, both
@@ -193,9 +194,10 @@ recovery words to enroll public W06 certificates. Profiles, server
 metadata and any replacement role labels are encrypted on the client
 before upload.
 
-Linux CI runs `make lint test e2e`. Lint and unit tests enable core client
-protocol and LiveKit pinning code with the bot package excluded. The Docker
-gate builds the bot harness without the native WebRTC toolchain or download. Local `make lint test` covers the whole workspace.
-Windows CI runs the client unit tests. Enabling the voice feature in that
-client build will also download and link LiveKit's prebuilt libwebrtc.
-Both jobs have a 15-minute timeout.
+CI runs `make lint test` on Linux, with core client protocol and LiveKit
+pinning code enabled and the bot package excluded, and the client unit tests
+on Windows. Both jobs have a 15-minute timeout. Run `make e2e` locally before
+every merge; CI does not run it. Local `make lint test` covers the whole
+workspace. `rust-toolchain.toml` pins the Rust version, so a new Rust release
+does not invalidate the CI caches; update it together with the image in
+`services/api/Dockerfile`.
