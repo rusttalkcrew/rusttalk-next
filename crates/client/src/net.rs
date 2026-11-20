@@ -50,7 +50,7 @@ use directory::{directory, get};
 pub use files::{MAX_FILE, file_name};
 pub use find::{Listed, PAGE_SIZE};
 use voice::{
-    Live, Next, leave_voice, next_voice, on_voice, room_changed, send_room, share_screen,
+    Live, Next, Transfer, leave_voice, next_voice, on_voice, room_changed, send_room, share_screen,
     stop_finished_shares, stop_lost_video, sync_voice_key, voice_command, voice_only, voice_stats,
 };
 
@@ -459,12 +459,10 @@ struct State {
     /// Who the server says is in each voice channel.
     rooms: HashMap<Id, VoiceRoster>,
     voice: Option<Live>,
-    /// Live file offers seen in text channels and DMs, by transfer: channel and record.
-    chat_offers: HashMap<Id, (Id, MessageRecord)>,
+    /// Live files in the call and in chats, by transfer ID.
+    transfers: HashMap<Id, Transfer>,
     /// Live files in text channels and DMs, by channel: our offers, and accepting others'.
     chat_files: HashMap<Id, DataLiveFiles>,
-    /// Live files being received in chats; aborting one cancels it.
-    chat_downloads: HashMap<Id, tokio::task::JoinHandle<()>>,
     /// Decoded pictures in the last directory, by hash.
     pictures: HashMap<[u8; 32], Picture>,
 }
@@ -837,7 +835,13 @@ async fn on_event(
                 if record.person != me
                     && let Some(file) = client.open_message(&channel, &record).await?.live
                 {
-                    live.offers.insert(file.id, record.clone());
+                    let channel = live.channel;
+                    let transfer = Transfer {
+                        channel,
+                        offer: Some(record.clone()),
+                        ..Transfer::default()
+                    };
+                    state.transfers.insert(file.id, transfer);
                     ctx.send(Update::LiveOffer(LiveOffer {
                         id: file.id,
                         from: Some(record.person),
@@ -925,7 +929,7 @@ async fn on_command(
         Command::SendLive(channel, path) => {
             voice::offer_chat_file(ctx, url, client, state, channel, path).await?;
         }
-        Command::AcceptFile(id, path) if state.chat_offers.contains_key(&id) => {
+        Command::AcceptFile(id, path) if state.transfers.get(&id).is_some_and(|t| t.chat) => {
             voice::accept_chat_file(ctx, client, state, id, path).await?;
         }
         Command::AcceptFile(id, path) => voice::accept_file(ctx, client, state, id, path).await?,
@@ -1059,9 +1063,8 @@ async fn open(
     match client.open_message(channel, record).await {
         Ok(body) => {
             if let Some(file) = &body.live {
-                state
-                    .chat_offers
-                    .insert(file.id, (*channel, record.clone()));
+                let transfer = state.transfers.entry(file.id);
+                transfer.or_insert(Transfer::chat(*channel)).offer = Some(record.clone());
             }
             to_msg(record, &body)
         }

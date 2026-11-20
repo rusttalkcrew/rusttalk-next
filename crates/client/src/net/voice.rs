@@ -44,12 +44,31 @@ pub(super) struct Live {
     camera: Option<TrackSid>,
     /// Screen and camera tracks this device receives; others are unsubscribed.
     watched: HashSet<String>,
-    /// Live files offered to us, by transfer ID, until accepted.
-    pub(super) offers: HashMap<Id, MessageRecord>,
-    /// Our own live file offers.
-    mine: HashSet<Id>,
-    /// Live files being received; aborting one cancels it.
-    downloads: HashMap<Id, tokio::task::JoinHandle<()>>,
+}
+
+/// A live file in the voice room or a chat, kept in `State::transfers` by transfer ID.
+#[derive(Default)]
+pub(super) struct Transfer {
+    /// Offered in a text channel or DM, rather than in the call.
+    pub(super) chat: bool,
+    /// The text channel or DM, or the voice channel.
+    pub(super) channel: Id,
+    /// The offer from someone else; in the call only until accepted.
+    pub(super) offer: Option<MessageRecord>,
+    /// Our own offer.
+    pub(super) mine: bool,
+    /// Receiving it; aborting cancels it.
+    pub(super) download: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Transfer {
+    pub(super) fn chat(channel: Id) -> Self {
+        Self {
+            chat: true,
+            channel,
+            ..Self::default()
+        }
+    }
 }
 
 pub(super) struct Share {
@@ -79,17 +98,11 @@ pub(super) async fn voice_command(
     command: Command,
 ) -> Result<Option<Id>> {
     if let Command::LeaveVoice = command {
-        return Ok(state.voice.take().map(|live| close(ctx, live)));
+        return Ok(close(ctx, state));
     }
-    if let Command::CancelFile(id) = &command {
-        if let Some(download) = state.chat_downloads.remove(id) {
-            tracing::info!("cancelled a live file download in a chat");
-            download.abort();
-        }
-        // Removing an offer that isn't there does nothing.
-        for files in state.chat_files.values_mut() {
-            files.cancel_live_offer(id);
-        }
+    if let Command::CancelFile(id) = command {
+        cancel_file(state, &id);
+        return Ok(None);
     }
     let Some(live) = &mut state.voice else {
         return Ok(None);
@@ -115,10 +128,6 @@ pub(super) async fn voice_command(
             stop_camera(live).await;
             true
         }
-        Command::CancelFile(id) => {
-            cancel_file(live, &id);
-            false
-        }
         _ => false,
     };
     Ok(changed.then_some(live.channel))
@@ -140,12 +149,21 @@ pub(super) async fn stop_screen(live: &mut Live) -> bool {
 }
 
 /// Stop offering our file, or stop receiving one; dropping a download removes its partial file.
-pub(super) fn cancel_file(live: &mut Live, id: &Id) {
-    if live.mine.remove(id) {
-        tracing::info!("stopped offering a live file");
-        live.room.cancel_live_offer(id);
-    } else if let Some(download) = live.downloads.remove(id) {
-        tracing::info!("cancelled a live file download");
+fn cancel_file(state: &mut State, id: &Id) {
+    let Some(transfer) = state.transfers.get_mut(id) else {
+        return;
+    };
+    if std::mem::take(&mut transfer.mine) {
+        tracing::info!(chat = transfer.chat, "stopped offering a live file");
+        if transfer.chat {
+            if let Some(files) = state.chat_files.get_mut(&transfer.channel) {
+                files.cancel_live_offer(id);
+            }
+        } else if let Some(live) = &mut state.voice {
+            live.room.cancel_live_offer(id);
+        }
+    } else if let Some(download) = transfer.download.take() {
+        tracing::info!(chat = transfer.chat, "cancelled a live file download");
         download.abort();
     }
 }
@@ -242,15 +260,17 @@ pub(super) async fn join_voice(
 }
 
 pub(super) fn leave_voice(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &mut State) {
-    if let Some(live) = state.voice.take() {
-        let channel = close(ctx, live);
+    if let Some(channel) = close(ctx, state) {
         send_room(ctx, url, client, state, channel);
     }
 }
 
 /// Leave a call: stop showing its videos, close a system picker that is still open,
 /// and close the room. Returns the call's channel.
-pub(super) fn close(ctx: &Ctx, live: Live) -> Id {
+pub(super) fn close(ctx: &Ctx, state: &mut State) -> Option<Id> {
+    let live = state.voice.take()?;
+    // The call's live files go with it.
+    state.transfers.retain(|_, transfer| transfer.chat);
     for sid in &live.watched {
         ctx.video.remove_track(sid);
     }
@@ -259,7 +279,7 @@ pub(super) fn close(ctx: &Ctx, live: Live) -> Id {
     }
     // Closing waits for the media server; nothing here needs to wait for it.
     tokio::spawn(leave_room(live.room));
-    live.channel
+    Some(live.channel)
 }
 
 pub(super) async fn leave_room(room: VoiceRoom) {
@@ -444,9 +464,7 @@ pub(super) fn on_voice(
         return;
     };
     let end = |state: &mut State, text: &str| {
-        if let Some(live) = state.voice.take() {
-            close(ctx, live);
-        }
+        close(ctx, state);
         ctx.send(Update::Call(url.clone(), channel, None));
         ctx.send(Update::Failed(text.into()));
     };
@@ -695,7 +713,15 @@ pub(super) async fn offer_file(
         .live
         .context("offer without a file")?;
     tracing::info!("offered a live file");
-    live.mine.insert(file.id);
+    let channel = live.channel;
+    state.transfers.insert(
+        file.id,
+        Transfer {
+            channel,
+            mine: true,
+            ..Transfer::default()
+        },
+    );
     ctx.send(Update::LiveOffer(LiveOffer {
         id: file.id,
         from: None,
@@ -721,6 +747,11 @@ pub(super) async fn offer_chat_file(
     let body = client.open_message(&channel, &record).await?;
     let file = body.live.as_ref().context("offer without a file")?;
     tracing::info!("offered a live file in a chat");
+    state
+        .transfers
+        .entry(file.id)
+        .or_insert(Transfer::chat(channel))
+        .mine = true;
     ctx.send(Update::LiveOffer(LiveOffer {
         id: file.id,
         from: None,
@@ -740,7 +771,9 @@ pub(super) async fn accept_chat_file(
     id: Id,
     path: PathBuf,
 ) -> Result<()> {
-    let Some((channel, record)) = state.chat_offers.get(&id).cloned() else {
+    let Some((channel, Some(record))) =
+        (state.transfers.get(&id)).map(|transfer| (transfer.channel, transfer.offer.clone()))
+    else {
         return Ok(());
     };
     let files =
@@ -754,7 +787,9 @@ pub(super) async fn accept_chat_file(
         }
     };
     tracing::info!("receiving a live file in a chat");
-    state.chat_downloads.insert(id, follow(ctx, id, download));
+    if let Some(transfer) = state.transfers.get_mut(&id) {
+        transfer.download = Some(follow(ctx, id, download));
+    }
     Ok(())
 }
 
@@ -788,7 +823,10 @@ pub(super) async fn accept_file(
     let Some(live) = &mut state.voice else {
         return Ok(());
     };
-    let Some(record) = live.offers.remove(&id) else {
+    let Some(transfer) = state.transfers.get_mut(&id) else {
+        return Ok(());
+    };
+    let Some(record) = transfer.offer.take() else {
         return Ok(());
     };
     let download = match live.room.accept_live_file(client, &record, &path).await {
@@ -800,7 +838,7 @@ pub(super) async fn accept_file(
         }
     };
     tracing::info!("receiving a live file");
-    live.downloads.insert(id, follow(ctx, id, download));
+    transfer.download = Some(follow(ctx, id, download));
     Ok(())
 }
 
@@ -833,9 +871,6 @@ pub(super) async fn start_call(
         screen: None,
         camera: None,
         watched: HashSet::new(),
-        offers: HashMap::new(),
-        mine: HashSet::new(),
-        downloads: HashMap::new(),
     });
     ctx.send(Update::Call(
         url.clone(),
@@ -968,7 +1003,8 @@ pub(super) fn live_file_accepted(
         true
     } else if let Some(voice) = &mut state.voice {
         voice.room.handle_live_file_event(client, event)?;
-        voice.mine.contains(&decode(&acceptance.transfer)?)
+        (state.transfers.get(&decode(&acceptance.transfer)?))
+            .is_some_and(|transfer| transfer.mine && !transfer.chat)
     } else {
         false
     };

@@ -572,18 +572,7 @@ fn live_files(
                     (None, _) => {
                         ui.label(format!("Sending {} ({size})", file.name))
                             .on_hover_text(DIRECT);
-                        let who: Vec<_> = file.receivers.iter().map(name).collect();
-                        ui.label(
-                            RichText::new(match who.len() {
-                                0 => "Waiting for someone to save it".to_owned(),
-                                _ => format!("{} receiving", who.join(", ")),
-                            })
-                            .small()
-                            .weak(),
-                        );
-                        if ui.small_button("Stop sending").clicked() {
-                            action = Some(LiveAction::Remove(file.id, true));
-                        }
+                        action = sending(ui, file, name).or(action.take());
                     }
                     (Some(from), LiveState::Offered) => {
                         ui.label(format!(
@@ -592,22 +581,13 @@ fn live_files(
                             file.name
                         ))
                         .on_hover_text(DIRECT);
-                        ui.horizontal(|ui| {
-                            if ui.small_button("Save").clicked() {
-                                action = Some(LiveAction::Save(file.id, file.name.clone()));
-                            }
-                            if ui.small_button("Decline").clicked() {
-                                action = Some(LiveAction::Remove(file.id, false));
-                            }
-                        });
+                        action =
+                            receiving(ui, file.id, &file.name, file.size, None).or(action.take());
                     }
                     (Some(_), LiveState::Saving(bytes)) => {
                         ui.label(&file.name);
-                        let done = *bytes as f32 / file.size.max(1) as f32;
-                        ui.add(egui::ProgressBar::new(done).show_percentage());
-                        if ui.small_button("Cancel").clicked() {
-                            action = Some(LiveAction::Remove(file.id, true));
-                        }
+                        action = receiving(ui, file.id, &file.name, file.size, Some(*bytes))
+                            .or(action.take());
                     }
                     (Some(_), state) => {
                         ui.horizontal(|ui| {
@@ -623,6 +603,47 @@ fn live_files(
                     }
                 }
             });
+    }
+    action
+}
+
+/// Who receives our live file, and "Stop sending".
+fn sending(ui: &mut Ui, file: &LiveFile, name: impl Fn(&Id) -> String) -> Option<LiveAction> {
+    let who: Vec<_> = file.receivers.iter().map(name).collect();
+    ui.label(
+        RichText::new(match who.len() {
+            0 => "Waiting for someone to save it".to_owned(),
+            _ => format!("{} receiving", who.join(", ")),
+        })
+        .small()
+        .weak(),
+    );
+    let stop = ui.small_button("Stop sending").clicked();
+    stop.then_some(LiveAction::Remove(file.id, true))
+}
+
+/// "Save" and "Decline" for a live file offered to us, or, with the bytes `saved`
+/// so far, its progress and "Cancel". Used in the call and in chats.
+fn receiving(ui: &mut Ui, id: Id, name: &str, size: u64, saved: Option<u64>) -> Option<LiveAction> {
+    let mut action = None;
+    match saved {
+        None => {
+            ui.horizontal(|ui| {
+                if ui.small_button("Save").clicked() {
+                    action = Some(LiveAction::Save(id, name.to_owned()));
+                }
+                if ui.small_button("Decline").clicked() {
+                    action = Some(LiveAction::Remove(id, false));
+                }
+            });
+        }
+        Some(bytes) => {
+            let done = bytes as f32 / size.max(1) as f32;
+            ui.add(egui::ProgressBar::new(done).show_percentage());
+            if ui.small_button("Cancel").clicked() {
+                action = Some(LiveAction::Remove(id, true));
+            }
+        }
     }
     action
 }
@@ -657,27 +678,10 @@ pub fn chat_live(
                     match (mine, state) {
                         (true, Some(LiveState::Sending)) => {
                             let file = entry.expect("matched a state");
-                            let who: Vec<_> = (file.receivers.iter())
-                                .map(|p| crate::server::member_name(dir, p))
-                                .collect();
-                            ui.label(
-                                RichText::new(match who.len() {
-                                    0 => "Waiting for someone to save it".to_owned(),
-                                    _ => format!("{} receiving", who.join(", ")),
-                                })
-                                .small()
-                                .weak(),
-                            );
-                            if ui.small_button("Stop sending").clicked() {
-                                action = Some(LiveAction::Remove(*id, true));
-                            }
+                            action = sending(ui, file, |p| crate::server::member_name(dir, p));
                         }
                         (_, Some(LiveState::Saving(bytes))) => {
-                            let done = *bytes as f32 / (*size).max(1) as f32;
-                            ui.add(egui::ProgressBar::new(done).show_percentage());
-                            if ui.small_button("Cancel").clicked() {
-                                action = Some(LiveAction::Remove(*id, true));
-                            }
+                            action = receiving(ui, *id, name, *size, Some(*bytes));
                         }
                         (_, Some(LiveState::Saved)) => {
                             ui.weak("Saved");
@@ -686,14 +690,7 @@ pub fn chat_live(
                             ui.colored_label(ui.visuals().error_fg_color, "Didn't arrive.");
                         }
                         (false, None | Some(LiveState::Offered)) if fresh => {
-                            ui.horizontal(|ui| {
-                                if ui.small_button("Save").clicked() {
-                                    action = Some(LiveAction::Save(*id, name.clone()));
-                                }
-                                if ui.small_button("Decline").clicked() {
-                                    action = Some(LiveAction::Remove(*id, false));
-                                }
-                            });
+                            action = receiving(ui, *id, name, *size, None);
                         }
                         (_, Some(LiveState::Ended)) => {
                             ui.weak("Stopped");
