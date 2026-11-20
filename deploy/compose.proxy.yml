@@ -1,0 +1,22 @@
+# Behind a reverse proxy you already run (Caddy, nginx, Traefik) on 80/443:
+#   docker compose -f docker-compose.yml -f compose.proxy.yml up -d --wait
+# Drops the bundled Caddy and publishes the API and LiveKit signaling on
+# RUSTTALK_PROXY_ADDRESS only. Proxy routes: docs/operations.md#behind-your-own-reverse-proxy.
+services:
+  api:
+    ports:
+      - "${RUSTTALK_PROXY_ADDRESS:-127.0.0.1}:${RUSTTALK_API_PORT:-8080}:8080"
+
+  livekit:
+    ports:
+      - "${RUSTTALK_PROXY_ADDRESS:-127.0.0.1}:${RUSTTALK_LIVEKIT_PORT:-7880}:7880"
+
+  index:
+    ports:
+      - "${RUSTTALK_PROXY_ADDRESS:-127.0.0.1}:${RUSTTALK_INDEX_PORT:-8081}:8080"
+
+  # Not started: your proxy terminates TLS.
+  cert:
+    profiles: [bundled-tls]
+  caddy:
+    profiles: [bundled-tls]
