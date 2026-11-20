@@ -5,9 +5,14 @@ AppVersion={#Version}
 DefaultDirName={localappdata}\Programs\RustTalk
 DefaultGroupName=RustTalk
 DisableProgramGroupPage=yes
-OutputBaseFilename=rusttalk-{#Version}-windows-x86_64
+OutputBaseFilename=rusttalk-{#Version}-windows-{#Arch}
+#if Arch == "aarch64"
+ArchitecturesAllowed=arm64
+ArchitecturesInstallIn64BitMode=arm64
+#else
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
+#endif
 PrivilegesRequired=lowest
 CloseApplications=force
 RestartApplications=no

@@ -1,4 +1,4 @@
-param([string]$Iscc = "ISCC.exe")
+param([string]$Iscc = "ISCC.exe", [ValidateSet("x86_64", "aarch64")][string]$Arch = "x86_64")
 
 $ErrorActionPreference = "Stop"
 Set-Location (Join-Path $PSScriptRoot "../..")
@@ -18,9 +18,10 @@ if ($version -cnotmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' -o
     ($version.Split('.') | Where-Object { [decimal]$_ -gt 65535 })) {
     throw "Release version must be MAJOR.MINOR.PATCH, with components at most 65535."
 }
-cargo build --release --locked -p rusttalk-client --target x86_64-pc-windows-msvc
+$target = "$Arch-pc-windows-msvc"
+cargo build --release --locked -p rusttalk-client --target $target
 if ($LASTEXITCODE -ne 0) { throw "RustTalk build failed." }
-$client = Join-Path $metadata.target_directory "x86_64-pc-windows-msvc/release/rusttalk-client.exe"
+$client = Join-Path $metadata.target_directory "$target/release/rusttalk-client.exe"
 $output = Join-Path (Get-Location) "dist"
-& $compiler.Source "/DVersion=$version" "/DClient=$client" "/O$output" (Join-Path $PSScriptRoot "rusttalk.iss")
+& $compiler.Source "/DVersion=$version" "/DArch=$Arch" "/DClient=$client" "/O$output" (Join-Path $PSScriptRoot "rusttalk.iss")
 if ($LASTEXITCODE -ne 0) { throw "Inno Setup compilation failed." }

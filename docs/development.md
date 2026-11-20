@@ -329,11 +329,10 @@ does not invalidate the CI caches; update it together with the image in
 
 Run `make release-key` to create `.dev/release-key.pem` and
 `.dev/release-public.pem` for local testing. The private PEM is created
-with mode 0600. Set `RUSTTALK_RELEASE_KEY` to its path for a local signing
-run. `make release` requires the matching Windows installer in `dist/` and
-writes a complete, signed release under `dist/<workspace-version>/`.
-Packaging is run locally and stays out of CI. See the
-[release steps and prerequisites](operations.md#releases-and-updates).
+with mode 0600. `python3 deploy/release/release.py sign <dir>` writes and
+signs `latest.json` for the installers in `<dir>` with the key in
+`RUSTTALK_RELEASE_KEY`. Real releases are built and signed by the release
+workflow on a tag; see [releases](operations.md#releases-and-updates).
 
 For the headless update gate, build two Linux client versions with
 `RUSTTALK_RELEASE_PUBLIC_KEY` set to the output of
