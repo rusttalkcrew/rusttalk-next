@@ -18,6 +18,8 @@ use rusttalk_core::{
 
 use crate::{
     app::{Action, error_text, primary, secondary, submitted},
+    audio::Audio,
+    call::{self, Voice},
     net::{Command, Net, Preview, Update},
     server::{Body, Chat, Directory, Id, Msg, Server, Status, member_name},
 };
@@ -30,13 +32,14 @@ const COUNT_FROM: usize = 1_800;
 pub struct Home {
     pub identity: Arc<DeviceIdentity>,
     net: Net,
-    servers: Vec<Server>,
+    pub servers: Vec<Server>,
     view: View,
     invite: String,
     join: Join,
     dialog: Option<Dialog>,
     toast: Option<(String, f64)>,
-    settings: Option<Tab>,
+    pub settings: Option<Tab>,
+    pub voice: Voice,
     pub confirm_sign_out: bool,
     pub error: Option<String>,
 }
@@ -73,15 +76,17 @@ enum Dialog {
 }
 
 #[derive(Clone, Copy, PartialEq)]
-enum Tab {
+pub enum Tab {
     Profile,
+    Voice,
     Devices,
 }
 
 impl Home {
     pub fn new(identity: DeviceIdentity, ctx: &egui::Context, data: PathBuf) -> Result<Self> {
         let identity = Arc::new(identity);
-        let net = Net::new(ctx.clone(), identity.clone(), data)?;
+        let audio = Audio::new(&data)?;
+        let net = Net::new(ctx.clone(), identity.clone(), data, audio.clone())?;
         let servers: Vec<_> = net
             .joined()
             .into_iter()
@@ -92,6 +97,7 @@ impl Home {
                 dir: Directory::default(),
                 chats: HashMap::new(),
                 open: None,
+                voice: HashMap::new(),
                 commands: net.start(known, None, None),
             })
             .collect();
@@ -109,6 +115,7 @@ impl Home {
             dialog: None,
             toast: None,
             settings: None,
+            voice: Voice::new(audio),
             confirm_sign_out: false,
             error: None,
         })
@@ -149,6 +156,15 @@ impl Home {
                         return;
                     }
                     _ => {}
+                }
+                if matches!(status, Status::Stopped(_))
+                    && self
+                        .voice
+                        .call
+                        .as_ref()
+                        .is_some_and(|c| c.server == address)
+                {
+                    call::leave(self);
                 }
                 let server = &mut self.servers[index];
                 if status == Status::Online {
@@ -225,6 +241,39 @@ impl Home {
                     *slot = Some(link);
                 }
             }
+            Update::Call(address, channel, state) => {
+                let Some(call) = &mut self.voice.call else {
+                    return;
+                };
+                if call.server != address || call.channel != channel {
+                    return;
+                }
+                match state {
+                    Some(state) => call.state = state,
+                    None => {
+                        self.voice.call = None;
+                        self.voice.audio.set_voice(false);
+                        self.voice.show_stats = false;
+                    }
+                }
+            }
+            Update::Room(address, channel, peers) => {
+                if let Some(index) = self.index(&address) {
+                    let rooms = &mut self.servers[index].voice;
+                    if peers.is_empty() {
+                        rooms.remove(&channel);
+                    } else {
+                        rooms.insert(channel, peers);
+                    }
+                }
+            }
+            Update::Stats(address, stats) => {
+                if let Some(call) = &mut self.voice.call
+                    && call.server == address
+                {
+                    call.stats = stats;
+                }
+            }
             Update::Failed(error) => {
                 if matches!(self.dialog, Some(Dialog::Invite(_, None))) {
                     self.dialog = None;
@@ -253,15 +302,15 @@ fn initials(name: &str) -> String {
     }
 }
 
-struct Palette {
+pub struct Palette {
     rail: Color32,
-    side: Color32,
+    pub side: Color32,
     main: Color32,
     hover: Color32,
     input: Color32,
 }
 
-fn palette(ui: &Ui) -> Palette {
+pub fn palette(ui: &Ui) -> Palette {
     if ui.visuals().dark_mode {
         Palette {
             rail: Color32::from_rgb(0x1e, 0x1f, 0x22),
@@ -328,6 +377,9 @@ pub fn show(ui: &mut Ui, home: &mut Home) -> Option<Action> {
             ),
             View::Direct(Some((index, channel))) => chat_pane(ui, home, index, channel),
             View::Server(index) => match home.servers[index].open {
+                Some(channel) if home.servers[index].is_voice(&channel) => {
+                    call::room(ui, home, index, channel)
+                }
                 Some(channel) => chat_pane(ui, home, index, channel),
                 None => {
                     let server = &home.servers[index];
@@ -346,6 +398,8 @@ pub fn show(ui: &mut Ui, home: &mut Home) -> Option<Action> {
             },
         });
     dialogs(ui.ctx(), home);
+    call::stats_window(ui.ctx(), home);
+    call::frame(ui.ctx(), home);
     settings(ui.ctx(), home)
 }
 
@@ -407,6 +461,7 @@ fn sidebar(ui: &mut Ui, home: &mut Home) {
     Panel::bottom("you")
         .frame(Frame::new().inner_margin(Margin::symmetric(0, 6)))
         .show(ui, |ui| {
+            call::call_bar(ui, home);
             if ui.button("⚙  Settings").clicked() {
                 home.settings = Some(Tab::Profile);
             }
@@ -417,7 +472,7 @@ fn sidebar(ui: &mut Ui, home: &mut Home) {
     }
 }
 
-fn section(ui: &mut Ui, text: &str) {
+pub fn section(ui: &mut Ui, text: &str) {
     ui.add_space(10.0);
     ui.label(RichText::new(text.to_uppercase()).small().strong().weak());
 }
@@ -518,6 +573,15 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
         Status::Stopped(reason) => {
             ui.colored_label(ui.visuals().error_fg_color, reason.as_str());
             if ui.button("Remove server").clicked() {
+                if home
+                    .voice
+                    .call
+                    .as_ref()
+                    .is_some_and(|call| call.server == server.address)
+                {
+                    call::leave(home);
+                }
+                let server = &home.servers[index];
                 home.net.forget(&server.address);
                 home.servers.remove(index);
                 home.view = View::Join;
@@ -538,6 +602,7 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
     ui.separator();
     let mut pick = None;
     let mut add = None;
+    let mut talk = None;
     ScrollArea::vertical().show(ui, |ui| {
         for category in &server.dir.categories {
             if !category.name.is_empty() {
@@ -563,13 +628,13 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
             for channel in &category.channels {
                 let width = ui.available_width();
                 if channel.voice {
-                    ui.add_enabled(
-                        false,
-                        Button::new(format!("🔊  {}", channel.name))
-                            .frame_when_inactive(false)
-                            .min_size(Vec2::new(width, 0.0)),
-                    )
-                    .on_disabled_hover_text("Voice comes soon");
+                    let selected = server.open == Some(channel.id);
+                    let button = Button::selectable(selected, format!("🔊  {}", channel.name))
+                        .min_size(Vec2::new(width, 0.0));
+                    if ui.add_enabled(online, button).clicked() {
+                        talk = Some(channel.id);
+                    }
+                    call::room_list(ui, home, server, &channel.id);
                     continue;
                 }
                 let selected = server.open == Some(channel.id);
@@ -583,6 +648,9 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
     });
     if let Some(channel) = pick {
         home.servers[index].open = Some(channel);
+    }
+    if let Some(channel) = talk {
+        call::join(home, index, channel);
     }
     if let Some(category) = add {
         home.dialog = Some(new_channel(&home.servers[index], index, category));
@@ -599,7 +667,7 @@ fn new_channel(server: &Server, index: usize, category: Option<Id>) -> Dialog {
     }
 }
 
-fn avatar(ui: &mut Ui, person: &Id, name: &str, size: f32) -> Response {
+pub fn avatar(ui: &mut Ui, person: &Id, name: &str, size: f32) -> Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
     let color: Color32 = Hsva::new(f32::from(person[0]) / 255.0, 0.45, 0.6, 1.0).into();
     ui.painter().circle_filled(rect.center(), size / 2.0, color);
@@ -643,6 +711,10 @@ fn member_list(ui: &mut Ui, home: &mut Home, index: usize) {
                 }
                 if ui.button("Details").clicked() {
                     home.dialog = Some(Dialog::Member(index, member.person));
+                }
+                if !me && home.voice.call.is_some() {
+                    ui.separator();
+                    call::person_menu(ui, &home.voice.audio, &member.person);
                 }
             });
         }
@@ -752,6 +824,7 @@ fn join(ui: &mut Ui, home: &mut Home) {
                         dir: Directory::default(),
                         chats: HashMap::new(),
                         open: None,
+                        voice: HashMap::new(),
                         commands,
                     });
                     home.join = Join::Joining(address);
@@ -1322,6 +1395,7 @@ fn settings(ctx: &egui::Context, home: &mut Home) -> Option<Action> {
         ui.heading("Settings");
         ui.horizontal(|ui| {
             ui.selectable_value(&mut tab, Tab::Profile, "Profile");
+            ui.selectable_value(&mut tab, Tab::Voice, "Voice");
             ui.selectable_value(&mut tab, Tab::Devices, "Devices");
         });
         ui.separator();
@@ -1334,6 +1408,7 @@ fn settings(ctx: &egui::Context, home: &mut Home) -> Option<Action> {
                     ui.weak("Friends can compare this to make sure it's really you.");
                 });
             }
+            Tab::Voice => call::settings_tab(ui, &mut home.voice),
             Tab::Devices => {
                 ui.label(format!("This device: {}", home.identity.certificate.name()));
             }

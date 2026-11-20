@@ -15,6 +15,33 @@ advertised `NODE_IP` for media. The IP must be reachable even when a bot
 uses loopback for signaling. LiveKit's signaling port 7880 stays on the
 Compose network. See [LiveKit privacy settings](privacy.md#livekit).
 
+## LiveKit credentials
+
+Set `LIVEKIT_API_KEY` and `LIVEKIT_API_SECRET` in the API service's
+environment to match the LiveKit key pair. The development Compose file
+uses the public values in `deploy/livekit.dev.yml`. Use a private,
+random secret for a real deployment and configure LiveKit's
+`webhook.api_key` to match. LiveKit sends signed webhooks to
+`http://api:8080/internal/livekit` and the API queries the internal
+`http://livekit:7880` RoomService. Keep both endpoints on the stack
+network. The API omits credentials and JWTs from logs. Leaving both
+variables unset disables voice routes. The API refuses to start with the
+public development secret unless `RUSTTALK_DEV=1` is set. Only
+`deploy/compose.dev.yml`, which also runs the e2e stack, sets it.
+
+Keep LiveKit's `logging.level` at `warn` or higher to
+suppress RoomService access logs that include the API key identifier.
+[LiveKit RoomService logging](https://github.com/livekit/livekit/blob/v1.13.11/pkg/service/twirp.go#L101-L145)
+
+A LiveKit token expires ten minutes after issue and authorizes room
+entry. Kick, ban and device revocation end API access, trigger rotation
+for readers and remove the device from every voice room. Losing `speak`
+stops its publishing. The API also checks each join, because a token
+can outlive the session that requested it. An excluded device that
+reaches the relay lacks the new media key, and peers drop its frames
+under retired keys. Removal failures appear in API logs as `could not
+remove voice access` or `could not check voice access` with a reason.
+
 ## Ownership and backups
 
 In the dev project, issue the bootstrap code from an operator terminal:

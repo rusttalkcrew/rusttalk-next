@@ -147,7 +147,8 @@ impl<'a> KeyClient<'a> {
         self.current_key(self.space())
     }
 
-    pub(super) fn current_key(&self, scope: Scope) -> Result<(i64, &Key)> {
+    /// The latest verified key once the scope is ready for use.
+    pub fn current_key(&self, scope: Scope) -> Result<(i64, &Key)> {
         let current = self
             .scopes
             .iter()
@@ -414,7 +415,9 @@ impl<'a> KeyClient<'a> {
                 }
                 self.stale |= !matches!(
                     event,
-                    Event::MessageCreated { .. } | Event::MessageDeleted { .. }
+                    Event::MessageCreated { .. }
+                        | Event::MessageDeleted { .. }
+                        | Event::VoiceChanged { .. }
                 );
                 self.queued.push_back(event);
             }

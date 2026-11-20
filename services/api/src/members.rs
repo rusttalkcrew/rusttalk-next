@@ -16,6 +16,7 @@ use crate::{
     keys, metadata, payload,
     roles::{self, Permission},
     store::{audit, hash, log_closed, now, write},
+    voice,
 };
 
 #[derive(Serialize)]
@@ -248,6 +249,7 @@ pub async fn kick(
     tx.commit().await?;
     log_closed(closed, actor.at, "kicked");
     keys::changed(&app, &person, None);
+    voice::enforce(&app, None);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -314,6 +316,7 @@ pub async fn ban(
     tx.commit().await?;
     log_closed(closed, actor.at, "banned");
     keys::changed(&app, &person, None);
+    voice::enforce(&app, None);
     Ok(StatusCode::NO_CONTENT)
 }
 

@@ -51,6 +51,15 @@ ciphertext. Explicit deletes and the retention cap remove message rows.
 Public sender certificates and audit IDs are retained for history and
 accountability.
 SQLite backups and old WAL pages can retain past database contents.
+The API can see who is in which voice room by matching opaque LiveKit
+device identities to current channel readers. Readers see unmatched
+devices only as a count. After a kick, ban, revocation or permission
+change the API asks LiveKit to remove devices that lost access and to
+stop publishing for devices that lost `speak`. It keeps the active
+roster in memory for one second per room. It keeps no voice roster or
+LiveKit join tokens in SQLite. LiveKit sees opaque room and device IDs,
+routing and timing information, ciphertext frame sizes and encrypted
+media. RustTalk sends no names or profile metadata to LiveKit.
 
 The dev TLS certificate and private key live in `.dev/tls/`. Bot data under
 `.dev/bots/` holds only saved origins, server IDs and TLS fingerprints.
@@ -72,14 +81,21 @@ messages stay in memory only; the log never contains them or invite links.
 
 - **Bot:** Only the configured RustTalk stack. Membership, key events, encrypted chat, signaling and failure-path
   validation use Caddy on 8443/TCP. WebRTC uses the advertised LiveKit node on
-  7882/UDP or 7881/TCP. The bot mints its dev token locally.
+  7882/UDP or 7881/TCP. The bot requests a voice token from the pinned API.
 - **Desktop client:** Configured RustTalk origins for pinned HTTPS and WebSocket
-  connections. On Linux it accesses Secret Service over the local session bus.
-- **API and index:** No outbound network connections.
+  connections. Voice uses the same pinned signaling path and advertised
+  WebRTC ports as the bot. On Linux it accesses Secret Service over the local session bus.
+- **API:** Queries LiveKit RoomService on 7880/TCP using the internal
+  Docker hostname `livekit`.
+- **Index:** No outbound network connections.
 - **Caddy:** Proxies requests to the API on 8080/TCP and to LiveKit on
   7880/TCP, using Docker's internal DNS. Dev TLS uses a local certificate.
 - **LiveKit:** Replies to Caddy and to room participants over their WebRTC
-  transports. The dev health checks use loopback HTTPS at Caddy and loopback
+  transports. LiveKit posts signed join, leave and room-end webhooks to
+  `http://api:8080/internal/livekit` for presence notifications. This route
+  stays behind the Compose network. Caddy exposes the public API and
+  signaling paths.
+  The dev health checks use loopback HTTPS at Caddy and loopback
   HTTP at LiveKit.
 
 Docker image pulls and Cargo dependency downloads happen during setup or build.
@@ -101,7 +117,7 @@ is advertised on `rtc.udp_port: 7882` and `rtc.tcp_port: 7881`.
 
 The open-source server constructs its analytics service without any reporting
 clients, so its send methods return immediately. The dev config leaves Redis,
-webhooks, Jaeger tracing, Prometheus, TURN and mDNS disabled. The server's
+Jaeger tracing, Prometheus, TURN and mDNS disabled. The server's
 startup path has no update check.
 [Analytics implementation](https://github.com/livekit/livekit/blob/v1.13.11/pkg/telemetry/analyticsservice.go#L66-L110),
 [startup](https://github.com/livekit/livekit/blob/v1.13.11/cmd/server/main.go),

@@ -92,7 +92,7 @@ async fn stream(
             }
         }
         refresh |= lagged;
-        // Message notices never change sessions, access or key work, so they reuse the last state.
+        // Message and voice notices reuse the last session and access state.
         let next = if refresh {
             refresh = false;
             let mut tx = app.db.begin().await?;
@@ -141,6 +141,7 @@ async fn stream(
             }
             let channel = match &notice {
                 Event::DmCreated { channel }
+                | Event::VoiceChanged { channel }
                 | Event::MessageCreated { channel, .. }
                 | Event::MessageDeleted { channel, .. } => Some(channel.clone()),
                 Event::KeysNeeded(need) if need.scope.kind == Kind::Channel => {
@@ -189,7 +190,11 @@ async fn stream(
 fn queue(notices: &mut Vec<Event>, notice: Option<Event>) -> bool {
     let refresh = !matches!(
         notice,
-        Some(Event::MessageCreated { .. } | Event::MessageDeleted { .. })
+        Some(
+            Event::MessageCreated { .. }
+                | Event::MessageDeleted { .. }
+                | Event::VoiceChanged { .. }
+        )
     );
     notices.extend(notice);
     refresh

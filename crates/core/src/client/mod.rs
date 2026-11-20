@@ -3,6 +3,8 @@
 mod chat;
 mod keys;
 mod server;
+#[cfg(feature = "voice")]
+pub mod voice;
 
 pub use crate::keys::Event;
 pub use crate::messages::MessageError;

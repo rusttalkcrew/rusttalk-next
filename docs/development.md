@@ -16,8 +16,11 @@ Use Docker with Compose 2.32 or later for file watch.
   advertises for media. By default Make reads the source address of the
   host's IPv4 route. Use the override when the selected route uses a VPN
   or when the host has no default route.
-- `make bot` starts `bot-a` and `bot-b` in the same dev room. Each logs
-  `joined` when its WebRTC data channel opens. Ctrl-C stops the bots.
+- `make bot CHANNEL=<voice-channel-id>` starts two bots in an existing
+  voice channel and verifies audio both ways. Set `RUSTTALK_BOT_INVITE`
+  in the environment to an invite with two available uses. Keep a
+  channel reader online to wrap the current key for the new bot devices.
+  Ctrl-C stops the bots.
 - `make logs` follows all service logs in another terminal.
 - `make down` stops the stack and keeps local data.
 - `make reset` stops the stack and deletes its volumes and `.dev/` after you
@@ -28,22 +31,21 @@ Published ports are 8443/TCP for HTTPS, 7881/TCP for LiveKit media fallback,
 and 7882/UDP for LiveKit media. The API's port 8080 and LiveKit's signaling
 port 7880 are internal to the stack.
 
-Run the bot once against a chosen address from the repo root:
+For a single bot, use the same invite environment variable and run it
+alongside a peer with the two frequencies reversed.
 
 ```sh
-cargo run --locked -p rusttalk-bot -- --server wss://192.168.1.10:8443 --identity gate --once
+cargo run --locked -p rusttalk-bot -- --identity bot-a --channel <voice-channel-id> --tone 440 --expect-tone 660 --once
 ```
 
-The bot hashes `.dev/tls/cert.pem` by default. Pass `--fingerprint` to use
-the hex fingerprint from `make dev`, with or without colons. The bot also
-checks the application server key and saves its pins in `.dev/bots/servers.json`.
-The default
-dev credentials match `deploy/livekit.dev.yml`. Set
-`LIVEKIT_API_KEY` and `LIVEKIT_API_SECRET` to override them.
+The invite provides the server ID and the TLS pin. A local dev
+certificate can supply the TLS pin when the invite omits it. The bot saves
+verified pins in `.dev/bots/servers.json` and exits after it hears the
+expected tone with `--once`.
 
-On Linux, building the bot requires Clang 21 or later, `pkg-config` and
-GLib development headers. The SDK downloads prebuilt WebRTC during the
-first build.
+On Linux, building the bot or the client requires Clang 21 or later,
+`pkg-config`, and GLib and ALSA development headers. The SDK downloads
+prebuilt WebRTC during the first build.
 
 ## Native client
 
@@ -78,8 +80,30 @@ certificate at a saved address stops the join or reconnect.
 Network work runs on a tokio runtime off the UI thread (`crates/client/src/net.rs`).
 Each joined server has one task that signs in, keeps the event socket open,
 refreshes the token ten minutes before expiry and reconnects with backoff.
-The window shows "Connecting…" or "Offline" per server meanwhile. Voice
-channels are listed but join in W08.
+The window shows "Connecting…" or "Offline" per server meanwhile.
+
+Voice audio runs on its own threads (`crates/client/src/audio.rs`): the
+microphone goes through WebRTC's echo cancellation, noise suppression and
+automatic gain, then the push-to-talk or voice-activity gate, into the
+published track. Each remote track is decoded separately, so every person
+has their own volume and mute; the mix plays on the chosen speakers and also
+feeds the echo canceller. On Linux the client talks to the sound server over
+the PulseAudio protocol (PipeWire serves it too) and falls back to ALSA.
+Settings → Voice picks devices, shows the mic level, and calibrates voice
+activity ("stay quiet", then "say something"). Push-to-talk works only while
+the RustTalk window is focused and no text field has focus. Voice settings
+are stored in `voice.json` in the profile folder.
+
+To test audio without the real speakers or microphone, create PipeWire null
+sinks and point `voice.json` at them (`"input": "pulseaudio:agent_src.monitor"`,
+`"output": "pulseaudio:agent_test"`; Settings hides monitors from the list):
+
+```sh
+pactl load-module module-null-sink sink_name=agent_test   # speakers
+pactl load-module module-null-sink sink_name=agent_src    # mic: use agent_src.monitor
+pw-play --target agent_src some.wav                        # "speak"
+pactl unload-module <id>                                   # clean up
+```
 
 Run `make client PROFILE=a` for an isolated identity. A profile is exactly
 one lowercase letter from `a` to `z`. For profile `a`, the settings and data
@@ -108,7 +132,7 @@ Debug builds open a console on Windows; release builds do not, so check
 - `make fmt`: format all code.
 - `make test`: unit and integration tests without Docker.
 - `make e2e` starts a disposable stack and runs membership, key distribution,
-  and encrypted chat with headless bots. It checks pre-sign-in invite
+  encrypted chat, and encrypted voice with headless bots. It checks pre-sign-in invite
   previews, historical key delivery, epoch rotation after kick, revocation and loss of
   channel read access, WebSocket closure and redaction in SQLite, its WAL and stack logs. It also
   checks owner bootstrap, invite use, kick, ban, unban, revocation and
@@ -116,12 +140,23 @@ Debug builds open a console on Windows; release builds do not, so check
   paging, edit authorization, author and moderator deletes, DM isolation and
   closure, historic signatures after kick, and case-insensitive searches for
   test message texts in SQLite, its WAL and service logs. It removes its containers, TLS directory and API
-  volume on exit. Run it with ports 8443, 7881 and 7882 free. The chat and membership bot harness builds without the media SDK.
+  volume on exit. Run it with ports 8443, 7881 and 7882 free. The voice
+  scenario checks duplex PCM tones, signed presence notices, a refused
+  listen-only publish, recovery after a forced reconnect, and new audio
+  after a key rotation that excludes a kicked reader. Set `E2E_FEATURES=`
+  to run the membership, keys and chat harness without WebRTC.
 
 Bots and the desktop client use `rusttalk-core` with the `client` feature.
 `client::Server` verifies pins and handles sign-in, and `client::KeyClient`
 owns the live stream and keeps keys and accepted message IDs in memory.
-The API builds core without the `client` feature. [Protocol reference](protocol.md)
+Enable the core `voice` feature for native media. Use
+`KeyClient::join_voice`, feed a LiveKit `NativeAudioSource` after
+`VoiceRoom::publish_audio` succeeds, and open a `NativeAudioStream` for
+each subscribed audio track. Drive `VoiceRoom::next_event` and forward
+reconciled key events to `VoiceRoom::sync_key` while in the room. Use
+`VoiceRoom::stats` on a timer, and call `VoiceRoom::leave` on user
+disconnect or API session closure. The API builds core without the
+`client` feature. [Protocol reference](protocol.md)
 
 For a new address, use `Server::probe` and show the observed server fingerprint
 for confirmation before connecting with that expected pin. Invite links
@@ -144,4 +179,6 @@ before upload.
 Linux CI runs `make lint test e2e`. Lint and unit tests enable core client
 protocol and LiveKit pinning code with the bot package excluded. The Docker
 gate builds the bot harness without the native WebRTC toolchain or download. Local `make lint test` covers the whole workspace.
-Windows CI runs the client unit tests. Both jobs have a 15-minute timeout.
+Windows CI runs the client unit tests. Enabling the voice feature in that
+client build will also download and link LiveKit's prebuilt libwebrtc.
+Both jobs have a 15-minute timeout.

@@ -2,6 +2,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod audio;
+mod call;
 mod home;
 mod keystore;
 mod log_file;
