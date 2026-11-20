@@ -125,6 +125,17 @@ pub async fn for_person(db: &mut SqliteConnection, person: &[u8]) -> ApiResult<V
     .await?)
 }
 
+pub async fn require_admin(db: &mut SqliteConnection, person: &[u8]) -> ApiResult<()> {
+    if !for_person(db, person)
+        .await?
+        .iter()
+        .any(|role| matches!(role.kind.as_str(), "owner" | "admin"))
+    {
+        return Err(ApiError::forbidden("permission_denied"));
+    }
+    Ok(())
+}
+
 pub async fn authority(db: &mut SqliteConnection, person: &[u8]) -> ApiResult<Authority> {
     let roles = for_person(db, person).await?;
     Ok(Authority {

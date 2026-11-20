@@ -78,6 +78,17 @@ pub struct SignIn {
     pub invite: Option<String>,
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct ServerInfo {
+    pub open_joining: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct OpenJoining {
+    pub open_joining: bool,
+    pub member_cap: i64,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Session {
     pub token: String,

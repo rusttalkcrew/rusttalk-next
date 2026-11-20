@@ -103,13 +103,7 @@ fn signaling_url(server: &KnownServer) -> Result<reqwest::Url> {
     let mut url = server.address.clone();
     url.set_scheme("wss")
         .map_err(|_| anyhow::anyhow!("invalid LiveKit signaling origin"))?;
-    // Unbox so callers can downcast to `PinnedElsewhere`.
-    pinned_tls::register(&url, server.tls_fingerprint).map_err(|error| {
-        match error.downcast::<pinned_tls::PinnedElsewhere>() {
-            Ok(error) => anyhow::Error::new(*error),
-            Err(error) => anyhow::Error::from_boxed(error),
-        }
-    })?;
+    pinned_tls::register(&url, server.tls_fingerprint).map_err(anyhow::Error::from_boxed)?;
     Ok(url)
 }
 

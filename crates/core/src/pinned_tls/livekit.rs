@@ -1,5 +1,8 @@
-use std::sync::Arc;
 use std::time::Duration;
+use std::{
+    collections::HashMap,
+    sync::{Arc, LazyLock, Mutex as SyncMutex},
+};
 
 use async_trait::async_trait;
 use futures_util::{
@@ -22,78 +25,79 @@ use url::Url;
 
 use super::{Fingerprint, https_client, pinned_config};
 
-/// Install or reuse the SDK's process-wide transports for one self-hosted server.
-// shortcut: one pinned server per process, upgrade to a host-to-pin map for the multi-server client (W15).
+static TRANSPORT: LazyLock<Arc<PinnedTransport>> = LazyLock::new(Arc::default);
+
+/// Register a trusted signaling origin with the SDK's process-wide transports.
 pub fn register(
     server: &Url,
     pin: Option<Fingerprint>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let pin = pin.ok_or("missing server TLS certificate fingerprint")?;
-    if server.scheme() != "wss" || server.host().is_none() {
-        return Err("the pinned LiveKit server must use wss".into());
-    }
-
-    static REGISTERED: std::sync::Mutex<Option<(Url, Fingerprint)>> = std::sync::Mutex::new(None);
-    let mut registered = REGISTERED
+    let origin = origin(server, "wss").ok_or("invalid pinned LiveKit signaling origin")?;
+    let mut origins = TRANSPORT
+        .origins
         .lock()
         .map_err(|_| "LiveKit transport lock poisoned")?;
-    if let Some((origin, fingerprint)) = registered.as_ref() {
-        return if origin == server && *fingerprint == pin {
+    if let Some(existing) = origins.get(&origin) {
+        return if existing.pin == pin {
             Ok(())
         } else {
-            Err(Box::new(PinnedElsewhere))
+            Err("LiveKit TLS certificate fingerprint changed at the known origin".into())
         };
-    }
-    if livekit_net::has_ws_client() || livekit_net::has_http_client() {
-        return Err("the LiveKit transport has already been registered".into());
     }
 
     let tls = pinned_config(pin)?;
     let http = https_client(Some(tls.clone()))?;
-    let transport = Arc::new(PinnedTransport {
-        server: server.clone(),
-        tls: Arc::new(tls),
-        http,
-    });
-
-    livekit_net::set_ws_client(transport.clone());
-    livekit_net::set_http_client(transport);
-    *registered = Some((server.clone(), pin));
+    if origins.is_empty() {
+        if livekit_net::has_ws_client() || livekit_net::has_http_client() {
+            return Err("the LiveKit transport has already been registered".into());
+        }
+        livekit_net::set_ws_client(TRANSPORT.clone());
+        livekit_net::set_http_client(TRANSPORT.clone());
+    }
+    origins.insert(
+        origin,
+        LiveKitPin {
+            pin,
+            tls: Arc::new(tls),
+            http,
+        },
+    );
     Ok(())
 }
 
-/// The process already uses LiveKit with another server.
-#[derive(Debug)]
-pub struct PinnedElsewhere;
-
-impl std::fmt::Display for PinnedElsewhere {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("LiveKit transport already pinned to a different origin or certificate")
+fn origin(url: &Url, scheme: &str) -> Option<(String, u16)> {
+    if url.scheme() != scheme || !url.username().is_empty() || url.password().is_some() {
+        return None;
     }
+    Some((url.host_str()?.to_owned(), url.port_or_known_default()?))
 }
 
-impl std::error::Error for PinnedElsewhere {}
-
+#[derive(Default)]
 struct PinnedTransport {
-    server: Url,
+    origins: SyncMutex<HashMap<(String, u16), LiveKitPin>>,
+}
+
+#[derive(Clone)]
+struct LiveKitPin {
+    pin: Fingerprint,
     tls: Arc<ClientConfig>,
     http: reqwest::Client,
 }
 
 impl PinnedTransport {
-    fn server_url(&self, url: &str, scheme: &str) -> Result<Url, TransportError> {
+    fn lookup(&self, url: &str, scheme: &str) -> Result<(Url, LiveKitPin), TransportError> {
         let url = Url::parse(url).map_err(connection_error)?;
-        if url.scheme() != scheme
-            || url.host() != self.server.host()
-            || url.port_or_known_default() != self.server.port_or_known_default()
-            || !url.username().is_empty()
-            || url.password().is_some()
-        {
-            return Err(TransportError::Other(
-                "unexpected LiveKit signaling origin".into(),
-            ));
-        }
-        Ok(url)
+        let origin = origin(&url, scheme)
+            .ok_or_else(|| TransportError::Other("invalid LiveKit signaling origin".into()))?;
+        let pin = self
+            .origins
+            .lock()
+            .map_err(|_| TransportError::Other("LiveKit transport lock poisoned".into()))?
+            .get(&origin)
+            .cloned()
+            .ok_or_else(|| TransportError::Other("unknown LiveKit signaling origin".into()))?;
+        Ok((url, pin))
     }
 }
 
@@ -105,7 +109,7 @@ impl WsClient for PinnedTransport {
         headers: Vec<Header>,
         timeout_ms: u64,
     ) -> Result<WsConnectResult, TransportError> {
-        let url = self.server_url(&url, "wss")?;
+        let (url, pin) = self.lookup(&url, "wss")?;
         let mut request = url
             .as_str()
             .into_client_request()
@@ -118,12 +122,8 @@ impl WsClient for PinnedTransport {
             let value = header.value.parse().map_err(connection_error)?;
             request.headers_mut().insert(name, value);
         }
-        let connect = connect_async_tls_with_config(
-            request,
-            None,
-            false,
-            Some(Connector::Rustls(self.tls.clone())),
-        );
+        let connect =
+            connect_async_tls_with_config(request, None, false, Some(Connector::Rustls(pin.tls)));
         let (socket, _) = tokio::time::timeout(Duration::from_millis(timeout_ms), connect)
             .await
             .map_err(|_| TransportError::Timeout)?
@@ -152,10 +152,10 @@ impl HttpClient for PinnedTransport {
         headers: Vec<Header>,
         body: Option<Vec<u8>>,
     ) -> Result<HttpResponse, TransportError> {
-        let url = self.server_url(&url, "https")?;
+        let (url, pin) = self.lookup(&url, "https")?;
         let mut request = match method {
-            HttpMethod::Get => self.http.get(url),
-            HttpMethod::Post => self.http.post(url),
+            HttpMethod::Get => pin.http.get(url),
+            HttpMethod::Post => pin.http.post(url),
         };
         for header in headers {
             request = request.header(header.name, header.value);
@@ -249,6 +249,63 @@ mod tests {
         assert_eq!(
             register(&server, None).unwrap_err().to_string(),
             "missing server TLS certificate fingerprint"
+        );
+    }
+
+    #[test]
+    fn each_origin_uses_only_its_own_certificate() {
+        use crate::pinned_tls::fingerprint;
+        use rustls::{
+            ClientConnection, ServerConfig, ServerConnection, crypto::ring,
+            pki_types::PrivatePkcs8KeyDer,
+        };
+
+        let certs = [8443, 8444].map(|port| {
+            let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+            let pin = fingerprint(cert.cert.der());
+            let url = Url::parse(&format!("wss://127.0.0.1:{port}")).unwrap();
+            register(&url, Some(pin)).unwrap();
+            let server = ServerConfig::builder_with_provider(Arc::new(ring::default_provider()))
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_no_client_auth()
+                .with_single_cert(
+                    vec![cert.cert.der().clone()],
+                    PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()).into(),
+                )
+                .unwrap();
+            (url, pin, Arc::new(server))
+        });
+        for (i, (url, _, _)) in certs.iter().enumerate() {
+            let https = url.as_str().replacen("wss:", "https:", 1);
+            for (request, scheme) in [(url.as_str(), "wss"), (&https, "https")] {
+                let (_, pin) = TRANSPORT.lookup(request, scheme).unwrap();
+                for (j, (_, _, config)) in certs.iter().enumerate() {
+                    let mut server = ServerConnection::new(config.clone()).unwrap();
+                    let mut client =
+                        ClientConnection::new(pin.tls.clone(), "127.0.0.1".try_into().unwrap())
+                            .unwrap();
+
+                    let mut flight = Vec::new();
+                    client.write_tls(&mut flight).unwrap();
+                    server.read_tls(&mut flight.as_slice()).unwrap();
+                    server.process_new_packets().unwrap();
+                    flight.clear();
+                    server.write_tls(&mut flight).unwrap();
+                    client.read_tls(&mut flight.as_slice()).unwrap();
+                    assert_eq!(client.process_new_packets().is_ok(), i == j);
+                    if i == j {
+                        assert!(!client.is_handshaking());
+                    }
+                }
+            }
+        }
+        assert!(register(&certs[0].0, Some(certs[1].1)).is_err());
+        assert!(TRANSPORT.lookup("wss://127.0.0.1:8445/rtc", "wss").is_err());
+        assert!(
+            TRANSPORT
+                .lookup("https://127.0.0.2:8443/rtc/validate", "https")
+                .is_err()
         );
     }
 

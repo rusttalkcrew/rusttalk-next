@@ -10,7 +10,7 @@ use ed25519_dalek::SigningKey;
 use rusttalk_core::identity::random_bytes;
 use sha2::{Digest, Sha256};
 use sqlx::{
-    Sqlite, SqliteConnection, SqlitePool, Transaction, query_scalar,
+    Sqlite, SqliteConnection, SqlitePool, Transaction, query, query_scalar,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
 };
 use zeroize::Zeroizing;
@@ -126,7 +126,7 @@ pub fn log_closed(sessions: Vec<i64>, at: i64, reason: &'static str) {
     }
 }
 
-pub async fn expire_sessions(pool: SqlitePool) {
+pub async fn expire_records(pool: SqlitePool) {
     let mut interval = tokio::time::interval(Duration::from_secs(30));
     loop {
         interval.tick().await;
@@ -138,11 +138,15 @@ pub async fn expire_sessions(pool: SqlitePool) {
                     .fetch_all(&pool)
                     .await?;
             log_closed(sessions, at, "token_expired");
+            query("DELETE FROM open_joins WHERE expires_at <= ?")
+                .bind(at)
+                .execute(&pool)
+                .await?;
             Ok::<_, ApiError>(())
         }
         .await;
         if let Err(error) = result {
-            tracing::error!(reason = error.code, "session expiry failed");
+            tracing::error!(reason = error.code, "record expiry failed");
         }
     }
 }

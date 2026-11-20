@@ -20,6 +20,7 @@ help: ## Show this help
 ##@ Dev
 
 dev: export NODE_IP ?= $(shell ip -4 route get 1.1.1.1 2>/dev/null | awk '{ for (i = 1; i < NF; i++) if ($$i == "src") { print $$(i + 1); exit } }')
+dev: export RUSTTALK_DEV_HTTPS_PORT ?= 8443
 dev: ## Start the Docker stack and rebuild the API on changes
 	@test -n "$$NODE_IP" || { printf '\033[1;31mSet NODE_IP to the host LAN IPv4 address.\033[0m\n' >&2; exit 1; }
 	@mkdir -p .dev
@@ -27,7 +28,7 @@ dev: ## Start the Docker stack and rebuild the API on changes
 	$(DEV_COMPOSE) up --build --wait --wait-timeout 60
 	@fingerprint=$$($(DEV_COMPOSE) run --rm --no-deps -T --entrypoint openssl cert \
 		x509 -in /dev-data/tls/cert.pem -noout -sha256 -fingerprint) && \
-		printf '\033[1;34m==> https://127.0.0.1:8443\n==> LAN wss://%s:8443\n==> TLS %s\033[0m\n' "$$NODE_IP" "$$fingerprint"
+		printf '\033[1;34m==> https://127.0.0.1:%s\n==> LAN wss://%s:%s\n==> TLS %s\033[0m\n' "$$RUSTTALK_DEV_HTTPS_PORT" "$$NODE_IP" "$$RUSTTALK_DEV_HTTPS_PORT" "$$fingerprint"
 	@server=$$($(DEV_COMPOSE) exec -T api rusttalk-api server-fingerprint) && \
 		printf '\033[1;34m==> Server fingerprint %s\033[0m\n' "$$server"
 	@invite=$$($(DEV_COMPOSE) exec -T api rusttalk-api owner-invite) && \
@@ -35,7 +36,7 @@ dev: ## Start the Docker stack and rebuild the API on changes
 			server_id=$$($(DEV_COMPOSE) exec -T api rusttalk-api server-id) && \
 			tls_pin=$$($(DEV_COMPOSE) run --rm --no-deps -T --entrypoint /bin/sh cert -ec \
 				'set -o pipefail; openssl x509 -in /dev-data/tls/cert.pem -outform DER | openssl dgst -sha256 -binary | openssl base64 -A | tr "/+" "_-" | tr -d "="') && \
-			printf '\033[1;34m==> Owner invite rusttalk://127.0.0.1:8443/i/%s#%s.%s\033[0m\n' "$$invite" "$$server_id" "$$tls_pin"; \
+			printf '\033[1;34m==> Owner invite rusttalk://127.0.0.1:%s/i/%s#%s.%s\033[0m\n' "$$RUSTTALK_DEV_HTTPS_PORT" "$$invite" "$$server_id" "$$tls_pin"; \
 		fi
 	$(DEV_COMPOSE) watch --no-up api
 
@@ -92,19 +93,34 @@ test: ## Run unit and integration tests
 	@printf '\033[1;34m==> tests\033[0m\n'
 	cargo test $(CARGO_SCOPE) --locked
 
-e2e: ## Run the Docker membership, keys, encrypted chat, stored files, voice, app audio, screen sharing, camera, live file transfer and device sync scenarios
-	@printf '\033[1;34m==> Docker membership, keys, encrypted chat, stored files, voice, app audio, screen sharing, camera, live file transfer and device sync\033[0m\n'
+e2e: ## Run the two-stack membership, keys, chat, stored files, voice, app audio, screen, camera, live file and device sync scenarios
+	@printf '\033[1;34m==> Two-stack membership, keys, chat, stored files, voice, app audio, screen, camera, live file and device sync\033[0m\n'
 	$(if $(and $(PIPEWIRE_HELPER),$(findstring media,$(E2E_FEATURES))),cargo build --locked $(PIPEWIRE_HELPER))
 	@set -eu; \
 		export RUSTTALK_E2E_PROJECT=rusttalk-e2e-$$$$; \
 		export RUSTTALK_DEV_DATA=$$(mktemp -d); \
+		export RUSTTALK_E2E_SECOND_PROJECT="$$RUSTTALK_E2E_PROJECT-second"; \
+		export RUSTTALK_E2E_SECOND_HTTPS_PORT="$${RUSTTALK_E2E_SECOND_HTTPS_PORT:-9443}"; \
 		export RUSTTALK_FILE_MAX_BYTES=33554432 RUSTTALK_FILE_MEMBER_BYTES=3145728 RUSTTALK_FILE_SERVER_BYTES=5242880 RUSTTALK_FILE_TTL_SECS=12; \
 		compose() { docker compose -f deploy/compose.dev.yml -p "$$RUSTTALK_E2E_PROJECT" "$$@"; }; \
+		compose_second() { \
+			RUSTTALK_DEV_DATA="$$RUSTTALK_E2E_SECOND_DATA" \
+			RUSTTALK_DEV_HTTPS_PORT="$$RUSTTALK_E2E_SECOND_HTTPS_PORT" \
+			RUSTTALK_DEV_MEDIA_TCP_PORT="$${RUSTTALK_E2E_SECOND_MEDIA_TCP_PORT:-8881}" \
+			RUSTTALK_DEV_MEDIA_UDP_PORT="$${RUSTTALK_E2E_SECOND_MEDIA_UDP_PORT:-8882}" \
+			docker compose -f deploy/compose.dev.yml -p "$$RUSTTALK_E2E_SECOND_PROJECT" "$$@"; \
+		}; \
 		cleanup() { \
 			status=$$?; trap - EXIT; \
+			if [ -n "$${RUSTTALK_E2E_SECOND_DATA:-}" ]; then \
+				compose_second down --volumes --rmi local || status=1; \
+				rm -rf "$$RUSTTALK_E2E_SECOND_DATA"; \
+			fi; \
 			compose down --volumes --rmi local || status=1; \
 			rm -rf "$$RUSTTALK_DEV_DATA"; exit "$$status"; \
 		}; \
 		trap cleanup EXIT; trap 'exit 130' INT; trap 'exit 143' TERM; \
+		export RUSTTALK_E2E_SECOND_DATA=$$(mktemp -d); \
 		compose up --build --wait --wait-timeout 60; \
+		compose_second up --build --wait --wait-timeout 60; \
 		cargo test --locked -p rusttalk-bot --no-default-features $(E2E_FEATURES) --test membership -- --nocapture

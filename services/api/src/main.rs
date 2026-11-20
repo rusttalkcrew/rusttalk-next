@@ -202,10 +202,16 @@ async fn run() -> Result<()> {
 }
 
 async fn serve(app: App) -> io::Result<()> {
-    let expiry = tokio::spawn(store::expire_sessions(app.db.clone()));
+    let expiry = tokio::spawn(store::expire_records(app.db.clone()));
     let file_expiry = tokio::spawn(files::expire(app.clone()));
     let app = Router::new()
         .route("/v1/health", get(|| async { "ok\n" }))
+        .route("/v1/server-info", get(members::server_info))
+        .route(
+            "/v1/settings/open-joining",
+            get(members::open_joining).put(members::set_open_joining),
+        )
+        .route("/v1/auth/join", post(auth::open_join))
         .route("/v1/auth/challenge", get(auth::challenge))
         .route("/v1/auth/sign-in", post(auth::sign_in))
         .route("/v1/auth/refresh", post(auth::refresh))
@@ -271,6 +277,7 @@ async fn serve(app: App) -> io::Result<()> {
         .route("/v1/roles/{id}", delete(roles::delete))
         .route("/v1/roles/{id}/name", put(roles::rename))
         .route("/v1/owner", put(roles::transfer))
+        .route("/v1/bans", get(members::bans))
         .route("/v1/audit", get(members::audit_log))
         .route("/v1/files/{id}", get(files::download).delete(files::delete))
         .layer(RequestBodyLimitLayer::new(4096))
