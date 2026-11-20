@@ -32,7 +32,7 @@ content on the server, not even temporarily.
   invite, join, kick, ban; a changed server key is refused.
 
 **3. Chat (encrypted first)**
-- [ ] **W06 Keys and zero-knowledge metadata.** Channel and space keys with epochs,
+- [x] **W06 Keys and zero-knowledge metadata.** Channel and space keys with epochs,
   envelopes, wrapping for new devices and members, full history for newcomers, new
   epoch on kick, ban and revoke; space-key encryption of every name (5.1). Gate: e2e
   kicked bot cannot read the new epoch, new member reads old history, a database
