@@ -31,9 +31,9 @@ use crate::{
     camera,
     device_sync::{self, Edit},
     files::{self, Ask, Files},
-    net::{Admin, AdminUpdate, Admission, Command, Listed, Net, PAGE_SIZE, Preview, Update},
+    net::{Admin, AdminUpdate, Admission, Command, Draft, Listed, Net, PAGE_SIZE, Preview, Update},
     screen::Video,
-    server::{Body, Chat, Directory, Id, Msg, Picture, Server, Status, member_name},
+    server::{Body, Chat, Directory, Id, Member, Msg, Picture, Server, Status, member_name},
 };
 
 /// The name shown until a server has one, or until its key arrives.
@@ -330,7 +330,7 @@ impl Home {
                     }
                     (Status::Stopped(error), true) => {
                         self.join = Join::Idle(Some(error.clone()));
-                        self.servers.remove(index);
+                        self.remove_server(index);
                         self.view = View::Join;
                         return;
                     }
@@ -596,6 +596,19 @@ impl Home {
                 let adopted = device_sync::adopt(&audio.settings(), &synced.settings);
                 self.synced = device_sync::synced(&adopted);
                 audio.set_settings(adopted);
+            }
+            Update::Unsent(address, draft) => {
+                let Some(index) = self.index(&address) else {
+                    return;
+                };
+                let chat = self.servers[index].chats.entry(draft.channel).or_default();
+                // Only when nothing new was typed or picked meanwhile.
+                if chat.draft.is_empty() && chat.staged.is_empty() {
+                    chat.draft = draft.text;
+                    chat.reply_to = draft.reply_to;
+                    chat.editing = draft.edit_of;
+                    files::stage(chat, draft.files);
+                }
             }
             Update::Failed(error) => {
                 match &mut self.dialog {
@@ -1275,6 +1288,18 @@ pub fn face(
     dot: bool,
 ) -> Response {
     let member = dir.members.iter().find(|m| m.person == *person);
+    member_face(ui, member, person, name, size, dot)
+}
+
+/// `face` for a member already looked up (`None` when not a member).
+fn member_face(
+    ui: &mut Ui,
+    member: Option<&Member>,
+    person: &Id,
+    name: &str,
+    size: f32,
+    dot: bool,
+) -> Response {
     let response = match member.and_then(|m| m.avatar.as_ref()) {
         Some(picture) => ui.add(
             egui::Image::new(&frame(ui, picture))
@@ -1307,11 +1332,11 @@ fn member_list(ui: &mut Ui, home: &mut Home, index: usize) {
     let (mut manage, mut moderate) = (None, None);
     ScrollArea::vertical().show(ui, |ui| {
         for member in &server.dir.members {
-            let name = server.member_name(&member.person);
+            let name = member.display_name();
             let me = member.person == server.dir.me;
             let row = ui
                 .horizontal(|ui| {
-                    face(ui, &server.dir, &member.person, &name, 30.0, true);
+                    member_face(ui, Some(member), &member.person, &name, 30.0, true);
                     let label = if me {
                         format!("{name} (you)")
                     } else {
@@ -2032,13 +2057,13 @@ fn composer(
     } else {
         chat.staged.drain(..).map(|file| file.path).collect()
     };
-    let command = Command::Send {
+    let command = Command::Send(Draft {
         channel,
         text: text.to_owned(),
         reply_to: chat.reply_to.take(),
         edit_of: chat.editing.take(),
         files,
-    };
+    });
     chat.draft.clear();
     field.request_focus();
     (Some(command), attach)

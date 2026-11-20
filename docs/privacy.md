@@ -163,7 +163,8 @@ through a temporary file in that folder that is removed if the download fails.
 so "Show in folder" and "Open" work later; it never leaves this device.
 "Open in default app" in the picture viewer, for a picture not saved yet,
 writes it to a `rusttalk-<id>` folder in the system temporary directory and
-hands it to the system's default app.
+hands it to the system's default app; the client deletes these folders when it
+starts and when the person signs out.
 `updates.json` holds the chosen release directory URL and the automatic
 check preference on this device.
 

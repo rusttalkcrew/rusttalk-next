@@ -21,7 +21,7 @@ use url::Url;
 use super::{Ctx, Update, send_messages, to_msg};
 use crate::server::Id;
 
-/// Upload the files, then send the message with them.
+/// Upload the files, then send the message with them; `false` when an upload failed.
 pub(super) async fn send(
     ctx: &Ctx,
     url: &Url,
@@ -29,7 +29,7 @@ pub(super) async fn send(
     channel: Id,
     mut body: MessageBody,
     files: Vec<PathBuf>,
-) -> Result<()> {
+) -> Result<bool> {
     if let Some(first) = files.first() {
         let label = match files.len() {
             1 => file_name(first),
@@ -52,7 +52,7 @@ pub(super) async fn send(
             tracing::warn!(error = %format_args!("{error:#}"), "uploading a file failed");
             discard(client, &body.attachments).await;
             ctx.send(Update::Failed(upload_problem(&error).into()));
-            return Ok(());
+            return Ok(false);
         }
     }
     let record = match client.send_message(&channel, &body).await {
@@ -63,7 +63,7 @@ pub(super) async fn send(
         }
     };
     send_messages(ctx, url, channel, vec![to_msg(&record, &body)], false, None);
-    Ok(())
+    Ok(true)
 }
 
 /// Delete a message, then its stored files.

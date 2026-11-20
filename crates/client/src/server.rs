@@ -162,11 +162,10 @@ impl Server {
 }
 
 pub fn member_name(dir: &Directory, person: &Id) -> String {
-    dir.members
-        .iter()
-        .find(|member| member.person == *person)
-        .and_then(|member| member.name.clone())
-        .unwrap_or_else(|| format!("Member {}", &fingerprint(person)[..4]))
+    match dir.members.iter().find(|member| member.person == *person) {
+        Some(member) => member.display_name(),
+        None => format!("Member {}", &fingerprint(person)[..4]),
+    }
 }
 
 #[derive(Clone, Default)]
@@ -258,6 +257,13 @@ pub struct Member {
     pub roles: Vec<String>,
     pub avatar: Option<Picture>,
     pub presence: Presence,
+}
+
+impl Member {
+    /// Their chosen name, or a placeholder from their fingerprint.
+    pub fn display_name(&self) -> String {
+        (self.name.clone()).unwrap_or_else(|| format!("Member {}", &fingerprint(&self.person)[..4]))
+    }
 }
 
 /// A decoded profile picture or server icon: each frame and how long it shows, in ms.
@@ -359,6 +365,10 @@ impl Chat {
         }
         // Stable, so records from the same second keep the server's order.
         self.messages.sort_by_key(|msg| msg.at);
+        // A retried edit replaces its "couldn't be opened" placeholder.
+        self.messages.retain(|msg| {
+            msg.body != Body::Unreadable || !edits.iter().any(|edit| edit.id == msg.id)
+        });
         for edit in edits {
             let original = edit.edit_of.expect("partitioned on edit_of");
             if self
@@ -373,6 +383,10 @@ impl Chat {
             let Some(target) = self.messages.iter_mut().find(|msg| msg.id == *original) else {
                 return true;
             };
+            // Wait for an unreadable original to be retried, then apply.
+            if target.body == Body::Unreadable {
+                return true;
+            }
             if let (Body::Text(text), Body::Text(new)) = (&mut target.body, &edit.body)
                 && self.edited.get(original).is_none_or(|at| *at <= edit.at)
             {
@@ -440,5 +454,21 @@ mod tests {
         chat.remove(&[1; 32]);
         assert_eq!(texts(&chat), ["b", "c"]);
         assert!(!chat.edited.contains_key(&[1; 32]));
+    }
+
+    #[test]
+    fn retried_records_replace_their_unreadable_placeholders() {
+        let unreadable = |id: u8, at: i64| Msg {
+            body: Body::Unreadable,
+            ..msg(id, at, "", None)
+        };
+        let mut chat = Chat::default();
+        chat.merge(vec![unreadable(1, 10), unreadable(2, 20)], false);
+        // The edit opens now, but its original still can't.
+        chat.merge(vec![msg(2, 20, "a2", Some(1))], false);
+        assert_eq!(texts(&chat), ["?"]);
+        // The original opens on retry and gets the waiting edit.
+        chat.merge(vec![msg(1, 10, "a", None)], false);
+        assert_eq!(texts(&chat), ["a2"]);
     }
 }

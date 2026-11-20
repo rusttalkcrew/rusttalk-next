@@ -15,7 +15,7 @@ use eframe::egui::{
     self, Align, Color32, Frame, Id as UiId, Image, Layout, Margin, Modal, Rect, Response,
     RichText, Role, ScrollArea, Sense, TextureHandle, TextureOptions, Ui, Vec2, WidgetInfo,
 };
-use rusttalk_core::client::Attachment;
+use rusttalk_core::client::{Attachment, save_json};
 use tokio::sync::mpsc::UnboundedSender;
 use url::Url;
 
@@ -107,19 +107,14 @@ pub type Answer = (Ask, Vec<PathBuf>);
 impl Files {
     pub fn new(data: &Path) -> Self {
         let saved = data.join(SAVED);
-        let paths = match fs::read(&saved) {
-            Ok(bytes) => serde_json::from_slice::<HashMap<String, PathBuf>>(&bytes)
-                .inspect_err(|error| tracing::warn!(%error, "reading saved file places failed"))
-                .unwrap_or_default()
-                .into_iter()
-                .filter_map(|(id, path)| Some((hex::decode(id).ok()?.try_into().ok()?, path)))
-                .collect(),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => HashMap::new(),
-            Err(error) => {
-                tracing::warn!(%error, "reading saved file places failed");
-                HashMap::new()
-            }
-        };
+        let paths = crate::load_json::<HashMap<String, PathBuf>>(&saved)
+            .inspect_err(|error| {
+                tracing::warn!(error = %format_args!("{error:#}"), "reading saved file places failed");
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(id, path)| Some((hex::decode(id).ok()?.try_into().ok()?, path)))
+            .collect();
         Self {
             images: HashMap::new(),
             saves: HashMap::new(),
@@ -178,11 +173,8 @@ impl Files {
         let paths: HashMap<String, &PathBuf> = (self.paths.iter())
             .map(|(id, path)| (hex::encode(id), path))
             .collect();
-        let written = serde_json::to_vec(&paths)
-            .map_err(io::Error::other)
-            .and_then(|bytes| fs::write(self.data.join(SAVED), bytes));
-        if let Err(error) = written {
-            tracing::warn!(%error, "saving where files were saved failed");
+        if let Err(error) = save_json(&self.data, &self.data.join(SAVED), &paths) {
+            tracing::warn!(error = %format_args!("{error:#}"), "saving where files were saved failed");
         }
     }
 
@@ -259,7 +251,7 @@ impl Files {
             return;
         }
         let folder =
-            std::env::temp_dir().join(format!("rusttalk-{}", hex::encode(&file.file.id[..8])));
+            std::env::temp_dir().join(format!("{OPENED}{}", hex::encode(&file.file.id[..8])));
         if let Err(error) = fs::create_dir_all(&folder) {
             tracing::warn!(%error, "making a folder to open a file failed");
             self.saves.insert(file.file.id, Saving::Failed);
@@ -272,6 +264,28 @@ impl Files {
 }
 
 const SAVED: &str = "saved.json";
+/// Prefix of the temporary folders that "Open" writes decrypted files to.
+const OPENED: &str = "rusttalk-";
+
+/// Remove decrypted files that "Open" left in the temporary directory
+/// (`rusttalk-` and 16 hex digits, so not the log folders). Failures are only logged.
+pub fn clear_opened() {
+    let Ok(entries) = fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(id) = name.to_str().and_then(|name| name.strip_prefix(OPENED)) else {
+            continue;
+        };
+        if id.len() == 16
+            && id.bytes().all(|byte| byte.is_ascii_hexdigit())
+            && let Err(error) = fs::remove_dir_all(entry.path())
+        {
+            tracing::warn!(%error, "removing an opened file failed");
+        }
+    }
+}
 
 /// Open a file in its app, or (`folder`) show it in the file manager. Failures are only logged.
 fn open(path: &Path, folder: bool) {
