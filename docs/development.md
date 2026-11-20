@@ -111,8 +111,8 @@ pactl unload-module <id>                                   # clean up
 Run `make client PROFILE=a` for an isolated identity. A profile is exactly
 one lowercase letter from `a` to `z`. For profile `a`, the settings and data
 directory is `.dev/profiles/a`, which holds `rusttalk.log`, the startup
-lock, `servers.json` (pins per address) and `joined.json` (servers to
-reconnect at start). The keystore service is `RustTalk-dev-a`. `make reset` removes the
+lock, `servers.json` (pins per address) and `sync.json` (the device sync
+snapshot: servers to reconnect at start and synced settings). The keystore service is `RustTalk-dev-a`. `make reset` removes the
 directory and leaves OS keystore entries in place; remove one with
 `secret-tool clear service RustTalk-dev-a username identity-v1` on Linux.
 

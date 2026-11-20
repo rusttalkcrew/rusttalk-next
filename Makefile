@@ -82,6 +82,7 @@ reset: ## Delete dev data and volumes after confirmation
 lint: ## Run clippy (warnings are errors) and check formatting
 	@printf '\033[1;34m==> clippy\033[0m\n'
 	cargo clippy $(CARGO_SCOPE) --all-targets --locked -- -D warnings
+	cargo clippy --locked -p rusttalk-bot --no-default-features --all-targets -- -D warnings
 	@printf '\033[1;34m==> rustfmt --check\033[0m\n'
 	cargo fmt --all --check
 
@@ -92,8 +93,9 @@ test: ## Run unit and integration tests
 	@printf '\033[1;34m==> tests\033[0m\n'
 	cargo test $(CARGO_SCOPE) --locked
 
-e2e: ## Run the two-stack membership, keys, encrypted chat, stored files, voice, app audio, screen sharing, camera and live file transfer scenarios
-	@printf '\033[1;34m==> Two-stack membership, keys, encrypted chat, stored files, voice, app audio, screen sharing, camera and live file transfer\033[0m\n'
+e2e: ## Run the two-stack membership, keys, chat, stored files, voice, app audio, screen, camera, live file and device sync scenarios
+	@printf '[1;34m==> Two-stack membership, keys, chat, stored files, voice, app audio, screen, camera, live file and device sync[0m
+'
 	$(if $(and $(PIPEWIRE_HELPER),$(findstring media,$(E2E_FEATURES))),cargo build --locked $(PIPEWIRE_HELPER))
 	@set -eu; \
 		export RUSTTALK_E2E_PROJECT=rusttalk-e2e-$$$$; \

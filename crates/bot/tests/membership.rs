@@ -1,6 +1,7 @@
 mod chat;
 mod files;
 mod multi_server;
+mod sync;
 #[cfg(feature = "media")]
 mod voice;
 
@@ -556,6 +557,13 @@ async fn docker_membership() -> Result<()> {
     println!(
         "owner issued a member invite; bot B joined and rotated its token through Caddy with a spoofed XFF header"
     );
+    sync::exercise(&project, data, &known, &member_words, &mut secrets).await?;
+    let owner_sync = owner_bot
+        .request(Method::GET, rusttalk_core::sync::PATH)
+        .bearer_auth(&owner.token)
+        .send()
+        .await?;
+    assert_eq!(owner_sync.status(), StatusCode::NO_CONTENT);
 
     let member_person = encode(member_id.certificate.person_id());
     let member_path = format!("/v1/members/{member_person}");
