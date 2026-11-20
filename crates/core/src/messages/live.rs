@@ -9,9 +9,10 @@ use crate::{
 pub const MAX_LIVE_FILE_SIZE: u64 = 2 * 1024 * 1024 * 1024;
 pub const LIVE_CHUNK_SIZE: usize = 64 * 1024;
 
-const MAX_NAME: usize = 1024;
-const MAX_TYPE: usize = 127;
-pub(super) const MAX_ATTACHMENT: usize = 1 + 32 + 32 + 8 + 4 + 2 + MAX_NAME + 1 + MAX_TYPE;
+use super::{MAX_FILE_NAME as MAX_NAME, MAX_MEDIA_TYPE as MAX_TYPE};
+
+/// Transfer ID, key, size, chunk size, then length-prefixed name and media type.
+pub(super) const MAX_ATTACHMENT: usize = 32 + 32 + 8 + 4 + 1 + MAX_NAME + 1 + MAX_TYPE;
 
 /// Ephemeral signed request to start or cancel a download, routed to the offering device.
 #[derive(Clone, Serialize, Deserialize)]
@@ -89,7 +90,10 @@ pub use attachment::LiveAttachment;
 #[cfg(any(feature = "client", test))]
 mod attachment {
     use super::*;
-    use crate::{keys::Key, messages::MessageError};
+    use crate::{
+        keys::Key,
+        messages::{MessageError, valid_file_name},
+    };
 
     /// Private metadata in the signed and encrypted chat offer.
     #[derive(Clone, PartialEq, Eq)]
@@ -102,21 +106,11 @@ mod attachment {
         pub(crate) key: Key,
     }
 
-    /// Bidirectional formatting characters can disguise a name's extension when displayed.
-    fn is_bidi(c: char) -> bool {
-        matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
-    }
-
     impl LiveAttachment {
         pub(crate) fn validate(&self) -> Result<(), MessageError> {
             if self.size > MAX_LIVE_FILE_SIZE
                 || self.chunk_size != LIVE_CHUNK_SIZE as u32
-                || !(1..=MAX_NAME).contains(&self.name.len())
-                || self
-                    .name
-                    .chars()
-                    .any(|c| c.is_control() || matches!(c, '/' | '\\' | ':') || is_bidi(c))
-                || matches!(self.name.as_str(), "." | "..")
+                || !valid_file_name(&self.name)
                 || !(1..=MAX_TYPE).contains(&self.mime_type.len())
                 || !self.mime_type.bytes().all(|b| b.is_ascii_graphic())
             {
@@ -127,51 +121,40 @@ mod attachment {
 
         pub(in crate::messages) fn encode(&self, out: &mut Vec<u8>) -> Result<(), MessageError> {
             self.validate()?;
-            out.push(1); // live
             out.extend_from_slice(&self.id);
             out.extend_from_slice(self.key.as_ref());
             out.extend_from_slice(&self.size.to_be_bytes());
             out.extend_from_slice(&self.chunk_size.to_be_bytes());
-            out.extend_from_slice(&(self.name.len() as u16).to_be_bytes());
+            out.push(self.name.len() as u8);
             out.extend_from_slice(self.name.as_bytes());
             out.push(self.mime_type.len() as u8);
             out.extend_from_slice(self.mime_type.as_bytes());
             Ok(())
         }
 
-        pub(in crate::messages) fn decode(bytes: &[u8]) -> Result<Self, MessageError> {
+        /// Read one offer from the front of `bytes`, leaving the rest.
+        pub(in crate::messages) fn decode(bytes: &mut &[u8]) -> Result<Self, MessageError> {
             fn take<const N: usize>(bytes: &mut &[u8]) -> Result<[u8; N], MessageError> {
                 let (head, tail) = bytes.split_first_chunk().ok_or(MessageError::Encoding)?;
                 *bytes = tail;
                 Ok(*head)
             }
-            fn text(bytes: &[u8]) -> Result<String, MessageError> {
-                String::from_utf8(bytes.to_vec()).map_err(|_| MessageError::Encoding)
+            fn text(bytes: &mut &[u8]) -> Result<String, MessageError> {
+                let [length] = take(bytes)?;
+                let (text, rest) = bytes
+                    .split_at_checked(usize::from(length))
+                    .ok_or(MessageError::Encoding)?;
+                *bytes = rest;
+                String::from_utf8(text.to_vec()).map_err(|_| MessageError::Encoding)
             }
 
-            let mut rest = bytes;
-            if take(&mut rest)? != [1] {
-                return Err(MessageError::Encoding);
-            }
-            let id = take(&mut rest)?;
-            let key = Key::new(take(&mut rest)?);
-            let size = u64::from_be_bytes(take(&mut rest)?);
-            let chunk_size = u32::from_be_bytes(take(&mut rest)?);
-            let length = usize::from(u16::from_be_bytes(take(&mut rest)?));
-            let (name, mut rest) = rest
-                .split_at_checked(length)
-                .ok_or(MessageError::Encoding)?;
-            let [length] = take(&mut rest)?;
-            if rest.len() != usize::from(length) {
-                return Err(MessageError::Encoding);
-            }
             let attachment = Self {
-                id,
-                key,
-                size,
-                chunk_size,
-                name: text(name)?,
-                mime_type: text(rest)?,
+                id: take(bytes)?,
+                key: Key::new(take(bytes)?),
+                size: u64::from_be_bytes(take(bytes)?),
+                chunk_size: u32::from_be_bytes(take(bytes)?),
+                name: text(bytes)?,
+                mime_type: text(bytes)?,
             };
             attachment.validate()?;
             Ok(attachment)

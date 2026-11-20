@@ -126,6 +126,10 @@ RUSTTALK_APP_ID=agent.rusttalk make client PROFILE=x
 
 A hidden window gets no frame callbacks, so it does not repaint until shown.
 
+Off-screen UI tests (for example with `egui_kittest`) set
+`files::TEST_ANSWER` so file dialogs return chosen paths instead of opening a
+native dialog on the desktop.
+
 Debug builds open a console on Windows; release builds do not, so check
 `rusttalk.log` for startup errors there.
 

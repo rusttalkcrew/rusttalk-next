@@ -60,7 +60,7 @@ content on the server, not even temporarily.
   2 GiB limit. Gate: e2e transfer between two bots in a room.
 
 **8. File sharing, server-stored**
-- [ ] **W13 Stored files** with the decided limits and expiry, encrypted thumbnails, no
+- [x] **W13 Stored files** with the decided limits and expiry, encrypted thumbnails, no
   file names on the server. Gate: e2e upload and download; limits enforced; volume
   and database hold no plaintext or names.
 

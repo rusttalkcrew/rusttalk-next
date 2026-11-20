@@ -523,8 +523,13 @@ mod tests {
     #[tokio::test]
     async fn one_ip_cannot_take_every_challenge() {
         let dir = tempfile::tempdir().unwrap();
+        let db = crate::store::open(dir.path()).await.unwrap();
         let app = crate::App {
-            db: crate::store::open(dir.path()).await.unwrap(),
+            files: crate::files::Files::open(dir.path(), &db)
+                .await
+                .unwrap()
+                .into(),
+            db,
             key: std::sync::Arc::new(ed25519_dalek::SigningKey::from_bytes(&[7; 32])),
             changes: tokio::sync::broadcast::channel(128).0,
             voice: None,

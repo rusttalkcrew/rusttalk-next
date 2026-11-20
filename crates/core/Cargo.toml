@@ -14,7 +14,7 @@ bip39 = { version = "3", features = ["zeroize"] }
 ed25519-dalek = { version = "2.2", default-features = false, features = ["fast", "zeroize"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"], optional = true }
 hkdf = "0.12"
-image = { version = "0.25", default-features = false, features = ["jpeg"], optional = true }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"], optional = true }
 livekit = { version = "=0.11.0", optional = true }
 livekit-net = { version = "=0.2.0", optional = true }
 livekit-protocol = { version = "=0.8.3", optional = true }
@@ -46,7 +46,7 @@ windows = { version = "0.62.2", features = ["Wdk_System_SystemServices", "Win32_
 
 [features]
 https-client = ["dep:reqwest", "dep:rustls"]
-client = ["dep:anyhow", "dep:futures-util", "https-client", "reqwest/json", "dep:serde_json", "dep:tempfile", "dep:tokio", "dep:tokio-tungstenite", "dep:tracing"]
+client = ["dep:anyhow", "dep:image", "dep:futures-util", "https-client", "reqwest/json", "dep:serde_json", "dep:tempfile", "dep:tokio", "dep:tokio-tungstenite", "dep:tracing"]
 livekit-tls = ["dep:async-trait", "dep:futures-util", "dep:livekit-net", "dep:livekit-protocol", "dep:prost", "dep:reqwest", "dep:rustls", "dep:tokio", "dep:tokio-tungstenite"]
 capture = ["dep:anyhow", "dep:serde_json", "dep:tracing", "dep:wasapi", "dep:windows"]
 voice = ["client", "livekit-tls", "dep:image", "dep:livekit", "dep:mime_guess", "dep:nokhwa", "dep:windows", "dep:windows-capture", "tokio/fs", "tokio/io-util", "tokio/process", "tokio/rt"]

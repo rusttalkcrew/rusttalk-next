@@ -23,7 +23,8 @@ use crate::{
     store::audit,
 };
 
-pub const BODY_LIMIT: usize = 16 * 1024;
+/// JSON for the largest envelope (unpadded base64url) plus 512 bytes for the ID, epoch and keys.
+pub const BODY_LIMIT: usize = (MAX_MESSAGE_BYTES * 4).div_ceil(3) + 512;
 const RETAIN: i64 = 10_000;
 const PAGE_LIMIT: i64 = 100;
 
@@ -68,7 +69,11 @@ impl TryFrom<Row> for MessageRecord {
     }
 }
 
-async fn chat_kind(db: &mut SqliteConnection, actor: &Actor, channel: &str) -> ApiResult<String> {
+pub async fn chat_kind(
+    db: &mut SqliteConnection,
+    actor: &Actor,
+    channel: &str,
+) -> ApiResult<String> {
     decode::<32>(channel)?;
     query_scalar(
         "SELECT c.kind FROM channels c JOIN channel_readers r ON r.channel_id = c.id
@@ -79,6 +84,19 @@ async fn chat_kind(db: &mut SqliteConnection, actor: &Actor, channel: &str) -> A
     .fetch_optional(db)
     .await?
     .ok_or(ApiError::forbidden("channel_read_denied"))
+}
+
+pub async fn require_write(
+    db: &mut SqliteConnection,
+    actor: &Actor,
+    channel: &str,
+) -> ApiResult<()> {
+    if chat_kind(db, actor, channel).await? != "dm"
+        && !channels::has_flag(db, channel, &actor.person, channels::WRITE).await?
+    {
+        return Err(ApiError::forbidden("channel_write_denied"));
+    }
+    Ok(())
 }
 
 pub async fn create(
@@ -96,11 +114,7 @@ pub async fn create(
     let message_id = decode(&id)?;
     let envelope_bytes = decode_bytes(&envelope)?;
     let (mut tx, actor) = authenticate(&app, &headers).await?;
-    if chat_kind(&mut tx, &actor, &channel).await? != "dm"
-        && !channels::has_flag(&mut tx, &channel, &actor.person, channels::WRITE).await?
-    {
-        return Err(ApiError::forbidden("channel_write_denied"));
-    }
+    require_write(&mut tx, &actor, &channel).await?;
     let scope = Scope {
         kind: Kind::Channel,
         id: channel_id,
@@ -347,11 +361,24 @@ pub async fn delete(
     Ok(StatusCode::NO_CONTENT)
 }
 
-const _: () = assert!(BODY_LIMIT > MAX_MESSAGE_BYTES.div_ceil(3) * 4 + 1024);
+const _: () = assert!(BODY_LIMIT == 14_847);
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn body_limit_holds_the_largest_message() {
+        let json = format!(
+            r#"{{"id":"{}","epoch":{},"envelope":"{}"}}"#,
+            "A".repeat(43),
+            i64::MAX,
+            "A".repeat((MAX_MESSAGE_BYTES * 4).div_ceil(3)),
+        );
+        assert!(json.len() <= BODY_LIMIT);
+        assert!(BODY_LIMIT - json.len() < 512);
+        assert!(serde_json::from_str::<NewMessage>(&json).is_ok());
+    }
 
     #[tokio::test]
     async fn retention_drops_the_oldest_record_in_one_channel() -> anyhow::Result<()> {

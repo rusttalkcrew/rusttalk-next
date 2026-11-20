@@ -17,7 +17,8 @@ use eframe::egui::{
 use crate::{
     audio::{self, Audio, Settings, StreamId},
     camera::{Camera, Change},
-    home::{Home, Tab, avatar, palette, section},
+    files::{self, Ask},
+    home::{Home, Tab, avatar, palette, section, toast_line},
     net::Command,
     screen::{self, Kind, Options, Target, Video},
     server::{Call, CallState, Id, Screen, Server, Stats},
@@ -33,6 +34,9 @@ const CEILING: f32 = -10.0;
 const METER_WIDTH: f32 = 360.0;
 /// Width of a person's tile while it shows their camera.
 const VIDEO_WIDTH: f32 = 240.0;
+/// The live transfer limit.
+pub const MAX_LIVE_FILE: u64 = rusttalk_core::messages::MAX_LIVE_FILE_SIZE;
+const DIRECT: &str = "Sent directly through the call. Nothing is stored.";
 
 pub struct Voice {
     pub audio: Audio,
@@ -59,6 +63,37 @@ pub struct Voice {
     cameras: HashMap<String, Option<TextureHandle>>,
     /// Camera tracks drawn this frame; only these stay subscribed.
     shown: HashSet<String>,
+    /// Files sent through the call, newest last.
+    pub live_files: Vec<LiveFile>,
+}
+
+/// A file sent through the call, shown in the call bar.
+pub struct LiveFile {
+    pub id: Id,
+    /// Who offers it; `None` for ours.
+    pub from: Option<Id>,
+    pub name: String,
+    pub size: u64,
+    pub state: LiveState,
+    /// Who is receiving our file.
+    pub receivers: Vec<Id>,
+}
+
+#[derive(PartialEq)]
+pub enum LiveState {
+    Offered,
+    /// Bytes received so far.
+    Saving(u64),
+    Saved,
+    Failed,
+    Sending,
+}
+
+enum LiveAction {
+    Send,
+    Save(Id, String),
+    /// Hide it here; for ours or a download, also stop it.
+    Remove(Id, bool),
 }
 
 pub enum Listing<T> {
@@ -112,6 +147,7 @@ impl Voice {
             hidden: HashSet::new(),
             cameras: HashMap::new(),
             shown: HashSet::new(),
+            live_files: Vec::new(),
         }
     }
 
@@ -124,8 +160,9 @@ impl Voice {
         self.clear_screens();
     }
 
-    /// Forget this call's video: our screen and camera, and what we watch.
+    /// Forget this call's video and files: our screen and camera, and what we watch.
     pub fn clear_screens(&mut self) {
+        self.live_files.clear();
         self.sharing = Sharing::Off;
         self.share_screen = None;
         self.watching = None;
@@ -164,6 +201,7 @@ pub fn join(home: &mut Home, index: usize, channel: Id) {
         stats: Stats::default(),
         can_talk: true,
         can_share_video: true,
+        can_send_files: true,
     });
     home.voice.audio.set_voice(true);
 }
@@ -374,6 +412,8 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
     let connected = call.state == CallState::Connected;
     let can_talk = call.can_talk;
     let can_share_video = call.can_share_video;
+    let can_send_files = call.can_send_files;
+    let mut live = None;
     let mut leave_now = false;
     let mut share = None;
     let mut stop = None;
@@ -442,6 +482,13 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
             if screen::SUPPORTED {
                 stop_screen = screen_button(ui, &mut home.voice, connected, can_share_video);
             }
+            live = live_files(
+                ui,
+                &home.voice.live_files,
+                server,
+                connected,
+                can_send_files,
+            );
         });
     let server = home
         .voice
@@ -465,9 +512,112 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
         home.voice.sharing = Sharing::Off;
         server.send(Command::StopScreen);
     }
+    if let Some(server) = server {
+        let address = server.address.clone();
+        match live {
+            Some(LiveAction::Send) => home.files.ask(ui.ctx(), Ask::Offer(address)),
+            Some(LiveAction::Save(id, name)) => {
+                home.files.ask(ui.ctx(), Ask::Accept(address, id, name))
+            }
+            Some(LiveAction::Remove(id, stop)) => {
+                if stop {
+                    server.send(Command::CancelFile(id));
+                }
+                home.voice.live_files.retain(|file| file.id != id);
+            }
+            None => {}
+        }
+    }
     if leave_now {
         leave(home);
     }
+}
+
+/// "Send file", then each file offered in the call with what can be done with it.
+fn live_files(
+    ui: &mut Ui,
+    list: &[LiveFile],
+    server: Option<&Server>,
+    connected: bool,
+    allowed: bool,
+) -> Option<LiveAction> {
+    let mut action = None;
+    let button = Button::new("📎  Send file").min_size(Vec2::new(ui.available_width(), 28.0));
+    let button = ui.add_enabled(connected && allowed, button);
+    let button = if allowed {
+        button.on_hover_text(DIRECT)
+    } else {
+        button.on_disabled_hover_text("You can't send files here")
+    };
+    if button.clicked() {
+        action = Some(LiveAction::Send);
+    }
+    let name = |person: &Id| server.map_or_else(String::new, |s| s.member_name(person));
+    for file in list {
+        let size = files::size(file.size);
+        Frame::new()
+            .fill(ui.visuals().faint_bg_color)
+            .corner_radius(4)
+            .inner_margin(Margin::same(6))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                match (file.from, &file.state) {
+                    (None, _) => {
+                        ui.label(format!("Sending {} ({size})", file.name))
+                            .on_hover_text(DIRECT);
+                        let who: Vec<_> = file.receivers.iter().map(name).collect();
+                        ui.label(
+                            RichText::new(match who.len() {
+                                0 => "Waiting for someone to save it".to_owned(),
+                                _ => format!("{} receiving", who.join(", ")),
+                            })
+                            .small()
+                            .weak(),
+                        );
+                        if ui.small_button("Stop sending").clicked() {
+                            action = Some(LiveAction::Remove(file.id, true));
+                        }
+                    }
+                    (Some(from), LiveState::Offered) => {
+                        ui.label(format!(
+                            "{} wants to send {} ({size})",
+                            name(&from),
+                            file.name
+                        ))
+                        .on_hover_text(DIRECT);
+                        ui.horizontal(|ui| {
+                            if ui.small_button("Save").clicked() {
+                                action = Some(LiveAction::Save(file.id, file.name.clone()));
+                            }
+                            if ui.small_button("Decline").clicked() {
+                                action = Some(LiveAction::Remove(file.id, false));
+                            }
+                        });
+                    }
+                    (Some(_), LiveState::Saving(bytes)) => {
+                        ui.label(&file.name);
+                        let done = *bytes as f32 / file.size.max(1) as f32;
+                        ui.add(egui::ProgressBar::new(done).show_percentage());
+                        if ui.small_button("Cancel").clicked() {
+                            action = Some(LiveAction::Remove(file.id, true));
+                        }
+                    }
+                    (Some(_), state) => {
+                        ui.horizontal(|ui| {
+                            ui.label(if *state == LiveState::Saved {
+                                format!("Saved {}", file.name)
+                            } else {
+                                format!("{} didn't arrive.", file.name)
+                            });
+                            if ui.small_button("×").on_hover_text("Dismiss").clicked() {
+                                action = Some(LiveAction::Remove(file.id, false));
+                            }
+                        });
+                    }
+                }
+            });
+    }
+    action
 }
 
 /// Turns the camera on or off in the call.
@@ -819,6 +969,8 @@ pub fn room(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
     let joined = home.voice.in_call(server, &channel);
     ui.label(RichText::new(format!("🔊 {title}")).strong().size(17.0));
     ui.separator();
+    // Problems from the call bar and the room show here; the chat has its own line.
+    toast_line(ui, &mut home.toast);
     let peers = server.voice.get(&channel).cloned().unwrap_or_default();
     if joined && home.voice.watching.is_some() {
         screen_view(ui, home);

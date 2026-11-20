@@ -3,6 +3,7 @@ mod channels;
 mod dms;
 mod events;
 mod index;
+mod files;
 mod keys;
 mod members;
 mod messages;
@@ -54,6 +55,7 @@ struct App {
     changes: broadcast::Sender<Option<Event>>,
     voice: Option<Arc<voice::LiveKit>>,
     listing_changed: watch::Sender<()>,
+    files: Arc<files::Files>,
 }
 
 impl App {
@@ -168,7 +170,9 @@ async fn run() -> Result<()> {
                     "Claim ownership with docker compose exec api rusttalk-api owner-invite"
                 );
             }
+            let files = Arc::new(files::Files::open(&dir, &db).await?);
             serve(App {
+                files,
                 db,
                 key: Arc::new(key),
                 changes: broadcast::channel(128).0,
@@ -200,6 +204,7 @@ async fn run() -> Result<()> {
 async fn serve(app: App) -> io::Result<()> {
     let expiry = tokio::spawn(store::expire_sessions(app.db.clone()));
     let publisher = tokio::spawn(index::refresh(app.clone(), app.listing_changed.subscribe()));
+    let file_expiry = tokio::spawn(files::expire(app.clone()));
     let app = Router::new()
         .route("/v1/health", get(|| async { "ok\n" }))
         .route("/v1/auth/challenge", get(auth::challenge))
@@ -262,6 +267,7 @@ async fn serve(app: App) -> io::Result<()> {
         .route("/v1/roles/{id}/name", put(roles::rename))
         .route("/v1/owner", put(roles::transfer))
         .route("/v1/audit", get(members::audit_log))
+        .route("/v1/files/{id}", get(files::download).delete(files::delete))
         .layer(RequestBodyLimitLayer::new(4096))
         .merge(
             Router::new()
@@ -271,6 +277,7 @@ async fn serve(app: App) -> io::Result<()> {
                 )
                 .layer(RequestBodyLimitLayer::new(rusttalk_core::index::BODY_LIMIT)),
         )
+        .route("/v1/files", post(files::upload))
         .route("/internal/livekit", post(voice::webhook))
         .merge(
             Router::new()
@@ -300,6 +307,7 @@ async fn serve(app: App) -> io::Result<()> {
     let result = axum::serve(listener, app).await;
     expiry.abort();
     publisher.abort();
+    file_expiry.abort();
     result
 }
 
