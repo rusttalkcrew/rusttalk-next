@@ -4,7 +4,7 @@ use anyhow::{Context, Result, ensure};
 use rusttalk_bot::screen;
 use rusttalk_core::client::{
     KeyClient,
-    voice::{TrackSource, VoiceRoom},
+    voice::{TrackSid, TrackSource, VoiceRoom},
 };
 
 use super::{LIMIT, set_flags};
@@ -64,5 +64,42 @@ pub(super) async fn exercise(
         result = screen::send(source) => result?,
     }
     a.unpublish_video(&sid).await?;
+
+    // Removing `video` from B's role mid-call takes B's camera off the call. The client stops
+    // its capture once its grant loses the camera.
+    let source = screen::source();
+    let sid = b
+        .publish_camera(screen::camera_options(), source.clone())
+        .await?
+        .sid();
+    let shown = |sid: &TrackSid| {
+        a.remote_video_tracks()
+            .iter()
+            .any(|video| video.sid == *sid)
+    };
+    let revoked = async {
+        tokio::time::timeout(LIMIT, async {
+            while !shown(&sid) {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .context("waiting for B's camera")?;
+        set_flags(owner, channel, "admin", 7).await?;
+        tokio::time::timeout(LIMIT, async {
+            while b.can_use_camera() || shown(&sid) {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .context("B's camera stayed after losing video")?;
+        set_flags(owner, channel, "admin", 15).await?;
+        println!("W11 camera taken off the call when video is removed");
+        Ok::<_, anyhow::Error>(())
+    };
+    tokio::select! {
+        result = revoked => result?,
+        result = screen::send(source) => result?,
+    }
     c.join_voice(channel_id).await
 }

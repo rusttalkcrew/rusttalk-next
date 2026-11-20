@@ -25,9 +25,15 @@ use crate::{
 pub struct Camera {
     /// Turned on in the call.
     pub on: bool,
+    /// `on` as of the last update, to retry a failed camera when it is turned on again.
+    was_on: bool,
+    /// The Video tab was open at the last update.
+    preview: bool,
     /// Camera names for the picker, listed when the Video tab opens.
     names: Option<Arc<Mutex<Listing<String>>>>,
     running: Option<Running>,
+    /// Finishes once the previous capture released the device; the next start waits for it.
+    closing: Option<thread::JoinHandle<()>>,
     /// Which `Running` the call publishes.
     published: Option<u64>,
     texture: Option<TextureHandle>,
@@ -43,6 +49,7 @@ struct Running {
     config: Config,
     /// Filled by the starting thread.
     capture: Arc<Mutex<Option<Result<Capture, String>>>>,
+    starter: thread::JoinHandle<()>,
 }
 
 /// What the call should do with the camera this frame.
@@ -68,8 +75,11 @@ impl Camera {
         Self {
             runtime,
             on: false,
+            was_on: false,
+            preview: false,
             names: None,
             running: None,
+            closing: None,
             published: None,
             texture: None,
             problem: None,
@@ -90,10 +100,16 @@ impl Camera {
         preview: bool,
     ) -> Option<Change> {
         self.on &= in_call;
+        self.preview = preview;
+        // A failure from before (e.g. in the Video tab) must not block turning the camera on.
+        let retry =
+            self.on && !self.was_on && matches!(self.ready().as_deref(), Some(Some(Err(_))));
+        self.was_on = self.on;
         let wanted = (self.on || preview).then(|| (settings.camera.clone(), options(settings)));
-        if self.running.as_ref().map(|r| &r.config) != wanted.as_ref() {
-            self.running = wanted.map(|config| launch(ctx, &self.runtime, config));
-            self.texture = None;
+        if retry || self.running.as_ref().map(|r| &r.config) != wanted.as_ref() {
+            self.stop_now();
+            let previous = self.closing.take();
+            self.running = wanted.map(|config| launch(ctx, &self.runtime, config, previous));
         }
         let mut failed = None;
         if let Some(mut slot) = self.ready() {
@@ -109,6 +125,7 @@ impl Camera {
         }
         if let Some(text) = failed {
             self.on = false;
+            self.was_on = false;
             self.problem = Some(text);
         }
         let serial = self.running.as_ref().map(|r| r.serial);
@@ -129,10 +146,35 @@ impl Camera {
         Some(Change::Publish(source, options))
     }
 
-    /// The call ended; capture stops unless the Video tab is open.
+    /// The call ended or dropped the camera; capture stops now unless the Video tab is open.
     pub fn reset(&mut self) {
         self.on = false;
         self.published = None;
+        if !self.preview {
+            self.stop_now();
+        }
+    }
+
+    /// Stop capture and keep a handle that finishes once the device is free.
+    fn stop_now(&mut self) {
+        self.texture = None;
+        let Some(running) = self.running.take() else {
+            return;
+        };
+        let taken = lock(&running.capture).take();
+        let release = match taken {
+            Some(Ok(capture)) => capture.stop(),
+            Some(Err(_)) => return,
+            // Still starting: stop it as soon as it has started.
+            None => thread::spawn(move || {
+                let _ = running.starter.join();
+                if let Some(Ok(capture)) = lock(&running.capture).take() {
+                    let _ = capture.stop().join();
+                }
+            }),
+        };
+        // `launch` took any earlier handle, so this one is the only one.
+        self.closing = Some(release);
     }
 
     /// The mirrored self view, if the camera is running.
@@ -165,19 +207,33 @@ impl Camera {
     }
 }
 
-fn launch(ctx: &egui::Context, runtime: &tokio::runtime::Handle, config: Config) -> Running {
+fn launch(
+    ctx: &egui::Context,
+    runtime: &tokio::runtime::Handle,
+    config: Config,
+    previous: Option<thread::JoinHandle<()>>,
+) -> Running {
     static SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let capture = Arc::new(Mutex::new(None));
     let slot = capture.clone();
     let ctx = ctx.clone();
     let (name, options) = config.clone();
     let runtime = runtime.clone();
-    thread::spawn(move || {
+    let starter = thread::spawn(move || {
+        // The previous capture may still hold the device.
+        if let Some(previous) = previous {
+            let _ = previous.join();
+        }
         let _runtime = runtime.enter();
         let started = list_cameras().and_then(|cameras| {
+            // A saved camera that is gone falls back to the first one.
+            let at = cameras
+                .iter()
+                .position(|camera| name.as_ref() == Some(&camera.name))
+                .unwrap_or(0);
             let device = cameras
                 .into_iter()
-                .find(|camera| name.as_ref().is_none_or(|name| camera.name == *name))
+                .nth(at)
                 .ok_or_else(|| anyhow::anyhow!("no camera found"))?;
             start(device, options)
         });
@@ -195,6 +251,7 @@ fn launch(ctx: &egui::Context, runtime: &tokio::runtime::Handle, config: Config)
         serial: SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         config,
         capture,
+        starter,
     }
 }
 

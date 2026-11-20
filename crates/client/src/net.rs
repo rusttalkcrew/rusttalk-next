@@ -12,7 +12,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use eframe::egui;
-use livekit::prelude::RemoteTrack;
+use livekit::prelude::{Participant, RemoteTrack};
 use reqwest::{Method, StatusCode};
 use rusttalk_core::{
     auth::{
@@ -636,7 +636,22 @@ async fn serve(
                 }
             }
             next = next_voice(&mut state.voice) => match next {
-                Next::Event(event) => on_voice(ctx, url, client, state, event),
+                Next::Event(event) => {
+                    let lost = match &event {
+                        Some(RoomEvent::ParticipantPermissionChanged {
+                            participant: Participant::Local(_),
+                            ..
+                        }) => Some(None),
+                        Some(RoomEvent::LocalTrackUnpublished { publication, .. }) => {
+                            Some(Some(publication.sid()))
+                        }
+                        _ => None,
+                    };
+                    on_voice(ctx, url, client, state, event);
+                    if let Some(unpublished) = lost {
+                        stop_lost_video(ctx, url, client, state, unpublished).await;
+                    }
+                }
                 Next::Capture(capture) => share_screen(ctx, url, client, state, capture).await,
             },
             _ = stats.tick(), if state.voice.is_some() => {
@@ -1721,6 +1736,52 @@ fn on_voice(
         _ => return,
     }
     send_room(ctx, url, client, state, channel);
+}
+
+/// Stop the camera and screen once LiveKit no longer carries them: `video` was removed
+/// mid-call (LiveKit drops the grant) or the SDK unpublished the track itself.
+async fn stop_lost_video(
+    ctx: &Ctx,
+    url: &Url,
+    client: &KeyClient<'_>,
+    state: &mut State,
+    unpublished: Option<TrackSid>,
+) {
+    let Some(live) = &mut state.voice else {
+        return;
+    };
+    let (camera, screen) = (live.room.can_use_camera(), live.room.can_share_screen());
+    let gone = |sid: &TrackSid, allowed: bool| !allowed || unpublished.as_ref() == Some(sid);
+    let mut changed = false;
+    if live.camera.as_ref().is_some_and(|sid| gone(sid, camera)) {
+        stop_camera(live).await;
+        ctx.send(Update::CameraStopped);
+        changed = true;
+    }
+    if !screen && let Some(starting) = live.starting.take() {
+        starting.abort();
+        ctx.send(Update::Sharing(false));
+    }
+    if live
+        .screen
+        .as_ref()
+        .is_some_and(|(sid, _)| gone(sid, screen))
+    {
+        let (sid, _capture) = live.screen.take().expect("checked above");
+        tracing::info!("stopped sharing screen");
+        if let Err(error) = live.room.unpublish_video(&sid).await {
+            tracing::warn!(error = %format_args!("{error:#}"), "stopping screen failed");
+        }
+        ctx.send(Update::Sharing(false));
+        changed = true;
+    }
+    let channel = live.channel;
+    if unpublished.is_none() && !(camera && screen) {
+        ctx.send(Update::NoVideo(url.clone(), channel));
+    }
+    if changed {
+        send_room(ctx, url, client, state, channel);
+    }
 }
 
 /// Stop sharing apps that closed or whose capture stopped by itself.
