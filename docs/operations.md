@@ -187,8 +187,8 @@ with BuildKit, the client build dependencies and `appimagetool` on PATH.
 Use a build host with the oldest glibc you intend to support. The AppImage
 uses the host's desktop stack, ALSA and PipeWire libraries. The package
 contains the RustTalk client and its PipeWire helper side by side.
-Set `RUSTTALK_APPIMAGE_RUNTIME` to a verified, locally staged x86_64
-AppImage runtime for offline builds. Keep the source and license notices
+`make release` requires `RUSTTALK_APPIMAGE_RUNTIME`: a verified, locally staged x86_64
+AppImage runtime, so nothing is downloaded while signing. Keep the source and license notices
 for the exact runtime with the publication. `--appimage-license` displays the runtime's
 component notices.
 [AppImage packager](https://github.com/AppImage/appimagetool/releases)

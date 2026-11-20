@@ -9,6 +9,7 @@ import platform
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import tomllib
 
@@ -85,9 +86,11 @@ def appimage(ver, directory, env):
     (appdir / "AppRun").symlink_to("usr/bin/rusttalk-client")
     shutil.copy2("deploy/release/rusttalk.desktop", appdir)
     shutil.copy2("deploy/release/rusttalk.svg", appdir)
+    # A pinned local runtime: appimagetool would otherwise download one unverified while signing.
     runtime = env.get("RUSTTALK_APPIMAGE_RUNTIME")
-    runtime_arg = ("--runtime-file", runtime) if runtime else ()
-    run("appimagetool", *runtime_arg, appdir, directory / names(ver)["linux-x86_64"],
+    if not runtime or not Path(runtime).is_file():
+        sys.exit("Set RUSTTALK_APPIMAGE_RUNTIME to a downloaded, checked AppImage runtime file.")
+    run("appimagetool", "--runtime-file", runtime, appdir, directory / names(ver)["linux-x86_64"],
         env={**env, "ARCH": "x86_64"})
 
 
