@@ -11,12 +11,13 @@ use crate::{
     keys::Key,
 };
 
-/// Decrypted W07 message text and references. The wire attachment list is empty until W12.
+/// Decrypted message text and references.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct MessageBody {
     pub text: String,
     pub reply_to: Option<[u8; 32]>,
     pub edit_of: Option<[u8; 32]>,
+    pub live: Option<LiveAttachment>,
 }
 
 impl MessageBody {
@@ -31,7 +32,10 @@ impl MessageBody {
         body.extend_from_slice(self.text.as_bytes());
         body.extend(self.reply_to.iter().flatten());
         body.extend(self.edit_of.iter().flatten());
-        body.push(0);
+        body.push(u8::from(self.live.is_some()));
+        if let Some(live) = &self.live {
+            live.encode(&mut body)?;
+        }
         Ok(body)
     }
 
@@ -55,9 +59,11 @@ impl MessageBody {
         };
         let reply_to = reference(1)?;
         let edit_of = reference(2)?;
-        if tail != [0] {
-            return Err(MessageError::Encoding);
-        }
+        let live = match tail {
+            [0] => None,
+            [1, attachment @ ..] => Some(LiveAttachment::decode(attachment)?),
+            _ => return Err(MessageError::Encoding),
+        };
         let text = std::str::from_utf8(text).map_err(|_| MessageError::Encoding)?;
         if text.chars().count() > MAX_TEXT_CHARS {
             return Err(MessageError::TextLimit);
@@ -66,6 +72,7 @@ impl MessageBody {
             text: text.to_owned(),
             reply_to,
             edit_of,
+            live,
         })
     }
 }
@@ -160,9 +167,10 @@ mod tests {
             text: "🦀".repeat(MAX_TEXT_CHARS),
             reply_to: Some([5; 32]),
             edit_of: Some([6; 32]),
+            live: None,
         };
         let envelope = context.seal(&key, &sender, &body).unwrap();
-        assert_eq!(envelope.len(), MAX_MESSAGE_BYTES);
+        assert_eq!(envelope.len(), MAX_MESSAGE_BYTES - live::MAX_ATTACHMENT);
         assert!(context.open(&key, &sender.certificate, &envelope).unwrap() == body);
         for changed in [
             MessageContext {
@@ -240,6 +248,34 @@ mod tests {
             context.seal(&key, &sender, &oversized).err(),
             Some(MessageError::TextLimit)
         );
+    }
+
+    #[test]
+    fn live_attachment_framing_checks_bounds() {
+        use crate::messages::{LIVE_CHUNK_SIZE, MAX_LIVE_FILE_SIZE};
+
+        let mut body = MessageBody {
+            live: Some(LiveAttachment {
+                id: [1; 32],
+                key: Key::new([2; 32]),
+                name: "crab.txt".into(),
+                mime_type: "text/plain".into(),
+                size: MAX_LIVE_FILE_SIZE,
+                chunk_size: LIVE_CHUNK_SIZE as u32,
+            }),
+            ..Default::default()
+        };
+        let encoded = body.encode().unwrap();
+        assert!(MessageBody::decode(&encoded).unwrap() == body);
+        assert!(MessageBody::decode(&encoded[..encoded.len() - 1]).is_err());
+
+        let size_at = MIN_PLAINTEXT + 1 + 32 + 32;
+        let mut oversized = encoded.to_vec();
+        oversized[size_at..size_at + 8].copy_from_slice(&(MAX_LIVE_FILE_SIZE + 1).to_be_bytes());
+        assert!(MessageBody::decode(&oversized).is_err());
+
+        body.live.as_mut().unwrap().name = "../crab.txt".into();
+        assert!(body.encode().is_err());
     }
 
     #[test]

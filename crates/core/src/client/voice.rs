@@ -1,15 +1,16 @@
 //! Pinned, end-to-end encrypted voice sessions and caller-owned audio I/O.
 
+mod live_file;
 mod screen;
 mod stats;
 mod track_name;
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use anyhow::{Context, Result, ensure};
 use hkdf::Hkdf;
 use livekit::{
-    Room, RoomOptions,
+    Room, RoomDataStreamOptions, RoomOptions,
     e2ee::{
         E2eeOptions, EncryptionType,
         key_provider::{KeyProvider, KeyProviderOptions},
@@ -42,6 +43,7 @@ use crate::{
 };
 
 use super::KeyClient;
+pub use live_file::{LiveDownload, LiveFileEvent};
 pub use screen::{NativeVideoSource, NativeVideoStream, RemoteVideo, RemoteVideoTrack};
 pub use stats::{TrackStats, VoiceStats};
 
@@ -142,6 +144,8 @@ impl KeyClient<'_> {
         });
         options.join_retries = 0;
         options.auto_subscribe = false;
+        options.data_stream =
+            RoomDataStreamOptions::default().with_max_payload_byte_length(live_file::RECEIVE_CAP);
         let (room, events) = Room::connect(url.as_str(), &reply.token, options)
             .await
             .context("connect to pinned LiveKit room")?;
@@ -151,7 +155,7 @@ impl KeyClient<'_> {
             }
         }
         Ok(VoiceRoom {
-            room,
+            room: Arc::new(room),
             events,
             server: server.clone(),
             channel: *channel,
@@ -160,6 +164,7 @@ impl KeyClient<'_> {
             name_keys,
             screen_names,
             stats: stats::Sampler::default(),
+            files: live_file::LiveFiles::default(),
         })
     }
 
@@ -213,7 +218,7 @@ fn install_key(provider: &KeyProvider, key: &Key, epoch: i64) -> Result<()> {
 
 /// A joined voice channel. Use the API events to reconcile keys alongside room events.
 pub struct VoiceRoom {
-    room: Room,
+    room: Arc<Room>,
     events: mpsc::UnboundedReceiver<RoomEvent>,
     server: KnownServer,
     channel: [u8; 32],
@@ -222,6 +227,7 @@ pub struct VoiceRoom {
     name_keys: HashMap<i64, Key>,
     screen_names: HashMap<i64, Key>,
     stats: stats::Sampler,
+    files: live_file::LiveFiles,
 }
 
 fn subscribe_audio(publication: &RemoteTrackPublication) {
@@ -288,15 +294,29 @@ impl VoiceRoom {
     /// Next SDK event. Encrypted subscribed audio tracks arrive as `TrackSubscribed`.
     pub async fn next_event(&mut self) -> Option<RoomEvent> {
         while let Some(event) = self.events.recv().await {
+            #[allow(deprecated, reason = "discard the SDK's legacy raw stream events")]
             match &event {
                 RoomEvent::TokenRefreshed { .. } => continue,
-                // Data channel payloads are not frame-encrypted; tokens deny publishing them.
+                RoomEvent::ByteStreamOpened {
+                    reader,
+                    participant_identity,
+                    ..
+                } => {
+                    if let Some(reader) = reader.take() {
+                        self.files.receive(participant_identity, reader);
+                    }
+                    continue;
+                }
+                RoomEvent::Disconnected { .. } => self.files.disconnect(),
+                // Only the file protocol authenticates its data payloads independently.
                 RoomEvent::DataReceived { .. }
                 | RoomEvent::ChatMessage { .. }
                 | RoomEvent::TranscriptionReceived { .. }
                 | RoomEvent::SipDTMFReceived { .. }
-                | RoomEvent::ByteStreamOpened { .. }
-                | RoomEvent::TextStreamOpened { .. } => continue,
+                | RoomEvent::TextStreamOpened { .. }
+                | RoomEvent::StreamHeaderReceived { .. }
+                | RoomEvent::StreamChunkReceived { .. }
+                | RoomEvent::StreamTrailerReceived { .. } => continue,
                 RoomEvent::TrackSubscribed { publication, .. }
                     if publication.encryption_type() != EncryptionType::Gcm =>
                 {
@@ -441,7 +461,8 @@ impl VoiceRoom {
     }
 
     /// Disconnect from LiveKit and release media tracks.
-    pub async fn leave(self) -> Result<()> {
+    pub async fn leave(mut self) -> Result<()> {
+        self.files.disconnect();
         self.room.close().await?;
         Ok(())
     }

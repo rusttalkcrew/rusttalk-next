@@ -133,6 +133,11 @@ pub enum Event {
         channel: String,
         id: String,
     },
+    LiveFileAccepted {
+        channel: String,
+        device: String,
+        acceptance: crate::messages::LiveFileAcceptance,
+    },
     Resync,
 }
 

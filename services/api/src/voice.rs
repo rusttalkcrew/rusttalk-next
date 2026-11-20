@@ -8,9 +8,10 @@ use std::{
 use anyhow::{Context, ensure};
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, State, rejection::JsonRejection},
     http::{HeaderMap, StatusCode, header::AUTHORIZATION},
 };
+use ed25519_dalek::VerifyingKey;
 use livekit_api::{
     access_token::{AccessToken, TokenVerifier, VideoGrants},
     webhooks::WebhookReceiver,
@@ -19,13 +20,14 @@ use livekit_protocol::{ParticipantPermission, TrackSource};
 use rusttalk_core::{
     auth::{decode, encode, voice_identity},
     keys::Event,
+    messages::LiveFileAcceptance,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::{SqliteConnection, query_as, query_scalar};
 use zeroize::Zeroizing;
 
-use crate::{ApiError, ApiResult, App, auth::authenticate, channels};
+use crate::{ApiError, ApiResult, App, auth::authenticate, channels, payload};
 
 const DEV_SECRET: &str = "dev-only-livekit-secret-do-not-deploy";
 const ROSTER_TTL: Duration = Duration::from_secs(1);
@@ -195,6 +197,8 @@ pub async fn token(
     let (mut tx, actor) = authenticate(&app, &headers).await?;
     require_voice_read(&mut tx, &channel, &actor.person).await?;
     let sources = publish_sources(&mut tx, &channel, &actor.person).await?;
+    let can_publish_data =
+        channels::has_flag(&mut tx, &channel, &actor.person, channels::WRITE).await?;
     let identity = voice_identity(app.key.verifying_key().as_bytes(), &actor.device);
     let token = configured(&app)?.sign(
         &identity,
@@ -202,8 +206,7 @@ pub async fn token(
             room: channel,
             room_join: true,
             can_publish: Some(!sources.is_empty()),
-            // Data channel payloads bypass frame encryption. Live transfer (W12) revisits this.
-            can_publish_data: Some(false),
+            can_publish_data: Some(can_publish_data),
             can_subscribe: Some(true),
             can_publish_sources: sources
                 .into_iter()
@@ -304,7 +307,7 @@ pub async fn participants(
     Ok(Json(presence))
 }
 
-/// Disconnect devices that lost read access and revoke publishing from those that lost `speak`.
+/// Disconnect devices that lost read access and revoke lost publication grants.
 /// Runs after the change commits and never blocks it; LiveKit keeps the grants a device
 /// joined with, and refreshes its token with them, until told otherwise.
 pub fn enforce(app: &App, room: Option<String>) {
@@ -362,21 +365,30 @@ async fn enforce_rooms(app: &App, livekit: &LiveKit, room: Option<String>) -> Ap
                     continue;
                 };
                 let mut permission = participant.permission;
-                if !permission.can_publish {
-                    continue;
+                let revoke_data = permission.can_publish_data
+                    && !channels::has_flag(&mut db, &room, person, channels::WRITE).await?;
+                let mut changed = revoke_data;
+                if revoke_data {
+                    permission.can_publish_data = false;
                 }
-                let allowed = publish_sources(&mut db, &room, person).await?;
-                let granted = &mut permission.can_publish_sources;
-                let before = granted.len();
-                if before == 0 {
-                    // LiveKit represents unrestricted grants with an empty source list.
-                    granted.extend(allowed.iter().map(|source| *source as i32));
-                } else {
-                    granted
-                        .retain(|source| allowed.iter().any(|allowed| *allowed as i32 == *source));
+                if permission.can_publish {
+                    let allowed = publish_sources(&mut db, &room, person).await?;
+                    let granted = &mut permission.can_publish_sources;
+                    let before = granted.len();
+                    if before == 0 {
+                        // LiveKit represents unrestricted grants with an empty source list.
+                        granted.extend(allowed.iter().map(|source| *source as i32));
+                    } else {
+                        granted.retain(|source| {
+                            allowed.iter().any(|allowed| *allowed as i32 == *source)
+                        });
+                    }
+                    if before == 0 || granted.len() != before {
+                        permission.can_publish = !granted.is_empty();
+                        changed = true;
+                    }
                 }
-                if before == 0 || granted.len() != before {
-                    permission.can_publish = !granted.is_empty();
+                if changed {
                     restrict.push((participant.identity, permission));
                 }
             }
@@ -395,6 +407,55 @@ async fn enforce_rooms(app: &App, livekit: &LiveKit, room: Option<String>) -> Ap
         }
     }
     Ok(())
+}
+
+/// Relay a device-signed acceptance to the offerer through the existing live events socket.
+pub async fn live_file(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path(channel): Path<String>,
+    body: Result<Json<LiveFileAcceptance>, JsonRejection>,
+) -> ApiResult<StatusCode> {
+    let acceptance = payload(body)?;
+    let (mut tx, actor) = authenticate(&app, &headers).await?;
+    require_voice_read(&mut tx, &channel, &actor.person).await?;
+    let device = actor
+        .device
+        .as_slice()
+        .try_into()
+        .ok()
+        .and_then(|id| VerifyingKey::from_bytes(id).ok())
+        .ok_or_else(|| ApiError::internal("invalid_stored_device"))?;
+    acceptance
+        .verify(
+            app.key.verifying_key().as_bytes(),
+            &decode(&channel)?,
+            &device,
+        )
+        .map_err(|_| ApiError::bad_request("invalid_file_acceptance"))?;
+    tx.commit().await?;
+    if !acceptance.cancel {
+        // A receive-only participant need not be visible in the SDK's remote participant map.
+        let server = app.key.verifying_key();
+        let receiver = voice_identity(server.as_bytes(), &actor.device);
+        let offerer = voice_identity(server.as_bytes(), &decode::<32>(&acceptance.recipient)?);
+        let participants = configured(&app)?.list(&channel).await?;
+        if receiver == offerer
+            || [receiver, offerer].iter().any(|identity| {
+                !participants
+                    .iter()
+                    .any(|p| &p.identity == identity && p.state == "ACTIVE")
+            })
+        {
+            return Err(ApiError::forbidden("live_file_peer_not_in_room"));
+        }
+    }
+    app.notify(Some(Event::LiveFileAccepted {
+        channel,
+        device: encode(&actor.device),
+        acceptance,
+    }));
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn webhook(
