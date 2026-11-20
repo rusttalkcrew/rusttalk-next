@@ -436,6 +436,8 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
             if screen::SUPPORTED {
                 stop_screen = screen_button(ui, &mut home.voice, connected, can_share_video);
             }
+            // W12 live transfer seam: "Send file" and the offered-file cards go here,
+            // once VoiceRoom::offer_live_file is merged.
         });
     let server = home
         .voice
