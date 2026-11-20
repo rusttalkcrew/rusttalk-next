@@ -134,7 +134,7 @@ Debug builds open a console on Windows; release builds do not, so check
 - `make lint`: clippy with warnings as errors, plus `rustfmt --check`.
 - `make fmt`: format all code.
 - `make test`: unit and integration tests without Docker.
-- `make e2e` starts a disposable stack and runs membership, key distribution,
+- `make e2e` starts two disposable stacks and runs membership, key distribution,
   encrypted chat, and encrypted voice with headless bots. It checks pre-sign-in invite
   previews, historical key delivery, epoch rotation after kick, revocation and loss of
   channel read access, WebSocket closure and redaction in SQLite, its WAL and stack logs. It also
@@ -142,8 +142,11 @@ Debug builds open a console on Windows; release builds do not, so check
   server key pinning. Chat covers both directions in text and DM channels,
   paging, edit authorization, author and moderator deletes, DM isolation and
   closure, historic signatures after kick, and case-insensitive searches for
-  test message texts in SQLite, its WAL and service logs. It removes its containers, TLS directory and API
-  volume on exit. Run it with ports 8443, 7881 and 7882 free. The voice
+  test message texts in SQLite, its WAL and service logs. The same bot exchanges
+  encrypted chat on both servers and hears a tone from each in sequence. The
+  second stack also exercises open admission, ban listing and audit paging.
+  See [Two development stacks](operations.md#two-development-stacks) for ports
+  and cleanup. The voice
   scenario checks duplex PCM tones, signed presence notices, a refused
   listen-only publish, recovery after a forced reconnect, and new audio
   after a key rotation that excludes a kicked reader. It also checks that

@@ -15,6 +15,30 @@ advertised `NODE_IP` for media. The IP must be reachable even when a bot
 uses loopback for signaling. LiveKit's signaling port 7880 stays on the
 Compose network. See [LiveKit privacy settings](privacy.md#livekit).
 
+## Two development stacks
+
+`make e2e` starts two disposable Compose projects with separate TLS
+directories and API volumes. Reserve 8443/TCP, 7881/TCP and 7882/UDP
+for the first project and 9443/TCP, 8881/TCP and 8882/UDP for the second.
+Signaling uses loopback. Each stack advertises its own LiveKit media
+ports at `NODE_IP` (loopback by default under `make e2e`). The target
+removes both projects on exit.
+
+For a manual second stack, use another Compose project, a different TLS
+directory and the same host and container port for each LiveKit media
+transport:
+
+```sh
+export RUSTTALK_DEV_USER="$(id -u):$(id -g)"
+export RUSTTALK_DEV_DATA="$(mktemp -d)"
+export RUSTTALK_DEV_HTTPS_PORT=9443
+export RUSTTALK_DEV_MEDIA_TCP_PORT=8881
+export RUSTTALK_DEV_MEDIA_UDP_PORT=8882
+docker compose -f deploy/compose.dev.yml -p rusttalk-dev-second up --build --wait
+```
+
+Use the same project and environment with `down --volumes` to remove it.
+
 ## LiveKit credentials
 
 Set `LIVEKIT_API_KEY` and `LIVEKIT_API_SECRET` in the API service's

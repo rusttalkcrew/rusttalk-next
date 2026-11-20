@@ -25,7 +25,7 @@ type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 #[cfg(feature = "livekit-tls")]
 mod livekit;
 #[cfg(feature = "livekit-tls")]
-pub use livekit::{PinnedElsewhere, register};
+pub use livekit::register;
 
 pub fn fingerprint(der: &[u8]) -> Fingerprint {
     Sha256::digest(der).into()
