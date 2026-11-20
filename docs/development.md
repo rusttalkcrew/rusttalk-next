@@ -93,24 +93,41 @@ Debug builds open a console on Windows; release builds do not, so check
 - `make lint`: clippy with warnings as errors, plus `rustfmt --check`.
 - `make fmt`: format all code.
 - `make test`: unit and integration tests without Docker.
-- `make e2e` starts a disposable stack and runs W05 membership and W06
-  key distribution with headless bots. It checks pre-sign-in invite
+- `make e2e` starts a disposable stack and runs membership, key distribution,
+  and encrypted chat with headless bots. It checks pre-sign-in invite
   previews, historical key delivery, epoch rotation after kick, revocation and loss of
   channel read access, WebSocket closure and redaction in SQLite, its WAL and stack logs. It also
   checks owner bootstrap, invite use, kick, ban, unban, revocation and
-  server key pinning. It removes its containers, TLS directory and API
-  volume on exit. Run it with ports 8443, 7881 and 7882 free. E2E runs
-  locally and stays out of CI for now.
+  server key pinning. Chat covers both directions in text and DM channels,
+  paging, edit authorization, author and moderator deletes, DM isolation and
+  closure, historic signatures after kick, and case-insensitive searches for
+  test message texts in SQLite, its WAL and service logs. It removes its containers, TLS directory and API
+  volume on exit. Run it with ports 8443, 7881 and 7882 free. The chat and membership bot harness builds without the media SDK.
 
-The membership gate uses the bot library's `KeyClient` through the same
-pinned TLS origin for HTTPS and live events. It holds keys only in memory.
+Bots and the desktop client use `rusttalk-core` with the `client` feature.
+`client::Server` verifies pins and handles sign-in, and `client::KeyClient`
+owns the live stream and keeps keys and accepted message IDs in memory.
+The API builds core without the `client` feature. [Protocol reference](protocol.md)
+
+For a new address, use `Server::probe` and show the observed server fingerprint
+for confirmation before connecting with that expected pin. Invite links
+already specify the expected pins. Use `KeyClient::next_event` while online
+to drive key delivery and refresh before `KeyClient::expires_at`.
+
+Use `message_page` for history and `message` for a live record, then call
+`open_message` before rendering. Preserve the oldest raw record ID for paging
+and retain accepted plaintext in the current UI model. If a key is pending,
+reconcile or process key events and retry. Apply edits to their original ID,
+hide them when that original is deleted, and reconcile visible history after
+`resync` or a reconnect. Recreating a key client starts a fresh replay cache.
+Use `refresh` and `reconnect` on the current client to preserve its cache.
 For an upgraded W05 stack the owner initializes the first space epoch
 after signing in with a W06 device. Existing W05 devices can use the same
 recovery words to enroll public W06 certificates. Profiles, server
 metadata and any replacement role labels are encrypted on the client
 before upload.
 
-Linux CI runs `make lint test` with the bot excluded and `rusttalk-core/livekit-tls`
-enabled, so it checks pinning and ICE filtering without the native WebRTC
-toolchain and download. Local `make lint test` covers the whole workspace.
+Linux CI runs `make lint test e2e`. Lint and unit tests enable core client
+protocol and LiveKit pinning code with the bot package excluded. The Docker
+gate builds the bot harness without the native WebRTC toolchain or download. Local `make lint test` covers the whole workspace.
 Windows CI runs the client unit tests. Both jobs have a 15-minute timeout.

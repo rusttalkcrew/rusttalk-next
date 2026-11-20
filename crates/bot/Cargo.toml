@@ -4,20 +4,27 @@ version.workspace = true
 edition.workspace = true
 publish = false
 
+[[bin]]
+name = "rusttalk-bot"
+required-features = ["media"]
+
+[features]
+default = ["media"]
+media = ["dep:clap", "dep:hex", "dep:livekit", "dep:livekit-api", "dep:tracing", "dep:tracing-subscriber", "dep:url", "rusttalk-core/livekit-tls"]
+
 [dependencies]
 anyhow = "1"
-clap = { version = "4", features = ["derive", "env"] }
-hex = "0.4"
-futures-util = { version = "0.3", default-features = false, features = ["std"] }
-livekit = "=0.11.0"
-livekit-api = { version = "=0.10.2", default-features = false, features = ["access-token"] }
+clap = { version = "4", features = ["derive", "env"] , optional = true }
+hex = { version = "0.4", optional = true }
+livekit = { version = "=0.11.0", optional = true }
+livekit-api = { version = "=0.10.2", default-features = false, features = ["access-token"] , optional = true }
+rustls-pki-types = "1"
+rusttalk-core = { path = "../core", features = ["client"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+tracing = { version = "0.1", optional = true }
+tracing-subscriber = { version = "0.3", optional = true }
+url = { version = "2", optional = true }
+
+[dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 serde_json = "1"
-tempfile = "3"
-rustls-pki-types = "1"
-rusttalk-core = { path = "../core", features = ["livekit-tls"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
-tokio-tungstenite = { version = "0.29", default-features = false }
-tracing = "0.1"
-tracing-subscriber = "0.3"
-url = "2"

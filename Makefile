@@ -85,8 +85,8 @@ test: ## Run unit and integration tests
 	@printf '\033[1;34m==> tests\033[0m\n'
 	cargo test $(CARGO_SCOPE) --locked
 
-e2e: ## Run the Docker membership and key rotation scenarios
-	@printf '\033[1;34m==> Docker membership and keys\033[0m\n'
+e2e: ## Run the Docker membership, keys and encrypted chat scenarios
+	@printf '\033[1;34m==> Docker membership, keys and encrypted chat\033[0m\n'
 	@set -eu; \
 		export RUSTTALK_E2E_PROJECT=rusttalk-e2e-$$$$; \
 		export RUSTTALK_DEV_DATA=$$(mktemp -d); \
@@ -98,4 +98,4 @@ e2e: ## Run the Docker membership and key rotation scenarios
 		}; \
 		trap cleanup EXIT; trap 'exit 130' INT; trap 'exit 143' TERM; \
 		compose up --build --wait --wait-timeout 60; \
-		cargo test --locked -p rusttalk-bot --test membership -- --nocapture
+		cargo test --locked -p rusttalk-bot --no-default-features --test membership -- --nocapture

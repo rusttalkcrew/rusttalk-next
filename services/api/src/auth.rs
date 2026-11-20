@@ -299,7 +299,8 @@ async fn redeem(db: &mut SqliteConnection, person: &[u8], invite: &str, at: i64)
         Some(&id),
         at,
     )
-    .await
+    .await?;
+    Ok(())
 }
 
 async fn issue_session(

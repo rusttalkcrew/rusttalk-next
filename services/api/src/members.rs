@@ -199,6 +199,11 @@ async fn remove_member(app: &App, db: &mut SqliteConnection, person: &[u8]) -> A
         .fetch_one(&mut *db)
         .await?;
     if exists {
+        query("DELETE FROM channels WHERE dm_first = ? OR dm_second = ?")
+            .bind(person)
+            .bind(person)
+            .execute(&mut *db)
+            .await?;
         keys::member_removed(app, db, person).await?;
     }
     let closed = query_scalar("DELETE FROM sessions WHERE person_id = ? RETURNING expires_at")
@@ -383,9 +388,13 @@ pub async fn audit_log(
         .require(Permission::ViewAuditLog)?;
     let rows = query_as::<_, AuditRow>(
         "SELECT id, actor_person_id, action, target_person_id, target_id, at
-                                       FROM audit_log WHERE id > ? ORDER BY id LIMIT 100",
+                                       FROM audit_log WHERE id > ? AND (dm_channel_id IS NULL OR EXISTS (
+                                           SELECT 1 FROM channel_readers r
+                                           WHERE r.channel_id = dm_channel_id AND r.person_id = ?
+                                       )) ORDER BY id LIMIT 100",
     )
     .bind(after)
+    .bind(actor.person.as_slice())
     .fetch_all(&mut *tx)
     .await?;
     tx.commit().await?;

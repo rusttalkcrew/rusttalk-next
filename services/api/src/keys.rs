@@ -290,7 +290,7 @@ pub async fn init_space(db: &mut SqliteConnection, id: &[u8; 32]) -> ApiResult<(
     Ok(())
 }
 
-async fn read_epoch(
+pub async fn read_epoch(
     db: &mut SqliteConnection,
     actor: &Actor,
     scope: Scope,
@@ -339,7 +339,30 @@ async fn checked_envelope(
     Ok(bytes)
 }
 
-pub async fn start_epoch(
+pub async fn start_channel(
+    db: &mut SqliteConnection,
+    app: &App,
+    actor: &Actor,
+    scope: Scope,
+    commitment: [u8; 32],
+    envelope: &str,
+) -> ApiResult<()> {
+    let id = encode(&scope.id);
+    query("INSERT INTO key_scopes (id, kind, channel_id) VALUES (?, 'channel', ?)")
+        .bind(&id)
+        .bind(&id)
+        .execute(&mut *db)
+        .await?;
+    let context = EnvelopeContext {
+        server_id: space(app).id,
+        scope,
+        epoch: 1,
+        commitment,
+    };
+    start_epoch(db, actor, context, envelope).await
+}
+
+async fn start_epoch(
     db: &mut SqliteConnection,
     actor: &Actor,
     context: EnvelopeContext,

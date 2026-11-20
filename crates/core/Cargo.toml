@@ -5,6 +5,7 @@ edition.workspace = true
 publish = false
 
 [dependencies]
+anyhow = { version = "1", optional = true }
 async-trait = { version = "0.1", optional = true }
 base64 = "0.22"
 chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc", "zeroize"] }
@@ -20,15 +21,19 @@ rand = { version = "0.10", default-features = false, features = ["alloc", "std_r
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots"], optional = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
 serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", optional = true }
 sha2 = "0.10"
+tempfile = { version = "3", optional = true }
 thiserror = "2"
 tokio = { version = "1", features = ["net", "sync", "time"], optional = true }
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-native-roots"], optional = true }
+tracing = { version = "0.1", optional = true }
 url = { version = "2", features = ["serde"] }
 x25519-dalek = { version = "2.0", default-features = false, features = ["static_secrets", "zeroize"] }
 zeroize = "1"
 
 [features]
+client = ["dep:anyhow", "dep:futures-util", "dep:reqwest", "reqwest/json", "dep:rustls", "dep:serde_json", "dep:tempfile", "dep:tokio", "dep:tokio-tungstenite", "dep:tracing"]
 livekit-tls = ["dep:async-trait", "dep:futures-util", "dep:livekit-net", "dep:livekit-protocol", "dep:prost", "dep:reqwest", "dep:rustls", "dep:tokio", "dep:tokio-tungstenite"]
 
 [dev-dependencies]

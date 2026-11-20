@@ -82,7 +82,7 @@ up to ten devices per server. Revoking a device frees its slot.
 
 ## Channel and space keys
 
-Each server has a separate space scope, and each text or voice channel
+Each server has a separate space scope, and each text, voice or DM channel
 has a channel scope. Each epoch key is 32 independent OS-random bytes.
 The owner creates space epoch 1 on claim and uploads a self-addressed
 envelope. A channel creator creates channel epoch 1 and uploads its
@@ -176,7 +176,37 @@ epochs through the normal envelope flow.
 
 ## Messages
 
-Written in W07.
+The plaintext contains a one-byte bit mask (bit 0 for reply-to, bit 1 for
+edit-of), a two-byte big-endian UTF-8 byte length, the UTF-8 text, the optional
+32-byte reply ID, the optional 32-byte original ID, and a one-byte attachment
+count of zero. This version requires all other flag bits to be clear, valid
+UTF-8 with at most 2,000 Unicode scalar values, and exact lengths. Spaces
+and line breaks are preserved.
+
+Use XChaCha20-Poly1305 with the current channel epoch key and an independent,
+random 24-byte nonce. Associated data is the following concatenation.
+
+```text
+"rusttalk-message-v1" || server_id (32 bytes) || channel_id (32 bytes) ||
+epoch (8 bytes, positive signed integer, big endian) || message_id (32 bytes) ||
+sender_device_Ed25519 (32 bytes) || sender_person (32 bytes)
+```
+
+The sender signs the associated data followed by byte `1`, the nonce, the
+two-byte big-endian ciphertext length, and the ciphertext including the
+16-byte authentication tag. The signature is the final 64 bytes of the
+envelope. Integer fields and lengths are fixed-width. The API verifies the
+signature and outer framing before storage. The sender person binding
+prevents a certificate under a different root from relabeling a signed post.
+
+Recipients find the sender in the current verified device directory or the
+channel's archived sender directory for retained history. They verify the
+root certificate, the matching device and person IDs, the device signature,
+and the AEAD tag before accepting the plaintext. A client remembers accepted
+IDs in memory across socket reconnects and token refreshes and rejects
+duplicates. To accept an edit it independently authenticates and opens the
+original in the same channel and checks that it has the same person ID.
+The server supplies delivery timestamps and order.
 
 ## Media encryption
 
@@ -195,7 +225,7 @@ decryption keys from an honest client. Former readers retain anything
 they already decrypted or saved. Rotation excludes them from subsequent
 epochs while access is denied. A re-invited member receives the full
 history for scopes they can read, including epochs created to exclude
-them. Each commitment attests to the key chosen by the epoch creator.
+them. Membership removal closes their existing DMs. Each commitment attests to the key chosen by the epoch creator.
 If that creator publishes an unusable key, recovering requires a new
 epoch.
 

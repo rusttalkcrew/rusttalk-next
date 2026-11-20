@@ -9,7 +9,7 @@ use clap::Parser;
 use livekit::{DataPacket, Room, RoomEvent, RoomOptions};
 use livekit_api::access_token::{AccessToken, VideoGrants};
 use rustls_pki_types::{CertificateDer, pem::PemObject};
-use rusttalk_bot::membership::Bot;
+use rusttalk_core::client::Server;
 use rusttalk_core::pinned_tls::{self, Fingerprint};
 use tracing::Level;
 use tracing_subscriber::{filter::Targets, prelude::*};
@@ -91,7 +91,7 @@ async fn run(args: Args) -> Result<()> {
         "https://{}",
         &args.server[url::Position::BeforeHost..]
     ))?;
-    Bot::connect(api, Some(pin), None, &args.data_dir).await?;
+    Server::connect(api, Some(pin), None, &args.data_dir).await?;
     pinned_tls::register(&args.server, Some(pin)).map_err(anyhow::Error::from_boxed)?;
 
     // shortcut: local dev token, replaced by api-minted tokens in W08
