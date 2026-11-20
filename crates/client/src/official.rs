@@ -9,6 +9,11 @@ use url::Url;
 
 use crate::net::Listed;
 
+/// The official server directory, used when the person sets no other.
+/// Temporary host: this becomes `https://index.rusttalk.com/` in a later release, once its DNS
+/// exists. It has a public certificate, so no pin.
+pub const DIRECTORY: &str = "https://rusttalk-index.mvl.sh/";
+
 /// Name, address and server ID (base64url). Each ID is that server's `rusttalk-api server-id`;
 /// Join checks it like an invite would. Their certificates are public, so no pin.
 const SERVERS: [(&str, &str, &str); 3] = [
@@ -62,6 +67,7 @@ mod tests {
     fn list_parses_and_filters() {
         let all = shown(&[], &[]);
         assert_eq!(all.len(), SERVERS.len());
+        assert!(https_url(DIRECTORY).is_some());
         for (listed, (_, _, raw)) in all.iter().zip(SERVERS) {
             assert_eq!(listed.server.address.scheme(), "https");
             assert_eq!(id(listed), raw);

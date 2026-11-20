@@ -182,8 +182,10 @@ check preference on this device.
   same edge.
 - **Desktop client:** Configured RustTalk origins for pinned HTTPS and WebSocket
   connections. Voice uses the same pinned signaling path and advertised
-  WebRTC ports as the bot. The client contacts a configured index only
-  when the person opens the server browser. The join page lists the
+  WebRTC ports as the bot. The client contacts the server directory only
+  when the person searches in Find servers: the address set in Settings →
+  Privacy, or else the official directory (`rusttalk-index.mvl.sh`, to move
+  to `index.rusttalk.com`) with normal certificate trust. The join page lists the
   official servers (`es`, `de` and `jp.public.rusttalk.com`) from a list
   built into the client; it contacts one only when the person picks Join. On Linux it accesses Secret
   Service, and opens file dialogs through xdg-desktop-portal, over the local
@@ -196,8 +198,9 @@ check preference on this device.
   device or server identifiers. Redirects are disabled.
 - **API:** Queries LiveKit RoomService on 7880/TCP using the internal
   Docker hostname `livekit`. When the owner enables public listing and
-  explicitly configures an index URL, the API posts a signed listing to that
-  HTTPS URL at opt-in, on startup and hourly while enabled. There is no
+  saves an index URL, the API posts a signed listing to that HTTPS URL at
+  opt-in, on startup and hourly while enabled. The owner's settings prefill
+  the official directory, which the owner can change; the API itself has no
   default index URL.
 - **Index:** No outbound network connections.
 - **Caddy:** Proxies requests to the API on 8080/TCP and to LiveKit on

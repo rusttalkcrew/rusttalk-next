@@ -633,6 +633,7 @@ fn listing_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Option<
     if listing.name.is_empty() && listing.address.is_empty() {
         listing.name = server.dir.name.clone().unwrap_or_default();
         listing.address = server.address.to_string();
+        listing.index_url = crate::official::DIRECTORY.into();
     }
     egui::Frame::group(ui.style()).show(ui, |ui| {
         ui.set_width(ui.available_width());

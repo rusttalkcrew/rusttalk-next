@@ -1563,10 +1563,11 @@ fn privacy_tab(ui: &mut Ui, home: &mut Home) {
     let label = ui.label("Directory address");
     ui.add(
         TextEdit::singleline(&mut settings.index_url)
-            .hint_text("https://…")
+            .hint_text(official::DIRECTORY)
             .desired_width(f32::INFINITY),
     )
     .labelled_by(label.id);
+    ui.weak("Leave it empty to use the official directory.");
     CollapsingHeader::new("Details").show(ui, |ui| {
         let label = ui.label("Certificate fingerprint, only for a directory without a domain");
         ui.add(TextEdit::singleline(&mut settings.index_fingerprint).desired_width(f32::INFINITY))
@@ -1580,10 +1581,16 @@ fn privacy_tab(ui: &mut Ui, home: &mut Home) {
     audio.set_settings(settings);
 }
 
-/// The configured directory and its optional certificate pin.
+/// The configured directory and its optional certificate pin, or the official one.
 fn directory(settings: &crate::audio::Settings) -> Result<(url::Url, Option<Fingerprint>), String> {
-    let url =
-        https_url(settings.index_url.trim()).ok_or("Use an address that starts with https://.")?;
+    let url = settings.index_url.trim();
+    if url.is_empty() {
+        return Ok((
+            https_url(official::DIRECTORY).expect("official directory"),
+            None,
+        ));
+    }
+    let url = https_url(url).ok_or("Use an address that starts with https://.")?;
     let pin = settings.index_fingerprint.trim();
     let pin = (!pin.is_empty())
         .then(|| decode(pin).map_err(|_| "That certificate fingerprint isn't right."))
@@ -1597,14 +1604,6 @@ fn find(ui: &mut Ui, home: &mut Home) {
         ui.set_max_width(640.0);
         ui.heading("Find servers");
         let settings = home.voice.audio.settings();
-        if settings.index_url.trim().is_empty() {
-            ui.label("Add a server directory in your settings first.");
-            ui.weak("RustTalk only contacts it while you're on this page.");
-            if primary(ui, "Open privacy settings").clicked() {
-                home.settings = Some(Tab::Privacy);
-            }
-            return;
-        }
         let find = &mut home.find;
         let mut page = None;
         ui.horizontal(|ui| {
@@ -2598,4 +2597,23 @@ fn settings(
         home.confirm_sign_out = false;
     }
     action
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn directory_defaults_to_official() {
+        let mut settings = crate::audio::Settings::default();
+        let (url, pin) = directory(&settings).unwrap();
+        assert_eq!(url.as_str(), official::DIRECTORY);
+        assert!(pin.is_none());
+
+        settings.index_url = "https://index.example/".into();
+        assert_eq!(
+            directory(&settings).unwrap().0.as_str(),
+            "https://index.example/"
+        );
+    }
 }
