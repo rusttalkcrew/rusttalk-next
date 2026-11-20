@@ -8,6 +8,7 @@ mod home;
 mod keystore;
 mod log_file;
 mod net;
+mod screen;
 mod server;
 mod share;
 

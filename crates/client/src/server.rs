@@ -34,6 +34,15 @@ pub struct Peer {
     pub unknown: bool,
     /// Names of the apps they share, only known inside the room.
     pub apps: Vec<String>,
+    /// Screens they share, only known inside the room.
+    pub screens: Vec<Screen>,
+}
+
+#[derive(Clone, PartialEq)]
+pub struct Screen {
+    /// The track, to watch it.
+    pub sid: String,
+    pub name: String,
 }
 
 impl Peer {

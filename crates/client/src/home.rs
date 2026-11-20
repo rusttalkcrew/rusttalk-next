@@ -21,6 +21,7 @@ use crate::{
     audio::Audio,
     call::{self, Voice},
     net::{Command, Net, Preview, Update},
+    screen::Video,
     server::{Body, Chat, Directory, Id, Msg, Server, Status, member_name},
 };
 
@@ -86,7 +87,14 @@ impl Home {
     pub fn new(identity: DeviceIdentity, ctx: &egui::Context, data: PathBuf) -> Result<Self> {
         let identity = Arc::new(identity);
         let audio = Audio::new(&data)?;
-        let net = Net::new(ctx.clone(), identity.clone(), data, audio.clone())?;
+        let video = Video::new(ctx.clone());
+        let net = Net::new(
+            ctx.clone(),
+            identity.clone(),
+            data,
+            audio.clone(),
+            video.clone(),
+        )?;
         let servers: Vec<_> = net
             .joined()
             .into_iter()
@@ -115,7 +123,7 @@ impl Home {
             dialog: None,
             toast: None,
             settings: None,
-            voice: Voice::new(audio),
+            voice: Voice::new(audio, video),
             confirm_sign_out: false,
             error: None,
         })
@@ -255,6 +263,7 @@ impl Home {
                         self.voice.audio.set_voice(false);
                         self.voice.show_stats = false;
                         self.voice.shares.clear();
+                        self.voice.clear_screens();
                     }
                 }
             }
@@ -269,6 +278,16 @@ impl Home {
                 }
             }
             Update::AppStopped(id) => self.voice.shares.retain(|app| app.id != id),
+            Update::Sharing(on) => {
+                // A late result after Stop or leaving doesn't turn the chip back on.
+                if self.voice.sharing != call::Sharing::Off || !on {
+                    self.voice.sharing = if on {
+                        call::Sharing::On
+                    } else {
+                        call::Sharing::Off
+                    };
+                }
+            }
             Update::Stats(address, stats) => {
                 if let Some(call) = &mut self.voice.call
                     && call.server == address
@@ -345,6 +364,13 @@ pub fn show(ui: &mut Ui, home: &mut Home) -> Option<Action> {
         home.toast = None;
     }
     let colors = palette(ui);
+    if home.voice.watching.as_ref().is_some_and(|w| w.full) {
+        CentralPanel::default()
+            .frame(panel_frame(colors.main))
+            .show(ui, |ui| call::screen_view(ui, home));
+        call::frame(ui.ctx(), home);
+        return None;
+    }
     Panel::left("servers")
         .resizable(false)
         .exact_size(72.0)
@@ -401,6 +427,7 @@ pub fn show(ui: &mut Ui, home: &mut Home) -> Option<Action> {
         });
     dialogs(ui.ctx(), home);
     call::stats_window(ui.ctx(), home);
+    call::screen_dialog(ui.ctx(), home);
     call::frame(ui.ctx(), home);
     settings(ui.ctx(), home)
 }
