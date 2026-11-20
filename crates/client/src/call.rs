@@ -369,7 +369,7 @@ fn share_picker(
         for app in &voice.shares {
             let chip = ui
                 .add(Button::new(
-                    RichText::new(format!("🎵 {}  ✕", app.name)).small(),
+                    RichText::new(format!("🎵 {}  ×", app.name)).small(),
                 ))
                 .on_hover_text("Stop sharing");
             chip.widget_info(|| {

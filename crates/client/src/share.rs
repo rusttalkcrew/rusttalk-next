@@ -27,7 +27,13 @@ pub fn support() -> Support {
 
 /// Apps playing sound now. Starts a helper process on Linux; keep it off the UI thread.
 pub fn list() -> Result<Vec<App>> {
-    capture::list_apps()
+    // Never offer our own playback: sharing it would echo the call.
+    // shortcut: PipeWire only shows our streams by cpal's client name, so this breaks if cpal
+    // renames it; then match the stream's process ID through its bound client instead.
+    let own = format!("cpal-pulseaudio-{}", std::process::id());
+    let mut apps = capture::list_apps()?;
+    apps.retain(|app| app.name != own);
+    Ok(apps)
 }
 
 /// Start capturing an app into a new source for its track. Blocks until audio flows.

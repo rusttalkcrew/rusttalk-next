@@ -140,7 +140,8 @@ fn enumerate() -> Result<Vec<App>> {
             let Ok(pid) = session.get_process_id() else {
                 continue;
             };
-            if pid == 0 || apps.contains_key(&pid) {
+            // Never offer RustTalk's own playback: sharing it would echo the call.
+            if pid == 0 || pid == std::process::id() || apps.contains_key(&pid) {
                 continue;
             }
             let Ok(process) = process(pid) else { continue };
