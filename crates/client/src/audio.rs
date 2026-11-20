@@ -24,8 +24,8 @@ use std::{
 
 use anyhow::{Context as _, Result, anyhow};
 use cpal::{
-    BufferSize, Device, DeviceId, FromSample, Host, Sample, SampleFormat, SizedSample, Stream,
-    StreamConfig, SupportedBufferSize, SupportedStreamConfig,
+    BufferSize, Device, DeviceId, ErrorKind, FromSample, Host, Sample, SampleFormat, SizedSample,
+    Stream, StreamConfig, SupportedBufferSize, SupportedStreamConfig,
     traits::{DeviceTrait, HostTrait, StreamTrait},
 };
 use futures_util::StreamExt;
@@ -148,11 +148,13 @@ struct Shared {
 #[derive(Default)]
 struct Mixer {
     tracks: HashMap<String, Track>,
+    serial: u64,
     /// Per-person volume (1.0 is normal) and mute.
     people: HashMap<Id, (f32, bool)>,
 }
 
 struct Track {
+    serial: u64,
     person: Id,
     queue: VecDeque<i16>,
     primed: bool,
@@ -360,15 +362,23 @@ impl Audio {
     /// Play a remote audio track until it ends or is removed.
     #[expect(dead_code, reason = "used once voice is wired to the core module")]
     pub fn add_track(&self, sid: String, person: Id, track: RtcAudioTrack) {
-        lock(&self.shared().mixer).tracks.insert(
-            sid.clone(),
-            Track {
-                person,
-                queue: VecDeque::new(),
-                primed: false,
-                loud: 0,
-            },
-        );
+        let serial = {
+            let mut mixer = lock(&self.shared().mixer);
+            mixer.serial += 1;
+            let serial = mixer.serial;
+            // Replaces an older reader of the same track, which then stops.
+            mixer.tracks.insert(
+                sid.clone(),
+                Track {
+                    serial,
+                    person,
+                    queue: VecDeque::new(),
+                    primed: false,
+                    loud: 0,
+                },
+            );
+            serial
+        };
         let shared = self.0.shared.clone();
         self.0.runtime.spawn(async move {
             let mut stream = NativeAudioStream::new(track, RATE as i32, 1);
@@ -376,8 +386,8 @@ impl Audio {
                 let loud = level_db(&frame.data) > SILENT_DB;
                 let now = shared.now();
                 let mut mixer = lock(&shared.mixer);
-                let Some(track) = mixer.tracks.get_mut(&sid) else {
-                    break;
+                let Some(track) = mixer.tracks.get_mut(&sid).filter(|t| t.serial == serial) else {
+                    return;
                 };
                 track.queue.extend(frame.data.iter());
                 // shortcut: clock drift between WebRTC and the sound card is fixed by dropping
@@ -390,7 +400,10 @@ impl Audio {
                     track.loud = now;
                 }
             }
-            lock(&shared.mixer).tracks.remove(&sid);
+            let mut mixer = lock(&shared.mixer);
+            if mixer.tracks.get(&sid).is_some_and(|t| t.serial == serial) {
+                mixer.tracks.remove(&sid);
+            }
         });
     }
 
@@ -600,6 +613,14 @@ fn on_error(
     control: Sender<Control>,
 ) -> impl FnMut(cpal::Error) + Send + 'static {
     move |error| {
+        // Glitches and followed default-device switches keep the stream running.
+        if matches!(
+            error.kind(),
+            ErrorKind::Xrun | ErrorKind::DeviceChanged | ErrorKind::RealtimeDenied
+        ) {
+            tracing::debug!(%error, "audio device hiccup");
+            return;
+        }
         tracing::warn!(%error, "audio device failed");
         let _ = lost.send(());
         let _ = control.send(Control::Refresh);
@@ -742,7 +763,7 @@ fn mix(shared: &Shared) -> Vec<i16> {
     let mut sum = [0f32; FRAME];
     let deafened = shared.deafened.load(Relaxed);
     let mut mixer = lock(&shared.mixer);
-    let Mixer { tracks, people } = &mut *mixer;
+    let Mixer { tracks, people, .. } = &mut *mixer;
     for track in tracks.values_mut() {
         let (volume, muted) = people.get(&track.person).copied().unwrap_or((1.0, false));
         let gain = if deafened || muted { 0.0 } else { volume };

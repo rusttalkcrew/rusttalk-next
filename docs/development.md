@@ -41,9 +41,9 @@ The default
 dev credentials match `deploy/livekit.dev.yml`. Set
 `LIVEKIT_API_KEY` and `LIVEKIT_API_SECRET` to override them.
 
-On Linux, building the bot requires Clang 21 or later, `pkg-config` and
-GLib development headers. The SDK downloads prebuilt WebRTC during the
-first build.
+On Linux, building the bot or the client requires Clang 21 or later,
+`pkg-config`, and GLib and ALSA development headers. The SDK downloads
+prebuilt WebRTC during the first build.
 
 ## Native client
 
@@ -78,8 +78,30 @@ certificate at a saved address stops the join or reconnect.
 Network work runs on a tokio runtime off the UI thread (`crates/client/src/net.rs`).
 Each joined server has one task that signs in, keeps the event socket open,
 refreshes the token ten minutes before expiry and reconnects with backoff.
-The window shows "Connecting…" or "Offline" per server meanwhile. Voice
-channels are listed but join in W08.
+The window shows "Connecting…" or "Offline" per server meanwhile.
+
+Voice audio runs on its own threads (`crates/client/src/audio.rs`): the
+microphone goes through WebRTC's echo cancellation, noise suppression and
+automatic gain, then the push-to-talk or voice-activity gate, into the
+published track. Each remote track is decoded separately, so every person
+has their own volume and mute; the mix plays on the chosen speakers and also
+feeds the echo canceller. On Linux the client talks to the sound server over
+the PulseAudio protocol (PipeWire serves it too) and falls back to ALSA.
+Settings → Voice picks devices, shows the mic level, and calibrates voice
+activity ("stay quiet", then "say something"). Push-to-talk works only while
+the RustTalk window is focused and no text field has focus. Voice settings
+are stored in `voice.json` in the profile folder.
+
+To test audio without the real speakers or microphone, create PipeWire null
+sinks and point `voice.json` at them (`"input": "pulseaudio:agent_src.monitor"`,
+`"output": "pulseaudio:agent_test"`; Settings hides monitors from the list):
+
+```sh
+pactl load-module module-null-sink sink_name=agent_test   # speakers
+pactl load-module module-null-sink sink_name=agent_src    # mic: use agent_src.monitor
+pw-play --target agent_src some.wav                        # "speak"
+pactl unload-module <id>                                   # clean up
+```
 
 Run `make client PROFILE=a` for an isolated identity. A profile is exactly
 one lowercase letter from `a` to `z`. For profile `a`, the settings and data
