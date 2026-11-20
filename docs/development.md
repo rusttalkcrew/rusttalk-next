@@ -45,7 +45,10 @@ expected tone with `--once`.
 
 On Linux, building the bot or the client requires Clang 21 or later,
 `pkg-config`, and GLib and ALSA development headers. The SDK downloads
-prebuilt WebRTC during the first build.
+prebuilt WebRTC during the first build. Building `rusttalk-pipewire`
+also needs PipeWire development headers (`libpipewire-0.3-dev` on Debian
+or Ubuntu), and libclang for bindgen. `make client` and `make bot` put the
+helper next to the app and bot. Ship it as a sibling binary in Linux packages.
 
 ## Native client
 
@@ -143,8 +146,22 @@ Debug builds open a console on Windows; release builds do not, so check
   volume on exit. Run it with ports 8443, 7881 and 7882 free. The voice
   scenario checks duplex PCM tones, signed presence notices, a refused
   listen-only publish, recovery after a forced reconnect, and new audio
-  after a key rotation that excludes a kicked reader. Set `E2E_FEATURES=`
+  after a key rotation that excludes a kicked reader. The app-audio check
+  uses two `pw-play` processes at 440 and 660 Hz on a disposable
+  `rusttalk_e2e_<pid>` null sink created with `pactl load-module module-null-sink`.
+  The receiving bot verifies two encrypted names and track sources, both
+  frequencies, and a quarter-scale gain on one track. The test unloads the
+  sink and stops both players on exit. It skips app audio with a message
+  when the host has no PipeWire or pipewire-pulse session. Set `E2E_FEATURES=`
   to run the membership, keys and chat harness without WebRTC.
+
+For a manual app-audio check, build with
+`cargo build --locked -p rusttalk-bot -p rusttalk-pipewire` and run both
+bots in the same voice channel with the invite setup above. Bot A uses
+`--share-app-audio --expect-tone 660`. Bot B uses
+`--tone 660 --expect-app-audio`. Bot A plays its tones for up to 25 seconds.
+On Windows app audio requires build 20348 or newer. Test enumeration and
+capture in the logged-on user's audio session.
 
 Bots and the desktop client use `rusttalk-core` with the `client` feature.
 `client::Server` verifies pins and handles sign-in, and `client::KeyClient`

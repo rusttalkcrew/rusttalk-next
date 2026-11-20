@@ -8,7 +8,10 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 use reqwest::{Method, StatusCode};
-use rusttalk_bot::voice::{hear_tone, send_tone, source};
+use rusttalk_bot::{
+    app_audio,
+    voice::{hear_tone, send_tone, source},
+};
 use rusttalk_core::{
     auth::encode,
     client::{
@@ -190,6 +193,16 @@ pub async fn exercise(
     println!(
         "W08 encrypted voice both ways, voice_changed and room presence, subscribe-only audio, and automatic signal reconnect"
     );
+
+    if app_audio::available() {
+        let capture = app_audio::share(&room_a).await?;
+        timeout(LIMIT, app_audio::hear(&mut room_b, Some(&a_id)))
+            .await
+            .context("waiting for two per-app tracks")??;
+        capture.stop(&room_a).await?;
+    } else {
+        println!("W09 skipped: PipeWire and its pipewire-pulse null sink are required on the host");
+    }
 
     let stats = room_a.stats().await?;
     assert!(

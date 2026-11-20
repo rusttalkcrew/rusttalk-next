@@ -58,8 +58,13 @@ change the API asks LiveKit to remove devices that lost access and to
 stop publishing for devices that lost `speak`. It keeps the active
 roster in memory for one second per room. It keeps no voice roster or
 LiveKit join tokens in SQLite. LiveKit sees opaque room and device IDs,
-routing and timing information, ciphertext frame sizes and encrypted
-media. RustTalk sends no names or profile metadata to LiveKit.
+routing and timing information, track IDs and source kinds, ciphertext
+sizes, and encrypted media. It can tell that a device shared an app track
+and see its encrypted track label. That label uses the room's media key
+via a separate HKDF derivation and a fresh nonce for each publication.
+App names and profile metadata never reach LiveKit in plaintext. The
+capture target ID and local list of playing applications stay on the
+sender's device.
 
 The dev TLS certificate and private key live in `.dev/tls/`. Bot data under
 `.dev/bots/` holds only saved origins, server IDs and TLS fingerprints.

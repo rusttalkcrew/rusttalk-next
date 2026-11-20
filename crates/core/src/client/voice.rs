@@ -1,6 +1,7 @@
 //! Pinned, end-to-end encrypted voice sessions and caller-owned audio I/O.
 
 mod stats;
+mod track_name;
 
 use anyhow::{Context, Result, ensure};
 use hkdf::Hkdf;
@@ -12,9 +13,9 @@ use livekit::{
     },
     options::TrackPublishOptions,
     participant::ParticipantState,
-    prelude::{LocalTrack, RemoteTrack, TrackSource},
+    prelude::{LocalTrack, RemoteTrack},
     rtc_engine::SimulateScenario,
-    webrtc::audio_source::RtcAudioSource,
+    webrtc::audio_source::{AudioSourceOptions, RtcAudioSource},
 };
 use reqwest::Method;
 use serde::Deserialize;
@@ -26,6 +27,7 @@ pub use livekit::{
     ConnectionState, RoomEvent,
     prelude::{
         LocalTrackPublication, ParticipantIdentity, RemoteAudioTrack, RemoteParticipant, TrackSid,
+        TrackSource,
     },
     webrtc::{audio_source::native::NativeAudioSource, audio_stream::native::NativeAudioStream},
 };
@@ -137,6 +139,7 @@ impl KeyClient<'_> {
             channel: *channel,
             epoch,
             provider,
+            name_key: track_name::derive(&key),
             stats: stats::Sampler::default(),
         })
     }
@@ -186,6 +189,7 @@ pub struct VoiceRoom {
     channel: [u8; 32],
     epoch: i64,
     provider: KeyProvider,
+    name_key: Key,
     stats: stats::Sampler,
 }
 
@@ -220,6 +224,7 @@ impl VoiceRoom {
         }
         let key = media_key(key, &self.server.server_id, &self.channel, epoch);
         install_key(&self.provider, &key, epoch)?;
+        self.name_key = track_name::derive(&key);
         self.epoch = epoch;
         self.switch_senders();
         Ok(true)
@@ -311,8 +316,47 @@ impl VoiceRoom {
 
     /// Publish a microphone. Feed PCM to the source after this call completes.
     pub async fn publish_audio(&self, source: NativeAudioSource) -> Result<LocalTrackPublication> {
+        self.publish_audio_track("microphone", source, TrackSource::Microphone)
+            .await
+    }
+
+    /// Publish one app as a separate encrypted audio track. Feed PCM after this succeeds.
+    pub async fn publish_app_audio(
+        &self,
+        name: &str,
+        source: NativeAudioSource,
+    ) -> Result<LocalTrackPublication> {
+        ensure!(
+            source.sample_rate() == 48_000 && matches!(source.num_channels(), 1 | 2),
+            "shared audio requires 48 kHz mono or stereo PCM"
+        );
+        source.set_audio_options(AudioSourceOptions::default());
+        let name = track_name::encrypt(&self.name_key, name)?;
+        self.publish_audio_track(&name, source, TrackSource::ScreenshareAudio)
+            .await
+    }
+
+    /// The display name for a subscribed app track, if this is app audio.
+    pub fn app_audio_name(&self, track: &RemoteAudioTrack) -> Option<String> {
+        if track.source() != TrackSource::ScreenshareAudio {
+            return None;
+        }
+        Some(
+            track_name::decrypt(&self.name_key, &track.name()).unwrap_or_else(|| {
+                tracing::warn!("could not decrypt shared audio track name");
+                "Shared audio".into()
+            }),
+        )
+    }
+
+    async fn publish_audio_track(
+        &self,
+        name: &str,
+        source: NativeAudioSource,
+        kind: TrackSource,
+    ) -> Result<LocalTrackPublication> {
         let track = livekit::prelude::LocalAudioTrack::create_audio_track(
-            "microphone",
+            name,
             RtcAudioSource::Native(source),
         );
         let publication = self
@@ -321,7 +365,7 @@ impl VoiceRoom {
             .publish_track(
                 LocalTrack::Audio(track),
                 TrackPublishOptions {
-                    source: TrackSource::Microphone,
+                    source: kind,
                     ..Default::default()
                 },
             )

@@ -7,7 +7,10 @@ use std::{
 use anyhow::{Context, Result, ensure};
 use clap::Parser;
 use rustls_pki_types::{CertificateDer, pem::PemObject};
-use rusttalk_bot::voice::{hear_tone, send_tone, source};
+use rusttalk_bot::{
+    app_audio,
+    voice::{hear_tone, send_tone, source},
+};
 use rusttalk_core::{
     auth::{InviteLink, decode},
     client::{KeyClient, Server, voice::RoomEvent},
@@ -28,10 +31,16 @@ struct Args {
     channel: String,
     #[arg(long)]
     identity: String,
-    #[arg(long, value_parser = clap::value_parser!(u32).range(100..=2000))]
-    tone: u32,
-    #[arg(long, value_parser = clap::value_parser!(u32).range(100..=2000))]
-    expect_tone: u32,
+    #[arg(long, value_parser = clap::value_parser!(u32).range(100..=2000), required_unless_present = "share_app_audio", conflicts_with = "share_app_audio")]
+    tone: Option<u32>,
+    #[arg(long, value_parser = clap::value_parser!(u32).range(100..=2000), required_unless_present = "expect_app_audio", conflicts_with = "expect_app_audio")]
+    expect_tone: Option<u32>,
+    /// Publish two PipeWire tone players on separate app audio tracks (Linux).
+    #[arg(long)]
+    share_app_audio: bool,
+    /// Verify two separate received app tone tracks with independent gain.
+    #[arg(long)]
+    expect_app_audio: bool,
     /// Location of the bot's saved server pins.
     #[arg(long, default_value = ".dev/bots")]
     data_dir: PathBuf,
@@ -96,14 +105,37 @@ async fn run(args: Args) -> Result<()> {
     .context("waiting for channel key")??;
 
     let mut room = keys.join_voice(&channel).await?;
-    let source = source();
     let result = async {
-        room.publish_audio(source.clone()).await?;
+        let mut _apps = None;
+        let mut microphone = None;
+        if args.share_app_audio {
+            _apps = Some(app_audio::share(&room).await?);
+        } else {
+            let source = source();
+            room.publish_audio(source.clone()).await?;
+            microphone = Some(source);
+        }
+        let send = async {
+            match microphone.zip(args.tone) {
+                Some((source, hz)) => send_tone(source, || hz).await,
+                None => {
+                    // The local players are finite so a missing receiver cannot leave them running.
+                    tokio::time::sleep(Duration::from_secs(25)).await;
+                    Ok(())
+                }
+            }
+        };
         tracing::info!(identity = %args.identity, "joined encrypted voice");
         let voice = async {
-            tokio::time::timeout(Duration::from_secs(10), hear_tone(&mut room, None, args.expect_tone))
-                .await.context("waiting for the peer's tone")??;
-            tracing::info!(hz = args.expect_tone, "verified peer tone");
+            tokio::time::timeout(Duration::from_secs(10), async {
+                if let Some(hz) = args.expect_tone {
+                    hear_tone(&mut room, None, hz).await?;
+                    tracing::info!(hz, "verified peer tone");
+                } else {
+                    app_audio::hear(&mut room, None).await?;
+                }
+                Ok::<_, anyhow::Error>(())
+            }).await.context("waiting for the peer's audio")??;
             if args.once {
                 return Ok(());
             }
@@ -125,7 +157,7 @@ async fn run(args: Args) -> Result<()> {
         };
         tokio::select! {
             result = tokio::signal::ctrl_c() => Ok(result?),
-            result = send_tone(source, || args.tone) => result,
+            result = send => result,
             result = voice => result,
         }
     }.await;
