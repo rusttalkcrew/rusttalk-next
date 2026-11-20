@@ -1,5 +1,7 @@
 mod chat;
 mod files;
+mod multi_server;
+mod sync;
 #[cfg(feature = "media")]
 mod voice;
 
@@ -470,7 +472,8 @@ async fn docker_membership() -> Result<()> {
     let data = env::var("RUSTTALK_DEV_DATA")?;
     let data = Path::new(&data);
     let cert = CertificateDer::from_pem_file(data.join("tls/cert.pem"))?;
-    let address = "https://127.0.0.1:8443/".parse()?;
+    let port = env::var("RUSTTALK_DEV_HTTPS_PORT").unwrap_or_else(|_| "8443".into());
+    let address = format!("https://127.0.0.1:{port}/").parse()?;
     let cli = |command| compose(&project, &["exec", "-T", "api", "rusttalk-api", command]);
     let known = KnownServer {
         address,
@@ -510,6 +513,17 @@ async fn docker_membership() -> Result<()> {
 
     let mut owner_keys = KeyClient::connect(&owner_bot, &owner_id, &owner).await?;
     docker_keys(&project, &owner_bot, &mut owner_keys, &mut secrets).await?;
+    if let Ok(second_project) = env::var("RUSTTALK_E2E_SECOND_PROJECT") {
+        multi_server::exercise(
+            &second_project,
+            &owner_bot,
+            &mut owner_keys,
+            &owner_pins,
+            &mut secrets,
+        )
+        .await
+        .context("W15 second server")?;
+    }
     #[cfg(feature = "media")]
     voice::exercise(&project, &owner_bot, &mut owner_keys, &mut secrets).await?;
 
@@ -543,6 +557,13 @@ async fn docker_membership() -> Result<()> {
     println!(
         "owner issued a member invite; bot B joined and rotated its token through Caddy with a spoofed XFF header"
     );
+    sync::exercise(&project, data, &known, &member_words, &mut secrets).await?;
+    let owner_sync = owner_bot
+        .request(Method::GET, rusttalk_core::sync::PATH)
+        .bearer_auth(&owner.token)
+        .send()
+        .await?;
+    assert_eq!(owner_sync.status(), StatusCode::NO_CONTENT);
 
     let member_person = encode(member_id.certificate.person_id());
     let member_path = format!("/v1/members/{member_person}");

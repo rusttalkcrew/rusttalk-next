@@ -5,6 +5,7 @@ mod app;
 mod audio;
 mod call;
 mod camera;
+mod device_sync;
 mod files;
 mod home;
 mod keystore;

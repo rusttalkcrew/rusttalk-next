@@ -172,7 +172,33 @@ pub(super) async fn scenario(
     .await?;
     check_storage(project, &id)?;
     a.delete_file(&winner).await?;
-    b.delete_file(&image_id).await?;
+    // B reposts A's image in a message of its own. Deleting that message as moderator names B as
+    // the sender, so A's file survives. Deleting A's message names A and removes it.
+    let repost = b
+        .send_message(
+            &channel.id,
+            &MessageBody {
+                attachments: vec![image.clone()],
+                ..Default::default()
+            },
+        )
+        .await?;
+    b.delete_message(&channel.id, &repost.id).await?;
+    let b_person = *b.identity.certificate.person_id();
+    let error = b
+        .delete_message_file(&image_id, &b_person)
+        .await
+        .expect_err("a moderator removed another member's file");
+    assert_eq!(
+        error
+            .downcast_ref::<reqwest::Error>()
+            .and_then(reqwest::Error::status),
+        Some(StatusCode::NOT_FOUND)
+    );
+    b.download_file(&image.file).await?;
+    let a_person = *a.identity.certificate.person_id();
+    b.delete_message(&channel.id, &post.id).await?;
+    b.delete_message_file(&image_id, &a_person).await?;
     rejected(
         a.request(Method::GET, &format!("/v1/files/{}", encode(&image_id)))
             .send()
@@ -216,7 +242,7 @@ pub(super) async fn scenario(
         .await?;
     check_storage(project, &encode(&replacement.file.id))?;
     println!(
-        "W13 verified encrypted file SHA-256, PNG thumbnail, access, streaming cap, quota races, deletion, expiry and zero plaintext in SQLite, WAL, blobs and logs"
+        "W13 verified encrypted file SHA-256, PNG thumbnail, access, streaming cap, quota races, deletion, moderator deletes limited to the sender's files, expiry and zero plaintext in SQLite, WAL, blobs and logs"
     );
     Ok(())
 }

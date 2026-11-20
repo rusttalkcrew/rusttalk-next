@@ -10,8 +10,10 @@ base64url. Times are Unix seconds. Auth and membership responses carry
 | Method and path | Request | Success |
 | --- | --- | --- |
 | GET `/v1/health` | Empty | 200, `ok` |
+| GET `/v1/server-info` | Empty | 200, `{open_joining}` |
 | GET `/v1/auth/challenge` | Empty | 200, `{challenge, server_id, signature}` |
 | POST `/v1/auth/sign-in` | `{person_id, certificate, challenge, signature, invite?}` | 200, `{token, expires_at}` |
+| POST `/v1/auth/join` | `{person_id, certificate, challenge, signature}` | 200, `{token, expires_at}` |
 | POST `/v1/auth/refresh` | Bearer token, empty body | 200, `{token, expires_at}` |
 
 The server signs the 32 raw bytes of the challenge followed by the ASCII
@@ -35,6 +37,23 @@ Successful sign-in replaces any previous token for the device. A refresh
 rotates the bearer token and extends expiry to 12 hours from the refresh.
 A person may register up to ten devices. At the cap, sign-in from a new
 device returns `409 device_limit`. Revoking a device frees a slot.
+
+### Open joining
+
+After verifying the server ID and TLS pins, read the public `GET /v1/server-info`
+flag before asking the person to join. Send a fresh device proof to
+`POST /v1/auth/join` to request admission without an invite. An ordinary
+`sign-in` still requires an invite for nonmembers. Person and IP bans apply
+to both join methods.
+
+Open joining starts disabled. An Owner or Admin can enable it and set a
+positive member cap, which defaults to 100. The cap counts all current
+members, including the owner, and applies to admission without an invite.
+At the cap, invitations and existing member sign-ins still work. Successful
+open admissions are limited to five per IPv4 address or IPv6 /64 and 25
+across the server in a rolling hour. An open join receives the current
+default role, and online members wrap the space and channel keys for the
+new device. The public response contains only the admission flag.
 
 ## Invite links and server pins
 
@@ -70,6 +89,7 @@ All endpoints below require `Authorization: Bearer <token>`.
 | POST `/v1/invites` | `{uses, ttl_seconds, space_key_ct, name_ct?}` | `invite`. 201, `{id, code, expires_at}` |
 | DELETE `/v1/invites/{id}` | Empty | `invite`. 204 |
 | DELETE `/v1/members/{person}` | Empty | `kick`. 204 |
+| GET `/v1/bans` | Empty | `ban`. 200, active bans as `{person_id, banned_at, ban_ip}`, newest first |
 | PUT `/v1/bans/{person}` | `{ban_ip?}`, default false | `ban`. 204 |
 | DELETE `/v1/bans/{person}` | Empty | `ban`. 204 |
 | GET `/v1/roles` | Empty | Any member. 200, `{default_role_id, roles}` |
@@ -79,7 +99,9 @@ All endpoints below require `Authorization: Bearer <token>`.
 | PUT `/v1/roles/default` | `{role_id}` | `manage_roles`. 204 |
 | PUT `/v1/members/{person}/roles` | `{role_ids}` | `manage_roles`. 204, replaces assigned roles |
 | PUT `/v1/owner` | `{person_id}` | Owner. 204, transfers ownership to a member |
-| GET `/v1/audit?after=0` | Empty | `view_audit_log`. 200, an array of up to 100 audit entries in ascending ID order |
+| GET `/v1/settings/open-joining` | Empty | Owner or Admin. 200, `{open_joining, member_cap}` |
+| PUT `/v1/settings/open-joining` | `{open_joining, member_cap}` | Owner or Admin. 204 |
+| GET `/v1/audit?after=0&limit=100&action=member_banned` | Empty | `view_audit_log`. 200, matching audit entries in ascending ID order |
 
 A role has `{id, kind, rank, permissions, name_ct}`. A member's permissions
 are the union of their role flags, and their highest rank is used for
@@ -113,16 +135,23 @@ current space epoch even if the server's stored metadata uses an older
 epoch. An invite issued before rotation can still preview the snapshot
 from issuance. Kick and ban
 remove membership and drop all its sessions. Unban clears the person ban
-and any linked IPs. The former member needs an invite to join again. When
+and any linked IPs. A former member can redeem a fresh invite or explicitly
+join again while open joining is enabled. Use a ban to prevent rejoining. When
 `ban_ip` is true, the server adds the target's IPs from active sessions.
-It refuses an IP ban when no such IP is available or when an address is
-shared with the actor or an equal or higher-ranked active member. The
+An IPv6 address bans its whole /64, matching the rate-limit grouping.
+It refuses an IP ban when no such IP is available or when a banned IPv4
+address or IPv6 /64 is shared with the actor or an equal or higher-ranked
+active member. The
 owner retains access from a banned IP so an IP ban cannot lock them out.
+The ban list returns whether each ban has linked IPs.
 
 Each audit entry has `{id, actor_person_id, action, target_person_id, target_id, at}`.
 A target field is null if the action has no target of that type. Use the
-last returned ID as the next `after` cursor. Audit entries contain action
-names and IDs.
+last returned ID as the next `after` cursor. Omit `after` to start at zero.
+The optional `limit` is 1–100 and defaults to 100. The optional `action`
+matches the action name exactly and applies before paging. Settings changes
+record `open_joining_changed`. Open admissions record `joined` with a null
+`target_id`.
 
 ## Errors
 
@@ -131,14 +160,14 @@ errors may have an empty body. The API logs a request ID, status and reason.
 
 | Status | Codes |
 | --- | --- |
-| 400 | `invalid_json`, `invalid_encoding`, `invalid_query`, `invalid_forwarded_ip`, `invalid_revocation`, `invalid_invite_limits`, `invalid_role_rank`, `role_name_too_large`, `invalid_role_count`, `already_owner` |
+| 400 | `invalid_json`, `invalid_encoding`, `invalid_query`, `invalid_forwarded_ip`, `invalid_revocation`, `invalid_invite_limits`, `invalid_role_rank`, `role_name_too_large`, `invalid_role_count`, `already_owner`, `unexpected_invite`, `invalid_member_cap` |
 | 401 | `invalid_challenge`, `invalid_certificate`, `invalid_device_signature`, `invalid_session`, `token_expired` |
-| 403 | `invite_required`, `invalid_invite`, `person_banned`, `ip_banned`, `device_revoked`, `permission_denied`, `role_hierarchy`, `cannot_grant_permission`, `built_in_role`, `owner_required` |
+| 403 | `invite_required`, `invalid_invite`, `person_banned`, `ip_banned`, `device_revoked`, `permission_denied`, `role_hierarchy`, `cannot_grant_permission`, `built_in_role`, `owner_required`, `open_joining_disabled` |
 | 404 | `invite_not_found`, `member_not_found`, `ban_not_found`, `role_not_found` |
-| 409 | `already_banned`, `no_active_ip`, `role_in_use`, `role_limit` |
+| 409 | `already_banned`, `no_active_ip`, `role_in_use`, `role_limit`, `member_cap_reached` |
 | 413 | `body_too_large` when generated after reading the body |
 | 415 | `expected_json` |
-| 429 | `challenge_limit` |
+| 429 | `challenge_limit`, `open_join_limit` |
 | 500 | `database_error`, `database_pool_timeout`, `database_busy`, `clock_error`, `randomness_error`, `invalid_stored_person` |
 
 ## Keys and encrypted metadata
@@ -157,7 +186,7 @@ in a state response indicating that the first epoch is still pending.
 | POST `/v1/keys/epochs` | `{scope, epoch, commitment, envelope}` | A reader of a rotating scope, or the owner for the initial space epoch. 201. The envelope is addressed to the caller's device |
 | GET `/v1/space` | Empty | Any member. 200, `{name_ct, description_ct, icon_ct}` |
 | PUT `/v1/space` | `{name_ct?, description_ct?, icon_ct?}` | Owner. 204 |
-| GET `/v1/members` | Empty | Any member. 200, `[{person_id, display_name_ct, avatar_ct}]` |
+| GET `/v1/members` | Empty | Any member. 200, `[{person_id, display_name_ct, avatar_ct, role_ids}]` |
 | PUT `/v1/me/profile` | `{display_name_ct?, avatar_ct?}` | Updates the authenticated member's own profile. 204 |
 | POST `/v1/invite-preview` | `{code}` | No bearer. 200, `{space_key_ct, name_ct}`. Missing, expired, spent or unpreviewable invite returns 404 |
 
@@ -393,14 +422,19 @@ quota charge and expiry. DMs grant read and write to both participants.
 | --- | --- | --- |
 | POST `/v1/files?channel={channel}&id={id}` | Stream of raw ciphertext with `application/octet-stream` | Channel `write`. 201, `{id}` |
 | GET `/v1/files/{id}` | Empty | Channel `read`. 200, streamed ciphertext with `Content-Type: application/octet-stream` and `Content-Length` |
-| DELETE `/v1/files/{id}` | Empty | Uploader or a channel reader with `delete_messages`. 204 |
+| DELETE `/v1/files/{id}?uploader={person}` | Empty | Uploader, or a channel reader with `delete_messages` when `uploader` names the file's uploader. 204 |
 
 The upload rejects a blob below 16 bytes and caps the bytes as they arrive,
 including when the request has no Content-Length. The configured limits count
 ciphertext bytes, including tags and thumbnail blobs. Upload errors include
 `413 file_too_large`, `413 file_member_quota`, `413 file_server_quota`,
 `409 file_exists`, `408 file_upload_timeout` and `503 file_upload_busy`. The
-API stages at most four uploads at once and at most two per member.
+API stages at most four uploads at once and at most two per member. An upload
+fails with 408 when no bytes arrive for 30 seconds or it takes over 15 minutes.
+A moderator deleting a message passes its sender as `uploader`; the
+optional parameter is ignored for the uploader's own files. When it is
+missing or names someone else, a moderator gets `404 file_not_found`, so a
+message that references another member's file cannot get it removed.
 A missing or expired blob returns `404 file_not_found`. A download without a
 valid session also returns 404. A member without channel access gets
 `403 channel_read_denied`. Only the upload route uses the file body limit.
@@ -484,4 +518,36 @@ path must be new.
 
 ## Sync
 
-Written in W14.
+Both routes require a member bearer token. The API selects the row using the
+session's person ID.
+
+| Method | Request body | Response |
+| --- | --- | --- |
+| GET `/v1/me/sync` | Empty | 200 with the latest blob, or 204 if absent |
+| PUT `/v1/me/sync` | Sync blob | 204 if stored, or 409 with the current version if the submitted version is equal or lower |
+
+A blob is an eight-byte, positive signed integer version in big-endian order
+followed by the encrypted payload (24-byte nonce, ciphertext, 16-byte tag).
+The payload limit is 256 KiB including the nonce and tag. The PUT body limit
+is 256 KiB plus eight bytes. Malformed framing returns 400 and an oversized
+body returns 413. Successful GET and conflict responses use
+`application/octet-stream`. The conflict body is exactly the eight-byte
+version field. A device reloads and merges before retrying a conflict.
+
+Core takes the highest authenticated version from the member servers it can
+reach, breaking ties between replicas by lexicographically greatest origin.
+Merge works per origin and per field: the newer snapshot wins for anything
+both sides mention, local wins ties, and entries present on only one side are
+retained. Leaving a server records its origin in `left`, and removing a
+setting or contact sets it to `null`, so an older or replayed blob cannot bring
+it back. Pin conflicts are reported and never adopted; local and saved pins
+stay. Devices persist their snapshot and version so a server cannot roll them
+back by serving an older blob.
+Apply pending local edits after merging and publish the next version to all
+current peers. A failed peer is reported separately and can catch up after
+reconnect. A restored device needs a verified member server as a starting point.
+The desktop client syncs on each connect and after each local change.
+A device restored from the words joins one server by invite and then picks
+up the rest of the list from that server's blob.
+There is no leave route: leaving a server in the client removes it from the
+person's devices, and the membership stays until a moderator removes it.

@@ -70,7 +70,7 @@ async fn wait_event(
     .context("waiting for message event")?
 }
 
-async fn exchange(
+pub(super) async fn exchange(
     a: &mut KeyClient<'_>,
     b: &mut KeyClient<'_>,
     channel: Scope,

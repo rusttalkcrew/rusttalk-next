@@ -1,6 +1,10 @@
 //! The signed-in window: server rail, channels, chat and members.
 
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    path::PathBuf,
+    sync::Arc,
+};
 
 use anyhow::Result;
 use chrono::{DateTime, Local};
@@ -21,6 +25,7 @@ use crate::{
     audio::Audio,
     call::{self, LiveFile, LiveState, Voice},
     camera,
+    device_sync::{self, Edit},
     files::{self, Ask, Files},
     net::{Command, Net, Preview, Update},
     screen::Video,
@@ -46,6 +51,10 @@ pub struct Home {
     pub files: Files,
     pub confirm_sign_out: bool,
     pub error: Option<String>,
+    /// The synced voice and video settings as last published or received.
+    synced: BTreeMap<String, serde_json::Value>,
+    /// Servers left in this session, so a sync that started before can't bring them back.
+    left: HashSet<url::Url>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -77,6 +86,7 @@ enum Dialog {
     Invite(usize, Option<String>),
     Member(usize, Id),
     Delete(usize, Id, Id),
+    Leave(usize),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -102,18 +112,16 @@ impl Home {
         let servers: Vec<_> = net
             .joined()
             .into_iter()
-            .map(|known| Server {
-                address: known.address.clone(),
-                label: NEW_SERVER.into(),
-                status: Status::Connecting,
-                dir: Directory::default(),
-                chats: HashMap::new(),
-                open: None,
-                voice: HashMap::new(),
-                commands: net.start(known, None, None),
+            .map(|known| {
+                new_server(
+                    known.address.clone(),
+                    NEW_SERVER,
+                    net.start(known, None, None),
+                )
             })
             .collect();
         let runtime = net.handle();
+        let synced = device_sync::synced(&audio.settings());
         Ok(Self {
             identity,
             net,
@@ -132,7 +140,57 @@ impl Home {
             files: Files::default(),
             confirm_sign_out: false,
             error: None,
+            synced,
+            left: HashSet::new(),
         })
+    }
+
+    /// Stop showing a server, and leave its call and any dialog that points into the list.
+    fn remove_server(&mut self, index: usize) -> Server {
+        if self
+            .voice
+            .call
+            .as_ref()
+            .is_some_and(|call| call.server == self.servers[index].address)
+        {
+            call::leave(self);
+        }
+        self.dialog = None;
+        let server = self.servers.remove(index);
+        self.view = match self.view {
+            View::Server(i) | View::Direct(Some((i, _))) if i == index => {
+                if self.servers.is_empty() {
+                    View::Join
+                } else {
+                    View::Server(0)
+                }
+            }
+            View::Server(i) if i > index => View::Server(i - 1),
+            View::Direct(Some((i, channel))) if i > index => View::Direct(Some((i - 1, channel))),
+            view => view,
+        };
+        server
+    }
+
+    /// Leave a server here and on this person's other devices.
+    fn leave_server(&mut self, index: usize) {
+        let server = self.remove_server(index);
+        self.left.insert(server.address.clone());
+        self.net.leave(server.address, server.commands);
+    }
+
+    /// Publish the synced settings that changed since the last sync.
+    fn publish_settings(&mut self) {
+        let current = device_sync::synced(&self.voice.audio.settings());
+        let edits: Vec<_> = current
+            .iter()
+            .filter(|(key, value)| self.synced.get(*key) != Some(value))
+            .map(|(key, value)| Edit::Setting(key.clone(), value.clone()))
+            .collect();
+        if !edits.is_empty() {
+            self.net.sync(edits);
+            self.synced = current;
+        }
     }
 
     fn index(&self, address: &url::Url) -> Option<usize> {
@@ -360,6 +418,32 @@ impl Home {
             }
             Update::Image(id, image) => self.files.image(ctx, id, image),
             Update::Saved(id, saved) => self.files.saved(id, saved),
+            Update::Synced(synced) => {
+                for known in &synced.servers {
+                    if self.index(&known.address).is_none() && !self.left.contains(&known.address) {
+                        let commands = self.net.start(known.clone(), None, None);
+                        self.servers
+                            .push(new_server(known.address.clone(), NEW_SERVER, commands));
+                    }
+                }
+                // A server being joined is added to the sync state only once signed in.
+                let joining = match &self.join {
+                    Join::Joining(address) => Some(address.clone()),
+                    _ => None,
+                };
+                for index in (0..self.servers.len()).rev() {
+                    let address = &self.servers[index].address;
+                    if Some(address) != joining.as_ref()
+                        && !synced.servers.iter().any(|known| &known.address == address)
+                    {
+                        self.remove_server(index);
+                    }
+                }
+                let audio = &self.voice.audio;
+                let adopted = device_sync::adopt(&audio.settings(), &synced.settings);
+                self.synced = device_sync::synced(&adopted);
+                audio.set_settings(adopted);
+            }
             Update::Failed(error) => {
                 if matches!(self.dialog, Some(Dialog::Invite(_, None))) {
                     self.dialog = None;
@@ -709,6 +793,9 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
                 mine.and_then(|m| m.name.clone()).unwrap_or_default(),
             ));
         }
+        if ui.button("Leave server").clicked() {
+            home.dialog = Some(Dialog::Leave(index));
+        }
     });
     let server = &home.servers[index];
     match &server.status {
@@ -724,18 +811,7 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
         Status::Stopped(reason) => {
             ui.colored_label(ui.visuals().error_fg_color, reason.as_str());
             if ui.button("Remove server").clicked() {
-                if home
-                    .voice
-                    .call
-                    .as_ref()
-                    .is_some_and(|call| call.server == server.address)
-                {
-                    call::leave(home);
-                }
-                let server = &home.servers[index];
-                home.net.forget(&server.address);
-                home.servers.remove(index);
-                home.view = View::Join;
+                home.leave_server(index);
                 return;
             }
         }
@@ -986,16 +1062,10 @@ fn join(ui: &mut Ui, home: &mut Home) {
                         Some(link.code),
                         (!name.is_empty()).then(|| name.to_owned()),
                     );
-                    home.servers.push(Server {
-                        address: address.clone(),
-                        label: preview.name.clone().unwrap_or_else(|| NEW_SERVER.into()),
-                        status: Status::Connecting,
-                        dir: Directory::default(),
-                        chats: HashMap::new(),
-                        open: None,
-                        voice: HashMap::new(),
-                        commands,
-                    });
+                    let label = preview.name.as_deref().unwrap_or(NEW_SERVER);
+                    home.servers
+                        .push(new_server(address.clone(), label, commands));
+                    home.left.remove(&address);
                     home.join = Join::Joining(address);
                 } else if secondary(ui, "Cancel").clicked() {
                     home.join = Join::Idle(None);
@@ -1003,6 +1073,23 @@ fn join(ui: &mut Ui, home: &mut Home) {
             }
         }
     });
+}
+
+fn new_server(
+    address: url::Url,
+    label: &str,
+    commands: tokio::sync::mpsc::UnboundedSender<Command>,
+) -> Server {
+    Server {
+        address,
+        label: label.into(),
+        status: Status::Connecting,
+        dir: Directory::default(),
+        chats: HashMap::new(),
+        open: None,
+        voice: HashMap::new(),
+        commands,
+    }
 }
 
 fn error_slot(join: &mut Join) -> &mut Option<String> {
@@ -1481,6 +1568,7 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
     };
     let mut close = false;
     let mut command = None;
+    let mut leave = None;
     let modal = Modal::new(UiId::unique("dialog")).show(ctx, |ui| {
         ui.set_width(400.0);
         match dialog {
@@ -1611,22 +1699,43 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
                         .add(Button::new("Delete").fill(ui.visuals().error_fg_color))
                         .clicked()
                     {
-                        let files = home.servers[*index]
+                        let msg = home.servers[*index]
                             .chats
                             .get(channel)
-                            .and_then(|chat| chat.messages.iter().find(|msg| msg.id == *id))
+                            .and_then(|chat| chat.messages.iter().find(|msg| msg.id == *id));
+                        let files = msg
                             .into_iter()
                             .flat_map(|msg| &msg.files)
                             .flat_map(|file| std::iter::once(&file.file).chain(&file.thumbnail))
                             .map(|blob| blob.id)
                             .collect();
-                        command = Some((*index, Command::Delete(*channel, *id, files)));
+                        let sender = msg.map_or([0; 32], |msg| msg.person);
+                        command = Some((*index, Command::Delete(*channel, *id, sender, files)));
+                    }
+                    close |= ui.button("Cancel").clicked();
+                });
+            }
+            Dialog::Leave(index) => {
+                ui.heading(format!("Leave {}?", home.servers[*index].name()));
+                ui.label(
+                    "It's removed from all your devices. To come back, you need a new invite.",
+                );
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(Button::new("Leave").fill(ui.visuals().error_fg_color))
+                        .clicked()
+                    {
+                        leave = Some(*index);
                     }
                     close |= ui.button("Cancel").clicked();
                 });
             }
         }
     });
+    if let Some(index) = leave {
+        home.leave_server(index);
+        return;
+    }
     if let Some((index, command)) = command {
         home.servers[index].send(command);
         close = true;
@@ -1710,6 +1819,7 @@ fn settings(
     if close || (modal.should_close() && !home.confirm_sign_out) {
         home.settings = None;
         home.error = None;
+        home.publish_settings();
     }
 
     if !home.confirm_sign_out {
