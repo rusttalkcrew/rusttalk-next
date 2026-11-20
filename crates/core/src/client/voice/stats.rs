@@ -16,7 +16,6 @@ pub struct TrackStats {
     pub participant: ParticipantIdentity,
     pub sid: TrackSid,
     pub outbound: bool,
-    pub ping_ms: Option<f64>,
     pub jitter_ms: Option<f64>,
     pub packets_lost: Option<i64>,
     pub bitrate_bps: Option<f64>,
@@ -75,7 +74,6 @@ impl Sampler {
             participant,
             outbound,
             sid,
-            ping_ms: ping(report),
             jitter_ms: None,
             packets_lost: None,
             bitrate_bps: None,
@@ -89,9 +87,6 @@ impl Sampler {
                 }
                 RtcStats::OutboundRtp(stat) if outbound => (&stat.rtc.id, stat.sent.bytes_sent),
                 RtcStats::RemoteInboundRtp(stat) if outbound => {
-                    if stat.remote_inbound.round_trip_time_measurements > 0 {
-                        result.ping_ms = Some(stat.remote_inbound.round_trip_time * 1000.0);
-                    }
                     result.jitter_ms = Some(stat.received.jitter * 1000.0);
                     result.packets_lost = Some(stat.received.packets_lost);
                     continue;
