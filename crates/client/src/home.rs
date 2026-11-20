@@ -156,13 +156,20 @@ impl Home {
             call::leave(self);
         }
         self.dialog = None;
+        let server = self.servers.remove(index);
         self.view = match self.view {
-            View::Server(i) | View::Direct(Some((i, _))) if i == index => View::Join,
+            View::Server(i) | View::Direct(Some((i, _))) if i == index => {
+                if self.servers.is_empty() {
+                    View::Join
+                } else {
+                    View::Server(0)
+                }
+            }
             View::Server(i) if i > index => View::Server(i - 1),
             View::Direct(Some((i, channel))) if i > index => View::Direct(Some((i - 1, channel))),
             view => view,
         };
-        self.servers.remove(index)
+        server
     }
 
     /// Leave a server here and on this person's other devices.

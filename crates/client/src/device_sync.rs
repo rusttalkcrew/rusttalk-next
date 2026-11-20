@@ -63,6 +63,8 @@ pub enum Edit {
 impl Edit {
     fn apply(&self, state: &mut State) {
         match self {
+            // Re-applying an unchanged join must not move the server to the end of the list.
+            Self::Join(server) if state.servers.contains(server) => {}
             Self::Join(server) => state.join(server.clone()),
             Self::Leave(address) => state.leave(address),
             Self::Setting(key, value) => {
