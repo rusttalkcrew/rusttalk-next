@@ -17,7 +17,7 @@ use livekit::{
     participant::ParticipantState,
     prelude::{LocalTrack, RemoteTrack},
     rtc_engine::SimulateScenario,
-    webrtc::audio_source::{AudioSourceOptions, RtcAudioSource},
+    webrtc::audio_source::RtcAudioSource,
 };
 use reqwest::Method;
 use serde::Deserialize;
@@ -346,11 +346,6 @@ impl VoiceRoom {
         name: &str,
         source: NativeAudioSource,
     ) -> Result<LocalTrackPublication> {
-        ensure!(
-            source.sample_rate() == 48_000 && matches!(source.num_channels(), 1 | 2),
-            "shared audio requires 48 kHz mono or stereo PCM"
-        );
-        source.set_audio_options(AudioSourceOptions::default());
         let key = self
             .name_keys
             .get(&self.epoch)

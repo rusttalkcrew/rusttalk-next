@@ -21,25 +21,22 @@ pub struct App {
     pub name: String,
 }
 
-/// The operating system does not provide per-application audio capture.
+/// Windows builds before 20348 cannot capture single apps.
 #[derive(Debug, thiserror::Error)]
-#[error("application audio capture is not supported on this platform")]
+#[error("application audio capture needs Windows build 20348 or later")]
 pub struct Unsupported;
 
-/// Whether this OS can capture single apps (Windows needs build 20348 or later).
-pub fn supported() -> bool {
+/// Fails with `Unsupported` on Windows builds that cannot capture single apps.
+pub fn supported() -> Result<()> {
     #[cfg(windows)]
-    return platform::supported().is_ok();
+    return platform::supported();
     #[cfg(not(windows))]
-    cfg!(target_os = "linux")
+    Ok(())
 }
 
 /// List playing applications. An unavailable backend returns an error.
 pub fn list_apps() -> Result<Vec<App>> {
-    #[cfg(any(target_os = "linux", windows))]
-    return platform::list_apps();
-    #[cfg(not(any(target_os = "linux", windows)))]
-    Err(Unsupported.into())
+    platform::list_apps()
 }
 
 /// Owns the capture. Dropping it requests shutdown without blocking the UI.
@@ -66,16 +63,9 @@ impl Drop for Capture {
 /// Deliver interleaved 48 kHz stereo s16 PCM in 10 ms frames on a capture worker.
 /// The sink must return promptly. A final in-flight callback can finish after drop.
 pub fn capture(app: &App, sink: impl FnMut(&[i16]) + Send + 'static) -> Result<Capture> {
-    #[cfg(any(target_os = "linux", windows))]
-    return platform::capture(app, sink);
-    #[cfg(not(any(target_os = "linux", windows)))]
-    {
-        let _ = (app, sink);
-        Err(Unsupported.into())
-    }
+    platform::capture(app, sink)
 }
 
-#[cfg(any(target_os = "linux", windows))]
 fn deliver(bytes: &[u8; FRAME_SAMPLES * 2], sink: &mut impl FnMut(&[i16])) {
     let mut frame = [0; FRAME_SAMPLES];
     for (sample, bytes) in frame.iter_mut().zip(bytes.as_chunks::<2>().0) {
@@ -101,13 +91,9 @@ pub fn capture_to_source(
     app: &App,
     source: crate::client::voice::NativeAudioSource,
 ) -> Result<Capture> {
-    use std::{
-        borrow::Cow,
-        future::Future,
-        pin::pin,
-        task::{Context, Poll, Waker},
-    };
+    use std::borrow::Cow;
 
+    use futures_util::FutureExt;
     use livekit::webrtc::audio_frame::AudioFrame;
 
     anyhow::ensure!(
@@ -121,10 +107,9 @@ pub fn capture_to_source(
             num_channels: CHANNELS,
             samples_per_channel: SAMPLE_RATE / 100,
         };
-        match pin!(source.capture_frame(&frame)).poll(&mut Context::from_waker(Waker::noop())) {
-            Poll::Ready(Ok(())) => (),
-            Poll::Ready(Err(error)) => tracing::warn!(%error, "sending app audio failed"),
-            Poll::Pending => tracing::warn!("app audio source must have no internal queue"),
+        let sent = source.capture_frame(&frame).now_or_never();
+        if let Err(error) = sent.expect("a source without a queue never waits") {
+            tracing::warn!(%error, "sending app audio failed");
         }
     })
 }

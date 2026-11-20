@@ -152,9 +152,9 @@ Debug builds open a console on Windows; release builds do not, so check
   `rusttalk_e2e_<pid>` null sink created with `pactl load-module module-null-sink`.
   The receiving bot verifies two encrypted names and track sources, both
   frequencies, and a quarter-scale gain on one track. The test unloads the
-  sink and stops both players on exit. It skips app audio with a message
-  when the host has no PipeWire or pipewire-pulse session. Set `E2E_FEATURES=`
-  to run the membership, keys and chat harness without WebRTC.
+  sink and stops both players on exit. It fails when the host has no PipeWire
+  or pipewire-pulse session. Set `E2E_FEATURES=` to run the membership, keys
+  and chat harness without WebRTC, voice or app audio.
 
 For a manual app-audio check, build with
 `cargo build --locked -p rusttalk-bot -p rusttalk-pipewire` and run both
