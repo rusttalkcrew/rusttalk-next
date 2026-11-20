@@ -51,7 +51,8 @@ pub enum LiveFileEvent {
 /// An accepted download. Dropping the handle cancels it.
 pub struct LiveDownload {
     events: watch::Receiver<LiveFileEvent>,
-    cancel: Option<oneshot::Sender<()>>,
+    /// Dropping this sender stops the download task.
+    _cancel: oneshot::Sender<()>,
 }
 
 impl LiveDownload {
@@ -59,11 +60,6 @@ impl LiveDownload {
     pub async fn next_event(&mut self) -> Option<LiveFileEvent> {
         self.events.changed().await.ok()?;
         Some(self.events.borrow_and_update().clone())
-    }
-
-    /// Stop downloading and remove the temporary file.
-    pub fn cancel(&mut self) {
-        self.cancel.take();
     }
 }
 
@@ -322,7 +318,7 @@ impl VoiceRoom {
         });
         Ok(LiveDownload {
             events: updates,
-            cancel: Some(cancel),
+            _cancel: cancel,
         })
     }
 
