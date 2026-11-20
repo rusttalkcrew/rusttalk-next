@@ -59,6 +59,7 @@ struct App {
     voice: Option<Arc<voice::LiveKit>>,
     listing_changed: watch::Sender<()>,
     files: Arc<files::Files>,
+    session_ttl: i64,
 }
 
 /// What event sockets hear: an update for clients, or a server-side change to recheck.
@@ -200,6 +201,7 @@ async fn run() -> Result<()> {
                 presence: Arc::default(),
                 listing_changed: watch::channel(()).0,
                 voice: voice::LiveKit::from_env()?.map(Arc::new),
+                session_ttl: auth::session_ttl()?,
             })
             .await?;
         }

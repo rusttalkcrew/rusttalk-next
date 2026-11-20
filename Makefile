@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help dev client bot logs down reset lint fmt test e2e release release-key
+.PHONY: help dev client bot logs down reset lint fmt test e2e soak release release-key
 
 DEV_COMPOSE := docker compose -f deploy/compose.dev.yml --profile index -p rusttalk-dev
 export RUSTTALK_DEV_USER := $(shell id -u):$(shell id -g)
@@ -124,6 +124,9 @@ e2e: ## Run the two-stack membership, keys, chat, stored files, voice, app audio
 		compose up --build --wait --wait-timeout 60; \
 		compose_second up --build --wait --wait-timeout 60; \
 		cargo test --locked -p rusttalk-bot --no-default-features $(E2E_FEATURES) --test membership -- --nocapture
+
+soak: ## Run two headless bots against a disposable stack for 30 minutes
+	@bash deploy/soak.sh
 
 ##@ Release
 

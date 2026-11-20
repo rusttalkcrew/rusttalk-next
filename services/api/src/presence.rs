@@ -282,6 +282,7 @@ mod tests {
             changes: tokio::sync::broadcast::channel(128).0,
             presence: Default::default(),
             voice: None,
+            session_ttl: crate::auth::SESSION_TTL,
             listing_changed: tokio::sync::watch::channel(()).0,
         };
         drop(open(&app, "p".into(), Status::Online));

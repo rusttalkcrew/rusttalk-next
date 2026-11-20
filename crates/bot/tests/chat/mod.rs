@@ -40,7 +40,7 @@ fn path(scope: Scope, suffix: &str) -> String {
     format!("/v1/channels/{}/messages{suffix}", encode(&scope.id))
 }
 
-async fn wait_event(
+pub(super) async fn wait_event(
     client: &mut KeyClient<'_>,
     scope: Scope,
     id: &[u8; 32],
