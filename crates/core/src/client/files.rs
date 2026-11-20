@@ -34,6 +34,9 @@ const TRANSFER_LIMIT: Duration = Duration::from_secs(15 * 60);
 /// Upload body piece size; each piece taken by the connection counts as progress.
 const UPLOAD_PIECE: usize = 64 * 1024;
 
+/// Called with the bytes moved so far and the total, as a transfer goes.
+pub type Progress = Arc<dyn Fn(u64, u64) + Send + Sync>;
+
 /// The API refused an upload. `code` is its error code, such as `file_member_quota`.
 #[derive(Debug, thiserror::Error)]
 #[error("upload rejected with {status}: {code}")]
@@ -45,12 +48,14 @@ const THUMBNAIL_EDGE: u32 = 320;
 
 impl KeyClient<'_> {
     /// Encrypt and upload a file and, for PNG/JPEG, an independently encrypted PNG thumbnail.
+    /// `progress` follows the file itself, not its small thumbnail.
     pub async fn upload_file(
         &self,
         channel: &[u8; 32],
         name: &str,
         media_type: &str,
         bytes: &[u8],
+        progress: Option<Progress>,
     ) -> Result<Attachment> {
         let mut attachment = Attachment {
             file: blob_ref(bytes.len())?,
@@ -63,9 +68,10 @@ impl KeyClient<'_> {
         if let Some(png) = &thumbnail {
             attachment.thumbnail = Some(blob_ref(png.len())?);
         }
-        self.upload_blob(channel, &attachment.file, bytes).await?;
+        self.upload_blob(channel, &attachment.file, bytes, progress)
+            .await?;
         if let (Some(reference), Some(bytes)) = (&attachment.thumbnail, thumbnail)
-            && let Err(error) = self.upload_blob(channel, reference, &bytes).await
+            && let Err(error) = self.upload_blob(channel, reference, &bytes, None).await
         {
             if let Err(cleanup) = self.delete_file(&attachment.file.id).await {
                 tracing::warn!(status = ?cleanup.downcast_ref::<reqwest::Error>().and_then(reqwest::Error::status),
@@ -81,6 +87,7 @@ impl KeyClient<'_> {
         channel: &[u8; 32],
         reference: &BlobRef,
         bytes: &[u8],
+        progress: Option<Progress>,
     ) -> Result<()> {
         #[derive(Deserialize)]
         struct Uploaded {
@@ -95,9 +102,13 @@ impl KeyClient<'_> {
         let pieces = {
             let taken = taken.clone();
             let ends = (UPLOAD_PIECE..ciphertext.len() + UPLOAD_PIECE).step_by(UPLOAD_PIECE);
+            let total = ciphertext.len() as u64;
             stream::iter(ends.map(move |end| {
                 let start = end - UPLOAD_PIECE;
                 taken.fetch_add(1, Ordering::Relaxed);
+                if let Some(progress) = &progress {
+                    progress((end as u64).min(total), total);
+                }
                 Ok::<_, io::Error>(ciphertext[start..end.min(ciphertext.len())].to_vec())
             }))
         };
@@ -134,7 +145,11 @@ impl KeyClient<'_> {
     }
 
     /// Download a file or thumbnail and return bytes only after authenticating the entire blob.
-    pub async fn download_file(&self, reference: &BlobRef) -> Result<Vec<u8>> {
+    pub async fn download_file(
+        &self,
+        reference: &BlobRef,
+        progress: Option<Progress>,
+    ) -> Result<Vec<u8>> {
         let expected = reference.ciphertext_len()?;
         let request = self
             .request(Method::GET, &file_path(&reference.id))
@@ -154,6 +169,9 @@ impl KeyClient<'_> {
                 "oversized ciphertext"
             );
             ciphertext.extend_from_slice(&chunk);
+            if let Some(progress) = &progress {
+                progress(ciphertext.len() as u64, expected as u64);
+            }
         }
         open(reference, &ciphertext)
     }

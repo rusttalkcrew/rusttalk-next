@@ -14,15 +14,15 @@ use rusttalk_core::{
     client::{
         Event, KeyClient, MessageRecord,
         voice::{
-            ConnectionState, LiveFileEvent, NativeVideoSource, RoomEvent, TrackSid, TrackSource,
-            VoiceRoom, VoiceState,
+            ConnectionState, DataLiveFiles, LiveDownload, LiveFileEvent, NativeVideoSource,
+            RoomEvent, TrackSid, TrackSource, VoiceRoom, VoiceState,
         },
     },
     identity::fingerprint,
 };
 use url::Url;
 
-use super::{Command, Ctx, LiveOffer, State, Update};
+use super::{Command, Ctx, LiveOffer, State, Update, send_messages, to_msg};
 use crate::{
     screen,
     server::{CallState, Id, Peer, Screen, Stats, TrackStats},
@@ -80,6 +80,16 @@ pub(super) async fn voice_command(
 ) -> Result<Option<Id>> {
     if let Command::LeaveVoice = command {
         return Ok(state.voice.take().map(|live| close(ctx, live)));
+    }
+    if let Command::CancelFile(id) = &command {
+        if let Some(download) = state.chat_downloads.remove(id) {
+            tracing::info!("cancelled a live file download in a chat");
+            download.abort();
+        }
+        // Removing an offer that isn't there does nothing.
+        for files in state.chat_files.values_mut() {
+            files.cancel_live_offer(id);
+        }
     }
     let Some(live) = &mut state.voice else {
         return Ok(None);
@@ -691,8 +701,80 @@ pub(super) async fn offer_file(
         from: None,
         name: file.name,
         size: file.size,
+        chat: false,
     }));
     Ok(())
+}
+
+/// Offer a file to whoever is online in a text channel or DM, shown as a message.
+pub(super) async fn offer_chat_file(
+    ctx: &Ctx,
+    url: &Url,
+    client: &mut KeyClient<'_>,
+    state: &mut State,
+    channel: Id,
+    path: PathBuf,
+) -> Result<()> {
+    let files =
+        (state.chat_files.entry(channel)).or_insert_with(|| DataLiveFiles::new(client, channel));
+    let record = files.offer_live_file(client, &path).await?;
+    let body = client.open_message(&channel, &record).await?;
+    let file = body.live.as_ref().context("offer without a file")?;
+    tracing::info!("offered a live file in a chat");
+    ctx.send(Update::LiveOffer(LiveOffer {
+        id: file.id,
+        from: None,
+        name: file.name.clone(),
+        size: file.size,
+        chat: true,
+    }));
+    send_messages(ctx, url, channel, vec![to_msg(&record, &body)], false, None);
+    Ok(())
+}
+
+/// Receive a live file offered in a text channel or DM into this path.
+pub(super) async fn accept_chat_file(
+    ctx: &Ctx,
+    client: &mut KeyClient<'_>,
+    state: &mut State,
+    id: Id,
+    path: PathBuf,
+) -> Result<()> {
+    let Some((channel, record)) = state.chat_offers.get(&id).cloned() else {
+        return Ok(());
+    };
+    let files =
+        (state.chat_files.entry(channel)).or_insert_with(|| DataLiveFiles::new(client, channel));
+    let download = match files.accept_live_file(client, &record, &path).await {
+        Ok(download) => download,
+        Err(error) => {
+            let reason = format!("{error:#}");
+            ctx.send(Update::LiveProgress(id, LiveFileEvent::Failed { reason }));
+            return Err(error);
+        }
+    };
+    tracing::info!("receiving a live file in a chat");
+    state.chat_downloads.insert(id, follow(ctx, id, download));
+    Ok(())
+}
+
+/// Show how a live download goes until it ends.
+fn follow(ctx: &Ctx, id: Id, mut download: LiveDownload) -> tokio::task::JoinHandle<()> {
+    let ctx = ctx.clone();
+    tokio::spawn(async move {
+        let mut shown = std::time::Instant::now();
+        while let Some(event) = download.next_event().await {
+            let end = !matches!(event, LiveFileEvent::Progress { .. });
+            // Progress comes per chunk; a few updates a second are enough to draw.
+            if end || shown.elapsed() > Duration::from_millis(150) {
+                shown = std::time::Instant::now();
+                ctx.send(Update::LiveProgress(id, event));
+            }
+            if end {
+                break;
+            }
+        }
+    })
 }
 
 /// Receive an offered live file into this path.
@@ -709,7 +791,7 @@ pub(super) async fn accept_file(
     let Some(record) = live.offers.remove(&id) else {
         return Ok(());
     };
-    let mut download = match live.room.accept_live_file(client, &record, &path).await {
+    let download = match live.room.accept_live_file(client, &record, &path).await {
         Ok(download) => download,
         Err(error) => {
             let reason = format!("{error:#}");
@@ -718,24 +800,7 @@ pub(super) async fn accept_file(
         }
     };
     tracing::info!("receiving a live file");
-    let ctx = ctx.clone();
-    live.downloads.insert(
-        id,
-        tokio::spawn(async move {
-            let mut shown = std::time::Instant::now();
-            while let Some(event) = download.next_event().await {
-                let end = !matches!(event, LiveFileEvent::Progress { .. });
-                // Progress comes per chunk; a few updates a second are enough to draw.
-                if end || shown.elapsed() > Duration::from_millis(150) {
-                    shown = std::time::Instant::now();
-                    ctx.send(Update::LiveProgress(id, event));
-                }
-                if end {
-                    break;
-                }
-            }
-        }),
-    );
+    live.downloads.insert(id, follow(ctx, id, download));
     Ok(())
 }
 
@@ -887,23 +952,35 @@ pub(super) fn live_file_accepted(
     event: &Event,
 ) -> Result<()> {
     let Event::LiveFileAccepted {
-        device, acceptance, ..
+        channel,
+        device,
+        acceptance,
+        data,
     } = event
     else {
         return Ok(());
     };
-    if let Some(voice) = &mut state.voice {
+    let mine = if *data {
+        let Some(files) = state.chat_files.get_mut(&decode::<32>(channel)?) else {
+            return Ok(());
+        };
+        files.handle_live_file_event(client, event)?;
+        true
+    } else if let Some(voice) = &mut state.voice {
         voice.room.handle_live_file_event(client, event)?;
+        voice.mine.contains(&decode(&acceptance.transfer)?)
+    } else {
+        false
+    };
+    let person = client
+        .devices()
+        .find(|cert| encode(cert.signing_key().as_bytes()) == *device)
+        .map(|cert| *cert.person_id());
+    if let Some(person) = person
+        && mine
+    {
         let transfer = decode(&acceptance.transfer)?;
-        let person = client
-            .devices()
-            .find(|cert| encode(cert.signing_key().as_bytes()) == *device)
-            .map(|cert| *cert.person_id());
-        if let Some(person) = person
-            && voice.mine.contains(&transfer)
-        {
-            ctx.send(Update::LiveReceiver(transfer, person, !acceptance.cancel));
-        }
+        ctx.send(Update::LiveReceiver(transfer, person, !acceptance.cancel));
     }
     Ok(())
 }

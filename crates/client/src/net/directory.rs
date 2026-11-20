@@ -1,19 +1,24 @@
 //! The server's names, channels, members and permissions, decrypted for the UI.
 
+use std::collections::HashMap;
+
 use anyhow::{Context, Result};
+use eframe::egui::ColorImage;
 use reqwest::Method;
 use rusttalk_core::{
     auth::{decode, encode},
-    client::{Catalog, KeyClient},
+    client::{Catalog, KeyClient, decode_profile_image},
     identity::fingerprint,
     keys::Metadata,
 };
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use url::Url;
 
 use super::{Ctx, State, Update, leave_voice, now};
 use crate::server::{
-    Body, Category, Channel, Device, Directory, Dm, Id, Member, Msg, Perms, Role, member_name,
+    Body, Category, Channel, Device, Directory, Dm, Id, Member, Msg, Perms, Picture, Role,
+    member_name,
 };
 
 pub(super) async fn get(client: &KeyClient<'_>, path: &str) -> Result<Value> {
@@ -38,7 +43,21 @@ pub(super) async fn directory(
     let me = get(client, "/v1/me").await?;
     let roles = get(client, "/v1/roles").await?;
     let space = get(client, "/v1/space").await?;
-    let dir = build(client, &catalog, &members, &me, &roles, &space)?;
+    let mut pictures = HashMap::new();
+    // Pictures are decoded here, off the UI; only new ones, the rest come from the last load.
+    let dir = tokio::task::block_in_place(|| {
+        let mut picture = |bytes: Vec<u8>| picture(&state.pictures, &mut pictures, &bytes);
+        build(
+            client,
+            &catalog,
+            &members,
+            &me,
+            &roles,
+            &space,
+            &mut picture,
+        )
+    })?;
+    state.pictures = pictures;
     if let Some(before) = &state.last {
         for (person, action, detail) in changes(before, &dir) {
             let name = member_name(&dir, &person);
@@ -62,6 +81,7 @@ pub(super) async fn directory(
                     detail,
                 },
                 files: Vec::new(),
+                live: None,
             };
             ctx.send(Update::Notice(url.clone(), person, msg));
         }
@@ -90,13 +110,17 @@ fn build(
     me: &Value,
     roles: &Value,
     space: &Value,
+    picture: &mut impl FnMut(Vec<u8>) -> Option<Picture>,
 ) -> Result<Directory> {
-    let text = |kind: Metadata, id: &[u8], ct: Option<&str>| {
+    let bytes = |kind: Metadata, id: &[u8], ct: Option<&str>| {
         let plain = client.decrypt_metadata(kind, id, ct?);
         if let Err(error) = &plain {
             tracing::warn!(error = %format_args!("{error:#}"), "name could not be decrypted");
         }
-        Some(String::from_utf8_lossy(&plain.ok()?).into_owned())
+        plain.ok()
+    };
+    let text = |kind: Metadata, id: &[u8], ct: Option<&str>| {
+        Some(String::from_utf8_lossy(&bytes(kind, id, ct)?).into_owned())
     };
     let strings = |value: &Value| -> Vec<String> {
         value
@@ -131,6 +155,7 @@ fn build(
                     "ban" => perms.ban = true,
                     "manage_roles" => perms.manage_roles = true,
                     "view_audit_log" => perms.audit = true,
+                    "manage_server" => perms.manage_server = true,
                     _ => {}
                 }
             }
@@ -245,6 +270,9 @@ fn build(
             ),
             devices,
             roles: strings(&row["role_ids"]),
+            avatar: bytes(Metadata::Avatar, &person, row["avatar_ct"].as_str())
+                .and_then(&mut *picture),
+            presence: serde_json::from_value(row["presence"].clone()).unwrap_or_default(),
         });
     }
     list.sort_by_cached_key(|member| {
@@ -256,6 +284,8 @@ fn build(
     let server_id = client.space().id;
     Ok(Directory {
         name: text(Metadata::ServerName, &server_id, space["name_ct"].as_str()),
+        icon: bytes(Metadata::ServerIcon, &server_id, space["icon_ct"].as_str()).and_then(picture),
+        status: serde_json::from_value(me["status"].clone()).ok(),
         me: *client.identity.certificate.person_id(),
         perms,
         categories,
@@ -264,6 +294,44 @@ fn build(
         roles: role_list,
         default_role: roles["default_role_id"].as_str().unwrap_or_default().into(),
     })
+}
+
+/// Decode a profile picture or server icon, reusing the one from the last load.
+fn picture(
+    last: &HashMap<[u8; 32], Picture>,
+    next: &mut HashMap<[u8; 32], Picture>,
+    bytes: &[u8],
+) -> Option<Picture> {
+    let key: [u8; 32] = Sha256::digest(bytes).into();
+    if let Some(known) = last.get(&key).or(next.get(&key)) {
+        let known = known.clone();
+        next.insert(key, known.clone());
+        return Some(known);
+    }
+    let frames = match decode_profile_image(bytes) {
+        Ok(frames) => frames,
+        Err(error) => {
+            tracing::warn!(error = %format_args!("{error:#}"), "picture could not be decoded");
+            return None;
+        }
+    };
+    let frames: Vec<_> = frames
+        .into_iter()
+        .map(|frame| {
+            let (numer, denom) = frame.delay().numer_denom_ms();
+            // Browsers also slow down GIF frames shorter than 20 ms.
+            let ms = (numer / denom.max(1)).max(20);
+            let image = frame.into_buffer();
+            let size = [image.width() as usize, image.height() as usize];
+            (ColorImage::from_rgba_unmultiplied(size, image.as_raw()), ms)
+        })
+        .collect();
+    let picture = Picture {
+        key,
+        frames: frames.into(),
+    };
+    next.insert(key, picture.clone());
+    Some(picture)
 }
 
 /// Member and device changes between two directory loads: (person, action, details).
@@ -336,6 +404,8 @@ mod tests {
                 })
                 .collect(),
             roles: Vec::new(),
+            avatar: None,
+            presence: Default::default(),
         }
     }
 

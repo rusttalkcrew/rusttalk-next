@@ -86,6 +86,7 @@ All endpoints below require `Authorization: Bearer <token>`.
 | --- | --- | --- |
 | GET `/v1/me` | Empty | Any member. 200, `{person_id, device_id, joined_at, role_ids, status}`; `status` is the caller’s own presence choice |
 | PUT `/v1/me/status` | `{status}`, one of `online`, `away`, `invisible` | Any member. 204. Stored and applied to the member’s event sockets |
+| DELETE `/v1/me/membership` | Empty | Any member except the owner. 204, leaves the server like a kick: sessions close, keys rotate, audit `left`. The owner gets `409 owner_cannot_leave` |
 | POST `/v1/me/revocations` | `{record}`, a W04 root-signed revocation for the caller's person | Any member. 204, affected device loses its token |
 | POST `/v1/invites` | `{uses, ttl_seconds, space_key_ct, name_ct?}` | `invite`. 201, `{id, code, expires_at}` |
 | DELETE `/v1/invites/{id}` | Empty | `invite`. 204 |
@@ -165,7 +166,7 @@ errors may have an empty body. The API logs a request ID, status and reason.
 | 401 | `invalid_challenge`, `invalid_certificate`, `invalid_device_signature`, `invalid_session`, `token_expired` |
 | 403 | `invite_required`, `invalid_invite`, `person_banned`, `ip_banned`, `device_revoked`, `permission_denied`, `role_hierarchy`, `cannot_grant_permission`, `built_in_role`, `owner_required`, `open_joining_disabled` |
 | 404 | `invite_not_found`, `member_not_found`, `ban_not_found`, `role_not_found` |
-| 409 | `already_banned`, `no_active_ip`, `role_in_use`, `role_limit`, `member_cap_reached` |
+| 409 | `owner_cannot_leave`, `already_banned`, `no_active_ip`, `role_in_use`, `role_limit`, `member_cap_reached` |
 | 413 | `body_too_large` when generated after reading the body |
 | 415 | `expected_json` |
 | 429 | `challenge_limit`, `open_join_limit` |
