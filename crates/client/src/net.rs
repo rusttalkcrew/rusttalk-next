@@ -747,8 +747,10 @@ async fn on_command(
                     send_room(ctx, url, client, state, channel);
                 }
                 Err(error) => {
+                    tracing::warn!(error = %format_args!("{error:#}"), "sharing app audio failed");
+                    let text = format!("Couldn't share {}. Is it still playing?", app.name);
                     ctx.send(Update::AppStopped(app.id));
-                    return Err(error.context("share app audio"));
+                    ctx.send(Update::Failed(text));
                 }
             }
         }
