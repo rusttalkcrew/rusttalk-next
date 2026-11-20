@@ -3,10 +3,12 @@ WORKDIR /src
 COPY Cargo.* ./
 COPY crates/ crates/
 COPY services/ services/
-# The target cache is shared by checkouts whose source files can have older mtimes.
+# The target cache is shared by checkouts whose source files can have older mtimes:
+# rebuild the workspace crates, and lock the cache so a concurrent build cannot
+# finish newer artifacts from another checkout after this touch.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/src/target \
-    touch crates/core/src/lib.rs services/api/src/main.rs services/api/build.rs && \
+    --mount=type=cache,target=/src/target,sharing=locked \
+    touch crates/core/src/lib.rs services/api/src/main.rs && \
     cargo build --release --locked -p rusttalk-api && \
     install target/release/rusttalk-api /usr/local/bin/rusttalk-api
 

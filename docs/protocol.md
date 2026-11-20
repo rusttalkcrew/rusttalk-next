@@ -456,10 +456,13 @@ version field. A device reloads and merges before retrying a conflict.
 
 Core takes the highest authenticated version from the member servers it can
 reach, breaking ties between replicas by lexicographically greatest origin.
-Merge unions joined origins with their pins and reports conflicts while
-preserving local pins. Saved pins protect previously seen origins, too.
-For settings and contacts the newer snapshot wins on shared fields, with
-local values winning ties. Fields present on only one side are retained.
+Merge works per origin and per field: the newer snapshot wins for anything
+both sides mention, local wins ties, and entries present on only one side are
+retained. Leaving a server records its origin in `left`, and removing a
+setting or contact sets it to `null`, so an older or replayed blob cannot bring
+it back. Pin conflicts are reported and never adopted; local and saved pins
+stay. Devices persist their snapshot and version so a server cannot roll them
+back by serving an older blob.
 Apply pending local edits after merging and publish the next version to all
 current peers. A failed peer is reported separately and can catch up after
 reconnect. A restored device needs a verified member server as a starting point.

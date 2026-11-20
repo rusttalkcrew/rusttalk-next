@@ -1,7 +1,7 @@
 //! End-to-end encrypted settings, joined servers and contacts for one person.
 
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     path::Path,
 };
 
@@ -33,6 +33,25 @@ pub struct State {
     pub settings: BTreeMap<String, Value>,
     pub servers: Vec<KnownServer>,
     pub contacts: BTreeMap<String, Value>,
+    /// Origins left on some device, so other devices drop them instead of re-adding them.
+    #[serde(default)]
+    pub left: BTreeSet<Url>,
+}
+
+impl State {
+    /// Add or update a joined server and clear an earlier leave of its origin.
+    pub fn join(&mut self, server: KnownServer) {
+        self.left.remove(&server.address);
+        self.servers
+            .retain(|joined| joined.address != server.address);
+        self.servers.push(server);
+    }
+
+    /// Drop a joined server and record the leave for the other devices.
+    pub fn leave(&mut self, address: &Url) {
+        self.servers.retain(|joined| &joined.address != address);
+        self.left.insert(address.clone());
+    }
 }
 
 /// Local version zero represents a profile that has never synced.
@@ -82,11 +101,20 @@ pub async fn load<'a>(peers: &[Peer<'a>], key: &[u8; 32]) -> (Option<Snapshot>, 
     (newest.map(|(_, snapshot)| snapshot), failures)
 }
 
-/// Union joined servers, preserving local and previously saved pins on conflict.
-/// For settings and contacts the newer snapshot wins per field, with local winning ties.
+/// Merge per origin and per field: the newer snapshot wins for anything both sides mention,
+/// with local winning ties, and entries only one side mentions are kept. Leaves are kept as
+/// tombstones in `State::left`; remove a setting or contact by setting it to `null`. So an
+/// older or replayed blob cannot bring back a removed server or field. A remote server whose
+/// pin differs from a local or saved pin is reported and never adopted.
 /// Apply pending local edits to the merged state before pushing.
 pub fn merge(data: &Path, local: &mut Snapshot, remote: Snapshot) -> Result<Vec<PinConflict>> {
     let pins = load_pins(&data.join("servers.json"))?;
+    let newer = remote.version > local.version;
+    for address in remote.state.left {
+        if newer || !local.state.servers.iter().any(|s| s.address == address) {
+            local.state.leave(&address);
+        }
+    }
     let mut conflicts = Vec::new();
     for candidate in remote.state.servers {
         let joined = local
@@ -104,17 +132,16 @@ pub fn merge(data: &Path, local: &mut Snapshot, remote: Snapshot) -> Result<Vec<
                 address: candidate.address,
                 reason,
             });
-        } else if joined.is_none() {
-            local.state.servers.push(candidate);
+        } else if joined.is_none() && (newer || !local.state.left.contains(&candidate.address)) {
+            local.state.join(candidate);
         }
     }
-    let prefer_remote = remote.version > local.version;
     for (local_fields, remote_fields) in [
         (&mut local.state.settings, remote.state.settings),
         (&mut local.state.contacts, remote.state.contacts),
     ] {
         for (field, value) in remote_fields {
-            if prefer_remote {
+            if newer {
                 local_fields.insert(field, value);
             } else {
                 local_fields.entry(field).or_insert(value);
@@ -218,6 +245,13 @@ fn validate_servers(state: &State) -> Result<()> {
             "duplicate sync server origin"
         );
     }
+    for address in &state.left {
+        validate_origin(address)?;
+        ensure!(
+            !origins.contains(address),
+            "sync server both joined and left"
+        );
+    }
     Ok(())
 }
 
@@ -286,6 +320,7 @@ mod tests {
             settings: [("theme".into(), json!("night"))].into(),
             servers: vec![server("home", 1, 2)],
             contacts: [("friend".into(), json!({"name": "Finch"}))].into(),
+            left: ["https://gone.example/".parse().unwrap()].into(),
         };
         let body = seal(&KEY, 1, &state).unwrap();
         let decoded = open(&KEY, &body).unwrap();
@@ -365,5 +400,64 @@ mod tests {
         assert_eq!(local.state.settings["theme"], "night");
         assert_eq!(local.state.settings["local"], true);
         assert_eq!(local.version, 2);
+    }
+
+    #[test]
+    fn leaves_and_deletions_propagate_and_replays_do_not_undo_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = server("home", 1, 2);
+        let work = server("work", 3, 4);
+        let base = State {
+            servers: vec![home.clone(), work.clone()],
+            settings: [("theme".into(), json!("day"))].into(),
+            ..State::default()
+        };
+        let old = Snapshot {
+            version: 1,
+            state: serde_json::from_slice(&serde_json::to_vec(&base).unwrap()).unwrap(),
+        };
+        let mut left = Snapshot {
+            version: 2,
+            state: base,
+        };
+        left.state.leave(&work.address);
+        left.state.settings.insert("theme".into(), Value::Null);
+
+        let mut stale = Snapshot {
+            version: 1,
+            state: State {
+                servers: vec![home.clone(), work.clone()],
+                ..State::default()
+            },
+        };
+        let replay = |snapshot: &Snapshot| {
+            open(
+                &KEY,
+                &seal(&KEY, snapshot.version, &snapshot.state).unwrap(),
+            )
+            .unwrap()
+        };
+        assert!(
+            merge(dir.path(), &mut stale, replay(&left))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(stale.state.servers == vec![home.clone()]);
+        assert!(stale.state.left.contains(&work.address));
+        assert_eq!(stale.state.settings["theme"], Value::Null);
+
+        assert!(merge(dir.path(), &mut left, old).unwrap().is_empty());
+        assert!(left.state.servers == vec![home.clone()]);
+        assert_eq!(left.state.settings["theme"], Value::Null);
+        assert_eq!(left.version, 2);
+
+        let mut rejoined = replay(&left);
+        rejoined.version = 3;
+        rejoined.state.join(work.clone());
+        assert!(merge(dir.path(), &mut left, rejoined).unwrap().is_empty());
+        assert!(left.state.servers == vec![home, work.clone()] && left.state.left.is_empty());
+
+        left.state.left.insert(work.address.clone());
+        assert!(seal(&KEY, 4, &left.state).is_err());
     }
 }
