@@ -117,6 +117,9 @@ CREATE TABLE message_senders (
     PRIMARY KEY (device_id, person_id)
 );
 
+-- Every message ID ever stored, so a deleted or pruned ID is never reused.
+CREATE TABLE message_ids (id TEXT NOT NULL PRIMARY KEY);
+
 CREATE TABLE messages (
     sequence INTEGER PRIMARY KEY,
     id TEXT NOT NULL UNIQUE,
@@ -133,4 +136,5 @@ CREATE TABLE messages (
 CREATE INDEX messages_channel_sequence ON messages (channel_id, sequence);
 CREATE INDEX messages_channel_sender ON messages (channel_id, sender_device, sender_person);
 
-ALTER TABLE audit_log ADD COLUMN dm_channel_id TEXT;
+-- A closed DM's entries become visible to everyone with audit access.
+ALTER TABLE audit_log ADD COLUMN dm_channel_id TEXT REFERENCES channels(id) ON DELETE SET NULL;

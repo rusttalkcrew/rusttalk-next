@@ -80,13 +80,8 @@ async fn exchange(
     wait_event(b, channel, &first.id, false).await?;
     let received = b.message(&channel.id, &first.id).await?;
     assert!(b.open_message(&channel.id, &received).await?.text == texts[0]);
-    assert_eq!(
-        b.open_message(&channel.id, &received)
-            .await
-            .err()
-            .and_then(|error| error.downcast::<MessageError>().ok()),
-        Some(MessageError::Replay)
-    );
+    // Scroll-back and resync reopen the same record.
+    assert!(b.open_message(&channel.id, &received).await?.text == texts[0]);
 
     let mut reply = body(texts[1]);
     reply.reply_to = Some(first.id);
@@ -247,6 +242,21 @@ pub(super) async fn scenario(
             .and_then(|error| error.downcast::<MessageError>().ok()),
         Some(MessageError::EditAuthor)
     );
+
+    // Deleting an original also deletes the edits its author's client sent.
+    a.delete_message(&text.id, &original).await?;
+    wait_event(b, text, &record.id, true).await?;
+    rejected(
+        b.request(
+            Method::GET,
+            &path(text, &format!("/{}", encode(&record.id))),
+        )
+        .send()
+        .await?,
+        StatusCode::NOT_FOUND,
+        "message_not_found",
+    )
+    .await?;
 
     let delete = b.send_message(&text.id, &body(DELETE)).await?;
     b.delete_message(&text.id, &delete.id).await?;

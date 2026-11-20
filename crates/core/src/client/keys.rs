@@ -15,7 +15,7 @@ use reqwest::{Method, RequestBuilder, Response, StatusCode};
 use serde_json::{Value, json};
 use tokio_tungstenite::tungstenite::Message;
 
-use super::Server;
+use super::{Server, chat::Opened};
 
 type HistoricalDevice = ([u8; 32], [u8; 32], [u8; 32]);
 
@@ -32,7 +32,7 @@ pub struct KeyClient<'a> {
     pub(super) devices: HashMap<String, DeviceCertificate>,
     pub(super) historical_devices: HashMap<HistoricalDevice, DeviceCertificate>,
     scopes: Vec<ScopeState>,
-    pub(super) received: HashSet<[u8; 32]>,
+    pub(super) opened: HashMap<[u8; 32], Opened>,
     pending_event: Option<Event>,
     /// The server's close reason after the event stream terminates.
     pub close_reason: Option<String>,
@@ -57,7 +57,7 @@ impl<'a> KeyClient<'a> {
             devices: HashMap::new(),
             historical_devices: HashMap::new(),
             scopes: Vec::new(),
-            received: HashSet::new(),
+            opened: HashMap::new(),
             pending_event: None,
             close_reason: None,
         };

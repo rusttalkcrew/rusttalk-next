@@ -264,20 +264,24 @@ device signature. The POST limit is 12 KiB of JSON. The API verifies the
 envelope against the authenticated person and device and requires the current
 channel epoch. Rotation or a stale epoch returns `409 epoch_changed`, a
 duplicate retained ID returns `409 message_exists`, and malformed framing or
-signature returns `400 invalid_message`. Access failures use
+signature returns `400 invalid_message`. IDs stay reserved after a delete or retention drop, and reusing one also returns
+`409 message_exists`. Access failures use
 `403 channel_read_denied` or `403 channel_write_denied`. Voice channels
 return `400 not_a_chat_channel`.
 
 The API keeps the newest 10,000 records per channel. Explicit deletes remove
 the ciphertext and add a `message_deleted` audit entry with actor, message ID
-and time. DM audit entries are visible to participants with audit access.
+and time. DM audit entries are visible to participants with audit access. When the DM
+closes, its entries become visible to everyone with audit access.
 Retention drops also emit a delete event.
 
 An edit is a new record with an encrypted `edit_of` reference. Clients
 verify the original's signature, channel and author before accepting the edit.
 Multiple edits can refer directly to the same original. If retention or a
 delete removes the original, clients suppress edits that still reference that
-ID. Each stored record can be deleted by its ID.
+ID. Deletes apply per stored record, because the API cannot see which records
+are edits. When a client deletes a message, including a moderator delete, it
+also deletes every edit of it that it has opened or sent.
 
 ## Live events
 

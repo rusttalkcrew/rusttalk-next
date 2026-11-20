@@ -1,9 +1,10 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, VecDeque};
 
 use anyhow::{Result, ensure};
-use reqwest::Method;
+use reqwest::{Method, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 use crate::{
     auth::{decode_bytes, encode},
@@ -14,6 +15,61 @@ use crate::{
 
 use super::KeyClient;
 pub use crate::messages::{MAX_TEXT_CHARS, MessageBody, MessageRecord};
+
+// shortcut: replay protection forgets the oldest IDs past this cap, same as server retention; persist with W14 sync.
+const OPENED_PER_CHANNEL: usize = 10_000;
+
+/// Opened records of one channel, oldest first, and the edits seen for each original.
+#[derive(Default)]
+pub(super) struct Opened {
+    order: VecDeque<[u8; 32]>,
+    bodies: HashMap<[u8; 32], ([u8; 32], MessageBody)>,
+    edits: HashMap<[u8; 32], Vec<[u8; 32]>>,
+}
+
+impl Opened {
+    /// Return the cached body for the same record, or reject a different record under a seen ID.
+    fn get(&self, record: &MessageRecord) -> Result<Option<MessageBody>, MessageError> {
+        match self.bodies.get(&record.id) {
+            Some((seen, body)) if *seen == digest(record) => Ok(Some(body.clone())),
+            Some(_) => Err(MessageError::Replay),
+            None => Ok(None),
+        }
+    }
+
+    fn insert(&mut self, record: &MessageRecord, body: &MessageBody) {
+        if self.bodies.contains_key(&record.id) {
+            return;
+        }
+        self.bodies
+            .insert(record.id, (digest(record), body.clone()));
+        self.order.push_back(record.id);
+        if let Some(original) = body.edit_of {
+            self.edits.entry(original).or_default().push(record.id);
+        }
+        if self.order.len() > OPENED_PER_CHANNEL
+            && let Some(old) = self.order.pop_front()
+            && let Some((_, body)) = self.bodies.remove(&old)
+            && let Some(original) = body.edit_of
+            && let Some(ids) = self.edits.get_mut(&original)
+        {
+            ids.retain(|id| *id != old);
+            if ids.is_empty() {
+                self.edits.remove(&original);
+            }
+        }
+    }
+}
+
+fn digest(record: &MessageRecord) -> [u8; 32] {
+    Sha256::new()
+        .chain_update(record.epoch.to_be_bytes())
+        .chain_update(record.person)
+        .chain_update(record.sender_device)
+        .chain_update(record.envelope.as_bytes())
+        .finalize()
+        .into()
+}
 
 /// A readable channel and its encrypted metadata.
 #[derive(Deserialize)]
@@ -178,27 +234,55 @@ impl KeyClient<'_> {
                 && record.envelope == envelope,
             MessageError::Encoding
         );
+        self.opened
+            .entry(*channel)
+            .or_default()
+            .insert(&record, body);
         Ok(record)
     }
 
-    /// Verify a certified sender, decrypt the message, and reject duplicate IDs or unauthorized edits.
+    /// Verify a certified sender, decrypt the message, and reject reused IDs or unauthorized edits.
+    /// Opening the same record again returns the cached body.
     pub async fn open_message(
         &mut self,
         channel: &[u8; 32],
         record: &MessageRecord,
     ) -> Result<MessageBody> {
-        ensure!(!self.received.contains(&record.id), MessageError::Replay);
+        if let Some(opened) = self.opened.get(channel)
+            && let Some(body) = opened.get(record)?
+        {
+            return Ok(body);
+        }
         let body = self.decrypt_record(channel, record).await?;
         if let Some(original) = body.edit_of {
             self.check_edit(channel, &record.id, &record.person, &original)
                 .await?;
         }
-        remember(&mut self.received, record.id)?;
+        self.opened
+            .entry(*channel)
+            .or_default()
+            .insert(record, &body);
         Ok(body)
     }
 
-    /// Remove a message the authenticated person owns or can moderate.
+    /// Remove a message the authenticated person owns or can moderate, with the edits of it this client has opened or sent.
     pub async fn delete_message(&self, channel: &[u8; 32], id: &[u8; 32]) -> Result<()> {
+        let edits = self
+            .opened
+            .get(channel)
+            .and_then(|opened| opened.edits.get(id))
+            .cloned()
+            .unwrap_or_default();
+        for edit in edits {
+            let reply = self
+                .request(Method::DELETE, &record_path(channel, &edit))
+                .send()
+                .await?;
+            // Another client or retention may already have removed the edit.
+            if reply.status() != StatusCode::NOT_FOUND {
+                reply.error_for_status()?;
+            }
+        }
         self.request(Method::DELETE, &record_path(channel, id))
             .send()
             .await?
@@ -295,14 +379,6 @@ fn record_path(channel: &[u8; 32], id: &[u8; 32]) -> String {
     format!("{}/{}", message_path(channel), encode(id))
 }
 
-fn remember(received: &mut HashSet<[u8; 32]>, id: [u8; 32]) -> Result<(), MessageError> {
-    if received.insert(id) {
-        Ok(())
-    } else {
-        Err(MessageError::Replay)
-    }
-}
-
 fn authorize_edit(
     author: &PersonId,
     original_author: &PersonId,
@@ -319,11 +395,54 @@ fn authorize_edit(
 mod tests {
     use super::*;
 
+    fn record(id: u8, envelope: &str) -> MessageRecord {
+        MessageRecord {
+            id: [id; 32],
+            epoch: 1,
+            person: [2; 32],
+            sender_device: [3; 32],
+            at: 0,
+            size: 0,
+            envelope: envelope.into(),
+        }
+    }
+
     #[test]
-    fn rejects_replayed_ids_and_edits_by_other_people() {
-        let mut received = HashSet::new();
-        assert_eq!(remember(&mut received, [1; 32]), Ok(()));
-        assert_eq!(remember(&mut received, [1; 32]), Err(MessageError::Replay));
+    fn reopens_the_same_record_and_rejects_another_under_its_id() {
+        let mut opened = Opened::default();
+        let first = record(1, "first");
+        let body = MessageBody {
+            text: "hello".into(),
+            ..Default::default()
+        };
+        assert!(opened.get(&first).unwrap().is_none());
+        opened.insert(&first, &body);
+        assert!(opened.get(&first).unwrap() == Some(body));
+        assert_eq!(
+            opened.get(&record(1, "other")).err(),
+            Some(MessageError::Replay)
+        );
+    }
+
+    #[test]
+    fn tracks_edits_until_they_are_evicted() {
+        let mut opened = Opened::default();
+        let edit = MessageBody {
+            edit_of: Some([0; 32]),
+            ..Default::default()
+        };
+        opened.insert(&record(1, "edit"), &edit);
+        assert_eq!(opened.edits[&[0; 32]], [[1; 32]]);
+        for i in 0..OPENED_PER_CHANNEL {
+            let mut filler = record(2, "filler");
+            filler.id[..8].copy_from_slice(&(i as u64).to_be_bytes());
+            opened.insert(&filler, &MessageBody::default());
+        }
+        assert!(opened.edits.is_empty() && opened.bodies.len() == OPENED_PER_CHANNEL);
+    }
+
+    #[test]
+    fn rejects_edits_by_other_people() {
         let original = MessageBody::default();
         assert_eq!(authorize_edit(&[2; 32], &[2; 32], &original), Ok(()));
         assert_eq!(
