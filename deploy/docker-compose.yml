@@ -5,7 +5,7 @@ name: rusttalk
 
 services:
   api:
-    image: rusttalk-api:${RUSTTALK_VERSION:?set RUSTTALK_VERSION in deploy/.env}
+    image: ${RUSTTALK_IMAGE_PREFIX:-}rusttalk-api:${RUSTTALK_VERSION:?set RUSTTALK_VERSION in deploy/.env}
     build:
       context: ..
       dockerfile: services/api/Dockerfile
@@ -25,7 +25,7 @@ services:
 
   index:
     profiles: ["index"]
-    image: rusttalk-index:${RUSTTALK_VERSION:?set RUSTTALK_VERSION in deploy/.env}
+    image: ${RUSTTALK_IMAGE_PREFIX:-}rusttalk-index:${RUSTTALK_VERSION:?set RUSTTALK_VERSION in deploy/.env}
     build:
       context: ..
       dockerfile: services/api/Dockerfile
