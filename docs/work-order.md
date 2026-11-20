@@ -48,7 +48,7 @@ content on the server, not even temporarily.
   encryption on, and a forced reconnect recovers by itself.
 
 **5. Audio sharing**
-- [ ] **W09 Per-application audio.** One track per app (Windows and Linux), receiver
+- [x] **W09 Per-application audio.** One track per app (Windows and Linux), receiver
   volume per track. Gate: e2e two app tracks with independent volume.
 
 **6. Screen sharing and camera**
