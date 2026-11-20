@@ -513,6 +513,7 @@ mod tests {
             db: crate::store::open(dir.path()).await.unwrap(),
             key: std::sync::Arc::new(ed25519_dalek::SigningKey::from_bytes(&[7; 32])),
             changes: tokio::sync::broadcast::channel(128).0,
+            voice: None,
         };
         let from = |ip: &str| {
             let mut headers = HeaderMap::new();

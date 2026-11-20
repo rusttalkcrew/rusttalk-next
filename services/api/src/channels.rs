@@ -112,6 +112,30 @@ async fn manage(db: &mut SqliteConnection, actor: &Actor) -> ApiResult<()> {
         .require(Permission::ManageChannels)
 }
 
+pub const WRITE: u8 = 2;
+pub const SPEAK: u8 = 4;
+
+pub async fn has_flag(
+    db: &mut SqliteConnection,
+    channel: &str,
+    person: &[u8],
+    flag: u8,
+) -> ApiResult<bool> {
+    Ok(query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM channel_permissions
+         WHERE channel_id = ? AND (flags & ?) <> 0 AND role_id IN (
+             SELECT role_id FROM member_roles WHERE person_id = ?
+             UNION ALL SELECT 'owner' FROM server_settings WHERE owner_person_id = ?
+         ))",
+    )
+    .bind(channel)
+    .bind(flag)
+    .bind(person)
+    .bind(person)
+    .fetch_one(db)
+    .await?)
+}
+
 async fn channels(db: &mut SqliteConnection, person: Option<&[u8]>) -> ApiResult<Vec<Channel>> {
     let rows: Vec<ChannelRow> = query_as(
         "SELECT id, kind, category_id, position, name_ct, topic_ct,

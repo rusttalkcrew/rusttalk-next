@@ -33,6 +33,16 @@ pub fn encode(bytes: &[u8]) -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
+/// Opaque, server-specific LiveKit identity for a device signing public key.
+pub fn voice_identity(server: &ServerId, device: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    hash.update(b"rusttalk-voice-device-v1");
+    hash.update(server);
+    hash.update(device);
+    encode(&hash.finalize())
+}
+
 pub fn decode_bytes(encoded: &str) -> Result<Vec<u8>, ProtocolError> {
     URL_SAFE_NO_PAD
         .decode(encoded)

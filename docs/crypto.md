@@ -225,7 +225,25 @@ reported by the API would add no protection under the same assumption.
 
 ## Media encryption
 
-Written in W08.
+Before joining, RustTalk derives a 32-byte key with HKDF-SHA256 using
+the current voice channel epoch key as input, the default zero salt and
+the following ASCII label and binary context as info.
+
+```text
+"rusttalk-media-v1" || server_id (32 bytes) || channel_id (32 bytes) ||
+epoch (8 bytes, positive signed integer, big endian)
+```
+
+The SDK uses AES-GCM frame encryption from the start of the room session.
+The primary key slot is `epoch mod 16` and the SDK's automatic ratchet is
+disabled. Each device reconciles the normal channel-key events, installs
+the newer derived key and switches every local sender to its slot. Slot
+zero also holds the current key so the SDK's new or automatically
+republished senders start on the current key before RustTalk sets their
+index. Receivers use each frame's stamped slot. A peer missing the new
+epoch drops those frames until its envelope arrives. LiveKit never
+receives the media key. The LiveKit JWT authorizes signaling and does
+not carry the media key.
 
 ## Trust model
 

@@ -10,20 +10,18 @@ required-features = ["media"]
 
 [features]
 default = ["media"]
-media = ["dep:clap", "dep:hex", "dep:livekit", "dep:livekit-api", "dep:tracing", "dep:tracing-subscriber", "dep:url", "rusttalk-core/livekit-tls"]
+media = ["dep:clap", "dep:livekit", "dep:tracing", "dep:tracing-subscriber", "dep:futures-util", "rusttalk-core/voice"]
 
 [dependencies]
 anyhow = "1"
-clap = { version = "4", features = ["derive", "env"] , optional = true }
-hex = { version = "0.4", optional = true }
+clap = { version = "4", features = ["derive", "env"], optional = true }
+futures-util = { version = "0.3", default-features = false, features = ["std"], optional = true }
 livekit = { version = "=0.11.0", optional = true }
-livekit-api = { version = "=0.10.2", default-features = false, features = ["access-token"] , optional = true }
 rustls-pki-types = "1"
 rusttalk-core = { path = "../core", features = ["client"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time"] }
 tracing = { version = "0.1", optional = true }
 tracing-subscriber = { version = "0.3", optional = true }
-url = { version = "2", optional = true }
 
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }

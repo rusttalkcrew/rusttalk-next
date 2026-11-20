@@ -3104,6 +3104,7 @@ version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "036d19943b88f8c9303ffde8478c86f00cfd15136ff8368693e16bf9932c1da3"
 dependencies = [
+ "base64 0.21.7",
  "http",
  "livekit-protocol",
  "livekit-token",
@@ -3112,6 +3113,7 @@ dependencies = [
  "prost",
  "rand 0.9.5",
  "serde",
+ "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.21",
  "url",
@@ -5000,6 +5002,8 @@ dependencies = [
  "anyhow",
  "axum",
  "ed25519-dalek",
+ "livekit-api",
+ "reqwest",
  "rusttalk-core",
  "serde",
  "serde_json",
@@ -5019,9 +5023,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "hex",
+ "futures-util",
  "livekit",
- "livekit-api",
  "reqwest",
  "rustls-pki-types",
  "rusttalk-core",
@@ -5029,7 +5032,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
- "url",
 ]
 
 [[package]]
@@ -5065,6 +5067,7 @@ dependencies = [
  "futures-util",
  "hkdf 0.12.4",
  "hpke",
+ "livekit",
  "livekit-net",
  "livekit-protocol",
  "prost",

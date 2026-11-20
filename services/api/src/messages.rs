@@ -18,7 +18,7 @@ use sqlx::{FromRow, SqliteConnection, query, query_as, query_scalar};
 use crate::{
     ApiError, ApiResult, App,
     auth::{Actor, authenticate},
-    keys, payload,
+    channels, keys, payload,
     roles::{self, Permission},
     store::audit,
 };
@@ -101,18 +101,7 @@ pub async fn create(
     let envelope_bytes = decode_bytes(&envelope)?;
     let (mut tx, actor) = authenticate(&app, &headers).await?;
     if chat_kind(&mut tx, &actor, &channel).await? != "dm"
-        && !query_scalar::<_, bool>(
-            "SELECT EXISTS (SELECT 1 FROM channel_permissions p JOIN member_roles r ON r.role_id = p.role_id
-             WHERE p.channel_id = ? AND r.person_id = ? AND (p.flags & 2) <> 0)
-             OR EXISTS (SELECT 1 FROM channel_permissions p JOIN server_settings s ON p.role_id = 'owner'
-                        WHERE p.channel_id = ? AND s.owner_person_id = ? AND (p.flags & 2) <> 0)",
-        )
-        .bind(&channel)
-        .bind(actor.person.as_slice())
-        .bind(&channel)
-        .bind(actor.person.as_slice())
-        .fetch_one(&mut *tx)
-        .await?
+        && !channels::has_flag(&mut tx, &channel, &actor.person, channels::WRITE).await?
     {
         return Err(ApiError::forbidden("channel_write_denied"));
     }
