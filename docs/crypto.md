@@ -31,10 +31,17 @@ The verifier takes the full person ID separately.
 
 | Record | Field order |
 | --- | --- |
-| Device certificate | `rusttalk-device-cert-v1`, Ed25519 public key (32 bytes), X25519 public key (32 bytes), creation time (8 bytes), name length (1 byte), device name (1–64 UTF-8 bytes), signature (64 bytes) |
+| Public device certificate | `rusttalk-device-cert-v2`, Ed25519 public key (32 bytes), X25519 public key (32 bytes), creation time (8 bytes), device-name commitment (32 bytes), signature (64 bytes) |
+| Legacy device certificate | `rusttalk-device-cert-v1`, Ed25519 public key (32 bytes), X25519 public key (32 bytes), creation time (8 bytes), name length (1 byte), device name (1–64 UTF-8 bytes), signature (64 bytes) |
 | Revocation | `rusttalk-device-revocation-v1`, device Ed25519 public key (32 bytes), revocation time (8 bytes), signature (64 bytes) |
 
-The parsers require the exact encoded length and reject malformed records.
+The parsers require exact lengths and reject malformed records. The public
+v2 certificate is the only form accepted by the API. Its name commitment
+is SHA-256 over `rusttalk-device-name-v2 || salt || name`, with a random
+32-byte salt. The keystore uses `rusttalk-device-local-v2 || public_certificate ||
+salt || name` to preserve the name locally. Verification checks the
+commitment. Older local keystore records still load. A v1 device needs to
+enroll a new device using the recovery words before signing in to W06.
 A device is revoked when a verified revocation for the same person matches
 its certified Ed25519 public key. The signed timestamp records when the
 revocation was issued. The match applies regardless of certificate time.
@@ -65,14 +72,88 @@ uses an explicit DER certificate pin in addition to the application key pin.
 Challenges expire in 60 seconds and are deleted on consumption. The API
 verifies device certificates in memory and checks stored revocations before
 minting a session. A token is 32 bytes from the OS random number generator.
-SQLite stores only its SHA-256 digest as the credential, with the person and
+SQLite stores the SHA-256 digest as the session credential, with the person and
 device binding and expiry. The client sends the encoded token in the HTTPS
 Authorization header. Refresh replaces the token inside a transaction. An
-invite code is 16 random bytes, hashed with SHA-256 before storage.
+invite code is 16 random bytes, hashed with SHA-256 before storage. The API
+records the verified public device certificate on sign-in so clients can
+wrap keys for the device even if it goes offline.
 
 ## Channel and space keys
 
-Written in W06.
+Each server has a separate space scope, and each text or voice channel
+has a channel scope. Each epoch key is 32 independent OS-random bytes.
+The owner creates space epoch 1 on claim and uploads a self-addressed
+envelope. A channel creator creates channel epoch 1 and uploads its
+self-addressed envelope with channel creation. The identity sync key is
+separate and reserved for device sync in W14.
+
+### Envelopes
+
+Use [RFC 9180](https://www.rfc-editor.org/rfc/rfc9180.html) base mode
+with DHKEM(X25519, HKDF-SHA256) (0x0020), HKDF-SHA256 (0x0001) and
+ChaCha20-Poly1305 (0x0003). The recipient key is the X25519 public key
+in its verified device certificate. Use empty HPKE AAD. HPKE info is the
+following fixed-length concatenation.
+
+```text
+"rusttalk-envelope-v1" || kind (1 byte: space=1, channel=2) ||
+scope_id (32 bytes) || epoch (8 bytes, big endian) || recipient_Ed25519 (32 bytes)
+```
+
+The 144-byte envelope is the 32-byte HPKE encapsulated public key, a
+48-byte HPKE ciphertext and a 64-byte Ed25519 signature. The sender
+signs the HPKE info followed by the encapsulated key and ciphertext.
+The API checks signature, record size and sender and recipient access
+before accepting an envelope. On receipt, clients verify the sender's
+root-signed certificate in the current member directory and verify
+the contextual envelope signature before opening it.
+
+Clients holding a key respond to pending wraps for every eligible
+device and epoch. Space keys go to all member devices. Channel keys
+go to every device of a current reader. A kick, ban or device revocation
+requests rotation of the space scope and the affected channel scopes.
+Losing channel read access requests rotation of that channel. A remaining
+reader publishes a new random epoch with a self-addressed envelope
+in one transaction. Other devices get their own envelopes through the
+same pending-wrap flow. A competing publisher discards its proposed key
+and fetches the winning epoch. Historical ciphertext retains its epoch.
+A historical key requires a remaining holder when a new envelope must
+be created. If all holders lose a key, an old envelope whose sender is
+no longer current cannot restore that history.
+
+### Metadata
+
+Use XChaCha20-Poly1305 with the space epoch key and an independent
+random 24-byte nonce. Store the 8-byte big-endian epoch, nonce, and
+ciphertext (including the 16-byte tag). Epochs are positive signed
+64-bit values in both formats. Associated data is the following
+concatenation.
+
+```text
+"rusttalk-meta-v1" || object_type (1 byte) || object_id_length (1 byte) ||
+object_id || epoch (8 bytes, big endian)
+```
+
+The object type values are server name (1), description (2), icon (3),
+channel name (4), topic (5), category name (6), role name (7), display
+name (8), and avatar (9). Server objects use the raw server ID. Channels
+and categories use their raw 32-byte IDs. Members use the raw person ID.
+Role names use the role ID's UTF-8 bytes. New metadata uses the newest
+space epoch held by the client, and the API accepts writes only when
+that epoch is current and the scope is ready.
+
+### Invite previews
+
+The client generates an independent random 32-byte link key. It seals
+`epoch || space_key` (8 + 32 bytes) with XChaCha20-Poly1305 under the
+link key, using a fresh 24-byte nonce and associated data
+`rusttalk-invite-v1 || server_id`. The uploaded 80-byte blob is nonce
+followed by ciphertext and tag. The invite also holds a server name
+snapshot encrypted under that same space epoch. The link key appears
+only in the invite fragment. After rotation an invite can still preview
+its original snapshot. Once the invitee joins, it obtains readable
+epochs through the normal envelope flow.
 
 ## Messages
 
@@ -84,7 +165,22 @@ Written in W08.
 
 ## Trust model
 
-Written in W06.
+The server decides membership and channel access. A malicious server
+can add a person it controls, or misrepresent who has access, and induce
+clients to wrap keys to that person's devices. A root signature binds
+a known person's device keys. It cannot show that the person belongs
+in a space or channel. Clients surface every observed member and device
+change with person and device fingerprints. The bot also logs the person
+and device fingerprints for every wrap. The API never receives the
+decryption keys from an honest client. Former readers retain anything
+they already decrypted or saved. Rotation excludes them from subsequent
+epochs until server membership or read access is granted again.
+
+The selected [hpke crate](https://github.com/rozbb/rust-hpke#security)
+uses the RFC 9180 construction and is dual-licensed MIT/Apache-2.0.
+The maintainers cite a Cloudflare security review of version 0.8 and
+report no formal audit. RustCrypto's `chacha20poly1305` is also
+dual-licensed MIT/Apache-2.0.
 
 ### What the server challenge signature does not cover
 

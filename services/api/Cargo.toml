@@ -6,7 +6,7 @@ publish = false
 
 [dependencies]
 anyhow = "1"
-axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio", "ws"] }
 ed25519-dalek = { version = "2.2", default-features = false, features = ["fast", "zeroize"] }
 rusttalk-core = { path = "../../crates/core" }
 serde = { version = "1", features = ["derive"] }
@@ -15,7 +15,7 @@ sha2 = "0.10"
 sqlx = { version = "0.8.6", default-features = false, features = ["sqlite", "runtime-tokio", "migrate", "macros"] }
 tempfile = "3"
 zeroize = "1"
-tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "time"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "time", "sync"] }
 tower-http = { version = "0.6", features = ["limit", "request-id"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json"] }

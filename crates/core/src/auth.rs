@@ -6,7 +6,10 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::Url;
 
-use crate::identity::DeviceIdentity;
+use crate::{
+    identity::{DeviceIdentity, IdentityError},
+    keys::Key,
+};
 
 pub type ServerId = [u8; 32];
 pub type Fingerprint = [u8; 32];
@@ -94,10 +97,10 @@ impl SignIn {
         challenge: &[u8; 32],
         server_id: &ServerId,
         invite: Option<&InviteCode>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, IdentityError> {
+        Ok(Self {
             person_id: encode(identity.certificate.person_id()),
-            certificate: encode(&identity.certificate.to_bytes()),
+            certificate: encode(identity.certificate.public_bytes()?),
             challenge: encode(challenge),
             signature: encode(
                 &identity
@@ -106,7 +109,7 @@ impl SignIn {
                     .to_bytes(),
             ),
             invite: invite.map(|code| encode(code)),
-        }
+        })
     }
 }
 
@@ -149,6 +152,7 @@ pub fn check_pin(known: Option<&KnownServer>, observed: &KnownServer) -> Result<
 pub struct InviteLink {
     pub server: KnownServer,
     pub code: InviteCode,
+    pub link_key: Option<Key>,
 }
 
 impl InviteLink {
@@ -166,6 +170,10 @@ impl InviteLink {
         }
         let address =
             Url::parse(&format!("https://{authority}/")).map_err(|_| ProtocolError::Invite)?;
+        let (pins, link_key) = match pins.split_once(".k~") {
+            Some((pins, key)) => (pins, Some(Key::new(decode(key)?))),
+            None => (pins, None),
+        };
         let (server_id, tls_fingerprint) = match pins.split_once('.') {
             Some((id, fp)) => (decode(id)?, Some(decode(fp)?)),
             None => (decode(pins)?, None),
@@ -177,6 +185,7 @@ impl InviteLink {
                 tls_fingerprint,
             },
             code: decode(code)?,
+            link_key,
         })
     }
 }
@@ -192,6 +201,9 @@ impl std::fmt::Display for InviteLink {
         )?;
         if let Some(fp) = self.server.tls_fingerprint {
             write!(f, ".{}", encode(&fp))?;
+        }
+        if let Some(key) = &self.link_key {
+            write!(f, ".k~{}", encode(key.as_ref()))?;
         }
         Ok(())
     }
@@ -252,10 +264,15 @@ mod tests {
                     tls_fingerprint,
                 },
                 code: [7; 16],
+                link_key: Some(Key::new([8; 32])),
             };
             let encoded = link.to_string();
             let decoded = InviteLink::parse(&encoded).unwrap();
-            assert!(decoded.server == link.server && decoded.code == link.code);
+            assert!(
+                decoded.server == link.server
+                    && decoded.code == link.code
+                    && decoded.link_key == link.link_key
+            );
             for bad in [
                 encoded.replace("/i/", "/x/"),
                 encoded.replace("/i/", "/i/%"),

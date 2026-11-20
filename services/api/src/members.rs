@@ -3,16 +3,19 @@ use axum::{
     extract::{Path, Query, State, rejection::JsonRejection, rejection::QueryRejection},
     http::{HeaderMap, StatusCode},
 };
-use rusttalk_core::auth::{decode, encode};
+use rusttalk_core::{
+    auth::{decode, encode},
+    keys::{INVITE_BYTES, Metadata},
+};
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, SqliteConnection, query, query_as, query_scalar};
 
 use crate::{
     ApiError, ApiResult, App,
-    auth::{authenticate, create_invite},
-    payload,
+    auth::{authenticate, client_ip, create_invite},
+    keys, metadata, payload,
     roles::{self, Permission},
-    store::{audit, log_closed},
+    store::{audit, hash, log_closed, now, write},
 };
 
 #[derive(Serialize)]
@@ -47,6 +50,8 @@ pub async fn me(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Me
 pub struct InviteRequest {
     uses: i64,
     ttl_seconds: i64,
+    space_key_ct: String,
+    name_ct: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -61,7 +66,13 @@ pub async fn invite(
     headers: HeaderMap,
     body: Result<Json<InviteRequest>, JsonRejection>,
 ) -> ApiResult<(StatusCode, Json<CreatedInvite>)> {
-    let InviteRequest { uses, ttl_seconds } = payload(body)?;
+    let InviteRequest {
+        uses,
+        ttl_seconds,
+        space_key_ct,
+        name_ct,
+    } = payload(body)?;
+    let blob = decode::<INVITE_BYTES>(&space_key_ct)?;
     if !(1..=1000).contains(&uses) || !(1..=30 * 86_400).contains(&ttl_seconds) {
         return Err(ApiError::bad_request("invalid_invite_limits"));
     }
@@ -74,7 +85,22 @@ pub async fn invite(
         .bind(actor.at)
         .execute(&mut *tx)
         .await?;
+    let epoch = keys::space_epoch(&mut tx, &app).await?;
+    let name = metadata::optional(Metadata::ServerName, epoch, name_ct)?;
+    let has_name: bool =
+        query_scalar("SELECT name_ct IS NOT NULL FROM server_settings WHERE id = 1")
+            .fetch_one(&mut *tx)
+            .await?;
+    if has_name && name.is_none() {
+        return Err(ApiError::bad_request("invite_name_required"));
+    }
     let (id, code) = create_invite(&mut tx, false, uses, expires_at).await?;
+    query("UPDATE invites SET space_key_ct = ?, name_ct = ? WHERE id = ?")
+        .bind(blob.as_slice())
+        .bind(name)
+        .bind(&id)
+        .execute(&mut *tx)
+        .await?;
     audit(
         &mut tx,
         &actor.person,
@@ -93,6 +119,62 @@ pub async fn invite(
             expires_at,
         }),
     ))
+}
+
+#[derive(Deserialize)]
+pub struct PreviewRequest {
+    code: String,
+}
+
+#[derive(Serialize)]
+pub struct InvitePreview {
+    space_key_ct: String,
+    name_ct: Option<String>,
+}
+
+pub async fn preview(
+    State(app): State<App>,
+    headers: HeaderMap,
+    body: Result<Json<PreviewRequest>, JsonRejection>,
+) -> ApiResult<Json<InvitePreview>> {
+    let code = decode::<16>(&payload(body)?.code)?;
+    let ip = client_ip(&headers)?;
+    let mut tx = write(&app.db).await?;
+    let at = now()?;
+    query("DELETE FROM invite_previews WHERE expires_at <= ?")
+        .bind(at)
+        .execute(&mut *tx)
+        .await?;
+    let (total, from_ip): (i64, i64) =
+        query_as("SELECT COUNT(*), COUNT(*) FILTER (WHERE ip = ?) FROM invite_previews")
+            .bind(&ip)
+            .fetch_one(&mut *tx)
+            .await?;
+    if total >= 256 || from_ip >= 8 {
+        return Err(ApiError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "invite_preview_limit",
+        ));
+    }
+    query("INSERT INTO invite_previews (ip, expires_at) VALUES (?, ?)")
+        .bind(ip)
+        .bind(at + 60)
+        .execute(&mut *tx)
+        .await?;
+    let result: Option<(Vec<u8>, Option<Vec<u8>>)> = query_as(
+        "SELECT space_key_ct, name_ct FROM invites WHERE code_hash = ? AND expires_at > ?
+           AND space_key_ct IS NOT NULL",
+    )
+    .bind(hash(&code).as_slice())
+    .bind(at)
+    .fetch_optional(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    let (space_key, name) = result.ok_or(ApiError::not_found("invite_not_found"))?;
+    Ok(Json(InvitePreview {
+        space_key_ct: encode(&space_key),
+        name_ct: metadata::encoded(name),
+    }))
 }
 
 pub async fn revoke_invite(
@@ -125,7 +207,14 @@ pub async fn revoke_invite(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn remove_member(db: &mut SqliteConnection, person: &[u8]) -> ApiResult<Vec<i64>> {
+async fn remove_member(app: &App, db: &mut SqliteConnection, person: &[u8]) -> ApiResult<Vec<i64>> {
+    let exists: bool = query_scalar("SELECT EXISTS (SELECT 1 FROM members WHERE person_id = ?)")
+        .bind(person)
+        .fetch_one(&mut *db)
+        .await?;
+    if exists {
+        keys::member_removed(app, db, person).await?;
+    }
     let closed = query_scalar("DELETE FROM sessions WHERE person_id = ? RETURNING expires_at")
         .bind(person)
         .fetch_all(&mut *db)
@@ -155,7 +244,7 @@ pub async fn kick(
     {
         return Err(ApiError::not_found("member_not_found"));
     }
-    let closed = remove_member(&mut tx, &person).await?;
+    let closed = remove_member(&app, &mut tx, &person).await?;
     audit(
         &mut tx,
         &actor.person,
@@ -167,6 +256,7 @@ pub async fn kick(
     .await?;
     tx.commit().await?;
     log_closed(closed, actor.at, "kicked");
+    keys::changed(&app, &person, None);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -220,7 +310,7 @@ pub async fn ban(
                 .await?;
         }
     }
-    let closed = remove_member(&mut tx, &person).await?;
+    let closed = remove_member(&app, &mut tx, &person).await?;
     audit(
         &mut tx,
         &actor.person,
@@ -232,6 +322,7 @@ pub async fn ban(
     .await?;
     tx.commit().await?;
     log_closed(closed, actor.at, "banned");
+    keys::changed(&app, &person, None);
     Ok(StatusCode::NO_CONTENT)
 }
 

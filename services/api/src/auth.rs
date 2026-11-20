@@ -14,7 +14,7 @@ use serde::Deserialize;
 use sqlx::{Sqlite, SqliteConnection, SqlitePool, Transaction, query, query_as, query_scalar};
 
 use crate::{
-    ApiError, ApiResult, App, payload,
+    ApiError, ApiResult, App, keys, payload,
     store::{audit, hash, log_closed, now, random, write},
 };
 
@@ -106,10 +106,17 @@ pub async fn sign_in(
         redeem(&mut tx, person, invite, at).await?;
     }
 
+    keys::init_space(&mut tx, &server_id).await?;
+    let added = keys::register_device(&mut tx, &cert).await?;
     let closed = remove_device_sessions(&mut tx, person, device).await?;
     let session = issue_session(&mut tx, person, device, &ip, at).await?;
     tx.commit().await?;
     log_closed(closed, at, "replaced");
+    if added {
+        keys::changed(&app, person, Some(device));
+    } else {
+        app.notify(None);
+    }
     Ok(Json(session))
 }
 
@@ -118,7 +125,7 @@ fn verify_device(
     challenge: &[u8; 32],
     server_id: &[u8; 32],
 ) -> ApiResult<DeviceCertificate> {
-    let cert = DeviceCertificate::verify(
+    let cert = DeviceCertificate::verify_public(
         decode(&request.person_id)?,
         &decode_bytes(&request.certificate)?,
     )
@@ -146,7 +153,7 @@ async fn check_revoked(db: &mut SqliteConnection, person: &[u8], device: &[u8]) 
     Ok(())
 }
 
-fn client_ip(headers: &HeaderMap) -> ApiResult<String> {
+pub fn client_ip(headers: &HeaderMap) -> ApiResult<String> {
     let mut values = headers.get_all("x-forwarded-for").iter();
     let ip = values
         .next()
@@ -315,6 +322,8 @@ pub struct Actor {
     pub device: Vec<u8>,
     pub ip: String,
     pub at: i64,
+    pub token_hash: [u8; 32],
+    pub expires_at: i64,
 }
 
 pub async fn authenticate(
@@ -328,17 +337,18 @@ pub async fn authenticate(
         .and_then(|value| decode::<32>(value).ok())
         .ok_or(ApiError::unauthorized("invalid_session"))?;
     let ip = client_ip(headers)?;
+    let token_hash = hash(&token);
     let mut tx = write(&app.db).await?;
     let at = now()?;
     let (person, device, expires_at): (Vec<u8>, Vec<u8>, i64) =
         query_as("SELECT person_id, device_id, expires_at FROM sessions WHERE token_hash = ?")
-            .bind(hash(&token).as_slice())
+            .bind(token_hash.as_slice())
             .fetch_optional(&mut *tx)
             .await?
             .ok_or(ApiError::unauthorized("invalid_session"))?;
     if expires_at <= at {
         query("DELETE FROM sessions WHERE token_hash = ?")
-            .bind(hash(&token).as_slice())
+            .bind(token_hash.as_slice())
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
@@ -356,6 +366,8 @@ pub async fn authenticate(
             device,
             ip,
             at,
+            token_hash,
+            expires_at,
         },
     ))
 }
@@ -366,6 +378,7 @@ pub async fn refresh(State(app): State<App>, headers: HeaderMap) -> ApiResult<Js
     let session = issue_session(&mut tx, &actor.person, &actor.device, &actor.ip, actor.at).await?;
     tx.commit().await?;
     log_closed(closed, actor.at, "refreshed");
+    app.notify(None);
     Ok(Json(session))
 }
 
@@ -402,6 +415,15 @@ pub async fn revoke(
     .await?;
     let closed = remove_device_sessions(&mut tx, &actor.person, device).await?;
     if added.rows_affected() != 0 {
+        let removed = query("DELETE FROM member_devices WHERE person_id = ? AND device_id = ?")
+            .bind(actor.person.as_slice())
+            .bind(device)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        if removed != 0 {
+            keys::member_removed(&app, &mut tx, &actor.person).await?;
+        }
         audit(
             &mut tx,
             &actor.person,
@@ -414,6 +436,7 @@ pub async fn revoke(
     }
     tx.commit().await?;
     log_closed(closed, actor.at, "revoked");
+    keys::changed(&app, &actor.person, Some(device));
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -427,7 +450,7 @@ mod tests {
         let (_, identity) = DeviceIdentity::create("test").unwrap();
         let challenge = [3; 32];
         let server_id = [4; 32];
-        let mut proof = SignIn::signed(&identity, &challenge, &server_id, None);
+        let mut proof = SignIn::signed(&identity, &challenge, &server_id, None).unwrap();
         let expected = [challenge.as_slice(), &server_id, b"rusttalk-auth-v1"].concat();
         let signature = Signature::from_bytes(&decode(&proof.signature).unwrap());
         identity
@@ -442,7 +465,7 @@ mod tests {
         ] {
             assert_eq!(result.unwrap_err().code, "invalid_device_signature");
         }
-        let mut cert = identity.certificate.to_bytes();
+        let mut cert = identity.certificate.public_bytes().unwrap().to_vec();
         cert[30] ^= 1;
         proof.certificate = encode(&cert);
         assert_eq!(
@@ -459,6 +482,7 @@ mod tests {
         let app = crate::App {
             db: crate::store::open(dir.path()).await.unwrap(),
             key: std::sync::Arc::new(ed25519_dalek::SigningKey::from_bytes(&[7; 32])),
+            changes: tokio::sync::broadcast::channel(128).0,
         };
         let from = |ip: &str| {
             let mut headers = HeaderMap::new();

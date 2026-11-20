@@ -5,21 +5,30 @@ No telemetry, analytics, crash reporting or tracking.
 ## What servers store
 
 The API stores its Ed25519 signing seed in `server.key` and the following
-tables in SQLite (WAL). IDs and digests are binary unless indicated.
+tables in SQLite (WAL). IDs and digests are binary unless indicated. The `_ct` suffix denotes encrypted binary data.
 
 | Table | Columns |
 | --- | --- |
-| `members` | `person_id` (root public key), `joined_at` (Unix seconds) |
-| `roles` | `id` (text), `kind` (built-in kind or custom), `rank`, `permissions` (six-bit mask), nullable `name_ct` (opaque ciphertext) |
-| `server_settings` | Singleton `id`, nullable `owner_person_id`, `default_role_id` |
+| `members` | `person_id` (root public key), `joined_at` (Unix seconds), nullable `display_name_ct`, nullable `avatar_ct` |
+| `roles` | `id` (text), `kind` (built-in kind or custom), `rank`, `permissions` (seven-bit mask), nullable `name_ct` (opaque ciphertext) |
+| `server_settings` | Singleton `id`, nullable `owner_person_id`, `default_role_id`, nullable `name_ct`, nullable `description_ct`, nullable `icon_ct` |
 | `member_roles` | `person_id`, `role_id` |
-| `invites` | `id` (opaque text), `code_hash` (SHA-256), `is_owner`, `remaining_uses`, `expires_at` |
-| `challenges` | `nonce` (32 random bytes), `expires_at` |
+| `invites` | `id` (opaque text), `code_hash` (SHA-256), `is_owner`, `remaining_uses`, `expires_at`, nullable `space_key_ct` and `name_ct` for preview |
+| `challenges` | `nonce` (32 random bytes), `ip`, `expires_at` |
 | `sessions` | `token_hash` (SHA-256), `person_id`, `device_id` (Ed25519 public key), `ip` (canonical source IP at issuance), `expires_at` |
 | `revocations` | `person_id`, `device_id`, `record` (W04 signature, device public key and revocation timestamp) |
 | `bans` | `person_id` |
 | `ban_ips` | `person_id`, `ip` (only for an explicitly requested IP ban) |
 | `audit_log` | `id` (sequence), `actor_person_id`, `action` (fixed event kind), nullable `target_person_id`, nullable `target_id` (role, invite or device ID), `at` (Unix seconds) |
+| `invite_previews` | `ip`, `expires_at` (60-second rate limit) |
+| `member_devices` | `device_id` (Ed25519 public key), `person_id`, `certificate` (public keys, timestamp, salted name commitment, root signature and format prefix) |
+| `categories` | `id` (text), `position`, `name_ct` |
+| `channels` | `id` (text), `kind` (text or voice), `category_id`, `position`, `name_ct`, nullable `topic_ct` |
+| `channel_ids` | `id` (text, including deleted channel IDs to prevent reuse) |
+| `channel_permissions` | `channel_id`, `role_id`, `flags` (four-bit mask) |
+| `key_scopes` | `id` (text), `kind` (space or channel), nullable `channel_id`, `rotate` |
+| `key_epochs` | `scope_id`, `epoch` |
+| `key_envelopes` | `scope_id`, `epoch`, `recipient_device`, `sender_device`, `envelope` (HPKE ciphertext, encapsulation and signature) |
 | `_sqlx_migrations` | `version`, `description`, `installed_on`, `success`, `checksum`, `execution_time` (migration bookkeeping) |
 
 Caddy supplies the source IP directly. Session IPs are retained with the active
@@ -27,9 +36,13 @@ session so a moderator can choose an IP ban. Termination removes the session
 row. An explicitly banned IP stays linked to its person ban until unban.
 Challenge issuance prunes expired nonces, and sign-in deletes a consumed nonce.
 Invite creation prunes expired invites, and redemption deletes spent ones.
-Device certificates and their W04 device names are used only in memory to verify
-sign-in. Raw invite codes, session tokens, readable names, avatars and server
-metadata are absent from persisted API records and logs. Audit records carry IDs and fixed actions.
+Preview requests prune expired rate-limit rows.
+The API persists public device certificates. The human-readable device
+name and commitment salt stay on the device. Raw invite codes, link keys,
+session tokens, space and channel keys, and readable names, descriptions,
+topics, icons and avatars are absent from API storage and logs. Audit
+records carry IDs and fixed actions. Ciphertext sizes and access changes
+are observable to the server.
 SQLite backups and old WAL pages can retain past database contents.
 
 The dev TLS certificate and private key live in `.dev/tls/`. Bot data under
@@ -45,10 +58,10 @@ the terminal. The client never stores or logs the words or the root signing key.
 
 ## Outbound connections
 
-- **Bot:** Only the configured RustTalk stack. Membership, signaling and failure-path
+- **Bot:** Only the configured RustTalk stack. Membership, key events, signaling and failure-path
   validation use Caddy on 8443/TCP. WebRTC uses the advertised LiveKit node on
   7882/UDP or 7881/TCP. The bot mints its dev token locally.
-- **Desktop client, API and index:** No outbound connections in W05. On Linux the
+- **Desktop client, API and index:** No outbound network connections. On Linux the
   client accesses Secret Service over the local session bus.
 - **Caddy:** Proxies requests to the API on 8080/TCP and to LiveKit on
   7880/TCP, using Docker's internal DNS. Dev TLS uses a local certificate.
