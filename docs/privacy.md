@@ -99,7 +99,8 @@ device identities to current channel readers. Readers see unmatched
 devices only as a count. After a kick, ban, revocation or permission
 change the API asks LiveKit to remove devices that lost access and to
 revoke any audio, video or data publication rights they lost. It keeps the active
-voice roster in memory for one second per room. It keeps no voice roster or
+voice roster in memory for one second per room and drops expired rooms on the
+next roster lookup. It keeps no voice roster or
 LiveKit join tokens in SQLite. LiveKit sees opaque room and device IDs,
 track IDs and source kinds, viewer subscriptions, routing and timing
 information, negotiated video codec, dimensions and simulcast layers,
@@ -151,8 +152,10 @@ Next to the settings, `servers.json` holds each server's address, server ID
 and TLS fingerprint. `sync.json` holds the last merged device sync snapshot
 with its version: joined servers with their pins, servers left, synced
 settings, and local edits not yet uploaded. `voice.json` holds the
-chosen audio devices, voice options, and the chosen camera's name,
-resolution and frame rate. Of these, only the voice options (push to talk
+chosen audio devices, voice options, the chosen camera's name,
+resolution and frame rate, and the server directory address and
+certificate pin used by "Find servers" (`index_url`, `index_fingerprint`).
+Of these, only the voice options (push to talk
 and its key, activation level, echo cancellation, noise suppression, auto
 gain) and the camera resolution and frame rate sync to the person's other
 devices; the chosen microphone, speakers and camera stay on this device. Decrypted names, messages and pictures stay in

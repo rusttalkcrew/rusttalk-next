@@ -86,7 +86,9 @@ The service logs one instruction on first start.
 
 The named `api-data` volume holds `/data/rusttalk.sqlite3` in WAL mode and
 `/data/server.key` with mode 0600. It also holds encrypted attachment blobs
-in `/data/files/`. Keep this volume and `.dev/tls/` across normal restarts.
+in `/data/files/`. Set `RUSTTALK_DATA_DIR` to use another data directory than
+`/data`; the index honors it too. Keep this volume and `.dev/tls/` across
+normal restarts.
 Stop the API and back up the whole volume, including any SQLite WAL files
 and `files/`, plus the TLS certificate and key. Restrict access to these
 backups and restore the database and blob directory from the same backup.
@@ -242,7 +244,7 @@ done
 Build the standalone directory image from the repository root:
 
 ```sh
-docker build -f services/index/Dockerfile -t rusttalk-index .
+docker build -f services/api/Dockerfile --target index --build-arg SERVICE=index -t rusttalk-index .
 ```
 
 Run the image with a persistent volume at `/data` (UID/GID 65532).
