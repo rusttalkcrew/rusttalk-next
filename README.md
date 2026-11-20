@@ -55,4 +55,4 @@ Owner invite, backups and upgrades: [Production](docs/operations.md#production).
 - [Development](docs/development.md)
 - [Work order](docs/work-order.md)
 
-License: all rights reserved.
+License: [MIT](LICENSE).
