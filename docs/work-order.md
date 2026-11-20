@@ -52,7 +52,7 @@ content on the server, not even temporarily.
   volume per track. Gate: e2e two app tracks with independent volume.
 
 **6. Screen sharing and camera**
-- [ ] **W10 Screen and window sharing** (Windows and Linux). Gate: e2e screen track.
+- [x] **W10 Screen and window sharing** (Windows and Linux). Gate: e2e screen track.
 - [ ] **W11 Camera.** Gate: e2e camera track.
 
 **7. File sharing, live**
