@@ -54,8 +54,9 @@ The dev TLS certificate and private key live in `.dev/tls/`. Bot data under
 The device signing secret, device agreement secret, sync key, person ID and
 public device certificate live in Windows Credential Manager or Linux Secret
 Service. Development profiles use separate entries. The client logs the
-person fingerprint locally. The first launch displays the recovery words in
-the terminal. The client never stores or logs the words or the root signing key.
+person fingerprint locally. Creating an account shows the recovery words once
+in the app window. The client never stores or logs the words or the root
+signing key. "Sign out of this device" deletes the keystore entry.
 
 ## Outbound connections
 

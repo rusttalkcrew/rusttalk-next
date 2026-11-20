@@ -47,21 +47,46 @@ first build.
 
 ## Native client
 
-Run `make client` in the repository root to build and start the native client.
-It uses the platform config directory and the OS keystore (Windows Credential
-Manager or an unlocked Linux Secret Service session).
+Run `make client` in the repository root to build and start the desktop
+app. It uses the platform config directory and the OS keystore (Windows
+Credential Manager or an unlocked Linux Secret Service session). The window
+follows the system light or dark theme.
+
+On first start the app offers two paths:
+
+- **Create account** shows the 24 recovery words once, then asks for 3 of
+  them. The device identity is saved to the keystore only after that check
+  passes, so closing the app earlier leaves nothing behind.
+- **I already have an account** takes the 24 words and adds this computer as
+  a new device (`DeviceIdentity::add_device`).
+
+Later starts load the identity from the keystore and open the main window:
+server rail, channel list, chat pane and member list. Settings has the
+short person fingerprint under Profile > Details, this device's name under
+Devices, and "Sign out of this device", which deletes the keystore entry
+after a confirmation. Joining a server is not wired up yet: the app checks
+a pasted invite link and says so. Recovery words and keys never reach the
+log or the terminal.
 
 Run `make client PROFILE=a` for an isolated identity. A profile is exactly
 one lowercase letter from `a` to `z`. For profile `a`, the settings and data
 directory is `.dev/profiles/a`, which holds `rusttalk.log` and the startup
 lock. The keystore service is `RustTalk-dev-a`. `make reset` removes the
-directory and leaves OS keystore entries in place.
+directory and leaves OS keystore entries in place; remove one with
+`secret-tool clear service RustTalk-dev-a username identity-v1` on Linux.
 
-On the first successful start, the client prints its recovery words to the
-terminal and saves the device identity. Each successful start logs the person
-fingerprint to `rusttalk.log`. The client currently opens a console on Windows
-so the first-run words are visible there too. Recovery-word confirmation is
-available in core for the UI.
+`RUSTTALK_APP_ID` sets the Wayland app id and X11 class (default
+`rusttalk`). Test runs on a desktop you are using can mark their window so a
+compositor rule hides it, for example on Hyprland:
+
+```sh
+RUSTTALK_APP_ID=agent.rusttalk make client PROFILE=x
+```
+
+A hidden window gets no frame callbacks, so it does not repaint until shown.
+
+Debug builds open a console on Windows; release builds do not, so check
+`rusttalk.log` for startup errors there.
 
 ## Checks
 
