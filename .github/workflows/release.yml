@@ -1,0 +1,139 @@
+name: Release
+
+# Push a tag vX.Y.Z (make release) whose version matches Cargo.toml. This
+# builds every platform, pushes the server images to ghcr.io, signs
+# latest.json and publishes the GitHub release.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+
+env:
+  RUSTTALK_RELEASE_PUBLIC_KEY: ${{ vars.RUSTTALK_RELEASE_PUBLIC_KEY }}
+  # Clients built here check this directory for updates by default.
+  RUSTTALK_DEFAULT_UPDATE_URL: https://github.com/${{ github.repository }}/releases/latest/download/
+  IMAGE: ghcr.io/${{ github.repository_owner }}/rusttalk
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        run: |
+          version=$(python3 deploy/release/release.py version)
+          test "v$version" = "$GITHUB_REF_NAME" || { echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $version"; exit 1; }
+          [[ "$RUSTTALK_RELEASE_PUBLIC_KEY" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::Set the RUSTTALK_RELEASE_PUBLIC_KEY repository variable"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  linux:
+    needs: version
+    strategy:
+      matrix:
+        include:
+          - { runner: ubuntu-24.04, arch: x86_64, docker: amd64, tool: ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0, runtime: 2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d }
+          - { runner: ubuntu-24.04-arm, arch: aarch64, docker: arm64, tool: f0837e7448a0c1e4e650a93bb3e85802546e60654ef287576f46c71c126a9158, runtime: 00cbdfcf917cc6c0ff6d3347d59e0ca1f7f45a6df1a428a0d6d8a78664d87444 }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      # The client links LiveKit's WebRTC (clang 21+) and opens audio devices (ALSA).
+      - run: |
+          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 21
+          sudo apt-get install -y libasound2-dev libglib2.0-dev libpipewire-0.3-dev libclang-dev
+          echo "CXX=clang++-21" >> "$GITHUB_ENV"
+      - run: cargo build --release --locked -p rusttalk-client -p rusttalk-pipewire
+      - name: AppImage
+        run: |
+          curl -fsSLo appimagetool https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-${{ matrix.arch }}.AppImage
+          curl -fsSLo runtime https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-${{ matrix.arch }}
+          printf '%s  appimagetool\n%s  runtime\n' ${{ matrix.tool }} ${{ matrix.runtime }} | sha256sum -c
+          chmod +x appimagetool
+          deploy/release/appimage.sh "$VERSION" ${{ matrix.arch }} ./appimagetool ./runtime dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: dist/
+          if-no-files-found: error
+      - name: Server images
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          for service in api index; do
+            docker build --build-arg SERVICE=$service --target $service -f services/api/Dockerfile \
+              -t "$IMAGE-$service:$VERSION-${{ matrix.docker }}" .
+            docker push "$IMAGE-$service:$VERSION-${{ matrix.docker }}"
+          done
+
+  windows:
+    needs: version
+    strategy:
+      matrix:
+        arch: [x86_64, aarch64]
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install && rustup target add ${{ matrix.arch }}-pc-windows-msvc
+      - name: Installer
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (!(Test-Path $iscc)) { choco install innosetup -y --no-progress }
+          ./deploy/release/windows.ps1 -Iscc $iscc -Arch ${{ matrix.arch }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-${{ matrix.arch }}
+          path: dist/*.exe
+          if-no-files-found: error
+
+  publish:
+    needs: [version, linux, windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # The release key is an environment secret, available to tag builds only.
+    environment: release
+    permissions:
+      contents: write
+      packages: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Multi-arch images
+        run: |
+          echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          for service in api index; do
+            docker buildx imagetools create -t "$IMAGE-$service:$VERSION" -t "$IMAGE-$service:latest" \
+              "$IMAGE-$service:$VERSION-amd64" "$IMAGE-$service:$VERSION-arm64"
+          done
+          api=$(docker buildx imagetools inspect "$IMAGE-api:$VERSION" --format '{{.Manifest.Digest}}')
+          index=$(docker buildx imagetools inspect "$IMAGE-index:$VERSION" --format '{{.Manifest.Digest}}')
+          printf '{"api": "%s@%s", "index": "%s@%s"}\n' "$IMAGE-api" "$api" "$IMAGE-index" "$index" > dist/images.json
+      - name: Sign
+        env:
+          KEY: ${{ secrets.RUSTTALK_RELEASE_KEY }}
+        run: |
+          umask 077
+          key=$(mktemp)
+          trap 'rm -f "$key"' EXIT
+          printf '%s\n' "$KEY" > "$key"
+          RUSTTALK_RELEASE_KEY="$key" python3 deploy/release/release.py sign dist
+      - run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes --title "RustTalk $VERSION"

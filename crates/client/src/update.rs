@@ -25,12 +25,28 @@ const LOCAL_TEST: bool = match option_env!("RUSTTALK_LOCAL_UPDATE_TEST") {
 #[cfg(target_os = "linux")]
 static RESTART: std::sync::OnceLock<Target> = std::sync::OnceLock::new();
 
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Deserialize, Serialize)]
 struct Settings {
     #[serde(default)]
     automatic: bool,
-    #[serde(default)]
+    #[serde(default = "default_url")]
     url: String,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            automatic: false,
+            url: default_url(),
+        }
+    }
+}
+
+/// Release builds point at their own release directory.
+fn default_url() -> String {
+    option_env!("RUSTTALK_DEFAULT_UPDATE_URL")
+        .unwrap_or_default()
+        .to_owned()
 }
 
 impl Settings {
@@ -149,7 +165,15 @@ async fn check(url: &str) -> Result<Option<Update>> {
     let client = reqwest::Client::builder()
         .no_proxy()
         .https_only(!local_http)
-        .redirect(reqwest::redirect::Policy::none())
+        // Release hosts such as GitHub redirect downloads to a CDN. The signed
+        // manifest pins every byte, so only the scheme needs checking here.
+        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+            if attempt.previous().len() < 5 && (attempt.url().scheme() == "https" || local_http) {
+                attempt.follow()
+            } else {
+                attempt.stop()
+            }
+        }))
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(300))
         .build()?;

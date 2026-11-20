@@ -130,10 +130,14 @@ soak: ## Run two headless bots against a disposable stack for 30 minutes
 
 ##@ Release
 
-release-key: ## Generate an Ed25519 key pair in .dev for local testing
+release-key: ## Generate an Ed25519 key pair in .dev for local update tests
 	@printf '\033[1;34m==> Generating local test release key\033[0m\n'
 	python3 deploy/release/release.py key
 
-release: ## Build and sign the AppImage, Windows installer and Docker images under dist
-	@printf '\033[1;34m==> Building signed release\033[0m\n'
-	python3 deploy/release/release.py release
+release: ## Tag origin/main as v<Cargo.toml version> and push it; CI builds, signs and publishes
+	@set -e; version=$$(python3 deploy/release/release.py version); \
+		test -z "$$(git status --porcelain)" || { printf '\033[1;31mCommit or stash your changes first.\033[0m\n' >&2; exit 1; }; \
+		git fetch -q origin main; test "$$(git rev-parse HEAD)" = "$$(git rev-parse origin/main)" || { printf '\033[1;31mCheck out the latest origin/main first.\033[0m\n' >&2; exit 1; }; \
+		printf '\033[1;34m==> Tagging v%s\033[0m\n' "$$version"; \
+		git tag -s "v$$version" -m "RustTalk $$version"; git push origin "v$$version"; \
+		printf '\033[1;34m==> Building in CI: https://github.com/vleeuwenmenno/RustTalk-cleanroom/actions/workflows/release.yml\033[0m\n'
