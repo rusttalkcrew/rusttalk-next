@@ -65,6 +65,43 @@ To upgrade, set `RUSTTALK_VERSION` to the new version in
 The volumes, server key and TLS pin carry over. To roll back, set the previous
 version again. Back up first, because a newer API may migrate the database.
 
+## Behind your own reverse proxy
+
+If the host already runs a reverse proxy on 80/443, let it terminate TLS for a
+domain and skip the bundled Caddy. Set `RUSTTALK_IP`, `LIVEKIT_API_SECRET`,
+`RUSTTALK_VERSION` and `RUSTTALK_IMAGE_PREFIX` in `.env` as above, then:
+
+```sh
+docker compose -f docker-compose.yml -f compose.proxy.yml pull
+docker compose -f docker-compose.yml -f compose.proxy.yml up -d --wait
+```
+
+`compose.proxy.yml` publishes the API on `127.0.0.1:8080`, LiveKit signaling on
+`127.0.0.1:7880` and the optional index on `127.0.0.1:8081`
+(`RUSTTALK_PROXY_ADDRESS`, `RUSTTALK_API_PORT`, `RUSTTALK_LIVEKIT_PORT`,
+`RUSTTALK_INDEX_PORT` change them). LiveKit media still needs 7881/tcp and
+7882/udp open to the internet at `RUSTTALK_IP`. A Caddy site:
+
+```caddy
+talk.example.com {
+	route {
+		request_header -X-Forwarded-For
+		reverse_proxy /v1/* 127.0.0.1:8080
+		reverse_proxy /rtc* 127.0.0.1:7880
+		handle_path /index/* {
+			reverse_proxy 127.0.0.1:8081
+		}
+		respond 404
+	}
+}
+```
+
+Any other proxy needs the same three things: route `/v1/` to the API and
+`/rtc` to LiveKit with WebSocket upgrades, and set `X-Forwarded-For` to the
+client address only (drop what the client sent). The API rate limits and bans
+by that address, so do not expose 8080 beyond the proxy. Invites use the
+domain without a pin: `rusttalk://talk.example.com/i/<code>#<server-id>`.
+
 ## TLS without a domain
 
 `make dev` generates a self-signed certificate valid for ten years. Caddy
@@ -237,7 +274,7 @@ It signs and pushes the tag `v<version>`. The
 1. builds the Linux AppImage (x86_64, aarch64) and the Windows installer
    (x86_64, aarch64) on native GitHub runners;
 2. pushes `ghcr.io/vleeuwenmenno/rusttalk-api` and `rusttalk-index` as
-   `<version>` and `latest` for amd64 and arm64;
+   `<version>`, `<major>.<minor>` and `latest` for amd64 and arm64;
 3. writes `latest.json` (size and SHA-256 of every installer, and the image
    digests) and signs it with the release key;
 4. publishes the GitHub release with all files.
