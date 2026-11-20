@@ -56,7 +56,7 @@ content on the server, not even temporarily.
 - [x] **W11 Camera.** Gate: e2e camera track.
 
 **7. File sharing, live**
-- [ ] **W12 Live transfer** through LiveKit data streams, encrypted, nothing stored,
+- [x] **W12 Live transfer** through LiveKit data streams, encrypted, nothing stored,
   2 GiB limit. Gate: e2e transfer between two bots in a room.
 
 **8. File sharing, server-stored**
