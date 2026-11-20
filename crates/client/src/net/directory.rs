@@ -13,7 +13,7 @@ use url::Url;
 
 use super::{Ctx, State, Update, leave_voice, now};
 use crate::server::{
-    Body, Category, Channel, Device, Directory, Dm, Id, Member, Msg, Perms, member_name,
+    Body, Category, Channel, Device, Directory, Dm, Id, Member, Msg, Perms, Role, member_name,
 };
 
 pub(super) async fn get(client: &KeyClient<'_>, path: &str) -> Result<Value> {
@@ -109,23 +109,51 @@ fn build(
     let my_roles = strings(&me["role_ids"]);
     let mut perms = Perms {
         owner: my_roles.iter().any(|role| role == "owner"),
+        admin: my_roles
+            .iter()
+            .any(|role| role == "owner" || role == "admin"),
+        rank: -1,
         ..Perms::default()
     };
+    let mut role_list = Vec::new();
     for role in roles["roles"].as_array().into_iter().flatten() {
-        if role["id"]
-            .as_str()
-            .is_some_and(|id| my_roles.iter().any(|mine| mine == id))
-        {
-            for permission in strings(&role["permissions"]) {
+        let id = role["id"].as_str().context("role without ID")?.to_owned();
+        let permissions = strings(&role["permissions"]);
+        let rank = role["rank"].as_i64().unwrap_or_default();
+        if my_roles.contains(&id) {
+            perms.rank = perms.rank.max(rank);
+            for permission in &permissions {
                 match permission.as_str() {
                     "manage_channels" => perms.manage_channels = true,
                     "invite" => perms.invite = true,
                     "delete_messages" => perms.delete_messages = true,
+                    "kick" => perms.kick = true,
+                    "ban" => perms.ban = true,
+                    "manage_roles" => perms.manage_roles = true,
+                    "view_audit_log" => perms.audit = true,
                     _ => {}
                 }
             }
         }
+        let kind = role["kind"].as_str().unwrap_or_default();
+        let builtin = match kind {
+            "owner" => "Owner",
+            "admin" => "Admin",
+            "moderator" => "Moderator",
+            "member" => "Member",
+            _ => "New role",
+        };
+        let name = text(Metadata::RoleName, id.as_bytes(), role["name_ct"].as_str());
+        role_list.push(Role {
+            name: name.unwrap_or_else(|| builtin.into()),
+            id,
+            rank,
+            permissions,
+            custom: kind == "custom",
+        });
     }
+    // Highest rank first, as the server lists them.
+    role_list.sort_by_key(|role| -role.rank);
 
     let mut categories: Vec<_> = catalog.categories.iter().collect();
     categories.sort_by_key(|category| (category.position, category.id));
@@ -165,6 +193,9 @@ fn build(
             )
             .unwrap_or_else(|| "channel".into()),
             voice: channel.kind == "voice",
+            flags: (channel.flags.iter())
+                .map(|entry| (entry.role_id.clone(), entry.flags))
+                .collect(),
         };
         let category = categories.iter_mut().find(|category| {
             category
@@ -213,6 +244,7 @@ fn build(
                 row["display_name_ct"].as_str(),
             ),
             devices,
+            roles: strings(&row["role_ids"]),
         });
     }
     list.sort_by_cached_key(|member| {
@@ -229,6 +261,8 @@ fn build(
         categories,
         members: list,
         dms,
+        roles: role_list,
+        default_role: roles["default_role_id"].as_str().unwrap_or_default().into(),
     })
 }
 
@@ -301,6 +335,7 @@ mod tests {
                     fingerprint: (*fp).into(),
                 })
                 .collect(),
+            roles: Vec::new(),
         }
     }
 

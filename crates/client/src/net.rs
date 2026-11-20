@@ -38,11 +38,13 @@ use crate::{
     share::App,
 };
 
+mod admin;
 mod directory;
 mod files;
 mod voice;
 
-use directory::directory;
+pub use admin::{Admin, AdminUpdate, AuditEntry, Ban};
+use directory::{directory, get};
 pub use files::{MAX_FILE, file_name};
 use voice::{
     Live, Next, leave_voice, next_voice, on_voice, room_changed, send_room, share_screen,
@@ -53,9 +55,6 @@ const PAGE: u32 = 50;
 const CHANGED: &str = "This server changed. Don't continue unless the owner told you it would.";
 const OFFLINE: &str = "You're offline. Try again in a moment.";
 const FAILED: &str = "That didn't work. Try again.";
-/// Invites made from the UI.
-const INVITE_USES: u32 = 10;
-const INVITE_SECONDS: u32 = 7 * 24 * 60 * 60;
 
 pub enum Command {
     /// Load the newest page and follow live messages.
@@ -93,7 +92,9 @@ pub enum Command {
     SetServerName(String),
     SetDisplayName(String),
     OpenDm(Id),
-    Invite,
+    /// Make an invite link: uses and lifetime in seconds.
+    Invite(u32, u32),
+    Admin(Admin),
     JoinVoice(Id),
     LeaveVoice,
     ShareApp(App),
@@ -118,11 +119,22 @@ pub struct LiveOffer {
 }
 
 pub struct Preview {
-    pub link: InviteLink,
+    pub server: KnownServer,
+    /// The invite to join with; `None` when it expired but the server lets anyone join.
+    pub invite: Option<InviteCode>,
     /// The server name from the invite, when the invite carries one.
     pub name: Option<String>,
     /// This profile has connected to this address before.
     pub known: bool,
+    /// The server lets people join without an invite.
+    pub open: bool,
+}
+
+/// How a new member gets in the first time.
+pub enum Admission {
+    Invite(InviteCode),
+    /// The server lets anyone join.
+    Open,
 }
 
 pub enum Update {
@@ -140,7 +152,9 @@ pub enum Update {
     Deleted(Url, Id, Id),
     Notice(Url, Id, Msg),
     DmReady(Url, Id),
-    Invite(Url, String),
+    /// A new invite: its ID (to revoke it) and link.
+    Invite(Url, String, String),
+    Admin(Url, AdminUpdate),
     /// The call in a voice channel changed state; `None` when it ended.
     Call(Url, Id, Option<CallState>),
     /// This device joined the call without permission to talk.
@@ -240,22 +254,21 @@ impl Net {
     pub fn preview(&self, link: InviteLink) {
         let ctx = self.ctx.clone();
         self.spawn(async move {
-            let result = preview(&ctx, &link).await;
-            let update = result.map(|(name, known)| Box::new(Preview { link, name, known }));
+            let update = preview(&ctx, &link).await.map(Box::new);
             ctx.send(Update::Preview(update));
         });
     }
 
-    /// Connect to a server (signing in with `invite` the first time) and keep it connected.
+    /// Connect to a server (joining with `admission` the first time) and keep it connected.
     pub fn start(
         &self,
         server: KnownServer,
-        invite: Option<InviteCode>,
+        admission: Option<Admission>,
         display_name: Option<String>,
     ) -> UnboundedSender<Command> {
         let (commands, receiver) = unbounded_channel();
         let ctx = self.ctx.clone();
-        self.spawn(run(ctx, server, invite, display_name, receiver));
+        self.spawn(run(ctx, server, admission, display_name, receiver));
         commands
     }
 
@@ -299,7 +312,7 @@ impl Drop for Net {
     }
 }
 
-async fn preview(ctx: &Ctx, link: &InviteLink) -> Result<(Option<String>, bool), String> {
+async fn preview(ctx: &Ctx, link: &InviteLink) -> Result<Preview, String> {
     let known = Api::pinned(&ctx.data, &link.server.address).map_err(|error| {
         tracing::error!(error = %format_args!("{error:#}"), "reading server pins failed");
         "Couldn't read your saved servers.".to_owned()
@@ -316,19 +329,41 @@ async fn preview(ctx: &Ctx, link: &InviteLink) -> Result<(Option<String>, bool),
         tracing::warn!("invite pins differ from the server");
         return Err(mismatch(known.is_some()));
     }
+    let open = match api.info().await {
+        Ok(info) => info.open_joining,
+        Err(error) => {
+            tracing::warn!(error = %format_args!("{error:#}"), "reading open joining failed");
+            false
+        }
+    };
+    let mut invite = Some(link.code);
     let name = match &link.link_key {
         // Owner invites from the server console carry no name.
         None => None,
-        Some(_) => invite_name(&api, link)
-            .await
-            .map_err(|error| {
+        Some(_) => match invite_name(&api, link).await {
+            Ok(name) => name.map(|name| String::from_utf8_lossy(&name).into_owned()),
+            // A used-up invite still names the server, which may let anyone join.
+            Err(error) if open => {
+                tracing::info!(error = %format_args!("{error:#}"), "invite spent, server is open");
+                invite = None;
+                None
+            }
+            Err(error) => {
                 tracing::warn!(error = %format_args!("{error:#}"), "invite preview failed");
-                "This invite has expired or was already used. Ask for a new one.".to_owned()
-            })?
-            .map(|name| String::from_utf8_lossy(&name).into_owned()),
+                return Err(
+                    "This invite has expired or was already used. Ask for a new one.".into(),
+                );
+            }
+        },
     };
-    tracing::info!(server = %fingerprint(&link.server.server_id), known = known.is_some(), "invite checked");
-    Ok((name, known.is_some()))
+    tracing::info!(server = %fingerprint(&link.server.server_id), known = known.is_some(), open, "invite checked");
+    Ok(Preview {
+        server: link.server.clone(),
+        invite,
+        name,
+        known: known.is_some(),
+        open,
+    })
 }
 
 fn explain(error: &anyhow::Error, known: bool) -> String {
@@ -389,7 +424,7 @@ enum End {
 async fn run(
     ctx: Ctx,
     server: KnownServer,
-    mut invite: Option<InviteCode>,
+    mut admission: Option<Admission>,
     display_name: Option<String>,
     mut commands: UnboundedReceiver<Command>,
 ) {
@@ -406,9 +441,9 @@ async fn run(
     let mut api = None;
     loop {
         ctx.send(Update::Status(url.clone(), Status::Connecting));
-        match session(&ctx, &server, &mut api, invite.as_ref()).await {
+        match session(&ctx, &server, &mut api, admission.as_ref()).await {
             Ok((api, session)) => {
-                if invite.take().is_some() {
+                if admission.take().is_some() {
                     tracing::info!(server = %fingerprint(&server.server_id), "joined server");
                     let joined = vec![Edit::Join(api.known_server().clone())];
                     if let Err(error) = ctx.sync.edit(&ctx.data, joined).await {
@@ -482,6 +517,9 @@ async fn run(
                         ctx.send(Update::CameraStopped);
                         ctx.send(Update::Failed(OFFLINE.into()));
                     }
+                    Some(Command::Admin(_)) => {
+                        ctx.send(Update::Admin(url.clone(), AdminUpdate::Failed(OFFLINE.into())));
+                    }
                     Some(Command::Image(file, _)) => ctx.send(Update::Image(file.id, Err(false))),
                     Some(Command::Save(file, _)) => ctx.send(Update::Saved(file.id, Err(false))),
                     Some(Command::AcceptFile(id, _)) => {
@@ -505,7 +543,7 @@ async fn session<'a>(
     ctx: &Ctx,
     server: &KnownServer,
     api: &'a mut Option<Api>,
-    invite: Option<&InviteCode>,
+    admission: Option<&Admission>,
 ) -> Result<(&'a Api, Session), Failure> {
     let stop_or_retry = |error: anyhow::Error| {
         if pin_changed(&error) {
@@ -528,10 +566,12 @@ async fn session<'a>(
         *api = Some(verified);
     }
     let api = api.as_ref().expect("set above");
-    let reply = api
-        .sign_in(&ctx.identity, invite)
-        .await
-        .map_err(stop_or_retry)?;
+    let reply = match admission {
+        Some(Admission::Open) => api.join_open(&ctx.identity).await,
+        Some(Admission::Invite(code)) => api.sign_in(&ctx.identity, Some(code)).await,
+        None => api.sign_in(&ctx.identity, None).await,
+    }
+    .map_err(stop_or_retry)?;
     let status = reply.status();
     if status.is_success() {
         let session = reply
@@ -548,13 +588,22 @@ async fn session<'a>(
         .unwrap_or_default();
     tracing::warn!(%status, code, "sign-in refused");
     Err(match code.as_str() {
-        "invite_required" if invite.is_none() => {
+        "invite_required" if admission.is_none() => {
             Failure::Stop("You're no longer a member of this server.".into())
         }
         "invite_required" | "invalid_invite" | "invite_not_found" => {
             Failure::Stop("This invite has expired or was already used. Ask for a new one.".into())
         }
         "person_banned" | "ip_banned" => Failure::Stop("You're banned from this server.".into()),
+        "open_joining_disabled" => {
+            Failure::Stop("This server needs an invite now. Ask someone for one.".into())
+        }
+        "member_cap_reached" => {
+            Failure::Stop("This server is full. Ask someone there for an invite.".into())
+        }
+        "open_join_limit" => Failure::Stop(
+            "Too many people joined this server recently. Try again in an hour.".into(),
+        ),
         "device_revoked" => Failure::Stop("This device was removed from your account.".into()),
         "device_limit" => Failure::Stop(
             "Your account already has 10 devices on this server. Remove one first.".into(),
@@ -848,10 +897,11 @@ async fn on_command(
             };
             ctx.send(Update::DmReady(url.clone(), channel));
         }
-        Command::Invite => {
-            let (_, link) = client.invite(INVITE_USES, INVITE_SECONDS).await?;
-            ctx.send(Update::Invite(url.clone(), link.to_string()));
+        Command::Invite(uses, seconds) => {
+            let (id, link) = client.invite(uses, seconds).await?;
+            ctx.send(Update::Invite(url.clone(), id, link.to_string()));
         }
+        Command::Admin(request) => admin::run(ctx, url, client, state, request).await,
         Command::JoinVoice(channel) => voice::start_call(ctx, url, client, state, channel).await?,
         command if voice_only(&command) => {
             if let Some(channel) = voice_command(ctx, state, command).await? {
