@@ -21,6 +21,7 @@ use crate::{
     audio::Audio,
     call::{self, Voice},
     camera,
+    files::{self, Ask, Files},
     net::{Command, Net, Preview, Update},
     screen::Video,
     server::{Body, Chat, Directory, Id, Msg, Server, Status, member_name},
@@ -42,6 +43,7 @@ pub struct Home {
     pub toast: Option<(String, f64)>,
     pub settings: Option<Tab>,
     pub voice: Voice,
+    pub files: Files,
     pub confirm_sign_out: bool,
     pub error: Option<String>,
 }
@@ -127,6 +129,7 @@ impl Home {
             toast: None,
             settings: None,
             voice: Voice::new(audio, video, runtime),
+            files: Files::default(),
             confirm_sign_out: false,
             error: None,
         })
@@ -138,7 +141,7 @@ impl Home {
             .position(|server| &server.address == address)
     }
 
-    fn apply(&mut self, update: Update, now: f64) {
+    fn apply(&mut self, ctx: &egui::Context, update: Update, now: f64) {
         match update {
             Update::Preview(result) => {
                 self.join = match result {
@@ -315,6 +318,17 @@ impl Home {
                     call.stats = stats;
                 }
             }
+            Update::Uploading(address, channel, what) => {
+                if let Some(index) = self.index(&address) {
+                    self.servers[index]
+                        .chats
+                        .entry(channel)
+                        .or_default()
+                        .uploading = what;
+                }
+            }
+            Update::Image(id, image) => self.files.image(ctx, id, image),
+            Update::Saved(id, saved) => self.files.saved(id, saved),
             Update::Failed(error) => {
                 if matches!(self.dialog, Some(Dialog::Invite(_, None))) {
                     self.dialog = None;
@@ -378,7 +392,27 @@ fn panel_frame(fill: Color32) -> Frame {
 pub fn show(ui: &mut Ui, home: &mut Home) -> Option<Action> {
     let now = ui.input(|input| input.time);
     while let Ok(update) = home.net.updates.try_recv() {
-        home.apply(update, now);
+        home.apply(ui.ctx(), update, now);
+    }
+    for (ask, paths) in home.files.answers() {
+        let (Ask::Attach(address, _) | Ask::Save(address, _)) = &ask;
+        let Some(index) = home.index(address) else {
+            continue;
+        };
+        let server = &mut home.servers[index];
+        match ask {
+            Ask::Attach(_, channel) => {
+                let chat = server.chats.entry(channel).or_default();
+                if let Some(problem) = files::stage(chat, paths) {
+                    home.toast = Some((problem, now + 6.0));
+                }
+            }
+            Ask::Save(_, file) => {
+                if let Some(path) = paths.into_iter().next() {
+                    home.files.save(&server.commands, &file, path);
+                }
+            }
+        }
     }
     if home.toast.as_ref().is_some_and(|(_, until)| *until < now) {
         home.toast = None;
@@ -446,6 +480,7 @@ pub fn show(ui: &mut Ui, home: &mut Home) -> Option<Action> {
             },
         });
     dialogs(ui.ctx(), home);
+    files::viewer(ui.ctx(), &mut home.files);
     call::stats_window(ui.ctx(), home);
     call::screen_dialog(ui.ctx(), home);
     call::frame(ui.ctx(), home);
@@ -942,9 +977,11 @@ fn chat_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
         servers,
         toast,
         dialog,
+        files,
         ..
     } = home;
     let Server {
+        address,
         chats,
         dir,
         status,
@@ -964,13 +1001,46 @@ fn chat_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
             ui.label(RichText::new(&title).strong().size(17.0));
         });
     let online = *status == Status::Online;
-    Panel::bottom("composer")
+    let (hovered, dropped) = ui.input(|input| {
+        let dropped: Vec<_> = (input.raw.dropped_files.iter())
+            .map(|file| file.path().to_owned())
+            .collect();
+        (!input.raw.hovered_files.is_empty(), dropped)
+    });
+    if online
+        && !dropped.is_empty()
+        && let Some(problem) = files::stage(chat, dropped)
+    {
+        *toast = Some((problem, ui.input(|input| input.time) + 6.0));
+    }
+    let attach = Panel::bottom("composer")
         .frame(Frame::new().inner_margin(Margin::symmetric(0, 8)))
         .show(ui, |ui| {
-            if let Some(command) = composer(ui, chat, dir, online, toast, channel, &title) {
+            let (command, attach) = composer(ui, chat, dir, online, toast, channel, &title);
+            if let Some(command) = command {
                 let _ = commands.send(command);
             }
-        });
+            attach
+        })
+        .inner;
+    if attach {
+        files.ask(ui.ctx(), Ask::Attach(address.clone(), channel));
+    }
+    if online && hovered {
+        let rect = ui.max_rect();
+        ui.painter().rect_filled(
+            rect,
+            8.0,
+            ui.visuals().selection.bg_fill.gamma_multiply(0.35),
+        );
+        ui.painter().text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            format!("Drop to send in {title}"),
+            FontId::proportional(20.0),
+            ui.visuals().strong_text_color(),
+        );
+    }
     let can_moderate = dir.perms.delete_messages && !dm;
     let mut area = ScrollArea::vertical()
         .id_salt(("chat", index, channel))
@@ -1001,7 +1071,10 @@ fn chat_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
                     && msg.at - prev.at < 300
                     && msg.reply_to.is_none()
             });
-            if let Some(chosen) = message(ui, chat, msg, start, dir, can_moderate) {
+            let shown = message(ui, chat, msg, start, dir, can_moderate, |ui| {
+                files::attachments(ui, files, address, commands, &msg.files);
+            });
+            if let Some(chosen) = shown {
                 pick = Some(chosen);
             }
             last = Some(msg);
@@ -1062,6 +1135,8 @@ fn composer_id(channel: Id) -> UiId {
     UiId::unique(("composer", channel))
 }
 
+/// Returns a message to send, and whether "Attach files" was clicked.
+/// Returns a message to send, and whether "Attach files" was clicked.
 fn composer(
     ui: &mut Ui,
     chat: &mut Chat,
@@ -1070,7 +1145,7 @@ fn composer(
     toast: &mut Option<(String, f64)>,
     channel: Id,
     title: &str,
-) -> Option<Command> {
+) -> (Option<Command>, bool) {
     if let Some((text, _)) = toast.as_ref() {
         let mut close = false;
         ui.horizontal(|ui| {
@@ -1099,26 +1174,46 @@ fn composer(
             cancel = ui.small_button("×").on_hover_text("Cancel edit").clicked();
         });
     }
+    if let Some(what) = &chat.uploading {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.weak(format!("Uploading {what}…"));
+        });
+    }
+    files::staged(ui, chat);
     let input = palette(ui).input;
-    let field = ScrollArea::vertical()
-        .id_salt("composer-scroll")
-        .max_height(180.0)
-        .show(ui, |ui| {
-            ui.add_enabled(
-                online,
-                TextEdit::multiline(&mut chat.draft)
-                    .background_color(input)
-                    .margin(Margin::symmetric(10, 8))
-                    .id(composer_id(channel))
-                    .hint_text(if online {
-                        format!("Message {title}")
-                    } else {
-                        "Waiting for the server…".into()
-                    })
-                    .desired_rows(1)
-                    .desired_width(f32::INFINITY)
-                    .return_key(KeyboardShortcut::new(Modifiers::SHIFT, Key::Enter)),
-            )
+    let mut attach = false;
+    let field = ui
+        .horizontal_top(|ui| {
+            let plus = ui
+                .add_enabled(
+                    online && chat.editing.is_none(),
+                    Button::new(RichText::new("➕").size(16.0)).min_size(Vec2::splat(34.0)),
+                )
+                .on_hover_text("Attach files (up to 32 MB each)");
+            plus.widget_info(|| WidgetInfo::labeled(Role::Button, plus.enabled(), "Attach files"));
+            attach = plus.clicked();
+            ScrollArea::vertical()
+                .id_salt("composer-scroll")
+                .max_height(180.0)
+                .show(ui, |ui| {
+                    ui.add_enabled(
+                        online,
+                        TextEdit::multiline(&mut chat.draft)
+                            .background_color(input)
+                            .margin(Margin::symmetric(10, 8))
+                            .id(composer_id(channel))
+                            .hint_text(if online {
+                                format!("Message {title}")
+                            } else {
+                                "Waiting for the server…".into()
+                            })
+                            .desired_rows(1)
+                            .desired_width(f32::INFINITY)
+                            .return_key(KeyboardShortcut::new(Modifiers::SHIFT, Key::Enter)),
+                    )
+                })
+                .inner
         })
         .inner;
     let (enter, escape) = ui.input(|input| {
@@ -1146,18 +1241,27 @@ fn composer(
         });
     }
     let text = chat.draft.trim();
-    if !(focused && enter) || text.is_empty() || count > MAX_TEXT_CHARS {
-        return None;
+    // Edits change only the text; staged files wait for the next message.
+    let editing = chat.editing.is_some();
+    let nothing = text.is_empty() && (editing || chat.staged.is_empty());
+    if !(focused && enter) || nothing || count > MAX_TEXT_CHARS {
+        return (None, attach);
     }
+    let files = if editing {
+        Vec::new()
+    } else {
+        chat.staged.drain(..).map(|file| file.path).collect()
+    };
     let command = Command::Send {
         channel,
         text: text.to_owned(),
         reply_to: chat.reply_to.take(),
         edit_of: chat.editing.take(),
+        files,
     };
     chat.draft.clear();
     field.request_focus();
-    Some(command)
+    (Some(command), attach)
 }
 
 fn message(
@@ -1167,6 +1271,7 @@ fn message(
     start: bool,
     dir: &Directory,
     can_moderate: bool,
+    attachments: impl FnOnce(&mut Ui),
 ) -> Option<Pick> {
     let names = |person: &Id| member_name(dir, person);
     let me = dir.me;
@@ -1216,6 +1321,11 @@ fn message(
                 let line = match quoted.map(|m| (&m.body, m.person)) {
                     Some((Body::Text(text), person)) => {
                         let snippet: String = text.chars().take(80).collect();
+                        let snippet = if snippet.is_empty() {
+                            "a file".into()
+                        } else {
+                            snippet
+                        };
                         format!("↪ {}: {}", names(&person), snippet.replace('\n', " "))
                     }
                     _ => "↪ Earlier message".into(),
@@ -1230,12 +1340,15 @@ fn message(
             }
             match &msg.body {
                 Body::Text(text) => {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.add(Label::new(text.as_str()).wrap());
-                        if chat.edited.contains_key(&msg.id) {
-                            ui.label(RichText::new("(edited)").small().weak());
-                        }
-                    });
+                    if !text.is_empty() {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.add(Label::new(text.as_str()).wrap());
+                            if chat.edited.contains_key(&msg.id) {
+                                ui.label(RichText::new("(edited)").small().weak());
+                            }
+                        });
+                    }
+                    attachments(ui);
                 }
                 _ => {
                     ui.label(
@@ -1427,7 +1540,16 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
                         .add(Button::new("Delete").fill(ui.visuals().error_fg_color))
                         .clicked()
                     {
-                        command = Some((*index, Command::Delete(*channel, *id)));
+                        let files = home.servers[*index]
+                            .chats
+                            .get(channel)
+                            .and_then(|chat| chat.messages.iter().find(|msg| msg.id == *id))
+                            .into_iter()
+                            .flat_map(|msg| &msg.files)
+                            .flat_map(|file| std::iter::once(&file.file).chain(&file.thumbnail))
+                            .map(|blob| blob.id)
+                            .collect();
+                        command = Some((*index, Command::Delete(*channel, *id, files)));
                     }
                     close |= ui.button("Cancel").clicked();
                 });
