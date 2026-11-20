@@ -70,6 +70,6 @@ content on the server, not even temporarily.
 - [x] **W15 Moderation polish and multi-server client.** Gate: one client on two dev
   servers at once.
 - [x] **W16 Index server.** Gate: a dev server registers, a client finds it.
-- [ ] **W17 Updates and packaging.** Signed releases, verified client updates,
+- [x] **W17 Updates and packaging.** Signed releases, verified client updates,
   installer, AppImage, images. Gate: a client updates itself from a local release.
 - [ ] **W18 First release.** `make soak` passes; `/ponytail-audit` findings fixed.
