@@ -94,8 +94,10 @@ signing key. "Sign out of this device" deletes the keystore entry.
 Next to the settings, `servers.json` and `joined.json` hold each joined
 server's address, server ID and TLS fingerprint. `voice.json` holds the
 chosen audio devices, voice options, and the chosen camera's name,
-resolution and frame rate. Decrypted names and
-messages stay in memory only; the log never contains them or invite links.
+resolution and frame rate. Decrypted names, messages and pictures stay in
+memory only; the log never contains them, file names or invite links. A
+downloaded file is written only where the person picks in the save dialog,
+through a temporary file in that folder that is removed if the download fails.
 
 ## Outbound connections
 
@@ -104,7 +106,8 @@ messages stay in memory only; the log never contains them or invite links.
   7882/UDP or 7881/TCP. The bot requests a voice token from the pinned API.
 - **Desktop client:** Configured RustTalk origins for pinned HTTPS and WebSocket
   connections. Voice uses the same pinned signaling path and advertised
-  WebRTC ports as the bot. On Linux it accesses Secret Service over the local session bus.
+  WebRTC ports as the bot. On Linux it accesses Secret Service, and opens file
+  dialogs through xdg-desktop-portal, over the local session bus.
 - **API:** Queries LiveKit RoomService on 7880/TCP using the internal
   Docker hostname `livekit`.
 - **Index:** No outbound network connections.
