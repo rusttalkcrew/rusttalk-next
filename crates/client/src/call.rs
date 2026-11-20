@@ -17,7 +17,7 @@ use crate::{
     audio::{self, Audio, Settings, StreamId},
     home::{Home, Tab, avatar, palette, section},
     net::Command,
-    screen::{self, Options, Target, Video},
+    screen::{self, Kind, Options, Target, Video},
     server::{Call, CallState, Id, Screen, Server, Stats},
     share::{self, App, Support},
 };
@@ -43,8 +43,8 @@ pub struct Voice {
     picking_key: bool,
     pub video: Video,
     pub sharing: Sharing,
-    /// The "Share your screen" dialog, while open.
-    share_screen: Option<(Options, Option<Target>)>,
+    /// The dialog's choices: options and the picked entry of `targets`.
+    share_screen: Option<(Options, Option<usize>)>,
     /// Screens and windows to pick from (Windows), filled by a listing thread.
     targets: Arc<Mutex<Listing<Target>>>,
     pub watching: Option<Watching>,
@@ -405,9 +405,7 @@ fn screen_button(ui: &mut Ui, voice: &mut Voice, connected: bool) -> bool {
                 Button::new("🖥  Share screen").min_size(Vec2::new(ui.available_width(), 28.0));
             if ui.add_enabled(connected, button).clicked() {
                 voice.share_screen = Some((Options::default(), None));
-                if !screen::SYSTEM_PICKER {
-                    list_targets(ui.ctx(), voice);
-                }
+                list_targets(ui.ctx(), voice);
             }
             return false;
         }
@@ -451,44 +449,53 @@ fn list_targets(ctx: &egui::Context, voice: &Voice) {
 /// The "Share your screen" dialog: what to share (Windows), quality, frame rate, cursor.
 pub fn screen_dialog(ctx: &egui::Context, home: &mut Home) {
     let voice = &mut home.voice;
-    let Some((options, target)) = &mut voice.share_screen else {
+    let Some((options, picked)) = &mut voice.share_screen else {
         return;
     };
     let mut close = false;
-    let mut start = false;
+    let mut share = None;
     let modal = Modal::new(egui::Id::unique("share screen")).show(ctx, |ui| {
         ui.set_width(400.0);
         ui.heading("Share your screen");
-        if !screen::SYSTEM_PICKER {
-            match &*audio::lock(&voice.targets) {
-                Listing::Loading => {
-                    ui.spinner();
-                }
-                Listing::Failed => {
-                    ui.weak("Couldn't look for screens. Try again.");
-                }
-                Listing::Found(found) => {
-                    for (heading, window) in [("Screens", false), ("Windows", true)] {
+        let targets = audio::lock(&voice.targets);
+        // Linux lists one entry that opens the system's own picker.
+        let portal = match &*targets {
+            Listing::Loading => {
+                ui.spinner();
+                None
+            }
+            Listing::Failed => {
+                ui.weak("Couldn't look for screens. Try again.");
+                None
+            }
+            Listing::Found(found) => {
+                let portal = found.iter().position(|t| t.kind == Kind::Portal);
+                if portal.is_none() {
+                    for (heading, kind) in [("Screens", Kind::Monitor), ("Windows", Kind::Window)] {
                         section(ui, heading);
                         egui::ScrollArea::vertical()
                             .id_salt(heading)
                             .max_height(160.0)
                             .show(ui, |ui| {
-                                for item in found.iter().filter(|t| t.window == window) {
-                                    let picked = target.as_ref() == Some(item);
-                                    if ui.selectable_label(picked, &item.name).clicked() {
-                                        *target = Some(item.clone());
+                                for (at, item) in found.iter().enumerate() {
+                                    if item.kind == kind
+                                        && ui
+                                            .selectable_label(*picked == Some(at), &item.name)
+                                            .clicked()
+                                    {
+                                        *picked = Some(at);
                                     }
                                 }
                             });
                     }
                 }
+                portal
             }
-        }
+        };
         section(ui, "Quality");
         ui.horizontal(|ui| {
             for (height, label) in [(Some(720), "720p"), (Some(1080), "1080p"), (None, "Native")] {
-                ui.selectable_value(&mut options.height, height, label);
+                ui.selectable_value(&mut options.max_height, height, label);
             }
         });
         section(ui, "Frame rate");
@@ -501,20 +508,24 @@ pub fn screen_dialog(ctx: &egui::Context, home: &mut Home) {
         ui.checkbox(&mut options.cursor, "Show my cursor");
         ui.add_space(10.0);
         ui.horizontal(|ui| {
-            let label = if screen::SYSTEM_PICKER {
+            let label = if portal.is_some() {
                 "Choose what to share"
             } else {
                 "Share"
             };
+            let target = match &*targets {
+                Listing::Found(found) => portal.or(*picked).and_then(|at| found.get(at)),
+                _ => None,
+            };
             let button = Button::new(label).fill(ui.visuals().selection.bg_fill);
-            start = ui
-                .add_enabled(screen::SYSTEM_PICKER || target.is_some(), button)
-                .clicked();
+            if ui.add_enabled(target.is_some(), button).clicked() {
+                share = target.cloned();
+            }
             close |= ui.button("Cancel").clicked();
         });
     });
-    if start {
-        let command = Command::ShareScreen(target.clone(), *options);
+    if let Some(target) = share {
+        let command = Command::ShareScreen(target, *options);
         if let Some(server) = call_server(home) {
             server.send(command);
             home.voice.sharing = Sharing::Starting;

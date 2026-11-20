@@ -1,109 +1,25 @@
-//! Screen sharing: what to share, publishing it in a voice room, and showing the
-//! screens other people share. Everything else uses these names.
+//! Screen sharing: what to share and showing the screens other people share.
+//! Capture and publishing live in `rusttalk_core::screen` and the voice room.
 
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
 };
 
-use anyhow::{Result, bail};
 use eframe::egui::{self, ColorImage};
 use futures_util::StreamExt;
-use livekit::{
-    e2ee::EncryptionType,
-    prelude::{RemoteTrackPublication, TrackKind},
-    webrtc::{
-        prelude::{BoxVideoFrame, RtcVideoTrack, VideoFormatType},
-        video_stream::native::NativeVideoStream,
-    },
+use livekit::webrtc::{
+    prelude::{BoxVideoFrame, RtcVideoTrack, VideoFormatType},
+    video_stream::native::NativeVideoStream,
 };
-use rusttalk_core::client::voice::{TrackSid, TrackSource, VoiceRoom};
+pub use rusttalk_core::screen::{
+    ScreenCapture as Capture, ScreenOptions as Options, ScreenSource as Target,
+    ScreenSourceKind as Kind, list_sources as targets, start,
+};
 
 use crate::audio::lock;
 
-/// A screen or window the person can pick on Windows.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Target {
-    pub id: String,
-    pub name: String,
-    pub window: bool,
-}
-
-#[derive(Clone, Copy, PartialEq)]
-pub struct Options {
-    /// Largest picture height; `None` keeps the screen's own size.
-    pub height: Option<u32>,
-    pub fps: u32,
-    pub cursor: bool,
-}
-
-impl Default for Options {
-    fn default() -> Self {
-        Self {
-            height: Some(1080),
-            fps: 30,
-            cursor: true,
-        }
-    }
-}
-
-/// Windows lists screens and windows in the app; Linux asks the system's picker.
-pub const SYSTEM_PICKER: bool = cfg!(target_os = "linux");
 pub const SUPPORTED: bool = cfg!(any(target_os = "linux", windows));
-
-/// A running capture. Dropping it stops capturing.
-pub struct Capture {
-    options: Options,
-}
-
-impl Capture {
-    /// True if the shared window closed or the capture stopped by itself.
-    pub fn is_finished(&self) -> bool {
-        false
-    }
-}
-
-// seam(w10-screen-share): `targets`, `capture`, `publish` and `name` call that branch's
-// capture and publishing work once it is merged; the rest of the client is built on them.
-
-/// Screens and windows to pick from (Windows). Starts OS work; keep it off the UI thread.
-pub fn targets() -> Result<Vec<Target>> {
-    bail!("screen capture is not available in this build")
-}
-
-/// Start capturing; `None` opens the system picker and waits for the person.
-pub async fn capture(target: Option<Target>, options: Options) -> Result<Capture> {
-    let _ = (target, Capture { options });
-    bail!("screen capture is not available in this build")
-}
-
-/// Publish a capture as an encrypted screen track.
-pub async fn publish(room: &VoiceRoom, capture: &Capture) -> Result<TrackSid> {
-    let _ = (room, capture.options);
-    bail!("screen capture is not available in this build")
-}
-
-/// The decrypted name of a remote screen share.
-fn name(room: &VoiceRoom, publication: &RemoteTrackPublication) -> String {
-    let _ = (room, publication);
-    "Screen".into()
-}
-
-/// Receive a screen's video or stop receiving it.
-pub fn set_subscribed(publication: &RemoteTrackPublication, on: bool) {
-    publication.set_subscribed(on);
-}
-
-/// A remote screen share, if this publication is one we can decrypt: (track, name).
-pub fn remote_screen(
-    room: &VoiceRoom,
-    publication: &RemoteTrackPublication,
-) -> Option<(String, String)> {
-    (publication.kind() == TrackKind::Video
-        && publication.source() == TrackSource::Screenshare
-        && publication.encryption_type() == EncryptionType::Gcm)
-        .then(|| (publication.sid().to_string(), name(room, publication)))
-}
 
 /// Watched screens, converted to RGBA off the UI thread. Only the newest frame is kept.
 #[derive(Clone)]

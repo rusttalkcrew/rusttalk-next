@@ -21,7 +21,9 @@ use rusttalk_core::{
     client::{
         Catalog, Event, KeyClient, MessageBody, MessageError, MessageRecord, Server as Api,
         invite_name, save_json,
-        voice::{ConnectionState, RoomEvent, TrackSid, VoiceRoom, VoiceRoster, VoiceState},
+        voice::{
+            ConnectionState, RoomEvent, TrackSid, TrackSource, VoiceRoom, VoiceRoster, VoiceState,
+        },
     },
     identity::{DeviceIdentity, fingerprint},
     keys::Metadata,
@@ -81,8 +83,8 @@ pub enum Command {
     ShareApp(App),
     /// Stop sharing an app, by its ID.
     StopApp(String),
-    /// Share a screen or window; `None` asks the system picker.
-    ShareScreen(Option<screen::Target>, screen::Options),
+    /// Share a screen or window, or open the system picker (Linux).
+    ShareScreen(screen::Target, screen::Options),
     StopScreen,
     /// Start or stop receiving a screen share, by track.
     Watch(String, bool),
@@ -316,7 +318,7 @@ struct Live {
     /// Apps this device shares, each with its own track.
     shares: Vec<Share>,
     /// A capture waiting for the person to pick (Linux) or for its first frame.
-    starting: Option<tokio::task::JoinHandle<Result<screen::Capture>>>,
+    starting: Option<tokio::task::JoinHandle<Result<(screen::Capture, screen::Options)>>>,
     screen: Option<(TrackSid, screen::Capture)>,
     /// Screen tracks this device receives; others are unsubscribed.
     watched: HashSet<String>,
@@ -807,7 +809,12 @@ async fn on_command(
                 return Ok(());
             };
             // The system picker waits for the person; keep the server loop running meanwhile.
-            live.starting = Some(tokio::spawn(screen::capture(target, options)));
+            live.starting = Some(tokio::spawn(async move {
+                // shortcut: always opens a fresh picker; keep the portal's restore token
+                // if people ask to skip it when sharing the same screen again.
+                let capture = screen::start(target, options, &mut None).await?;
+                Ok((capture, options))
+            }));
         }
         Command::StopScreen => {
             let Some(live) = &mut state.voice else {
@@ -823,7 +830,7 @@ async fn on_command(
             let channel = live.channel;
             send_room(ctx, url, client, state, channel);
             if let Some(live) = &mut state.voice {
-                live.room.unpublish_audio(&sid).await?;
+                live.room.unpublish_screen(&sid).await?;
             }
         }
         Command::Watch(sid, on) => {
@@ -836,22 +843,18 @@ async fn on_command(
                 live.watched.remove(&sid);
                 ctx.video.remove_track(&sid);
             }
-            let publication = live
+            let Some(video) = live
                 .room
-                .participants()
+                .remote_video_tracks()
                 .into_iter()
-                .find_map(|(participant, _)| {
-                    participant
-                        .track_publications()
-                        .into_iter()
-                        .find(|(id, _)| id.as_str() == sid)
-                });
-            if let Some((_, publication)) = publication {
-                screen::set_subscribed(&publication, on);
-                // Already subscribed: no new event will come.
-                if let (true, Some(RemoteTrack::Video(track))) = (on, publication.track()) {
-                    ctx.video.add_track(sid, track.rtc_track());
-                }
+                .find(|video| video.sid.as_str() == sid)
+            else {
+                return Ok(());
+            };
+            live.room.set_subscribed(&video.sid, on)?;
+            // Already subscribed: no new event will come.
+            if let (true, Some(track)) = (on, video.track) {
+                ctx.video.add_track(sid, track.rtc_track());
             }
         }
     }
@@ -864,16 +867,18 @@ async fn share_screen(
     url: &Url,
     client: &KeyClient<'_>,
     state: &mut State,
-    capture: Result<screen::Capture>,
+    capture: Result<(screen::Capture, screen::Options)>,
 ) {
     let Some(live) = &mut state.voice else {
         return;
     };
     live.starting = None;
     let published = match capture {
-        Ok(capture) => screen::publish(&live.room, &capture)
+        Ok((capture, options)) => live
+            .room
+            .publish_screen(&capture.name, options, capture.source.clone())
             .await
-            .map(|sid| (sid, capture)),
+            .map(|publication| (publication.sid(), capture)),
         Err(error) => Err(error),
     };
     match published {
@@ -1337,7 +1342,7 @@ fn sync_voice_key(client: &KeyClient<'_>, state: &mut State) {
 enum Next {
     Event(Option<RoomEvent>),
     /// A screen capture finished starting; clear `starting` before polling again.
-    Capture(Result<screen::Capture>),
+    Capture(Result<(screen::Capture, screen::Options)>),
 }
 
 async fn next_voice(voice: &mut Option<Live>) -> Next {
@@ -1403,15 +1408,6 @@ fn send_room(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &State, channe
             for (participant, voice) in live.room.participants() {
                 if let Some(person) = ids.get(participant.identity().as_str()) {
                     *live_people.entry(*person).or_default() |= voice == VoiceState::Connected;
-                    screens.entry(*person).or_default().extend(
-                        participant
-                            .track_publications()
-                            .values()
-                            .filter_map(|publication| {
-                                screen::remote_screen(&live.room, publication)
-                            })
-                            .map(|(sid, name)| Screen { sid, name }),
-                    );
                     apps.entry(*person).or_default().extend(
                         participant
                             .track_publications()
@@ -1433,6 +1429,16 @@ fn send_room(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &State, channe
                     .map(|share| share.app.name.clone())
                     .collect(),
             );
+            for video in live.room.remote_video_tracks() {
+                if video.source == TrackSource::Screenshare
+                    && let Some(person) = ids.get(video.participant.as_str())
+                {
+                    screens.entry(*person).or_default().push(Screen {
+                        sid: video.sid.to_string(),
+                        name: video.name,
+                    });
+                }
+            }
             if let Some((sid, _)) = &live.screen {
                 screens.insert(
                     me,
@@ -1527,8 +1533,13 @@ fn on_voice(
                 Some(live) if live.watched.contains(&sid) => {
                     ctx.video.add_track(sid, track.rtc_track());
                 }
-                // Auto-subscribed, but nobody watches it here.
-                _ => screen::set_subscribed(&publication, false),
+                // Watching stopped while subscribing.
+                Some(live) => {
+                    if let Err(error) = live.room.set_subscribed(&publication.sid(), false) {
+                        tracing::warn!(error = %format_args!("{error:#}"), "unsubscribing a screen failed");
+                    }
+                }
+                None => {}
             }
         }
         RoomEvent::TrackUnsubscribed { track, .. } => {
@@ -1582,7 +1593,7 @@ async fn stop_finished_shares(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, stat
     {
         let (sid, _) = live.screen.take().expect("checked above");
         tracing::info!("screen capture ended");
-        if let Err(error) = live.room.unpublish_audio(&sid).await {
+        if let Err(error) = live.room.unpublish_screen(&sid).await {
             tracing::warn!(error = %format_args!("{error:#}"), "stopping screen share failed");
         }
         ctx.send(Update::Sharing(false));
@@ -1628,6 +1639,9 @@ async fn voice_stats(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &mut S
         if let Some(name) = share::app_name(&live.room, &track) {
             apps.insert(sid, name);
         }
+    }
+    for video in live.room.remote_video_tracks() {
+        apps.insert(video.sid, video.name);
     }
     let (sent, received): (Vec<_>, Vec<_>) = snapshot.tracks.iter().partition(|t| t.outbound);
     let lost = |tracks: &[&rusttalk_core::client::voice::TrackStats]| {
