@@ -30,12 +30,15 @@ use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
 };
 use futures_util::StreamExt;
-use livekit::webrtc::{
-    audio_frame::AudioFrame,
-    audio_source::{AudioSourceOptions, native::NativeAudioSource},
-    audio_stream::native::NativeAudioStream,
-    native::{apm::AudioProcessingModule, audio_resampler::AudioResampler},
-    prelude::RtcAudioTrack,
+use livekit::{
+    prelude::TrackSid,
+    webrtc::{
+        audio_frame::AudioFrame,
+        audio_source::{AudioSourceOptions, native::NativeAudioSource},
+        audio_stream::native::NativeAudioStream,
+        native::{apm::AudioProcessingModule, audio_resampler::AudioResampler},
+        prelude::RtcAudioTrack,
+    },
 };
 use serde::{Deserialize, Serialize};
 use tokio::runtime::Runtime;
@@ -151,8 +154,8 @@ struct Shared {
     start: Instant,
 }
 
-/// A person's voice (`None`) or one app they share, by its name.
-pub type StreamId = (Id, Option<String>);
+/// A person's voice (`None`) or one app they share, by its track.
+pub type StreamId = (Id, Option<TrackSid>);
 
 #[derive(Default)]
 struct Mixer {

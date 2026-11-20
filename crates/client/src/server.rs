@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use rusttalk_core::identity::fingerprint;
+use rusttalk_core::{client::voice::TrackSid, identity::fingerprint};
 use tokio::sync::mpsc::UnboundedSender;
 use url::Url;
 
@@ -32,8 +32,8 @@ pub struct Peer {
     pub connecting: bool,
     /// A device the server couldn't match to a member; `person` is all zeros.
     pub unknown: bool,
-    /// Names of the apps they share, only known inside the room.
-    pub apps: Vec<String>,
+    /// Track and name of each app they share, only known inside the room.
+    pub apps: Vec<(TrackSid, String)>,
     /// Screens they share, only known inside the room.
     pub screens: Vec<Screen>,
 }
@@ -61,6 +61,10 @@ pub struct Call {
     pub channel: Id,
     pub state: CallState,
     pub stats: Stats,
+    /// False when this device may only listen.
+    pub can_talk: bool,
+    /// False when this device may not publish a screen.
+    pub can_share_screen: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]

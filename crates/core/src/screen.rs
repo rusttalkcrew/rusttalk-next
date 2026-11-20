@@ -251,3 +251,36 @@ pub async fn start(
         anyhow::bail!("screen capture is unavailable on this platform")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frame_size_bounds() {
+        assert_eq!(frame_bytes(3, 5).unwrap(), 60);
+        assert_eq!(frame_bytes(7680, 4320).unwrap(), 7680 * 4320 * 4);
+        for (width, height) in [(0, 1), (1, 0), (8193, 1), (1, 8193), (8192, 8192)] {
+            assert!(frame_bytes(width, height).is_err());
+        }
+    }
+
+    #[test]
+    fn odd_frames_convert() {
+        // Red in BGRA memory order, with odd dimensions for the chroma planes.
+        let pixels = [0, 0, 255, 255].repeat(5 * 3);
+        assert!(bgra_to_i420(5, 3, &pixels[4..], None).is_err());
+        assert!(bgra_to_i420(5, 3, &[pixels.clone(), vec![0; 4]].concat(), None).is_err());
+        assert!(bgra_to_i420(0, 3, &[], None).is_err());
+        let frame = bgra_to_i420(5, 3, &pixels, None).unwrap();
+        let rgba = frame_to_rgba(&frame).unwrap();
+        assert_eq!(rgba.len(), 5 * 3 * 4);
+        assert!(rgba[0] > 200 && rgba[1] < 50 && rgba[2] < 50);
+        let scaled = bgra_to_i420(5, 3, &pixels, Some(1)).unwrap();
+        assert_eq!((scaled.width(), scaled.height()), (1, 1));
+        assert_eq!(frame_to_rgba(&scaled).unwrap().len(), 4);
+        let pixels = [0; 4].repeat(7 * 1081);
+        let scaled = bgra_to_i420(7, 1081, &pixels, Some(1080)).unwrap();
+        assert_eq!((scaled.width(), scaled.height()), (6, 1080));
+    }
+}

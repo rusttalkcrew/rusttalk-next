@@ -3,7 +3,7 @@ use std::process::Stdio;
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader},
     process::Command,
     sync::watch,
     task::JoinHandle,
@@ -78,18 +78,7 @@ pub async fn open(
     let task = tokio::spawn(async move {
         let result = async {
             loop {
-                let width = stdout.read_u32_le().await?;
-                let height = stdout.read_u32_le().await?;
-                let mut pixels = vec![0; frame_bytes(width, height)?];
-                stdout.read_exact(&mut pixels).await?;
-                if output
-                    .send(Some(BgraFrame {
-                        width,
-                        height,
-                        pixels,
-                    }))
-                    .is_err()
-                {
+                if output.send(Some(read_frame(&mut stdout).await?)).is_err() {
                     break;
                 }
             }
@@ -103,4 +92,56 @@ pub async fn open(
         drop(child);
     });
     Ok((selection.name, frames, Backend(task)))
+}
+
+/// One helper frame: little-endian width and height, then tightly packed BGRx rows.
+async fn read_frame(input: &mut (impl AsyncRead + Unpin)) -> Result<BgraFrame> {
+    let width = input.read_u32_le().await?;
+    let height = input.read_u32_le().await?;
+    let mut pixels = vec![0; frame_bytes(width, height)?];
+    input.read_exact(&mut pixels).await?;
+    Ok(BgraFrame {
+        width,
+        height,
+        pixels,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn read(bytes: &[u8]) -> Result<BgraFrame> {
+        tokio::runtime::Builder::new_current_thread()
+            .build()?
+            .block_on(read_frame(&mut &bytes[..]))
+    }
+
+    fn header(width: u32, height: u32) -> Vec<u8> {
+        [width.to_le_bytes(), height.to_le_bytes()].concat()
+    }
+
+    #[test]
+    fn helper_frame_bounds() {
+        let mut odd = header(3, 1);
+        odd.extend([7; 12]);
+        let frame = read(&odd).unwrap();
+        assert_eq!(
+            (frame.width, frame.height, frame.pixels),
+            (3, 1, vec![7; 12])
+        );
+        // Oversized and empty headers fail before allocating pixels.
+        for (width, height) in [
+            (0, 1),
+            (1, 0),
+            (8193, 1),
+            (8192, 8192),
+            (u32::MAX, u32::MAX),
+        ] {
+            assert!(read(&header(width, height)).is_err());
+        }
+        assert!(read(&odd[..odd.len() - 1]).is_err());
+        assert!(read(&odd[..6]).is_err());
+        assert!(read(&[]).is_err());
+    }
 }
