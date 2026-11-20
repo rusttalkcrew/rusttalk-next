@@ -8,7 +8,10 @@ use axum::{
     http::{HeaderMap, Uri},
     response::Response,
 };
-use rusttalk_core::keys::{Event, KeyNeed, Scope};
+use rusttalk_core::{
+    auth::encode,
+    keys::{Event, KeyNeed, Kind, Scope},
+};
 use sqlx::{SqliteConnection, query_scalar};
 use tokio::{
     sync::broadcast,
@@ -91,9 +94,14 @@ async fn stream(
             return Ok(reason);
         }
         let next_pending: HashSet<_> = keys::pending(&mut tx, actor).await?.into_iter().collect();
-        let next_rotations: HashSet<_> = keys::scopes(&mut tx, actor)
-            .await?
-            .into_iter()
+        let scopes = keys::scopes(&mut tx, actor).await?;
+        let readable: HashSet<_> = scopes
+            .iter()
+            .filter(|state| state.scope.kind == Kind::Channel)
+            .map(|state| encode(&state.scope.id))
+            .collect();
+        let next_rotations: HashSet<_> = scopes
+            .iter()
             .filter(|state| state.rotate)
             .map(|state| (state.scope, state.epoch))
             .collect();
@@ -118,7 +126,18 @@ async fn stream(
                     continue;
                 }
             }
-            send(socket, notice).await?;
+            let channel = match &notice {
+                Event::DmCreated { channel }
+                | Event::MessageCreated { channel, .. }
+                | Event::MessageDeleted { channel, .. } => Some(channel.clone()),
+                Event::KeysNeeded(need) if need.scope.kind == Kind::Channel => {
+                    Some(encode(&need.scope.id))
+                }
+                _ => None,
+            };
+            if channel.is_none_or(|id| readable.contains(&id)) {
+                send(socket, notice).await?;
+            }
         }
         for need in next_pending.difference(&pending) {
             send(socket, Event::KeysNeeded(need.clone())).await?;

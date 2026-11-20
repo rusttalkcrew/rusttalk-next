@@ -1,8 +1,10 @@
 mod auth;
 mod channels;
+mod dms;
 mod events;
 mod keys;
 mod members;
+mod messages;
 mod metadata;
 mod roles;
 mod store;
@@ -203,6 +205,15 @@ async fn serve(app: App) -> io::Result<()> {
         .route("/v1/member-devices", get(keys::devices))
         .route("/v1/invite-preview", post(members::preview))
         .route("/v1/catalog", get(channels::catalog))
+        .route("/v1/dms", post(dms::create))
+        .route(
+            "/v1/channels/{id}/message-devices/{device}/{person}",
+            get(messages::device),
+        )
+        .route(
+            "/v1/channels/{id}/messages/{message}",
+            get(messages::get).delete(messages::delete),
+        )
         .route(
             "/v1/channels",
             get(channels::list_channels).post(channels::create_channel),
@@ -244,6 +255,14 @@ async fn serve(app: App) -> io::Result<()> {
                 .route("/v1/space", put(metadata::update_space))
                 .route("/v1/me/profile", put(metadata::update_profile))
                 .layer(RequestBodyLimitLayer::new(metadata::IMAGE_BODY_LIMIT)),
+        )
+        .merge(
+            Router::new()
+                .route(
+                    "/v1/channels/{id}/messages",
+                    get(messages::list).post(messages::create),
+                )
+                .layer(RequestBodyLimitLayer::new(messages::BODY_LIMIT)),
         )
         .with_state(app)
         .layer(middleware::from_fn(log_request))

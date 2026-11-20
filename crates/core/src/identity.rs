@@ -127,7 +127,7 @@ impl DeviceIdentity {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct DeviceCertificate {
     person_id: PersonId,
     device_signing_key: VerifyingKey,

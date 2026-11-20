@@ -64,7 +64,7 @@ pub struct Scope {
     pub id: [u8; 32],
 }
 
-mod wire_id {
+pub(crate) mod wire_id {
     use super::*;
 
     pub fn serialize<S: serde::Serializer>(id: &[u8; 32], out: S) -> Result<S::Ok, S::Error> {
@@ -119,6 +119,17 @@ pub enum Event {
         device: Option<String>,
     },
     ChannelChanged,
+    DmCreated {
+        channel: String,
+    },
+    MessageCreated {
+        channel: String,
+        id: String,
+    },
+    MessageDeleted {
+        channel: String,
+        id: String,
+    },
     Resync,
 }
 

@@ -86,7 +86,7 @@ are the union of their role flags, and their highest rank is used for
 hierarchy. Owner (1000) and Admin (100) have all seven flags. Moderator (50)
 has `kick`, `ban`, and `delete_messages`. Member (0) has no flags and starts
 as the default. The other flags are `invite`, `manage_roles`, and
-`view_audit_log`, and `manage_channels`. `delete_messages` is reserved for W07. Built-in role IDs
+`view_audit_log`, and `manage_channels`. Built-in role IDs
 match their kinds. Custom roles have opaque IDs and ranks from 1 to 999,
 strictly below their creator. They can only receive flags that the creator
 has. `name_ct` is null or a metadata ciphertext of at most 512 bytes
@@ -186,10 +186,10 @@ Invite preview permits eight lookups per IPv4 address or IPv6 /64 and
 
 ## Channels and categories
 
-All routes require a bearer header. Channel kind is `text` or `voice`.
+All routes require a bearer header. Channel kind is `text`, `voice`, or `dm`.
 Channel and category IDs are client-generated random 32-byte values.
 `position` is an integer used for ordering with ID as the tiebreaker.
-Every channel has one category. Channel kind is fixed at creation.
+Text and voice channels each have one category. Channel kind is fixed at creation.
 
 | Method and path | Body | Permission and success |
 | --- | --- | --- |
@@ -208,7 +208,7 @@ Channel responses have `{id, kind, category_id, position, name_ct, topic_ct, fla
 A category has `{id, position, name_ct}`. Each channel's flags are
 `[{role_id, flags}]` with read (1), write (2), speak (4), and video (8).
 Flags accumulate across assigned roles, including the owner role while
-held. The owner always reads every channel, so the Owner role's read flag
+held. The owner always reads every text and voice channel, so the Owner role's read flag
 never removes the owner's access. A zero mask removes a role's entry.
 Write, speak and video each require read in the same mask. An invalid
 mask returns `400 invalid_channel_flags`. Owner, Admin and Member start
@@ -218,6 +218,66 @@ otherwise lack read access, its highest-ranked assigned role with
 through any assignment or permission change requests a channel rotation.
 Channel names and topics use space keys, while channel keys protect
 the channel's content.
+
+## Direct messages
+
+| Method and path | Body | Permission and success |
+| --- | --- | --- |
+| POST `/v1/dms` | `{id, peer, commitment, envelope}` | Any member. 201, `{id}`. Returns 200 with the existing ID if the pair already has a DM |
+
+`peer` is a different current person. Either person can create the DM, using a
+random ID and an epoch 1 envelope addressed to their device. The normal channel
+key flow wraps keys for both people's devices, including their later devices.
+Both people can read and write regardless of role. DMs are visible only to the
+two participants, including when an Owner, Admin or Moderator requests access.
+
+The catalog includes DMs with `kind: "dm"`, `peer` set to the other person ID,
+`category_id`, `name_ct` and `topic_ct` set to null, `position: 0`, and
+empty `flags`. Clients display the peer's decrypted display name or person
+fingerprint. Channel management routes cover text and voice channels.
+When either person leaves the server through membership removal, the API
+closes the pair's DM and deletes its history and envelopes. They can create a
+new DM if the former member rejoins. Copies already held by either person can
+remain on their devices.
+
+## Messages
+
+These routes require a bearer header and apply to text channels and DMs.
+IDs are random 32-byte client-generated values. A page is newest first by
+insertion order. Pass the last record ID as `before` for the next page. If
+that cursor was pruned or deleted, the API returns `404 message_not_found`
+and the client can restart from the newest page.
+
+| Method and path | Body or query | Permission and success |
+| --- | --- | --- |
+| GET `/v1/channels/{channel}/messages?before={id}&limit={n}` | Optional cursor and limit, 1–100, default 50 | `read`. 200, array of message records |
+| POST `/v1/channels/{channel}/messages` | `{id, epoch, envelope}` | `write`. 201, the stored message record |
+| GET `/v1/channels/{channel}/messages/{id}` | Empty | `read`. 200, one message record |
+| DELETE `/v1/channels/{channel}/messages/{id}` | Empty | The author or a reader with `delete_messages`. 204 |
+| GET `/v1/channels/{channel}/message-devices/{device}/{person}` | Empty | `read`. 200, the public device certificate as a base64url JSON string, when the device authored a retained message here |
+
+A message record has `{id, epoch, person, sender_device, at, size, envelope}`.
+`at` is the server's Unix timestamp. `size` is the binary envelope length.
+`envelope` carries a one-byte version, 24-byte nonce, two-byte big-endian
+ciphertext length, ciphertext including its authentication tag, and 64-byte
+device signature. The POST limit is 12 KiB of JSON. The API verifies the
+envelope against the authenticated person and device and requires the current
+channel epoch. Rotation or a stale epoch returns `409 epoch_changed`, a
+duplicate retained ID returns `409 message_exists`, and malformed framing or
+signature returns `400 invalid_message`. Access failures use
+`403 channel_read_denied` or `403 channel_write_denied`. Voice channels
+return `400 not_a_chat_channel`.
+
+The API keeps the newest 10,000 records per channel. Explicit deletes remove
+the ciphertext and add a `message_deleted` audit entry with actor, message ID
+and time. DM audit entries are visible to participants with audit access.
+Retention drops also emit a delete event.
+
+An edit is a new record with an encrypted `edit_of` reference. Clients
+verify the original's signature, channel and author before accepting the edit.
+Multiple edits can refer directly to the same original. If retention or a
+delete removes the original, clients suppress edits that still reference that
+ID. Each stored record can be deleted by its ID.
 
 ## Live events
 
@@ -230,14 +290,17 @@ session validity before pushing updates.
 | --- | --- |
 | `keys_needed` | `scope`, `epoch`, `device`. Reconcile pending wraps and delivered keys. Completion also wakes the recipient |
 | `rotate_needed` | `scope`. Fetch the current epoch and try to publish its successor |
-| `member_changed` | `person`, optional `device`. Refresh the member and device directory and surface fingerprints |
+| `member_changed` | `person`, optional `device`. Refresh the member and device directory and catalog, and surface fingerprints |
 | `channel_changed` | None. Refresh the catalog |
-| `resync` | None. The socket fell behind. Fetch current state, including keys, catalog and member devices |
+| `dm_created` | `channel`. Refresh the catalog and reconcile keys |
+| `message_created` | `channel`, `id`. Fetch the ciphertext record |
+| `message_deleted` | `channel`, `id`. Remove the record and hide edits that reference it |
+| `resync` | None. The socket fell behind. Fetch current state, including keys, catalog, member devices and visible message history |
 
 The API closes the socket when the token expires or ends, including kick,
 ban and device revocation. Close reasons are fixed strings and logged.
 The server keeps lagging sockets open and recomputes the outstanding
-key work. Message events are specified in W07.
+key work. DM and message notices are sent only to current channel readers.
 
 ## Files
 

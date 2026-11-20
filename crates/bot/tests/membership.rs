@@ -1,14 +1,13 @@
+mod chat;
+
 use std::{env, path::Path, process::Command, time::Duration};
 
 use anyhow::{Context, Result, ensure};
 use reqwest::{Method, Response, StatusCode};
 use rustls_pki_types::{CertificateDer, pem::PemObject};
-use rusttalk_bot::{
-    keys::{KeyClient, invite_name},
-    membership::Bot,
-};
 use rusttalk_core::{
     auth::{InviteLink, KnownServer, ProtocolError, Session, decode, encode},
+    client::{KeyClient, Server, invite_name},
     identity::{DeviceIdentity, revoke_device},
     keys::{self, EnvelopeContext, Event, KeyState, Metadata, Scope},
     pinned_tls::fingerprint,
@@ -63,7 +62,7 @@ async fn invite(
     Ok((id, InviteLink::parse(&link.to_string())?))
 }
 
-async fn check_me(bot: &Bot, session: &Session, status: StatusCode) -> Result<()> {
+async fn check_me(bot: &Server, session: &Session, status: StatusCode) -> Result<()> {
     let reply = bot
         .request(Method::GET, "/v1/me")
         .bearer_auth(&session.token)
@@ -127,7 +126,7 @@ async fn expect_close(client: &mut KeyClient<'_>, reason: &str) -> Result<()> {
 
 async fn docker_keys(
     project: &str,
-    bot: &Bot,
+    bot: &Server,
     a: &mut KeyClient<'_>,
     secrets: &mut Vec<String>,
 ) -> Result<()> {
@@ -259,6 +258,7 @@ async fn docker_keys(
     assert!(c.key(channel, 1) == a.key(channel, 1));
     println!("W06 C rejected B's bad first wrap and received the real key");
     receive_key(&mut c, space, 1).await?;
+    let (dm, history_message) = chat::scenario(a, &mut b, &mut c, channel).await?;
     let channel_path = format!("/v1/channels/{}/permissions", encode(&channel.id));
     let b_person = encode(b_identity.certificate.person_id());
     a.request(Method::PUT, &format!("/v1/members/{b_person}/roles"))
@@ -318,6 +318,7 @@ async fn docker_keys(
     )
     .await?;
 
+    chat::after_kick(a, &mut c, channel, dm, history_message).await?;
     let key = c.key(channel, 2).context("C missing epoch 2")?;
     let context = EnvelopeContext::new(space.id, channel, 2, key);
     let for_b = context.wrap(key, &b_identity.certificate, &c_identity)?;
@@ -440,8 +441,20 @@ async fn docker_keys(
                 );
             }
         }
+        for secret in chat::TEXTS {
+            let encoded = encode(secret.as_bytes());
+            for needle in [secret.as_bytes(), encoded.as_bytes()] {
+                let needle = needle.to_ascii_lowercase();
+                assert!(
+                    !folded.windows(needle.len()).any(|window| window == needle),
+                    "test message plaintext leaked"
+                );
+            }
+        }
     }
     println!("W06 SQLite database, WAL and stack logs contained none of the test names or topics");
+    println!("W07 SQLite database, WAL and stack logs contained none of the test message text");
+
     Ok(())
 }
 
@@ -462,7 +475,7 @@ async fn docker_membership() -> Result<()> {
     };
     let owner_pins = data.join("bot-a");
     let member_pins = data.join("bot-b");
-    let owner_bot = Bot::connect(
+    let owner_bot = Server::connect(
         known.address.clone(),
         known.tls_fingerprint,
         Some(&known),
@@ -496,7 +509,7 @@ async fn docker_membership() -> Result<()> {
 
     let (_, link) = invite(&mut owner_keys, &mut secrets).await?;
     let first_invite = link.code;
-    let member_bot = Bot::connect(
+    let member_bot = Server::connect(
         link.server.address.clone(),
         link.server.tls_fingerprint,
         Some(&link.server),
@@ -734,7 +747,7 @@ async fn docker_membership() -> Result<()> {
     )?;
     compose(&project, &["up", "--wait", "--wait-timeout", "60"])?;
     assert!(decode::<32>(&cli("server-id")?)? != known.server_id);
-    let result = Bot::connect(
+    let result = Server::connect(
         known.address.clone(),
         known.tls_fingerprint,
         None,

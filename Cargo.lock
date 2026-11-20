@@ -3382,7 +3382,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "futures-util",
  "hex",
  "livekit",
  "livekit-api",
@@ -3390,9 +3389,7 @@ dependencies = [
  "rustls-pki-types",
  "rusttalk-core",
  "serde_json",
- "tempfile",
  "tokio",
- "tokio-tungstenite",
  "tracing",
  "tracing-subscriber",
  "url",
@@ -3415,6 +3412,7 @@ dependencies = [
 name = "rusttalk-core"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "base64 0.22.1",
  "bip39",
@@ -3431,10 +3429,13 @@ dependencies = [
  "reqwest",
  "rustls",
  "serde",
+ "serde_json",
  "sha2 0.10.9",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tokio-tungstenite",
+ "tracing",
  "url",
  "x25519-dalek 2.0.1",
  "zeroize",
