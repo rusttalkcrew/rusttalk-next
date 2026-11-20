@@ -23,7 +23,7 @@ use crate::{
     store::audit,
 };
 
-pub const BODY_LIMIT: usize = 12 * 1024;
+pub const BODY_LIMIT: usize = 16 * 1024;
 const RETAIN: i64 = 10_000;
 const PAGE_LIMIT: i64 = 100;
 
@@ -70,7 +70,7 @@ impl TryFrom<Row> for MessageRecord {
 
 async fn chat_kind(db: &mut SqliteConnection, actor: &Actor, channel: &str) -> ApiResult<String> {
     decode::<32>(channel)?;
-    let kind: String = query_scalar(
+    query_scalar(
         "SELECT c.kind FROM channels c JOIN channel_readers r ON r.channel_id = c.id
          WHERE c.id = ? AND r.person_id = ?",
     )
@@ -78,11 +78,7 @@ async fn chat_kind(db: &mut SqliteConnection, actor: &Actor, channel: &str) -> A
     .bind(actor.person.as_slice())
     .fetch_optional(db)
     .await?
-    .ok_or(ApiError::forbidden("channel_read_denied"))?;
-    if kind == "voice" {
-        return Err(ApiError::bad_request("not_a_chat_channel"));
-    }
-    Ok(kind)
+    .ok_or(ApiError::forbidden("channel_read_denied"))
 }
 
 pub async fn create(

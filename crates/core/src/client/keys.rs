@@ -426,6 +426,7 @@ impl<'a> KeyClient<'a> {
                     Event::MessageCreated { .. }
                         | Event::MessageDeleted { .. }
                         | Event::VoiceChanged { .. }
+                        | Event::LiveFileAccepted { .. }
                 );
                 self.queued.push_back(event);
             }
