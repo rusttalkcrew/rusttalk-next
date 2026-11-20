@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    time::Duration,
+};
 
 use crate::{
     auth::{InviteLink, Session, decode, decode_bytes, encode},
@@ -10,7 +13,7 @@ use crate::{
     pinned_tls,
 };
 use anyhow::{Context, Result, ensure};
-use futures_util::StreamExt;
+use futures_util::{FutureExt, StreamExt};
 use reqwest::{Method, RequestBuilder, Response, StatusCode};
 use serde_json::{Value, json};
 use tokio_tungstenite::tungstenite::Message;
@@ -33,7 +36,10 @@ pub struct KeyClient<'a> {
     pub(super) historical_devices: HashMap<HistoricalDevice, DeviceCertificate>,
     scopes: Vec<ScopeState>,
     pub(super) opened: HashMap<[u8; 32], Opened>,
-    pending_event: Option<Event>,
+    /// Received events not yet returned, and whether key state must sync before returning them.
+    queued: VecDeque<Event>,
+    stale: bool,
+    closed: bool,
     /// The server's close reason after the event stream terminates.
     pub close_reason: Option<String>,
 }
@@ -58,7 +64,9 @@ impl<'a> KeyClient<'a> {
             historical_devices: HashMap::new(),
             scopes: Vec::new(),
             opened: HashMap::new(),
-            pending_event: None,
+            queued: VecDeque::new(),
+            stale: false,
+            closed: false,
             close_reason: None,
         };
         client.sync().await?;
@@ -77,12 +85,14 @@ impl<'a> KeyClient<'a> {
     }
 
     /// Reopen the event stream with the current bearer token and reconcile key state.
-    pub async fn reconnect(&mut self) -> Result<()> {
+    async fn reconnect(&mut self) -> Result<()> {
         self.events = pinned_tls::events_socket(self.server.known_server(), &self.session.token)
             .await
             .map_err(anyhow::Error::from_boxed)?;
         self.close_reason = None;
-        self.pending_event = None;
+        self.queued.clear();
+        self.stale = false;
+        self.closed = false;
         self.sync().await
     }
 
@@ -152,13 +162,7 @@ impl<'a> KeyClient<'a> {
     /// Reconcile the current directory, missing envelopes and rotations. SQLite decides races.
     pub async fn sync(&mut self) -> Result<()> {
         loop {
-            let state: KeyState = self
-                .request(Method::GET, "/v1/keys")
-                .send()
-                .await?
-                .error_for_status()?
-                .json()
-                .await?;
+            let state = self.key_state().await?;
             self.sync_devices().await?;
             let mut refetch = false;
             for wrapped in state.envelopes {
@@ -222,7 +226,20 @@ impl<'a> KeyClient<'a> {
                 }
             }
 
-            for need in state.pending {
+            let mut pending = state.pending;
+            pending.retain(|need| {
+                self.key(need.scope, need.epoch).is_some()
+                    && self.devices.contains_key(&need.device)
+            });
+            if !pending.is_empty() {
+                // Every online member sees the same need; a random pause lets one wrap and the rest skip.
+                let [a, b, ..] = *keys::random_key()?;
+                let pause = u64::from(u16::from_le_bytes([a, b])) % 3001;
+                tokio::time::sleep(Duration::from_millis(pause)).await;
+                let fresh = self.key_state().await?.pending;
+                pending.retain(|need| fresh.contains(need));
+            }
+            for need in pending {
                 let (Some(key), Some(device)) = (
                     self.key(need.scope, need.epoch),
                     self.devices.get(&need.device),
@@ -250,6 +267,16 @@ impl<'a> KeyClient<'a> {
                 return Ok(());
             }
         }
+    }
+
+    async fn key_state(&self) -> Result<KeyState> {
+        Ok(self
+            .request(Method::GET, "/v1/keys")
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
     }
 
     async fn is_owner(&self) -> Result<bool> {
@@ -336,17 +363,9 @@ impl<'a> KeyClient<'a> {
     /// Await the next event and reconcile key work when needed.
     pub async fn next_event(&mut self) -> Result<Option<Event>> {
         loop {
-            if let Some(event) = &self.pending_event {
-                if matches!(
-                    event,
-                    Event::MessageCreated { .. } | Event::MessageDeleted { .. }
-                ) {
-                    return Ok(self.pending_event.take());
-                }
-                let result = self.sync().await;
-                let event = self.pending_event.take();
-                match result {
-                    Ok(()) => return Ok(event),
+            if self.stale && !self.queued.is_empty() {
+                match self.sync().await {
+                    Ok(()) => self.stale = false,
                     // A queued notice can precede removal of this session. Wait for the close frame.
                     Err(error)
                         if error
@@ -354,36 +373,58 @@ impl<'a> KeyClient<'a> {
                             .and_then(reqwest::Error::status)
                             == Some(StatusCode::UNAUTHORIZED) =>
                     {
-                        continue;
+                        self.queued.clear();
+                        self.stale = false;
                     }
                     Err(error) => return Err(error),
                 }
             }
+            if let Some(event) = self.queued.pop_front() {
+                return Ok(Some(event));
+            }
+            if self.closed {
+                return Ok(None);
+            }
             let Some(frame) = self.events.next().await else {
                 return Ok(None);
             };
-            match frame? {
-                Message::Text(text) => {
-                    let event = serde_json::from_str(&text)?;
-                    if let Event::MemberChanged { person, device } = &event {
-                        let person = fingerprint(&decode(person)?);
-                        let device = device
-                            .as_deref()
-                            .map(decode)
-                            .transpose()?
-                            .as_ref()
-                            .map(fingerprint);
-                        tracing::info!(%person, device, "member changed");
-                    }
-                    self.pending_event = Some(event);
-                }
-                Message::Close(frame) => {
-                    self.close_reason = frame.map(|frame| frame.reason.to_string());
-                    return Ok(None);
-                }
-                _ => {}
+            self.receive(frame?)?;
+            // A join queues one notice per missing envelope; one sync covers the whole burst.
+            while !self.closed
+                && let Some(Some(frame)) = self.events.next().now_or_never()
+            {
+                self.receive(frame?)?;
             }
         }
+    }
+
+    fn receive(&mut self, frame: Message) -> Result<()> {
+        match frame {
+            Message::Text(text) => {
+                let event = serde_json::from_str(&text)?;
+                if let Event::MemberChanged { person, device } = &event {
+                    let person = fingerprint(&decode(person)?);
+                    let device = device
+                        .as_deref()
+                        .map(decode)
+                        .transpose()?
+                        .as_ref()
+                        .map(fingerprint);
+                    tracing::info!(%person, device, "member changed");
+                }
+                self.stale |= !matches!(
+                    event,
+                    Event::MessageCreated { .. } | Event::MessageDeleted { .. }
+                );
+                self.queued.push_back(event);
+            }
+            Message::Close(frame) => {
+                self.close_reason = frame.map(|frame| frame.reason.to_string());
+                self.closed = true;
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     /// Encrypt and replace the server name.
