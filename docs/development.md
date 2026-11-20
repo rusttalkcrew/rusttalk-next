@@ -156,8 +156,8 @@ Debug builds open a console on Windows; release builds do not, so check
   when the host has no PipeWire or pipewire-pulse session. The screen scenario
   decodes a synthetic 320×180 red-and-blue pattern and its encrypted name,
   verifies an idle viewer receives no video, and checks that a subscribed
-  viewer with the wrong key reports a frame decryption failure and gets
-  no decoded frames. Set `E2E_FEATURES=` to run membership, keys and chat
+  viewer with the wrong key gets no decoded frames and can decode the
+  pattern after installing the correct key on the same subscription. Set `E2E_FEATURES=` to run membership, keys and chat
   without WebRTC.
 
 For a manual app-audio check, build with

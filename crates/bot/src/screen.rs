@@ -83,7 +83,10 @@ pub async fn hear(room: &mut VoiceRoom) -> Result<()> {
         track.name() != NAME,
         "LiveKit received a plaintext share name"
     );
-    let mut stream = NativeVideoStream::new(track.rtc_track());
+    verify(&mut NativeVideoStream::new(track.rtc_track())).await
+}
+
+pub async fn verify(stream: &mut NativeVideoStream) -> Result<()> {
     while let Some(frame) = stream.next().await {
         if (frame.buffer.width(), frame.buffer.height()) != (WIDTH, HEIGHT) {
             continue;

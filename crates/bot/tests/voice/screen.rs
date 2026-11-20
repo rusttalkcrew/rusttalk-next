@@ -4,15 +4,20 @@ use anyhow::{Context, Result, ensure};
 use futures_util::StreamExt;
 use livekit::{
     Room, RoomOptions,
-    e2ee::{E2eeOptions, EncryptionType, key_provider::KeyProvider},
+    e2ee::{
+        E2eeOptions, EncryptionType,
+        key_provider::{KeyProvider, KeyProviderOptions},
+    },
     prelude::RemoteTrack,
-    webrtc::native::frame_cryptor::EncryptionState,
 };
 use reqwest::Method;
 use rusttalk_bot::screen;
-use rusttalk_core::client::{
-    KeyClient, Server,
-    voice::{NativeVideoStream, RoomEvent, VoiceRoom},
+use rusttalk_core::{
+    client::{
+        KeyClient, Server,
+        voice::{NativeVideoStream, RoomEvent, TrackSid, VoiceRoom, media_key},
+    },
+    keys::{Kind, Scope},
 };
 
 use super::LIMIT;
@@ -23,7 +28,6 @@ pub(super) async fn exercise(
     mut listener: VoiceRoom,
     server: &Server,
     c: &mut KeyClient<'_>,
-    channel: &str,
     channel_id: &[u8; 32],
 ) -> Result<VoiceRoom> {
     assert!(a.can_share_screen() && !listener.can_share_screen());
@@ -63,9 +67,9 @@ pub(super) async fn exercise(
                 .iter()
                 .all(|video| video.track.is_none())
         );
-        b.set_subscribed(&sid, false)?;
         listener.leave().await?;
-        wrong_key(server, c, channel, a, &sid).await?;
+        wrong_key(server, c, channel_id, a, &sid).await?;
+        b.set_subscribed(&sid, false)?;
         println!(
             "W10 encrypted 320x180 synthetic screen, decrypted name and color bars, no video without subscription or with the wrong key"
         );
@@ -82,12 +86,13 @@ pub(super) async fn exercise(
 async fn wrong_key(
     server: &Server,
     c: &KeyClient<'_>,
-    channel: &str,
+    channel: &[u8; 32],
     sender: &VoiceRoom,
-    sid: &rusttalk_core::client::voice::TrackSid,
+    sid: &TrackSid,
 ) -> Result<()> {
+    let encoded = rusttalk_core::auth::encode(channel);
     let reply: serde_json::Value = c
-        .request(Method::POST, &format!("/v1/voice/{channel}/token"))
+        .request(Method::POST, &format!("/v1/voice/{encoded}/token"))
         .send()
         .await?
         .error_for_status()?
@@ -99,46 +104,76 @@ async fn wrong_key(
         .map_err(|_| anyhow::anyhow!("invalid signaling origin"))?;
     // This independent receiver can subscribe with its valid token but lacks the room key.
     let key = vec![42; 32];
-    let provider = KeyProvider::with_shared_key(Default::default(), key.clone());
-    assert!(provider.set_shared_key(key, rusttalk_core::client::voice::key_index(sender.epoch())));
+    let provider = KeyProvider::with_shared_key(
+        KeyProviderOptions {
+            ratchet_window_size: 0,
+            ..Default::default()
+        },
+        key.clone(),
+    );
+    for slot in 0..16 {
+        assert!(provider.set_shared_key(key.clone(), slot));
+    }
     let mut options = RoomOptions::default();
     options.auto_subscribe = false;
     options.encryption = Some(E2eeOptions {
         encryption_type: EncryptionType::Gcm,
-        key_provider: provider,
+        key_provider: provider.clone(),
     });
     let (room, mut events) = Room::connect(url.as_str(), token, options).await?;
-    let result = tokio::time::timeout(LIMIT, async {
-        let peer = room.remote_participants().remove(&sender.identity()).context("missing screen sender")?;
-        let publication = peer.track_publications().remove(sid).context("missing screen publication")?;
+    let result = async {
+        let peer = room
+            .remote_participants()
+            .remove(&sender.identity())
+            .context("missing screen sender")?;
+        let publication = peer
+            .track_publications()
+            .remove(sid)
+            .context("missing screen publication")?;
         publication.set_subscribed(true);
-        let mut video = loop {
-            match events.recv().await.context("missing video subscription")? {
-                RoomEvent::TrackSubscribed { track: RemoteTrack::Video(track), .. } if &track.sid() == sid => {
-                    break NativeVideoStream::new(track.rtc_track());
+        let mut video = tokio::time::timeout(LIMIT, async {
+            while let Some(event) = events.recv().await {
+                if let RoomEvent::TrackSubscribed {
+                    track: RemoteTrack::Video(track),
+                    ..
+                } = event
+                    && &track.sid() == sid
+                {
+                    return Ok(NativeVideoStream::new(track.rtc_track()));
                 }
-                _ => (),
             }
-        };
-        tokio::select! {
-            _ = video.next() => anyhow::bail!("wrong-key viewer decoded video or its stream closed"),
-            result = async {
-                while let Some(event) = events.recv().await {
-                    if matches!(event, RoomEvent::E2eeStateChanged { participant, state: EncryptionState::DecryptionFailed, .. }
-                        if participant.identity() == sender.identity())
-                    {
-                        return Ok(());
-                    }
-                }
-                anyhow::bail!("no frame decryption failure reported")
-            } => result?,
+            anyhow::bail!("event stream closed")
+        })
+        .await
+        .context("wrong-key viewer did not subscribe")??;
+        ensure!(
+            tokio::time::timeout(Duration::from_secs(1), video.next())
+                .await
+                .is_err(),
+            "wrong-key viewer decoded video or its stream closed"
+        );
+        let (epoch, channel_key) = c.current_key(Scope {
+            kind: Kind::Channel,
+            id: *channel,
+        })?;
+        assert_eq!(epoch, sender.epoch());
+        let key = media_key(
+            channel_key,
+            &server.known_server().server_id,
+            channel,
+            epoch,
+        );
+        for slot in 0..16 {
+            assert!(provider.set_shared_key(key.to_vec(), slot));
         }
-        ensure!(tokio::time::timeout(Duration::from_millis(400), video.next()).await.is_err(),
-            "wrong-key viewer decoded video or its stream closed");
+        tokio::time::timeout(LIMIT, screen::verify(&mut video))
+            .await
+            .context("screen pattern after installing the correct key")??;
         Ok::<_, anyhow::Error>(())
-    }).await.context("wrong-key screen subscription");
+    }
+    .await;
     let closed = room.close().await;
-    result??;
+    result?;
     closed?;
     Ok(())
 }

@@ -116,7 +116,8 @@ async fn select(fps: u32, cursor: CursorMode, token: Option<String>) -> Result<(
         .open_pipe_wire_remote(&session, Default::default())
         .await?;
     let node = stream.pipe_wire_node_id();
-    let mut worker = tokio::task::spawn_blocking(move || capture(fd, node, fps));
+    let serial = stream.pipewire_serial();
+    let mut worker = tokio::task::spawn_blocking(move || capture(fd, node, serial, fps));
     tokio::select! {
         result = &mut worker => result?,
         _ = closed.next() => {
@@ -129,7 +130,7 @@ async fn select(fps: u32, cursor: CursorMode, token: Option<String>) -> Result<(
 
 static CLOSED: AtomicBool = AtomicBool::new(false);
 
-fn capture(fd: OwnedFd, node: u32, fps: u32) -> Result<()> {
+fn capture(fd: OwnedFd, node: u32, serial: Option<u64>, fps: u32) -> Result<()> {
     pw::init();
     let loop_ = MainLoopRc::new(None)?;
     let context = pw::context::ContextRc::new(&loop_, None)?;
@@ -148,18 +149,18 @@ fn capture(fd: OwnedFd, node: u32, fps: u32) -> Result<()> {
             }
         })
         .register();
-    let stream = StreamBox::new(
-        &core,
-        "RustTalk screen",
-        properties! {
-            *pw::keys::MEDIA_TYPE => "Video",
-            *pw::keys::MEDIA_CATEGORY => "Capture",
-            *pw::keys::TARGET_OBJECT => node.to_string(),
-            "node.dont-fallback" => "true",
-            "node.dont-move" => "true",
-            "node.dont-reconnect" => "true",
-        },
-    )?;
+    let mut properties = properties! {
+        *pw::keys::MEDIA_TYPE => "Video",
+        *pw::keys::MEDIA_CATEGORY => "Capture",
+        "node.dont-fallback" => "true",
+        "node.dont-move" => "true",
+        "node.dont-reconnect" => "true",
+    };
+    // A numeric target.object is a serial. Older portals return only a node ID.
+    if let Some(serial) = serial {
+        properties.insert(*pw::keys::TARGET_OBJECT, serial.to_string());
+    }
+    let stream = StreamBox::new(&core, "RustTalk screen", properties)?;
 
     let params = format(fps)?;
     let buffers = shared_memory()?;
@@ -205,7 +206,7 @@ fn capture(fd: OwnedFd, node: u32, fps: u32) -> Result<()> {
         .register()?;
     stream.connect(
         Direction::Input,
-        Some(node),
+        serial.is_none().then_some(node),
         StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS,
         &mut [pod(&params)],
     )?;
