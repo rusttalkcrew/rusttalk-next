@@ -142,13 +142,16 @@ async fn publish(app: &App, last_timestamp: &mut i64) -> ApiResult<()> {
     let member_count = query_scalar("SELECT COUNT(*) FROM members")
         .fetch_one(&app.db)
         .await?;
+    let open_joining = query_scalar("SELECT open_joining FROM server_settings WHERE id = 1")
+        .fetch_one(&app.db)
+        .await?;
     let listing = Listing {
         server_id: encode(app.key.verifying_key().as_bytes()),
         name: settings.name,
         description: settings.description,
         address: settings.address,
         member_count,
-        open_joining: false,
+        open_joining,
     };
     let now = now_ms().ok_or(ApiError::internal("clock_error"))?;
     let timestamp = now.max(*last_timestamp + 1);

@@ -46,6 +46,11 @@ pub struct Files {
     uploaders: Mutex<HashMap<[u8; 32], usize>>,
 }
 
+/// An upload fails when no bytes arrive for this long, so slow links still finish.
+const UPLOAD_IDLE: Duration = Duration::from_secs(30);
+/// The longest an upload may hold a staging slot.
+const UPLOAD_LIMIT: Duration = Duration::from_secs(15 * 60);
+
 /// Uploads one member may stage at once, so a single slow sender cannot hold every slot.
 const UPLOADS_PER_MEMBER: usize = 2;
 
@@ -171,12 +176,13 @@ pub async fn upload(
         .map_err(disk_error)?;
     let (output, temp) = temp.into_parts();
     let mut output = fs::File::from_std(output);
-    let size = time::timeout(Duration::from_secs(120), async {
+    let timeout = || ApiError::new(StatusCode::REQUEST_TIMEOUT, "file_upload_timeout");
+    let size = time::timeout(UPLOAD_LIMIT, async {
         let mut body = body.into_data_stream();
         let mut size = 0;
-        while let Some(chunk) = body
-            .try_next()
+        while let Some(chunk) = time::timeout(UPLOAD_IDLE, body.try_next())
             .await
+            .map_err(|_| timeout())?
             .map_err(|_| ApiError::bad_request("invalid_file_body"))?
         {
             if chunk.len() as i64 > files.max_file - size {
@@ -188,7 +194,7 @@ pub async fn upload(
         Ok(size)
     })
     .await
-    .map_err(|_| ApiError::new(StatusCode::REQUEST_TIMEOUT, "file_upload_timeout"))??;
+    .map_err(|_| timeout())??;
     if size < 16 {
         return Err(ApiError::bad_request("invalid_file_body"));
     }
@@ -331,17 +337,30 @@ pub async fn download(
         .into_response())
 }
 
+#[derive(Deserialize)]
+pub struct Remove {
+    uploader: Option<String>,
+}
+
 pub async fn delete(
     State(app): State<App>,
     headers: HeaderMap,
     RoutePath(id): RoutePath<String>,
+    args: Result<Query<Remove>, QueryRejection>,
 ) -> ApiResult<StatusCode> {
+    let Query(Remove { uploader }) = args.map_err(|_| ApiError::bad_request("invalid_query"))?;
     decode::<32>(&id)?;
+    let uploader = uploader.as_deref().map(decode::<32>).transpose()?;
     let (mut tx, actor) = authenticate(&app, &headers).await?;
     let row = lookup(&mut tx, &id, actor.at).await?;
     let moderated = row.uploader != actor.person;
     let mut dm = None;
     if moderated {
+        // A moderator removes files of the message being deleted, named by its sender, so a
+        // message that references someone else's file cannot get that file removed.
+        if uploader.is_none_or(|person| row.uploader != person) {
+            return Err(missing());
+        }
         if messages::chat_kind(&mut tx, &actor, &row.channel_id).await? == "dm" {
             dm = Some(row.channel_id.clone());
         }

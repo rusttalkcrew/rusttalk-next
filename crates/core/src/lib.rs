@@ -17,3 +17,4 @@ pub mod pinned_tls;
 mod pipewire_helper;
 #[cfg(feature = "voice")]
 pub mod screen;
+pub mod sync;

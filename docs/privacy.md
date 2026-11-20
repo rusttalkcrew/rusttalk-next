@@ -11,16 +11,17 @@ tables in SQLite (WAL). IDs and digests are binary unless indicated. The `_ct` s
 | --- | --- |
 | `members` | `person_id` (root public key), `joined_at` (Unix seconds), nullable `display_name_ct`, nullable `avatar_ct` |
 | `roles` | `id` (text), `kind` (built-in kind or custom), `rank`, `permissions` (seven-bit mask), nullable `name_ct` (opaque ciphertext) |
-| `server_settings` | Singleton `id`, nullable `owner_person_id`, `default_role_id`, nullable `name_ct`, nullable `description_ct`, nullable `icon_ct`, nullable `index_listing_ct` (encrypted public-listing configuration) |
+| `server_settings` | Singleton `id`, nullable `owner_person_id`, `default_role_id`, nullable `name_ct`, nullable `description_ct`, nullable `icon_ct`, `open_joining` (public flag), `member_cap` (open admission limit), nullable `index_listing_ct` (encrypted public-listing configuration) |
 | `member_roles` | `person_id`, `role_id` |
 | `invites` | `id` (opaque text), `code_hash` (SHA-256), `is_owner`, `remaining_uses`, `expires_at`, nullable `space_key_ct` and `name_ct` for preview |
 | `challenges` | `nonce` (32 random bytes), `ip` (IPv4 address or IPv6 /64), `expires_at` |
 | `sessions` | `token_hash` (SHA-256), `person_id`, `device_id` (Ed25519 public key), `ip` (canonical source IP at issuance), `expires_at` |
 | `revocations` | `person_id`, `device_id`, `record` (W04 signature, device public key and revocation timestamp) |
-| `bans` | `person_id` |
-| `ban_ips` | `person_id`, `ip` (only for an explicitly requested IP ban) |
+| `bans` | `person_id`, `banned_at` (Unix seconds) |
+| `ban_ips` | `person_id`, `ip` (IPv4 address or IPv6 /64; only for an explicitly requested IP ban) |
 | `audit_log` | `id` (sequence), `actor_person_id`, `action` (fixed event kind), nullable `target_person_id`, nullable `target_id` (opaque object ID), `at` (Unix seconds), nullable `dm_channel_id` (audit visibility) |
 | `invite_previews` | `ip` (IPv4 address or IPv6 /64), `expires_at` (60-second rate limit) |
+| `open_joins` | `ip` (IPv4 address or IPv6 /64), `expires_at` (one-hour admission limit) |
 | `member_devices` | `device_id` (Ed25519 public key), `person_id`, `certificate` (public keys, timestamp, salted name commitment, root signature and format prefix) |
 | `categories` | `id` (text), `position`, `name_ct` |
 | `channels` | `id` (text), `kind` (text, voice or dm), nullable `category_id`, `position`, nullable `name_ct` and `topic_ct`, nullable `dm_first` and `dm_second` (person IDs) |
@@ -34,6 +35,7 @@ tables in SQLite (WAL). IDs and digests are binary unless indicated. The `_ct` s
 | `messages` | `sequence` (insertion order), `id` and `channel_id` (text), `epoch`, `sender_device`, `sender_person`, `at` (Unix seconds), `size` (binary envelope length), `envelope` (public framing, nonce, ciphertext with tag, and signature) |
 | `message_ids` | `id` (opaque text, including deleted message IDs to prevent reuse) |
 | `files` | `id` and `channel_id` (opaque text), `uploader` (person public key), `size` (ciphertext bytes), `created_at`, `expires_at` (Unix seconds) |
+| `device_sync` | `person_id`, `version`, `ciphertext` (nonce and encrypted payload with tag), `size` (ciphertext bytes), `at` (Unix seconds) |
 | `_sqlx_migrations` | `version`, `description`, `installed_on`, `success`, `checksum`, `execution_time` (migration bookkeeping) |
 
 Caddy supplies the source IP directly. Session IPs are retained with the active
@@ -41,7 +43,10 @@ session so a moderator can choose an IP ban. Termination removes the session
 row. An explicitly banned IP stays linked to its person ban until unban.
 Challenge issuance prunes expired nonces, and sign-in deletes a consumed nonce.
 Invite creation prunes expired invites, and redemption deletes spent ones.
-Preview requests prune expired rate-limit rows.
+Preview requests prune expired rate-limit rows. An open admission stores a
+source address bucket without a person ID for one hour. A cleanup task
+prunes expired admission rows every 30 seconds, and new admissions also
+prune them.
 The API persists public device certificates. The human-readable device
 name and commitment salt stay on the device. Raw invite codes, link keys,
 session tokens, space and channel keys, and readable names, descriptions,
@@ -57,7 +62,11 @@ as ciphertext under opaque disk names. Committed blobs are named only by their
 random IDs. File names, types, keys, plaintext lengths and references linking
 thumbnails to originals are inside the encrypted message. File operation logs
 carry the opaque ID and ciphertext size. The expiry sweep unlinks blobs and
-removes their metadata. SQLite backups and old WAL pages can retain past
+removes their metadata.
+Each member has at most one current sync row per server. It is removed with
+membership. Settings, joined origins and pins, and contacts are encrypted
+on the device before upload. The sync key stays on the person's devices.
+SQLite backups and old WAL pages can retain past
 database contents, and volume backups can retain expired ciphertext.
 
 Public listing is off by default. The owner explicitly supplies the name
@@ -120,20 +129,27 @@ person fingerprint locally. Creating an account shows the recovery words once
 in the app window. The client never stores or logs the words or the root
 signing key. "Sign out of this device" deletes the keystore entry.
 
-Next to the settings, `servers.json` and `joined.json` hold each joined
-server's address, server ID and TLS fingerprint. `voice.json` holds the
+Next to the settings, `servers.json` holds each server's address, server ID
+and TLS fingerprint. `sync.json` holds the last merged device sync snapshot
+with its version: joined servers with their pins, servers left, synced
+settings, and local edits not yet uploaded. `voice.json` holds the
 chosen audio devices, voice options, and the chosen camera's name,
-resolution and frame rate. Decrypted names, messages and pictures stay in
+resolution and frame rate. Of these, only the voice options (push to talk
+and its key, activation level, echo cancellation, noise suppression, auto
+gain) and the camera resolution and frame rate sync to the person's other
+devices; the chosen microphone, speakers and camera stay on this device. Decrypted names, messages and pictures stay in
 memory only; the log never contains them, file names or invite links. A
 downloaded file is written only where the person picks in the save dialog,
 through a temporary file in that folder that is removed if the download fails.
 
 ## Outbound connections
 
-- **Bot:** Only the configured RustTalk stack. Membership, key events, encrypted chat, signaling and failure-path
-  validation use Caddy on 8443/TCP. WebRTC uses the advertised LiveKit node on
-  7882/UDP or 7881/TCP. The bot requests a voice token from the pinned API. The index e2e scenario uses pinned HTTPS to search
-  the dev index on the same edge.
+- **Bot:** Only the configured RustTalk stack. Membership, key events, encrypted
+  chat, device sync, signaling and failure-path validation use Caddy on 8443/TCP.
+  WebRTC uses the advertised LiveKit node on
+  7882/UDP or 7881/TCP. The bot requests a voice token from the pinned API.
+  The index e2e scenario uses pinned HTTPS to search the dev index on the
+  same edge.
 - **Desktop client:** Configured RustTalk origins for pinned HTTPS and WebSocket
   connections. Voice uses the same pinned signaling path and advertised
   WebRTC ports as the bot. The client contacts a configured index only

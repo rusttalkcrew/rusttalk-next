@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use axum::{
     Json,
     extract::{State, rejection::JsonRejection},
@@ -119,6 +121,7 @@ pub struct Member {
     person_id: String,
     display_name_ct: Option<String>,
     avatar_ct: Option<String>,
+    role_ids: Vec<String>,
 }
 
 pub async fn members(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Vec<Member>>> {
@@ -127,6 +130,17 @@ pub async fn members(State(app): State<App>, headers: HeaderMap) -> ApiResult<Js
         query_as("SELECT person_id, display_name_ct, avatar_ct FROM members ORDER BY person_id")
             .fetch_all(&mut *tx)
             .await?;
+    let assignments: Vec<(Vec<u8>, String)> = query_as(
+        "SELECT person_id, role_id FROM member_roles
+         UNION ALL SELECT owner_person_id, 'owner' FROM server_settings WHERE owner_person_id IS NOT NULL
+         ORDER BY role_id",
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    let mut roles = HashMap::<_, Vec<_>>::new();
+    for (person, role) in assignments {
+        roles.entry(person).or_default().push(role);
+    }
     tx.commit().await?;
     Ok(Json(
         rows.into_iter()
@@ -134,6 +148,7 @@ pub async fn members(State(app): State<App>, headers: HeaderMap) -> ApiResult<Js
                 person_id: encode(&person),
                 display_name_ct: encoded(display_name),
                 avatar_ct: encoded(avatar),
+                role_ids: roles.remove(&person).unwrap_or_default(),
             })
             .collect(),
     ))

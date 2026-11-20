@@ -29,8 +29,9 @@ the WebSocket connector and the HTTP connector used for `/rtc/validate`.
 Rustls verifies the SHA-256 fingerprint of the exact leaf certificate over
 DER and checks the handshake signatures. The pin replaces CA and hostname
 validation for this connection, so the same certificate works on loopback
-and on the LAN address. A missing or different pin stops the join. The SDK
-registration covers one signaling origin per process.
+and on the LAN address. Both connectors select the pin by host and effective
+port and refuse unknown origins. A change to the pin at a known origin stops
+the join.
 [SDK transport hooks](https://github.com/livekit/rust-sdks/blob/livekit/v0.11.0/livekit-net/src/lib.rs#L43-L63).
 
 

@@ -15,6 +15,30 @@ advertised `NODE_IP` for media. The IP must be reachable even when a bot
 uses loopback for signaling. LiveKit's signaling port 7880 stays on the
 Compose network. See [LiveKit privacy settings](privacy.md#livekit).
 
+## Two development stacks
+
+`make e2e` starts two disposable Compose projects with separate TLS
+directories and API volumes. Reserve 8443/TCP, 7881/TCP and 7882/UDP
+for the first project and 9443/TCP, 8881/TCP and 8882/UDP for the second.
+Signaling uses loopback. Each stack advertises its own LiveKit media
+ports at `NODE_IP` (loopback by default under `make e2e`). The target
+removes both projects on exit.
+
+For a manual second stack, use another Compose project, a different TLS
+directory and the same host and container port for each LiveKit media
+transport:
+
+```sh
+export RUSTTALK_DEV_USER="$(id -u):$(id -g)"
+export RUSTTALK_DEV_DATA="$(mktemp -d)"
+export RUSTTALK_DEV_HTTPS_PORT=9443
+export RUSTTALK_DEV_MEDIA_TCP_PORT=8881
+export RUSTTALK_DEV_MEDIA_UDP_PORT=8882
+docker compose -f deploy/compose.dev.yml -p rusttalk-dev-second up --build --wait
+```
+
+Use the same project and environment with `down --volumes` to remove it.
+
 ## LiveKit credentials
 
 Set `LIVEKIT_API_KEY` and `LIVEKIT_API_SECRET` in the API service's
@@ -126,7 +150,7 @@ as the API and works on Windows with the console disabled.
 
 ### IP bans
 
-IP bans match one exact address (IPv6 included), so a person with an IPv6 /64 can move to another address. The api only sees real client addresses when Docker forwards the original source IP to Caddy (the default bridge networking with iptables does; rootless Docker or a userland proxy shows every client as the gateway IP, and an IP ban would then hit everyone). Abuse limits: 32 open sign-in challenges per IP (256 in total), 16 sessions and 64 stored revocations per person.
+IP bans match one IPv4 address or one IPv6 /64, so a person cannot rotate within their own IPv6 prefix to rejoin through open joining. Bans created before W15 still match their exact address. The api only sees real client addresses when Docker forwards the original source IP to Caddy (the default bridge networking with iptables does; rootless Docker or a userland proxy shows every client as the gateway IP, and an IP ban would then hit everyone). Abuse limits: 32 open sign-in challenges per IP (256 in total), 16 sessions and 64 stored revocations per person.
 
 ## Optional index
 

@@ -59,8 +59,28 @@ pub async fn sign_in(
     headers: HeaderMap,
     body: Result<Json<SignIn>, JsonRejection>,
 ) -> ApiResult<Json<Session>> {
+    sign_in_device(&app, &headers, payload(body)?, false).await
+}
+
+pub async fn open_join(
+    State(app): State<App>,
+    headers: HeaderMap,
+    body: Result<Json<SignIn>, JsonRejection>,
+) -> ApiResult<Json<Session>> {
     let request = payload(body)?;
-    let ip = client_ip(&headers)?;
+    if request.invite.is_some() {
+        return Err(ApiError::bad_request("unexpected_invite"));
+    }
+    sign_in_device(&app, &headers, request, true).await
+}
+
+async fn sign_in_device(
+    app: &App,
+    headers: &HeaderMap,
+    request: SignIn,
+    open_join: bool,
+) -> ApiResult<Json<Session>> {
+    let ip = client_ip(headers)?;
     let challenge = decode(&request.challenge)?;
     // Commit consumption even if subsequent checks reject the sign-in.
     consume_challenge(&app.db, &challenge, now()?).await?;
@@ -85,11 +105,13 @@ pub async fn sign_in(
         .fetch_one(&mut *tx)
         .await?;
     if !member {
-        let invite = request
-            .invite
-            .as_deref()
-            .ok_or(ApiError::forbidden("invite_required"))?;
-        redeem(&mut tx, person, invite, at).await?;
+        if let Some(invite) = request.invite.as_deref() {
+            redeem(&mut tx, person, invite, at).await?;
+        } else if open_join {
+            admit_open(&mut tx, person, &ip, at).await?;
+        } else {
+            return Err(ApiError::forbidden("invite_required"));
+        }
     }
 
     keys::init_space(&mut tx, &server_id).await?;
@@ -99,7 +121,7 @@ pub async fn sign_in(
     tx.commit().await?;
     log_closed(closed, at, "replaced");
     if added {
-        keys::changed(&app, person, Some(device));
+        keys::changed(app, person, Some(device));
     } else {
         app.notify(None);
     }
@@ -151,7 +173,7 @@ pub fn client_ip(headers: &HeaderMap) -> ApiResult<String> {
 }
 
 /// One IPv6 user owns a whole /64, so rate limits count that prefix as one address.
-fn limit_key(ip: &str) -> String {
+pub fn limit_key(ip: &str) -> String {
     match ip.parse() {
         Ok(IpAddr::V6(v6)) => {
             std::net::Ipv6Addr::from(u128::from(v6) & !(u128::MAX >> 64)).to_string()
@@ -163,6 +185,7 @@ fn limit_key(ip: &str) -> String {
 pub enum PublicLimit {
     Challenge,
     InvitePreview,
+    OpenJoin,
 }
 
 pub async fn check_public_limit(
@@ -171,9 +194,20 @@ pub async fn check_public_limit(
     at: i64,
     limit: PublicLimit,
 ) -> ApiResult<String> {
-    let (table, code) = match limit {
-        PublicLimit::Challenge => ("challenges", "challenge_limit"),
-        PublicLimit::InvitePreview => ("invite_previews", "invite_preview_limit"),
+    let (table, code, max_total, max_per_ip) = match limit {
+        PublicLimit::Challenge => (
+            "challenges",
+            "challenge_limit",
+            PUBLIC_LIMIT,
+            PUBLIC_LIMIT_PER_IP,
+        ),
+        PublicLimit::InvitePreview => (
+            "invite_previews",
+            "invite_preview_limit",
+            PUBLIC_LIMIT,
+            PUBLIC_LIMIT_PER_IP,
+        ),
+        PublicLimit::OpenJoin => ("open_joins", "open_join_limit", 25, 5),
     };
     let ip = limit_key(ip);
     query(&format!("DELETE FROM {table} WHERE expires_at <= ?"))
@@ -186,7 +220,7 @@ pub async fn check_public_limit(
     .bind(&ip)
     .fetch_one(db)
     .await?;
-    if total >= PUBLIC_LIMIT || from_ip >= PUBLIC_LIMIT_PER_IP {
+    if total >= max_total || from_ip >= max_per_ip {
         return Err(ApiError::new(StatusCode::TOO_MANY_REQUESTS, code));
     }
     Ok(ip)
@@ -194,10 +228,12 @@ pub async fn check_public_limit(
 
 async fn check_ip(db: &mut SqliteConnection, ip: &str, person: &[u8]) -> ApiResult<()> {
     let banned: bool = query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM ban_ips WHERE ip = ?)
+        "SELECT EXISTS (SELECT 1 FROM ban_ips WHERE ip IN (?, ?))
          AND NOT EXISTS (SELECT 1 FROM server_settings WHERE owner_person_id = ?)",
     )
+    // IPv6 bans cover the /64; older bans may hold an exact address.
     .bind(ip)
+    .bind(limit_key(ip))
     .bind(person)
     .fetch_one(db)
     .await?;
@@ -262,18 +298,7 @@ async fn redeem(db: &mut SqliteConnection, person: &[u8], invite: &str, at: i64)
     .fetch_optional(&mut *db)
     .await?
     .ok_or(ApiError::forbidden("invalid_invite"))?;
-    query("INSERT INTO members (person_id, joined_at) VALUES (?, ?)")
-        .bind(person)
-        .bind(at)
-        .execute(&mut *db)
-        .await?;
-    query(
-        "INSERT INTO member_roles (person_id, role_id)
-           SELECT ?, default_role_id FROM server_settings WHERE id = 1",
-    )
-    .bind(person)
-    .execute(&mut *db)
-    .await?;
+    add_default_member(db, person, at).await?;
     if owner {
         let claimed = query("UPDATE server_settings SET owner_person_id = ? WHERE id = 1 AND owner_person_id IS NULL")
             .bind(person).execute(&mut *db).await?;
@@ -300,6 +325,47 @@ async fn redeem(db: &mut SqliteConnection, person: &[u8], invite: &str, at: i64)
         Some(&id),
         at,
     )
+    .await?;
+    Ok(())
+}
+
+async fn admit_open(db: &mut SqliteConnection, person: &[u8], ip: &str, at: i64) -> ApiResult<()> {
+    let (open_joining, member_cap): (bool, i64) =
+        query_as("SELECT open_joining, member_cap FROM server_settings WHERE id = 1")
+            .fetch_one(&mut *db)
+            .await?;
+    if !open_joining {
+        return Err(ApiError::forbidden("open_joining_disabled"));
+    }
+    let members: i64 = query_scalar("SELECT COUNT(*) FROM members")
+        .fetch_one(&mut *db)
+        .await?;
+    if members >= member_cap {
+        return Err(ApiError::new(StatusCode::CONFLICT, "member_cap_reached"));
+    }
+    let ip = check_public_limit(db, ip, at, PublicLimit::OpenJoin).await?;
+    query("INSERT INTO open_joins (ip, expires_at) VALUES (?, ?)")
+        .bind(ip)
+        .bind(at + 3600)
+        .execute(&mut *db)
+        .await?;
+    add_default_member(db, person, at).await?;
+    audit(db, person, "joined", Some(person), None, at).await?;
+    Ok(())
+}
+
+async fn add_default_member(db: &mut SqliteConnection, person: &[u8], at: i64) -> ApiResult<()> {
+    query("INSERT INTO members (person_id, joined_at) VALUES (?, ?)")
+        .bind(person)
+        .bind(at)
+        .execute(&mut *db)
+        .await?;
+    query(
+        "INSERT INTO member_roles (person_id, role_id)
+           SELECT ?, default_role_id FROM server_settings WHERE id = 1",
+    )
+    .bind(person)
+    .execute(&mut *db)
     .await?;
     Ok(())
 }
@@ -555,6 +621,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn open_join_budget_expires_and_groups_ipv6_prefixes() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::store::open(dir.path()).await.unwrap();
+        let mut tx = write(&db).await.unwrap();
+        query("UPDATE server_settings SET open_joining = TRUE")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let at = 100;
+        for i in 0..25u8 {
+            let ip = format!("2001:db8:{}::{i}", i / 5);
+            admit_open(&mut tx, &[i; 32], &ip, at).await.unwrap();
+            if i == 4 {
+                let refused = admit_open(&mut tx, &[99; 32], "2001:db8:0::ffff", at).await;
+                assert_eq!(refused.unwrap_err().code, "open_join_limit");
+            }
+        }
+        let ip = "192.0.2.1";
+        let refused = admit_open(&mut tx, &[99; 32], ip, at + 3599).await;
+        assert_eq!(refused.unwrap_err().code, "open_join_limit");
+        admit_open(&mut tx, &[99; 32], ip, at + 3600).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn ip_bans_block_members_but_never_the_owner() {
         let dir = tempfile::tempdir().unwrap();
         let db = crate::store::open(dir.path()).await.unwrap();
@@ -571,6 +661,14 @@ mod tests {
         assert_eq!(banned.unwrap_err().code, "ip_banned");
         assert!(check_ip(&mut conn, "192.0.2.9", &[1]).await.is_ok());
         assert!(check_ip(&mut conn, "192.0.2.8", &[2]).await.is_ok());
+
+        query("INSERT INTO ban_ips (person_id, ip) VALUES (x'03', '2001:db8:1:2::')")
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        let rotated = check_ip(&mut conn, "2001:db8:1:2:aaaa::7", &[2]).await;
+        assert_eq!(rotated.unwrap_err().code, "ip_banned");
+        assert!(check_ip(&mut conn, "2001:db8:1:3::7", &[2]).await.is_ok());
     }
 
     #[tokio::test]

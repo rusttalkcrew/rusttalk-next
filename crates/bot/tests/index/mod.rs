@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use ed25519_dalek::SigningKey;
-use reqwest::{Client, Method, StatusCode};
+use reqwest::{Client, Method, StatusCode, Url};
 use rusttalk_core::{
     auth::{KnownServer, Session, decode, encode},
     client::Server,
@@ -15,11 +15,10 @@ use super::{compose_bytes, rejected};
 pub const SETTINGS: &str = "/v1/settings/public-listing";
 const NAME: &str = "W16 Public Clover";
 const DESCRIPTION: &str = "W16 public directory listing";
-const URL: &str = "https://127.0.0.1:8443/index/v1/servers";
 
-async fn search(client: &Client) -> Result<Vec<Listing>> {
+async fn search(client: &Client, url: &Url) -> Result<Vec<Listing>> {
     Ok(client
-        .get(URL)
+        .get(url.clone())
         .query(&[("q", "Public Clover"), ("page", "1")])
         .timeout(Duration::from_secs(2))
         .send()
@@ -33,11 +32,12 @@ pub async fn exercise(project: &str, api: &Server, owner: &Session) -> Result<()
     let known = api.known_server();
     let tls = known.tls_fingerprint.context("dev TLS pin missing")?;
     let index = https_client(Some(tls)).map_err(anyhow::Error::from_boxed)?;
-    let health = "https://127.0.0.1:8443/index/v1/health";
+    let url = known.address.join("index/v1/servers")?;
+    let health = known.address.join("index/v1/health")?;
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if index
-                .get(health)
+                .get(health.clone())
                 .timeout(Duration::from_secs(2))
                 .send()
                 .await
@@ -58,7 +58,7 @@ pub async fn exercise(project: &str, api: &Server, owner: &Session) -> Result<()
         .json()
         .await?;
     assert_eq!(state, json!({"enabled": false, "listing": null}));
-    assert!(search(&index).await?.is_empty());
+    assert!(search(&index, &url).await?.is_empty());
 
     let forged = Registration::signed(
         Listing {
@@ -74,7 +74,7 @@ pub async fn exercise(project: &str, api: &Server, owner: &Session) -> Result<()
     )?;
     rejected(
         index
-            .post(URL)
+            .post(url.clone())
             .timeout(Duration::from_secs(2))
             .json(&forged)
             .send()
@@ -106,7 +106,7 @@ pub async fn exercise(project: &str, api: &Server, owner: &Session) -> Result<()
 
     let entry = tokio::time::timeout(Duration::from_secs(12), async {
         loop {
-            if let Some(entry) = search(&index).await?.into_iter().next() {
+            if let Some(entry) = search(&index, &url).await?.into_iter().next() {
                 return Ok::<_, anyhow::Error>(entry);
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
@@ -118,6 +118,27 @@ pub async fn exercise(project: &str, api: &Server, owner: &Session) -> Result<()
     assert_eq!(entry.description, DESCRIPTION);
     assert_eq!(entry.member_count, 1);
     assert!(!entry.open_joining);
+    let open_joining = |enabled: bool| {
+        api.request(Method::PUT, "/v1/settings/open-joining")
+            .bearer_auth(&owner.token)
+            .json(&json!({"open_joining": enabled, "member_cap": 100}))
+    };
+    let response = open_joining(true).send().await?;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    tokio::time::timeout(Duration::from_secs(12), async {
+        while !search(&index, &url)
+            .await?
+            .first()
+            .is_some_and(|entry| entry.open_joining)
+        {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .context("waiting for the listing to report open joining")??;
+    let response = open_joining(false).send().await?;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
     let found = KnownServer {
         address: entry.address.parse()?,
         server_id: decode(&entry.server_id)?,
@@ -132,7 +153,7 @@ pub async fn exercise(project: &str, api: &Server, owner: &Session) -> Result<()
         .await?;
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
     tokio::time::timeout(Duration::from_secs(12), async {
-        while !search(&index).await?.is_empty() {
+        while !search(&index, &url).await?.is_empty() {
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
         Ok::<_, anyhow::Error>(())
@@ -162,7 +183,7 @@ pub async fn exercise(project: &str, api: &Server, owner: &Session) -> Result<()
         }
     }
     println!(
-        "W16 owner published, pinned bot search verified the server ID, disabling let the listing expire, and a forged signature was rejected"
+        "W16 owner published, pinned bot search verified the server ID, open joining reached the listing, disabling let the listing expire, and a forged signature was rejected"
     );
     Ok(())
 }

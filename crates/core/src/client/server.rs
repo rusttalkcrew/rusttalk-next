@@ -6,7 +6,10 @@ use std::{
 };
 
 use crate::{
-    auth::{Challenge, Fingerprint, InviteCode, KnownServer, Session, SignIn, check_pin, decode},
+    auth::{
+        Challenge, Fingerprint, InviteCode, KnownServer, ServerInfo, Session, SignIn, check_pin,
+        decode,
+    },
     identity::{DeviceIdentity, fingerprint},
     pinned_tls,
 };
@@ -15,6 +18,7 @@ use reqwest::{Client, RequestBuilder, Response};
 use url::Url;
 
 /// A verified RustTalk HTTPS origin and its pinned transport.
+#[derive(Clone)]
 pub struct Server {
     http: Client,
     server: KnownServer,
@@ -81,16 +85,42 @@ impl Server {
             .timeout(Duration::from_secs(10))
     }
 
+    /// Read public admission information through the verified server connection.
+    pub async fn info(&self) -> Result<ServerInfo> {
+        Ok(self
+            .request(reqwest::Method::GET, "/v1/server-info")
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
+    }
+
     /// Verify a fresh server challenge and submit a device proof with an optional invite.
     pub async fn sign_in(
         &self,
         identity: &DeviceIdentity,
         invite: Option<&InviteCode>,
     ) -> Result<Response> {
+        self.submit_proof(identity, invite, "/v1/auth/sign-in")
+            .await
+    }
+
+    /// Explicitly request admission without an invite.
+    pub async fn join_open(&self, identity: &DeviceIdentity) -> Result<Response> {
+        self.submit_proof(identity, None, "/v1/auth/join").await
+    }
+
+    async fn submit_proof(
+        &self,
+        identity: &DeviceIdentity,
+        invite: Option<&InviteCode>,
+        path: &str,
+    ) -> Result<Response> {
         let proof = challenge(&self.http, &self.server.address).await?;
         let challenge = proof.verify(&self.server.server_id)?;
         let request = SignIn::signed(identity, &challenge, &self.server.server_id, invite)?;
-        self.request(reqwest::Method::POST, "/v1/auth/sign-in")
+        self.request(reqwest::Method::POST, path)
             .json(&request)
             .send()
             .await
@@ -108,7 +138,7 @@ impl Server {
     }
 }
 
-fn validate_origin(address: &Url) -> Result<()> {
+pub(super) fn validate_origin(address: &Url) -> Result<()> {
     ensure!(
         address.scheme() == "https"
             && address.host().is_some()
@@ -155,7 +185,7 @@ async fn challenge(client: &Client, address: &Url) -> Result<Challenge> {
         .context("read server proof")
 }
 
-fn load_pins(file: &Path) -> Result<Vec<KnownServer>> {
+pub(super) fn load_pins(file: &Path) -> Result<Vec<KnownServer>> {
     match fs::read(file) {
         Ok(bytes) => serde_json::from_slice(&bytes).context("read saved server pins"),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
