@@ -37,7 +37,7 @@ use windows::{
 
 use super::{App, CHANNELS, Capture, FRAME_SAMPLES, SAMPLE_RATE, Unsupported, deliver};
 
-fn supported() -> Result<()> {
+pub(super) fn supported() -> Result<()> {
     let mut version = OSVERSIONINFOW {
         dwOSVersionInfoSize: size_of::<OSVERSIONINFOW>() as u32,
         ..Default::default()

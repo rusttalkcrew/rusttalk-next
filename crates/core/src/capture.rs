@@ -26,6 +26,14 @@ pub struct App {
 #[error("application audio capture is not supported on this platform")]
 pub struct Unsupported;
 
+/// Whether this OS can capture single apps (Windows needs build 20348 or later).
+pub fn supported() -> bool {
+    #[cfg(windows)]
+    return platform::supported().is_ok();
+    #[cfg(not(windows))]
+    cfg!(target_os = "linux")
+}
+
 /// List playing applications. An unavailable backend returns an error.
 pub fn list_apps() -> Result<Vec<App>> {
     #[cfg(any(target_os = "linux", windows))]
@@ -36,7 +44,7 @@ pub fn list_apps() -> Result<Vec<App>> {
 
 /// Owns the capture. Dropping it requests shutdown without blocking the UI.
 pub struct Capture {
-    stop: Option<Box<dyn FnOnce() + Send>>,
+    stop: Option<Box<dyn FnOnce() + Send + Sync>>,
     worker: std::thread::JoinHandle<()>,
 }
 

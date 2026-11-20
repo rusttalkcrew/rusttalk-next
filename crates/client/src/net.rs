@@ -756,14 +756,15 @@ async fn on_command(
             let Some(live) = &mut state.voice else {
                 return Ok(());
             };
-            if let Some(at) = live.shares.iter().position(|share| share.app.id == id) {
-                let share = live.shares.remove(at);
-                tracing::info!("stopped sharing app audio");
-                let channel = live.channel;
-                send_room(ctx, url, client, state, channel);
-                if let Some(live) = &state.voice {
-                    live.room.unpublish_audio(&share.sid).await?;
-                }
+            let Some(at) = live.shares.iter().position(|share| share.app.id == id) else {
+                return Ok(());
+            };
+            let share = live.shares.remove(at);
+            tracing::info!("stopped sharing app audio");
+            let channel = live.channel;
+            send_room(ctx, url, client, state, channel);
+            if let Some(live) = &mut state.voice {
+                live.room.unpublish_audio(&share.sid).await?;
             }
         }
     }
