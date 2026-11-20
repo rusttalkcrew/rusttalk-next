@@ -1,7 +1,11 @@
 //! Voice in the window: who is in each room, the call bar, the room view,
 //! the connection panel and Settings → Voice.
 
-use std::time::{Duration, Instant};
+use std::{
+    sync::{Arc, Mutex},
+    thread,
+    time::{Duration, Instant},
+};
 
 use eframe::egui::{
     self, Align, Button, Color32, ComboBox, Event, Frame, Grid, Key, Layout, Margin, Popup,
@@ -30,11 +34,17 @@ pub struct Voice {
     pub show_stats: bool,
     /// Apps this device shares in the call.
     pub shares: Vec<App>,
-    /// Apps playing sound when the picker opened; `None` if listing them failed.
-    apps: Option<Vec<App>>,
+    /// Apps playing sound when the picker opened, filled by a listing thread.
+    apps: Arc<Mutex<Apps>>,
     support: Support,
     calibration: Option<Calibration>,
     picking_key: bool,
+}
+
+enum Apps {
+    Loading,
+    Failed,
+    Found(Vec<App>),
 }
 
 enum Calibration {
@@ -51,7 +61,7 @@ impl Voice {
             call: None,
             show_stats: false,
             shares: Vec::new(),
-            apps: Some(Vec::new()),
+            apps: Arc::new(Mutex::new(Apps::Loading)),
             support: share::support(),
             calibration: None,
             picking_key: false,
@@ -312,27 +322,38 @@ fn share_picker(
         ui.add_enabled(connected, button)
     };
     if button.clicked() {
-        // shortcut: lists apps on the UI thread once per click; move it to a thread if
-        // listing ever takes long enough to notice.
-        voice.apps = share::list()
-            .inspect_err(
-                |error| tracing::warn!(error = %format_args!("{error:#}"), "listing apps failed"),
-            )
-            .ok();
+        *audio::lock(&voice.apps) = Apps::Loading;
+        let slot = voice.apps.clone();
+        let ctx = ui.ctx().clone();
+        // Listing starts a helper process on Linux; keep it off the UI thread.
+        thread::spawn(move || {
+            let found = match share::list() {
+                Ok(found) => Apps::Found(found),
+                Err(error) => {
+                    tracing::warn!(error = %format_args!("{error:#}"), "listing apps failed");
+                    Apps::Failed
+                }
+            };
+            *audio::lock(&slot) = found;
+            ctx.request_repaint();
+        });
     }
     Popup::menu(&button)
         .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
             ui.set_min_width(200.0);
             ui.label(RichText::new("Pick apps to share").strong());
-            match &voice.apps {
-                None => {
+            match &*audio::lock(&voice.apps) {
+                Apps::Loading => {
+                    ui.spinner();
+                }
+                Apps::Failed => {
                     ui.weak("Couldn't look for apps. Try again.");
                 }
-                Some(apps) if apps.is_empty() => {
+                Apps::Found(apps) if apps.is_empty() => {
                     ui.weak("No apps are playing sound.");
                 }
-                Some(apps) => {
+                Apps::Found(apps) => {
                     for app in apps {
                         let was = voice.shares.iter().any(|shared| shared.id == app.id);
                         let mut on = was;

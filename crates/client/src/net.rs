@@ -731,7 +731,11 @@ async fn on_command(
                 return Ok(());
             };
             let started = async {
-                let (capture, source) = share::capture(&app)?;
+                let target = app.clone();
+                // shortcut: starting waits for the app's first audio (up to seconds) and holds
+                // this server's loop meanwhile; move it to its own task if that gets noticed.
+                let (capture, source) =
+                    tokio::task::spawn_blocking(move || share::capture(&target)).await??;
                 let sid = share::publish(&live.room, &app, source).await?;
                 anyhow::Ok((capture, sid))
             };

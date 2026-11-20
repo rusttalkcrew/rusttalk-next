@@ -177,7 +177,7 @@ enum Mic {
     Far(Vec<i16>),
 }
 
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+pub fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     // A panicking audio callback must not take the UI down with it.
     mutex
         .lock()
