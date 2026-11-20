@@ -4,7 +4,8 @@ use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use livekit::webrtc::{audio_frame::AudioFrame, audio_source::AudioSourceOptions};
 use rusttalk_core::client::voice::{
-    NativeAudioSource, NativeAudioStream, ParticipantIdentity, VoiceRoom,
+    NativeAudioSource, NativeAudioStream, ParticipantIdentity, RemoteAudioTrack, TrackSource,
+    VoiceRoom,
 };
 use tokio::time::{MissedTickBehavior, interval};
 
@@ -41,10 +42,12 @@ pub async fn hear_tone(
     hz: u32,
 ) -> Result<()> {
     let track = loop {
-        if let Some((_, _, track)) = room
-            .remote_audio_tracks()
-            .into_iter()
-            .find(|(id, _, _)| peer.is_none_or(|peer| peer == id))
+        if let Some((_, _, track)) =
+            room.remote_audio_tracks()
+                .into_iter()
+                .find(|(id, _, track)| {
+                    peer.is_none_or(|peer| peer == id) && track.source() == TrackSource::Microphone
+                })
         {
             break track;
         }
@@ -52,6 +55,15 @@ pub async fn hear_tone(
             .await
             .context("room closed waiting for remote audio")?;
     };
+    measure_tone(track, hz, 1.0).await?;
+    Ok(())
+}
+
+pub(crate) async fn measure_tone(
+    track: RemoteAudioTrack,
+    hz: u32,
+    gain: f32,
+) -> Result<(f32, f32)> {
     let mut stream = NativeAudioStream::new(track.rtc_track(), RATE as i32, 1);
     let mut window = Vec::with_capacity(RATE as usize / 10);
     while let Some(frame) = stream.next().await {
@@ -64,7 +76,12 @@ pub async fn hear_tone(
         let mean_abs =
             window.iter().map(|x| f32::from(*x).abs()).sum::<f32>() / window.len() as f32;
         if mean_abs > 500.0 && (frequency - hz as f32).abs() <= 25.0 {
-            return Ok(());
+            let scaled = window
+                .iter()
+                .map(|x| (f32::from(*x) * gain).abs())
+                .sum::<f32>()
+                / window.len() as f32;
+            return Ok((mean_abs, scaled));
         }
         window.clear();
     }

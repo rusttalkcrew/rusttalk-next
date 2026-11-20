@@ -1,6 +1,8 @@
 //! Identity, crypto and protocol types shared by client, bot and api.
 
 pub mod auth;
+#[cfg(feature = "capture")]
+pub mod capture;
 #[cfg(feature = "client")]
 pub mod client;
 pub mod identity;
