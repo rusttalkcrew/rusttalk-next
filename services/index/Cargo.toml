@@ -5,3 +5,16 @@ edition.workspace = true
 publish = false
 
 [dependencies]
+anyhow = "1"
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
+rusttalk-core = { path = "../../crates/core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8.6", default-features = false, features = ["sqlite", "runtime-tokio", "migrate", "macros"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "time"] }
+tower-http = { version = "0.6", features = ["request-id"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json"] }
+
+[dev-dependencies]
+ed25519-dalek = { version = "2.2", default-features = false, features = ["fast", "zeroize"] }
