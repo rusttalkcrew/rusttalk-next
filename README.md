@@ -18,6 +18,8 @@ curl -fsS --cacert .dev/tls/cert.pem https://127.0.0.1:8443/v1/health
 make down
 ```
 
+To run a real server, see [Production](docs/operations.md#production).
+
 ## Docs
 
 - [Architecture](docs/architecture.md)
