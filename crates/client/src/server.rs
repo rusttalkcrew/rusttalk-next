@@ -20,7 +20,52 @@ pub struct Server {
     pub chats: HashMap<Id, Chat>,
     /// The channel shown when this server is picked.
     pub open: Option<Id>,
+    /// Who is in each voice channel.
+    pub voice: HashMap<Id, Vec<Peer>>,
     pub commands: UnboundedSender<Command>,
+}
+
+#[derive(Clone)]
+pub struct Peer {
+    pub person: Id,
+    /// In the room on the server, but their audio isn't flowing (yet or again).
+    pub connecting: bool,
+}
+
+/// The voice room this device is in.
+pub struct Call {
+    pub server: Url,
+    pub channel: Id,
+    pub state: CallState,
+    pub stats: Stats,
+}
+
+#[expect(dead_code, reason = "used once voice is wired to the core module")]
+#[derive(Clone, Copy, PartialEq)]
+pub enum CallState {
+    Connecting,
+    Connected,
+    /// Lost the media connection; retrying by itself.
+    Reconnecting,
+}
+
+/// From the SDK's WebRTC stats; `None` until it reports a value.
+#[derive(Clone, Default)]
+pub struct Stats {
+    pub ping_ms: Option<f64>,
+    pub jitter_ms: Option<f64>,
+    /// Percent of packets lost.
+    pub loss_in: Option<f64>,
+    pub loss_out: Option<f64>,
+    pub tracks: Vec<TrackStats>,
+}
+
+#[derive(Clone)]
+pub struct TrackStats {
+    pub person: Id,
+    /// Sent by this device, rather than received.
+    pub mine: bool,
+    pub kbps: f64,
 }
 
 #[derive(Clone, PartialEq)]
@@ -45,6 +90,14 @@ impl Server {
     pub fn send(&self, command: Command) {
         // The task only ends after the UI drops this sender or the server stopped for good.
         let _ = self.commands.send(command);
+    }
+
+    pub fn is_voice(&self, id: &Id) -> bool {
+        self.dir
+            .categories
+            .iter()
+            .flat_map(|category| &category.channels)
+            .any(|channel| channel.id == *id && channel.voice)
     }
 
     /// Find a text channel or DM by ID: (title, is a DM).

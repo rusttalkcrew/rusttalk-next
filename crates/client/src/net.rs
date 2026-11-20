@@ -30,7 +30,8 @@ use tokio::{
 use url::Url;
 
 use crate::server::{
-    Body, Category, Channel, Device, Directory, Dm, Id, Member, Msg, Perms, Status, member_name,
+    Body, CallState, Category, Channel, Device, Directory, Dm, Id, Member, Msg, Peer, Perms, Stats,
+    Status, member_name,
 };
 
 const PAGE: u32 = 50;
@@ -65,6 +66,8 @@ pub enum Command {
     SetDisplayName(String),
     OpenDm(Id),
     Invite,
+    JoinVoice(Id),
+    LeaveVoice,
 }
 
 pub struct Preview {
@@ -91,6 +94,13 @@ pub enum Update {
     Notice(Url, Id, Msg),
     DmReady(Url, Id),
     Invite(Url, String),
+    /// The call in a voice channel changed state; `None` when it ended.
+    Call(Url, Id, Option<CallState>),
+    /// Everyone in one voice channel.
+    #[allow(dead_code)]
+    Room(Url, Id, Vec<Peer>),
+    #[allow(dead_code)]
+    Stats(Url, Stats),
     Failed(String),
 }
 
@@ -135,6 +145,15 @@ impl Net {
             },
             updates: receiver,
         })
+    }
+
+    /// For audio work that must outlive a frame, like reading remote tracks.
+    pub fn runtime(&self) -> tokio::runtime::Handle {
+        self.runtime
+            .as_ref()
+            .expect("set until drop")
+            .handle()
+            .clone()
     }
 
     /// Servers this profile joined earlier, to reconnect at start.
@@ -615,6 +634,12 @@ async fn on_command(
             let (_, link) = client.invite(INVITE_USES, INVITE_SECONDS).await?;
             ctx.send(Update::Invite(url.clone(), link.to_string()));
         }
+        // Stand-in until the core voice module is wired.
+        Command::JoinVoice(channel) => {
+            ctx.send(Update::Call(url.clone(), channel, None));
+            ctx.send(Update::Failed("Voice isn't ready yet.".into()));
+        }
+        Command::LeaveVoice => {}
     }
     Ok(())
 }
