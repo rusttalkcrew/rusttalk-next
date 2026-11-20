@@ -32,7 +32,6 @@ pub fn register(
     server: &Url,
     pin: Option<Fingerprint>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let pin = pin.ok_or("missing server TLS certificate fingerprint")?;
     let origin = origin(server, "wss").ok_or("invalid pinned LiveKit signaling origin")?;
     let mut origins = TRANSPORT
         .origins
@@ -46,8 +45,10 @@ pub fn register(
         };
     }
 
-    let tls = pinned_config(pin)?;
-    let http = build_https_client(Some(tls.clone()))?;
+    // No pin means a domain server with a public certificate: use system trust,
+    // like the HTTPS API and the event socket do.
+    let tls = pin.map(pinned_config).transpose()?;
+    let http = build_https_client(tls.clone())?;
     if origins.is_empty() {
         if livekit_net::has_ws_client() || livekit_net::has_http_client() {
             return Err("the LiveKit transport has already been registered".into());
@@ -59,7 +60,7 @@ pub fn register(
         origin,
         LiveKitPin {
             pin,
-            tls: Arc::new(tls),
+            tls: tls.map(Arc::new),
             http,
         },
     );
@@ -80,8 +81,8 @@ struct PinnedTransport {
 
 #[derive(Clone)]
 struct LiveKitPin {
-    pin: Fingerprint,
-    tls: Arc<ClientConfig>,
+    pin: Option<Fingerprint>,
+    tls: Option<Arc<ClientConfig>>,
     http: reqwest::Client,
 }
 
@@ -123,7 +124,7 @@ impl WsClient for PinnedTransport {
             request.headers_mut().insert(name, value);
         }
         let connect =
-            connect_async_tls_with_config(request, None, false, Some(Connector::Rustls(pin.tls)));
+            connect_async_tls_with_config(request, None, false, pin.tls.map(Connector::Rustls));
         let (socket, _) = tokio::time::timeout(Duration::from_millis(timeout_ms), connect)
             .await
             .map_err(|_| TransportError::Timeout)?
@@ -244,12 +245,16 @@ fn connection_error(error: impl std::fmt::Display) -> TransportError {
 mod tests {
     use super::*;
     #[test]
-    fn refuses_to_install_without_a_pin() {
-        let server = Url::parse("wss://127.0.0.1:8443").unwrap();
-        assert_eq!(
-            register(&server, None).unwrap_err().to_string(),
-            "missing server TLS certificate fingerprint"
-        );
+    fn a_domain_server_without_a_pin_uses_system_trust() {
+        let server = Url::parse("wss://talk.example.com").unwrap();
+        register(&server, None).unwrap();
+        register(&server, None).unwrap();
+        let (_, origin) = TRANSPORT
+            .lookup("wss://talk.example.com/rtc", "wss")
+            .unwrap();
+        assert!(origin.pin.is_none() && origin.tls.is_none());
+        // A later pin for the same origin is a changed trust decision.
+        assert!(register(&server, Some([7; 32])).is_err());
     }
 
     #[test]
@@ -282,9 +287,11 @@ mod tests {
                 let (_, pin) = TRANSPORT.lookup(request, scheme).unwrap();
                 for (j, (_, _, config)) in certs.iter().enumerate() {
                     let mut server = ServerConnection::new(config.clone()).unwrap();
-                    let mut client =
-                        ClientConnection::new(pin.tls.clone(), "127.0.0.1".try_into().unwrap())
-                            .unwrap();
+                    let mut client = ClientConnection::new(
+                        pin.tls.clone().unwrap(),
+                        "127.0.0.1".try_into().unwrap(),
+                    )
+                    .unwrap();
 
                     let mut flight = Vec::new();
                     client.write_tls(&mut flight).unwrap();
