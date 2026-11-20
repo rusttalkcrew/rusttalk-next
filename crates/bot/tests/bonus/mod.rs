@@ -1,6 +1,6 @@
 use std::{io::Cursor, time::Duration};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use image::{DynamicImage, ImageFormat};
 use reqwest::{Method, StatusCode};
 use rusttalk_core::{
@@ -158,9 +158,29 @@ pub async fn icons(a: &KeyClient<'_>, b: &KeyClient<'_>) -> Result<()> {
         .json()
         .await?;
     let profile = member(a, &encode(person_id)).await?;
+    // Directory loads carry only short hashes; the pictures are fetched on their own.
+    ensure!(space["icon_hash"].is_string() && profile["avatar_hash"].is_string());
+    ensure!(space.get("icon_ct").is_none() && profile.get("avatar_ct").is_none());
+    let icon: Value = a
+        .request(Method::GET, "/v1/space/icon")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let avatar: Value = a
+        .request(
+            Method::GET,
+            &format!("/v1/members/{}/avatar", encode(person_id)),
+        )
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
     for (kind, id, ct) in [
-        (Metadata::ServerIcon, &server_id, &space["icon_ct"]),
-        (Metadata::Avatar, person_id, &profile["avatar_ct"]),
+        (Metadata::ServerIcon, &server_id, &icon["icon_ct"]),
+        (Metadata::Avatar, person_id, &avatar["avatar_ct"]),
     ] {
         let opened = a.decrypt_metadata(kind, id, ct.as_str().context("missing image")?)?;
         assert_eq!(opened, png);

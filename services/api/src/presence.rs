@@ -13,7 +13,7 @@ use serde::Deserialize;
 use sqlx::{SqliteConnection, query, query_scalar};
 use tokio::time::{Instant, sleep_until};
 
-use crate::{ApiResult, App, auth::authenticate, payload};
+use crate::{ApiResult, App, Change, auth::authenticate, payload};
 
 const RECONNECT_GRACE: Duration = Duration::from_secs(1);
 /// At most one presence notice per member per interval; later choices are coalesced.
@@ -182,12 +182,12 @@ impl Drop for Socket {
 }
 
 fn changed(app: &App, person_id: &str, status: Presence) {
-    let _ = app
-        .changes
-        .send(Some(Update::Presence(PresenceEvent::PresenceChanged {
+    let _ = app.changes.send(Change::Update(Update::Presence(
+        PresenceEvent::PresenceChanged {
             person_id: person_id.to_owned(),
             status,
-        })));
+        },
+    )));
 }
 
 #[derive(Deserialize)]
@@ -209,13 +209,18 @@ pub async fn set(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
-    let person_id = encode(&actor.person);
-    let mut state = app.presence.0.lock().expect("presence sessions");
-    if let Some(member) = state.get_mut(&person_id).filter(|member| member.count > 0) {
-        member.status = status;
-        announce(&app, &person_id, member);
-    }
+    apply(&app, &encode(&actor.person), status);
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Apply a choice to a connected member, including one within the reconnect grace,
+/// so the reconnected sockets keep the new choice.
+fn apply(app: &App, person_id: &str, status: Status) {
+    let mut state = app.presence.0.lock().expect("presence sessions");
+    if let Some(member) = state.get_mut(person_id) {
+        member.status = status;
+        announce(app, person_id, member);
+    }
 }
 
 #[cfg(test)]
@@ -261,6 +266,30 @@ mod tests {
         // Flipping back before the flush leaves nothing to tell.
         let back = member(Status::Online, Presence::Online, start);
         assert_eq!(announcement(&back, soon), Announce::Nothing);
+    }
+
+    #[tokio::test]
+    async fn a_choice_during_the_reconnect_grace_applies() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::store::open(dir.path()).await.unwrap();
+        let app = App {
+            files: crate::files::Files::open(dir.path(), &db)
+                .await
+                .unwrap()
+                .into(),
+            db,
+            key: std::sync::Arc::new(ed25519_dalek::SigningKey::from_bytes(&[7; 32])),
+            changes: tokio::sync::broadcast::channel(128).0,
+            presence: Default::default(),
+            voice: None,
+            listing_changed: tokio::sync::watch::channel(()).0,
+        };
+        drop(open(&app, "p".into(), Status::Online));
+        apply(&app, "p", Status::Away);
+        let _socket = open(&app, "p".into(), Status::Online);
+        let state = app.presence.0.lock().unwrap();
+        assert_eq!(state["p"].count, 1);
+        assert_eq!(status_name(state["p"].status), "away");
     }
 
     #[test]

@@ -148,10 +148,10 @@ impl LiveKit {
             .filter(|participant| participant.state == "ACTIVE")
             .map(|participant| participant.identity)
             .collect();
-        self.rosters
-            .lock()
-            .expect("roster cache")
-            .insert(room.into(), (Instant::now(), active.clone()));
+        let mut rosters = self.rosters.lock().expect("roster cache");
+        // Expired rooms are dropped so closed rooms' participants are not kept in memory.
+        rosters.retain(|_, (at, _)| at.elapsed() < ROSTER_TTL);
+        rosters.insert(room.into(), (Instant::now(), active.clone()));
         Ok(active)
     }
 
@@ -589,12 +589,12 @@ async fn relay_acceptance(
             return Err(ApiError::forbidden("live_file_peer_not_in_room"));
         }
     }
-    app.notify(Some(Event::LiveFileAccepted {
+    app.notify(Event::LiveFileAccepted {
         channel,
         device: encode(&actor.device),
         acceptance,
         data,
-    }));
+    });
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -623,7 +623,7 @@ pub async fn webhook(
             enforce(&app, Some(channel.to_owned()));
         }
         if !data {
-            app.notify(Some(Event::VoiceChanged { channel: room.name }));
+            app.notify(Event::VoiceChanged { channel: room.name });
         }
     }
     Ok(StatusCode::NO_CONTENT)

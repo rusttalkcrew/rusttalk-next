@@ -174,6 +174,16 @@ pub(super) async fn scenario(
     .await?;
     check_storage(project, &id)?;
     a.delete_file(&winner).await?;
+    // A deleted file's ID stays reserved.
+    rejected(
+        upload(a, encode(&winner))
+            .body(vec![0xA3; 1024])
+            .send()
+            .await?,
+        StatusCode::CONFLICT,
+        "file_exists",
+    )
+    .await?;
     // B reposts A's image in a message of its own. Deleting that message as moderator names B as
     // the sender, so A's file survives. Deleting A's message names A and removes it.
     let repost = b
@@ -239,12 +249,19 @@ pub(super) async fn scenario(
         "file_not_found",
     )
     .await?;
+    // An expired file's ID stays reserved.
+    rejected(
+        upload(a, id.clone()).body(vec![0xA3; 1024]).send().await?,
+        StatusCode::CONFLICT,
+        "file_exists",
+    )
+    .await?;
     let replacement = a
         .upload_file(&channel.id, FILE, "application/octet-stream", &bytes, None)
         .await?;
     check_storage(project, &encode(&replacement.file.id))?;
     println!(
-        "W13 verified encrypted file SHA-256, PNG thumbnail, access, streaming cap, quota races, deletion, moderator deletes limited to the sender's files, expiry and zero plaintext in SQLite, WAL, blobs and logs"
+        "W13 verified encrypted file SHA-256, PNG thumbnail, access, streaming cap, quota races, deletion, moderator deletes limited to the sender's files, expiry, no ID reuse and zero plaintext in SQLite, WAL, blobs and logs"
     );
     Ok(())
 }

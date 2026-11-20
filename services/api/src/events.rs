@@ -21,7 +21,7 @@ use tokio::{
 use tracing::Instrument;
 
 use crate::{
-    ApiError, ApiResult, App,
+    ApiError, ApiResult, App, Change,
     auth::{Actor, authenticate},
     keys, presence,
     store::now,
@@ -50,7 +50,7 @@ async fn serve(
     app: App,
     mut socket: WebSocket,
     actor: Actor,
-    mut changes: broadcast::Receiver<Option<Update>>,
+    mut changes: broadcast::Receiver<Change>,
 ) {
     let result = stream(&app, &mut socket, &actor, &mut changes).await;
     let reason = result.unwrap_or_else(|error| error.code);
@@ -69,7 +69,7 @@ async fn stream(
     app: &App,
     socket: &mut WebSocket,
     actor: &Actor,
-    changes: &mut broadcast::Receiver<Option<Update>>,
+    changes: &mut broadcast::Receiver<Change>,
 ) -> ApiResult<&'static str> {
     let expires = sleep(Duration::from_secs(
         (actor.expires_at - now()?).max(0) as u64
@@ -81,22 +81,32 @@ async fn stream(
     let mut readable: HashSet<String> = HashSet::new();
     let mut notices = Vec::new();
     let mut lagged = false;
-    let mut refresh = true;
+    let mut recheck = Recheck::Access;
     loop {
         // Bound the drain to the broadcast backlog so a busy stream still makes progress.
         for _ in 0..=app.changes.len() {
             use broadcast::error::TryRecvError;
             match changes.try_recv() {
-                Ok(notice) => refresh |= queue(&mut notices, notice),
+                Ok(change) => recheck = recheck.max(queue(&mut notices, change)),
                 Err(TryRecvError::Lagged(_)) => lagged = true,
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Closed) => return Ok("server_closed"),
             }
         }
-        refresh |= lagged;
-        // Message and voice notices reuse the last session and access state.
-        let next = if refresh {
-            refresh = false;
+        if lagged {
+            recheck = Recheck::Access;
+        }
+        // Message and voice notices reuse the last session and access state. Sign-ins only
+        // recheck this socket's session; key and membership changes also recheck access.
+        let current = std::mem::replace(&mut recheck, Recheck::None);
+        if current == Recheck::Session {
+            let mut tx = app.db.begin().await?;
+            if let Some(reason) = session_end(&mut tx, actor).await? {
+                return Ok(reason);
+            }
+            tx.commit().await?;
+        }
+        let next = if current == Recheck::Access {
             let mut tx = app.db.begin().await?;
             if let Some(reason) = session_end(&mut tx, actor).await? {
                 return Ok(reason);
@@ -195,7 +205,7 @@ async fn stream(
                 },
                 update = changes.recv() => {
                     match update {
-                        Ok(notice) => refresh |= queue(&mut notices, notice),
+                        Ok(change) => recheck = recheck.max(queue(&mut notices, change)),
                         Err(broadcast::error::RecvError::Lagged(_)) => lagged = true,
                         Err(broadcast::error::RecvError::Closed) => return Ok("server_closed"),
                     }
@@ -206,20 +216,34 @@ async fn stream(
     }
 }
 
-/// Queue a notice and report whether it can change session, access or key state.
-fn queue(notices: &mut Vec<Update>, notice: Option<Update>) -> bool {
-    let refresh = !matches!(
-        notice,
-        Some(Update::Presence(_))
-            | Some(Update::Event(
-                Event::MessageCreated { .. }
+/// What a socket must recheck before forwarding queued notices.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Recheck {
+    None,
+    Session,
+    Access,
+}
+
+/// Queue a client notice and report what it can change: nothing, sessions, or access and keys.
+fn queue(notices: &mut Vec<Update>, change: Change) -> Recheck {
+    match change {
+        Change::Session => Recheck::Session,
+        Change::Keys => Recheck::Access,
+        Change::Update(update) => {
+            let recheck = match &update {
+                Update::Presence(_)
+                | Update::Event(
+                    Event::MessageCreated { .. }
                     | Event::MessageDeleted { .. }
                     | Event::VoiceChanged { .. }
-                    | Event::LiveFileAccepted { .. }
-            ))
-    );
-    notices.extend(notice);
-    refresh
+                    | Event::LiveFileAccepted { .. },
+                ) => Recheck::None,
+                Update::Event(_) => Recheck::Access,
+            };
+            notices.push(update);
+            recheck
+        }
+    }
 }
 
 async fn send(socket: &mut WebSocket, notice: Update) -> ApiResult<()> {
@@ -263,4 +287,34 @@ async fn session_end(db: &mut SqliteConnection, actor: &Actor) -> ApiResult<Opti
         "revoked" => "revoked",
         _ => "session_replaced",
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sign_ins_recheck_only_sessions() {
+        let mut notices = Vec::new();
+        assert!(queue(&mut notices, Change::Session) == Recheck::Session);
+        assert!(queue(&mut notices, Change::Keys) == Recheck::Access);
+        let message = Event::MessageCreated {
+            channel: "c".into(),
+            id: "m".into(),
+        };
+        assert!(queue(&mut notices, Change::Update(Update::Event(message))) == Recheck::None);
+        let member = Event::MemberChanged {
+            person: "p".into(),
+            device: None,
+        };
+        assert!(queue(&mut notices, Change::Update(Update::Event(member))) == Recheck::Access);
+        assert!(
+            queue(
+                &mut notices,
+                Change::Update(Update::Event(Event::ChannelChanged))
+            ) == Recheck::Access
+        );
+        // Only client updates are forwarded.
+        assert_eq!(notices.len(), 3);
+    }
 }

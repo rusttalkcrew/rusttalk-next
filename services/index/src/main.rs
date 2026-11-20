@@ -49,11 +49,16 @@ struct RateLimit {
 }
 
 impl RateLimit {
-    fn allow(&mut self, ip: IpAddr) -> bool {
+    /// Forget the counts of a finished minute, so client addresses are not kept longer.
+    fn expire(&mut self) {
         if self.started.elapsed() >= Duration::from_secs(60) {
             self.started = Instant::now();
             self.counts.clear();
         }
+    }
+
+    fn allow(&mut self, ip: IpAddr) -> bool {
+        self.expire();
         let ip = match ip.to_canonical() {
             IpAddr::V6(ip) => Ipv6Addr::from(u128::from(ip) & (u128::MAX << 64)).into(),
             ip => ip,
@@ -126,16 +131,17 @@ async fn run() -> Result<()> {
     let listener = TcpListener::bind("0.0.0.0:8080")
         .await
         .context("bind index listener")?;
-    tokio::spawn(prune(db.clone()));
+    let rate_limit = Arc::new(Mutex::new(RateLimit {
+        started: Instant::now(),
+        counts: HashMap::new(),
+    }));
+    tokio::spawn(prune(db.clone(), rate_limit.clone()));
     let app = App {
         db,
         ttl_ms: ttl * 1_000,
         max_listings,
         trust_proxy: env::var("RUSTTALK_INDEX_TRUST_PROXY").as_deref() == Ok("1"),
-        rate_limit: Arc::new(Mutex::new(RateLimit {
-            started: Instant::now(),
-            counts: HashMap::new(),
-        })),
+        rate_limit,
     };
     let router = Router::new()
         .route("/v1/health", get(|| async { "ok\n" }))
@@ -207,10 +213,14 @@ fn clock() -> IndexResult<i64> {
     now_ms().ok_or(IndexError(StatusCode::INTERNAL_SERVER_ERROR, "clock_error"))
 }
 
-async fn prune(db: SqlitePool) {
+async fn prune(db: SqlitePool, rate_limit: Arc<Mutex<RateLimit>>) {
     let mut interval = tokio::time::interval(Duration::from_secs(60));
     loop {
         interval.tick().await;
+        rate_limit
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .expire();
         if let Err(IndexError(_, reason)) = async { prune_expired(&db, clock()?).await }.await {
             tracing::error!(reason, "pruning expired listings failed");
         }
@@ -234,12 +244,8 @@ async fn limit_registration(
     next: Next,
 ) -> IndexResult<Response> {
     let ip = if app.trust_proxy {
-        let mut values = request.headers().get_all("x-forwarded-for").iter();
-        values
-            .next()
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse().ok())
-            .filter(|_| values.next().is_none())
+        let values = request.headers().get_all("x-forwarded-for").iter();
+        rusttalk_core::auth::forwarded_ip(values.map(|value| value.as_bytes()))
             .ok_or(IndexError(StatusCode::BAD_REQUEST, "invalid_forwarded_ip"))?
     } else {
         peer.ip()

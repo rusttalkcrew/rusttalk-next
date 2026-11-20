@@ -162,6 +162,13 @@ pub struct KnownServer {
     pub tls_fingerprint: Option<Fingerprint>,
 }
 
+/// The client address from exactly one `X-Forwarded-For` value holding one IP address.
+/// A missing, repeated or list-valued header yields `None`.
+pub fn forwarded_ip<'a>(mut values: impl Iterator<Item = &'a [u8]>) -> Option<std::net::IpAddr> {
+    let ip = std::str::from_utf8(values.next()?).ok()?.parse().ok()?;
+    values.next().is_none().then_some(ip)
+}
+
 pub fn check_pin(known: Option<&KnownServer>, observed: &KnownServer) -> Result<(), ProtocolError> {
     let Some(known) = known else {
         return Ok(());
@@ -253,6 +260,16 @@ mod tests {
         assert_eq!(proof.verify(&[0; 32]), Err(ProtocolError::ServerIdChanged));
         proof.challenge = encode(&[2; 32]);
         assert_eq!(proof.verify(&id), Err(ProtocolError::ServerProof));
+
+        // A flipped signature bit, or a valid signature by another key naming this server.
+        let mut tampered = Challenge::signed(&[3; 32], &key);
+        let mut bytes = decode::<64>(&tampered.signature).unwrap();
+        bytes[0] ^= 1;
+        tampered.signature = encode(&bytes);
+        assert_eq!(tampered.verify(&id), Err(ProtocolError::ServerProof));
+        let mut forged = Challenge::signed(&[3; 32], &SigningKey::from_bytes(&[5; 32]));
+        forged.server_id = encode(&id);
+        assert_eq!(forged.verify(&id), Err(ProtocolError::ServerProof));
     }
 
     #[test]

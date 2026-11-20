@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use eframe::egui::ColorImage;
+use futures_util::future::join_all;
 use reqwest::Method;
 use rusttalk_core::{
     auth::{decode, encode},
@@ -43,20 +44,16 @@ pub(super) async fn directory(
     let me = get(client, "/v1/me").await?;
     let roles = get(client, "/v1/roles").await?;
     let space = get(client, "/v1/space").await?;
-    let mut pictures = HashMap::new();
-    // Pictures are decoded here, off the UI; only new ones, the rest come from the last load.
-    let dir = tokio::task::block_in_place(|| {
-        let mut picture = |bytes: Vec<u8>| picture(&state.pictures, &mut pictures, &bytes);
-        build(
-            client,
-            &catalog,
-            &members,
-            &me,
-            &roles,
-            &space,
-            &mut picture,
-        )
-    })?;
+    let pictures = pictures(client, &members, &space, &state.pictures).await?;
+    let dir = build(
+        client,
+        &catalog,
+        &members,
+        &me,
+        &roles,
+        &space,
+        &|id: &Id, hash: Option<&str>| pictures.get(&picture_key(id, hash?)).cloned(),
+    )?;
     state.pictures = pictures;
     if let Some(before) = &state.last {
         for (person, action, detail) in changes(before, &dir) {
@@ -110,7 +107,7 @@ fn build(
     me: &Value,
     roles: &Value,
     space: &Value,
-    picture: &mut impl FnMut(Vec<u8>) -> Option<Picture>,
+    picture: &impl Fn(&Id, Option<&str>) -> Option<Picture>,
 ) -> Result<Directory> {
     let bytes = |kind: Metadata, id: &[u8], ct: Option<&str>| {
         let plain = client.decrypt_metadata(kind, id, ct?);
@@ -270,8 +267,7 @@ fn build(
             ),
             devices,
             roles: strings(&row["role_ids"]),
-            avatar: bytes(Metadata::Avatar, &person, row["avatar_ct"].as_str())
-                .and_then(&mut *picture),
+            avatar: picture(&person, row["avatar_hash"].as_str()),
             presence: serde_json::from_value(row["presence"].clone()).unwrap_or_default(),
         });
     }
@@ -284,7 +280,7 @@ fn build(
     let server_id = client.space().id;
     Ok(Directory {
         name: text(Metadata::ServerName, &server_id, space["name_ct"].as_str()),
-        icon: bytes(Metadata::ServerIcon, &server_id, space["icon_ct"].as_str()).and_then(picture),
+        icon: picture(&server_id, space["icon_hash"].as_str()),
         status: serde_json::from_value(me["status"].clone()).ok(),
         me: *client.identity.certificate.person_id(),
         perms,
@@ -296,18 +292,89 @@ fn build(
     })
 }
 
-/// Decode a profile picture or server icon, reusing the one from the last load.
-fn picture(
+/// The cache key of a member's avatar or the server icon: its owner and ciphertext hash.
+/// The owner is part of the key so one member cannot reuse another's picture.
+fn picture_key(owner: &Id, hash: &str) -> [u8; 32] {
+    Sha256::new()
+        .chain_update(owner)
+        .chain_update(hash.as_bytes())
+        .finalize()
+        .into()
+}
+
+/// The pictures in this directory load. Only pictures whose hash is new are fetched and
+/// decoded, the rest come from the last load. Pictures that fail are tried again next load.
+async fn pictures(
+    client: &KeyClient<'_>,
+    members: &Value,
+    space: &Value,
     last: &HashMap<[u8; 32], Picture>,
-    next: &mut HashMap<[u8; 32], Picture>,
-    bytes: &[u8],
-) -> Option<Picture> {
-    let key: [u8; 32] = Sha256::digest(bytes).into();
-    if let Some(known) = last.get(&key).or(next.get(&key)) {
-        let known = known.clone();
-        next.insert(key, known.clone());
-        return Some(known);
+) -> Result<HashMap<[u8; 32], Picture>> {
+    let mut wanted = Vec::new();
+    for row in members.as_array().into_iter().flatten() {
+        if let (Some(id), Some(hash)) = (row["person_id"].as_str(), row["avatar_hash"].as_str()) {
+            let path = format!("/v1/members/{id}/avatar");
+            wanted.push((Metadata::Avatar, decode::<32>(id)?, hash, path, "avatar_ct"));
+        }
     }
+    if let Some(hash) = space["icon_hash"].as_str() {
+        let path = "/v1/space/icon".to_owned();
+        wanted.push((
+            Metadata::ServerIcon,
+            client.space().id,
+            hash,
+            path,
+            "icon_ct",
+        ));
+    }
+    let mut pictures = HashMap::new();
+    let mut missing = Vec::new();
+    for (kind, id, hash, path, field) in wanted {
+        let key = picture_key(&id, hash);
+        match last.get(&key) {
+            Some(known) => {
+                pictures.insert(key, known.clone());
+            }
+            None => missing.push((kind, id, key, path, field)),
+        }
+    }
+    let mut fetched = Vec::new();
+    for batch in missing.chunks(8) {
+        let replies = join_all(batch.iter().map(|(_, _, _, path, _)| get(client, path))).await;
+        for ((kind, id, key, _, field), reply) in batch.iter().zip(replies) {
+            match reply {
+                Ok(reply) => {
+                    if let Some(ct) = reply[*field].as_str() {
+                        fetched.push((*kind, *id, *key, ct.to_owned()));
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(error = %format_args!("{error:#}"), "picture could not be fetched");
+                }
+            }
+        }
+    }
+    // Decrypted and decoded here, off the UI.
+    tokio::task::block_in_place(|| {
+        for (kind, id, key, ct) in fetched {
+            let bytes = match client.decrypt_metadata(kind, &id, &ct) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    tracing::warn!(error = %format_args!("{error:#}"), "picture could not be decrypted");
+                    continue;
+                }
+            };
+            if let Some(picture) = picture(&bytes) {
+                pictures.insert(key, picture);
+            }
+        }
+    });
+    Ok(pictures)
+}
+
+/// Decode a profile picture or server icon.
+fn picture(bytes: &[u8]) -> Option<Picture> {
+    let key: [u8; 32] = Sha256::digest(bytes).into();
     let frames = match decode_profile_image(bytes) {
         Ok(frames) => frames,
         Err(error) => {
@@ -326,12 +393,10 @@ fn picture(
             (ColorImage::from_rgba_unmultiplied(size, image.as_raw()), ms)
         })
         .collect();
-    let picture = Picture {
+    Some(Picture {
         key,
         frames: frames.into(),
-    };
-    next.insert(key, picture.clone());
-    Some(picture)
+    })
 }
 
 /// Member and device changes between two directory loads: (person, action, details).

@@ -54,18 +54,34 @@ use tracing_subscriber::{filter::Targets, prelude::*};
 struct App {
     db: SqlitePool,
     key: Arc<SigningKey>,
-    changes: broadcast::Sender<Option<rusttalk_core::presence::Update>>,
+    changes: broadcast::Sender<Change>,
     presence: Arc<presence::Sessions>,
     voice: Option<Arc<voice::LiveKit>>,
     listing_changed: watch::Sender<()>,
     files: Arc<files::Files>,
 }
 
+/// What event sockets hear: an update for clients, or a server-side change to recheck.
+#[derive(Clone)]
+enum Change {
+    Update(rusttalk_core::presence::Update),
+    /// Sessions were replaced, so each socket rechecks only its own session.
+    Session,
+    /// A new key epoch, so each socket also recomputes pending wraps and scopes.
+    Keys,
+}
+
 impl App {
-    fn notify(&self, event: Option<Event>) {
+    fn notify(&self, event: Event) {
         let _ = self
             .changes
-            .send(event.map(rusttalk_core::presence::Update::Event));
+            .send(Change::Update(rusttalk_core::presence::Update::Event(
+                event,
+            )));
+    }
+
+    fn signal(&self, change: Change) {
+        let _ = self.changes.send(change);
     }
 }
 
@@ -226,7 +242,9 @@ async fn serve(app: App) -> io::Result<()> {
         .route("/v1/me/status", put(presence::set))
         .route("/v1/me/membership", delete(members::leave))
         .route("/v1/space", get(metadata::space))
+        .route("/v1/space/icon", get(metadata::icon))
         .route("/v1/members", get(metadata::members))
+        .route("/v1/members/{person}/avatar", get(metadata::avatar))
         .route("/v1/events", get(events::upgrade))
         .route("/v1/keys", get(keys::state).post(keys::upload))
         .route("/v1/keys/epochs", post(keys::new_epoch))
@@ -299,13 +317,7 @@ async fn serve(app: App) -> io::Result<()> {
         )
         .route("/v1/files", post(files::upload))
         .route("/internal/livekit", post(voice::webhook))
-        .merge(
-            Router::new()
-                .route(rusttalk_core::sync::PATH, get(sync::get).put(sync::put))
-                .layer(axum::extract::DefaultBodyLimit::max(
-                    rusttalk_core::sync::MAX_BODY,
-                )),
-        )
+        .route(rusttalk_core::sync::PATH, get(sync::get).put(sync::put))
         .merge(
             Router::new()
                 .route("/v1/space", put(metadata::update_space))

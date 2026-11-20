@@ -29,6 +29,7 @@ pub async fn open(dir: &Path) -> Result<SqlitePool> {
         .connect_with(options)
         .await?;
     sqlx::migrate!().run(&pool).await?;
+    crate::metadata::hash_pictures(&pool).await?;
     Ok(pool)
 }
 
