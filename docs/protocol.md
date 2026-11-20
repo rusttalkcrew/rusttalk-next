@@ -304,14 +304,18 @@ the `speak` flag from at least one assigned role. The grant allows
 
 Each shared application is an independent `screen_share_audio` track
 with the same frame encryption as the microphone. Its LiveKit track name
-is unpadded base64url of the 24-byte random nonce followed by the
+is `<epoch>.<base64url>`: the decimal channel-key epoch at publication,
+a dot, then unpadded base64url of the 24-byte random nonce followed by the
 XChaCha20-Poly1305 ciphertext and tag. The plaintext is the app's name
 limited to 128 UTF-8 bytes, cut at a character boundary. The AEAD key is
-32 bytes of HKDF-SHA256 from the current room media key, with no salt
-and info `rusttalk-track-name-v1`. The same literal is the associated data.
-Receivers use their current key and display “Shared audio” if the name
-cannot be authenticated or decoded. A track published in an older epoch
-can keep its original encrypted name after the media key rotates.
+32 bytes of HKDF-SHA256 from that epoch's room media key, with no salt
+and info `rusttalk-track-name-v1`. The associated data is that literal
+followed by the epoch as a big-endian i64. Receivers decrypt with the
+media key of the stated epoch, which they keep after rotations, and
+display “Shared audio” if they lack that epoch or the name cannot be
+authenticated or decoded. The name length is not hidden. The SFU can
+still move a valid label to another track in the same room and epoch,
+as it can move frame-encrypted tracks themselves.
 Volume and mute are local and keyed by track ID.
 
 The API gets the active roster from LiveKit's internal RoomService,

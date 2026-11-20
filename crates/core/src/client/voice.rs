@@ -3,6 +3,8 @@
 mod stats;
 mod track_name;
 
+use std::collections::HashMap;
+
 use anyhow::{Context, Result, ensure};
 use hkdf::Hkdf;
 use livekit::{
@@ -120,6 +122,7 @@ impl KeyClient<'_> {
                 Err(error) => anyhow::Error::from_boxed(error),
             }
         })?;
+        let name_keys = self.name_keys(channel);
         let key = media_key(key, &server.server_id, channel, epoch);
         let provider = KeyProvider::with_shared_key(
             KeyProviderOptions {
@@ -145,9 +148,20 @@ impl KeyClient<'_> {
             channel: *channel,
             epoch,
             provider,
-            name_key: track_name::derive(&key),
+            name_keys,
             stats: stats::Sampler::default(),
         })
+    }
+
+    // Name keys for every held epoch, so app names published before a rotation still decrypt.
+    fn name_keys(&self, channel: &[u8; 32]) -> HashMap<i64, Key> {
+        let server = &self.server.known_server().server_id;
+        self.epoch_keys(scope(channel))
+            .map(|(epoch, key)| {
+                let media = media_key(key, server, channel, epoch);
+                (epoch, track_name::derive(&media))
+            })
+            .collect()
     }
 
     /// Fetch who is currently in a voice channel.
@@ -195,7 +209,7 @@ pub struct VoiceRoom {
     channel: [u8; 32],
     epoch: i64,
     provider: KeyProvider,
-    name_key: Key,
+    name_keys: HashMap<i64, Key>,
     stats: stats::Sampler,
 }
 
@@ -225,12 +239,12 @@ impl VoiceRoom {
             "key client belongs to a different server"
         );
         let (epoch, key) = keys.current_key(scope(&self.channel))?;
+        self.name_keys = keys.name_keys(&self.channel);
         if epoch <= self.epoch {
             return Ok(false);
         }
         let key = media_key(key, &self.server.server_id, &self.channel, epoch);
         install_key(&self.provider, &key, epoch)?;
-        self.name_key = track_name::derive(&key);
         self.epoch = epoch;
         self.switch_senders();
         Ok(true)
@@ -337,7 +351,11 @@ impl VoiceRoom {
             "shared audio requires 48 kHz mono or stereo PCM"
         );
         source.set_audio_options(AudioSourceOptions::default());
-        let name = track_name::encrypt(&self.name_key, name)?;
+        let key = self
+            .name_keys
+            .get(&self.epoch)
+            .context("missing current media key")?;
+        let name = track_name::encrypt(key, self.epoch, name)?;
         self.publish_audio_track(&name, source, TrackSource::ScreenshareAudio)
             .await
     }
@@ -348,7 +366,7 @@ impl VoiceRoom {
             return None;
         }
         Some(
-            track_name::decrypt(&self.name_key, &track.name()).unwrap_or_else(|| {
+            track_name::decrypt(&self.name_keys, &track.name()).unwrap_or_else(|| {
                 tracing::warn!("could not decrypt shared audio track name");
                 "Shared audio".into()
             }),
@@ -378,6 +396,12 @@ impl VoiceRoom {
             .await?;
         self.switch_senders();
         Ok(publication)
+    }
+
+    /// Stop an audio publication, such as one shared app, while keeping the voice session open.
+    pub async fn unpublish_audio(&self, sid: &TrackSid) -> Result<()> {
+        self.room.local_participant().unpublish_track(sid).await?;
+        Ok(())
     }
 
     /// Poll WebRTC reports. Track bitrate is available after two samples.
