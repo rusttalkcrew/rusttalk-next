@@ -10,7 +10,7 @@ use ed25519_dalek::SigningKey;
 use rusttalk_core::identity::random_bytes;
 use sha2::{Digest, Sha256};
 use sqlx::{
-    Sqlite, SqliteConnection, SqlitePool, Transaction, query, query_scalar,
+    Sqlite, SqliteConnection, SqlitePool, Transaction, query_scalar,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
 };
 use zeroize::Zeroizing;
@@ -101,19 +101,18 @@ pub async fn audit(
     person: Option<&[u8]>,
     id: Option<&str>,
     at: i64,
-) -> ApiResult<()> {
-    query(
+) -> ApiResult<i64> {
+    Ok(query_scalar(
         "INSERT INTO audit_log (id, actor_person_id, action, target_person_id, target_id, at)
-           SELECT COALESCE(MAX(id), 0) + 1, ?, ?, ?, ?, ? FROM audit_log",
+           SELECT COALESCE(MAX(id), 0) + 1, ?, ?, ?, ?, ? FROM audit_log RETURNING id",
     )
     .bind(actor)
     .bind(action)
     .bind(person)
     .bind(id)
     .bind(at)
-    .execute(db)
-    .await?;
-    Ok(())
+    .fetch_one(db)
+    .await?)
 }
 
 pub fn log_closed(sessions: Vec<i64>, at: i64, reason: &'static str) {

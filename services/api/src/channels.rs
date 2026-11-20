@@ -5,7 +5,7 @@ use axum::{
 };
 use rusttalk_core::{
     auth::{decode, encode},
-    keys::{EnvelopeContext, Event, Kind, Metadata, Scope},
+    keys::{Event, Kind, Metadata, Scope},
 };
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, SqliteConnection, query, query_as, query_scalar};
@@ -47,20 +47,23 @@ pub struct NewChannel {
 struct ChannelRow {
     id: String,
     kind: String,
-    category_id: String,
+    category_id: Option<String>,
     position: i64,
-    name_ct: Vec<u8>,
+    name_ct: Option<Vec<u8>>,
     topic_ct: Option<Vec<u8>>,
+    peer: Option<Vec<u8>>,
 }
 
 #[derive(Serialize)]
 pub struct Channel {
     id: String,
     kind: String,
-    category_id: String,
+    category_id: Option<String>,
     position: i64,
-    name_ct: String,
+    name_ct: Option<String>,
     topic_ct: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    peer: Option<String>,
     flags: Vec<RoleFlags>,
 }
 
@@ -111,10 +114,18 @@ async fn manage(db: &mut SqliteConnection, actor: &Actor) -> ApiResult<()> {
 
 async fn channels(db: &mut SqliteConnection, person: Option<&[u8]>) -> ApiResult<Vec<Channel>> {
     let rows: Vec<ChannelRow> = query_as(
-        "SELECT id, kind, category_id, position, name_ct, topic_ct FROM channels c
-         WHERE ? IS NULL OR EXISTS (SELECT 1 FROM channel_readers r WHERE r.channel_id = c.id AND r.person_id = ?)
+        "SELECT id, kind, category_id, position, name_ct, topic_ct,
+                CASE WHEN dm_first = ? THEN dm_second ELSE dm_first END AS peer
+         FROM channels c
+         WHERE (? IS NULL AND kind <> 'dm') OR EXISTS
+             (SELECT 1 FROM channel_readers r WHERE r.channel_id = c.id AND r.person_id = ?)
          ORDER BY position, id",
-    ).bind(person).bind(person).fetch_all(&mut *db).await?;
+    )
+    .bind(person)
+    .bind(person)
+    .bind(person)
+    .fetch_all(&mut *db)
+    .await?;
     let mut channels = Vec::with_capacity(rows.len());
     for row in rows {
         let flags = query_as(
@@ -128,7 +139,8 @@ async fn channels(db: &mut SqliteConnection, person: Option<&[u8]>) -> ApiResult
             kind: row.kind,
             category_id: row.category_id,
             position: row.position,
-            name_ct: encode(&row.name_ct),
+            name_ct: metadata::encoded(row.name_ct),
+            peer: metadata::encoded(row.peer),
             topic_ct: metadata::encoded(row.topic_ct),
             flags,
         });
@@ -253,18 +265,15 @@ pub async fn create_channel(
                WHERE m.person_id = ? AND (r.permissions & 64) <> 0 ORDER BY r.rank DESC, r.id LIMIT 1")
             .bind(&id).bind(actor.person.as_slice()).execute(&mut *tx).await?;
     }
-    query("INSERT INTO key_scopes (id, kind, channel_id) VALUES (?, 'channel', ?)")
-        .bind(&id)
-        .bind(&id)
-        .execute(&mut *tx)
-        .await?;
-    let context = EnvelopeContext {
-        server_id: keys::space(&app).id,
+    keys::start_channel(
+        &mut tx,
+        &app,
+        &actor,
         scope,
-        epoch: 1,
-        commitment: decode(&commitment)?,
-    };
-    keys::start_epoch(&mut tx, &actor, context, &envelope).await?;
+        decode(&commitment)?,
+        &envelope,
+    )
+    .await?;
     audit(
         &mut tx,
         &actor.person,
@@ -292,7 +301,7 @@ pub async fn update_channel(
     category_exists(&mut tx, &fields.category_id).await?;
     let epoch = keys::space_epoch(&mut tx, &app).await?;
     let changed = query(
-        "UPDATE channels SET category_id = ?, position = ?, name_ct = ?, topic_ct = ? WHERE id = ?",
+        "UPDATE channels SET category_id = ?, position = ?, name_ct = ?, topic_ct = ? WHERE id = ? AND kind <> 'dm'",
     )
     .bind(&fields.category_id)
     .bind(fields.position)
@@ -341,10 +350,11 @@ pub async fn permissions(
     let (mut tx, actor) = authenticate(&app, &headers).await?;
     let authority = roles::authority(&mut tx, &actor.person).await?;
     authority.require(Permission::ManageChannels)?;
-    let exists: bool = query_scalar("SELECT EXISTS (SELECT 1 FROM channels WHERE id = ?)")
-        .bind(&id)
-        .fetch_one(&mut *tx)
-        .await?;
+    let exists: bool =
+        query_scalar("SELECT EXISTS (SELECT 1 FROM channels WHERE id = ? AND kind <> 'dm')")
+            .bind(&id)
+            .fetch_one(&mut *tx)
+            .await?;
     if !exists {
         return Err(ApiError::not_found("channel_not_found"));
     }
@@ -410,7 +420,7 @@ pub async fn delete_channel(
     decode::<32>(&id)?;
     let (mut tx, actor) = authenticate(&app, &headers).await?;
     manage(&mut tx, &actor).await?;
-    let deleted = query("DELETE FROM channels WHERE id = ?")
+    let deleted = query("DELETE FROM channels WHERE id = ? AND kind <> 'dm'")
         .bind(&id)
         .execute(&mut *tx)
         .await?

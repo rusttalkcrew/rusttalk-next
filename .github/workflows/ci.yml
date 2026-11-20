@@ -15,7 +15,7 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-      - run: make lint test CARGO_SCOPE='--workspace --exclude rusttalk-bot --features rusttalk-core/livekit-tls'
+      - run: make lint test e2e CARGO_SCOPE='--workspace --exclude rusttalk-bot --features rusttalk-core/client,rusttalk-core/livekit-tls'
 
   windows-client:
     runs-on: windows-latest

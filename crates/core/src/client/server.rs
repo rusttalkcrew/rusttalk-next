@@ -5,37 +5,30 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, Result, ensure};
-use reqwest::{Client, RequestBuilder, Response};
-use rusttalk_core::{
-    auth::{Challenge, Fingerprint, InviteCode, KnownServer, SignIn, check_pin, decode},
+use crate::{
+    auth::{Challenge, Fingerprint, InviteCode, KnownServer, Session, SignIn, check_pin, decode},
     identity::{DeviceIdentity, fingerprint},
     pinned_tls,
 };
+use anyhow::{Context, Result, ensure};
+use reqwest::{Client, RequestBuilder, Response};
 use url::Url;
 
-pub struct Bot {
+/// A verified RustTalk HTTPS origin and its pinned transport.
+pub struct Server {
     http: Client,
-    pub server: KnownServer,
+    server: KnownServer,
 }
 
-impl Bot {
+impl Server {
+    /// Verify the origin against saved and supplied pins, then persist the verified pins.
     pub async fn connect(
         address: Url,
         tls_fingerprint: Option<Fingerprint>,
         expected: Option<&KnownServer>,
         data: &Path,
     ) -> Result<Self> {
-        ensure!(
-            address.scheme() == "https"
-                && address.host().is_some()
-                && address.username().is_empty()
-                && address.password().is_none()
-                && address.path() == "/"
-                && address.query().is_none()
-                && address.fragment().is_none(),
-            "expected an HTTPS server origin"
-        );
+        validate_origin(&address)?;
         let pins = data.join("servers.json");
         let known = load_pins(&pins)?
             .into_iter()
@@ -46,15 +39,7 @@ impl Bot {
         let trusted = known.as_ref().or(expected);
 
         let http = pinned_tls::api_client(tls_fingerprint).map_err(anyhow::Error::from_boxed)?;
-        let proof = challenge(&http, &address).await?;
-        let server_id = decode(&proof.server_id)?;
-        let observed = KnownServer {
-            address,
-            server_id,
-            tls_fingerprint,
-        };
-        check_pin(trusted, &observed)?;
-        proof.verify(&server_id)?;
+        let observed = verified_server(&http, address, tls_fingerprint, trusted).await?;
         save_pin(data, &pins, &observed)?;
         Ok(Self {
             http,
@@ -62,6 +47,31 @@ impl Bot {
         })
     }
 
+    /// Verify a server proof against `trusted` pins without saving them or sending device credentials.
+    pub async fn probe(
+        address: Url,
+        tls_fingerprint: Option<Fingerprint>,
+        trusted: Option<&KnownServer>,
+    ) -> Result<Self> {
+        validate_origin(&address)?;
+        let http = pinned_tls::api_client(tls_fingerprint).map_err(anyhow::Error::from_boxed)?;
+        let server = verified_server(&http, address, tls_fingerprint, trusted).await?;
+        Ok(Self { http, server })
+    }
+
+    /// Return the saved pins for an origin, if this data folder has connected to it before.
+    pub fn pinned(data: &Path, address: &Url) -> Result<Option<KnownServer>> {
+        Ok(load_pins(&data.join("servers.json"))?
+            .into_iter()
+            .find(|entry| &entry.address == address))
+    }
+
+    /// Return the verified origin, server ID and optional TLS fingerprint.
+    pub fn known_server(&self) -> &KnownServer {
+        &self.server
+    }
+
+    /// Build a request confined to the pinned origin.
     pub fn request(&self, method: reqwest::Method, path: &str) -> RequestBuilder {
         self.http
             .request(
@@ -71,6 +81,7 @@ impl Bot {
             .timeout(Duration::from_secs(10))
     }
 
+    /// Verify a fresh server challenge and submit a device proof with an optional invite.
     pub async fn sign_in(
         &self,
         identity: &DeviceIdentity,
@@ -85,6 +96,47 @@ impl Bot {
             .await
             .map_err(|error| error.without_url().into())
     }
+    pub(super) async fn refresh(&self, session: &Session) -> Result<Session> {
+        Ok(self
+            .request(reqwest::Method::POST, "/v1/auth/refresh")
+            .bearer_auth(&session.token)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
+    }
+}
+
+fn validate_origin(address: &Url) -> Result<()> {
+    ensure!(
+        address.scheme() == "https"
+            && address.host().is_some()
+            && address.username().is_empty()
+            && address.password().is_none()
+            && address.path() == "/"
+            && address.query().is_none()
+            && address.fragment().is_none(),
+        "expected an HTTPS server origin"
+    );
+    Ok(())
+}
+
+async fn verified_server(
+    http: &Client,
+    address: Url,
+    tls_fingerprint: Option<Fingerprint>,
+    trusted: Option<&KnownServer>,
+) -> Result<KnownServer> {
+    let proof = challenge(http, &address).await?;
+    let observed = KnownServer {
+        address,
+        server_id: decode(&proof.server_id)?,
+        tls_fingerprint,
+    };
+    check_pin(trusted, &observed)?;
+    proof.verify(&observed.server_id)?;
+    Ok(observed)
 }
 
 async fn challenge(client: &Client, address: &Url) -> Result<Challenge> {

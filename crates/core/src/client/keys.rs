@@ -1,9 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use anyhow::{Context, Result, ensure};
-use futures_util::StreamExt;
-use reqwest::{Method, RequestBuilder, Response, StatusCode};
-use rusttalk_core::{
+use crate::{
     auth::{InviteLink, Session, decode, decode_bytes, encode},
     identity::{DeviceCertificate, DeviceIdentity, fingerprint},
     keys::{
@@ -12,68 +9,108 @@ use rusttalk_core::{
     },
     pinned_tls,
 };
+use anyhow::{Context, Result, ensure};
+use futures_util::StreamExt;
+use reqwest::{Method, RequestBuilder, Response, StatusCode};
 use serde_json::{Value, json};
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::membership::Bot;
+use super::{Server, chat::Opened};
 
+type HistoricalDevice = ([u8; 32], [u8; 32], [u8; 32]);
+
+/// An authenticated client with a live event stream and an in-memory epoch key store.
 pub struct KeyClient<'a> {
-    bot: &'a Bot,
+    pub(super) server: &'a Server,
+    /// The authenticated device identity.
     pub identity: &'a DeviceIdentity,
-    pub session: &'a Session,
+    session: Session,
     events: tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,
     keys: HashMap<(Scope, i64), (Key, String)>,
-    devices: HashMap<String, DeviceCertificate>,
+    pub(super) devices: HashMap<String, DeviceCertificate>,
+    pub(super) historical_devices: HashMap<HistoricalDevice, DeviceCertificate>,
     scopes: Vec<ScopeState>,
+    pub(super) opened: HashMap<[u8; 32], Opened>,
+    pending_event: Option<Event>,
+    /// The server's close reason after the event stream terminates.
     pub close_reason: Option<String>,
 }
 
 impl<'a> KeyClient<'a> {
+    /// Open the pinned event stream and reconcile envelope and device state.
     pub async fn connect(
-        bot: &'a Bot,
+        server: &'a Server,
         identity: &'a DeviceIdentity,
-        session: &'a Session,
+        session: &Session,
     ) -> Result<Self> {
-        let events = pinned_tls::events_socket(&bot.server, &session.token)
+        let events = pinned_tls::events_socket(server.known_server(), &session.token)
             .await
             .map_err(anyhow::Error::from_boxed)?;
         let mut client = Self {
-            bot,
+            server,
             identity,
-            session,
+            session: session.clone(),
             events,
             keys: HashMap::new(),
             devices: HashMap::new(),
+            historical_devices: HashMap::new(),
             scopes: Vec::new(),
+            opened: HashMap::new(),
+            pending_event: None,
             close_reason: None,
         };
         client.sync().await?;
         Ok(client)
     }
 
+    /// Return the expiry time of the active bearer token as Unix seconds.
+    pub fn expires_at(&self) -> i64 {
+        self.session.expires_at
+    }
+
+    /// Rotate the bearer token and reopen the stream while retaining keys and replay state.
+    pub async fn refresh(&mut self) -> Result<()> {
+        self.session = self.server.refresh(&self.session).await?;
+        self.reconnect().await
+    }
+
+    /// Reopen the event stream with the current bearer token and reconcile key state.
+    pub async fn reconnect(&mut self) -> Result<()> {
+        self.events = pinned_tls::events_socket(self.server.known_server(), &self.session.token)
+            .await
+            .map_err(anyhow::Error::from_boxed)?;
+        self.close_reason = None;
+        self.pending_event = None;
+        self.sync().await
+    }
+
+    /// Build an authenticated API request for the pinned server.
     pub fn request(&self, method: Method, path: &str) -> RequestBuilder {
-        self.bot
+        self.server
             .request(method, path)
             .bearer_auth(&self.session.token)
     }
 
+    /// Return this server’s space scope.
     pub fn space(&self) -> Scope {
         Scope {
             kind: Kind::Space,
-            id: self.bot.server.server_id,
+            id: self.server.known_server().server_id,
         }
     }
 
+    /// Borrow a verified key for any known epoch of a readable scope.
     pub fn key(&self, scope: Scope, epoch: i64) -> Option<&Key> {
         self.keys.get(&(scope, epoch)).map(|(key, _)| key)
     }
 
+    /// Seal metadata with the current space key and return base64url ciphertext.
     pub fn encrypt_metadata(&self, kind: Metadata, id: &[u8], plaintext: &[u8]) -> Result<String> {
         let (epoch, key) = self.current_space()?;
         Ok(encode(&kind.seal(
-            &self.bot.server.server_id,
+            &self.server.known_server().server_id,
             id,
             epoch,
             key,
@@ -81,24 +118,34 @@ impl<'a> KeyClient<'a> {
         )?))
     }
 
+    /// Open base64url metadata with the space key for its recorded epoch.
     pub fn decrypt_metadata(&self, kind: Metadata, id: &[u8], encoded: &str) -> Result<Vec<u8>> {
         let bytes = decode_bytes(encoded)?;
         let epoch = kind.epoch(&bytes)?;
         let key = self
             .key(self.space(), epoch)
             .context("missing metadata key")?;
-        Ok(kind.open(&self.bot.server.server_id, id, key, &bytes)?)
+        Ok(kind.open(&self.server.known_server().server_id, id, key, &bytes)?)
+    }
+
+    /// Whether the current space key is here, so names can be encrypted.
+    pub fn has_space_key(&self) -> bool {
+        self.current_space().is_ok()
     }
 
     fn current_space(&self) -> Result<(i64, &Key)> {
+        self.current_key(self.space())
+    }
+
+    pub(super) fn current_key(&self, scope: Scope) -> Result<(i64, &Key)> {
         let current = self
             .scopes
             .iter()
-            .find(|state| state.scope == self.space() && !state.rotate)
-            .context("space rotation pending")?;
+            .find(|state| state.scope == scope && !state.rotate)
+            .context("scope key unavailable or rotation pending")?;
         let key = self
             .key(current.scope, current.epoch)
-            .context("missing current space key")?;
+            .context("missing current scope key")?;
         Ok((current.epoch, key))
     }
 
@@ -128,7 +175,7 @@ impl<'a> KeyClient<'a> {
                     continue;
                 }
                 let context = EnvelopeContext {
-                    server_id: self.bot.server.server_id,
+                    server_id: self.server.known_server().server_id,
                     scope: slot.0,
                     epoch: slot.1,
                     commitment: wrapped.commitment,
@@ -154,6 +201,14 @@ impl<'a> KeyClient<'a> {
                     }
                 }
             }
+            let readable: HashSet<_> = state.scopes.iter().map(|state| state.scope).collect();
+            self.keys.retain(|(scope, _), _| readable.contains(scope));
+            self.historical_devices.retain(|(id, _, _), _| {
+                readable.contains(&Scope {
+                    kind: Kind::Channel,
+                    id: *id,
+                })
+            });
             self.scopes = state.scopes;
 
             for scope in &self.scopes {
@@ -174,8 +229,12 @@ impl<'a> KeyClient<'a> {
                 ) else {
                     continue;
                 };
-                let context =
-                    EnvelopeContext::new(self.bot.server.server_id, need.scope, need.epoch, key);
+                let context = EnvelopeContext::new(
+                    self.server.known_server().server_id,
+                    need.scope,
+                    need.epoch,
+                    key,
+                );
                 let envelope = context.wrap(key, device, self.identity)?;
                 tracing::info!(
                     person = %fingerprint(device.person_id()),
@@ -210,7 +269,8 @@ impl<'a> KeyClient<'a> {
 
     async fn publish_epoch(&self, scope: Scope, epoch: i64) -> Result<()> {
         let key = keys::random_key()?;
-        let context = EnvelopeContext::new(self.bot.server.server_id, scope, epoch, &key);
+        let context =
+            EnvelopeContext::new(self.server.known_server().server_id, scope, epoch, &key);
         let envelope = self.wrap_for_self(context, &key)?;
         let reply = self
             .request(Method::POST, "/v1/keys/epochs")
@@ -221,7 +281,7 @@ impl<'a> KeyClient<'a> {
         Ok(())
     }
 
-    fn wrap_for_self(&self, context: EnvelopeContext, key: &Key) -> Result<String> {
+    pub(super) fn wrap_for_self(&self, context: EnvelopeContext, key: &Key) -> Result<String> {
         let cert = &self.identity.certificate;
         tracing::info!(
             person = %fingerprint(cert.person_id()),
@@ -229,6 +289,11 @@ impl<'a> KeyClient<'a> {
             "wrapping key for device"
         );
         Ok(encode(&context.wrap(key, cert, self.identity)?))
+    }
+
+    /// Iterate current verified member-device certificates for fingerprint display.
+    pub fn devices(&self) -> impl Iterator<Item = &DeviceCertificate> {
+        self.devices.values()
     }
 
     async fn sync_devices(&mut self) -> Result<()> {
@@ -268,9 +333,35 @@ impl<'a> KeyClient<'a> {
         Ok(())
     }
 
-    /// Drive the bot by awaiting this method while it is online.
+    /// Await the next event and reconcile key work when needed.
     pub async fn next_event(&mut self) -> Result<Option<Event>> {
-        while let Some(frame) = self.events.next().await {
+        loop {
+            if let Some(event) = &self.pending_event {
+                if matches!(
+                    event,
+                    Event::MessageCreated { .. } | Event::MessageDeleted { .. }
+                ) {
+                    return Ok(self.pending_event.take());
+                }
+                let result = self.sync().await;
+                let event = self.pending_event.take();
+                match result {
+                    Ok(()) => return Ok(event),
+                    // A queued notice can precede removal of this session. Wait for the close frame.
+                    Err(error)
+                        if error
+                            .downcast_ref::<reqwest::Error>()
+                            .and_then(reqwest::Error::status)
+                            == Some(StatusCode::UNAUTHORIZED) =>
+                    {
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            let Some(frame) = self.events.next().await else {
+                return Ok(None);
+            };
             match frame? {
                 Message::Text(text) => {
                     let event = serde_json::from_str(&text)?;
@@ -284,18 +375,7 @@ impl<'a> KeyClient<'a> {
                             .map(fingerprint);
                         tracing::info!(%person, device, "member changed");
                     }
-                    // A queued notice can precede removal of this session. Let the socket deliver the close reason.
-                    if let Err(error) = self.sync().await {
-                        if error
-                            .downcast_ref::<reqwest::Error>()
-                            .and_then(reqwest::Error::status)
-                            != Some(StatusCode::UNAUTHORIZED)
-                        {
-                            return Err(error);
-                        }
-                        continue;
-                    }
-                    return Ok(Some(event));
+                    self.pending_event = Some(event);
                 }
                 Message::Close(frame) => {
                     self.close_reason = frame.map(|frame| frame.reason.to_string());
@@ -304,9 +384,9 @@ impl<'a> KeyClient<'a> {
                 _ => {}
             }
         }
-        Ok(None)
     }
 
+    /// Encrypt and replace the server name.
     pub async fn set_server_name(&self, name: &[u8]) -> Result<()> {
         let name_ct = self.encrypt_metadata(Metadata::ServerName, &self.space().id, name)?;
         self.request(Method::PUT, "/v1/space")
@@ -317,6 +397,7 @@ impl<'a> KeyClient<'a> {
         Ok(())
     }
 
+    /// Encrypt and replace this member’s display name.
     pub async fn set_display_name(&self, name: &[u8]) -> Result<()> {
         let name_ct = self.encrypt_metadata(
             Metadata::DisplayName,
@@ -331,6 +412,7 @@ impl<'a> KeyClient<'a> {
         Ok(())
     }
 
+    /// Create a category with an encrypted name.
     pub async fn create_category(&self, name: &[u8]) -> Result<[u8; 32]> {
         let id = *keys::random_key()?;
         let name_ct = self.encrypt_metadata(Metadata::CategoryName, &id, name)?;
@@ -342,6 +424,7 @@ impl<'a> KeyClient<'a> {
         Ok(id)
     }
 
+    /// Create a text or voice channel and initialize its first key epoch.
     pub async fn create_channel(
         &mut self,
         category: &[u8; 32],
@@ -357,7 +440,7 @@ impl<'a> KeyClient<'a> {
         let name_ct = self.encrypt_metadata(Metadata::ChannelName, &id, name)?;
         let topic_ct = self.encrypt_metadata(Metadata::ChannelTopic, &id, topic)?;
         let key = keys::random_key()?;
-        let context = EnvelopeContext::new(self.bot.server.server_id, scope, 1, &key);
+        let context = EnvelopeContext::new(self.server.known_server().server_id, scope, 1, &key);
         let envelope = self.wrap_for_self(context, &key)?;
         self.request(Method::POST, "/v1/channels")
             .json(&json!({
@@ -368,14 +451,20 @@ impl<'a> KeyClient<'a> {
             .await?
             .error_for_status()?;
         self.keys.insert((scope, 1), (key, envelope));
+        self.scopes.push(ScopeState {
+            scope,
+            epoch: 1,
+            rotate: false,
+        });
         Ok(scope)
     }
 
+    /// Create an invite with the current space key and optional name snapshot.
     pub async fn invite(&mut self, uses: u32, ttl_seconds: u32) -> Result<(String, InviteLink)> {
         self.sync().await?;
         let (epoch, key) = self.current_space()?;
         let link_key = keys::random_key()?;
-        let server = &self.bot.server;
+        let server = self.server.known_server();
         let space_key_ct = encode(&keys::seal_invite(
             &server.server_id,
             epoch,
@@ -430,16 +519,17 @@ async fn key_state_raced(reply: Response) -> Result<bool> {
     Err(error.into())
 }
 
-pub async fn invite_name(bot: &Bot, link: &InviteLink) -> Result<Option<Vec<u8>>> {
+/// Decrypt the optional server name carried by a verified invite link.
+pub async fn invite_name(server: &Server, link: &InviteLink) -> Result<Option<Vec<u8>>> {
     ensure!(
-        bot.server == link.server,
+        server.known_server() == &link.server,
         "invite pins differ from the established server"
     );
     let key = link
         .link_key
         .as_ref()
         .context("invite has no preview key")?;
-    let reply: Value = bot
+    let reply: Value = server
         .request(Method::POST, "/v1/invite-preview")
         .json(&json!({"code": encode(&link.code)}))
         .send()

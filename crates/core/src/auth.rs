@@ -63,7 +63,7 @@ pub struct SignIn {
     pub invite: Option<String>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Session {
     pub token: String,
     pub expires_at: i64,
