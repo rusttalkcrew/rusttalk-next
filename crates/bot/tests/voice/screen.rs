@@ -15,7 +15,7 @@ use rusttalk_bot::screen;
 use rusttalk_core::{
     client::{
         KeyClient, Server,
-        voice::{NativeVideoStream, RoomEvent, TrackSid, VoiceRoom, media_key},
+        voice::{NativeVideoStream, RoomEvent, TrackSid, TrackSource, VoiceRoom, media_key},
     },
     keys::{Kind, Scope},
 };
@@ -37,10 +37,12 @@ pub(super) async fn exercise(
         .await?
         .sid();
     let result = async {
-        let found = tokio::time::timeout(LIMIT, screen::find(&mut listener)).await??;
+        let found =
+            tokio::time::timeout(LIMIT, screen::find(&mut listener, TrackSource::Screenshare))
+                .await??;
         assert_eq!(found.sid, sid);
         assert!(found.track.is_none());
-        tokio::time::timeout(LIMIT, screen::hear(b))
+        tokio::time::timeout(LIMIT, screen::hear(b, TrackSource::Screenshare))
             .await
             .context("screen pattern with current key")??;
         if let Ok(error) = tokio::time::timeout(Duration::from_millis(400), async {
@@ -79,7 +81,7 @@ pub(super) async fn exercise(
         result = result => result?,
         result = screen::send(source) => result?,
     }
-    a.unpublish_screen(&sid).await?;
+    a.unpublish_video(&sid).await?;
     c.join_voice(channel_id).await
 }
 

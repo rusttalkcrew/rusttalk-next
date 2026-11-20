@@ -11,7 +11,7 @@ pub use livekit::{
     webrtc::{video_source::native::NativeVideoSource, video_stream::native::NativeVideoStream},
 };
 
-use crate::screen::ScreenOptions;
+use crate::{camera::CameraOptions, screen::ScreenOptions};
 
 use super::{
     LocalTrackPublication, ParticipantIdentity, TrackSid, TrackSource, VoiceRoom, track_name,
@@ -48,23 +48,49 @@ impl VoiceRoom {
             .get(&self.epoch)
             .context("missing current screen name key")?;
         let name = track_name::encrypt(key, track_name::SCREEN, self.epoch, name)?;
+        self.publish_video(&name, source, TrackSource::Screenshare, options.fps)
+            .await
+    }
+
+    pub fn can_use_camera(&self) -> bool {
+        self.can_publish_source(livekit_protocol::TrackSource::Camera)
+    }
+
+    /// Publish a VP8 simulcast camera track. The track name never names the device.
+    /// LiveKit refuses it unless the token grants the camera source (see `can_use_camera`).
+    pub async fn publish_camera(
+        &self,
+        options: CameraOptions,
+        source: NativeVideoSource,
+    ) -> Result<LocalTrackPublication> {
+        options.validate()?;
+        self.publish_video("camera", source, TrackSource::Camera, options.fps)
+            .await
+    }
+
+    async fn publish_video(
+        &self,
+        name: &str,
+        source: NativeVideoSource,
+        kind: TrackSource,
+        fps: u32,
+    ) -> Result<LocalTrackPublication> {
         let resolution = source.video_resolution();
         let max_bitrate =
-            (u64::from(resolution.width) * u64::from(resolution.height) * u64::from(options.fps)
-                / 12)
+            (u64::from(resolution.width) * u64::from(resolution.height) * u64::from(fps) / 12)
                 .clamp(300_000, 12_000_000);
-        let track = LocalVideoTrack::create_video_track(&name, RtcVideoSource::Native(source));
+        let track = LocalVideoTrack::create_video_track(name, RtcVideoSource::Native(source));
         let publication = self
             .room
             .local_participant()
             .publish_track(
                 LocalTrack::Video(track),
                 TrackPublishOptions {
-                    source: TrackSource::Screenshare,
+                    source: kind,
                     video_codec: VideoCodec::VP8,
                     video_encoding: Some(VideoEncoding {
                         max_bitrate,
-                        max_framerate: options.fps.into(),
+                        max_framerate: fps.into(),
                     }),
                     simulcast: true,
                     ..Default::default()
@@ -75,7 +101,8 @@ impl VoiceRoom {
         Ok(publication)
     }
 
-    pub async fn unpublish_screen(&self, sid: &TrackSid) -> Result<()> {
+    /// Stop a screen or camera publication.
+    pub async fn unpublish_video(&self, sid: &TrackSid) -> Result<()> {
         self.room.local_participant().unpublish_track(sid).await?;
         Ok(())
     }
@@ -104,6 +131,7 @@ impl VoiceRoom {
                                 &publication.name(),
                             )
                             .unwrap_or_else(|| "Shared screen".into()),
+                            TrackSource::Camera => "Camera".into(),
                             _ => "Shared video".into(),
                         };
                         let track = match publication.track() {

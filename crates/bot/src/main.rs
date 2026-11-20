@@ -13,7 +13,11 @@ use rusttalk_bot::{
 };
 use rusttalk_core::{
     auth::{InviteLink, decode},
-    client::{KeyClient, Server, voice::RoomEvent},
+    camera,
+    client::{
+        KeyClient, Server,
+        voice::{RoomEvent, TrackSource},
+    },
     identity::DeviceIdentity,
     pinned_tls, screen as capture,
 };
@@ -31,9 +35,9 @@ struct Args {
     channel: String,
     #[arg(long)]
     identity: String,
-    #[arg(long, value_parser = clap::value_parser!(u32).range(100..=2000), required_unless_present_any = ["share_app_audio", "share_screen", "expect_screen"], conflicts_with = "share_app_audio")]
+    #[arg(long, value_parser = clap::value_parser!(u32).range(100..=2000), required_unless_present_any = ["share_app_audio", "share_screen", "expect_screen", "share_camera", "expect_camera"], conflicts_with = "share_app_audio")]
     tone: Option<u32>,
-    #[arg(long, value_parser = clap::value_parser!(u32).range(100..=2000), required_unless_present_any = ["expect_app_audio", "share_screen", "expect_screen"], conflicts_with = "expect_app_audio")]
+    #[arg(long, value_parser = clap::value_parser!(u32).range(100..=2000), required_unless_present_any = ["expect_app_audio", "share_screen", "expect_screen", "share_camera", "expect_camera"], conflicts_with = "expect_app_audio")]
     expect_tone: Option<u32>,
     /// Publish two PipeWire tone players on separate app audio tracks (Linux).
     #[arg(long)]
@@ -47,6 +51,12 @@ struct Args {
     /// Subscribe to a synthetic screen share and verify its pattern.
     #[arg(long, conflicts_with_all = ["expect_tone", "expect_app_audio"])]
     expect_screen: bool,
+    /// Publish a synthetic pattern or the first camera as a camera track.
+    #[arg(long)]
+    share_camera: Option<CameraInput>,
+    /// Subscribe to a camera track and verify the synthetic pattern.
+    #[arg(long, conflicts_with_all = ["expect_tone", "expect_app_audio", "expect_screen"])]
+    expect_camera: bool,
     /// Location of the bot's saved server pins.
     #[arg(long, default_value = ".dev/bots")]
     data_dir: PathBuf,
@@ -59,6 +69,12 @@ struct Args {
 enum ScreenInput {
     Synthetic,
     Portal,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum CameraInput {
+    Synthetic,
+    Device,
 }
 
 #[tokio::main]
@@ -129,6 +145,7 @@ async fn run(args: Args) -> Result<()> {
         }
         let mut portal_capture = None;
         let mut synthetic = None;
+        let mut synthetic_camera = None;
         match args.share_screen {
             Some(ScreenInput::Synthetic) => {
                 let source = screen::source();
@@ -143,6 +160,22 @@ async fn run(args: Args) -> Result<()> {
                 let capture = capture::start(target, options, &mut None).await?;
                 room.publish_screen(&capture.name, options, capture.source.clone()).await?;
                 portal_capture = Some(capture);
+            }
+            None => (),
+        }
+        let mut device_camera = None;
+        match args.share_camera {
+            Some(CameraInput::Synthetic) => {
+                let source = screen::source();
+                room.publish_camera(screen::camera_options(), source.clone()).await?;
+                synthetic_camera = Some(source);
+            }
+            Some(CameraInput::Device) => {
+                let device = camera::list_cameras()?.into_iter().next().context("no camera found")?;
+                let options = camera::CameraOptions::default();
+                let capture = tokio::task::spawn_blocking(move || camera::start(device, options)).await??;
+                room.publish_camera(options, capture.source.clone()).await?;
+                device_camera = Some(capture);
             }
             None => (),
         }
@@ -169,6 +202,18 @@ async fn run(args: Args) -> Result<()> {
                 std::future::pending().await
             }
         };
+        let send_camera = async {
+            if let Some(source) = synthetic_camera {
+                screen::send(source).await
+            } else if let Some(capture) = device_camera {
+                loop {
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    ensure!(!capture.is_finished(), "camera capture ended");
+                }
+            } else {
+                std::future::pending().await
+            }
+        };
         tracing::info!(identity = %args.identity, "joined encrypted voice");
         let voice = async {
             tokio::time::timeout(Duration::from_secs(10), async {
@@ -178,12 +223,15 @@ async fn run(args: Args) -> Result<()> {
                 } else if args.expect_app_audio {
                     app_audio::hear(&mut room, None).await?;
                 } else if args.expect_screen {
-                    screen::hear(&mut room).await?;
+                    screen::hear(&mut room, TrackSource::Screenshare).await?;
                     tracing::info!("verified encrypted synthetic screen");
+                } else if args.expect_camera {
+                    screen::hear(&mut room, TrackSource::Camera).await?;
+                    tracing::info!("verified encrypted synthetic camera");
                 }
                 Ok::<_, anyhow::Error>(())
             }).await.context("waiting for the peer's audio")??;
-            if args.once && (args.expect_screen || args.expect_tone.is_some() || args.expect_app_audio) {
+            if args.once && (args.expect_screen || args.expect_camera || args.expect_tone.is_some() || args.expect_app_audio) {
                 return Ok(());
             }
             loop {
@@ -206,6 +254,7 @@ async fn run(args: Args) -> Result<()> {
             result = tokio::signal::ctrl_c() => Ok(result?),
             result = send_audio => result,
             result = send_screen => result,
+            result = send_camera => result,
             result = voice => result,
         }
     }.await;

@@ -301,7 +301,7 @@ publication, because data channel payloads bypass frame encryption, and
 clients drop received data channel events. Track publication requires
 the relevant flag from at least one assigned role. The `speak` grant
 allows `microphone` and `screen_share_audio`. The independent `video`
-grant allows `screen_share`.
+grant allows `camera` and `screen_share`.
 
 Each shared application is an independent `screen_share_audio` track
 with the same frame encryption as the microphone. Its LiveKit track name
@@ -325,9 +325,15 @@ use the app audio wire format with the distinct HKDF info and associated
 data prefix `rusttalk-screen-track-name-v1`. Receivers display “Shared
 screen” if label decryption fails. The desktop portal supplies no title,
 so Linux uses “Shared screen” or “Shared window” based on the source kind.
-App audio remains a separate publication. Clients join with automatic
+A camera is published as `camera` with VP8 simulcast and the same frame
+encryption. Its LiveKit track name is the fixed string `camera`, so the
+device name never leaves the sender; receivers show “Camera”. Clients
+offer 480p, 720p or 1080p at 15 or 30 fps and open the camera's closest
+mode. App audio remains a separate publication. Clients join with automatic
 subscription disabled, subscribe to encrypted audio when announced, and
-subscribe to each encrypted video track only while the viewer chooses it.
+subscribe to each encrypted video track only while the viewer chooses it:
+a watched screen, or a camera while its person's tile is on screen and
+the viewer has not turned that person's video off.
 
 The API gets the active roster from LiveKit's internal RoomService,
 cached for one second per room, and maps device identities to current

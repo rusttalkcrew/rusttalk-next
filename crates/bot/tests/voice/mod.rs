@@ -1,3 +1,4 @@
+mod camera;
 mod screen;
 
 use std::{
@@ -201,8 +202,18 @@ pub async fn exercise(
         .context("waiting for two per-app tracks")??;
     capture.stop(&room_a).await?;
 
-    let mut listener =
+    let listener =
         screen::exercise(&room_a, &mut room_b, listener, server, &mut c, &voice.id).await?;
+    let mut listener = camera::exercise(
+        &room_a,
+        &mut room_b,
+        listener,
+        a,
+        &mut c,
+        &channel,
+        &voice.id,
+    )
+    .await?;
 
     let stats = room_a.stats().await?;
     assert!(
