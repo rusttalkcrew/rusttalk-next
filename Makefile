@@ -91,12 +91,13 @@ test: ## Run unit and integration tests
 	@printf '\033[1;34m==> tests\033[0m\n'
 	cargo test $(CARGO_SCOPE) --locked
 
-e2e: ## Run the Docker membership, keys, encrypted chat, media, live file transfer and device sync scenarios
-	@printf '\033[1;34m==> Docker membership, keys, encrypted chat, media, live file transfer and device sync\033[0m\n'
+e2e: ## Run the Docker membership, keys, encrypted chat, stored files, voice, app audio, screen sharing, camera, live file transfer and device sync scenarios
+	@printf '\033[1;34m==> Docker membership, keys, encrypted chat, stored files, voice, app audio, screen sharing, camera, live file transfer and device sync\033[0m\n'
 	$(if $(and $(PIPEWIRE_HELPER),$(findstring media,$(E2E_FEATURES))),cargo build --locked $(PIPEWIRE_HELPER))
 	@set -eu; \
 		export RUSTTALK_E2E_PROJECT=rusttalk-e2e-$$$$; \
 		export RUSTTALK_DEV_DATA=$$(mktemp -d); \
+		export RUSTTALK_FILE_MAX_BYTES=33554432 RUSTTALK_FILE_MEMBER_BYTES=3145728 RUSTTALK_FILE_SERVER_BYTES=5242880 RUSTTALK_FILE_TTL_SECS=12; \
 		compose() { docker compose -f deploy/compose.dev.yml -p "$$RUSTTALK_E2E_PROJECT" "$$@"; }; \
 		cleanup() { \
 			status=$$?; trap - EXIT; \

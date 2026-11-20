@@ -8,12 +8,10 @@ use std::{
 
 use eframe::egui::{self, ColorImage};
 use futures_util::StreamExt;
-use livekit::webrtc::{
-    prelude::{BoxVideoFrame, RtcVideoTrack, VideoFormatType},
-    video_stream::native::NativeVideoStream,
-};
+use livekit::webrtc::{prelude::RtcVideoTrack, video_stream::native::NativeVideoStream};
+use rusttalk_core::screen::frame_to_rgba;
 pub use rusttalk_core::screen::{
-    ScreenCapture as Capture, ScreenOptions as Options, ScreenSource as Target,
+    Cancelled, ScreenCapture as Capture, ScreenOptions as Options, ScreenSource as Target,
     ScreenSourceKind as Kind, list_sources as targets, start,
 };
 
@@ -58,8 +56,22 @@ impl Video {
             // Holds one frame: a slow converter skips frames instead of falling behind.
             let mut stream = NativeVideoStream::new(track);
             while let Some(frame) = stream.next().await {
-                let Ok(image) = tokio::task::spawn_blocking(move || rgba(&frame)).await else {
-                    break;
+                let converted = tokio::task::spawn_blocking(move || {
+                    let size = [
+                        frame.buffer.width() as usize,
+                        frame.buffer.height() as usize,
+                    ];
+                    frame_to_rgba(frame.buffer.as_ref())
+                        .map(|pixels| ColorImage::from_rgba_unmultiplied(size, &pixels))
+                })
+                .await;
+                let image = match converted {
+                    Ok(Ok(image)) => image,
+                    Ok(Err(error)) => {
+                        tracing::debug!(%error, "skipped a video frame");
+                        continue;
+                    }
+                    Err(_) => break,
                 };
                 let mut frames = lock(&video.frames);
                 let Some(slot) = frames.get_mut(&sid).filter(|s| s.serial == serial) else {
@@ -84,18 +96,4 @@ impl Video {
     pub fn take(&self, sid: &str) -> Option<ColorImage> {
         lock(&self.frames).get_mut(sid)?.image.take()
     }
-}
-
-fn rgba(frame: &BoxVideoFrame) -> ColorImage {
-    let (width, height) = (frame.buffer.width(), frame.buffer.height());
-    let mut pixels = vec![0; width as usize * height as usize * 4];
-    // libyuv names formats by word order: "ABGR" is R, G, B, A in memory.
-    frame.buffer.to_argb(
-        VideoFormatType::ABGR,
-        &mut pixels,
-        width * 4,
-        width as i32,
-        height as i32,
-    );
-    ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &pixels)
 }

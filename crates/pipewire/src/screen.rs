@@ -9,7 +9,7 @@ use std::{
 
 use anyhow::{Context, Result, bail, ensure};
 use ashpd::desktop::{
-    PersistMode,
+    PersistMode, ResponseError,
     screencast::{CursorMode, Screencast, SelectSourcesOptions, SourceType},
 };
 use futures_util::StreamExt;
@@ -54,6 +54,15 @@ pub fn run() -> Result<()> {
         })
 }
 
+/// The one selection line the client reads before frames.
+fn report(selection: &serde_json::Value) -> Result<()> {
+    let mut out = io::stdout().lock();
+    serde_json::to_writer(&mut out, selection)?;
+    writeln!(out)?;
+    out.flush()?;
+    Ok(())
+}
+
 async fn watch_parent() -> Result<()> {
     loop {
         tokio::time::sleep(Duration::from_millis(250)).await;
@@ -87,10 +96,17 @@ async fn select(fps: u32, cursor: CursorMode, token: Option<String>) -> Result<(
     }
     portal.select_sources(&session, options).await?.response()?;
 
-    let selection = tokio::select! {
+    let response = tokio::select! {
         result = portal.start(&session, None, Default::default()) =>
-            result.context("open desktop screen picker")?.response()?,
+            result.context("open desktop screen picker")?.response(),
         _ = closed.next() => bail!("portal screen selection closed"),
+    };
+    let selection = match response {
+        // The person closed the picker: not an error to show.
+        Err(ashpd::Error::Response(ResponseError::Cancelled)) => {
+            return report(&serde_json::json!({ "cancelled": true }));
+        }
+        response => response?,
     };
     let [stream] = selection.streams() else {
         bail!("expected one selected screen source")
@@ -101,17 +117,9 @@ async fn select(fps: u32, cursor: CursorMode, token: Option<String>) -> Result<(
         "Shared screen"
     };
     // Save a replacement even if opening the PipeWire stream subsequently fails.
-    {
-        let mut out = io::stdout().lock();
-        serde_json::to_writer(
-            &mut out,
-            &serde_json::json!({
-                "name": name, "restore_token": selection.restore_token(),
-            }),
-        )?;
-        writeln!(out)?;
-        out.flush()?;
-    }
+    report(&serde_json::json!({
+        "name": name, "restore_token": selection.restore_token(),
+    }))?;
     let fd = portal
         .open_pipe_wire_remote(&session, Default::default())
         .await?;

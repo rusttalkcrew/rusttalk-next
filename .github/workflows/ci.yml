@@ -13,7 +13,7 @@ concurrency:
 jobs:
   linux:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       # Installs the version and components from rust-toolchain.toml.
@@ -30,7 +30,7 @@ jobs:
 
   windows-client:
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install

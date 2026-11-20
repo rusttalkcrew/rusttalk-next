@@ -7,8 +7,7 @@ use std::{
 };
 
 use eframe::egui::{
-    self, ColorImage, ComboBox, Image, Rect, RichText, TextureHandle, TextureOptions, Ui, Vec2,
-    pos2,
+    self, ColorImage, ComboBox, Image, Rect, RichText, TextureHandle, Ui, Vec2, pos2,
 };
 pub use rusttalk_core::camera::{CameraCapture as Capture, CameraOptions as Options};
 use rusttalk_core::{
@@ -18,7 +17,7 @@ use rusttalk_core::{
 
 use crate::{
     audio::{Settings, lock},
-    call::Listing,
+    call::{Listing, fill, upload},
     home::section,
 };
 
@@ -187,16 +186,7 @@ impl Camera {
             let size = [frame.width() as usize, frame.height() as usize];
             // Opaque pixels: premultiplied and straight alpha are the same bytes.
             let image = ColorImage::from_rgba_premultiplied(size, frame.as_raw());
-            match &mut self.texture {
-                Some(texture) => texture.set(image, TextureOptions::LINEAR),
-                None => {
-                    self.texture = Some(ui.ctx().load_texture(
-                        "self view",
-                        image,
-                        TextureOptions::LINEAR,
-                    ));
-                }
-            }
+            upload(ui.ctx(), &mut self.texture, "self view", image);
         }
         let texture = self.texture.as_ref()?;
         let size = texture.size_vec2();
@@ -259,17 +249,8 @@ fn launch(
 pub fn settings_tab(ui: &mut Ui, camera: &mut Camera, s: &mut Settings) {
     let names = camera.names.get_or_insert_with(|| {
         let names = Arc::new(Mutex::new(Listing::Loading));
-        let slot = names.clone();
-        let ctx = ui.ctx().clone();
-        thread::spawn(move || {
-            *lock(&slot) = match list_cameras() {
-                Ok(found) => Listing::Found(found.into_iter().map(|c| c.name).collect()),
-                Err(error) => {
-                    tracing::warn!(error = %format_args!("{error:#}"), "listing cameras failed");
-                    Listing::Failed
-                }
-            };
-            ctx.request_repaint();
+        fill(ui.ctx(), &names, "cameras", || {
+            Ok(list_cameras()?.into_iter().map(|c| c.name).collect())
         });
         names
     });
