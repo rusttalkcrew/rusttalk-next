@@ -1,6 +1,8 @@
 use std::{env, path::Path};
 
-use anyhow::{Context, Result};
+#[cfg(feature = "media")]
+use anyhow::Context;
+use anyhow::Result;
 use reqwest::{Method, StatusCode};
 use rustls_pki_types::{CertificateDer, pem::PemObject};
 use rusttalk_core::{
