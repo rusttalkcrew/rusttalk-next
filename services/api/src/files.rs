@@ -339,8 +339,12 @@ pub async fn delete(
     decode::<32>(&id)?;
     let (mut tx, actor) = authenticate(&app, &headers).await?;
     let row = lookup(&mut tx, &id, actor.at).await?;
-    if row.uploader != actor.person {
-        messages::chat_kind(&mut tx, &actor, &row.channel_id).await?;
+    let moderated = row.uploader != actor.person;
+    let mut dm = None;
+    if moderated {
+        if messages::chat_kind(&mut tx, &actor, &row.channel_id).await? == "dm" {
+            dm = Some(row.channel_id.clone());
+        }
         roles::authority(&mut tx, &actor.person)
             .await?
             .require(Permission::DeleteMessages)?;
@@ -348,6 +352,25 @@ pub async fn delete(
     tokio::spawn(
         async move {
             app.files.remove(&mut tx, &id).await?;
+            // Moderator deletes are audited like message deletes; the audit holds ids only.
+            if moderated {
+                let audit_id = store::audit(
+                    &mut tx,
+                    &actor.person,
+                    "file_deleted",
+                    Some(&row.uploader),
+                    Some(&id),
+                    actor.at,
+                )
+                .await?;
+                if let Some(channel) = dm {
+                    query("UPDATE audit_log SET dm_channel_id = ? WHERE id = ?")
+                        .bind(channel)
+                        .bind(audit_id)
+                        .execute(&mut *tx)
+                        .await?;
+                }
+            }
             tx.commit().await?;
             tracing::info!(id, size = row.size, "file deleted");
             Ok(StatusCode::NO_CONTENT)
