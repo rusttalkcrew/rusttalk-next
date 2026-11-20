@@ -214,6 +214,12 @@ under **Settings → Profile**. **Check now** checks once. The automatic
 option checks once at startup and is off by default. A verified newer
 release offers **Install**. On Linux the AppImage directory must allow the
 current user to create and rename files.
+Linux updates only replace the AppImage that RustTalk was started from.
+RustTalk ignores `APPIMAGE` and `APPDIR` values inherited from other
+AppImages: it checks that its own AppImage mount carries the file's name,
+serves the squashfs image inside that file, and that a running process was
+started from that file. Extracted AppImages and `--appimage-extract-and-run`
+cannot update themselves.
 The update replaces the AppImage atomically and offers **Restart now**.
 
 The release command builds and tags `rusttalk-api:<version>` and

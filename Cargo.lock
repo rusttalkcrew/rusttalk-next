@@ -5582,6 +5582,7 @@ dependencies = [
  "futures-util",
  "hex",
  "keyring",
+ "libc",
  "livekit",
  "reqwest",
  "rfd",

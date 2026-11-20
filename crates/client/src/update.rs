@@ -204,31 +204,17 @@ impl Target {
         {
             let _ = config;
             let executable = env::current_exe()?;
-            // Other AppImages can leave APPDIR and APPIMAGE in a child process's environment.
-            let running_appdir = env::var_os("APPDIR").is_some_and(|dir| {
-                fs::canonicalize(PathBuf::from(dir).join("usr/bin/rusttalk-client"))
-                    .is_ok_and(|client| client == executable)
-            });
-            let path = if running_appdir {
-                let image = env::var_os("APPIMAGE").context("locate running AppImage")?;
-                let path = fs::canonicalize(image).context("locate running AppImage")?;
-                let mut header = [0u8; 11];
-                std::io::Read::read_exact(&mut fs::File::open(&path)?, &mut header)?;
-                ensure!(
-                    &header[..4] == b"\x7fELF" && &header[8..] == b"AI\x02",
-                    "invalid AppImage target"
-                );
-                path
-            } else {
-                ensure!(
-                    LOCAL_TEST,
-                    "install the RustTalk AppImage to use in-app updates"
-                );
-                executable
-            };
+            if let Some(target) = running_appimage(&executable)? {
+                return Ok(target);
+            }
+            // Test builds may replace a disposable copy of the plain executable.
+            ensure!(
+                LOCAL_TEST,
+                "install the RustTalk AppImage to use in-app updates"
+            );
             Ok(Self {
-                inode: file_id(&fs::metadata(&path)?),
-                path,
+                inode: file_id(&fs::metadata(&executable)?),
+                path: executable,
             })
         }
         #[cfg(target_os = "windows")]
@@ -314,6 +300,174 @@ pub fn restart_if_requested() -> Result<()> {
         target.restart()?;
     }
     Ok(())
+}
+
+/// Finds the AppImage file that this process was started from, or `None` when the
+/// executable is not running from an AppImage mount.
+///
+/// `APPIMAGE` and `APPDIR` are inherited by every child of another AppImage (an
+/// editor, a launcher), so neither is trusted on its own: the path is only accepted
+/// when the AppImage runtime's FUSE mount that holds this executable is named after
+/// it, serves the squashfs image embedded in that exact file, and a running process
+/// (the runtime's FUSE server) was started from that same file.
+#[cfg(target_os = "linux")]
+fn running_appimage(executable: &Path) -> Result<Option<Target>> {
+    let Some(appdir) = env::var_os("APPDIR")
+        .and_then(|dir| fs::canonicalize(dir).ok())
+        .filter(|dir| {
+            fs::canonicalize(dir.join("usr/bin/rusttalk-client"))
+                .is_ok_and(|client| client == executable)
+        })
+    else {
+        return Ok(None);
+    };
+    let refused = "RustTalk can't confirm which AppImage it was started from";
+    let image = env::var_os("APPIMAGE")
+        .and_then(|image| fs::canonicalize(image).ok())
+        .context(refused)?;
+    let mountinfo = fs::read_to_string("/proc/self/mountinfo").context(refused)?;
+    let mut mount = mount_at(&mountinfo, &appdir).context(refused)?;
+    let stat = statvfs(&appdir).context(refused)?;
+    (mount.block_size, mount.blocks, mount.files) = stat;
+    prove_image(&image, &mount).context(refused)?;
+    let inode = file_id(&fs::metadata(&image)?);
+    ensure!(process_runs(inode), refused);
+    Ok(Some(Target { path: image, inode }))
+}
+
+#[cfg(target_os = "linux")]
+fn statvfs(path: &Path) -> Result<(u64, u64, u64)> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    // SAFETY: `path` is NUL-terminated and `stat` is a valid output buffer.
+    ensure!(
+        unsafe { libc::statvfs(path.as_ptr(), stat.as_mut_ptr()) } == 0,
+        "statvfs failed"
+    );
+    // SAFETY: statvfs succeeded and initialised the buffer.
+    let stat = unsafe { stat.assume_init() };
+    Ok((stat.f_bsize, stat.f_blocks, stat.f_files))
+}
+
+/// The AppImage FUSE mount that serves an AppDir, as the kernel and the runtime report it.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Default)]
+struct Mount {
+    fstype: String,
+    source: String,
+    block_size: u64,
+    blocks: u64,
+    files: u64,
+}
+
+#[cfg(target_os = "linux")]
+fn mount_at(mountinfo: &str, dir: &Path) -> Option<Mount> {
+    use std::os::unix::ffi::OsStrExt;
+    // Octal escapes (`\040` for a space) are used for whitespace and backslashes.
+    fn unescape(field: &str) -> Vec<u8> {
+        let bytes = field.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            match bytes.get(i..i + 4) {
+                Some([b'\\', digits @ ..]) if digits.iter().all(|d| (b'0'..=b'7').contains(d)) => {
+                    out.push(
+                        digits
+                            .iter()
+                            .fold(0u8, |n, d| n.wrapping_mul(8) + (d - b'0')),
+                    );
+                    i += 4;
+                }
+                _ => {
+                    out.push(bytes[i]);
+                    i += 1;
+                }
+            }
+        }
+        out
+    }
+    // The last matching line is the mount that is visible at that path.
+    mountinfo.lines().rev().find_map(|line| {
+        let (mounted, rest) = line.split_once(" - ")?;
+        if unescape(mounted.split(' ').nth(4)?) != dir.as_os_str().as_bytes() {
+            return None;
+        }
+        let mut rest = rest.split(' ');
+        Some(Mount {
+            fstype: String::from_utf8(unescape(rest.next()?)).ok()?,
+            source: String::from_utf8(unescape(rest.next()?)).ok()?,
+            ..Mount::default()
+        })
+    })
+}
+
+/// Checks that `image` is a type 2 AppImage whose embedded squashfs is the file
+/// system mounted at `mount`.
+#[cfg(target_os = "linux")]
+fn prove_image(image: &Path, mount: &Mount) -> Result<()> {
+    use std::io::{Read, Seek, SeekFrom};
+    let name = image
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("unnamed AppImage")?;
+    ensure!(
+        mount.fstype == format!("fuse.{name}") && mount.source == name,
+        "the app folder is not mounted from {name}"
+    );
+    let mut file = fs::File::open(image)?;
+    let mut header = [0u8; 64];
+    file.read_exact(&mut header)?;
+    ensure!(
+        header[..4] == *b"\x7fELF"
+            && header[4] == 2
+            && header[5] == 1
+            && header[8..11] == *b"AI\x02",
+        "not a 64-bit type 2 AppImage"
+    );
+    let le64 = |at: usize| u64::from_le_bytes(header[at..at + 8].try_into().expect("8 bytes"));
+    let le16 = |at: usize| u64::from(u16::from_le_bytes([header[at], header[at + 1]]));
+    // The squashfs image starts right after the runtime's section headers.
+    let offset = le16(0x3a)
+        .checked_mul(le16(0x3c))
+        .and_then(|size| size.checked_add(le64(0x28)))
+        .context("invalid AppImage runtime")?;
+    let mut superblock = [0u8; 48];
+    file.seek(SeekFrom::Start(offset))?;
+    file.read_exact(&mut superblock)?;
+    let le32 = |at: usize| {
+        u64::from(u32::from_le_bytes(
+            superblock[at..at + 4].try_into().expect("4 bytes"),
+        ))
+    };
+    ensure!(
+        &superblock[..4] == b"hsqs",
+        "no squashfs image in the AppImage"
+    );
+    let (inodes, block_size) = (le32(4), le32(12));
+    let used = u64::from_le_bytes(superblock[40..48].try_into().expect("8 bytes"));
+    ensure!(
+        block_size > 0
+            && mount.block_size == block_size
+            && mount.files == inodes
+            && (used / block_size..=used / block_size + 1).contains(&mount.blocks),
+        "the app folder is not served from {name}"
+    );
+    Ok(())
+}
+
+/// Whether any visible process was started from the file with this device and inode.
+#[cfg(target_os = "linux")]
+fn process_runs(inode: (u64, u64)) -> bool {
+    fs::read_dir("/proc").is_ok_and(|entries| {
+        entries.flatten().any(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|pid| pid.bytes().all(|b| b.is_ascii_digit()))
+                && fs::metadata(entry.path().join("exe")).is_ok_and(|exe| file_id(&exe) == inode)
+        })
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -553,5 +707,87 @@ mod tests {
         assert!(newer(&Version::new(0, 1, 2), &current).unwrap());
         assert!(!newer(&current, &current).unwrap());
         assert!(newer(&Version::new(0, 1, 0), &current).is_err());
+    }
+
+    /// Writes a minimal type 2 AppImage: an ELF64 header with the AppImage magic, no
+    /// section headers, and a squashfs superblock right after it.
+    #[cfg(target_os = "linux")]
+    fn fake_appimage(path: &Path, inodes: u32, used: u64) {
+        let mut bytes = vec![0u8; 64];
+        bytes[..4].copy_from_slice(b"\x7fELF");
+        bytes[4] = 2;
+        bytes[5] = 1;
+        bytes[8..11].copy_from_slice(b"AI\x02");
+        bytes[0x28..0x30].copy_from_slice(&64u64.to_le_bytes());
+        let mut superblock = [0u8; 96];
+        superblock[..4].copy_from_slice(b"hsqs");
+        superblock[4..8].copy_from_slice(&inodes.to_le_bytes());
+        superblock[12..16].copy_from_slice(&131_072u32.to_le_bytes());
+        superblock[40..48].copy_from_slice(&used.to_le_bytes());
+        bytes.extend_from_slice(&superblock);
+        fs::write(path, bytes).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    fn mount_of(name: &str) -> Mount {
+        Mount {
+            fstype: format!("fuse.{name}"),
+            source: name.to_owned(),
+            block_size: 131_072,
+            blocks: 3,
+            files: 40,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn appimage_mount_is_found_by_escaped_mount_point() {
+        let info = "431 252 0:84 / /tmp/.mount_T3-CodPgjFne ro,nosuid - fuse.T3-Code.AppImage T3-Code.AppImage ro\n\
+                    1279 252 0:127 / /tmp/.mount_My\\040TesiakNcb ro,nosuid shared:911 - fuse.My\\040Test.AppImage My\\040Test.AppImage ro,user_id=1000\n";
+        let mount = mount_at(info, Path::new("/tmp/.mount_My TesiakNcb")).unwrap();
+        assert_eq!(mount.fstype, "fuse.My Test.AppImage");
+        assert_eq!(mount.source, "My Test.AppImage");
+        assert!(mount_at(info, Path::new("/tmp/.mount_other")).is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn running_appimage_is_proven_by_its_mount() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("RustTalk.AppImage");
+        fake_appimage(&image, 40, 300_000);
+        prove_image(&image, &mount_of("RustTalk.AppImage")).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn inherited_appimage_pointing_at_another_appimage_is_refused() {
+        // RustTalk runs from its own mount while APPIMAGE still names the AppImage of
+        // the program that started it (for example an editor packaged as an AppImage).
+        let dir = tempfile::tempdir().unwrap();
+        let other = dir.path().join("T3-Code.AppImage");
+        fake_appimage(&other, 40, 300_000);
+        let before = fs::read(&other).unwrap();
+        let ours = mount_of("RustTalk.AppImage");
+        assert!(prove_image(&other, &ours).is_err());
+        // Even an AppImage with the same file name is refused when its image differs.
+        let renamed = dir.path().join("RustTalk.AppImage");
+        fake_appimage(&renamed, 9_000, 200_000_000);
+        assert!(prove_image(&renamed, &ours).is_err());
+        // A plain file that is not an AppImage is refused too.
+        let plain = dir.path().join("plain").join("RustTalk.AppImage");
+        fs::create_dir(plain.parent().unwrap()).unwrap();
+        fs::write(&plain, vec![0u8; 256]).unwrap();
+        assert!(prove_image(&plain, &ours).is_err());
+        // No process was started from the other AppImage, so it is not running either.
+        assert!(!process_runs(file_id(&fs::metadata(&other).unwrap())));
+        assert_eq!(fs::read(&other).unwrap(), before);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn running_program_files_are_detected() {
+        let exe = env::current_exe().unwrap();
+        assert!(process_runs(file_id(&fs::metadata(exe).unwrap())));
     }
 }
