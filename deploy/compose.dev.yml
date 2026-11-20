@@ -3,6 +3,8 @@ services:
     build:
       context: ..
       dockerfile: services/api/Dockerfile
+    volumes:
+      - api-data:/data
     develop:
       watch:
         - action: rebuild
@@ -33,7 +35,7 @@ services:
     image: alpine/openssl:3.5.9
     user: "${RUSTTALK_DEV_USER:-0:0}"
     volumes:
-      - ../.dev:/dev-data
+      - ${RUSTTALK_DEV_DATA:-../.dev}:/dev-data
     entrypoint: ["/bin/sh", "-ec"]
     command:
       - |
@@ -60,7 +62,7 @@ services:
         condition: service_completed_successfully
     volumes:
       - ./Caddyfile.dev:/etc/caddy/Caddyfile:ro
-      - ../.dev:/dev-data:ro
+      - ${RUSTTALK_DEV_DATA:-../.dev}:/dev-data:ro
     ports:
       - "8443:8443/tcp"
     healthcheck:
@@ -68,3 +70,6 @@ services:
       interval: 3s
       timeout: 2s
       retries: 10
+
+volumes:
+  api-data:

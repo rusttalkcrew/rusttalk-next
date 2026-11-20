@@ -52,6 +52,24 @@ The recovery words and root signing key are never stored. Adding or revoking
 a device requires the recovery words again. The client records the person
 fingerprint in the startup log.
 
+## Server identity and sessions
+
+The API creates a 32-byte Ed25519 signing seed with the OS random number
+generator on first start and saves it as `server.key` (mode 0600) on the API
+data volume. The 32-byte public key is the server ID. The human-readable
+fingerprint uses the same SHA-256 truncation and formatting as a person ID.
+The key signs `challenge || "rusttalk-server-v1"`. Clients verify both this
+proof and their TLS trust before sending device credentials. Self-signed TLS
+uses an explicit DER certificate pin in addition to the application key pin.
+
+Challenges expire in 60 seconds and are deleted on consumption. The API
+verifies device certificates in memory and checks stored revocations before
+minting a session. A token is 32 bytes from the OS random number generator.
+SQLite stores only its SHA-256 digest as the credential, with the person and
+device binding and expiry. The client sends the encoded token in the HTTPS
+Authorization header. Refresh replaces the token inside a transaction. An
+invite code is 16 random bytes, hashed with SHA-256 before storage.
+
 ## Channel and space keys
 
 Written in W06.
@@ -67,3 +85,7 @@ Written in W08.
 ## Trust model
 
 Written in W06.
+
+### What the server challenge signature does not cover
+
+The server's signature over the challenge proves the server holds the pinned key, but it is not bound to the TLS connection and the client adds no nonce of its own. In self-signed mode the TLS certificate pin stops a relay. In CA mode (public domain, no certificate pin), an attacker holding a valid certificate for the domain could relay a sign-in to the real server. Binding the device signature to a TLS exporter value would close this; it is not done yet.

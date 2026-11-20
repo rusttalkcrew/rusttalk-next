@@ -1,0 +1,143 @@
+use std::{
+    fs::{self, File},
+    io::{self, Write},
+    path::Path,
+    time::Duration,
+};
+
+use anyhow::{Context, Result, ensure};
+use reqwest::{Client, RequestBuilder, Response};
+use rusttalk_core::{
+    auth::{
+        Challenge, Fingerprint, InviteCode, KnownServer, ProtocolError, SignIn, check_pin, decode,
+    },
+    identity::{DeviceIdentity, fingerprint},
+    pinned_tls,
+};
+use url::Url;
+
+pub struct Bot {
+    http: Client,
+    pub server: KnownServer,
+}
+
+impl Bot {
+    pub async fn connect(
+        address: Url,
+        tls_fingerprint: Option<Fingerprint>,
+        expected: Option<&KnownServer>,
+        data: &Path,
+    ) -> Result<Self> {
+        ensure!(
+            address.scheme() == "https"
+                && address.host().is_some()
+                && address.username().is_empty()
+                && address.password().is_none()
+                && address.path() == "/"
+                && address.query().is_none()
+                && address.fragment().is_none(),
+            "expected an HTTPS server origin"
+        );
+        let pins = data.join("servers.json");
+        let known = load_pins(&pins)?
+            .into_iter()
+            .find(|entry| entry.address == address);
+        if let (Some(known), Some(expected)) = (&known, expected) {
+            check_pin(Some(known), expected)?;
+        }
+        let trusted = known.as_ref().or(expected);
+        if trusted.is_some_and(|entry| entry.tls_fingerprint != tls_fingerprint) {
+            return Err(ProtocolError::TlsChanged.into());
+        }
+
+        let http = pinned_tls::api_client(tls_fingerprint).map_err(anyhow::Error::from_boxed)?;
+        let proof = challenge(&http, &address).await?;
+        let server_id = decode(&proof.server_id)?;
+        let observed = KnownServer {
+            address,
+            server_id,
+            tls_fingerprint,
+        };
+        check_pin(trusted, &observed)?;
+        proof.verify(&server_id)?;
+        save_pin(data, &pins, &observed)?;
+        Ok(Self {
+            http,
+            server: observed,
+        })
+    }
+
+    pub fn request(&self, method: reqwest::Method, path: &str) -> RequestBuilder {
+        self.http
+            .request(
+                method,
+                format!("{}{}", self.server.address, path.trim_start_matches('/')),
+            )
+            .timeout(Duration::from_secs(10))
+    }
+
+    pub async fn sign_in(
+        &self,
+        identity: &DeviceIdentity,
+        invite: Option<&InviteCode>,
+    ) -> Result<Response> {
+        let proof = challenge(&self.http, &self.server.address).await?;
+        let challenge = proof.verify(&self.server.server_id)?;
+        let request = SignIn::signed(identity, &challenge, &self.server.server_id, invite);
+        self.request(reqwest::Method::POST, "/v1/auth/sign-in")
+            .json(&request)
+            .send()
+            .await
+            .map_err(|error| error.without_url().into())
+    }
+}
+
+async fn challenge(client: &Client, address: &Url) -> Result<Challenge> {
+    let reply = client
+        .get(format!("{address}v1/auth/challenge"))
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+        .and_then(Response::error_for_status)
+        .map_err(reqwest::Error::without_url)
+        .context("request server proof")?;
+    reply
+        .json()
+        .await
+        .map_err(reqwest::Error::without_url)
+        .context("read server proof")
+}
+
+fn load_pins(file: &Path) -> Result<Vec<KnownServer>> {
+    match fs::read(file) {
+        Ok(bytes) => serde_json::from_slice(&bytes).context("read saved server pins"),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(error).context("open saved server pins"),
+    }
+}
+
+fn save_pin(data: &Path, pins: &Path, observed: &KnownServer) -> Result<()> {
+    fs::create_dir_all(data)?;
+    let lock = File::options()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(data.join("servers.lock"))?;
+    lock.lock()?;
+    let mut entries = load_pins(pins)?;
+    if let Some(known) = entries
+        .iter()
+        .find(|entry| entry.address == observed.address)
+    {
+        check_pin(Some(known), observed)?;
+    } else {
+        entries.push(observed.clone());
+        let mut file = tempfile::NamedTempFile::new_in(data)?;
+        serde_json::to_writer(&mut file, &entries)?;
+        file.flush()?;
+        file.as_file().sync_all()?;
+        file.persist(pins).context("save server pin")?;
+        tracing::info!(fingerprint = %fingerprint(&observed.server_id), "server pinned");
+    }
+    Ok(())
+}

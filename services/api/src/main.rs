@@ -1,16 +1,121 @@
-use std::{io, process::ExitCode};
+mod auth;
+mod members;
+mod roles;
+mod store;
 
-use axum::{
-    Router,
-    extract::Request,
-    middleware::{self, Next},
-    response::Response,
-    routing::get,
+use std::{
+    env,
+    io::{self, Write},
+    path::PathBuf,
+    process::ExitCode,
+    sync::Arc,
 };
+
+use anyhow::{Result, bail};
+use axum::{
+    Json, Router,
+    extract::{Request, rejection::JsonRejection},
+    http::{StatusCode, header::CACHE_CONTROL},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
+    routing::{delete, get, post, put},
+};
+use ed25519_dalek::SigningKey;
+use rusttalk_core::{
+    auth::{ProtocolError, encode},
+    identity::fingerprint,
+};
+use serde_json::json;
+use sqlx::SqlitePool;
 use tokio::net::TcpListener;
-use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
+use tower_http::{
+    limit::RequestBodyLimitLayer,
+    request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
+};
 use tracing::{Instrument, Level};
 use tracing_subscriber::{filter::Targets, prelude::*};
+
+#[derive(Clone)]
+struct App {
+    db: SqlitePool,
+    key: Arc<SigningKey>,
+}
+
+type ApiResult<T> = Result<T, ApiError>;
+
+#[derive(Debug)]
+struct ApiError {
+    status: StatusCode,
+    code: &'static str,
+}
+
+impl ApiError {
+    fn new(status: StatusCode, code: &'static str) -> Self {
+        Self { status, code }
+    }
+    fn bad_request(code: &'static str) -> Self {
+        Self::new(StatusCode::BAD_REQUEST, code)
+    }
+    fn unauthorized(code: &'static str) -> Self {
+        Self::new(StatusCode::UNAUTHORIZED, code)
+    }
+    fn forbidden(code: &'static str) -> Self {
+        Self::new(StatusCode::FORBIDDEN, code)
+    }
+    fn not_found(code: &'static str) -> Self {
+        Self::new(StatusCode::NOT_FOUND, code)
+    }
+    fn internal(code: &'static str) -> Self {
+        Self::new(StatusCode::INTERNAL_SERVER_ERROR, code)
+    }
+}
+
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.code)
+    }
+}
+
+impl std::error::Error for ApiError {}
+
+impl From<sqlx::Error> for ApiError {
+    fn from(error: sqlx::Error) -> Self {
+        let code = match error {
+            sqlx::Error::PoolTimedOut => "database_pool_timeout",
+            sqlx::Error::Database(ref error) if error.code().as_deref() == Some("5") => {
+                "database_busy"
+            }
+            _ => "database_error",
+        };
+        Self::internal(code)
+    }
+}
+
+impl From<ProtocolError> for ApiError {
+    fn from(_: ProtocolError) -> Self {
+        Self::bad_request("invalid_encoding")
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        if self.status.is_server_error() {
+            tracing::error!(reason = self.code, "request failed");
+        } else {
+            tracing::warn!(reason = self.code, "request rejected");
+        }
+        (self.status, Json(json!({ "error": self.code }))).into_response()
+    }
+}
+
+fn payload<T>(body: Result<Json<T>, JsonRejection>) -> ApiResult<T> {
+    body.map(|Json(value)| value)
+        .map_err(|error| match error.status() {
+            StatusCode::PAYLOAD_TOO_LARGE => ApiError::new(error.status(), "body_too_large"),
+            StatusCode::UNSUPPORTED_MEDIA_TYPE => ApiError::new(error.status(), "expected_json"),
+            _ => ApiError::bad_request("invalid_json"),
+        })
+}
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -22,17 +127,76 @@ async fn main() -> ExitCode {
         )
         .with(tracing_subscriber::fmt::layer().json())
         .init();
-
-    if let Err(error) = serve().await {
-        tracing::error!(%error, "API server failed");
+    if let Err(error) = run().await {
+        tracing::error!(error = %format_args!("{error:#}"), "API command failed");
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
 }
 
-async fn serve() -> io::Result<()> {
+async fn run() -> Result<()> {
+    let dir =
+        env::var_os("RUSTTALK_DATA_DIR").map_or_else(|| PathBuf::from("/data"), PathBuf::from);
+    let args: Vec<_> = env::args_os().skip(1).collect();
+    match args.as_slice() {
+        [] => {
+            let db = store::open(&dir).await?;
+            let (key, created) = store::server_key(&dir)?;
+            if created && auth::owner_pending(&db).await? {
+                tracing::info!(
+                    "Claim ownership with docker compose exec api rusttalk-api owner-invite"
+                );
+            }
+            serve(App {
+                db,
+                key: Arc::new(key),
+            })
+            .await?;
+        }
+        [cmd] if cmd == "owner-invite" => {
+            if let Some(code) = auth::owner_invite(&store::open(&dir).await?).await? {
+                writeln!(io::stdout().lock(), "{code}")?;
+            }
+        }
+        [cmd] if cmd == "server-id" || cmd == "server-fingerprint" => {
+            let (key, _) = store::server_key(&dir)?;
+            let id = key.verifying_key().to_bytes();
+            let value = if cmd == "server-id" {
+                encode(&id)
+            } else {
+                fingerprint(&id)
+            };
+            writeln!(io::stdout().lock(), "{value}")?;
+        }
+        _ => bail!("usage: rusttalk-api [owner-invite|server-id|server-fingerprint]"),
+    }
+    Ok(())
+}
+
+async fn serve(app: App) -> io::Result<()> {
+    let expiry = tokio::spawn(store::expire_sessions(app.db.clone()));
     let app = Router::new()
         .route("/v1/health", get(|| async { "ok\n" }))
+        .route("/v1/auth/challenge", get(auth::challenge))
+        .route("/v1/auth/sign-in", post(auth::sign_in))
+        .route("/v1/auth/refresh", post(auth::refresh))
+        .route("/v1/me", get(members::me))
+        .route("/v1/me/revocations", post(auth::revoke))
+        .route("/v1/invites", post(members::invite))
+        .route("/v1/invites/{id}", delete(members::revoke_invite))
+        .route("/v1/members/{person}", delete(members::kick))
+        .route("/v1/members/{person}/roles", put(roles::assign))
+        .route(
+            "/v1/bans/{person}",
+            put(members::ban).delete(members::unban),
+        )
+        .route("/v1/roles", get(roles::list).post(roles::create))
+        .route("/v1/roles/default", put(roles::set_default))
+        .route("/v1/roles/{id}", delete(roles::delete))
+        .route("/v1/owner", put(roles::transfer))
+        .route("/v1/audit", get(members::audit_log))
+        .with_state(app)
+        .layer(RequestBodyLimitLayer::new(4096))
         .layer(middleware::from_fn(log_request))
         .layer(PropagateRequestIdLayer::x_request_id())
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
@@ -43,7 +207,9 @@ async fn serve() -> io::Result<()> {
 
     let listener = TcpListener::bind("0.0.0.0:8080").await?;
     tracing::info!("API listening on port 8080");
-    axum::serve(listener, app).await
+    let result = axum::serve(listener, app).await;
+    expiry.abort();
+    result
 }
 
 async fn log_request(request: Request, next: Next) -> Response {
@@ -53,8 +219,21 @@ async fn log_request(request: Request, next: Next) -> Response {
         .and_then(|id| id.to_str().ok());
     let span = tracing::info_span!("request", request_id);
     async move {
-        let response = next.run(request).await;
-        tracing::info!(status = response.status().as_u16(), "request completed");
+        let mut response = next.run(request).await;
+        response.headers_mut().insert(
+            CACHE_CONTROL,
+            "no-store".parse().expect("static Cache-Control value"),
+        );
+        let status = response.status();
+        if status.is_client_error() || status.is_server_error() {
+            tracing::info!(
+                status = status.as_u16(),
+                reason = status.canonical_reason(),
+                "request completed"
+            );
+        } else {
+            tracing::info!(status = status.as_u16(), "request completed");
+        }
         response
     }
     .instrument(span)
