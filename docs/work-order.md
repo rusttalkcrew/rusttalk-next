@@ -37,7 +37,7 @@ content on the server, not even temporarily.
   epoch on kick, ban and revoke; space-key encryption of every name (5.1). Gate: e2e
   kicked bot cannot read the new epoch, new member reads old history, a database
   dump contains none of the test names.
-- [ ] **W07 Encrypted chat.** Messages, signatures, edits, deletes, 10,000-message
+- [x] **W07 Encrypted chat.** Messages, signatures, edits, deletes, 10,000-message
   limit, direct messages, chat UI. Gate: e2e chat both ways; ciphertext only in the
   database.
 
