@@ -108,7 +108,7 @@ impl Server {
     }
 }
 
-fn validate_origin(address: &Url) -> Result<()> {
+pub(super) fn validate_origin(address: &Url) -> Result<()> {
     ensure!(
         address.scheme() == "https"
             && address.host().is_some()
@@ -155,7 +155,7 @@ async fn challenge(client: &Client, address: &Url) -> Result<Challenge> {
         .context("read server proof")
 }
 
-fn load_pins(file: &Path) -> Result<Vec<KnownServer>> {
+pub(super) fn load_pins(file: &Path) -> Result<Vec<KnownServer>> {
     match fs::read(file) {
         Ok(bytes) => serde_json::from_slice(&bytes).context("read saved server pins"),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),

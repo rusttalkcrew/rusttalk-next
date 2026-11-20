@@ -3,6 +3,7 @@
 mod chat;
 mod keys;
 mod server;
+pub mod sync;
 #[cfg(feature = "voice")]
 pub mod voice;
 

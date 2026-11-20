@@ -384,4 +384,28 @@ Written in W13.
 
 ## Sync
 
-Written in W14.
+Both routes require a member bearer token. The API selects the row using the
+session's person ID.
+
+| Method | Request body | Response |
+| --- | --- | --- |
+| GET `/v1/me/sync` | Empty | 200 with the latest blob, or 204 if absent |
+| PUT `/v1/me/sync` | Sync blob | 204 if stored, or 409 with the current version if the submitted version is equal or lower |
+
+A blob is an eight-byte, positive signed integer version in big-endian order
+followed by the encrypted payload (24-byte nonce, ciphertext, 16-byte tag).
+The payload limit is 256 KiB including the nonce and tag. The PUT body limit
+is 256 KiB plus eight bytes. Malformed framing returns 400 and an oversized
+body returns 413. Successful GET and conflict responses use
+`application/octet-stream`. The conflict body is exactly the eight-byte
+version field. A device reloads and merges before retrying a conflict.
+
+Core takes the highest authenticated version from the member servers it can
+reach, breaking ties between replicas by lexicographically greatest origin.
+Merge unions joined origins with their pins and reports conflicts while
+preserving local pins. Saved pins protect previously seen origins, too.
+For settings and contacts the newer snapshot wins on shared fields, with
+local values winning ties. Fields present on only one side are retained.
+Apply pending local edits after merging and publish the next version to all
+current peers. A failed peer is reported separately and can catch up after
+reconnect. A restored device needs a verified member server as a starting point.

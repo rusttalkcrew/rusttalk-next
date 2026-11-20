@@ -32,6 +32,7 @@ tables in SQLite (WAL). IDs and digests are binary unless indicated. The `_ct` s
 | `key_envelope_rejections` | `scope_id`, `epoch`, `recipient_device`, `sender_person` |
 | `message_senders` | `device_id`, `person_id`, `certificate` (archived public certificate for signature verification) |
 | `messages` | `sequence` (insertion order), `id` and `channel_id` (text), `epoch`, `sender_device`, `sender_person`, `at` (Unix seconds), `size` (binary envelope length), `envelope` (public framing, nonce, ciphertext with tag, and signature) |
+| `device_sync` | `person_id`, `version`, `ciphertext` (nonce and encrypted payload with tag), `size` (ciphertext bytes), `at` (Unix seconds) |
 | `_sqlx_migrations` | `version`, `description`, `installed_on`, `success`, `checksum`, `execution_time` (migration bookkeeping) |
 
 Caddy supplies the source IP directly. Session IPs are retained with the active
@@ -50,6 +51,9 @@ Text, replies, attachment references and edit targets are inside message
 ciphertext. Explicit deletes and the retention cap remove message rows.
 Public sender certificates and audit IDs are retained for history and
 accountability.
+Each member has at most one current sync row per server. It is removed with
+membership. Settings, joined origins and pins, and contacts are encrypted
+on the device before upload. The sync key stays on the person's devices.
 SQLite backups and old WAL pages can retain past database contents.
 The API can see who is in which voice room by matching opaque LiveKit
 device identities to current channel readers. Readers see unmatched
@@ -91,8 +95,9 @@ messages stay in memory only; the log never contains them or invite links.
 
 ## Outbound connections
 
-- **Bot:** Only the configured RustTalk stack. Membership, key events, encrypted chat, signaling and failure-path
-  validation use Caddy on 8443/TCP. WebRTC uses the advertised LiveKit node on
+- **Bot:** Only the configured RustTalk stack. Membership, key events, encrypted
+  chat, device sync, signaling and failure-path validation use Caddy on 8443/TCP.
+  WebRTC uses the advertised LiveKit node on
   7882/UDP or 7881/TCP. The bot requests a voice token from the pinned API.
 - **Desktop client:** Configured RustTalk origins for pinned HTTPS and WebSocket
   connections. Voice uses the same pinned signaling path and advertised

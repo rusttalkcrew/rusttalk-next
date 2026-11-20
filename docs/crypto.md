@@ -59,6 +59,18 @@ The recovery words and root signing key are never stored. Adding or revoking
 a device requires the recovery words again. The client records the person
 fingerprint in the startup log.
 
+### Device sync
+
+Devices encrypt a JSON object containing settings and contacts keyed by field
+and joined server entries with their pins. XChaCha20-Poly1305 uses the
+32-byte identity sync key and a fresh 24-byte OS-random nonce for each
+version. Associated data is the ASCII bytes `rusttalk-sync-v1` followed by
+the eight-byte big-endian version from the header. This authenticates the
+version along with the contents. Devices can send the resulting blob
+unchanged to every member server. Server-side device revocation blocks new
+requests from that device. A revoked device can still decrypt copies it
+already holds using its copy of the sync key.
+
 ## Server identity and sessions
 
 The API creates a 32-byte Ed25519 signing seed with the OS random number
@@ -86,8 +98,8 @@ Each server has a separate space scope, and each text, voice or DM channel
 has a channel scope. Each epoch key is 32 independent OS-random bytes.
 The owner creates space epoch 1 on claim and uploads a self-addressed
 envelope. A channel creator creates channel epoch 1 and uploads its
-self-addressed envelope with channel creation. The identity sync key is
-separate and reserved for device sync in W14.
+self-addressed envelope with channel creation. The identity sync key is used
+exclusively for device sync.
 
 The epoch creator stores a 32-byte commitment with the epoch. It computes
 HMAC-SHA256 keyed by the epoch key over these bytes.

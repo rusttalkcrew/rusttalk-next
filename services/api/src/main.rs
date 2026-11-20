@@ -8,6 +8,7 @@ mod messages;
 mod metadata;
 mod roles;
 mod store;
+mod sync;
 mod voice;
 
 use std::{
@@ -256,6 +257,13 @@ async fn serve(app: App) -> io::Result<()> {
         .route("/v1/audit", get(members::audit_log))
         .layer(RequestBodyLimitLayer::new(4096))
         .route("/internal/livekit", post(voice::webhook))
+        .merge(
+            Router::new()
+                .route(rusttalk_core::sync::PATH, get(sync::get).put(sync::put))
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    rusttalk_core::sync::MAX_BODY,
+                )),
+        )
         .merge(
             Router::new()
                 .route("/v1/space", put(metadata::update_space))
