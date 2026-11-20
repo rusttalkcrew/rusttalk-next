@@ -6,7 +6,7 @@ use image::{DynamicImage, ImageFormat, Rgb, RgbImage};
 use reqwest::{Body, Method, StatusCode};
 use rusttalk_core::{
     auth::encode,
-    client::{KeyClient, MessageBody, Server, decode_image},
+    client::{KeyClient, MessageBody, Server, decode_thumbnail},
     keys::random_key,
 };
 use serde_json::json;
@@ -109,7 +109,7 @@ pub(super) async fn scenario(
     let thumbnail = b
         .download_file(image.thumbnail.as_ref().context("missing thumbnail")?)
         .await?;
-    let thumbnail = decode_image(&thumbnail)?.into_rgb8();
+    let thumbnail = decode_thumbnail(&thumbnail)?.into_rgb8();
     assert_eq!(thumbnail.dimensions(), (320, 120));
     assert_eq!(*thumbnail.get_pixel(100, 50), Rgb([19, 83, 211]));
     rejected(

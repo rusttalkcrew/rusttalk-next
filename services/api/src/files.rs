@@ -1,6 +1,8 @@
 use std::{
+    collections::HashMap,
     env, io,
     path::{Path, PathBuf},
+    sync::Mutex,
     time::Duration,
 };
 
@@ -17,7 +19,12 @@ use rusttalk_core::auth::decode;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::{FromRow, SqliteConnection, SqlitePool, query, query_as, query_scalar};
-use tokio::{fs, io::AsyncWriteExt, sync::Semaphore, time};
+use tokio::{
+    fs,
+    io::AsyncWriteExt,
+    sync::{Semaphore, SemaphorePermit},
+    time,
+};
 use tokio_util::io::ReaderStream;
 use tracing::Instrument;
 
@@ -36,6 +43,32 @@ pub struct Files {
     max_server: i64,
     ttl: i64,
     uploads: Semaphore,
+    uploaders: Mutex<HashMap<[u8; 32], usize>>,
+}
+
+/// Uploads one member may stage at once, so a single slow sender cannot hold every slot.
+const UPLOADS_PER_MEMBER: usize = 2;
+
+struct UploadSlot<'a> {
+    files: &'a Files,
+    person: [u8; 32],
+    _permit: SemaphorePermit<'a>,
+}
+
+impl Drop for UploadSlot<'_> {
+    fn drop(&mut self) {
+        let mut uploaders = self
+            .files
+            .uploaders
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(count) = uploaders.get_mut(&self.person) {
+            *count -= 1;
+            if *count == 0 {
+                uploaders.remove(&self.person);
+            }
+        }
+    }
 }
 
 impl Files {
@@ -47,10 +80,26 @@ impl Files {
             max_server: setting("RUSTTALK_FILE_SERVER_BYTES", 5 * 1024 * 1024 * 1024)?,
             ttl: setting("RUSTTALK_FILE_TTL_SECS", 30 * 24 * 60 * 60)?,
             uploads: Semaphore::new(4),
+            uploaders: Mutex::default(),
         };
         fs::create_dir_all(&files.dir).await?;
         files.remove_orphans(db).await?;
         Ok(files)
+    }
+
+    fn upload_slot(&self, person: [u8; 32]) -> ApiResult<UploadSlot<'_>> {
+        let busy = || ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "file_upload_busy");
+        let mut uploaders = self.uploaders.lock().unwrap_or_else(|e| e.into_inner());
+        if uploaders.get(&person).copied().unwrap_or(0) >= UPLOADS_PER_MEMBER {
+            return Err(busy());
+        }
+        let permit = self.uploads.try_acquire().map_err(|_| busy())?;
+        *uploaders.entry(person).or_default() += 1;
+        Ok(UploadSlot {
+            files: self,
+            person,
+            _permit: permit,
+        })
     }
 
     async fn remove_orphans(&self, db: &SqlitePool) -> Result<()> {
@@ -115,10 +164,7 @@ pub async fn upload(
     {
         return Err(too_large());
     }
-    let _slot = files
-        .uploads
-        .try_acquire()
-        .map_err(|_| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "file_upload_busy"))?;
+    let _slot = files.upload_slot(actor.person)?;
     let temp = tempfile::Builder::new()
         .prefix(".upload-")
         .tempfile_in(&files.dir)
@@ -365,5 +411,39 @@ pub async fn expire(app: App) {
         if let Err(error) = result {
             tracing::error!(reason = error.code, "file expiry failed");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn one_member_cannot_hold_every_upload_slot() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let db = store::open(dir.path()).await?;
+        let files = Files::open(dir.path(), &db).await?;
+        let a = files
+            .upload_slot([1; 32])
+            .map_err(|e| anyhow::anyhow!(e.code))?;
+        let _a2 = files
+            .upload_slot([1; 32])
+            .map_err(|e| anyhow::anyhow!(e.code))?;
+        assert!(files.upload_slot([1; 32]).is_err());
+        let _b = files
+            .upload_slot([2; 32])
+            .map_err(|e| anyhow::anyhow!(e.code))?;
+        let _b2 = files
+            .upload_slot([2; 32])
+            .map_err(|e| anyhow::anyhow!(e.code))?;
+        // Every global slot is taken, so a third member waits even with no uploads of its own.
+        assert!(files.upload_slot([3; 32]).is_err());
+        assert_eq!(files.uploaders.lock().unwrap().len(), 2);
+        drop(a);
+        let _c = files
+            .upload_slot([3; 32])
+            .map_err(|e| anyhow::anyhow!(e.code))?;
+        assert!(files.upload_slot([1; 32]).is_err());
+        Ok(())
     }
 }
