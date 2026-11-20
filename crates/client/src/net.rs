@@ -1022,6 +1022,8 @@ fn build(
     for category in &mut categories {
         category.channels.sort_by_key(|channel| channel.voice);
     }
+    // Stable, so voice-only categories follow the rest in server order.
+    categories.sort_by_key(|c| !c.channels.is_empty() && c.channels.iter().all(|ch| ch.voice));
     if !loose.is_empty() {
         categories.insert(
             0,
