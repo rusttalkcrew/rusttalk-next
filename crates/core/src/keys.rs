@@ -343,7 +343,7 @@ impl Metadata {
     }
 }
 
-fn seal(key: &Key, aad: &[u8], msg: &[u8]) -> Result<Vec<u8>, KeyError> {
+pub(crate) fn seal(key: &Key, aad: &[u8], msg: &[u8]) -> Result<Vec<u8>, KeyError> {
     let mut nonce = [0; NONCE];
     random_bytes(&mut nonce)?;
     let ct = XChaCha20Poly1305::new(&(**key).into())
@@ -352,7 +352,7 @@ fn seal(key: &Key, aad: &[u8], msg: &[u8]) -> Result<Vec<u8>, KeyError> {
     Ok([nonce.as_slice(), &ct].concat())
 }
 
-fn open(key: &Key, aad: &[u8], bytes: &[u8]) -> Result<Vec<u8>, KeyError> {
+pub(crate) fn open(key: &Key, aad: &[u8], bytes: &[u8]) -> Result<Vec<u8>, KeyError> {
     let (nonce, msg) = bytes
         .split_first_chunk::<NONCE>()
         .ok_or(KeyError::Encoding)?;

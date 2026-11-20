@@ -21,7 +21,7 @@ use rusttalk_core::{
     client::{
         Catalog, Event, KeyClient, MessageBody, MessageError, MessageRecord, Server as Api,
         invite_name, save_json,
-        voice::{ConnectionState, RoomEvent, VoiceRoom, VoiceRoster, VoiceState},
+        voice::{ConnectionState, RoomEvent, TrackSid, VoiceRoom, VoiceRoster, VoiceState},
     },
     identity::{DeviceIdentity, fingerprint},
     keys::Metadata,
@@ -40,6 +40,7 @@ use crate::{
         Body, CallState, Category, Channel, Device, Directory, Dm, Id, Member, Msg, Peer, Perms,
         Stats, Status, TrackStats, member_name,
     },
+    share::{self, App, Capture},
 };
 
 const PAGE: u32 = 50;
@@ -76,6 +77,9 @@ pub enum Command {
     Invite,
     JoinVoice(Id),
     LeaveVoice,
+    ShareApp(App),
+    /// Stop sharing an app, by its ID.
+    StopApp(String),
 }
 
 pub struct Preview {
@@ -106,6 +110,8 @@ pub enum Update {
     Call(Url, Id, Option<CallState>),
     /// Everyone in one voice channel.
     Room(Url, Id, Vec<Peer>),
+    /// Sharing this app stopped or never started.
+    AppStopped(String),
     Stats(Url, Stats),
     Failed(String),
 }
@@ -296,6 +302,15 @@ struct State {
 struct Live {
     room: VoiceRoom,
     channel: Id,
+    /// Apps this device shares, each with its own track.
+    shares: Vec<Share>,
+}
+
+struct Share {
+    app: App,
+    sid: TrackSid,
+    /// Stops capturing when dropped.
+    capture: Capture,
 }
 
 enum Failure {
@@ -530,7 +545,10 @@ async fn serve(
                 }
             }
             event = next_voice(&mut state.voice) => on_voice(ctx, url, client, state, event),
-            _ = stats.tick(), if state.voice.is_some() => voice_stats(ctx, url, client, state).await,
+            _ = stats.tick(), if state.voice.is_some() => {
+                stop_finished_shares(ctx, url, client, state).await;
+                voice_stats(ctx, url, client, state).await;
+            }
         }
     }
 }
@@ -704,7 +722,11 @@ async fn on_command(
                 }
             };
             tracing::info!(server = %fingerprint(&state.server_id), "joined voice");
-            state.voice = Some(Live { room, channel });
+            state.voice = Some(Live {
+                room,
+                channel,
+                shares: Vec::new(),
+            });
             ctx.send(Update::Call(
                 url.clone(),
                 channel,
@@ -713,6 +735,50 @@ async fn on_command(
             send_room(ctx, url, client, state, channel);
         }
         Command::LeaveVoice => leave_voice(ctx, url, client, state),
+        Command::ShareApp(app) => {
+            let Some(live) = &mut state.voice else {
+                ctx.send(Update::AppStopped(app.id));
+                return Ok(());
+            };
+            let started = async {
+                let target = app.clone();
+                // shortcut: starting waits for the app's first audio (up to seconds) and holds
+                // this server's loop meanwhile; move it to its own task if that gets noticed.
+                let (capture, source) =
+                    tokio::task::spawn_blocking(move || share::capture(&target)).await??;
+                let sid = share::publish(&live.room, &app, source).await?;
+                anyhow::Ok((capture, sid))
+            };
+            match started.await {
+                Ok((capture, sid)) => {
+                    tracing::info!("sharing app audio");
+                    live.shares.push(Share { app, sid, capture });
+                    let channel = live.channel;
+                    send_room(ctx, url, client, state, channel);
+                }
+                Err(error) => {
+                    tracing::warn!(error = %format_args!("{error:#}"), "sharing app audio failed");
+                    let text = format!("Couldn't share {}. Is it still playing?", app.name);
+                    ctx.send(Update::AppStopped(app.id));
+                    ctx.send(Update::Failed(text));
+                }
+            }
+        }
+        Command::StopApp(id) => {
+            let Some(live) = &mut state.voice else {
+                return Ok(());
+            };
+            let Some(at) = live.shares.iter().position(|share| share.app.id == id) else {
+                return Ok(());
+            };
+            let share = live.shares.remove(at);
+            tracing::info!("stopped sharing app audio");
+            let channel = live.channel;
+            send_room(ctx, url, client, state, channel);
+            if let Some(live) = &mut state.voice {
+                live.room.unpublish_audio(&share.sid).await?;
+            }
+        }
     }
     Ok(())
 }
@@ -980,6 +1046,8 @@ fn build(
     for category in &mut categories {
         category.channels.sort_by_key(|channel| channel.voice);
     }
+    // Stable, so voice-only categories follow the rest in server order.
+    categories.sort_by_key(|c| !c.channels.is_empty() && c.channels.iter().all(|ch| ch.voice));
     if !loose.is_empty() {
         categories.insert(
             0,
@@ -1191,15 +1259,36 @@ fn send_room(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &State, channe
             person,
             connecting: false,
             unknown: false,
+            apps: Vec::new(),
         })),
         Some(live) => {
             let ids = identities(client, &state.server_id);
             let mut live_people: HashMap<Id, bool> = HashMap::new();
+            let mut apps: HashMap<Id, Vec<String>> = HashMap::new();
             for (participant, voice) in live.room.participants() {
                 if let Some(person) = ids.get(participant.identity().as_str()) {
                     *live_people.entry(*person).or_default() |= voice == VoiceState::Connected;
+                    apps.entry(*person).or_default().extend(
+                        participant
+                            .track_publications()
+                            .values()
+                            .filter_map(|publication| match publication.track()? {
+                                RemoteTrack::Audio(track) => share::app_name(&live.room, &track),
+                                RemoteTrack::Video(_) => None,
+                            }),
+                    );
                 }
             }
+            for names in apps.values_mut() {
+                names.sort();
+            }
+            apps.insert(
+                me,
+                live.shares
+                    .iter()
+                    .map(|share| share.app.name.clone())
+                    .collect(),
+            );
             people.extend(live_people.keys().copied());
             people.push(me);
             people.sort();
@@ -1215,6 +1304,7 @@ fn send_room(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &State, channe
                     person,
                     connecting: !ok,
                     unknown: false,
+                    apps: apps.remove(&person).unwrap_or_default(),
                 });
             }
         }
@@ -1223,6 +1313,7 @@ fn send_room(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &State, channe
         person: [0; 32],
         connecting: false,
         unknown: true,
+        apps: Vec::new(),
     }));
     ctx.send(Update::Room(url.clone(), channel, peers));
 }
@@ -1259,9 +1350,13 @@ fn on_voice(
             if person.is_none() {
                 tracing::warn!("voice track from a device this client doesn't know yet");
             }
+            let app = state
+                .voice
+                .as_ref()
+                .and_then(|live| share::app_name(&live.room, &track));
             let sid = track.sid().to_string();
             ctx.audio
-                .add_track(sid, person.unwrap_or_default(), track.rtc_track());
+                .add_track(sid, (person.unwrap_or_default(), app), track.rtc_track());
         }
         RoomEvent::TrackUnsubscribed { track, .. } => {
             ctx.audio.remove_track(track.sid().as_str());
@@ -1295,6 +1390,29 @@ fn on_voice(
     send_room(ctx, url, client, state, channel);
 }
 
+/// Stop sharing apps that closed or whose capture stopped by itself.
+async fn stop_finished_shares(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &mut State) {
+    let Some(live) = &mut state.voice else {
+        return;
+    };
+    let (ended, kept): (Vec<Share>, _) = std::mem::take(&mut live.shares)
+        .into_iter()
+        .partition(|share| share.capture.is_finished());
+    live.shares = kept;
+    if ended.is_empty() {
+        return;
+    }
+    for share in &ended {
+        tracing::info!("app audio capture ended");
+        if let Err(error) = live.room.unpublish_audio(&share.sid).await {
+            tracing::warn!(error = %format_args!("{error:#}"), "stopping app audio failed");
+        }
+        ctx.send(Update::AppStopped(share.app.id.clone()));
+    }
+    let channel = live.channel;
+    send_room(ctx, url, client, state, channel);
+}
+
 /// The connection panel's numbers, from the SDK's WebRTC stats.
 async fn voice_stats(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &mut State) {
     let Some(live) = &mut state.voice else {
@@ -1309,6 +1427,16 @@ async fn voice_stats(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &mut S
     };
     let ids = identities(client, &state.server_id);
     let me = *ctx.identity.certificate.person_id();
+    let mut apps: HashMap<TrackSid, String> = live
+        .shares
+        .iter()
+        .map(|share| (share.sid.clone(), share.app.name.clone()))
+        .collect();
+    for (_, sid, track) in live.room.remote_audio_tracks() {
+        if let Some(name) = share::app_name(&live.room, &track) {
+            apps.insert(sid, name);
+        }
+    }
     let (sent, received): (Vec<_>, Vec<_>) = snapshot.tracks.iter().partition(|t| t.outbound);
     let lost = |tracks: &[&rusttalk_core::client::voice::TrackStats]| {
         tracks
@@ -1332,6 +1460,7 @@ async fn voice_stats(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &mut S
                         *ids.get(t.participant.as_str())?
                     },
                     mine: t.outbound,
+                    app: apps.get(&t.sid).cloned(),
                     kbps: t.bitrate_bps? / 1000.0,
                 })
             })

@@ -3,8 +3,9 @@
 //! Microphone: cpal capture → 48 kHz mono → WebRTC audio processing (echo
 //! cancellation, noise suppression, auto gain) → push-to-talk or voice gate →
 //! the `NativeAudioSource` that voice publishes.
-//! Speakers: each remote track is read as 48 kHz mono, scaled per person, mixed
-//! and played through cpal; the mix also feeds the echo canceller.
+//! Speakers: each remote track is read as 48 kHz mono, scaled per stream (a
+//! person's voice or one app they share), mixed and played through cpal; the mix
+//! also feeds the echo canceller.
 
 use std::{
     borrow::Cow,
@@ -150,17 +151,20 @@ struct Shared {
     start: Instant,
 }
 
+/// A person's voice (`None`) or one app they share, by its name.
+pub type StreamId = (Id, Option<String>);
+
 #[derive(Default)]
 struct Mixer {
     tracks: HashMap<String, Track>,
     serial: u64,
-    /// Per-person volume (1.0 is normal) and mute.
-    people: HashMap<Id, (f32, bool)>,
+    /// Per-stream volume (1.0 is normal) and mute.
+    volumes: HashMap<StreamId, (f32, bool)>,
 }
 
 struct Track {
     serial: u64,
-    person: Id,
+    stream: StreamId,
     queue: VecDeque<i16>,
     primed: bool,
     loud: u64,
@@ -180,7 +184,7 @@ enum Mic {
     Far([i16; FRAME]),
 }
 
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+pub fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     // A panicking audio callback must not take the UI down with it.
     mutex
         .lock()
@@ -349,23 +353,24 @@ impl Audio {
         self.shared().now() < self.shared().talked.load(Relaxed) + SPEAKING_MS
     }
 
+    /// This person's voice is loud right now; shared apps don't count.
     pub fn speaking(&self, person: &Id) -> bool {
         let now = self.shared().now();
         lock(&self.shared().mixer)
             .tracks
             .values()
-            .any(|track| track.person == *person && now < track.loud + SPEAKING_MS)
+            .any(|track| track.stream == (*person, None) && now < track.loud + SPEAKING_MS)
     }
 
-    pub fn volume(&self, person: &Id) -> (f32, bool) {
+    pub fn volume(&self, stream: &StreamId) -> (f32, bool) {
         let mixer = lock(&self.shared().mixer);
-        mixer.people.get(person).copied().unwrap_or((1.0, false))
+        mixer.volumes.get(stream).copied().unwrap_or((1.0, false))
     }
 
-    pub fn set_volume(&self, person: Id, volume: f32, muted: bool) {
+    pub fn set_volume(&self, stream: StreamId, volume: f32, muted: bool) {
         lock(&self.shared().mixer)
-            .people
-            .insert(person, (volume, muted));
+            .volumes
+            .insert(stream, (volume, muted));
     }
 
     /// Start or stop keeping frame levels for calibration; stopping returns them.
@@ -374,7 +379,7 @@ impl Audio {
     }
 
     /// Play a remote audio track until it ends or is removed.
-    pub fn add_track(&self, sid: String, person: Id, track: RtcAudioTrack) {
+    pub fn add_track(&self, sid: String, stream: StreamId, track: RtcAudioTrack) {
         let serial = {
             let mut mixer = lock(&self.shared().mixer);
             mixer.serial += 1;
@@ -384,7 +389,7 @@ impl Audio {
                 sid.clone(),
                 Track {
                     serial,
-                    person,
+                    stream,
                     queue: VecDeque::with_capacity(CAP + FRAME),
                     primed: false,
                     loud: 0,
@@ -773,14 +778,16 @@ fn play<T: SizedSample + FromSample<i16>>(
     )?)
 }
 
-/// 10 ms of all tracks at their people's volumes.
+/// 10 ms of all tracks at their streams' volumes.
 fn mix(shared: &Shared) -> [i16; FRAME] {
     let mut sum = [0f32; FRAME];
     let deafened = shared.deafened.load(Relaxed);
     let mut mixer = lock(&shared.mixer);
-    let Mixer { tracks, people, .. } = &mut *mixer;
+    let Mixer {
+        tracks, volumes, ..
+    } = &mut *mixer;
     for track in tracks.values_mut() {
-        let (volume, muted) = people.get(&track.person).copied().unwrap_or((1.0, false));
+        let (volume, muted) = volumes.get(&track.stream).copied().unwrap_or((1.0, false));
         let gain = if deafened || muted { 0.0 } else { volume };
         track.primed |= track.queue.len() >= PRIME;
         if !track.primed {

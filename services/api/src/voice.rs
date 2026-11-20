@@ -205,7 +205,7 @@ pub async fn token(
             can_publish_data: Some(false),
             can_subscribe: Some(true),
             can_publish_sources: if speak {
-                vec!["microphone".into()]
+                vec!["microphone".into(), "screen_share_audio".into()]
             } else {
                 Vec::new()
             },

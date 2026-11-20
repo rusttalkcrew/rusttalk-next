@@ -8,6 +8,7 @@ Components: caddy (TLS edge), api (Rust, axum, SQLite), livekit (unmodified upst
 crates/core      identity, crypto, protocol types (shared by client, bot, api)
 crates/client    desktop app
 crates/bot       headless test client
+crates/pipewire  Linux per-stream audio capture helper
 services/api     server
 services/index   directory service
 deploy/          compose files, caddy and livekit config
@@ -31,3 +32,17 @@ validation for this connection, so the same certificate works on loopback
 and on the LAN address. A missing or different pin stops the join. The SDK
 registration covers one signaling origin per process.
 [SDK transport hooks](https://github.com/livekit/rust-sdks/blob/livekit/v0.11.0/livekit-net/src/lib.rs#L43-L63).
+
+
+## Application audio
+
+The core `capture` feature lists and starts local app audio on Linux and
+Windows and emits 48 kHz stereo s16 PCM in 10 ms frames. On Windows it calls
+WASAPI process loopback from a COM MTA thread. On Linux the desktop client
+and bot launch the sibling `rusttalk-pipewire` executable. It uses PipeWire
+0.10.1 and system libpipewire. Keeping its dependency graph separate
+prevents the weak PipeWire stubs in the prebuilt WebRTC archive from
+shadowing libpipewire entry points. The helper reports the running playback
+nodes as JSON and sends PCM on a private stdout pipe. It adds a capture
+stream targeting the selected PipeWire object serial, with target fallback
+and moving disabled. The playback stream keeps its existing output.

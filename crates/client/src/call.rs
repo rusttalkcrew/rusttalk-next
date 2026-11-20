@@ -1,18 +1,23 @@
 //! Voice in the window: who is in each room, the call bar, the room view,
 //! the connection panel and Settings → Voice.
 
-use std::time::{Duration, Instant};
+use std::{
+    sync::{Arc, Mutex},
+    thread,
+    time::{Duration, Instant},
+};
 
 use eframe::egui::{
     self, Align, Button, Color32, ComboBox, Event, Frame, Grid, Key, Layout, Margin, Popup,
-    RichText, Role, Sense, Slider, Stroke, Ui, Vec2, Window,
+    PopupCloseBehavior, RichText, Role, Sense, Slider, Stroke, Ui, Vec2, Window,
 };
 
 use crate::{
-    audio::{self, Audio, Settings},
+    audio::{self, Audio, Settings, StreamId},
     home::{Home, Tab, avatar, palette, section},
     net::Command,
     server::{Call, CallState, Id, Server, Stats},
+    share::{self, App, Support},
 };
 
 const GREEN: Color32 = Color32::from_rgb(0x23, 0xa5, 0x5a);
@@ -27,8 +32,19 @@ pub struct Voice {
     pub audio: Audio,
     pub call: Option<Call>,
     pub show_stats: bool,
+    /// Apps this device shares in the call.
+    pub shares: Vec<App>,
+    /// Apps playing sound when the picker opened, filled by a listing thread.
+    apps: Arc<Mutex<Apps>>,
+    support: Support,
     calibration: Option<Calibration>,
     picking_key: bool,
+}
+
+enum Apps {
+    Loading,
+    Failed,
+    Found(Vec<App>),
 }
 
 enum Calibration {
@@ -44,6 +60,9 @@ impl Voice {
             audio,
             call: None,
             show_stats: false,
+            shares: Vec::new(),
+            apps: Arc::new(Mutex::new(Apps::Loading)),
+            support: share::support(),
             calibration: None,
             picking_key: false,
         }
@@ -88,6 +107,7 @@ pub fn leave(home: &mut Home) {
     };
     home.voice.audio.set_voice(false);
     home.voice.show_stats = false;
+    home.voice.shares.clear();
     if let Some(server) = home.servers.iter().find(|s| s.address == call.server) {
         server.send(Command::LeaveVoice);
     }
@@ -131,8 +151,25 @@ pub fn room_list(ui: &mut Ui, home: &Home, server: &Server, channel: &Id) {
             }
         });
         let row = row.response.interact(Sense::click());
-        if peer.person != server.dir.me && !peer.unknown && home.voice.in_call(server, channel) {
-            Popup::context_menu(&row).show(|ui| person_menu(ui, &home.voice.audio, &peer.person));
+        let listening =
+            peer.person != server.dir.me && !peer.unknown && home.voice.in_call(server, channel);
+        if listening {
+            Popup::context_menu(&row)
+                .show(|ui| stream_menu(ui, &home.voice.audio, &(peer.person, None)));
+        }
+        for app in &peer.apps {
+            let stream = (peer.person, Some(app.clone()));
+            let row = ui.horizontal(|ui| {
+                ui.add_space(52.0);
+                ui.label(RichText::new(format!("🎵 {app}")).small());
+                if listening && home.voice.audio.volume(&stream).1 {
+                    ui.label(RichText::new("Muted").small().weak());
+                }
+            });
+            if listening {
+                let row = row.response.interact(Sense::click());
+                Popup::context_menu(&row).show(|ui| stream_menu(ui, &home.voice.audio, &stream));
+            }
         }
     }
 }
@@ -145,23 +182,27 @@ fn ring(ui: &Ui, rect: egui::Rect) {
     );
 }
 
-/// Volume and mute for one person, in their context menu.
-pub fn person_menu(ui: &mut Ui, audio: &Audio, person: &Id) {
-    let (mut volume, mut muted) = audio.volume(person);
+/// Volume and mute for a person's voice or one app they share, in its context menu.
+pub fn stream_menu(ui: &mut Ui, audio: &Audio, stream: &StreamId) {
+    let (mut volume, mut muted) = audio.volume(stream);
     let before = (volume, muted);
     ui.label("Volume");
+    volume_slider(ui, &mut volume);
+    ui.checkbox(&mut muted, "Mute");
+    if (volume, muted) != before {
+        audio.set_volume(stream.clone(), volume, muted);
+    }
+}
+
+fn volume_slider(ui: &mut Ui, volume: &mut f32) -> egui::Response {
     ui.add(
-        Slider::new(&mut volume, 0.0..=2.0)
+        Slider::new(volume, 0.0..=2.0)
             .custom_formatter(|value, _| format!("{:.0}%", value * 100.0))
             .custom_parser(|text| {
                 let percent: f64 = text.trim().trim_end_matches('%').parse().ok()?;
                 Some(percent / 100.0)
             }),
-    );
-    ui.checkbox(&mut muted, "Mute");
-    if (volume, muted) != before {
-        audio.set_volume(*person, volume, muted);
-    }
+    )
 }
 
 /// The bar at the bottom of the channel list while in a voice room.
@@ -182,7 +223,10 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
         CallState::Reconnecting => ("Reconnecting…", AMBER),
     };
     let audio = home.voice.audio.clone();
+    let connected = call.state == CallState::Connected;
     let mut leave_now = false;
+    let mut share = None;
+    let mut stop = None;
     Frame::new()
         .fill(ui.visuals().extreme_bg_color)
         .corner_radius(6)
@@ -235,10 +279,107 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
                     leave_now = hang.clicked();
                 });
             });
+            if home.voice.support != Support::No {
+                share_picker(ui, &mut home.voice, connected, &mut share, &mut stop);
+            }
         });
+    let server = home
+        .voice
+        .call
+        .as_ref()
+        .and_then(|call| home.servers.iter().find(|s| s.address == call.server));
+    if let (Some(server), Some((app, on))) = (server, share) {
+        if on {
+            home.voice.shares.push(app.clone());
+            server.send(Command::ShareApp(app));
+        } else {
+            home.voice.shares.retain(|shared| shared.id != app.id);
+            server.send(Command::StopApp(app.id.clone()));
+        }
+    }
+    if let (Some(server), Some(id)) = (server, stop) {
+        home.voice.shares.retain(|shared| shared.id != id);
+        server.send(Command::StopApp(id));
+    }
     if leave_now {
         leave(home);
     }
+}
+
+/// "Share app audio", its app picker, and a chip with a stop button per shared app.
+fn share_picker(
+    ui: &mut Ui,
+    voice: &mut Voice,
+    connected: bool,
+    share: &mut Option<(App, bool)>,
+    stop: &mut Option<String>,
+) {
+    let button = Button::new("🎵  Share app audio").min_size(Vec2::new(ui.available_width(), 28.0));
+    let button = if voice.support == Support::NeedsWindows11 {
+        ui.add_enabled(false, button)
+            .on_disabled_hover_text("Needs Windows 11")
+    } else {
+        ui.add_enabled(connected, button)
+    };
+    if button.clicked() {
+        *audio::lock(&voice.apps) = Apps::Loading;
+        let slot = voice.apps.clone();
+        let ctx = ui.ctx().clone();
+        // Listing starts a helper process on Linux; keep it off the UI thread.
+        thread::spawn(move || {
+            let found = match share::list() {
+                Ok(found) => Apps::Found(found),
+                Err(error) => {
+                    tracing::warn!(error = %format_args!("{error:#}"), "listing apps failed");
+                    Apps::Failed
+                }
+            };
+            *audio::lock(&slot) = found;
+            ctx.request_repaint();
+        });
+    }
+    Popup::menu(&button)
+        .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| {
+            ui.set_min_width(200.0);
+            ui.label(RichText::new("Pick apps to share").strong());
+            match &*audio::lock(&voice.apps) {
+                Apps::Loading => {
+                    ui.spinner();
+                }
+                Apps::Failed => {
+                    ui.weak("Couldn't look for apps. Try again.");
+                }
+                Apps::Found(apps) if apps.is_empty() => {
+                    ui.weak("No apps are playing sound.");
+                }
+                Apps::Found(apps) => {
+                    for app in apps {
+                        let was = voice.shares.iter().any(|shared| shared.id == app.id);
+                        let mut on = was;
+                        ui.checkbox(&mut on, &app.name);
+                        if on != was {
+                            *share = Some((app.clone(), on));
+                        }
+                    }
+                }
+            }
+        });
+    ui.horizontal_wrapped(|ui| {
+        for app in &voice.shares {
+            let chip = ui
+                .add(Button::new(
+                    RichText::new(format!("🎵 {}  ×", app.name)).small(),
+                ))
+                .on_hover_text("Stop sharing");
+            chip.widget_info(|| {
+                egui::WidgetInfo::labeled(Role::Button, true, format!("Stop sharing {}", app.name))
+            });
+            if chip.clicked() {
+                *stop = Some(app.id.clone());
+            }
+        }
+    });
 }
 
 /// An icon button; `on` fills it, with `fill` or the selection color.
@@ -295,7 +436,7 @@ pub fn room(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
                             ui.weak("Deafened");
                         } else if me && home.voice.audio.muted() {
                             ui.weak("Muted");
-                        } else if !me && home.voice.audio.volume(&peer.person).1 {
+                        } else if !me && home.voice.audio.volume(&(peer.person, None)).1 {
                             ui.weak("Muted by you");
                         } else {
                             ui.label(" ");
@@ -305,15 +446,69 @@ pub fn room(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
             let tile = tile.response.interact(Sense::click());
             if !me && !peer.unknown && joined {
                 Popup::context_menu(&tile)
-                    .show(|ui| person_menu(ui, &home.voice.audio, &peer.person));
+                    .show(|ui| stream_menu(ui, &home.voice.audio, &(peer.person, None)));
             }
         }
     });
+    if peers.iter().any(|peer| !peer.apps.is_empty()) {
+        ui.add_space(12.0);
+        section(ui, "Shared audio");
+        let mut stop = None;
+        Grid::new("shared audio")
+            .num_columns(3)
+            .spacing(Vec2::new(12.0, 6.0))
+            .show(ui, |ui| {
+                for peer in &peers {
+                    let me = peer.person == server.dir.me;
+                    let name = if me { "You".into() } else { peer.name(server) };
+                    for app in &peer.apps {
+                        ui.label(format!("{name} · {app}"));
+                        if me {
+                            if ui.button("Stop sharing").clicked() {
+                                stop = home
+                                    .voice
+                                    .shares
+                                    .iter()
+                                    .find(|s| s.name == *app)
+                                    .map(|s| s.id.clone());
+                            }
+                            ui.label("");
+                        } else {
+                            stream_row(
+                                ui,
+                                &home.voice.audio,
+                                (peer.person, Some(app.clone())),
+                                &format!("{name} · {app}"),
+                            );
+                        }
+                        ui.end_row();
+                    }
+                }
+            });
+        if let Some(id) = stop {
+            home.voice.shares.retain(|shared| shared.id != id);
+            home.servers[index].send(Command::StopApp(id));
+        }
+    }
     if !joined {
         ui.add_space(12.0);
         if crate::app::primary(ui, "Join voice").clicked() {
             join(home, index, channel);
         }
+    }
+}
+
+/// Volume slider and mute button for one stream, in a grid row.
+fn stream_row(ui: &mut Ui, audio: &Audio, stream: StreamId, name: &str) {
+    let (mut volume, muted) = audio.volume(&stream);
+    let slider = volume_slider(ui, &mut volume);
+    slider.widget_info(|| egui::WidgetInfo::labeled(Role::Slider, true, format!("{name} volume")));
+    let icon = if muted { "🔇" } else { "🔊" };
+    let label = if muted { "Unmute" } else { "Mute" };
+    let fill = muted.then_some(RED.gamma_multiply(0.6));
+    let mute = toggle(ui, icon, &format!("{label} {name}"), fill);
+    if slider.changed() || mute.clicked() {
+        audio.set_volume(stream, volume, muted ^ mute.clicked());
     }
 }
 
@@ -361,7 +556,10 @@ pub fn stats_window(ctx: &egui::Context, home: &mut Home) {
                         (false, Some(server)) => server.member_name(&track.person),
                         (false, None) => String::new(),
                     };
-                    ui.label(name);
+                    match &track.app {
+                        Some(app) => ui.label(format!("{name} · {app}")),
+                        None => ui.label(name),
+                    };
                     ui.label(format!("{:.0} kbps", track.kbps));
                     ui.end_row();
                 }

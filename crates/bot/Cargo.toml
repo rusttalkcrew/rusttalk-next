@@ -10,7 +10,7 @@ required-features = ["media"]
 
 [features]
 default = ["media"]
-media = ["dep:clap", "dep:livekit", "dep:tracing", "dep:tracing-subscriber", "dep:futures-util", "rusttalk-core/voice"]
+media = ["dep:clap", "dep:livekit", "dep:tracing", "dep:tracing-subscriber", "dep:futures-util", "rusttalk-core/voice", "rusttalk-core/capture", "dep:tempfile"]
 
 [dependencies]
 anyhow = "1"
@@ -22,6 +22,8 @@ rusttalk-core = { path = "../core", features = ["client"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time"] }
 tracing = { version = "0.1", optional = true }
 tracing-subscriber = { version = "0.3", optional = true }
+
+tempfile = { version = "3", optional = true }
 
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }

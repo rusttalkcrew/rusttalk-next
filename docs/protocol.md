@@ -299,8 +299,24 @@ device_signing_public_key`, with each ID as 32 raw bytes. It carries
 no display name or metadata. It permits subscription. It denies data
 publication, because data channel payloads bypass frame encryption, and
 clients drop received data channel events. Track publication requires
-the `speak` flag from at least one assigned role. W08 publishes
-microphone tracks.
+the `speak` flag from at least one assigned role. The grant allows
+`microphone` and `screen_share_audio` sources.
+
+Each shared application is an independent `screen_share_audio` track
+with the same frame encryption as the microphone. Its LiveKit track name
+is `<epoch>.<base64url>`: the decimal channel-key epoch at publication,
+a dot, then unpadded base64url of the 24-byte random nonce followed by the
+XChaCha20-Poly1305 ciphertext and tag. The plaintext is the app's name
+limited to 128 UTF-8 bytes, cut at a character boundary. The AEAD key is
+32 bytes of HKDF-SHA256 from that epoch's room media key, with no salt
+and info `rusttalk-track-name-v1`. The associated data is that literal
+followed by the epoch as a big-endian i64. Receivers decrypt with the
+media key of the stated epoch, which they keep after rotations, and
+display “Shared audio” if they lack that epoch or the name cannot be
+authenticated or decoded. The name length is not hidden. The SFU can
+still move a valid label to another track in the same room and epoch,
+as it can move frame-encrypted tracks themselves.
+Volume and mute are local and keyed by track ID.
 
 The API gets the active roster from LiveKit's internal RoomService,
 cached for one second per room, and maps device identities to current

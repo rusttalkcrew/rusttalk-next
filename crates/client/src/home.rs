@@ -254,6 +254,7 @@ impl Home {
                         self.voice.call = None;
                         self.voice.audio.set_voice(false);
                         self.voice.show_stats = false;
+                        self.voice.shares.clear();
                     }
                 }
             }
@@ -267,6 +268,7 @@ impl Home {
                     }
                 }
             }
+            Update::AppStopped(id) => self.voice.shares.retain(|app| app.id != id),
             Update::Stats(address, stats) => {
                 if let Some(call) = &mut self.voice.call
                     && call.server == address
@@ -662,8 +664,26 @@ fn new_channel(server: &Server, index: usize, category: Option<Id>) -> Dialog {
         server: index,
         name: String::new(),
         voice: false,
-        category: category.or_else(|| server.dir.categories.iter().find_map(|c| c.id)),
-        new_category: "Text channels".into(),
+        category: category.or_else(|| default_category(server, false)),
+        new_category: category_name(false).into(),
+    }
+}
+
+/// A category that already holds this kind of channel, else an empty one;
+/// `None` makes a new category named after the kind.
+fn default_category(server: &Server, voice: bool) -> Option<Id> {
+    let categories = || server.dir.categories.iter().filter(|c| c.id.is_some());
+    categories()
+        .find(|c| c.channels.iter().any(|channel| channel.voice == voice))
+        .or_else(|| categories().find(|c| c.channels.is_empty()))
+        .and_then(|c| c.id)
+}
+
+fn category_name(voice: bool) -> &'static str {
+    if voice {
+        "Voice channels"
+    } else {
+        "Text channels"
     }
 }
 
@@ -714,7 +734,7 @@ fn member_list(ui: &mut Ui, home: &mut Home, index: usize) {
                 }
                 if !me && home.voice.call.is_some() {
                     ui.separator();
-                    call::person_menu(ui, &home.voice.audio, &member.person);
+                    call::stream_menu(ui, &home.voice.audio, &(member.person, None));
                 }
             });
         }
@@ -1261,31 +1281,42 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
                 new_category,
             } => {
                 ui.heading("Create channel");
+                let was_voice = *voice;
                 ui.horizontal(|ui| {
                     ui.selectable_value(voice, false, "# Text");
                     ui.selectable_value(voice, true, "🔊 Voice");
                 });
-                let categories: Vec<_> = home.servers[*server]
+                let data = &home.servers[*server];
+                // Switching kind moves a default pick along, but keeps one the person made.
+                if *voice != was_voice && *category == default_category(data, was_voice) {
+                    *category = default_category(data, *voice);
+                    if *new_category == category_name(was_voice) {
+                        *new_category = category_name(*voice).into();
+                    }
+                }
+                let categories: Vec<_> = data
                     .dir
                     .categories
                     .iter()
                     .filter_map(|c| Some((c.id?, c.name.clone())))
                     .collect();
-                if categories.is_empty() {
-                    let label = ui.label("Category");
-                    ui.text_edit_singleline(new_category).labelled_by(label.id);
-                } else {
+                if !categories.is_empty() {
                     let current = categories
                         .iter()
                         .find(|(id, _)| Some(*id) == *category)
-                        .map_or("", |(_, name)| name.as_str());
+                        .map_or("New category", |(_, name)| name.as_str());
                     egui::ComboBox::from_label("Category")
                         .selected_text(current)
                         .show_ui(ui, |ui| {
                             for (id, name) in &categories {
                                 ui.selectable_value(category, Some(*id), name.as_str());
                             }
+                            ui.selectable_value(category, None, "New category");
                         });
+                }
+                if category.is_none() {
+                    let label = ui.label("New category name");
+                    ui.text_edit_singleline(new_category).labelled_by(label.id);
                 }
                 ui.label("Name");
                 if text_dialog(ui, name, "Create", &mut close)

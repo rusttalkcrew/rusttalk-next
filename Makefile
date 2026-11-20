@@ -5,6 +5,9 @@ DEV_COMPOSE := docker compose -f deploy/compose.dev.yml -p rusttalk-dev
 export RUSTTALK_DEV_USER := $(shell id -u):$(shell id -g)
 CARGO_SCOPE ?= --workspace
 E2E_FEATURES ?= --features media
+ifeq ($(shell uname -s),Linux)
+PIPEWIRE_HELPER := -p rusttalk-pipewire
+endif
 
 ##@ Help
 
@@ -43,14 +46,14 @@ client: ## Run the native client, optionally with PROFILE=a to z
 		*) printf '\033[1;31mPROFILE must be one lowercase letter (a-z).\033[0m\n' >&2; exit 1 ;; \
 	esac; \
 	printf '\033[1;34m==> Starting native client\033[0m\n'; \
-	cargo run --locked -p rusttalk-client
+	$(if $(PIPEWIRE_HELPER),cargo build --locked $(PIPEWIRE_HELPER) &&) cargo run --locked -p rusttalk-client
 
 bot: export CARGO_TARGET_DIR ?= target
 bot: export CHANNEL := $(CHANNEL)
 bot: ## Exchange tones as two bots using RUSTTALK_BOT_INVITE and CHANNEL
 	@test -n "$$RUSTTALK_BOT_INVITE" && test -n "$$CHANNEL" || { printf 'Set RUSTTALK_BOT_INVITE and CHANNEL.\n' >&2; exit 1; }
 	@printf '\033[1;34m==> Starting dev bots\033[0m\n'
-	cargo build --locked -p rusttalk-bot
+	cargo build --locked -p rusttalk-bot $(PIPEWIRE_HELPER)
 	@bash -ec '"$$CARGO_TARGET_DIR/debug/rusttalk-bot" --identity bot-a --channel "$$CHANNEL" --tone 440 --expect-tone 660 & first=$$!; \
 		"$$CARGO_TARGET_DIR/debug/rusttalk-bot" --identity bot-b --channel "$$CHANNEL" --tone 660 --expect-tone 440 & second=$$!; \
 		trap "kill -TERM $$first $$second 2>/dev/null || true; wait || true" EXIT; \
@@ -88,8 +91,9 @@ test: ## Run unit and integration tests
 	@printf '\033[1;34m==> tests\033[0m\n'
 	cargo test $(CARGO_SCOPE) --locked
 
-e2e: ## Run the Docker membership, keys, encrypted chat and voice scenarios
-	@printf '\033[1;34m==> Docker membership, keys, encrypted chat and voice\033[0m\n'
+e2e: ## Run the Docker membership, keys, encrypted chat, voice and app audio scenarios
+	@printf '\033[1;34m==> Docker membership, keys, encrypted chat, voice and app audio\033[0m\n'
+	$(if $(and $(PIPEWIRE_HELPER),$(findstring media,$(E2E_FEATURES))),if pw-cli info 0 >/dev/null 2>&1; then cargo build --locked $(PIPEWIRE_HELPER); fi)
 	@set -eu; \
 		export RUSTTALK_E2E_PROJECT=rusttalk-e2e-$$$$; \
 		export RUSTTALK_DEV_DATA=$$(mktemp -d); \
