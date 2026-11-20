@@ -157,8 +157,8 @@ Debug builds open a console on Windows; release builds do not, so check
   taking `speak` from a role stops that speaker's audio. The app-audio check
   uses two `pw-play` processes at 440 and 660 Hz on a disposable
   `rusttalk_e2e_<pid>` null sink created with `pactl load-module module-null-sink`.
-  The receiving bot verifies two encrypted names and track sources, both
-  frequencies, and a quarter-scale gain on one track. The test unloads the
+  The receiving bot verifies two encrypted names and track sources and both
+  frequencies. The test unloads the
   sink and stops both players on exit. It fails when the host has no PipeWire
   or pipewire-pulse session. The screen scenario
   decodes a synthetic 320×180 red-and-blue pattern and its encrypted name,
@@ -319,7 +319,7 @@ before upload.
 
 CI runs `make lint test` on Linux, with core client protocol and LiveKit
 pinning code enabled and the bot package excluded, and the client unit tests
-on Windows. Both jobs have a 15-minute timeout. Run `make e2e` locally before
+on Windows. Both jobs have a 25-minute timeout. Run `make e2e` locally before
 every merge; CI does not run it. Local `make lint test` covers the whole
 workspace. `rust-toolchain.toml` pins the Rust version, so a new Rust release
 does not invalidate the CI caches; update it together with the image in

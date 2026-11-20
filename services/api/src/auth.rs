@@ -16,7 +16,7 @@ use serde::Deserialize;
 use sqlx::{Sqlite, SqliteConnection, SqlitePool, Transaction, query, query_as, query_scalar};
 
 use crate::{
-    ApiError, ApiResult, App, keys, payload,
+    ApiError, ApiResult, App, Change, keys, payload,
     store::{audit, hash, log_closed, now, random, write},
 };
 
@@ -26,7 +26,7 @@ const PUBLIC_LIMIT_PER_IP: i64 = 32;
 const SESSIONS_PER_PERSON: i64 = 16;
 const REVOCATIONS_PER_PERSON: i64 = 64;
 const CHALLENGE_TTL: i64 = 60;
-const SESSION_TTL: i64 = Duration::from_hours(12).as_secs() as i64;
+pub const SESSION_TTL: i64 = Duration::from_hours(12).as_secs() as i64;
 
 pub fn session_ttl() -> anyhow::Result<i64> {
     if env::var("RUSTTALK_DEV").as_deref() == Ok("1")
@@ -137,10 +137,10 @@ async fn sign_in_device(
     let session = issue_session(&mut tx, person, device, &ip, at, app.session_ttl).await?;
     tx.commit().await?;
     log_closed(closed, at, "replaced");
-    if added {
+    if added || !member {
         keys::changed(app, person, Some(device));
     } else {
-        app.notify(None);
+        app.signal(Change::Session);
     }
     Ok(Json(session))
 }
@@ -179,12 +179,8 @@ async fn check_revoked(db: &mut SqliteConnection, person: &[u8], device: &[u8]) 
 }
 
 pub fn client_ip(headers: &HeaderMap) -> ApiResult<String> {
-    let mut values = headers.get_all("x-forwarded-for").iter();
-    let ip = values
-        .next()
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<IpAddr>().ok())
-        .filter(|_| values.next().is_none())
+    let values = headers.get_all("x-forwarded-for").iter();
+    let ip = rusttalk_core::auth::forwarded_ip(values.map(|value| value.as_bytes()))
         .ok_or(ApiError::bad_request("invalid_forwarded_ip"))?;
     Ok(ip.to_canonical().to_string())
 }
@@ -516,7 +512,7 @@ pub async fn refresh(State(app): State<App>, headers: HeaderMap) -> ApiResult<Js
         .await?;
     tx.commit().await?;
     tracing::info!(reason = "refreshed", "session token rotated");
-    app.notify(None);
+    app.signal(Change::Session);
     Ok(Json(Session {
         token: encode(&token),
         expires_at,

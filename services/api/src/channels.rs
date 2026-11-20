@@ -309,7 +309,7 @@ pub async fn create_channel(
     )
     .await?;
     tx.commit().await?;
-    app.notify(Some(Event::ChannelChanged));
+    app.notify(Event::ChannelChanged);
     Ok(StatusCode::CREATED)
 }
 
@@ -357,7 +357,7 @@ pub async fn update_channel(
     )
     .await?;
     tx.commit().await?;
-    app.notify(Some(Event::ChannelChanged));
+    app.notify(Event::ChannelChanged);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -417,7 +417,7 @@ pub async fn permissions(
     .await?;
     tx.commit().await?;
     crate::voice::enforce(&app, Some(id));
-    app.notify(Some(Event::ChannelChanged));
+    app.notify(Event::ChannelChanged);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -463,7 +463,7 @@ pub async fn delete_channel(
     .await?;
     tx.commit().await?;
     crate::voice::close_rooms(&app, id, kind == "voice");
-    app.notify(Some(Event::ChannelChanged));
+    app.notify(Event::ChannelChanged);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -494,7 +494,7 @@ pub async fn create_category(
     )
     .await?;
     tx.commit().await?;
-    app.notify(Some(Event::ChannelChanged));
+    app.notify(Event::ChannelChanged);
     Ok(StatusCode::CREATED)
 }
 
@@ -529,7 +529,7 @@ pub async fn update_category(
     )
     .await?;
     tx.commit().await?;
-    app.notify(Some(Event::ChannelChanged));
+    app.notify(Event::ChannelChanged);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -562,6 +562,6 @@ pub async fn delete_category(
     )
     .await?;
     tx.commit().await?;
-    app.notify(Some(Event::ChannelChanged));
+    app.notify(Event::ChannelChanged);
     Ok(StatusCode::NO_CONTENT)
 }

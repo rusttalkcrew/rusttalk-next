@@ -75,9 +75,11 @@ pub(super) async fn scenario(
         .write_to(&mut png, ImageFormat::Png)?;
     let png = png.into_inner();
     let file = a
-        .upload_file(&channel.id, FILE, "application/octet-stream", &bytes)
+        .upload_file(&channel.id, FILE, "application/octet-stream", &bytes, None)
         .await?;
-    let image = a.upload_file(&channel.id, PNG, "image/png", &png).await?;
+    let image = a
+        .upload_file(&channel.id, PNG, "image/png", &png, None)
+        .await?;
     let id = encode(&file.file.id);
     let image_id = image.file.id;
     let path = format!("/v1/files/{id}");
@@ -102,12 +104,12 @@ pub(super) async fn scenario(
     assert_eq!((&*image.name, &*image.media_type), (PNG, "image/png"));
     for (reference, expected) in [(&file.file, &bytes), (&image.file, &png)] {
         assert_eq!(
-            Sha256::digest(b.download_file(reference).await?),
+            Sha256::digest(b.download_file(reference, None).await?),
             Sha256::digest(expected)
         );
     }
     let thumbnail = b
-        .download_file(image.thumbnail.as_ref().context("missing thumbnail")?)
+        .download_file(image.thumbnail.as_ref().context("missing thumbnail")?, None)
         .await?;
     let thumbnail = decode_thumbnail(&thumbnail)?.into_rgb8();
     assert_eq!(thumbnail.dimensions(), (320, 120));
@@ -172,6 +174,16 @@ pub(super) async fn scenario(
     .await?;
     check_storage(project, &id)?;
     a.delete_file(&winner).await?;
+    // A deleted file's ID stays reserved.
+    rejected(
+        upload(a, encode(&winner))
+            .body(vec![0xA3; 1024])
+            .send()
+            .await?,
+        StatusCode::CONFLICT,
+        "file_exists",
+    )
+    .await?;
     // B reposts A's image in a message of its own. Deleting that message as moderator names B as
     // the sender, so A's file survives. Deleting A's message names A and removes it.
     let repost = b
@@ -195,7 +207,7 @@ pub(super) async fn scenario(
             .and_then(reqwest::Error::status),
         Some(StatusCode::NOT_FOUND)
     );
-    b.download_file(&image.file).await?;
+    b.download_file(&image.file, None).await?;
     let a_person = *a.identity.certificate.person_id();
     b.delete_message(&channel.id, &post.id).await?;
     b.delete_message_file(&image_id, &a_person).await?;
@@ -237,12 +249,19 @@ pub(super) async fn scenario(
         "file_not_found",
     )
     .await?;
+    // An expired file's ID stays reserved.
+    rejected(
+        upload(a, id.clone()).body(vec![0xA3; 1024]).send().await?,
+        StatusCode::CONFLICT,
+        "file_exists",
+    )
+    .await?;
     let replacement = a
-        .upload_file(&channel.id, FILE, "application/octet-stream", &bytes)
+        .upload_file(&channel.id, FILE, "application/octet-stream", &bytes, None)
         .await?;
     check_storage(project, &encode(&replacement.file.id))?;
     println!(
-        "W13 verified encrypted file SHA-256, PNG thumbnail, access, streaming cap, quota races, deletion, moderator deletes limited to the sender's files, expiry and zero plaintext in SQLite, WAL, blobs and logs"
+        "W13 verified encrypted file SHA-256, PNG thumbnail, access, streaming cap, quota races, deletion, moderator deletes limited to the sender's files, expiry, no ID reuse and zero plaintext in SQLite, WAL, blobs and logs"
     );
     Ok(())
 }

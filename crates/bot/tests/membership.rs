@@ -427,6 +427,51 @@ async fn docker_keys(
     assert!(!state.scopes.is_empty() && state.envelopes.iter().all(|e| e.need.scope == space));
     println!("W06 losing channel read permission hid its envelopes and rotated only the channel");
 
+    let (_, link) = invite(a, secrets).await?;
+    let (_, d_identity) = DeviceIdentity::create("W14 D")?;
+    let d_token = session(bot.sign_in(&d_identity, Some(&link.code)).await?, secrets).await?;
+    let mut d = KeyClient::connect(bot, &d_identity, &d_token).await?;
+    wait_for_device(a, &encode(d_identity.certificate.signing_key().as_bytes())).await?;
+    receive_key(&mut d, space, 3).await?;
+    rejected(
+        a.request(Method::DELETE, "/v1/me/membership")
+            .send()
+            .await?,
+        StatusCode::CONFLICT,
+        "owner_cannot_leave",
+    )
+    .await?;
+    let reply = d
+        .request(Method::DELETE, "/v1/me/membership")
+        .send()
+        .await?;
+    assert_eq!(reply.status(), StatusCode::NO_CONTENT);
+    expect_close(&mut d, "kicked").await?;
+    receive_key(a, space, 4).await?;
+    receive_key(&mut c, space, 4).await?;
+    assert!(d.key(space, 4).is_none());
+    rejected(
+        bot.sign_in(&d_identity, None).await?,
+        StatusCode::FORBIDDEN,
+        "invite_required",
+    )
+    .await?;
+    let left: Vec<Value> = a
+        .request(Method::GET, "/v1/audit?action=left")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let d_person = encode(d_identity.certificate.person_id());
+    assert!(
+        left.iter()
+            .any(|entry| entry["actor_person_id"] == d_person)
+    );
+    println!(
+        "W14 D left by itself: its socket closed, the space key rotated, and it needs a new invite"
+    );
+
     let raw = compose_bytes(
         project,
         &[

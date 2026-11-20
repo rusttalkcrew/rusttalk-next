@@ -21,7 +21,7 @@ use tokio::{
 use tracing::Instrument;
 
 use crate::{
-    ApiError, ApiResult, App,
+    ApiError, ApiResult, App, Change,
     auth::{Actor, authenticate},
     keys, presence,
     store::now,
@@ -50,7 +50,7 @@ async fn serve(
     app: App,
     mut socket: WebSocket,
     actor: Actor,
-    mut changes: broadcast::Receiver<Option<Update>>,
+    mut changes: broadcast::Receiver<Change>,
 ) {
     let result = stream(&app, &mut socket, &actor, &mut changes).await;
     let reason = result.unwrap_or_else(|error| error.code);
@@ -69,9 +69,10 @@ async fn stream(
     app: &App,
     socket: &mut WebSocket,
     actor: &Actor,
-    changes: &mut broadcast::Receiver<Option<Update>>,
+    changes: &mut broadcast::Receiver<Change>,
 ) -> ApiResult<&'static str> {
     let mut expires_at = actor.expires_at;
+    // The first pass reads the session and arms this.
     let expires = sleep(Duration::ZERO);
     tokio::pin!(expires);
     let mut presence = None;
@@ -80,43 +81,39 @@ async fn stream(
     let mut readable: HashSet<String> = HashSet::new();
     let mut notices = Vec::new();
     let mut lagged = false;
-    let mut refresh = true;
+    let mut recheck = Recheck::Access;
     loop {
         // Bound the drain to the broadcast backlog so a busy stream still makes progress.
         for _ in 0..=app.changes.len() {
             use broadcast::error::TryRecvError;
             match changes.try_recv() {
-                Ok(notice) => refresh |= queue(&mut notices, notice),
+                Ok(change) => recheck = recheck.max(queue(&mut notices, change)),
                 Err(TryRecvError::Lagged(_)) => lagged = true,
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Closed) => return Ok("server_closed"),
             }
         }
-        refresh |= lagged;
-        // Message and voice notices reuse the last session and access state.
-        let next = if refresh {
-            refresh = false;
-            let mut tx = app.db.begin().await?;
-            let at = now()?;
-            // The bearer changes on refresh. A new sign-in replaces the session ID.
-            let renewed: Option<i64> = query_scalar(
-                "SELECT expires_at FROM sessions WHERE person_id = ? AND device_id = ? AND session_id = ?",
-            )
-            .bind(actor.person.as_slice())
-            .bind(&actor.device)
-            .bind(&actor.session_id)
-            .fetch_optional(&mut *tx)
-            .await?;
-            expires_at = renewed.unwrap_or(expires_at);
-            if expires_at <= at {
-                return Ok("token_expired");
-            }
-            if renewed.is_none() {
-                return session_end(&mut tx, actor).await;
-            }
+        if lagged {
+            recheck = Recheck::Access;
+        }
+        // Message and voice notices reuse the last session and access state. Sign-ins only
+        // recheck this socket's session; key and membership changes also recheck access.
+        let current = std::mem::replace(&mut recheck, Recheck::None);
+        let mut tx = None;
+        if current != Recheck::None {
+            let mut db = app.db.begin().await?;
+            expires_at = match session(&mut db, actor, expires_at).await? {
+                Ok(at) => at,
+                Err(reason) => return Ok(reason),
+            };
             expires
                 .as_mut()
-                .reset(Instant::now() + Duration::from_secs((expires_at - at) as u64));
+                .reset(Instant::now() + Duration::from_secs((expires_at - now()?).max(0) as u64));
+            tx = Some(db);
+        }
+        let next = if let Some(mut tx) = tx
+            && current == Recheck::Access
+        {
             let next_pending: HashSet<_> =
                 keys::pending(&mut tx, actor).await?.into_iter().collect();
             let scopes = keys::scopes(&mut tx, actor).await?;
@@ -202,8 +199,9 @@ async fn stream(
 
         loop {
             tokio::select! {
+                // A refresh keeps the session and moves its expiry, so reread it.
                 _ = &mut expires => {
-                    refresh = true;
+                    recheck = Recheck::Session;
                     break;
                 },
                 incoming = socket.recv() => match incoming {
@@ -214,7 +212,7 @@ async fn stream(
                 },
                 update = changes.recv() => {
                     match update {
-                        Ok(notice) => refresh |= queue(&mut notices, notice),
+                        Ok(change) => recheck = recheck.max(queue(&mut notices, change)),
                         Err(broadcast::error::RecvError::Lagged(_)) => lagged = true,
                         Err(broadcast::error::RecvError::Closed) => return Ok("server_closed"),
                     }
@@ -225,20 +223,34 @@ async fn stream(
     }
 }
 
-/// Queue a notice and report whether it can change session, access or key state.
-fn queue(notices: &mut Vec<Update>, notice: Option<Update>) -> bool {
-    let refresh = !matches!(
-        notice,
-        Some(Update::Presence(_))
-            | Some(Update::Event(
-                Event::MessageCreated { .. }
+/// What a socket must recheck before forwarding queued notices.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Recheck {
+    None,
+    Session,
+    Access,
+}
+
+/// Queue a client notice and report what it can change: nothing, sessions, or access and keys.
+fn queue(notices: &mut Vec<Update>, change: Change) -> Recheck {
+    match change {
+        Change::Session => Recheck::Session,
+        Change::Keys => Recheck::Access,
+        Change::Update(update) => {
+            let recheck = match &update {
+                Update::Presence(_)
+                | Update::Event(
+                    Event::MessageCreated { .. }
                     | Event::MessageDeleted { .. }
                     | Event::VoiceChanged { .. }
-                    | Event::LiveFileAccepted { .. }
-            ))
-    );
-    notices.extend(notice);
-    refresh
+                    | Event::LiveFileAccepted { .. },
+                ) => Recheck::None,
+                Update::Event(_) => Recheck::Access,
+            };
+            notices.push(update);
+            recheck
+        }
+    }
 }
 
 async fn send(socket: &mut WebSocket, notice: Update) -> ApiResult<()> {
@@ -252,7 +264,29 @@ async fn send(socket: &mut WebSocket, notice: Update) -> ApiResult<()> {
     .map_err(|_| ApiError::internal("socket_io_error"))
 }
 
-async fn session_end(db: &mut SqliteConnection, actor: &Actor) -> ApiResult<&'static str> {
+/// The session's current expiry, or why this socket must close. The bearer changes on
+/// refresh; a new sign-in replaces the session ID. `known` is the last expiry seen, so a
+/// session the sweeper already removed still reports `token_expired`.
+async fn session(
+    db: &mut SqliteConnection,
+    actor: &Actor,
+    known: i64,
+) -> ApiResult<Result<i64, &'static str>> {
+    let renewed: Option<i64> = query_scalar(
+        "SELECT expires_at FROM sessions WHERE person_id = ? AND device_id = ? AND session_id = ?",
+    )
+    .bind(actor.person.as_slice())
+    .bind(&actor.device)
+    .bind(&actor.session_id)
+    .fetch_optional(&mut *db)
+    .await?;
+    let expires_at = renewed.unwrap_or(known);
+    if expires_at <= now()? {
+        return Ok(Err("token_expired"));
+    }
+    if renewed.is_some() {
+        return Ok(Ok(expires_at));
+    }
     let reason: String = query_scalar(
         "SELECT CASE
         WHEN EXISTS (SELECT 1 FROM bans WHERE person_id = ?) THEN 'banned'
@@ -266,10 +300,40 @@ async fn session_end(db: &mut SqliteConnection, actor: &Actor) -> ApiResult<&'st
     .bind(&actor.device)
     .fetch_one(db)
     .await?;
-    Ok(match reason.as_str() {
+    Ok(Err(match reason.as_str() {
         "banned" => "banned",
         "kicked" => "kicked",
         "revoked" => "revoked",
         _ => "session_replaced",
-    })
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sign_ins_recheck_only_sessions() {
+        let mut notices = Vec::new();
+        assert!(queue(&mut notices, Change::Session) == Recheck::Session);
+        assert!(queue(&mut notices, Change::Keys) == Recheck::Access);
+        let message = Event::MessageCreated {
+            channel: "c".into(),
+            id: "m".into(),
+        };
+        assert!(queue(&mut notices, Change::Update(Update::Event(message))) == Recheck::None);
+        let member = Event::MemberChanged {
+            person: "p".into(),
+            device: None,
+        };
+        assert!(queue(&mut notices, Change::Update(Update::Event(member))) == Recheck::Access);
+        assert!(
+            queue(
+                &mut notices,
+                Change::Update(Update::Event(Event::ChannelChanged))
+            ) == Recheck::Access
+        );
+        // Only client updates are forwarded.
+        assert_eq!(notices.len(), 3);
+    }
 }

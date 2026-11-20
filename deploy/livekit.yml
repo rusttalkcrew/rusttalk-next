@@ -1,0 +1,18 @@
+# Production LiveKit config. Compose supplies the key (LIVEKIT_KEYS), the
+# advertised IP (NODE_IP) and the media ports from deploy/.env.
+port: 7880
+rtc:
+  tcp_port: 7881
+  udp_port: 7882
+  use_external_ip: false
+  use_ice_lite: true
+logging:
+  json: true
+  # RoomService's info access logs include the API key identifier.
+  level: warn
+# Webhooks stay on the stack network; nothing is reported outside.
+webhook:
+  api_key: rusttalk
+  urls: ["http://api:8080/internal/livekit"]
+  filter_params:
+    include_events: ["participant_joined", "participant_left", "room_finished"]

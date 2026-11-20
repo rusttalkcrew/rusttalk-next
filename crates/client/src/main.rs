@@ -17,7 +17,12 @@ mod server;
 mod share;
 mod update;
 
-use std::{env, fs, path::PathBuf, process::ExitCode, sync::Mutex};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+    process::ExitCode,
+    sync::Mutex,
+};
 
 use anyhow::{Context, Result, anyhow, bail};
 use eframe::egui::ViewportBuilder;
@@ -25,6 +30,17 @@ use etcetera::{BaseStrategy, base_strategy::choose_native_strategy};
 use rusttalk_core::identity::fingerprint;
 use tracing::Level;
 use tracing_subscriber::{filter::Targets, prelude::*};
+
+/// Read a JSON settings file; a missing file gives the default.
+pub fn load_json<T: serde::de::DeserializeOwned + Default>(file: &Path) -> Result<T> {
+    match fs::read(file) {
+        Ok(bytes) => {
+            serde_json::from_slice(&bytes).with_context(|| format!("read {}", file.display()))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
+        Err(error) => Err(error).with_context(|| format!("open {}", file.display())),
+    }
+}
 
 fn main() -> ExitCode {
     if let Err(error) = run() {
@@ -77,6 +93,7 @@ fn run() -> Result<()> {
         return update::check_now(&config);
     }
 
+    files::clear_opened();
     let opened = keystore::Keystore::open(&config, &service);
     match &opened {
         Ok((_, Some(identity))) => tracing::info!(

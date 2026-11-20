@@ -40,6 +40,8 @@ pub enum Admin {
     /// Open joining on or off, with a member limit.
     Joining(bool, u32),
     RevokeInvite(String),
+    /// Replace the server icon (PNG, JPEG or GIF bytes).
+    SetIcon(Vec<u8>),
     /// The owner's public listing setting.
     LoadListing,
     /// List the server publicly with these details, or stop (`None`).
@@ -218,6 +220,10 @@ pub(super) async fn run(
             .await
             .map(|()| "Listing saved. It shows up in the directory within a minute.")
         }
+        Admin::SetIcon(bytes) => match client.set_server_icon(&bytes).await {
+            Ok(()) => Ok("Server icon changed."),
+            Err(error) => Err(failed(&error)),
+        },
         Admin::RevokeInvite(id) => call(client, Method::DELETE, &format!("/v1/invites/{id}"), None)
             .await
             .map(|()| "That invite link no longer works."),
@@ -315,8 +321,13 @@ async fn audit_log(
         }
         let page = get(client, &path).await.map_err(|error| failed(&error))?;
         let rows = page.as_array().cloned().unwrap_or_default();
+        // A row without a growing ID would page forever; stop after this page.
+        let mut stuck = false;
         for row in &rows {
-            after = row["id"].as_i64().unwrap_or(after);
+            match row["id"].as_i64() {
+                Some(id) if id > after => after = id,
+                _ => stuck = true,
+            }
             let person = |key: &str| row[key].as_str().and_then(|id| decode(id).ok());
             let Some(actor) = person("actor_person_id") else {
                 continue;
@@ -328,7 +339,7 @@ async fn audit_log(
                 at: row["at"].as_i64().unwrap_or_else(now),
             });
         }
-        if rows.len() < 100 {
+        if stuck || rows.len() < 100 {
             break;
         }
     }

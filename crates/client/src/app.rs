@@ -182,6 +182,9 @@ impl App {
             }
             (Action::SignOut, Screen::Home(mut home)) => match keystore.delete() {
                 Ok(()) => {
+                    // Stop the network first, so nothing writes these files again.
+                    drop(home);
+                    forget_profile(&self.data);
                     tracing::info!("signed out of this device");
                     Screen::Welcome
                 }
@@ -194,6 +197,21 @@ impl App {
             },
             (_, screen) => screen,
         };
+    }
+}
+
+/// Remove what this profile remembers about the person who signed out: joined servers
+/// and their sync state, server pins, where files were saved and files opened from chat.
+/// Device settings stay.
+fn forget_profile(data: &std::path::Path) {
+    crate::files::clear_opened();
+    for name in ["sync.json", "servers.json", "saved.json"] {
+        match std::fs::remove_file(data.join(name)) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                tracing::error!(%error, file = name, "removing profile data at sign out failed");
+            }
+            _ => {}
+        }
     }
 }
 

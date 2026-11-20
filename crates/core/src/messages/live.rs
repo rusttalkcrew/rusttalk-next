@@ -182,6 +182,13 @@ mod tests {
                 .verify(&server, &channel, other.certificate.signing_key())
                 .is_err()
         );
+        request.recipient = encode(&[7; 32]);
+        assert!(request.verify(&server, &channel, key).is_err());
+        request.recipient = encode(&[3; 32]);
+        request.transfer = encode(&[8; 32]);
+        assert!(request.verify(&server, &channel, key).is_err());
+        request.transfer = encode(&[4; 32]);
+        assert!(request.verify(&server, &channel, key).is_ok());
         request.nonce = encode(&[6; 16]);
         assert!(request.verify(&server, &channel, key).is_err());
         request.nonce = encode(&[5; 16]);

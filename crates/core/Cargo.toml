@@ -53,3 +53,4 @@ voice = ["client", "livekit-tls", "dep:image", "dep:livekit", "dep:mime_guess", 
 
 [dev-dependencies]
 rcgen = { version = "0.14", default-features = false, features = ["ring"] }
+tokio = { version = "1", features = ["macros", "rt"] }

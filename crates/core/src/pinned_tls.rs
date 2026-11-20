@@ -31,6 +31,33 @@ pub fn fingerprint(der: &[u8]) -> Fingerprint {
     Sha256::digest(der).into()
 }
 
+/// The server presented a TLS certificate other than the pinned one.
+#[derive(Debug, thiserror::Error)]
+#[error("server TLS certificate fingerprint mismatch")]
+pub struct PinMismatch;
+
+/// Whether an error, or any error it wraps, is a [`PinMismatch`] from the pinned verifier.
+pub fn is_pin_mismatch(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut next = Some(error);
+    while let Some(error) = next {
+        if error.is::<PinMismatch>() {
+            return true;
+        }
+        if let Some(Error::Other(other)) = error.downcast_ref::<Error>() {
+            return other.0.is::<PinMismatch>();
+        }
+        // An I/O error's source skips the error it wraps, so look inside it first.
+        next = match error
+            .downcast_ref::<std::io::Error>()
+            .and_then(|io| io.get_ref())
+        {
+            Some(inner) => Some(inner as &(dyn std::error::Error + 'static)),
+            None => error.source(),
+        };
+    }
+    false
+}
+
 /// Build an HTTPS-only client using system trust or an explicit leaf certificate pin.
 #[cfg(feature = "https-client")]
 pub fn https_client(
@@ -109,9 +136,7 @@ impl ServerCertVerifier for PinnedCertificate {
         _: UnixTime,
     ) -> Result<ServerCertVerified, Error> {
         if fingerprint(end_entity.as_ref()) != self.pin {
-            return Err(Error::General(
-                "server TLS certificate fingerprint mismatch".into(),
-            ));
+            return Err(Error::Other(rustls::OtherError(Arc::new(PinMismatch))));
         }
         Ok(ServerCertVerified::assertion())
     }
@@ -158,10 +183,52 @@ mod tests {
                 .verify_server_cert(cert.cert.der(), &[], &ip, &[], now)
                 .is_ok()
         );
-        assert!(
-            verifier
-                .verify_server_cert(other.cert.der(), &[cert.cert.der().clone()], &ip, &[], now)
-                .is_err()
+        let error = verifier
+            .verify_server_cert(other.cert.der(), &[cert.cert.der().clone()], &ip, &[], now)
+            .unwrap_err();
+        assert!(is_pin_mismatch(&error));
+    }
+
+    /// A real handshake against another certificate reports the typed mismatch through
+    /// reqwest's error chain.
+    #[cfg(feature = "https-client")]
+    #[tokio::test]
+    async fn a_changed_certificate_is_reported_as_a_pin_mismatch() {
+        use std::io::Read;
+
+        let served = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let pinned = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let config = Arc::new(
+            rustls::ServerConfig::builder_with_provider(Arc::new(ring::default_provider()))
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_no_client_auth()
+                .with_single_cert(
+                    vec![served.cert.der().clone()],
+                    rustls::pki_types::PrivateKeyDer::Pkcs8(
+                        served.signing_key.serialize_der().into(),
+                    ),
+                )
+                .unwrap(),
         );
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            let connection = rustls::ServerConnection::new(config).unwrap();
+            let mut stream = rustls::StreamOwned::new(connection, socket);
+            let _ = stream.read(&mut [0; 1]);
+        });
+        let client = https_client(Some(fingerprint(pinned.cert.der().as_ref()))).unwrap();
+        let error = client
+            .get(format!("https://127.0.0.1:{port}/"))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(is_pin_mismatch(&error), "{error:?}");
+        server.join().unwrap();
+
+        let unrelated = std::io::Error::other("connection refused");
+        assert!(!is_pin_mismatch(&unrelated));
     }
 }

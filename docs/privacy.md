@@ -99,7 +99,8 @@ device identities to current channel readers. Readers see unmatched
 devices only as a count. After a kick, ban, revocation or permission
 change the API asks LiveKit to remove devices that lost access and to
 revoke any audio, video or data publication rights they lost. It keeps the active
-voice roster in memory for one second per room. It keeps no voice roster or
+voice roster in memory for one second per room and drops expired rooms on the
+next roster lookup. It keeps no voice roster or
 LiveKit join tokens in SQLite. LiveKit sees opaque room and device IDs,
 track IDs and source kinds, viewer subscriptions, routing and timing
 information, negotiated video codec, dimensions and simulcast layers,
@@ -142,20 +143,31 @@ public device certificate live in Windows Credential Manager or Linux Secret
 Service. Development profiles use separate entries. The client logs the
 person fingerprint locally. Creating an account shows the recovery words once
 in the app window. The client never stores or logs the words or the root
-signing key. "Sign out of this device" deletes the keystore entry.
+signing key. "Sign out of this device" deletes the keystore entry and the
+profile's `sync.json`, `servers.json` and `saved.json`, so the next person
+on that profile starts without the servers, pins or saved file places.
+Device settings (`voice.json`, `updates.json`) stay.
 
 Next to the settings, `servers.json` holds each server's address, server ID
 and TLS fingerprint. `sync.json` holds the last merged device sync snapshot
 with its version: joined servers with their pins, servers left, synced
 settings, and local edits not yet uploaded. `voice.json` holds the
-chosen audio devices, voice options, and the chosen camera's name,
-resolution and frame rate. Of these, only the voice options (push to talk
+chosen audio devices, voice options, the chosen camera's name,
+resolution and frame rate, and the server directory address and
+certificate pin used by "Find servers" (`index_url`, `index_fingerprint`).
+Of these, only the voice options (push to talk
 and its key, activation level, echo cancellation, noise suppression, auto
 gain) and the camera resolution and frame rate sync to the person's other
 devices; the chosen microphone, speakers and camera stay on this device. Decrypted names, messages and pictures stay in
 memory only; the log never contains them, file names or invite links. A
 downloaded file is written only where the person picks in the save dialog,
 through a temporary file in that folder that is removed if the download fails.
+`saved.json` maps each downloaded file's opaque blob ID to where it was saved,
+so "Show in folder" and "Open" work later; it never leaves this device.
+"Open in default app" in the picture viewer, for a picture not saved yet,
+writes it to a `rusttalk-<id>` folder in the system temporary directory and
+hands it to the system's default app; the client deletes these folders when it
+starts and when the person signs out.
 `updates.json` holds the chosen release directory URL and the automatic
 check preference on this device.
 

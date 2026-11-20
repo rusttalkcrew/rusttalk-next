@@ -323,6 +323,26 @@ pub async fn kick(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// The caller leaves the server, as if kicked by themselves. The owner must hand over first.
+pub async fn leave(State(app): State<App>, headers: HeaderMap) -> ApiResult<StatusCode> {
+    let (mut tx, actor) = authenticate(&app, &headers).await?;
+    let owner: bool =
+        query_scalar("SELECT EXISTS (SELECT 1 FROM server_settings WHERE owner_person_id = ?)")
+            .bind(actor.person.as_slice())
+            .fetch_one(&mut *tx)
+            .await?;
+    if owner {
+        return Err(ApiError::new(StatusCode::CONFLICT, "owner_cannot_leave"));
+    }
+    let closed = remove_member(&app, &mut tx, &actor.person).await?;
+    audit(&mut tx, &actor.person, "left", None, None, actor.at).await?;
+    tx.commit().await?;
+    log_closed(closed, actor.at, "left");
+    keys::changed(&app, &actor.person, None);
+    voice::enforce(&app, None);
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[derive(Deserialize)]
 pub struct BanRequest {
     #[serde(default)]

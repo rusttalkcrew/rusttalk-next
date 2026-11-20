@@ -87,6 +87,7 @@ All endpoints below require `Authorization: Bearer <token>`.
 | --- | --- | --- |
 | GET `/v1/me` | Empty | Any member. 200, `{person_id, device_id, joined_at, role_ids, status}`; `status` is the caller’s own presence choice |
 | PUT `/v1/me/status` | `{status}`, one of `online`, `away`, `invisible` | Any member. 204. Stored and applied to the member’s event sockets |
+| DELETE `/v1/me/membership` | Empty | Any member except the owner. 204, leaves the server like a kick: sessions close, keys rotate, audit `left`. The owner gets `409 owner_cannot_leave` |
 | POST `/v1/me/revocations` | `{record}`, a W04 root-signed revocation for the caller's person | Any member. 204, affected device loses its token |
 | POST `/v1/invites` | `{uses, ttl_seconds, space_key_ct, name_ct?}` | `invite`. 201, `{id, code, expires_at}` |
 | DELETE `/v1/invites/{id}` | Empty | `invite`. 204 |
@@ -162,15 +163,18 @@ errors may have an empty body. The API logs a request ID, status and reason.
 
 | Status | Codes |
 | --- | --- |
-| 400 | `invalid_json`, `invalid_encoding`, `invalid_query`, `invalid_forwarded_ip`, `invalid_revocation`, `invalid_invite_limits`, `invalid_role_rank`, `role_name_too_large`, `invalid_role_count`, `already_owner`, `unexpected_invite`, `invalid_member_cap` |
-| 401 | `invalid_challenge`, `invalid_certificate`, `invalid_device_signature`, `invalid_session`, `token_expired` |
-| 403 | `invite_required`, `invalid_invite`, `person_banned`, `ip_banned`, `device_revoked`, `permission_denied`, `role_hierarchy`, `cannot_grant_permission`, `built_in_role`, `owner_required`, `open_joining_disabled` |
-| 404 | `invite_not_found`, `member_not_found`, `ban_not_found`, `role_not_found` |
-| 409 | `already_banned`, `no_active_ip`, `role_in_use`, `role_limit`, `member_cap_reached` |
-| 413 | `body_too_large` when generated after reading the body |
+| 400 | `invalid_json`, `invalid_encoding`, `invalid_query`, `invalid_forwarded_ip`, `invalid_revocation`, `invalid_invite_limits`, `invalid_role_rank`, `invalid_role_count`, `role_id_required`, `already_owner`, `unexpected_invite`, `invite_name_required`, `invalid_member_cap`, `invalid_certificate`, `invalid_metadata`, `invalid_envelope`, `invalid_channel_flags`, `invalid_dm_peer`, `not_a_chat_channel`, `not_a_voice_channel`, `invalid_message`, `invalid_file_body`, `invalid_file_acceptance`, `invalid_event_query`, `invalid_sync_blob`, `invalid_listing`, `invalid_listing_settings`, `invalid_index_url`, `invalid_index_tls_fingerprint` |
+| 401 | `invalid_challenge`, `invalid_certificate`, `invalid_device_signature`, `invalid_session`, `token_expired`, `invalid_livekit_webhook` |
+| 403 | `invite_required`, `invalid_invite`, `person_banned`, `ip_banned`, `device_revoked`, `device_certificate_required`, `permission_denied`, `role_hierarchy`, `cannot_grant_permission`, `built_in_role`, `owner_required`, `open_joining_disabled`, `scope_read_denied`, `recipient_read_denied`, `channel_read_denied`, `channel_write_denied`, `live_file_peer_not_in_room` |
+| 404 | `invite_not_found`, `member_not_found`, `ban_not_found`, `role_not_found`, `category_not_found`, `channel_not_found`, `message_not_found`, `message_device_not_found`, `file_not_found`, `avatar_not_found`, `icon_not_found` |
+| 408 | `file_upload_timeout` |
+| 409 | `owner_cannot_leave`, `already_banned`, `no_active_ip`, `role_exists`, `role_in_use`, `role_limit`, `member_cap_reached`, `device_limit`, `device_certificate_changed`, `revocation_limit`, `epoch_changed`, `space_key_unavailable`, `metadata_epoch_changed`, `category_exists`, `category_in_use`, `channel_exists`, `message_exists`, `file_exists` |
+| 413 | `body_too_large` when generated after reading the body, `file_too_large`, `file_member_quota`, `file_server_quota` |
 | 415 | `expected_json` |
-| 429 | `challenge_limit`, `open_join_limit` |
-| 500 | `database_error`, `database_pool_timeout`, `database_busy`, `clock_error`, `randomness_error`, `invalid_stored_person` |
+| 429 | `challenge_limit`, `invite_preview_limit`, `open_join_limit` |
+| 500 | `database_error`, `database_pool_timeout`, `database_busy`, `clock_error`, `randomness_error`, `invalid_stored_person`, `invalid_stored_certificate`, `invalid_stored_commitment`, `invalid_stored_device`, `invalid_stored_message`, `invalid_stored_sender`, `file_storage_error`, `file_task_failed`, `file_expiry_overflow`, `listing_settings_encode`, `listing_settings_encrypt`, `listing_settings_decrypt`, `listing_settings_decode`, `livekit_token_failed`, `event_encoding`, `event_timeout`, `socket_io_error` |
+| 502 | `livekit_unreachable`, `livekit_rooms_unavailable`, `livekit_roster_unavailable` |
+| 503 | `file_upload_busy`, `voice_unavailable` |
 
 ## Keys and encrypted metadata
 
@@ -186,9 +190,11 @@ in a state response indicating that the first epoch is still pending.
 | POST `/v1/keys` | `{scope, epoch, device, envelope}` | A reader of the scope. 204. The recipient must also be a current device of a reader |
 | POST `/v1/keys/reject` | `{scope, epoch, sender, envelope}` | A reader of the scope. 204. Deletes a matching envelope addressed to the caller's device |
 | POST `/v1/keys/epochs` | `{scope, epoch, commitment, envelope}` | A reader of a rotating scope, or the owner for the initial space epoch. 201. The envelope is addressed to the caller's device |
-| GET `/v1/space` | Empty | Any member. 200, `{name_ct, description_ct, icon_ct}` |
+| GET `/v1/space` | Empty | Any member. 200, `{name_ct, description_ct, icon_hash}` |
+| GET `/v1/space/icon` | Empty | Any member. 200, `{icon_ct}`, or `404 icon_not_found` |
 | PUT `/v1/space` | `{name_ct?, description_ct?, icon_ct?}` | `manage_server`. 204 |
-| GET `/v1/members` | Empty | Any member. 200, `[{person_id, display_name_ct, avatar_ct, role_ids, presence}]` |
+| GET `/v1/members` | Empty | Any member. 200, `[{person_id, display_name_ct, avatar_hash, role_ids, presence}]` |
+| GET `/v1/members/{person}/avatar` | Empty | Any member. 200, `{avatar_ct}`, or `404 avatar_not_found` |
 | PUT `/v1/me/profile` | `{display_name_ct?, avatar_ct?}` | Updates the authenticated member's own profile. 204 |
 | POST `/v1/invite-preview` | `{code}` | No bearer. 200, `{space_key_ct, name_ct}`. Missing, expired, spent or unpreviewable invite returns 404 |
 
@@ -210,10 +216,12 @@ space epoch.
 During space rotation, the API returns `409 space_key_unavailable`.
 A ciphertext from a different epoch returns `409 metadata_epoch_changed`.
 Server names, descriptions, channel names and topics, category names and
-display names allow 1024 plaintext bytes each. Icon and avatar ciphertext
+display names allow 1024 plaintext bytes each. The directory routes return a
+short hash of each icon and avatar ciphertext instead of the ciphertext, so
+clients fetch a picture only when its hash is new. Icon and avatar ciphertext
 blobs allow 256 KiB each. The two metadata PUT routes that accept images
 allow 356 KiB JSON bodies to account for base64url and accompanying fields.
-Invite preview permits eight lookups per IPv4 address or IPv6 /64 and
+Invite preview permits 32 lookups per IPv4 address or IPv6 /64 and
 256 server-wide in 60 seconds. Invalid codes that pass base64url parsing also count.
 
 ## Channels and categories
@@ -437,7 +445,9 @@ quota charge and expiry. DMs grant read and write to both participants.
 | DELETE `/v1/files/{id}?uploader={person}` | Empty | Uploader, or a channel reader with `delete_messages` when `uploader` names the file's uploader. 204 |
 
 The upload rejects a blob below 16 bytes and caps the bytes as they arrive,
-including when the request has no Content-Length. The configured limits count
+including when the request has no Content-Length. An oversized upload is read
+to its end and discarded before the 413, so proxies do not report a reset
+stream. A file ID is never reused, even after its file expired or was deleted. The configured limits count
 ciphertext bytes, including tags and thumbnail blobs. Upload errors include
 `413 file_too_large`, `413 file_member_quota`, `413 file_server_quota`,
 `409 file_exists`, `408 file_upload_timeout` and `503 file_upload_busy`. The
@@ -581,8 +591,8 @@ reconnect. A restored device needs a verified member server as a starting point.
 The desktop client syncs on each connect and after each local change.
 A device restored from the words joins one server by invite and then picks
 up the rest of the list from that server's blob.
-There is no leave route: leaving a server in the client removes it from the
-person's devices, and the membership stays until a moderator removes it.
+Leaving a server in the client calls `DELETE /v1/me/membership` and then
+removes the server from the person's devices.
 
 ## Public index
 

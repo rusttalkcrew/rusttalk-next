@@ -12,16 +12,17 @@ use std::{
 use anyhow::{Context, Result};
 use eframe::egui;
 use livekit::prelude::Participant;
-use reqwest::StatusCode;
+use reqwest::{Method, StatusCode};
 use rusttalk_core::{
     auth::{Fingerprint, InviteCode, InviteLink, KnownServer, ProtocolError, Session, decode},
     camera::CameraOptions,
     client::{
         BlobRef, Event, KeyClient, MessageBody, MessageError, MessageRecord, Server as Api,
         invite_name,
-        voice::{LiveFileEvent, NativeVideoSource, RoomEvent, VoiceRoster},
+        voice::{DataLiveFiles, LiveFileEvent, NativeVideoSource, RoomEvent, VoiceRoster},
     },
     identity::{DeviceIdentity, fingerprint},
+    presence::{Presence, PresenceEvent, Status as Choice, Update as Pushed},
 };
 use serde_json::Value;
 use tokio::{
@@ -34,7 +35,7 @@ use crate::{
     audio::Audio,
     device_sync::{DeviceSync, Edit, Synced},
     screen::{self, Video},
-    server::{Body, CallState, Directory, Id, Msg, Peer, Stats, Status},
+    server::{Body, CallState, Directory, Id, Msg, Peer, Picture, Stats, Status},
     share::App,
 };
 
@@ -49,7 +50,7 @@ use directory::{directory, get};
 pub use files::{MAX_FILE, file_name};
 pub use find::{Listed, PAGE_SIZE};
 use voice::{
-    Live, Next, leave_voice, next_voice, on_voice, room_changed, send_room, share_screen,
+    Live, Next, Transfer, leave_voice, next_voice, on_voice, room_changed, send_room, share_screen,
     stop_finished_shares, stop_lost_video, sync_voice_key, voice_command, voice_only, voice_stats,
 };
 
@@ -63,14 +64,7 @@ pub enum Command {
     Open(Id),
     /// Load the page before a message: channel, oldest loaded message.
     Older(Id, Id),
-    Send {
-        channel: Id,
-        text: String,
-        reply_to: Option<Id>,
-        edit_of: Option<Id>,
-        /// Uploaded first, then sent with the message.
-        files: Vec<PathBuf>,
-    },
+    Send(Draft),
     /// Channel, message, and the IDs of its stored files to remove too.
     Delete(Id, Id, Id, Vec<Id>),
     /// Download and decode a picture: a thumbnail, or the full image (`true`).
@@ -93,6 +87,14 @@ pub enum Command {
     CreateCategory(String),
     SetServerName(String),
     SetDisplayName(String),
+    /// Set this person's picture (PNG, JPEG or GIF bytes).
+    SetAvatar(Vec<u8>),
+    /// Online, away or invisible.
+    SetStatus(Choice),
+    /// Leave this server for good, on the server too.
+    Leave,
+    /// Offer a file live to whoever is online in a text channel or DM.
+    SendLive(Id, PathBuf),
     OpenDm(Id),
     /// Make an invite link: uses and lifetime in seconds.
     Invite(u32, u32),
@@ -112,12 +114,24 @@ pub enum Command {
     StopCamera,
 }
 
+/// A message to send, and what goes back to the composer when sending fails.
+pub struct Draft {
+    pub channel: Id,
+    pub text: String,
+    pub reply_to: Option<Id>,
+    pub edit_of: Option<Id>,
+    /// Uploaded first, then sent with the message.
+    pub files: Vec<PathBuf>,
+}
+
 pub struct LiveOffer {
     pub id: Id,
     /// Who offers it; `None` for our own offer.
     pub from: Option<Id>,
     pub name: String,
     pub size: u64,
+    /// Offered in a text channel or DM, rather than in the call.
+    pub chat: bool,
 }
 
 pub struct Preview {
@@ -156,6 +170,10 @@ pub enum Update {
         at_start: Option<bool>,
     },
     Deleted(Url, Id, Id),
+    /// This person left the server; remove it here too.
+    Left(Url),
+    /// A member came online, went away or offline.
+    Presence(Url, Id, Presence),
     Notice(Url, Id, Msg),
     DmReady(Url, Id),
     /// A new invite: its ID (to revoke it) and link.
@@ -176,8 +194,10 @@ pub enum Update {
     /// This device's camera stopped publishing or never started.
     CameraStopped,
     Stats(Url, Stats),
-    /// A file upload in a channel started (with what to show) or ended.
-    Uploading(Url, Id, Option<String>),
+    /// A file upload in a channel started or went on (what to show, and how far), or ended.
+    Uploading(Url, Id, Option<(String, f32)>),
+    /// How far saving a stored file got (0 to 1), by blob ID.
+    SaveProgress(Id, f32),
     /// A picture by blob ID, or why not: `true` when it expired or was deleted.
     Image(Id, Result<egui::ColorImage, bool>),
     /// A file by blob ID was saved, or why not: `true` when it expired or was deleted.
@@ -192,6 +212,8 @@ pub enum Update {
     NoFiles(Url, Id),
     /// The joined servers and synced settings after a device sync.
     Synced(Box<Synced>),
+    /// Sending this message failed; put it back in the composer.
+    Unsent(Url, Draft),
     Failed(String),
 }
 
@@ -416,10 +438,10 @@ fn mismatch(known: bool) -> String {
 fn pin_changed(error: &anyhow::Error) -> bool {
     matches!(
         error.downcast_ref::<ProtocolError>(),
-        Some(ProtocolError::ServerIdChanged | ProtocolError::TlsChanged | ProtocolError::ServerProof)
-    ) ||
-        // The pinned TLS verifier reports another certificate only inside the transport error text.
-        format!("{error:#}").contains("fingerprint mismatch")
+        Some(
+            ProtocolError::ServerIdChanged | ProtocolError::TlsChanged | ProtocolError::ServerProof
+        )
+    ) || rusttalk_core::pinned_tls::is_pin_mismatch(error.as_ref())
 }
 
 #[derive(Default)]
@@ -437,6 +459,12 @@ struct State {
     /// Who the server says is in each voice channel.
     rooms: HashMap<Id, VoiceRoster>,
     voice: Option<Live>,
+    /// Live files in the call and in chats, by transfer ID.
+    transfers: HashMap<Id, Transfer>,
+    /// Live files in text channels and DMs, by channel: our offers, and accepting others'.
+    chat_files: HashMap<Id, DataLiveFiles>,
+    /// Decoded pictures in the last directory, by hash.
+    pictures: HashMap<[u8; 32], Picture>,
 }
 
 enum Failure {
@@ -529,6 +557,8 @@ async fn run(
                 command = commands.recv() => match command {
                     None => return,
                     // The voice room outlives the API connection, so its shares can still stop.
+                    // The status is sent again once connected, when it differs.
+                    Some(Command::SetStatus(_)) => {}
                     Some(command) if voice_only(&command) => {
                         if let Err(error) = voice_command(&ctx, &mut state, command).await {
                             tracing::warn!(error = %format_args!("{error:#}"), "voice request failed");
@@ -548,6 +578,10 @@ async fn run(
                     }
                     Some(Command::Admin(_)) => {
                         ctx.send(Update::Admin(url.clone(), AdminUpdate::Failed(OFFLINE.into())));
+                    }
+                    Some(Command::Send(draft)) => {
+                        ctx.send(Update::Unsent(url.clone(), draft));
+                        ctx.send(Update::Failed(OFFLINE.into()));
                     }
                     Some(Command::Image(file, _)) => ctx.send(Update::Image(file.id, Err(false))),
                     Some(Command::Save(file, _)) => ctx.send(Update::Saved(file.id, Err(false))),
@@ -663,8 +697,14 @@ async fn serve(
         // Refresh ten minutes before the 12-hour token expires.
         let refresh = Duration::from_secs((client.expires_at() - 600 - now()).max(0) as u64);
         tokio::select! {
-            event = client.next_event() => match event {
-                Ok(Some(event)) => {
+            event = client.next_update() => match event {
+                Ok(Some(Pushed::Presence(PresenceEvent::PresenceChanged { person_id, status }))) => {
+                    match decode(&person_id) {
+                        Ok(person) => ctx.send(Update::Presence(url.clone(), person, status)),
+                        Err(error) => tracing::warn!(%error, "presence for a bad person ID"),
+                    }
+                }
+                Ok(Some(Pushed::Event(event))) => {
                     if let Err(error) = on_event(ctx, url, client, state, event).await {
                         tracing::warn!(error = %format_args!("{error:#}"), "handling a server event failed");
                     }
@@ -795,12 +835,19 @@ async fn on_event(
                 if record.person != me
                     && let Some(file) = client.open_message(&channel, &record).await?.live
                 {
-                    live.offers.insert(file.id, record.clone());
+                    let channel = live.channel;
+                    let transfer = Transfer {
+                        channel,
+                        offer: Some(record.clone()),
+                        ..Transfer::default()
+                    };
+                    state.transfers.insert(file.id, transfer);
                     ctx.send(Update::LiveOffer(LiveOffer {
                         id: file.id,
                         from: Some(record.person),
                         name: file.name,
                         size: file.size,
+                        chat: false,
                     }));
                 }
             }
@@ -858,21 +905,20 @@ async fn on_command(
         Command::Older(channel, before) => {
             page(ctx, url, client, state, channel, Some(before)).await;
         }
-        Command::Send {
-            channel,
-            text,
-            reply_to,
-            edit_of,
-            files,
-        } => {
+        Command::Send(draft) => {
             let body = MessageBody {
-                text,
-                reply_to,
-                edit_of,
+                text: draft.text.clone(),
+                reply_to: draft.reply_to,
+                edit_of: draft.edit_of,
                 attachments: Vec::new(),
                 live: None,
             };
-            files::send(ctx, url, client, channel, body, files).await?;
+            let sent =
+                files::send(ctx, url, client, draft.channel, body, draft.files.clone()).await;
+            if !matches!(sent, Ok(true)) {
+                ctx.send(Update::Unsent(url.clone(), draft));
+            }
+            sent?;
         }
         Command::Delete(channel, id, sender, blobs) => {
             files::delete(ctx, url, client, (channel, id, sender), blobs).await?;
@@ -880,6 +926,12 @@ async fn on_command(
         Command::Image(file, full) => files::image(ctx, client, file, full).await,
         Command::Save(file, path) => files::save(ctx, client, file, path).await,
         Command::OfferFile(path) => voice::offer_file(ctx, client, state, path).await?,
+        Command::SendLive(channel, path) => {
+            voice::offer_chat_file(ctx, url, client, state, channel, path).await?;
+        }
+        Command::AcceptFile(id, path) if state.transfers.get(&id).is_some_and(|t| t.chat) => {
+            voice::accept_chat_file(ctx, client, state, id, path).await?;
+        }
         Command::AcceptFile(id, path) => voice::accept_file(ctx, client, state, id, path).await?,
         Command::CreateChannel {
             category,
@@ -908,6 +960,30 @@ async fn on_command(
         Command::SetDisplayName(name) => {
             state.display_name = Some(name);
             set_display_name(ctx, url, client, state).await;
+        }
+        Command::SetAvatar(bytes) => {
+            if let Err(error) = client.set_avatar(&bytes).await {
+                tracing::warn!(error = %format_args!("{error:#}"), "setting picture failed");
+                ctx.send(Update::Failed(
+                    "Couldn't change your picture. Try again.".into(),
+                ));
+                return Ok(());
+            }
+            directory(ctx, url, client, state).await?;
+        }
+        Command::SetStatus(choice) => client.set_status(choice).await?,
+        Command::Leave => {
+            let reply = client
+                .request(Method::DELETE, "/v1/me/membership")
+                .send()
+                .await?;
+            if reply.status() == StatusCode::CONFLICT {
+                ctx.send(Update::Failed("Make someone else the owner first.".into()));
+                return Ok(());
+            }
+            reply.error_for_status()?;
+            tracing::info!(server = %fingerprint(&state.server_id), "left server");
+            ctx.send(Update::Left(url.clone()));
         }
         Command::OpenDm(peer) => {
             let existing = state
@@ -985,7 +1061,13 @@ async fn open(
     record: &MessageRecord,
 ) -> Msg {
     match client.open_message(channel, record).await {
-        Ok(body) => to_msg(record, &body),
+        Ok(body) => {
+            if let Some(file) = &body.live {
+                let transfer = state.transfers.entry(file.id);
+                transfer.or_insert(Transfer::chat(*channel)).offer = Some(record.clone());
+            }
+            to_msg(record, &body)
+        }
         Err(error) => {
             if error.downcast_ref::<MessageError>() == Some(&MessageError::MissingKey) {
                 state.waiting.entry(*channel).or_default().insert(record.id);
@@ -999,6 +1081,7 @@ async fn open(
                 edit_of: None,
                 body: Body::Unreadable,
                 files: Vec::new(),
+                live: None,
             }
         }
     }
@@ -1013,6 +1096,7 @@ fn to_msg(record: &MessageRecord, body: &MessageBody) -> Msg {
         edit_of: body.edit_of,
         body: Body::Text(body.text.clone()),
         files: body.attachments.clone(),
+        live: (body.live.as_ref()).map(|file| (file.id, file.name.clone(), file.size)),
     }
 }
 

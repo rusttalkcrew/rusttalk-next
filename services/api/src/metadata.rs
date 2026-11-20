@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use axum::{
     Json,
-    extract::{State, rejection::JsonRejection},
+    extract::{Path, State, rejection::JsonRejection},
     http::{HeaderMap, StatusCode},
 };
 use rusttalk_core::{
@@ -11,7 +11,9 @@ use rusttalk_core::{
     presence::Presence,
 };
 use serde::{Deserialize, Deserializer, Serialize};
-use sqlx::query_as;
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use sqlx::{SqlitePool, query, query_as, query_scalar};
 
 use crate::{
     ApiError, ApiResult, App,
@@ -43,25 +45,90 @@ pub fn encoded(bytes: Option<Vec<u8>>) -> Option<String> {
     bytes.map(|value| encode(&value))
 }
 
+/// A short hash of picture ciphertext, so clients refetch a picture only when it changes.
+fn picture_hash(ciphertext: &[u8]) -> String {
+    encode(&Sha256::digest(ciphertext)[..16])
+}
+
+/// Hash pictures stored before hashes were kept.
+pub async fn hash_pictures(db: &SqlitePool) -> anyhow::Result<()> {
+    let avatars: Vec<(Vec<u8>, Vec<u8>)> = query_as(
+        "SELECT person_id, avatar_ct FROM members
+         WHERE avatar_ct IS NOT NULL AND avatar_hash IS NULL",
+    )
+    .fetch_all(db)
+    .await?;
+    for (person, avatar) in avatars {
+        query("UPDATE members SET avatar_hash = ? WHERE person_id = ?")
+            .bind(picture_hash(&avatar))
+            .bind(person)
+            .execute(db)
+            .await?;
+    }
+    query(
+        "UPDATE server_settings SET icon_hash = ? WHERE id = 1 AND icon_hash IS NULL
+         AND icon_ct IS NOT NULL",
+    )
+    .bind(
+        query_scalar::<_, Option<Vec<u8>>>("SELECT icon_ct FROM server_settings WHERE id = 1")
+            .fetch_optional(db)
+            .await?
+            .flatten()
+            .map(|icon| picture_hash(&icon)),
+    )
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
 #[derive(Serialize)]
 pub struct Space {
     name_ct: Option<String>,
     description_ct: Option<String>,
-    icon_ct: Option<String>,
+    icon_hash: Option<String>,
 }
 
 pub async fn space(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Space>> {
     let (mut tx, _) = authenticate(&app, &headers).await?;
-    let (name, description, icon): (Ciphertext, Ciphertext, Ciphertext) =
-        query_as("SELECT name_ct, description_ct, icon_ct FROM server_settings WHERE id = 1")
+    let (name, description, icon_hash): (Ciphertext, Ciphertext, Option<String>) =
+        query_as("SELECT name_ct, description_ct, icon_hash FROM server_settings WHERE id = 1")
             .fetch_one(&mut *tx)
             .await?;
     tx.commit().await?;
     Ok(Json(Space {
         name_ct: encoded(name),
         description_ct: encoded(description),
-        icon_ct: encoded(icon),
+        icon_hash,
     }))
+}
+
+pub async fn icon(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Value>> {
+    let (mut tx, _) = authenticate(&app, &headers).await?;
+    let icon: Ciphertext = query_scalar("SELECT icon_ct FROM server_settings WHERE id = 1")
+        .fetch_one(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    let icon = icon.ok_or_else(|| ApiError::not_found("icon_not_found"))?;
+    Ok(Json(json!({ "icon_ct": encode(&icon) })))
+}
+
+pub async fn avatar(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path(person): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let person = decode_bytes(&person)?;
+    let (mut tx, _) = authenticate(&app, &headers).await?;
+    let avatar: Option<Ciphertext> =
+        query_scalar("SELECT avatar_ct FROM members WHERE person_id = ?")
+            .bind(person)
+            .fetch_optional(&mut *tx)
+            .await?;
+    tx.commit().await?;
+    let avatar = avatar
+        .flatten()
+        .ok_or_else(|| ApiError::not_found("avatar_not_found"))?;
+    Ok(Json(json!({ "avatar_ct": encode(&avatar) })))
 }
 
 // An omitted field stays unchanged. An explicit null clears it.
@@ -94,11 +161,13 @@ pub async fn update_space(
         .await?
         .require(Permission::ManageServer)?;
     let epoch = keys::space_epoch(&mut tx, &app).await?;
+    let icon = optional(Metadata::ServerIcon, epoch, icon_ct.clone().flatten())?;
     sqlx::query(
         "UPDATE server_settings SET
             name_ct = CASE WHEN ? THEN ? ELSE name_ct END,
             description_ct = CASE WHEN ? THEN ? ELSE description_ct END,
-            icon_ct = CASE WHEN ? THEN ? ELSE icon_ct END
+            icon_ct = CASE WHEN ? THEN ? ELSE icon_ct END,
+            icon_hash = CASE WHEN ? THEN ? ELSE icon_hash END
          WHERE id = 1",
     )
     .bind(name_ct.is_some())
@@ -110,11 +179,13 @@ pub async fn update_space(
         description_ct.flatten(),
     )?)
     .bind(icon_ct.is_some())
-    .bind(optional(Metadata::ServerIcon, epoch, icon_ct.flatten())?)
+    .bind(icon.as_deref())
+    .bind(icon_ct.is_some())
+    .bind(icon.as_deref().map(picture_hash))
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
-    app.notify(Some(Event::ChannelChanged));
+    app.notify(Event::ChannelChanged);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -137,10 +208,12 @@ pub async fn update_profile(
     } = payload(body)?;
     let (mut tx, actor) = authenticate(&app, &headers).await?;
     let epoch = keys::space_epoch(&mut tx, &app).await?;
+    let avatar = optional(Metadata::Avatar, epoch, avatar_ct.clone().flatten())?;
     sqlx::query(
         "UPDATE members SET
             display_name_ct = CASE WHEN ? THEN ? ELSE display_name_ct END,
-            avatar_ct = CASE WHEN ? THEN ? ELSE avatar_ct END
+            avatar_ct = CASE WHEN ? THEN ? ELSE avatar_ct END,
+            avatar_hash = CASE WHEN ? THEN ? ELSE avatar_hash END
          WHERE person_id = ?",
     )
     .bind(display_name_ct.is_some())
@@ -150,7 +223,9 @@ pub async fn update_profile(
         display_name_ct.flatten(),
     )?)
     .bind(avatar_ct.is_some())
-    .bind(optional(Metadata::Avatar, epoch, avatar_ct.flatten())?)
+    .bind(avatar.as_deref())
+    .bind(avatar_ct.is_some())
+    .bind(avatar.as_deref().map(picture_hash))
     .bind(actor.person.as_slice())
     .execute(&mut *tx)
     .await?;
@@ -164,14 +239,14 @@ pub struct Member {
     person_id: String,
     presence: Presence,
     display_name_ct: Option<String>,
-    avatar_ct: Option<String>,
+    avatar_hash: Option<String>,
     role_ids: Vec<String>,
 }
 
 pub async fn members(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Vec<Member>>> {
     let (mut tx, _) = authenticate(&app, &headers).await?;
-    let rows: Vec<(Vec<u8>, Ciphertext, Ciphertext)> =
-        query_as("SELECT person_id, display_name_ct, avatar_ct FROM members ORDER BY person_id")
+    let rows: Vec<(Vec<u8>, Ciphertext, Option<String>)> =
+        query_as("SELECT person_id, display_name_ct, avatar_hash FROM members ORDER BY person_id")
             .fetch_all(&mut *tx)
             .await?;
     let assignments: Vec<(Vec<u8>, String)> = query_as(
@@ -189,16 +264,40 @@ pub async fn members(State(app): State<App>, headers: HeaderMap) -> ApiResult<Js
     let presence = app.presence.snapshot();
     Ok(Json(
         rows.into_iter()
-            .map(|(person, display_name, avatar)| {
+            .map(|(person, display_name, avatar_hash)| {
                 let person_id = encode(&person);
                 Member {
                     presence: presence.get(&person_id).copied().unwrap_or_default(),
                     person_id,
                     display_name_ct: encoded(display_name),
-                    avatar_ct: encoded(avatar),
+                    avatar_hash,
                     role_ids: roles.remove(&person).unwrap_or_default(),
                 }
             })
             .collect(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn pictures_stored_before_hashes_get_one_at_startup() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::store::open(dir.path()).await.unwrap();
+        query("INSERT INTO members (person_id, joined_at, avatar_ct) VALUES (?, 1, ?)")
+            .bind([3; 32].as_slice())
+            .bind([9; 64].as_slice())
+            .execute(&db)
+            .await
+            .unwrap();
+        hash_pictures(&db).await.unwrap();
+        let hash: Option<String> = query_scalar("SELECT avatar_hash FROM members")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(hash, Some(picture_hash(&[9; 64])));
+        assert_eq!(hash.unwrap().len(), 22);
+    }
 }

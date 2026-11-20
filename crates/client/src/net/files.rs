@@ -4,6 +4,7 @@ use std::{
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use anyhow::{Context, Result};
@@ -20,7 +21,7 @@ use url::Url;
 use super::{Ctx, Update, send_messages, to_msg};
 use crate::server::Id;
 
-/// Upload the files, then send the message with them.
+/// Upload the files, then send the message with them; `false` when an upload failed.
 pub(super) async fn send(
     ctx: &Ctx,
     url: &Url,
@@ -28,7 +29,7 @@ pub(super) async fn send(
     channel: Id,
     mut body: MessageBody,
     files: Vec<PathBuf>,
-) -> Result<()> {
+) -> Result<bool> {
     if let Some(first) = files.first() {
         let label = match files.len() {
             1 => file_name(first),
@@ -36,14 +37,22 @@ pub(super) async fn send(
         };
         // shortcut: uploads run inside this server's loop, so its events wait until they
         // finish (at most 4 × 32 MiB); give them their own task if that gets noticed.
-        ctx.send(Update::Uploading(url.clone(), channel, Some(label)));
-        let uploaded = upload(client, &channel, files, &mut body.attachments).await;
+        let count = files.len() as f32;
+        let shown = {
+            let (ctx, url) = (ctx.clone(), url.clone());
+            move |done: f32| {
+                let what = Some((label.clone(), done / count));
+                ctx.send(Update::Uploading(url.clone(), channel, what));
+            }
+        };
+        shown(0.0);
+        let uploaded = upload(client, &channel, files, &mut body.attachments, shown).await;
         ctx.send(Update::Uploading(url.clone(), channel, None));
         if let Err(error) = uploaded {
             tracing::warn!(error = %format_args!("{error:#}"), "uploading a file failed");
             discard(client, &body.attachments).await;
             ctx.send(Update::Failed(upload_problem(&error).into()));
-            return Ok(());
+            return Ok(false);
         }
     }
     let record = match client.send_message(&channel, &body).await {
@@ -54,7 +63,7 @@ pub(super) async fn send(
         }
     };
     send_messages(ctx, url, channel, vec![to_msg(&record, &body)], false, None);
-    Ok(())
+    Ok(true)
 }
 
 /// Delete a message, then its stored files.
@@ -81,7 +90,7 @@ pub(super) async fn delete(
 pub(super) async fn image(ctx: &Ctx, client: &KeyClient<'_>, file: BlobRef, full: bool) {
     let id = file.id;
     let image = async {
-        let bytes = client.download_file(&file).await?;
+        let bytes = client.download_file(&file, None).await?;
         // Received pictures are hostile: decode with limits, off the async workers.
         tokio::task::spawn_blocking(move || {
             let image = if full {
@@ -109,7 +118,11 @@ pub(super) async fn image(ctx: &Ctx, client: &KeyClient<'_>, file: BlobRef, full
 pub(super) async fn save(ctx: &Ctx, client: &KeyClient<'_>, file: BlobRef, path: PathBuf) {
     let id = file.id;
     let saved = async {
-        let bytes = client.download_file(&file).await?;
+        let shown = ctx.clone();
+        let progress = Arc::new(move |done: u64, total: u64| {
+            shown.send(Update::SaveProgress(id, done as f32 / total.max(1) as f32));
+        });
+        let bytes = client.download_file(&file, Some(progress)).await?;
         tokio::task::spawn_blocking(move || save_file(&path, &bytes)).await?
     };
     let saved = saved.await.map_err(|error| {
@@ -130,8 +143,9 @@ async fn upload(
     channel: &Id,
     files: Vec<PathBuf>,
     out: &mut Vec<Attachment>,
+    shown: impl Fn(f32) + Clone + Send + Sync + 'static,
 ) -> Result<()> {
-    for path in files {
+    for (at, path) in files.into_iter().enumerate() {
         let name = file_name(&path);
         let media_type = media_type(&path);
         let bytes = tokio::task::spawn_blocking(move || {
@@ -143,9 +157,13 @@ async fn upload(
             Ok(bytes)
         })
         .await??;
+        let shown = shown.clone();
+        let progress = Arc::new(move |done: u64, total: u64| {
+            shown(at as f32 + done as f32 / total.max(1) as f32);
+        });
         out.push(
             client
-                .upload_file(channel, &name, media_type, &bytes)
+                .upload_file(channel, &name, media_type, &bytes, Some(progress))
                 .await?,
         );
     }

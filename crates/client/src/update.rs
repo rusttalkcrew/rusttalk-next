@@ -10,6 +10,7 @@ use std::{
 use anyhow::{Context, Result, anyhow, ensure};
 use ed25519_dalek::{Signature, VerifyingKey};
 use eframe::egui;
+use rusttalk_core::client::save_json;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -34,18 +35,11 @@ struct Settings {
 
 impl Settings {
     fn load(path: &Path) -> Result<Self> {
-        match fs::read(path) {
-            Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(error) => Err(error.into()),
-        }
+        crate::load_json(path)
     }
 
     fn save(&self, path: &Path) -> Result<()> {
-        let mut file = NamedTempFile::new_in(path.parent().context("locate update settings")?)?;
-        serde_json::to_writer(&mut file, self)?;
-        file.persist(path)?;
-        Ok(())
+        save_json(path.parent().context("locate update settings")?, path, self)
     }
 }
 

@@ -28,7 +28,10 @@ services:
     profiles: ["index"]
     build:
       context: ..
-      dockerfile: services/index/Dockerfile
+      dockerfile: services/api/Dockerfile
+      target: index
+      args:
+        SERVICE: index
     environment:
       RUSTTALK_INDEX_TRUST_PROXY: "1"
       RUSTTALK_INDEX_TTL_SECONDS: "${RUSTTALK_INDEX_TTL_SECONDS:-10800}"

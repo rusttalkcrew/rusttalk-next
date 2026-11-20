@@ -9,7 +9,7 @@ use std::{
 use anyhow::{Context, Result, ensure};
 use axum::{
     Json,
-    body::Body,
+    body::{Body, BodyDataStream},
     extract::{Path as RoutePath, Query, State, rejection::QueryRejection},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
@@ -167,6 +167,7 @@ pub async fn upload(
         .and_then(|n| n.parse::<u64>().ok())
         .is_some_and(|n| n > files.max_file as u64)
     {
+        drain(&mut body.into_data_stream()).await;
         return Err(too_large());
     }
     let _slot = files.upload_slot(actor.person)?;
@@ -180,16 +181,23 @@ pub async fn upload(
     let size = time::timeout(UPLOAD_LIMIT, async {
         let mut body = body.into_data_stream();
         let mut size = 0;
+        let mut oversized = false;
         while let Some(chunk) = time::timeout(UPLOAD_IDLE, body.try_next())
             .await
             .map_err(|_| timeout())?
             .map_err(|_| ApiError::bad_request("invalid_file_body"))?
         {
-            if chunk.len() as i64 > files.max_file - size {
-                return Err(too_large());
+            // Keep reading an oversized body to its end: answering while the client still
+            // sends makes the proxy see a reset and report 502 instead of 413.
+            if oversized || chunk.len() as i64 > files.max_file - size {
+                oversized = true;
+                continue;
             }
             size += chunk.len() as i64;
             output.write_all(&chunk).await.map_err(disk_error)?;
+        }
+        if oversized {
+            return Err(too_large());
         }
         Ok(size)
     })
@@ -227,9 +235,18 @@ pub async fn upload(
         .at
         .checked_add(files.ttl)
         .ok_or(ApiError::internal("file_expiry_overflow"))?;
-    let inserted = query(
+    // An ID is never reused, even after its file expired or was deleted.
+    let reserved = query("INSERT INTO file_ids (id) VALUES (?) ON CONFLICT (id) DO NOTHING")
+        .bind(&id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    if reserved == 0 {
+        return Err(ApiError::new(StatusCode::CONFLICT, "file_exists"));
+    }
+    query(
         "INSERT INTO files (id, channel_id, uploader, size, created_at, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING",
+         VALUES (?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(&channel)
@@ -238,11 +255,7 @@ pub async fn upload(
     .bind(actor.at)
     .bind(expires)
     .execute(&mut *tx)
-    .await?
-    .rows_affected();
-    if inserted == 0 {
-        return Err(ApiError::new(StatusCode::CONFLICT, "file_exists"));
-    }
+    .await?;
     let path = files.dir.join(&id);
     temp.persist_noclobber(&path)
         .map_err(|error| disk_error(error.error))?;
@@ -294,6 +307,14 @@ fn missing() -> ApiError {
 fn disk_error(error: io::Error) -> ApiError {
     tracing::warn!(kind = ?error.kind(), "file storage I/O failed");
     ApiError::internal("file_storage_error")
+}
+
+/// Reads and discards the rest of a rejected body within the upload timeouts, so the
+/// rejection reaches the client instead of a proxy error for a reset stream.
+pub(crate) async fn drain(body: &mut BodyDataStream) {
+    let rest =
+        async { while let Ok(Ok(Some(_))) = time::timeout(UPLOAD_IDLE, body.try_next()).await {} };
+    let _ = time::timeout(UPLOAD_LIMIT, rest).await;
 }
 
 fn too_large() -> ApiError {
