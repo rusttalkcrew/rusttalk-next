@@ -26,7 +26,7 @@ use crate::{
     keys::{Event, random_key},
     messages::{
         LIVE_CHUNK_SIZE, LiveAttachment, LiveFileAcceptance, MAX_LIVE_FILE_SIZE, MessageBody,
-        MessageRecord,
+        MessageRecord, fit_file_name,
     },
 };
 
@@ -174,11 +174,12 @@ impl VoiceRoom {
         );
         let file = LiveAttachment {
             id: *random_key()?,
-            name: path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .context("live file requires a UTF-8 name")?
-                .to_owned(),
+            name: fit_file_name(
+                &path
+                    .file_name()
+                    .context("live file requires a name")?
+                    .to_string_lossy(),
+            ),
             mime_type: mime_guess::from_path(path)
                 .first_or_octet_stream()
                 .essence_str()

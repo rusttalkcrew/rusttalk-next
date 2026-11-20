@@ -2,6 +2,7 @@ mod auth;
 mod channels;
 mod dms;
 mod events;
+mod files;
 mod keys;
 mod members;
 mod messages;
@@ -49,6 +50,7 @@ struct App {
     key: Arc<SigningKey>,
     changes: broadcast::Sender<Option<Event>>,
     voice: Option<Arc<voice::LiveKit>>,
+    files: Arc<files::Files>,
 }
 
 impl App {
@@ -163,7 +165,9 @@ async fn run() -> Result<()> {
                     "Claim ownership with docker compose exec api rusttalk-api owner-invite"
                 );
             }
+            let files = Arc::new(files::Files::open(&dir, &db).await?);
             serve(App {
+                files,
                 db,
                 key: Arc::new(key),
                 changes: broadcast::channel(128).0,
@@ -193,6 +197,7 @@ async fn run() -> Result<()> {
 
 async fn serve(app: App) -> io::Result<()> {
     let expiry = tokio::spawn(store::expire_records(app.db.clone()));
+    let file_expiry = tokio::spawn(files::expire(app.clone()));
     let app = Router::new()
         .route("/v1/health", get(|| async { "ok\n" }))
         .route("/v1/server-info", get(members::server_info))
@@ -262,7 +267,9 @@ async fn serve(app: App) -> io::Result<()> {
         .route("/v1/owner", put(roles::transfer))
         .route("/v1/bans", get(members::bans))
         .route("/v1/audit", get(members::audit_log))
+        .route("/v1/files/{id}", get(files::download).delete(files::delete))
         .layer(RequestBodyLimitLayer::new(4096))
+        .route("/v1/files", post(files::upload))
         .route("/internal/livekit", post(voice::webhook))
         .merge(
             Router::new()
@@ -291,6 +298,7 @@ async fn serve(app: App) -> io::Result<()> {
     tracing::info!("API listening on port 8080");
     let result = axum::serve(listener, app).await;
     expiry.abort();
+    file_expiry.abort();
     result
 }
 

@@ -4,7 +4,8 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    fs, io,
+    fs,
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, mpsc},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -20,15 +21,16 @@ use rusttalk_core::{
     },
     camera::CameraOptions,
     client::{
-        Catalog, Event, KeyClient, MessageBody, MessageError, MessageRecord, Server as Api,
-        invite_name, save_json,
+        Attachment, BlobRef, Catalog, Event, KeyClient, MessageBody, MessageError, MessageRecord,
+        Server as Api, UploadRejected, decode_image, decode_thumbnail, invite_name, save_json,
         voice::{
-            ConnectionState, NativeVideoSource, RoomEvent, TrackSid, TrackSource, VoiceRoom,
-            VoiceRoster, VoiceState,
+            ConnectionState, LiveFileEvent, NativeVideoSource, RoomEvent, TrackSid, TrackSource,
+            VoiceRoom, VoiceRoster, VoiceState,
         },
     },
     identity::{DeviceIdentity, fingerprint},
     keys::Metadata,
+    messages::fit_file_name,
 };
 use serde_json::Value;
 use tokio::{
@@ -51,6 +53,10 @@ const PAGE: u32 = 50;
 const CHANGED: &str = "This server changed. Don't continue unless the owner told you it would.";
 const OFFLINE: &str = "You're offline. Try again in a moment.";
 const FAILED: &str = "That didn't work. Try again.";
+/// The largest file that still fits the server's 32 MiB blob limit with its
+/// 16-byte tag per 64 KiB chunk.
+pub const MAX_FILE: u64 = 32 * 1024 * 1024 - 8 * 1024;
+const _: () = assert!(MAX_FILE + MAX_FILE.div_ceil(64 * 1024) * 16 <= 32 * 1024 * 1024);
 /// Invites made from the UI.
 const INVITE_USES: u32 = 10;
 const INVITE_SECONDS: u32 = 7 * 24 * 60 * 60;
@@ -65,8 +71,21 @@ pub enum Command {
         text: String,
         reply_to: Option<Id>,
         edit_of: Option<Id>,
+        /// Uploaded first, then sent with the message.
+        files: Vec<PathBuf>,
     },
-    Delete(Id, Id),
+    /// Channel, message, and the IDs of its stored files to remove too.
+    Delete(Id, Id, Vec<Id>),
+    /// Download and decode a picture: a thumbnail, or the full image (`true`).
+    Image(BlobRef, bool),
+    /// Download a file and save it here.
+    Save(BlobRef, PathBuf),
+    /// Offer a file to everyone in the voice room, sent through the call.
+    OfferFile(PathBuf),
+    /// Receive an offered file into this path.
+    AcceptFile(Id, PathBuf),
+    /// Stop our offer, or our download, of a live file.
+    CancelFile(Id),
     CreateChannel {
         /// `None` creates a category named `new_category` first.
         category: Option<Id>,
@@ -92,6 +111,14 @@ pub enum Command {
     /// Publish a running camera, replacing an earlier one.
     ShareCamera(NativeVideoSource, CameraOptions),
     StopCamera,
+}
+
+pub struct LiveOffer {
+    pub id: Id,
+    /// Who offers it; `None` for our own offer.
+    pub from: Option<Id>,
+    pub name: String,
+    pub size: u64,
 }
 
 pub struct Preview {
@@ -133,6 +160,20 @@ pub enum Update {
     /// This device's camera stopped publishing or never started.
     CameraStopped,
     Stats(Url, Stats),
+    /// A file upload in a channel started (with what to show) or ended.
+    Uploading(Url, Id, Option<String>),
+    /// A picture by blob ID, or why not: `true` when it expired or was deleted.
+    Image(Id, Result<egui::ColorImage, bool>),
+    /// A file by blob ID was saved, or why not: `true` when it expired or was deleted.
+    Saved(Id, Result<(), bool>),
+    /// A file offered in the voice room, by someone else or by us.
+    LiveOffer(LiveOffer),
+    /// Someone started (`true`) or stopped receiving our live file.
+    LiveReceiver(Id, Id, bool),
+    /// How receiving a live file goes.
+    LiveProgress(Id, LiveFileEvent),
+    /// This device may not send files in the call.
+    NoFiles(Url, Id),
     Failed(String),
 }
 
@@ -345,6 +386,12 @@ struct Live {
     camera: Option<TrackSid>,
     /// Screen and camera tracks this device receives; others are unsubscribed.
     watched: HashSet<String>,
+    /// Live files offered to us, by transfer ID, until accepted.
+    offers: HashMap<Id, MessageRecord>,
+    /// Our own live file offers.
+    mine: HashSet<Id>,
+    /// Live files being received; aborting one cancels it.
+    downloads: HashMap<Id, tokio::task::JoinHandle<()>>,
 }
 
 struct Share {
@@ -461,6 +508,8 @@ async fn run(
                         ctx.send(Update::CameraStopped);
                         ctx.send(Update::Failed(OFFLINE.into()));
                     }
+                    Some(Command::Image(file, _)) => ctx.send(Update::Image(file.id, Err(false))),
+                    Some(Command::Save(file, _)) => ctx.send(Update::Saved(file.id, Err(false))),
                     Some(command) => {
                         if let Command::JoinVoice(channel) = command {
                             ctx.send(Update::Call(url.clone(), channel, None));
@@ -659,6 +708,21 @@ async fn on_event(
                 let record = client.message(&channel, &id).await?;
                 let msg = open(client, state, &channel, &record).await;
                 send_messages(ctx, url, channel, vec![msg], false, None);
+            } else if let Some(live) = state.voice.as_mut().filter(|live| live.channel == channel) {
+                // Live file offers arrive as messages in the voice channel.
+                let record = client.message(&channel, &id).await?;
+                let me = *client.identity.certificate.person_id();
+                if record.person != me
+                    && let Some(file) = client.open_message(&channel, &record).await?.live
+                {
+                    live.offers.insert(file.id, record.clone());
+                    ctx.send(Update::LiveOffer(LiveOffer {
+                        id: file.id,
+                        from: Some(record.person),
+                        name: file.name,
+                        size: file.size,
+                    }));
+                }
             }
         }
         Event::MessageDeleted { channel, id } => {
@@ -693,9 +757,23 @@ async fn on_event(
         Event::VoiceChanged { channel } => {
             room_changed(ctx, url, client, state, decode(&channel)?).await?;
         }
-        Event::LiveFileAccepted { .. } => {
+        Event::LiveFileAccepted {
+            ref device,
+            ref acceptance,
+            ..
+        } => {
             if let Some(voice) = &mut state.voice {
                 voice.room.handle_live_file_event(client, &event)?;
+                let transfer = decode(&acceptance.transfer)?;
+                let person = client
+                    .devices()
+                    .find(|cert| encode(cert.signing_key().as_bytes()) == *device)
+                    .map(|cert| *cert.person_id());
+                if let Some(person) = person
+                    && voice.mine.contains(&transfer)
+                {
+                    ctx.send(Update::LiveReceiver(transfer, person, !acceptance.cancel));
+                }
             }
         }
         Event::RotateNeeded { .. } => {}
@@ -723,19 +801,143 @@ async fn on_command(
             text,
             reply_to,
             edit_of,
+            files,
         } => {
-            let body = MessageBody {
+            let mut body = MessageBody {
                 text,
                 reply_to,
                 edit_of,
+                attachments: Vec::new(),
                 live: None,
             };
-            let record = client.send_message(&channel, &body).await?;
+            if let Some(first) = files.first() {
+                let label = match files.len() {
+                    1 => file_name(first),
+                    count => format!("{count} files"),
+                };
+                // shortcut: uploads run inside this server's loop, so its events wait until they
+                // finish (at most 4 × 32 MiB); give them their own task if that gets noticed.
+                ctx.send(Update::Uploading(url.clone(), channel, Some(label)));
+                let uploaded = upload(client, &channel, files, &mut body.attachments).await;
+                ctx.send(Update::Uploading(url.clone(), channel, None));
+                if let Err(error) = uploaded {
+                    tracing::warn!(error = %format_args!("{error:#}"), "uploading a file failed");
+                    discard(client, &body.attachments).await;
+                    ctx.send(Update::Failed(upload_problem(&error).into()));
+                    return Ok(());
+                }
+            }
+            let record = match client.send_message(&channel, &body).await {
+                Ok(record) => record,
+                Err(error) => {
+                    discard(client, &body.attachments).await;
+                    return Err(error);
+                }
+            };
             send_messages(ctx, url, channel, vec![to_msg(&record, &body)], false, None);
         }
-        Command::Delete(channel, id) => {
+        Command::Delete(channel, id, files) => {
             client.delete_message(&channel, &id).await?;
             ctx.send(Update::Deleted(url.clone(), channel, id));
+            for file in files {
+                if let Err(error) = client.delete_file(&file).await
+                    && !gone(&error)
+                {
+                    tracing::warn!(error = %format_args!("{error:#}"), "deleting a stored file failed");
+                }
+            }
+        }
+        Command::Image(file, full) => {
+            let id = file.id;
+            let image = async {
+                let bytes = client.download_file(&file).await?;
+                // Received pictures are hostile: decode with limits, off the async workers.
+                tokio::task::spawn_blocking(move || {
+                    let image = if full {
+                        decode_image(&bytes)
+                    } else {
+                        decode_thumbnail(&bytes)
+                    }?
+                    .into_rgba8();
+                    let size = [image.width() as usize, image.height() as usize];
+                    anyhow::Ok(egui::ColorImage::from_rgba_unmultiplied(
+                        size,
+                        image.as_raw(),
+                    ))
+                })
+                .await?
+            };
+            let image = image.await.map_err(|error| {
+                tracing::warn!(error = %format_args!("{error:#}"), "loading a picture failed");
+                gone(&error)
+            });
+            ctx.send(Update::Image(id, image));
+        }
+        Command::Save(file, path) => {
+            let id = file.id;
+            let saved = async {
+                let bytes = client.download_file(&file).await?;
+                tokio::task::spawn_blocking(move || save_file(&path, &bytes)).await?
+            };
+            let saved = saved.await.map_err(|error| {
+                tracing::warn!(error = %format_args!("{error:#}"), "saving a file failed");
+                gone(&error)
+            });
+            ctx.send(Update::Saved(id, saved));
+        }
+        Command::OfferFile(path) => {
+            let Some(live) = &mut state.voice else {
+                return Ok(());
+            };
+            let record = live.room.offer_live_file(client, &path).await?;
+            let file = client
+                .open_message(&live.channel, &record)
+                .await?
+                .live
+                .context("offer without a file")?;
+            tracing::info!("offered a live file");
+            live.mine.insert(file.id);
+            ctx.send(Update::LiveOffer(LiveOffer {
+                id: file.id,
+                from: None,
+                name: file.name,
+                size: file.size,
+            }));
+        }
+        Command::AcceptFile(id, path) => {
+            let Some(live) = &mut state.voice else {
+                return Ok(());
+            };
+            let Some(record) = live.offers.remove(&id) else {
+                return Ok(());
+            };
+            let mut download = match live.room.accept_live_file(client, &record, &path).await {
+                Ok(download) => download,
+                Err(error) => {
+                    let reason = format!("{error:#}");
+                    ctx.send(Update::LiveProgress(id, LiveFileEvent::Failed { reason }));
+                    return Err(error);
+                }
+            };
+            tracing::info!("receiving a live file");
+            let ctx = ctx.clone();
+            live.downloads.insert(
+                id,
+                tokio::spawn(async move {
+                    let mut shown = std::time::Instant::now();
+                    while let Some(event) = download.next_event().await {
+                        let end = !matches!(event, LiveFileEvent::Progress { .. });
+                        // Progress comes per chunk; a few updates a second are enough to draw.
+                        if end || shown.elapsed() > Duration::from_millis(150) {
+                            shown = std::time::Instant::now();
+                            ctx.send(Update::LiveProgress(id, event));
+                        }
+                        if end {
+                            break;
+                        }
+                    }
+                }),
+            );
         }
         Command::CreateChannel {
             category,
@@ -798,6 +1000,7 @@ async fn on_command(
             tracing::info!(server = %fingerprint(&state.server_id), "joined voice");
             let listening = !room.can_publish();
             let no_video = !room.can_use_camera();
+            let no_files = !room.can_publish_data();
             state.voice = Some(Live {
                 room,
                 channel,
@@ -807,6 +1010,9 @@ async fn on_command(
                 screen: None,
                 camera: None,
                 watched: HashSet::new(),
+                offers: HashMap::new(),
+                mine: HashSet::new(),
+                downloads: HashMap::new(),
             });
             ctx.send(Update::Call(
                 url.clone(),
@@ -818,6 +1024,9 @@ async fn on_command(
             }
             if no_video {
                 ctx.send(Update::NoVideo(url.clone(), channel));
+            }
+            if no_files {
+                ctx.send(Update::NoFiles(url.clone(), channel));
             }
             send_room(ctx, url, client, state, channel);
         }
@@ -892,7 +1101,8 @@ async fn on_command(
         | Command::StopApp(_)
         | Command::StopScreen
         | Command::Watch(..)
-        | Command::StopCamera => unreachable!("handled by voice_command"),
+        | Command::StopCamera
+        | Command::CancelFile(_) => unreachable!("handled by voice_command"),
     }
     Ok(())
 }
@@ -906,6 +1116,7 @@ fn voice_only(command: &Command) -> bool {
             | Command::StopScreen
             | Command::Watch(..)
             | Command::StopCamera
+            | Command::CancelFile(_)
     )
 }
 
@@ -938,6 +1149,10 @@ async fn voice_command(ctx: &Ctx, state: &mut State, command: Command) -> Result
             stop_camera(live).await;
             true
         }
+        Command::CancelFile(id) => {
+            cancel_file(live, &id);
+            false
+        }
         _ => false,
     };
     Ok(changed.then_some(live.channel))
@@ -956,6 +1171,17 @@ async fn stop_screen(live: &mut Live) -> bool {
         tracing::warn!(error = %format_args!("{error:#}"), "stopping screen failed");
     }
     true
+}
+
+/// Stop offering our file, or stop receiving one; dropping a download removes its partial file.
+fn cancel_file(live: &mut Live, id: &Id) {
+    if live.mine.remove(id) {
+        tracing::info!("stopped offering a live file");
+        live.room.cancel_live_offer(id);
+    } else if let Some(download) = live.downloads.remove(id) {
+        tracing::info!("cancelled a live file download");
+        download.abort();
+    }
 }
 
 async fn stop_camera(live: &mut Live) {
@@ -1077,6 +1303,7 @@ async fn open(
                 reply_to: None,
                 edit_of: None,
                 body: Body::Unreadable,
+                files: Vec::new(),
             }
         }
     }
@@ -1090,7 +1317,114 @@ fn to_msg(record: &MessageRecord, body: &MessageBody) -> Msg {
         reply_to: body.reply_to,
         edit_of: body.edit_of,
         body: Body::Text(body.text.clone()),
+        files: body.attachments.clone(),
     }
+}
+
+/// Encrypt and upload each file, adding it to `out` so a failure can remove the earlier ones.
+async fn upload(
+    client: &KeyClient<'_>,
+    channel: &Id,
+    files: Vec<PathBuf>,
+    out: &mut Vec<Attachment>,
+) -> Result<()> {
+    for path in files {
+        let name = file_name(&path);
+        let media_type = media_type(&path);
+        let bytes = tokio::task::spawn_blocking(move || {
+            let mut bytes = Vec::new();
+            fs::File::open(&path)?
+                .take(MAX_FILE + 1)
+                .read_to_end(&mut bytes)?;
+            anyhow::ensure!(bytes.len() as u64 <= MAX_FILE, "file too large");
+            Ok(bytes)
+        })
+        .await??;
+        out.push(
+            client
+                .upload_file(channel, &name, media_type, &bytes)
+                .await?,
+        );
+    }
+    Ok(())
+}
+
+/// Remove uploaded files that will not be sent after all.
+async fn discard(client: &KeyClient<'_>, files: &[Attachment]) {
+    for file in files {
+        for blob in std::iter::once(&file.file).chain(&file.thumbnail) {
+            if let Err(error) = client.delete_file(&blob.id).await {
+                tracing::warn!(error = %format_args!("{error:#}"), "removing an unsent file failed");
+            }
+        }
+    }
+}
+
+pub fn file_name(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || "file".into(),
+        |name| fit_file_name(&name.to_string_lossy()),
+    )
+}
+
+/// Only a hint for the receiver; images are recognised by their contents.
+fn media_type(path: &Path) -> &'static str {
+    let extension = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase);
+    match extension.as_deref() {
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("pdf") => "application/pdf",
+        _ => "application/octet-stream",
+    }
+}
+
+fn status(error: &anyhow::Error) -> Option<StatusCode> {
+    error
+        .downcast_ref::<UploadRejected>()
+        .map(|rejected| rejected.status)
+        .or_else(|| {
+            error
+                .downcast_ref::<reqwest::Error>()
+                .and_then(reqwest::Error::status)
+        })
+}
+
+/// The server no longer has this file: it expired or was deleted.
+fn gone(error: &anyhow::Error) -> bool {
+    status(error) == Some(StatusCode::NOT_FOUND)
+}
+
+fn upload_problem(error: &anyhow::Error) -> &'static str {
+    let code = error
+        .downcast_ref::<UploadRejected>()
+        .map(|r| r.code.as_str());
+    match (status(error), code) {
+        (_, Some("file_too_large")) => "File too large.",
+        (_, Some("file_member_quota")) => "You reached your storage limit.",
+        (_, Some("file_server_quota")) => "This server is full.",
+        (Some(StatusCode::PAYLOAD_TOO_LARGE), _) => {
+            "There's no room for this file. You or this server reached the storage limit."
+        }
+        (Some(StatusCode::SERVICE_UNAVAILABLE), _) => {
+            "Too many uploads right now. Try again in a moment."
+        }
+        (Some(StatusCode::FORBIDDEN), _) => "You can't send files here.",
+        _ => "Couldn't send the file. Try again.",
+    }
+}
+
+/// Write next to the target first, so a failed download leaves no partial file.
+fn save_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    let folder = path.parent().context("no folder to save in")?;
+    let mut file = tempfile::NamedTempFile::new_in(folder)?;
+    file.write_all(bytes)?;
+    file.persist(path)?;
+    Ok(())
 }
 
 fn send_messages(
@@ -1175,6 +1509,7 @@ async fn directory(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &mut Sta
                     action,
                     detail,
                 },
+                files: Vec::new(),
             };
             ctx.send(Update::Notice(url.clone(), person, msg));
         }
@@ -1875,6 +2210,36 @@ async fn voice_stats(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &mut S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upload_problems_name_the_limit_that_was_hit() {
+        let rejected = |status, code: &str| {
+            anyhow::Error::from(UploadRejected {
+                status,
+                code: code.into(),
+            })
+        };
+        let full = StatusCode::PAYLOAD_TOO_LARGE;
+        assert_eq!(
+            upload_problem(&rejected(full, "file_too_large")),
+            "File too large."
+        );
+        assert_eq!(
+            upload_problem(&rejected(full, "file_member_quota")),
+            "You reached your storage limit."
+        );
+        assert_eq!(
+            upload_problem(&rejected(full, "file_server_quota")),
+            "This server is full."
+        );
+        assert_eq!(
+            upload_problem(&rejected(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "file_upload_busy"
+            )),
+            "Too many uploads right now. Try again in a moment."
+        );
+    }
 
     fn member(person: u8, devices: &[&str]) -> Member {
         Member {

@@ -287,7 +287,9 @@ A message record has `{id, epoch, person, sender_device, at, size, envelope}`.
 `at` is the server's Unix timestamp. `size` is the binary envelope length.
 `envelope` carries a one-byte version, 24-byte nonce, two-byte big-endian
 ciphertext length, ciphertext including its authentication tag, and 64-byte
-device signature. The POST limit is 16 KiB of JSON. The API verifies the
+device signature. The version is `2`. The envelope is at most 10,751 bytes
+(see [the plaintext format](crypto.md#messages)). The POST limit is
+14,847 bytes of JSON: the unpadded base64url envelope plus 512 bytes. The API verifies the
 envelope against the authenticated person and device and requires the current
 channel epoch. Rotation or a stale epoch returns `409 epoch_changed`, a
 duplicate retained ID returns `409 message_exists`, and malformed framing or
@@ -408,21 +410,69 @@ Fetch the roster when loading a channel list and after `resync`.
 
 ## Files
 
+Files use the same bearer and channel permissions as messages. Each file ID
+is a random 32-byte value chosen by the sender before encryption and encoded
+as unpadded base64url. The sender encrypts the file before making the request.
+An image thumbnail is a separate blob with its own ID and key, authorization,
+quota charge and expiry. DMs grant read and write to both participants.
+
+| Method and path | Body | Permission and success |
+| --- | --- | --- |
+| POST `/v1/files?channel={channel}&id={id}` | Stream of raw ciphertext with `application/octet-stream` | Channel `write`. 201, `{id}` |
+| GET `/v1/files/{id}` | Empty | Channel `read`. 200, streamed ciphertext with `Content-Type: application/octet-stream` and `Content-Length` |
+| DELETE `/v1/files/{id}` | Empty | Uploader or a channel reader with `delete_messages`. 204 |
+
+The upload rejects a blob below 16 bytes and caps the bytes as they arrive,
+including when the request has no Content-Length. The configured limits count
+ciphertext bytes, including tags and thumbnail blobs. Upload errors include
+`413 file_too_large`, `413 file_member_quota`, `413 file_server_quota`,
+`409 file_exists`, `408 file_upload_timeout` and `503 file_upload_busy`. The
+API stages at most four uploads at once and at most two per member.
+A missing or expired blob returns `404 file_not_found`. A download without a
+valid session also returns 404. A member without channel access gets
+`403 channel_read_denied`. Only the upload route uses the file body limit.
+The default JSON cap is 4 KiB, with the existing scoped chat and encrypted
+profile/space metadata limits.
+
+The encrypted and signed [message plaintext](crypto.md#messages) has a
+one-byte attachment count from 0 to 4, followed by that many references
+of at most 529 bytes each.
+Each reference is encoded in this order.
+
+| Field | Encoding |
+| --- | --- |
+| File | A blob reference |
+| Name | One-byte length, then a [file name](crypto.md#messages) |
+| Media type | One-byte length, then 1–127 printable ASCII bytes excluding spaces |
+| Thumbnail present | Byte 0 or 1 |
+| Thumbnail | Blob reference when present. Plaintext at most 512 KiB and ID distinct from the file ID |
+
+A blob reference contains a 32-byte raw file ID, a 32-byte key, a four-byte
+plaintext size and a four-byte chunk size. Integers are unsigned big-endian.
+Readers accept power-of-two chunk sizes from 16 KiB through 1 MiB, with
+64 KiB used by senders. The client bounds the full ciphertext to 32 MiB.
+Recipients treat the name as display text and choose a local save path
+independently. The filename and media type are never part of the HTTP request.
+
+Message deletion and history pruning do not reveal the encrypted reference
+list to the API. When deleting a message, the client calls DELETE for its
+attachment IDs, including thumbnail IDs, while it still has the references.
+Unreferenced blobs expire on schedule. Deleting a channel marks its blobs for
+the next sweep.
+
 ### Live transfer
 
 A live offer is an original signed, encrypted chat message in the voice
-channel. Its attachment list has count `1` and kind byte `1` (`live`).
-The attachment payload in order is a random 32-byte transfer ID, a random
-32-byte file key, the plaintext length (u64), the chunk size (u32, 65,536),
-the filename byte length (u16) followed by the UTF-8 basename (1–1,024
-bytes), and the MIME type byte length (u8) followed by the ASCII type
-(1–127 bytes). Integers are big endian. The sender guesses the MIME type
-from the extension and uses `application/octet-stream` when unknown.
-Receivers reject a name that is `.` or `..` or contains `/`, `\`, `:`,
-control characters or bidirectional formatting characters (U+061C,
-U+200E, U+200F, U+202A to U+202E, U+2066 to U+2069). The name is only
-displayed. The receiver never derives a save path from it.
-Messages with zero attachments retain their original encoding.
+channel with flag bit 2 set and the offer as the last
+[plaintext field](crypto.md#messages). The offer in order is a random
+32-byte transfer ID, a random 32-byte file key, the plaintext length
+(u64, at most 2 GiB), the chunk size (u32, 65,536), the file name byte
+length (u8) followed by the UTF-8 [file name](crypto.md#messages), and
+the MIME type byte length (u8) followed by the ASCII type (1–127
+printable bytes). It is at most 460 bytes. Integers are big endian. The
+sender guesses the MIME type from the extension and uses
+`application/octet-stream` when unknown. The name is only displayed. The
+receiver never derives a save path from it.
 
 The receiver chooses a destination and explicitly accepts an offer from a
 currently verified device in the same voice room. It sends
@@ -458,10 +508,6 @@ maximum ciphertext size is 2 GiB plus 512 KiB. Clients reject missing
 chunks and extra bytes and only publish a temporary download to its
 chosen path after verifying the final chunk and stream end. The chosen
 path must be new.
-
-### Server-stored files
-
-Written in W13.
 
 ## Sync
 
