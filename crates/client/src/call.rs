@@ -17,7 +17,7 @@ use eframe::egui::{
 use crate::{
     audio::{self, Audio, Settings, StreamId},
     camera::{Camera, Change},
-    home::{Home, Tab, avatar, palette, section},
+    home::{Home, Tab, avatar, palette, section, toast_line},
     net::Command,
     screen::{self, Kind, Options, Target, Video},
     server::{Call, CallState, Id, Screen, Server, Stats},
@@ -812,6 +812,8 @@ pub fn room(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
     let joined = home.voice.in_call(server, &channel);
     ui.label(RichText::new(format!("🔊 {title}")).strong().size(17.0));
     ui.separator();
+    // Problems from the call bar and the room show here; the chat has its own line.
+    toast_line(ui, &mut home.toast);
     let peers = server.voice.get(&channel).cloned().unwrap_or_default();
     if joined && home.voice.watching.is_some() {
         screen_view(ui, home);

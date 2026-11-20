@@ -1135,17 +1135,8 @@ fn composer_id(channel: Id) -> UiId {
     UiId::unique(("composer", channel))
 }
 
-/// Returns a message to send, and whether "Attach files" was clicked.
-/// Returns a message to send, and whether "Attach files" was clicked.
-fn composer(
-    ui: &mut Ui,
-    chat: &mut Chat,
-    dir: &Directory,
-    online: bool,
-    toast: &mut Option<(String, f64)>,
-    channel: Id,
-    title: &str,
-) -> (Option<Command>, bool) {
+/// The latest problem, in red, with a close button.
+pub fn toast_line(ui: &mut Ui, toast: &mut Option<(String, f64)>) {
     if let Some((text, _)) = toast.as_ref() {
         let mut close = false;
         ui.horizontal(|ui| {
@@ -1156,6 +1147,19 @@ fn composer(
             *toast = None;
         }
     }
+}
+
+/// Returns a message to send, and whether "Attach files" was clicked.
+fn composer(
+    ui: &mut Ui,
+    chat: &mut Chat,
+    dir: &Directory,
+    online: bool,
+    toast: &mut Option<(String, f64)>,
+    channel: Id,
+    title: &str,
+) -> (Option<Command>, bool) {
+    toast_line(ui, toast);
     let mut cancel = false;
     if let Some(reply) = chat.reply_to {
         let author = chat
