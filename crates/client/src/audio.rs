@@ -37,7 +37,7 @@ use livekit::webrtc::{
     prelude::RtcAudioTrack,
 };
 use serde::{Deserialize, Serialize};
-use tokio::runtime::Handle;
+use tokio::runtime::Runtime;
 
 use crate::server::Id;
 
@@ -50,7 +50,6 @@ pub const SILENT_DB: f32 = -50.0;
 const HOLD_FRAMES: u32 = 40;
 /// Playback starts once a track has this much queued, and drops what exceeds the cap.
 const PRIME: usize = 3 * FRAME;
-#[expect(dead_code, reason = "used once voice is wired to the core module")]
 const CAP: usize = 20 * FRAME;
 const SPEAKING_MS: u64 = 300;
 
@@ -98,13 +97,17 @@ pub struct Audio(Arc<Engine>);
 struct Engine {
     shared: Arc<Shared>,
     control: Sender<Control>,
-    #[expect(dead_code, reason = "used once voice is wired to the core module")]
-    runtime: Handle,
+    /// Reads remote tracks; `None` only while dropping.
+    runtime: Option<Runtime>,
 }
 
 impl Drop for Engine {
     fn drop(&mut self) {
         let _ = self.control.send(Control::Stop);
+        // Never wait for track readers on the UI thread.
+        if let Some(runtime) = self.runtime.take() {
+            runtime.shutdown_background();
+        }
     }
 }
 
@@ -189,7 +192,12 @@ impl Shared {
 
 impl Audio {
     /// Starts the device and processing threads; devices open only when needed.
-    pub fn new(data: &Path, runtime: Handle) -> Result<Self> {
+    pub fn new(data: &Path) -> Result<Self> {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .thread_name("rusttalk-playback")
+            .build()
+            .context("start playback runtime")?;
         let file = data.join("voice.json");
         let settings = match fs::read(&file) {
             Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|error| {
@@ -244,7 +252,7 @@ impl Audio {
         Ok(Self(Arc::new(Engine {
             shared,
             control,
-            runtime,
+            runtime: Some(runtime),
         })))
     }
 
@@ -258,7 +266,6 @@ impl Audio {
     }
 
     /// The source that voice publishes as the microphone track.
-    #[expect(dead_code, reason = "used once voice is wired to the core module")]
     pub fn source(&self) -> NativeAudioSource {
         self.shared().source.clone()
     }
@@ -360,7 +367,6 @@ impl Audio {
     }
 
     /// Play a remote audio track until it ends or is removed.
-    #[expect(dead_code, reason = "used once voice is wired to the core module")]
     pub fn add_track(&self, sid: String, person: Id, track: RtcAudioTrack) {
         let serial = {
             let mut mixer = lock(&self.shared().mixer);
@@ -380,7 +386,10 @@ impl Audio {
             serial
         };
         let shared = self.0.shared.clone();
-        self.0.runtime.spawn(async move {
+        let Some(runtime) = &self.0.runtime else {
+            return;
+        };
+        runtime.spawn(async move {
             let mut stream = NativeAudioStream::new(track, RATE as i32, 1);
             while let Some(frame) = stream.next().await {
                 let loud = level_db(&frame.data) > SILENT_DB;
@@ -407,7 +416,6 @@ impl Audio {
         });
     }
 
-    #[expect(dead_code, reason = "used once voice is wired to the core module")]
     pub fn remove_track(&self, sid: &str) {
         lock(&self.shared().mixer).tracks.remove(sid);
     }

@@ -40,7 +40,6 @@ pub struct Call {
     pub stats: Stats,
 }
 
-#[expect(dead_code, reason = "used once voice is wired to the core module")]
 #[derive(Clone, Copy, PartialEq)]
 pub enum CallState {
     Connecting,
@@ -54,9 +53,9 @@ pub enum CallState {
 pub struct Stats {
     pub ping_ms: Option<f64>,
     pub jitter_ms: Option<f64>,
-    /// Percent of packets lost.
-    pub loss_in: Option<f64>,
-    pub loss_out: Option<f64>,
+    /// Packets lost since joining.
+    pub lost_in: Option<i64>,
+    pub lost_out: Option<i64>,
     pub tracks: Vec<TrackStats>,
 }
 

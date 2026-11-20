@@ -12,12 +12,16 @@ use std::{
 
 use anyhow::{Context, Result};
 use eframe::egui;
+use livekit::prelude::RemoteTrack;
 use reqwest::{Method, StatusCode};
 use rusttalk_core::{
-    auth::{InviteCode, InviteLink, KnownServer, ProtocolError, Session, decode, encode},
+    auth::{
+        InviteCode, InviteLink, KnownServer, ProtocolError, Session, decode, encode, voice_identity,
+    },
     client::{
         Catalog, Event, KeyClient, MessageBody, MessageError, MessageRecord, Server as Api,
         invite_name, save_json,
+        voice::{ConnectionState, RoomEvent, VoiceRoom, VoiceState},
     },
     identity::{DeviceIdentity, fingerprint},
     keys::Metadata,
@@ -29,9 +33,12 @@ use tokio::{
 };
 use url::Url;
 
-use crate::server::{
-    Body, CallState, Category, Channel, Device, Directory, Dm, Id, Member, Msg, Peer, Perms, Stats,
-    Status, member_name,
+use crate::{
+    audio::Audio,
+    server::{
+        Body, CallState, Category, Channel, Device, Directory, Dm, Id, Member, Msg, Peer, Perms,
+        Stats, Status, TrackStats, member_name,
+    },
 };
 
 const PAGE: u32 = 50;
@@ -97,9 +104,7 @@ pub enum Update {
     /// The call in a voice channel changed state; `None` when it ended.
     Call(Url, Id, Option<CallState>),
     /// Everyone in one voice channel.
-    #[allow(dead_code)]
     Room(Url, Id, Vec<Peer>),
-    #[allow(dead_code)]
     Stats(Url, Stats),
     Failed(String),
 }
@@ -116,6 +121,7 @@ struct Ctx {
     egui: egui::Context,
     identity: Arc<DeviceIdentity>,
     data: Arc<Path>,
+    audio: Audio,
 }
 
 impl Ctx {
@@ -127,7 +133,12 @@ impl Ctx {
 }
 
 impl Net {
-    pub fn new(egui: egui::Context, identity: Arc<DeviceIdentity>, data: PathBuf) -> Result<Self> {
+    pub fn new(
+        egui: egui::Context,
+        identity: Arc<DeviceIdentity>,
+        data: PathBuf,
+        audio: Audio,
+    ) -> Result<Self> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .thread_name("rusttalk-net")
@@ -142,18 +153,10 @@ impl Net {
                 egui,
                 identity,
                 data: data.into(),
+                audio,
             },
             updates: receiver,
         })
-    }
-
-    /// For audio work that must outlive a frame, like reading remote tracks.
-    pub fn runtime(&self) -> tokio::runtime::Handle {
-        self.runtime
-            .as_ref()
-            .expect("set until drop")
-            .handle()
-            .clone()
     }
 
     /// Servers this profile joined earlier, to reconnect at start.
@@ -282,6 +285,16 @@ struct State {
     named: bool,
     display_name: Option<String>,
     notices: u64,
+    server_id: Id,
+    /// Who the server says is in each voice channel.
+    rooms: HashMap<Id, Vec<Id>>,
+    voice: Option<Live>,
+}
+
+/// The voice room this device is in, on this server.
+struct Live {
+    room: VoiceRoom,
+    channel: Id,
 }
 
 enum Failure {
@@ -305,6 +318,9 @@ async fn run(
     let url = server.address.clone();
     let mut state = State {
         display_name,
+        server_id: server.server_id,
+        rooms: HashMap::new(),
+        voice: None,
         ..State::default()
     };
     let mut delay = 1;
@@ -370,7 +386,12 @@ async fn run(
                 () = &mut wait => break,
                 command = commands.recv() => match command {
                     None => return,
-                    Some(_) => ctx.send(Update::Failed(OFFLINE.into())),
+                    Some(command) => {
+                        if let Command::JoinVoice(channel) = command {
+                            ctx.send(Update::Call(url.clone(), channel, None));
+                        }
+                        ctx.send(Update::Failed(OFFLINE.into()));
+                    }
                 },
             }
         }
@@ -457,6 +478,7 @@ async fn serve(
         tracing::warn!(error = %format_args!("{error:#}"), "loading server state failed");
         return End::Error;
     }
+    let mut stats = tokio::time::interval(Duration::from_secs(2));
     loop {
         // Refresh ten minutes before the 12-hour token expires.
         let refresh = Duration::from_secs((client.expires_at() - 600 - now()).max(0) as u64);
@@ -466,6 +488,7 @@ async fn serve(
                     if let Err(error) = on_event(ctx, url, client, state, event).await {
                         tracing::warn!(error = %format_args!("{error:#}"), "handling a server event failed");
                     }
+                    sync_voice_key(client, state);
                 }
                 Ok(None) => return End::Closed(client.close_reason.clone()),
                 Err(error) => {
@@ -496,6 +519,8 @@ async fn serve(
                     tracing::warn!(error = %format_args!("{error:#}"), "reloading after refresh failed");
                 }
             }
+            event = next_voice(&mut state.voice) => on_voice(ctx, url, client, state, event),
+            _ = stats.tick(), if state.voice.is_some() => voice_stats(ctx, url, client, state).await,
         }
     }
 }
@@ -507,6 +532,20 @@ async fn resume(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, state: &mut St
         page(ctx, url, client, state, channel, None).await;
     }
     set_display_name(ctx, url, client, state).await;
+    let voice: Vec<Id> = state
+        .last
+        .iter()
+        .flat_map(|dir| &dir.categories)
+        .flat_map(|category| &category.channels)
+        .filter(|channel| channel.voice)
+        .map(|channel| channel.id)
+        .collect();
+    for channel in voice {
+        if let Err(error) = room_changed(ctx, url, client, state, channel).await {
+            tracing::warn!(error = %format_args!("{error:#}"), "loading voice presence failed");
+        }
+    }
+    sync_voice_key(client, state);
     Ok(())
 }
 
@@ -555,8 +594,10 @@ async fn on_event(
             }
             set_display_name(ctx, url, client, state).await;
         }
-        // Voice presence is shown by the voice UI (W08 client), not the chat directory.
-        Event::RotateNeeded { .. } | Event::VoiceChanged { .. } => {}
+        Event::VoiceChanged { channel } => {
+            room_changed(ctx, url, client, state, decode(&channel)?).await?;
+        }
+        Event::RotateNeeded { .. } => {}
     }
     Ok(())
 }
@@ -643,12 +684,25 @@ async fn on_command(
             let (_, link) = client.invite(INVITE_USES, INVITE_SECONDS).await?;
             ctx.send(Update::Invite(url.clone(), link.to_string()));
         }
-        // Stand-in until the core voice module is wired.
         Command::JoinVoice(channel) => {
-            ctx.send(Update::Call(url.clone(), channel, None));
-            ctx.send(Update::Failed("Voice isn't ready yet.".into()));
+            leave_voice(ctx, url, client, state);
+            let room = match join_voice(ctx, client, &channel).await {
+                Ok(room) => room,
+                Err(error) => {
+                    ctx.send(Update::Call(url.clone(), channel, None));
+                    return Err(error);
+                }
+            };
+            tracing::info!(server = %fingerprint(&state.server_id), "joined voice");
+            state.voice = Some(Live { room, channel });
+            ctx.send(Update::Call(
+                url.clone(),
+                channel,
+                Some(CallState::Connected),
+            ));
+            send_room(ctx, url, client, state, channel);
         }
-        Command::LeaveVoice => {}
+        Command::LeaveVoice => leave_voice(ctx, url, client, state),
     }
     Ok(())
 }
@@ -1032,6 +1086,224 @@ fn edit_joined(data: &Path, edit: impl FnOnce(&mut Vec<KnownServer>)) -> Result<
     let mut list = load_joined(data)?;
     edit(&mut list);
     save_json(data, &data.join("joined.json"), &list).context("save joined servers")
+}
+
+/// Connect to a voice channel and publish the microphone when allowed to talk.
+async fn join_voice(ctx: &Ctx, client: &mut KeyClient<'_>, channel: &Id) -> Result<VoiceRoom> {
+    let room = client.join_voice(channel).await?;
+    if room.can_publish() {
+        room.publish_audio(ctx.audio.source()).await?;
+    } else {
+        ctx.send(Update::Failed("You can listen here, but not talk.".into()));
+    }
+    Ok(room)
+}
+
+fn leave_voice(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &mut State) {
+    let Some(live) = state.voice.take() else {
+        return;
+    };
+    tracing::info!("left voice");
+    // Closing waits for the media server; nothing here needs to wait for it.
+    tokio::spawn(async move {
+        if let Err(error) = live.room.leave().await {
+            tracing::warn!(error = %format_args!("{error:#}"), "leaving voice failed");
+        }
+    });
+    send_room(ctx, url, client, state, live.channel);
+}
+
+/// Install a newer media key after key work for the voice channel.
+fn sync_voice_key(client: &KeyClient<'_>, state: &mut State) {
+    if let Some(live) = &mut state.voice
+        && let Err(error) = live.room.sync_key(client)
+    {
+        tracing::warn!(error = %format_args!("{error:#}"), "voice key rotation failed");
+    }
+}
+
+async fn next_voice(voice: &mut Option<Live>) -> Option<RoomEvent> {
+    match voice {
+        Some(live) => live.room.next_event().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// LiveKit identity of every known device, to find the person behind a voice participant.
+fn identities(client: &KeyClient<'_>, server: &Id) -> HashMap<String, Id> {
+    client
+        .devices()
+        .map(|device| {
+            let id = voice_identity(server, device.signing_key().as_bytes());
+            (id, *device.person_id())
+        })
+        .collect()
+}
+
+async fn room_changed(
+    ctx: &Ctx,
+    url: &Url,
+    client: &mut KeyClient<'_>,
+    state: &mut State,
+    channel: Id,
+) -> Result<()> {
+    let people = client.voice_participants(&channel).await?;
+    state.rooms.insert(channel, people);
+    send_room(ctx, url, client, state, channel);
+    Ok(())
+}
+
+/// The server's roster for a voice channel, plus who the room itself shows,
+/// with "connecting" for anyone whose audio isn't flowing in our room.
+fn send_room(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &State, channel: Id) {
+    let me = *ctx.identity.certificate.person_id();
+    let mut people = state.rooms.get(&channel).cloned().unwrap_or_default();
+    let mut peers = Vec::new();
+    match state.voice.as_ref().filter(|live| live.channel == channel) {
+        None => peers.extend(people.into_iter().map(|person| Peer {
+            person,
+            connecting: false,
+        })),
+        Some(live) => {
+            let ids = identities(client, &state.server_id);
+            let mut live_people: HashMap<Id, bool> = HashMap::new();
+            for (participant, voice) in live.room.participants() {
+                if let Some(person) = ids.get(participant.identity().as_str()) {
+                    *live_people.entry(*person).or_default() |= voice == VoiceState::Connected;
+                }
+            }
+            people.extend(live_people.keys().copied());
+            people.push(me);
+            people.sort();
+            people.dedup();
+            let connected = live.room.connection_state() == ConnectionState::Connected;
+            for person in people {
+                let ok = if person == me {
+                    connected
+                } else {
+                    live_people.get(&person) == Some(&true)
+                };
+                peers.push(Peer {
+                    person,
+                    connecting: !ok,
+                });
+            }
+        }
+    }
+    ctx.send(Update::Room(url.clone(), channel, peers));
+}
+
+fn on_voice(
+    ctx: &Ctx,
+    url: &Url,
+    client: &KeyClient<'_>,
+    state: &mut State,
+    event: Option<RoomEvent>,
+) {
+    let Some(channel) = state.voice.as_ref().map(|live| live.channel) else {
+        return;
+    };
+    let end = |state: &mut State, text: &str| {
+        state.voice = None;
+        ctx.send(Update::Call(url.clone(), channel, None));
+        ctx.send(Update::Failed(text.into()));
+    };
+    let Some(event) = event else {
+        tracing::warn!("voice room closed");
+        end(state, "Voice disconnected.");
+        send_room(ctx, url, client, state, channel);
+        return;
+    };
+    match event {
+        RoomEvent::TrackSubscribed {
+            track: RemoteTrack::Audio(track),
+            participant,
+            ..
+        } => {
+            let ids = identities(client, &state.server_id);
+            let person = ids.get(participant.identity().as_str()).copied();
+            if person.is_none() {
+                tracing::warn!("voice track from a device this client doesn't know yet");
+            }
+            let sid = track.sid().to_string();
+            ctx.audio
+                .add_track(sid, person.unwrap_or_default(), track.rtc_track());
+        }
+        RoomEvent::TrackUnsubscribed { track, .. } => {
+            ctx.audio.remove_track(track.sid().as_str());
+        }
+        RoomEvent::Reconnecting => {
+            tracing::info!("voice reconnecting");
+            ctx.send(Update::Call(
+                url.clone(),
+                channel,
+                Some(CallState::Reconnecting),
+            ));
+        }
+        RoomEvent::Reconnected => {
+            tracing::info!("voice reconnected");
+            ctx.send(Update::Call(
+                url.clone(),
+                channel,
+                Some(CallState::Connected),
+            ));
+        }
+        RoomEvent::Disconnected { reason } => {
+            tracing::info!(?reason, "voice disconnected");
+            end(state, "Voice disconnected.");
+        }
+        RoomEvent::ParticipantConnected(_)
+        | RoomEvent::ParticipantActive(_)
+        | RoomEvent::ParticipantDisconnected(_)
+        | RoomEvent::ConnectionStateChanged(_) => {}
+        _ => return,
+    }
+    send_room(ctx, url, client, state, channel);
+}
+
+/// The connection panel's numbers, from the SDK's WebRTC stats.
+async fn voice_stats(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &mut State) {
+    let Some(live) = &mut state.voice else {
+        return;
+    };
+    let snapshot = match live.room.stats().await {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            tracing::warn!(error = %format_args!("{error:#}"), "reading voice stats failed");
+            return;
+        }
+    };
+    let ids = identities(client, &state.server_id);
+    let me = *ctx.identity.certificate.person_id();
+    let (sent, received): (Vec<_>, Vec<_>) = snapshot.tracks.iter().partition(|t| t.outbound);
+    let lost = |tracks: &[&rusttalk_core::client::voice::TrackStats]| {
+        tracks
+            .iter()
+            .filter_map(|t| t.packets_lost)
+            .reduce(|a, b| a + b)
+    };
+    let stats = Stats {
+        ping_ms: snapshot.ping_ms,
+        jitter_ms: received.iter().filter_map(|t| t.jitter_ms).reduce(f64::max),
+        lost_in: lost(&received),
+        lost_out: lost(&sent),
+        tracks: snapshot
+            .tracks
+            .iter()
+            .filter_map(|t| {
+                Some(TrackStats {
+                    person: if t.outbound {
+                        me
+                    } else {
+                        *ids.get(t.participant.as_str())?
+                    },
+                    mine: t.outbound,
+                    kbps: t.bitrate_bps? / 1000.0,
+                })
+            })
+            .collect(),
+    };
+    ctx.send(Update::Stats(url.clone(), stats));
 }
 
 #[cfg(test)]

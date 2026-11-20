@@ -335,7 +335,7 @@ pub fn stats_window(ctx: &egui::Context, home: &mut Home) {
         .show(ctx, |ui| {
             let stats = &call.stats;
             let ms = |value: Option<f64>| value.map_or("—".into(), |v| format!("{v:.0} ms"));
-            let percent = |value: Option<f64>| value.map_or("—".into(), |v| format!("{v:.1}%"));
+            let count = |value: Option<i64>| value.map_or("—".into(), |v| v.to_string());
             Grid::new("connection").num_columns(2).show(ui, |ui| {
                 ui.label("Ping");
                 ui.label(ms(stats.ping_ms));
@@ -343,11 +343,11 @@ pub fn stats_window(ctx: &egui::Context, home: &mut Home) {
                 ui.label("Jitter");
                 ui.label(ms(stats.jitter_ms));
                 ui.end_row();
-                ui.label("Lost, incoming");
-                ui.label(percent(stats.loss_in));
+                ui.label("Lost packets in");
+                ui.label(count(stats.lost_in));
                 ui.end_row();
-                ui.label("Lost, outgoing");
-                ui.label(percent(stats.loss_out));
+                ui.label("Lost packets out");
+                ui.label(count(stats.lost_out));
                 ui.end_row();
             });
             section(ui, "Bitrate");

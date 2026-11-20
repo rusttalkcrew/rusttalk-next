@@ -85,8 +85,8 @@ pub enum Tab {
 impl Home {
     pub fn new(identity: DeviceIdentity, ctx: &egui::Context, data: PathBuf) -> Result<Self> {
         let identity = Arc::new(identity);
-        let net = Net::new(ctx.clone(), identity.clone(), data.clone())?;
-        let audio = Audio::new(&data, net.runtime())?;
+        let audio = Audio::new(&data)?;
+        let net = Net::new(ctx.clone(), identity.clone(), data, audio.clone())?;
         let servers: Vec<_> = net
             .joined()
             .into_iter()
@@ -156,6 +156,15 @@ impl Home {
                         return;
                     }
                     _ => {}
+                }
+                if matches!(status, Status::Stopped(_))
+                    && self
+                        .voice
+                        .call
+                        .as_ref()
+                        .is_some_and(|c| c.server == address)
+                {
+                    call::leave(self);
                 }
                 let server = &mut self.servers[index];
                 if status == Status::Online {

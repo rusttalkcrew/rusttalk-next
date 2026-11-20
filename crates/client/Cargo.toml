@@ -18,7 +18,7 @@ futures-util = "0.3"
 keyring = { version = "4.2", default-features = false, features = ["v1"] }
 livekit = "=0.11.0"
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
-rusttalk-core = { path = "../core", features = ["client"] }
+rusttalk-core = { path = "../core", features = ["client", "voice"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
