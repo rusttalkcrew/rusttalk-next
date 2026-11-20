@@ -4,7 +4,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
 };
 use rusttalk_core::{
-    auth::{decode, encode},
+    auth::{OpenJoining, ServerInfo, decode, encode},
     keys::{INVITE_BYTES, Metadata},
 };
 use serde::{Deserialize, Serialize};
@@ -12,12 +12,75 @@ use sqlx::{FromRow, SqliteConnection, query, query_as, query_scalar};
 
 use crate::{
     ApiError, ApiResult, App,
-    auth::{PublicLimit, authenticate, check_public_limit, client_ip, create_invite},
+    auth::{PublicLimit, authenticate, check_public_limit, client_ip, create_invite, limit_key},
     keys, metadata, payload,
     roles::{self, Permission},
     store::{audit, hash, log_closed, now, write},
     voice,
 };
+
+pub async fn server_info(State(app): State<App>) -> ApiResult<Json<ServerInfo>> {
+    let open_joining = query_scalar("SELECT open_joining FROM server_settings WHERE id = 1")
+        .fetch_one(&app.db)
+        .await?;
+    Ok(Json(ServerInfo { open_joining }))
+}
+
+pub async fn open_joining(
+    State(app): State<App>,
+    headers: HeaderMap,
+) -> ApiResult<Json<OpenJoining>> {
+    let (mut tx, actor) = authenticate(&app, &headers).await?;
+    roles::require_admin(&mut tx, &actor.person).await?;
+    let (open_joining, member_cap) =
+        query_as("SELECT open_joining, member_cap FROM server_settings WHERE id = 1")
+            .fetch_one(&mut *tx)
+            .await?;
+    tx.commit().await?;
+    Ok(Json(OpenJoining {
+        open_joining,
+        member_cap,
+    }))
+}
+
+pub async fn set_open_joining(
+    State(app): State<App>,
+    headers: HeaderMap,
+    body: Result<Json<OpenJoining>, JsonRejection>,
+) -> ApiResult<StatusCode> {
+    let (mut tx, actor) = authenticate(&app, &headers).await?;
+    roles::require_admin(&mut tx, &actor.person).await?;
+    let OpenJoining {
+        open_joining,
+        member_cap,
+    } = payload(body)?;
+    if member_cap < 1 {
+        return Err(ApiError::bad_request("invalid_member_cap"));
+    }
+    let changed = query(
+        "UPDATE server_settings SET open_joining = ?, member_cap = ?
+        WHERE id = 1 AND (open_joining <> ? OR member_cap <> ?)",
+    )
+    .bind(open_joining)
+    .bind(member_cap)
+    .bind(open_joining)
+    .bind(member_cap)
+    .execute(&mut *tx)
+    .await?;
+    if changed.rows_affected() > 0 {
+        audit(
+            &mut tx,
+            &actor.person,
+            "open_joining_changed",
+            None,
+            None,
+            actor.at,
+        )
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
 
 #[derive(Serialize)]
 pub struct Me {
@@ -270,10 +333,13 @@ pub async fn ban(
     let auth = roles::authority(&mut tx, &actor.person).await?;
     auth.require(Permission::Ban)?;
     auth.outrank(&roles::authority(&mut tx, &person).await?)?;
-    let added = query("INSERT INTO bans (person_id) VALUES (?) ON CONFLICT (person_id) DO NOTHING")
-        .bind(person.as_slice())
-        .execute(&mut *tx)
-        .await?;
+    let added = query(
+        "INSERT INTO bans (person_id, banned_at) VALUES (?, ?) ON CONFLICT (person_id) DO NOTHING",
+    )
+    .bind(person.as_slice())
+    .bind(actor.at)
+    .execute(&mut *tx)
+    .await?;
     if added.rows_affected() == 0 {
         return Err(ApiError::new(StatusCode::CONFLICT, "already_banned"));
     }
@@ -287,15 +353,26 @@ pub async fn ban(
         if addresses.is_empty() {
             return Err(ApiError::new(StatusCode::CONFLICT, "no_active_ip"));
         }
-        for ip in addresses {
-            let others: Vec<Vec<u8>> = query_scalar("SELECT DISTINCT person_id FROM sessions WHERE ip = ? AND expires_at > ? AND person_id <> ?")
-                .bind(&ip).bind(actor.at).bind(person.as_slice()).fetch_all(&mut *tx).await?;
-            if ip == actor.ip {
-                return Err(ApiError::forbidden("role_hierarchy"));
-            }
-            for other in others {
+        // One IPv6 user owns a whole /64, so the ban covers the prefix.
+        let mut banned: Vec<String> = addresses.iter().map(|ip| limit_key(ip)).collect();
+        banned.sort();
+        banned.dedup();
+        if banned.contains(&limit_key(&actor.ip)) {
+            return Err(ApiError::forbidden("role_hierarchy"));
+        }
+        let sessions: Vec<(Vec<u8>, String)> = query_as(
+            "SELECT DISTINCT person_id, ip FROM sessions WHERE expires_at > ? AND person_id <> ?",
+        )
+        .bind(actor.at)
+        .bind(person.as_slice())
+        .fetch_all(&mut *tx)
+        .await?;
+        for (other, ip) in sessions {
+            if banned.contains(&limit_key(&ip)) {
                 auth.outrank(&roles::authority(&mut tx, &other).await?)?;
             }
+        }
+        for ip in banned {
             query("INSERT INTO ban_ips (person_id, ip) VALUES (?, ?)")
                 .bind(person.as_slice())
                 .bind(ip)
@@ -350,10 +427,43 @@ pub async fn unban(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(Serialize)]
+pub struct Ban {
+    person_id: String,
+    banned_at: i64,
+    ban_ip: bool,
+}
+
+pub async fn bans(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Vec<Ban>>> {
+    let (mut tx, actor) = authenticate(&app, &headers).await?;
+    roles::authority(&mut tx, &actor.person)
+        .await?
+        .require(Permission::Ban)?;
+    let rows: Vec<(Vec<u8>, i64, bool)> = query_as(
+        "SELECT b.person_id, b.banned_at,
+                EXISTS (SELECT 1 FROM ban_ips WHERE person_id = b.person_id)
+         FROM bans b ORDER BY b.banned_at DESC, b.person_id",
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|(person, banned_at, ban_ip)| Ban {
+                person_id: encode(&person),
+                banned_at,
+                ban_ip,
+            })
+            .collect(),
+    ))
+}
+
 #[derive(Deserialize)]
 pub struct AuditQuery {
     #[serde(default)]
     after: i64,
+    action: Option<String>,
+    limit: Option<i64>,
 }
 
 #[derive(FromRow)]
@@ -381,23 +491,32 @@ pub async fn audit_log(
     headers: HeaderMap,
     query: Result<Query<AuditQuery>, QueryRejection>,
 ) -> ApiResult<Json<Vec<AuditEvent>>> {
-    let after = query
-        .map_err(|_| ApiError::bad_request("invalid_query"))?
-        .0
-        .after;
+    let AuditQuery {
+        after,
+        action,
+        limit,
+    } = query.map_err(|_| ApiError::bad_request("invalid_query"))?.0;
+    let limit = limit.unwrap_or(100);
+    if after < 0 || !(1..=100).contains(&limit) {
+        return Err(ApiError::bad_request("invalid_query"));
+    }
     let (mut tx, actor) = authenticate(&app, &headers).await?;
     roles::authority(&mut tx, &actor.person)
         .await?
         .require(Permission::ViewAuditLog)?;
     let rows = query_as::<_, AuditRow>(
         "SELECT id, actor_person_id, action, target_person_id, target_id, at
-                                       FROM audit_log WHERE id > ? AND (dm_channel_id IS NULL OR EXISTS (
+                                       FROM audit_log WHERE id > ? AND (? IS NULL OR action = ?)
+                                       AND (dm_channel_id IS NULL OR EXISTS (
                                            SELECT 1 FROM channel_readers r
                                            WHERE r.channel_id = dm_channel_id AND r.person_id = ?
-                                       )) ORDER BY id LIMIT 100",
+                                       )) ORDER BY id LIMIT ?",
     )
     .bind(after)
+    .bind(&action)
+    .bind(&action)
     .bind(actor.person.as_slice())
+    .bind(limit)
     .fetch_all(&mut *tx)
     .await?;
     tx.commit().await?;

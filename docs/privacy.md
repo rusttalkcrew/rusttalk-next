@@ -11,16 +11,17 @@ tables in SQLite (WAL). IDs and digests are binary unless indicated. The `_ct` s
 | --- | --- |
 | `members` | `person_id` (root public key), `joined_at` (Unix seconds), nullable `display_name_ct`, nullable `avatar_ct` |
 | `roles` | `id` (text), `kind` (built-in kind or custom), `rank`, `permissions` (seven-bit mask), nullable `name_ct` (opaque ciphertext) |
-| `server_settings` | Singleton `id`, nullable `owner_person_id`, `default_role_id`, nullable `name_ct`, nullable `description_ct`, nullable `icon_ct` |
+| `server_settings` | Singleton `id`, nullable `owner_person_id`, `default_role_id`, nullable `name_ct`, nullable `description_ct`, nullable `icon_ct`, `open_joining` (public flag), `member_cap` (open admission limit) |
 | `member_roles` | `person_id`, `role_id` |
 | `invites` | `id` (opaque text), `code_hash` (SHA-256), `is_owner`, `remaining_uses`, `expires_at`, nullable `space_key_ct` and `name_ct` for preview |
 | `challenges` | `nonce` (32 random bytes), `ip` (IPv4 address or IPv6 /64), `expires_at` |
 | `sessions` | `token_hash` (SHA-256), `person_id`, `device_id` (Ed25519 public key), `ip` (canonical source IP at issuance), `expires_at` |
 | `revocations` | `person_id`, `device_id`, `record` (W04 signature, device public key and revocation timestamp) |
-| `bans` | `person_id` |
-| `ban_ips` | `person_id`, `ip` (only for an explicitly requested IP ban) |
+| `bans` | `person_id`, `banned_at` (Unix seconds) |
+| `ban_ips` | `person_id`, `ip` (IPv4 address or IPv6 /64; only for an explicitly requested IP ban) |
 | `audit_log` | `id` (sequence), `actor_person_id`, `action` (fixed event kind), nullable `target_person_id`, nullable `target_id` (opaque object ID), `at` (Unix seconds), nullable `dm_channel_id` (audit visibility) |
 | `invite_previews` | `ip` (IPv4 address or IPv6 /64), `expires_at` (60-second rate limit) |
+| `open_joins` | `ip` (IPv4 address or IPv6 /64), `expires_at` (one-hour admission limit) |
 | `member_devices` | `device_id` (Ed25519 public key), `person_id`, `certificate` (public keys, timestamp, salted name commitment, root signature and format prefix) |
 | `categories` | `id` (text), `position`, `name_ct` |
 | `channels` | `id` (text), `kind` (text, voice or dm), nullable `category_id`, `position`, nullable `name_ct` and `topic_ct`, nullable `dm_first` and `dm_second` (person IDs) |
@@ -42,7 +43,10 @@ session so a moderator can choose an IP ban. Termination removes the session
 row. An explicitly banned IP stays linked to its person ban until unban.
 Challenge issuance prunes expired nonces, and sign-in deletes a consumed nonce.
 Invite creation prunes expired invites, and redemption deletes spent ones.
-Preview requests prune expired rate-limit rows.
+Preview requests prune expired rate-limit rows. An open admission stores a
+source address bucket without a person ID for one hour. A cleanup task
+prunes expired admission rows every 30 seconds, and new admissions also
+prune them.
 The API persists public device certificates. The human-readable device
 name and commitment salt stay on the device. Raw invite codes, link keys,
 session tokens, space and channel keys, and readable names, descriptions,

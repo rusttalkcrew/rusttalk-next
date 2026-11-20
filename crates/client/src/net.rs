@@ -31,7 +31,6 @@ use rusttalk_core::{
     identity::{DeviceIdentity, fingerprint},
     keys::Metadata,
     messages::fit_file_name,
-    pinned_tls::PinnedElsewhere,
 };
 use serde_json::Value;
 use tokio::{
@@ -642,10 +641,6 @@ async fn serve(
                     tracing::warn!(error = %format_args!("{error:#}"), "server request failed");
                     let text = match error.downcast_ref::<MessageError>() {
                         Some(MessageError::TextLimit) => "Messages can be up to 2,000 characters.",
-                        // shortcut: one LiveKit server per process until multi-server voice (W15).
-                        _ if error.is::<PinnedElsewhere>() => {
-                            "Restart RustTalk to use voice on another server."
-                        }
                         _ => FAILED,
                     };
                     ctx.send(Update::Failed(text.into()));
