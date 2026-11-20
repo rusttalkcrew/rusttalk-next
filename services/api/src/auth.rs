@@ -19,7 +19,8 @@ use crate::{
 };
 
 const PUBLIC_LIMIT: i64 = 256;
-const PUBLIC_LIMIT_PER_IP: i64 = 8;
+// Several friends behind one home router reconnect at once after a restart.
+const PUBLIC_LIMIT_PER_IP: i64 = 32;
 const SESSIONS_PER_PERSON: i64 = 16;
 const REVOCATIONS_PER_PERSON: i64 = 64;
 const CHALLENGE_TTL: i64 = 60;
