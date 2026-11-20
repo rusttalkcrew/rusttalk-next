@@ -31,11 +31,12 @@ pub fn fingerprint(der: &[u8]) -> Fingerprint {
     Sha256::digest(der).into()
 }
 
-#[cfg(feature = "client")]
-pub(crate) fn api_client(
+/// Build an HTTPS-only client using system trust or an explicit leaf certificate pin.
+#[cfg(feature = "https-client")]
+pub fn https_client(
     pin: Option<Fingerprint>,
 ) -> Result<reqwest::Client, Box<dyn std::error::Error + Send + Sync>> {
-    https_client(pin.map(pinned_config).transpose()?)
+    build_https_client(pin.map(pinned_config).transpose()?)
 }
 
 /// Connect to the event stream using the same trust decision as the HTTPS API.
@@ -79,7 +80,7 @@ fn pinned_config(pin: Fingerprint) -> Result<ClientConfig, rustls::Error> {
         .with_no_client_auth())
 }
 
-fn https_client(
+fn build_https_client(
     tls: Option<ClientConfig>,
 ) -> Result<reqwest::Client, Box<dyn std::error::Error + Send + Sync>> {
     let mut builder = reqwest::Client::builder()

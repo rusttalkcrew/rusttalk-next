@@ -1,7 +1,7 @@
 .DEFAULT_GOAL := help
 .PHONY: help dev client bot logs down reset lint fmt test e2e
 
-DEV_COMPOSE := docker compose -f deploy/compose.dev.yml -p rusttalk-dev
+DEV_COMPOSE := docker compose -f deploy/compose.dev.yml --profile index -p rusttalk-dev
 export RUSTTALK_DEV_USER := $(shell id -u):$(shell id -g)
 CARGO_SCOPE ?= --workspace
 E2E_FEATURES ?= --features media
@@ -27,7 +27,7 @@ dev: ## Start the Docker stack and rebuild the API on changes
 	$(DEV_COMPOSE) up --build --wait --wait-timeout 60
 	@fingerprint=$$($(DEV_COMPOSE) run --rm --no-deps -T --entrypoint openssl cert \
 		x509 -in /dev-data/tls/cert.pem -noout -sha256 -fingerprint) && \
-		printf '\033[1;34m==> https://127.0.0.1:8443\n==> LAN wss://%s:8443\n==> TLS %s\033[0m\n' "$$NODE_IP" "$$fingerprint"
+		printf '\033[1;34m==> https://127.0.0.1:8443\n==> Index https://127.0.0.1:8443/index/\n==> LAN wss://%s:8443\n==> TLS %s\033[0m\n' "$$NODE_IP" "$$fingerprint"
 	@server=$$($(DEV_COMPOSE) exec -T api rusttalk-api server-fingerprint) && \
 		printf '\033[1;34m==> Server fingerprint %s\033[0m\n' "$$server"
 	@invite=$$($(DEV_COMPOSE) exec -T api rusttalk-api owner-invite) && \
@@ -91,13 +91,13 @@ test: ## Run unit and integration tests
 	@printf '\033[1;34m==> tests\033[0m\n'
 	cargo test $(CARGO_SCOPE) --locked
 
-e2e: ## Run the Docker membership, keys, encrypted chat, voice, app audio, screen sharing, camera and live file transfer scenarios
-	@printf '\033[1;34m==> Docker membership, keys, encrypted chat, voice, app audio, screen sharing, camera and live file transfer\033[0m\n'
+e2e: ## Run the Docker membership, keys, encrypted chat, voice, app audio, screen sharing, camera, live file transfer and index scenarios
+	@printf '\033[1;34m==> Docker membership, keys, encrypted chat, voice, app audio, screen sharing, camera, live file transfer and index\033[0m\n'
 	$(if $(and $(PIPEWIRE_HELPER),$(findstring media,$(E2E_FEATURES))),cargo build --locked $(PIPEWIRE_HELPER))
 	@set -eu; \
-		export RUSTTALK_E2E_PROJECT=rusttalk-e2e-$$$$; \
+		export RUSTTALK_E2E_PROJECT=rusttalk-e2e-$$$$ RUSTTALK_INDEX_TTL_SECONDS=8; \
 		export RUSTTALK_DEV_DATA=$$(mktemp -d); \
-		compose() { docker compose -f deploy/compose.dev.yml -p "$$RUSTTALK_E2E_PROJECT" "$$@"; }; \
+		compose() { docker compose -f deploy/compose.dev.yml --profile index -p "$$RUSTTALK_E2E_PROJECT" "$$@"; }; \
 		cleanup() { \
 			status=$$?; trap - EXIT; \
 			compose down --volumes --rmi local || status=1; \

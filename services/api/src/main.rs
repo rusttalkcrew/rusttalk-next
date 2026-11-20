@@ -2,6 +2,7 @@ mod auth;
 mod channels;
 mod dms;
 mod events;
+mod index;
 mod keys;
 mod members;
 mod messages;
@@ -35,7 +36,10 @@ use rusttalk_core::{
 };
 use serde_json::json;
 use sqlx::SqlitePool;
-use tokio::{net::TcpListener, sync::broadcast};
+use tokio::{
+    net::TcpListener,
+    sync::{broadcast, watch},
+};
 use tower_http::{
     limit::RequestBodyLimitLayer,
     request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
@@ -49,6 +53,7 @@ struct App {
     key: Arc<SigningKey>,
     changes: broadcast::Sender<Option<Event>>,
     voice: Option<Arc<voice::LiveKit>>,
+    listing_changed: watch::Sender<()>,
 }
 
 impl App {
@@ -167,6 +172,7 @@ async fn run() -> Result<()> {
                 db,
                 key: Arc::new(key),
                 changes: broadcast::channel(128).0,
+                listing_changed: watch::channel(()).0,
                 voice: voice::LiveKit::from_env()?.map(Arc::new),
             })
             .await?;
@@ -193,6 +199,7 @@ async fn run() -> Result<()> {
 
 async fn serve(app: App) -> io::Result<()> {
     let expiry = tokio::spawn(store::expire_sessions(app.db.clone()));
+    let publisher = tokio::spawn(index::refresh(app.clone(), app.listing_changed.subscribe()));
     let app = Router::new()
         .route("/v1/health", get(|| async { "ok\n" }))
         .route("/v1/auth/challenge", get(auth::challenge))
@@ -256,6 +263,14 @@ async fn serve(app: App) -> io::Result<()> {
         .route("/v1/owner", put(roles::transfer))
         .route("/v1/audit", get(members::audit_log))
         .layer(RequestBodyLimitLayer::new(4096))
+        .merge(
+            Router::new()
+                .route(
+                    "/v1/settings/public-listing",
+                    get(index::get).put(index::update),
+                )
+                .layer(RequestBodyLimitLayer::new(rusttalk_core::index::BODY_LIMIT)),
+        )
         .route("/internal/livekit", post(voice::webhook))
         .merge(
             Router::new()
@@ -284,6 +299,7 @@ async fn serve(app: App) -> io::Result<()> {
     tracing::info!("API listening on port 8080");
     let result = axum::serve(listener, app).await;
     expiry.abort();
+    publisher.abort();
     result
 }
 

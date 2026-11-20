@@ -38,7 +38,7 @@ impl Server {
         }
         let trusted = known.as_ref().or(expected);
 
-        let http = pinned_tls::api_client(tls_fingerprint).map_err(anyhow::Error::from_boxed)?;
+        let http = pinned_tls::https_client(tls_fingerprint).map_err(anyhow::Error::from_boxed)?;
         let observed = verified_server(&http, address, tls_fingerprint, trusted).await?;
         save_pin(data, &pins, &observed)?;
         Ok(Self {
@@ -54,7 +54,7 @@ impl Server {
         trusted: Option<&KnownServer>,
     ) -> Result<Self> {
         validate_origin(&address)?;
-        let http = pinned_tls::api_client(tls_fingerprint).map_err(anyhow::Error::from_boxed)?;
+        let http = pinned_tls::https_client(tls_fingerprint).map_err(anyhow::Error::from_boxed)?;
         let server = verified_server(&http, address, tls_fingerprint, trusted).await?;
         Ok(Self { http, server })
     }

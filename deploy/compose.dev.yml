@@ -19,6 +19,17 @@ services:
           path: ..
           include: "Cargo.*"
 
+  index:
+    profiles: ["index"]
+    build:
+      context: ..
+      dockerfile: services/index/Dockerfile
+    environment:
+      RUSTTALK_INDEX_TRUST_PROXY: "1"
+      RUSTTALK_INDEX_TTL_SECONDS: "${RUSTTALK_INDEX_TTL_SECONDS:-10800}"
+    volumes:
+      - index-data:/data
+
   livekit:
     image: livekit/livekit-server:v1.13.11
     command: ["--config", "/etc/livekit.yaml"]
@@ -77,3 +88,4 @@ services:
 
 volumes:
   api-data:
+  index-data:

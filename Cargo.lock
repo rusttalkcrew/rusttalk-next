@@ -5512,6 +5512,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "ed25519-dalek",
  "futures-util",
  "livekit",
  "reqwest",
@@ -5592,6 +5593,19 @@ dependencies = [
 [[package]]
 name = "rusttalk-index"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "ed25519-dalek",
+ "rusttalk-core",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "rusttalk-pipewire"

@@ -20,7 +20,7 @@ use tokio_tungstenite::{
 };
 use url::Url;
 
-use super::{Fingerprint, https_client, pinned_config};
+use super::{Fingerprint, build_https_client, pinned_config};
 
 /// Install or reuse the SDK's process-wide transports for one self-hosted server.
 // shortcut: one pinned server per process, upgrade to a host-to-pin map for the multi-server client (W15).
@@ -49,7 +49,7 @@ pub fn register(
     }
 
     let tls = pinned_config(pin)?;
-    let http = https_client(Some(tls.clone()))?;
+    let http = build_https_client(Some(tls.clone()))?;
     let transport = Arc::new(PinnedTransport {
         server: server.clone(),
         tls: Arc::new(tls),
