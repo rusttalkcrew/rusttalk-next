@@ -141,6 +141,8 @@ devices; the chosen microphone, speakers and camera stay on this device. Decrypt
 memory only; the log never contains them, file names or invite links. A
 downloaded file is written only where the person picks in the save dialog,
 through a temporary file in that folder that is removed if the download fails.
+`updates.json` holds the chosen release directory URL and the automatic
+check preference on this device.
 
 ## Outbound connections
 
@@ -156,6 +158,12 @@ through a temporary file in that folder that is removed if the download fails.
   when the person opens the server browser. On Linux it accesses Secret
   Service, and opens file dialogs through xdg-desktop-portal, over the local
   session bus.
+- **Update host (opt-in):** The desktop client contacts the HTTPS directory
+  configured in Settings when you select **Check now** or opt in to a startup
+  check. It requests the release manifest and its detached signature, then
+  requests your platform’s artifact if you choose to install. The host sees
+  your IP address, requested files and timing. Requests carry no account,
+  device or server identifiers. Redirects are disabled.
 - **API:** Queries LiveKit RoomService on 7880/TCP using the internal
   Docker hostname `livekit`. When the owner enables public listing and
   explicitly configures an index URL, the API posts a signed listing to that
@@ -175,8 +183,9 @@ through a temporary file in that folder that is removed if the download fails.
   HTTP at LiveKit.
 
 Docker image pulls and Cargo dependency downloads happen during setup or build.
-The bot's WebRTC build also downloads the pinned LiveKit prebuilt archive from
-GitHub Releases.
+WebRTC builds download the pinned LiveKit prebuilt archive from GitHub
+Releases. Linux release builds let appimagetool fetch the AppImage runtime
+from GitHub Releases when no local runtime is supplied.
 
 ## LiveKit
 
