@@ -23,7 +23,7 @@ use tokio_tungstenite::{
 };
 use url::Url;
 
-use super::{Fingerprint, https_client, pinned_config};
+use super::{Fingerprint, build_https_client, pinned_config};
 
 static TRANSPORT: LazyLock<Arc<PinnedTransport>> = LazyLock::new(Arc::default);
 
@@ -47,7 +47,7 @@ pub fn register(
     }
 
     let tls = pinned_config(pin)?;
-    let http = https_client(Some(tls.clone()))?;
+    let http = build_https_client(Some(tls.clone()))?;
     if origins.is_empty() {
         if livekit_net::has_ws_client() || livekit_net::has_http_client() {
             return Err("the LiveKit transport has already been registered".into());

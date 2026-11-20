@@ -3,6 +3,7 @@ mod channels;
 mod dms;
 mod events;
 mod files;
+mod index;
 mod keys;
 mod members;
 mod messages;
@@ -38,7 +39,10 @@ use rusttalk_core::{
 };
 use serde_json::json;
 use sqlx::SqlitePool;
-use tokio::{net::TcpListener, sync::broadcast};
+use tokio::{
+    net::TcpListener,
+    sync::{broadcast, watch},
+};
 use tower_http::{
     limit::RequestBodyLimitLayer,
     request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
@@ -53,6 +57,7 @@ struct App {
     changes: broadcast::Sender<Option<rusttalk_core::presence::Update>>,
     presence: Arc<presence::Sessions>,
     voice: Option<Arc<voice::LiveKit>>,
+    listing_changed: watch::Sender<()>,
     files: Arc<files::Files>,
 }
 
@@ -177,6 +182,7 @@ async fn run() -> Result<()> {
                 key: Arc::new(key),
                 changes: broadcast::channel(128).0,
                 presence: Arc::default(),
+                listing_changed: watch::channel(()).0,
                 voice: voice::LiveKit::from_env()?.map(Arc::new),
             })
             .await?;
@@ -203,6 +209,7 @@ async fn run() -> Result<()> {
 
 async fn serve(app: App) -> io::Result<()> {
     let expiry = tokio::spawn(store::expire_records(app.db.clone()));
+    let publisher = tokio::spawn(index::refresh(app.clone(), app.listing_changed.subscribe()));
     let file_expiry = tokio::spawn(files::expire(app.clone()));
     let app = Router::new()
         .route("/v1/health", get(|| async { "ok\n" }))
@@ -281,6 +288,14 @@ async fn serve(app: App) -> io::Result<()> {
         .route("/v1/audit", get(members::audit_log))
         .route("/v1/files/{id}", get(files::download).delete(files::delete))
         .layer(RequestBodyLimitLayer::new(4096))
+        .merge(
+            Router::new()
+                .route(
+                    "/v1/settings/public-listing",
+                    get(index::get).put(index::update),
+                )
+                .layer(RequestBodyLimitLayer::new(rusttalk_core::index::BODY_LIMIT)),
+        )
         .route("/v1/files", post(files::upload))
         .route("/internal/livekit", post(voice::webhook))
         .merge(
@@ -317,6 +332,7 @@ async fn serve(app: App) -> io::Result<()> {
     tracing::info!("API listening on port 8080");
     let result = axum::serve(listener, app).await;
     expiry.abort();
+    publisher.abort();
     file_expiry.abort();
     result
 }

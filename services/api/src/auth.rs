@@ -422,6 +422,19 @@ pub struct Actor {
     pub expires_at: i64,
 }
 
+pub async fn require_owner(db: &mut SqliteConnection, person: &PersonId) -> ApiResult<()> {
+    let owner: bool = query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM server_settings WHERE id = 1 AND owner_person_id = ?)",
+    )
+    .bind(person.as_slice())
+    .fetch_one(db)
+    .await?;
+    if !owner {
+        return Err(ApiError::forbidden("owner_required"));
+    }
+    Ok(())
+}
+
 pub async fn authenticate(
     app: &App,
     headers: &HeaderMap,
@@ -587,6 +600,7 @@ mod tests {
             changes: tokio::sync::broadcast::channel(128).0,
             presence: Default::default(),
             voice: None,
+            listing_changed: tokio::sync::watch::channel(()).0,
         };
         let from = |ip: &str| {
             let mut headers = HeaderMap::new();

@@ -9,9 +9,9 @@ tables in SQLite (WAL). IDs and digests are binary unless indicated. The `_ct` s
 
 | Table | Columns |
 | --- | --- |
-| `members` | `person_id` (root public key), `joined_at` (Unix seconds), nullable `display_name_ct`, nullable `avatar_ct` |
+| `members` | `person_id` (root public key), `joined_at` (Unix seconds), nullable `display_name_ct`, nullable `avatar_ct`, `presence_status` (current choice: online, away or invisible) |
 | `roles` | `id` (text), `kind` (built-in kind or custom), `rank`, `permissions` (eight-bit mask), nullable `name_ct` (opaque ciphertext) |
-| `server_settings` | Singleton `id`, nullable `owner_person_id`, `default_role_id`, nullable `name_ct`, nullable `description_ct`, nullable `icon_ct`, `open_joining` (public flag), `member_cap` (open admission limit) |
+| `server_settings` | Singleton `id`, nullable `owner_person_id`, `default_role_id`, nullable `name_ct`, nullable `description_ct`, nullable `icon_ct`, `open_joining` (public flag), `member_cap` (open admission limit), nullable `index_listing_ct` (encrypted public-listing configuration) |
 | `member_roles` | `person_id`, `role_id` |
 | `invites` | `id` (opaque text), `code_hash` (SHA-256), `is_owner`, `remaining_uses`, `expires_at`, nullable `space_key_ct` and `name_ct` for preview |
 | `challenges` | `nonce` (32 random bytes), `ip` (IPv4 address or IPv6 /64), `expires_at` |
@@ -78,6 +78,21 @@ is kept, and it is returned only to that member. Members see only the person
 ID and visible status (online, away or offline). There is no last-seen
 timestamp or presence event history. The existing session and connection-close logging
 still applies.
+
+Public listing is off by default. The owner explicitly supplies the name
+and description they want to make public. The API encrypts this separate
+configuration with a key derived from the local server key before writing
+SQLite. The publisher opens it in memory for registration, and only the
+owner can read it through the settings API. The private space metadata
+continues to use the space key.
+
+The index stores the intentionally public name, description, address, server
+ID, member count and open-joining flag, plus the registration and expiry
+timestamps used to enforce the lease and reject replays. It retains no
+members' identities or signatures. It uses source IPs in memory for
+registration rate limits, clears them each minute, and does not retain
+search terms. Expired entries stop appearing in results immediately and
+are later pruned from SQLite.
 
 The API can see who is in which voice room by matching opaque LiveKit
 device identities to current channel readers. Readers see unmatched
@@ -148,15 +163,24 @@ through a temporary file in that folder that is removed if the download fails.
   chat, device sync, signaling and failure-path validation use Caddy on 8443/TCP.
   WebRTC uses the advertised LiveKit node on
   7882/UDP or 7881/TCP. The bot requests a voice token from the pinned API.
+  The index e2e scenario uses pinned HTTPS to search the dev index on the
+  same edge.
 - **Desktop client:** Configured RustTalk origins for pinned HTTPS and WebSocket
   connections. Voice uses the same pinned signaling path and advertised
-  WebRTC ports as the bot. On Linux it accesses Secret Service, and opens file
-  dialogs through xdg-desktop-portal, over the local session bus.
+  WebRTC ports as the bot. The client contacts a configured index only
+  when the person opens the server browser. On Linux it accesses Secret
+  Service, and opens file dialogs through xdg-desktop-portal, over the local
+  session bus.
 - **API:** Queries LiveKit RoomService on 7880/TCP using the internal
-  Docker hostname `livekit`.
+  Docker hostname `livekit`. When the owner enables public listing and
+  explicitly configures an index URL, the API posts a signed listing to that
+  HTTPS URL at opt-in, on startup and hourly while enabled. There is no
+  default index URL.
 - **Index:** No outbound network connections.
 - **Caddy:** Proxies requests to the API on 8080/TCP and to LiveKit on
-  7880/TCP, using Docker's internal DNS. Dev TLS uses a local certificate.
+  7880/TCP, using Docker's internal DNS. With the optional index enabled,
+  Caddy also proxies the directory path to the index on 8080/TCP. Dev TLS
+  uses a local certificate.
 - **LiveKit:** Replies to Caddy and to room participants over their WebRTC
   transports. LiveKit posts signed join, leave and room-end webhooks to
   `http://api:8080/internal/livekit` for presence notifications. This route

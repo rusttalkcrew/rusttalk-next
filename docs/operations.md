@@ -153,3 +153,43 @@ as the API and works on Windows with the console disabled.
 ### IP bans
 
 IP bans match one IPv4 address or one IPv6 /64, so a person cannot rotate within their own IPv6 prefix to rejoin through open joining. Bans created before W15 still match their exact address. The api only sees real client addresses when Docker forwards the original source IP to Caddy (the default bridge networking with iptables does; rootless Docker or a userland proxy shows every client as the gateway IP, and an IP ban would then hit everyone). Abuse limits: 32 open sign-in challenges per IP (256 in total), 16 sessions and 64 stored revocations per person.
+
+## Optional index
+
+Build the standalone directory image from the repository root:
+
+```sh
+docker build -f services/index/Dockerfile -t rusttalk-index .
+```
+
+Run the image with a persistent volume at `/data` (UID/GID 65532).
+The index uses `index.sqlite3` in WAL mode and listens on port 8080.
+Proxy the port through an HTTPS edge and check `GET /v1/health`.
+If the edge strips any incoming `X-Forwarded-For` and supplies exactly one
+client address, set `RUSTTALK_INDEX_TRUST_PROXY=1` and keep 8080 accessible
+only to that edge. Otherwise the index limits registrations by the direct
+TCP peer. Keep request URL and header logging disabled at the edge to
+avoid recording searches and credentials. The default lease is three hours.
+`RUSTTALK_INDEX_TTL_SECONDS` can shorten it for testing.
+`RUSTTALK_INDEX_MAX_LISTINGS` (default 10,000) caps the stored rows, expired
+ones included until the minute prune; new server IDs then get `503 index_full`
+while listed servers keep refreshing. Registration rate limits track at most
+4,096 addresses per minute and refuse new addresses beyond that. Keep system
+clocks synchronized so registrations fall within the one-minute window.
+
+`make dev` and `make e2e` enable the Compose `index` profile. To run the dev
+Compose stack without a directory, invoke Compose directly and omit the
+profile. The dev directory is available to a local bot at
+`https://127.0.0.1:8443/index/` with the dev certificate pin. The owner
+setting uses `https://caddy:8443/index/` as seen from the API container
+and the same TLS fingerprint as the dev server. Use the actual client-facing
+HTTPS origin as the advertised server address. See the request fields and
+base64url pin format in [the protocol](protocol.md#public-index).
+
+To print the dev certificate pin in the settings format:
+
+```sh
+openssl x509 -in .dev/tls/cert.pem -outform DER |
+  openssl dgst -sha256 -binary |
+  openssl base64 -A | tr '/+' '_-' | tr -d '='
+```

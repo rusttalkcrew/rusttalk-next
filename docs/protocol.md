@@ -582,3 +582,96 @@ A device restored from the words joins one server by invite and then picks
 up the rest of the list from that server's blob.
 There is no leave route: leaving a server in the client removes it from the
 person's devices, and the membership stays until a moderator removes it.
+
+## Public index
+
+### Owner setting on the chat API
+
+`GET /v1/settings/public-listing` and `PUT /v1/settings/public-listing`
+require an owner bearer token. GET returns the current setting, initially
+`{"enabled":false,"listing":null}`. PUT replaces the setting and returns
+204 after saving it. Registration runs in the background.
+
+```json
+{
+  "enabled": true,
+  "listing": {
+    "name": "Clover",
+    "description": "A community for friends",
+    "address": "https://chat.example.org",
+    "index_url": "https://directory.example.org",
+    "index_tls_fingerprint": null
+  }
+}
+```
+
+Supply the advertised HTTPS origin as `address`. The API appends
+`/v1/servers` to `index_url`, which may include a path prefix such as
+`/index`. Neither URL accepts credentials, query strings or fragments.
+The optional `index_tls_fingerprint` is the 32-byte SHA-256 fingerprint
+of the index's DER leaf certificate encoded as unpadded base64url. Omitting
+it uses the API container's CA bundle. The publisher follows no redirects.
+
+The API registers again every hour and retries after five minutes when a
+registration fails. It logs failures with a short reason and, when the index
+rejects the registration, the index's error code.
+
+Send `{"enabled":false}` to clear the configured publication and stop renewals.
+The existing listing remains visible until its lease expires. Changing the
+directory URL also lets the old lease expire. Public text is supplied
+explicitly and the API counts rows in its members table. The listing
+reports the server's current open joining setting.
+
+### Index HTTP API
+
+The index uses its own HTTPS base URL and no bearer token.
+
+| Method and path | Request | Success |
+| --- | --- | --- |
+| GET `/v1/health` | Empty | 200, `ok` |
+| GET `/v1/servers?q=&page=1` | Optional literal search string and one-based page | 200, array of up to 25 listing objects |
+| POST `/v1/servers` | `{listing, timestamp, signature}` | 204, accepts or refreshes a listing |
+
+A listing is `{server_id, name, description, address, member_count,
+open_joining}`. The name must contain a non-whitespace character and
+have at most 100 Unicode scalar values. The description may be empty
+and has at most 1,000 scalar values. The name permits no control
+characters and the description permits tab, carriage return and newline.
+Neither permits bidi embeddings, overrides or isolates (U+202A to U+202E,
+U+2066 to U+2069) or the invisible U+200B, U+2060 and U+FEFF.
+The address is an HTTPS origin of up to 512 bytes with an optional trailing
+slash. IPv6 hosts use brackets. `member_count` is an unsigned 32-bit integer
+and `open_joining` is a JSON boolean. The POST and owner PUT limits are
+16 KiB of JSON.
+
+Search matches a literal substring of name or description using SQLite LIKE
+with ASCII case folding. An omitted or empty `q` browses all listings.
+`q` has a maximum of 100 Unicode scalar values. Pages 1 through 1,000 are
+accepted. The index orders rows by name with ASCII case folding, then by
+server ID. Use a short or empty page to detect the end of results. Listings
+can change between pages. A directory result supplies an advertised server
+ID. Connect using the normal TLS trust or pin and verify a freshly signed
+server challenge against that ID. A listing does not carry a TLS pin.
+
+Registration timestamps are **Unix milliseconds**. The Ed25519 signature is
+64 bytes, encoded as unpadded base64url. The bytes to sign are:
+
+```text
+"rusttalk-index-v1" || server_id (32 raw bytes) ||
+timestamp (i64, big endian) || member_count (u32, big endian) ||
+open_joining (one byte, 0 or 1) ||
+len(name) (u16, big endian) || name (UTF-8) ||
+len(description) (u16, big endian) || description (UTF-8) ||
+len(address) (u16, big endian) || address (UTF-8)
+```
+
+Lengths count UTF-8 bytes. There is no domain terminator or normalization.
+The index rejects timestamps more than 60 seconds from its clock in either
+direction, and requires each accepted timestamp to exceed the last one for
+that server ID. Expiry is three hours from acceptance. Registration allows
+16 attempts per minute per IPv4 address or IPv6 /64. Registration errors use
+`400 invalid_listing`, `400 stale_registration`, `401 invalid_signature`,
+`409 replayed_registration`, `429 registration_limit` or
+`503 index_full` when a new server ID would exceed the index's listing cap
+(refreshes of an existing listing are still accepted). Invalid search
+parameters return `400 invalid_query`.
