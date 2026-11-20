@@ -57,13 +57,14 @@ impl VoiceRoom {
     }
 
     /// Publish a VP8 simulcast camera track. The track name never names the device.
-    /// LiveKit refuses it unless the token grants the camera source (see `can_use_camera`).
+    /// Fails at once unless the token grants the camera source (see `can_use_camera`).
     pub async fn publish_camera(
         &self,
         options: CameraOptions,
         source: NativeVideoSource,
     ) -> Result<LocalTrackPublication> {
         options.validate()?;
+        ensure!(self.can_use_camera(), "camera publication is not permitted");
         self.publish_video("camera", source, TrackSource::Camera, options.fps)
             .await
     }

@@ -261,13 +261,7 @@ impl Home {
                 }
                 match state {
                     Some(state) => call.state = state,
-                    None => {
-                        self.voice.call = None;
-                        self.voice.audio.set_voice(false);
-                        self.voice.show_stats = false;
-                        self.voice.shares.clear();
-                        self.voice.clear_screens();
-                    }
+                    None => self.voice.end_call(),
                 }
             }
             Update::Listening(address, channel) => {

@@ -80,6 +80,11 @@ pub fn list_sources() -> Result<Vec<ScreenSource>> {
     anyhow::bail!("screen capture is unavailable on this platform")
 }
 
+/// The person closed the system screen picker without choosing.
+#[derive(Debug, thiserror::Error)]
+#[error("screen picker cancelled")]
+pub struct Cancelled;
+
 struct BgraFrame {
     width: u32,
     height: u32,

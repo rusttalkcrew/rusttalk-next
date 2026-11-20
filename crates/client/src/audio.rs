@@ -790,12 +790,14 @@ fn play<T: SizedSample + FromSample<i16>>(
 
 /// 10 ms of all tracks at their streams' volumes.
 fn mix(shared: &Shared) -> [i16; FRAME] {
+    mix_tracks(&mut lock(&shared.mixer), shared.deafened.load(Relaxed))
+}
+
+fn mix_tracks(mixer: &mut Mixer, deafened: bool) -> [i16; FRAME] {
     let mut sum = [0f32; FRAME];
-    let deafened = shared.deafened.load(Relaxed);
-    let mut mixer = lock(&shared.mixer);
     let Mixer {
         tracks, volumes, ..
-    } = &mut *mixer;
+    } = mixer;
     for track in tracks.values_mut() {
         let (volume, muted) = volumes.get(&track.stream).copied().unwrap_or((1.0, false));
         let gain = if deafened || muted { 0.0 } else { volume };
@@ -932,5 +934,36 @@ fn send(source: &NativeAudioSource, frame: &[i16]) {
         Poll::Ready(Ok(())) => {}
         Poll::Ready(Err(error)) => tracing::warn!(%error, "sending microphone audio failed"),
         Poll::Pending => tracing::warn!("microphone source is buffering"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mix_applies_each_stream_volume() {
+        let loud: StreamId = ([1; 32], None);
+        let quiet: StreamId = ([2; 32], None);
+        let mut mixer = Mixer::default();
+        mixer.volumes.insert(loud.clone(), (1.0, false));
+        mixer.volumes.insert(quiet.clone(), (0.25, false));
+        let track = |stream, sample| Track {
+            serial: 0,
+            stream,
+            queue: VecDeque::from(vec![sample; PRIME]),
+            primed: false,
+            loud: 0,
+        };
+        mixer.tracks.insert("a".into(), track(loud.clone(), 8000));
+        let alone = mix_tracks(&mut mixer, false);
+        assert!(alone.iter().all(|&s| s == 8000));
+
+        mixer.tracks.clear();
+        mixer.tracks.insert("b".into(), track(quiet, 8000));
+        let quarter = mix_tracks(&mut mixer, false);
+        assert!(quarter.iter().all(|&s| s == 2000));
+
+        assert!(mix_tracks(&mut mixer, true).iter().all(|&s| s == 0));
     }
 }

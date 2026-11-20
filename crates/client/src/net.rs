@@ -444,39 +444,15 @@ async fn run(
                 () = &mut wait => break,
                 command = commands.recv() => match command {
                     None => return,
-                    Some(Command::LeaveVoice) => {
-                        if let Some(live) = state.voice.take() {
-                            tokio::spawn(leave_room(live.room));
-                        }
-                    }
                     // The voice room outlives the API connection, so its shares can still stop.
-                    Some(Command::StopApp(id)) => {
-                        if let Some(live) = &mut state.voice
-                            && let Some(at) = live.shares.iter().position(|share| share.app.id == id)
-                        {
-                            let share = live.shares.remove(at);
-                            tracing::info!("stopped sharing app audio");
-                            if let Err(error) = live.room.unpublish_audio(&share.sid).await {
-                                tracing::warn!(error = %format_args!("{error:#}"), "stopping app audio failed");
-                            }
+                    Some(command) if voice_only(&command) => {
+                        if let Err(error) = voice_command(&ctx, &mut state, command).await {
+                            tracing::warn!(error = %format_args!("{error:#}"), "voice request failed");
                         }
                     }
                     Some(Command::ShareApp(app)) => {
                         ctx.send(Update::AppStopped(app.id));
                         ctx.send(Update::Failed(OFFLINE.into()));
-                    }
-                    Some(Command::StopScreen) => {
-                        if let Some(live) = &mut state.voice {
-                            if let Some(starting) = live.starting.take() {
-                                starting.abort();
-                            }
-                            if let Some((sid, _capture)) = live.screen.take() {
-                                tracing::info!("stopped sharing screen");
-                                if let Err(error) = live.room.unpublish_video(&sid).await {
-                                    tracing::warn!(error = %format_args!("{error:#}"), "stopping screen failed");
-                                }
-                            }
-                        }
                     }
                     Some(Command::ShareScreen(..)) => {
                         ctx.send(Update::Sharing(false));
@@ -485,18 +461,6 @@ async fn run(
                     Some(Command::ShareCamera(..)) => {
                         ctx.send(Update::CameraStopped);
                         ctx.send(Update::Failed(OFFLINE.into()));
-                    }
-                    Some(Command::StopCamera) => {
-                        if let Some(live) = &mut state.voice {
-                            stop_camera(live).await;
-                        }
-                    }
-                    Some(Command::Watch(sid, on)) => {
-                        if let Some(live) = &mut state.voice
-                            && let Err(error) = watch(&ctx, live, sid, on)
-                        {
-                            tracing::warn!(error = %format_args!("{error:#}"), "watching a screen failed");
-                        }
                     }
                     Some(command) => {
                         if let Command::JoinVoice(channel) = command {
@@ -862,7 +826,11 @@ async fn on_command(
             }
             send_room(ctx, url, client, state, channel);
         }
-        Command::LeaveVoice => leave_voice(ctx, url, client, state),
+        command if voice_only(&command) => {
+            if let Some(channel) = voice_command(ctx, state, command).await? {
+                send_room(ctx, url, client, state, channel);
+            }
+        }
         Command::ShareApp(app) => {
             let Some(live) = &mut state.voice else {
                 ctx.send(Update::AppStopped(app.id));
@@ -892,21 +860,6 @@ async fn on_command(
                 }
             }
         }
-        Command::StopApp(id) => {
-            let Some(live) = &mut state.voice else {
-                return Ok(());
-            };
-            let Some(at) = live.shares.iter().position(|share| share.app.id == id) else {
-                return Ok(());
-            };
-            let share = live.shares.remove(at);
-            tracing::info!("stopped sharing app audio");
-            let channel = live.channel;
-            send_room(ctx, url, client, state, channel);
-            if let Some(live) = &mut state.voice {
-                live.room.unpublish_audio(&share.sid).await?;
-            }
-        }
         Command::ShareScreen(target, options) => {
             let Some(live) = state.voice.as_mut().filter(|live| live.screen.is_none()) else {
                 ctx.send(Update::Sharing(false));
@@ -919,28 +872,6 @@ async fn on_command(
                 let capture = screen::start(target, options, &mut None).await?;
                 Ok((capture, options))
             }));
-        }
-        Command::StopScreen => {
-            let Some(live) = &mut state.voice else {
-                return Ok(());
-            };
-            if let Some(starting) = live.starting.take() {
-                starting.abort();
-            }
-            let Some((sid, _capture)) = live.screen.take() else {
-                return Ok(());
-            };
-            tracing::info!("stopped sharing screen");
-            let channel = live.channel;
-            send_room(ctx, url, client, state, channel);
-            if let Some(live) = &mut state.voice {
-                live.room.unpublish_video(&sid).await?;
-            }
-        }
-        Command::Watch(sid, on) => {
-            if let Some(live) = &mut state.voice {
-                watch(ctx, live, sid, on)?;
-            }
         }
         Command::ShareCamera(source, options) => {
             let Some(live) = &mut state.voice else {
@@ -962,15 +893,74 @@ async fn on_command(
             let channel = live.channel;
             send_room(ctx, url, client, state, channel);
         }
-        Command::StopCamera => {
-            if let Some(live) = &mut state.voice {
-                stop_camera(live).await;
-                let channel = live.channel;
-                send_room(ctx, url, client, state, channel);
-            }
-        }
+        Command::LeaveVoice
+        | Command::StopApp(_)
+        | Command::StopScreen
+        | Command::Watch(..)
+        | Command::StopCamera => unreachable!("handled by voice_command"),
     }
     Ok(())
+}
+
+/// Commands that only need the voice room, which outlives the API connection.
+fn voice_only(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::LeaveVoice
+            | Command::StopApp(_)
+            | Command::StopScreen
+            | Command::Watch(..)
+            | Command::StopCamera
+    )
+}
+
+/// Run a `voice_only` command. Returns the call's channel when its roster changed.
+async fn voice_command(ctx: &Ctx, state: &mut State, command: Command) -> Result<Option<Id>> {
+    if let Command::LeaveVoice = command {
+        return Ok(state.voice.take().map(|live| close(ctx, live)));
+    }
+    let Some(live) = &mut state.voice else {
+        return Ok(None);
+    };
+    let changed = match command {
+        Command::StopApp(id) => {
+            let Some(at) = live.shares.iter().position(|share| share.app.id == id) else {
+                return Ok(None);
+            };
+            let share = live.shares.remove(at);
+            tracing::info!("stopped sharing app audio");
+            if let Err(error) = live.room.unpublish_audio(&share.sid).await {
+                tracing::warn!(error = %format_args!("{error:#}"), "stopping app audio failed");
+            }
+            true
+        }
+        Command::StopScreen => stop_screen(live).await,
+        Command::Watch(sid, on) => {
+            watch(ctx, live, sid, on)?;
+            false
+        }
+        Command::StopCamera => {
+            stop_camera(live).await;
+            true
+        }
+        _ => false,
+    };
+    Ok(changed.then_some(live.channel))
+}
+
+/// Stop the screen share, closing a system picker that is still open. True if a share stopped.
+async fn stop_screen(live: &mut Live) -> bool {
+    if let Some(starting) = live.starting.take() {
+        starting.abort();
+    }
+    let Some((sid, _capture)) = live.screen.take() else {
+        return false;
+    };
+    tracing::info!("stopped sharing screen");
+    if let Err(error) = live.room.unpublish_video(&sid).await {
+        tracing::warn!(error = %format_args!("{error:#}"), "stopping screen failed");
+    }
+    true
 }
 
 async fn stop_camera(live: &mut Live) {
@@ -1033,6 +1023,10 @@ async fn share_screen(
             ctx.send(Update::Sharing(true));
             let channel = live.channel;
             send_room(ctx, url, client, state, channel);
+        }
+        Err(error) if error.is::<screen::Cancelled>() => {
+            tracing::info!("screen picker cancelled");
+            ctx.send(Update::Sharing(false));
         }
         Err(error) => {
             tracing::warn!(error = %format_args!("{error:#}"), "sharing screen failed");
@@ -1451,19 +1445,24 @@ async fn join_voice(ctx: &Ctx, client: &mut KeyClient<'_>, channel: &Id) -> Resu
 }
 
 fn leave_voice(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &mut State) {
-    let Some(live) = state.voice.take() else {
-        return;
-    };
+    if let Some(live) = state.voice.take() {
+        let channel = close(ctx, live);
+        send_room(ctx, url, client, state, channel);
+    }
+}
+
+/// Leave a call: stop showing its videos, close a system picker that is still open,
+/// and close the room. Returns the call's channel.
+fn close(ctx: &Ctx, live: Live) -> Id {
     for sid in &live.watched {
         ctx.video.remove_track(sid);
     }
-    // Closes a system picker that is still open.
     if let Some(starting) = &live.starting {
         starting.abort();
     }
     // Closing waits for the media server; nothing here needs to wait for it.
     tokio::spawn(leave_room(live.room));
-    send_room(ctx, url, client, state, live.channel);
+    live.channel
 }
 
 async fn leave_room(room: VoiceRoom) {
@@ -1649,9 +1648,7 @@ fn on_voice(
     };
     let end = |state: &mut State, text: &str| {
         if let Some(live) = state.voice.take() {
-            for sid in &live.watched {
-                ctx.video.remove_track(sid);
-            }
+            close(ctx, live);
         }
         ctx.send(Update::Call(url.clone(), channel, None));
         ctx.send(Update::Failed(text.into()));
@@ -1764,22 +1761,15 @@ async fn stop_lost_video(
         ctx.send(Update::CameraStopped);
         changed = true;
     }
-    if !screen && let Some(starting) = live.starting.take() {
-        starting.abort();
-        ctx.send(Update::Sharing(false));
-    }
+    // A picker still open (`starting`) never has a published screen beside it.
     if live
         .screen
         .as_ref()
         .is_some_and(|(sid, _)| gone(sid, screen))
+        || !screen && live.starting.is_some()
     {
-        let (sid, _capture) = live.screen.take().expect("checked above");
-        tracing::info!("stopped sharing screen");
-        if let Err(error) = live.room.unpublish_video(&sid).await {
-            tracing::warn!(error = %format_args!("{error:#}"), "stopping screen failed");
-        }
+        changed |= stop_screen(live).await;
         ctx.send(Update::Sharing(false));
-        changed = true;
     }
     let channel = live.channel;
     if unpublished.is_none() && !(camera && screen) {
@@ -1804,11 +1794,8 @@ async fn stop_finished_shares(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, stat
         .as_ref()
         .is_some_and(|(_, capture)| capture.is_finished())
     {
-        let (sid, _) = live.screen.take().expect("checked above");
         tracing::info!("screen capture ended");
-        if let Err(error) = live.room.unpublish_video(&sid).await {
-            tracing::warn!(error = %format_args!("{error:#}"), "stopping screen share failed");
-        }
+        stop_screen(live).await;
         ctx.send(Update::Sharing(false));
     } else if ended.is_empty() {
         return;
