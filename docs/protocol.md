@@ -33,8 +33,9 @@ verifying the device proof, and rejects challenges after 60 seconds. At most
 Members sign in with their device proof. For a new member, supply the invite
 code as the optional `invite` field. Invite redemption, membership and session
 creation are atomic. Each person and device pair can have one current session.
-Successful sign-in replaces any previous token for the device. A refresh
-rotates the bearer token and extends expiry to 12 hours from the refresh.
+Successful sign-in replaces the previous session for the device and closes
+its event sockets. A refresh rotates the bearer token and extends expiry to
+12 hours from the refresh while preserving the session's open event sockets.
 A person may register up to ten devices. At the cap, sign-in from a new
 device returns `409 device_limit`. Revoking a device frees a slot.
 

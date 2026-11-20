@@ -16,7 +16,7 @@ use rusttalk_core::{
 use sqlx::{SqliteConnection, query_scalar};
 use tokio::{
     sync::broadcast,
-    time::{sleep, timeout},
+    time::{Instant, sleep, timeout},
 };
 use tracing::Instrument;
 
@@ -71,9 +71,8 @@ async fn stream(
     actor: &Actor,
     changes: &mut broadcast::Receiver<Option<Update>>,
 ) -> ApiResult<&'static str> {
-    let expires = sleep(Duration::from_secs(
-        (actor.expires_at - now()?).max(0) as u64
-    ));
+    let mut expires_at = actor.expires_at;
+    let expires = sleep(Duration::ZERO);
     tokio::pin!(expires);
     let mut presence = None;
     let mut pending: HashSet<KeyNeed> = HashSet::new();
@@ -98,9 +97,26 @@ async fn stream(
         let next = if refresh {
             refresh = false;
             let mut tx = app.db.begin().await?;
-            if let Some(reason) = session_end(&mut tx, actor).await? {
-                return Ok(reason);
+            let at = now()?;
+            // The bearer changes on refresh. A new sign-in replaces the session ID.
+            let renewed: Option<i64> = query_scalar(
+                "SELECT expires_at FROM sessions WHERE person_id = ? AND device_id = ? AND session_id = ?",
+            )
+            .bind(actor.person.as_slice())
+            .bind(&actor.device)
+            .bind(&actor.session_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            expires_at = renewed.unwrap_or(expires_at);
+            if expires_at <= at {
+                return Ok("token_expired");
             }
+            if renewed.is_none() {
+                return session_end(&mut tx, actor).await;
+            }
+            expires
+                .as_mut()
+                .reset(Instant::now() + Duration::from_secs((expires_at - at) as u64));
             let next_pending: HashSet<_> =
                 keys::pending(&mut tx, actor).await?.into_iter().collect();
             let scopes = keys::scopes(&mut tx, actor).await?;
@@ -186,7 +202,10 @@ async fn stream(
 
         loop {
             tokio::select! {
-                _ = &mut expires => return Ok("token_expired"),
+                _ = &mut expires => {
+                    refresh = true;
+                    break;
+                },
                 incoming = socket.recv() => match incoming {
                     Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
                     None | Some(Ok(Message::Close(_))) => return Ok("client_left"),
@@ -233,17 +252,7 @@ async fn send(socket: &mut WebSocket, notice: Update) -> ApiResult<()> {
     .map_err(|_| ApiError::internal("socket_io_error"))
 }
 
-async fn session_end(db: &mut SqliteConnection, actor: &Actor) -> ApiResult<Option<&'static str>> {
-    if actor.expires_at <= now()? {
-        return Ok(Some("token_expired"));
-    }
-    let live: bool = query_scalar("SELECT EXISTS (SELECT 1 FROM sessions WHERE token_hash = ?)")
-        .bind(actor.token_hash.as_slice())
-        .fetch_one(&mut *db)
-        .await?;
-    if live {
-        return Ok(None);
-    }
+async fn session_end(db: &mut SqliteConnection, actor: &Actor) -> ApiResult<&'static str> {
     let reason: String = query_scalar(
         "SELECT CASE
         WHEN EXISTS (SELECT 1 FROM bans WHERE person_id = ?) THEN 'banned'
@@ -257,10 +266,10 @@ async fn session_end(db: &mut SqliteConnection, actor: &Actor) -> ApiResult<Opti
     .bind(&actor.device)
     .fetch_one(db)
     .await?;
-    Ok(Some(match reason.as_str() {
+    Ok(match reason.as_str() {
         "banned" => "banned",
         "kicked" => "kicked",
         "revoked" => "revoked",
         _ => "session_replaced",
-    }))
+    })
 }

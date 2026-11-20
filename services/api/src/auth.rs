@@ -1,4 +1,6 @@
-use std::{net::IpAddr, time::Duration};
+use std::{env, net::IpAddr, time::Duration};
+
+use anyhow::{Context, ensure};
 
 use axum::{
     Json,
@@ -25,6 +27,21 @@ const SESSIONS_PER_PERSON: i64 = 16;
 const REVOCATIONS_PER_PERSON: i64 = 64;
 const CHALLENGE_TTL: i64 = 60;
 const SESSION_TTL: i64 = Duration::from_hours(12).as_secs() as i64;
+
+pub fn session_ttl() -> anyhow::Result<i64> {
+    if env::var("RUSTTALK_DEV").as_deref() == Ok("1")
+        && let Ok(value) = env::var("RUSTTALK_DEV_SESSION_TTL_SECS")
+        && !value.is_empty()
+    {
+        let ttl = value.parse().context("invalid dev session lifetime")?;
+        ensure!(
+            (10..=SESSION_TTL).contains(&ttl),
+            "dev session lifetime out of range"
+        );
+        return Ok(ttl);
+    }
+    Ok(SESSION_TTL)
+}
 
 pub async fn challenge(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Challenge>> {
     let ip = client_ip(&headers)?;
@@ -117,7 +134,7 @@ async fn sign_in_device(
     keys::init_space(&mut tx, &server_id).await?;
     let added = keys::register_device(&mut tx, &cert).await?;
     let closed = remove_device_sessions(&mut tx, person, device).await?;
-    let session = issue_session(&mut tx, person, device, &ip, at).await?;
+    let session = issue_session(&mut tx, person, device, &ip, at, app.session_ttl).await?;
     tx.commit().await?;
     log_closed(closed, at, "replaced");
     if added {
@@ -376,9 +393,11 @@ async fn issue_session(
     device: &[u8],
     ip: &str,
     at: i64,
+    ttl: i64,
 ) -> ApiResult<Session> {
     let token = random::<32>()?;
-    let expires_at = at + SESSION_TTL;
+    let token_hash = hash(&token);
+    let expires_at = at + ttl;
     // Device certificates are free to mint, so bound sessions per person by dropping the oldest.
     let dropped: Vec<i64> = query_scalar(
         "DELETE FROM sessions WHERE person_id = ? AND token_hash NOT IN (SELECT token_hash
@@ -390,8 +409,9 @@ async fn issue_session(
     .fetch_all(&mut *db)
     .await?;
     log_closed(dropped, at, "session_limit");
-    query("INSERT INTO sessions (token_hash, person_id, device_id, ip, expires_at) VALUES (?, ?, ?, ?, ?)")
-        .bind(hash(&token).as_slice()).bind(person).bind(device).bind(ip).bind(expires_at)
+    query("INSERT INTO sessions (token_hash, person_id, device_id, ip, expires_at, session_id) VALUES (?, ?, ?, ?, ?, ?)")
+        .bind(token_hash.as_slice()).bind(person).bind(device).bind(ip).bind(expires_at)
+        .bind(token_hash.as_slice())
         .execute(db).await?;
     Ok(Session {
         token: encode(&token),
@@ -418,7 +438,7 @@ pub struct Actor {
     pub device: Vec<u8>,
     pub ip: String,
     pub at: i64,
-    pub token_hash: [u8; 32],
+    pub session_id: Vec<u8>,
     pub expires_at: i64,
 }
 
@@ -449,12 +469,13 @@ pub async fn authenticate(
     let token_hash = hash(&token);
     let mut tx = write(&app.db).await?;
     let at = now()?;
-    let (person, device, expires_at): (Vec<u8>, Vec<u8>, i64) =
-        query_as("SELECT person_id, device_id, expires_at FROM sessions WHERE token_hash = ?")
-            .bind(token_hash.as_slice())
-            .fetch_optional(&mut *tx)
-            .await?
-            .ok_or(ApiError::unauthorized("invalid_session"))?;
+    let (person, device, expires_at, session_id): (Vec<u8>, Vec<u8>, i64, Vec<u8>) = query_as(
+        "SELECT person_id, device_id, expires_at, session_id FROM sessions WHERE token_hash = ?",
+    )
+    .bind(token_hash.as_slice())
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or(ApiError::unauthorized("invalid_session"))?;
     if expires_at <= at {
         query("DELETE FROM sessions WHERE token_hash = ?")
             .bind(token_hash.as_slice())
@@ -475,7 +496,7 @@ pub async fn authenticate(
             device,
             ip,
             at,
-            token_hash,
+            session_id,
             expires_at,
         },
     ))
@@ -483,12 +504,23 @@ pub async fn authenticate(
 
 pub async fn refresh(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Session>> {
     let (mut tx, actor) = authenticate(&app, &headers).await?;
-    let closed = remove_device_sessions(&mut tx, &actor.person, &actor.device).await?;
-    let session = issue_session(&mut tx, &actor.person, &actor.device, &actor.ip, actor.at).await?;
+    let token = random::<32>()?;
+    let expires_at = actor.at + app.session_ttl;
+    query("UPDATE sessions SET token_hash = ?, expires_at = ?, ip = ? WHERE person_id = ? AND device_id = ?")
+        .bind(hash(&token).as_slice())
+        .bind(expires_at)
+        .bind(&actor.ip)
+        .bind(actor.person.as_slice())
+        .bind(&actor.device)
+        .execute(&mut *tx)
+        .await?;
     tx.commit().await?;
-    log_closed(closed, actor.at, "refreshed");
+    tracing::info!(reason = "refreshed", "session token rotated");
     app.notify(None);
-    Ok(Json(session))
+    Ok(Json(Session {
+        token: encode(&token),
+        expires_at,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -600,6 +632,7 @@ mod tests {
             changes: tokio::sync::broadcast::channel(128).0,
             presence: Default::default(),
             voice: None,
+            session_ttl: SESSION_TTL,
             listing_changed: tokio::sync::watch::channel(()).0,
         };
         let from = |ip: &str| {
@@ -686,11 +719,18 @@ mod tests {
                 .unwrap();
         }
         for at in 0..=SESSIONS_PER_PERSON {
-            issue_session(&mut conn, &[1; 32], &[at as u8; 32], "192.0.2.1", at)
-                .await
-                .unwrap();
+            issue_session(
+                &mut conn,
+                &[1; 32],
+                &[at as u8; 32],
+                "192.0.2.1",
+                at,
+                SESSION_TTL,
+            )
+            .await
+            .unwrap();
         }
-        issue_session(&mut conn, &[2; 32], &[0; 32], "192.0.2.1", 0)
+        issue_session(&mut conn, &[2; 32], &[0; 32], "192.0.2.1", 0, SESSION_TTL)
             .await
             .unwrap();
         let rows: Vec<(Vec<u8>, i64)> =

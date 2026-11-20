@@ -176,6 +176,18 @@ Debug builds open a console on Windows; release builds do not, so check
   opt-out with an eight-second test lease, and forged signature rejection.
   Set `E2E_FEATURES=` to run the membership, keys, chat and index harness without WebRTC, voice, app audio,
   screen sharing, camera or live files.
+- Run `make soak` before every release. Two headless bots keep their event
+  sockets and encrypted voice sessions open for 30 minutes, exchange chat
+  every minute, and verify tones in both directions every 30 seconds. The
+  disposable stack uses 90-second tokens to exercise refresh on the same
+  sockets. Any disconnect, reconnect, failed probe, or API, Caddy, LiveKit,
+  or index warning or error fails the run. The target reports and excludes
+  Caddy's startup warning for the intentional `admin off` setting and
+  LiveKit's data-channel abort and `websocket: close sent` warnings after
+  the bots deliberately leave at the end. It prints counts and removes its stack and data.
+  Use `SOAK_MINUTES=2 make soak` for a quick check. Override occupied ports
+  with `RUSTTALK_DEV_HTTPS_PORT`,
+  `RUSTTALK_DEV_MEDIA_TCP_PORT`, and `RUSTTALK_DEV_MEDIA_UDP_PORT`.
 
 For a manual app-audio check, build with
 `cargo build --locked -p rusttalk-bot -p rusttalk-pipewire` and run both

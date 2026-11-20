@@ -3,6 +3,8 @@ mod chat;
 mod files;
 mod index;
 mod multi_server;
+#[cfg(feature = "media")]
+mod soak;
 mod sync;
 #[cfg(feature = "media")]
 mod voice;
@@ -580,6 +582,9 @@ async fn docker_membership() -> Result<()> {
     println!(
         "owner issued a member invite; bot B joined and rotated its token through Caddy with a spoofed XFF header"
     );
+    let mut prior_events = KeyClient::connect(&member_bot, &member_id, &initial).await?;
+    let initial = session(member_bot.sign_in(&member_id, None).await?, &mut secrets).await?;
+    expect_close(&mut prior_events, "session_replaced").await?;
     sync::exercise(&project, data, &known, &member_words, &mut secrets).await?;
     let owner_sync = owner_bot
         .request(Method::GET, rusttalk_core::sync::PATH)
@@ -831,11 +836,9 @@ async fn docker_membership() -> Result<()> {
     for reason in ["refreshed", "kicked", "banned", "revoked"] {
         assert!(
             logs.contains(&format!("\"reason\":\"{reason}\"")),
-            "missing session close reason {reason}"
+            "missing session log reason {reason}"
         );
     }
-    println!(
-        "API logs contained session-close reasons and none of the issued invite codes or tokens"
-    );
+    println!("API logs contained session reasons and none of the issued invite codes or tokens");
     Ok(())
 }

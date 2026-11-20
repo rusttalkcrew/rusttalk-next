@@ -79,22 +79,10 @@ impl<'a> KeyClient<'a> {
         self.session.expires_at
     }
 
-    /// Rotate the bearer token and reopen the stream while retaining keys and replay state.
+    /// Rotate the bearer token on the current session, keeping the event stream open.
     pub async fn refresh(&mut self) -> Result<()> {
         self.session = self.server.refresh(&self.session).await?;
-        self.reconnect().await
-    }
-
-    /// Reopen the event stream with the current bearer token and reconcile key state.
-    async fn reconnect(&mut self) -> Result<()> {
-        self.events = pinned_tls::events_socket(self.server.known_server(), &self.session.token)
-            .await
-            .map_err(anyhow::Error::from_boxed)?;
-        self.close_reason = None;
-        self.queued.clear();
-        self.stale = false;
-        self.closed = false;
-        self.sync().await
+        Ok(())
     }
 
     /// Build an authenticated API request for the pinned server.

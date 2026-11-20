@@ -140,10 +140,11 @@ header `X-Request-Id`. The API logs at `info` for RustTalk code and `warn` for
 libraries. Headers, URLs and bodies are omitted from API request logs. Caddy
 and LiveKit also use JSON logging.
 
-The API emits one JSON session-close event per invalidated token. Reasons
-include `token_expired`, `kicked`, `banned`, `revoked`, `refreshed` and
-`replaced`. Failed requests log static error kinds. A TCP disconnect
-leaves its bearer token valid until expiry or invalidation.
+The API emits one JSON session-close event per closed session. Reasons
+include `token_expired`, `kicked`, `banned`, `revoked` and `replaced`.
+A token rotation logs `refreshed` while keeping the session open. Failed
+requests log static error kinds. A TCP disconnect leaves its bearer token
+valid until expiry or invalidation.
 
 The desktop client writes `rusttalk.log` next to its settings in the platform
 config directory. It rotates at 5 MiB, keeping one backup (`rusttalk.log.1`),
