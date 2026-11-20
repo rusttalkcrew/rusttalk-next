@@ -9,6 +9,7 @@ anyhow = "1"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio", "ws"] }
 ed25519-dalek = { version = "2.2", default-features = false, features = ["fast", "zeroize"] }
 livekit-api = { version = "=0.10.2", default-features = false, features = ["webhooks"] }
+livekit-protocol = "=0.8.3"
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 rusttalk-core = { path = "../../crates/core" }
 serde = { version = "1", features = ["derive"] }

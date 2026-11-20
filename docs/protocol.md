@@ -299,8 +299,9 @@ device_signing_public_key`, with each ID as 32 raw bytes. It carries
 no display name or metadata. It permits subscription. It denies data
 publication, because data channel payloads bypass frame encryption, and
 clients drop received data channel events. Track publication requires
-the `speak` flag from at least one assigned role. The grant allows
-`microphone` and `screen_share_audio` sources.
+the relevant flag from at least one assigned role. The `speak` grant
+allows `microphone` and `screen_share_audio`. The independent `video`
+grant allows `screen_share`.
 
 Each shared application is an independent `screen_share_audio` track
 with the same frame encryption as the microphone. Its LiveKit track name
@@ -318,6 +319,16 @@ still move a valid label to another track in the same room and epoch,
 as it can move frame-encrypted tracks themselves.
 Volume and mute are local and keyed by track ID.
 
+A screen or window is published as `screen_share` with VP8 simulcast and
+the same epoch-bound LiveKit GCM frame encryption as audio. Screen labels
+use the app audio wire format with the distinct HKDF info and associated
+data prefix `rusttalk-screen-track-name-v1`. Receivers display “Shared
+screen” if label decryption fails. The desktop portal supplies no title,
+so Linux uses “Shared screen” or “Shared window” based on the source kind.
+App audio remains a separate publication. Clients join with automatic
+subscription disabled, subscribe to encrypted audio when announced, and
+subscribe to each encrypted video track only while the viewer chooses it.
+
 The API gets the active roster from LiveKit's internal RoomService,
 cached for one second per room, and maps device identities to current
 channel readers. Multiple devices for one person produce one entry in
@@ -328,8 +339,9 @@ channel readers. Multiple devices for one person produce one entry in
 After a kick, ban, device revocation, role assignment, ownership
 transfer or channel permission change, and on each LiveKit join notice,
 the API removes devices without read access from every voice room with
-RoomService `RemoveParticipant`, and drops publishing for devices that
-lost `speak` with `UpdateParticipant`. These calls run after the change
+RoomService `RemoveParticipant`, and removes the publication sources
+that devices lost with `UpdateParticipant`. An existing room session
+keeps its other publication rights. Rejoin to pick up a new grant. These calls run after the change
 commits. A failure is logged with a reason and never undoes the change.
 Errors include `403 channel_read_denied`, `400 not_a_voice_channel`,
 `502 livekit_roster_unavailable` and

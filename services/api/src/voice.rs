@@ -15,6 +15,7 @@ use livekit_api::{
     access_token::{AccessToken, TokenVerifier, VideoGrants},
     webhooks::WebhookReceiver,
 };
+use livekit_protocol::{ParticipantPermission, TrackSource};
 use rusttalk_core::{
     auth::{decode, encode, voice_identity},
     keys::Event,
@@ -193,22 +194,21 @@ pub async fn token(
 ) -> ApiResult<Json<Token>> {
     let (mut tx, actor) = authenticate(&app, &headers).await?;
     require_voice_read(&mut tx, &channel, &actor.person).await?;
-    let speak = channels::has_flag(&mut tx, &channel, &actor.person, channels::SPEAK).await?;
+    let sources = publish_sources(&mut tx, &channel, &actor.person).await?;
     let identity = voice_identity(app.key.verifying_key().as_bytes(), &actor.device);
     let token = configured(&app)?.sign(
         &identity,
         VideoGrants {
             room: channel,
             room_join: true,
-            can_publish: Some(speak),
+            can_publish: Some(!sources.is_empty()),
             // Data channel payloads bypass frame encryption. Live transfer (W12) revisits this.
             can_publish_data: Some(false),
             can_subscribe: Some(true),
-            can_publish_sources: if speak {
-                vec!["microphone".into(), "screen_share_audio".into()]
-            } else {
-                Vec::new()
-            },
+            can_publish_sources: sources
+                .into_iter()
+                .map(|source| source.as_str_name().to_ascii_lowercase())
+                .collect(),
             ..Default::default()
         },
         Duration::from_secs(600),
@@ -217,19 +217,28 @@ pub async fn token(
     Ok(Json(Token { token }))
 }
 
+async fn publish_sources(
+    db: &mut SqliteConnection,
+    channel: &str,
+    person: &[u8],
+) -> ApiResult<Vec<TrackSource>> {
+    let mut sources = Vec::new();
+    if channels::has_flag(db, channel, person, channels::SPEAK).await? {
+        sources.extend([TrackSource::Microphone, TrackSource::ScreenShareAudio]);
+    }
+    if channels::has_flag(db, channel, person, channels::VIDEO).await? {
+        sources.push(TrackSource::ScreenShare);
+    }
+    Ok(sources)
+}
+
 #[derive(Deserialize)]
 struct Participant {
     identity: String,
     #[serde(default)]
     state: String,
     #[serde(default)]
-    permission: Grants,
-}
-
-#[derive(Default, Deserialize)]
-struct Grants {
-    #[serde(default, alias = "canPublish")]
-    can_publish: bool,
+    permission: ParticipantPermission,
 }
 
 #[derive(Deserialize)]
@@ -343,21 +352,32 @@ async fn enforce_rooms(app: &App, livekit: &LiveKit, room: Option<String>) -> Ap
             continue;
         }
         // Decide first so no pooled connection is held across LiveKit calls.
-        let (mut remove, mut mute) = (Vec::new(), Vec::new());
+        let (mut remove, mut restrict) = (Vec::new(), Vec::new());
         {
             let mut db = app.db.acquire().await?;
             let readers = reader_identities(app, &mut db, &room).await?;
             for participant in participants {
-                match readers.get(&participant.identity) {
-                    None => remove.push(participant.identity),
-                    Some(person)
-                        if participant.permission.can_publish
-                            && !channels::has_flag(&mut db, &room, person, channels::SPEAK)
-                                .await? =>
-                    {
-                        mute.push(participant.identity);
-                    }
-                    Some(_) => (),
+                let Some(person) = readers.get(&participant.identity) else {
+                    remove.push(participant.identity);
+                    continue;
+                };
+                let mut permission = participant.permission;
+                if !permission.can_publish {
+                    continue;
+                }
+                let allowed = publish_sources(&mut db, &room, person).await?;
+                let granted = &mut permission.can_publish_sources;
+                let before = granted.len();
+                if before == 0 {
+                    // LiveKit represents unrestricted grants with an empty source list.
+                    granted.extend(allowed.iter().map(|source| *source as i32));
+                } else {
+                    granted
+                        .retain(|source| allowed.iter().any(|allowed| *allowed as i32 == *source));
+                }
+                if before == 0 || granted.len() != before {
+                    permission.can_publish = !granted.is_empty();
+                    restrict.push((participant.identity, permission));
                 }
             }
         }
@@ -365,11 +385,11 @@ async fn enforce_rooms(app: &App, livekit: &LiveKit, room: Option<String>) -> Ap
             let body = json!({ "room": room, "identity": identity });
             livekit.moderate(&room, "RemoveParticipant", body).await;
         }
-        for identity in mute {
+        for (identity, permission) in restrict {
             let body = json!({
                 "room": room,
                 "identity": identity,
-                "permission": { "can_subscribe": true, "can_publish": false, "can_publish_data": false },
+                "permission": permission,
             });
             livekit.moderate(&room, "UpdateParticipant", body).await;
         }
