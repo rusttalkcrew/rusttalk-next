@@ -119,6 +119,9 @@ pub enum Event {
         device: Option<String>,
     },
     ChannelChanged,
+    VoiceChanged {
+        channel: String,
+    },
     DmCreated {
         channel: String,
     },

@@ -6,6 +6,13 @@ rtc:
   use_ice_lite: true
 logging:
   json: true
+  # RoomService's info access logs include the API key identifier.
+  level: warn
 keys:
   # Public development credentials.
   rusttalk-dev: dev-only-livekit-secret-do-not-deploy
+webhook:
+  api_key: rusttalk-dev
+  urls: ["http://api:8080/internal/livekit"]
+  filter_params:
+    include_events: ["participant_joined", "participant_left", "room_finished"]

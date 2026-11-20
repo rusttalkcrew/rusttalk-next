@@ -1,4 +1,6 @@
 mod chat;
+#[cfg(feature = "media")]
+mod voice;
 
 use std::{env, path::Path, process::Command, time::Duration};
 
@@ -506,6 +508,8 @@ async fn docker_membership() -> Result<()> {
 
     let mut owner_keys = KeyClient::connect(&owner_bot, &owner_id, &owner).await?;
     docker_keys(&project, &owner_bot, &mut owner_keys, &mut secrets).await?;
+    #[cfg(feature = "media")]
+    voice::exercise(&owner_bot, &mut owner_keys, &mut secrets).await?;
 
     let (_, link) = invite(&mut owner_keys, &mut secrets).await?;
     let first_invite = link.code;
@@ -760,6 +764,18 @@ async fn docker_membership() -> Result<()> {
     println!("bot refused the replacement server key using its saved pin");
 
     let logs = compose(&project, &["logs", "--no-color", "api"])?;
+    #[cfg(feature = "media")]
+    {
+        let livekit_logs = compose(&project, &["logs", "--no-color", "livekit"])?;
+        assert!(
+            !logs.contains("rusttalk-dev"),
+            "LiveKit credential in API logs"
+        );
+        assert!(
+            !livekit_logs.contains("rusttalk-dev"),
+            "LiveKit credential in relay logs"
+        );
+    }
     for secret in secrets {
         assert!(
             !logs.contains(&secret),

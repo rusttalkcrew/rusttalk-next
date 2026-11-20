@@ -4,6 +4,7 @@
 DEV_COMPOSE := docker compose -f deploy/compose.dev.yml -p rusttalk-dev
 export RUSTTALK_DEV_USER := $(shell id -u):$(shell id -g)
 CARGO_SCOPE ?= --workspace
+E2E_FEATURES ?= --features media
 
 ##@ Help
 
@@ -45,11 +46,13 @@ client: ## Run the native client, optionally with PROFILE=a to z
 	cargo run --locked -p rusttalk-client
 
 bot: export CARGO_TARGET_DIR ?= target
-bot: ## Join the dev room as bot-a and bot-b
+bot: export CHANNEL := $(CHANNEL)
+bot: ## Exchange tones as two bots using RUSTTALK_BOT_INVITE and CHANNEL
+	@test -n "$$RUSTTALK_BOT_INVITE" && test -n "$$CHANNEL" || { printf 'Set RUSTTALK_BOT_INVITE and CHANNEL.\n' >&2; exit 1; }
 	@printf '\033[1;34m==> Starting dev bots\033[0m\n'
 	cargo build --locked -p rusttalk-bot
-	@bash -ec '"$$CARGO_TARGET_DIR/debug/rusttalk-bot" --identity bot-a & first=$$!; \
-		"$$CARGO_TARGET_DIR/debug/rusttalk-bot" --identity bot-b & second=$$!; \
+	@bash -ec '"$$CARGO_TARGET_DIR/debug/rusttalk-bot" --identity bot-a --channel "$$CHANNEL" --tone 440 --expect-tone 660 & first=$$!; \
+		"$$CARGO_TARGET_DIR/debug/rusttalk-bot" --identity bot-b --channel "$$CHANNEL" --tone 660 --expect-tone 440 & second=$$!; \
 		trap "kill -TERM $$first $$second 2>/dev/null || true; wait || true" EXIT; \
 		trap "exit 130" INT; trap "exit 143" TERM; \
 		wait -n'
@@ -85,8 +88,8 @@ test: ## Run unit and integration tests
 	@printf '\033[1;34m==> tests\033[0m\n'
 	cargo test $(CARGO_SCOPE) --locked
 
-e2e: ## Run the Docker membership, keys and encrypted chat scenarios
-	@printf '\033[1;34m==> Docker membership, keys and encrypted chat\033[0m\n'
+e2e: ## Run the Docker membership, keys, encrypted chat and voice scenarios
+	@printf '\033[1;34m==> Docker membership, keys, encrypted chat and voice\033[0m\n'
 	@set -eu; \
 		export RUSTTALK_E2E_PROJECT=rusttalk-e2e-$$$$; \
 		export RUSTTALK_DEV_DATA=$$(mktemp -d); \
@@ -98,4 +101,4 @@ e2e: ## Run the Docker membership, keys and encrypted chat scenarios
 		}; \
 		trap cleanup EXIT; trap 'exit 130' INT; trap 'exit 143' TERM; \
 		compose up --build --wait --wait-timeout 60; \
-		cargo test --locked -p rusttalk-bot --no-default-features --test membership -- --nocapture
+		cargo test --locked -p rusttalk-bot --no-default-features $(E2E_FEATURES) --test membership -- --nocapture

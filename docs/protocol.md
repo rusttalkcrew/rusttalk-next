@@ -283,6 +283,30 @@ ID. Deletes apply per stored record, because the API cannot see which records
 are edits. When a client deletes a message, including a moderator delete, it
 also deletes every edit of it that it has opened or sent.
 
+## Voice
+
+These routes require a bearer header and channel `read` access. They apply
+to voice channels only.
+
+| Method and path | Body | Success |
+| --- | --- | --- |
+| POST `/v1/voice/{channel}/token` | Empty | 200, `{token}`. LiveKit JWT valid for ten minutes for this room |
+| GET `/v1/voice/{channel}/participants` | Empty | 200, sorted array of unique person IDs |
+
+The room name is the encoded channel ID. The token's identity is
+base64url of SHA-256 over `"rusttalk-voice-device-v1" || server_id ||
+device_signing_public_key`, with each ID as 32 raw bytes. It carries
+no display name or metadata. It permits subscription and data
+publication. Track publication requires the `speak` flag from at least
+one assigned role. W08 publishes microphone tracks.
+
+The API gets the active roster from LiveKit's internal RoomService and
+maps device identities to current channel readers. Multiple devices
+for one person produce one entry. An empty room returns an empty array.
+Errors include `403 channel_read_denied`, `400 not_a_voice_channel`,
+`502 livekit_roster_unavailable` and
+`503 voice_unavailable`.
+
 ## Live events
 
 Open one `GET /v1/events` WebSocket per connection with the bearer
@@ -296,6 +320,7 @@ session validity before pushing updates.
 | `rotate_needed` | `scope`. Fetch the current epoch and try to publish its successor |
 | `member_changed` | `person`, optional `device`. Refresh the member and device directory and catalog, and surface fingerprints |
 | `channel_changed` | None. Refresh the catalog |
+| `voice_changed` | `channel`. Fetch current voice participants. Sent to current channel readers on signed LiveKit join, leave and room-end notices |
 | `dm_created` | `channel`. Refresh the catalog and reconcile keys |
 | `message_created` | `channel`, `id`. Fetch the ciphertext record |
 | `message_deleted` | `channel`, `id`. Remove the record and hide edits that reference it |
@@ -304,7 +329,8 @@ session validity before pushing updates.
 The API closes the socket when the token expires or ends, including kick,
 ban and device revocation. Close reasons are fixed strings and logged.
 The server keeps lagging sockets open and recomputes the outstanding
-key work. DM and message notices are sent only to current channel readers.
+key work. DM, message and voice notices are sent only to current channel readers.
+Fetch the roster when loading a channel list and after `resync`.
 
 ## Files
 

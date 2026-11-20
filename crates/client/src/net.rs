@@ -17,7 +17,7 @@ use rusttalk_core::{
     auth::{InviteCode, InviteLink, KnownServer, ProtocolError, Session, decode, encode},
     client::{
         Catalog, Event, KeyClient, MessageBody, MessageError, MessageRecord, Server as Api,
-        invite_name,
+        invite_name, save_json,
     },
     identity::{DeviceIdentity, fingerprint},
     keys::Metadata,
@@ -273,13 +273,13 @@ fn pin_changed(error: &anyhow::Error) -> bool {
 
 #[derive(Default)]
 struct State {
-    /// Opened messages by record ID; `open_message` refuses to open an ID twice.
-    opened: HashMap<Id, Msg>,
     /// Channels the UI has opened, which get live messages.
     loaded: HashSet<Id>,
     /// Records that waited for a channel key, retried after key work.
     waiting: HashMap<Id, HashSet<Id>>,
     last: Option<Directory>,
+    /// Whether `last` was built with the space key.
+    named: bool,
     display_name: Option<String>,
     notices: u64,
 }
@@ -534,18 +534,29 @@ async fn on_event(
             ));
         }
         Event::Resync => resume(ctx, url, client, state).await?,
-        _ => {
+        Event::MemberChanged { .. } | Event::ChannelChanged | Event::DmCreated { .. } => {
             directory(ctx, url, client, state).await?;
+        }
+        Event::KeysNeeded(_) => {
+            // Names stay unreadable until the space key arrives, which can be after the first load.
+            if !state.named && client.has_space_key() {
+                directory(ctx, url, client, state).await?;
+            }
             for (channel, ids) in std::mem::take(&mut state.waiting) {
                 let mut items = Vec::new();
                 for id in ids {
-                    let record = client.message(&channel, &id).await?;
+                    // The message may have been deleted meanwhile.
+                    let Ok(record) = client.message(&channel, &id).await else {
+                        continue;
+                    };
                     items.push(open(client, state, &channel, &record).await);
                 }
                 send_messages(ctx, url, channel, items, false, None);
             }
             set_display_name(ctx, url, client, state).await;
         }
+        // Voice presence is shown by the voice UI (W08 client), not the chat directory.
+        Event::RotateNeeded { .. } | Event::VoiceChanged { .. } => {}
     }
     Ok(())
 }
@@ -577,9 +588,7 @@ async fn on_command(
                 edit_of,
             };
             let record = client.send_message(&channel, &body).await?;
-            let msg = to_msg(&record, &body);
-            state.opened.insert(record.id, msg.clone());
-            send_messages(ctx, url, channel, vec![msg], false, None);
+            send_messages(ctx, url, channel, vec![to_msg(&record, &body)], false, None);
         }
         Command::Delete(channel, id) => {
             client.delete_message(&channel, &id).await?;
@@ -657,15 +666,8 @@ async fn page(
         Ok(records) => records,
         Err(error) => {
             tracing::warn!(error = %format_args!("{error:#}"), "loading messages failed");
-            // Stop paging; a cursor can vanish when its message is deleted.
-            send_messages(
-                ctx,
-                url,
-                channel,
-                Vec::new(),
-                before.is_some(),
-                Some(before.is_some()),
-            );
+            // Leave the chat loading: reconnecting reloads opened channels, and paging stays paused until then.
+            ctx.send(Update::Failed("Couldn't load messages. Try again.".into()));
             return;
         }
     };
@@ -683,15 +685,8 @@ async fn open(
     channel: &Id,
     record: &MessageRecord,
 ) -> Msg {
-    if let Some(msg) = state.opened.get(&record.id) {
-        return msg.clone();
-    }
     match client.open_message(channel, record).await {
-        Ok(body) => {
-            let msg = to_msg(record, &body);
-            state.opened.insert(record.id, msg.clone());
-            msg
-        }
+        Ok(body) => to_msg(record, &body),
         Err(error) => {
             if error.downcast_ref::<MessageError>() == Some(&MessageError::MissingKey) {
                 state.waiting.entry(*channel).or_default().insert(record.id);
@@ -807,6 +802,7 @@ async fn directory(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &mut Sta
         }
     }
     state.last = Some(dir.clone());
+    state.named = client.has_space_key();
     ctx.send(Update::Directory(url.clone(), Box::new(dir)));
     Ok(())
 }
@@ -1035,9 +1031,7 @@ fn edit_joined(data: &Path, edit: impl FnOnce(&mut Vec<KnownServer>)) -> Result<
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut list = load_joined(data)?;
     edit(&mut list);
-    let temporary = data.join("joined.json.tmp");
-    fs::write(&temporary, serde_json::to_vec(&list)?)?;
-    fs::rename(temporary, data.join("joined.json")).context("save joined servers")
+    save_json(data, &data.join("joined.json"), &list).context("save joined servers")
 }
 
 #[cfg(test)]

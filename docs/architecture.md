@@ -23,11 +23,11 @@ media bypasses Caddy and goes directly to LiveKit on port 7882/UDP or the
 in signaling.
 
 On IP deployments, LiveKit Rust SDK 0.11.0 uses the shared
-`rusttalk-core/livekit-tls` transport. At process startup the bot registers
-both the WebSocket connector and the HTTP connector used for `/rtc/validate`.
+`rusttalk-core/livekit-tls` transport. The first voice join registers both
+the WebSocket connector and the HTTP connector used for `/rtc/validate`.
 Rustls verifies the SHA-256 fingerprint of the exact leaf certificate over
 DER and checks the handshake signatures. The pin replaces CA and hostname
 validation for this connection, so the same certificate works on loopback
-and on the LAN address. A missing or different pin stops the join. The W03
-SDK registration covers one signaling origin per bot process.
+and on the LAN address. A missing or different pin stops the join. The SDK
+registration covers one signaling origin per process.
 [SDK transport hooks](https://github.com/livekit/rust-sdks/blob/livekit/v0.11.0/livekit-net/src/lib.rs#L43-L63).

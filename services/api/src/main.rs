@@ -8,6 +8,7 @@ mod messages;
 mod metadata;
 mod roles;
 mod store;
+mod voice;
 
 use std::{
     env,
@@ -47,6 +48,7 @@ struct App {
     db: SqlitePool,
     key: Arc<SigningKey>,
     changes: broadcast::Sender<Option<Event>>,
+    voice: Option<Arc<voice::LiveKit>>,
 }
 
 impl App {
@@ -165,6 +167,7 @@ async fn run() -> Result<()> {
                 db,
                 key: Arc::new(key),
                 changes: broadcast::channel(128).0,
+                voice: voice::LiveKit::from_env()?.map(Arc::new),
             })
             .await?;
         }
@@ -205,6 +208,8 @@ async fn serve(app: App) -> io::Result<()> {
         .route("/v1/member-devices", get(keys::devices))
         .route("/v1/invite-preview", post(members::preview))
         .route("/v1/catalog", get(channels::catalog))
+        .route("/v1/voice/{id}/token", post(voice::token))
+        .route("/v1/voice/{id}/participants", get(voice::participants))
         .route("/v1/dms", post(dms::create))
         .route(
             "/v1/channels/{id}/message-devices/{device}/{person}",
@@ -250,6 +255,7 @@ async fn serve(app: App) -> io::Result<()> {
         .route("/v1/owner", put(roles::transfer))
         .route("/v1/audit", get(members::audit_log))
         .layer(RequestBodyLimitLayer::new(4096))
+        .route("/internal/livekit", post(voice::webhook))
         .merge(
             Router::new()
                 .route("/v1/space", put(metadata::update_space))

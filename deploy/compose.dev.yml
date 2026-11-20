@@ -3,6 +3,9 @@ services:
     build:
       context: ..
       dockerfile: services/api/Dockerfile
+    environment:
+      LIVEKIT_API_KEY: rusttalk-dev
+      LIVEKIT_API_SECRET: dev-only-livekit-secret-do-not-deploy
     volumes:
       - api-data:/data
     develop:

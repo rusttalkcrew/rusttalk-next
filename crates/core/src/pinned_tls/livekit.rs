@@ -1,4 +1,4 @@
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -22,7 +22,7 @@ use url::Url;
 
 use super::{Fingerprint, https_client, pinned_config};
 
-/// Install the SDK's process-wide transports for one self-hosted server at startup.
+/// Install or reuse the SDK's process-wide transports for one self-hosted server.
 // shortcut: one pinned server per process, upgrade to a host-to-pin map for the multi-server client (W15).
 pub fn register(
     server: &Url,
@@ -33,6 +33,21 @@ pub fn register(
         return Err("the pinned LiveKit server must use wss".into());
     }
 
+    static REGISTERED: std::sync::Mutex<Option<(Url, Fingerprint)>> = std::sync::Mutex::new(None);
+    let mut registered = REGISTERED
+        .lock()
+        .map_err(|_| "LiveKit transport lock poisoned")?;
+    if let Some((origin, fingerprint)) = registered.as_ref() {
+        return if origin == server && *fingerprint == pin {
+            Ok(())
+        } else {
+            Err("LiveKit transport already pinned to a different origin or certificate".into())
+        };
+    }
+    if livekit_net::has_ws_client() || livekit_net::has_http_client() {
+        return Err("the LiveKit transport has already been registered".into());
+    }
+
     let tls = pinned_config(pin)?;
     let http = https_client(Some(tls.clone()))?;
     let transport = Arc::new(PinnedTransport {
@@ -41,13 +56,9 @@ pub fn register(
         http,
     });
 
-    static REGISTERED: OnceLock<()> = OnceLock::new();
-    if REGISTERED.set(()).is_err() || livekit_net::has_ws_client() || livekit_net::has_http_client()
-    {
-        return Err("the LiveKit transport has already been registered".into());
-    }
     livekit_net::set_ws_client(transport.clone());
     livekit_net::set_http_client(transport);
+    *registered = Some((server.clone(), pin));
     Ok(())
 }
 
