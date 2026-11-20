@@ -1,7 +1,7 @@
 .DEFAULT_GOAL := help
 .PHONY: help dev client bot logs down reset lint fmt test e2e
 
-DEV_COMPOSE := docker compose -f deploy/compose.dev.yml -p rusttalk-dev
+DEV_COMPOSE := docker compose -f deploy/compose.dev.yml --profile index -p rusttalk-dev
 export RUSTTALK_DEV_USER := $(shell id -u):$(shell id -g)
 CARGO_SCOPE ?= --workspace
 E2E_FEATURES ?= --features media
@@ -28,7 +28,7 @@ dev: ## Start the Docker stack and rebuild the API on changes
 	$(DEV_COMPOSE) up --build --wait --wait-timeout 60
 	@fingerprint=$$($(DEV_COMPOSE) run --rm --no-deps -T --entrypoint openssl cert \
 		x509 -in /dev-data/tls/cert.pem -noout -sha256 -fingerprint) && \
-		printf '\033[1;34m==> https://127.0.0.1:%s\n==> LAN wss://%s:%s\n==> TLS %s\033[0m\n' "$$RUSTTALK_DEV_HTTPS_PORT" "$$NODE_IP" "$$RUSTTALK_DEV_HTTPS_PORT" "$$fingerprint"
+		printf '\033[1;34m==> https://127.0.0.1:%s\n==> Index https://127.0.0.1:%s/index/\n==> LAN wss://%s:%s\n==> TLS %s\033[0m\n' "$$RUSTTALK_DEV_HTTPS_PORT" "$$RUSTTALK_DEV_HTTPS_PORT" "$$NODE_IP" "$$RUSTTALK_DEV_HTTPS_PORT" "$$fingerprint"
 	@server=$$($(DEV_COMPOSE) exec -T api rusttalk-api server-fingerprint) && \
 		printf '\033[1;34m==> Server fingerprint %s\033[0m\n' "$$server"
 	@invite=$$($(DEV_COMPOSE) exec -T api rusttalk-api owner-invite) && \
@@ -93,16 +93,16 @@ test: ## Run unit and integration tests
 	@printf '\033[1;34m==> tests\033[0m\n'
 	cargo test $(CARGO_SCOPE) --locked
 
-e2e: ## Run the two-stack membership, keys, chat, stored files, voice, app audio, screen, camera, live file and device sync scenarios
-	@printf '\033[1;34m==> Two-stack membership, keys, chat, stored files, voice, app audio, screen, camera, live file and device sync\033[0m\n'
+e2e: ## Run the two-stack membership, keys, chat, stored files, voice, app audio, screen, camera, live file, device sync and index scenarios
+	@printf '\033[1;34m==> Two-stack membership, keys, chat, stored files, voice, app audio, screen, camera, live file, device sync and index\033[0m\n'
 	$(if $(and $(PIPEWIRE_HELPER),$(findstring media,$(E2E_FEATURES))),cargo build --locked $(PIPEWIRE_HELPER))
 	@set -eu; \
-		export RUSTTALK_E2E_PROJECT=rusttalk-e2e-$$$$; \
+		export RUSTTALK_E2E_PROJECT=rusttalk-e2e-$$$$ RUSTTALK_INDEX_TTL_SECONDS=8; \
 		export RUSTTALK_DEV_DATA=$$(mktemp -d); \
 		export RUSTTALK_E2E_SECOND_PROJECT="$$RUSTTALK_E2E_PROJECT-second"; \
 		export RUSTTALK_E2E_SECOND_HTTPS_PORT="$${RUSTTALK_E2E_SECOND_HTTPS_PORT:-9443}"; \
 		export RUSTTALK_FILE_MAX_BYTES=33554432 RUSTTALK_FILE_MEMBER_BYTES=3145728 RUSTTALK_FILE_SERVER_BYTES=5242880 RUSTTALK_FILE_TTL_SECS=12; \
-		compose() { docker compose -f deploy/compose.dev.yml -p "$$RUSTTALK_E2E_PROJECT" "$$@"; }; \
+		compose() { docker compose -f deploy/compose.dev.yml --profile index -p "$$RUSTTALK_E2E_PROJECT" "$$@"; }; \
 		compose_second() { \
 			RUSTTALK_DEV_DATA="$$RUSTTALK_E2E_SECOND_DATA" \
 			RUSTTALK_DEV_HTTPS_PORT="$$RUSTTALK_E2E_SECOND_HTTPS_PORT" \

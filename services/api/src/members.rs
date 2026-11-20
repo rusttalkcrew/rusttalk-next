@@ -79,6 +79,9 @@ pub async fn set_open_joining(
         .await?;
     }
     tx.commit().await?;
+    if changed.rows_affected() > 0 {
+        app.listing_changed.send_replace(());
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 

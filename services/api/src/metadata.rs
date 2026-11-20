@@ -69,14 +69,7 @@ pub async fn update_space(
         icon_ct,
     } = payload(body)?;
     let (mut tx, actor) = authenticate(&app, &headers).await?;
-    let owner: bool =
-        sqlx::query_scalar("SELECT owner_person_id = ? FROM server_settings WHERE id = 1")
-            .bind(actor.person.as_slice())
-            .fetch_one(&mut *tx)
-            .await?;
-    if !owner {
-        return Err(ApiError::forbidden("owner_required"));
-    }
+    crate::auth::require_owner(&mut tx, &actor.person).await?;
     let epoch = keys::space_epoch(&mut tx, &app).await?;
     sqlx::query(
         "UPDATE server_settings SET name_ct = ?, description_ct = ?, icon_ct = ? WHERE id = 1",
