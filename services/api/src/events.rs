@@ -11,6 +11,7 @@ use axum::{
 use rusttalk_core::{
     auth::encode,
     keys::{Event, KeyNeed, Kind, Scope},
+    presence::Update,
 };
 use sqlx::{SqliteConnection, query_scalar};
 use tokio::{
@@ -22,7 +23,7 @@ use tracing::Instrument;
 use crate::{
     ApiError, ApiResult, App,
     auth::{Actor, authenticate},
-    keys,
+    keys, presence,
     store::now,
 };
 
@@ -49,7 +50,7 @@ async fn serve(
     app: App,
     mut socket: WebSocket,
     actor: Actor,
-    mut changes: broadcast::Receiver<Option<Event>>,
+    mut changes: broadcast::Receiver<Option<Update>>,
 ) {
     let result = stream(&app, &mut socket, &actor, &mut changes).await;
     let reason = result.unwrap_or_else(|error| error.code);
@@ -68,12 +69,13 @@ async fn stream(
     app: &App,
     socket: &mut WebSocket,
     actor: &Actor,
-    changes: &mut broadcast::Receiver<Option<Event>>,
+    changes: &mut broadcast::Receiver<Option<Update>>,
 ) -> ApiResult<&'static str> {
     let expires = sleep(Duration::from_secs(
         (actor.expires_at - now()?).max(0) as u64
     ));
     tokio::pin!(expires);
+    let mut presence = None;
     let mut pending: HashSet<KeyNeed> = HashSet::new();
     let mut rotations: HashSet<(Scope, i64)> = HashSet::new();
     let mut readable: HashSet<String> = HashSet::new();
@@ -112,20 +114,32 @@ async fn stream(
                 .filter(|state| state.rotate)
                 .map(|state| (state.scope, state.epoch))
                 .collect();
+            let status = if presence.is_none() {
+                Some(presence::stored(&mut tx, &actor.person).await?)
+            } else {
+                None
+            };
             tx.commit().await?;
+            if let Some(status) = status {
+                presence = Some(presence::open(app, encode(&actor.person), status));
+            }
             Some((next_pending, next_rotations))
         } else {
             None
         };
 
         if lagged {
-            send(socket, Event::Resync).await?;
+            send(socket, Update::Event(Event::Resync)).await?;
             pending.clear();
             rotations.clear();
             lagged = false;
         }
         let device = rusttalk_core::auth::encode(&actor.device);
-        for notice in notices.drain(..) {
+        for update in notices.drain(..) {
+            let Update::Event(notice) = update else {
+                send(socket, update).await?;
+                continue;
+            };
             if let Event::KeysNeeded(need) = &notice {
                 // A rejected slot can reopen within this batch and still need a wrap.
                 if let Some((next_pending, _)) = &next
@@ -156,15 +170,15 @@ async fn stream(
                 _ => None,
             };
             if channel.is_none_or(|id| readable.contains(&id)) {
-                send(socket, notice).await?;
+                send(socket, Update::Event(notice)).await?;
             }
         }
         if let Some((next_pending, next_rotations)) = next {
             for need in next_pending.difference(&pending) {
-                send(socket, Event::KeysNeeded(need.clone())).await?;
+                send(socket, Update::Event(Event::KeysNeeded(need.clone()))).await?;
             }
             for &(scope, _) in next_rotations.difference(&rotations) {
-                send(socket, Event::RotateNeeded { scope }).await?;
+                send(socket, Update::Event(Event::RotateNeeded { scope })).await?;
             }
             pending = next_pending;
             rotations = next_rotations;
@@ -193,21 +207,22 @@ async fn stream(
 }
 
 /// Queue a notice and report whether it can change session, access or key state.
-fn queue(notices: &mut Vec<Event>, notice: Option<Event>) -> bool {
+fn queue(notices: &mut Vec<Update>, notice: Option<Update>) -> bool {
     let refresh = !matches!(
         notice,
-        Some(
-            Event::MessageCreated { .. }
-                | Event::MessageDeleted { .. }
-                | Event::VoiceChanged { .. }
-                | Event::LiveFileAccepted { .. }
-        )
+        Some(Update::Presence(_))
+            | Some(Update::Event(
+                Event::MessageCreated { .. }
+                    | Event::MessageDeleted { .. }
+                    | Event::VoiceChanged { .. }
+                    | Event::LiveFileAccepted { .. }
+            ))
     );
     notices.extend(notice);
     refresh
 }
 
-async fn send(socket: &mut WebSocket, notice: Event) -> ApiResult<()> {
+async fn send(socket: &mut WebSocket, notice: Update) -> ApiResult<()> {
     let text = serde_json::to_string(&notice).map_err(|_| ApiError::internal("event_encoding"))?;
     timeout(
         Duration::from_secs(5),

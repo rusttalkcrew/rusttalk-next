@@ -91,6 +91,8 @@ pub struct Me {
     device_id: String,
     joined_at: i64,
     role_ids: Vec<String>,
+    /// This member's own presence choice; never shown to others.
+    status: rusttalk_core::presence::Status,
 }
 
 pub async fn me(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Me>> {
@@ -104,12 +106,14 @@ pub async fn me(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Me
         .into_iter()
         .map(|role| role.id)
         .collect();
+    let status = crate::presence::stored(&mut tx, &actor.person).await?;
     tx.commit().await?;
     Ok(Json(Me {
         person_id: encode(&actor.person),
         device_id: encode(&actor.device),
         joined_at,
         role_ids,
+        status,
     }))
 }
 

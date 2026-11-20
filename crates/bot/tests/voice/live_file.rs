@@ -180,3 +180,154 @@ pub(super) async fn exercise(
     );
     Ok(())
 }
+
+pub(super) async fn data_only(
+    a: &mut KeyClient<'_>,
+    b: &mut KeyClient<'_>,
+    c: &mut KeyClient<'_>,
+    text: Scope,
+    voice: Scope,
+) -> Result<()> {
+    use rusttalk_core::client::voice::DataLiveFiles;
+
+    let dm = a.create_dm(b.identity.certificate.person_id()).await?;
+    super::receive_key(b, dm, 1).await?;
+    super::receive_key(b, text, 1).await?;
+    super::receive_key(c, text, 1).await?;
+
+    let data_token = |scope: Scope| {
+        c.request(
+            Method::POST,
+            &format!(
+                "/v1/channels/{}/live-file/token/{}",
+                encode(&scope.id),
+                encode(&[0; 16])
+            ),
+        )
+    };
+    super::rejected(
+        data_token(dm).send().await?,
+        reqwest::StatusCode::FORBIDDEN,
+        "channel_read_denied",
+    )
+    .await?;
+
+    // A voice channel has no data room, so voice permissions never reach one.
+    super::rejected(
+        data_token(voice).send().await?,
+        reqwest::StatusCode::BAD_REQUEST,
+        "not_a_chat_channel",
+    )
+    .await?;
+
+    // A reader without write may join to receive but never to send.
+    super::set_flags(a, &encode(&text.id), "member", 1).await?;
+    let request = data_token(text);
+    let mut url = request
+        .try_clone()
+        .context("build observer request")?
+        .build()?
+        .url()
+        .clone();
+    url.set_path("");
+    url.set_scheme("wss")
+        .map_err(|()| anyhow::anyhow!("invalid observer origin"))?;
+    let pin = a.sync_peer().0.known_server().tls_fingerprint;
+    rusttalk_core::pinned_tls::register(&url, pin).map_err(anyhow::Error::from_boxed)?;
+    let mut options = RoomOptions::default();
+    options.auto_subscribe = false;
+    let reply: serde_json::Value = request.send().await?.error_for_status()?.json().await?;
+    let (grant_room, _) = Room::connect(
+        url.as_str(),
+        reply["token"].as_str().context("missing data token")?,
+        options.clone(),
+    )
+    .await?;
+    let grant = grant_room
+        .local_participant()
+        .permission()
+        .context("missing data grant")?;
+    assert!(!grant.can_publish_data && grant.can_subscribe && !grant.can_publish);
+    assert!(a.voice_participants(&voice.id).await?.people.is_empty());
+    grant_room.close().await?;
+    super::set_flags(a, &encode(&text.id), "member", 15).await?;
+
+    let reply: serde_json::Value = data_token(text)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let (observer, mut observer_events) = Room::connect(
+        url.as_str(),
+        reply["token"].as_str().context("missing observer token")?,
+        options,
+    )
+    .await?;
+    let dir = tempfile::tempdir()?;
+    let source = dir.path().join(NAME);
+    let mut bytes = vec![0u8; 10 * 1024 * 1024 + 17];
+    random_bytes(&mut bytes)?;
+    let digest = Sha256::digest(&bytes);
+    std::fs::write(&source, bytes)?;
+
+    for scope in [text, dm] {
+        let mut sender = DataLiveFiles::new(a, scope.id);
+        let receiver = DataLiveFiles::new(b, scope.id);
+        let posted = sender.offer_live_file(a, &source).await?;
+        let offer = b.message(&scope.id, &posted.id).await?;
+        if scope == text {
+            assert!(
+                observer.remote_participants().is_empty(),
+                "offer alone joined the data room"
+            );
+        }
+        let path = dir.path().join(encode(&scope.id));
+        let mut download = receiver.accept_live_file(b, &offer, &path).await?;
+        timeout(Duration::from_secs(45), async {
+            loop {
+                tokio::select! {
+                    event = a.next_event() => {
+                        let event = event?.context("sender event socket closed")?;
+                        sender.handle_live_file_event(a, &event)?;
+                    },
+                    event = observer_events.recv() => match event {
+                        Some(RoomEvent::ByteStreamOpened { .. }) => bail!("unaccepting bot received a data stream"),
+                        None => bail!("data observer disconnected"),
+                        _ => (),
+                    },
+                    event = download.next_event() => match event {
+                        Some(LiveFileEvent::Done) => return Ok(()),
+                        Some(LiveFileEvent::Progress { .. }) => (),
+                        Some(LiveFileEvent::Failed { reason }) => bail!("data transfer failed: {reason}"),
+                        None => bail!("download ended without a terminal event"),
+                    },
+                }
+            }
+        }).await.context("waiting for data-only transfer")??;
+        assert_eq!(Sha256::digest(std::fs::read(path)?), digest);
+        if scope == text {
+            timeout(super::LIMIT, async {
+                while !observer.remote_participants().is_empty() {
+                    if matches!(
+                        observer_events.recv().await,
+                        Some(RoomEvent::ByteStreamOpened { .. })
+                    ) {
+                        bail!("unaccepting bot received a data stream");
+                    }
+                }
+                Ok::<_, anyhow::Error>(())
+            })
+            .await
+            .context("accepted devices did not leave the text data room")??;
+        }
+    }
+    while let Ok(event) = observer_events.try_recv() {
+        assert!(!matches!(event, RoomEvent::ByteStreamOpened { .. }));
+    }
+    observer.close().await?;
+    println!(
+        "B3 10 MiB matched SHA-256 in text and DM without a voice call, with media grants disabled and no stream to the unaccepting bot"
+    );
+    Ok(())
+}

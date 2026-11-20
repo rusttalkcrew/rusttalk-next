@@ -75,12 +75,20 @@ pub async fn chat_kind(
     channel: &str,
 ) -> ApiResult<String> {
     decode::<32>(channel)?;
+    readable_kind(db, channel, &actor.person).await
+}
+
+pub async fn readable_kind(
+    db: &mut SqliteConnection,
+    channel: &str,
+    person: &[u8],
+) -> ApiResult<String> {
     query_scalar(
         "SELECT c.kind FROM channels c JOIN channel_readers r ON r.channel_id = c.id
          WHERE c.id = ? AND r.person_id = ?",
     )
     .bind(channel)
-    .bind(actor.person.as_slice())
+    .bind(person)
     .fetch_optional(db)
     .await?
     .ok_or(ApiError::forbidden("channel_read_denied"))
@@ -91,12 +99,29 @@ pub async fn require_write(
     actor: &Actor,
     channel: &str,
 ) -> ApiResult<()> {
-    if chat_kind(db, actor, channel).await? != "dm"
-        && !channels::has_flag(db, channel, &actor.person, channels::WRITE).await?
-    {
+    decode::<32>(channel)?;
+    require_writer(db, channel, &actor.person).await
+}
+
+pub async fn require_writer(
+    db: &mut SqliteConnection,
+    channel: &str,
+    person: &[u8],
+) -> ApiResult<()> {
+    let kind = readable_kind(db, channel, person).await?;
+    if !can_write(db, channel, person, &kind).await? {
         return Err(ApiError::forbidden("channel_write_denied"));
     }
     Ok(())
+}
+
+pub async fn can_write(
+    db: &mut SqliteConnection,
+    channel: &str,
+    person: &[u8],
+    kind: &str,
+) -> ApiResult<bool> {
+    Ok(kind == "dm" || channels::has_flag(db, channel, person, channels::WRITE).await?)
 }
 
 pub async fn create(

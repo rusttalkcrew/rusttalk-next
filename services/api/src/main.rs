@@ -8,6 +8,7 @@ mod keys;
 mod members;
 mod messages;
 mod metadata;
+mod presence;
 mod roles;
 mod store;
 mod sync;
@@ -53,7 +54,8 @@ use tracing_subscriber::{filter::Targets, prelude::*};
 struct App {
     db: SqlitePool,
     key: Arc<SigningKey>,
-    changes: broadcast::Sender<Option<Event>>,
+    changes: broadcast::Sender<Option<rusttalk_core::presence::Update>>,
+    presence: Arc<presence::Sessions>,
     voice: Option<Arc<voice::LiveKit>>,
     listing_changed: watch::Sender<()>,
     files: Arc<files::Files>,
@@ -61,7 +63,9 @@ struct App {
 
 impl App {
     fn notify(&self, event: Option<Event>) {
-        let _ = self.changes.send(event);
+        let _ = self
+            .changes
+            .send(event.map(rusttalk_core::presence::Update::Event));
     }
 }
 
@@ -177,6 +181,7 @@ async fn run() -> Result<()> {
                 db,
                 key: Arc::new(key),
                 changes: broadcast::channel(128).0,
+                presence: Arc::default(),
                 listing_changed: watch::channel(()).0,
                 voice: voice::LiveKit::from_env()?.map(Arc::new),
             })
@@ -218,6 +223,7 @@ async fn serve(app: App) -> io::Result<()> {
         .route("/v1/auth/sign-in", post(auth::sign_in))
         .route("/v1/auth/refresh", post(auth::refresh))
         .route("/v1/me", get(members::me))
+        .route("/v1/me/status", put(presence::set))
         .route("/v1/space", get(metadata::space))
         .route("/v1/members", get(metadata::members))
         .route("/v1/events", get(events::upgrade))
@@ -230,6 +236,11 @@ async fn serve(app: App) -> io::Result<()> {
         .route("/v1/voice/{id}/token", post(voice::token))
         .route("/v1/voice/{id}/participants", get(voice::participants))
         .route("/v1/voice/{id}/live-file", post(voice::live_file))
+        .route(
+            "/v1/channels/{id}/live-file/token/{nonce}",
+            post(voice::data_token),
+        )
+        .route("/v1/channels/{id}/live-file", post(voice::data_accept))
         .route("/v1/dms", post(dms::create))
         .route(
             "/v1/channels/{id}/message-devices/{device}/{person}",

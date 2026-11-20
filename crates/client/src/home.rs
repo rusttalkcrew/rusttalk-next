@@ -585,7 +585,7 @@ fn panel_frame(fill: Color32) -> Frame {
     Frame::new().fill(fill).inner_margin(Margin::same(8))
 }
 
-pub fn show(ui: &mut Ui, home: &mut Home) -> Option<Action> {
+pub fn show(ui: &mut Ui, home: &mut Home, updates: &mut crate::update::Updater) -> Option<Action> {
     let now = ui.input(|input| input.time);
     while let Ok(update) = home.net.updates.try_recv() {
         home.apply(ui.ctx(), update, now);
@@ -661,7 +661,7 @@ pub fn show(ui: &mut Ui, home: &mut Home) -> Option<Action> {
         .resizable(false)
         .exact_size(240.0)
         .frame(panel_frame(colors.side))
-        .show(ui, |ui| sidebar(ui, home));
+        .show(ui, |ui| sidebar(ui, home, updates.available()));
     if let View::Server(index) = home.view
         && home.servers[index].status != Status::Connecting
     {
@@ -713,7 +713,7 @@ pub fn show(ui: &mut Ui, home: &mut Home) -> Option<Action> {
     call::stats_window(ui.ctx(), home);
     call::screen_dialog(ui.ctx(), home);
     call::frame(ui.ctx(), home);
-    settings(ui.ctx(), home)
+    settings(ui.ctx(), home, updates)
 }
 
 fn empty(ui: &mut Ui, title: &str, hint: &str) {
@@ -777,12 +777,17 @@ fn server_rail(ui: &mut Ui, home: &mut Home) {
     });
 }
 
-fn sidebar(ui: &mut Ui, home: &mut Home) {
+fn sidebar(ui: &mut Ui, home: &mut Home, update_available: bool) {
     Panel::bottom("you")
         .frame(Frame::new().inner_margin(Margin::symmetric(0, 6)))
         .show(ui, |ui| {
             call::call_bar(ui, home);
-            if ui.button("⚙  Settings").clicked() {
+            let settings = if update_available {
+                "⚙  Settings · Update available"
+            } else {
+                "⚙  Settings"
+            };
+            if ui.button(settings).clicked() {
                 home.settings = Some(Tab::Profile);
             }
         });
@@ -2071,7 +2076,11 @@ fn text_dialog(ui: &mut Ui, text: &mut String, confirm: &str, close: &mut bool) 
     done && !text.trim().is_empty()
 }
 
-fn settings(ctx: &egui::Context, home: &mut Home) -> Option<Action> {
+fn settings(
+    ctx: &egui::Context,
+    home: &mut Home,
+    updates: &mut crate::update::Updater,
+) -> Option<Action> {
     let mut tab = home.settings?;
     let mut close = false;
     let modal = Modal::new(UiId::unique("settings")).show(ctx, |ui| {
@@ -2093,6 +2102,8 @@ fn settings(ctx: &egui::Context, home: &mut Home) -> Option<Action> {
                     ui.monospace(fingerprint(home.identity.certificate.person_id()));
                     ui.weak("Friends can compare this to make sure it's really you.");
                 });
+                ui.separator();
+                updates.settings(ui);
             }
             Tab::Voice => call::settings_tab(ui, &mut home.voice),
             Tab::Video => {

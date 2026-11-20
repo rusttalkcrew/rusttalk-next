@@ -29,9 +29,10 @@ pub enum Permission {
     ViewAuditLog = 16,
     DeleteMessages = 32,
     ManageChannels = 64,
+    ManageServer = 128,
 }
 
-const PERMISSIONS: [Permission; 7] = [
+const PERMISSIONS: [Permission; 8] = [
     Permission::Invite,
     Permission::Kick,
     Permission::Ban,
@@ -39,6 +40,7 @@ const PERMISSIONS: [Permission; 7] = [
     Permission::ViewAuditLog,
     Permission::DeleteMessages,
     Permission::ManageChannels,
+    Permission::ManageServer,
 ];
 
 #[derive(FromRow)]

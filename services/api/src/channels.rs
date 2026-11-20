@@ -462,9 +462,7 @@ pub async fn delete_channel(
     )
     .await?;
     tx.commit().await?;
-    if kind == "voice" {
-        crate::voice::close_room(&app, id);
-    }
+    crate::voice::close_rooms(&app, id, kind == "voice");
     app.notify(Some(Event::ChannelChanged));
     Ok(StatusCode::NO_CONTENT)
 }

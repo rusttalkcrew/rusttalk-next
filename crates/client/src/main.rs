@@ -15,6 +15,7 @@ mod net;
 mod screen;
 mod server;
 mod share;
+mod update;
 
 use std::{env, fs, path::PathBuf, process::ExitCode, sync::Mutex};
 
@@ -35,6 +36,10 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<()> {
+    if env::args_os().nth(1).as_deref() == Some("--version".as_ref()) {
+        println!("{}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     let (config, service) = match env::var_os("RUSTTALK_PROFILE") {
         None => (
             choose_native_strategy()?.config_dir().join("RustTalk"),
@@ -67,6 +72,11 @@ fn run() -> Result<()> {
         )
         .init();
 
+    #[cfg(target_os = "linux")]
+    if env::args_os().nth(1).as_deref() == Some("--check-update-now".as_ref()) {
+        return update::check_now(&config);
+    }
+
     let opened = keystore::Keystore::open(&config, &service);
     match &opened {
         Ok((_, Some(identity))) => tracing::info!(
@@ -94,5 +104,6 @@ fn run() -> Result<()> {
         options,
         Box::new(|cc| Ok(Box::new(app::App::new(cc, opened, config)))),
     )
-    .map_err(|error| anyhow!("run window: {error}"))
+    .map_err(|error| anyhow!("run window: {error}"))?;
+    update::restart_if_requested()
 }

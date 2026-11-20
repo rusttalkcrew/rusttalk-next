@@ -28,6 +28,8 @@ pub const IMAGE_CIPHERTEXT: usize = 256 * 1024;
 const NONCE: usize = 24;
 const TAG: usize = 16;
 const HEADER: usize = 8 + NONCE;
+/// The largest avatar or server icon that still seals within `IMAGE_CIPHERTEXT`.
+pub const IMAGE_PLAINTEXT: usize = IMAGE_CIPHERTEXT - HEADER - TAG;
 pub const INVITE_BYTES: usize = NONCE + 8 + 32 + TAG;
 
 #[derive(Debug, Error)]
@@ -137,6 +139,8 @@ pub enum Event {
         channel: String,
         device: String,
         acceptance: crate::messages::LiveFileAcceptance,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        data: bool,
     },
     Resync,
 }

@@ -11,6 +11,7 @@ use crate::{
         ScopeState,
     },
     pinned_tls,
+    presence::{Status, Update},
 };
 use anyhow::{Context, Result, ensure};
 use futures_util::{FutureExt, StreamExt};
@@ -37,7 +38,7 @@ pub struct KeyClient<'a> {
     scopes: Vec<ScopeState>,
     pub(super) opened: HashMap<[u8; 32], Opened>,
     /// Received events not yet returned, and whether key state must sync before returning them.
-    queued: VecDeque<Event>,
+    queued: VecDeque<Update>,
     stale: bool,
     closed: bool,
     /// The server's close reason after the event stream terminates.
@@ -377,6 +378,16 @@ impl<'a> KeyClient<'a> {
 
     /// Await the next event and reconcile key work when needed.
     pub async fn next_event(&mut self) -> Result<Option<Event>> {
+        while let Some(update) = self.next_update().await? {
+            if let Update::Event(event) = update {
+                return Ok(Some(event));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Await the next API event, including presence changes.
+    pub async fn next_update(&mut self) -> Result<Option<Update>> {
         loop {
             if self.stale && !self.queued.is_empty() {
                 match self.sync().await {
@@ -416,8 +427,8 @@ impl<'a> KeyClient<'a> {
     fn receive(&mut self, frame: Message) -> Result<()> {
         match frame {
             Message::Text(text) => {
-                let event = serde_json::from_str(&text)?;
-                if let Event::MemberChanged { person, device } = &event {
+                let update = serde_json::from_str(&text)?;
+                if let Update::Event(Event::MemberChanged { person, device }) = &update {
                     let person = fingerprint(&decode(person)?);
                     let device = device
                         .as_deref()
@@ -428,13 +439,16 @@ impl<'a> KeyClient<'a> {
                     tracing::info!(%person, device, "member changed");
                 }
                 self.stale |= !matches!(
-                    event,
-                    Event::MessageCreated { .. }
-                        | Event::MessageDeleted { .. }
-                        | Event::VoiceChanged { .. }
-                        | Event::LiveFileAccepted { .. }
+                    update,
+                    Update::Presence(_)
+                        | Update::Event(
+                            Event::MessageCreated { .. }
+                                | Event::MessageDeleted { .. }
+                                | Event::VoiceChanged { .. }
+                                | Event::LiveFileAccepted { .. }
+                        )
                 );
-                self.queued.push_back(event);
+                self.queued.push_back(update);
             }
             Message::Close(frame) => {
                 self.close_reason = frame.map(|frame| frame.reason.to_string());
@@ -442,6 +456,16 @@ impl<'a> KeyClient<'a> {
             }
             _ => {}
         }
+        Ok(())
+    }
+
+    /// Set the presence choice for this member’s open event sockets.
+    pub async fn set_status(&self, status: Status) -> Result<()> {
+        self.request(Method::PUT, "/v1/me/status")
+            .json(&json!({"status": status}))
+            .send()
+            .await?
+            .error_for_status()?;
         Ok(())
     }
 

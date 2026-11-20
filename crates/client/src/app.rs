@@ -20,6 +20,7 @@ pub struct App {
     ctx: egui::Context,
     /// The profile folder, for saved servers.
     data: PathBuf,
+    updates: crate::update::Updater,
 }
 
 enum Screen {
@@ -75,11 +76,13 @@ impl App {
         cc.egui_ctx.style_mut_of(egui::Theme::Light, |style| {
             style.visuals.widgets.noninteractive.fg_stroke.color = egui::Color32::from_gray(35);
         });
+        let updates = crate::update::Updater::new(&data, &cc.egui_ctx);
         let mut app = Self {
             keystore: None,
             screen: Screen::Welcome,
             ctx: cc.egui_ctx.clone(),
             data,
+            updates,
         };
         match opened {
             Ok((keystore, identity)) => {
@@ -208,6 +211,7 @@ fn problem(what: &str, error: &IdentityError) -> Screen {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        self.updates.poll(ui.ctx());
         let action = match &mut self.screen {
             Screen::Problem(details) => card(ui, |ui| {
                 ui.heading("RustTalk couldn't start");
@@ -224,7 +228,7 @@ impl eframe::App for App {
                 ..
             } => card(ui, |ui| confirm(ui, check, answers, error.as_deref())),
             Screen::Restore { words, error } => card(ui, |ui| restore(ui, words, error.as_deref())),
-            Screen::Home(home) => crate::home::show(ui, home),
+            Screen::Home(home) => crate::home::show(ui, home, &mut self.updates),
         };
         if let Some(action) = action {
             self.apply(action);

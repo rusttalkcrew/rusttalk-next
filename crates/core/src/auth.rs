@@ -43,6 +43,11 @@ pub fn voice_identity(server: &ServerId, device: &[u8]) -> String {
     encode(&hash.finalize())
 }
 
+/// LiveKit identity scoped to one acceptance, so transfers can run concurrently.
+pub fn live_file_identity(server: &ServerId, device: &[u8], nonce: &[u8; 16]) -> String {
+    format!("{}.{}", voice_identity(server, device), encode(nonce))
+}
+
 pub fn decode_bytes(encoded: &str) -> Result<Vec<u8>, ProtocolError> {
     URL_SAFE_NO_PAD
         .decode(encoded)

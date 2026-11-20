@@ -269,9 +269,23 @@ disconnect or API session closure. The API builds core without the
 For a new address, use `Server::probe` and show the observed server fingerprint
 for confirmation before connecting with that expected pin. Invite links
 already specify the expected pins. Use `KeyClient::next_event` while online
-to drive key delivery and refresh before `KeyClient::expires_at`.
+to drive key delivery and refresh before `KeyClient::expires_at`. Use
+`KeyClient::next_update` to receive those events alongside presence
+changes, and `KeyClient::set_status` to set the member’s status.
 
-For live files, use `VoiceRoom::offer_live_file` to post the offer and
+Use `KeyClient::set_avatar` and `KeyClient::set_server_icon` to validate
+and encrypt images for upload. After decrypting an avatar or icon with
+`KeyClient::decrypt_metadata`, use `decode_profile_image` to get RGBA
+frames and their delays.
+
+For live files in any readable and writable channel or DM, create
+`DataLiveFiles::new(&client, channel_id)` and keep it for the lifetime of local
+offers. Use its `offer_live_file` and forward API events to
+`handle_live_file_event`. Call `accept_live_file` when the receiver chooses a
+new destination. The returned download pumps its own room events and closes
+the data connection when it finishes or is dropped.
+
+For in-call transfers, use `VoiceRoom::offer_live_file` to post the offer and
 `accept_live_file` with a verified message record and a new destination
 path. Call `handle_live_file_event` for API events while polling
 `VoiceRoom::next_event` for LiveKit events. The returned `LiveDownload`
@@ -298,3 +312,23 @@ every merge; CI does not run it. Local `make lint test` covers the whole
 workspace. `rust-toolchain.toml` pins the Rust version, so a new Rust release
 does not invalidate the CI caches; update it together with the image in
 `services/api/Dockerfile`.
+
+## Local release testing
+
+Run `make release-key` to create `.dev/release-key.pem` and
+`.dev/release-public.pem` for local testing. The private PEM is created
+with mode 0600. Set `RUSTTALK_RELEASE_KEY` to its path for a local signing
+run. `make release` requires the matching Windows installer in `dist/` and
+writes a complete, signed release under `dist/<workspace-version>/`.
+Packaging is run locally and stays out of CI. See the
+[release steps and prerequisites](operations.md#releases-and-updates).
+
+For the headless update gate, build two Linux client versions with
+`RUSTTALK_RELEASE_PUBLIC_KEY` set to the output of
+`python3 deploy/release/release.py public-key` and
+`RUSTTALK_LOCAL_UPDATE_TEST=1` set at compile time. Serve the newer artifact,
+its manifest and its signature on `127.0.0.1`. Run the older client with
+`RUSTTALK_UPDATE_URL=http://127.0.0.1:<port>/` and `--check-update-now`, then
+run the same file with `--version`. Test builds also accept the executable
+itself as the install target if run without an AppImage. Use a disposable
+copy. Production packages disable these test overrides.
