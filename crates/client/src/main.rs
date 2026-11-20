@@ -12,6 +12,7 @@ mod home;
 mod keystore;
 mod log_file;
 mod net;
+mod official;
 mod screen;
 mod server;
 mod share;

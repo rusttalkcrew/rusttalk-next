@@ -81,6 +81,8 @@ pub struct Settings {
     pub index_url: String,
     /// Its certificate pin (base64url), for a directory without a public certificate.
     pub index_fingerprint: String,
+    /// Server IDs of official servers the person dismissed from the join page.
+    pub dismissed_official: Vec<String>,
 }
 
 impl Default for Settings {
@@ -99,6 +101,7 @@ impl Default for Settings {
             camera_fps: 30,
             index_url: String::new(),
             index_fingerprint: String::new(),
+            dismissed_official: Vec::new(),
         }
     }
 }
