@@ -2935,6 +2935,8 @@ dependencies = [
  "num-traits",
  "png",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -5201,12 +5203,14 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
+ "tokio-util",
  "tower",
  "tower-http",
  "tower-service",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "wasm-streams",
  "web-sys",
 ]
 
@@ -5369,6 +5373,7 @@ dependencies = [
  "anyhow",
  "axum",
  "ed25519-dalek",
+ "futures-util",
  "livekit-api",
  "livekit-protocol",
  "reqwest",
@@ -5379,6 +5384,7 @@ dependencies = [
  "sqlx",
  "tempfile",
  "tokio",
+ "tokio-util",
  "tower-http",
  "tracing",
  "tracing-subscriber",
@@ -5392,11 +5398,13 @@ dependencies = [
  "anyhow",
  "clap",
  "futures-util",
+ "image",
  "livekit",
  "reqwest",
  "rustls-pki-types",
  "rusttalk-core",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
  "tracing",
@@ -5440,6 +5448,7 @@ dependencies = [
  "futures-util",
  "hkdf 0.12.4",
  "hpke",
+ "image",
  "livekit",
  "livekit-net",
  "livekit-protocol",
@@ -7007,6 +7016,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3b1f9c3798725016c6ee5f2f57869ec0831e8bbc0ab0310a86e787e97f41389e"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "wasm-streams"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "15053d8d85c7eccdbefef60f06769760a563c7f0a9d6902a13d35c7800b0ad65"
+dependencies = [
+ "futures-util",
+ "js-sys",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]

@@ -13,7 +13,11 @@ const TAG: usize = 16;
 const SIGNATURE: usize = 64;
 const HEADER: usize = 1 + NONCE + 2;
 const MIN_PLAINTEXT: usize = 4;
-const MAX_PLAINTEXT: usize = MIN_PLAINTEXT + 2 * 32 + MAX_TEXT_CHARS * 4;
+const MAX_PLAINTEXT: usize =
+    MIN_PLAINTEXT + 2 * 32 + MAX_TEXT_CHARS * 4 + MAX_ATTACHMENTS * MAX_ATTACHMENT_BYTES;
+
+const MAX_ATTACHMENTS: usize = 4;
+const MAX_ATTACHMENT_BYTES: usize = 529;
 
 /// Maximum message length in Unicode scalar values.
 pub const MAX_TEXT_CHARS: usize = 2_000;
@@ -29,6 +33,8 @@ pub enum MessageError {
     Signature,
     #[error("message encryption or authentication failed")]
     Authentication,
+    #[error("invalid attachment reference")]
+    Attachment,
     #[error("message text exceeds 2,000 characters")]
     TextLimit,
     #[error("message randomness unavailable")]
@@ -111,3 +117,10 @@ pub struct MessageRecord {
 mod crypto;
 #[cfg(any(feature = "client", test))]
 pub use crypto::MessageBody;
+
+#[cfg(any(feature = "client", test))]
+mod attachment;
+#[cfg(any(feature = "client", test))]
+pub use attachment::{Attachment, BlobRef};
+#[cfg(feature = "client")]
+pub(crate) use attachment::{CHUNK_BYTES, MAX_CIPHERTEXT, MAX_THUMBNAIL_BYTES, TAG_BYTES};
