@@ -77,6 +77,7 @@ fn run() -> Result<()> {
         return update::check_now(&config);
     }
 
+    files::clear_opened();
     let opened = keystore::Keystore::open(&config, &service);
     match &opened {
         Ok((_, Some(identity))) => tracing::info!(

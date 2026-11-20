@@ -201,8 +201,10 @@ impl App {
 }
 
 /// Remove what this profile remembers about the person who signed out: joined servers
-/// and their sync state, server pins and where files were saved. Device settings stay.
+/// and their sync state, server pins, where files were saved and files opened from chat.
+/// Device settings stay.
 fn forget_profile(data: &std::path::Path) {
+    crate::files::clear_opened();
     for name in ["sync.json", "servers.json", "saved.json"] {
         match std::fs::remove_file(data.join(name)) {
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => {

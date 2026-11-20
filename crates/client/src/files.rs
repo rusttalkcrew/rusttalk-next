@@ -259,7 +259,7 @@ impl Files {
             return;
         }
         let folder =
-            std::env::temp_dir().join(format!("rusttalk-{}", hex::encode(&file.file.id[..8])));
+            std::env::temp_dir().join(format!("{OPENED}{}", hex::encode(&file.file.id[..8])));
         if let Err(error) = fs::create_dir_all(&folder) {
             tracing::warn!(%error, "making a folder to open a file failed");
             self.saves.insert(file.file.id, Saving::Failed);
@@ -272,6 +272,28 @@ impl Files {
 }
 
 const SAVED: &str = "saved.json";
+/// Prefix of the temporary folders that "Open" writes decrypted files to.
+const OPENED: &str = "rusttalk-";
+
+/// Remove decrypted files that "Open" left in the temporary directory
+/// (`rusttalk-` and 16 hex digits, so not the log folders). Failures are only logged.
+pub fn clear_opened() {
+    let Ok(entries) = fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(id) = name.to_str().and_then(|name| name.strip_prefix(OPENED)) else {
+            continue;
+        };
+        if id.len() == 16
+            && id.bytes().all(|byte| byte.is_ascii_hexdigit())
+            && let Err(error) = fs::remove_dir_all(entry.path())
+        {
+            tracing::warn!(%error, "removing an opened file failed");
+        }
+    }
+}
 
 /// Open a file in its app, or (`folder`) show it in the file manager. Failures are only logged.
 fn open(path: &Path, folder: bool) {
