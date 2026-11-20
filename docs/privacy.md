@@ -18,7 +18,7 @@ tables in SQLite (WAL). IDs and digests are binary unless indicated. The `_ct` s
 | `sessions` | `token_hash` (SHA-256), `person_id`, `device_id` (Ed25519 public key), `ip` (canonical source IP at issuance), `expires_at` |
 | `revocations` | `person_id`, `device_id`, `record` (W04 signature, device public key and revocation timestamp) |
 | `bans` | `person_id`, `banned_at` (Unix seconds) |
-| `ban_ips` | `person_id`, `ip` (only for an explicitly requested IP ban) |
+| `ban_ips` | `person_id`, `ip` (IPv4 address or IPv6 /64; only for an explicitly requested IP ban) |
 | `audit_log` | `id` (sequence), `actor_person_id`, `action` (fixed event kind), nullable `target_person_id`, nullable `target_id` (opaque object ID), `at` (Unix seconds), nullable `dm_channel_id` (audit visibility) |
 | `invite_previews` | `ip` (IPv4 address or IPv6 /64), `expires_at` (60-second rate limit) |
 | `open_joins` | `ip` (IPv4 address or IPv6 /64), `expires_at` (one-hour admission limit) |

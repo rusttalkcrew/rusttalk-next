@@ -12,7 +12,7 @@ use sqlx::{FromRow, SqliteConnection, query, query_as, query_scalar};
 
 use crate::{
     ApiError, ApiResult, App,
-    auth::{PublicLimit, authenticate, check_public_limit, client_ip, create_invite},
+    auth::{PublicLimit, authenticate, check_public_limit, client_ip, create_invite, limit_key},
     keys, metadata, payload,
     roles::{self, Permission},
     store::{audit, hash, log_closed, now, write},
@@ -353,15 +353,26 @@ pub async fn ban(
         if addresses.is_empty() {
             return Err(ApiError::new(StatusCode::CONFLICT, "no_active_ip"));
         }
-        for ip in addresses {
-            let others: Vec<Vec<u8>> = query_scalar("SELECT DISTINCT person_id FROM sessions WHERE ip = ? AND expires_at > ? AND person_id <> ?")
-                .bind(&ip).bind(actor.at).bind(person.as_slice()).fetch_all(&mut *tx).await?;
-            if ip == actor.ip {
-                return Err(ApiError::forbidden("role_hierarchy"));
-            }
-            for other in others {
+        // One IPv6 user owns a whole /64, so the ban covers the prefix.
+        let mut banned: Vec<String> = addresses.iter().map(|ip| limit_key(ip)).collect();
+        banned.sort();
+        banned.dedup();
+        if banned.contains(&limit_key(&actor.ip)) {
+            return Err(ApiError::forbidden("role_hierarchy"));
+        }
+        let sessions: Vec<(Vec<u8>, String)> = query_as(
+            "SELECT DISTINCT person_id, ip FROM sessions WHERE expires_at > ? AND person_id <> ?",
+        )
+        .bind(actor.at)
+        .bind(person.as_slice())
+        .fetch_all(&mut *tx)
+        .await?;
+        for (other, ip) in sessions {
+            if banned.contains(&limit_key(&ip)) {
                 auth.outrank(&roles::authority(&mut tx, &other).await?)?;
             }
+        }
+        for ip in banned {
             query("INSERT INTO ban_ips (person_id, ip) VALUES (?, ?)")
                 .bind(person.as_slice())
                 .bind(ip)

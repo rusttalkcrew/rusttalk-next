@@ -138,8 +138,10 @@ remove membership and drop all its sessions. Unban clears the person ban
 and any linked IPs. A former member can redeem a fresh invite or explicitly
 join again while open joining is enabled. Use a ban to prevent rejoining. When
 `ban_ip` is true, the server adds the target's IPs from active sessions.
-It refuses an IP ban when no such IP is available or when an address is
-shared with the actor or an equal or higher-ranked active member. The
+An IPv6 address bans its whole /64, matching the rate-limit grouping.
+It refuses an IP ban when no such IP is available or when a banned IPv4
+address or IPv6 /64 is shared with the actor or an equal or higher-ranked
+active member. The
 owner retains access from a banned IP so an IP ban cannot lock them out.
 The ban list returns whether each ban has linked IPs.
 

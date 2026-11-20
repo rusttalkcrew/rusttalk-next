@@ -150,4 +150,4 @@ as the API and works on Windows with the console disabled.
 
 ### IP bans
 
-IP bans match one exact address (IPv6 included), so a person with an IPv6 /64 can move to another address. The api only sees real client addresses when Docker forwards the original source IP to Caddy (the default bridge networking with iptables does; rootless Docker or a userland proxy shows every client as the gateway IP, and an IP ban would then hit everyone). Abuse limits: 32 open sign-in challenges per IP (256 in total), 16 sessions and 64 stored revocations per person.
+IP bans match one IPv4 address or one IPv6 /64, so a person cannot rotate within their own IPv6 prefix to rejoin through open joining. Bans created before W15 still match their exact address. The api only sees real client addresses when Docker forwards the original source IP to Caddy (the default bridge networking with iptables does; rootless Docker or a userland proxy shows every client as the gateway IP, and an IP ban would then hit everyone). Abuse limits: 32 open sign-in challenges per IP (256 in total), 16 sessions and 64 stored revocations per person.

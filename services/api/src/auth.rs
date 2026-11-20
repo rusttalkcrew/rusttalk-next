@@ -173,7 +173,7 @@ pub fn client_ip(headers: &HeaderMap) -> ApiResult<String> {
 }
 
 /// One IPv6 user owns a whole /64, so rate limits count that prefix as one address.
-fn limit_key(ip: &str) -> String {
+pub fn limit_key(ip: &str) -> String {
     match ip.parse() {
         Ok(IpAddr::V6(v6)) => {
             std::net::Ipv6Addr::from(u128::from(v6) & !(u128::MAX >> 64)).to_string()
@@ -228,10 +228,12 @@ pub async fn check_public_limit(
 
 async fn check_ip(db: &mut SqliteConnection, ip: &str, person: &[u8]) -> ApiResult<()> {
     let banned: bool = query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM ban_ips WHERE ip = ?)
+        "SELECT EXISTS (SELECT 1 FROM ban_ips WHERE ip IN (?, ?))
          AND NOT EXISTS (SELECT 1 FROM server_settings WHERE owner_person_id = ?)",
     )
+    // IPv6 bans cover the /64; older bans may hold an exact address.
     .bind(ip)
+    .bind(limit_key(ip))
     .bind(person)
     .fetch_one(db)
     .await?;
@@ -645,6 +647,14 @@ mod tests {
         assert_eq!(banned.unwrap_err().code, "ip_banned");
         assert!(check_ip(&mut conn, "192.0.2.9", &[1]).await.is_ok());
         assert!(check_ip(&mut conn, "192.0.2.8", &[2]).await.is_ok());
+
+        query("INSERT INTO ban_ips (person_id, ip) VALUES (x'03', '2001:db8:1:2::')")
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        let rotated = check_ip(&mut conn, "2001:db8:1:2:aaaa::7", &[2]).await;
+        assert_eq!(rotated.unwrap_err().code, "ip_banned");
+        assert!(check_ip(&mut conn, "2001:db8:1:3::7", &[2]).await.is_ok());
     }
 
     #[tokio::test]
