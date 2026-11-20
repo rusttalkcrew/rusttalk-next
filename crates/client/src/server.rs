@@ -1,9 +1,12 @@
 //! What the UI shows for each server. The network task in net.rs decrypts the
 //! server's metadata and messages and sends these; the UI only reads and merges them.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, path::PathBuf};
 
-use rusttalk_core::{client::voice::TrackSid, identity::fingerprint};
+use rusttalk_core::{
+    client::{Attachment, voice::TrackSid},
+    identity::fingerprint,
+};
 use tokio::sync::mpsc::UnboundedSender;
 use url::Url;
 
@@ -67,6 +70,8 @@ pub struct Call {
     pub can_talk: bool,
     /// False when this device may not publish a screen or camera.
     pub can_share_video: bool,
+    /// False when this device may not send files in the call.
+    pub can_send_files: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -212,6 +217,8 @@ pub struct Msg {
     pub reply_to: Option<Id>,
     pub edit_of: Option<Id>,
     pub body: Body,
+    /// Server-stored files; edits never change them.
+    pub files: Vec<Attachment>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -228,6 +235,12 @@ pub enum Body {
     },
 }
 
+pub struct Staged {
+    pub path: PathBuf,
+    pub name: String,
+    pub size: u64,
+}
+
 /// One channel's loaded history, oldest first, plus the composer state.
 #[derive(Default)]
 pub struct Chat {
@@ -241,6 +254,10 @@ pub struct Chat {
     pub draft: String,
     pub reply_to: Option<Id>,
     pub editing: Option<Id>,
+    /// Files picked or dropped, sent with the next message.
+    pub staged: Vec<Staged>,
+    /// What is uploading now, shown under the messages.
+    pub uploading: Option<String>,
     /// Content height last frame, and before older messages were added,
     /// so the view stays in place when a page is added above it.
     pub content_height: f32,
@@ -314,6 +331,7 @@ mod tests {
             reply_to: None,
             edit_of: edit_of.map(|id| [id; 32]),
             body: Body::Text(text.into()),
+            files: Vec::new(),
         }
     }
 

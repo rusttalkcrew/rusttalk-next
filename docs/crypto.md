@@ -176,14 +176,27 @@ epochs through the normal envelope flow.
 
 ## Messages
 
-The plaintext contains a one-byte bit mask (bit 0 for reply-to, bit 1 for
-edit-of), a two-byte big-endian UTF-8 byte length, the UTF-8 text, the optional
-32-byte reply ID, the optional 32-byte original ID, and a one-byte attachment
-count. A count of zero has no payload. A count of one is followed by the
-live attachment described in [the protocol](protocol.md#live-transfer).
-This version requires all other flag bits to be clear, valid
-UTF-8 with at most 2,000 Unicode scalar values, and exact lengths. Spaces
-and line breaks are preserved.
+Format version 2 (the envelope's first byte) has this plaintext, in order.
+
+| Field | Encoding | Maximum bytes |
+| --- | --- | --- |
+| Flags | Bit 0 reply-to, bit 1 edit-of, bit 2 live offer. Other bits clear | 1 |
+| Text | Two-byte big-endian UTF-8 length, then text of at most 2,000 Unicode scalar values | 2 + 8,000 |
+| Reply ID | 32 bytes, present with bit 0 | 32 |
+| Original ID | 32 bytes, present with bit 1 | 32 |
+| Stored files | One-byte count 0–4, then that many [references](protocol.md#files) of at most 529 bytes | 1 + 2,116 |
+| Live offer | Present with bit 2, [offer fields](protocol.md#live-transfer) | 460 |
+
+Nothing may follow the last field. The largest plaintext is 10,644 bytes
+and the largest envelope is 10,751 bytes. Every length is checked against
+its field maximum before reading. Readers reject version 1 envelopes.
+Spaces and line breaks are preserved.
+
+File names, for stored and live files, are 1–255 UTF-8 bytes. They are not
+`.` or `..` and contain no `/`, `\`, `:`, control characters or
+bidirectional formatting characters (U+061C, U+200E, U+200F, U+202A to
+U+202E, U+2066 to U+2069). Senders replace such characters with `_` and
+shorten longer names, keeping a short extension.
 
 Use XChaCha20-Poly1305 with the current channel epoch key and an independent,
 random 24-byte nonce. Associated data is the following concatenation.
@@ -194,7 +207,7 @@ epoch (8 bytes, positive signed integer, big endian) || message_id (32 bytes) ||
 sender_device_Ed25519 (32 bytes) || sender_person (32 bytes)
 ```
 
-The sender signs the associated data followed by byte `1`, the nonce, the
+The sender signs the associated data followed by byte `2`, the nonce, the
 two-byte big-endian ciphertext length, and the ciphertext including the
 16-byte authentication tag. The signature is the final 64 bytes of the
 envelope. Integer fields and lengths are fixed-width. The API verifies the
@@ -224,6 +237,37 @@ store such a back-dated record from a stolen, revoked device. Clients cannot
 detect this, because the API also controls the device directory and does not
 expose root-signed revocation records to other members. A removal epoch
 reported by the API would add no protection under the same assumption.
+
+## Server-stored file encryption
+
+The sender generates a fresh random 32-byte key and independent random 32-byte
+ID for each blob. PNG and JPEG files that decode within the image limits
+(4096 pixels per edge, 64 MiB of pixels) get a separate encrypted PNG thumbnail
+with a longest edge of at most 320 pixels. Other files, including other image
+formats, are sent without one. Receivers decode a thumbnail only as a PNG of at
+most 320 pixels per edge. Thumbnail bytes have their own key
+and ID. Keys, names, media types and plaintext framing travel in the signed,
+encrypted message.
+
+The sender splits the plaintext into 64 KiB chunks with a possibly shorter last
+chunk. An empty file has one empty final chunk. Each chunk is independently
+sealed with XChaCha20-Poly1305. Its 24-byte nonce is 16 zero bytes followed by
+the zero-based chunk index as a big-endian unsigned 64-bit integer. The key is
+used for exactly one blob, so every nonce under it is distinct. The associated
+data is the following concatenation.
+
+```text
+"rusttalk-file-chunk-v1" || file_id (32 bytes) || index (8 bytes, big endian) ||
+final (1 byte, 1 for the last chunk and 0 otherwise)
+```
+
+The blob concatenates each ciphertext and its 16-byte tag without headers.
+The recipient uses the authenticated plaintext size and chunk size to enforce
+the exact ciphertext length and framing. It verifies every tag before
+returning bytes to the caller, so substitution, tampering, reordering and
+truncation fail. The image decoder checks actual bytes and accepts only
+pure-Rust PNG and JPEG decoding. It caps compressed input at 32 MiB and
+sets `image::Limits` to 4,096 pixels per axis and a 64 MiB allocation budget.
 
 ## Media encryption
 

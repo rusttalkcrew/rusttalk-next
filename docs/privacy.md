@@ -32,6 +32,8 @@ tables in SQLite (WAL). IDs and digests are binary unless indicated. The `_ct` s
 | `key_envelope_rejections` | `scope_id`, `epoch`, `recipient_device`, `sender_person` |
 | `message_senders` | `device_id`, `person_id`, `certificate` (archived public certificate for signature verification) |
 | `messages` | `sequence` (insertion order), `id` and `channel_id` (text), `epoch`, `sender_device`, `sender_person`, `at` (Unix seconds), `size` (binary envelope length), `envelope` (public framing, nonce, ciphertext with tag, and signature) |
+| `message_ids` | `id` (opaque text, including deleted message IDs to prevent reuse) |
+| `files` | `id` and `channel_id` (opaque text), `uploader` (person public key), `size` (ciphertext bytes), `created_at`, `expires_at` (Unix seconds) |
 | `_sqlx_migrations` | `version`, `description`, `installed_on`, `success`, `checksum`, `execution_time` (migration bookkeeping) |
 
 Caddy supplies the source IP directly. Session IPs are retained with the active
@@ -50,7 +52,13 @@ Text, replies, attachment references and edit targets are inside message
 ciphertext. Explicit deletes and the retention cap remove message rows.
 Public sender certificates and audit IDs are retained for history and
 accountability.
-SQLite backups and old WAL pages can retain past database contents.
+The API volume stores file blobs, including in-progress uploads and thumbnails,
+as ciphertext under opaque disk names. Committed blobs are named only by their
+random IDs. File names, types, keys, plaintext lengths and references linking
+thumbnails to originals are inside the encrypted message. File operation logs
+carry the opaque ID and ciphertext size. The expiry sweep unlinks blobs and
+removes their metadata. SQLite backups and old WAL pages can retain past
+database contents, and volume backups can retain expired ciphertext.
 The API can see who is in which voice room by matching opaque LiveKit
 device identities to current channel readers. Readers see unmatched
 devices only as a count. After a kick, ban, revocation or permission
@@ -100,8 +108,10 @@ signing key. "Sign out of this device" deletes the keystore entry.
 Next to the settings, `servers.json` and `joined.json` hold each joined
 server's address, server ID and TLS fingerprint. `voice.json` holds the
 chosen audio devices, voice options, and the chosen camera's name,
-resolution and frame rate. Decrypted names and
-messages stay in memory only; the log never contains them or invite links.
+resolution and frame rate. Decrypted names, messages and pictures stay in
+memory only; the log never contains them, file names or invite links. A
+downloaded file is written only where the person picks in the save dialog,
+through a temporary file in that folder that is removed if the download fails.
 
 ## Outbound connections
 
@@ -110,7 +120,8 @@ messages stay in memory only; the log never contains them or invite links.
   7882/UDP or 7881/TCP. The bot requests a voice token from the pinned API.
 - **Desktop client:** Configured RustTalk origins for pinned HTTPS and WebSocket
   connections. Voice uses the same pinned signaling path and advertised
-  WebRTC ports as the bot. On Linux it accesses Secret Service over the local session bus.
+  WebRTC ports as the bot. On Linux it accesses Secret Service, and opens file
+  dialogs through xdg-desktop-portal, over the local session bus.
 - **API:** Queries LiveKit RoomService on 7880/TCP using the internal
   Docker hostname `livekit`.
 - **Index:** No outbound network connections.
