@@ -203,12 +203,12 @@ pub async fn create(
     let dropped = prune(&mut tx, &channel).await?;
     tx.commit().await?;
     for id in dropped {
-        app.notify(Some(Event::MessageDeleted {
+        app.notify(Event::MessageDeleted {
             channel: channel.clone(),
             id,
-        }));
+        });
     }
-    app.notify(Some(Event::MessageCreated { channel, id }));
+    app.notify(Event::MessageCreated { channel, id });
     Ok((
         StatusCode::CREATED,
         Json(MessageRecord {
@@ -382,7 +382,7 @@ pub async fn delete(
             .await?;
     }
     tx.commit().await?;
-    app.notify(Some(Event::MessageDeleted { channel, id }));
+    app.notify(Event::MessageDeleted { channel, id });
     Ok(StatusCode::NO_CONTENT)
 }
 

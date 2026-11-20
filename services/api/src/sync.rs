@@ -1,13 +1,14 @@
 use axum::{
-    body::Bytes,
+    body::Body,
     extract::State,
     http::{HeaderMap, StatusCode, header::CONTENT_TYPE},
     response::{IntoResponse, Response},
 };
-use rusttalk_core::sync::split_blob;
+use futures_util::TryStreamExt;
+use rusttalk_core::sync::{MAX_BODY, split_blob};
 use sqlx::{query, query_as, query_scalar};
 
-use crate::{ApiError, ApiResult, App, auth::authenticate};
+use crate::{ApiError, ApiResult, App, auth::authenticate, files};
 
 pub async fn get(State(app): State<App>, headers: HeaderMap) -> ApiResult<Response> {
     let (mut tx, actor) = authenticate(&app, &headers).await?;
@@ -26,7 +27,30 @@ pub async fn get(State(app): State<App>, headers: HeaderMap) -> ApiResult<Respon
     })
 }
 
-pub async fn put(State(app): State<App>, headers: HeaderMap, body: Bytes) -> ApiResult<Response> {
+/// Reads at most `MAX_BODY` bytes. A larger body is read to its end before the 413, so the
+/// proxy does not report a reset stream as 502.
+async fn read_body(body: Body) -> ApiResult<Vec<u8>> {
+    let mut stream = body.into_data_stream();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = stream
+        .try_next()
+        .await
+        .map_err(|_| ApiError::bad_request("invalid_sync_blob"))?
+    {
+        if chunk.len() > MAX_BODY - bytes.len() {
+            files::drain(&mut stream).await;
+            return Err(ApiError::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "body_too_large",
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
+pub async fn put(State(app): State<App>, headers: HeaderMap, body: Body) -> ApiResult<Response> {
+    let body = read_body(body).await?;
     let (mut tx, actor) = authenticate(&app, &headers).await?;
     let (version, ciphertext) =
         split_blob(&body).ok_or(ApiError::bad_request("invalid_sync_blob"))?;

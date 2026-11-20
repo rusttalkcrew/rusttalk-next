@@ -14,7 +14,7 @@ use serde::Deserialize;
 use sqlx::{Sqlite, SqliteConnection, SqlitePool, Transaction, query, query_as, query_scalar};
 
 use crate::{
-    ApiError, ApiResult, App, keys, payload,
+    ApiError, ApiResult, App, Change, keys, payload,
     store::{audit, hash, log_closed, now, random, write},
 };
 
@@ -120,10 +120,10 @@ async fn sign_in_device(
     let session = issue_session(&mut tx, person, device, &ip, at).await?;
     tx.commit().await?;
     log_closed(closed, at, "replaced");
-    if added {
+    if added || !member {
         keys::changed(app, person, Some(device));
     } else {
-        app.notify(None);
+        app.signal(Change::Session);
     }
     Ok(Json(session))
 }
@@ -162,12 +162,8 @@ async fn check_revoked(db: &mut SqliteConnection, person: &[u8], device: &[u8]) 
 }
 
 pub fn client_ip(headers: &HeaderMap) -> ApiResult<String> {
-    let mut values = headers.get_all("x-forwarded-for").iter();
-    let ip = values
-        .next()
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<IpAddr>().ok())
-        .filter(|_| values.next().is_none())
+    let values = headers.get_all("x-forwarded-for").iter();
+    let ip = rusttalk_core::auth::forwarded_ip(values.map(|value| value.as_bytes()))
         .ok_or(ApiError::bad_request("invalid_forwarded_ip"))?;
     Ok(ip.to_canonical().to_string())
 }
@@ -487,7 +483,7 @@ pub async fn refresh(State(app): State<App>, headers: HeaderMap) -> ApiResult<Js
     let session = issue_session(&mut tx, &actor.person, &actor.device, &actor.ip, actor.at).await?;
     tx.commit().await?;
     log_closed(closed, actor.at, "refreshed");
-    app.notify(None);
+    app.signal(Change::Session);
     Ok(Json(session))
 }
 

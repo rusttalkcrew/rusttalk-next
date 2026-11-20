@@ -438,10 +438,10 @@ fn mismatch(known: bool) -> String {
 fn pin_changed(error: &anyhow::Error) -> bool {
     matches!(
         error.downcast_ref::<ProtocolError>(),
-        Some(ProtocolError::ServerIdChanged | ProtocolError::TlsChanged | ProtocolError::ServerProof)
-    ) ||
-        // The pinned TLS verifier reports another certificate only inside the transport error text.
-        format!("{error:#}").contains("fingerprint mismatch")
+        Some(
+            ProtocolError::ServerIdChanged | ProtocolError::TlsChanged | ProtocolError::ServerProof
+        )
+    ) || rusttalk_core::pinned_tls::is_pin_mismatch(error.as_ref())
 }
 
 #[derive(Default)]

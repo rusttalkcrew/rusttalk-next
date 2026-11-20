@@ -117,7 +117,7 @@ fn problem(error: &anyhow::Error, pinned: bool) -> String {
             "This server doesn't match its listing.".into()
         }
         Some(ProtocolError::TlsChanged) => CHANGED.into(),
-        _ if pinned && text.contains("fingerprint mismatch") => CHANGED.into(),
+        _ if pinned && rusttalk_core::pinned_tls::is_pin_mismatch(error.as_ref()) => CHANGED.into(),
         // Without a pin only a publicly trusted certificate can be checked.
         _ if !pinned && text.contains("certificate") => {
             "Can't check this server's certificate. Ask someone there for an invite link.".into()

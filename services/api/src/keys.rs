@@ -15,7 +15,7 @@ use serde::Deserialize;
 use sqlx::{FromRow, SqliteConnection, query, query_as, query_scalar};
 
 use crate::{
-    ApiError, ApiResult, App,
+    ApiError, ApiResult, App, Change,
     auth::{Actor, authenticate},
     payload,
 };
@@ -447,7 +447,7 @@ pub async fn new_epoch(
     let (mut tx, actor) = authenticate(&app, &headers).await?;
     start_epoch(&mut tx, &actor, context, &envelope).await?;
     tx.commit().await?;
-    app.notify(None);
+    app.signal(Change::Keys);
     Ok(StatusCode::CREATED)
 }
 
@@ -502,11 +502,11 @@ pub async fn upload(
         .execute(&mut *tx).await?.rows_affected();
     tx.commit().await?;
     if inserted != 0 {
-        app.notify(Some(Event::KeysNeeded(KeyNeed {
+        app.notify(Event::KeysNeeded(KeyNeed {
             scope,
             epoch,
             device: encode(&device),
-        })));
+        }));
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -563,20 +563,20 @@ pub async fn reject(
     }
     tx.commit().await?;
     if removed != 0 {
-        app.notify(Some(Event::KeysNeeded(KeyNeed {
+        app.notify(Event::KeysNeeded(KeyNeed {
             scope,
             epoch,
             device: encode(&actor.device),
-        })));
+        }));
     }
     Ok(StatusCode::NO_CONTENT)
 }
 
 pub fn changed(app: &App, person: &[u8], device: Option<&[u8]>) {
-    app.notify(Some(Event::MemberChanged {
+    app.notify(Event::MemberChanged {
         person: encode(person),
         device: device.map(encode),
-    }));
+    });
 }
 
 #[cfg(test)]

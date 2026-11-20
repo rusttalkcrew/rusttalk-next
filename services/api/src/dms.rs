@@ -86,8 +86,8 @@ pub async fn create(
     )
     .await?;
     tx.commit().await?;
-    app.notify(Some(Event::DmCreated {
+    app.notify(Event::DmCreated {
         channel: id.clone(),
-    }));
+    });
     Ok((StatusCode::CREATED, Json(json!({ "id": id }))))
 }

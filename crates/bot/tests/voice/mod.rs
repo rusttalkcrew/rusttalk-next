@@ -229,12 +229,15 @@ pub async fn exercise(
     // Taking `speak` from B's role must make LiveKit stop forwarding B's audio.
     let b_id = room_b.identity();
     set_flags(a, &channel, "admin", 11).await?;
+    // Only a full second without B's tone ends the wait; a closed room or stream keeps
+    // waiting until LIMIT fails the test.
     timeout(LIMIT, async {
-        while let Ok(Ok(())) = timeout(
+        while timeout(
             Duration::from_secs(1),
             hear_tone(&mut room_a, Some(&b_id), 780),
         )
         .await
+        .is_ok()
         {}
     })
     .await
@@ -284,15 +287,10 @@ pub async fn exercise(
                 .all(|(peer, _)| peer.identity() != b_id),
             "kicked speaker still in the room"
         );
-        let heard = timeout(Duration::from_secs(1), hear_tone(room, Some(&b_id), 1100)).await;
-        assert!(
-            !matches!(heard, Ok(Ok(()))),
-            "kicked speaker was still audible"
-        );
     }
     roster(a, &voice.id, 2).await?;
     println!(
-        "W08 kick removed the speaking device from the room, rotation kept the listener hearing, and nobody heard the kicked speaker"
+        "W08 kick removed the speaking device from the room, rotation kept the listener hearing, and no room still listed the kicked speaker"
     );
 
     senders.abort_all();

@@ -283,7 +283,8 @@ pub async fn rename(
     let auth = authority(&mut tx, &actor.person).await?;
     auth.require(Permission::ManageRoles)?;
     let role = by_id(&mut tx, &id).await?;
-    if role.kind == "custom" {
+    // Built-in roles follow the same hierarchy. Only the owner renames the Owner role.
+    if auth.rank != OWNER_RANK || role.rank != OWNER_RANK {
         auth.can_grant(role.rank, role.permissions)?;
     }
     let epoch = keys::space_epoch(&mut tx, &app).await?;

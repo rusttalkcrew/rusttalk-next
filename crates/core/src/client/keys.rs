@@ -15,6 +15,7 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use futures_util::{FutureExt, StreamExt};
+use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
 use reqwest::{Method, RequestBuilder, Response, StatusCode};
 use serde_json::{Value, json};
 use tokio_tungstenite::tungstenite::Message;
@@ -22,6 +23,9 @@ use tokio_tungstenite::tungstenite::Message;
 use super::{Server, chat::Opened};
 
 type HistoricalDevice = ([u8; 32], [u8; 32], [u8; 32]);
+
+/// Wraps between refreshes of the still-missing set.
+const WRAP_BATCH: usize = 20;
 
 /// An authenticated client with a live event stream and an in-memory epoch key store.
 pub struct KeyClient<'a> {
@@ -255,29 +259,40 @@ impl<'a> KeyClient<'a> {
                 let fresh = self.key_state().await?.pending;
                 pending.retain(|need| fresh.contains(need));
             }
-            for need in pending {
-                let (Some(key), Some(device)) = (
-                    self.key(need.scope, need.epoch),
-                    self.devices.get(&need.device),
-                ) else {
-                    continue;
-                };
-                let context = EnvelopeContext::new(
-                    self.server.known_server().server_id,
-                    need.scope,
-                    need.epoch,
-                    key,
-                );
-                let envelope = context.wrap(key, device, self.identity)?;
-                tracing::info!(
-                    person = %fingerprint(device.person_id()),
-                    device = %fingerprint(device.signing_key().as_bytes()),
-                    "wrapping key for device"
-                );
-                let reply = self.request(Method::POST, "/v1/keys")
-                    .json(&json!({"scope": need.scope, "epoch": need.epoch, "device": need.device, "envelope": encode(&envelope)}))
-                    .send().await?;
-                refetch |= key_state_raced(reply).await?;
+            // Shuffled so members that wake together start on different devices, and
+            // refreshed every 20 wraps to skip needs another member already met.
+            pending.shuffle(&mut StdRng::from_seed(*keys::random_key()?));
+            while !pending.is_empty() {
+                let rest = pending.split_off(pending.len().min(WRAP_BATCH));
+                for need in pending {
+                    let (Some(key), Some(device)) = (
+                        self.key(need.scope, need.epoch),
+                        self.devices.get(&need.device),
+                    ) else {
+                        continue;
+                    };
+                    let context = EnvelopeContext::new(
+                        self.server.known_server().server_id,
+                        need.scope,
+                        need.epoch,
+                        key,
+                    );
+                    let envelope = context.wrap(key, device, self.identity)?;
+                    tracing::info!(
+                        person = %fingerprint(device.person_id()),
+                        device = %fingerprint(device.signing_key().as_bytes()),
+                        "wrapping key for device"
+                    );
+                    let reply = self.request(Method::POST, "/v1/keys")
+                        .json(&json!({"scope": need.scope, "epoch": need.epoch, "device": need.device, "envelope": encode(&envelope)}))
+                        .send().await?;
+                    refetch |= key_state_raced(reply).await?;
+                }
+                pending = rest;
+                if !pending.is_empty() {
+                    let fresh = self.key_state().await?.pending;
+                    pending.retain(|need| fresh.contains(need));
+                }
             }
             if !refetch {
                 return Ok(());
