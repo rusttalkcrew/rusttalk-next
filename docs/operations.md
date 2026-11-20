@@ -68,3 +68,7 @@ The desktop client writes `rusttalk.log` next to its settings in the platform
 config directory. It rotates at 5 MiB, keeping one backup (`rusttalk.log.1`),
 and creates log files with mode `0600` on Unix. It uses the same level filter
 as the API and works on Windows with the console disabled.
+
+### IP bans
+
+IP bans match one exact address (IPv6 included), so a person with an IPv6 /64 can move to another address. The api only sees real client addresses when Docker forwards the original source IP to Caddy (the default bridge networking with iptables does; rootless Docker or a userland proxy shows every client as the gateway IP, and an IP ban would then hit everyone). Abuse limits: 8 open sign-in challenges per IP (256 in total), 16 sessions and 64 stored revocations per person.

@@ -14,7 +14,6 @@ use std::{
 use anyhow::{Result, bail};
 use axum::{
     Json, Router,
-    body::to_bytes,
     extract::{Request, rejection::JsonRejection},
     http::{StatusCode, header::CACHE_CONTROL},
     middleware::{self, Next},
@@ -197,7 +196,6 @@ async fn serve(app: App) -> io::Result<()> {
         .route("/v1/owner", put(roles::transfer))
         .route("/v1/audit", get(members::audit_log))
         .with_state(app)
-        .layer(middleware::from_fn(limit_body))
         .layer(RequestBodyLimitLayer::new(4096))
         .layer(middleware::from_fn(log_request))
         .layer(PropagateRequestIdLayer::x_request_id())
@@ -212,14 +210,6 @@ async fn serve(app: App) -> io::Result<()> {
     let result = axum::serve(listener, app).await;
     expiry.abort();
     result
-}
-
-async fn limit_body(request: Request, next: Next) -> Response {
-    let (parts, body) = request.into_parts();
-    match to_bytes(body, 4096).await {
-        Ok(bytes) => next.run(Request::from_parts(parts, bytes.into())).await,
-        Err(_) => ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "body_too_large").into_response(),
-    }
 }
 
 async fn log_request(request: Request, next: Next) -> Response {

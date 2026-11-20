@@ -85,3 +85,7 @@ Written in W08.
 ## Trust model
 
 Written in W06.
+
+### What the server challenge signature does not cover
+
+The server's signature over the challenge proves the server holds the pinned key, but it is not bound to the TLS connection and the client adds no nonce of its own. In self-signed mode the TLS certificate pin stops a relay. In CA mode (public domain, no certificate pin), an attacker holding a valid certificate for the domain could relay a sign-in to the real server. Binding the device signature to a TLS exporter value would close this; it is not done yet.

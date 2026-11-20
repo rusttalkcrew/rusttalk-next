@@ -41,8 +41,11 @@ CREATE TABLE invites (
 
 CREATE TABLE challenges (
     nonce BLOB NOT NULL PRIMARY KEY,
+    ip TEXT NOT NULL DEFAULT '',
     expires_at BIGINT NOT NULL
 );
+
+CREATE INDEX challenges_ip ON challenges (ip);
 
 CREATE TABLE sessions (
     token_hash BLOB NOT NULL PRIMARY KEY,

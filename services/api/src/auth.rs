@@ -19,28 +19,36 @@ use crate::{
 };
 
 const CHALLENGE_LIMIT: i64 = 256;
+const CHALLENGES_PER_IP: i64 = 8;
+const SESSIONS_PER_PERSON: i64 = 16;
+const REVOCATIONS_PER_PERSON: i64 = 64;
 const CHALLENGE_TTL: i64 = 60;
 const SESSION_TTL: i64 = Duration::from_hours(12).as_secs() as i64;
 
-pub async fn challenge(State(app): State<App>) -> ApiResult<Json<Challenge>> {
+pub async fn challenge(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Challenge>> {
+    let ip = client_ip(&headers)?;
     let mut tx = write(&app.db).await?;
     let at = now()?;
     query("DELETE FROM challenges WHERE expires_at <= ?")
         .bind(at)
         .execute(&mut *tx)
         .await?;
-    let count: i64 = query_scalar("SELECT COUNT(*) FROM challenges")
-        .fetch_one(&mut *tx)
-        .await?;
-    if count >= CHALLENGE_LIMIT {
+    // The per-IP cap keeps one client from using up the global backstop for everyone.
+    let (total, from_ip): (i64, i64) =
+        query_as("SELECT COUNT(*), COUNT(*) FILTER (WHERE ip = ?) FROM challenges")
+            .bind(&ip)
+            .fetch_one(&mut *tx)
+            .await?;
+    if total >= CHALLENGE_LIMIT || from_ip >= CHALLENGES_PER_IP {
         return Err(ApiError::new(
             StatusCode::TOO_MANY_REQUESTS,
             "challenge_limit",
         ));
     }
     let challenge = random::<32>()?;
-    query("INSERT INTO challenges (nonce, expires_at) VALUES (?, ?)")
+    query("INSERT INTO challenges (nonce, ip, expires_at) VALUES (?, ?, ?)")
         .bind(challenge.as_slice())
+        .bind(&ip)
         .bind(at + CHALLENGE_TTL)
         .execute(&mut *tx)
         .await?;
@@ -269,6 +277,16 @@ async fn issue_session(
 ) -> ApiResult<Session> {
     let token = random::<32>()?;
     let expires_at = at + SESSION_TTL;
+    // Device certificates are free to mint, so bound sessions per person by dropping the oldest.
+    let dropped: Vec<i64> = query_scalar(
+        "DELETE FROM sessions WHERE token_hash IN (SELECT token_hash FROM sessions
+         WHERE person_id = ? ORDER BY expires_at DESC LIMIT -1 OFFSET ?) RETURNING expires_at",
+    )
+    .bind(person)
+    .bind(SESSIONS_PER_PERSON - 1)
+    .fetch_all(&mut *db)
+    .await?;
+    log_closed(dropped, at, "session_limit");
     query("INSERT INTO sessions (token_hash, person_id, device_id, ip, expires_at) VALUES (?, ?, ?, ?, ?)")
         .bind(hash(&token).as_slice()).bind(person).bind(device).bind(ip).bind(expires_at)
         .execute(db).await?;
@@ -366,6 +384,13 @@ pub async fn revoke(
     let revocation = Revocation::verify(actor.person, &bytes)
         .map_err(|_| ApiError::bad_request("invalid_revocation"))?;
     let device = revocation.device_signing_key().as_slice();
+    let stored: i64 = query_scalar("SELECT COUNT(*) FROM revocations WHERE person_id = ?")
+        .bind(actor.person.as_slice())
+        .fetch_one(&mut *tx)
+        .await?;
+    if stored >= REVOCATIONS_PER_PERSON {
+        return Err(ApiError::new(StatusCode::CONFLICT, "revocation_limit"));
+    }
     let added = query(
         "INSERT INTO revocations (person_id, device_id, record) VALUES (?, ?, ?)
                        ON CONFLICT (person_id, device_id) DO NOTHING",
@@ -426,6 +451,30 @@ mod tests {
                 .code,
             "invalid_certificate"
         );
+    }
+
+    #[tokio::test]
+    async fn one_ip_cannot_take_every_challenge() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = crate::App {
+            db: crate::store::open(dir.path()).await.unwrap(),
+            key: std::sync::Arc::new(ed25519_dalek::SigningKey::from_bytes(&[7; 32])),
+        };
+        let from = |ip: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert("x-forwarded-for", ip.parse().unwrap());
+            headers
+        };
+        for _ in 0..CHALLENGES_PER_IP {
+            assert!(
+                challenge(State(app.clone()), from("192.0.2.1"))
+                    .await
+                    .is_ok()
+            );
+        }
+        let refused = challenge(State(app.clone()), from("192.0.2.1")).await;
+        assert_eq!(refused.err().unwrap().code, "challenge_limit");
+        assert!(challenge(State(app), from("192.0.2.2")).await.is_ok());
     }
 
     #[tokio::test]

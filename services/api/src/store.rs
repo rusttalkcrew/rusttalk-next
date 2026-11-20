@@ -88,6 +88,8 @@ pub fn hash(value: &[u8]) -> [u8; 32] {
 }
 
 pub async fn write(pool: &SqlitePool) -> ApiResult<Transaction<'static, Sqlite>> {
+    // shortcut: every authenticated request takes SQLite's single write lock, fine for small
+    // communities; move read-only handlers to deferred transactions if busy errors show up.
     // Serialize authorization and mutation with other requests and owner-invite CLI executions.
     Ok(pool.begin_with("BEGIN IMMEDIATE").await?)
 }
