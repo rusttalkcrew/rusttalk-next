@@ -46,8 +46,12 @@ pub(super) struct Live {
     shares: Vec<Share>,
     /// Decrypted names of subscribed remote app tracks.
     apps: HashMap<TrackSid, String>,
+    /// Audio tracks from devices not known when they arrived, with their identity, to
+    /// give them their person once known.
+    nameless: HashMap<String, String>,
     /// A capture waiting for the person to pick (Linux) or for its first frame.
-    starting: Option<tokio::task::JoinHandle<Result<(screen::Capture, screen::Options)>>>,
+    pub(super) starting:
+        Option<tokio::task::JoinHandle<Result<(screen::Capture, screen::Options)>>>,
     /// The published screen with its capture and quality, which a change keeps.
     pub(super) screen: Option<(TrackSid, screen::Capture, screen::Options)>,
     /// Picking another source for the screen; the old one keeps sharing meanwhile.
@@ -446,21 +450,44 @@ pub(super) async fn next_voice(voice: &mut Option<Live>) -> Next {
     }
 }
 
-/// A sealed remote control message from someone in the call.
+/// A sealed remote control message from someone in the call. Without `client` (the API
+/// connection is down) the sender isn't named, so they can't ask for control; ending it works.
 pub(super) async fn control_received(
     ctx: &Ctx,
-    client: &KeyClient<'_>,
+    client: Option<&KeyClient<'_>>,
     state: &mut State,
     from: &RemoteParticipant,
     wire: &[u8],
 ) {
     let from = from.identity();
-    let person = identities(client, &state.server_id)
-        .get(from.as_str())
-        .copied();
+    let person = client.and_then(|client| {
+        identities(client, &state.server_id)
+            .get(from.as_str())
+            .copied()
+    });
     if let Some(live) = &mut state.voice {
         control::received(ctx, live, &from, person, wire).await;
     }
+}
+
+/// Give audio from devices that weren't known when it arrived its person, now that the
+/// API names them (after reconnecting, or once their device is synced).
+pub(super) fn name_audio(ctx: &Ctx, client: &KeyClient<'_>, state: &mut State) {
+    let Some(live) = &mut state.voice else {
+        return;
+    };
+    if live.nameless.is_empty() {
+        return;
+    }
+    let ids = identities(client, &state.server_id);
+    live.nameless
+        .retain(|sid, identity| match ids.get(identity.as_str()) {
+            Some(person) => {
+                ctx.audio.set_person(sid, *person);
+                false
+            }
+            None => true,
+        });
 }
 
 /// LiveKit identity of every known device, to find the person behind a voice participant.
@@ -490,11 +517,24 @@ pub(super) async fn room_changed(
 /// The server's roster for a voice channel, plus who the room itself shows,
 /// with "connecting" for anyone whose audio isn't flowing in our room.
 pub(super) fn send_room(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &State, channel: Id) {
+    send_roster(
+        ctx,
+        url,
+        &identities(client, &state.server_id),
+        state,
+        channel,
+    );
+}
+
+/// Send the people in `channel` to the window, `ids` naming the call's participants.
+fn send_roster(ctx: &Ctx, url: &Url, ids: &HashMap<String, Id>, state: &State, channel: Id) {
     let me = *ctx.identity.certificate.person_id();
     let roster = state.rooms.get(&channel).cloned().unwrap_or_default();
     let mut people = roster.people;
     let mut peers = Vec::new();
     let mut call_sounds = None;
+    // Devices in our call that can't be named (yet), shown as unknown like the server's.
+    let mut nameless = 0;
     match state.voice.as_ref().filter(|live| live.channel == channel) {
         None => peers.extend(people.into_iter().map(|person| Peer {
             person,
@@ -506,7 +546,6 @@ pub(super) fn send_room(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &St
             camera: None,
         })),
         Some(live) => {
-            let ids = identities(client, &state.server_id);
             let mut live_people: HashMap<Id, bool> = HashMap::new();
             let mut statuses: HashMap<Id, VoiceStatus> = HashMap::new();
             let mut apps: HashMap<Id, Vec<(TrackSid, String)>> = HashMap::new();
@@ -518,7 +557,11 @@ pub(super) fn send_room(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &St
                 ..Snapshot::default()
             };
             for (participant, voice) in live.room.participants() {
-                if let Some(person) = ids.get(participant.identity().as_str()) {
+                let person = ids.get(participant.identity().as_str());
+                if person.is_none() && voice != VoiceState::Disconnected {
+                    nameless += 1;
+                }
+                if let Some(person) = person {
                     *live_people.entry(*person).or_default() |= voice == VoiceState::Connected;
                     if *person != me && voice != VoiceState::Disconnected {
                         sounds.people.insert(*person);
@@ -619,7 +662,8 @@ pub(super) fn send_room(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &St
             }
         }
     }
-    peers.extend((0..roster.unknown).map(|_| Peer {
+    // The server's unknown people are likely the same devices: count them once.
+    peers.extend((0..roster.unknown.max(nameless)).map(|_| Peer {
         person: [0; 32],
         connecting: false,
         unknown: true,
@@ -631,10 +675,26 @@ pub(super) fn send_room(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &St
     ctx.send(Update::Room(url.clone(), channel, peers, call_sounds));
 }
 
+/// Send the people in `channel` to the window. Without `client` (the API connection is
+/// down) the call's participants are named as last known; reconnecting reloads them.
+pub(super) fn roster(
+    ctx: &Ctx,
+    url: &Url,
+    client: Option<&KeyClient<'_>>,
+    state: &State,
+    channel: Id,
+) {
+    match client {
+        Some(client) => send_room(ctx, url, client, state, channel),
+        None => send_roster(ctx, url, &state.identities, state, channel),
+    }
+}
+
+/// Handle a voice room event; `client` as for `roster`.
 pub(super) async fn on_voice(
     ctx: &Ctx,
     url: &Url,
-    client: &KeyClient<'_>,
+    client: Option<&KeyClient<'_>>,
     state: &mut State,
     event: Option<RoomEvent>,
 ) {
@@ -649,7 +709,7 @@ pub(super) async fn on_voice(
     let Some(event) = event else {
         tracing::warn!("voice room closed");
         end(state, t!("voice.disconnected"));
-        send_room(ctx, url, client, state, channel);
+        roster(ctx, url, client, state, channel);
         return;
     };
     match event {
@@ -658,18 +718,23 @@ pub(super) async fn on_voice(
             participant,
             ..
         } => {
-            let ids = identities(client, &state.server_id);
+            let ids = client.map(|client| identities(client, &state.server_id));
+            let ids = ids.as_ref().unwrap_or(&state.identities);
             let person = ids.get(participant.identity().as_str()).copied();
             if person.is_none() {
                 tracing::warn!("voice track from a device this client doesn't know yet");
             }
             let sid = track.sid();
             let mut app = None;
-            if let Some(live) = &mut state.voice
-                && let Some(name) = live.room.app_audio_name(&track)
-            {
-                live.apps.insert(sid.clone(), name);
-                app = Some(sid.clone());
+            if let Some(live) = &mut state.voice {
+                if person.is_none() {
+                    let identity = participant.identity().to_string();
+                    live.nameless.insert(sid.to_string(), identity);
+                }
+                if let Some(name) = live.room.app_audio_name(&track) {
+                    live.apps.insert(sid.clone(), name);
+                    app = Some(sid.clone());
+                }
             }
             ctx.audio.add_track(
                 sid.to_string(),
@@ -700,6 +765,7 @@ pub(super) async fn on_voice(
         RoomEvent::TrackUnsubscribed { track, .. } => {
             if let Some(live) = &mut state.voice {
                 live.apps.remove(&track.sid());
+                live.nameless.remove(track.sid().as_str());
                 if matches!(track, RemoteTrack::Video(_)) {
                     sync_video_watches(live).await;
                 }
@@ -767,7 +833,7 @@ pub(super) async fn on_voice(
         | RoomEvent::ConnectionStateChanged(_) => {}
         _ => return,
     }
-    send_room(ctx, url, client, state, channel);
+    roster(ctx, url, client, state, channel);
 }
 
 /// Stop the camera and screen once LiveKit no longer carries them: `video` was removed
@@ -775,7 +841,7 @@ pub(super) async fn on_voice(
 pub(super) async fn stop_lost_video(
     ctx: &Ctx,
     url: &Url,
-    client: &KeyClient<'_>,
+    client: Option<&KeyClient<'_>>,
     state: &mut State,
     unpublished: Option<TrackSid>,
 ) {
@@ -805,7 +871,7 @@ pub(super) async fn stop_lost_video(
         ctx.send(Update::NoVideo(url.clone(), channel));
     }
     if changed {
-        send_room(ctx, url, client, state, channel);
+        roster(ctx, url, client, state, channel);
     }
 }
 
@@ -813,7 +879,7 @@ pub(super) async fn stop_lost_video(
 pub(super) async fn stop_finished_shares(
     ctx: &Ctx,
     url: &Url,
-    client: &KeyClient<'_>,
+    client: Option<&KeyClient<'_>>,
     state: &mut State,
 ) {
     let Some(live) = &mut state.voice else {
@@ -842,7 +908,7 @@ pub(super) async fn stop_finished_shares(
         ctx.send(Update::AppStopped(share.app.id.clone()));
     }
     let channel = live.channel;
-    send_room(ctx, url, client, state, channel);
+    roster(ctx, url, client, state, channel);
 }
 
 /// The connection panel's numbers, from the SDK's WebRTC stats.
@@ -1062,6 +1128,7 @@ pub(super) async fn start_call(
         deafened: Some(false),
         shares: Vec::new(),
         apps: HashMap::new(),
+        nameless: HashMap::new(),
         starting: None,
         screen: None,
         swap: screen::Swap::Idle,

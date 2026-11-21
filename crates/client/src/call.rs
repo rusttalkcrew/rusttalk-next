@@ -9,8 +9,8 @@ use std::{
 };
 
 use eframe::egui::{
-    self, ColorImage, ComboBox, Event, Frame, Key, Label, Margin, RichText, Role, Sense, Slider,
-    Stroke, TextureHandle, TextureOptions, Ui, Vec2, WidgetInfo,
+    self, Align, ColorImage, ComboBox, Event, Frame, Key, Label, Layout, Margin, RichText, Role,
+    Sense, Slider, Stroke, TextureHandle, TextureOptions, Ui, UiBuilder, Vec2, WidgetInfo,
 };
 use rusttalk_core::client::voice::VoiceStatus;
 
@@ -378,6 +378,8 @@ pub fn room_list(ui: &mut Ui, home: &Home, server: &Server, channel: &Id) {
     let Some(peers) = server.voice.get(channel) else {
         return;
     };
+    // The speaking ring reaches 3 points past the picture: keep rows clear of each other.
+    ui.spacing_mut().item_spacing.y = ui::SPACE_S;
     for peer in peers {
         let name = peer.name(server);
         let row = ui.horizontal(|ui| {
@@ -394,13 +396,38 @@ pub fn room_list(ui: &mut Ui, home: &Home, server: &Server, channel: &Id) {
             } else {
                 peer.status
             };
-            status_name(ui, &name, status);
-            if peer.connecting {
-                ui.label(ui::caption(t!("common.connecting")));
-            }
-            if !peer.screens.is_empty() {
-                live_badge(ui);
-            }
+            let after_name = |ui: &mut Ui| {
+                if peer.connecting {
+                    ui.label(ui::caption(t!("common.connecting")));
+                }
+                if !peer.screens.is_empty() {
+                    live_badge(ui);
+                }
+            };
+            // Mute and deafen sit at the row's right edge; the name, and LIVE right after
+            // it, fill what is left and the name shortens to keep clear of them.
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.add_space(ui::SPACE_S);
+                let marks: Vec<_> = sound_badges(status).collect();
+                for (glyph, tip) in marks.into_iter().rev() {
+                    sound_mark(ui, glyph, tip);
+                }
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    let mut measure = ui.new_child(UiBuilder::new().sizing_pass().invisible());
+                    after_name(&mut measure);
+                    let width = measure.min_rect().width();
+                    let reserved = if width > 0.0 {
+                        width + ui.spacing().item_spacing.x
+                    } else {
+                        0.0
+                    };
+                    ui.scope(|ui| {
+                        ui.set_max_width((ui.available_width() - reserved).max(0.0));
+                        ui.add(Label::new(RichText::new(&name).size(ui::TEXT_SMALL)).truncate());
+                    });
+                    after_name(ui);
+                });
+            });
         });
         let row = row.response.interact(Sense::click());
         let listening =
@@ -444,14 +471,19 @@ fn status_name(ui: &mut Ui, name: &str, status: VoiceStatus) {
         ui.add(Label::new(RichText::new(name).size(ui::TEXT_SMALL)).truncate());
     });
     for (glyph, tip) in badges {
-        let response = ui.label(ui::caption(glyph)).on_hover_text(tip);
-        let half = Vec2::splat(ui::SPACE_XS);
-        ui.painter().line_segment(
-            [response.rect.center() - half, response.rect.center() + half],
-            Stroke::new(2.0, ui::colors(ui).danger_text),
-        );
-        response.widget_info(|| WidgetInfo::labeled(Role::Image, true, tip));
+        sound_mark(ui, glyph, tip);
     }
+}
+
+/// A struck-through microphone or headphones.
+fn sound_mark(ui: &mut Ui, glyph: &str, tip: &str) {
+    let response = ui.label(ui::caption(glyph)).on_hover_text(tip);
+    let half = Vec2::splat(ui::SPACE_XS);
+    ui.painter().line_segment(
+        [response.rect.center() - half, response.rect.center() + half],
+        Stroke::new(2.0, ui::colors(ui).danger_text),
+    );
+    response.widget_info(|| WidgetInfo::labeled(Role::Image, true, tip));
 }
 
 fn ring(ui: &Ui, rect: egui::Rect) {

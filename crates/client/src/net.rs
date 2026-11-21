@@ -3,7 +3,7 @@
 //! Never log names, message text or invite links here.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     sync::{Arc, mpsc},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -599,6 +599,9 @@ struct State {
     pins_saved: HashMap<Id, DmPin>,
     /// `dm_pins` couldn't be read: it is left as it is, and DMs here stay blocked.
     pins_lost: bool,
+    /// Who each voice participant (LiveKit identity) is, as last known from the API: the
+    /// call's people and their videos still show while the API connection is down.
+    identities: HashMap<String, Id>,
     /// DMs the server relabelled, already warned about.
     relabelled: HashSet<Id>,
 }
@@ -632,10 +635,15 @@ async fn run(
     let mut delay = 1;
     // Verified once, then reused: each verification spends one of the server's rate-limited challenges.
     let mut api = None;
+    // Commands that came while connecting, for when it is done. Not in `State`: some
+    // hold Windows handles, and `State` is borrowed across awaits so must stay `Sync`.
+    let mut queued = VecDeque::new();
     loop {
         ctx.send(Update::Status(url.clone(), Status::Connecting));
-        match session(&ctx, &server, &mut api, admission.as_ref()).await {
-            Ok((api, session)) => {
+        let connecting = {
+            let (ctx, server, api, admission) = (&ctx, &server, &mut api, &mut admission);
+            async move {
+                let (api, session) = session(ctx, server, api, admission.as_ref()).await?;
                 if admission.take().is_some() {
                     tracing::info!(server = %fingerprint(&server.server_id), "joined server");
                     let joined = vec![Edit::Join(api.known_server().clone())];
@@ -644,15 +652,43 @@ async fn run(
                     }
                 }
                 let pins = load_pins(&ctx.data, &server.server_id);
+                let client =
+                    KeyClient::connect_with_dms(api, &ctx.identity, &session, pins.clone()).await;
+                Ok::<_, Failure>((client, pins))
+            }
+        };
+        let Some(connected) = offline(
+            &ctx,
+            &url,
+            &mut state,
+            &mut commands,
+            connecting,
+            Some(&mut queued),
+        )
+        .await
+        else {
+            return;
+        };
+        match connected {
+            Ok((connected, pins)) => {
                 state.pins_lost = pins.is_none();
-                state.pins_saved = pins.clone().unwrap_or_default();
-                match KeyClient::connect_with_dms(api, &ctx.identity, &session, pins).await {
+                state.pins_saved = pins.unwrap_or_default();
+                match connected {
                     Ok(mut client) => {
                         delay = 1;
                         state.order_unavailable = false;
                         tracing::info!(server = %fingerprint(&server.server_id), "connected to server");
                         ctx.send(Update::Status(url.clone(), Status::Online));
-                        let end = serve(&ctx, &url, &mut client, &mut state, &mut commands).await;
+                        let end = serve(
+                            &ctx,
+                            &url,
+                            &mut client,
+                            &mut state,
+                            &mut commands,
+                            &mut queued,
+                        )
+                        .await;
+                        state.identities = voice::identities(&client, &state.server_id);
                         ctx.sync.set_peer(&url, None);
                         match end {
                             End::Quit => return,
@@ -688,59 +724,123 @@ async fn run(
             }
             Err(Failure::Retry) => {}
         }
+        // What was asked while connecting can't be done now.
+        for command in std::mem::take(&mut queued) {
+            refuse(&ctx, &url, command);
+        }
         ctx.send(Update::Status(url.clone(), Status::Offline));
         let wait = tokio::time::sleep(Duration::from_secs(delay));
-        tokio::pin!(wait);
-        loop {
-            tokio::select! {
-                () = &mut wait => break,
-                command = commands.recv() => match command {
-                    None => return,
-                    // The voice room outlives the API connection, so its shares can still stop.
-                    // The status is sent again once connected, when it differs.
-                    Some(Command::SetStatus(_) | Command::CheckGone(..)) => {}
-                    Some(command) if voice_only(&command) => {
-                        if let Err(error) = voice_command(&ctx, &url, &mut state, command).await {
+        if offline(&ctx, &url, &mut state, &mut commands, wait, None)
+            .await
+            .is_none()
+        {
+            return;
+        }
+        delay = (delay * 2).min(30);
+    }
+}
+
+/// Wait for `until` without the API connection. The voice room outlives it, so the call
+/// keeps going: remote control and leaving work now (the other side may still be online),
+/// and other room events wait for the connection. Other commands wait in `queued` while
+/// connecting, and are refused otherwise. `None` when the window closed.
+async fn offline<T>(
+    ctx: &Ctx,
+    url: &Url,
+    state: &mut State,
+    commands: &mut UnboundedReceiver<Command>,
+    until: impl Future<Output = T>,
+    mut queued: Option<&mut VecDeque<Command>>,
+) -> Option<T> {
+    tokio::pin!(until);
+    // A capture that ends by itself (its window closed) still stops sharing, and control.
+    let mut finished = tokio::time::interval(Duration::from_secs(2));
+    loop {
+        tokio::select! {
+            done = &mut until => return Some(done),
+            next = next_voice(&mut state.voice) => voice_next(ctx, url, None, state, next).await,
+            _ = finished.tick(), if state.voice.is_some() => {
+                stop_finished_shares(ctx, url, None, state).await;
+            }
+            command = commands.recv() => match command? {
+                command if voice_only(&command) => {
+                    if let Some(queued) = queued.as_deref_mut() {
+                        cancel_queued(queued, &command);
+                    }
+                    match voice_command(ctx, url, state, command).await {
+                        Ok(Some(channel)) => voice::roster(ctx, url, None, state, channel),
+                        Ok(None) => {}
+                        Err(error) => {
                             tracing::warn!(error = %format_args!("{error:#}"), "voice request failed");
                         }
                     }
-                    Some(Command::ShareApp(app)) => {
-                        ctx.send(Update::AppStopped(app.id));
-                        ctx.send(Update::Failed(t!("admin.offline").into()));
-                    }
-                    Some(Command::ShareScreen(..)) => {
-                        ctx.send(Update::Sharing(false));
-                        ctx.send(Update::Failed(t!("admin.offline").into()));
-                    }
-                    Some(Command::ShareCamera(..)) => {
-                        ctx.send(Update::CameraStopped);
-                        ctx.send(Update::Failed(t!("admin.offline").into()));
-                    }
-                    Some(Command::Admin(_)) => {
-                        ctx.send(Update::Admin(url.clone(), AdminUpdate::Failed(t!("admin.offline").into())));
-                    }
-                    Some(Command::Send(draft)) => {
-                        ctx.send(Update::Unsent(url.clone(), draft));
-                        ctx.send(Update::Failed(t!("admin.offline").into()));
-                    }
-                    Some(Command::Image(file, fetch)) => {
-                        ctx.send(Update::Image(file.id, fetch, Err(false)));
-                    }
-                    Some(Command::Save(file, _)) => ctx.send(Update::Saved(file.id, Err(false))),
-                    Some(Command::AcceptFile(id, _)) => {
-                        let reason = t!("admin.offline").into();
-                        ctx.send(Update::LiveProgress(id, LiveFileEvent::Failed { reason }));
-                    }
-                    Some(command) => {
-                        if let Command::JoinVoice(channel) = command {
-                            ctx.send(Update::Call(url.clone(), channel, None));
-                        }
-                        ctx.send(Update::Failed(t!("admin.offline").into()));
-                    }
+                }
+                command => match queued.as_deref_mut() {
+                    Some(queued) => queued.push_back(command),
+                    None => refuse(ctx, url, command),
                 },
-            }
+            },
         }
-        delay = (delay * 2).min(30);
+    }
+}
+
+/// Leaving or stopping while connecting also drops the join or share still waiting for
+/// the connection, so it doesn't start again once connected.
+fn cancel_queued(queued: &mut VecDeque<Command>, command: &Command) {
+    queued.retain(|queued| match (command, queued) {
+        (
+            Command::LeaveVoice,
+            Command::JoinVoice(_)
+            | Command::ShareScreen(..)
+            | Command::ShareCamera(..)
+            | Command::ShareApp(_),
+        ) => false,
+        (Command::StopScreen, Command::ShareScreen(..)) => false,
+        (Command::StopCamera, Command::ShareCamera(..)) => false,
+        (Command::StopApp(id), Command::ShareApp(app)) => app.id != *id,
+        _ => true,
+    });
+}
+
+/// Turn down a command that needs the API connection, which is down.
+fn refuse(ctx: &Ctx, url: &Url, command: Command) {
+    match command {
+        // The status is sent again once connected, when it differs.
+        Command::SetStatus(_) | Command::CheckGone(..) => {}
+        Command::ShareApp(app) => {
+            ctx.send(Update::AppStopped(app.id));
+            ctx.send(Update::Failed(t!("admin.offline").into()));
+        }
+        Command::ShareScreen(..) => {
+            ctx.send(Update::Sharing(false));
+            ctx.send(Update::Failed(t!("admin.offline").into()));
+        }
+        Command::ShareCamera(..) => {
+            ctx.send(Update::CameraStopped);
+            ctx.send(Update::Failed(t!("admin.offline").into()));
+        }
+        Command::Admin(_) => {
+            ctx.send(Update::Admin(
+                url.clone(),
+                AdminUpdate::Failed(t!("admin.offline").into()),
+            ));
+        }
+        Command::Send(draft) => {
+            ctx.send(Update::Unsent(url.clone(), draft));
+            ctx.send(Update::Failed(t!("admin.offline").into()));
+        }
+        Command::Image(file, fetch) => ctx.send(Update::Image(file.id, fetch, Err(false))),
+        Command::Save(file, _) => ctx.send(Update::Saved(file.id, Err(false))),
+        Command::AcceptFile(id, _) => {
+            let reason = t!("admin.offline").into();
+            ctx.send(Update::LiveProgress(id, LiveFileEvent::Failed { reason }));
+        }
+        command => {
+            if let Command::JoinVoice(channel) = command {
+                ctx.send(Update::Call(url.clone(), channel, None));
+            }
+            ctx.send(Update::Failed(t!("admin.offline").into()));
+        }
     }
 }
 
@@ -845,10 +945,16 @@ async fn serve(
     client: &mut KeyClient<'_>,
     state: &mut State,
     commands: &mut UnboundedReceiver<Command>,
+    queued: &mut VecDeque<Command>,
 ) -> End {
     if let Err(error) = resume(ctx, url, client, state).await {
         tracing::warn!(error = %format_args!("{error:#}"), "loading server state failed");
         return End::Error;
+    }
+    voice::name_audio(ctx, client, state);
+    // What was asked while connecting.
+    for command in std::mem::take(queued) {
+        run_command(ctx, url, client, state, command).await;
     }
     let mut stats = tokio::time::interval(Duration::from_secs(2));
     loop {
@@ -886,14 +992,7 @@ async fn serve(
                 let Some(command) = command else {
                     return End::Quit;
                 };
-                if let Err(error) = on_command(ctx, url, client, state, command).await {
-                    tracing::warn!(error = %format_args!("{error:#}"), "server request failed");
-                    let text = match error.downcast_ref::<MessageError>() {
-                        Some(MessageError::TextLimit) => t!("net.text_limit"),
-                        _ => t!("admin.failed"),
-                    };
-                    ctx.send(Update::Failed(text.into()));
-                }
+                run_command(ctx, url, client, state, command).await;
             }
             () = rekey_due => {
                 match client.sync().await {
@@ -915,40 +1014,80 @@ async fn serve(
                     tracing::warn!(error = %format_args!("{error:#}"), "reloading after refresh failed");
                 }
             }
-            next = next_voice(&mut state.voice) => match next {
-                Next::Event(Some(RoomEvent::DataReceived {
-                    payload,
-                    participant: Some(participant),
-                    ..
-                })) => voice::control_received(ctx, client, state, &participant, &payload).await,
-                Next::Event(event) => {
-                    let lost = match &event {
-                        Some(RoomEvent::ParticipantPermissionChanged {
-                            participant: Participant::Local(_),
-                            ..
-                        }) => Some(None),
-                        Some(RoomEvent::LocalTrackUnpublished { publication, .. }) => {
-                            Some(Some(publication.sid()))
-                        }
-                        _ => None,
-                    };
-                    on_voice(ctx, url, client, state, event).await;
-                    if let Some(unpublished) = lost {
-                        stop_lost_video(ctx, url, client, state, unpublished).await;
-                    }
-                }
-                Next::Capture(capture) => share_screen(ctx, url, client, state, capture).await,
-                Next::Swap(capture) => screen_changed(ctx, state, capture),
-            },
+            next = next_voice(&mut state.voice) => voice_next(ctx, url, Some(client), state, next).await,
             _ = stats.tick(), if state.voice.is_some() => {
                 voice::sync_voice_status(ctx, state).await;
                 if let Some(live) = &mut state.voice {
                     voice::sync_video_watches(live).await;
                 }
-                stop_finished_shares(ctx, url, client, state).await;
+                stop_finished_shares(ctx, url, Some(client), state).await;
+                voice::name_audio(ctx, client, state);
                 voice_stats(ctx, url, client, state).await;
             }
         }
+    }
+}
+
+async fn run_command(
+    ctx: &Ctx,
+    url: &Url,
+    client: &mut KeyClient<'_>,
+    state: &mut State,
+    command: Command,
+) {
+    if let Err(error) = on_command(ctx, url, client, state, command).await {
+        tracing::warn!(error = %format_args!("{error:#}"), "server request failed");
+        let text = match error.downcast_ref::<MessageError>() {
+            Some(MessageError::TextLimit) => t!("net.text_limit"),
+            _ => t!("admin.failed"),
+        };
+        ctx.send(Update::Failed(text.into()));
+    }
+}
+
+/// A voice room event or finished screen pick. Without `client` the API connection is
+/// down; the call goes on with the people last known.
+async fn voice_next(
+    ctx: &Ctx,
+    url: &Url,
+    client: Option<&KeyClient<'_>>,
+    state: &mut State,
+    next: Next,
+) {
+    match next {
+        Next::Event(Some(RoomEvent::DataReceived {
+            payload,
+            participant: Some(participant),
+            ..
+        })) => voice::control_received(ctx, client, state, &participant, &payload).await,
+        Next::Event(event) => {
+            let lost = match &event {
+                Some(RoomEvent::ParticipantPermissionChanged {
+                    participant: Participant::Local(_),
+                    ..
+                }) => Some(None),
+                Some(RoomEvent::LocalTrackUnpublished { publication, .. }) => {
+                    Some(Some(publication.sid()))
+                }
+                _ => None,
+            };
+            on_voice(ctx, url, client, state, event).await;
+            if let Some(unpublished) = lost {
+                stop_lost_video(ctx, url, client, state, unpublished).await;
+            }
+        }
+        Next::Capture(capture) => match client {
+            Some(client) => share_screen(ctx, url, client, state, capture).await,
+            // Like a new share while offline: publishing needs the API.
+            None => {
+                if let Some(live) = &mut state.voice {
+                    live.starting = None;
+                }
+                ctx.send(Update::Sharing(false));
+                ctx.send(Update::Failed(t!("admin.offline").into()));
+            }
+        },
+        Next::Swap(capture) => screen_changed(ctx, state, capture),
     }
 }
 
@@ -1667,5 +1806,36 @@ mod protocol_tests {
             Compatibility::for_protocol(Some(PROTOCOL_VERSION + 1)),
             Compatibility::AppTooOld
         );
+    }
+
+    /// Joining or sharing while connecting, then leaving or stopping: once connected, the
+    /// join or share must not run after all (#142).
+    #[test]
+    fn leaving_while_connecting_drops_the_waiting_join_and_shares() {
+        let app = |id: &str| {
+            Command::ShareApp(App {
+                id: id.into(),
+                name: "Music".into(),
+            })
+        };
+        let mut queued = VecDeque::from([
+            Command::JoinVoice([1; 32]),
+            Command::Open([2; 32]),
+            app("a"),
+            app("b"),
+        ]);
+        cancel_queued(&mut queued, &Command::StopApp("a".into()));
+        assert_eq!(queued.len(), 3);
+        assert!(
+            !queued
+                .iter()
+                .any(|command| matches!(command, Command::ShareApp(app) if app.id == "a"))
+        );
+        cancel_queued(&mut queued, &Command::LeaveVoice);
+        // What reconnecting runs: only what has nothing to do with the call.
+        assert_eq!(queued.len(), 1);
+        assert!(matches!(queued[0], Command::Open(_)));
+        cancel_queued(&mut queued, &Command::StopControl);
+        assert_eq!(queued.len(), 1);
     }
 }
