@@ -921,3 +921,15 @@ home.allow_dms_everyone = 全員
 home.allow_dms_everyone_help = 同じサーバーにいる人なら誰でもメッセージを送れます。
 home.allow_dms_friends = フレンドのみ
 home.allow_dms_friends_help = それ以外の人からのメッセージは、通知なしで「メッセージリクエスト」に入ります。振り分けはアプリが行うので、サーバーには誰がフレンドかわかりません。
+
+sounds.section = 通話サウンド
+sounds.enabled = 通話サウンドを再生
+sounds.volume = 通話サウンドの音量
+sounds.you_joined = ボイスチャンネルに参加したとき
+sounds.you_left = ボイスチャンネルから退出したとき
+sounds.peer_joined = 誰かが同じボイスチャンネルに参加したとき
+sounds.peer_left = 誰かが同じボイスチャンネルから退出したとき
+sounds.stream_started = 配信を開始したとき
+sounds.stream_stopped = 配信を終了したとき
+sounds.viewer_started = 誰かが自分の配信を見始めたとき
+sounds.viewer_stopped = 誰かが自分の配信の視聴をやめたとき

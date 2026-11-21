@@ -924,3 +924,15 @@ home.allow_dms_everyone = Everyone
 home.allow_dms_everyone_help = Anyone you share a server with can message you.
 home.allow_dms_friends = Friends only
 home.allow_dms_friends_help = Messages from others wait under Message requests, without notifications. Your app sorts them; servers don't know who your friends are.
+
+sounds.section = Call sounds
+sounds.enabled = Play call sounds
+sounds.volume = Call sound volume
+sounds.you_joined = You join a voice channel
+sounds.you_left = You leave a voice channel
+sounds.peer_joined = Someone joins your voice channel
+sounds.peer_left = Someone leaves your voice channel
+sounds.stream_started = You start streaming
+sounds.stream_stopped = You stop streaming
+sounds.viewer_started = Someone starts watching your stream
+sounds.viewer_stopped = Someone stops watching your stream

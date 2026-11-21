@@ -921,3 +921,15 @@ home.allow_dms_everyone = Iedereen
 home.allow_dms_everyone_help = Iedereen met wie je een server deelt, kan je berichten sturen.
 home.allow_dms_friends = Alleen vrienden
 home.allow_dms_friends_help = Berichten van anderen wachten zonder meldingen onder Berichtverzoeken. Je app sorteert ze; servers weten niet wie je vrienden zijn.
+
+sounds.section = Oproepgeluiden
+sounds.enabled = Oproepgeluiden afspelen
+sounds.volume = Volume van oproepgeluiden
+sounds.you_joined = Je gaat een spraakkanaal in
+sounds.you_left = Je verlaat een spraakkanaal
+sounds.peer_joined = Iemand komt je spraakkanaal binnen
+sounds.peer_left = Iemand verlaat je spraakkanaal
+sounds.stream_started = Je start een stream
+sounds.stream_stopped = Je stopt een stream
+sounds.viewer_started = Iemand begint je stream te kijken
+sounds.viewer_stopped = Iemand stopt met kijken naar je stream

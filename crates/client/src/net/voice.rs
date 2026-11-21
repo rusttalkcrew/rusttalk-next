@@ -33,6 +33,7 @@ use crate::{
     screen,
     server::{CallState, Id, Peer, Screen, Stats, TrackStats},
     share::{self, App, Capture},
+    sounds::Snapshot,
 };
 
 /// The voice room this device is in, on this server.
@@ -55,6 +56,7 @@ pub(super) struct Live {
     camera: Option<TrackSid>,
     /// Screen and camera tracks this device receives; others are unsubscribed.
     watched: HashSet<String>,
+    announced_watches: Option<Vec<TrackSid>>,
     /// Who asks for, or has, control of our screen.
     pub(super) host: Host,
     /// The screen we ask for, or have, control of.
@@ -113,6 +115,7 @@ pub(super) fn voice_only(command: &Command) -> bool {
 /// Run a `voice_only` command. Returns the call's channel when its roster changed.
 pub(super) async fn voice_command(
     ctx: &Ctx,
+    url: &Url,
     state: &mut State,
     command: Command,
 ) -> Result<Option<Id>> {
@@ -146,7 +149,14 @@ pub(super) async fn voice_command(
             }
             true
         }
-        Command::StopScreen => stop_screen(ctx, live).await,
+        Command::StopScreen => {
+            let sid = live.screen.as_ref().map(|(sid, ..)| sid.clone());
+            let changed = stop_screen(ctx, live).await;
+            if let Some(sid) = sid {
+                ctx.send(Update::CallVideoStopped(url.clone(), live.channel, sid));
+            }
+            changed
+        }
         Command::ChangeScreen(target) => {
             // Control was granted for what is shared now, not what comes next.
             control::stop_hosting(ctx, live).await;
@@ -155,10 +165,15 @@ pub(super) async fn voice_command(
         }
         Command::Watch(sid, on) => {
             watch(ctx, live, sid, on)?;
+            sync_video_watches(live).await;
             false
         }
         Command::StopCamera => {
+            let sid = live.camera.clone();
             stop_camera(live).await;
+            if let Some(sid) = sid {
+                ctx.send(Update::CallVideoStopped(url.clone(), live.channel, sid));
+            }
             true
         }
         _ => false,
@@ -237,6 +252,28 @@ pub(super) fn watch(ctx: &Ctx, live: &mut Live, sid: String, on: bool) -> Result
         ctx.video.add_track(sid, track.rtc_track());
     }
     Ok(())
+}
+
+/// Use the subscriptions that actually supply video to the call stage.
+pub(super) async fn sync_video_watches(live: &mut Live) {
+    if live.room.connection_state() != ConnectionState::Connected {
+        return;
+    }
+    let mut tracks: Vec<_> = live
+        .room
+        .remote_video_tracks()
+        .into_iter()
+        .filter(|video| video.track.is_some() && live.watched.contains(video.sid.as_str()))
+        .map(|video| video.sid)
+        .collect();
+    tracks.sort_unstable();
+    if live.announced_watches.as_ref() == Some(&tracks) {
+        return;
+    }
+    match live.room.set_video_watches(&tracks).await {
+        Ok(()) => live.announced_watches = Some(tracks),
+        Err(error) => tracing::warn!(%error, "announcing video subscriptions failed"),
+    }
 }
 
 /// Publish a capture that started, or report why it didn't.
@@ -438,6 +475,7 @@ pub(super) fn send_room(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &St
     let roster = state.rooms.get(&channel).cloned().unwrap_or_default();
     let mut people = roster.people;
     let mut peers = Vec::new();
+    let mut call_sounds = None;
     match state.voice.as_ref().filter(|live| live.channel == channel) {
         None => peers.extend(people.into_iter().map(|person| Peer {
             person,
@@ -455,10 +493,30 @@ pub(super) fn send_room(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &St
             let mut apps: HashMap<Id, Vec<(TrackSid, String)>> = HashMap::new();
             let mut screens: HashMap<Id, Vec<Screen>> = HashMap::new();
             let mut cameras: HashMap<Id, String> = HashMap::new();
+            let mut sounds = Snapshot {
+                camera: live.camera.clone(),
+                screen: live.screen.as_ref().map(|(sid, ..)| sid.clone()),
+                ..Snapshot::default()
+            };
             for (participant, voice) in live.room.participants() {
                 if let Some(person) = ids.get(participant.identity().as_str()) {
                     *live_people.entry(*person).or_default() |= voice == VoiceState::Connected;
+                    if *person != me && voice != VoiceState::Disconnected {
+                        sounds.people.insert(*person);
+                    }
                     if voice == VoiceState::Connected {
+                        if *person != me && (sounds.camera.is_some() || sounds.screen.is_some()) {
+                            sounds.viewers.extend(
+                                live.room
+                                    .video_watches(&participant)
+                                    .into_iter()
+                                    .filter(|sid| {
+                                        sounds.camera.as_ref() == Some(sid)
+                                            || sounds.screen.as_ref() == Some(sid)
+                                    })
+                                    .map(|sid| (*person, sid)),
+                            );
+                        }
                         let status = VoiceStatus::from_participant(&participant);
                         // A person gets a badge only when every connected device agrees.
                         statuses
@@ -523,6 +581,7 @@ pub(super) fn send_room(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &St
             people.sort();
             people.dedup();
             let connected = live.room.connection_state() == ConnectionState::Connected;
+            call_sounds = connected.then_some(sounds);
             for person in people {
                 let ok = if person == me {
                     connected
@@ -550,10 +609,10 @@ pub(super) fn send_room(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &St
         screens: Vec::new(),
         camera: None,
     }));
-    ctx.send(Update::Room(url.clone(), channel, peers));
+    ctx.send(Update::Room(url.clone(), channel, peers, call_sounds));
 }
 
-pub(super) fn on_voice(
+pub(super) async fn on_voice(
     ctx: &Ctx,
     url: &Url,
     client: &KeyClient<'_>,
@@ -605,9 +664,10 @@ pub(super) fn on_voice(
             ..
         } => {
             let sid = track.sid().to_string();
-            match state.voice.as_ref() {
+            match state.voice.as_mut() {
                 Some(live) if live.watched.contains(&sid) => {
                     ctx.video.add_track(sid, track.rtc_track());
+                    sync_video_watches(live).await;
                 }
                 // Watching stopped while subscribing.
                 Some(live) => {
@@ -621,6 +681,9 @@ pub(super) fn on_voice(
         RoomEvent::TrackUnsubscribed { track, .. } => {
             if let Some(live) = &mut state.voice {
                 live.apps.remove(&track.sid());
+                if matches!(track, RemoteTrack::Video(_)) {
+                    sync_video_watches(live).await;
+                }
             }
             ctx.audio.remove_track(track.sid().as_str());
             ctx.video.remove_track(track.sid().as_str());
@@ -637,6 +700,8 @@ pub(super) fn on_voice(
             tracing::info!("voice reconnected");
             if let Some(live) = &mut state.voice {
                 live.deafened = None;
+                live.announced_watches = None;
+                sync_video_watches(live).await;
             }
             ctx.send(Update::Call(
                 url.clone(),
@@ -656,6 +721,22 @@ pub(super) fn on_voice(
         RoomEvent::TrackUnpublished { publication, .. } => {
             if let Some(live) = &mut state.voice {
                 control::unpublished(ctx, live, publication.sid().as_str());
+            }
+        }
+        RoomEvent::LocalTrackRepublished {
+            previous_sid,
+            publication,
+            ..
+        } => {
+            if let Some(live) = &mut state.voice {
+                if live.camera.as_ref() == Some(&previous_sid) {
+                    live.camera = Some(publication.sid());
+                }
+                if let Some((sid, ..)) = &mut live.screen
+                    && *sid == previous_sid
+                {
+                    *sid = publication.sid();
+                }
             }
         }
         RoomEvent::ParticipantConnected(_)
@@ -966,6 +1047,7 @@ pub(super) async fn start_call(
         swap: screen::Swap::Idle,
         camera: None,
         watched: HashSet::new(),
+        announced_watches: Some(Vec::new()),
         host: Host::default(),
         guest: Guest::default(),
         control: ControlView::default(),

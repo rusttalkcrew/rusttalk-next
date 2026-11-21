@@ -47,6 +47,7 @@ use tokio::runtime::Runtime;
 use crate::{
     denoise::{self, Denoiser},
     server::Id,
+    sounds::{self, Cue},
 };
 
 pub const RATE: u32 = 48_000;
@@ -83,6 +84,7 @@ pub struct Settings {
     /// cpal device IDs; `None` follows the system default.
     pub input: Option<String>,
     pub output: Option<String>,
+    pub call_sounds: sounds::Preferences,
     pub push_to_talk: bool,
     /// An `egui::Key` name.
     pub key: String,
@@ -161,6 +163,7 @@ impl Default for Settings {
         Self {
             input: None,
             output: None,
+            call_sounds: sounds::Preferences::default(),
             push_to_talk: false,
             key: "V".into(),
             threshold: -42.0,
@@ -285,6 +288,8 @@ pub type StreamId = (Id, Option<TrackSid>);
 struct Mixer {
     tracks: HashMap<String, Track>,
     serial: u64,
+    cues: VecDeque<i16>,
+    cue_until: Option<Instant>,
     /// Per-stream volume (1.0 is normal) and mute.
     volumes: HashMap<StreamId, (f32, bool)>,
 }
@@ -434,17 +439,34 @@ impl Audio {
         if toggles(&current) != toggles(&settings) {
             self.shared().processing.fetch_add(1, Relaxed);
         }
+        if current.call_sounds != settings.call_sounds {
+            let mut mixer = lock(&self.shared().mixer);
+            mixer.cues.clear();
+            mixer.cue_until = None;
+        }
         *current = settings;
         drop(current);
         self.refresh();
     }
 
-    /// Joined or left a voice room.
-    pub fn set_voice(&self, on: bool) {
-        self.shared().voice.store(on, Relaxed);
-        if !on {
-            lock(&self.shared().mixer).tracks.clear();
+    /// Joined a voice room.
+    pub fn start_voice(&self) {
+        self.shared().voice.store(true, Relaxed);
+        self.refresh();
+    }
+
+    /// Drop the old room's audio before queuing its leave cue.
+    pub fn end_voice(&self, cue: Option<Cue>) {
+        {
+            let mut mixer = lock(&self.shared().mixer);
+            mixer.tracks.clear();
+            mixer.cues.clear();
+            mixer.cue_until = None;
         }
+        if let Some(cue) = cue {
+            self.play_cue(cue);
+        }
+        self.shared().voice.store(false, Relaxed);
         self.refresh();
     }
 
@@ -520,6 +542,32 @@ impl Audio {
 
     pub fn set_deafened(&self, on: bool) {
         self.shared().deafened.store(on, Relaxed);
+        if on {
+            let mut mixer = lock(&self.shared().mixer);
+            mixer.cues.clear();
+            mixer.cue_until = None;
+        }
+    }
+
+    /// Queue a chime in the speaker mixer only. Echo cancellation gets the same
+    /// reference it gets for remote audio, including any sound from the speakers.
+    pub fn play_cue(&self, cue: Cue) {
+        let settings = lock(&self.shared().settings);
+        let prefs = &settings.call_sounds;
+        if !prefs.enabled || prefs.volume <= 0.0 || self.deafened() || prefs.disabled.contains(&cue)
+        {
+            return;
+        }
+        let mut mixer = lock(&self.shared().mixer);
+        let now = Instant::now();
+        if mixer.cue_until.is_some_and(|until| until <= now) {
+            mixer.cues.clear();
+        }
+        // Keep cues timely if several people join at once or the output stalls.
+        if mixer.cues.len() < RATE as usize / 2 {
+            mixer.cues.extend(cue.samples(RATE, prefs.volume));
+            mixer.cue_until = Some(now + Duration::from_secs(1));
+        }
     }
 
     /// The last microphone level in dBFS.
@@ -721,11 +769,14 @@ fn devices(
     let mut output: Option<(Option<String>, Stream)> = None;
     let mut saved = shared.settings();
     let mut retry = false;
+    let mut close_output_at = None::<Instant>;
     loop {
-        let wait = if retry {
-            commands.recv_timeout(Duration::from_secs(2))
-        } else {
-            commands.recv().map_err(|_| RecvTimeoutError::Disconnected)
+        let wait = match (close_output_at, retry) {
+            (Some(until), _) => {
+                commands.recv_timeout(until.saturating_duration_since(Instant::now()))
+            }
+            (None, true) => commands.recv_timeout(Duration::from_secs(2)),
+            (None, false) => commands.recv().map_err(|_| RecvTimeoutError::Disconnected),
         };
         if matches!(
             wait,
@@ -773,7 +824,12 @@ fn devices(
                 }
             }
         }
-        let want_output = voice.then_some(settings.output);
+        // A leave cue can keep speakers open after the microphone closes.
+        let playing_cue = lock(&shared.mixer)
+            .cue_until
+            .filter(|until| *until > Instant::now());
+        close_output_at = if voice { None } else { playing_cue };
+        let want_output = (voice || playing_cue.is_some()).then_some(settings.output);
         if want_output.as_ref() != output.as_ref().map(|(id, _)| id) {
             output = None;
             if let Some(id) = want_output {
@@ -823,8 +879,9 @@ fn list(host: &Host) -> (Vec<DeviceInfo>, Vec<DeviceInfo>) {
     (list(host.input_devices()), list(host.output_devices()))
 }
 
-fn pick(host: &Host, id: Option<&str>, input: bool) -> Result<Device> {
+fn pick(host: &Host, id: Option<&str>, input: bool) -> Result<(Device, bool)> {
     let chosen = id.and_then(|id| host.device_by_id(&id.parse::<DeviceId>().ok()?));
+    let is_selected = id.is_none() || chosen.is_some();
     if id.is_some() && chosen.is_none() {
         tracing::warn!("saved audio device missing, using the default");
     }
@@ -836,6 +893,7 @@ fn pick(host: &Host, id: Option<&str>, input: bool) -> Result<Device> {
                 host.default_output_device()
             }
         })
+        .map(|device| (device, is_selected))
         .ok_or_else(|| anyhow!("no audio device"))
 }
 
@@ -901,7 +959,7 @@ fn open_input(
     mic: SyncSender<Mic>,
     error: impl FnMut(cpal::Error) + Send + 'static,
 ) -> Result<Stream> {
-    let device = pick(host, id, true)?;
+    let (device, _) = pick(host, id, true)?;
     let supported = config(&device, true)?;
     let format = supported.sample_format();
     let config = low_latency(&supported);
@@ -962,7 +1020,7 @@ fn open_output(
     mic: SyncSender<Mic>,
     error: impl FnMut(cpal::Error) + Send + 'static,
 ) -> Result<Stream> {
-    let device = pick(host, id, false)?;
+    let (device, play_cues) = pick(host, id, false)?;
     let supported = config(&device, false)?;
     let format = supported.sample_format();
     let config = low_latency(&supported);
@@ -973,9 +1031,9 @@ fn open_output(
         "speakers opened"
     );
     let stream = match format {
-        SampleFormat::F32 => play::<f32>(&device, config, shared, mic, error),
-        SampleFormat::I16 => play::<i16>(&device, config, shared, mic, error),
-        SampleFormat::I32 => play::<i32>(&device, config, shared, mic, error),
+        SampleFormat::F32 => play::<f32>(&device, config, shared, mic, error, play_cues),
+        SampleFormat::I16 => play::<i16>(&device, config, shared, mic, error, play_cues),
+        SampleFormat::I32 => play::<i32>(&device, config, shared, mic, error, play_cues),
         other => return Err(anyhow!("unsupported sample format {other}")),
     }?;
     stream.play()?;
@@ -988,6 +1046,7 @@ fn play<T: SizedSample + FromSample<i16>>(
     shared: &Arc<Shared>,
     mic: SyncSender<Mic>,
     error: impl FnMut(cpal::Error) + Send + 'static,
+    play_cues: bool,
 ) -> Result<Stream> {
     let channels = usize::from(config.channels);
     let rate = config.sample_rate;
@@ -1002,7 +1061,7 @@ fn play<T: SizedSample + FromSample<i16>>(
             shared.output_delay.store(delay, Relaxed);
             let frames = data.len() / channels;
             while ready.len() < frames {
-                let chunk = mix(&shared);
+                let chunk = mix(&shared, play_cues);
                 if rate == RATE {
                     ready.extend(&chunk);
                 } else {
@@ -1017,8 +1076,9 @@ fn play<T: SizedSample + FromSample<i16>>(
                 }
                 let _ = mic.try_send(Mic::Far(chunk));
             }
+            let deafened = shared.deafened.load(Relaxed);
             for (frame, sample) in data.chunks_mut(channels).zip(ready.drain(..frames)) {
-                frame.fill(T::from_sample(sample));
+                frame.fill(T::from_sample(if deafened { 0 } else { sample }));
             }
         },
         error,
@@ -1027,15 +1087,30 @@ fn play<T: SizedSample + FromSample<i16>>(
 }
 
 /// 10 ms of all tracks at their streams' volumes.
-fn mix(shared: &Shared) -> [i16; FRAME] {
-    mix_tracks(&mut lock(&shared.mixer), shared.deafened.load(Relaxed))
+fn mix(shared: &Shared, play_cues: bool) -> [i16; FRAME] {
+    let mut mixer = lock(&shared.mixer);
+    // Remote voices can fall back to the default device when a saved device is missing.
+    if !play_cues {
+        mixer.cues.clear();
+    }
+    mix_tracks(&mut mixer, shared.deafened.load(Relaxed))
 }
 
 fn mix_tracks(mixer: &mut Mixer, deafened: bool) -> [i16; FRAME] {
     let mut sum = [0f32; FRAME];
     let Mixer {
-        tracks, volumes, ..
+        tracks,
+        volumes,
+        cues,
+        cue_until,
+        ..
     } = mixer;
+    if deafened || cue_until.is_some_and(|until| until <= Instant::now()) {
+        cues.clear();
+    }
+    for (slot, sample) in sum.iter_mut().zip(cues.drain(..cues.len().min(FRAME))) {
+        *slot = f32::from(sample);
+    }
     for track in tracks.values_mut() {
         let (volume, muted) = volumes.get(&track.stream).copied().unwrap_or((1.0, false));
         let gain = if deafened || muted { 0.0 } else { volume };
@@ -1353,6 +1428,23 @@ mod tests {
             }
         }
         assert_eq!(frames, 100);
+    }
+
+    #[test]
+    fn mixer_consumes_cues_and_drops_them_on_deafen() {
+        let samples: VecDeque<_> = Cue::YouJoined.samples(RATE, 0.5).collect();
+        let mut mixer = Mixer {
+            cues: samples.clone(),
+            ..Mixer::default()
+        };
+        assert!(
+            mix_tracks(&mut mixer, false)
+                .iter()
+                .any(|&sample| sample != 0)
+        );
+        assert_eq!(mixer.cues.len(), samples.len() - FRAME);
+        assert_eq!(mix_tracks(&mut mixer, true), [0; FRAME]);
+        assert!(mixer.cues.is_empty());
     }
 
     #[test]

@@ -23,6 +23,7 @@ use crate::{
     screen::{self, Kind, Options, Target, Video},
     server::{Call, CallState, Id, Screen, Server, Stats},
     share::{self, App},
+    sounds,
     ui::{self, section},
 };
 
@@ -46,6 +47,7 @@ pub use stage::{Stage, full_view, stage};
 pub struct Voice {
     pub audio: Audio,
     pub call: Option<Call>,
+    pub sounds: sounds::Detector,
     /// Ping history and packet loss for the connection popup.
     pub link: Link,
     /// Apps this device shares in the call.
@@ -145,6 +147,7 @@ impl Voice {
         Self {
             audio,
             call: None,
+            sounds: sounds::Detector::default(),
             link: Link::default(),
             shares: Vec::new(),
             apps: Arc::new(Mutex::new(Listing::Loading)),
@@ -170,7 +173,7 @@ impl Voice {
     /// The call ended or was left: stop sending audio and forget its shares and video.
     pub fn end_call(&mut self) {
         self.call = None;
-        self.audio.set_voice(false);
+        self.audio.end_voice(self.sounds.end());
         self.link = Link::default();
         self.shares.clear();
         self.clear_screens();
@@ -221,7 +224,7 @@ pub fn join(home: &mut Home, index: usize, channel: Id) {
         can_talk: true,
         can_share_video: true,
     });
-    home.voice.audio.set_voice(true);
+    home.voice.audio.start_voice();
 }
 
 pub fn leave(home: &mut Home) {

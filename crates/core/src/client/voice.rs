@@ -5,6 +5,7 @@ mod live_file;
 mod screen;
 mod stats;
 mod track_name;
+mod watch;
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -165,6 +166,7 @@ impl KeyClient<'_> {
         let name_keys = self.name_keys(channel, track_name::APP_AUDIO);
         let screen_names = self.name_keys(channel, track_name::SCREEN);
         let control_keys = self.name_keys(channel, control::LABEL);
+        let watch_keys = self.name_keys(channel, watch::LABEL);
         let key = media_key(key, &server.server_id, channel, epoch);
         let provider = KeyProvider::with_shared_key(
             KeyProviderOptions {
@@ -201,6 +203,7 @@ impl KeyClient<'_> {
             name_keys,
             screen_names,
             control_keys,
+            watch_keys,
             stats: stats::Sampler::default(),
             files: live_file::LiveFiles::default(),
         })
@@ -266,6 +269,7 @@ pub struct VoiceRoom {
     screen_names: HashMap<i64, Key>,
     /// Seal remote control messages; only the current epoch's is used.
     control_keys: HashMap<i64, Key>,
+    watch_keys: HashMap<i64, Key>,
     stats: stats::Sampler,
     files: live_file::LiveFiles,
 }
@@ -313,6 +317,7 @@ impl VoiceRoom {
         self.name_keys = keys.name_keys(&self.channel, track_name::APP_AUDIO);
         self.screen_names = keys.name_keys(&self.channel, track_name::SCREEN);
         self.control_keys = keys.name_keys(&self.channel, control::LABEL);
+        self.watch_keys = keys.name_keys(&self.channel, watch::LABEL);
         if epoch <= self.epoch {
             return Ok(false);
         }

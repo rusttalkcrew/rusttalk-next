@@ -139,6 +139,16 @@ sender. Capture target IDs, enumerated sources and cameras, and Linux
 portal restore tokens stay on the sender's device.
 LiveKit can see microphone mute state and the deafen attribute for each device in a voice room.
 
+Clients use the `rusttalk.video-watches` participant attribute for local
+watch/unwatch sounds. It contains the IDs of video tracks that device is
+receiving, encrypted with a separate HKDF derivation from the room media
+key and authenticated against the viewer's LiveKit identity and key
+epoch. Room clients can open it, and the publisher uses only entries for
+its own tracks. LiveKit sees the attribute name, update timing, key epoch
+and ciphertext length. It already sees video subscriptions for routing.
+RustTalk's API receives no watch state, and sound preferences stay on the
+device.
+
 For remote control of a shared screen, LiveKit sees that two devices in a
 room exchange data packets on the `rusttalk.control` topic, their sizes,
 whether each is reliable or lossy, and their timing, which reveals roughly

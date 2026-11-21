@@ -254,7 +254,8 @@ pub enum Update {
     /// This device may not share its screen or camera in the call.
     NoVideo(Url, Id),
     /// Everyone in one voice channel.
-    Room(Url, Id, Vec<Peer>),
+    Room(Url, Id, Vec<Peer>, Option<crate::sounds::Snapshot>),
+    CallVideoStopped(Url, Id, livekit::prelude::TrackSid),
     /// Sharing this app stopped or never started.
     AppStopped(String),
     /// This device's screen share went live (`true`), or stopped or never started.
@@ -649,7 +650,7 @@ async fn run(
                     // The status is sent again once connected, when it differs.
                     Some(Command::SetStatus(_) | Command::CheckGone(..)) => {}
                     Some(command) if voice_only(&command) => {
-                        if let Err(error) = voice_command(&ctx, &mut state, command).await {
+                        if let Err(error) = voice_command(&ctx, &url, &mut state, command).await {
                             tracing::warn!(error = %format_args!("{error:#}"), "voice request failed");
                         }
                     }
@@ -877,7 +878,7 @@ async fn serve(
                         }
                         _ => None,
                     };
-                    on_voice(ctx, url, client, state, event);
+                    on_voice(ctx, url, client, state, event).await;
                     if let Some(unpublished) = lost {
                         stop_lost_video(ctx, url, client, state, unpublished).await;
                     }
@@ -887,6 +888,9 @@ async fn serve(
             },
             _ = stats.tick(), if state.voice.is_some() => {
                 voice::sync_voice_status(ctx, state).await;
+                if let Some(live) = &mut state.voice {
+                    voice::sync_video_watches(live).await;
+                }
                 stop_finished_shares(ctx, url, client, state).await;
                 voice_stats(ctx, url, client, state).await;
             }
@@ -1279,7 +1283,7 @@ async fn on_command(
         Command::Admin(request) => admin::run(ctx, url, client, state, request).await,
         Command::JoinVoice(channel) => voice::start_call(ctx, url, client, state, channel).await?,
         command if voice_only(&command) => {
-            if let Some(channel) = voice_command(ctx, state, command).await? {
+            if let Some(channel) = voice_command(ctx, url, state, command).await? {
                 send_room(ctx, url, client, state, channel);
             }
         }

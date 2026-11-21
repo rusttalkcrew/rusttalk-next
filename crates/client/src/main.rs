@@ -27,6 +27,7 @@ mod screen;
 mod server;
 mod settings;
 mod share;
+mod sounds;
 mod ui;
 mod update;
 

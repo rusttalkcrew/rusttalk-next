@@ -527,9 +527,40 @@ fn notifications_page(ui: &mut Ui, home: &mut Home) {
             t!("settings.unfocused_only_help"),
         );
     });
+    let mut audio = home.voice.audio.settings();
+    call_sounds(ui, &mut audio.call_sounds);
+    home.voice.audio.set_settings(audio);
     ui::page_section(ui, t!("settings.servers_and_channels"));
     ui.weak(t!("settings.servers_and_channels_help"));
     home.notify.set_prefs(prefs);
+}
+
+fn call_sounds(ui: &mut Ui, prefs: &mut crate::sounds::Preferences) {
+    ui::page_section(ui, t!("sounds.section"));
+    ui::toggle_row(ui, &mut prefs.enabled, t!("sounds.enabled"), "");
+    ui.add_enabled_ui(prefs.enabled, |ui| {
+        let label = t!("sounds.volume");
+        ui::setting_row(ui, label, "", |ui| {
+            let slider = egui::Slider::new(&mut prefs.volume, 0.0..=1.0)
+                .custom_formatter(|value, _| format!("{:.0}%", value * 100.0))
+                .custom_parser(|text| {
+                    Some(text.trim().trim_end_matches('%').parse::<f64>().ok()? / 100.0)
+                });
+            ui.add(slider).widget_info(|| {
+                egui::WidgetInfo::labeled(egui::Role::Slider, ui.is_enabled(), label)
+            });
+        });
+        for cue in crate::sounds::Cue::ALL {
+            let mut enabled = !prefs.disabled.contains(&cue);
+            if ui::toggle_row(ui, &mut enabled, cue.label(), "").changed() {
+                if enabled {
+                    prefs.disabled.retain(|&disabled| disabled != cue);
+                } else {
+                    prefs.disabled.push(cue);
+                }
+            }
+        }
+    });
 }
 
 fn devices_page(ui: &mut Ui, home: &mut Home) {
