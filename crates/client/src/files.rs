@@ -7,7 +7,11 @@ use std::{
     f32::consts::FRAC_PI_2,
     fs, io,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, mpsc},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     thread,
     time::Duration,
 };
@@ -510,16 +514,33 @@ const PREVIEW_BUDGET: usize = 32 * MIB as usize;
 const OPEN_BUDGET: usize = 64 * MIB as usize;
 const OPEN_EDGE: u32 = 1600;
 
-/// Staged pictures by path and whether it is the large copy for the preview dialog.
-/// Decoded on their own thread; entries go when the file is no longer staged.
+/// Pictures decoding at once; the rest wait their turn.
+const MAX_DECODES: usize = 2;
+
+/// A staged picture's preview: its path, whether it is the large copy for the preview
+/// dialog, and the file's size and change time, so a changed file decodes again.
+type PreviewKey = (PathBuf, bool, u64, Option<std::time::SystemTime>);
+
+/// Staged pictures' previews, decoded on their own threads, at most `MAX_DECODES`
+/// at once. Entries go when the file is no longer staged, and at sign-out.
 #[derive(Clone, Default)]
-struct Previews(Arc<Mutex<HashMap<(PathBuf, bool), Preview>>>);
+struct Previews(Arc<Mutex<HashMap<PreviewKey, Preview>>>);
 
 enum Preview {
-    Loading,
+    Waiting,
+    /// Decoding; clearing the flag stops it before the next frame.
+    Loading(Arc<AtomicBool>),
     Decoded(Vec<(egui::ColorImage, u32)>),
     Ready(Anim),
     Failed,
+}
+
+impl Drop for Preview {
+    fn drop(&mut self) {
+        if let Preview::Loading(going) = self {
+            going.store(false, Ordering::Relaxed);
+        }
+    }
 }
 
 fn is_picture(name: &str) -> bool {
@@ -529,14 +550,24 @@ fn is_picture(name: &str) -> bool {
         .any(|end| name.ends_with(end))
 }
 
+fn preview_key(path: &Path, large: bool) -> PreviewKey {
+    let meta = fs::metadata(path).ok();
+    let size = meta.as_ref().map_or(0, |meta| meta.len());
+    let changed = meta.and_then(|meta| meta.modified().ok());
+    (path.to_owned(), large, size, changed)
+}
+
 /// Decode a staged picture to fit `edge`, with every frame of an animation.
 fn decode_staged(
     path: &Path,
     edge: u32,
     budget: usize,
+    going: &AtomicBool,
 ) -> anyhow::Result<Vec<(egui::ColorImage, u32)>> {
     let bytes = fs::read(path)?;
-    let frames = rusttalk_core::client::decode_frames(&bytes, Some(edge), budget)?;
+    let frames = rusttalk_core::client::decode_frames_until(&bytes, Some(edge), budget, || {
+        going.load(Ordering::Relaxed)
+    })?;
     Ok(frames.into_iter().map(crate::net::frame_image).collect())
 }
 
@@ -548,32 +579,38 @@ impl Previews {
         })
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<(PathBuf, bool), Preview>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<PreviewKey, Preview>> {
         self.0.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// The picture's frames as textures once decoded; starts decoding on first ask.
-    fn with<R>(
-        &self,
-        ui: &mut Ui,
-        path: &Path,
-        large: bool,
-        show: impl FnOnce(&mut Ui, Option<&Anim>, bool) -> R,
-    ) -> R {
-        let key = (path.to_owned(), large);
-        let mut map = self.lock();
-        let entry = map.entry(key.clone()).or_insert_with(|| {
-            let (previews, ctx, path) = (self.clone(), ui.ctx().clone(), path.to_owned());
+    /// Start waiting decodes while there is room.
+    fn start(&self, ctx: &egui::Context, map: &mut HashMap<PreviewKey, Preview>) {
+        let mut busy = (map.values())
+            .filter(|preview| matches!(preview, Preview::Loading(_)))
+            .count();
+        for (key, preview) in map.iter_mut() {
+            if busy >= MAX_DECODES {
+                break;
+            }
+            if !matches!(preview, Preview::Waiting) {
+                continue;
+            }
+            busy += 1;
+            let going = Arc::new(AtomicBool::new(true));
+            *preview = Preview::Loading(going.clone());
+            let (previews, ctx, key) = (self.clone(), ctx.clone(), key.clone());
             thread::spawn(move || {
-                let (edge, budget) = if large {
+                let (edge, budget) = if key.1 {
                     (OPEN_EDGE, OPEN_BUDGET)
                 } else {
                     (PREVIEW as u32 * 2, PREVIEW_BUDGET)
                 };
-                let decoded = decode_staged(&path, edge, budget);
+                let decoded = decode_staged(&key.0, edge, budget, &going);
                 let mut map = previews.lock();
-                // Unstaged meanwhile: nothing to show it in.
-                if let Some(slot) = map.get_mut(&(path, large)) {
+                // Unstaged or changed meanwhile: nothing to show it in.
+                if let Some(slot) = map.get_mut(&key)
+                    && matches!(slot, Preview::Loading(_))
+                {
                     *slot = match decoded {
                         Ok(frames) => Preview::Decoded(frames),
                         Err(error) => {
@@ -581,11 +618,28 @@ impl Previews {
                             Preview::Failed
                         }
                     };
-                    ctx.request_repaint();
                 }
+                // The next waiting one starts on the next frame.
+                ctx.request_repaint();
             });
-            Preview::Loading
-        });
+        }
+    }
+
+    /// The picture's frames as textures once decoded; queues it on first ask.
+    fn with<R>(
+        &self,
+        ui: &mut Ui,
+        path: &Path,
+        large: bool,
+        show: impl FnOnce(&mut Ui, Option<&Anim>, bool) -> R,
+    ) -> R {
+        let key = preview_key(path, large);
+        let mut map = self.lock();
+        // A changed file at the same path: the old preview no longer applies.
+        map.retain(|other, _| other.0 != key.0 || other.1 != large || *other == key);
+        map.entry(key.clone()).or_insert(Preview::Waiting);
+        self.start(ui.ctx(), &mut map);
+        let entry = map.get_mut(&key).expect("inserted above");
         if let Preview::Decoded(frames) = entry {
             let delays = frames.iter().map(|(_, ms)| *ms).collect();
             let frames = (std::mem::take(frames).into_iter())
@@ -602,6 +656,25 @@ impl Previews {
             _ => show(ui, None, false),
         }
     }
+
+    /// Drop the previews of files no longer staged, stopping their decodes.
+    fn keep(&self, staged: &[Staged]) {
+        self.lock()
+            .retain(|(path, ..), _| staged.iter().any(|file| file.path == *path));
+    }
+}
+
+/// Forget every staged picture's preview, as at sign-out.
+pub fn forget_previews(ctx: &egui::Context) {
+    Previews::get(ctx).lock().clear();
+}
+
+/// Drop previews of files no longer in this composer, also once it holds none.
+pub fn keep_previews(ctx: &egui::Context, staged: &[Staged]) {
+    Previews::get(ctx).keep(staged);
+    if staged.is_empty() {
+        ctx.data_mut(|data| data.remove::<PathBuf>(UiId::unique("staged-open")));
+    }
 }
 
 /// The staged files in the composer: pictures as tiles that play on hover and open
@@ -609,9 +682,7 @@ impl Previews {
 pub fn staged(ui: &mut Ui, chat: &mut Chat) {
     let previews = Previews::get(ui.ctx());
     let open_id = UiId::unique("staged-open");
-    previews
-        .lock()
-        .retain(|(path, _), _| chat.staged.iter().any(|file| file.path == *path));
+    previews.keep(&chat.staged);
     let mut remove = None;
     let mut open = None;
     ui.horizontal_wrapped(|ui| {
@@ -653,7 +724,7 @@ pub fn staged(ui: &mut Ui, chat: &mut Chat) {
             None => true,
         };
         if close {
-            previews.lock().remove(&(path, true));
+            previews.lock().retain(|key, _| key.0 != path || !key.1);
             ui.data_mut(|data| data.remove::<PathBuf>(open_id));
         }
     }
@@ -1052,6 +1123,32 @@ pub fn viewer(ctx: &egui::Context, files: &mut Files) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn staged_previews_follow_the_file_and_stop_when_unstaged() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.png");
+        fs::write(&path, b"one").unwrap();
+        let before = preview_key(&path, false);
+        fs::write(&path, b"longer").unwrap();
+        assert_ne!(preview_key(&path, false), before, "a changed file decodes again");
+
+        let previews = Previews::default();
+        let going = Arc::new(AtomicBool::new(true));
+        previews
+            .lock()
+            .insert(preview_key(&path, false), Preview::Loading(going.clone()));
+        let staged = Staged {
+            path: path.clone(),
+            name: "a.png".into(),
+            size: 6,
+        };
+        previews.keep(std::slice::from_ref(&staged));
+        assert!(going.load(Ordering::Relaxed));
+        previews.keep(&[]);
+        assert!(previews.lock().is_empty());
+        assert!(!going.load(Ordering::Relaxed), "its decode stops");
+    }
 
     #[test]
     fn small_gifs_and_webps_play_in_the_chat_big_ones_wait_for_a_click() {

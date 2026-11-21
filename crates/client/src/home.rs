@@ -3450,6 +3450,8 @@ fn composer(
                     files::staged(ui, chat);
                 });
                 ui.add_space(ui::SPACE_XS);
+            } else {
+                files::keep_previews(ui.ctx(), &[]);
             }
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;

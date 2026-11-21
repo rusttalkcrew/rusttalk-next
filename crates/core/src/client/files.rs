@@ -231,6 +231,17 @@ fn still(bytes: &[u8], fit: Option<u32>) -> Result<Vec<Frame>> {
 /// the decoded frames together stay within `budget` bytes, else this fails: received
 /// pictures are hostile.
 pub fn decode_frames(bytes: &[u8], fit: Option<u32>, budget: usize) -> Result<Vec<Frame>> {
+    decode_frames_until(bytes, fit, budget, || true)
+}
+
+/// `decode_frames` that stops with an error once `keep_going` turns false, checked
+/// before each frame, so work nobody waits for any more ends early.
+pub fn decode_frames_until(
+    bytes: &[u8],
+    fit: Option<u32>,
+    budget: usize,
+    keep_going: impl Fn() -> bool,
+) -> Result<Vec<Frame>> {
     ensure!(bytes.len() <= MAX_CIPHERTEXT, "image input too large");
     let format = image::guess_format(bytes).context("unknown image format")?;
     ensure!(
@@ -261,6 +272,7 @@ pub fn decode_frames(bytes: &[u8], fit: Option<u32>, budget: usize) -> Result<Ve
     };
     let (mut out, mut used) = (Vec::new(), 0usize);
     for frame in frames {
+        ensure!(keep_going(), "decoding cancelled");
         ensure!(out.len() < MAX_ANIMATION_FRAMES, "too many frames");
         let mut frame = frame?;
         if let Some(fit) = fit {
@@ -511,6 +523,7 @@ mod tests {
         assert!(decode_frames(&gif(64, 64, 3)?, None, 64 * 64 * 4 * 2).is_err());
         assert!(decode_frames(&gif(1, 1, MAX_ANIMATION_FRAMES + 1)?, None, usize::MAX).is_err());
         assert!(decode_frames(b"not an image", None, 1 << 20).is_err());
+        assert!(decode_frames_until(&gif(64, 64, 3)?, None, 1 << 20, || false).is_err());
         Ok(())
     }
 

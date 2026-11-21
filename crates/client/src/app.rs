@@ -168,6 +168,7 @@ impl<'a> App<'a> {
                     // Stop the network first, so nothing writes these files again.
                     drop(home);
                     forget_profile(&self.data);
+                    crate::files::forget_previews(&self.ctx);
                     tracing::info!("signed out of this device");
                     Screen::Welcome
                 }
