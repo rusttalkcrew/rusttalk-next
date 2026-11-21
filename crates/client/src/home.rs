@@ -861,7 +861,7 @@ pub fn show(ui: &mut Ui, home: &mut Home, updates: &mut crate::update::Updater) 
             View::Direct(Some((index, channel))) => chat_pane(ui, home, index, channel),
             View::Server(index) => match home.servers[index].open {
                 Some(channel) if home.servers[index].is_voice(&channel) => {
-                    call::room(ui, home, index, channel)
+                    voice_pane(ui, home, index, channel)
                 }
                 Some(channel) => chat_pane(ui, home, index, channel),
                 None => {
@@ -1896,7 +1896,25 @@ fn time(at: i64) -> String {
     }
 }
 
+/// A voice channel: the call on top and its chat below. Issue #63 replaces this
+/// fixed split with a draggable one and layout choices; only this function changes.
+fn voice_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
+    let height = (ui.available_height() * 0.45).max(180.0);
+    Panel::top("stage")
+        .resizable(false)
+        .exact_size(height)
+        .frame(Frame::new().inner_margin(Margin {
+            bottom: ui::SPACE_S as i8,
+            ..Margin::ZERO
+        }))
+        .show_separator_line(true)
+        .show(ui, |ui| call::room(ui, home, index, channel));
+    chat_pane(ui, home, index, channel);
+}
+
 fn chat_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
+    // A voice channel's chat sits under its call, which already shows the title.
+    let in_voice = home.servers[index].is_voice(&channel);
     let Some((title, dm)) = home.servers[index].chat_title(&channel) else {
         home.servers[index].open = None;
         if matches!(home.view, View::Direct(_)) {
@@ -1906,6 +1924,8 @@ fn chat_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
     };
     let title = if dm {
         format!("@ {title}")
+    } else if in_voice {
+        format!("🔊 {title}")
     } else {
         format!("# {title}")
     };
@@ -1935,7 +1955,9 @@ fn chat_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
         chat.loading = true;
         chat
     });
-    pane_title(ui, "chat-title", &title, in_server.then_some(layout));
+    if !in_voice {
+        pane_title(ui, "chat-title", &title, in_server.then_some(layout));
+    }
     let online = *status == Status::Online;
     let (hovered, dropped) = ui.input(|input| {
         let dropped: Vec<_> = (input.raw.dropped_files.iter())
@@ -1952,7 +1974,11 @@ fn chat_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
     let attach = Panel::bottom("composer")
         .frame(Frame::new().inner_margin(Margin::symmetric(0, 8)))
         .show(ui, |ui| {
-            let (command, attach) = composer(ui, chat, dir, online, toast, channel, &title);
+            // The call above already shows problems in a voice channel.
+            if !in_voice {
+                toast_line(ui, toast);
+            }
+            let (command, attach) = composer(ui, chat, dir, online, channel, &title);
             if let Some(command) = command {
                 let _ = commands.send(command);
             }
@@ -2160,11 +2186,9 @@ fn composer(
     chat: &mut Chat,
     dir: &Directory,
     online: bool,
-    toast: &mut Option<(String, f64)>,
     channel: Id,
     title: &str,
 ) -> (Option<Command>, Option<bool>) {
-    toast_line(ui, toast);
     let mut cancel = false;
     if let Some(reply) = chat.reply_to {
         let author = chat
