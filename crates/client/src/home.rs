@@ -854,7 +854,7 @@ pub fn show(ui: &mut Ui, home: &mut Home, updates: &mut crate::update::Updater) 
         .resizable(false)
         .exact_size(home.layout.channels)
         .frame(panel_frame(colors.side))
-        .show(ui, |ui| sidebar(ui, home, updates.available()))
+        .show(ui, |ui| sidebar(ui, home, updates))
         .response
         .rect;
     let mut members = None;
@@ -946,6 +946,7 @@ pub fn show(ui: &mut Ui, home: &mut Home, updates: &mut crate::update::Updater) 
     call::screen_dialog(ui.ctx(), home);
     call::frame(ui.ctx(), home);
     let action = crate::settings::show(ui.ctx(), home, updates);
+    updates.dialog(ui.ctx());
     crop_dialog(ui.ctx(), home);
     action
 }
@@ -1056,12 +1057,17 @@ fn server_rail(ui: &mut Ui, home: &mut Home) {
     });
 }
 
-fn sidebar(ui: &mut Ui, home: &mut Home, update_available: bool) {
+fn sidebar(ui: &mut Ui, home: &mut Home, updates: &mut crate::update::Updater) {
     Panel::bottom("you")
         .frame(Frame::new().inner_margin(Margin::symmetric(0, 6)))
         .show(ui, |ui| {
+            if updates.available() {
+                Frame::new()
+                    .inner_margin(Margin::symmetric(0, ui::SPACE_XS as i8))
+                    .show(ui, |ui| updates.button(ui));
+            }
             call::call_bar(ui, home);
-            user_bar::show(ui, home, update_available);
+            user_bar::show(ui, home, updates.available());
         });
     match home.view {
         View::Server(index) => channel_list(ui, home, index),

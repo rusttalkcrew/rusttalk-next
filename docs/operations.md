@@ -355,11 +355,16 @@ openssl pkeyutl -verify -pubin -inkey rusttalk-release-public.pem \
 
 Release builds check
 `https://github.com/rusttalkcrew/rusttalk-next/releases/latest/download/`
-by default; **Settings → Profile** can point at another HTTPS directory
+by default; **Settings → Updates** can point at another HTTPS directory
 holding `latest.json`, `latest.json.sig` and the installers. **Check now**
-checks once. The automatic option checks once at startup and is off by
-default. A verified newer release offers **Install**. Redirects are followed
-over HTTPS only; the signed size and SHA-256 decide what installs.
+checks once. Release builds also check automatically at startup and every
+six hours; **Check automatically** turns that off, and a saved choice is kept.
+Builds without a default update URL never check on their own. A verified
+newer release shows an **Update to vX.Y.Z** button above the user bar (and a
+dot on the gear). It opens a confirmation with a **What's new** link (the
+GitHub release page for that tag when the directory is a GitHub release
+download directory) and **Update** / **Later**. Redirects are followed over
+HTTPS only; the signed size and SHA-256 decide what installs.
 
 The Windows installer installs under the user's local application directory,
 requires no elevation and restarts RustTalk after an in-app update.
@@ -370,7 +375,8 @@ other AppImages: it checks that its own AppImage mount carries the file's
 name, serves the squashfs image inside that file, and that a running process
 was started from that file. Extracted AppImages and
 `--appimage-extract-and-run` cannot update themselves. The update replaces
-the AppImage atomically and offers **Restart now**.
+the AppImage atomically and RustTalk restarts from it by itself. Any failure
+shows a short error and the current version keeps running.
 
 The AppImage uses the host's desktop stack, ALSA and PipeWire libraries and
 is built on Ubuntu 24.04 (glibc 2.39). It packs the
