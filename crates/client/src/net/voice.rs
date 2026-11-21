@@ -255,11 +255,11 @@ async fn set_stream_audio(ctx: &Ctx, live: &mut Live, apps: Vec<App>) -> bool {
             Err(error) => {
                 tracing::warn!(error = %format_args!("{error:#}"), "sharing app audio failed");
                 live.stream_audio.retain(|wanted| wanted.id != app.id);
-                ctx.send(Update::AppStopped(app.id));
                 ctx.send(Update::Failed(t!("voice.app_failed", app = app.name)));
             }
         }
     }
+    ctx.send(Update::StreamAudio(live.stream_audio.clone()));
     changed
 }
 
@@ -1002,11 +1002,15 @@ pub(super) async fn stop_finished_shares(
     }
     for share in &ended {
         tracing::info!("app audio capture ended");
-        live.stream_audio.retain(|app| app.id != share.app.id);
         if let Err(error) = live.room.unpublish_audio(&share.sid).await {
             tracing::warn!(error = %format_args!("{error:#}"), "stopping app audio failed");
         }
-        ctx.send(Update::AppStopped(share.app.id.clone()));
+        if share.stream {
+            live.stream_audio.retain(|app| app.id != share.app.id);
+            ctx.send(Update::StreamAudio(live.stream_audio.clone()));
+        } else {
+            ctx.send(Update::AppStopped(share.app.id.clone()));
+        }
     }
     let channel = live.channel;
     roster(ctx, url, client, state, channel);

@@ -50,9 +50,21 @@ pub(super) async fn exercise(
         tokio::time::timeout(LIMIT, screen::hear(b, TrackSource::Screenshare))
             .await
             .context("screen pattern with current key")??;
-        tokio::time::timeout(LIMIT, stream_sound(b, true))
-            .await
-            .context("stream sound arriving with the watched share")??;
+        // Watching is announced, as the app does once the video arrives; only then does
+        // the publisher allow the sound.
+        b.set_video_watches(std::slice::from_ref(&sid)).await?;
+        tokio::time::timeout(LIMIT, async {
+            loop {
+                // The sender has no event loop here; let it read the announcement.
+                a.update_stream_viewers().await?;
+                let wait = Duration::from_millis(500);
+                if let Ok(heard) = tokio::time::timeout(wait, stream_sound(b, true)).await {
+                    return heard;
+                }
+            }
+        })
+        .await
+        .context("stream sound arriving with the watched share")??;
         if let Ok(error) = tokio::time::timeout(Duration::from_millis(400), async {
             while let Some(event) = listener.next_event().await {
                 if let RoomEvent::TrackSubscribed { track, .. } = event {
@@ -85,8 +97,9 @@ pub(super) async fn exercise(
             "an idle viewer holds the stream's sound"
         );
         listener.leave().await?;
-        wrong_key(server, c, channel_id, a, &sid).await?;
+        wrong_key(server, c, channel_id, a, &sid, &sound).await?;
         b.set_subscribed(&sid, false)?;
+        b.set_video_watches(&[]).await?;
         tokio::time::timeout(LIMIT, stream_sound(b, false))
             .await
             .context("stream sound leaving with the share")??;
@@ -129,6 +142,7 @@ async fn wrong_key(
     channel: &[u8; 32],
     sender: &VoiceRoom,
     sid: &TrackSid,
+    sound: &TrackSid,
 ) -> Result<()> {
     let encoded = rusttalk_core::auth::encode(channel);
     let reply: serde_json::Value = c
@@ -171,15 +185,24 @@ async fn wrong_key(
             .remove(sid)
             .context("missing screen publication")?;
         publication.set_subscribed(true);
+        // Like an older client that takes every audio track, without saying it watches.
+        peer.track_publications()
+            .remove(sound)
+            .context("missing stream sound publication")?
+            .set_subscribed(true);
         let mut video = tokio::time::timeout(LIMIT, async {
             while let Some(event) = events.recv().await {
-                if let RoomEvent::TrackSubscribed {
-                    track: RemoteTrack::Video(track),
-                    ..
-                } = event
-                    && &track.sid() == sid
-                {
-                    return Ok(NativeVideoStream::new(track.rtc_track()));
+                match event {
+                    RoomEvent::TrackSubscribed {
+                        track: RemoteTrack::Video(track),
+                        ..
+                    } if &track.sid() == sid => {
+                        return Ok(NativeVideoStream::new(track.rtc_track()));
+                    }
+                    RoomEvent::TrackSubscribed { track, .. } if &track.sid() == sound => {
+                        anyhow::bail!("a member not watching received the stream's sound");
+                    }
+                    _ => {}
                 }
             }
             anyhow::bail!("event stream closed")
@@ -192,6 +215,24 @@ async fn wrong_key(
                 .is_err(),
             "wrong-key viewer decoded video or its stream closed"
         );
+        // The publisher allows the sound only to members who announced they watch.
+        if let Ok(subscribed) = tokio::time::timeout(Duration::from_secs(2), async {
+            while let Some(event) = events.recv().await {
+                if let RoomEvent::TrackSubscribed { track, .. } = event
+                    && &track.sid() == sound
+                {
+                    return true;
+                }
+            }
+            false
+        })
+        .await
+        {
+            ensure!(
+                !subscribed,
+                "a member not watching received the stream's sound"
+            );
+        }
         let (epoch, channel_key) = c.current_key(Scope {
             kind: Kind::Channel,
             id: *channel,

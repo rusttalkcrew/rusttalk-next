@@ -278,8 +278,10 @@ pub enum Update {
     /// Everyone in one voice channel.
     Room(Url, Id, Vec<Peer>, Option<crate::sounds::Snapshot>),
     CallVideoStopped(Url, Id, livekit::prelude::TrackSid),
-    /// Sharing this app stopped or never started.
+    /// Sharing this app on its own stopped or never started.
     AppStopped(String),
+    /// What the screen share's sound is now, after a change or a failure.
+    StreamAudio(Vec<App>),
     /// This device's screen share went live (`true`), or stopped or never started.
     Sharing(bool),
     /// This device's camera stopped publishing or never started.

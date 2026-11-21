@@ -14,8 +14,8 @@ pub use livekit::{
 use crate::{camera::CameraOptions, screen::ScreenOptions};
 
 use super::{
-    LocalTrackPublication, ParticipantIdentity, TrackSid, TrackSource, VoiceRoom, is_stream_audio,
-    track_name,
+    LocalTrackPublication, ParticipantIdentity, TrackSid, TrackSource, VoiceRoom,
+    stream_audio::is_stream_audio, track_name,
 };
 
 /// A remote video publication. The track becomes available after subscription.

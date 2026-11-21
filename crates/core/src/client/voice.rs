@@ -4,6 +4,7 @@ mod control;
 mod live_file;
 mod screen;
 mod stats;
+mod stream_audio;
 mod track_name;
 mod watch;
 
@@ -19,7 +20,7 @@ use livekit::{
     },
     options::{AudioEncoding, TrackPublishOptions},
     participant::ParticipantState,
-    prelude::{LocalTrack, RemoteTrack, RemoteTrackPublication, TrackKind},
+    prelude::{LocalTrack, RemoteTrack},
     rtc_engine::SimulateScenario,
     webrtc::audio_source::RtcAudioSource,
 };
@@ -196,7 +197,7 @@ impl KeyClient<'_> {
             .context("connect to pinned LiveKit room")?;
         for participant in room.remote_participants().into_values() {
             for publication in participant.track_publications().into_values() {
-                subscribe_audio(&publication, &stream_names);
+                stream_audio::subscribe_audio(&publication, &name_keys, &stream_names, false);
             }
         }
         Ok(VoiceRoom {
@@ -214,6 +215,7 @@ impl KeyClient<'_> {
             watch_keys,
             stats: stats::Sampler::default(),
             files: live_file::LiveFiles::default(),
+            permissions: std::sync::Mutex::new(None),
         })
     }
 
@@ -283,23 +285,8 @@ pub struct VoiceRoom {
     watch_keys: HashMap<i64, Key>,
     stats: stats::Sampler,
     files: live_file::LiveFiles,
-}
-
-/// Receive voices and shared apps. A screen share's sound comes with its video instead.
-fn subscribe_audio(publication: &RemoteTrackPublication, stream_names: &HashMap<i64, Key>) {
-    if publication.kind() == TrackKind::Audio
-        && publication.encryption_type() == EncryptionType::Gcm
-        && !publication.is_desired()
-        && !is_stream_audio(publication, stream_names)
-    {
-        publication.set_subscribed(true);
-    }
-}
-
-fn is_stream_audio(publication: &RemoteTrackPublication, stream_names: &HashMap<i64, Key>) -> bool {
-    publication.source() == TrackSource::ScreenshareAudio
-        && track_name::decrypt(stream_names, track_name::STREAM_AUDIO, &publication.name())
-            .is_some()
+    /// The track permissions last sent; see `stream_audio`.
+    permissions: std::sync::Mutex<Option<stream_audio::Permissions>>,
 }
 
 impl VoiceRoom {
@@ -338,6 +325,8 @@ impl VoiceRoom {
         self.stream_names = keys.name_keys(&self.channel, track_name::STREAM_AUDIO);
         self.control_keys = keys.name_keys(&self.channel, control::LABEL);
         self.watch_keys = keys.name_keys(&self.channel, watch::LABEL);
+        // Tracks published under the new epoch's names could not be told apart before.
+        self.reconcile_audio();
         if epoch <= self.epoch {
             return Ok(false);
         }
@@ -396,28 +385,34 @@ impl VoiceRoom {
                     tracing::warn!("refused unencrypted voice track");
                     continue;
                 }
-                RoomEvent::TrackPublished {
-                    publication,
-                    participant,
-                } => {
-                    subscribe_audio(publication, &self.stream_names);
-                    // Sound added to a screen share someone already watches.
-                    let watched = participant
-                        .track_publications()
-                        .into_values()
-                        .any(|p| p.source() == TrackSource::Screenshare && p.is_desired());
-                    if watched && is_stream_audio(publication, &self.stream_names) {
-                        publication.set_subscribed(true);
-                    }
-                }
+                RoomEvent::TrackPublished { .. } => self.reconcile_audio(),
                 RoomEvent::LocalTrackPublished { .. } | RoomEvent::LocalTrackRepublished { .. } => {
                     self.switch_senders();
+                    self.sync_permissions().await;
                 }
+                // Who watches our share, or who is here, changed.
+                RoomEvent::LocalTrackUnpublished { .. }
+                | RoomEvent::ParticipantConnected(_)
+                | RoomEvent::ParticipantDisconnected(_)
+                | RoomEvent::ParticipantAttributesChanged { .. }
+                | RoomEvent::Reconnected => self.sync_permissions().await,
                 _ => (),
             }
             return Some(event);
         }
         None
+    }
+
+    async fn sync_permissions(&self) {
+        if let Err(error) = self.update_stream_viewers().await {
+            tracing::warn!(%error, "updating who may receive our tracks failed");
+        }
+    }
+
+    /// Allow our share's sound to whoever watches it now. `next_event` does this when
+    /// viewers change; call it directly only without an event loop (headless tests).
+    pub async fn update_stream_viewers(&self) -> Result<()> {
+        self.sync_stream_permissions(false).await
     }
 
     /// Current local connection state.
@@ -531,6 +526,8 @@ impl VoiceRoom {
             .get(&self.epoch)
             .context("missing current media key")?;
         let name = track_name::encrypt(key, track_name::STREAM_AUDIO, self.epoch, name)?;
+        // Keep it from people who don't watch before it exists.
+        self.sync_stream_permissions(true).await?;
         self.publish_audio_track(&name, source, TrackSource::ScreenshareAudio)
             .await
     }

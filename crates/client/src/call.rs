@@ -20,7 +20,7 @@ use crate::{
     denoise, files,
     home::{Home, Tab, face},
     mic_check::Verdict,
-    net::Command,
+    net::{Command, Update},
     screen::{self, Kind, Options, Target, Video},
     server::{Call, CallState, Id, Screen, Server, Stats},
     share::{self, App},
@@ -772,6 +772,20 @@ fn change_screen(ctx: &egui::Context, voice: &mut Voice, server: &Server) {
     }
 }
 
+/// Apply what the network says about shared sound. An app stopping on its own never
+/// touches the stream's sound: going live stops apps that move into the stream.
+pub fn shared_sound(voice: &mut Voice, update: Update) {
+    shared_sound_in(&mut voice.shares, &mut voice.stream_audio, update);
+}
+
+fn shared_sound_in(shares: &mut Vec<App>, stream: &mut Vec<App>, update: Update) {
+    match update {
+        Update::AppStopped(id) => shares.retain(|app| app.id != id),
+        Update::StreamAudio(apps) => *stream = apps,
+        _ => {}
+    }
+}
+
 /// Open t!("call.share_screen") with the last choices and look for what to share.
 fn open_screen_dialog(ctx: &egui::Context, voice: &mut Voice) {
     voice.share_screen = Some((screen_options(&voice.audio.settings()), None));
@@ -1239,6 +1253,37 @@ fn calibrate(ui: &mut Ui, voice: &mut Voice, s: &mut Settings) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn going_live_moves_shared_apps_into_the_stream() {
+        let spotify = App {
+            id: "1:10".into(),
+            name: "Spotify".into(),
+        };
+        // The share dialog folded the shared app into the stream's sound.
+        let (mut shares, mut stream) = (vec![spotify.clone()], vec![spotify.clone()]);
+        // What going live sends: the app stops on its own, the stream carries it.
+        shared_sound_in(
+            &mut shares,
+            &mut stream,
+            Update::AppStopped(spotify.id.clone()),
+        );
+        assert_eq!(
+            stream,
+            std::slice::from_ref(&spotify),
+            "a stopped app keeps the stream's sound"
+        );
+        shared_sound_in(
+            &mut shares,
+            &mut stream,
+            Update::StreamAudio(vec![spotify.clone()]),
+        );
+        assert!(shares.is_empty());
+        assert_eq!(stream, [spotify]);
+        // A failed or ended stream capture arrives as the whole new selection.
+        shared_sound_in(&mut shares, &mut stream, Update::StreamAudio(Vec::new()));
+        assert!(stream.is_empty());
+    }
 
     #[test]
     fn screen_choices_are_remembered() {
