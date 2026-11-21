@@ -11,6 +11,7 @@ use egui::{
     text::LayoutJob,
 };
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd, TextMergeWithOffset};
+use rusttalk_core::auth::InviteLink;
 mod highlight;
 
 use super::{frame, mentions::Message};
@@ -25,6 +26,8 @@ struct Style {
     heading: u8,
     code: bool,
     link: Option<String>,
+    // A RustTalk invite with a card: shown shortened, copied in full.
+    invite: bool,
 }
 
 struct Span {
@@ -43,6 +46,8 @@ pub(super) struct Document {
     blocks: Vec<Block>,
     // Original byte offsets for shortcode and mention substitution in the composer.
     code_ranges: Vec<Range<usize>>,
+    // Valid RustTalk invite links in prose, once each, shown as cards under the text.
+    invites: Vec<String>,
 }
 
 fn web_link(text: &str) -> Option<String> {
@@ -249,6 +254,12 @@ impl Document {
                             let mut style = style.clone();
                             if piece.kind().is_some() {
                                 style.link = web_link(piece.as_str());
+                                let link = piece.as_str();
+                                style.invite =
+                                    style.link.is_none() && InviteLink::parse(link).is_ok();
+                                if style.invite && !doc.invites.iter().any(|known| known == link) {
+                                    doc.invites.push(link.to_owned());
+                                }
                             }
                             line.push(Span {
                                 text: piece.as_str().into(),
@@ -263,6 +274,10 @@ impl Document {
         }
         flush(&mut line, &mut doc.blocks);
         doc
+    }
+
+    pub(super) fn invites(&self) -> &[String] {
+        &self.invites
     }
 
     pub(super) fn prose(&self) -> impl Iterator<Item = &str> {
@@ -320,6 +335,19 @@ impl Document {
         jumbo: bool,
         edited: bool,
     ) {
+        // A message that is only invite links says it all with the cards.
+        let only_invites = !self.invites.is_empty()
+            && self.blocks.iter().all(|block| {
+                matches!(block, Block::Line(spans) if spans
+                    .iter()
+                    .all(|s| s.style.invite || s.text.trim().is_empty()))
+            });
+        if only_invites {
+            if edited {
+                edited_label(ui);
+            }
+            return;
+        }
         for (index, block) in self.blocks.iter().enumerate() {
             let last = index + 1 == self.blocks.len();
             match block {
@@ -412,7 +440,14 @@ fn show_line(
             if s.style.underline {
                 format.underline = Stroke::new(1., color);
             }
-            if s.literal {
+            if s.style.invite {
+                // The pins and keys are long noise; the card shows where it leads.
+                let short = match s.text.split_once("/i/") {
+                    Some((place, _)) => format!("{place}/i/…"),
+                    None => s.text.clone(),
+                };
+                job.append(&short, 0., format);
+            } else if s.literal {
                 if s.style.code {
                     format.font_id = FontId::monospace(ui::TEXT_MONO);
                     format.background = ui.visuals().extreme_bg_color;
@@ -553,5 +588,35 @@ mod tests {
             ["https://example.org/path", "https://example.org/bare"]
         );
         assert!(doc.plain(str::to_owned).ends_with("bad alt"));
+    }
+
+    #[test]
+    fn only_valid_rusttalk_invites_in_prose_get_a_card() {
+        use rusttalk_core::auth::encode;
+        let pins = format!("{}.{}", encode(&[2; 32]), encode(&[3; 32]));
+        let invite = format!(
+            "rusttalk://chat.example.org:8443/i/{}#{pins}",
+            encode(&[1; 16])
+        );
+        let cards = |source: &str| Document::parse(source).invites().to_vec();
+        assert_eq!(cards(&format!("Join us: {invite}")), [invite.as_str()]);
+        // Shown shortened, but copied in full.
+        let doc = Document::parse(&format!("Join us: {invite}"));
+        assert_eq!(doc.plain(str::to_owned), format!("Join us: {invite}"));
+        let [Block::Line(spans)] = doc.blocks.as_slice() else {
+            panic!()
+        };
+        assert!(spans.iter().any(|s| s.style.invite && s.text == invite));
+        assert_eq!(
+            cards(&format!("**{invite}** and <{invite}> again")),
+            [invite.as_str()]
+        );
+        assert!(cards("https://chat.example.org/i/abc and https://example.org").is_empty());
+        assert!(cards(&invite.replace("rusttalk://", "https://")).is_empty());
+        assert!(cards(&format!("{invite}x")).is_empty(), "malformed pins");
+        assert!(cards("rusttalk://chat.example.org/i/short#nope").is_empty());
+        assert!(cards(&format!("`{invite}`")).is_empty());
+        assert!(cards(&format!("```\n{invite}\n```")).is_empty());
+        assert!(cards(&format!("    {invite}")).is_empty());
     }
 }

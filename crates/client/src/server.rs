@@ -10,6 +10,7 @@ use std::{
 use eframe::egui::{Color32, ColorImage};
 
 use rusttalk_core::{
+    auth::KnownServer,
     client::{
         Attachment,
         voice::{CallTraffic, TrackSid},
@@ -27,6 +28,9 @@ pub type Id = [u8; 32];
 
 pub struct Server {
     pub address: Url,
+    /// The pinned server ID and certificate, so an invite is only taken as this
+    /// server's when it names the same identity, not just the same address.
+    pub known: KnownServer,
     /// The name from the invite, or the host, until the space key arrives.
     pub label: String,
     pub status: Status,

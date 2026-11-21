@@ -284,7 +284,16 @@ is deleted and never used; the normal noise suppression keeps working.
   official servers (`es`, `de` and `jp.public.rusttalk.com`) from a list
   built into the client; it contacts one only when the person picks Join. An
   invite link or server address typed on the join page is contacted only when
-  the person picks Continue. On Linux it accesses Secret
+  the person picks Continue. An invite link in a chat message shows as a
+  card built only from the link itself (the server address) or, for a server
+  the person is already in, from what the device already knows (its name
+  and icon). Viewing the card contacts nothing. The invited server is first
+  contacted when the person picks Join, which makes the same invite preview
+  request as Continue on the join page; the server's name comes from that
+  preview, and joining still needs confirmation. There is no separate
+  "details" request: the preview is the only thing the server reveals before
+  joining, and asking for it earlier would leak the same IP address and timing
+  as Join. On Linux it accesses Secret
   Service, and opens file dialogs through xdg-desktop-portal, over the local
   session bus.
 - **Update host:** Release builds contact the HTTPS directory configured in
