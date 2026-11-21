@@ -64,6 +64,7 @@ const MESSAGE_AVATAR: f32 = 38.0;
 const STICKER_SIZE: f32 = 160.0;
 const TOOLBAR_BUTTON: Vec2 = Vec2::new(30.0, 26.0);
 
+mod embed;
 mod friends;
 pub mod layout;
 mod markdown;
@@ -3033,6 +3034,10 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
         emoji_picker,
         voice,
         layout,
+        view,
+        invite: invite_text,
+        net,
+        join: joining,
         ..
     } = home;
     let dir = named.map_or(&fallback, |index| &servers[index].dir);
@@ -3153,7 +3158,7 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
                     && msg.at - prev.at < 300
                     && msg.reply_to.is_none()
             });
-            let shown = message(ui, chat, msg, start, dir, key, |ui| {
+            let shown = message(ui, chat, msg, start, dir, servers, key, |ui| {
                 if let Some(server) = holder(msg) {
                     files::attachments(ui, files, &server.address, &server.commands, &msg.files);
                 }
@@ -3288,6 +3293,26 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
                 At::Dm(peer) => Dialog::DeleteDm(peer, id),
             });
         }
+        Some(Pick::Invite(text)) => {
+            if let Ok(link) = InviteLink::parse(&text) {
+                match servers
+                    .iter()
+                    .position(|s| s.address == link.server.address)
+                {
+                    Some(index) => *view = View::Server(index),
+                    None => {
+                        *view = View::Join;
+                        // The click is the consent to contact the server, as Continue is on the
+                        // join page; its preview still asks for a name and confirmation.
+                        if !matches!(joining, Join::Checking | Join::Joining(_)) {
+                            *invite_text = text;
+                            net.preview(link, true);
+                            *joining = Join::Checking;
+                        }
+                    }
+                }
+            }
+        }
         None => {}
     }
     act
@@ -3408,6 +3433,8 @@ enum Pick {
     Reply(Id, Id),
     Edit(Id, String),
     Delete(Id),
+    /// Join with, or open the server of, an invite link shown as a card.
+    Invite(String),
 }
 
 fn composer_id(channel: Id) -> UiId {
@@ -3734,12 +3761,14 @@ fn composer_field(
         .inner
 }
 
+#[allow(clippy::too_many_arguments)]
 fn message(
     ui: &mut Ui,
     chat: &Chat,
     msg: &Msg,
     start: bool,
     dir: &Directory,
+    servers: &[Server],
     channel: Id,
     attachments: impl FnOnce(&mut Ui),
 ) -> Option<Pick> {
@@ -3797,6 +3826,7 @@ fn message(
     let pinged = mentions::mentions_me(&mention, &me, my_roles);
     let background = ui.painter().add(Shape::Noop);
     let name = names(&msg.person);
+    let mut invite = None;
     if start {
         ui.add_space(10.0);
     }
@@ -3860,6 +3890,11 @@ fn message(
                                     jumbo,
                                     chat.edited.contains_key(&(msg.person, msg.id)),
                                 );
+                                for link in mention.doc.invites() {
+                                    if invite_card(ui, servers, link) {
+                                        invite = Some(Pick::Invite(link.clone()));
+                                    }
+                                }
                             });
                         }
                         attachments(ui);
@@ -3894,7 +3929,7 @@ fn message(
     let authored = mine && !(dm_copy && msg.body == Body::Unreadable);
     let can_delete =
         authored || (dir.perms.delete_messages && !dir.dms.iter().any(|dm| dm.channel == channel));
-    let mut pick = None;
+    let mut pick = invite;
     ui::context_menu(&row.response, |m| {
         if can_reply && m.item("↩", t!("common.reply")).clicked() {
             pick = Some(Pick::Reply(msg.person, msg.id));
@@ -3988,6 +4023,52 @@ fn message(
         pick = Some(Pick::Delete(msg.id));
     }
     pick
+}
+
+/// A RustTalk invite under a message. Shows only what the link carries, or what this
+/// device already knows about a server it is in: viewing it contacts nothing.
+/// Returns whether Join or Open was clicked.
+fn invite_card(ui: &mut Ui, servers: &[Server], link: &str) -> bool {
+    let Ok(invite) = InviteLink::parse(link) else {
+        return false;
+    };
+    let address = &invite.server.address;
+    let place = match address.port() {
+        Some(port) => format!("{}:{port}", host(address)),
+        None => host(address),
+    };
+    let known = servers.iter().find(|server| &server.address == address);
+    let (image, title, description, button) = match known {
+        Some(server) => (
+            match &server.dir.icon {
+                Some(icon) => embed::Image::Picture(icon),
+                None => embed::Image::Glyph(initials(server.name())),
+            },
+            server.name(),
+            Some(place.as_str()),
+            embed::Button {
+                label: t!("home.invite_open"),
+                primary: false,
+            },
+        ),
+        None => (
+            embed::Image::Glyph("🔗".into()),
+            place.as_str(),
+            None,
+            embed::Button {
+                label: t!("common.join"),
+                primary: true,
+            },
+        ),
+    };
+    embed::Embed {
+        image: Some(image),
+        kind: t!("home.invite_card"),
+        title,
+        description,
+        button: Some(button),
+    }
+    .show(ui)
 }
 
 /// A sticker message: the picture, large, or its name when not available.
