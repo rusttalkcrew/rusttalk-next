@@ -14,6 +14,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 FROM debian:trixie-slim AS runtime
 LABEL org.opencontainers.image.source=https://github.com/rusttalkcrew/rusttalk-next
+LABEL org.opencontainers.image.licenses=Apache-2.0
+COPY LICENSE NOTICE /usr/share/doc/rusttalk/
 ARG SERVICE=api
 COPY --from=build /usr/local/bin/rusttalk-${SERVICE} /usr/local/bin/
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
