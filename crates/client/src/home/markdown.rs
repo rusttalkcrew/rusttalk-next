@@ -26,6 +26,8 @@ struct Style {
     heading: u8,
     code: bool,
     link: Option<String>,
+    // A RustTalk invite with a card: shown shortened, copied in full.
+    invite: bool,
 }
 
 struct Span {
@@ -253,10 +255,9 @@ impl Document {
                             if piece.kind().is_some() {
                                 style.link = web_link(piece.as_str());
                                 let link = piece.as_str();
-                                if style.link.is_none()
-                                    && InviteLink::parse(link).is_ok()
-                                    && !doc.invites.iter().any(|known| known == link)
-                                {
+                                style.invite =
+                                    style.link.is_none() && InviteLink::parse(link).is_ok();
+                                if style.invite && !doc.invites.iter().any(|known| known == link) {
                                     doc.invites.push(link.to_owned());
                                 }
                             }
@@ -334,6 +335,19 @@ impl Document {
         jumbo: bool,
         edited: bool,
     ) {
+        // A message that is only invite links says it all with the cards.
+        let only_invites = !self.invites.is_empty()
+            && self.blocks.iter().all(|block| {
+                matches!(block, Block::Line(spans) if spans
+                    .iter()
+                    .all(|s| s.style.invite || s.text.trim().is_empty()))
+            });
+        if only_invites {
+            if edited {
+                edited_label(ui);
+            }
+            return;
+        }
         for (index, block) in self.blocks.iter().enumerate() {
             let last = index + 1 == self.blocks.len();
             match block {
@@ -426,7 +440,14 @@ fn show_line(
             if s.style.underline {
                 format.underline = Stroke::new(1., color);
             }
-            if s.literal {
+            if s.style.invite {
+                // The pins and keys are long noise; the card shows where it leads.
+                let short = match s.text.split_once("/i/") {
+                    Some((place, _)) => format!("{place}/i/…"),
+                    None => s.text.clone(),
+                };
+                job.append(&short, 0., format);
+            } else if s.literal {
                 if s.style.code {
                     format.font_id = FontId::monospace(ui::TEXT_MONO);
                     format.background = ui.visuals().extreme_bg_color;
@@ -579,6 +600,13 @@ mod tests {
         );
         let cards = |source: &str| Document::parse(source).invites().to_vec();
         assert_eq!(cards(&format!("Join us: {invite}")), [invite.as_str()]);
+        // Shown shortened, but copied in full.
+        let doc = Document::parse(&format!("Join us: {invite}"));
+        assert_eq!(doc.plain(str::to_owned), format!("Join us: {invite}"));
+        let [Block::Line(spans)] = doc.blocks.as_slice() else {
+            panic!()
+        };
+        assert!(spans.iter().any(|s| s.style.invite && s.text == invite));
         assert_eq!(
             cards(&format!("**{invite}** and <{invite}> again")),
             [invite.as_str()]
