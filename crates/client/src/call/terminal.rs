@@ -1,19 +1,36 @@
 //! A shared terminal in the window: sharing ours (with a warning the first time), our
-//! own tile, which we type in, and the tile of a terminal we watch.
+//! own tile, which we type in, and the tile of a terminal we watch. A viewer can ask
+//! to type too; the sharer allows each person and can take it back.
 
-use eframe::egui::{self, Id as UiId, Rect, Ui};
-use rusttalk_core::terminal::Feed;
+use eframe::egui::{self, Align, Id as UiId, Layout, Rect, Ui, UiBuilder, vec2};
+use rusttalk_core::terminal::{Access, Feed, REQUEST_TIMEOUT};
 
 use super::call_server;
 use crate::{
     home::Home,
-    net::Command,
+    net::{Command, terminal::Guests},
+    server::Server,
     terminal::{self as term, Emulator, Local, Shell},
     ui,
 };
 
 /// The size a new share starts at, until its tile is drawn.
 const START: (u16, u16) = (100, 30);
+/// Allow can't be clicked until the prompt has been up this long, so a click meant for
+/// something else can't let someone type.
+const ALLOW_DELAY: f64 = 1.0;
+/// The height of the "Ada can type" band above our terminal.
+const BAND: f32 = 28.0;
+
+/// Typing in a terminal we watch.
+#[derive(Clone, Copy, Default, PartialEq)]
+pub enum Typing {
+    #[default]
+    Idle,
+    /// Asked, at this window time.
+    Asking(f64),
+    On,
+}
 
 #[derive(Default)]
 pub struct Terminals {
@@ -24,6 +41,12 @@ pub struct Terminals {
     pub watching: Option<(String, Option<Emulator>)>,
     /// The first-time warning is open, to start this shell.
     confirm: Option<Shell>,
+    /// Who asks to type in ours, and who may.
+    pub guests: Guests,
+    /// The device whose request the prompt shows, since when.
+    prompt: Option<(String, f64)>,
+    /// Typing in the one we watch.
+    pub typing: Typing,
 }
 
 impl Terminals {
@@ -48,8 +71,11 @@ impl Terminals {
                     screen.resize(cols, rows);
                 }
             }
-            Feed::Ended => self.watching = None,
-            Feed::Nothing | Feed::Resync => {}
+            Feed::Ended => {
+                self.watching = None;
+                self.typing = Typing::Idle;
+            }
+            Feed::Nothing | Feed::Resync | Feed::Typing(_) => {}
         }
     }
 
@@ -90,6 +116,9 @@ fn start(ctx: &egui::Context, home: &mut Home, shell: Shell) {
 
 /// Stop sharing our terminal, ending its shell.
 pub fn stop(home: &mut Home) {
+    // Asking and typing end with the share.
+    home.voice.terminals.guests = Guests::default();
+    home.voice.terminals.prompt = None;
     if home.voice.terminals.local.take().is_some()
         && let Some(server) = call_server(home)
     {
@@ -103,12 +132,14 @@ pub fn watch(home: &mut Home, sharer: &str) {
         return;
     }
     home.voice.terminals.watching = Some((sharer.to_owned(), None));
+    home.voice.terminals.typing = Typing::Idle;
     if let Some(server) = call_server(home) {
         server.send(Command::WatchTerminal(Some(sharer.to_owned())));
     }
 }
 
 pub fn stop_watching(home: &mut Home) {
+    home.voice.terminals.typing = Typing::Idle;
     if home.voice.terminals.watching.take().is_some()
         && let Some(server) = call_server(home)
     {
@@ -116,9 +147,61 @@ pub fn stop_watching(home: &mut Home) {
     }
 }
 
-/// Once per frame: stop sharing when the shell ended, and stop watching a terminal that
-/// is no longer shared.
-pub fn frame(home: &mut Home) {
+/// Ask to type in the terminal we watch, or stop asking or typing.
+pub fn ask(home: &mut Home, now: f64) {
+    let terms = &mut home.voice.terminals;
+    let command = if terms.typing == Typing::Idle {
+        terms.typing = Typing::Asking(now);
+        Command::AskToType
+    } else {
+        terms.typing = Typing::Idle;
+        Command::StopTyping
+    };
+    if let Some(server) = call_server(home) {
+        server.send(command);
+    }
+}
+
+/// What the sharer said about typing: a note unless it was a yes.
+pub fn answered(home: &mut Home, access: Access, now: f64) {
+    let name = sharer_name(home).unwrap_or_else(|| t!("remote.the_sharer").into());
+    let terms = &mut home.voice.terminals;
+    let note = match access {
+        Access::Granted if matches!(terms.typing, Typing::Asking(_)) => {
+            terms.typing = Typing::On;
+            None
+        }
+        Access::Granted => None,
+        Access::Denied => Some(t!("terminal.denied", name = name)),
+        Access::Revoked => Some(t!("terminal.taken_back", name = name)),
+    };
+    if let Some(note) = note {
+        terms.typing = Typing::Idle;
+        home.toast = Some((note, now + 6.0));
+    }
+}
+
+/// The name of whoever shares the terminal we watch.
+fn sharer_name(home: &Home) -> Option<String> {
+    let sharer = home.voice.terminals.watched()?;
+    let server = call_server(home)?;
+    let call = home.voice.call.as_ref()?;
+    let peer = (server.voice.get(&call.channel)?.iter())
+        .find(|peer| peer.terminal.as_deref() == Some(sharer))?;
+    Some(peer.name(server))
+}
+
+/// Once per frame: stop sharing when the shell ended, stop watching a terminal that is
+/// no longer shared, and give up asking to type after no answer.
+pub fn frame(home: &mut Home, now: f64) {
+    // A little longer than the sharer waits, so their answer can still arrive.
+    if let Typing::Asking(since) = home.voice.terminals.typing
+        && now - since > REQUEST_TIMEOUT.as_secs_f64() + 2.0
+    {
+        let name = sharer_name(home).unwrap_or_else(|| t!("remote.they").into());
+        home.toast = Some((t!("remote.no_answer", name = name), now + 6.0));
+        ask(home, now);
+    }
     if home
         .voice
         .terminals
@@ -171,32 +254,153 @@ pub fn dialog(ctx: &egui::Context, home: &mut Home) {
     }
 }
 
+/// "Ada wants to type in your terminal", for each request in turn. Draw before the panels.
+pub fn prompt(ctx: &egui::Context, home: &mut Home) {
+    // Field by field, so the terminals stay writable.
+    let Some(server) = home
+        .voice
+        .call
+        .as_ref()
+        .and_then(|call| (home.servers.iter()).find(|s| s.address == call.server))
+    else {
+        return;
+    };
+    let now = ctx.input(|input| input.time);
+    let terms = &mut home.voice.terminals;
+    let first = terms.guests.asking.first().cloned();
+    let Some((device, person)) = first else {
+        terms.prompt = None;
+        return;
+    };
+    if terms
+        .prompt
+        .as_ref()
+        .is_none_or(|(shown, _)| *shown != device)
+    {
+        terms.prompt = Some((device.clone(), now));
+    }
+    let since = terms.prompt.as_ref().map_or(now, |(_, since)| *since);
+    let answer = if now - since > REQUEST_TIMEOUT.as_secs_f64() {
+        Some(false)
+    } else {
+        let ready = now - since >= ALLOW_DELAY;
+        if !ready {
+            ctx.request_repaint();
+        }
+        let name = server.member_name(&person);
+        let title = t!("terminal.request_title", name = name);
+        let (picked, closed) = ui::dialog(ctx, "terminal typing", &title, |ui| {
+            ui.add(egui::Label::new(t!("terminal.allow_help")).wrap());
+            let mut picked = None;
+            ui::footer(ui, |ui| {
+                let allow = ui.add_enabled_ui(ready, |ui| ui::primary(ui, t!("remote.allow")));
+                if allow.inner.clicked() {
+                    picked = Some(true);
+                }
+                if ui::secondary(ui, t!("remote.deny")).clicked() {
+                    picked = Some(false);
+                }
+            });
+            picked
+        });
+        // Closing the prompt any other way is a no.
+        picked.or(closed.then_some(false))
+    };
+    if let Some(allow) = answer {
+        terms.guests.asking.retain(|(asker, _)| *asker != device);
+        terms.prompt = None;
+        server.send(Command::AnswerTyping(device, allow));
+    }
+}
+
+/// "Ada can type" for each person allowed to, at the top of our terminal; clicking one
+/// takes it back.
+fn typists(ui: &mut Ui, rect: Rect, guests: &Guests, server: Option<&Server>) {
+    let Some(server) = server.filter(|_| !guests.typing.is_empty()) else {
+        return;
+    };
+    let area = Rect::from_min_size(
+        rect.min + vec2(ui::SPACE_S, ui::SPACE_S),
+        vec2(rect.width() - 2.0 * ui::SPACE_S, BAND - ui::SPACE_S),
+    );
+    let mut child = ui.new_child(
+        UiBuilder::new()
+            .max_rect(area)
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    for (device, person) in &guests.typing {
+        let text = format!(
+            "⌨ {}",
+            t!("terminal.can_type", name = server.member_name(person))
+        );
+        let fill = ui::accent(&child).base;
+        let chip = ui::badge(&mut child, &text, fill)
+            .interact(egui::Sense::click())
+            .on_hover_text(t!("terminal.take_back"));
+        if chip.clicked() {
+            server.send(Command::RevokeTyping(device.clone()));
+        }
+    }
+}
+
 /// Our terminal in its tile: we type in it, and while it isn't squeezed into the strip
-/// (`active`) the shell takes the tile's size.
-pub fn ours(ui: &mut Ui, rect: Rect, local: &mut Local, active: bool, label: &str) {
+/// (`active`) the shell takes the tile's size. Shows who else may type.
+pub fn ours(
+    ui: &mut Ui,
+    rect: Rect,
+    local: &mut Local,
+    (guests, server): (&Guests, Option<&Server>),
+    active: bool,
+    label: &str,
+) {
+    // Who may type gets a band above the screen, rather than covering it.
+    let mut screen = rect;
+    if !guests.typing.is_empty() {
+        screen.min.y += BAND;
+    }
     let now = ui.input(|input| input.time);
-    if active && local.follow(term::fit(ui, rect), now) {
+    if active && local.follow(term::fit(ui, screen), now) {
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(100));
     }
     let id = UiId::unique("own terminal");
     let bytes = {
         let mut inner = local.shared.lock();
-        term::show(ui, rect, id, &mut inner.emulator, active, true, label).1
+        term::show(ui, screen, id, &mut inner.emulator, active, true, label).1
     };
     if !bytes.is_empty() {
         local.shared.write(&bytes);
     }
+    typists(ui, rect, guests, server);
 }
 
-/// A terminal we watch, in its tile: read only, but it can be scrolled, selected and
-/// copied from. `None` until its screen arrived.
-pub fn theirs(ui: &mut Ui, rect: Rect, screen: Option<&mut Emulator>, active: bool, label: &str) {
+/// A terminal we watch, in its tile: it can be scrolled, selected and copied from, and
+/// typed in once the sharer allowed it. `None` until its screen arrived. Returns what
+/// was typed.
+pub fn theirs(
+    ui: &mut Ui,
+    rect: Rect,
+    screen: Option<&mut Emulator>,
+    (active, typing): (bool, bool),
+    label: &str,
+) -> Vec<u8> {
     match screen {
         Some(screen) => {
             let id = UiId::unique(("terminal", label));
-            term::show(ui, rect, id, screen, active, false, label);
+            term::show(ui, rect, id, screen, active, typing, label).1
         }
-        None => term::placeholder(ui, rect, t!("call.waiting_picture")),
+        None => {
+            term::placeholder(ui, rect, t!("call.waiting_picture"));
+            Vec::new()
+        }
+    }
+}
+
+/// Send what was typed into the terminal we watch.
+pub fn send_typed(home: &Home, bytes: Vec<u8>) {
+    if !bytes.is_empty()
+        && let Some(server) = call_server(home)
+    {
+        server.send(Command::TypeInTerminal(bytes));
     }
 }

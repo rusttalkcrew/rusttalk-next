@@ -30,6 +30,22 @@ pub const SNAPSHOT_EVERY: Duration = Duration::from_millis(500);
 /// per second. More asks for a fresh screen instead, so a sharer can't flood a viewer.
 const VIEW_BURST: f64 = 4.0 * 1024.0 * 1024.0;
 const VIEW_RATE: f64 = 2.0 * 1024.0 * 1024.0;
+/// Typed bytes per message; a longer paste is split.
+pub const MAX_INPUT: usize = 1024;
+/// What someone may type: this many bytes at once, refilled at `TYPE_RATE` per second.
+const TYPE_BURST: f64 = 16.0 * 1024.0;
+const TYPE_RATE: f64 = 8.0 * 1024.0;
+/// A request nobody answered in this time counts as denied.
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Random, unguessable handle for the right to type, given with a grant.
+pub type Session = [u8; 16];
+
+fn random() -> [u8; 16] {
+    let mut bytes = [0; 16];
+    crate::identity::random_bytes(&mut bytes).expect("system randomness");
+    bytes
+}
 
 /// What a sharer announces to the call (as a sealed participant attribute) while sharing.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -72,6 +88,24 @@ pub enum Message {
     },
     /// Sharer to viewers: the share stopped.
     End { id: Id },
+    /// Viewer to sharer: may I type?
+    Request { id: Id },
+    /// Viewer to sharer: never mind, or stop typing.
+    Withdraw { id: Id },
+    /// Sharer to viewer: yes; send what you type with `session`.
+    Grant { id: Id, session: Session },
+    /// Sharer to viewer: no, or the request lapsed.
+    Deny { id: Id },
+    /// Sharer to viewer: typing taken back.
+    Revoke { id: Id },
+    /// Viewer to sharer: typed bytes. `seq` rises with every message, so a replay is dropped.
+    Input {
+        id: Id,
+        session: Session,
+        seq: u64,
+        #[serde(with = "bytes")]
+        data: Vec<u8>,
+    },
 }
 
 fn size_ok(cols: u16, rows: u16) -> bool {
@@ -86,7 +120,13 @@ impl Message {
             | Self::Snapshot { id, .. }
             | Self::Data { id, .. }
             | Self::Resize { id, .. }
-            | Self::End { id } => *id,
+            | Self::End { id }
+            | Self::Request { id }
+            | Self::Withdraw { id }
+            | Self::Grant { id, .. }
+            | Self::Deny { id }
+            | Self::Revoke { id }
+            | Self::Input { id, .. } => *id,
         }
     }
 
@@ -97,7 +137,8 @@ impl Message {
             } => size_ok(*cols, *rows) && data.len() <= MAX_CHUNK,
             Self::Data { data, .. } => data.len() <= MAX_CHUNK,
             Self::Resize { cols, rows, .. } => size_ok(*cols, *rows),
-            Self::Watch { .. } | Self::Unwatch { .. } | Self::End { .. } => true,
+            Self::Input { data, .. } => !data.is_empty() && data.len() <= MAX_INPUT,
+            _ => true,
         }
     }
 }
@@ -145,7 +186,31 @@ pub fn snapshot(host: &Host, cols: u16, rows: u16, bytes: &[u8]) -> Vec<Message>
         .collect()
 }
 
-/// The sharer's side: who watches, and the numbering of the output.
+/// Someone the sharer let type.
+struct Typist {
+    session: Session,
+    /// The last `seq` taken, so a replay is dropped.
+    seq: u64,
+    /// Bytes they may still type now, and when that was worked out.
+    budget: f64,
+    at: Instant,
+}
+
+/// What the sharer does with a viewer's message.
+#[derive(Debug, PartialEq)]
+pub enum Step {
+    Nothing,
+    /// Show the prompt: someone asks to type.
+    Ask,
+    /// Answer the sender with this.
+    Reply(Message),
+    /// Write these bytes to the shell.
+    Type(Vec<u8>),
+    /// An asker gave up, or someone stopped typing: update the prompt and the badges.
+    Ended,
+}
+
+/// The sharer's side: who watches, the numbering of the output, and who may type.
 pub struct Host {
     pub id: Id,
     seq: u64,
@@ -155,18 +220,21 @@ pub struct Host {
     screens: BTreeMap<String, Instant>,
     /// Watchers waiting for a screen.
     owed: BTreeSet<String>,
+    /// Who asks to type, since when.
+    asking: BTreeMap<String, Instant>,
+    typists: BTreeMap<String, Typist>,
 }
 
 impl Default for Host {
     fn default() -> Self {
-        let mut id = [0; 16];
-        crate::identity::random_bytes(&mut id).expect("system randomness");
         Self {
-            id,
+            id: random(),
             seq: 0,
             watchers: BTreeSet::new(),
             screens: BTreeMap::new(),
             owed: BTreeSet::new(),
+            asking: BTreeMap::new(),
+            typists: BTreeMap::new(),
         }
     }
 }
@@ -186,26 +254,122 @@ impl Host {
         self.seq
     }
 
-    /// A viewer's message. Anyone in the call may watch.
-    pub fn receive(&mut self, from: &str, message: &Message) {
+    /// A viewer's message. Anyone in the call may watch; only watchers may ask to type,
+    /// and only those the sharer allowed may. `online` says whether the sharer is
+    /// connected to the server and so knows who the sender is: without that nobody may
+    /// ask or type.
+    pub fn receive(&mut self, from: &str, message: Message, online: bool, now: Instant) -> Step {
+        if message.id() != self.id {
+            return Step::Nothing;
+        }
+        let id = self.id;
         match message {
-            Message::Watch { id } if *id == self.id => {
+            Message::Watch { .. } => {
                 self.watchers.insert(from.to_owned());
                 self.owed.insert(from.to_owned());
+                Step::Nothing
             }
-            Message::Unwatch { id } if *id == self.id => {
-                self.watchers.remove(from);
-                self.owed.remove(from);
+            Message::Unwatch { .. } => self.unwatch(from),
+            Message::Request { .. } => {
+                if !online || !self.watchers.contains(from) {
+                    return Step::Reply(Message::Deny { id });
+                }
+                if self.typists.contains_key(from) {
+                    return Step::Nothing;
+                }
+                // Asking again restarts the wait.
+                self.asking.insert(from.to_owned(), now);
+                Step::Ask
             }
-            _ => {}
+            Message::Withdraw { .. } => {
+                let asked = self.asking.remove(from).is_some();
+                let typed = self.typists.remove(from).is_some();
+                if asked || typed {
+                    Step::Ended
+                } else {
+                    Step::Nothing
+                }
+            }
+            Message::Input {
+                session, seq, data, ..
+            } => {
+                let Some(typist) = self.typists.get_mut(from) else {
+                    return Step::Nothing;
+                };
+                if !online || session != typist.session || seq <= typist.seq {
+                    return Step::Nothing;
+                }
+                typist.seq = seq;
+                let elapsed = now.saturating_duration_since(typist.at).as_secs_f64();
+                typist.budget = (typist.budget + elapsed * TYPE_RATE).min(TYPE_BURST);
+                typist.at = now;
+                if (data.len() as f64) > typist.budget {
+                    return Step::Nothing;
+                }
+                typist.budget -= data.len() as f64;
+                Step::Type(data)
+            }
+            _ => Step::Nothing,
         }
     }
 
-    /// Someone left the call.
-    pub fn left(&mut self, who: &str) {
+    /// Who asks to type now, longest waiting first.
+    pub fn askers(&self, now: Instant) -> Vec<&str> {
+        let mut askers: Vec<_> = (self.asking.iter())
+            .filter(|(_, at)| now.duration_since(**at) < REQUEST_TIMEOUT)
+            .collect();
+        askers.sort_by_key(|(_, at)| **at);
+        askers.into_iter().map(|(who, _)| who.as_str()).collect()
+    }
+
+    /// Who may type.
+    pub fn typists(&self) -> impl Iterator<Item = &str> {
+        self.typists.keys().map(String::as_str)
+    }
+
+    /// The sharer answered `who`'s request. `None` unless that request is still open:
+    /// an "Allow" never outlives the request it was meant for.
+    pub fn answer(&mut self, who: &str, allow: bool, now: Instant) -> Option<Message> {
+        let at = self.asking.remove(who)?;
+        let id = self.id;
+        let open = now.duration_since(at) < REQUEST_TIMEOUT && self.watchers.contains(who);
+        if !allow || !open {
+            return Some(Message::Deny { id });
+        }
+        let session = random();
+        let typist = Typist {
+            session,
+            seq: 0,
+            budget: TYPE_BURST,
+            at: now,
+        };
+        self.typists.insert(who.to_owned(), typist);
+        Some(Message::Grant { id, session })
+    }
+
+    /// Take typing back from `who`.
+    pub fn revoke(&mut self, who: &str) -> Option<Message> {
+        self.typists.remove(who)?;
+        Some(Message::Revoke { id: self.id })
+    }
+
+    /// Someone left the call: they no longer watch or type, and the wait before their
+    /// next screen is forgotten.
+    pub fn left(&mut self, who: &str) -> Step {
+        self.screens.remove(who);
+        self.unwatch(who)
+    }
+
+    /// Someone stopped watching: they may no longer type either.
+    fn unwatch(&mut self, who: &str) -> Step {
         self.watchers.remove(who);
         self.owed.remove(who);
-        self.screens.remove(who);
+        let asked = self.asking.remove(who).is_some();
+        if self.typists.remove(who).is_some() || asked {
+            Step::Ended
+        } else {
+            Step::Nothing
+        }
     }
 
     /// This watcher needs the screen again.
@@ -254,6 +418,28 @@ pub enum Feed {
     Resync,
     /// The share stopped.
     Ended,
+    /// What the sharer said about typing.
+    Typing(Access),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Access {
+    Granted,
+    Denied,
+    /// Taken back.
+    Revoked,
+}
+
+/// Asking to type in a terminal we watch, or typing in it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum Typing {
+    #[default]
+    Idle,
+    Asking,
+    Granted {
+        session: Session,
+        seq: u64,
+    },
 }
 
 enum Sync {
@@ -277,6 +463,7 @@ pub struct Viewer {
     /// Bytes we may still take now, and when that was worked out.
     budget: f64,
     at: Instant,
+    pub typing: Typing,
 }
 
 impl Viewer {
@@ -287,7 +474,39 @@ impl Viewer {
             sync: Sync::Waiting,
             budget: VIEW_BURST,
             at: Instant::now(),
+            typing: Typing::Idle,
         }
+    }
+
+    /// Ask to type.
+    pub fn ask(&mut self) -> Message {
+        self.typing = Typing::Asking;
+        Message::Request { id: self.id }
+    }
+
+    /// Stop asking or typing; `None` if we did neither.
+    pub fn release(&mut self) -> Option<Message> {
+        let was = std::mem::take(&mut self.typing);
+        (was != Typing::Idle).then_some(Message::Withdraw { id: self.id })
+    }
+
+    /// What we typed, split into numbered messages, while allowed to type.
+    pub fn input(&mut self, bytes: &[u8]) -> Vec<Message> {
+        let Typing::Granted { session, seq } = &mut self.typing else {
+            return Vec::new();
+        };
+        bytes
+            .chunks(MAX_INPUT)
+            .map(|chunk| {
+                *seq += 1;
+                Message::Input {
+                    id: self.id,
+                    session: *session,
+                    seq: *seq,
+                    data: chunk.to_vec(),
+                }
+            })
+            .collect()
     }
 
     /// The message that asks for the screen.
@@ -361,8 +580,23 @@ impl Viewer {
             Message::Resize {
                 seq, cols, rows, ..
             } => self.next(seq, Feed::Resize { cols, rows }),
-            Message::End { .. } => Feed::Ended,
-            Message::Watch { .. } | Message::Unwatch { .. } => Feed::Nothing,
+            Message::End { .. } => {
+                self.typing = Typing::Idle;
+                Feed::Ended
+            }
+            Message::Grant { session, .. } if self.typing == Typing::Asking => {
+                self.typing = Typing::Granted { session, seq: 0 };
+                Feed::Typing(Access::Granted)
+            }
+            Message::Deny { .. } if self.typing == Typing::Asking => {
+                self.typing = Typing::Idle;
+                Feed::Typing(Access::Denied)
+            }
+            Message::Revoke { .. } if matches!(self.typing, Typing::Granted { .. }) => {
+                self.typing = Typing::Idle;
+                Feed::Typing(Access::Revoked)
+            }
+            _ => Feed::Nothing,
         }
     }
 
@@ -478,7 +712,7 @@ mod tests {
     fn watched(now: Instant) -> (Host, Viewer) {
         let mut host = Host::default();
         let mut viewer = Viewer::new(SHARER, host.id);
-        host.receive("ada", &viewer.watch());
+        host.receive("ada", viewer.watch(), true, Instant::now());
         assert_eq!(host.due(now), ["ada"]);
         let parts = snapshot(&host, 80, 24, &vec![b'x'; MAX_CHUNK + 10]);
         assert_eq!(parts.len(), 2);
@@ -532,7 +766,7 @@ mod tests {
         // Until the new screen arrives, output is part of it.
         let more = data(&mut host, b"more");
         assert_eq!(viewer.receive(SHARER, more[0].clone()), Feed::Nothing);
-        host.receive("ada", &viewer.watch());
+        host.receive("ada", viewer.watch(), true, Instant::now());
         // Not before the last screen is old enough.
         assert!(host.due(now).is_empty());
         let later_on = now + SNAPSHOT_EVERY;
@@ -558,9 +792,14 @@ mod tests {
         let other = Message::End { id: [9; 16] };
         assert_eq!(viewer.receive(SHARER, other), Feed::Nothing);
         // A watch for another share adds nobody.
-        host.receive("bob", &Message::Watch { id: [9; 16] });
+        host.receive("bob", Message::Watch { id: [9; 16] }, true, Instant::now());
         assert_eq!(host.watchers().collect::<Vec<_>>(), ["ada"]);
-        host.receive("ada", &Message::Unwatch { id: host.id });
+        host.receive(
+            "ada",
+            Message::Unwatch { id: host.id },
+            true,
+            Instant::now(),
+        );
         assert_eq!(host.watchers().count(), 0);
     }
 
@@ -568,7 +807,7 @@ mod tests {
     fn resync_sends_everyone_a_screen_in_turn() {
         let now = Instant::now();
         let (mut host, _) = watched(now);
-        host.receive("bob", &Message::Watch { id: host.id });
+        host.receive("bob", Message::Watch { id: host.id }, true, Instant::now());
         host.resync();
         // Bob never had a screen; Ada waits until hers is old enough.
         assert_eq!(host.due(now), ["bob"]);
@@ -602,14 +841,14 @@ mod tests {
         let now = Instant::now();
         let (mut host, viewer) = watched(now);
         for _ in 0..5 {
-            host.receive("ada", &Message::Unwatch { id: host.id });
-            host.receive("ada", &viewer.watch());
+            host.receive("ada", Message::Unwatch { id: host.id }, true, now);
+            host.receive("ada", viewer.watch(), true, now);
             assert!(host.due(now).is_empty());
         }
         assert_eq!(host.due(now + SNAPSHOT_EVERY), ["ada"]);
         // Leaving the call forgets it.
         host.left("ada");
-        host.receive("ada", &viewer.watch());
+        host.receive("ada", viewer.watch(), true, now);
         assert_eq!(host.due(now + SNAPSHOT_EVERY), ["ada"]);
     }
 
@@ -630,5 +869,136 @@ mod tests {
         let next = data(&mut host, b"next");
         let bytes = viewer.receive_at(SHARER, next[0].clone(), later);
         assert_eq!(bytes, Feed::Bytes(b"next".to_vec()));
+    }
+
+    /// Ada watches and asked to type; the sharer allows her.
+    fn typing(now: Instant) -> (Host, Viewer) {
+        let (mut host, mut viewer) = watched(now);
+        assert_eq!(host.receive("ada", viewer.ask(), true, now), Step::Ask);
+        assert_eq!(host.askers(now), ["ada"]);
+        let grant = host.answer("ada", true, now).unwrap();
+        assert_eq!(viewer.receive(SHARER, grant), Feed::Typing(Access::Granted));
+        assert_eq!(host.typists().collect::<Vec<_>>(), ["ada"]);
+        (host, viewer)
+    }
+
+    #[test]
+    fn an_allowed_viewer_types_in_order() {
+        let now = Instant::now();
+        let (mut host, mut viewer) = typing(now);
+        let typed = viewer.input(b"ls\r");
+        assert_eq!(
+            host.receive("ada", typed[0].clone(), true, now),
+            Step::Type(b"ls\r".to_vec())
+        );
+        // A replay is dropped.
+        assert_eq!(
+            host.receive("ada", typed[0].clone(), true, now),
+            Step::Nothing
+        );
+        // A long paste is split and numbered.
+        let paste = viewer.input(&[b'x'; MAX_INPUT + 1]);
+        assert_eq!(paste.len(), 2);
+        for part in paste {
+            assert!(matches!(
+                host.receive("ada", part, true, now),
+                Step::Type(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn input_from_anyone_not_allowed_is_dropped() {
+        let now = Instant::now();
+        let (mut host, mut viewer) = typing(now);
+        let typed = viewer.input(b"whoami\r");
+        // Another device, even with Ada's session; and nothing while offline.
+        assert_eq!(
+            host.receive("bob", typed[0].clone(), true, now),
+            Step::Nothing
+        );
+        assert_eq!(
+            host.receive("ada", typed[0].clone(), false, now),
+            Step::Nothing
+        );
+        // A made-up session.
+        let id = host.id;
+        let forged = |seq| Message::Input {
+            id,
+            session: [0; 16],
+            seq,
+            data: b"x".to_vec(),
+        };
+        assert_eq!(host.receive("ada", forged(99), true, now), Step::Nothing);
+        // Taken back, stopped watching or left: nothing more.
+        let revoke = host.revoke("ada").unwrap();
+        assert_eq!(
+            viewer.receive(SHARER, revoke),
+            Feed::Typing(Access::Revoked)
+        );
+        assert!(viewer.input(b"x").is_empty());
+        assert_eq!(host.receive("ada", forged(100), true, now), Step::Nothing);
+        let (mut host, mut viewer) = typing(now);
+        let unwatch = Message::Unwatch { id: host.id };
+        assert_eq!(host.receive("ada", unwatch, true, now), Step::Ended);
+        let typed = viewer.input(b"x");
+        assert_eq!(
+            host.receive("ada", typed[0].clone(), true, now),
+            Step::Nothing
+        );
+        let (mut host, mut viewer) = typing(now);
+        assert_eq!(host.left("ada"), Step::Ended);
+        let typed = viewer.input(b"x");
+        assert_eq!(
+            host.receive("ada", typed[0].clone(), true, now),
+            Step::Nothing
+        );
+    }
+
+    #[test]
+    fn asking_needs_watching_a_connection_and_a_fresh_answer() {
+        let now = Instant::now();
+        let mut host = Host::default();
+        let request = Message::Request { id: host.id };
+        let deny = Step::Reply(Message::Deny { id: host.id });
+        // Not watching, or the sharer can't tell who asks.
+        assert_eq!(host.receive("bob", request.clone(), true, now), deny);
+        host.receive("bob", Message::Watch { id: host.id }, true, now);
+        assert_eq!(host.receive("bob", request.clone(), false, now), deny);
+        assert_eq!(host.receive("bob", request.clone(), true, now), Step::Ask);
+        // Too late: the request lapsed, and an "Allow" denies.
+        let late = now + REQUEST_TIMEOUT;
+        assert!(host.askers(late).is_empty());
+        let denied = Some(Message::Deny { id: host.id });
+        assert_eq!(host.answer("bob", true, late), denied);
+        assert_eq!(host.typists().count(), 0);
+        // An answer to nobody does nothing; a withdrawn request can't be allowed.
+        assert_eq!(host.answer("bob", true, now), None);
+        host.receive("bob", request, true, now);
+        let withdraw = Message::Withdraw { id: host.id };
+        assert_eq!(host.receive("bob", withdraw, true, now), Step::Ended);
+        assert_eq!(host.answer("bob", true, now), None);
+    }
+
+    #[test]
+    fn typing_is_rate_limited() {
+        let now = Instant::now();
+        let (mut host, mut viewer) = typing(now);
+        let typed: Vec<_> = (0..20)
+            .flat_map(|_| viewer.input(&[b'x'; MAX_INPUT]))
+            .collect();
+        let taken = (typed.into_iter())
+            .filter(|message| {
+                matches!(
+                    host.receive("ada", message.clone(), true, now),
+                    Step::Type(_)
+                )
+            })
+            .count();
+        assert_eq!(taken, 16);
+        // A second later there's room again.
+        let later = viewer.input(&[b'x'; MAX_INPUT]);
+        let step = host.receive("ada", later[0].clone(), true, now + Duration::from_secs(1));
+        assert!(matches!(step, Step::Type(_)));
     }
 }

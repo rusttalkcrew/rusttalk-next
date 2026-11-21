@@ -421,6 +421,7 @@ impl Inner {
     }
 }
 
+/// The writer is apart from the rest, so typing never waits for output being read.
 #[derive(Clone)]
 pub struct Shared {
     inner: Arc<Mutex<Inner>>,
@@ -750,6 +751,7 @@ fn cell(ui: &Ui, font: f32) -> Vec2 {
 
 /// How many columns and rows fit `rect` at the normal text size.
 pub fn fit(ui: &Ui, rect: Rect) -> (u16, u16) {
+    let rect = rect.shrink(ui::SPACE_XS);
     let size = cell(ui, ui::TEXT_MONO);
     let cols = (rect.width() / size.x).floor().clamp(0.0, 500.0) as u16;
     let rows = (rect.height() / size.y).floor().clamp(0.0, 200.0) as u16;
@@ -814,6 +816,8 @@ fn paint(ui: &Ui, rect: Rect, emulator: &Emulator, focused: bool) -> Layout {
     let (fg, bg) = (c.text, c.side);
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, ui::RADIUS, bg);
+    // A little room so text doesn't touch the tile's edge.
+    let rect = rect.shrink(ui::SPACE_XS);
     let (cols, rows) = emulator.size();
     let unit = cell(ui, 100.0) / 100.0;
     let font = (ui::TEXT_MONO)

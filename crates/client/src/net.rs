@@ -47,7 +47,7 @@ mod control;
 mod directory;
 mod files;
 mod find;
-mod terminal;
+pub mod terminal;
 mod voice;
 
 pub use admin::{Admin, AdminUpdate, AuditEntry, Ban, Invite, PublicListing};
@@ -165,6 +165,15 @@ pub enum Command {
     StopTerminal,
     /// Watch the terminal this device (LiveKit identity) shares, or stop watching.
     WatchTerminal(Option<String>),
+    /// Allow (`true`) or deny this device's request to type in our terminal.
+    AnswerTyping(String, bool),
+    /// Take typing in our terminal back from this device.
+    RevokeTyping(String),
+    /// Ask to type in the terminal we watch, or stop asking or typing.
+    AskToType,
+    StopTyping,
+    /// Bytes typed into the terminal we watch.
+    TypeInTerminal(Vec<u8>),
 }
 
 /// A message to send, and what goes back to the composer when sending fails.
@@ -309,6 +318,8 @@ pub enum Update {
     Terminal(rusttalk_core::terminal::Feed),
     /// Our terminal share couldn't start.
     TerminalStopped,
+    /// Who asks to type in our terminal, and who may.
+    TerminalGuests(terminal::Guests),
     Stats(Url, Stats),
     /// A file upload in a channel started or went on (what to show, and how far), or ended.
     Uploading(Url, Id, Option<(String, f32)>),
@@ -1096,9 +1107,7 @@ async fn voice_next(
             ..
         })) => {
             if topic.as_deref() == Some(rusttalk_core::client::voice::terminal::TOPIC) {
-                if let Some(live) = &mut state.voice {
-                    terminal::received(ctx, live, &participant.identity(), &payload).await;
-                }
+                voice::terminal_received(ctx, client, state, &participant, &payload).await;
             } else {
                 voice::control_received(ctx, client, state, &participant, &payload).await;
             }
@@ -1591,7 +1600,12 @@ async fn on_command(
         | Command::ControlInput(_)
         | Command::ShareTerminal(_)
         | Command::StopTerminal
-        | Command::WatchTerminal(_) => unreachable!("handled by voice_command"),
+        | Command::WatchTerminal(_)
+        | Command::AnswerTyping(..)
+        | Command::RevokeTyping(_)
+        | Command::AskToType
+        | Command::StopTyping
+        | Command::TypeInTerminal(_) => unreachable!("handled by voice_command"),
     }
     Ok(())
 }

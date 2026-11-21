@@ -319,7 +319,7 @@ pub fn frame(ctx: &egui::Context, home: &mut Home) {
         ctx.request_repaint_after(Duration::from_millis(100));
     }
     remote::frame(home, ctx.input(|input| input.time));
-    terminal::frame(home);
+    terminal::frame(home, ctx.input(|input| input.time));
     // Stop watching a screen once it is no longer shared.
     if let Some(watching) = &home.voice.watching {
         let shared = call_server(home)

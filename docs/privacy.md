@@ -179,8 +179,11 @@ viewers ask for are encrypted and authenticated with keys derived from the
 room's media key, and each message is bound to its sender and recipient.
 Because those keys come from the channel's media key, a member of the
 channel who also controls the media server could read a shared terminal or
-pose as another device in the call. Everyone watching sees everything the terminal shows, so the app warns the
-first time someone shares one. Nothing about a shared terminal is stored by
+pose as another device in the call, and so type in it. Requests to type,
+answers and typed bytes are sealed the same way; LiveKit sees their sizes
+and timing, which reveal roughly when someone types. Everyone watching sees
+everything the terminal shows, so the app warns the first time someone
+shares one. Nothing about a shared terminal is stored by
 the API or LiveKit; the output lives only in each device's memory while it
 is shown.
 

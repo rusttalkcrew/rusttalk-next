@@ -590,6 +590,25 @@ pub(super) async fn control_received(
     }
 }
 
+/// A sealed terminal message from someone in the call; `client` as for `control_received`.
+pub(super) async fn terminal_received(
+    ctx: &Ctx,
+    client: Option<&KeyClient<'_>>,
+    state: &mut State,
+    from: &RemoteParticipant,
+    wire: &[u8],
+) {
+    let from = from.identity();
+    let person = client.and_then(|client| {
+        identities(client, &state.server_id)
+            .get(from.as_str())
+            .copied()
+    });
+    if let Some(live) = &mut state.voice {
+        terminal::received(ctx, live, &from, person, wire).await;
+    }
+}
+
 /// Give audio from devices that weren't known when it arrived its person, now that the
 /// API names them (after reconnecting, or once their device is synced).
 pub(super) fn name_audio(ctx: &Ctx, client: &KeyClient<'_>, state: &mut State) {

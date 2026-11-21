@@ -16,7 +16,7 @@ use super::{
     overlay::{self, Overlay, Row},
     remote::Control,
     ring, sound_badges, stop_watching,
-    terminal::{self, Terminals},
+    terminal::{self, Terminals, Typing},
     upload, watch,
 };
 use crate::{
@@ -345,6 +345,9 @@ enum Act {
     /// Watch the terminal this device shares.
     WatchTerminal(String),
     StopWatchingTerminal,
+    /// Ask to type in the terminal we watch, or stop asking or typing.
+    AskToType,
+    TypeInTerminal(Vec<u8>),
 }
 
 /// The tiles in this room: shared screens first, then people.
@@ -588,6 +591,10 @@ pub fn stage(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
             Tile::Screen(sid) if joined && !entry.me => control.screen(sid),
             _ => None,
         };
+        let typing = match entry.tile {
+            Tile::Terminal(_) if entry.watched => terms.typing,
+            _ => Typing::Idle,
+        };
         let state = TileState {
             relation: home.friends.relation(&entry.peer.person),
             joined,
@@ -595,6 +602,7 @@ pub fn stage(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
             spotlight: big.is_some(),
             focused,
             remote,
+            typing,
         };
         let overlay = Overlay::new(&entry.tile, split.show_fps, split.nerd_stats, stats);
         let tools = (&mut *control, &mut *terms);
@@ -686,6 +694,8 @@ struct TileState {
     focused: bool,
     /// This screen is ours to control (`true`), or we asked to.
     remote: Option<bool>,
+    /// Typing in this terminal we watch.
+    typing: Typing,
 }
 
 /// One tile: picture or video, speaking outline, name and badges, and its actions
@@ -849,13 +859,18 @@ fn tile(
         if entry.me
             && let Some(local) = &mut terms.local
         {
-            terminal::ours(ui, rect, local, active, &entry.name);
+            let guests = (&terms.guests, Some(server));
+            terminal::ours(ui, rect, local, guests, active, &entry.name);
         } else if entry.watched {
+            let typing = state.typing == Typing::On;
             let screen = terms
                 .watching
                 .as_mut()
                 .and_then(|(_, screen)| screen.as_mut());
-            terminal::theirs(ui, rect, screen, active, &entry.name);
+            let typed = terminal::theirs(ui, rect, screen, (active, typing), &entry.name);
+            if !typed.is_empty() {
+                acts.push(Act::TypeInTerminal(typed));
+            }
         }
     }
     if let Some(on) = state.remote {
@@ -1152,7 +1167,17 @@ fn tools(
     {
         acts.push(Act::Full(entry.tile.clone()));
     }
-    if remote && room() {
+    if remote && terminal && room() {
+        let on = Look::On(ui::accent(ui).base);
+        let (tip, look) = match state.typing {
+            Typing::Idle => (t!("terminal.ask_to_type"), Look::Plain),
+            Typing::Asking(_) => (t!("call.cancel_request"), on),
+            Typing::On => (t!("terminal.stop_typing"), on),
+        };
+        if ui::icon_button(ui, "⌨", tip, look, TOOL).clicked() {
+            acts.push(Act::AskToType);
+        }
+    } else if remote && room() {
         let on = Look::On(ui::accent(ui).base);
         let (tip, look) = match state.remote {
             None => (t!("call.request_control"), Look::Plain),
@@ -1218,6 +1243,8 @@ fn apply(home: &mut Home, index: usize, now: f64, acts: Vec<Act>) {
             Act::RequestControl(sid) => send(home, Command::RequestControl(sid)),
             Act::ReleaseControl => send(home, Command::ReleaseControl),
             Act::Control(inputs) => send(home, Command::ControlInput(inputs)),
+            Act::AskToType => terminal::ask(home, now),
+            Act::TypeInTerminal(bytes) => terminal::send_typed(home, bytes),
             Act::WatchTerminal(sharer) => terminal::watch(home, &sharer),
             Act::StopWatchingTerminal => {
                 // Like a screen: a big terminal would be watched again at once.
@@ -1294,16 +1321,25 @@ pub fn full_view(ui: &mut Ui, home: &mut Home) {
         });
         ui.add_space(ui::SPACE_S);
         let (rect, _) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
+        // Field by field, so the terminals stay writable.
+        let server = home
+            .voice
+            .call
+            .as_ref()
+            .and_then(|call| (home.servers.iter()).find(|s| s.address == call.server));
         let terms = &mut home.voice.terminals;
+        let mut typed = Vec::new();
         if let (true, Some(local)) = (me, &mut terms.local) {
-            terminal::ours(ui, rect, local, true, &name);
+            terminal::ours(ui, rect, local, (&terms.guests, server), true, &name);
         } else {
+            let typing = terms.typing == Typing::On;
             let screen = terms
                 .watching
                 .as_mut()
                 .and_then(|(_, screen)| screen.as_mut());
-            terminal::theirs(ui, rect, screen, true, &name);
+            typed = terminal::theirs(ui, rect, screen, (true, typing), &name);
         }
+        terminal::send_typed(home, typed);
         if exit {
             home.voice.stage.full = None;
         }
