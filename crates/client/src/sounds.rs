@@ -16,10 +16,12 @@ pub enum Cue {
     StreamStopped,
     ViewerStarted,
     ViewerStopped,
+    Deafened,
+    Undeafened,
 }
 
 impl Cue {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 10] = [
         Self::YouJoined,
         Self::YouLeft,
         Self::PeerJoined,
@@ -28,6 +30,8 @@ impl Cue {
         Self::StreamStopped,
         Self::ViewerStarted,
         Self::ViewerStopped,
+        Self::Deafened,
+        Self::Undeafened,
     ];
 
     pub fn label(self) -> &'static str {
@@ -40,6 +44,8 @@ impl Cue {
             Self::StreamStopped => t!("sounds.stream_stopped"),
             Self::ViewerStarted => t!("sounds.viewer_started"),
             Self::ViewerStopped => t!("sounds.viewer_stopped"),
+            Self::Deafened => t!("sounds.deafened"),
+            Self::Undeafened => t!("sounds.undeafened"),
         }
     }
 
@@ -54,6 +60,9 @@ impl Cue {
             Self::StreamStopped => &[698.46, 523.25, 349.23],
             Self::ViewerStarted => &[783.99, 880.0],
             Self::ViewerStopped => &[880.0, 698.46],
+            // Lower than every other chime, so they are not mistaken for a join or leave.
+            Self::Deafened => &[293.66, 220.0],
+            Self::Undeafened => &[220.0, 293.66],
         };
         let volume = volume.clamp(0.0, 1.0);
         notes.iter().flat_map(move |&hz| {
