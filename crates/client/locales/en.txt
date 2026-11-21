@@ -717,6 +717,8 @@ call.stat_decoded = Decoded
 call.stat_dropped = Dropped
 call.stat_encoded = Encoded
 call.stat_limited = Limited by
+call.limit_cpu = CPU
+call.limit_bandwidth = Bandwidth
 
 # crates/client/src/call/remote.rs
 remote.share_opt_in = Allow control requests

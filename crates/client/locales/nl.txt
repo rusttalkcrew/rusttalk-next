@@ -714,6 +714,8 @@ call.stat_decoded = Gedecodeerd
 call.stat_dropped = Overgeslagen
 call.stat_encoded = Gecodeerd
 call.stat_limited = Beperkt door
+call.limit_cpu = CPU
+call.limit_bandwidth = Bandbreedte
 
 # crates/client/src/call/remote.rs
 remote.share_opt_in = Bedieningsverzoeken toestaan

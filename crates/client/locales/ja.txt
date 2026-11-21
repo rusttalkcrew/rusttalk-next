@@ -714,6 +714,8 @@ call.stat_decoded = デコード済み
 call.stat_dropped = 破棄
 call.stat_encoded = エンコード済み
 call.stat_limited = 制限要因
+call.limit_cpu = CPU
+call.limit_bandwidth = 帯域幅
 
 # crates/client/src/call/remote.rs
 remote.share_opt_in = 操作リクエストを許可

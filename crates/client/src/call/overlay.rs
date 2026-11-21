@@ -88,7 +88,9 @@ impl Overlay {
                 return;
             }
         }
-        if self.fps
+        // Nerd stats include the frame rate, so the chip stands in for a panel that
+        // does not fit.
+        if (self.fps || self.nerd)
             && let Some(line) = fps_line(track)
         {
             chip(ui, at, &line);
@@ -102,30 +104,38 @@ pub fn fps_line(track: &TrackStats) -> Option<String> {
     Some(format!("{:.0} fps · {}p", video.fps, video.height))
 }
 
-/// Label and value of each line in the fuller overlay; missing numbers are left out.
+/// Label and value of each line in the fuller overlay. A number not reported yet
+/// shows as a dash, so the rows stay put while the stats arrive.
 pub fn nerd_rows(track: &TrackStats, ping_ms: Option<f64>) -> Vec<(String, String)> {
-    let mut rows = Vec::new();
-    let mut add = |label: &str, value: String| rows.push((label.to_owned(), value));
-    if let Some(video) = track.video {
-        let (w, h, fps) = (video.width, video.height, video.fps);
-        add(t!("call.stat_picture"), format!("{w}×{h} · {fps:.0} fps"));
-    }
-    add(t!("call.stat_bitrate"), format!("{:.0} kbps", track.kbps));
+    let dash = || "—".to_owned();
     let detail = track.detail.as_ref();
-    if let Some(codec) = detail.and_then(|d| d.codec.as_deref()) {
-        add(
-            t!("call.stat_codec"),
-            codec.trim_start_matches("video/").to_owned(),
-        );
-    }
-    if let Some(implementation) = detail.and_then(|d| d.implementation.clone()) {
-        let label = if track.mine {
-            t!("call.stat_encoder")
-        } else {
-            t!("call.stat_decoder")
-        };
-        add(label, implementation);
-    }
+    let mut rows = Vec::new();
+    let mut add = |label: &str, value: Option<String>| {
+        rows.push((label.to_owned(), value.unwrap_or_else(dash)));
+    };
+    add(
+        t!("call.stat_picture"),
+        track.video.map(|v| {
+            let (w, h, fps) = (v.width, v.height, v.fps);
+            format!("{w}×{h} · {fps:.0} fps")
+        }),
+    );
+    add(
+        t!("call.stat_bitrate"),
+        Some(format!("{:.0} kbps", track.kbps)),
+    );
+    add(
+        t!("call.stat_codec"),
+        detail
+            .and_then(|d| d.codec.as_deref())
+            .map(|codec| codec.trim_start_matches("video/").to_owned()),
+    );
+    let label = if track.mine {
+        t!("call.stat_encoder")
+    } else {
+        t!("call.stat_decoder")
+    };
+    add(label, detail.and_then(|d| d.implementation.clone()));
     let loss = match (track.lost, track.received) {
         (Some(lost), Some(received)) if lost + received as i64 > 0 => Some(format!(
             "{:.1}% ({lost})",
@@ -134,28 +144,35 @@ pub fn nerd_rows(track: &TrackStats, ping_ms: Option<f64>) -> Vec<(String, Strin
         (Some(lost), None) => Some(lost.to_string()),
         _ => None,
     };
-    if let Some(loss) = loss {
-        add(t!("call.stat_loss"), loss);
+    add(t!("call.stat_loss"), loss);
+    add(
+        t!("call.jitter"),
+        track.jitter_ms.map(|jitter| format!("{jitter:.0} ms")),
+    );
+    add(
+        t!("call.stat_rtt"),
+        ping_ms.map(|ping| format!("{ping:.0} ms")),
+    );
+    let label = if track.mine {
+        t!("call.stat_encoded")
+    } else {
+        t!("call.stat_decoded")
+    };
+    add(label, detail.map(|d| d.frames.to_string()));
+    if !track.mine {
+        add(
+            t!("call.stat_dropped"),
+            detail.and_then(|d| d.dropped).map(|n| n.to_string()),
+        );
     }
-    if let Some(jitter) = track.jitter_ms {
-        add(t!("call.jitter"), format!("{jitter:.0} ms"));
-    }
-    if let Some(ping) = ping_ms {
-        add(t!("call.stat_rtt"), format!("{ping:.0} ms"));
-    }
-    if let Some(detail) = detail {
-        let label = if track.mine {
-            t!("call.stat_encoded")
-        } else {
-            t!("call.stat_decoded")
+    // Only said when something holds the encoder back.
+    if let Some(limit) = detail.and_then(|d| d.limited_by) {
+        let text = match limit {
+            "cpu" => t!("call.limit_cpu"),
+            "bandwidth" => t!("call.limit_bandwidth"),
+            other => other,
         };
-        add(label, detail.frames.to_string());
-        if let Some(dropped) = detail.dropped {
-            add(t!("call.stat_dropped"), dropped.to_string());
-        }
-        if let Some(limit) = detail.limited_by {
-            add(t!("call.stat_limited"), limit.to_owned());
-        }
+        add(t!("call.stat_limited"), Some(text.to_owned()));
     }
     rows
 }
@@ -209,6 +226,7 @@ fn panel(ui: &Ui, tile: Rect, at: Pos2, rows: &[(String, String)]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use eframe::egui;
     use rusttalk_core::client::voice::{VideoDetail, VideoFormat};
 
     use super::*;
@@ -274,12 +292,61 @@ mod tests {
         let rows = text(&nerd_rows(&track(true), None));
         assert!(rows.contains(&"Encoder: libvpx".to_owned()));
         assert!(rows.contains(&"Packet loss: 12".to_owned()));
-        assert!(rows.contains(&"Limited by: bandwidth".to_owned()));
-        assert!(!rows.iter().any(|r| r.starts_with("Round trip")));
+        assert!(rows.contains(&"Limited by: Bandwidth".to_owned()));
+        assert!(rows.contains(&"Round trip: —".to_owned()));
+        // The rows stay put, with dashes, while numbers are missing.
         let mut bare = track(false);
         (bare.video, bare.detail, bare.jitter_ms) = (None, None, None);
         (bare.lost, bare.received) = (None, None);
-        assert_eq!(text(&nerd_rows(&bare, None)), ["Bitrate: 6120 kbps"]);
+        assert_eq!(
+            text(&nerd_rows(&bare, None)),
+            [
+                "Picture: —",
+                "Bitrate: 6120 kbps",
+                "Codec: —",
+                "Decoder: —",
+                "Packet loss: —",
+                "Jitter: —",
+                "Round trip: —",
+                "Decoded: —",
+                "Dropped: —",
+            ]
+        );
+    }
+
+    /// Everything the overlay painted, as text.
+    fn painted(overlay: &Overlay, size: Vec2) -> Vec<String> {
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(Default::default(), |ui| {
+            overlay.paint(ui, Rect::from_min_size(pos2(0.0, 0.0), size));
+        });
+        output.textures_delta.clear();
+        output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) => Some(text.galley.text().to_owned()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn nerd_stats_alone_still_show_a_line_on_a_tile_too_small_for_the_panel() {
+        let stats = Stats {
+            tracks: vec![track(false)],
+            ..Stats::default()
+        };
+        let tile = Tile::Screen("TR_screen".into());
+        let overlay = Overlay::new(&tile, false, true, Some(&stats));
+        assert_eq!(painted(&overlay, vec2(200.0, 100.0)), ["60 fps · 1080p"]);
+        // Room enough: the panel, not the line.
+        let big = painted(&overlay, vec2(600.0, 400.0));
+        assert_eq!(big.len(), 2);
+        assert!(big[1].contains("1920×1080"));
+        // Neither on: nothing.
+        let off = Overlay::new(&tile, false, false, Some(&stats));
+        assert!(painted(&off, vec2(600.0, 400.0)).is_empty());
     }
 
     #[test]
