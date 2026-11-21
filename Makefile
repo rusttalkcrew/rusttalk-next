@@ -92,6 +92,7 @@ fmt: ## Format all code
 test: ## Run unit and integration tests
 	@printf '\033[1;34m==> tests\033[0m\n'
 	cargo test $(CARGO_SCOPE) --locked
+	python3 -m unittest discover -s deploy/updater
 
 e2e: ## Run the two-stack membership, keys, chat, stored files, voice, app audio, screen, camera, live file, device sync and index scenarios
 	@printf '\033[1;34m==> Two-stack membership, keys, chat, stored files, voice, app audio, screen, camera, live file, device sync and index\033[0m\n'

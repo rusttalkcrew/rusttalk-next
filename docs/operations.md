@@ -273,52 +273,100 @@ IP bans match one IPv4 address or one IPv6 /64, so a person cannot rotate within
 
 ## Automatic updates
 
-Off by default. Without it you update by hand (see [Production](#production)).
-The optional `updater` service (a pinned [Watchtower](https://github.com/nicholas-fedor/watchtower)
-fork) checks the registry on a schedule and recreates the `api` and `index`
-containers when their image tag has a new image. It touches only containers
-labelled for it, never LiveKit, Caddy or your own services.
+The optional updater checks GitHub Releases every five minutes. It verifies
+the detached Ed25519 signature over `latest.json`, then accepts only a newer
+patch in the running server's configured `<major>.<minor>` series. If GitHub's
+latest release is in another series, update the server manually to change series.
 
-Turn on:
+### Turn on
 
-1. Back up first ([Production](#production)).
-2. In `deploy/.env` set `RUSTTALK_VERSION=<major>.<minor>` (for example `0.1`)
-   and keep `RUSTTALK_IMAGE_PREFIX=ghcr.io/rusttalkcrew/`. Pulling needs the
-   published images, not a local build.
-3. `docker compose --profile auto-update up -d --wait` (add
-   `-f docker-compose.yml -f compose.proxy.yml` behind your own proxy).
-4. Optional: `RUSTTALK_UPDATE_SCHEDULE` sets the check time, six fields with
-   seconds first, server local time. Default `0 0 4 * * *` (04:00 daily).
+From `deploy/`, take a [manual backup](#production) before enabling the updater
+or switching from Watchtower. If Watchtower is running, stop and remove the
+existing `updater` container first with
+`docker compose --profile auto-update stop updater` and
+`docker compose --profile auto-update rm -f updater`.
 
-Turn off: `docker compose --profile auto-update stop updater` and
-`docker compose --profile auto-update rm -f updater`, then pin an exact
-`RUSTTALK_VERSION` again if you want.
+1. Set `RUSTTALK_VERSION=<major>.<minor>` (for example `0.1`) and
+   `RUSTTALK_IMAGE_PREFIX=ghcr.io/rusttalkcrew/` in `.env`. Start the server
+   manually first if it is stopped or runs a different series.
+2. The Compose file supplies the official Ed25519 release public key. If
+   the project rotates it, update your Compose file or set the new trusted
+   64-character hexadecimal key in `RUSTTALK_RELEASE_PUBLIC_KEY`.
+3. Initialize the Compose override once:
 
-What it does and does not do:
+   ```sh
+   mkdir -p auto-update
+   test -f auto-update/images.yml || printf '{"services":{}}\n' > auto-update/images.yml
+   ```
 
-- **Patch releases only.** `<major>.<minor>` moves with patch releases. A new
-  minor (0.2) never installs by itself: change `RUSTTALK_VERSION` yourself,
-  after a backup, because it may migrate the database and cannot be rolled
-  back by switching the version.
-- **Images come from `ghcr.io/rusttalkcrew`**, published by the release
-  workflow. The updater does not verify signatures; trust is the registry and
-  the tag.
-- **No quiet-moment check.** It restarts the API at the scheduled time, which
-  drops everyone in a call and their connection for a few seconds. Pick an
-  hour nobody uses.
-- **No backup and no rollback.** A bad patch stays installed until you set
-  `RUSTTALK_VERSION` to the previous exact version and run `docker compose up -d`.
-  Back up regularly.
-- **Docker socket.** The updater mounts `/var/run/docker.sock`, which gives it
-  root-level control of the host. Leave the profile off if you do not accept that.
+   Set `COMPOSE_FILE=docker-compose.yml:auto-update/images.yml` in `.env`.
+   Behind your own proxy use
+   `COMPOSE_FILE=docker-compose.yml:compose.proxy.yml:auto-update/images.yml`.
+   Run Compose from this directory and put deployment settings in `.env` so
+   the updater uses the same settings. The last file carries the installed
+   image digests. Keep it when running Compose again.
+4. Run `docker compose --profile auto-update up -d --no-deps updater`.
+   This starts the updater alongside the running stack. On its first check,
+   the updater pins the running images before looking for a patch.
 
-Check the running version:
+The updater mounts the Docker socket, which gives it host-level control. It
+can also read your deployment configuration and write the data volumes and
+image override. Enable it only if you accept that access.
 
-```sh
-curl https://<host>/v1/server-info
-```
+### What happens during an update
 
-The `version` field is the API version. Updates do not show in the app yet.
+- The updater checks for LiveKit rooms. While a room exists, or LiveKit cannot
+  report its status, it holds the update. It installs when rooms clear. After
+  `RUSTTALK_UPDATE_HOLD_HOURS` (default 6) it can install during the next
+  `RUSTTALK_UPDATE_HOUR_UTC` hour (default 4, meaning 04:00–04:59 UTC) even
+  with a call in progress.
+- It pulls the signed image digests, rechecks activity, stops the API and
+  running index, checkpoints SQLite WALs and archives the full data volumes.
+  Expect downtime during the archive and restart. The archive includes the
+  server key and stored files.
+- It recreates the services by digest and checks their health endpoints and the
+  API version. If a candidate fails, it stops it, restores the archive and
+  restarts the previous images. Writes accepted by the candidate before rollback
+  are reverted. An interrupted transaction is recovered when the updater next
+  runs. Let the updater finish before manually recreating either service.
+  A failed release stays skipped until a newer patch appears or you install
+  it yourself.
+- The owner sees pending and last update results in **Server settings →
+  Overview**. For details use `docker compose --profile auto-update logs updater`.
+
+### Turn off and restore
+
+Stop and remove `updater` with the commands above. To keep the installed
+digests, keep the override in `COMPOSE_FILE`. To manage versions manually,
+remove the override entry and move `auto-update/images.yml` out of the
+deployment directory. Set `RUSTTALK_VERSION` to an exact release before the
+next `docker compose up`.
+
+Backups are UTC-timestamped `rusttalk-*.tar.gz` archives in the project's
+`update-backups` volume. The updater keeps the last `RUSTTALK_UPDATE_KEEP`
+(default 3). Keep independent copies if you need protection from disk loss.
+Each archive includes `release.json` with the previous version and image
+references. Treat the archives as private. Allow space for the archive and,
+on restore, an unpacked copy of the data.
+
+1. Finish any active update, then stop the updater and the backed-up services.
+   Save an independent copy of the current volumes before replacing them.
+
+   ```sh
+   docker compose --profile auto-update --profile index stop updater api index
+   docker compose --profile auto-update run --rm --no-deps --entrypoint ls updater -l /backups
+   ```
+2. Replace `ARCHIVE` with the desired filename. Restore replaces the API data
+   and, if the archive contains it, the index data.
+
+   ```sh
+   docker compose --profile auto-update run --rm --no-deps updater restore ARCHIVE
+   ```
+3. Remove the updater container and follow the manual version steps above.
+   Set the exact version printed by the restore command. Start the stack with
+   `docker compose up -d --wait` (include `--profile index` if you ran the
+   index). Check `/v1/server-info` and keep the updater off while verifying the
+   restored data.
 
 ## Releases and updates
 

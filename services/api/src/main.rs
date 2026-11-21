@@ -15,6 +15,7 @@ mod store;
 mod sync;
 #[cfg(test)]
 mod testing;
+mod updates;
 mod voice;
 
 use std::{
@@ -238,6 +239,7 @@ async fn serve(app: App) -> io::Result<()> {
     let app = Router::new()
         .route("/v1/health", get(|| async { "ok\n" }))
         .route("/v1/server-info", get(members::server_info))
+        .route("/v1/settings/updates", get(updates::status))
         .route(
             "/v1/settings/open-joining",
             get(members::open_joining).put(members::set_open_joining),
