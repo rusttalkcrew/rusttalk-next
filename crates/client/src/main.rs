@@ -23,6 +23,7 @@ mod mic_check;
 mod net;
 mod notify;
 mod official;
+mod paste;
 mod pokes;
 mod reorder;
 mod screen;
@@ -181,6 +182,9 @@ fn run(
             )
             .with_inner_size([1100.0, 700.0])
             .with_min_inner_size([760.0, 480.0]),
+        // Ctrl+V arrives as a key, so pictures and copied files can be pasted
+        // (paste.rs); it turns the other clipboard keys back into what they were.
+        clipboard_shortcuts: false,
         ..Default::default()
     };
     eframe::run_native(

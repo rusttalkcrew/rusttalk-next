@@ -152,6 +152,7 @@ common.show_more = Meer tonen
 home.members.one = {count} lid
 home.members.other = {count} leden
 home.drop_to_send = Loslaten om te sturen in {channel}
+home.drop_hint = Wordt aan je bericht toegevoegd, tot {max} bestanden
 home.chat_start = Dit is het begin van {channel}
 home.replying_to = Antwoord aan {name}
 home.cancel_reply = Antwoord annuleren

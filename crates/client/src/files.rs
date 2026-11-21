@@ -26,7 +26,7 @@ use crate::{
 };
 
 /// Files per message, as the message format allows.
-const MAX_FILES: usize = 4;
+pub const MAX_FILES: usize = 4;
 const THUMBNAIL: f32 = 320.0;
 /// Pictures kept before the cache is emptied; shown ones load again on demand.
 const MAX_PICTURES: usize = 200;
@@ -57,6 +57,8 @@ pub struct Files {
     /// A file dialog is open; answers arrive on `answers`.
     asking: bool,
     answers: Option<(mpsc::Sender<Answer>, mpsc::Receiver<Answer>)>,
+    /// Files pasted into a composer, read from the clipboard on their own thread.
+    pastes: (mpsc::Sender<Answer>, mpsc::Receiver<Answer>),
 }
 
 enum Picture {
@@ -127,6 +129,7 @@ impl Files {
             viewer: None,
             asking: false,
             answers: None,
+            pastes: mpsc::channel(),
         }
     }
 
@@ -228,15 +231,31 @@ impl Files {
         });
     }
 
-    /// Dialogs answered since the last frame.
+    /// Read the clipboard for files to attach (see paste.rs) on its own thread, so
+    /// the window keeps drawing. Without any, it becomes a text paste.
+    pub fn paste(&self, ctx: &egui::Context, ask: Ask) {
+        let pastes = self.pastes.0.clone();
+        let ctx = ctx.clone();
+        thread::spawn(move || {
+            match crate::paste::files() {
+                Some(paths) => {
+                    let _ = pastes.send((ask, paths));
+                }
+                None => ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaste),
+            }
+            ctx.request_repaint();
+        });
+    }
+
+    /// Dialogs answered and files pasted since the last frame.
     pub fn answers(&mut self) -> Vec<Answer> {
-        let Some((_, answers)) = &self.answers else {
-            return Vec::new();
-        };
-        let answers: Vec<_> = answers.try_iter().collect();
+        let mut answers: Vec<_> = (self.answers.iter())
+            .flat_map(|(_, answers)| answers.try_iter())
+            .collect();
         if !answers.is_empty() {
             self.asking = false;
         }
+        answers.extend(self.pastes.1.try_iter());
         answers
     }
 
@@ -256,8 +275,7 @@ impl Files {
         if matches!(self.saves.get(&file.file.id), Some(Saving::Busy(..))) {
             return;
         }
-        let folder =
-            std::env::temp_dir().join(format!("{OPENED}{}", hex::encode(&file.file.id[..8])));
+        let folder = temp_folder(&file.file.id[..8]);
         if let Err(error) = fs::create_dir_all(&folder) {
             tracing::warn!(%error, "making a folder to open a file failed");
             self.saves.insert(file.file.id, Saving::Failed);
@@ -273,23 +291,44 @@ const SAVED: &str = "saved.json";
 /// Prefix of the temporary folders that "Open" writes decrypted files to.
 const OPENED: &str = "rusttalk-";
 
-/// Remove decrypted files that "Open" left in the temporary directory
-/// (`rusttalk-` and 16 hex digits, so not the log folders). Failures are only logged.
+/// A temporary folder for an opened or pasted file, by 8 bytes of ID.
+pub fn temp_folder(id: &[u8]) -> PathBuf {
+    std::env::temp_dir().join(format!("{OPENED}{}", hex::encode(id)))
+}
+
+/// Whether this is one of our temporary folders: `rusttalk-` and 16 hex digits,
+/// so not the log folders.
+fn is_temp_folder(name: &std::ffi::OsStr) -> bool {
+    name.to_str()
+        .and_then(|name| name.strip_prefix(OPENED))
+        .is_some_and(|id| id.len() == 16 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
+/// Remove decrypted files that "Open" left in the temporary directory, and
+/// pasted pictures. Failures are only logged.
 pub fn clear_opened() {
     let Ok(entries) = fs::read_dir(std::env::temp_dir()) else {
         return;
     };
     for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(id) = name.to_str().and_then(|name| name.strip_prefix(OPENED)) else {
-            continue;
-        };
-        if id.len() == 16
-            && id.bytes().all(|byte| byte.is_ascii_hexdigit())
+        if is_temp_folder(&entry.file_name())
             && let Err(error) = fs::remove_dir_all(entry.path())
         {
             tracing::warn!(%error, "removing an opened file failed");
         }
+    }
+}
+
+/// Remove a pasted picture that is no longer staged. Other files stay.
+pub fn discard(path: &Path) {
+    let Some(folder) = path.parent() else {
+        return;
+    };
+    if folder.parent() == Some(std::env::temp_dir().as_path())
+        && folder.file_name().is_some_and(is_temp_folder)
+        && let Err(error) = fs::remove_dir_all(folder)
+    {
+        tracing::warn!(%error, "removing a pasted picture failed");
     }
 }
 
@@ -352,8 +391,10 @@ pub fn stage(chat: &mut Chat, paths: Vec<PathBuf>) -> Option<String> {
         };
         if size > MAX_FILE {
             problem = Some(t!("files.too_big", name = name));
+            discard(&path);
         } else if chat.staged.len() >= MAX_FILES {
             problem = Some(t!("files.too_many", max = MAX_FILES));
+            discard(&path);
         } else {
             chat.staged.push(Staged { path, name, size });
         }
@@ -393,7 +434,7 @@ pub fn staged(ui: &mut Ui, chat: &mut Chat) {
         }
     });
     if let Some(at) = remove {
-        chat.staged.remove(at);
+        discard(&chat.staged.remove(at).path);
     }
 }
 

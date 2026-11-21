@@ -230,7 +230,11 @@ so "Show in folder" and "Open" work later; it never leaves this device.
 "Open in default app" in the picture viewer, for a picture not saved yet,
 writes it to a `rusttalk-<id>` folder in the system temporary directory and
 hands it to the system's default app; the client deletes these folders when it
-starts and when the person signs out.
+starts and when the person signs out. A picture pasted into the composer
+(Ctrl+V) is written the same way, to a `rusttalk-<random>` folder, so it can be
+sent like a picked file; removing it from the message deletes it, and otherwise
+it goes with the other folders. The client reads the clipboard only when the
+person pastes into the composer.
 `emoji-recent.json` holds up to 32 emoji selected through the picker or
 autocomplete. It stays on this device.
 `updates.json` holds the chosen release directory URL and the automatic
@@ -276,6 +280,12 @@ is deleted and never used; the normal noise suppression keeps working.
   signature, then requests your platform’s artifact if you choose to update.
   The host sees your IP address, requested files and timing. Requests carry no
   account, device or server identifiers. Redirects stay on HTTPS.
+- **Pasted web pictures:** When the person pastes a picture copied from a web
+  page and the browser put only a still copy of a moving picture (GIF or WebP)
+  on the clipboard, the desktop client downloads the original over HTTPS from
+  the address the page gave, as the browser already did. That site sees the IP
+  address and timing. The request carries no account, device or server
+  identifiers.
 - **AI noise removal model (opt-in):** Only when the person selects
   **Download** in Settings → Voice & audio, the desktop client fetches
   `models/DeepFilterNet3_onnx.tar.gz` of `Rikorose/DeepFilterNet` at commit

@@ -216,6 +216,10 @@ fn problem(what: &str, error: &IdentityError) -> Screen {
 }
 
 impl eframe::App for App<'_> {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        crate::paste::keys(ctx, raw_input);
+    }
+
     fn logic(&mut self, _ctx: &egui::Context, frame: &mut eframe::Frame) {
         // eframe reports frame time after painting and showing the first frame.
         if frame.info().cpu_usage.is_some() {
@@ -247,6 +251,7 @@ impl eframe::App for App<'_> {
         if let Some(action) = action {
             self.apply(action);
         }
+        crate::paste::text(ui.ctx());
     }
 }
 

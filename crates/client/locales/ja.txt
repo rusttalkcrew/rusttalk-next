@@ -152,6 +152,7 @@ common.show_more = もっと見る
 home.members.one = メンバー {count} 人
 home.members.other = メンバー {count} 人
 home.drop_to_send = ドロップして {channel} に送信
+home.drop_hint = メッセージに追加されます（最大 {max} ファイル）
 home.chat_start = {channel} の始まりです
 home.replying_to = {name} に返信中
 home.cancel_reply = 返信をキャンセル

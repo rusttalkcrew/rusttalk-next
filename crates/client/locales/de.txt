@@ -152,6 +152,7 @@ common.show_more = Mehr anzeigen
 home.members.one = {count} Mitglied
 home.members.other = {count} Mitglieder
 home.drop_to_send = Ablegen, um in {channel} zu senden
+home.drop_hint = Wird deiner Nachricht hinzugefügt, bis zu {max} Dateien
 home.chat_start = Das ist der Anfang von {channel}
 home.replying_to = Antwort an {name}
 home.cancel_reply = Antwort abbrechen

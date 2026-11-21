@@ -11,9 +11,9 @@ use anyhow::Result;
 use chrono::{DateTime, Local};
 use eframe::egui::{
     self, Align, Align2, CentralPanel, CollapsingHeader, Color32, FontId, Frame, Id as UiId, Key,
-    KeyboardShortcut, Label, Layout, Margin, Modifiers, Panel, Rect, Response, RichText, Role,
-    ScrollArea, Sense, Shape, TextEdit, TextureHandle, TextureOptions, Ui, UiBuilder, Vec2,
-    WidgetInfo, ecolor::Hsva,
+    KeyboardShortcut, Label, LayerId, Layout, Margin, Modifiers, Order, Panel, Rect, Response,
+    RichText, Role, ScrollArea, Sense, Shape, Stroke, StrokeKind, TextEdit, TextureHandle,
+    TextureOptions, Ui, UiBuilder, Vec2, WidgetInfo, ecolor::Hsva,
 };
 use rusttalk_core::{
     auth::{Fingerprint, InviteLink, decode},
@@ -2902,6 +2902,17 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
     {
         *toast = Some((problem, now + 6.0));
     }
+    // Ctrl+V in this composer may attach a picture or copied files (see paste.rs).
+    if online
+        && ui.memory(|memory| memory.has_focus(composer_id(key)))
+        && crate::paste::wanted(ui.ctx())
+    {
+        let ask = match at {
+            At::Channel(index, channel) => Ask::Attach(servers[index].address.clone(), channel),
+            At::Dm(peer) => Ask::AttachDm(peer),
+        };
+        files.paste(ui.ctx(), ask);
+    }
     let attach = Panel::bottom("composer")
         .frame(Frame::new().inner_margin(Margin::symmetric(0, 8)))
         .show(ui, |ui| {
@@ -2939,17 +2950,7 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
         (None, ..) => {}
     }
     if online && hovered {
-        let rect = ui.max_rect();
-        let accent = ui::accent(ui);
-        ui.painter()
-            .rect_filled(rect, ui::RADIUS, accent.base.gamma_multiply(0.35));
-        ui.painter().text(
-            rect.center(),
-            Align2::CENTER_CENTER,
-            t!("home.drop_to_send", channel = title),
-            FontId::new(20.0, ui::bold_family()),
-            ui::colors(ui).strong,
-        );
+        drop_zone(ui, &title);
     }
     // The server a message's files and live offer come from.
     let holder = |msg: &Msg| {
@@ -3163,6 +3164,46 @@ fn send_dm(
         chat.editing = draft.edit_of;
         *toast = Some((t!("home.waiting_try_again").into(), now + 6.0));
     }
+}
+
+/// What files dragged over the chat would do: the chat dimmed behind an accent
+/// frame that says where they go. On top, because the messages are drawn after it.
+fn drop_zone(ui: &Ui, title: &str) {
+    let rect = ui.max_rect().shrink(8.0);
+    let colors = ui::colors(ui);
+    let accent = ui::accent(ui);
+    let painter = (ui.ctx())
+        .layer_painter(LayerId::new(Order::Foreground, UiId::unique("drop-zone")))
+        .with_clip_rect(ui.max_rect());
+    painter.rect(
+        rect,
+        ui::RADIUS,
+        colors.main.gamma_multiply(0.92),
+        Stroke::new(2.0, accent.base),
+        StrokeKind::Inside,
+    );
+    let center = rect.center();
+    painter.text(
+        center - Vec2::new(0.0, 28.0),
+        Align2::CENTER_CENTER,
+        "📎",
+        FontId::new(40.0, ui::bold_family()),
+        accent.tint,
+    );
+    painter.text(
+        center + Vec2::new(0.0, 16.0),
+        Align2::CENTER_CENTER,
+        t!("home.drop_to_send", channel = title),
+        FontId::new(20.0, ui::bold_family()),
+        colors.strong,
+    );
+    painter.text(
+        center + Vec2::new(0.0, 42.0),
+        Align2::CENTER_CENTER,
+        t!("home.drop_hint", max = files::MAX_FILES),
+        FontId::proportional(ui::TEXT_BODY),
+        colors.muted,
+    );
 }
 
 /// The title bar of a pane, like "# general", with a line under it.
