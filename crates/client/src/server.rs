@@ -230,20 +230,6 @@ pub struct Perms {
     pub rank: i64,
 }
 
-impl Perms {
-    /// May open the server settings window.
-    pub fn settings(&self) -> bool {
-        self.admin
-            || self.invite
-            || self.kick
-            || self.ban
-            || self.manage_roles
-            || self.audit
-            || self.manage_server
-            || self.manage_emoji
-    }
-}
-
 pub const MENTION_EVERYONE: &str = "mention_everyone";
 
 /// The permissions a role can grant, as the API names them, with their labels.

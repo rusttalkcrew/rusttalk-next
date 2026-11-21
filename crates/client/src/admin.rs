@@ -1,5 +1,6 @@
-//! The server settings window (members, roles, invites, bans, audit log, joining) and channel
-//! settings. Shown only to people whose roles allow some of it; the server decides.
+//! Server and channel settings. The server decides who can make each change.
+
+mod file_limits;
 
 use chrono::{DateTime, Local};
 use eframe::egui::{
@@ -54,6 +55,7 @@ pub enum Tab {
     Bans,
     Audit,
     Joining,
+    Files,
     /// The owner's public listing.
     Listing,
     /// Server emoji and stickers.
@@ -77,6 +79,7 @@ pub struct Settings {
     audit_filter: Option<&'static str>,
     /// Open joining and member limit, once loaded (owners and admins).
     joining: Option<(bool, u32)>,
+    files: Option<file_limits::Form>,
     /// Whether the server is listed and the details, once loaded (owner).
     listing: Option<(bool, PublicListing)>,
     updates: ServerUpdates,
@@ -110,6 +113,7 @@ impl Settings {
             }
             AdminUpdate::Invites(invites) => self.invites = invites,
             AdminUpdate::Joining(open, cap) => self.joining = Some((open, cap)),
+            AdminUpdate::Files(settings) => self.files = Some(file_limits::Form::new(settings)),
             AdminUpdate::Listing(on, saved) => {
                 self.listing = Some((on, saved.unwrap_or_default()));
             }
@@ -140,8 +144,10 @@ pub fn open(home: &mut Home, index: usize, mut tab: Tab) {
             Tab::Audit
         } else if perms.admin {
             Tab::Joining
-        } else {
+        } else if perms.invite {
             Tab::Invites
+        } else {
+            Tab::Files
         };
     }
     server.send(Command::Admin(Admin::Load {
@@ -155,6 +161,9 @@ pub fn open(home: &mut Home, index: usize, mut tab: Tab) {
     if tab == Tab::Invites {
         server.send(Command::Admin(Admin::Invites));
     }
+    if tab == Tab::Files {
+        server.send(Command::Admin(Admin::LoadFiles));
+    }
     home.server_settings = Some(Settings {
         server: index,
         tab,
@@ -163,6 +172,7 @@ pub fn open(home: &mut Home, index: usize, mut tab: Tab) {
         audit_shown: AUDIT_PAGE,
         audit_filter: None,
         joining: None,
+        files: None,
         listing: None,
         updates: ServerUpdates::default(),
         member: None,
@@ -288,6 +298,7 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
                         perms.manage_server,
                     ),
                     page(Tab::Joining, "🚪", t!("admin.joining"), perms.admin),
+                    page(Tab::Files, "📎", t!("admin.files"), true),
                     page(
                         Tab::Emoji,
                         "😀",
@@ -343,6 +354,16 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
                     Tab::Bans => bans_tab(ui, server, settings),
                     Tab::Audit => audit_tab(ui, server, settings),
                     Tab::Joining => joining_tab(ui, settings),
+                    Tab::Files => {
+                        if let Some(form) = &mut settings.files {
+                            form.show(ui, perms.manage_server).map(Admin::SaveFiles)
+                        } else {
+                            if settings.message.is_none() {
+                                ui.spinner();
+                            }
+                            None
+                        }
+                    }
                     Tab::Listing => listing_tab(ui, server, settings),
                     Tab::Emoji => {
                         let (picked, request) = emoji_tab(ui, server, settings);
@@ -367,6 +388,7 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
                     bans: true,
                 }),
                 Tab::Listing => Some(Admin::LoadListing),
+                Tab::Files => Some(Admin::LoadFiles),
                 Tab::Overview if perms.owner => Some(Admin::LoadUpdates),
                 Tab::Invites => Some(Admin::Invites),
                 _ => None,

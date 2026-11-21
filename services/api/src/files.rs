@@ -15,7 +15,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use futures_util::TryStreamExt;
-use rusttalk_core::auth::decode;
+use rusttalk_core::auth::{FileLimits, decode};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::{FromRow, SqliteConnection, SqlitePool, query, query_as, query_scalar};
@@ -31,17 +31,14 @@ use tracing::Instrument;
 use crate::{
     ApiError, ApiResult, App,
     auth::authenticate,
-    messages,
+    file_settings, messages,
     roles::{self, Permission},
     store,
 };
 
 pub struct Files {
     dir: PathBuf,
-    max_file: i64,
-    max_member: i64,
-    max_server: i64,
-    ttl: i64,
+    pub(crate) ceilings: FileLimits,
     uploads: Semaphore,
     uploaders: Mutex<HashMap<[u8; 32], usize>>,
 }
@@ -80,10 +77,7 @@ impl Files {
     pub async fn open(data: &Path, db: &SqlitePool) -> Result<Self> {
         let files = Self {
             dir: data.join("files"),
-            max_file: setting("RUSTTALK_FILE_MAX_BYTES", 32 * 1024 * 1024)?,
-            max_member: setting("RUSTTALK_FILE_MEMBER_BYTES", 500 * 1024 * 1024)?,
-            max_server: setting("RUSTTALK_FILE_SERVER_BYTES", 5 * 1024 * 1024 * 1024)?,
-            ttl: setting("RUSTTALK_FILE_TTL_SECS", 30 * 24 * 60 * 60)?,
+            ceilings: file_settings::ceilings()?,
             uploads: Semaphore::new(4),
             uploaders: Mutex::default(),
         };
@@ -158,14 +152,17 @@ pub async fn upload(
     decode::<32>(&id)?;
     let (mut tx, actor) = authenticate(&app, &headers).await?;
     messages::require_write(&mut tx, &actor, &channel).await?;
+    let files = &app.files;
+    let max_file = file_settings::effective(&mut tx, files.ceilings)
+        .await?
+        .max_file_bytes;
     tx.commit().await?;
 
-    let files = &app.files;
     if headers
         .get(header::CONTENT_LENGTH)
         .and_then(|h| h.to_str().ok())
         .and_then(|n| n.parse::<u64>().ok())
-        .is_some_and(|n| n > files.max_file as u64)
+        .is_some_and(|n| n > max_file as u64)
     {
         drain(&mut body.into_data_stream()).await;
         return Err(too_large());
@@ -189,7 +186,7 @@ pub async fn upload(
         {
             // Keep reading an oversized body to its end: answering while the client still
             // sends makes the proxy see a reset and report 502 instead of 413.
-            if oversized || chunk.len() as i64 > files.max_file - size {
+            if oversized || chunk.len() as i64 > max_file - size {
                 oversized = true;
                 continue;
             }
@@ -212,29 +209,28 @@ pub async fn upload(
     // Reauthorize and include quota checks, ID reservation and file installation in one write transaction.
     let (mut tx, actor) = authenticate(&app, &headers).await?;
     messages::require_write(&mut tx, &actor, &channel).await?;
+    let limits = file_settings::effective(&mut tx, files.ceilings).await?;
+    if size > limits.max_file_bytes {
+        return Err(too_large());
+    }
     let used: i64 = query_scalar("SELECT COALESCE(SUM(size), 0) FROM files WHERE uploader = ?")
         .bind(actor.person.as_slice())
         .fetch_one(&mut *tx)
         .await?;
-    if size > files.max_member - used {
+    if size > limits.member_storage_bytes - used {
         return Err(ApiError::new(
             StatusCode::PAYLOAD_TOO_LARGE,
             "file_member_quota",
         ));
     }
-    let used: i64 = query_scalar("SELECT COALESCE(SUM(size), 0) FROM files")
-        .fetch_one(&mut *tx)
-        .await?;
-    if size > files.max_server - used {
+    let used = file_settings::used_bytes(&mut tx).await?;
+    if size > limits.server_storage_bytes - used {
         return Err(ApiError::new(
             StatusCode::PAYLOAD_TOO_LARGE,
             "file_server_quota",
         ));
     }
-    let expires = actor
-        .at
-        .checked_add(files.ttl)
-        .ok_or(ApiError::internal("file_expiry_overflow"))?;
+    let expires = actor.at.saturating_add(limits.retention_secs);
     // An ID is never reused, even after its file expired or was deleted.
     let reserved = query("INSERT INTO file_ids (id) VALUES (?) ON CONFLICT (id) DO NOTHING")
         .bind(&id)
@@ -446,40 +442,113 @@ impl Files {
 }
 
 pub async fn expire(app: App) {
-    let mut interval = time::interval(Duration::from_secs((app.files.ttl / 4).clamp(1, 30) as u64));
+    let seconds = (app.files.ceilings.retention_secs / 4).clamp(1, 30) as u64;
+    let mut interval = time::interval(Duration::from_secs(seconds));
     loop {
         interval.tick().await;
-        let result = async {
-            let mut tx = store::write(&app.db).await?;
-            let rows: Vec<(String, i64)> = query_as(
-                "SELECT id, size FROM files WHERE expires_at <= ? ORDER BY expires_at LIMIT 64",
-            )
-            .bind(store::now()?)
-            .fetch_all(&mut *tx)
-            .await?;
-            let mut removed = Vec::new();
-            for (id, size) in rows {
-                match app.files.remove(&mut tx, &id).await {
-                    Ok(()) => removed.push((id, size)),
-                    Err(error) => tracing::error!(reason = error.code, "file expiry failed"),
-                }
-            }
-            tx.commit().await?;
-            for (id, size) in removed {
-                tracing::info!(id, size, "file expired");
-            }
-            Ok::<_, ApiError>(())
-        }
-        .await;
-        if let Err(error) = result {
+        if let Err(error) = expire_batch(&app).await {
             tracing::error!(reason = error.code, "file expiry failed");
         }
     }
 }
 
+async fn expire_batch(app: &App) -> ApiResult<()> {
+    let mut tx = store::write(&app.db).await?;
+    let limits = file_settings::effective(&mut tx, app.files.ceilings).await?;
+    let now = store::now()?;
+    // Shorter retention also applies to files uploaded before the setting changed.
+    let rows: Vec<(String, i64)> = query_as(
+        "SELECT id, size FROM files WHERE expires_at <= ? OR created_at <= ?
+         ORDER BY expires_at LIMIT 64",
+    )
+    .bind(now)
+    .bind(now - limits.retention_secs)
+    .fetch_all(&mut *tx)
+    .await?;
+    let mut removed = Vec::new();
+    for (id, size) in rows {
+        match app.files.remove(&mut tx, &id).await {
+            Ok(()) => removed.push((id, size)),
+            Err(error) => tracing::error!(reason = error.code, "file expiry failed"),
+        }
+    }
+    tx.commit().await?;
+    for (id, size) in removed {
+        tracing::info!(id, size, "file expired");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::{app, as_person, person};
+    use rusttalk_core::auth::encode;
+
+    #[tokio::test]
+    async fn saved_limits_apply_to_uploads_and_shorter_retention_waits_for_cleanup() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let app = app(dir.path(), 2).await?;
+        let channel = encode(&[3; 32]);
+        query("INSERT INTO channels (id, kind, position, dm_first, dm_second) VALUES (?, 'dm', 0, ?, ?)")
+            .bind(&channel)
+            .bind(person(1))
+            .bind(person(2))
+            .execute(&app.db)
+            .await?;
+        let set = |limits| file_settings::set(State(app.clone()), as_person(1), Ok(Json(limits)));
+        let send = |by, id, size| {
+            upload(
+                State(app.clone()),
+                as_person(by),
+                Ok(Query(Upload {
+                    channel: channel.clone(),
+                    id: encode(&[id; 32]),
+                })),
+                Body::from(vec![0; size]),
+            )
+        };
+        let limits = FileLimits {
+            max_file_bytes: 64,
+            member_storage_bytes: 128,
+            server_storage_bytes: 256,
+            retention_secs: 300,
+            max_stickers: 10,
+        };
+        assert_eq!(set(limits).await?.0.limits, limits);
+        assert_eq!(send(1, 4, 32).await?.0, StatusCode::CREATED);
+        let id = encode(&[4; 32]);
+        query("UPDATE files SET created_at = created_at - 60 WHERE id = ?")
+            .bind(&id)
+            .execute(&app.db)
+            .await?;
+
+        let Json(updated) = set(FileLimits {
+            max_file_bytes: 24,
+            member_storage_bytes: 32,
+            server_storage_bytes: 40,
+            retention_secs: 30,
+            ..limits
+        })
+        .await?;
+        assert_eq!(updated.used_bytes, 32);
+        assert_eq!(
+            download(State(app.clone()), as_person(2), RoutePath(id.clone()))
+                .await?
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(send(2, 5, 25).await.unwrap_err().code, "file_too_large");
+        assert_eq!(send(1, 5, 16).await.unwrap_err().code, "file_member_quota");
+        assert_eq!(send(2, 5, 16).await.unwrap_err().code, "file_server_quota");
+
+        expire_batch(&app).await?;
+        assert!(!app.files.dir.join(id).exists());
+        let Json(after) = file_settings::get(State(app.clone()), as_person(2)).await?;
+        assert_eq!(after.used_bytes, 0);
+        assert_eq!(send(2, 5, 16).await?.0, StatusCode::CREATED);
+        Ok(())
+    }
 
     #[tokio::test]
     async fn one_member_cannot_hold_every_upload_slot() -> Result<()> {

@@ -2068,7 +2068,6 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
 /// The server header menu, with only what this person may do.
 fn server_menu(m: &mut ui::Menu, home: &mut Home, index: usize) {
     let perms = home.servers[index].dir.perms;
-    let mut grouped = false;
     if perms.invite && m.item("👤", t!("home.invite_people")).clicked() {
         home.dialog = Some(Dialog::Invite(Invite {
             server: index,
@@ -2078,14 +2077,11 @@ fn server_menu(m: &mut ui::Menu, home: &mut Home, index: usize) {
             link: None,
         }));
     }
-    if perms.settings() && m.item("⚙", t!("home.server_settings")).clicked() {
+    if m.item("⚙", t!("home.server_settings")).clicked() {
         admin::open(home, index, admin::Tab::Members);
     }
-    grouped |= perms.invite || perms.settings();
     if perms.manage_channels || perms.manage_server {
-        if grouped {
-            m.separator();
-        }
+        m.separator();
         if perms.manage_channels {
             if m.item("#", t!("home.create_channel")).clicked() {
                 home.dialog = Some(new_channel(&home.servers[index], index, None));
@@ -2098,11 +2094,8 @@ fn server_menu(m: &mut ui::Menu, home: &mut Home, index: usize) {
             let name = home.servers[index].dir.name.clone().unwrap_or_default();
             home.dialog = Some(Dialog::ServerName(index, name));
         }
-        grouped = true;
     }
-    if grouped {
-        m.separator();
-    }
+    m.separator();
     let rule = home.notify.prefs().server(&home.servers[index].address);
     if let Some(rule) = notify::rule_menu(m, &rule, false, notify::unix_now()) {
         home.set_rule(index, None, rule);

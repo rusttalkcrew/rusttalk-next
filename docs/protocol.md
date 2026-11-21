@@ -129,7 +129,15 @@ All endpoints below require `Authorization: Bearer <token>`.
 | PUT `/v1/owner` | `{person_id}` | Owner. 204, transfers ownership to a member |
 | GET `/v1/settings/open-joining` | Empty | Owner or Admin. 200, `{open_joining, member_cap}` |
 | PUT `/v1/settings/open-joining` | `{open_joining, member_cap}` | Owner or Admin. 204 |
+| GET `/v1/settings/files` | Empty | Any member. 200, `{limits, ceilings, used_bytes}` |
+| PUT `/v1/settings/files` | `{max_file_bytes, member_storage_bytes, server_storage_bytes, retention_secs, max_stickers}` | `manage_server`. 200, updated `{limits, ceilings, used_bytes}` |
 | GET `/v1/audit?after=0&limit=100&action=member_banned` | Empty | `view_audit_log`. 200, matching audit entries in ascending ID order |
+
+`limits` and `ceilings` each contain the five fields accepted by PUT. Every
+field must be a positive integer, or PUT returns `400 invalid_file_limits`.
+Host ceilings are also the defaults for unset limits. The server clamps
+limits to host ceilings on save and on read. `used_bytes` counts all committed
+file ciphertext, including expired files that cleanup has yet to remove.
 
 A role has `{id, kind, rank, permissions, name_ct}`. A member's permissions
 are the union of their role flags, and their highest rank is used for
@@ -274,7 +282,8 @@ current space epoch, so the server knows only the ID, kind, ciphertext size,
 picture hash and the person who added it. Clients upload PNG or animated GIF
 pictures and names of 2–32 lowercase letters, digits and `_`; the server cannot
 check either. The server allows `RUSTTALK_EMOJI_MAX` emoji (default 100) and
-`RUSTTALK_STICKER_MAX` stickers (default 50), and returns `409 emoji_limit` or
+uses the effective sticker limit from `GET /v1/settings/files`, capped by
+`RUSTTALK_STICKER_MAX` (default 50). It returns `409 emoji_limit` or
 `409 sticker_limit` past them. A picture ciphertext larger than
 `RUSTTALK_EMOJI_MAX_BYTES` (default and maximum 262,144) returns
 `413 emoji_too_large`. POST allows a 356 KiB JSON body. Pictures are stored as
@@ -756,6 +765,8 @@ ciphertext bytes, including tags and thumbnail blobs. Upload errors include
 `409 file_exists`, `408 file_upload_timeout` and `503 file_upload_busy`. The
 API stages at most four uploads at once and at most two per member. An upload
 fails with 408 when no bytes arrive for 30 seconds or it takes over 15 minutes.
+Lower limits apply to new uploads. Shorter retention also applies to existing
+blobs during the next cleanup.
 A moderator deleting a message passes its sender as `uploader`; the
 optional parameter is ignored for the uploader's own files. When it is
 missing or names someone else, a moderator gets `404 file_not_found`, so a

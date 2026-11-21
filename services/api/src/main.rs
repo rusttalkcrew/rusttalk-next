@@ -3,6 +3,7 @@ mod channels;
 mod dms;
 mod emoji;
 mod events;
+mod file_settings;
 mod files;
 mod index;
 mod keys;
@@ -240,6 +241,10 @@ async fn serve(app: App) -> io::Result<()> {
         .route("/v1/health", get(|| async { "ok\n" }))
         .route("/v1/server-info", get(members::server_info))
         .route("/v1/settings/updates", get(updates::status))
+        .route(
+            "/v1/settings/files",
+            get(file_settings::get).put(file_settings::set),
+        )
         .route(
             "/v1/settings/open-joining",
             get(members::open_joining).put(members::set_open_joining),
