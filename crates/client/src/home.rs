@@ -346,6 +346,9 @@ impl Home {
         self.dialog = None;
         self.server_settings = None;
         let server = self.servers.remove(index);
+        let mut settings = self.voice.audio.settings();
+        settings.hide_offline.left(&server.address);
+        self.voice.audio.set_settings(settings);
         for thread in self.threads.values_mut() {
             thread.forget(&server.address);
         }
@@ -2525,6 +2528,11 @@ fn join(ui: &mut Ui, home: &mut Home) {
                     let label = preview.name.as_deref().unwrap_or(t!("home.new_server"));
                     home.servers
                         .push(new_server(address.clone(), label, commands));
+                    if !member {
+                        let mut settings = home.voice.audio.settings();
+                        settings.hide_offline.joined(&address);
+                        home.voice.audio.set_settings(settings);
+                    }
                     home.left.remove(&address);
                     home.join = Join::Joining(address);
                 } else if ui::secondary_large(ui, t!("common.cancel")).clicked() {

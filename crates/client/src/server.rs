@@ -2,7 +2,7 @@
 //! server's metadata and messages and sends these; the UI only reads and merges them.
 
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, HashMap},
     path::PathBuf,
     sync::Arc,
 };
@@ -343,30 +343,45 @@ impl Member {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HideOffline {
+    /// What the switch shows: the last value chosen here or reported by a server.
     pub on: bool,
-    /// Server addresses that haven't confirmed this device's last change yet.
-    pub pending: BTreeSet<String>,
+    /// Servers that haven't confirmed a value from this device yet, with that value.
+    pub pending: BTreeMap<String, bool>,
 }
 
 impl HideOffline {
     /// The person changed it here: every server has to be told.
     pub fn choose<'a>(&mut self, on: bool, servers: impl Iterator<Item = &'a Url>) {
         self.on = on;
-        self.pending = servers.map(Url::to_string).collect();
+        self.pending = servers.map(|server| (server.to_string(), on)).collect();
+    }
+
+    /// This person joined a server, which starts with hiding off: tell it the
+    /// value still being sent elsewhere, or else the one shown.
+    pub fn joined(&mut self, server: &Url) {
+        let on = self.pending.values().next().copied().unwrap_or(self.on);
+        self.pending.insert(server.to_string(), on);
+    }
+
+    /// A server this person is no longer in has nothing left to be told.
+    pub fn left(&mut self, server: &Url) {
+        self.pending.remove(server.as_str());
     }
 
     /// A server reported its stored flag; returns what to send it, if anything.
-    /// Without a change pending for that server, its value is the newest one (made
+    /// Without a value pending for that server, its value is the newest one (made
     /// on another device) and is taken over, so two devices never write back and forth.
     pub fn reported(&mut self, server: &Url, theirs: bool) -> Option<bool> {
-        if !self.pending.contains(server.as_str()) {
-            self.on = theirs;
-            None
-        } else if theirs == self.on {
-            self.pending.remove(server.as_str());
-            None
-        } else {
-            Some(self.on)
+        match self.pending.get(server.as_str()) {
+            None => {
+                self.on = theirs;
+                None
+            }
+            Some(&on) if on == theirs => {
+                self.pending.remove(server.as_str());
+                None
+            }
+            Some(&on) => Some(on),
         }
     }
 }
@@ -658,6 +673,23 @@ mod tests {
         assert_eq!(restarted.reported(&a, true), None);
         assert_eq!(restarted.reported(&b, true), None);
         assert!(restarted.pending.is_empty());
+    }
+
+    #[test]
+    fn a_new_server_gets_the_value_still_being_sent_elsewhere() {
+        let (a, b, c) = (server(1), server(2), server(3));
+        let mut device = HideOffline::default();
+        device.choose(true, [&a, &b].into_iter());
+        assert_eq!(device.reported(&a, true), None);
+        // B is still offline when C is joined; C starts with hiding off.
+        device.joined(&c);
+        assert_eq!(device.reported(&c, false), Some(true));
+        assert!(device.on);
+        assert_eq!(device.reported(&b, false), Some(true));
+        assert_eq!(device.reported(&c, true), None);
+        // Leaving B drops what it still had to be told.
+        device.left(&b);
+        assert!(device.pending.is_empty());
     }
 
     #[test]
