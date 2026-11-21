@@ -46,7 +46,7 @@ pub fn encoded(bytes: Option<Vec<u8>>) -> Option<String> {
 }
 
 /// A short hash of picture ciphertext, so clients refetch a picture only when it changes.
-fn picture_hash(ciphertext: &[u8]) -> String {
+pub(crate) fn picture_hash(ciphertext: &[u8]) -> String {
     encode(&Sha256::digest(ciphertext)[..16])
 }
 

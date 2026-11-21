@@ -577,6 +577,7 @@ mod tests {
                 body: Body::Text(text),
                 files: vec![],
                 live: None,
+                sticker: None,
             };
             mention(&Message::new(&msg, &dir, chat), &me, &roles)
         };

@@ -640,6 +640,7 @@ mod tests {
         let api_secret = "test-secret-with-at-least-32-characters";
         let verifier = TokenVerifier::with_api_key(api_key, api_secret);
         let app = App {
+            emoji: crate::emoji::Emoji::open(dir.path(), &db).await?.into(),
             files: crate::files::Files::open(dir.path(), &db).await?.into(),
             db,
             key: Arc::new(ed25519_dalek::SigningKey::from_bytes(&[7; 32])),

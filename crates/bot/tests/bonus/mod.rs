@@ -210,3 +210,168 @@ pub async fn icons(a: &KeyClient<'_>, b: &KeyClient<'_>) -> Result<()> {
     );
     Ok(())
 }
+
+/// Server emoji: the Manage emoji permission, encrypted names and pictures, limits,
+/// rename, delete, audit entries and the change event.
+pub async fn emoji(a: &mut KeyClient<'_>, b: &KeyClient<'_>) -> Result<()> {
+    let mut png = Cursor::new(Vec::new());
+    DynamicImage::new_rgba8(4, 4).write_to(&mut png, ImageFormat::Png)?;
+    let png = png.into_inner();
+    let body = |client: &KeyClient<'_>, id: &[u8; 32], kind: &str, name: &[u8]| -> Result<Value> {
+        Ok(json!({
+            "id": encode(id),
+            "kind": kind,
+            "name_ct": client.encrypt_metadata(Metadata::EmojiName, id, name)?,
+            "image_ct": client.encrypt_metadata(Metadata::EmojiImage, id, &png)?,
+        }))
+    };
+    let add = |client: &KeyClient<'_>, body: Value| {
+        client.request(Method::POST, "/v1/emoji").json(&body).send()
+    };
+    let party = [41; 32];
+    super::rejected(
+        add(b, body(b, &party, "emoji", b"party")?).await?,
+        StatusCode::FORBIDDEN,
+        "permission_denied",
+    )
+    .await?;
+
+    let person_id = b.identity.certificate.person_id();
+    let role: Value = a
+        .request(Method::POST, "/v1/roles")
+        .json(&json!({"rank": 1, "permissions": ["manage_emoji"]}))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let roles = format!("/v1/members/{}/roles", encode(person_id));
+    a.request(Method::PUT, &roles)
+        .json(&json!({"role_ids": ["member", role["id"]]}))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    add(b, body(b, &party, "emoji", b"party")?)
+        .await?
+        .error_for_status()?;
+    // Everyone hears that the server changed and reloads its emoji with the directory.
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let update = a.next_update().await?.context("event socket closed")?;
+            if matches!(
+                update,
+                Update::Event(rusttalk_core::keys::Event::ChannelChanged)
+            ) {
+                return Ok::<_, anyhow::Error>(());
+            }
+        }
+    })
+    .await
+    .context("waiting for the emoji change event")??;
+    super::rejected(
+        add(b, body(b, &party, "emoji", b"again")?).await?,
+        StatusCode::CONFLICT,
+        "emoji_exists",
+    )
+    .await?;
+    add(b, body(b, &[42; 32], "sticker", b"hug")?)
+        .await?
+        .error_for_status()?;
+    // The e2e stack allows one sticker.
+    super::rejected(
+        add(b, body(b, &[43; 32], "sticker", b"hug2")?).await?,
+        StatusCode::CONFLICT,
+        "sticker_limit",
+    )
+    .await?;
+    let mut oversized = body(b, &[44; 32], "emoji", b"big")?;
+    oversized["image_ct"] = json!(encode(&vec![0; 256 * 1024 + 1]));
+    let reply = add(b, oversized).await?;
+    ensure!(
+        reply.status() == StatusCode::PAYLOAD_TOO_LARGE,
+        "oversized emoji got {}",
+        reply.status()
+    );
+
+    let list: Value = a
+        .request(Method::GET, "/v1/emoji")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(list["max_stickers"], 1);
+    let items = list["items"].as_array().context("no emoji list")?;
+    assert_eq!(items.len(), 2);
+    let row = &items[0];
+    assert_eq!(row["id"], encode(&party));
+    assert_eq!(row["kind"], "emoji");
+    assert_eq!(row["owner"], encode(person_id));
+    ensure!(row["image_hash"].is_string() && row.get("image_ct").is_none());
+    let name = row["name_ct"].as_str().context("missing name")?;
+    assert_eq!(
+        a.decrypt_metadata(Metadata::EmojiName, &party, name)?,
+        b"party"
+    );
+    let image: Value = a
+        .request(Method::GET, &format!("/v1/emoji/{}/image", encode(&party)))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let image = image["image_ct"].as_str().context("missing image")?;
+    assert_eq!(
+        a.decrypt_metadata(Metadata::EmojiImage, &party, image)?,
+        png
+    );
+
+    let name_ct = b.encrypt_metadata(Metadata::EmojiName, &party, b"party_time")?;
+    b.request(Method::PUT, &format!("/v1/emoji/{}/name", encode(&party)))
+        .json(&json!({"name_ct": name_ct}))
+        .send()
+        .await?
+        .error_for_status()?;
+    for id in [party, [42; 32]] {
+        b.request(Method::DELETE, &format!("/v1/emoji/{}", encode(&id)))
+            .send()
+            .await?
+            .error_for_status()?;
+    }
+    super::rejected(
+        a.request(Method::GET, &format!("/v1/emoji/{}/image", encode(&party)))
+            .send()
+            .await?,
+        StatusCode::NOT_FOUND,
+        "emoji_not_found",
+    )
+    .await?;
+    for action in ["emoji_added", "emoji_renamed", "emoji_deleted"] {
+        let audit: Vec<Value> = a
+            .request(
+                Method::GET,
+                &format!("/v1/audit?after=0&limit=100&action={action}"),
+            )
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        ensure!(
+            audit
+                .iter()
+                .any(|e| e["action"] == action && e["target_id"] == encode(&party)),
+            "missing audit entry {action}"
+        );
+    }
+    a.request(Method::PUT, &roles)
+        .json(&json!({"role_ids": ["member"]}))
+        .send()
+        .await?
+        .error_for_status()?;
+    println!(
+        "B5 manage_emoji grant allowed emoji and stickers within limits, a peer decrypted names and pictures, and rename and delete were audited"
+    );
+    Ok(())
+}

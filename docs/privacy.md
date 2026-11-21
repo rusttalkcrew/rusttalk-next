@@ -35,6 +35,7 @@ tables in SQLite (WAL). IDs and digests are binary unless indicated. The `_ct` s
 | `messages` | `sequence` (insertion order), `id` and `channel_id` (text), `epoch`, `sender_device`, `sender_person`, `at` (Unix seconds), `size` (binary envelope length), `envelope` (public framing, nonce, ciphertext with tag, and signature) |
 | `message_ids` | `id` (opaque text, including deleted message IDs to prevent reuse) |
 | `files` | `id` and `channel_id` (opaque text), `uploader` (person public key), `size` (ciphertext bytes), `created_at`, `expires_at` (Unix seconds) |
+| `emoji` | `id` (opaque text), `kind` (emoji or sticker), `owner` (person public key), `size` (picture ciphertext bytes), `image_hash` (short hash of the picture ciphertext), `name_ct`, `created_at` (Unix seconds) |
 | `device_sync` | `person_id`, `version`, `ciphertext` (nonce and encrypted payload with tag), `size` (ciphertext bytes), `at` (Unix seconds) |
 | `_sqlx_migrations` | `version`, `description`, `installed_on`, `success`, `checksum`, `execution_time` (migration bookkeeping) |
 
@@ -50,7 +51,7 @@ prune them.
 The API persists public device certificates. The human-readable device
 name and commitment salt stay on the device. Raw invite codes, link keys,
 session tokens, space and channel keys, and readable names, descriptions,
-topics, icons and avatars are absent from API storage and logs. Audit
+topics, icons, avatars and server emoji names and pictures are absent from API storage and logs. Audit
 records carry IDs and fixed actions. The server knows DM participant IDs,
 sender and routing IDs, ciphertext sizes, timestamps and access changes.
 Text, replies, attachment references and edit targets are inside message
@@ -60,7 +61,8 @@ accountability.
 The API volume stores file blobs, including in-progress uploads and thumbnails,
 as ciphertext under opaque disk names. Committed blobs are named only by their
 random IDs. File names, types, keys, plaintext lengths and references linking
-thumbnails to originals are inside the encrypted message. File operation logs
+thumbnails to originals are inside the encrypted message. Server emoji and
+sticker pictures are space-key ciphertext in `emoji/`, named by their random IDs. File operation logs
 carry the opaque ID and ciphertext size. The expiry sweep unlinks blobs and
 removes their metadata.
 Each member has at most one current sync row per server. It is removed with

@@ -133,11 +133,11 @@ All endpoints below require `Authorization: Bearer <token>`.
 
 A role has `{id, kind, rank, permissions, name_ct}`. A member's permissions
 are the union of their role flags, and their highest rank is used for
-hierarchy. Owner (1000) and Admin (100) have all nine flags. Moderator (50)
+hierarchy. Owner (1000) and Admin (100) have all ten flags. Moderator (50)
 has `kick`, `ban`, and `delete_messages`. Member (0) has no flags and starts
 as the default. The other flags are `invite`, `manage_roles`,
-`view_audit_log`, `manage_channels`, `manage_server`, and `mention_everyone`.
-Built-in role IDs match their kinds. Custom roles have opaque IDs and ranks
+`view_audit_log`, `manage_channels`, `manage_server`, `mention_everyone`, and
+`manage_emoji`. Built-in role IDs match their kinds. Custom roles have opaque IDs and ranks
 from 1 to 999, strictly below their creator. They can only receive flags that the creator
 has. `name_ct` is null or a metadata ciphertext of at most 512 bytes
 after decoding. Supply a client-generated 16-byte ID when setting an
@@ -199,13 +199,13 @@ errors may have an empty body. The API logs a request ID, status and reason.
 | 400 | `invalid_json`, `invalid_encoding`, `invalid_query`, `invalid_forwarded_ip`, `invalid_revocation`, `invalid_invite_limits`, `invalid_role_rank`, `invalid_role_count`, `role_id_required`, `already_owner`, `unexpected_invite`, `invite_name_required`, `invalid_member_cap`, `invalid_certificate`, `invalid_metadata`, `invalid_envelope`, `invalid_channel_flags`, `invalid_order`, `invalid_dm_peer`, `not_a_voice_channel`, `invalid_message`, `invalid_file_body`, `invalid_file_acceptance`, `invalid_event_query`, `invalid_sync_blob`, `invalid_listing`, `invalid_listing_settings`, `invalid_index_url`, `invalid_index_tls_fingerprint` |
 | 401 | `invalid_challenge`, `invalid_certificate`, `invalid_device_signature`, `invalid_session`, `token_expired`, `invalid_livekit_webhook` |
 | 403 | `invite_required`, `invalid_invite`, `person_banned`, `ip_banned`, `device_revoked`, `device_certificate_required`, `permission_denied`, `role_hierarchy`, `cannot_grant_permission`, `built_in_role`, `owner_required`, `open_joining_disabled`, `scope_read_denied`, `recipient_read_denied`, `channel_read_denied`, `channel_write_denied`, `live_file_peer_not_in_room` |
-| 404 | `invite_not_found`, `member_not_found`, `ban_not_found`, `role_not_found`, `category_not_found`, `channel_not_found`, `message_not_found`, `message_device_not_found`, `file_not_found`, `avatar_not_found`, `icon_not_found` |
+| 404 | `invite_not_found`, `member_not_found`, `ban_not_found`, `role_not_found`, `category_not_found`, `channel_not_found`, `message_not_found`, `message_device_not_found`, `file_not_found`, `avatar_not_found`, `icon_not_found`, `emoji_not_found` |
 | 408 | `file_upload_timeout` |
-| 409 | `owner_cannot_leave`, `already_banned`, `no_active_ip`, `role_exists`, `role_in_use`, `role_limit`, `member_cap_reached`, `device_limit`, `device_certificate_changed`, `revocation_limit`, `epoch_changed`, `space_key_unavailable`, `metadata_epoch_changed`, `category_exists`, `category_in_use`, `channel_exists`, `order_changed`, `message_exists`, `file_exists` |
-| 413 | `body_too_large` when generated after reading the body, `file_too_large`, `file_member_quota`, `file_server_quota` |
+| 409 | `owner_cannot_leave`, `already_banned`, `no_active_ip`, `role_exists`, `role_in_use`, `role_limit`, `member_cap_reached`, `device_limit`, `device_certificate_changed`, `revocation_limit`, `epoch_changed`, `space_key_unavailable`, `metadata_epoch_changed`, `category_exists`, `category_in_use`, `channel_exists`, `order_changed`, `message_exists`, `file_exists`, `emoji_exists`, `emoji_limit`, `sticker_limit` |
+| 413 | `body_too_large` when generated after reading the body, `file_too_large`, `file_member_quota`, `file_server_quota`, `emoji_too_large` |
 | 415 | `expected_json` |
 | 429 | `challenge_limit`, `invite_preview_limit`, `open_join_limit` |
-| 500 | `database_error`, `database_pool_timeout`, `database_busy`, `clock_error`, `randomness_error`, `invalid_stored_person`, `invalid_stored_certificate`, `invalid_stored_commitment`, `invalid_stored_device`, `invalid_stored_message`, `invalid_stored_sender`, `file_storage_error`, `file_task_failed`, `file_expiry_overflow`, `listing_settings_encode`, `listing_settings_encrypt`, `listing_settings_decrypt`, `listing_settings_decode`, `livekit_token_failed`, `event_encoding`, `event_timeout`, `socket_io_error` |
+| 500 | `database_error`, `database_pool_timeout`, `database_busy`, `clock_error`, `randomness_error`, `invalid_stored_person`, `invalid_stored_certificate`, `invalid_stored_commitment`, `invalid_stored_device`, `invalid_stored_message`, `invalid_stored_sender`, `file_storage_error`, `file_task_failed`, `emoji_storage_error`, `emoji_task_failed`, `file_expiry_overflow`, `listing_settings_encode`, `listing_settings_encrypt`, `listing_settings_decrypt`, `listing_settings_decode`, `livekit_token_failed`, `event_encoding`, `event_timeout`, `socket_io_error` |
 | 502 | `livekit_unreachable`, `livekit_rooms_unavailable`, `livekit_roster_unavailable` |
 | 503 | `file_upload_busy`, `voice_unavailable` |
 
@@ -256,6 +256,36 @@ blobs allow 256 KiB each. The two metadata PUT routes that accept images
 allow 356 KiB JSON bodies to account for base64url and accompanying fields.
 Invite preview permits 32 lookups per IPv4 address or IPv6 /64 and
 256 server-wide in 60 seconds. Invalid codes that pass base64url parsing also count.
+
+### Server emoji and stickers
+
+| Method and path | Body | Permission and success |
+| --- | --- | --- |
+| GET `/v1/emoji` | Empty | Any member. 200, `{max_emoji, max_stickers, max_bytes, items: [{id, kind, owner, size, image_hash, name_ct}]}`, oldest first |
+| GET `/v1/emoji/{id}/image` | Empty | Any member. 200, `{image_ct}`, or `404 emoji_not_found` |
+| POST `/v1/emoji` | `{id, kind, name_ct, image_ct}` | `manage_emoji`. 201 |
+| PUT `/v1/emoji/{id}/name` | `{name_ct}` | `manage_emoji`. 204 |
+| DELETE `/v1/emoji/{id}` | Empty | `manage_emoji`. 204 |
+
+`kind` is `emoji` or `sticker`. The ID is a random 32-byte client-generated
+value; reusing a current ID returns `409 emoji_exists`. Names and pictures are
+space metadata (types 10 and 11 in [Crypto](crypto.md#metadata)) under the
+current space epoch, so the server knows only the ID, kind, ciphertext size,
+picture hash and the person who added it. Clients upload PNG or animated GIF
+pictures and names of 2–32 lowercase letters, digits and `_`; the server cannot
+check either. The server allows `RUSTTALK_EMOJI_MAX` emoji (default 100) and
+`RUSTTALK_STICKER_MAX` stickers (default 50), and returns `409 emoji_limit` or
+`409 sticker_limit` past them. A picture ciphertext larger than
+`RUSTTALK_EMOJI_MAX_BYTES` (default and maximum 262,144) returns
+`413 emoji_too_large`. POST allows a 356 KiB JSON body. Pictures are stored as
+files beside the database. Changes record `emoji_added`, `emoji_renamed` and
+`emoji_deleted` audit entries with the emoji ID as `target_id`, and send
+`channel_changed`.
+
+Messages carry a server emoji as the token `<:name:id>` inside the encrypted
+text, with the base64url ID. Clients show the picture when this server has
+that ID and `:name:` otherwise. A sticker is its own message, see
+[the plaintext format](crypto.md#messages).
 
 ## Channels and categories
 
@@ -529,7 +559,7 @@ session validity before pushing updates.
 | `rotate_needed` | `scope`. Fetch the current epoch and try to publish its successor |
 | `member_changed` | `person`, optional `device`. Refresh the member and device directory and catalog, and surface fingerprints |
 | `presence_changed` | `person_id`, `status`. Sent to members when visible presence changes |
-| `channel_changed` | None. Refresh the catalog |
+| `channel_changed` | None. Refresh the catalog, server metadata and server emoji |
 | `voice_changed` | `channel`. Fetch current voice participants. Sent to current channel readers on signed LiveKit join, leave and room-end notices |
 | `dm_created` | `channel`. Refresh the catalog and reconcile keys |
 | `message_created` | `channel`, `id`. Fetch the ciphertext record |

@@ -28,7 +28,7 @@ pub const IMAGE_CIPHERTEXT: usize = 256 * 1024;
 const NONCE: usize = 24;
 const TAG: usize = 16;
 const HEADER: usize = 8 + NONCE;
-/// The largest avatar or server icon that still seals within `IMAGE_CIPHERTEXT`.
+/// The largest avatar, server icon or server emoji that still seals within `IMAGE_CIPHERTEXT`.
 pub const IMAGE_PLAINTEXT: usize = IMAGE_CIPHERTEXT - HEADER - TAG;
 pub const INVITE_BYTES: usize = NONCE + 8 + 32 + TAG;
 
@@ -287,12 +287,14 @@ pub enum Metadata {
     RoleName,
     DisplayName,
     Avatar,
+    EmojiName,
+    EmojiImage,
 }
 
 impl Metadata {
     fn limit(self) -> usize {
         match self {
-            Self::ServerIcon | Self::Avatar => IMAGE_CIPHERTEXT,
+            Self::ServerIcon | Self::Avatar | Self::EmojiImage => IMAGE_CIPHERTEXT,
             // W05 roles already have a 512-byte storage limit.
             Self::RoleName => 512,
             _ => SMALL_METADATA + HEADER + TAG,

@@ -149,6 +149,8 @@ pub struct Draft {
     pub edit_of: Option<Id>,
     /// Uploaded first, then sent with the message.
     pub files: Vec<PathBuf>,
+    /// A server sticker to send; `text` is its name.
+    pub sticker: Option<Id>,
 }
 
 pub struct LiveOffer {
@@ -1040,6 +1042,7 @@ async fn on_command(
                 edit_of: draft.edit_of,
                 attachments: Vec::new(),
                 live: None,
+                sticker: draft.sticker,
             };
             let sent =
                 files::send(ctx, url, client, draft.channel, body, draft.files.clone()).await;
@@ -1276,6 +1279,7 @@ fn unreadable(record: &MessageRecord) -> Msg {
         body: Body::Unreadable,
         files: Vec::new(),
         live: None,
+        sticker: None,
     }
 }
 
@@ -1289,6 +1293,7 @@ fn to_msg(record: &MessageRecord, body: &MessageBody) -> Msg {
         body: Body::Text(body.text.clone()),
         files: body.attachments.clone(),
         live: (body.live.as_ref()).map(|file| (file.id, file.name.clone(), file.size)),
+        sticker: body.sticker,
     }
 }
 

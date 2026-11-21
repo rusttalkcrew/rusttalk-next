@@ -51,6 +51,8 @@ pub enum Tab {
     Joining,
     /// The owner's public listing.
     Listing,
+    /// Server emoji and stickers.
+    Emoji,
     /// The settings of one channel.
     Channel(Id),
 }
@@ -83,6 +85,11 @@ pub struct Settings {
     revoking: Option<String>,
     /// The server name being typed in Overview; `None` until edited.
     server_name: Option<String>,
+    /// The name for the next emoji or (`emoji_sticker`) sticker upload.
+    emoji_name: String,
+    emoji_sticker: bool,
+    /// An emoji or sticker being renamed, and the new name.
+    emoji_renaming: Option<(Id, String)>,
     /// The last result: text and whether it went wrong.
     message: Option<(String, bool)>,
 }
@@ -105,6 +112,7 @@ impl Settings {
                 self.renaming = None;
                 self.editing = None;
                 self.revoking = None;
+                self.emoji_renaming = None;
                 self.message = Some((text.into(), false));
             }
             AdminUpdate::Failed(text) => self.message = Some((text, true)),
@@ -119,6 +127,8 @@ pub fn open(home: &mut Home, index: usize, mut tab: Tab) {
     if tab == Tab::Members && !(perms.kick || perms.ban || perms.manage_roles) {
         tab = if perms.manage_server {
             Tab::Overview
+        } else if perms.manage_emoji {
+            Tab::Emoji
         } else if perms.audit {
             Tab::Audit
         } else if perms.admin {
@@ -152,6 +162,9 @@ pub fn open(home: &mut Home, index: usize, mut tab: Tab) {
         invites: Vec::new(),
         revoking: None,
         server_name: None,
+        emoji_name: String::new(),
+        emoji_sticker: false,
+        emoji_renaming: None,
         message: None,
     });
 }
@@ -216,6 +229,7 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
     };
     let mut request = None;
     let mut icon = false;
+    let mut upload = None;
     let mut channel_edit = None;
     let mut rename = None;
     let close = if let Tab::Channel(channel) = settings.tab {
@@ -256,6 +270,7 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
                 vec![
                     page(Tab::Overview, "🖼", "Overview", perms.manage_server),
                     page(Tab::Joining, "🚪", "Joining", perms.admin),
+                    page(Tab::Emoji, "😀", "Emoji & stickers", perms.manage_emoji),
                     page(Tab::Listing, "🌐", "Public listing", perms.owner),
                 ],
             ),
@@ -306,6 +321,11 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
                     Tab::Audit => audit_tab(ui, server, settings),
                     Tab::Joining => joining_tab(ui, settings),
                     Tab::Listing => listing_tab(ui, server, settings),
+                    Tab::Emoji => {
+                        let (picked, request) = emoji_tab(ui, server, settings);
+                        upload = picked;
+                        request
+                    }
                     Tab::Channel(_) => None,
                 };
                 message(ui, settings);
@@ -347,6 +367,12 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
     if icon {
         settings.message = None;
         home.files.ask(ctx, Ask::Icon(server.address.clone()));
+    }
+    if let Some((name, sticker)) = upload {
+        settings.message = None;
+        settings.emoji_name.clear();
+        home.files
+            .ask(ctx, Ask::Emoji(server.address.clone(), name, sticker));
     }
     if close || channel_edit.is_some() {
         home.server_settings = None;
@@ -439,6 +465,157 @@ fn server_icon(ui: &mut Ui, server: &Server, size: f32) {
             );
         }
     }
+}
+
+/// Names people type as `:name:`: 2 to 32 lowercase letters, digits or `_`.
+fn emoji_name_ok(name: &str) -> bool {
+    (2..=32).contains(&name.len())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// Keep a typed name to the characters a `:name:` allows.
+fn clean_emoji_name(name: &mut String) {
+    *name = name
+        .chars()
+        .filter_map(|c| match c {
+            ' ' | '-' => Some('_'),
+            c if c.is_ascii_alphanumeric() || c == '_' => Some(c.to_ascii_lowercase()),
+            _ => None,
+        })
+        .take(32)
+        .collect();
+}
+
+/// Upload, rename and delete server emoji and stickers. Returns a name and kind to
+/// pick a picture for, or a change to send.
+fn emoji_tab(
+    ui: &mut Ui,
+    server: &Server,
+    settings: &mut Settings,
+) -> (Option<(String, bool)>, Option<Admin>) {
+    let dir = &server.dir;
+    let mut upload = None;
+    let mut request = None;
+    let count = |sticker: bool| dir.emoji.iter().filter(|e| e.sticker == sticker).count();
+    ui::page_section(ui, "Upload");
+    ui.horizontal(|ui| {
+        for (sticker, label) in [(false, "Emoji"), (true, "Sticker")] {
+            if ui::choice_button(
+                ui,
+                settings.emoji_sticker == sticker,
+                label,
+                egui::Vec2::ZERO,
+            )
+            .clicked()
+            {
+                settings.emoji_sticker = sticker;
+            }
+        }
+    });
+    let sticker = settings.emoji_sticker;
+    let label = ui.label(ui::bold("Name"));
+    ui.horizontal(|ui| {
+        let field = ui
+            .add(ui::field(&mut settings.emoji_name).hint_text("party_parrot"))
+            .labelled_by(label.id);
+        if field.changed() {
+            clean_emoji_name(&mut settings.emoji_name);
+        }
+        let name = settings.emoji_name.as_str();
+        let taken = dir
+            .emoji
+            .iter()
+            .any(|e| e.sticker == sticker && e.name == name);
+        let max = if sticker {
+            dir.emoji_max.1
+        } else {
+            dir.emoji_max.0
+        };
+        let full = count(sticker) >= max;
+        let ready = emoji_name_ok(name) && !taken && !full;
+        let pick = ui
+            .add_enabled_ui(ready, |ui| ui::primary(ui, "Pick a picture"))
+            .inner
+            .clicked();
+        if pick || (ready && crate::app::submitted(ui, &field)) {
+            upload = Some((name.to_owned(), sticker));
+        }
+        if taken {
+            ui.label(RichText::new("That name is taken.").color(ui::colors(ui).danger_text));
+        } else if full {
+            ui.label(
+                RichText::new("This server has as many as it can have.")
+                    .color(ui::colors(ui).danger_text),
+            );
+        }
+    });
+    ui.weak(if sticker {
+        "PNG, JPG or GIF. Stickers are sent as their own message, shown large."
+    } else {
+        "PNG, JPG or GIF. People type it as :name: or pick it in the emoji picker."
+    });
+    for (sticker, title, max) in [
+        (false, "Emoji", dir.emoji_max.0),
+        (true, "Stickers", dir.emoji_max.1),
+    ] {
+        ui::page_section(ui, &format!("{title} · {} of {max}", count(sticker)));
+        let mut empty = true;
+        for item in dir.emoji.iter().filter(|e| e.sticker == sticker) {
+            empty = false;
+            ui.push_id(item.id, |ui| {
+                ui.horizontal(|ui| {
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::Vec2::splat(32.0), egui::Sense::hover());
+                    if let Some(picture) = &item.picture {
+                        egui::Image::new(&frame(ui, picture)).paint_at(ui, rect);
+                    }
+                    match &mut settings.emoji_renaming {
+                        Some((id, name)) if *id == item.id => {
+                            if ui.add(ui::field(name).char_limit(32)).changed() {
+                                clean_emoji_name(name);
+                            }
+                            let taken = dir
+                                .emoji
+                                .iter()
+                                .any(|e| e.sticker == sticker && e.name == *name && e.id != *id);
+                            let ok = emoji_name_ok(name) && !taken;
+                            if ui
+                                .add_enabled_ui(ok, |ui| ui::primary(ui, "Save"))
+                                .inner
+                                .clicked()
+                            {
+                                request = Some(Admin::RenameEmoji(*id, name.clone()));
+                            }
+                            if ui::secondary(ui, "Cancel").clicked() {
+                                settings.emoji_renaming = None;
+                            }
+                        }
+                        _ => {
+                            ui.label(format!(":{}:", item.name));
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if danger(ui, "Delete").clicked() {
+                                        request = Some(Admin::DeleteEmoji(item.id));
+                                    }
+                                    if ui::secondary(ui, "Rename").clicked() {
+                                        settings.emoji_renaming =
+                                            Some((item.id, item.name.clone()));
+                                    }
+                                },
+                            );
+                        }
+                    }
+                });
+            });
+        }
+        if empty {
+            ui.weak("None yet.");
+        }
+    }
+    (upload, request)
 }
 
 fn role_names(server: &Server, roles: &[String]) -> String {
@@ -858,6 +1035,9 @@ fn sentence(server: &Server, entry: &AuditEntry) -> String {
         "open_joining_changed" => format!("{actor} changed who can join"),
         "message_deleted" => format!("{actor} deleted a message"),
         "file_deleted" => format!("{actor} deleted a file"),
+        "emoji_added" => format!("{actor} added an emoji or sticker"),
+        "emoji_renamed" => format!("{actor} renamed an emoji or sticker"),
+        "emoji_deleted" => format!("{actor} deleted an emoji or sticker"),
         "device_certificate_changed" => format!("{actor} changed their devices"),
         "owner_claimed" => format!("{actor} set up the server"),
         other => format!("{actor}: {}", other.replace('_', " ")),

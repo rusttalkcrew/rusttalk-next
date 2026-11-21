@@ -686,6 +686,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let db = store::open(dir.path()).await?;
         let app = App {
+            emoji: crate::emoji::Emoji::open(dir.path(), &db).await?.into(),
             files: crate::files::Files::open(dir.path(), &db).await?.into(),
             db,
             key: std::sync::Arc::new(ed25519_dalek::SigningKey::from_bytes(&[7; 32])),

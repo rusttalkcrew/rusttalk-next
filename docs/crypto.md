@@ -165,15 +165,17 @@ object_id || epoch (8 bytes, big endian)
 
 The object type values are server name (1), description (2), icon (3),
 channel name (4), topic (5), category name (6), role name (7), display
-name (8), and avatar (9). Server objects use the raw server ID. Channels
+name (8), avatar (9), server emoji or sticker name (10), and server emoji
+or sticker picture (11). Server objects use the raw server ID. Channels
 and categories use their raw 32-byte IDs. Members use the raw person ID.
+Server emoji and stickers use their raw 32-byte IDs.
 Role names use the role ID's UTF-8 bytes. New metadata uses the newest
 space epoch held by the client, and the API accepts writes only when
 that epoch is current and the scope is ready. A removed member who
 colludes with the server can forge metadata under any old space key
 they held. Clients prefer metadata from the newest epoch and re-encrypt
-their own display name after a space rotation. Avatar and icon ciphertext is
-capped at 256 KiB including the 48-byte encryption framing and tag. Clients
+their own display name after a space rotation. Avatar, icon and emoji picture
+ciphertext is capped at 256 KiB including the 48-byte encryption framing and tag. Clients
 decode PNG, JPEG and GIF with pure Rust decoders, a 512×512 canvas limit,
 up to 100 GIF frames and a 32 MiB limit on retained RGBA frame pixels.
 
@@ -195,13 +197,17 @@ Format version 2 (the envelope's first byte) has this plaintext, in order.
 
 | Field | Encoding | Maximum bytes |
 | --- | --- | --- |
-| Flags | Bit 0 reply-to, bit 1 edit-of, bit 2 live offer. Other bits clear | 1 |
+| Flags | Bit 0 reply-to, bit 1 edit-of, bit 2 live offer, bit 3 sticker. Other bits clear | 1 |
 | Text | Two-byte big-endian UTF-8 length, then text of at most 2,000 Unicode scalar values | 2 + 8,000 |
 | Reply ID | 32 bytes, present with bit 0 | 32 |
 | Original ID | 32 bytes, present with bit 1 | 32 |
+| Sticker ID | 32 bytes, present with bit 3 | 32 |
 | Stored files | One-byte count 0–4, then that many [references](protocol.md#files) of at most 529 bytes | 1 + 2,116 |
 | Live offer | Present with bit 2, [offer fields](protocol.md#live-transfer) | 460 |
 
+A sticker message has no stored files and no live offer; its text is the
+sticker's name, shown when the sticker is not available. Server emoji travel
+in the text as `<:name:id>` tokens (see [Protocol](protocol.md#server-emoji-and-stickers)).
 Nothing may follow the last field. The largest plaintext is 10,644 bytes
 and the largest envelope is 10,751 bytes. Every length is checked against
 its field maximum before reading. Readers reject version 1 envelopes.

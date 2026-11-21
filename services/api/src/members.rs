@@ -694,6 +694,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = crate::store::open(dir.path()).await.unwrap();
         let app = App {
+            emoji: crate::emoji::Emoji::open(dir.path(), &db)
+                .await
+                .unwrap()
+                .into(),
             files: crate::files::Files::open(dir.path(), &db)
                 .await
                 .unwrap()

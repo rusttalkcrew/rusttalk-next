@@ -19,11 +19,14 @@ pub struct MessageBody {
     pub edit_of: Option<[u8; 32]>,
     pub attachments: Vec<Attachment>,
     pub live: Option<LiveAttachment>,
+    /// A server sticker by ID; the text holds its name. Sent without files or a live offer.
+    pub sticker: Option<[u8; 32]>,
 }
 
 const REPLY: u8 = 1;
 const EDIT: u8 = 2;
 const LIVE: u8 = 4;
+const STICKER: u8 = 8;
 
 impl MessageBody {
     /// Format version 2: flags, text, references, stored attachments, then the live offer.
@@ -31,12 +34,15 @@ impl MessageBody {
         if self.text.len() > MAX_TEXT_BYTES || self.text.chars().count() > MAX_TEXT_CHARS {
             return Err(MessageError::TextLimit);
         }
-        if self.attachments.len() > MAX_ATTACHMENTS {
+        if self.attachments.len() > MAX_ATTACHMENTS
+            || (self.sticker.is_some() && (!self.attachments.is_empty() || self.live.is_some()))
+        {
             return Err(MessageError::Attachment);
         }
         let flags = if self.reply_to.is_some() { REPLY } else { 0 }
             | if self.edit_of.is_some() { EDIT } else { 0 }
-            | if self.live.is_some() { LIVE } else { 0 };
+            | if self.live.is_some() { LIVE } else { 0 }
+            | if self.sticker.is_some() { STICKER } else { 0 };
         // Full capacity up front, so no plaintext copy is left behind by a reallocation.
         let mut body = Zeroizing::new(Vec::with_capacity(MAX_PLAINTEXT));
         body.push(flags);
@@ -44,6 +50,7 @@ impl MessageBody {
         body.extend_from_slice(self.text.as_bytes());
         body.extend(self.reply_to.iter().flatten());
         body.extend(self.edit_of.iter().flatten());
+        body.extend(self.sticker.iter().flatten());
         body.push(self.attachments.len() as u8);
         for attachment in &self.attachments {
             attachment.encode(&mut body)?;
@@ -60,7 +67,7 @@ impl MessageBody {
             return Err(MessageError::Encoding);
         }
         let ([flags, high, low], rest) = bytes.split_first_chunk().ok_or(MessageError::Encoding)?;
-        if flags & !(REPLY | EDIT | LIVE) != 0 {
+        if flags & !(REPLY | EDIT | LIVE | STICKER) != 0 {
             return Err(MessageError::Encoding);
         }
         let length = u16::from_be_bytes([*high, *low]) as usize;
@@ -81,8 +88,12 @@ impl MessageBody {
         };
         let reply_to = reference(REPLY)?;
         let edit_of = reference(EDIT)?;
+        let sticker = reference(STICKER)?;
         let (&count, mut tail) = tail.split_first().ok_or(MessageError::Encoding)?;
-        if count as usize > MAX_ATTACHMENTS {
+        // A sticker never has files or a live offer, so it stays within the plaintext limit.
+        if count as usize > MAX_ATTACHMENTS
+            || (sticker.is_some() && (count != 0 || flags & LIVE != 0))
+        {
             return Err(MessageError::Attachment);
         }
         let attachments = (0..count)
@@ -106,6 +117,7 @@ impl MessageBody {
             edit_of,
             attachments,
             live,
+            sticker,
         })
     }
 }
@@ -202,6 +214,7 @@ mod tests {
             edit_of: Some([6; 32]),
             attachments: Vec::new(),
             live: None,
+            sticker: None,
         };
         let envelope = context.seal(&key, &sender, &body).unwrap();
         assert_eq!(
@@ -311,6 +324,7 @@ mod tests {
             edit_of: Some([6; 32]),
             attachments: vec![attachment; MAX_ATTACHMENTS],
             live: None,
+            sticker: None,
         };
         let encoded = body.encode().unwrap();
         assert_eq!(encoded.len(), MAX_PLAINTEXT - live::MAX_ATTACHMENT);
@@ -336,6 +350,34 @@ mod tests {
             invalid[attachment + offset] = byte;
             assert!(MessageBody::decode(&invalid).is_err(), "offset {offset}");
         }
+    }
+
+    #[test]
+    fn stickers_round_trip_without_files() {
+        let mut body = MessageBody {
+            text: "party".into(),
+            reply_to: Some([5; 32]),
+            sticker: Some([7; 32]),
+            ..Default::default()
+        };
+        let encoded = body.encode().unwrap();
+        assert!(MessageBody::decode(&encoded).unwrap() == body);
+        // The sticker follows the reply ID, then a zero file count.
+        let mut with_file = encoded.to_vec();
+        *with_file.last_mut().unwrap() = 1;
+        assert_eq!(
+            MessageBody::decode(&with_file).err(),
+            Some(MessageError::Attachment)
+        );
+        body.live = Some(LiveAttachment {
+            id: [1; 32],
+            key: Key::new([2; 32]),
+            name: "crab.txt".into(),
+            mime_type: "text/plain".into(),
+            size: 1,
+            chunk_size: 1,
+        });
+        assert_eq!(body.encode().err(), Some(MessageError::Attachment));
     }
 
     #[test]
@@ -404,6 +446,7 @@ mod tests {
                 size: MAX_LIVE_FILE_SIZE,
                 chunk_size: LIVE_CHUNK_SIZE as u32,
             }),
+            sticker: None,
         };
         let encoded = body.encode().unwrap();
         assert_eq!(encoded.len(), MAX_PLAINTEXT);

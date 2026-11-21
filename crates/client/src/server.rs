@@ -190,6 +190,26 @@ pub struct Directory {
     pub roles: Vec<Role>,
     /// The role new members get.
     pub default_role: String,
+    /// Server emoji and stickers, oldest first.
+    pub emoji: Vec<CustomEmoji>,
+    /// How many emoji and stickers the server allows.
+    pub emoji_max: (usize, usize),
+}
+
+/// A server emoji or sticker, its name decrypted here.
+#[derive(Clone)]
+pub struct CustomEmoji {
+    pub id: Id,
+    pub name: String,
+    pub sticker: bool,
+    /// `None` until the image is fetched, or when it could not be read.
+    pub picture: Option<Picture>,
+}
+
+impl Directory {
+    pub fn emoji_by_id(&self, id: &Id) -> Option<&CustomEmoji> {
+        self.emoji.iter().find(|e| e.id == *id)
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -205,6 +225,7 @@ pub struct Perms {
     pub manage_roles: bool,
     pub audit: bool,
     pub manage_server: bool,
+    pub manage_emoji: bool,
     /// This person's highest role rank; they can only manage people and roles below it.
     pub rank: i64,
 }
@@ -219,13 +240,14 @@ impl Perms {
             || self.manage_roles
             || self.audit
             || self.manage_server
+            || self.manage_emoji
     }
 }
 
 pub const MENTION_EVERYONE: &str = "mention_everyone";
 
 /// The permissions a role can grant, as the API names them, with their labels.
-pub const PERMISSIONS: [(&str, &str); 9] = [
+pub const PERMISSIONS: [(&str, &str); 10] = [
     ("invite", "Invite people"),
     ("kick", "Kick"),
     ("ban", "Ban"),
@@ -235,6 +257,7 @@ pub const PERMISSIONS: [(&str, &str); 9] = [
     ("manage_channels", "Manage channels"),
     ("manage_server", "Manage server"),
     (MENTION_EVERYONE, "Mention everyone"),
+    ("manage_emoji", "Manage emoji"),
 ];
 
 #[derive(Clone)]
@@ -316,6 +339,8 @@ pub struct Msg {
     pub files: Vec<Attachment>,
     /// A file offered live: transfer ID, name and size.
     pub live: Option<(Id, String, u64)>,
+    /// A server sticker by ID; the text is its name.
+    pub sticker: Option<Id>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -448,6 +473,7 @@ mod tests {
             body: Body::Text(text.into()),
             files: Vec::new(),
             live: None,
+            sticker: None,
         }
     }
 

@@ -11,6 +11,7 @@ use crate::{App, store};
 pub async fn app(dir: &std::path::Path, people: u8) -> anyhow::Result<App> {
     let db = store::open(dir).await?;
     let app = App {
+        emoji: crate::emoji::Emoji::open(dir, &db).await?.into(),
         files: crate::files::Files::open(dir, &db).await?.into(),
         db,
         key: std::sync::Arc::new(ed25519_dalek::SigningKey::from_bytes(&[7; 32])),

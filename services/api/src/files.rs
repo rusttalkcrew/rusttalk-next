@@ -130,7 +130,7 @@ impl Files {
     }
 }
 
-fn setting(name: &str, default: i64) -> Result<i64> {
+pub(crate) fn setting(name: &str, default: i64) -> Result<i64> {
     let value = match env::var(name) {
         Ok(value) => value
             .parse::<i64>()
