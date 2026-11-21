@@ -117,6 +117,8 @@ pub enum Command {
     SetAvatar(Vec<u8>),
     /// Online, away or invisible.
     SetStatus(Choice),
+    /// Leave this person out of others' member lists while they appear offline.
+    SetHideOffline(bool),
     /// Leave this server for good, on the server too.
     Leave,
     /// Offer a file live to whoever is online in a text channel or DM.
@@ -810,8 +812,8 @@ fn cancel_queued(queued: &mut VecDeque<Command>, command: &Command) {
 /// Turn down a command that needs the API connection, which is down.
 fn refuse(ctx: &Ctx, url: &Url, command: Command) {
     match command {
-        // The status is sent again once connected, when it differs.
-        Command::SetStatus(_) | Command::CheckGone(..) => {}
+        // The status and hiding are sent again once connected, when they differ.
+        Command::SetStatus(_) | Command::SetHideOffline(_) | Command::CheckGone(..) => {}
         Command::ShareApp(app) => {
             ctx.send(Update::AppStopped(app.id));
             ctx.send(Update::Failed(t!("admin.offline").into()));
@@ -1466,6 +1468,7 @@ async fn on_command(
             directory(ctx, url, client, state).await?;
         }
         Command::SetStatus(choice) => client.set_status(choice).await?,
+        Command::SetHideOffline(hide) => client.set_hide_offline(hide).await?,
         Command::Leave => {
             let reply = client
                 .request(Method::DELETE, "/v1/me/membership")

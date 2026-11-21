@@ -887,6 +887,16 @@ impl<'a> KeyClient<'a> {
         Ok(())
     }
 
+    /// Leave this member out of others' member lists while they appear offline.
+    pub async fn set_hide_offline(&self, hide_offline: bool) -> Result<()> {
+        self.request(Method::PUT, "/v1/me/hide-offline")
+            .json(&json!({"hide_offline": hide_offline}))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
     /// Encrypt and replace the server name.
     pub async fn set_server_name(&self, name: &[u8]) -> Result<()> {
         let name_ct = self.encrypt_metadata(Metadata::ServerName, &self.space().id, name)?;

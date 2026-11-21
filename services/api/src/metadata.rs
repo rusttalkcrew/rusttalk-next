@@ -241,14 +241,18 @@ pub struct Member {
     display_name_ct: Option<String>,
     avatar_hash: Option<String>,
     role_ids: Vec<String>,
+    /// Clients leave this member out of member lists while they are offline.
+    hide_offline: bool,
 }
 
 pub async fn members(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Vec<Member>>> {
     let (mut tx, _) = authenticate_read(&app, &headers).await?;
-    let rows: Vec<(Vec<u8>, Ciphertext, Option<String>)> =
-        query_as("SELECT person_id, display_name_ct, avatar_hash FROM members ORDER BY person_id")
-            .fetch_all(&mut *tx)
-            .await?;
+    let rows: Vec<(Vec<u8>, Ciphertext, Option<String>, bool)> = query_as(
+        "SELECT person_id, display_name_ct, avatar_hash, hide_offline FROM members
+         ORDER BY person_id",
+    )
+    .fetch_all(&mut *tx)
+    .await?;
     let assignments: Vec<(Vec<u8>, String)> = query_as(
         "SELECT person_id, role_id FROM member_roles
          UNION ALL SELECT owner_person_id, 'owner' FROM server_settings WHERE owner_person_id IS NOT NULL
@@ -264,7 +268,7 @@ pub async fn members(State(app): State<App>, headers: HeaderMap) -> ApiResult<Js
     let presence = app.presence.snapshot();
     Ok(Json(
         rows.into_iter()
-            .map(|(person, display_name, avatar_hash)| {
+            .map(|(person, display_name, avatar_hash, hide_offline)| {
                 let person_id = encode(&person);
                 Member {
                     presence: presence.get(&person_id).copied().unwrap_or_default(),
@@ -272,6 +276,7 @@ pub async fn members(State(app): State<App>, headers: HeaderMap) -> ApiResult<Js
                     display_name_ct: encoded(display_name),
                     avatar_hash,
                     role_ids: roles.remove(&person).unwrap_or_default(),
+                    hide_offline,
                 }
             })
             .collect(),
@@ -299,5 +304,41 @@ mod tests {
             .unwrap();
         assert_eq!(hash, Some(picture_hash(&[9; 64])));
         assert_eq!(hash.unwrap().len(), 22);
+    }
+
+    #[tokio::test]
+    async fn hidden_members_are_flagged_and_show_presence_once_back() -> anyhow::Result<()> {
+        use crate::testing::{app, as_person};
+        use rusttalk_core::presence::Status;
+        let dir = tempfile::tempdir()?;
+        let app = app(dir.path(), 2).await?;
+        let hide = |on: bool| {
+            crate::presence::set_hide_offline(
+                State(app.clone()),
+                as_person(2),
+                Ok(Json(
+                    serde_json::from_value(json!({ "hide_offline": on })).unwrap(),
+                )),
+            )
+        };
+        let listed = || async {
+            let Json(rows) = members(State(app.clone()), as_person(1)).await.unwrap();
+            let row = serde_json::to_value(&rows[1]).unwrap();
+            (row["hide_offline"].clone(), row["presence"].clone())
+        };
+        assert_eq!(listed().await, (json!(false), json!("offline")));
+
+        assert_eq!(hide(true).await?, StatusCode::NO_CONTENT);
+        let Json(me) = crate::members::me(State(app.clone()), as_person(2)).await?;
+        assert_eq!(serde_json::to_value(me)?["hide_offline"], true);
+        assert_eq!(listed().await, (json!(true), json!("offline")));
+
+        let person = encode(&crate::testing::person(2));
+        let _socket = crate::presence::open(&app, person, Status::Online);
+        assert_eq!(listed().await, (json!(true), json!("online")));
+
+        hide(false).await?;
+        assert_eq!(listed().await.0, json!(false));
+        Ok(())
     }
 }

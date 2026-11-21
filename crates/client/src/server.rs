@@ -182,6 +182,8 @@ pub struct Directory {
     pub icon: Option<Picture>,
     /// This person's presence choice here.
     pub status: Option<Choice>,
+    /// Whether this person hides from member lists here while offline.
+    pub hide_offline: Option<bool>,
     pub me: Id,
     pub perms: Perms,
     pub categories: Vec<Category>,
@@ -309,9 +311,16 @@ pub struct Member {
     pub roles: Vec<String>,
     pub avatar: Option<Picture>,
     pub presence: Presence,
+    /// They asked to be left out of member lists while offline.
+    pub hide_offline: bool,
 }
 
 impl Member {
+    /// Whether the member list shows them; hidden people still have names elsewhere.
+    pub fn listed(&self) -> bool {
+        !(self.hide_offline && self.presence == Presence::Offline)
+    }
+
     /// Their chosen name, or a placeholder from their fingerprint.
     pub fn display_name(&self) -> String {
         (self.name.clone()).unwrap_or_else(|| {
@@ -567,6 +576,25 @@ fn add_replicas(replicas: &mut Vec<Url>, more: Vec<Url>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hidden_members_leave_the_list_only_while_offline() {
+        use rusttalk_core::presence::Presence;
+        let member = |hide_offline, presence| super::Member {
+            person: [0; 32],
+            name: None,
+            devices: Vec::new(),
+            roles: Vec::new(),
+            avatar: None,
+            presence,
+            hide_offline,
+        };
+        assert!(member(false, Presence::Offline).listed());
+        assert!(member(true, Presence::Online).listed());
+        assert!(member(true, Presence::Away).listed());
+        // Invisible people look offline, so they are left out too.
+        assert!(!member(true, Presence::Offline).listed());
+    }
+
     use super::*;
 
     fn msg(id: u8, at: i64, text: &str, edit_of: Option<u8>) -> Msg {
