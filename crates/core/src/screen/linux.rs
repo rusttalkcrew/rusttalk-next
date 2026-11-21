@@ -9,6 +9,7 @@ use tokio::{
     task::JoinHandle,
 };
 
+use super::hyprland::Control;
 use super::{BgraFrame, Cancelled, ScreenOptions, ScreenSource, ScreenSourceKind, frame_bytes};
 use crate::pipewire_helper::pipewire_helper;
 
@@ -24,6 +25,7 @@ struct Selection {
     #[serde(default)]
     name: String,
     restore_token: Option<String>,
+    monitor: Option<String>,
     /// The person closed the picker.
     #[serde(default)]
     cancelled: bool,
@@ -47,7 +49,12 @@ pub async fn open(
     _: ScreenSource,
     options: ScreenOptions,
     restore_token: &mut Option<String>,
-) -> Result<(String, watch::Receiver<Option<BgraFrame>>, Backend)> {
+) -> Result<(
+    String,
+    watch::Receiver<Option<BgraFrame>>,
+    Backend,
+    Option<Control>,
+)> {
     let mut child = Command::new(pipewire_helper()?)
         .args([
             "screen",
@@ -81,6 +88,20 @@ pub async fn open(
     }
     *restore_token = selection.restore_token;
 
+    let control = if options.remote_control
+        && let Some(name) = selection.monitor
+    {
+        match Control::open(name).await {
+            Ok(control) => Some(control),
+            Err(error) => {
+                tracing::warn!(%error, "Hyprland remote control unavailable for this share");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let (output, frames) = watch::channel(None);
     let task = tokio::spawn(async move {
         let result = async {
@@ -98,7 +119,7 @@ pub async fn open(
         // The child is killed and reaped by Tokio when the reader stops or is cancelled.
         drop(child);
     });
-    Ok((selection.name, frames, Backend(task)))
+    Ok((selection.name, frames, Backend(task), control))
 }
 
 /// One helper frame: little-endian width and height, then tightly packed BGRx rows.

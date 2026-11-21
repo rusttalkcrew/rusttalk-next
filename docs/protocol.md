@@ -721,7 +721,7 @@ granted `session`, and only when `seq` is higher than the last one seen on
 the same lane (moves, or everything else), which drops replays and stale
 moves. Control ends when the sharer stops it, the viewer withdraws or stops
 watching, either leaves, or the share stops or switches to another source.
-The sharer then releases every key and button the controller still held.
+The sharer then releases held remote keys and buttons.
 
 The viewer sends input only while the screen's tile (or its full screen
 view) has the keyboard focus; holding Escape for one second stops
@@ -734,13 +734,73 @@ are dropped; releases always go through. Windows never lets an app inject
 Ctrl+Alt+Del, and it keeps input from reaching apps running as
 administrator unless RustTalk does too.
 
-Linux sharers answer `unsupported` for both monitor and window shares. The
-[RemoteDesktop portal](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.RemoteDesktop.html)
-scopes absolute pointer motion to a ScreenCast stream. Clicks and scrolls
-are separate calls that target the compositor's current pointer location,
-which local input can change after the move. Keystrokes follow the
-compositor's keyboard focus, which RustTalk cannot verify against the
-shared source. RustTalk requires input to stay within the shared source.
+On Hyprland, the sharer can enable control requests for each monitor share.
+ScreenCast supplies the selected output's name, and RustTalk binds a Wayland
+virtual pointer to that output. It uses a Wayland virtual keyboard with the
+seat keymap and the active layout at the start of control. RustTalk's Allow
+prompt is the only permission gate for input. Window shares, shares without
+the opt-in or a usable output identifier, and other Linux compositors answer
+`unsupported`. A source switch ends control and starts with a fresh opt-in.
+
+Before a click, scroll or key event, RustTalk checks the pointer is on the
+selected output through Hyprland IPC. Keyboard input also requires a mapped,
+visible regular window on that output, as reported by `activewindow`.
+Because Hyprland can keep reporting that window while a layer surface owns
+keyboard focus, RustTalk checks mapped `layers` on all outputs. It drops keys
+when a layer with exclusive or on-demand keyboard interactivity is on
+another output or on any top or overlay layer. It uses the layer's IPC
+interactivity field where available, or corroborates the layer address using
+Hyprland's Lua layer query. Unknown interactivity in those positions blocks
+keys.
+
+RustTalk reads the configured `binds` and active `submap` at control start and
+again when verifying clicks, scrolls, keys or held input. It checks XKB
+modifiers, keysyms and keycodes against the active and universal binds.
+Hyprland resolves keysym binds with a keymap built from the global
+`input:kb_rules`, `kb_model`, `kb_layout`, `kb_variant` and `kb_options`
+options, which can differ from the seat keymap the virtual keyboard uses.
+RustTalk reads those options with `getoption`, builds the same keymap and
+blocks a key whose keysym under either keymap, or whose keycode, matches a
+bind. Like Hyprland, a key that resolves to a modifier keysym such as
+`Control_L` counts its own modifier bit when matching. Keys are blocked if the options can't be read or compiled, or if
+`input:kb_file` is set. Buttons match `mouse:272`-style triggers and scrolls
+match `mouse_up`, `mouse_down`, `mouse_left` and `mouse_right` in either
+direction, with the virtual keyboard's modifiers, including release, click
+and drag binds and `bindm`. Catch-all binds in the active submap block
+pointer input too. A new modifier is checked against held buttons, and held
+buttons are rechecked with held keys. RustTalk cross-checks the text bind
+list for triggers omitted from JSON. Hyprland's JSON bind list omits the
+flag that says a bind ignores modifiers, so RustTalk assumes Hyprland's
+default: a bind fires only with exactly its modifiers. A bind explicitly
+flagged to ignore modifiers is not detected and can still fire with other
+modifiers held. Super, Logo and Mod4,
+including remapped keys, and Ctrl+Alt with Delete or a function key are
+blocked. VT switch keysyms (`XF86Switch_VT_1` to `XF86Switch_VT_12`),
+`Terminate_Server` and the other server-private `XF86` keysyms that the
+compositor can act on before binds are blocked with any modifiers. RustTalk
+drops stale or failed events. Local pointer or keyboard activity pauses
+input until the seat is idle for about 500 ms.
+
+About every 100 ms while a remote key or button remains held, RustTalk
+rechecks the lock state, monitor, pointer, keyboard focus and binds even
+without incoming events. A failed check releases held remote input and
+destroys the virtual devices. Cleanup clears the virtual modifier mask
+before sending key releases.
+
+There is a time-of-check/time-of-use race between the IPC snapshot and the
+compositor delivering an event. The pointer, focus, lock state or bind
+configuration can change in between. Hyprland reports local and virtual input
+through the same idle protocol, so coincident local activity can be
+coalesced into a virtual event's notification. The pause and periodic checks
+reduce exposure, and release events still follow compositor routing.
+Compositor actions outside the reported binds may affect other outputs.
+Hyprland combines modifiers from all keyboards when matching binds, but its
+IPC reports only Caps Lock and Num Lock, not the modifiers held right now.
+RustTalk matches binds with the virtual keyboard's modifiers only. If the
+sharer holds a physical modifier such as Super for more than about 500 ms
+without other local input, a viewer's click, scroll or key can trigger the
+sharer's bind for that modifier, for example `SUPER + mouse:272` moving a
+window. This needs the sharer to hold the modifier themselves.
 
 The API gets the active roster from LiveKit's internal RoomService,
 cached for one second per room, and maps device identities to current

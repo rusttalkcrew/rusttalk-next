@@ -687,6 +687,8 @@ call.stop_watching = Stop watching
 call.exit_full_screen = Exit full screen
 
 # crates/client/src/call/remote.rs
+remote.share_opt_in = Allow control requests
+remote.share_warning = Monitors only. An approved viewer can use apps on the shared screen. Only RustTalk asks for permission.
 remote.allow_help = They can use your mouse and keyboard in what you share. You can take it back at any time.
 remote.they = They
 remote.no_answer = {name} didn't answer.

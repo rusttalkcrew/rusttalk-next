@@ -141,7 +141,7 @@ pub enum Command {
     StreamAudio(Vec<App>),
     StopScreen,
     /// Pick another screen or window while sharing, keeping the quality; no reconnect.
-    ChangeScreen(screen::Target),
+    ChangeScreen(screen::Target, bool),
     /// Start or stop receiving a screen or camera, by track.
     Watch(String, bool),
     /// Publish a running camera, replacing an earlier one.
@@ -1544,7 +1544,7 @@ async fn on_command(
         | Command::StopApp(_)
         | Command::StopScreen
         | Command::StreamAudio(_)
-        | Command::ChangeScreen(_)
+        | Command::ChangeScreen(..)
         | Command::Watch(..)
         | Command::StopCamera
         | Command::CancelFile(_)
