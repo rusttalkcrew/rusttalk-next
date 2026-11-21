@@ -543,7 +543,7 @@ pub async fn start_into(
         options.validate()?;
         #[cfg(windows)]
         let target = input::Target::from(source.target);
-        #[cfg(windows)]
+        #[cfg(not(target_os = "linux"))]
         let (name, mut frames, backend) = platform::open(source, options, restore_token).await?;
         #[cfg(target_os = "linux")]
         let (name, mut frames, backend, control) =
