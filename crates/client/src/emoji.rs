@@ -13,6 +13,17 @@ use crate::server::{CustomEmoji, Id};
 
 pub mod picker;
 
+/// Whether server emoji and stickers in chat play only under the pointer (Settings →
+/// Appearance), kept where every message can read it cheaply.
+pub fn hover_only(ctx: &egui::Context) -> bool {
+    ctx.data(|data| data.get_temp(egui::Id::unique("emoji on hover")))
+        .unwrap_or_default()
+}
+
+pub fn set_hover_only(ctx: &egui::Context, on: bool) {
+    ctx.data_mut(|data| data.insert_temp(egui::Id::unique("emoji on hover"), on));
+}
+
 const PNGS: &[u8] = include_bytes!("../assets/emoji/sprites.bin");
 static SPRITES: LazyLock<HashMap<&str, Range<usize>>> = LazyLock::new(|| {
     let mut start = 0;

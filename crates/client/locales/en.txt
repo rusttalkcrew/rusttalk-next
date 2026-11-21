@@ -66,6 +66,11 @@ settings.accent_help = Used for buttons, links and what's selected.
 settings.language = Language
 settings.app_language = App language
 settings.language_help = Names and messages stay as people wrote them.
+settings.motion = Motion
+settings.animated_emoji = Animated emoji
+settings.animated_emoji_help = Server emoji and stickers that move. On hover is calmer and saves power.
+settings.always = Always
+settings.on_hover = On hover
 common.system_default = System default
 
 # crates/client/src/home.rs

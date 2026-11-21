@@ -308,6 +308,7 @@ mod tests {
         };
         let mut other = synced(&local);
         assert!(other.keys().all(|key| SYNCED.contains(&key.as_str())));
+        assert!(!other.contains_key("emoji_on_hover"));
         other.insert("push_to_talk".into(), json!(true));
         other.insert("input".into(), json!("their mic"));
         let adopted = adopt(&local, &other);

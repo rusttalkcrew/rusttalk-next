@@ -286,13 +286,7 @@ impl Crop {
     fn save(&self) -> Result<Vec<u8>> {
         let (x, y, side) = self.square.pixels();
         if !self.frames.is_empty() {
-            let edge = match self.target {
-                Target::Emoji { sticker, .. } => {
-                    ANIMATED_EDGE.min(if sticker { STICKER_EDGE } else { EMOJI_EDGE })
-                }
-                _ => ANIMATED_EDGE,
-            };
-            return encode_animated(&self.frames, (x, y, side), edge);
+            return encode_animated(&self.frames, (x, y, side), animated_edge(&self.target));
         }
         let crop = image::imageops::crop_imm(&self.image, x, y, side, side).to_image();
         // Server emoji and stickers are PNG or GIF only, so they never fall back to JPEG.
@@ -302,6 +296,16 @@ impl Crop {
             }
             _ => encode(crop, EDGE, true),
         }
+    }
+}
+
+/// The largest side an animation for `target` is saved at.
+fn animated_edge(target: &Target) -> u32 {
+    match target {
+        Target::Emoji { sticker, .. } => {
+            ANIMATED_EDGE.min(if *sticker { STICKER_EDGE } else { EMOJI_EDGE })
+        }
+        _ => ANIMATED_EDGE,
     }
 }
 
@@ -563,6 +567,54 @@ mod tests {
             .map(|f| f.delay().numer_denom_ms().0 / f.delay().numer_denom_ms().1)
             .sum();
         assert!((5900..=6100).contains(&ms), "{ms}");
+        Ok(())
+    }
+
+    fn emoji(sticker: bool) -> Target {
+        Target::Emoji {
+            address: "https://example.com".parse().unwrap(),
+            name: "party".into(),
+            sticker,
+        }
+    }
+
+    #[test]
+    fn animated_emoji_and_stickers_are_capped_in_size() {
+        assert_eq!(animated_edge(&emoji(false)), EMOJI_EDGE);
+        assert_eq!(animated_edge(&emoji(true)), STICKER_EDGE.min(ANIMATED_EDGE));
+        assert_eq!(animated_edge(&Target::Avatar), ANIMATED_EDGE);
+    }
+
+    #[test]
+    fn emoji_and_stickers_keep_their_animation_when_downscaled() -> Result<()> {
+        // A big animated GIF, the way it comes in through the crop dialog.
+        let (_, frames) = decode(&gif(900, 900, 8)?)?;
+        assert_eq!(frames.len(), 8);
+        for sticker in [false, true] {
+            let edge = animated_edge(&emoji(sticker));
+            let bytes = encode_animated(&frames, (0, 0, 512), edge)?;
+            assert_eq!(image::guess_format(&bytes)?, ImageFormat::Gif);
+            // What every receiver decodes: all frames, at most the cap on a side.
+            let out = decode_profile_image(&bytes)?;
+            assert_eq!(out.len(), 8, "sticker: {sticker}");
+            let (width, height) = out[0].buffer().dimensions();
+            assert!(width.max(height) <= edge, "{width}x{height}");
+            assert_ne!(
+                out[0].buffer().get_pixel(width - 2, 5),
+                out[7].buffer().get_pixel(width - 2, 5)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn capped_animations_stay_playable_for_receivers() -> Result<()> {
+        // The most frames the largest sticker may have must pass the receiver's
+        // decoded-memory check, not only the file size limit.
+        let (_, frames) = decode(&gif(320, 320, 150)?)?;
+        let bytes = encode_animated(&frames, (0, 0, 320), animated_edge(&emoji(true)))?;
+        let out = decode_profile_image(&bytes)?;
+        assert!(out.len() > 1 && out.len() <= MAX_FRAMES);
         Ok(())
     }
 

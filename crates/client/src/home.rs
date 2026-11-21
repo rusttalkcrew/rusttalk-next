@@ -10,10 +10,10 @@ use std::{
 use anyhow::Result;
 use chrono::{DateTime, Local};
 use eframe::egui::{
-    self, Align, Align2, CentralPanel, CollapsingHeader, Color32, FontId, Frame, Id as UiId, Key,
-    KeyboardShortcut, Label, LayerId, Layout, Margin, Modifiers, Order, Panel, Rect, Response,
-    RichText, Role, ScrollArea, Sense, Shape, Stroke, StrokeKind, TextEdit, TextureHandle,
-    TextureOptions, Ui, UiBuilder, Vec2, WidgetInfo, ecolor::Hsva,
+    self, Align, Align2, CentralPanel, CollapsingHeader, Color32, ColorImage, FontId, Frame,
+    Id as UiId, Key, KeyboardShortcut, Label, LayerId, Layout, Margin, Modifiers, Order, Panel,
+    Rect, Response, RichText, Role, ScrollArea, Sense, Shape, Stroke, StrokeKind, TextEdit,
+    TextureHandle, TextureOptions, Ui, UiBuilder, Vec2, WidgetInfo, ecolor::Hsva,
 };
 use rusttalk_core::{
     auth::{Fingerprint, InviteLink, KnownServer, decode},
@@ -1418,6 +1418,7 @@ pub fn show(ui: &mut Ui, home: &mut Home, updates: &mut crate::update::Updater) 
     home.track_activity(ui);
     let settings = home.voice.audio.settings();
     ui::apply(ui.ctx(), settings.appearance());
+    emoji::set_hover_only(ui.ctx(), settings.emoji_on_hover);
     crate::i18n::set(&settings.language);
     for (ask, paths) in home.files.answers() {
         if let Ask::Picture = ask {
@@ -1855,11 +1856,6 @@ pub fn frame_at(delays: impl Iterator<Item = u32> + Clone, now: u64) -> Option<(
     None
 }
 
-/// The texture for a picture's current frame, so animated GIFs play.
-pub fn frame(ui: &Ui, picture: &Picture) -> TextureHandle {
-    frame_when(ui, picture, true)
-}
-
 /// Paint a profile picture or server icon in `rect`: its first frame, and it plays
 /// only while the pointer is over it, so lists of them cost nothing at rest.
 pub fn paint_hovered(ui: &Ui, rect: Rect, picture: &Picture, radius: f32) {
@@ -1869,32 +1865,54 @@ pub fn paint_hovered(ui: &Ui, rect: Rect, picture: &Picture, radius: f32) {
         .paint_at(ui, rect);
 }
 
-/// `frame`, with `play` false for the first frame only (and no repaints).
+/// A server emoji or sticker in a square of `size`. It plays while on screen in a
+/// focused window, or only under the pointer with "Animated emoji: On hover".
+pub fn emoji_image(ui: &mut Ui, picture: &Picture, size: f32, label: &str) -> Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    let play = ui.is_rect_visible(rect)
+        && ui.input(|input| input.focused)
+        && (!emoji::hover_only(ui.ctx()) || response.hovered());
+    egui::Image::new(&frame_when(ui, picture, play)).paint_at(ui, rect);
+    response.widget_info(|| WidgetInfo::labeled(Role::Image, true, label));
+    response
+}
+
+/// The texture for a picture's current frame, or its first with `play` false (and no
+/// repaints). Textures are shared by every use of the same image file; the other
+/// frames only go to the GPU once something plays.
 // shortcut: textures stay in egui's memory until restart; evict them if people change pictures often.
 fn frame_when(ui: &Ui, picture: &Picture, play: bool) -> TextureHandle {
-    let id = UiId::unique(("picture", picture.key));
-    let textures = ui.data(|data| data.get_temp::<Arc<Vec<TextureHandle>>>(id));
-    let textures = textures.unwrap_or_else(|| {
-        let made: Arc<Vec<_>> = Arc::new(
-            (picture.frames.iter())
-                .map(|(image, _)| {
-                    ui.ctx()
-                        .load_texture("picture", image.clone(), TextureOptions::LINEAR)
-                })
-                .collect(),
-        );
-        ui.data_mut(|data| data.insert_temp(id, made.clone()));
+    let load = |image: &ColorImage| {
+        ui.ctx()
+            .load_texture("picture", image.clone(), TextureOptions::LINEAR)
+    };
+    let first_id = UiId::unique(("picture", picture.key));
+    let first = ui.data(|data| data.get_temp::<TextureHandle>(first_id));
+    let first = first.unwrap_or_else(|| {
+        let made = load(&picture.frames[0].0);
+        ui.data_mut(|data| data.insert_temp(first_id, made.clone()));
         made
     });
-    if play && textures.len() > 1 {
-        let now = (ui.input(|input| input.time) * 1000.0) as u64;
-        let delays = picture.frames.iter().map(|(_, ms)| *ms);
-        if let Some((at, left)) = frame_at(delays, now) {
-            ui.ctx().request_repaint_after(Duration::from_millis(left));
-            return textures[at].clone();
-        }
+    if !play || picture.frames.len() < 2 {
+        return first;
     }
-    textures[0].clone()
+    let all_id = UiId::unique(("picture frames", picture.key));
+    let all = ui.data(|data| data.get_temp::<Arc<Vec<TextureHandle>>>(all_id));
+    let all = all.unwrap_or_else(|| {
+        let rest = picture.frames.iter().skip(1).map(|(image, _)| load(image));
+        let made: Arc<Vec<_>> = Arc::new(std::iter::once(first.clone()).chain(rest).collect());
+        ui.data_mut(|data| data.insert_temp(all_id, made.clone()));
+        made
+    });
+    let now = (ui.input(|input| input.time) * 1000.0) as u64;
+    let delays = picture.frames.iter().map(|(_, ms)| *ms);
+    match frame_at(delays, now) {
+        Some((at, left)) => {
+            ui.ctx().request_repaint_after(Duration::from_millis(left));
+            all[at].clone()
+        }
+        None => first,
+    }
 }
 
 fn dm_list(ui: &mut Ui, home: &mut Home) {
@@ -4408,12 +4426,8 @@ fn sticker(ui: &mut Ui, dir: &Directory, id: Option<&Id>, name: &str) {
         .and_then(|e| e.picture.as_ref())
     {
         Some(picture) => {
-            ui.add(
-                egui::Image::new(&frame(ui, picture))
-                    .fit_to_exact_size(Vec2::splat(STICKER_SIZE))
-                    .alt_text(t!("home.sticker", code = code)),
-            )
-            .on_hover_text(code);
+            emoji_image(ui, picture, STICKER_SIZE, &t!("home.sticker", code = code))
+                .on_hover_text(code);
         }
         None => {
             ui.label(

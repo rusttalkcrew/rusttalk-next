@@ -63,6 +63,11 @@ settings.accent_help = Für Schaltflächen, Links und Ausgewähltes.
 settings.language = Sprache
 settings.app_language = App-Sprache
 settings.language_help = Namen und Nachrichten bleiben, wie sie geschrieben wurden.
+settings.motion = Bewegung
+settings.animated_emoji = Animierte Emoji
+settings.animated_emoji_help = Server-Emoji und Sticker, die sich bewegen. Beim Darüberfahren ist ruhiger und spart Strom.
+settings.always = Immer
+settings.on_hover = Beim Darüberfahren
 common.system_default = Systemstandard
 
 # crates/client/src/home.rs

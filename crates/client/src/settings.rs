@@ -629,6 +629,7 @@ fn appearance_page(ui: &mut Ui, home: &mut Home) {
     let before = settings.appearance();
     let mut look = before;
     let language = settings.language.clone();
+    let emoji_on_hover = settings.emoji_on_hover;
     ui::page_section(ui, t!("settings.language"));
     ui::setting_row(
         ui,
@@ -710,7 +711,31 @@ fn appearance_page(ui: &mut Ui, home: &mut Home) {
             }
         }
     });
-    if look != before || settings.language != language {
+    ui::page_section(ui, t!("settings.motion"));
+    ui::setting_row(
+        ui,
+        t!("settings.animated_emoji"),
+        t!("settings.animated_emoji_help"),
+        |ui| {
+            let current = if settings.emoji_on_hover {
+                t!("settings.on_hover")
+            } else {
+                t!("settings.always")
+            };
+            let combo = ComboBox::from_id_salt("animated-emoji")
+                .selected_text(current)
+                .show_ui(ui, |ui| {
+                    let choice = &mut settings.emoji_on_hover;
+                    ui.selectable_value(choice, false, t!("settings.always"));
+                    ui.selectable_value(choice, true, t!("settings.on_hover"));
+                });
+            combo.response.widget_info(|| {
+                egui::WidgetInfo::labeled(Role::ComboBox, true, t!("settings.animated_emoji"))
+            });
+        },
+    );
+    if look != before || settings.language != language || settings.emoji_on_hover != emoji_on_hover
+    {
         crate::i18n::set(&settings.language);
         settings.set_appearance(look);
         audio.set_settings(settings);
