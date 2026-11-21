@@ -22,10 +22,22 @@ use url::Url;
 
 use crate::i18n::Lang;
 
+pub mod github;
+pub mod reddit;
+pub mod spotify;
 pub mod steam;
+pub mod wikipedia;
+pub mod youtube;
 
 /// Every site previews can come from. Each needs the person's yes first.
-pub static PROVIDERS: &[&dyn Provider] = &[&steam::Steam];
+pub static PROVIDERS: &[&dyn Provider] = &[
+    &steam::Steam,
+    &youtube::YouTube,
+    &spotify::Spotify,
+    &github::GitHub,
+    &wikipedia::Wikipedia,
+    &reddit::Reddit,
+];
 
 pub const MAX_TITLE: usize = 120;
 pub const MAX_DESCRIPTION: usize = 300;
@@ -49,7 +61,10 @@ const SEEN: Duration = Duration::from_secs(1);
 /// While a preview loads, the screen is redrawn at least this often, renewing `SEEN`.
 const REPAINT: Duration = Duration::from_millis(500);
 /// Prices change; anything older is fetched again when shown, while the old copy stays up.
+/// Sites without prices may wait longer (see `Provider::fresh`).
 const FRESH: u64 = 60 * 60;
+/// A site asking to wait longer than this is given this.
+const MAX_WAIT: Duration = Duration::from_secs(24 * 60 * 60);
 /// Previews are dropped after a day, in memory and on disk.
 const KEEP: u64 = 24 * 60 * 60;
 const MAX_SAVED: usize = 200;
@@ -68,9 +83,32 @@ pub trait Provider: Send + Sync {
     /// What to fetch for `url`, or `None` when it isn't this site's kind of link.
     fn key(&self, url: &Url) -> Option<String>;
     /// The details for `key`, in the app's language and the computer's country.
-    fn fetch(&self, get: &Get, key: &str, lang: Lang, country: Option<&str>) -> Option<Details>;
+    fn fetch(
+        &self,
+        get: &Get,
+        key: &str,
+        lang: Lang,
+        country: Option<&str>,
+    ) -> Result<Details, Failure>;
     /// Whether a picture may be downloaded from `host`.
     fn image_host(&self, host: &str) -> bool;
+    /// Seconds before a shown preview is fetched again.
+    fn fresh(&self) -> u64 {
+        FRESH
+    }
+    /// The card's button.
+    fn action(&self) -> String {
+        t!("previews.view_on", site = self.name())
+    }
+}
+
+/// Why a fetch gave nothing.
+#[derive(Debug, PartialEq)]
+pub enum Failure {
+    /// Only this link: gone, private or unreadable. Other links are still tried.
+    Item,
+    /// The whole site, which pauses for `RETRY` or as long as it asked.
+    Site(Option<Duration>),
 }
 
 /// The links a site can preview, once per site and key, at most `MAX_PER_MESSAGE`.
@@ -111,6 +149,18 @@ pub fn safe_url(text: &str, host: impl Fn(&str) -> bool) -> Option<Url> {
     .then_some(url)
 }
 
+/// A string in a JSON reply as plain text of at most `max` characters; `None` when
+/// missing or empty.
+pub fn json_text(value: Option<&serde_json::Value>, max: usize) -> Option<String> {
+    let text = plain(value?.as_str()?, max);
+    (!text.is_empty()).then_some(text)
+}
+
+/// Whether `text` is 1 to `max` bytes, all of them allowed by `ok`.
+pub fn token(text: &str, max: usize, ok: impl Fn(u8) -> bool) -> bool {
+    (1..=max).contains(&text.len()) && text.bytes().all(ok)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Field {
     Price,
@@ -118,6 +168,11 @@ pub enum Field {
     Developer,
     Genres,
     Platforms,
+    Channel,
+    Stars,
+    Language,
+    State,
+    Subreddit,
 }
 
 impl Field {
@@ -128,6 +183,11 @@ impl Field {
             Self::Developer => t!("previews.developer"),
             Self::Genres => t!("previews.genres"),
             Self::Platforms => t!("previews.platforms"),
+            Self::Channel => t!("previews.channel"),
+            Self::Stars => t!("previews.stars"),
+            Self::Language => t!("previews.language"),
+            Self::State => t!("previews.state"),
+            Self::Subreddit => t!("previews.subreddit"),
         }
     }
 }
@@ -142,6 +202,27 @@ pub struct Details {
     pub url: String,
     /// Checked with `safe_url` against the provider's picture hosts.
     pub image: Option<String>,
+    /// The picture is a small icon (an avatar), not a banner.
+    #[serde(default)]
+    pub icon: bool,
+    /// Marked as adult content by the site: shown with a label and without a picture.
+    #[serde(default)]
+    pub nsfw: bool,
+}
+
+impl Details {
+    /// The usual card: title, optional description and picture, no fields.
+    pub fn new(title: String, url: String) -> Self {
+        Self {
+            title,
+            description: String::new(),
+            fields: Vec::new(),
+            url,
+            image: None,
+            icon: false,
+            nsfw: false,
+        }
+    }
 }
 
 pub struct Preview {
@@ -248,18 +329,61 @@ impl Get {
 
     /// The body of `url`, when it passes `safe_url` with `host` and fits in `max` bytes.
     pub fn get(&self, url: &Url, max: u64, host: impl Fn(&str) -> bool) -> Option<Vec<u8>> {
-        let url = safe_url(url.as_str(), host)?;
-        let reply = match self.0.get(url).send().and_then(|r| r.error_for_status()) {
-            Ok(reply) => reply,
-            Err(error) => {
-                tracing::info!(error = %error.without_url(), "link preview fetch failed");
-                return None;
-            }
-        };
+        self.request(url, max, host, None).ok()
+    }
+
+    /// Like `get`, with an optional `Accept` header, telling why it failed.
+    pub fn request(
+        &self,
+        url: &Url,
+        max: u64,
+        host: impl Fn(&str) -> bool,
+        accept: Option<&str>,
+    ) -> Result<Vec<u8>, Failure> {
+        let url = safe_url(url.as_str(), host).ok_or(Failure::Item)?;
+        let mut request = self.0.get(url);
+        if let Some(accept) = accept {
+            request = request.header(reqwest::header::ACCEPT, accept);
+        }
+        let reply = request.send().map_err(|error| {
+            tracing::info!(error = %error.without_url(), "link preview fetch failed");
+            Failure::Site(None)
+        })?;
+        let status = reply.status();
+        if !status.is_success() {
+            tracing::info!(%status, "link preview fetch refused");
+            return Err(failure(status.as_u16(), reply.headers(), now()));
+        }
         let mut bytes = Vec::new();
         // One byte over the limit tells a too-big reply apart.
-        reply.take(max + 1).read_to_end(&mut bytes).ok()?;
-        (bytes.len() as u64 <= max).then_some(bytes)
+        reply
+            .take(max + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| Failure::Site(None))?;
+        if bytes.len() as u64 > max {
+            return Err(Failure::Item);
+        }
+        Ok(bytes)
+    }
+}
+
+/// What a refusal means: rate limits and server trouble pause the site (as long as it
+/// asks, by `Retry-After` or `X-RateLimit-Reset`), anything else is about this link.
+fn failure(status: u16, headers: &reqwest::header::HeaderMap, now: u64) -> Failure {
+    let number = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.trim().parse::<u64>().ok())
+    };
+    match status {
+        403 | 429 => {
+            let wait = number("retry-after")
+                .or_else(|| number("x-ratelimit-reset").map(|reset| reset.saturating_sub(now)));
+            Failure::Site(wait.map(|secs| Duration::from_secs(secs).min(MAX_WAIT)))
+        }
+        500.. => Failure::Site(None),
+        _ => Failure::Item,
     }
 }
 
@@ -607,8 +731,12 @@ fn run(shared: &Shared, get: &Get, job: &Job) {
         .join(hex::encode(Sha256::digest(job.cache.as_bytes())));
     let saved = load(&file);
     if let Some((preview, at)) = &saved {
-        let fresh = now() < at + FRESH;
-        let refresh = if fresh { at + FRESH } else { u64::MAX };
+        let fresh = now() < at + job.provider.fresh();
+        let refresh = if fresh {
+            at + job.provider.fresh()
+        } else {
+            u64::MAX
+        };
         publish(shared, job, preview.clone(), refresh, at + KEEP);
         if fresh {
             return;
@@ -629,30 +757,31 @@ fn run(shared: &Shared, get: &Get, job: &Job) {
         return abandon(shared, job);
     }
     let fetched = fetch(get, job, || allowed(shared, job));
-    if fetched.is_none() {
-        lock(&shared.backoff).insert(job.provider.id(), Instant::now() + RETRY);
+    if let Err(Failure::Site(wait)) = &fetched {
+        let wait = wait.unwrap_or(RETRY).max(RETRY);
+        lock(&shared.backoff).insert(job.provider.id(), Instant::now() + wait);
     }
     // Turned off while the request ran: keep nothing from it.
     if !allowed(shared, job) {
         return abandon(shared, job);
     }
     let committed = match (fetched, saved) {
-        (Some((details, image, bytes)), _) => {
+        (Ok((details, image, bytes)), _) => {
             let at = now();
             save(shared, job, &file, &details, bytes.as_deref())
                 && publish(
                     shared,
                     job,
                     Arc::new(Preview::new(details, image)),
-                    at + FRESH,
+                    at + job.provider.fresh(),
                     at + KEEP,
                 )
         }
         // A failed refresh keeps the old copy, without an error.
-        (None, Some((preview, at))) => {
+        (Err(_), Some((preview, at))) => {
             publish(shared, job, preview, now() + RETRY.as_secs(), at + KEEP)
         }
-        (None, None) => set(shared, job, Entry::Failed(Instant::now())),
+        (Err(_), None) => set(shared, job, Entry::Failed(Instant::now())),
     };
     if !committed {
         abandon(shared, job);
@@ -698,20 +827,20 @@ type Fetched = (Details, Option<ColorImage>, Option<Vec<u8>>);
 
 /// The details, and the picture decoded and as downloaded.
 /// `go` is checked before every request, so none starts after sign-out or turning off.
-fn fetch(get: &Get, job: &Job, go: impl Fn() -> bool) -> Option<Fetched> {
+fn fetch(get: &Get, job: &Job, go: impl Fn() -> bool) -> Result<Fetched, Failure> {
     if !go() {
-        return None;
+        return Err(Failure::Item);
     }
     let details = job
         .provider
         .fetch(get, &job.key, job.lang, job.country.as_deref())?;
     let bytes = (details.image.as_deref())
-        .filter(|_| go())
+        .filter(|_| go() && !details.nsfw)
         .and_then(|u| safe_url(u, |host| job.provider.image_host(host)))
         .and_then(|url| get.get(&url, MAX_IMAGE, |host| job.provider.image_host(host)));
     let image = bytes.as_deref().and_then(picture);
     let bytes = image.is_some().then_some(bytes).flatten();
-    Some((details, image, bytes))
+    Ok((details, image, bytes))
 }
 
 /// A picture within the size and memory limits, scaled down to fit a card.
@@ -830,18 +959,17 @@ mod tests {
         fn key(&self, _: &Url) -> Option<String> {
             None
         }
-        fn fetch(&self, _: &Get, key: &str, _: Lang, _: Option<&str>) -> Option<Details> {
+        fn fetch(&self, _: &Get, key: &str, _: Lang, _: Option<&str>) -> Result<Details, Failure> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             if let Some(during) = lock(&self.during).as_ref() {
                 during();
             }
-            self.answer.then(|| Details {
-                title: format!("Game {key}"),
-                description: String::new(),
-                fields: Vec::new(),
-                url: "https://example.org/".into(),
-                image: Some("https://picture.invalid/header.png".into()),
-            })
+            if !self.answer {
+                return Err(Failure::Site(None));
+            }
+            let mut details = Details::new(format!("Game {key}"), "https://example.org/".into());
+            details.image = Some("https://picture.invalid/header.png".into());
+            Ok(details)
         }
         fn image_host(&self, _: &str) -> bool {
             self.pictures.fetch_add(1, Ordering::SeqCst);
@@ -987,6 +1115,42 @@ mod tests {
                 "{key} starts again"
             );
         }
+    }
+
+    #[test]
+    fn rate_limits_pause_the_site_as_long_as_it_asks() {
+        use reqwest::header::{HeaderMap, HeaderValue};
+        let headers = |name: &'static str, value: &str| {
+            let mut map = HeaderMap::new();
+            map.insert(name, HeaderValue::from_str(value).unwrap());
+            map
+        };
+        let now = 1_000_000;
+        assert_eq!(
+            failure(403, &headers("x-ratelimit-reset", "1001800"), now),
+            Failure::Site(Some(Duration::from_secs(1800)))
+        );
+        assert_eq!(
+            failure(429, &headers("retry-after", "120"), now),
+            Failure::Site(Some(Duration::from_secs(120)))
+        );
+        assert_eq!(
+            failure(429, &headers("retry-after", "99999999"), now),
+            Failure::Site(Some(MAX_WAIT))
+        );
+        assert_eq!(failure(503, &HeaderMap::new(), now), Failure::Site(None));
+        assert_eq!(failure(404, &HeaderMap::new(), now), Failure::Item);
+    }
+
+    #[test]
+    fn a_missing_link_does_not_pause_the_site() {
+        let (previews, _data, get) = setup();
+        let site = fake(true);
+        previews.allow(site.id(), true);
+        // Asking with the shutdown check already failing gives `Item`, as a 404 would.
+        let job = job(&previews, site, "1", true);
+        assert_eq!(fetch(&get, &job, || false).err(), Some(Failure::Item));
+        assert!(lock(&previews.shared.backoff).is_empty());
     }
 
     #[test]

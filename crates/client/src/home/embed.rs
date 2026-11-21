@@ -8,6 +8,7 @@ use crate::{server::Picture, ui};
 
 const WIDTH: f32 = 420.0;
 const IMAGE: f32 = 40.0;
+const BANNER_HEIGHT: f32 = 220.0;
 
 pub enum Image<'a> {
     Picture(&'a Picture),
@@ -16,6 +17,8 @@ pub enum Image<'a> {
     /// A banner across the top, such as a game's header picture. Owned by its
     /// preview, so it is freed with it.
     Wide(&'a TextureHandle),
+    /// A small square picture beside the title, such as an avatar; owned like `Wide`.
+    Icon(&'a TextureHandle),
 }
 
 pub struct Button<'a> {
@@ -48,7 +51,10 @@ impl Embed<'_> {
             ui::card(ui, |ui| {
                 if let Some(Image::Wide(texture)) = &self.image {
                     let [w, h] = texture.size();
-                    let width = ui.available_width();
+                    // Square covers would otherwise fill the chat.
+                    let width = ui
+                        .available_width()
+                        .min(BANNER_HEIGHT * w as f32 / h.max(1) as f32);
                     let size = Vec2::new(width, width * h as f32 / w.max(1) as f32);
                     ui.add(
                         eframe::egui::Image::new(*texture)
@@ -58,6 +64,13 @@ impl Embed<'_> {
                 }
                 let clicked = ui
                     .horizontal(|ui| {
+                        if let Some(Image::Icon(texture)) = &self.image {
+                            ui.add(
+                                eframe::egui::Image::new(*texture)
+                                    .fit_to_exact_size(Vec2::splat(IMAGE))
+                                    .corner_radius(IMAGE / 2.0),
+                            );
+                        }
                         let icon = match &self.image {
                             Some(Image::Picture(picture)) => Some(Ok(*picture)),
                             Some(Image::Glyph(glyph)) => Some(Err(glyph)),

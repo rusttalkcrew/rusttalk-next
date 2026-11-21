@@ -4,7 +4,8 @@ use serde_json::Value;
 use url::Url;
 
 use super::{
-    Details, Field, Get, MAX_DESCRIPTION, MAX_FIELD, MAX_JSON, MAX_TITLE, Provider, plain, safe_url,
+    Details, Failure, Field, Get, MAX_DESCRIPTION, MAX_FIELD, MAX_JSON, MAX_TITLE, Provider, plain,
+    safe_url,
 };
 use crate::i18n::Lang;
 
@@ -36,15 +37,23 @@ impl Provider for Steam {
             .map(|id| id.to_string())
     }
 
-    fn fetch(&self, get: &Get, key: &str, lang: Lang, country: Option<&str>) -> Option<Details> {
-        let mut url = Url::parse(&format!("https://{STORE}/api/appdetails")).ok()?;
+    fn fetch(
+        &self,
+        get: &Get,
+        key: &str,
+        lang: Lang,
+        country: Option<&str>,
+    ) -> Result<Details, Failure> {
+        let mut url =
+            Url::parse(&format!("https://{STORE}/api/appdetails")).map_err(|_| Failure::Item)?;
         url.query_pairs_mut()
             .append_pair("appids", key)
             .append_pair("l", language(lang));
         if let Some(country) = country {
             url.query_pairs_mut().append_pair("cc", country);
         }
-        parse(&get.get(&url, MAX_JSON, |host| host == STORE)?, key)
+        let bytes = get.request(&url, MAX_JSON, |host| host == STORE, None)?;
+        parse(&bytes, key).ok_or(Failure::Item)
     }
 
     fn image_host(&self, host: &str) -> bool {
@@ -129,6 +138,8 @@ pub fn parse(bytes: &[u8], id: &str) -> Option<Details> {
         fields,
         url: format!("https://{STORE}/app/{id}/"),
         image,
+        icon: false,
+        nsfw: false,
     })
 }
 

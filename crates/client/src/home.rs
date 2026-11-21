@@ -4177,10 +4177,20 @@ fn link_preview(
             let fields: Vec<_> = (details.fields.iter())
                 .map(|(field, value)| (field.label(), value.as_str()))
                 .collect();
-            let view = t!("previews.view_on", site = site);
+            let view = provider.action();
+            let kind = if details.nsfw {
+                format!("{site} · {}", t!("previews.nsfw"))
+            } else {
+                site.to_owned()
+            };
+            let texture = preview.texture(ui.ctx());
             let clicked = embed::Embed {
-                image: preview.texture(ui.ctx()).map(embed::Image::Wide),
-                kind: site,
+                image: texture.map(if details.icon {
+                    embed::Image::Icon
+                } else {
+                    embed::Image::Wide
+                }),
+                kind: &kind,
                 title: &details.title,
                 description: (!details.description.is_empty()).then_some(&*details.description),
                 fields: &fields,
