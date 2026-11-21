@@ -17,7 +17,7 @@ use sqlx::{Sqlite, SqliteConnection, SqlitePool, Transaction, query, query_as, q
 
 use crate::{
     ApiError, ApiResult, App, Change, keys, payload,
-    store::{audit, hash, log_closed, now, random, write},
+    store::{WriteTx, audit, hash, log_closed, now, random, write},
 };
 
 const PUBLIC_LIMIT: i64 = 256;
@@ -59,12 +59,15 @@ pub async fn challenge(State(app): State<App>, headers: HeaderMap) -> ApiResult<
     Ok(Json(Challenge::signed(&challenge, &app.key)))
 }
 
-async fn consume_challenge(db: &SqlitePool, challenge: &[u8; 32], at: i64) -> ApiResult<()> {
+async fn consume_challenge(db: &SqlitePool, challenge: &[u8; 32]) -> ApiResult<()> {
+    let mut tx = write(db).await?;
+    // Read the clock after the writer queue, so a challenge that expired while waiting is refused.
     let result = query("DELETE FROM challenges WHERE nonce = ? AND expires_at > ?")
         .bind(challenge.as_slice())
-        .bind(at)
-        .execute(db)
+        .bind(now()?)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     if result.rows_affected() == 0 {
         return Err(ApiError::unauthorized("invalid_challenge"));
     }
@@ -100,7 +103,7 @@ async fn sign_in_device(
     let ip = client_ip(headers)?;
     let challenge = decode(&request.challenge)?;
     // Commit consumption even if subsequent checks reject the sign-in.
-    consume_challenge(&app.db, &challenge, now()?).await?;
+    consume_challenge(&app.db, &challenge).await?;
     let server_id = app.key.verifying_key().to_bytes();
     let cert = verify_device(&request, &challenge, &server_id)?;
     let person = cert.person_id().as_slice();
@@ -451,51 +454,81 @@ pub async fn require_owner(db: &mut SqliteConnection, person: &PersonId) -> ApiR
     Ok(())
 }
 
-pub async fn authenticate(
+/// Authenticate a request that may write, inside a write transaction.
+pub async fn authenticate(app: &App, headers: &HeaderMap) -> ApiResult<(WriteTx, Actor)> {
+    let (token_hash, ip) = credentials(headers)?;
+    // Refuse unknown or expired sessions from a snapshot first, so they never queue for the
+    // writer turn; the check is repeated inside the write transaction.
+    drop(authenticate_read(app, headers).await?);
+    let mut tx = write(&app.db).await?;
+    match actor(&mut tx, &token_hash, ip).await? {
+        Ok(actor) => Ok((tx, actor)),
+        Err(expires_at) => {
+            query("DELETE FROM sessions WHERE token_hash = ?")
+                .bind(token_hash.as_slice())
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            log_closed(vec![expires_at], now()?, "token_expired");
+            Err(ApiError::unauthorized("token_expired"))
+        }
+    }
+}
+
+/// Authenticate a read-only request. Its deferred transaction reads a snapshot and never waits
+/// for a writer, so it must not write: an upgrade fails at once if another write committed in
+/// between. An expired session is refused here and removed by the expiry sweep.
+pub async fn authenticate_read(
     app: &App,
     headers: &HeaderMap,
 ) -> ApiResult<(Transaction<'static, Sqlite>, Actor)> {
+    let (token_hash, ip) = credentials(headers)?;
+    let mut tx = app.db.begin().await?;
+    let actor = actor(&mut tx, &token_hash, ip)
+        .await?
+        .map_err(|_| ApiError::unauthorized("token_expired"))?;
+    Ok((tx, actor))
+}
+
+fn credentials(headers: &HeaderMap) -> ApiResult<([u8; 32], String)> {
     let token = headers
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
         .and_then(|value| decode::<32>(value).ok())
         .ok_or(ApiError::unauthorized("invalid_session"))?;
-    let ip = client_ip(headers)?;
-    let token_hash = hash(&token);
-    let mut tx = write(&app.db).await?;
+    Ok((hash(&token), client_ip(headers)?))
+}
+
+/// The session's actor, or its expiry time if it has expired.
+async fn actor(
+    db: &mut SqliteConnection,
+    token_hash: &[u8; 32],
+    ip: String,
+) -> ApiResult<Result<Actor, i64>> {
     let at = now()?;
     let (person, device, expires_at, session_id): (Vec<u8>, Vec<u8>, i64, Vec<u8>) = query_as(
         "SELECT person_id, device_id, expires_at, session_id FROM sessions WHERE token_hash = ?",
     )
     .bind(token_hash.as_slice())
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut *db)
     .await?
     .ok_or(ApiError::unauthorized("invalid_session"))?;
     if expires_at <= at {
-        query("DELETE FROM sessions WHERE token_hash = ?")
-            .bind(token_hash.as_slice())
-            .execute(&mut *tx)
-            .await?;
-        tx.commit().await?;
-        log_closed(vec![expires_at], at, "token_expired");
-        return Err(ApiError::unauthorized("token_expired"));
+        return Ok(Err(expires_at));
     }
-    check_ip(&mut tx, &ip, &person).await?;
+    check_ip(db, &ip, &person).await?;
     let person = person
         .try_into()
         .map_err(|_| ApiError::internal("invalid_stored_person"))?;
-    Ok((
-        tx,
-        Actor {
-            person,
-            device,
-            ip,
-            at,
-            session_id,
-            expires_at,
-        },
-    ))
+    Ok(Ok(Actor {
+        person,
+        device,
+        ip,
+        at,
+        session_id,
+        expires_at,
+    }))
 }
 
 pub async fn refresh(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Session>> {
@@ -754,24 +787,47 @@ mod tests {
     async fn challenges_are_single_use_and_expire() {
         let dir = tempfile::tempdir().unwrap();
         let db = crate::store::open(dir.path()).await.unwrap();
-        for nonce in [[1u8; 32], [2u8; 32]] {
-            query("INSERT INTO challenges (nonce, expires_at) VALUES (?, 101)")
+        let at = now().unwrap();
+        for (nonce, expires_at) in [([1u8; 32], at + 60), ([2u8; 32], at)] {
+            query("INSERT INTO challenges (nonce, expires_at) VALUES (?, ?)")
                 .bind(nonce.as_slice())
+                .bind(expires_at)
                 .execute(&db)
                 .await
                 .unwrap();
         }
         let nonce = [1; 32];
         let (first, second) = tokio::join!(
-            consume_challenge(&db, &nonce, 100),
-            consume_challenge(&db, &nonce, 100)
+            consume_challenge(&db, &nonce),
+            consume_challenge(&db, &nonce)
         );
         assert_ne!(first.is_ok(), second.is_ok());
         assert_eq!(
-            consume_challenge(&db, &[2; 32], 101)
-                .await
-                .unwrap_err()
-                .code,
+            consume_challenge(&db, &[2; 32]).await.unwrap_err().code,
+            "invalid_challenge"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_challenge_that_expires_while_queued_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::store::open(dir.path()).await.unwrap();
+        query("INSERT INTO challenges (nonce, expires_at) VALUES (?, ?)")
+            .bind([3u8; 32].as_slice())
+            .bind(now().unwrap() + 1)
+            .execute(&db)
+            .await
+            .unwrap();
+        // Another write holds the writer turn until the challenge has expired.
+        let busy = write(&db).await.unwrap();
+        let consume = tokio::spawn({
+            let db = db.clone();
+            async move { consume_challenge(&db, &[3; 32]).await }
+        });
+        tokio::time::sleep(Duration::from_millis(2100)).await;
+        drop(busy);
+        assert_eq!(
+            consume.await.unwrap().unwrap_err().code,
             "invalid_challenge"
         );
     }

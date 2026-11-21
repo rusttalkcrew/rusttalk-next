@@ -27,7 +27,7 @@ use serde_json::json;
 use sqlx::{SqliteConnection, query_as, query_scalar};
 use zeroize::Zeroizing;
 
-use crate::{ApiError, ApiResult, App, auth::authenticate, channels, messages, payload};
+use crate::{ApiError, ApiResult, App, auth::authenticate_read, channels, messages, payload};
 
 const DEV_SECRET: &str = "dev-only-livekit-secret-do-not-deploy";
 const DATA_PREFIX: &str = "file-";
@@ -232,7 +232,7 @@ pub async fn token(
     headers: HeaderMap,
     Path(channel): Path<String>,
 ) -> ApiResult<Json<Token>> {
-    let (mut tx, actor) = authenticate(&app, &headers).await?;
+    let (mut tx, actor) = authenticate_read(&app, &headers).await?;
     require_voice_read(&mut tx, &channel, &actor.person).await?;
     let sources = publish_sources(&mut tx, &channel, &actor.person).await?;
     let can_publish_data =
@@ -269,7 +269,7 @@ pub async fn data_token(
     Path((channel, nonce)): Path<(String, String)>,
 ) -> ApiResult<Json<Token>> {
     let nonce = decode(&nonce)?;
-    let (mut tx, actor) = authenticate(&app, &headers).await?;
+    let (mut tx, actor) = authenticate_read(&app, &headers).await?;
     let can_publish_data = require_chat_read(&mut tx, &channel, &actor.person).await?;
     let identity = live_file_identity(app.key.verifying_key().as_bytes(), &actor.device, &nonce);
     let token = configured(&app)?.sign(
@@ -365,13 +365,13 @@ pub async fn participants(
     headers: HeaderMap,
     Path(channel): Path<String>,
 ) -> ApiResult<Json<Presence>> {
-    let (mut tx, actor) = authenticate(&app, &headers).await?;
+    let (mut tx, actor) = authenticate_read(&app, &headers).await?;
     require_voice_read(&mut tx, &channel, &actor.person).await?;
     tx.commit().await?;
     let active = configured(&app)?.active(&channel).await?;
 
     // Recheck access after the network call, which can overlap a kick or permission change.
-    let (mut tx, _) = authenticate(&app, &headers).await?;
+    let (mut tx, _) = authenticate_read(&app, &headers).await?;
     require_voice_read(&mut tx, &channel, &actor.person).await?;
     let readers = reader_identities(&app, &mut tx, &channel).await?;
     tx.commit().await?;
@@ -560,7 +560,7 @@ async fn relay_acceptance(
     acceptance: LiveFileAcceptance,
     data: bool,
 ) -> ApiResult<StatusCode> {
-    let (mut tx, actor) = authenticate(app, headers).await?;
+    let (mut tx, actor) = authenticate_read(app, headers).await?;
     if data {
         require_chat_read(&mut tx, &channel, &actor.person).await?;
     } else {

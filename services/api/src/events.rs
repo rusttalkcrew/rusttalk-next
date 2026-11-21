@@ -22,7 +22,7 @@ use tracing::Instrument;
 
 use crate::{
     ApiError, ApiResult, App, Change,
-    auth::{Actor, authenticate},
+    auth::{Actor, authenticate_read},
     keys, presence,
     store::now,
 };
@@ -38,7 +38,7 @@ pub async fn upgrade(
     }
     let span = tracing::Span::current();
     let changes = app.changes.subscribe();
-    let (tx, actor) = authenticate(&app, &headers).await?;
+    let (tx, actor) = authenticate_read(&app, &headers).await?;
     tx.commit().await?;
     Ok(ws
         .max_message_size(4096)

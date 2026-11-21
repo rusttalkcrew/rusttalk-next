@@ -23,7 +23,7 @@ use tokio::fs;
 
 use crate::{
     ApiError, ApiResult, App,
-    auth::authenticate,
+    auth::{authenticate, authenticate_read},
     file_settings,
     files::setting,
     keys,
@@ -115,7 +115,7 @@ pub struct List {
 }
 
 pub async fn list(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<List>> {
-    let (mut tx, _) = authenticate(&app, &headers).await?;
+    let (mut tx, _) = authenticate_read(&app, &headers).await?;
     let max_stickers = file_settings::effective(&mut tx, app.files.ceilings)
         .await?
         .max_stickers;
@@ -150,7 +150,7 @@ pub async fn image(
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
     decode::<32>(&id)?;
-    let (mut tx, _) = authenticate(&app, &headers).await?;
+    let (mut tx, _) = authenticate_read(&app, &headers).await?;
     let exists: bool = query_scalar("SELECT EXISTS (SELECT 1 FROM emoji WHERE id = ?)")
         .bind(&id)
         .fetch_one(&mut *tx)

@@ -12,7 +12,7 @@ use sqlx::{FromRow, SqliteConnection, query, query_as, query_scalar};
 
 use crate::{
     ApiError, ApiResult, App,
-    auth::{Actor, authenticate},
+    auth::{Actor, authenticate, authenticate_read},
     keys, metadata, payload,
     roles::{self, Permission},
     store::audit,
@@ -203,7 +203,7 @@ async fn categories(db: &mut SqliteConnection, person: Option<&[u8]>) -> ApiResu
 }
 
 pub async fn catalog(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Catalog>> {
-    let (mut tx, actor) = authenticate(&app, &headers).await?;
+    let (mut tx, actor) = authenticate_read(&app, &headers).await?;
     let person = Some(actor.person.as_slice());
     let catalog = Catalog {
         channels: channels(&mut tx, person).await?,
@@ -217,7 +217,7 @@ pub async fn list_channels(
     State(app): State<App>,
     headers: HeaderMap,
 ) -> ApiResult<Json<Vec<Channel>>> {
-    let (mut tx, actor) = authenticate(&app, &headers).await?;
+    let (mut tx, actor) = authenticate_read(&app, &headers).await?;
     manage(&mut tx, &actor).await?;
     let list = channels(&mut tx, None).await?;
     tx.commit().await?;
@@ -228,7 +228,7 @@ pub async fn list_categories(
     State(app): State<App>,
     headers: HeaderMap,
 ) -> ApiResult<Json<Vec<Category>>> {
-    let (mut tx, actor) = authenticate(&app, &headers).await?;
+    let (mut tx, actor) = authenticate_read(&app, &headers).await?;
     manage(&mut tx, &actor).await?;
     let list = categories(&mut tx, None).await?;
     tx.commit().await?;

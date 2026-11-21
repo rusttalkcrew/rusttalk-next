@@ -16,7 +16,7 @@ use sqlx::{FromRow, SqliteConnection, query, query_as, query_scalar};
 
 use crate::{
     ApiError, ApiResult, App, Change,
-    auth::{Actor, authenticate},
+    auth::{Actor, authenticate, authenticate_read},
     payload,
 };
 
@@ -31,7 +31,7 @@ pub async fn devices(
     State(app): State<App>,
     headers: HeaderMap,
 ) -> ApiResult<Json<Vec<MemberDevice>>> {
-    let (mut tx, _) = authenticate(&app, &headers).await?;
+    let (mut tx, _) = authenticate_read(&app, &headers).await?;
     let rows: Vec<(Vec<u8>, Vec<u8>)> =
         query_as("SELECT person_id, certificate FROM member_devices ORDER BY person_id, device_id")
             .fetch_all(&mut *tx)
@@ -218,7 +218,7 @@ fn stored_commitment(bytes: Vec<u8>) -> ApiResult<[u8; 32]> {
 }
 
 pub async fn state(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<KeyState>> {
-    let (mut tx, actor) = authenticate(&app, &headers).await?;
+    let (mut tx, actor) = authenticate_read(&app, &headers).await?;
     let rows: Vec<EnvelopeRow> = query_as(
         "SELECT k.id, k.kind, e.epoch, e.sender_device, v.commitment, e.envelope FROM key_envelopes e
          JOIN key_epochs v ON v.scope_id = e.scope_id AND v.epoch = e.epoch

@@ -88,11 +88,69 @@ pub fn hash(value: &[u8]) -> [u8; 32] {
     Sha256::digest(value).into()
 }
 
-pub async fn write(pool: &SqlitePool) -> ApiResult<Transaction<'static, Sqlite>> {
-    // shortcut: every authenticated request takes SQLite's single write lock, fine for small
-    // communities; move read-only handlers to deferred transactions if busy errors show up.
-    // Serialize authorization and mutation with other requests and owner-invite CLI executions.
-    Ok(pool.begin_with("BEGIN IMMEDIATE").await?)
+/// One writer at a time in this process. SQLite's busy handler gives up after the busy timeout
+/// and is not fair, so writers queue here instead, without holding a pooled connection.
+static WRITER: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+type Turn = tokio::sync::MutexGuard<'static, ()>;
+
+/// A write transaction that holds this process's writer turn until SQLite has really ended it.
+/// SQLite keeps running a statement or commit after its request is cancelled, so the turn
+/// passes only once the commit or rollback has completed, never when the future is dropped.
+pub struct WriteTx(Option<(Transaction<'static, Sqlite>, Turn)>);
+
+impl WriteTx {
+    pub async fn commit(mut self) -> Result<(), sqlx::Error> {
+        let (tx, turn) = self.0.take().expect("open write transaction");
+        // The task owns the turn, so cancelling this request cannot pass it on mid-commit.
+        tokio::spawn(async move {
+            let committed = tx.commit().await;
+            drop(turn);
+            committed
+        })
+        .await
+        .map_err(|_| sqlx::Error::WorkerCrashed)?
+    }
+}
+
+impl Drop for WriteTx {
+    fn drop(&mut self) {
+        let Some((tx, turn)) = self.0.take() else {
+            return;
+        };
+        // Awaiting the rollback also waits for a statement a cancelled request left running.
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let _ = tx.rollback().await;
+                drop(turn);
+            });
+        }
+    }
+}
+
+impl std::ops::Deref for WriteTx {
+    type Target = SqliteConnection;
+    fn deref(&self) -> &SqliteConnection {
+        &self.0.as_ref().expect("open write transaction").0
+    }
+}
+
+impl std::ops::DerefMut for WriteTx {
+    fn deref_mut(&mut self) -> &mut SqliteConnection {
+        &mut self.0.as_mut().expect("open write transaction").0
+    }
+}
+
+/// Start a transaction that may write. Read-only work uses a deferred `begin()` instead: in WAL
+/// mode it reads a snapshot and never waits for a writer.
+pub async fn write(pool: &SqlitePool) -> ApiResult<WriteTx> {
+    let turn = WRITER.lock().await;
+    // IMMEDIATE takes the write lock up front, so it serializes authorization and mutation with
+    // owner-invite CLI executions too, and never fails the later upgrade from read to write.
+    Ok(WriteTx(Some((
+        pool.begin_with("BEGIN IMMEDIATE").await?,
+        turn,
+    ))))
 }
 
 pub async fn audit(
@@ -132,22 +190,259 @@ pub async fn expire_records(pool: SqlitePool) {
     loop {
         interval.tick().await;
         let result = async {
+            let mut tx = write(&pool).await?;
             let at = now()?;
             let sessions =
                 query_scalar("DELETE FROM sessions WHERE expires_at <= ? RETURNING expires_at")
                     .bind(at)
-                    .fetch_all(&pool)
+                    .fetch_all(&mut *tx)
                     .await?;
-            log_closed(sessions, at, "token_expired");
             query("DELETE FROM open_joins WHERE expires_at <= ?")
                 .bind(at)
-                .execute(&pool)
+                .execute(&mut *tx)
                 .await?;
+            tx.commit().await?;
+            log_closed(sessions, at, "token_expired");
             Ok::<_, ApiError>(())
         }
         .await;
         if let Err(error) = result {
             tracing::error!(reason = error.code, "record expiry failed");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        collections::BTreeMap,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
+    };
+
+    use axum::{
+        Json,
+        extract::{Path, State},
+    };
+
+    use super::*;
+    use crate::{
+        App, auth, channels, keys, members, metadata, presence,
+        testing::{self, as_person},
+        voice,
+    };
+
+    const PEOPLE: u8 = 12;
+
+    const VOICE: [u8; 32] = [9; 32];
+
+    /// One request of the mix that people in a voice call with chat and presence produce.
+    /// Returns whether it was a read.
+    async fn request(app: &App, step: usize) -> ApiResult<bool> {
+        let who = (step % PEOPLE as usize) as u8 + 1;
+        let headers = as_person(who);
+        let state = State(app.clone());
+        let kind = step % 9;
+        let result = match kind {
+            0 => {
+                let status = if step.is_multiple_of(2) {
+                    "away"
+                } else {
+                    "online"
+                };
+                let choice = serde_json::from_value(serde_json::json!({ "status": status }))
+                    .expect("valid status");
+                presence::set(state, headers, Ok(Json(choice)))
+                    .await
+                    .map(drop)
+            }
+            1 => channels::catalog(state, headers).await.map(drop),
+            2 => keys::state(state, headers).await.map(drop),
+            3 => metadata::members(state, headers).await.map(drop),
+            4 => members::me(state, headers).await.map(drop),
+            5 => {
+                // The owner reads every channel, so only the missing LiveKit refuses this.
+                let channel = Path(rusttalk_core::auth::encode(&VOICE));
+                voice::token(state, as_person(1), channel).await.map(drop)
+            }
+            6 => auth::challenge(state, headers).await.map(drop),
+            _ => {
+                // What an event socket reads when it opens and after a change.
+                let (tx, actor) = auth::authenticate_read(app, &headers).await?;
+                tx.commit().await?;
+                let mut db = app.db.begin().await?;
+                keys::pending(&mut db, &actor).await?;
+                keys::scopes(&mut db, &actor).await?;
+                presence::stored(&mut db, &actor.person).await?;
+                db.commit().await?;
+                Ok(())
+            }
+        };
+        let expected = match kind {
+            5 => Some("voice_unavailable"),
+            6 => Some("challenge_limit"),
+            _ => None,
+        };
+        match result {
+            Err(error) if Some(error.code) == expected => {}
+            other => other?,
+        }
+        Ok(!matches!(kind, 0 | 6))
+    }
+
+    /// A write that outlasts SQLite's busy timeout, as a commit on a stalled disk does, must
+    /// only delay other requests: readers never wait for it and writers queue behind it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn a_slow_write_fails_no_concurrent_request() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let app = testing::app(dir.path(), PEOPLE).await?;
+        query("INSERT INTO categories (id, position, name_ct) VALUES ('c', 0, x'00')")
+            .execute(&app.db)
+            .await?;
+        query("INSERT INTO channels (id, kind, category_id, position, name_ct) VALUES (?, 'voice', 'c', 0, x'00')")
+            .bind(rusttalk_core::auth::encode(&VOICE))
+            .execute(&app.db)
+            .await?;
+        let stalled = Arc::new(AtomicBool::new(true));
+        let reads_during_stall = Arc::new(AtomicUsize::new(0));
+        let mut tx = write(&app.db).await?;
+        query("UPDATE members SET presence_status = 'away' WHERE person_id = ?")
+            .bind(testing::person(1))
+            .execute(&mut *tx)
+            .await?;
+        let stall = tokio::spawn({
+            let stalled = stalled.clone();
+            async move {
+                tokio::time::sleep(Duration::from_secs(6)).await;
+                let committed = tx.commit().await;
+                stalled.store(false, Ordering::SeqCst);
+                committed
+            }
+        });
+        let tasks: Vec<_> = (0..48)
+            .map(|task| {
+                let (app, stalled) = (app.clone(), stalled.clone());
+                let reads = reads_during_stall.clone();
+                tokio::spawn(async move {
+                    let (mut failures, mut ok, mut step) = (Vec::new(), 0, task);
+                    // Keep the mix going through the stall and for a while after it.
+                    while stalled.load(Ordering::SeqCst) || ok < 20 {
+                        match request(&app, step).await {
+                            Ok(read) => {
+                                if read && stalled.load(Ordering::SeqCst) {
+                                    reads.fetch_add(1, Ordering::SeqCst);
+                                }
+                                ok += 1;
+                            }
+                            Err(error) => failures.push(error.code),
+                        }
+                        step += 48;
+                    }
+                    failures
+                })
+            })
+            .collect();
+        let mut failures = BTreeMap::new();
+        for task in tasks {
+            for code in task.await? {
+                *failures.entry(code).or_insert(0) += 1;
+            }
+        }
+        stall.await??;
+        assert!(failures.is_empty(), "failed requests: {failures:?}");
+        assert!(
+            reads_during_stall.load(Ordering::SeqCst) > 0,
+            "reads waited for the write"
+        );
+        Ok(())
+    }
+
+    /// The same database with no busy timeout, so a writer that reaches SQLite while another
+    /// connection still holds the write lock fails at once instead of waiting.
+    async fn impatient(dir: &std::path::Path) -> anyhow::Result<SqlitePool> {
+        let options = SqliteConnectOptions::new()
+            .filename(dir.join("rusttalk.sqlite3"))
+            .busy_timeout(Duration::ZERO);
+        Ok(SqlitePoolOptions::new().connect_with(options).await?)
+    }
+
+    async fn next_write_succeeds(pool: &SqlitePool) -> ApiResult<()> {
+        let mut tx = write(pool).await?;
+        query("UPDATE server_settings SET open_joining = open_joining")
+            .execute(&mut *tx)
+            .await?;
+        Ok(tx.commit().await?)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_cancelled_statement_keeps_the_turn_until_it_rolls_back() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        // Kept open: closing the last connection checkpoints and locks the database.
+        let _schema = open(dir.path()).await?;
+        let pool = impatient(dir.path()).await?;
+        // The next writer comes from elsewhere, so it cannot queue behind on the same connection.
+        let next = impatient(dir.path()).await?;
+        query("SELECT 1").execute(&next).await?;
+        let mut tx = write(&pool).await?;
+        let (started, running) = tokio::sync::oneshot::channel();
+        let mut started = Some(started);
+        tx.lock_handle().await?.set_progress_handler(1000, move || {
+            if let Some(started) = started.take() {
+                let _ = started.send(());
+            }
+            true
+        });
+        let slow = async move {
+            query(
+                "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 5000000)
+                 SELECT COUNT(*) FROM n",
+            )
+            .execute(&mut *tx)
+            .await
+        };
+        // The request goes away once SQLite is running its statement.
+        tokio::select! {
+            _ = slow => panic!("the statement finished before the request went away"),
+            _ = running => {}
+        }
+        next_write_succeeds(&next).await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_cancelled_commit_keeps_the_turn_until_it_finishes() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        // Kept open: closing the last connection checkpoints and locks the database.
+        let _schema = open(dir.path()).await?;
+        let pool = impatient(dir.path()).await?;
+        // The next writer comes from elsewhere, so it cannot queue behind on the same connection.
+        let next = impatient(dir.path()).await?;
+        query("SELECT 1").execute(&next).await?;
+        query("CREATE TABLE bulk (data BLOB)")
+            .execute(&pool)
+            .await?;
+        let mut tx = write(&pool).await?;
+        query("INSERT INTO bulk VALUES (x'00')")
+            .execute(&mut *tx)
+            .await?;
+        // A commit that stalls while holding the write lock, as a slow disk sync does.
+        tx.lock_handle().await?.set_commit_hook(|| {
+            std::thread::sleep(Duration::from_millis(500));
+            true
+        });
+        // The request goes away while SQLite still commits.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), tx.commit())
+                .await
+                .is_err()
+        );
+        next_write_succeeds(&next).await?;
+        let rows: i64 = query_scalar("SELECT COUNT(*) FROM bulk")
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(rows, 1, "the cancelled commit still completes");
+        Ok(())
     }
 }

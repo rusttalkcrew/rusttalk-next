@@ -36,7 +36,7 @@ struct Settings {
 }
 
 pub async fn get(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Publication>> {
-    let (mut tx, actor) = auth::authenticate(&app, &headers).await?;
+    let (mut tx, actor) = auth::authenticate_read(&app, &headers).await?;
     auth::require_owner(&mut tx, &actor.person).await?;
     let listing = settings(&app, &mut tx).await?;
     tx.commit().await?;

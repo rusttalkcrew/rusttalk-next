@@ -12,7 +12,7 @@ use sqlx::{FromRow, SqliteConnection, query, query_as, query_scalar};
 
 use crate::{
     ApiError, ApiResult, App,
-    auth::authenticate,
+    auth::{authenticate, authenticate_read},
     keys, metadata, payload,
     store::{audit, random},
 };
@@ -166,7 +166,7 @@ pub struct RoleList {
 }
 
 pub async fn list(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<RoleList>> {
-    let (mut tx, _) = authenticate(&app, &headers).await?;
+    let (mut tx, _) = authenticate_read(&app, &headers).await?;
     let default_role_id = query_scalar("SELECT default_role_id FROM server_settings WHERE id = 1")
         .fetch_one(&mut *tx)
         .await?;

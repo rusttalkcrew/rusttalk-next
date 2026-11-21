@@ -9,7 +9,7 @@ use sqlx::{SqliteConnection, query, query_as, query_scalar};
 
 use crate::{
     ApiError, ApiResult, App,
-    auth::authenticate,
+    auth::{authenticate, authenticate_read},
     files::setting,
     payload,
     roles::{self, Permission},
@@ -59,7 +59,7 @@ pub async fn used_bytes(db: &mut SqliteConnection) -> ApiResult<i64> {
 }
 
 pub async fn get(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<FileSettings>> {
-    let (mut tx, _) = authenticate(&app, &headers).await?;
+    let (mut tx, _) = authenticate_read(&app, &headers).await?;
     let ceilings = app.files.ceilings;
     let limits = effective(&mut tx, ceilings).await?;
     let used_bytes = used_bytes(&mut tx).await?;

@@ -30,8 +30,8 @@ use std::{
 use anyhow::{Result, bail};
 use axum::{
     Json, Router,
-    extract::{Request, rejection::JsonRejection},
-    http::{StatusCode, header::CACHE_CONTROL},
+    extract::{MatchedPath, Request, rejection::JsonRejection},
+    http::{Method, StatusCode, header::CACHE_CONTROL},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{delete, get, post, put},
@@ -98,11 +98,17 @@ type ApiResult<T> = Result<T, ApiError>;
 struct ApiError {
     status: StatusCode,
     code: &'static str,
+    /// The underlying error for the server log only, such as SQLite's message.
+    detail: Option<String>,
 }
 
 impl ApiError {
     fn new(status: StatusCode, code: &'static str) -> Self {
-        Self { status, code }
+        Self {
+            status,
+            code,
+            detail: None,
+        }
     }
     fn bad_request(code: &'static str) -> Self {
         Self::new(StatusCode::BAD_REQUEST, code)
@@ -138,7 +144,11 @@ impl From<sqlx::Error> for ApiError {
             }
             _ => "database_error",
         };
-        Self::internal(code)
+        // sqlx and SQLite messages name the failing code, constraint or column, never values.
+        Self {
+            detail: Some(error.to_string()),
+            ..Self::internal(code)
+        }
     }
 }
 
@@ -151,7 +161,7 @@ impl From<ProtocolError> for ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         if self.status.is_server_error() {
-            tracing::error!(reason = self.code, "request failed");
+            tracing::error!(reason = self.code, error = self.detail, "request failed");
         } else {
             tracing::warn!(reason = self.code, "request rejected");
         }
@@ -358,6 +368,7 @@ async fn serve(app: App) -> io::Result<()> {
                 .layer(RequestBodyLimitLayer::new(messages::BODY_LIMIT)),
         )
         .with_state(app)
+        .layer(middleware::from_fn(finish_changes))
         .layer(middleware::from_fn(log_request))
         .layer(PropagateRequestIdLayer::x_request_id())
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
@@ -375,12 +386,48 @@ async fn serve(app: App) -> io::Result<()> {
     result
 }
 
+/// Changes running at once. Each keeps running after its client leaves, so this bounds what
+/// clients that send and hang up can leave behind during a slow write.
+const CHANGE_LIMIT: usize = 256;
+static CHANGES: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(CHANGE_LIMIT);
+
+/// Run every change to completion even if the client leaves. Otherwise a cancelled request
+/// can commit and then skip what follows, such as notifying members or voice enforcement.
+async fn finish_changes(request: Request, next: Next) -> Response {
+    if matches!(
+        *request.method(),
+        Method::GET | Method::HEAD | Method::OPTIONS
+    ) {
+        return next.run(request).await;
+    }
+    let Ok(permit) = CHANGES.try_acquire() else {
+        return ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "server_busy").into_response();
+    };
+    // The task owns the permit, so a client that leaves cannot free its slot early.
+    tokio::spawn(
+        async move {
+            let response = next.run(request).await;
+            drop(permit);
+            response
+        }
+        .in_current_span(),
+    )
+    .await
+    .unwrap_or_else(|_| ApiError::internal("request_task_failed").into_response())
+}
+
 async fn log_request(request: Request, next: Next) -> Response {
     let request_id = request
         .headers()
         .get("x-request-id")
         .and_then(|id| id.to_str().ok());
-    let span = tracing::info_span!("request", request_id);
+    // The route pattern, not the path, so logs never carry IDs from the URL.
+    let route = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map(MatchedPath::as_str);
+    let method = request.method().as_str();
+    let span = tracing::info_span!("request", request_id, method, route);
     async move {
         let mut response = next.run(request).await;
         response.headers_mut().insert(
@@ -401,4 +448,147 @@ async fn log_request(request: Request, next: Next) -> Response {
     }
     .instrument(span)
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{net::SocketAddr, time::Duration};
+
+    use sqlx::query_scalar;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpStream,
+        time::{sleep, timeout},
+    };
+
+    use super::*;
+    use crate::testing;
+
+    /// These tests count `CHANGES` permits, so they run one at a time.
+    static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    async fn serve_kicks(app: &App) -> anyhow::Result<SocketAddr> {
+        let router = Router::new()
+            .route("/v1/members/{person}", delete(members::kick))
+            .with_state(app.clone())
+            .layer(middleware::from_fn(finish_changes));
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        tokio::spawn(async move { axum::serve(listener, router).await });
+        Ok(address)
+    }
+
+    /// Send a kick of person 2 with this bearer token and return the open connection.
+    async fn send_kick(address: SocketAddr, token: [u8; 32]) -> anyhow::Result<TcpStream> {
+        let mut client = TcpStream::connect(address).await?;
+        let request = format!(
+            "DELETE /v1/members/{} HTTP/1.1\r\nHost: test\r\nAuthorization: Bearer {}\r\n\
+             X-Forwarded-For: 192.0.2.1\r\nContent-Length: 0\r\n\r\n",
+            encode(&testing::person(2)),
+            encode(&token),
+        );
+        client.write_all(request.as_bytes()).await?;
+        Ok(client)
+    }
+
+    /// The response status if one arrives within `wait`, then hang up either way.
+    async fn status_within(mut client: TcpStream, wait: Duration) -> Option<u16> {
+        let mut head = [0; 12];
+        timeout(wait, client.read_exact(&mut head))
+            .await
+            .ok()?
+            .ok()?;
+        std::str::from_utf8(&head[9..12]).ok()?.parse().ok()
+    }
+
+    async fn permits_reach(available: usize) -> anyhow::Result<()> {
+        // Generous: the writer turn is shared with other tests, such as the 6 s slow write.
+        timeout(Duration::from_secs(30), async {
+            while CHANGES.available_permits() != available {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_change_finishes_after_the_client_leaves() -> anyhow::Result<()> {
+        let _serial = SERIAL.lock().await;
+        let dir = tempfile::tempdir()?;
+        let app = testing::app(dir.path(), 2).await?;
+        let mut changes = app.changes.subscribe();
+        let address = serve_kicks(&app).await?;
+
+        // Holding the writer turn parks the kick mid-request while its client hangs up.
+        let turn = store::write(&app.db).await?;
+        let client = send_kick(address, [1; 32]).await?;
+        permits_reach(CHANGE_LIMIT - 1).await?;
+        drop(client);
+        // Give the server time to see the hang-up, which used to cancel the handler.
+        sleep(Duration::from_millis(200)).await;
+        drop(turn);
+
+        timeout(Duration::from_secs(30), async {
+            loop {
+                if let Change::Update(rusttalk_core::presence::Update::Event(
+                    Event::MemberChanged { .. },
+                )) = changes.recv().await?
+                {
+                    return anyhow::Ok(());
+                }
+            }
+        })
+        .await??;
+        let member: bool =
+            query_scalar("SELECT EXISTS (SELECT 1 FROM members WHERE person_id = ?)")
+                .bind(testing::person(2))
+                .fetch_one(&app.db)
+                .await?;
+        assert!(!member, "the kick committed");
+        permits_reach(CHANGE_LIMIT).await
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn changes_left_behind_by_clients_stay_bounded() -> anyhow::Result<()> {
+        let _serial = SERIAL.lock().await;
+        let dir = tempfile::tempdir()?;
+        let app = testing::app(dir.path(), 2).await?;
+        let address = serve_kicks(&app).await?;
+        let turn = store::write(&app.db).await?;
+
+        // Unknown sessions are refused while the writer turn is taken, without queueing for it.
+        for byte in 0..32 {
+            let client = send_kick(address, [200 + byte as u8; 32]).await?;
+            let status = status_within(client, Duration::from_secs(5)).await;
+            assert_eq!(status, Some(401));
+        }
+        permits_reach(CHANGE_LIMIT).await?;
+
+        // Valid changes that queue and hang up fill the admission slots, then are refused.
+        let sent = CHANGE_LIMIT + 64;
+        let mut clients = Vec::new();
+        for _ in 0..sent {
+            clients.push(send_kick(address, [1; 32]).await?);
+        }
+        let answers: Vec<_> = clients
+            .into_iter()
+            .map(|client| tokio::spawn(status_within(client, Duration::from_secs(2))))
+            .collect();
+        let (mut parked, mut busy) = (0, 0);
+        for answer in answers {
+            match answer.await? {
+                None => parked += 1,
+                Some(503) => busy += 1,
+                other => panic!("unexpected answer {other:?}"),
+            }
+        }
+        assert_eq!(parked, CHANGE_LIMIT);
+        assert_eq!(busy, sent - CHANGE_LIMIT);
+        assert_eq!(CHANGES.available_permits(), 0);
+
+        // Once the write ends, the left-behind changes finish and free every slot.
+        drop(turn);
+        permits_reach(CHANGE_LIMIT).await
+    }
 }
