@@ -45,13 +45,12 @@ const DAY: u32 = 24 * 60 * 60;
 /// Seconds without any input before "Online" turns into "Away" by itself.
 const AWAY_AFTER: f64 = 10.0 * 60.0;
 const RAIL_WIDTH: f32 = 72.0;
-const SIDEBAR_WIDTH: f32 = 240.0;
-const MEMBERS_WIDTH: f32 = 220.0;
 const RAIL_BUTTON: f32 = 48.0;
 const SERVER_HEADER: f32 = 44.0;
 const MESSAGE_AVATAR: f32 = 38.0;
 const TOOLBAR_BUTTON: Vec2 = Vec2::new(30.0, 26.0);
 
+pub mod layout;
 mod user_bar;
 
 pub struct Home {
@@ -80,6 +79,7 @@ pub struct Home {
     auto_away: bool,
     /// When the person last used the window, in egui time.
     active_at: f64,
+    pub layout: layout::Layout,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -206,6 +206,7 @@ impl Home {
             .collect();
         let runtime = net.handle();
         let synced = device_sync::synced(&audio.settings());
+        let layout = layout::Layout::new(&audio.settings());
         // Without servers yet, start by browsing the directory.
         let browse = servers.is_empty();
         Ok(Self {
@@ -232,6 +233,7 @@ impl Home {
             status: None,
             auto_away: false,
             active_at: 0.0,
+            layout,
         })
     }
 
@@ -832,19 +834,26 @@ pub fn show(ui: &mut Ui, home: &mut Home, updates: &mut crate::update::Updater) 
         .exact_size(RAIL_WIDTH)
         .frame(panel_frame(colors.rail))
         .show(ui, |ui| server_rail(ui, home));
-    Panel::left("channels")
+    home.layout.set_window_width(ui.available_width());
+    let channels = Panel::left("channels")
         .resizable(false)
-        .exact_size(SIDEBAR_WIDTH)
+        .exact_size(home.layout.channels)
         .frame(panel_frame(colors.side))
-        .show(ui, |ui| sidebar(ui, home, updates.available()));
+        .show(ui, |ui| sidebar(ui, home, updates.available()))
+        .response
+        .rect;
+    let mut members = None;
     if let View::Server(index) = home.view
         && home.servers[index].status != Status::Connecting
     {
-        Panel::right("members")
+        // Toggled from the channel header; the panel only slides.
+        let mut shown = home.layout.members_shown();
+        members = Panel::right("members")
             .resizable(false)
-            .exact_size(MEMBERS_WIDTH)
+            .exact_size(home.layout.members)
             .frame(panel_frame(colors.side))
-            .show(ui, |ui| member_list(ui, home, index));
+            .show_collapsible(ui, &mut shown, |ui| member_list(ui, home, index))
+            .map(|panel| panel.response.rect);
     }
     CentralPanel::default()
         .frame(
@@ -882,6 +891,30 @@ pub fn show(ui: &mut Ui, home: &mut Home, updates: &mut crate::update::Updater) 
                 }
             },
         });
+    // Resize handles go last so they sit above the panels on both sides of each edge.
+    let mut dragging = layout::resize_edge(
+        ui,
+        "Resize channels",
+        channels,
+        true,
+        &mut home.layout.channels,
+        layout::CHANNELS_WIDTH,
+        layout::CHANNELS_RANGE,
+    );
+    if let Some(members) = members {
+        dragging |= layout::resize_edge(
+            ui,
+            "Resize members",
+            members,
+            false,
+            &mut home.layout.members,
+            layout::MEMBERS_WIDTH,
+            layout::MEMBERS_RANGE,
+        );
+    }
+    if !dragging {
+        home.layout.save(&home.voice.audio);
+    }
     dialogs(ui.ctx(), home);
     admin::window(ui.ctx(), home);
     files::viewer(ui.ctx(), &mut home.files);
@@ -1853,12 +1886,14 @@ fn chat_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
     } else {
         format!("# {title}")
     };
+    let in_server = matches!(home.view, View::Server(_));
     let Home {
         servers,
         toast,
         dialog,
         files,
         voice,
+        layout,
         ..
     } = home;
     let server = &mut servers[index];
@@ -1877,7 +1912,7 @@ fn chat_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
         chat.loading = true;
         chat
     });
-    pane_title(ui, "chat-title", &title);
+    pane_title(ui, "chat-title", &title, in_server.then_some(layout));
     let online = *status == Status::Online;
     let (hovered, dropped) = ui.input(|input| {
         let dropped: Vec<_> = (input.raw.dropped_files.iter())
@@ -2045,7 +2080,13 @@ fn chat_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
 }
 
 /// The title bar of a pane, like "# general", with a line under it.
-pub fn pane_title(ui: &mut Ui, id: &'static str, title: &str) {
+/// In a server it also has the button that shows or hides the member list.
+pub fn pane_title(
+    ui: &mut Ui,
+    id: &'static str,
+    title: &str,
+    members: Option<&mut layout::Layout>,
+) {
     Panel::top(id)
         .frame(Frame::new().inner_margin(Margin {
             left: 4,
@@ -2055,7 +2096,14 @@ pub fn pane_title(ui: &mut Ui, id: &'static str, title: &str) {
         }))
         .show_separator_line(true)
         .show(ui, |ui| {
-            ui.label(ui::title(title));
+            ui.horizontal(|ui| {
+                ui.label(ui::title(title));
+                if let Some(layout) = members {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        layout::members_button(ui, layout);
+                    });
+                }
+            });
         });
 }
 
