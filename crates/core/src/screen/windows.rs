@@ -54,11 +54,16 @@ pub fn focused_window() -> Result<Option<ScreenSource>> {
             && window.process_id().is_ok_and(|id| id != own)
             && window.title().is_ok_and(|title| !title.trim().is_empty())
     };
-    // Pressed while RustTalk is in front: the window under it. EnumWindows goes front to back.
-    let window = Window::foreground()
-        .ok()
-        .filter(|window| other(window))
-        .or_else(|| Window::enumerate().ok()?.into_iter().find(|w| other(w)));
+    let window = match Window::foreground() {
+        // Pressed while RustTalk is in front: the window under it. EnumWindows goes
+        // front to back.
+        Ok(window) if window.process_id().is_ok_and(|id| id == own) => {
+            Window::enumerate()?.into_iter().find(|w| other(w))
+        }
+        Ok(window) if other(&window) => Some(window),
+        // The lock screen, a UAC prompt or the taskbar: never guess another window.
+        _ => None,
+    };
     Ok(window.map(|window| ScreenSource {
         name: window.title().unwrap_or_default(),
         kind: ScreenSourceKind::Window,

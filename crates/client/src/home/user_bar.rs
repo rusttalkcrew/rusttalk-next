@@ -152,7 +152,7 @@ fn sound_buttons(ui: &mut Ui, home: &Home) {
 }
 
 /// A moderator's mute holds until they lift it; the person can't unmute themselves.
-fn server_muted(home: &Home) -> bool {
+pub fn server_muted(home: &Home) -> bool {
     call_server(home).is_some_and(|server| server.voice_muted(&server.dir.me))
 }
 

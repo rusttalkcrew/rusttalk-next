@@ -50,16 +50,13 @@ pub enum Target {
     Window(u32),
 }
 
-const DENIED: &str = "screen recording is off for RustTalk; allow it in System Settings, \
-                      Privacy & Security, Screen & System Audio Recording, then reopen RustTalk";
-
 /// macOS asks once; after allowing, the app must restart before capture works.
 fn ensure_access() -> Result<()> {
     if CGPreflightScreenCaptureAccess() {
         return Ok(());
     }
     CGRequestScreenCaptureAccess();
-    bail!(DENIED)
+    Err(super::NoAccess.into())
 }
 
 /// What can be captured now, from ScreenCaptureKit's completion handler.

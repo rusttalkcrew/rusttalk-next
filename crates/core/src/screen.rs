@@ -116,6 +116,14 @@ pub fn focused_window() -> Result<Option<ScreenSource>> {
     anyhow::bail!("screen capture is unavailable on this platform")
 }
 
+/// macOS: screen recording is off for RustTalk.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "screen recording is off for RustTalk; allow it in System Settings, Privacy & Security, \
+     Screen & System Audio Recording, then reopen RustTalk"
+)]
+pub struct NoAccess;
+
 /// The person closed the system screen picker without choosing.
 #[derive(Debug, thiserror::Error)]
 #[error("screen picker cancelled")]

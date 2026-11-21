@@ -14,6 +14,7 @@ use std::{
     path::PathBuf,
     sync::Once,
     thread,
+    time::Duration,
 };
 
 use anyhow::{Context, Result};
@@ -63,6 +64,8 @@ fn start() -> Result<()> {
         .spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
+                // A client that connects and sends nothing must not block the others.
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
                 let mut line = String::new();
                 // One short line per connection; anything longer is not a command.
                 if BufReader::new(stream.take(64))

@@ -436,15 +436,15 @@ impl Hotkeys {
     }
 
     fn support(&mut self) -> Support {
-        if !self.wayland {
-            return Support::Keys;
+        if self.wayland {
+            self.start();
         }
-        self.start();
         match &self.backend {
             #[cfg(target_os = "linux")]
             Backend::Portal(portal) => portal.support(),
             Backend::Failed => Support::Unsupported,
-            _ => Support::Checking,
+            _ if self.wayland => Support::Checking,
+            _ => Support::Keys,
         }
     }
 
@@ -494,6 +494,9 @@ pub fn frame(home: &mut Home) {
 /// What a shortcut does; every one plays the sound its button plays.
 fn run(home: &mut Home, action: Action) {
     match action {
+        Action::ToggleMute if user_bar::server_muted(home) => {
+            toast(home, t!("call.server_muted"));
+        }
         Action::ToggleMute => user_bar::toggle_mute(home),
         Action::ToggleDeafen => user_bar::toggle_deafen(home),
         // Already applied as it happened, in `Route::deliver`.
@@ -533,6 +536,9 @@ fn share(home: &mut Home, found: anyhow::Result<Option<screen::Target>>) {
     let target = match found {
         Ok(Some(target)) => target,
         Ok(None) => return toast(home, t!("hotkeys.no_window")),
+        Err(error) if error.is::<screen::NoAccess>() => {
+            return toast(home, t!("hotkeys.no_screen_access"));
+        }
         Err(error) => {
             tracing::warn!(error = %format_args!("{error:#}"), "finding the window to share failed");
             return toast(home, t!("call.screens_failed"));
@@ -601,8 +607,13 @@ pub fn settings_page(ui: &mut Ui, home: &mut Home) {
             #[cfg(not(target_os = "linux"))]
             let _ = configurable;
         }
-        Support::Unsupported => {
+        // Linux desktops can still run the commands; elsewhere nothing can be bound.
+        Support::Unsupported if cfg!(target_os = "linux") => {
             ui::error_text(ui, Some(t!("hotkeys.unsupported")));
+        }
+        Support::Unsupported => {
+            ui::error_text(ui, Some(t!("hotkeys.unavailable")));
+            return;
         }
     }
     ui.add_space(ui::SPACE_S);

@@ -13,6 +13,7 @@ use ashpd::desktop::{
     Session,
     global_shortcuts::{GlobalShortcuts, NewShortcut, Shortcut},
 };
+use ashpd::wire::ObjectPath;
 use eframe::egui;
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
@@ -48,6 +49,8 @@ impl Portal {
                 if let Err(error) = result {
                     tracing::warn!(error = %format_args!("{error:#}"), "global shortcuts portal unavailable");
                 }
+                // No release can come any more.
+                deliver(Action::PushToTalk, false);
                 *lock(&shared) = Support::Unsupported;
                 ctx.request_repaint();
             });
@@ -85,6 +88,19 @@ fn set_triggers(support: &Mutex<Support>, ctx: &egui::Context, shortcuts: &[Shor
     ctx.request_repaint();
 }
 
+/// Signals come for every session of this app's portal connection, also one an
+/// earlier home screen left open. ashpd keeps a session's path private; it
+/// serializes as that path.
+fn is_current(session: &Option<Session<GlobalShortcuts>>, handle: &ObjectPath<'_>) -> bool {
+    session.as_ref().is_some_and(|session| {
+        serde_json::to_value(session)
+            .ok()
+            .as_ref()
+            .and_then(|path| path.as_str())
+            == Some(handle.as_str())
+    })
+}
+
 async fn run(
     mut requests: mpsc::UnboundedReceiver<Request>,
     support: &Mutex<Support>,
@@ -99,12 +115,18 @@ async fn run(
         triggers: BTreeMap::new(),
     };
     ctx.request_repaint();
-    // Signals only come for this app's sessions, and only one is open at a time.
     let mut session: Option<Session<GlobalShortcuts>> = None;
     loop {
         tokio::select! {
             request = requests.recv() => match request {
-                None => return Ok(()),
+                None => {
+                    // The home screen is gone. The portal's connection outlives this
+                    // thread, so an open session would keep firing for the next one.
+                    if let Some(old) = session.take() {
+                        let _ = old.close().await;
+                    }
+                    return Ok(());
+                }
                 Some(Request::Bind(shortcuts)) => {
                     if let Some(old) = session.take()
                         && let Err(error) = old.close().await
@@ -147,12 +169,16 @@ async fn run(
                 }
             },
             Some(event) = activated.next() => {
-                if let Some(action) = action(event.shortcut_id()) {
+                if is_current(&session, &event.session_handle())
+                    && let Some(action) = action(event.shortcut_id())
+                {
                     deliver(action, true);
                 }
             }
             Some(event) = deactivated.next() => {
-                if let Some(action) = action(event.shortcut_id()) {
+                if is_current(&session, &event.session_handle())
+                    && let Some(action) = action(event.shortcut_id())
+                {
                     deliver(action, false);
                 }
             }
