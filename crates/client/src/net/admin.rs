@@ -121,7 +121,7 @@ const NEW_ROLE_RANK: i64 = 25;
 pub(super) async fn run(
     ctx: &Ctx,
     url: &Url,
-    client: &KeyClient<'_>,
+    client: &mut KeyClient<'_>,
     state: &mut State,
     request: Admin,
 ) {

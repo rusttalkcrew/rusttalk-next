@@ -5,7 +5,7 @@ use std::{
 
 use crate::{
     auth::{InviteLink, Session, decode, decode_bytes, encode},
-    identity::{DeviceCertificate, DeviceIdentity, fingerprint},
+    identity::{DeviceCertificate, DeviceIdentity, PersonId, fingerprint},
     keys::{
         self, EnvelopeContext, Event, Key, KeyState, Kind, MemberDevice, Metadata, Scope,
         ScopeState,
@@ -36,7 +36,11 @@ pub struct KeyClient<'a> {
     events: tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,
-    keys: HashMap<(Scope, i64), (Key, String)>,
+    /// Each verified key with its envelope and the person whose device wrapped it.
+    keys: HashMap<(Scope, i64), (Key, String, PersonId)>,
+    /// The person each DM channel is with, pinned once seen so the server can't
+    /// relabel it. A DM key is only taken from, and wrapped to, those two people.
+    dms: HashMap<[u8; 32], PersonId>,
     pub(super) devices: HashMap<String, DeviceCertificate>,
     pub(super) historical_devices: HashMap<HistoricalDevice, DeviceCertificate>,
     scopes: Vec<ScopeState>,
@@ -56,6 +60,17 @@ impl<'a> KeyClient<'a> {
         identity: &'a DeviceIdentity,
         session: &Session,
     ) -> Result<Self> {
+        Self::connect_with_dms(server, identity, session, HashMap::new()).await
+    }
+
+    /// Like `connect`, with the DM channels pinned earlier (channel and peer), so
+    /// the first key sync already applies them.
+    pub async fn connect_with_dms(
+        server: &'a Server,
+        identity: &'a DeviceIdentity,
+        session: &Session,
+        dms: HashMap<[u8; 32], PersonId>,
+    ) -> Result<Self> {
         let events = pinned_tls::events_socket(server.known_server(), &session.token)
             .await
             .map_err(anyhow::Error::from_boxed)?;
@@ -65,6 +80,7 @@ impl<'a> KeyClient<'a> {
             session: session.clone(),
             events,
             keys: HashMap::new(),
+            dms,
             devices: HashMap::new(),
             historical_devices: HashMap::new(),
             scopes: Vec::new(),
@@ -111,7 +127,7 @@ impl<'a> KeyClient<'a> {
 
     /// Borrow a verified key for any known epoch of a readable scope.
     pub fn key(&self, scope: Scope, epoch: i64) -> Option<&Key> {
-        self.keys.get(&(scope, epoch)).map(|(key, _)| key)
+        self.keys.get(&(scope, epoch)).map(|(key, ..)| key)
     }
 
     /// Every verified epoch key held for a scope.
@@ -120,7 +136,7 @@ impl<'a> KeyClient<'a> {
         self.keys
             .iter()
             .filter(move |((held, _), _)| *held == scope)
-            .map(|((_, epoch), (key, _))| (*epoch, key))
+            .map(|((_, epoch), (key, ..))| (*epoch, key))
     }
 
     /// Seal metadata with the current space key and return base64url ciphertext.
@@ -182,8 +198,16 @@ impl<'a> KeyClient<'a> {
                 if self
                     .keys
                     .get(&slot)
-                    .is_some_and(|(_, envelope)| *envelope == wrapped.envelope)
+                    .is_some_and(|(_, envelope, _)| *envelope == wrapped.envelope)
                 {
+                    continue;
+                }
+                if !self.dm_allows(slot.0, sender.person_id()) {
+                    // Not rejected: that would ask the same device to wrap it again.
+                    tracing::warn!(
+                        device = %fingerprint(sender.signing_key().as_bytes()),
+                        "ignored a DM key from someone outside the DM"
+                    );
                     continue;
                 }
                 let context = EnvelopeContext {
@@ -197,7 +221,8 @@ impl<'a> KeyClient<'a> {
                     .and_then(|bytes| context.unwrap(self.identity, sender, &bytes));
                 match opened {
                     Ok(key) => {
-                        self.keys.insert(slot, (key, wrapped.envelope));
+                        let person = *sender.person_id();
+                        self.keys.insert(slot, (key, wrapped.envelope, person));
                     }
                     Err(error) => {
                         tracing::warn!(
@@ -235,6 +260,10 @@ impl<'a> KeyClient<'a> {
             }
 
             let mut pending = state.pending;
+            if pending.iter().any(|need| need.scope.kind == Kind::Channel) {
+                // Learn which channels are DMs before wrapping any channel key.
+                self.learn_dms().await?;
+            }
             pending.retain(|need| {
                 self.key(need.scope, need.epoch).is_some()
                     && self.devices.contains_key(&need.device)
@@ -259,6 +288,14 @@ impl<'a> KeyClient<'a> {
                     ) else {
                         continue;
                     };
+                    if !self.dm_allows(need.scope, device.person_id()) {
+                        tracing::warn!(
+                            person = %fingerprint(device.person_id()),
+                            device = %fingerprint(device.signing_key().as_bytes()),
+                            "refused to wrap a DM key for someone outside the DM"
+                        );
+                        continue;
+                    }
                     let context = EnvelopeContext::new(
                         self.server.known_server().server_id,
                         need.scope,
@@ -340,6 +377,69 @@ impl<'a> KeyClient<'a> {
     /// Iterate current verified member-device certificates for fingerprint display.
     pub fn devices(&self) -> impl Iterator<Item = &DeviceCertificate> {
         self.devices.values()
+    }
+
+    /// Pin a DM channel to the person it is with. `false` when it is already pinned
+    /// to someone else: the server relabelled it, and it must not be used.
+    pub fn bind_dm(&mut self, channel: [u8; 32], peer: PersonId) -> bool {
+        match self.dms.get(&channel) {
+            Some(bound) => *bound == peer,
+            None => {
+                self.dms.insert(channel, peer);
+                let me = *self.identity.certificate.person_id();
+                // Keys taken before this channel was known as a DM must pass the check too.
+                self.keys.retain(|(scope, _), (.., person)| {
+                    scope.kind != Kind::Channel
+                        || scope.id != channel
+                        || dm_member(&me, &peer, person)
+                });
+                true
+            }
+        }
+    }
+
+    /// DM channels pinned so far, with the person each is with.
+    pub fn dms(&self) -> &HashMap<[u8; 32], PersonId> {
+        &self.dms
+    }
+
+    /// Whether this DM channel can take a message only the two people can read:
+    /// pinned to `peer`, and its current key came from one of their devices.
+    pub fn dm_private(&self, channel: &[u8; 32], peer: &PersonId) -> bool {
+        let scope = Scope {
+            kind: Kind::Channel,
+            id: *channel,
+        };
+        let me = self.identity.certificate.person_id();
+        self.dms.get(channel) == Some(peer)
+            && self.current_key(scope).is_ok_and(|(epoch, _)| {
+                (self.keys.get(&(scope, epoch)))
+                    .is_some_and(|(.., person)| dm_member(me, peer, person))
+            })
+    }
+
+    /// Whether a key of this scope may come from or go to this person: anyone for
+    /// a channel or space, only the two people for a pinned DM.
+    fn dm_allows(&self, scope: Scope, person: &PersonId) -> bool {
+        dm_allows(
+            &self.dms,
+            self.identity.certificate.person_id(),
+            scope,
+            person,
+        )
+    }
+
+    /// Pin the DMs the catalog lists. One pinned to someone else keeps its pin.
+    async fn learn_dms(&mut self) -> Result<()> {
+        for channel in self.catalog().await?.channels {
+            if channel.kind == "dm"
+                && let Some(peer) = channel.peer.as_deref()
+                && !self.bind_dm(channel.id, decode(peer)?)
+            {
+                tracing::warn!("the server relabelled a pinned DM; keeping the pin");
+            }
+        }
+        Ok(())
     }
 
     async fn sync_devices(&mut self) -> Result<()> {
@@ -536,7 +636,8 @@ impl<'a> KeyClient<'a> {
             .send()
             .await?
             .error_for_status()?;
-        self.keys.insert((scope, 1), (key, envelope));
+        let me = *self.identity.certificate.person_id();
+        self.keys.insert((scope, 1), (key, envelope, me));
         self.scopes.push(ScopeState {
             scope,
             epoch: 1,
@@ -586,6 +687,20 @@ impl<'a> KeyClient<'a> {
             },
         ))
     }
+}
+
+fn dm_member(me: &PersonId, peer: &PersonId, person: &PersonId) -> bool {
+    person == me || person == peer
+}
+
+fn dm_allows(
+    dms: &HashMap<[u8; 32], PersonId>,
+    me: &PersonId,
+    scope: Scope,
+    person: &PersonId,
+) -> bool {
+    scope.kind != Kind::Channel
+        || (dms.get(&scope.id)).is_none_or(|peer| dm_member(me, peer, person))
 }
 
 async fn key_state_raced(reply: Response) -> Result<bool> {
@@ -645,4 +760,29 @@ pub async fn invite_name(server: &Server, link: &InviteLink) -> Result<Option<Ve
             )?)
         })
         .transpose()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_dm_key_only_comes_from_and_goes_to_the_two_people() {
+        let (me, peer, mallory) = ([1; 32], [2; 32], [3; 32]);
+        let dm = Scope {
+            kind: Kind::Channel,
+            id: [9; 32],
+        };
+        let channel = Scope { id: [8; 32], ..dm };
+        let space = Scope {
+            kind: Kind::Space,
+            id: [9; 32],
+        };
+        let dms = HashMap::from([(dm.id, peer)]);
+        assert!(dm_allows(&dms, &me, dm, &me) && dm_allows(&dms, &me, dm, &peer));
+        assert!(!dm_allows(&dms, &me, dm, &mallory));
+        // Channels and the space follow the server's membership, as before.
+        assert!(dm_allows(&dms, &me, channel, &mallory));
+        assert!(dm_allows(&dms, &me, space, &mallory));
+    }
 }

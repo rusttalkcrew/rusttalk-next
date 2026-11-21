@@ -70,6 +70,21 @@ async fn merged(person: Pair<'_, '_, '_>, dms: [Scope; 2]) -> Result<Vec<String>
     Ok(all.into_iter().map(|item| item.3).collect())
 }
 
+/// The DM is pinned to the other person and its key came from one of the two, so
+/// a message may go there; it can't be pinned to anyone else afterwards.
+fn pinned(client: &mut KeyClient<'_>, dm: Scope, other: [u8; 32]) -> Result<()> {
+    ensure!(
+        client.bind_dm(dm.id, other) && client.dm_private(&dm.id, &other),
+        "a DM was not private to the two people"
+    );
+    let stranger = [0xab; 32];
+    ensure!(
+        !client.bind_dm(dm.id, stranger) && !client.dm_private(&dm.id, &stranger),
+        "a pinned DM was relabelled"
+    );
+    Ok(())
+}
+
 /// Wait until the restarted API answers again.
 async fn reachable(server: &Server) -> Result<()> {
     tokio::time::timeout(Duration::from_secs(60), async {
@@ -97,6 +112,12 @@ pub async fn replicas(
     receive_key(peer.1, dm_b, 1).await?;
     let dms = [dm_a, dm_b];
     assert_ne!(dm_a.id, dm_b.id);
+    let owner_person = *owner.0.identity.certificate.person_id();
+    pinned(owner.0, dm_a, peer_person)?;
+    pinned(owner.1, dm_b, peer_person)?;
+    pinned(peer.0, dm_a, owner_person)?;
+    pinned(peer.1, dm_b, owner_person)?;
+    println!("W70 each DM copy is pinned to the two people and keyed by one of them");
 
     assert_eq!(
         post((&mut *owner.0, &mut *owner.1), dms, BOTH).await?,

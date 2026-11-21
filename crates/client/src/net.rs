@@ -148,8 +148,11 @@ pub struct Draft {
     /// The other person, for a DM.
     pub peer: Option<Id>,
     pub text: String,
-    pub reply_to: Option<Id>,
+    /// The message replied to: person and ID. Only the ID goes on the wire.
+    pub reply_to: Option<(Id, Id)>,
     pub edit_of: Option<Id>,
+    /// An edit's revision (see `server::revision_id`); unused otherwise.
+    pub revision: u64,
     /// Uploaded first, then sent with the message.
     pub files: Vec<PathBuf>,
     /// A server sticker to send; `text` is its name.
@@ -225,6 +228,8 @@ pub enum Update {
         at_start: Option<bool>,
     },
     Deleted(Url, Id, Id),
+    /// Loading a page of a channel failed; `true` when its cursor is gone from the server.
+    PageFailed(Url, Id, bool),
     /// A new message in any readable channel or DM, for unread marks and notifications.
     Arrived(Url, Id, Msg),
     /// The newest message time from someone else per channel, after (re)connecting.
@@ -342,6 +347,11 @@ impl Net {
     /// Friends as last synced.
     pub fn contacts(&self) -> std::collections::BTreeMap<String, serde_json::Value> {
         self.ctx.sync.contacts()
+    }
+
+    /// This person's deleted DM messages as last saved, at start.
+    pub fn dm_deleted(&self) -> Vec<Id> {
+        self.ctx.sync.dm_deleted()
     }
 
     /// Check an invite's server and read its name, without joining yet.
@@ -530,6 +540,10 @@ struct State {
     chat_files: HashMap<Id, DataLiveFiles>,
     /// Decoded pictures in the last directory, by hash.
     pictures: HashMap<[u8; 32], Picture>,
+    /// How many DM pins `dm_pins` last saved, to save again when there are more.
+    pins_saved: usize,
+    /// DMs the server relabelled, already warned about.
+    relabelled: HashSet<Id>,
 }
 
 enum Failure {
@@ -572,7 +586,9 @@ async fn run(
                         tracing::error!(error = %format_args!("{error:#}"), "saving joined server failed");
                     }
                 }
-                match KeyClient::connect(api, &ctx.identity, &session).await {
+                let pins = load_pins(&ctx.data, &server.server_id);
+                state.pins_saved = pins.len();
+                match KeyClient::connect_with_dms(api, &ctx.identity, &session, pins).await {
                     Ok(mut client) => {
                         delay = 1;
                         state.order_unavailable = false;
@@ -1043,9 +1059,29 @@ async fn on_command(
                     return Err(error);
                 }
             };
+            // Only to a DM that just the two people can read: pinned to this person,
+            // with a key from one of their devices. A missing key fails below as before.
+            let scope = rusttalk_core::keys::Scope {
+                kind: rusttalk_core::keys::Kind::Channel,
+                id: channel,
+            };
+            if let Some(peer) = draft.peer
+                && client.current_key(scope).is_ok()
+                && !client.dm_private(&channel, &peer)
+            {
+                tracing::warn!("not sending a DM where someone else could read it");
+                let server = url.host_str().unwrap_or(t!("net.a_server"));
+                ctx.send(Update::Unsent(url.clone(), draft));
+                ctx.send(Update::Failed(t!("net.dm_not_private", server = server)));
+                return Ok(());
+            }
             let body = MessageBody {
                 text: draft.text.clone(),
-                reply_to: draft.reply_to,
+                // Edits carry their revision there; current apps ignore it on edits.
+                reply_to: match draft.edit_of {
+                    Some(_) => Some(crate::server::revision_id(draft.revision)),
+                    None => draft.reply_to.map(|(_, id)| id),
+                },
                 edit_of: draft.edit_of,
                 attachments: Vec::new(),
                 live: None,
@@ -1223,8 +1259,46 @@ async fn dm_channel(
         return Ok(dm.channel);
     }
     let scope = client.create_dm(&peer).await?;
+    // Made just now with a key of ours, or one the server already had; checked before use.
+    client.bind_dm(scope.id, peer);
     directory(ctx, url, client, state).await?;
     Ok(scope.id)
+}
+
+/// `dm_pins/<server ID>.json`: each DM channel on this server and who it is with, so
+/// the server can't later relabel a DM as being with someone else.
+fn pins_path(data: &Path, server_id: &Id) -> PathBuf {
+    data.join("dm_pins")
+        .join(format!("{}.json", hex::encode(server_id)))
+}
+
+fn load_pins(data: &Path, server_id: &Id) -> HashMap<Id, Id> {
+    let saved: HashMap<String, String> = crate::load_json(&pins_path(data, server_id))
+        .unwrap_or_else(|error| {
+            tracing::warn!(error = %format_args!("{error:#}"), "DM pins unreadable");
+            HashMap::new()
+        });
+    (saved.iter())
+        .filter_map(|(channel, peer)| Some((decode(channel).ok()?, decode(peer).ok()?)))
+        .collect()
+}
+
+/// Save the DM pins when the client learned new ones.
+fn save_pins(ctx: &Ctx, client: &KeyClient<'_>, state: &mut State) {
+    if client.dms().len() == state.pins_saved {
+        return;
+    }
+    let path = pins_path(&ctx.data, &state.server_id);
+    let pins: HashMap<String, String> = (client.dms().iter())
+        .map(|(channel, peer)| (encode(channel), encode(peer)))
+        .collect();
+    let saved = std::fs::create_dir_all(path.parent().expect("in a folder"))
+        .map_err(anyhow::Error::from)
+        .and_then(|()| rusttalk_core::client::save_json(&ctx.data, &path, &pins));
+    match saved {
+        Ok(()) => state.pins_saved = pins.len(),
+        Err(error) => tracing::warn!(error = %format_args!("{error:#}"), "saving DM pins failed"),
+    }
 }
 
 /// Load one page, newest first on the wire, and send it oldest first.
@@ -1240,7 +1314,11 @@ async fn page(
         Ok(records) => records,
         Err(error) => {
             tracing::warn!(error = %format_args!("{error:#}"), "loading messages failed");
-            // Leave the chat loading: reconnecting reloads opened channels, and paging stays paused until then.
+            // A channel stays loading: reconnecting reloads opened channels, and paging
+            // stays paused until then. A DM keeps paging its other copies.
+            let missing = (error.downcast_ref::<reqwest::Error>()).and_then(reqwest::Error::status)
+                == Some(StatusCode::NOT_FOUND);
+            ctx.send(Update::PageFailed(url.clone(), channel, missing));
             ctx.send(Update::Failed(t!("net.messages_failed").into()));
             return;
         }

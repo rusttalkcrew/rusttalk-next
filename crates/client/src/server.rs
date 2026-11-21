@@ -375,19 +375,45 @@ pub struct Staged {
     pub size: u64,
 }
 
+/// Which of two edits of one message wins: one with an authenticated revision beats
+/// one without, then the higher revision (or, for old apps' edits, the later server
+/// time), then the higher edit ID so every reader picks the same one.
+pub type Rank = (bool, i64, Id);
+
+/// An edit's reply-to field carries its revision, because current apps ignore it on
+/// edits: 24 zero bytes, then the revision as a big-endian u64. It is inside the
+/// signed ciphertext, so a server can't change it.
+pub fn revision_id(revision: u64) -> Id {
+    let mut id = [0; 32];
+    id[24..].copy_from_slice(&revision.to_be_bytes());
+    id
+}
+
+fn rank(edit: &Msg) -> Rank {
+    match edit.reply_to {
+        Some(id) if id[..24] == [0; 24] => {
+            let revision = u64::from_be_bytes(id[24..].try_into().expect("8 bytes"));
+            (true, i64::try_from(revision).unwrap_or(i64::MAX), edit.id)
+        }
+        _ => (false, edit.at, edit.id),
+    }
+}
+
 /// One channel's loaded history, oldest first, plus the composer state.
 #[derive(Default)]
 pub struct Chat {
     pub messages: Vec<Msg>,
-    /// Originals that show edited text, with the time of the applied edit.
-    pub edited: HashMap<Id, i64>,
-    /// Edits whose original is not loaded yet.
-    pending_edits: HashMap<Id, Msg>,
+    /// Originals that show edited text, by person and ID, with the applied edit's rank.
+    pub edited: HashMap<(Id, Id), Rank>,
+    /// Edits whose original is not loaded yet, by person and original ID.
+    pending_edits: HashMap<(Id, Id), Msg>,
     pub loading: bool,
     pub at_start: bool,
     pub draft: String,
     pub mentions: crate::home::mentions::DraftMentions,
-    pub reply_to: Option<Id>,
+    /// The message replied to: person and ID.
+    pub reply_to: Option<(Id, Id)>,
+    /// One of this person's own messages.
     pub editing: Option<Id>,
     /// Files picked or dropped, sent with the next message.
     pub staged: Vec<Staged>,
@@ -419,29 +445,23 @@ impl Chat {
             // The person is part of the key: in a DM another server could hold their
             // record under an ID of yours.
             let same = |old: &&mut Msg| old.id == msg.id && old.person == msg.person;
-            match (self.messages.iter_mut().chain(&mut fresh)).find(same) {
-                Some(old) => {
-                    // DM copies on several servers: keep the earliest server time.
-                    let at = old.at.min(msg.at);
-                    let mut replicas = std::mem::take(&mut old.replicas);
-                    // A retry after a missing key, or a readable copy, replaces the placeholder.
-                    if old.body == Body::Unreadable && msg.body != Body::Unreadable {
-                        replicas.retain(|server| !msg.replicas.contains(server));
-                        *old = Msg {
-                            replicas: [msg.replicas, replicas].concat(),
-                            ..msg
-                        };
-                    } else {
-                        for server in msg.replicas {
-                            if !replicas.contains(&server) {
-                                replicas.push(server);
-                            }
-                        }
-                        old.replicas = replicas;
-                    }
-                    old.at = at;
+            let Some(old) = (self.messages.iter_mut().chain(&mut fresh)).find(same) else {
+                fresh.push(msg);
+                continue;
+            };
+            match (old.body == Body::Unreadable, msg.body == Body::Unreadable) {
+                // A retry after a missing key, or a readable DM copy, replaces the
+                // placeholder whole: an unopened record's time and server don't count.
+                (true, false) => *old = msg,
+                // DM copies on several servers: keep the earliest server time.
+                (false, false) => {
+                    old.at = old.at.min(msg.at);
+                    add_replicas(&mut old.replicas, msg.replicas);
                 }
-                None => fresh.push(msg),
+                // So a delete on that server clears the placeholder.
+                (true, true) => add_replicas(&mut old.replicas, msg.replicas),
+                // A copy that couldn't be opened changes nothing about a readable one.
+                (false, true) => {}
             }
         }
         if older {
@@ -453,21 +473,18 @@ impl Chat {
         self.messages.sort_by_key(|msg| msg.at);
         // A retried edit replaces its "couldn't be opened" placeholder.
         self.messages.retain(|msg| {
-            msg.body != Body::Unreadable || !edits.iter().any(|edit| edit.id == msg.id)
+            msg.body != Body::Unreadable
+                || !(edits.iter()).any(|edit| edit.id == msg.id && edit.person == msg.person)
         });
         for edit in edits {
-            let original = edit.edit_of.expect("partitioned on edit_of");
-            if self
-                .pending_edits
-                .get(&original)
-                .is_none_or(|old| old.at <= edit.at)
-            {
-                self.pending_edits.insert(original, edit);
+            let key = (edit.person, edit.edit_of.expect("partitioned on edit_of"));
+            if (self.pending_edits.get(&key)).is_none_or(|old| rank(old) <= rank(&edit)) {
+                self.pending_edits.insert(key, edit);
             }
         }
-        self.pending_edits.retain(|original, edit| {
-            let Some(target) = (self.messages.iter_mut())
-                .find(|msg| msg.id == *original && msg.person == edit.person)
+        self.pending_edits.retain(|key, edit| {
+            let Some(target) =
+                (self.messages.iter_mut()).find(|msg| msg.id == key.1 && msg.person == key.0)
             else {
                 return true;
             };
@@ -476,21 +493,55 @@ impl Chat {
                 return true;
             }
             if let (Body::Text(text), Body::Text(new)) = (&mut target.body, &edit.body)
-                && self.edited.get(original).is_none_or(|at| *at <= edit.at)
+                && self.edited.get(key).is_none_or(|old| *old <= rank(edit))
             {
                 text.clone_from(new);
-                self.edited.insert(*original, edit.at);
+                self.edited.insert(*key, rank(edit));
             }
             false
         });
+    }
+
+    /// The revision for this person's next edit of a message: their clock in
+    /// milliseconds, but always above the edit shown now.
+    pub fn next_revision(&self, person: Id, original: Id, now_ms: u64) -> u64 {
+        match self.edited.get(&(person, original)) {
+            Some((true, shown, _)) => now_ms.max((*shown as u64).saturating_add(1)),
+            _ => now_ms,
+        }
+    }
+
+    /// The message a reply quotes. `None` while it isn't loaded, or when two people's
+    /// messages share the ID, since a reply names only the ID.
+    pub fn quoted(&self, id: &Id) -> Option<&Msg> {
+        let mut found = self.messages.iter().filter(|msg| msg.id == *id);
+        let first = found.next()?;
+        found.all(|msg| msg.person == first.person).then_some(first)
     }
 
     /// Drop a deleted record. Edits of a deleted original stay hidden.
     // shortcut: deleting an edit record keeps its text on the original, until a reload.
     pub fn remove(&mut self, id: &Id) {
         self.messages.retain(|msg| msg.id != *id);
-        self.pending_edits.remove(id);
-        self.edited.remove(id);
+        self.pending_edits.retain(|(_, original), _| original != id);
+        self.edited.retain(|(_, original), _| original != id);
+    }
+
+    /// Drop one person's record, leaving another person's under the same ID.
+    pub fn remove_one(&mut self, person: &Id, id: &Id) {
+        let key = (*person, *id);
+        self.messages
+            .retain(|msg| msg.id != *id || msg.person != *person);
+        self.pending_edits.remove(&key);
+        self.edited.remove(&key);
+    }
+}
+
+fn add_replicas(replicas: &mut Vec<Url>, more: Vec<Url>) {
+    for server in more {
+        if !replicas.contains(&server) {
+            replicas.push(server);
+        }
     }
 }
 
@@ -534,7 +585,7 @@ mod tests {
         assert_eq!(texts(&chat), ["c"]);
         chat.merge(vec![msg(1, 10, "a", None), msg(2, 20, "b", None)], true);
         assert_eq!(texts(&chat), ["a2", "b", "c"]);
-        assert!(chat.edited.contains_key(&[1; 32]));
+        assert!(chat.edited.contains_key(&([9; 32], [1; 32])));
         // An older edit arriving later does not win, and duplicates are ignored.
         chat.merge(
             vec![msg(5, 15, "a1", Some(1)), msg(3, 30, "c", None)],
@@ -543,7 +594,7 @@ mod tests {
         assert_eq!(texts(&chat), ["a2", "b", "c"]);
         chat.remove(&[1; 32]);
         assert_eq!(texts(&chat), ["b", "c"]);
-        assert!(!chat.edited.contains_key(&[1; 32]));
+        assert!(!chat.edited.contains_key(&([9; 32], [1; 32])));
     }
 
     #[test]
@@ -560,5 +611,64 @@ mod tests {
         // The original opens on retry and gets the waiting edit.
         chat.merge(vec![msg(1, 10, "a", None)], false);
         assert_eq!(texts(&chat), ["a2"]);
+    }
+
+    fn revised(id: u8, at: i64, text: &str, original: u8, revision: u64) -> Msg {
+        Msg {
+            reply_to: Some(revision_id(revision)),
+            ..msg(id, at, text, Some(original))
+        }
+    }
+
+    #[test]
+    fn a_server_cant_roll_back_an_edit_with_its_timestamps() {
+        let mut chat = Chat::default();
+        chat.merge(vec![msg(1, 10, "a", None)], false);
+        chat.merge(vec![revised(3, 30, "a2", 1, 2_000)], false);
+        // An older edit, dated later by a server, arrives afterwards.
+        chat.merge(vec![revised(2, 99, "a1", 1, 1_000)], false);
+        assert_eq!(texts(&chat), ["a2"]);
+        // In either order, also while the original isn't loaded yet.
+        let mut chat = Chat::default();
+        chat.merge(vec![revised(2, 99, "a1", 1, 1_000)], false);
+        chat.merge(vec![revised(3, 30, "a2", 1, 2_000)], false);
+        chat.merge(vec![msg(1, 10, "a", None)], true);
+        assert_eq!(texts(&chat), ["a2"]);
+        // An old app's edit, ordered by server time, never beats a revised one.
+        chat.merge(vec![msg(4, 999, "old app", Some(1))], false);
+        assert_eq!(texts(&chat), ["a2"]);
+        // The next edit's revision is above the shown one, even with a slow clock.
+        assert_eq!(chat.next_revision([9; 32], [1; 32], 5), 2_001);
+        assert_eq!(chat.next_revision([9; 32], [1; 32], 9_000), 9_000);
+        assert_eq!(chat.next_revision([9; 32], [2; 32], 5), 5);
+    }
+
+    #[test]
+    fn edits_and_replies_follow_the_person_as_well_as_the_id() {
+        let theirs = |m: Msg| Msg {
+            person: [8; 32],
+            ..m
+        };
+        let mut chat = Chat::default();
+        chat.merge(vec![msg(1, 10, "mine", None)], false);
+        assert_eq!(chat.quoted(&[1; 32]).map(|m| m.person), Some([9; 32]));
+        // The other person reuses the ID and "edits" it.
+        chat.merge(
+            vec![
+                theirs(msg(1, 11, "theirs", None)),
+                theirs(revised(2, 12, "forged", 1, u64::MAX)),
+            ],
+            false,
+        );
+        assert_eq!(texts(&chat), ["mine", "forged"]);
+        assert!(!chat.edited.contains_key(&([9; 32], [1; 32])));
+        // A reply naming that ID can't say whose message it was: no preview.
+        assert!(chat.quoted(&[1; 32]).is_none());
+        assert!(chat.quoted(&[5; 32]).is_none());
+        // My own edit still applies to mine, and removing theirs leaves mine.
+        chat.merge(vec![revised(3, 13, "mine2", 1, 1)], false);
+        chat.remove_one(&[8; 32], &[1; 32]);
+        assert_eq!(texts(&chat), ["mine2"]);
+        assert!(chat.edited.contains_key(&([9; 32], [1; 32])));
     }
 }

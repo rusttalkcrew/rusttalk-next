@@ -9,7 +9,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use rusttalk_core::{
-    auth::{KnownServer, Session},
+    auth::{KnownServer, Session, decode, encode},
     client::{
         Server as Api, save_json,
         sync::{self, Failures, Snapshot, State, VersionConflict},
@@ -60,6 +60,12 @@ struct Saved {
     warned: HashSet<Url>,
 }
 
+/// The synced setting with the IDs of this person's DM messages they deleted, oldest
+/// first, so copies on servers that were away get deleted there too and never shown.
+pub const DM_DELETED: &str = "dm_deleted";
+/// Enough for the copies on a server that comes back; keeps the sync blob small.
+const MAX_DM_DELETED: usize = 1_000;
+
 #[derive(Serialize, Deserialize)]
 pub enum Edit {
     Join(KnownServer),
@@ -67,6 +73,9 @@ pub enum Edit {
     Setting(String, Value),
     /// A friend, by hex person ID (see `friends`).
     Contact(String, Value),
+    /// One of this person's DM messages, deleted. Added to the others' deletes,
+    /// rather than replacing them, so two devices can each delete one.
+    DeletedDm([u8; 32]),
 }
 
 impl Edit {
@@ -87,8 +96,25 @@ impl Edit {
                     state.contacts.insert(key.clone(), value.clone());
                 }
             }
+            Self::DeletedDm(id) => {
+                let mut ids = dm_deleted(&state.settings);
+                if !ids.contains(id) {
+                    ids.push(*id);
+                }
+                let extra = ids.len().saturating_sub(MAX_DM_DELETED);
+                let ids: Vec<_> = ids[extra..].iter().map(|id| encode(id)).collect();
+                state.settings.insert(DM_DELETED.into(), ids.into());
+            }
         }
     }
+}
+
+/// This person's deleted DM messages in the synced settings. Bad entries are skipped.
+pub fn dm_deleted(settings: &BTreeMap<String, Value>) -> Vec<[u8; 32]> {
+    let ids = settings.get(DM_DELETED).and_then(Value::as_array);
+    (ids.into_iter().flatten())
+        .filter_map(|id| decode(id.as_str()?).ok())
+        .collect()
 }
 
 /// The merged state for the UI.
@@ -117,6 +143,11 @@ impl DeviceSync {
     /// Friends and other contacts as last merged, for the start. Not for async code.
     pub fn contacts(&self) -> BTreeMap<String, Value> {
         self.saved.blocking_lock().snapshot.state.contacts.clone()
+    }
+
+    /// Deleted DM messages as last saved, at start. Not for async code.
+    pub fn dm_deleted(&self) -> Vec<[u8; 32]> {
+        dm_deleted(&self.saved.blocking_lock().snapshot.state.settings)
     }
 
     pub fn set_peer(&self, address: &Url, peer: Option<(Api, Session)>) {
@@ -290,5 +321,34 @@ mod tests {
         assert_eq!(look.mode, crate::ui::Mode::Light);
         assert_eq!(look.light.id, "paper");
         assert_eq!(look.accent.id, "teal");
+    }
+
+    #[test]
+    fn deleted_dms_add_up_across_devices_and_stay_bounded() {
+        let mut state = State::default();
+        Edit::DeletedDm([1; 32]).apply(&mut state);
+        // Another device's delete arrives in a newer snapshot; this device's
+        // unpublished delete is applied on top again, as `run` does.
+        let mut newer = State::default();
+        Edit::DeletedDm([2; 32]).apply(&mut newer);
+        state.settings = newer.settings;
+        Edit::DeletedDm([1; 32]).apply(&mut state);
+        Edit::DeletedDm([1; 32]).apply(&mut state);
+        assert_eq!(dm_deleted(&state.settings), [[2; 32], [1; 32]]);
+        // Saved and loaded again, like after a restart.
+        let saved = serde_json::to_string(&state.settings).unwrap();
+        assert_eq!(
+            dm_deleted(&serde_json::from_str(&saved).unwrap()),
+            [[2; 32], [1; 32]]
+        );
+        for n in 0..MAX_DM_DELETED as u16 {
+            let mut id = [0; 32];
+            id[..2].copy_from_slice(&n.to_be_bytes());
+            id[31] = 9;
+            Edit::DeletedDm(id).apply(&mut state);
+        }
+        let ids = dm_deleted(&state.settings);
+        assert_eq!(ids.len(), MAX_DM_DELETED);
+        assert!(!ids.contains(&[2; 32]) && !ids.contains(&[1; 32]));
     }
 }

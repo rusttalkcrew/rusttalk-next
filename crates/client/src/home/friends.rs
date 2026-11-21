@@ -60,6 +60,7 @@ impl Home {
                 text: String::new(),
                 reply_to: None,
                 edit_of: None,
+                revision: 0,
                 files: Vec::new(),
                 sticker: None,
                 friend: Some(signal),
