@@ -614,6 +614,9 @@ struct State {
     identities: HashMap<String, Id>,
     /// DMs the server relabelled, already warned about.
     relabelled: HashSet<Id>,
+    /// The voice room LiveKit last removed this device from, and when: a move notice for
+    /// it may arrive just after.
+    removed_from: Option<(Id, std::time::Instant)>,
 }
 
 enum Failure {
@@ -1276,13 +1279,22 @@ async fn on_event(
         Event::VoiceChanged { channel } => {
             room_changed(ctx, url, client, state, decode(&channel)?).await?;
         }
-        // The server only sends our own moves; the UI switches the call it shows.
         Event::VoiceMoved { from, to, .. } => {
-            ctx.send(Update::VoiceMoved(
-                url.clone(),
-                decode(&from)?,
-                decode(&to)?,
-            ));
+            let (from, to) = (decode(&from)?, decode(&to)?);
+            // Only for this device's own call, or the room LiveKit just removed it from, so a
+            // notice can't start a call on an idle device.
+            let in_call = state
+                .voice
+                .as_ref()
+                .is_some_and(|live| live.channel == from);
+            let removed = (state.removed_from.take()).is_some_and(|(channel, at)| {
+                channel == from && at.elapsed() < std::time::Duration::from_secs(10)
+            });
+            if in_call || removed {
+                ctx.send(Update::VoiceMoved(url.clone(), from, to));
+            } else {
+                tracing::warn!("ignored a voice move for a call this device is not in");
+            }
         }
         Event::LiveFileAccepted { .. } => voice::live_file_accepted(ctx, client, state, &event)?,
         Event::RotateNeeded { .. } => {}

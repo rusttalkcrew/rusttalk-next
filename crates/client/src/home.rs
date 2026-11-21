@@ -868,6 +868,10 @@ impl Home {
                     {
                         if muted {
                             self.toast = Some((t!("call.server_muted").into(), now + 6.0));
+                            // LiveKit drops shared app audio too; stop capturing it.
+                            for app in self.voice.shares.drain(..) {
+                                server.send(Command::StopApp(app.id));
+                            }
                         } else {
                             // The call's grant left the microphone out; a new join brings it back.
                             call.state = crate::server::CallState::Connecting;
@@ -1069,9 +1073,11 @@ impl Home {
                 let Some(index) = self.index(&address) else {
                     return;
                 };
-                // The removal from the old room may have ended the call already.
+                // The removal from the old room may have ended the call already; the network
+                // task only passes moves for this device's call.
                 if (self.voice.call.as_ref())
                     .is_none_or(|call| call.server == address && call.channel == from)
+                    && self.servers[index].is_voice(&to)
                 {
                     call::join(self, index, to);
                     let name = (self.servers[index].channel(&to)).map_or("", |c| c.name.as_str());

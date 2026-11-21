@@ -150,7 +150,7 @@ portal restore tokens stay on the sender's device.
 LiveKit can see microphone mute state and the deafen attribute for each device in a voice room.
 A moderator's voice mute is stored on the member and shown to every member. Removing or
 moving someone from a voice room is logged by opaque channel ID; the move notice with
-both channel IDs goes only to the moved person.
+both channel IDs goes only to the moved devices.
 
 Clients use the `rusttalk.video-watches` participant attribute for local
 watch/unwatch sounds. It contains the IDs of video tracks that device is

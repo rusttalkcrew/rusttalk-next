@@ -178,18 +178,30 @@ impl LiveKit {
         rosters.insert(room.into(), (Instant::now(), None));
     }
 
-    async fn moderate(&self, room: &str, method: &str, body: serde_json::Value) {
-        let reason = match self.room_service(method, room, body).await {
-            Ok(response) if response.status().is_success() => {
+    async fn try_moderate(
+        &self,
+        room: &str,
+        method: &str,
+        body: serde_json::Value,
+    ) -> ApiResult<()> {
+        match self.room_service(method, room, body).await? {
+            response if response.status().is_success() => {
                 tracing::info!(method, "changed voice room");
-                return;
+                Ok(())
             }
             // The participant left, or the room closed, on its own in the meantime.
-            Ok(response) if response.status() == StatusCode::NOT_FOUND => return,
-            Ok(_) => "livekit_rejected",
-            Err(error) => error.code,
-        };
-        tracing::warn!(method, reason, "could not change voice room");
+            response if response.status() == StatusCode::NOT_FOUND => Ok(()),
+            _ => Err(ApiError::new(StatusCode::BAD_GATEWAY, "livekit_rejected")),
+        }
+    }
+
+    /// Like `try_moderate`, but logs a failure; returns whether the change went through.
+    async fn moderate(&self, room: &str, method: &str, body: serde_json::Value) -> bool {
+        let result = self.try_moderate(room, method, body).await;
+        if let Err(error) = &result {
+            tracing::warn!(method, reason = error.code, "could not change voice room");
+        }
+        result.is_ok()
     }
 
     fn sign(&self, identity: &str, grants: VideoGrants, ttl: Duration) -> ApiResult<String> {
@@ -312,11 +324,10 @@ async fn publish_sources(
 ) -> ApiResult<Vec<TrackSource>> {
     let mut sources = Vec::new();
     if channels::has_flag(db, channel, person, channels::SPEAK).await? {
-        // A moderator's mute takes the microphone only, as shared app audio is separate.
+        // A moderator's mute silences them fully: app audio could carry the microphone too.
         if !moderation::muted(db, person).await? {
-            sources.push(TrackSource::Microphone);
+            sources.extend([TrackSource::Microphone, TrackSource::ScreenShareAudio]);
         }
-        sources.push(TrackSource::ScreenShareAudio);
     }
     if channels::has_flag(db, channel, person, channels::VIDEO).await? {
         sources.extend([TrackSource::Camera, TrackSource::ScreenShare]);
@@ -405,9 +416,16 @@ pub fn enforce(app: &App, room: Option<String>) {
     };
     let app = app.clone();
     tokio::spawn(async move {
-        if let Err(error) = enforce_rooms(&app, &livekit, room).await {
-            tracing::warn!(reason = error.code, "could not check voice access");
+        // LiveKit can be briefly unreachable, and lost access must still be taken away.
+        for delay in [1, 2, 4, 8, 16, 32] {
+            match enforce_rooms(&app, &livekit, room.clone()).await {
+                Ok(true) => return,
+                Ok(false) => {}
+                Err(error) => tracing::warn!(reason = error.code, "could not check voice access"),
+            }
+            tokio::time::sleep(Duration::from_secs(delay)).await;
         }
+        tracing::warn!("gave up checking voice access until the next change");
     });
 }
 
@@ -439,7 +457,9 @@ fn room_channel(room: &str) -> Option<(&str, bool)> {
     Some((channel, true))
 }
 
-async fn enforce_rooms(app: &App, livekit: &LiveKit, room: Option<String>) -> ApiResult<()> {
+/// Returns whether every room was checked and every change went through.
+async fn enforce_rooms(app: &App, livekit: &LiveKit, room: Option<String>) -> ApiResult<bool> {
+    let mut complete = true;
     let rooms = match room {
         Some(channel) => vec![format!("{DATA_PREFIX}{channel}"), channel],
         None => livekit.rooms().await?,
@@ -452,6 +472,7 @@ async fn enforce_rooms(app: &App, livekit: &LiveKit, room: Option<String>) -> Ap
             Ok(participants) => participants,
             Err(error) => {
                 tracing::warn!(reason = error.code, "could not check voice access");
+                complete = false;
                 continue;
             }
         };
@@ -526,7 +547,7 @@ async fn enforce_rooms(app: &App, livekit: &LiveKit, room: Option<String>) -> Ap
         }
         for identity in remove {
             let body = json!({ "room": room, "identity": identity });
-            livekit.moderate(&room, "RemoveParticipant", body).await;
+            complete &= livekit.moderate(&room, "RemoveParticipant", body).await;
         }
         for (identity, permission) in restrict {
             let body = json!({
@@ -534,10 +555,10 @@ async fn enforce_rooms(app: &App, livekit: &LiveKit, room: Option<String>) -> Ap
                 "identity": identity,
                 "permission": permission,
             });
-            livekit.moderate(&room, "UpdateParticipant", body).await;
+            complete &= livekit.moderate(&room, "UpdateParticipant", body).await;
         }
     }
-    Ok(())
+    Ok(complete)
 }
 
 /// Relay a device-signed acceptance to the offerer through the existing live events socket.

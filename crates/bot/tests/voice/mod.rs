@@ -357,7 +357,7 @@ pub async fn exercise(
     let mut room_b = moderation::exercise(
         a,
         &mut b,
-        &c,
+        &mut c,
         &mut room_a,
         room_b,
         b_source,

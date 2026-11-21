@@ -187,6 +187,14 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
     };
     let connected = call.state == CallState::Connected;
     let can_talk = call.can_talk;
+    // A moderator's mute also takes shared app audio.
+    let blocked = if server.is_some_and(|server| server.voice_muted(&server.dir.me)) {
+        Some(t!("call.server_muted"))
+    } else if !can_talk {
+        Some(t!("call.no_talk_here"))
+    } else {
+        None
+    };
     let can_share_video = call.can_share_video;
     let stats = call.stats.clone();
     let channel = call.channel;
@@ -293,7 +301,7 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
                         }
                     }
                 }
-                share = app_button(ui, voice, connected && can_talk, can_talk, size);
+                share = app_button(ui, voice, connected && blocked.is_none(), blocked, size);
             });
             if let Some(action) = live_files(ui, &home.voice.live_files, server) {
                 live = Some(action);
@@ -620,7 +628,7 @@ fn app_button(
     ui: &mut Ui,
     voice: &mut Voice,
     enabled: bool,
-    can_talk: bool,
+    blocked: Option<&str>,
     size: Vec2,
 ) -> Vec<(App, bool)> {
     let look = if voice.shares.is_empty() {
@@ -642,8 +650,8 @@ fn app_button(
         } else {
             t!("call.needs_windows_11")
         })
-    } else if !can_talk {
-        button.on_disabled_hover_text(t!("call.no_talk_here"))
+    } else if let Some(why) = blocked {
+        button.on_disabled_hover_text(why)
     } else if live {
         button.on_disabled_hover_text(t!("call.sound_in_stream"))
     } else {

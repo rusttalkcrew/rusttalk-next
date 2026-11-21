@@ -584,19 +584,29 @@ to voice channels only.
 | POST `/v1/voice/{channel}/token` | Empty | 200, `{token, audio_kbps}`. LiveKit JWT valid for ten minutes for this room, and the channel's Opus bitrate in kbps |
 | GET `/v1/voice/{channel}/participants` | Empty | 200, `{people, unknown}`: sorted unique person IDs and a count of unmatched devices |
 | DELETE `/v1/voice/{channel}/participants/{person}` | Empty | `move_members`. 204, disconnects their devices from the room |
-| POST `/v1/voice/{channel}/participants/{person}/move` | `{to}` | `move_members` and `read` on `to`. 204, sends them `voice_moved`, then disconnects their devices from the room |
+| POST `/v1/voice/{channel}/participants/{person}/move` | `{to}` | `move_members` and `read` on `to`. 204, sends `voice_moved` to their devices in the room, then disconnects them |
 
 A voice mute is server-wide and stored on the member, so it holds across
 channels and rejoins until lifted. Leaving or being removed from the server
 deletes it with the membership. While muted, tokens and access enforcement
-leave out the `microphone` source, so LiveKit refuses and drops that
-publication; shared app audio is unaffected. Clients rejoin the call when the
-mute is lifted to get a token with the microphone again. Removing and moving
-fail with `404 not_in_voice` when none of the person's devices is in the
-room, and a move with `403 voice_move_denied` when the person may not read
-the target channel. A removal is not a kick: they may rejoin. The audit
-actions are `voice_muted` and `voice_unmuted`, and `voice_removed` and
-`voice_moved` with the source or target channel as `target_id`.
+leave out the `microphone` and `screen_share_audio` sources, so LiveKit refuses
+and drops those publications: the person is fully silent, as shared audio could
+otherwise carry the microphone. The API applies mutes at startup, retries
+enforcement with backoff while LiveKit fails, and muting again reapplies it
+without a second audit entry. Clients rejoin the call when the mute is lifted
+to get a token with those sources again.
+
+Removing and moving fail with `404 not_in_voice` when none of the person's
+devices is in the room, and a move with `403 voice_move_denied` when the person
+may not read the target channel. Permission, rank, membership and channel
+access are checked again after the LiveKit roster lookup. The audit entry is
+written only after LiveKit removed at least one device; if removing any device
+fails, the request returns `502 livekit_rejected` (or `livekit_unreachable`).
+A removal is not a kick: they may rejoin. Clients act on `voice_moved` only
+for their own call in `from`, or just after LiveKit removed them from it, and
+only when `to` is a voice channel they can read. The audit actions are
+`voice_muted` and `voice_unmuted`, and `voice_removed` and `voice_moved` with
+the source or target channel as `target_id`.
 
 The room name is the encoded channel ID. The token's identity is
 base64url of SHA-256 over `"rusttalk-voice-device-v1" || server_id ||
@@ -747,7 +757,7 @@ session validity before pushing updates.
 | `presence_changed` | `person_id`, `status`. Sent to members when visible presence changes |
 | `channel_changed` | None. Refresh the catalog, server metadata and server emoji |
 | `voice_changed` | `channel`. Fetch current voice participants. Sent to current channel readers on signed LiveKit join, leave and room-end notices |
-| `voice_moved` | `person`, `from`, `to`. A moderator moved this person's call; join `to`. Sent only to that person |
+| `voice_moved` | `devices`, `from`, `to`. A moderator moved these devices' call; join `to`. Sent only to those devices |
 | `dm_created` | `channel`. Refresh the catalog and reconcile keys |
 | `message_created` | `channel`, `id`. Fetch the ciphertext record |
 | `message_deleted` | `channel`, `id`. Remove the record and hide edits that reference it |

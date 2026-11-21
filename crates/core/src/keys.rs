@@ -124,9 +124,9 @@ pub enum Event {
     VoiceChanged {
         channel: String,
     },
-    /// A moderator moved `person` from one voice channel to another. Sent only to that person.
+    /// A moderator moved these devices from one voice channel to another. Sent only to them.
     VoiceMoved {
-        person: String,
+        devices: Vec<String>,
         from: String,
         to: String,
     },

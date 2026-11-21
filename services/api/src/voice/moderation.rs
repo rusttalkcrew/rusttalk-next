@@ -2,7 +2,8 @@
 //!
 //! A mute is server-wide and kept on the member, so it holds across channels and rejoins
 //! until a moderator lifts it; leaving the server drops it with the member row. LiveKit
-//! enforces it: tokens and `enforce` leave out the microphone source while it lasts.
+//! enforces it: tokens and `enforce` leave out the microphone and app audio sources while it
+//! lasts.
 
 use std::collections::BTreeSet;
 
@@ -79,28 +80,30 @@ async fn set_muted(
         .fetch_optional(&mut *tx)
         .await?
         .ok_or(ApiError::not_found("member_not_found"))?;
-    if before == on {
-        return Ok(StatusCode::NO_CONTENT);
-    }
-    query("UPDATE members SET voice_muted = ? WHERE person_id = ?")
-        .bind(on)
-        .bind(person.as_slice())
-        .execute(&mut *tx)
+    if before != on {
+        query("UPDATE members SET voice_muted = ? WHERE person_id = ?")
+            .bind(on)
+            .bind(person.as_slice())
+            .execute(&mut *tx)
+            .await?;
+        let action = if on { "voice_muted" } else { "voice_unmuted" };
+        audit(
+            &mut tx,
+            &actor.person,
+            action,
+            Some(&person),
+            None,
+            actor.at,
+        )
         .await?;
-    let action = if on { "voice_muted" } else { "voice_unmuted" };
-    audit(
-        &mut tx,
-        &actor.person,
-        action,
-        Some(&person),
-        None,
-        actor.at,
-    )
-    .await?;
+    }
     tx.commit().await?;
-    // Member lists show the mute. When it is lifted, the person's client rejoins its call
-    // for a token with the microphone again.
-    keys::changed(app, &person, None);
+    if before != on {
+        // Member lists show the mute. When it is lifted, the person's client rejoins its
+        // call for a token with the microphone again.
+        keys::changed(app, &person, None);
+    }
+    // Muting again applies the mute in LiveKit again, should an earlier attempt have failed.
     if on {
         enforce(app, None);
     }
@@ -130,7 +133,54 @@ pub async fn move_to(
     take_out(&app, &headers, channel, &person, Some(to)).await
 }
 
-/// Disconnect a person's devices from a voice room, after telling them where to go if moved.
+/// The actor may remove this member from `channel` (and move them to `to`), and both may
+/// use those channels.
+async fn may_take_out(
+    db: &mut SqliteConnection,
+    actor: &[u8],
+    channel: &str,
+    person: &[u8],
+    to: Option<&str>,
+) -> ApiResult<()> {
+    require_voice_read(db, channel, actor).await?;
+    require(db, actor, person, Permission::MoveMembers).await?;
+    if !query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM members WHERE person_id = ?)")
+        .bind(person)
+        .fetch_one(&mut *db)
+        .await?
+    {
+        return Err(ApiError::not_found("member_not_found"));
+    }
+    if let Some(to) = to {
+        if to == channel {
+            return Err(ApiError::bad_request("same_voice_channel"));
+        }
+        require_voice_read(db, to, actor).await?;
+        // They must be allowed in, as when joining it themselves.
+        require_voice_read(db, to, person)
+            .await
+            .map_err(|_| ApiError::forbidden("voice_move_denied"))?;
+    }
+    Ok(())
+}
+
+/// Check `may_take_out` again in a fresh transaction: access can change during a
+/// LiveKit call.
+async fn confirm(
+    app: &App,
+    headers: &HeaderMap,
+    channel: &str,
+    person: &[u8],
+    to: Option<&str>,
+) -> ApiResult<()> {
+    let (mut tx, actor) = authenticate(app, headers).await?;
+    may_take_out(&mut tx, &actor.person, channel, person, to).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Disconnect a person's devices from a voice room, after telling those devices where to go
+/// if moved. Audited once LiveKit removed at least one device; any failure is returned.
 async fn take_out(
     app: &App,
     headers: &HeaderMap,
@@ -140,18 +190,7 @@ async fn take_out(
 ) -> ApiResult<StatusCode> {
     let person = decode::<32>(person)?;
     let (mut tx, actor) = authenticate(app, headers).await?;
-    require_voice_read(&mut tx, &channel, &actor.person).await?;
-    require(&mut tx, &actor.person, &person, Permission::MoveMembers).await?;
-    if let Some(to) = &to {
-        if *to == channel {
-            return Err(ApiError::bad_request("same_voice_channel"));
-        }
-        require_voice_read(&mut tx, to, &actor.person).await?;
-        // They must be allowed in, as when joining it themselves.
-        require_voice_read(&mut tx, to, &person)
-            .await
-            .map_err(|_| ApiError::forbidden("voice_move_denied"))?;
-    }
+    may_take_out(&mut tx, &actor.person, &channel, &person, to.as_deref()).await?;
     let devices: Vec<Vec<u8>> =
         query_scalar("SELECT device_id FROM member_devices WHERE person_id = ?")
             .bind(person.as_slice())
@@ -161,45 +200,58 @@ async fn take_out(
 
     let livekit = configured(app)?;
     let server = app.key.verifying_key();
-    let identities: BTreeSet<_> = (devices.iter())
-        .map(|device| voice_identity(server.as_bytes(), device))
-        .collect();
-    let present: Vec<_> = (livekit.list(&channel).await?.into_iter())
+    let in_room: BTreeSet<_> = (livekit.list(&channel).await?.into_iter())
         .map(|participant| participant.identity)
-        .filter(|identity| identities.contains(identity))
+        .collect();
+    let present: Vec<_> = (devices.iter())
+        .map(|device| (voice_identity(server.as_bytes(), device), device))
+        .filter(|(identity, _)| in_room.contains(identity))
         .collect();
     if present.is_empty() {
         return Err(ApiError::not_found("not_in_voice"));
     }
+    confirm(app, headers, &channel, &person, to.as_deref()).await?;
 
-    let (mut tx, actor) = authenticate(app, headers).await?;
-    let (action, target) = match &to {
-        Some(to) => ("voice_moved", to),
-        None => ("voice_removed", &channel),
-    };
-    audit(
-        &mut tx,
-        &actor.person,
-        action,
-        Some(&person),
-        Some(target),
-        actor.at,
-    )
-    .await?;
-    tx.commit().await?;
-    if let Some(to) = to {
-        // Sent before the removal so their client switches rooms instead of reporting it.
+    if let Some(to) = &to {
+        // Sent before the removal so those devices switch rooms instead of reporting it.
         app.notify(Event::VoiceMoved {
-            person: encode(&person),
+            devices: present.iter().map(|(_, device)| encode(device)).collect(),
             from: channel.clone(),
-            to,
+            to: to.clone(),
         });
     }
-    for identity in present {
+    let (mut removed, mut failure) = (false, None);
+    for (identity, _) in &present {
         let body = json!({ "room": channel, "identity": identity });
-        livekit.moderate(&channel, "RemoveParticipant", body).await;
+        match livekit
+            .try_moderate(&channel, "RemoveParticipant", body)
+            .await
+        {
+            Ok(()) => removed = true,
+            Err(error) => {
+                tracing::warn!(reason = error.code, "could not remove a voice participant");
+                failure = Some(error);
+            }
+        }
     }
-    Ok(StatusCode::NO_CONTENT)
+    if removed {
+        let (mut tx, actor) = authenticate(app, headers).await?;
+        let (action, target) = match &to {
+            Some(to) => ("voice_moved", to),
+            None => ("voice_removed", &channel),
+        };
+        audit(
+            &mut tx,
+            &actor.person,
+            action,
+            Some(&person),
+            Some(target),
+            actor.at,
+        )
+        .await?;
+        tx.commit().await?;
+    }
+    failure.map_or(Ok(StatusCode::NO_CONTENT), Err)
 }
 
 #[cfg(test)]
@@ -275,11 +327,7 @@ mod tests {
         assert!(events.try_recv().is_err());
         assert_eq!(
             sources().await?,
-            [
-                TrackSource::ScreenShareAudio,
-                TrackSource::Camera,
-                TrackSource::ScreenShare
-            ]
+            [TrackSource::Camera, TrackSource::ScreenShare]
         );
         let Json(members) = crate::metadata::members(State(app.clone()), as_person(1)).await?;
         let listed = serde_json::to_value(members)?;
@@ -335,6 +383,46 @@ mod tests {
             .fetch_one(&app.db)
             .await?;
         assert_eq!(audited, 0, "nothing logged before LiveKit confirms");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn access_is_checked_again_after_the_roster_lookup() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let app = server(dir.path()).await?;
+        let check = |to: Option<String>| {
+            let app = app.clone();
+            async move { confirm(&app, &as_person(2), &channel(1), &person(3), to.as_deref()).await }
+        };
+        check(None).await?;
+        // While LiveKit lists the room, the moderator loses the role.
+        query("DELETE FROM member_roles WHERE person_id = ? AND role_id = 'moderator'")
+            .bind(person(2))
+            .execute(&app.db)
+            .await?;
+        assert_eq!(check(None).await.unwrap_err().code, "permission_denied");
+        // Or the person may no longer join the target, or leaves the server.
+        query("INSERT INTO member_roles (person_id, role_id) VALUES (?, 'admin')")
+            .bind(person(2))
+            .execute(&app.db)
+            .await?;
+        query(
+            "INSERT INTO channel_permissions (channel_id, role_id, flags) VALUES (?, 'member', 1)",
+        )
+        .bind(channel(2))
+        .execute(&app.db)
+        .await?;
+        check(Some(channel(2))).await?;
+        query("DELETE FROM channel_permissions WHERE channel_id = ? AND role_id = 'member'")
+            .bind(channel(2))
+            .execute(&app.db)
+            .await?;
+        assert_eq!(
+            check(Some(channel(2))).await.unwrap_err().code,
+            "voice_move_denied"
+        );
+        crate::members::kick(State(app.clone()), as_person(1), Path(encode(&person(3)))).await?;
+        assert_eq!(check(None).await.unwrap_err().code, "member_not_found");
         Ok(())
     }
 }

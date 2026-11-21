@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use tokio::time::timeout;
 
 use super::{A_HZ, LIMIT, both_ways, falls_silent};
-use crate::rejected;
+use crate::{receive_key, rejected};
 
 const B_HZ: u32 = 780;
 
@@ -22,7 +22,7 @@ const B_HZ: u32 = 780;
 pub async fn exercise(
     a: &mut KeyClient<'_>,
     b: &mut KeyClient<'_>,
-    c: &KeyClient<'_>,
+    c: &mut KeyClient<'_>,
     room_a: &mut VoiceRoom,
     mut room_b: VoiceRoom,
     b_source: NativeAudioSource,
@@ -103,10 +103,12 @@ pub async fn exercise(
         .await?
         .error_for_status()?;
     disconnected(&mut room_b).await?;
+    let b_device = encode(b.identity.certificate.signing_key().as_bytes());
     timeout(LIMIT, async {
         loop {
             let event = b.next_event().await?.context("socket closed")?;
-            if let Event::VoiceMoved { from, to, .. } = event {
+            if let Event::VoiceMoved { devices, from, to } = event {
+                assert_eq!(devices, std::slice::from_ref(&b_device));
                 assert_eq!((from, to), (channel.clone(), encode(&lobby.id)));
                 return Ok::<_, anyhow::Error>(());
             }
@@ -114,6 +116,22 @@ pub async fn exercise(
     })
     .await
     .context("waiting for voice_moved")??;
+    no_move_notice(a).await?;
+    no_move_notice(c).await?;
+    // B follows the notice into the lobby, as the app does.
+    a.sync().await?;
+    receive_key(b, lobby, 1).await?;
+    let lobby_room = b.join_voice(&lobby.id).await?;
+    let me = *b.identity.certificate.person_id();
+    timeout(LIMIT, async {
+        while !a.voice_participants(&lobby.id).await?.people.contains(&me) {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .context("B did not show up in the lobby")??;
+    lobby_room.leave().await?;
     let room_b = rejoin(b, room_a, voice, &b_source).await?;
     let audited: Value = a
         .request(Method::GET, "/v1/audit?action=voice_moved")
@@ -127,6 +145,22 @@ pub async fn exercise(
     );
     println!("Voice remove and move disconnected B from the room, and only B learned the target");
     Ok(room_b)
+}
+
+/// Nobody but the moved device hears about a move.
+async fn no_move_notice(client: &mut KeyClient<'_>) -> Result<()> {
+    let seen = timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            match client.next_event().await {
+                Ok(Some(Event::VoiceMoved { .. })) => return true,
+                Ok(Some(_)) => {}
+                _ => return false,
+            }
+        }
+    })
+    .await;
+    ensure!(seen != Ok(true), "another member received the move notice");
+    Ok(())
 }
 
 async fn rejoin(

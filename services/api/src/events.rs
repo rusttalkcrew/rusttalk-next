@@ -171,8 +171,8 @@ async fn stream(
             {
                 continue;
             }
-            if let Event::VoiceMoved { person, .. } = &notice
-                && *person != encode(&actor.person)
+            if let Event::VoiceMoved { devices, .. } = &notice
+                && !devices.contains(&device)
             {
                 continue;
             }

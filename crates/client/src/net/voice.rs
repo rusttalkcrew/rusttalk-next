@@ -896,7 +896,10 @@ pub(super) async fn on_voice(
         }
         RoomEvent::Disconnected { reason } => {
             tracing::info!(?reason, "voice disconnected");
-            // A move to another channel follows as its own notice and replaces this text.
+            // A move to another channel can follow as its own notice and replaces this text.
+            if reason == DisconnectReason::ParticipantRemoved {
+                state.removed_from = Some((channel, std::time::Instant::now()));
+            }
             end(
                 state,
                 if reason == DisconnectReason::ParticipantRemoved {
