@@ -32,6 +32,33 @@ pub(super) async fn get(client: &KeyClient<'_>, path: &str) -> Result<Value> {
         .await?)
 }
 
+/// Save a channel order. Everything this person can't see keeps its place.
+pub(super) async fn save_order(client: &KeyClient<'_>, shown: &[(Id, Vec<Id>)]) -> Result<()> {
+    let id = |value: &Value| -> Result<Id> { Ok(decode(value.as_str().context("missing ID")?)?) };
+    let categories = get(client, "/v1/categories").await?;
+    let categories: Vec<Id> = (categories.as_array().into_iter().flatten())
+        .map(|category| id(&category["id"]))
+        .collect::<Result<_>>()?;
+    let channels = get(client, "/v1/channels").await?;
+    let channels: Vec<(Id, Id)> = (channels.as_array().into_iter().flatten())
+        .map(|channel| Ok((id(&channel["id"])?, id(&channel["category_id"])?)))
+        .collect::<Result<_>>()?;
+    let order = crate::reorder::merge(shown, &categories, &channels);
+    let body: Vec<Value> = (order.iter())
+        .map(|(category, list)| {
+            let list: Vec<String> = list.iter().map(|channel| encode(channel)).collect();
+            serde_json::json!({"id": encode(category), "channels": list})
+        })
+        .collect();
+    client
+        .request(Method::PUT, "/v1/channels/order")
+        .json(&serde_json::json!({ "categories": body }))
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(())
+}
+
 /// Fetch and decrypt names, channels, members and permissions, and report member changes.
 pub(super) async fn directory(
     ctx: &Ctx,
@@ -177,10 +204,7 @@ fn build(
     // Highest rank first, as the server lists them.
     role_list.sort_by_key(|role| -role.rank);
 
-    let mut categories: Vec<_> = catalog.categories.iter().collect();
-    categories.sort_by_key(|category| (category.position, category.id));
-    let mut categories: Vec<Category> = categories
-        .into_iter()
+    let mut categories: Vec<Category> = (catalog.categories.iter())
         .map(|category| Category {
             id: Some(category.id),
             name: text(
@@ -194,8 +218,9 @@ fn build(
         .collect();
     let mut loose = Vec::new();
     let mut dms = Vec::new();
+    // Text before voice only where positions tie, as on servers nobody has reordered yet.
     let mut channels: Vec<_> = catalog.channels.iter().collect();
-    channels.sort_by_key(|channel| (channel.position, channel.id));
+    channels.sort_by_key(|channel| (channel.position, channel.kind == "voice", channel.id));
     for channel in channels {
         if channel.kind == "dm" {
             if let Some(peer) = channel.peer.as_deref() {
@@ -229,13 +254,16 @@ fn build(
             None => loose.push(entry),
         }
     }
-    // Text channels first, then voice, like other chat apps.
-    loose.sort_by_key(|channel| channel.voice);
-    for category in &mut categories {
-        category.channels.sort_by_key(|channel| channel.voice);
-    }
-    // Stable, so voice-only categories follow the rest in server order.
-    categories.sort_by_key(|c| !c.channels.is_empty() && c.channels.iter().all(|ch| ch.voice));
+    // Voice-only categories follow the rest only where positions tie.
+    let position = |id: &Option<Id>| {
+        (catalog.categories.iter())
+            .find(|category| Some(category.id) == *id)
+            .map_or(0, |category| category.position)
+    };
+    categories.sort_by_key(|c| {
+        let voice = !c.channels.is_empty() && c.channels.iter().all(|ch| ch.voice);
+        (position(&c.id), voice, c.id)
+    });
     if !loose.is_empty() {
         categories.insert(
             0,

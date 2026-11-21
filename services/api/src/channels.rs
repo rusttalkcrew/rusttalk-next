@@ -263,11 +263,14 @@ pub async fn create_channel(
     if new == 0 || scope.id == keys::space(&app).id {
         return Err(keys::conflict("channel_exists"));
     }
-    query("INSERT INTO channels (id, kind, category_id, position, name_ct, topic_ct) VALUES (?, ?, ?, ?, ?, ?)")
+    // A new channel goes last in its category, so it never jumps ahead of a chosen order.
+    query("INSERT INTO channels (id, kind, category_id, position, name_ct, topic_ct)
+           SELECT ?, ?, ?, COALESCE(MAX(position) + 1, 0), ?, ? FROM channels WHERE category_id = ?")
         .bind(&id).bind(match kind { ChannelKind::Text => "text", ChannelKind::Voice => "voice" })
-        .bind(&fields.category_id).bind(fields.position)
+        .bind(&fields.category_id)
         .bind(metadata::checked(Metadata::ChannelName, epoch, fields.name_ct)?)
         .bind(metadata::optional(Metadata::ChannelTopic, epoch, fields.topic_ct)?)
+        .bind(&fields.category_id)
         .execute(&mut *tx).await?;
     query(
         "INSERT INTO channel_permissions (channel_id, role_id, flags)
@@ -477,10 +480,20 @@ pub async fn create_category(
     let (mut tx, actor) = authenticate(&app, &headers).await?;
     manage(&mut tx, &actor).await?;
     let epoch = keys::space_epoch(&mut tx, &app).await?;
-    let inserted = query("INSERT INTO categories (id, position, name_ct) VALUES (?, ?, ?) ON CONFLICT (id) DO NOTHING")
-        .bind(&id).bind(fields.position)
-        .bind(metadata::checked(Metadata::CategoryName, epoch, fields.name_ct)?)
-        .execute(&mut *tx).await?.rows_affected();
+    let inserted = query(
+        "INSERT INTO categories (id, position, name_ct)
+                          SELECT ?, COALESCE(MAX(position) + 1, 0), ? FROM categories WHERE true
+                          ON CONFLICT (id) DO NOTHING",
+    )
+    .bind(&id)
+    .bind(metadata::checked(
+        Metadata::CategoryName,
+        epoch,
+        fields.name_ct,
+    )?)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
     if inserted == 0 {
         return Err(keys::conflict("category_exists"));
     }
@@ -564,4 +577,208 @@ pub async fn delete_category(
     tx.commit().await?;
     app.notify(Event::ChannelChanged);
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Largest order body: about 1,400 channel and category IDs.
+pub const ORDER_BODY_LIMIT: usize = 64 * 1024;
+
+#[derive(Deserialize)]
+pub struct OrderedCategory {
+    id: String,
+    channels: Vec<String>,
+}
+
+#[derive(Deserialize)]
+pub struct Order {
+    categories: Vec<OrderedCategory>,
+}
+
+/// Apply a full new order of every category and text or voice channel at once.
+pub async fn reorder(
+    State(app): State<App>,
+    headers: HeaderMap,
+    body: Result<Json<Order>, JsonRejection>,
+) -> ApiResult<StatusCode> {
+    let order = payload(body)?;
+    let mut categories = std::collections::BTreeSet::new();
+    let mut channels = std::collections::BTreeSet::new();
+    for category in &order.categories {
+        decode::<32>(&category.id)?;
+        if !categories.insert(category.id.as_str()) {
+            return Err(ApiError::bad_request("invalid_order"));
+        }
+        for channel in &category.channels {
+            decode::<32>(channel)?;
+            if !channels.insert(channel.as_str()) {
+                return Err(ApiError::bad_request("invalid_order"));
+            }
+        }
+    }
+    let (mut tx, actor) = authenticate(&app, &headers).await?;
+    manage(&mut tx, &actor).await?;
+    let known_categories: Vec<String> = query_scalar("SELECT id FROM categories ORDER BY id")
+        .fetch_all(&mut *tx)
+        .await?;
+    let known_channels: Vec<String> =
+        query_scalar("SELECT id FROM channels WHERE kind <> 'dm' ORDER BY id")
+            .fetch_all(&mut *tx)
+            .await?;
+    // Both sides are sorted, so equal lists mean exactly the current IDs.
+    let same = |given: &std::collections::BTreeSet<&str>, known: &[String]| {
+        given.iter().copied().eq(known.iter().map(String::as_str))
+    };
+    if !same(&categories, &known_categories) || !same(&channels, &known_channels) {
+        return Err(keys::conflict("order_changed"));
+    }
+    for (position, category) in (0_i64..).zip(&order.categories) {
+        query("UPDATE categories SET position = ? WHERE id = ?")
+            .bind(position)
+            .bind(&category.id)
+            .execute(&mut *tx)
+            .await?;
+        for (position, channel) in (0_i64..).zip(&category.channels) {
+            query("UPDATE channels SET category_id = ?, position = ? WHERE id = ?")
+                .bind(&category.id)
+                .bind(position)
+                .bind(channel)
+                .execute(&mut *tx)
+                .await?;
+        }
+    }
+    audit(
+        &mut tx,
+        &actor.person,
+        "channels_reordered",
+        None,
+        None,
+        actor.at,
+    )
+    .await?;
+    tx.commit().await?;
+    app.notify(Event::ChannelChanged);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Change, store};
+    use rusttalk_core::presence::Update;
+
+    fn id(byte: u8) -> String {
+        encode(&[byte; 32])
+    }
+
+    fn order(categories: &[(u8, &[u8])]) -> Result<Json<Order>, JsonRejection> {
+        Ok(Json(Order {
+            categories: categories
+                .iter()
+                .map(|(category, channels)| OrderedCategory {
+                    id: id(*category),
+                    channels: channels.iter().map(|channel| id(*channel)).collect(),
+                })
+                .collect(),
+        }))
+    }
+
+    #[tokio::test]
+    async fn reorder_checks_permission_and_ids_then_saves_and_signals() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let db = store::open(dir.path()).await?;
+        let app = App {
+            files: crate::files::Files::open(dir.path(), &db).await?.into(),
+            db,
+            key: std::sync::Arc::new(ed25519_dalek::SigningKey::from_bytes(&[7; 32])),
+            changes: tokio::sync::broadcast::channel(128).0,
+            presence: Default::default(),
+            voice: None,
+            session_ttl: 3600,
+            listing_changed: tokio::sync::watch::channel(()).0,
+        };
+        // Person 1 owns the server; person 2 is a member without any role.
+        let person = |byte: u8| vec![byte; 32];
+        query("INSERT INTO members (person_id, joined_at) VALUES (?, 0), (?, 0)")
+            .bind(person(1))
+            .bind(person(2))
+            .execute(&app.db)
+            .await?;
+        query("UPDATE server_settings SET owner_person_id = ?")
+            .bind(person(1))
+            .execute(&app.db)
+            .await?;
+        for byte in [1_u8, 2] {
+            query("INSERT INTO sessions (token_hash, person_id, device_id, ip, expires_at, session_id) VALUES (?, ?, ?, '192.0.2.1', ?, ?)")
+                .bind(store::hash(&[byte; 32]).as_slice()).bind(person(byte)).bind(vec![byte])
+                .bind(i64::MAX).bind(vec![byte]).execute(&app.db).await?;
+        }
+        // Categories 10 and 11; channels 20 and 21 in 10, 22 in 11, and a DM that stays out.
+        for (category, at) in [(10_u8, 0), (11, 1)] {
+            query("INSERT INTO categories (id, position, name_ct) VALUES (?, ?, x'00')")
+                .bind(id(category))
+                .bind(at)
+                .execute(&app.db)
+                .await?;
+        }
+        for (channel, category) in [(20_u8, 10_u8), (21, 10), (22, 11)] {
+            query("INSERT INTO channels (id, kind, category_id, position, name_ct) VALUES (?, 'text', ?, 0, x'00')")
+                .bind(id(channel)).bind(id(category)).execute(&app.db).await?;
+        }
+        query("INSERT INTO channels (id, kind, position, dm_first, dm_second) VALUES ('dm', 'dm', 0, ?, ?)")
+            .bind(person(1)).bind(person(2)).execute(&app.db).await?;
+        let as_person = |person: u8| {
+            let mut headers = HeaderMap::new();
+            let token = format!("Bearer {}", encode(&[person; 32]));
+            headers.insert("authorization", token.parse().unwrap());
+            headers.insert("x-forwarded-for", "192.0.2.1".parse().unwrap());
+            headers
+        };
+        let mut events = app.changes.subscribe();
+        let wanted: &[(u8, &[u8])] = &[(11, &[21, 22]), (10, &[20])];
+        let refused = |result: ApiResult<StatusCode>| result.unwrap_err().code;
+
+        let denied = reorder(State(app.clone()), as_person(2), order(wanted)).await;
+        assert_eq!(refused(denied), "permission_denied");
+        for (bad, code) in [
+            (&[(11, &[21, 22][..]), (10, &[20, 21])][..], "invalid_order"),
+            (&[(11, &[21, 22]), (11, &[20])], "invalid_order"),
+            (&[(11, &[21, 22]), (10, &[])], "order_changed"),
+            (&[(11, &[21, 22]), (10, &[20, 23])], "order_changed"),
+            (&[(11, &[21, 22])], "order_changed"),
+        ] {
+            let result = reorder(State(app.clone()), as_person(1), order(bad)).await;
+            assert_eq!(refused(result), code);
+        }
+        assert!(events.try_recv().is_err(), "refusals change nothing");
+
+        let saved = reorder(State(app.clone()), as_person(1), order(wanted)).await;
+        assert_eq!(saved.unwrap(), StatusCode::NO_CONTENT);
+        let rows: Vec<(String, String, i64)> = query_as(
+            "SELECT id, category_id, position FROM channels WHERE kind <> 'dm' ORDER BY id",
+        )
+        .fetch_all(&app.db)
+        .await?;
+        assert_eq!(
+            rows,
+            [
+                (id(20), id(10), 0),
+                (id(21), id(11), 0),
+                (id(22), id(11), 1)
+            ]
+        );
+        let categories: Vec<(String, i64)> =
+            query_as("SELECT id, position FROM categories ORDER BY id")
+                .fetch_all(&app.db)
+                .await?;
+        assert_eq!(categories, [(id(10), 1), (id(11), 0)]);
+        let audited: i64 =
+            query_scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'channels_reordered'")
+                .fetch_one(&app.db)
+                .await?;
+        assert_eq!(audited, 1);
+        assert!(matches!(
+            events.try_recv(),
+            Ok(Change::Update(Update::Event(Event::ChannelChanged)))
+        ));
+        Ok(())
+    }
 }

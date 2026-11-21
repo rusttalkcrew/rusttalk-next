@@ -32,7 +32,7 @@ use crate::{
     device_sync::{self, Edit},
     files::{self, Ask, Files},
     net::{Admin, AdminUpdate, Admission, Command, Draft, Listed, Net, PAGE_SIZE, Preview, Update},
-    official,
+    official, reorder,
     screen::Video,
     server::{Body, Chat, Directory, Id, Member, Msg, Picture, Server, Status, member_name},
 };
@@ -1036,9 +1036,10 @@ pub fn frame(ui: &Ui, picture: &Picture) -> TextureHandle {
     textures[0].clone()
 }
 
-pub fn section(ui: &mut Ui, text: &str) {
+pub fn section(ui: &mut Ui, text: &str) -> Response {
     ui.add_space(10.0);
-    ui.label(RichText::new(text.to_uppercase()).small().strong().weak());
+    let text = RichText::new(text.to_uppercase()).small().strong().weak();
+    ui.add(Label::new(text).selectable(false))
 }
 
 fn dm_list(ui: &mut Ui, home: &mut Home) {
@@ -1168,65 +1169,89 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
     let mut add = None;
     let mut talk = None;
     let mut configure = None;
+    let mut moved = None;
+    let categories = &server.dir.categories;
+    let can_move = perms.manage_channels && online && reorder::order(categories).is_some();
     ScrollArea::vertical().show(ui, |ui| {
-        for category in &server.dir.categories {
-            if !category.name.is_empty() {
-                ui.horizontal(|ui| {
-                    section(ui, &category.name);
-                    if perms.manage_channels {
-                        ui.with_layout(Layout::right_to_left(Align::Max), |ui| {
-                            let plus = ui.small_button("+").on_hover_text("Create channel");
-                            plus.widget_info(|| {
-                                WidgetInfo::labeled(
-                                    Role::Button,
-                                    true,
-                                    format!("Create channel in {}", category.name),
-                                )
+        let list_id = UiId::unique(("channel order", &server.address));
+        let mut list = reorder::List::begin(ui, list_id, categories, can_move);
+        for category in categories {
+            let block = category.id.unwrap_or_default();
+            if let Some(id) = category.id.filter(|_| !category.name.is_empty()) {
+                let item = reorder::Item::Category(id);
+                let header = list.row(ui, item, block, |ui| {
+                    ui.horizontal(|ui| {
+                        let label = section(ui, &category.name);
+                        if perms.manage_channels {
+                            ui.with_layout(Layout::right_to_left(Align::Max), |ui| {
+                                let plus = ui.small_button("+").on_hover_text("Create channel");
+                                plus.widget_info(|| {
+                                    WidgetInfo::labeled(
+                                        Role::Button,
+                                        true,
+                                        format!("Create channel in {}", category.name),
+                                    )
+                                });
+                                if plus.clicked() {
+                                    add = Some(category.id);
+                                }
                             });
-                            if plus.clicked() {
-                                add = Some(category.id);
-                            }
-                        });
-                    }
+                        }
+                        label
+                    })
+                    .inner
                 });
+                if can_move {
+                    header.context_menu(|ui| {
+                        moved = moved.or(reorder::menu(ui, categories, item));
+                    });
+                }
             }
             for channel in &category.channels {
-                let width = ui.available_width();
-                if channel.voice {
-                    let selected = server.open == Some(channel.id);
-                    let button = Button::selectable(selected, format!("🔊  {}", channel.name))
-                        .min_size(Vec2::new(width, 0.0));
-                    let button = ui.add_enabled(online, button);
-                    if button.clicked() {
-                        talk = Some(channel.id);
-                    }
-                    if perms.manage_channels {
-                        button.context_menu(|ui| {
-                            if ui.button("Channel settings").clicked() {
-                                configure = Some(channel.id);
-                            }
-                        });
-                    }
-                    call::room_list(ui, home, server, &channel.id);
-                    continue;
-                }
+                let item = reorder::Item::Channel(channel.id);
                 let selected = server.open == Some(channel.id);
-                let button = Button::selectable(selected, format!("#  {}", channel.name))
-                    .min_size(Vec2::new(width, 0.0));
-                let button = ui.add(button);
+                let button = list.row(ui, item, block, |ui| {
+                    let width = ui.available_width();
+                    if channel.voice {
+                        let button = Button::selectable(selected, format!("🔊  {}", channel.name))
+                            .min_size(Vec2::new(width, 0.0));
+                        let button = ui.add_enabled(online, button);
+                        call::room_list(ui, home, server, &channel.id);
+                        return button;
+                    }
+                    let button = Button::selectable(selected, format!("#  {}", channel.name))
+                        .min_size(Vec2::new(width, 0.0));
+                    ui.add(button)
+                });
                 if button.clicked() {
-                    pick = Some(channel.id);
+                    if channel.voice {
+                        talk = Some(channel.id);
+                    } else {
+                        pick = Some(channel.id);
+                    }
                 }
                 if perms.manage_channels {
                     button.context_menu(|ui| {
                         if ui.button("Channel settings").clicked() {
                             configure = Some(channel.id);
                         }
+                        if can_move {
+                            moved = moved.or(reorder::menu(ui, categories, item));
+                        }
                     });
                 }
             }
         }
+        moved = moved.or(list.end(ui, categories));
     });
+    if let Some((item, slot)) = moved {
+        let server = &mut home.servers[index];
+        if reorder::place(&mut server.dir.categories, item, slot)
+            && let Some(order) = reorder::order(&server.dir.categories)
+        {
+            server.send(Command::Reorder(order));
+        }
+    }
     if let Some(channel) = configure {
         admin::open(home, index, admin::Tab::Channel(channel));
     }

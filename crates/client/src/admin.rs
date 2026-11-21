@@ -589,6 +589,7 @@ fn sentence(server: &Server, entry: &AuditEntry) -> String {
         "channel_permissions_changed" => format!("{actor} changed who can use a channel"),
         "category_created" => format!("{actor} made a category"),
         "category_deleted" => format!("{actor} deleted a category"),
+        "channels_reordered" => format!("{actor} changed the channel order"),
         "invite_created" => format!("{actor} made an invite"),
         "invite_revoked" => format!("{actor} stopped an invite"),
         "open_joining_changed" => format!("{actor} changed who can join"),

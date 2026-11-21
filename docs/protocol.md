@@ -163,12 +163,12 @@ errors may have an empty body. The API logs a request ID, status and reason.
 
 | Status | Codes |
 | --- | --- |
-| 400 | `invalid_json`, `invalid_encoding`, `invalid_query`, `invalid_forwarded_ip`, `invalid_revocation`, `invalid_invite_limits`, `invalid_role_rank`, `invalid_role_count`, `role_id_required`, `already_owner`, `unexpected_invite`, `invite_name_required`, `invalid_member_cap`, `invalid_certificate`, `invalid_metadata`, `invalid_envelope`, `invalid_channel_flags`, `invalid_dm_peer`, `not_a_chat_channel`, `not_a_voice_channel`, `invalid_message`, `invalid_file_body`, `invalid_file_acceptance`, `invalid_event_query`, `invalid_sync_blob`, `invalid_listing`, `invalid_listing_settings`, `invalid_index_url`, `invalid_index_tls_fingerprint` |
+| 400 | `invalid_json`, `invalid_encoding`, `invalid_query`, `invalid_forwarded_ip`, `invalid_revocation`, `invalid_invite_limits`, `invalid_role_rank`, `invalid_role_count`, `role_id_required`, `already_owner`, `unexpected_invite`, `invite_name_required`, `invalid_member_cap`, `invalid_certificate`, `invalid_metadata`, `invalid_envelope`, `invalid_channel_flags`, `invalid_order`, `invalid_dm_peer`, `not_a_chat_channel`, `not_a_voice_channel`, `invalid_message`, `invalid_file_body`, `invalid_file_acceptance`, `invalid_event_query`, `invalid_sync_blob`, `invalid_listing`, `invalid_listing_settings`, `invalid_index_url`, `invalid_index_tls_fingerprint` |
 | 401 | `invalid_challenge`, `invalid_certificate`, `invalid_device_signature`, `invalid_session`, `token_expired`, `invalid_livekit_webhook` |
 | 403 | `invite_required`, `invalid_invite`, `person_banned`, `ip_banned`, `device_revoked`, `device_certificate_required`, `permission_denied`, `role_hierarchy`, `cannot_grant_permission`, `built_in_role`, `owner_required`, `open_joining_disabled`, `scope_read_denied`, `recipient_read_denied`, `channel_read_denied`, `channel_write_denied`, `live_file_peer_not_in_room` |
 | 404 | `invite_not_found`, `member_not_found`, `ban_not_found`, `role_not_found`, `category_not_found`, `channel_not_found`, `message_not_found`, `message_device_not_found`, `file_not_found`, `avatar_not_found`, `icon_not_found` |
 | 408 | `file_upload_timeout` |
-| 409 | `owner_cannot_leave`, `already_banned`, `no_active_ip`, `role_exists`, `role_in_use`, `role_limit`, `member_cap_reached`, `device_limit`, `device_certificate_changed`, `revocation_limit`, `epoch_changed`, `space_key_unavailable`, `metadata_epoch_changed`, `category_exists`, `category_in_use`, `channel_exists`, `message_exists`, `file_exists` |
+| 409 | `owner_cannot_leave`, `already_banned`, `no_active_ip`, `role_exists`, `role_in_use`, `role_limit`, `member_cap_reached`, `device_limit`, `device_certificate_changed`, `revocation_limit`, `epoch_changed`, `space_key_unavailable`, `metadata_epoch_changed`, `category_exists`, `category_in_use`, `channel_exists`, `order_changed`, `message_exists`, `file_exists` |
 | 413 | `body_too_large` when generated after reading the body, `file_too_large`, `file_member_quota`, `file_server_quota` |
 | 415 | `expected_json` |
 | 429 | `challenge_limit`, `invite_preview_limit`, `open_join_limit` |
@@ -230,6 +230,11 @@ All routes require a bearer header. Channel kind is `text`, `voice`, or `dm`.
 Channel and category IDs are client-generated random 32-byte values.
 `position` is an integer used for ordering with ID as the tiebreaker.
 Text and voice channels each have one category. Channel kind is fixed at creation.
+A new channel goes last in its category and a new category goes last; the
+`position` in a create body is ignored. The order body must list every
+category and every text or voice channel exactly once, in the new order and
+any category; the body may be up to 64 KiB. A repeated ID returns
+`400 invalid_order`; a missing or unknown ID returns `409 order_changed`.
 
 | Method and path | Body | Permission and success |
 | --- | --- | --- |
@@ -243,6 +248,7 @@ Text and voice channels each have one category. Channel kind is fixed at creatio
 | POST `/v1/categories` | `{id, position, name_ct}` | `manage_channels`. 201 |
 | PUT `/v1/categories/{id}` | `{position, name_ct}` | `manage_channels`. 204 |
 | DELETE `/v1/categories/{id}` | Empty | `manage_channels`. 204 if empty, 409 if in use |
+| PUT `/v1/channels/order` | `{categories: [{id, channels: [id]}]}` | `manage_channels`. 204. Sets every category's and text or voice channel's `position` and `category_id` in one transaction, audited as `channels_reordered`, then sends `channel_changed` |
 
 Channel responses have `{id, kind, category_id, position, name_ct, topic_ct, flags}`.
 A category has `{id, position, name_ct}`. Each channel's flags are
