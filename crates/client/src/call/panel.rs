@@ -10,7 +10,7 @@ use eframe::egui::{
 };
 
 use super::{
-    Listing, LiveAction, Sharing, Voice, audio, fill, leave, list_targets, live_files, screen,
+    Listing, LiveAction, Sharing, Voice, audio, fill, leave, live_files, open_screen_dialog, screen,
 };
 use crate::{
     files::Ask,
@@ -167,7 +167,6 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
     let connected = call.state == CallState::Connected;
     let can_talk = call.can_talk;
     let can_share_video = call.can_share_video;
-    let can_send_files = call.can_send_files;
     let stats = call.stats.clone();
     let quality = if connected {
         quality(stats.ping_ms, home.voice.link.loss)
@@ -177,7 +176,7 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
     let stopped = sharing_card(ui, &home.voice);
     let mut live = None;
     let mut leave_now = false;
-    let mut share = None;
+    let mut share = Vec::new();
     let mut stop_screen = matches!(stopped, Some(Stop::Screen));
     let mut voice_settings = false;
     Frame::new()
@@ -202,7 +201,7 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
                 });
             });
             ui.add_space(6.0);
-            let count = if screen::SUPPORTED { 4.0 } else { 3.0 };
+            let count = if screen::SUPPORTED { 3.0 } else { 2.0 };
             let width = (ui.available_width() - SPACE_XS * (count - 1.0)) / count;
             let size = Vec2::new(width, ICON_BUTTON);
             ui.horizontal(|ui| {
@@ -239,24 +238,13 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
                         button.on_disabled_hover_text("You can't share your screen here");
                     } else if button.clicked() {
                         if voice.sharing == Sharing::Off {
-                            voice.share_screen = Some((Default::default(), None));
-                            list_targets(ui.ctx(), voice);
+                            open_screen_dialog(ui.ctx(), voice);
                         } else {
                             stop_screen = true;
                         }
                     }
                 }
                 share = app_button(ui, voice, connected && can_talk, can_talk, size);
-                let button = ui
-                    .add_enabled_ui(connected && can_send_files, |ui| {
-                        ui::icon_button(ui, "📎", "Send a file", Look::Plain, size)
-                    })
-                    .inner;
-                if !can_send_files {
-                    button.on_disabled_hover_text("You can't send files here");
-                } else if button.clicked() {
-                    live = Some(LiveAction::Send);
-                }
             });
             if let Some(action) = live_files(ui, &home.voice.live_files, server) {
                 live = Some(action);
@@ -267,7 +255,8 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
         .call
         .as_ref()
         .and_then(|call| home.servers.iter().find(|s| s.address == call.server));
-    if let (Some(server), Some((app, on))) = (server, share) {
+    for (app, on) in share {
+        let Some(server) = server else { break };
         if on {
             home.voice.shares.push(app.clone());
             server.send(Command::ShareApp(app));
@@ -287,7 +276,6 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
     if let Some(server) = server {
         let address = server.address.clone();
         match live {
-            Some(LiveAction::Send) => home.files.ask(ui.ctx(), Ask::Offer(address)),
             Some(LiveAction::Save(id, name)) => {
                 home.files.ask(ui.ctx(), Ask::Accept(address, id, name))
             }
@@ -421,14 +409,15 @@ fn details(ui: &mut Ui, stats: &Stats, server: Option<&Server>) {
         });
 }
 
-/// The app audio button and its picker. Returns an app turned on or off.
+/// The app audio button and its picker: each app playing sound with a check, a
+/// refresh and "Stop sharing all". Returns the apps turned on or off.
 fn app_button(
     ui: &mut Ui,
     voice: &mut Voice,
     enabled: bool,
     can_talk: bool,
     size: Vec2,
-) -> Option<(App, bool)> {
+) -> Vec<(App, bool)> {
     let look = if voice.shares.is_empty() {
         Look::Plain
     } else {
@@ -447,36 +436,65 @@ fn app_button(
     } else {
         button
     };
+    // Listing starts a helper process on Linux; keep it off the UI thread.
+    let list = |ui: &Ui| fill(ui.ctx(), &voice.apps, "apps", share::list);
     if button.clicked() {
-        // Listing starts a helper process on Linux; keep it off the UI thread.
-        fill(ui.ctx(), &voice.apps, "apps", share::list);
+        list(ui);
     }
-    let mut share = None;
-    ui::popup(&button, |ui| {
-        ui.label(ui::bold("Pick apps to share"));
+    let mut changes = Vec::new();
+    let mut refresh = false;
+    ui::menu_above(&button, |m| {
+        m.caption("Share app audio");
         match &*audio::lock(&voice.apps) {
             Listing::Loading => {
-                ui.spinner();
+                m.ui().horizontal(|ui| {
+                    ui.add_space(10.0);
+                    ui.spinner();
+                    ui.weak("Looking for apps…");
+                });
             }
-            Listing::Failed => {
-                ui.weak("Couldn't look for apps. Try again.");
-            }
+            Listing::Failed => empty(m.ui(), "Couldn't look for apps."),
             Listing::Found(apps) if apps.is_empty() => {
-                ui.weak("No apps are playing sound.");
+                empty(
+                    m.ui(),
+                    "Start playing something in an app, then pick it here.",
+                );
             }
             Listing::Found(apps) => {
+                let c = ui::colors(m.ui());
+                // A soft pulse on each dot: these apps are playing right now.
+                let time = m.ui().input(|input| input.time);
+                let pulse = 0.65 + 0.35 * (time * 3.0).sin().abs() as f32;
+                m.ui().ctx().request_repaint_after_secs(0.05);
                 for app in apps {
                     let was = voice.shares.iter().any(|shared| shared.id == app.id);
-                    let mut on = was;
-                    ui::checkbox(ui, &mut on, &app.name);
-                    if on != was {
-                        share = Some((app.clone(), on));
+                    let item = ui::Item::dot(c.success.gamma_multiply(pulse), &app.name)
+                        .hint("Playing")
+                        .checked(was);
+                    if m.add(item).clicked() {
+                        changes.push((app.clone(), !was));
                     }
                 }
             }
         }
+        m.separator();
+        refresh = m.item("🔄", "Refresh").clicked();
+        if !voice.shares.is_empty() && m.danger("⏹", "Stop sharing all").clicked() {
+            changes.extend(voice.shares.iter().map(|app| (app.clone(), false)));
+        }
     });
-    share
+    if refresh {
+        list(ui);
+    }
+    changes
+}
+
+/// A line of help in the app picker when there is nothing to pick.
+fn empty(ui: &mut Ui, text: &str) {
+    ui.horizontal(|ui| {
+        ui.add_space(10.0);
+        ui.add(Label::new(RichText::new(text).color(ui::colors(ui).muted)).wrap());
+    });
 }
 
 /// "Now sharing" above the panel while this device shares its screen or app audio,

@@ -100,7 +100,6 @@ pub enum LiveState {
 }
 
 pub enum LiveAction {
-    Send,
     Save(Id, String),
     /// Hide it here; for ours or a download, also stop it.
     Remove(Id, bool),
@@ -211,7 +210,6 @@ pub fn join(home: &mut Home, index: usize, channel: Id) {
         stats: Stats::default(),
         can_talk: true,
         can_share_video: true,
-        can_send_files: true,
     });
     home.voice.audio.set_voice(true);
 }
@@ -548,10 +546,6 @@ pub fn chat_live(
     action
 }
 
-fn list_targets(ctx: &egui::Context, voice: &Voice) {
-    fill(ctx, &voice.targets, "screens", screen::targets);
-}
-
 /// List `what` on its own thread into `slot`, then repaint.
 pub fn fill<T: Send + 'static>(
     ctx: &egui::Context,
@@ -586,6 +580,54 @@ pub fn upload(
         Some(texture) => texture.set(image, TextureOptions::LINEAR),
         None => *slot = Some(ctx.load_texture(name, image, TextureOptions::LINEAR)),
     }
+}
+
+/// The quality steps of "Share your screen": height cap, label and hint. The picture
+/// keeps its shape and is only ever scaled down, so a smaller screen stays as it is.
+const SCREEN_QUALITIES: [(Option<u32>, &str, &str); 4] = [
+    (Some(720), "720p", "720p — light on slow connections"),
+    (Some(1080), "1080p", "1080p — sharp text, the usual pick"),
+    (
+        Some(1440),
+        "1440p",
+        "1440p — extra sharp, needs a fast connection",
+    ),
+    (None, "Native", "Native — your screen's full size"),
+];
+const SCREEN_RATES: [(u32, &str, &str); 3] = [
+    (15, "15", "15 fps — fine for slides and documents"),
+    (30, "30", "30 fps — smooth for most things"),
+    (60, "60", "60 fps — for games and video"),
+];
+
+/// The last choices from Settings, or the defaults for values this version no longer offers.
+fn screen_options(s: &Settings) -> Options {
+    let default = Options::default();
+    let height = SCREEN_QUALITIES.iter().map(|q| q.0);
+    let fps = SCREEN_RATES.iter().map(|r| r.0);
+    Options {
+        max_height: height
+            .clone()
+            .find(|h| *h == s.screen_height)
+            .unwrap_or(default.max_height),
+        fps: fps
+            .clone()
+            .find(|f| *f == s.screen_fps)
+            .unwrap_or(default.fps),
+        cursor: s.screen_cursor,
+    }
+}
+
+fn remember_screen_options(s: &mut Settings, options: Options) {
+    s.screen_height = options.max_height;
+    s.screen_fps = options.fps;
+    s.screen_cursor = options.cursor;
+}
+
+/// Open "Share your screen" with the last choices and look for what to share.
+fn open_screen_dialog(ctx: &egui::Context, voice: &mut Voice) {
+    voice.share_screen = Some((screen_options(&voice.audio.settings()), None));
+    fill(ctx, &voice.targets, "screens", screen::targets);
 }
 
 /// The "Share your screen" dialog: what to share (Windows), quality, frame rate, cursor.
@@ -633,19 +675,18 @@ pub fn screen_dialog(ctx: &egui::Context, home: &mut Home) {
             }
         };
         section(ui, "Quality");
-        ui.horizontal(|ui| {
-            for (height, label) in [(Some(720), "720p"), (Some(1080), "1080p"), (None, "Native")] {
-                ui.selectable_value(&mut options.max_height, height, label);
-            }
-        });
+        ui.add_space(ui::SPACE_XS);
+        ui::segmented(ui, &mut options.max_height, &SCREEN_QUALITIES);
         section(ui, "Frame rate");
-        ui.horizontal(|ui| {
-            for fps in [15, 30, 60] {
-                ui.selectable_value(&mut options.fps, fps, fps.to_string());
-            }
-        });
-        ui.add_space(6.0);
-        ui::checkbox(ui, &mut options.cursor, "Show my cursor");
+        ui.add_space(ui::SPACE_XS);
+        ui::segmented(ui, &mut options.fps, &SCREEN_RATES);
+        ui.add_space(ui::SPACE_S);
+        ui::toggle_row(
+            ui,
+            &mut options.cursor,
+            "Show my cursor",
+            "Others see your mouse pointer",
+        );
         ui::footer(ui, |ui| {
             let label = if portal.is_some() {
                 "Choose what to share"
@@ -664,9 +705,12 @@ pub fn screen_dialog(ctx: &egui::Context, home: &mut Home) {
         });
     });
     if let Some(target) = share {
-        let command = Command::ShareScreen(target, *options);
+        let options = *options;
+        let mut settings = home.voice.audio.settings();
+        remember_screen_options(&mut settings, options);
+        home.voice.audio.set_settings(settings);
         if let Some(server) = call_server(home) {
-            server.send(command);
+            server.send(Command::ShareScreen(target, options));
             home.voice.sharing = Sharing::Starting;
         }
         close = true;
@@ -1135,5 +1179,50 @@ fn calibrate(ui: &mut Ui, voice: &mut Voice, s: &mut Settings) {
                 voice.calibration = Some(Calibration::Quiet(now + Duration::from_secs(2)));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn screen_choices_are_remembered() {
+        assert_eq!(screen_options(&Settings::default()), Options::default());
+        for (max_height, _, _) in SCREEN_QUALITIES {
+            for (fps, _, _) in SCREEN_RATES {
+                for cursor in [false, true] {
+                    let options = Options {
+                        max_height,
+                        fps,
+                        cursor,
+                    };
+                    let mut settings = Settings::default();
+                    remember_screen_options(&mut settings, options);
+                    // Through the settings file and back.
+                    let saved = serde_json::to_string(&settings).unwrap();
+                    let loaded: Settings = serde_json::from_str(&saved).unwrap();
+                    assert_eq!(screen_options(&loaded), options);
+                }
+            }
+        }
+        assert!(SCREEN_QUALITIES.iter().any(|q| q.0 == Some(1440)));
+    }
+
+    #[test]
+    fn unknown_screen_choices_fall_back() {
+        let settings = Settings {
+            screen_height: Some(900),
+            screen_fps: 24,
+            screen_cursor: false,
+            ..Settings::default()
+        };
+        let options = screen_options(&settings);
+        assert_eq!(options.max_height, Options::default().max_height);
+        assert_eq!(options.fps, Options::default().fps);
+        assert!(!options.cursor);
+        // An older settings file without these keys gets the defaults.
+        let old: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(screen_options(&old), Options::default());
     }
 }

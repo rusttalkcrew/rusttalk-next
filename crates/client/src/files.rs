@@ -91,8 +91,6 @@ pub enum Ask {
     Attach(Url, Id),
     /// Save a stored file.
     Save(Url, Attachment),
-    /// Offer a file in the voice room.
-    Offer(Url),
     /// Save a live file: transfer ID and suggested name.
     Accept(Url, Id, String),
     /// Offer a file live in a text channel or DM.
@@ -196,9 +194,7 @@ impl Files {
             let name = match &ask {
                 Ask::Save(_, file) => Some(file.name.replace(['/', '\\'], "_")),
                 Ask::Accept(_, _, name) => Some(name.replace(['/', '\\'], "_")),
-                Ask::Attach(..) | Ask::Offer(_) | Ask::Live(..) | Ask::Picture | Ask::Icon(_) => {
-                    None
-                }
+                Ask::Attach(..) | Ask::Live(..) | Ask::Picture | Ask::Icon(_) => None,
             };
             let single = !matches!(ask, Ask::Attach(..));
             let pictures = matches!(ask, Ask::Picture | Ask::Icon(_));

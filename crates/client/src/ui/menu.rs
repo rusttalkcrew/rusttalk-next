@@ -6,8 +6,8 @@
 use std::sync::Arc;
 
 use eframe::egui::{
-    self, Align2, Color32, CursorIcon, FontId, Galley, Popup, Rect, Response, Sense, Stroke,
-    StrokeKind, Ui, Vec2, WidgetInfo,
+    self, Align2, Color32, CursorIcon, FontId, Galley, Popup, PopupCloseBehavior, Rect, RectAlign,
+    Response, Sense, Stroke, StrokeKind, Ui, Vec2, WidgetInfo,
     accesskit::Role,
     containers::menu::SubMenu,
     text::{LayoutJob, TextWrapping},
@@ -363,6 +363,16 @@ pub fn menu_wide<R>(anchor: &Response, add: impl FnOnce(&mut Menu) -> R) -> Opti
 pub fn menu_below<R>(anchor: &Response, add: impl FnOnce(&mut Menu) -> R) -> Option<R> {
     let width = anchor.rect.width().max(MENU_WIDTH);
     show(Popup::menu(anchor).gap(4.0), width, add)
+}
+
+/// A wide menu above `anchor` that stays open while its checkboxes are toggled,
+/// for picking several things, like apps to share.
+pub fn menu_above<R>(anchor: &Response, add: impl FnOnce(&mut Menu) -> R) -> Option<R> {
+    let popup = Popup::menu(anchor)
+        .gap(4.0)
+        .align(RectAlign::TOP_START)
+        .close_behavior(PopupCloseBehavior::CloseOnClickOutside);
+    show(popup, MENU_WIDE, add)
 }
 
 /// A menu that opens at the pointer when `anchor` is right-clicked.
