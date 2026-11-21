@@ -42,7 +42,9 @@ use crate::{
         Preview, Update,
     },
     notify::{self, Arrival, Notify},
-    official, reorder,
+    official,
+    previews::{self, Previews},
+    reorder,
     screen::Video,
     server::{Body, Chat, Directory, Id, Member, Msg, Picture, Server, Status, member_name},
     ui::{self, Item, Look, Palette, error_text},
@@ -62,6 +64,15 @@ const RAIL_BUTTON: f32 = 48.0;
 const SERVER_HEADER: f32 = 44.0;
 const MESSAGE_AVATAR: f32 = 38.0;
 const STICKER_SIZE: f32 = 160.0;
+/// Link preview cards under one message, at most.
+const MAX_PREVIEWS: usize = 3;
+
+/// What the cards under messages need: joined servers for invites, and link previews.
+struct Embeds<'a> {
+    servers: &'a [Server],
+    previews: &'a Previews,
+    allowed: &'a BTreeMap<String, bool>,
+}
 const TOOLBAR_BUTTON: Vec2 = Vec2::new(30.0, 26.0);
 
 mod embed;
@@ -100,6 +111,8 @@ pub struct Home {
     pub settings: Option<Tab>,
     pub voice: Voice,
     pub files: Files,
+    /// Link previews fetched on this device.
+    pub previews: Previews,
     emoji_picker: Picker,
     pub confirm_sign_out: bool,
     pub error: Option<String>,
@@ -293,6 +306,7 @@ impl Home {
             settings: None,
             voice: Voice::new(audio, video, runtime),
             files: Files::new(&data_dir),
+            previews: Previews::new(ctx, &data_dir),
             emoji_picker: Picker::new(&data_dir),
             confirm_sign_out: false,
             error: None,
@@ -2660,6 +2674,15 @@ pub fn privacy_tab(ui: &mut Ui, home: &mut Home) {
             server.send(Command::SetHideOffline(hide));
         }
     }
+    ui::page_section(ui, t!("previews.section"));
+    for provider in previews::PROVIDERS {
+        let mut on = settings.link_previews.get(provider.id()) == Some(&true);
+        let help = t!("previews.toggle_help", site = provider.name());
+        if ui::toggle_row(ui, &mut on, provider.name(), &help).changed() {
+            settings.link_previews.insert(provider.id().into(), on);
+            home.previews.allow(provider.id(), on);
+        }
+    }
     ui::page_section(ui, t!("home.server_directory"));
     ui::banner(ui, "privacy-directory", t!("home.directory_help"));
     ui::setting_row(
@@ -3047,6 +3070,7 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
         invite: invite_text,
         net,
         join: joining,
+        previews,
         ..
     } = home;
     let dir = named.map_or(&fallback, |index| &servers[index].dir);
@@ -3143,6 +3167,12 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
     if let Some(offset) = chat.scroll_to.take() {
         area = area.vertical_scroll_offset(offset);
     }
+    let settings = voice.audio.settings();
+    let embeds = Embeds {
+        servers,
+        previews,
+        allowed: &settings.link_previews,
+    };
     let mut pick = None;
     let mut live = None;
     let output = area.show(ui, |ui| {
@@ -3167,7 +3197,7 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
                     && msg.at - prev.at < 300
                     && msg.reply_to.is_none()
             });
-            let shown = message(ui, chat, msg, start, dir, servers, key, |ui| {
+            let shown = message(ui, chat, msg, start, dir, &embeds, key, |ui| {
                 if let Some(server) = holder(msg) {
                     files::attachments(ui, files, &server.address, &server.commands, &msg.files);
                 }
@@ -3301,6 +3331,12 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
                 At::Channel(index, channel) => Dialog::Delete(index, channel, id),
                 At::Dm(peer) => Dialog::DeleteDm(peer, id),
             });
+        }
+        Some(Pick::Previews(id, allow)) => {
+            let mut settings = voice.audio.settings();
+            settings.link_previews.insert(id.into(), allow);
+            voice.audio.set_settings(settings);
+            previews.allow(id, allow);
         }
         Some(Pick::Invite(text)) => {
             if let Ok(link) = InviteLink::parse(&text) {
@@ -3441,6 +3477,8 @@ enum Pick {
     Delete(Id),
     /// Join with, or open the server of, an invite link shown as a card.
     Invite(String),
+    /// Allow (or not) link previews from a site, by its ID.
+    Previews(&'static str, bool),
 }
 
 fn composer_id(channel: Id) -> UiId {
@@ -3774,7 +3812,7 @@ fn message(
     msg: &Msg,
     start: bool,
     dir: &Directory,
-    servers: &[Server],
+    embeds: &Embeds,
     channel: Id,
     attachments: impl FnOnce(&mut Ui),
 ) -> Option<Pick> {
@@ -3897,8 +3935,17 @@ fn message(
                                     chat.edited.contains_key(&(msg.person, msg.id)),
                                 );
                                 for link in mention.doc.invites() {
-                                    if invite_card(ui, servers, link) {
+                                    if invite_card(ui, embeds.servers, link) {
                                         invite = Some(Pick::Invite(link.clone()));
+                                    }
+                                }
+                                let mut links: Vec<&str> = Vec::new();
+                                for link in mention.doc.links() {
+                                    if links.len() < MAX_PREVIEWS && !links.contains(&link) {
+                                        links.push(link);
+                                        if let Some(pick) = link_preview(ui, embeds, link) {
+                                            invite = Some(pick);
+                                        }
                                     }
                                 }
                             });
@@ -4074,9 +4121,75 @@ fn invite_card(ui: &mut Ui, servers: &[Server], link: &str) -> bool {
         kind: t!("home.invite_card"),
         title,
         description,
-        button: Some(button),
+        fields: &[],
+        buttons: &[button],
     }
     .show(ui)
+    .is_some()
+}
+
+/// A link's preview card, from a site the person allowed, or the question whether to
+/// allow it. Nothing is fetched before that yes, nor for messages off screen.
+fn link_preview(ui: &mut Ui, embeds: &Embeds, link: &str) -> Option<Pick> {
+    let url = url::Url::parse(link).ok()?;
+    let (provider, key) = previews::find(&url)?;
+    let site = provider.name();
+    match embeds.allowed.get(provider.id()) {
+        Some(false) => None,
+        None => {
+            let ask = t!("previews.ask", site = site);
+            let help = t!("previews.ask_help", site = site);
+            let clicked = embed::Embed {
+                image: None,
+                kind: site,
+                title: &ask,
+                description: Some(&help),
+                fields: &[],
+                buttons: &[
+                    embed::Button {
+                        label: t!("previews.allow"),
+                        primary: true,
+                    },
+                    embed::Button {
+                        label: t!("previews.not_now"),
+                        primary: false,
+                    },
+                ],
+            }
+            .show(ui)?;
+            Some(Pick::Previews(provider.id(), clicked == 0))
+        }
+        Some(true) => {
+            let on_screen = ui.clip_rect().contains(ui.next_widget_position());
+            let preview = if on_screen {
+                embeds.previews.get(provider, &key)
+            } else {
+                embeds.previews.cached(provider, &key)
+            }?;
+            let details = &preview.details;
+            let fields: Vec<_> = (details.fields.iter())
+                .map(|(field, value)| (field.label(), value.as_str()))
+                .collect();
+            let view = t!("previews.view_on", site = site);
+            let clicked = embed::Embed {
+                image: preview.image.as_ref().map(embed::Image::Wide),
+                kind: site,
+                title: &details.title,
+                description: (!details.description.is_empty()).then_some(&*details.description),
+                fields: &fields,
+                buttons: &[embed::Button {
+                    label: &view,
+                    primary: false,
+                }],
+            }
+            .show(ui);
+            if clicked.is_some() {
+                ui.ctx()
+                    .open_url(egui::OpenUrl::new_tab(details.url.clone()));
+            }
+            None
+        }
+    }
 }
 
 /// A sticker message: the picture, large, or its name when not available.

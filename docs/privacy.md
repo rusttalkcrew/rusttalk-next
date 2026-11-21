@@ -304,6 +304,24 @@ is deleted and never used; the normal noise suppression keeps working.
   signature, then requests your platform’s artifact if you choose to update.
   The host sees your IP address, requested files and timing. Requests carry no
   account, device or server identifiers. Redirects stay on HTTPS.
+- **Link previews (opt-in per site, per device):** Off until the person allows a
+  site, either on the first card that asks ("Show Steam previews?") or in
+  Settings → Privacy → Link previews, and off again there. Until then the
+  link stays a plain link and nothing is requested. Once allowed, the app
+  showing a message fetches the preview itself, only for messages on screen;
+  the sender and the RustTalk server are not involved. Steam (the only site
+  for now): for `store.steampowered.com/app/<id>` links, the client requests
+  `https://store.steampowered.com/api/appdetails` with the app ID, the app's
+  language and the computer's country (for local prices), then the header
+  picture from a Steam CDN host (`*.steamstatic.com` or
+  `steamcdn-a.akamaihd.net`) named in the reply. Requests are HTTPS only,
+  follow no redirects, and send a generic User-Agent, no cookies and no
+  Referer. They have a timeout and size caps, start at most one per second
+  with two at a time, and a failed site is retried after ten minutes. Steam
+  sees your IP address, timing and which games you look at; requests carry
+  no account, device or server identifiers. Previews are kept in memory and
+  in `previews/` in the app's data folder for up to a day (refreshed after an
+  hour, for prices), at most 200 of them.
 - **Pasted web pictures:** When the person pastes a picture copied from a web
   page and the browser put only a still copy of a moving picture (GIF or WebP)
   on the clipboard, the desktop client downloads the original over HTTPS from

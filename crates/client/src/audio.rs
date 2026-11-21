@@ -144,6 +144,9 @@ pub struct Settings {
     pub screen_cursor: bool,
     /// Hide from member lists while offline; this device's copy of the per-server flag.
     pub hide_offline: crate::server::HideOffline,
+    /// Link previews by site (see `previews`): missing until the person answers the
+    /// first card's question. This device only, never synced.
+    pub link_previews: std::collections::BTreeMap<String, bool>,
 }
 
 impl Settings {
@@ -205,6 +208,7 @@ impl Default for Settings {
             screen_fps: 30,
             screen_cursor: true,
             hide_offline: Default::default(),
+            link_previews: Default::default(),
         }
     }
 }
