@@ -367,10 +367,17 @@ drops, and joining a voice channel then aborts with an unrecognized selector.
 Cargo doesn't pass on the flag that `webrtc-sys` prints.
 
 Microphone, speakers, camera, screen and window sharing, chat and files
-work. App audio and remote control are off and say so, and in-app updates
-are unavailable, until their macOS backends land (`docs/work-order.md`, section 10). Started
-from a terminal, the client's microphone and camera prompts name the
-terminal app, which then holds the permission.
+work. App audio and remote control are off and say so, until their macOS
+backends land (`docs/work-order.md`, section 10). Started from a terminal,
+the client's microphone and camera prompts name the terminal app, which then
+holds the permission.
+
+`deploy/release/macos.sh <version> dist` builds the release `RustTalk.app`
+(one universal binary for Apple Silicon and Intel, made with `lipo`),
+ad-hoc signs it and packs it into a DMG. It needs both Rust targets
+(`rustup target add aarch64-apple-darwin x86_64-apple-darwin`). The
+**macOS app** workflow runs it on pull requests that touch the packaging, and
+by hand from the Actions tab, and keeps the DMG as a build artifact.
 
 ## Local release testing
 

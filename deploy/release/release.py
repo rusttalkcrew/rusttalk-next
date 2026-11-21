@@ -17,7 +17,9 @@ KEY = Path(".dev/release-key.pem")
 PUBLIC = Path(".dev/release-public.pem")
 ED25519_SPKI = bytes.fromhex("302a300506032b6570032100")
 # rusttalk-<version>-<os>-<arch>.<ext>; the updater looks up "<os>-<arch>".
-ARTIFACT = re.compile(r"rusttalk-(?P<version>[0-9.]+)-(?P<platform>(linux|windows|macos)-(x86_64|aarch64))\.(AppImage|exe|dmg)")
+ARTIFACT = re.compile(r"rusttalk-(?P<version>[0-9.]+)-(?P<platform>(linux|windows)-(x86_64|aarch64)|macos-universal)\.(AppImage|exe|dmg)")
+# One universal macOS app serves both architectures.
+PLATFORMS = {"macos-universal": ("macos-aarch64", "macos-x86_64")}
 
 
 def run(*args, **kwargs):
@@ -76,7 +78,9 @@ def sign(key, directory, ver):
         if match:
             if match["version"] != ver:
                 raise SystemExit(f"{path.name} is not version {ver}.")
-            platforms[match["platform"]] = digest(path)
+            artifact = digest(path)
+            for platform in PLATFORMS.get(match["platform"], (match["platform"],)):
+                platforms[platform] = artifact
     if not platforms:
         raise SystemExit(f"No release artifacts in {directory}.")
     document = {"version": ver, "platforms": platforms}

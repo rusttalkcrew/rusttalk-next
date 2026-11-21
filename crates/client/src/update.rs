@@ -9,7 +9,6 @@ use std::{
     },
     time::{Duration, Instant},
 };
-#[cfg(not(target_os = "macos"))]
 use std::{fs, process::Command};
 
 use anyhow::{Context, Result, anyhow, ensure};
@@ -27,7 +26,7 @@ const LOCAL_TEST: bool = match option_env!("RUSTTALK_LOCAL_UPDATE_TEST") {
     None => false,
 };
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 static RESTART: std::sync::OnceLock<Target> = std::sync::OnceLock::new();
 
 /// How often a running app looks for a new version.
@@ -245,7 +244,8 @@ async fn check(url: &str) -> Result<Option<Update>> {
 #[derive(Clone)]
 struct Target {
     path: PathBuf,
-    #[cfg(target_os = "linux")]
+    /// The installed file (Linux) or bundle folder (macOS) as RustTalk found it.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     inode: (u64, u64),
 }
 
@@ -277,11 +277,32 @@ impl Target {
         #[cfg(target_os = "macos")]
         {
             let _ = config;
-            anyhow::bail!("in-app updates are not available on macOS yet")
+            let path = bundle_of(&fs::canonicalize(env::current_exe()?)?)
+                .context("install RustTalk.app to use in-app updates")?;
+            // macOS runs a quarantined app opened from Downloads from a read-only copy.
+            ensure!(
+                !path.to_string_lossy().contains("/AppTranslocation/"),
+                "move RustTalk to Applications to use in-app updates"
+            );
+            Ok(Self {
+                inode: file_id(&fs::symlink_metadata(&path)?),
+                path,
+            })
         }
     }
 
     async fn install(self, update: Update, done: Arc<AtomicU64>) -> Result<State> {
+        // hdiutil reopens the image by path after it is verified, so it is kept in
+        // this user's private cache, where no one else can swap it.
+        #[cfg(target_os = "macos")]
+        let cache = cache_dir()?;
+        #[cfg(target_os = "macos")]
+        let download = tempfile::Builder::new()
+            .prefix("download")
+            .tempdir_in(&cache)?;
+        #[cfg(target_os = "macos")]
+        let mut file = NamedTempFile::new_in(download.path())?;
+        #[cfg(not(target_os = "macos"))]
         let mut file =
             NamedTempFile::new_in(self.path.parent().context("locate update directory")?)?;
         let mut response = get(&update.client, update.base.join(&update.artifact.file)?).await?;
@@ -336,9 +357,21 @@ impl Target {
         }
         #[cfg(target_os = "macos")]
         {
-            let _ = (file, update);
-            anyhow::bail!("in-app updates are not available on macOS yet")
+            file.as_file().sync_all()?;
+            install_dmg(file.path(), &self, &update.version, &cache)?;
+            Ok(State::Installed(update.version, self))
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn restart(&self) -> Result<()> {
+        // `-n`: this instance is still exiting, and would otherwise just be activated.
+        Command::new("/usr/bin/open")
+            .arg("-n")
+            .arg(&self.path)
+            .spawn()
+            .context("restart RustTalk")?;
+        Ok(())
     }
 
     #[cfg(target_os = "linux")]
@@ -357,10 +390,257 @@ impl Target {
 }
 
 pub fn restart_if_requested() -> Result<()> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     if let Some(target) = RESTART.get() {
         target.restart()?;
     }
+    Ok(())
+}
+
+/// The `.app` bundle that holds `executable` (`<bundle>.app/Contents/MacOS/<name>`).
+#[cfg(target_os = "macos")]
+fn bundle_of(executable: &Path) -> Option<PathBuf> {
+    let macos = executable.parent().filter(|dir| dir.ends_with("MacOS"))?;
+    let contents = macos.parent().filter(|dir| dir.ends_with("Contents"))?;
+    let bundle = contents.parent()?;
+    (bundle.extension()? == "app").then(|| bundle.to_path_buf())
+}
+
+/// The bundle identifier in `deploy/release/Info.plist`.
+#[cfg(target_os = "macos")]
+const BUNDLE_ID: &str = "io.github.rusttalkcrew.rusttalk";
+
+/// `~/Library/Caches/<bundle id>`, readable by this user only.
+#[cfg(target_os = "macos")]
+fn cache_dir() -> Result<PathBuf> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    let home = env::var_os("HOME").context("locate the home folder")?;
+    let dir = Path::new(&home).join("Library/Caches").join(BUNDLE_ID);
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&dir)?;
+    let metadata = fs::symlink_metadata(&dir)?;
+    ensure!(metadata.is_dir(), "the update cache is not a folder");
+    if metadata.permissions().mode() & 0o077 != 0 {
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(dir)
+}
+
+/// Replaces the installed bundle with the `RustTalk.app` in the verified disk image
+/// `dmg`. The new bundle is copied next to the old one and checked first, so the
+/// swap happens on one volume and any failure leaves the old app in place. `cache`
+/// is the private folder that holds the per-bundle install lock.
+#[cfg(target_os = "macos")]
+fn install_dmg(dmg: &Path, target: &Target, version: &Version, cache: &Path) -> Result<()> {
+    let bundle = &target.path;
+    let (_lock, key) = lock_bundle(cache, bundle)?;
+    let parent = bundle.parent().context("locate the app folder")?;
+    clean_stale(parent, ".rusttalk-update");
+    clean_stale(cache, "download");
+    let stage = tempfile::Builder::new()
+        .prefix(".rusttalk-update")
+        .tempdir_in(parent)
+        .context("RustTalk's folder must allow creating files")?;
+    let mount = stage.path().join("mount");
+    let new = stage.path().join("RustTalk.app");
+    fs::create_dir(&mount)?;
+    run(Command::new("/usr/bin/hdiutil")
+        .args(["attach", "-nobrowse", "-readonly", "-noautoopen", "-quiet"])
+        .arg("-mountpoint")
+        .arg(&mount)
+        .arg(dmg))
+    .context("open the update disk image")?;
+    // `ditto` keeps the bundle's code signature and symlinks intact.
+    let copied = run(Command::new("/usr/bin/ditto")
+        .arg(mount.join("RustTalk.app"))
+        .arg(&new));
+    let detached = run(Command::new("/usr/bin/hdiutil")
+        .args(["detach", "-quiet"])
+        .arg(&mount))
+    .or_else(|_| {
+        run(Command::new("/usr/bin/hdiutil")
+            .args(["detach", "-force", "-quiet"])
+            .arg(&mount))
+    });
+    copied.context("copy the new RustTalk.app")?;
+    detached.context("close the update disk image")?;
+    check_bundle(&new, version)?;
+    // A window that started before another one updated must not put its older
+    // download over the newer app.
+    ensure!(
+        fs::symlink_metadata(bundle).is_ok_and(|now| file_id(&now) == target.inode),
+        "RustTalk was updated in another window; restart it first"
+    );
+    // After the exchange the old bundle sits in the stage, which is removed on return.
+    match swap(&new, bundle) {
+        Ok(()) => Ok(()),
+        // The volume can't exchange in one step.
+        Err(error) if matches!(error.raw_os_error(), Some(libc::ENOTSUP | libc::EINVAL)) => {
+            let old = parent.join(format!(".RustTalk-old-{key}.app"));
+            replace_bundle(&new, bundle, &old, |from, to| fs::rename(from, to))
+        }
+        Err(error) => Err(anyhow::Error::new(error).context("put the new RustTalk.app in place")),
+    }
+}
+
+/// Removes what an install that was cut short (a crash, a forced quit) left in
+/// `dir`: entries named `prefix*` older than an hour, so a running download or
+/// install is never touched. A disk image still mounted in one is closed first.
+#[cfg(target_os = "macos")]
+fn clean_stale(dir: &Path, prefix: &str) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let stale = entry.file_name().to_string_lossy().starts_with(prefix)
+            && entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .is_ok_and(|time| time.elapsed().is_ok_and(|age| age > STALE));
+        if stale {
+            let mount = entry.path().join("mount");
+            if mount.is_dir() {
+                let _ = run(Command::new("/usr/bin/hdiutil")
+                    .args(["detach", "-force", "-quiet"])
+                    .arg(&mount));
+            }
+            let _ = fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+/// Longer than any download or install takes (the HTTP timeout is five minutes).
+#[cfg(target_os = "macos")]
+const STALE: Duration = Duration::from_secs(60 * 60);
+
+/// Takes the install lock for `bundle`, so two windows can't install into it at
+/// once. Returns the held lock and the bundle's short key.
+#[cfg(target_os = "macos")]
+fn lock_bundle(cache: &Path, bundle: &Path) -> Result<(fs::File, String)> {
+    let mut key = hex::encode(Sha256::digest(bundle.as_os_str().as_encoded_bytes()));
+    key.truncate(16);
+    let lock = fs::File::create(cache.join(format!("install-{key}.lock")))?;
+    lock.try_lock()
+        .context("another RustTalk window is installing an update")?;
+    Ok((lock, key))
+}
+
+/// Checks that `bundle` is a validly signed RustTalk.app of exactly `version`, whose
+/// executable is a regular file and whose symlinks stay inside it.
+#[cfg(target_os = "macos")]
+fn check_bundle(bundle: &Path, version: &Version) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let not_app = "the update is not a RustTalk app";
+    for dir in [
+        bundle.to_owned(),
+        bundle.join("Contents"),
+        bundle.join("Contents/MacOS"),
+    ] {
+        ensure!(fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir()), not_app);
+    }
+    let plist = bundle.join("Contents/Info.plist");
+    ensure!(
+        fs::symlink_metadata(&plist).is_ok_and(|m| m.is_file()),
+        "the update has no app information"
+    );
+    let read = |key: &str| -> Result<String> {
+        let output = Command::new("/usr/bin/plutil")
+            .args(["-extract", key, "raw", "-o", "-"])
+            .arg(&plist)
+            .output()?;
+        ensure!(output.status.success(), "the update has no {key}");
+        Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+    };
+    ensure!(read("CFBundleIdentifier")? == BUNDLE_ID, not_app);
+    ensure!(
+        read("CFBundleShortVersionString")? == version.to_string(),
+        "the update is not version {version}"
+    );
+    let executable =
+        fs::symlink_metadata(bundle.join("Contents/MacOS/rusttalk-client")).context(not_app)?;
+    ensure!(
+        executable.is_file() && executable.permissions().mode() & 0o111 != 0,
+        not_app
+    );
+    let root = fs::canonicalize(bundle)?;
+    let mut dirs = vec![root.clone()];
+    while let Some(dir) = dirs.pop() {
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            if kind.is_symlink() {
+                ensure!(
+                    fs::canonicalize(entry.path()).is_ok_and(|to| to.starts_with(&root)),
+                    "the update links outside its app"
+                );
+            } else if kind.is_dir() {
+                dirs.push(entry.path());
+            }
+        }
+    }
+    run(Command::new("/usr/bin/codesign")
+        .args(["--verify", "--deep", "--strict"])
+        .arg(bundle))
+    .context("the update's signature is broken")
+}
+
+/// Exchanges `new` and `bundle` in one step, so the app path is never missing.
+#[cfg(target_os = "macos")]
+fn swap(new: &Path, bundle: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = |path: &Path| std::ffi::CString::new(path.as_os_str().as_bytes());
+    let (from, to) = (c_path(new)?, c_path(bundle)?);
+    // SAFETY: both are NUL-terminated C strings that outlive the call.
+    if unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_SWAP) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+/// For volumes without an atomic exchange: moves the old bundle to `old`, then `new`
+/// into place. The old bundle is deleted only once the new one is in place; if it
+/// can't even be put back, it stays at `old` and the error says where.
+#[cfg(target_os = "macos")]
+fn replace_bundle(
+    new: &Path,
+    bundle: &Path,
+    old: &Path,
+    rename: impl Fn(&Path, &Path) -> std::io::Result<()>,
+) -> Result<()> {
+    rename(bundle, old).map_err(|error| {
+        if matches!(error.raw_os_error(), Some(libc::ENOTEMPTY | libc::EEXIST)) {
+            anyhow!(
+                "remove the leftover copy at {} and try again",
+                old.display()
+            )
+        } else {
+            anyhow::Error::new(error).context("move the old RustTalk.app aside")
+        }
+    })?;
+    if let Err(error) = rename(new, bundle) {
+        return match rename(old, bundle) {
+            Ok(()) => Err(anyhow::Error::new(error).context("put the new RustTalk.app in place")),
+            Err(_) => Err(anyhow!(
+                "couldn't put RustTalk back; your copy is at {}",
+                old.display()
+            )),
+        };
+    }
+    let _ = fs::remove_dir_all(old);
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn run(command: &mut Command) -> Result<()> {
+    let status = command.status()?;
+    ensure!(
+        status.success(),
+        "{:?} failed: {status}",
+        command.get_program()
+    );
     Ok(())
 }
 
@@ -532,7 +812,7 @@ fn process_runs(inode: (u64, u64)) -> bool {
     })
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn file_id(metadata: &fs::Metadata) -> (u64, u64) {
     use std::os::unix::fs::MetadataExt;
     (metadata.dev(), metadata.ino())
@@ -582,7 +862,7 @@ enum State {
     Working(Receiver<Result<State>>, Option<Progress>),
     Available(Update),
     Current,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     Installed(Version, Target),
     #[cfg(target_os = "windows")]
     InstallerStarted(Version),
@@ -666,7 +946,7 @@ impl Updater {
     fn busy(&self) -> bool {
         match self.state {
             State::Working(..) => true,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             State::Installed(..) => true,
             #[cfg(target_os = "windows")]
             State::InstallerStarted(_) => true,
@@ -685,7 +965,7 @@ impl Updater {
             }
         }
         // The new app starts once this one has exited (`restart_if_requested`).
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         if let State::Installed(_, target) = &self.state {
             let _ = RESTART.set(target.clone());
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -840,7 +1120,7 @@ impl Updater {
             State::Current => {
                 ui.label(t!("update.up_to_date"));
             }
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             State::Installed(version, _) => {
                 ui.label(t!("update.installed", version = version));
             }
@@ -971,7 +1251,7 @@ mod tests {
         let mut ready = updater(State::Idle);
         ready.target = Ok(Target {
             path: dir.path().join("app"),
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             inode: (0, 0),
         });
         ready.settings.url = "http://invalid.test/".into();
@@ -1072,6 +1352,252 @@ mod tests {
         assert!(newer(&Version::new(0, 1, 2), &current).unwrap());
         assert!(!newer(&current, &current).unwrap());
         assert!(newer(&Version::new(0, 1, 0), &current).is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn bundle_is_found_from_its_executable() {
+        assert_eq!(
+            bundle_of(Path::new(
+                "/Applications/RustTalk.app/Contents/MacOS/rusttalk-client"
+            )),
+            Some(PathBuf::from("/Applications/RustTalk.app"))
+        );
+        assert!(bundle_of(Path::new("/usr/local/bin/rusttalk-client")).is_none());
+        assert!(bundle_of(Path::new("/tmp/RustTalk/Contents/MacOS/rusttalk-client")).is_none());
+        assert!(bundle_of(Path::new("/tmp/RustTalk.app/MacOS/rusttalk-client")).is_none());
+    }
+
+    /// An unsigned bundle shaped like RustTalk.app, with a real program inside.
+    #[cfg(target_os = "macos")]
+    fn fake_bundle(path: &Path, id: &str, version: &str) {
+        let macos = path.join("Contents/MacOS");
+        fs::create_dir_all(&macos).unwrap();
+        fs::copy("/usr/bin/true", macos.join("rusttalk-client")).unwrap();
+        fs::write(
+            path.join("Contents/Info.plist"),
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>rusttalk-client</string>
+<key>CFBundleIdentifier</key><string>{id}</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleShortVersionString</key><string>{version}</string>
+<key>CFBundleVersion</key><string>{version}</string>
+</dict></plist>
+"#
+            ),
+        )
+        .unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    fn signed_bundle(path: &Path, version: &str) {
+        fake_bundle(path, BUNDLE_ID, version);
+        run(Command::new("/usr/bin/codesign")
+            .args(["--force", "--sign", "-"])
+            .arg(path))
+        .unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    fn version_of(bundle: &Path) -> String {
+        let plist = fs::read_to_string(bundle.join("Contents/Info.plist")).unwrap();
+        ["0.1.0", "0.2.0"]
+            .into_iter()
+            .find(|version| plist.contains(version))
+            .unwrap()
+            .to_owned()
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn only_a_signed_rusttalk_app_of_the_signed_version_passes() {
+        let dir = tempfile::tempdir().unwrap();
+        let version = Version::new(0, 2, 0);
+        let good = dir.path().join("good.app");
+        signed_bundle(&good, "0.2.0");
+        check_bundle(&good, &version).unwrap();
+        assert!(check_bundle(&good, &Version::new(0, 3, 0)).is_err());
+        // Changed after signing: the signature seals Info.plist.
+        let plist = good.join("Contents/Info.plist");
+        let changed = fs::read_to_string(&plist)
+            .unwrap()
+            .replace("</dict>", "<key>LSUIElement</key><true/></dict>");
+        fs::write(&plist, changed).unwrap();
+        assert!(check_bundle(&good, &version).is_err());
+
+        let other = dir.path().join("other.app");
+        fake_bundle(&other, "com.example.other", "0.2.0");
+        assert!(check_bundle(&other, &version).is_err());
+        let missing = dir.path().join("missing.app");
+        signed_bundle(&missing, "0.2.0");
+        fs::remove_file(missing.join("Contents/Info.plist")).unwrap();
+        assert!(check_bundle(&missing, &version).is_err());
+        let escaping = dir.path().join("escaping.app");
+        signed_bundle(&escaping, "0.2.0");
+        std::os::unix::fs::symlink("/etc", escaping.join("Contents/link")).unwrap();
+        assert!(check_bundle(&escaping, &version).is_err());
+        let linked = dir.path().join("linked.app");
+        signed_bundle(&linked, "0.2.0");
+        let program = linked.join("Contents/MacOS/rusttalk-client");
+        fs::remove_file(&program).unwrap();
+        std::os::unix::fs::symlink("/usr/bin/true", &program).unwrap();
+        assert!(check_bundle(&linked, &version).is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn swap_exchanges_the_two_bundles() {
+        let dir = tempfile::tempdir().unwrap();
+        let (bundle, new) = (dir.path().join("RustTalk.app"), dir.path().join("new.app"));
+        fake_bundle(&bundle, BUNDLE_ID, "0.1.0");
+        fake_bundle(&new, BUNDLE_ID, "0.2.0");
+        swap(&new, &bundle).unwrap();
+        assert_eq!(version_of(&bundle), "0.2.0");
+        assert_eq!(version_of(&new), "0.1.0");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_leftover_copy_is_named_and_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = dir.path().join("RustTalk.app");
+        let (new, old) = (dir.path().join("new.app"), dir.path().join("old.app"));
+        fake_bundle(&bundle, BUNDLE_ID, "0.1.0");
+        fake_bundle(&new, BUNDLE_ID, "0.2.0");
+        fake_bundle(&old, BUNDLE_ID, "0.0.9");
+        let error =
+            replace_bundle(&new, &bundle, &old, |from, to| fs::rename(from, to)).unwrap_err();
+        assert!(error.to_string().contains("leftover"));
+        assert!(error.to_string().contains(&old.display().to_string()));
+        assert_eq!(version_of(&bundle), "0.1.0");
+        assert!(old.exists() && new.exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn only_stale_leftovers_are_cleaned() {
+        let dir = tempfile::tempdir().unwrap();
+        let make = |name: &str, age: Duration| {
+            let path = dir.path().join(name);
+            fs::create_dir(&path).unwrap();
+            fs::write(path.join("file"), b"x").unwrap();
+            let modified = std::time::SystemTime::now() - age;
+            fs::File::open(&path)
+                .unwrap()
+                .set_modified(modified)
+                .unwrap();
+            path
+        };
+        let old_stage = make(".rusttalk-update1", STALE * 2);
+        let running = make(".rusttalk-update2", Duration::ZERO);
+        let other = make("Other.app", STALE * 2);
+        clean_stale(dir.path(), ".rusttalk-update");
+        assert!(!old_stage.exists());
+        assert!(running.exists() && other.exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn fallback_swap_never_deletes_the_only_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = dir.path().join("RustTalk.app");
+        let (new, old) = (dir.path().join("new.app"), dir.path().join("old.app"));
+        // Renames succeed only for the listed calls (1-based).
+        let only = |allowed: &'static [usize]| {
+            let calls = std::cell::Cell::new(0);
+            move |from: &Path, to: &Path| {
+                calls.set(calls.get() + 1);
+                if allowed.contains(&calls.get()) {
+                    fs::rename(from, to)
+                } else {
+                    Err(std::io::Error::other("refused"))
+                }
+            }
+        };
+        fake_bundle(&bundle, BUNDLE_ID, "0.1.0");
+        fake_bundle(&new, BUNDLE_ID, "0.2.0");
+        // The new bundle can't move in: the old one goes back.
+        assert!(replace_bundle(&new, &bundle, &old, only(&[1, 3])).is_err());
+        assert_eq!(version_of(&bundle), "0.1.0");
+        // Nor can the old one go back: it is kept, and the error names it.
+        let error = replace_bundle(&new, &bundle, &old, only(&[1])).unwrap_err();
+        assert!(error.to_string().contains(&old.display().to_string()));
+        assert_eq!(version_of(&old), "0.1.0");
+        assert!(!bundle.exists());
+        // Without failures the new bundle moves in and the old one is removed.
+        fs::rename(&old, &bundle).unwrap();
+        replace_bundle(&new, &bundle, &old, |from, to| fs::rename(from, to)).unwrap();
+        assert_eq!(version_of(&bundle), "0.2.0");
+        assert!(!old.exists() && !new.exists());
+    }
+
+    /// A disk image holding a signed RustTalk.app of `version`.
+    #[cfg(target_os = "macos")]
+    fn fake_dmg(dir: &Path, version: &str) -> PathBuf {
+        let source = dir.join(format!("source-{version}"));
+        signed_bundle(&source.join("RustTalk.app"), version);
+        let dmg = dir.join(format!("update-{version}.dmg"));
+        run(Command::new("/usr/bin/hdiutil")
+            .args(["create", "-quiet", "-fs", "HFS+", "-format", "UDZO"])
+            .args(["-volname", "RustTalk", "-srcfolder"])
+            .arg(&source)
+            .arg(&dmg))
+        .unwrap();
+        dmg
+    }
+
+    #[cfg(target_os = "macos")]
+    fn installed(path: PathBuf) -> Target {
+        Target {
+            inode: file_id(&fs::symlink_metadata(&path).unwrap()),
+            path,
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn disk_image_replaces_the_installed_bundle() {
+        let dir = tempfile::tempdir().unwrap();
+        let dmg = fake_dmg(dir.path(), "0.2.0");
+        let apps = dir.path().join("Applications");
+        let bundle = apps.join("RustTalk.app");
+        signed_bundle(&bundle, "0.1.0");
+        let target = installed(bundle.clone());
+        let cache = tempfile::tempdir().unwrap();
+        // A download that doesn't match the signed version is refused.
+        assert!(install_dmg(&dmg, &target, &Version::new(0, 3, 0), cache.path()).is_err());
+        assert_eq!(version_of(&bundle), "0.1.0");
+        install_dmg(&dmg, &target, &Version::new(0, 2, 0), cache.path()).unwrap();
+        assert_eq!(version_of(&bundle), "0.2.0");
+        // The staging folder and the old bundle are gone.
+        assert_eq!(fs::read_dir(&apps).unwrap().count(), 1);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_stale_window_cant_install_over_a_newer_app() {
+        let dir = tempfile::tempdir().unwrap();
+        let dmg = fake_dmg(dir.path(), "0.2.0");
+        let apps = dir.path().join("Applications");
+        let bundle = apps.join("RustTalk.app");
+        signed_bundle(&bundle, "0.1.0");
+        let stale = installed(bundle.clone());
+        // Another window replaced the bundle since this one started.
+        fs::remove_dir_all(&bundle).unwrap();
+        signed_bundle(&bundle, "0.1.0");
+        let cache = tempfile::tempdir().unwrap();
+        let error = install_dmg(&dmg, &stale, &Version::new(0, 2, 0), cache.path()).unwrap_err();
+        assert!(error.to_string().contains("another window"));
+        assert_eq!(version_of(&bundle), "0.1.0");
+        assert_eq!(fs::read_dir(&apps).unwrap().count(), 1);
+        // While one window installs, another can't start.
+        let (held, _) = lock_bundle(cache.path(), &bundle).unwrap();
+        assert!(lock_bundle(cache.path(), &bundle).is_err());
+        drop(held);
+        assert!(lock_bundle(cache.path(), &bundle).is_ok());
     }
 
     /// Writes a minimal type 2 AppImage: an ELF64 header with the AppImage magic, no

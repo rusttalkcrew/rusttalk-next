@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>RustTalk</string>
+	<key>CFBundleExecutable</key>
+	<string>rusttalk-client</string>
+	<key>CFBundleIconFile</key>
+	<string>rusttalk</string>
+	<key>CFBundleIdentifier</key>
+	<string>io.github.rusttalkcrew.rusttalk</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>RustTalk</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>@VERSION@</string>
+	<key>CFBundleVersion</key>
+	<string>@VERSION@</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.social-networking</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.2</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>RustTalk uses the camera when you turn on video in a call.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>RustTalk uses the microphone so others can hear you in a call.</string>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>RustTalk records your screen or a window only while you share it.</string>
+</dict>
+</plist>

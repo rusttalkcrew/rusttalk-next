@@ -387,8 +387,8 @@ make release
 It signs and pushes the tag `v<version>`. The
 [release workflow](../.github/workflows/release.yml) then:
 
-1. builds the Linux AppImage (x86_64, aarch64) and the Windows installer
-   (x86_64, aarch64) on native GitHub runners;
+1. builds the Linux AppImage (x86_64, aarch64), the Windows installer
+   (x86_64, aarch64) and a universal macOS DMG on native GitHub runners;
 2. pushes `ghcr.io/rusttalkcrew/rusttalk-api` and `rusttalk-index` as
    `<version>`, `<major>.<minor>` and `latest` for amd64 and arm64;
 3. writes `latest.json` (size and SHA-256 of every installer, and the image
@@ -444,6 +444,21 @@ was started from that file. Extracted AppImages and
 `--appimage-extract-and-run` cannot update themselves. The update replaces
 the AppImage atomically and RustTalk restarts from it by itself. Any failure
 shows a short error and the current version keeps running.
+
+On macOS one universal DMG serves both `macos-aarch64` and `macos-x86_64` in
+`latest.json`. The app is ad-hoc signed only (no Developer ID, not
+notarized), so the first start needs right-click → **Open** (see the README).
+An update downloads and verifies the DMG in the user's private
+`~/Library/Caches/io.github.rusttalkcrew.rusttalk`, mounts it read-only and
+copies its `RustTalk.app` next to the running bundle. The copy must carry the
+RustTalk bundle id, the signed version and a valid signature. One window at a
+time installs, and only over the bundle it started from. The two bundles are
+exchanged in one step (`renamex_np`), and RustTalk reopens. The
+folder holding `RustTalk.app` must allow the current user to create and
+rename files; an app that macOS runs from a translocated copy (opened
+straight from Downloads) asks to be moved to Applications first. Because
+each build has a new ad-hoc signature, macOS may ask again for camera,
+microphone, screen recording and keychain access after an update.
 
 The AppImage uses the host's desktop stack, ALSA, PipeWire and libxkbcommon libraries and
 is built on Ubuntu 24.04 (glibc 2.39). It packs the
