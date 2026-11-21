@@ -1131,7 +1131,11 @@ mod tests {
         fs::write(&path, b"one").unwrap();
         let before = preview_key(&path, false);
         fs::write(&path, b"longer").unwrap();
-        assert_ne!(preview_key(&path, false), before, "a changed file decodes again");
+        assert_ne!(
+            preview_key(&path, false),
+            before,
+            "a changed file decodes again"
+        );
 
         let previews = Previews::default();
         let going = Arc::new(AtomicBool::new(true));
