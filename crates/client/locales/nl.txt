@@ -173,6 +173,8 @@ home.upload_file_help = Opgeslagen op de server, tot 32 MB
 home.send_live = Bestand live sturen
 home.send_live_help = Rechtstreeks naar mensen die nu online zijn
 home.emoji_picker = Emojikiezer
+home.sticker_picker = Stickers
+home.send = Versturen
 home.message_hint = Bericht aan {channel}
 home.waiting_for_server = Wachten op de server…
 home.no_wide_mentions = In deze chat kun je geen rollen, @everyone of @here noemen.
@@ -759,9 +761,11 @@ net.messages_failed = Kon berichten niet laden. Probeer het opnieuw.
 net.name_failed = Kon je naam niet wijzigen. Probeer het opnieuw.
 
 # crates/client/src/emoji/picker.rs
-picker.recent = Recent
+picker.recent = Vaak gebruikt
 picker.server = Server
 picker.stickers = Stickers
+picker.emoji = Emoji
+picker.favourites = Favorieten
 picker.smileys = Smileys
 picker.people = Mensen
 picker.animals = Dieren
@@ -778,9 +782,14 @@ picker.tone_medium = Middelste huidskleur
 picker.tone_medium_dark = Middeldonkere huidskleur
 picker.tone_dark = Donkere huidskleur
 picker.search = Emoji zoeken
+picker.search_stickers = Stickers zoeken
 picker.skin_tone = Huidskleur
-picker.recent_empty = Je recente emoji verschijnen hier.
 picker.none_found = Geen emoji gevonden.
+picker.no_stickers = Hier zijn nog geen stickers.
+picker.favourite = Toevoegen aan favorieten
+picker.unfavourite = Verwijderen uit favorieten
+picker.favourite_tip = Klik met rechts op een emoji om hem aan je favorieten toe te voegen.
+picker.sticker_tip = Kies een sticker om hem meteen te versturen.
 picker.from_server = server
 
 # crates/client/src/files.rs

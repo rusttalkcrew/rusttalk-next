@@ -173,6 +173,8 @@ home.upload_file_help = サーバーに保存されます (32 MB まで)
 home.send_live = ファイルをライブ送信
 home.send_live_help = いまオンラインの人に直接送ります
 home.emoji_picker = 絵文字を選ぶ
+home.sticker_picker = スタンプ
+home.send = 送信
 home.message_hint = {channel} へメッセージを送信
 home.waiting_for_server = サーバーを待っています…
 home.no_wide_mentions = このチャットではロール、@everyone、@here をメンションできません。
@@ -759,9 +761,11 @@ net.messages_failed = メッセージを読み込めませんでした。もう�
 net.name_failed = 名前を変更できませんでした。もう一度お試しください。
 
 # crates/client/src/emoji/picker.rs
-picker.recent = 最近
+picker.recent = よく使う
 picker.server = サーバー
 picker.stickers = スタンプ
+picker.emoji = 絵文字
+picker.favourites = お気に入り
 picker.smileys = 顔
 picker.people = 人
 picker.animals = 動物
@@ -778,9 +782,14 @@ picker.tone_medium = 中間の肌の色
 picker.tone_medium_dark = やや濃い肌の色
 picker.tone_dark = 濃い肌の色
 picker.search = 絵文字を検索
+picker.search_stickers = スタンプを検索
 picker.skin_tone = 肌の色
-picker.recent_empty = 最近使った絵文字がここに表示されます。
 picker.none_found = 絵文字が見つかりませんでした。
+picker.no_stickers = まだスタンプがありません。
+picker.favourite = お気に入りに追加
+picker.unfavourite = お気に入りから削除
+picker.favourite_tip = 絵文字を右クリックするとお気に入りに追加できます。
+picker.sticker_tip = スタンプを選ぶとすぐに送信されます。
 picker.from_server = サーバー
 
 # crates/client/src/files.rs

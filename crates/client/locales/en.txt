@@ -176,6 +176,8 @@ home.upload_file_help = Stored on the server, up to 32 MB
 home.send_live = Send file live
 home.send_live_help = Directly to people online now
 home.emoji_picker = Emoji picker
+home.sticker_picker = Stickers
+home.send = Send
 home.message_hint = Message {channel}
 home.waiting_for_server = Waiting for the server…
 home.no_wide_mentions = You can’t mention roles, @everyone or @here in this chat.
@@ -762,9 +764,11 @@ net.messages_failed = Couldn't load messages. Try again.
 net.name_failed = Couldn't change your name. Try again.
 
 # crates/client/src/emoji/picker.rs
-picker.recent = Recent
+picker.recent = Frequently used
 picker.server = Server
 picker.stickers = Stickers
+picker.emoji = Emoji
+picker.favourites = Favourites
 picker.smileys = Smileys
 picker.people = People
 picker.animals = Animals
@@ -781,9 +785,14 @@ picker.tone_medium = Medium skin tone
 picker.tone_medium_dark = Medium-dark skin tone
 picker.tone_dark = Dark skin tone
 picker.search = Search emoji
+picker.search_stickers = Search stickers
 picker.skin_tone = Skin tone
-picker.recent_empty = Your recent emoji will appear here.
 picker.none_found = No emoji found.
+picker.no_stickers = No stickers here yet.
+picker.favourite = Add to favourites
+picker.unfavourite = Remove from favourites
+picker.favourite_tip = Right-click an emoji to add it to your favourites.
+picker.sticker_tip = Pick a sticker to send it right away.
 picker.from_server = server
 
 # crates/client/src/files.rs

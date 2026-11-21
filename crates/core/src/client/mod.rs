@@ -17,7 +17,9 @@ pub use chat::{
     Catalog, Category, Channel, MAX_POKE_CHARS, MAX_TEXT_CHARS, MessageBody, MessageRecord,
     RoleFlags,
 };
-pub use files::{Progress, UploadRejected, decode_frames, decode_image, decode_thumbnail};
+pub use files::{
+    Progress, UploadRejected, decode_frames, decode_frames_until, decode_image, decode_thumbnail,
+};
 pub use keys::{DmPin, KeyClient, invite_name};
 pub use metadata::decode_profile_image;
 pub use server::{Server, save_json};

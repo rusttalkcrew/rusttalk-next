@@ -168,6 +168,7 @@ impl<'a> App<'a> {
                     // Stop the network first, so nothing writes these files again.
                     drop(home);
                     forget_profile(&self.data);
+                    crate::files::forget_previews(&self.ctx);
                     tracing::info!("signed out of this device");
                     Screen::Welcome
                 }
@@ -196,6 +197,7 @@ fn forget_profile(data: &std::path::Path) {
         "notify.json",
         "pokes.json",
         crate::emoji::picker::RECENT_FILE,
+        crate::emoji::picker::FAVOURITES_FILE,
     ] {
         match std::fs::remove_file(data.join(name)) {
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
