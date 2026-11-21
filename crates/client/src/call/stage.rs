@@ -12,8 +12,8 @@ use eframe::egui::{
 use rusttalk_core::client::voice::VoiceStatus;
 
 use super::{
-    Voice, call_server, join, remote::Control, ring, sound_badges, stop_watching, stream_menu,
-    upload, watch,
+    Sharing, Voice, call_server, join, remote::Control, ring, sound_badges, stop_watching,
+    stream_menu, upload, watch,
 };
 use crate::{
     home::{Home, face},
@@ -41,11 +41,13 @@ const TOOL: Vec2 = Vec2::splat(28.0);
 /// The badge after a tile's name.
 const BADGE: f32 = 22.0;
 
-/// What a tile shows: a person (their camera or picture) or a shared screen.
+/// What a tile shows: a person (their camera or picture), a shared screen, or the
+/// preview of our own.
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub enum Tile {
     Person(Id),
     Screen(String),
+    Preview,
 }
 
 /// The stage's choices for this call only; they reset when it ends.
@@ -247,6 +249,27 @@ fn screen_picture(ctx: &egui::Context, voice: &mut Voice, sid: &str) -> Option<P
     })
 }
 
+/// Our own share's newest picture, from the capture. Its copies don't ask for a
+/// repaint, so the window looks again at their rate.
+fn preview_picture(ctx: &egui::Context, voice: &mut Voice) -> Option<Picture> {
+    ctx.request_repaint_after(std::time::Duration::from_millis(1000 / 15));
+    if let Some(image) = voice.video.take_preview() {
+        upload(ctx, &mut voice.preview, "preview", image);
+    }
+    let texture = voice.preview.as_ref()?;
+    Some(Picture {
+        texture: texture.id(),
+        size: texture.size_vec2(),
+        mirrored: false,
+        cover: false,
+    })
+}
+
+/// Whether our screen's preview is on the stage.
+fn previewing(voice: &Voice) -> bool {
+    matches!(voice.sharing, Sharing::On | Sharing::Changing) && voice.video.preview.is_on()
+}
+
 /// A person's camera picture: the self view for us, else their track, which this
 /// marks as drawn so it stays received.
 fn person_picture(
@@ -294,6 +317,7 @@ enum Act {
     Full(Tile),
     Watch(Screen),
     StopWatching,
+    HidePreview,
     ShowVideo(Id, bool),
     RequestControl(String),
     ReleaseControl,
@@ -320,7 +344,19 @@ fn entries<'p>(
         let picture = camera
             .then(|| person_picture(ctx, voice, peer, me))
             .flatten();
-        // Our own screen can't be received here; the voice panel shows it.
+        // Our own screen isn't received; its preview comes straight from the capture.
+        if joined && me && previewing(voice) {
+            screens.push(Entry {
+                tile: Tile::Preview,
+                peer,
+                name: t!("call.your_screen_preview").to_owned(),
+                me,
+                picture: preview_picture(ctx, voice),
+                video: true,
+                watched: false,
+                speaking: false,
+            });
+        }
         if joined && !me {
             for screen in &peer.screens {
                 let watched = voice.watching.as_ref().is_some_and(|w| w.sid == screen.sid);
@@ -368,7 +404,9 @@ pub fn stage(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
     stage
         .minimized
         .retain(|person| peers.iter().any(|p| p.person == *person));
-    let presentable = all.iter().position(|e| matches!(e.tile, Tile::Screen(_)));
+    let presentable = all
+        .iter()
+        .position(|e| matches!(e.tile, Tile::Screen(_) | Tile::Preview));
     if presentable.is_none() {
         stage.presenting = false;
     }
@@ -416,7 +454,7 @@ pub fn stage(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
         .iter()
         .filter(|e| match e.tile {
             Tile::Person(person) => !stage.minimized.contains(&person),
-            Tile::Screen(_) => true,
+            Tile::Screen(_) | Tile::Preview => true,
         })
         .filter(|e| !*video_only || e.video)
         .collect();
@@ -439,7 +477,11 @@ pub fn stage(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
     // The big tile: the presented screen, else the focused tile.
     let big = if stage.presenting {
         let watched = shown.iter().position(|e| e.watched);
-        watched.or_else(|| shown.iter().position(|e| matches!(e.tile, Tile::Screen(_))))
+        watched.or_else(|| {
+            shown
+                .iter()
+                .position(|e| matches!(e.tile, Tile::Screen(_) | Tile::Preview))
+        })
     } else {
         (stage.focus.as_ref()).and_then(|focus| shown.iter().position(|e| e.tile == *focus))
     };
@@ -615,8 +657,8 @@ fn tile(
                 ring(ui, picture.rect);
             }
         }
-        (None, Tile::Screen(_)) => {
-            let text = if entry.watched {
+        (None, Tile::Screen(_) | Tile::Preview) => {
+            let text = if entry.watched || entry.tile == Tile::Preview {
                 t!("call.waiting_picture")
             } else if rect.height() > 90.0 {
                 t!("call.click_to_watch")
@@ -649,7 +691,7 @@ fn tile(
     let response = ui.interact(rect, UiId::unique(("tile", &entry.tile)), Sense::click());
     let screen = match &entry.tile {
         Tile::Screen(sid) => entry.peer.screens.iter().find(|s| s.sid == *sid),
-        Tile::Person(_) => None,
+        Tile::Person(_) | Tile::Preview => None,
     };
     let watch_click = screen.filter(|_| !entry.watched && state.joined);
     let controlling = state.remote == Some(true);
@@ -874,7 +916,8 @@ fn tools(
     }
     let volume = is_person && !entry.me && !entry.peer.unknown && state.joined;
     let full = entry.picture.is_some();
-    let stop = entry.watched;
+    let preview = entry.tile == Tile::Preview;
+    let stop = entry.watched || preview;
     // You need to see a screen to control it.
     let remote = !is_person && !entry.me && state.joined && entry.watched && full;
     // In order of importance; the first ones win on a small tile.
@@ -950,11 +993,13 @@ fn tools(
         let open = ui::menu_open(&button);
         ui.data_mut(|data| data.insert_temp(menu_id, open));
     }
-    if stop
-        && room()
-        && ui::icon_button(ui, "⏹", t!("call.stop_watching"), Look::Plain, TOOL).clicked()
-    {
-        acts.push(Act::StopWatching);
+    let (tip, act) = if preview {
+        (t!("call.hide_preview"), Act::HidePreview)
+    } else {
+        (t!("call.stop_watching"), Act::StopWatching)
+    };
+    if stop && room() && ui::icon_button(ui, "⏹", tip, Look::Plain, TOOL).clicked() {
+        acts.push(act);
     }
 }
 
@@ -983,6 +1028,7 @@ fn apply(home: &mut Home, acts: Vec<Act>) {
                 stage.stop_watching();
                 stop_watching(home);
             }
+            Act::HidePreview => home.voice.stop_preview(),
             Act::ShowVideo(person, true) => {
                 home.voice.hidden.remove(&person);
             }
@@ -1028,6 +1074,8 @@ pub fn full_view(ui: &mut Ui, home: &mut Home) {
                         false,
                     ))
                 }
+                Tile::Preview => previewing(&home.voice)
+                    .then(|| (t!("call.your_screen_preview").to_owned(), None, true)),
             }
         });
     let Some((name, peer, me)) = found else {
@@ -1039,6 +1087,7 @@ pub fn full_view(ui: &mut Ui, home: &mut Home) {
     let picture = match (&tile, &peer) {
         (Tile::Person(_), Some(peer)) => person_picture(&ctx, voice, peer, me),
         (Tile::Screen(sid), _) => screen_picture(&ctx, voice, sid),
+        (Tile::Preview, _) => preview_picture(&ctx, voice),
         _ => None,
     };
     // Camera turned off or hidden: nothing left to show big.
@@ -1048,7 +1097,7 @@ pub fn full_view(ui: &mut Ui, home: &mut Home) {
     }
     let controlling = match &tile {
         Tile::Screen(sid) => voice.control.screen(sid) == Some(true),
-        Tile::Person(_) => false,
+        Tile::Person(_) | Tile::Preview => false,
     };
     // While controlling, Escape belongs to the shared screen.
     let mut exit = !controlling && ui.input(|input| input.key_pressed(Key::Escape));

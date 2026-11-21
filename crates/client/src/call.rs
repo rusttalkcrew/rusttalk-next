@@ -69,6 +69,8 @@ pub struct Voice {
     /// Screens and windows to pick from (Windows), filled by a listing thread.
     targets: Arc<Mutex<Listing<Target>>>,
     pub watching: Option<Watching>,
+    /// The newest picture of our own share, while its preview is on.
+    preview: Option<TextureHandle>,
     pub camera: Camera,
     /// People whose camera this device chose not to receive.
     hidden: HashSet<Id>,
@@ -184,6 +186,7 @@ impl Voice {
             changing_screen: false,
             targets: Arc::new(Mutex::new(Listing::Loading)),
             watching: None,
+            preview: None,
             camera: Camera::new(runtime),
             hidden: HashSet::new(),
             cameras: HashMap::new(),
@@ -221,8 +224,15 @@ impl Voice {
         self.share_screen = None;
         self.changing_screen = false;
         self.watching = None;
+        self.stop_preview();
         self.camera.reset();
         self.cameras.clear();
+    }
+
+    /// Our screen share ended or the preview was hidden: the next share starts without one.
+    pub fn stop_preview(&mut self) {
+        self.video.preview.set(false);
+        self.preview = None;
     }
 
     fn in_call(&self, server: &Server, channel: &Id) -> bool {

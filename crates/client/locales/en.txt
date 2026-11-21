@@ -619,6 +619,9 @@ call.sound_in_stream = You're live: pick the sound under Now sharing
 call.now_sharing = Now sharing
 call.starting_screen = Starting your screen…
 call.your_screen = Your screen
+call.your_screen_preview = Your screen (preview)
+call.preview = Preview
+call.hide_preview = Hide preview
 call.stop_sharing_screen = Stop sharing your screen
 call.stop_sharing_app = Stop sharing {app}
 

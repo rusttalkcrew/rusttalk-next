@@ -8,9 +8,11 @@ use std::{
 
 use eframe::egui::{self, Color32, ColorImage};
 use futures_util::StreamExt;
-use livekit::webrtc::{prelude::RtcVideoTrack, video_stream::native::NativeVideoStream};
+use livekit::webrtc::{
+    prelude::RtcVideoTrack, video_frame::VideoBuffer, video_stream::native::NativeVideoStream,
+};
 pub use rusttalk_core::screen::{
-    Cancelled, ScreenCapture as Capture, ScreenOptions as Options, ScreenSource as Target,
+    Cancelled, Preview, ScreenCapture as Capture, ScreenOptions as Options, ScreenSource as Target,
     ScreenSourceKind as Kind, list_sources as targets, start, start_into,
 };
 use rusttalk_core::screen::{frame_bytes, frame_to_rgba_into};
@@ -73,6 +75,8 @@ pub const SUPPORTED: bool = cfg!(any(target_os = "linux", target_os = "macos", w
 pub struct Video {
     frames: Arc<Mutex<HashMap<String, Slot>>>,
     egui: egui::Context,
+    /// Our own share, straight from the capture.
+    pub preview: Preview,
 }
 
 struct Slot {
@@ -85,6 +89,7 @@ impl Video {
         Self {
             frames: Arc::default(),
             egui,
+            preview: Preview::default(),
         }
     }
 
@@ -146,6 +151,16 @@ impl Video {
     /// The newest frame since the last call, to upload as a texture.
     pub fn take(&self, sid: &str) -> Option<ColorImage> {
         lock(&self.frames).get_mut(sid)?.image.take()
+    }
+
+    /// The newest copy of our own share, while its preview is on. Converted here: the
+    /// copy is small, and the capture shouldn't spend the time.
+    pub fn take_preview(&self) -> Option<ColorImage> {
+        let frame = self.preview.take()?;
+        let size = [frame.width() as usize, frame.height() as usize];
+        let mut image = ColorImage::filled(size, Color32::BLACK);
+        frame_to_rgba_into(&frame, image.as_raw_mut()).ok()?;
+        Some(image)
     }
 }
 

@@ -616,6 +616,9 @@ call.sound_in_stream = Je bent live: kies het geluid bij Nu gedeeld
 call.now_sharing = Nu gedeeld
 call.starting_screen = Je scherm starten…
 call.your_screen = Jouw scherm
+call.your_screen_preview = Jouw scherm (voorbeeld)
+call.preview = Voorbeeld
+call.hide_preview = Voorbeeld verbergen
 call.stop_sharing_screen = Stoppen met je scherm delen
 call.stop_sharing_app = Stoppen met {app} delen
 

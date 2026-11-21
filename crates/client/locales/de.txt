@@ -616,6 +616,9 @@ call.sound_in_stream = Du bist live: Wähle den Ton unter „Wird geteilt“
 call.now_sharing = Wird geteilt
 call.starting_screen = Bildschirm wird gestartet…
 call.your_screen = Dein Bildschirm
+call.your_screen_preview = Dein Bildschirm (Vorschau)
+call.preview = Vorschau
+call.hide_preview = Vorschau ausblenden
 call.stop_sharing_screen = Bildschirm nicht mehr teilen
 call.stop_sharing_app = {app} nicht mehr teilen
 
