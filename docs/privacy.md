@@ -332,23 +332,44 @@ is deleted and never used; the normal noise suppression keeps working.
   Settings → Privacy → Link previews, and off again there. Until then the
   link stays a plain link and nothing is requested. Once allowed, the app
   showing a message fetches the preview itself, only for messages on screen;
-  the sender and the RustTalk server are not involved. Steam (the only site
-  for now): for `store.steampowered.com/app/<id>` links, the client requests
-  `https://store.steampowered.com/api/appdetails` with the app ID, the app's
-  language and the computer's country (for local prices), then the header
-  picture from a Steam CDN host (`*.steamstatic.com` or
-  `steamcdn-a.akamaihd.net`) named in the reply. Requests are HTTPS only,
-  follow no redirects, and send a generic User-Agent, no cookies and no
-  Referer. They have a timeout and size caps (pictures are also capped in
-  size before decoding), start at most one per second with two at a time,
-  and after a failure the whole site waits ten minutes. A request still
-  queued is dropped when its link scrolls off screen or the site is turned
-  off, and one under way when it is turned off keeps nothing. Steam sees your
-  IP address, timing and which games you look at; requests carry no account,
-  device or server identifiers. Previews are kept in memory (the 50 most
-  recently shown) and in `previews/` in the app's data folder for up to a day
-  (refreshed after an hour, for prices), at most 200 of them. Signing out
-  stops all of it and deletes `previews/`.
+  the sender and the RustTalk server are not involved. Each site has its own
+  question and toggle, and is asked only for its own kind of link:
+  - **Steam**, `store.steampowered.com/app/<id>`: requests
+    `https://store.steampowered.com/api/appdetails` with the app ID, the app's
+    language and the computer's country (for local prices); the header picture
+    from `*.steamstatic.com` or `steamcdn-a.akamaihd.net`.
+  - **YouTube**, `youtube.com/watch`, `youtu.be` and `youtube.com/shorts`:
+    requests `https://www.youtube.com/oembed` with the video's address; the
+    thumbnail from `i.ytimg.com`.
+  - **Spotify**, `open.spotify.com` tracks, albums, playlists and episodes:
+    requests `https://open.spotify.com/oembed` with the item's address; the
+    cover from `i.scdn.co` or `*.spotifycdn.com`.
+  - **GitHub**, repositories, issues and pull requests on `github.com`:
+    requests `https://api.github.com/repos/...` without an account; the avatar
+    from `avatars.githubusercontent.com`. GitHub allows 60 such requests an
+    hour per IP address, so a rate limit pauses GitHub previews until the time
+    GitHub gives.
+  - **Wikipedia**, `<language>.wikipedia.org/wiki/<title>`: requests
+    `https://<language>.wikipedia.org/api/rest_v1/page/summary/<title>` of the
+    link's own language; the picture from `upload.wikimedia.org`.
+  - **Reddit**, `reddit.com/r/<subreddit>/comments/<id>`: requests the post's
+    `.json` from `https://www.reddit.com`; the picture from `i.redd.it`,
+    `preview.redd.it` or `external-preview.redd.it`, never for posts marked
+    adult (those show an NSFW label).
+
+  Requests are HTTPS only, go only to the hosts above, follow no redirects,
+  and send a generic User-Agent, no cookies and no Referer. They have a
+  timeout and size caps (pictures are also capped in size before decoding),
+  start at most one per second with two at a time, and after a failure or a
+  rate limit the whole site waits ten minutes or as long as it asks. A missing
+  page only affects that link. A request still queued is dropped when its link
+  scrolls off screen or the site is turned off, and one under way when it is
+  turned off keeps nothing. Each site sees your IP address, timing and which
+  links you look at; requests carry no account, device or server identifiers.
+  Previews are kept in memory (the 50 most recently shown) and in `previews/`
+  in the app's data folder for up to a day (refreshed after an hour for Steam
+  prices, twelve hours for the others), at most 200 of them. Signing out stops
+  all of it and deletes `previews/`.
 - **Pasted web pictures:** When the person pastes a picture copied from a web
   page and the browser put only a still copy of a moving picture (GIF or WebP)
   on the clipboard, the desktop client downloads the original over HTTPS from
