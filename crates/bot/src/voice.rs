@@ -5,7 +5,7 @@ use futures_util::StreamExt;
 use livekit::webrtc::{audio_frame::AudioFrame, audio_source::AudioSourceOptions};
 use rusttalk_core::client::voice::{
     NativeAudioSource, NativeAudioStream, ParticipantIdentity, RemoteAudioTrack, RoomEvent,
-    TrackSource, VoiceRoom,
+    TrackSid, TrackSource, VoiceRoom,
 };
 use tokio::time::{MissedTickBehavior, interval};
 
@@ -42,6 +42,22 @@ pub async fn hear_tone(
     hz: u32,
 ) -> Result<()> {
     hear_tone_with_events(room, peer, hz, |_| Ok(())).await
+}
+
+/// Wait for one specific remote track, such as a republished microphone, and hear `hz` on it.
+pub async fn hear_track(room: &mut VoiceRoom, sid: &TrackSid, hz: u32) -> Result<()> {
+    let track = loop {
+        if let Some((_, _, track)) =
+            (room.remote_audio_tracks().into_iter()).find(|(_, s, _)| s == sid)
+        {
+            break track;
+        }
+        room.next_event()
+            .await
+            .context("room closed waiting for remote audio")?;
+    };
+    measure_tone(track, hz, 500.0).await?;
+    Ok(())
 }
 
 /// Check room events received while waiting for the peer's encrypted microphone track.

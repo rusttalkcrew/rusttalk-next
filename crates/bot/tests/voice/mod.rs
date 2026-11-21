@@ -14,7 +14,7 @@ use anyhow::{Context, Result, ensure};
 use reqwest::{Method, StatusCode};
 use rusttalk_bot::{
     app_audio,
-    voice::{hear_tone, send_tone, source},
+    voice::{hear_tone, hear_track, send_tone, source},
 };
 use rusttalk_core::{
     auth::encode,
@@ -98,6 +98,25 @@ pub async fn exercise(
     )
     .await?;
 
+    // Channels start at 64 kbps; text channels have none; limits hold.
+    let catalog = a.catalog().await?;
+    let kbps = |id: &[u8; 32]| catalog.channels.iter().find(|c| &c.id == id)?.audio_kbps;
+    assert_eq!((kbps(&voice.id), kbps(&text.id)), (Some(64), None));
+    let update = |value: i64| {
+        a.request(Method::PUT, &format!("/v1/channels/{channel}"))
+            .json(
+                &json!({ "category_id": encode(&category), "position": 0, "name_ct": "",
+                           "audio_kbps": value }),
+            )
+            .send()
+    };
+    rejected(
+        update(7).await?,
+        StatusCode::BAD_REQUEST,
+        "invalid_audio_kbps",
+    )
+    .await?;
+
     let (_, b_invite) = invite(a, secrets).await?;
     let (_, b_device) = DeviceIdentity::create("Voice B")?;
     let b_session = session(
@@ -171,6 +190,16 @@ pub async fn exercise(
         timeout(LIMIT, both_ways(&mut room_a, &mut room_b, A_HZ, B_HZ))
             .await
             .context("initial duplex")??;
+        // A new bitrate republishes our audio; the call keeps flowing both ways.
+        let replaced = room_a.set_audio_kbps(32).await?;
+        assert_eq!(replaced.len(), 1);
+        let b_id = room_b.identity();
+        timeout(LIMIT, hear_track(&mut room_b, &replaced[0].1, A_HZ))
+            .await
+            .context("B hearing A after a bitrate change")??;
+        timeout(LIMIT, hear_tone(&mut room_a, Some(&b_id), B_HZ))
+            .await
+            .context("A hearing B after a bitrate change")??;
         for muted in [true, false] {
             room_a.set_microphone_muted(muted);
             wait_for_microphone(&mut room_b, &a_id, muted).await?;

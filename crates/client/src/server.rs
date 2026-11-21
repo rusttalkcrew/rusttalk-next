@@ -294,6 +294,8 @@ pub struct Channel {
     pub name: String,
     pub topic: String,
     pub voice: bool,
+    /// Opus bitrate of a voice channel, in kbps.
+    pub audio_kbps: u32,
     /// Per role: read (1), write (2), speak (4) and video (8).
     pub flags: Vec<(String, u8)>,
 }

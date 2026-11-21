@@ -201,6 +201,9 @@ async fn require_voice_read(
 #[derive(Serialize)]
 pub struct Token {
     token: String,
+    /// The channel's Opus bitrate, so a joining client publishes at it from the start.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    audio_kbps: Option<i64>,
 }
 
 pub async fn token(
@@ -217,7 +220,7 @@ pub async fn token(
     let token = configured(&app)?.sign(
         &identity,
         VideoGrants {
-            room: channel,
+            room: channel.clone(),
             room_join: true,
             can_publish: Some(!sources.is_empty()),
             can_publish_data: Some(can_publish_data),
@@ -231,8 +234,12 @@ pub async fn token(
         },
         Duration::from_secs(600),
     )?;
+    let audio_kbps = query_scalar("SELECT audio_kbps FROM channels WHERE id = ?")
+        .bind(&channel)
+        .fetch_optional(&mut *tx)
+        .await?;
     tx.commit().await?;
-    Ok(Json(Token { token }))
+    Ok(Json(Token { token, audio_kbps }))
 }
 
 pub async fn data_token(
@@ -257,7 +264,10 @@ pub async fn data_token(
         Duration::from_secs(60),
     )?;
     tx.commit().await?;
-    Ok(Json(Token { token }))
+    Ok(Json(Token {
+        token,
+        audio_kbps: None,
+    }))
 }
 
 /// Every chat (text, voice or DM) has a data room. Readers may receive; only

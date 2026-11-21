@@ -82,6 +82,9 @@ pub struct Channel {
     pub name_ct: Option<String>,
     pub topic_ct: Option<String>,
     pub peer: Option<String>,
+    /// Voice channels only: the Opus bitrate in kbps.
+    #[serde(default)]
+    pub audio_kbps: Option<u32>,
     pub flags: Vec<RoleFlags>,
 }
 
