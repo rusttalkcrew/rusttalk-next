@@ -185,13 +185,17 @@ pub struct Preview {
     pub known: bool,
     /// The server lets people join without an invite.
     pub open: bool,
+    /// This person is a member there already (say, from another device): sign in, ask no name.
+    pub member: bool,
 }
 
-/// How a new member gets in the first time.
+/// How this device gets in the first time.
 pub enum Admission {
     Invite(InviteCode),
     /// The server lets anyone join.
     Open,
+    /// Already a member, from another device: members sign in without an invite.
+    Member,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -361,11 +365,21 @@ impl Net {
         self.ctx.sync.dm_deleted()
     }
 
-    /// Check an invite's server and read its name, without joining yet.
-    pub fn preview(&self, link: InviteLink) {
+    /// Check an invite's server and read its name, without joining yet. With `probe`
+    /// (not joined here yet), also check whether this person is a member already.
+    pub fn preview(&self, link: InviteLink, probe: bool) {
         let ctx = self.ctx.clone();
         self.spawn(async move {
-            let update = preview(&ctx, &link).await.map(Box::new);
+            let update = preview(&ctx, &link, probe).await.map(Box::new);
+            ctx.send(Update::Preview(update));
+        });
+    }
+
+    /// Check a server typed in by address, without joining yet; `probe` as for `preview`.
+    pub fn check_address(&self, address: Url, probe: bool) {
+        let ctx = self.ctx.clone();
+        self.spawn(async move {
+            let update = find::address(&ctx, address, probe).await.map(Box::new);
             ctx.send(Update::Preview(update));
         });
     }
@@ -380,10 +394,10 @@ impl Net {
     }
 
     /// Check a server picked from the directory, without joining yet.
-    pub fn check_listed(&self, listed: Listed) {
+    pub fn check_listed(&self, listed: Listed, probe: bool) {
         let ctx = self.ctx.clone();
         self.spawn(async move {
-            let update = find::preview(&ctx, listed).await.map(Box::new);
+            let update = find::preview(&ctx, listed, probe).await.map(Box::new);
             ctx.send(Update::Listed(update));
         });
     }
@@ -441,7 +455,7 @@ impl Drop for Net {
     }
 }
 
-async fn preview(ctx: &Ctx, link: &InviteLink) -> Result<Preview, String> {
+async fn preview(ctx: &Ctx, link: &InviteLink, probe: bool) -> Result<Preview, String> {
     let known = Api::pinned(&ctx.data, &link.server.address).map_err(|error| {
         tracing::error!(error = %format_args!("{error:#}"), "reading server pins failed");
         t!("net.saved_servers_failed").to_owned()
@@ -477,14 +491,34 @@ async fn preview(ctx: &Ctx, link: &InviteLink) -> Result<Preview, String> {
             }
         },
     };
-    tracing::info!(server = %fingerprint(&link.server.server_id), known = known.is_some(), open, "invite checked");
+    let member = probe && member(ctx, &api).await;
+    tracing::info!(server = %fingerprint(&link.server.server_id), known = known.is_some(), open, member, "invite checked");
     Ok(Preview {
         server: link.server.clone(),
         invite,
         name,
         known: known.is_some(),
         open,
+        member,
     })
+}
+
+/// Whether this person is a member of the server already, by signing in without an invite,
+/// which only members may. A restored device has no other way to know, and a member
+/// rejoining by invite must not be asked for a name again. The connection that follows
+/// signs in afresh, which replaces this session.
+async fn member(ctx: &Ctx, api: &Api) -> bool {
+    match api.sign_in(&ctx.identity, None).await {
+        Ok(reply) if reply.status().is_success() => true,
+        Ok(reply) => {
+            tracing::info!(status = %reply.status(), "not a member yet");
+            false
+        }
+        Err(error) => {
+            tracing::warn!(error = %format_args!("{error:#}"), "checking membership failed");
+            false
+        }
+    }
 }
 
 /// Whether the server lets anyone join; `false` when it can't tell.
@@ -748,7 +782,7 @@ async fn session<'a>(
     let reply = match admission {
         Some(Admission::Open) => api.join_open(&ctx.identity).await,
         Some(Admission::Invite(code)) => api.sign_in(&ctx.identity, Some(code)).await,
-        None => api.sign_in(&ctx.identity, None).await,
+        Some(Admission::Member) | None => api.sign_in(&ctx.identity, None).await,
     }
     .map_err(stop_or_retry)?;
     let status = reply.status();
@@ -767,7 +801,9 @@ async fn session<'a>(
         .unwrap_or_default();
     tracing::warn!(%status, code, "sign-in refused");
     Err(match code.as_str() {
-        "invite_required" if admission.is_none() => Failure::Stop(t!("net.not_member").into()),
+        "invite_required" if matches!(admission, None | Some(Admission::Member)) => {
+            Failure::Stop(t!("net.not_member").into())
+        }
         "invite_required" | "invalid_invite" | "invite_not_found" => {
             Failure::Stop(t!("net.invite_expired").into())
         }
@@ -902,6 +938,14 @@ async fn serve(
 
 /// Reload what the UI shows after (re)connecting, since events may have been missed.
 async fn resume(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, state: &mut State) -> Result<()> {
+    // Sync first, beside the rest: on a device restored from the words this first server
+    // brings back the others, which must not wait for (or be skipped by a failure in) the
+    // directory, history and voice loads below. Also after each token refresh, which picks
+    // up changes from other devices twice a day.
+    let (api, session) = client.sync_peer();
+    ctx.sync.set_peer(url, Some((api.clone(), session.clone())));
+    let sync_ctx = ctx.clone();
+    tokio::spawn(async move { sync(&sync_ctx, Vec::new()).await });
     directory(ctx, url, client, state).await?;
     for channel in state.loaded.clone() {
         page(ctx, url, client, state, channel, None).await;
@@ -922,11 +966,6 @@ async fn resume(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, state: &mut St
         }
     }
     sync_voice_key(client, state);
-    // Also after each token refresh, which picks up changes from other devices twice a day.
-    let (api, session) = client.sync_peer();
-    ctx.sync.set_peer(url, Some((api.clone(), session.clone())));
-    let ctx = ctx.clone();
-    tokio::spawn(async move { sync(&ctx, Vec::new()).await });
     Ok(())
 }
 

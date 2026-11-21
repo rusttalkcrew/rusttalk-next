@@ -904,8 +904,13 @@ Apply pending local edits after merging and publish the next version to all
 current peers. A failed peer is reported separately and can catch up after
 reconnect. A restored device needs a verified member server as a starting point.
 The desktop client syncs on each connect and after each local change.
-A device restored from the words joins one server by invite and then picks
-up the rest of the list from that server's blob.
+A device restored from the words signs in to one server it is a member of
+(members need no invite) and then picks up the rest of the list from that
+server's blob. Before asking for a display name, the desktop client checks a
+server picked on the join page by signing in without an invite: if that works
+the person is a member already, keeps their name and picture, and is signed
+in without a name step. The sync runs as soon as a server is signed in, ahead
+of loading its channels.
 Leaving a server in the client calls `DELETE /v1/me/membership` and then
 removes the server from the person's devices.
 

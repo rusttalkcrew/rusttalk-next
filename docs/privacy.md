@@ -269,7 +269,9 @@ is deleted and never used; the normal noise suppression keeps working.
   Privacy, or else the official directory (`rusttalk-index.mvl.sh`, to move
   to `index.rusttalk.com`) with normal certificate trust. The join page lists the
   official servers (`es`, `de` and `jp.public.rusttalk.com`) from a list
-  built into the client; it contacts one only when the person picks Join. On Linux it accesses Secret
+  built into the client; it contacts one only when the person picks Join. An
+  invite link or server address typed on the join page is contacted only when
+  the person picks Continue. On Linux it accesses Secret
   Service, and opens file dialogs through xdg-desktop-portal, over the local
   session bus.
 - **Update host:** Release builds contact the HTTPS directory configured in
