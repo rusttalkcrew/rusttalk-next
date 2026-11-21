@@ -1,8 +1,8 @@
 //! Voice audio on its own threads, so device work never blocks the UI.
 //!
 //! Microphone: cpal capture → 48 kHz mono → WebRTC audio processing (echo
-//! cancellation, noise suppression, auto gain) → push-to-talk or voice gate →
-//! the `NativeAudioSource` that voice publishes.
+//! cancellation, noise suppression, auto gain) → optional AI noise removal →
+//! push-to-talk or voice gate → the `NativeAudioSource` that voice publishes.
 //! Speakers: each remote track is read as 48 kHz mono, scaled per stream (a
 //! person's voice or one app they share), mixed and played through cpal; the mix
 //! also feeds the echo canceller.
@@ -10,6 +10,7 @@
 use std::{
     borrow::Cow,
     collections::{HashMap, VecDeque},
+    fs,
     path::{Path, PathBuf},
     pin::pin,
     sync::{
@@ -43,11 +44,14 @@ use rusttalk_core::client::save_json;
 use serde::{Deserialize, Serialize};
 use tokio::runtime::Runtime;
 
-use crate::server::Id;
+use crate::{
+    denoise::{self, Denoiser},
+    server::Id,
+};
 
 pub const RATE: u32 = 48_000;
-/// 10 ms at 48 kHz mono, the frame size of audio processing and the source.
-const FRAME: usize = 480;
+/// 10 ms at 48 kHz mono, the frame size of audio processing, AI noise removal and the source.
+pub const FRAME: usize = 480;
 /// Quieter than this counts as silence for the meter and speaking rings.
 pub const SILENT_DB: f32 = -50.0;
 /// Voice activation stays open this long after the last loud frame.
@@ -91,6 +95,9 @@ pub struct Settings {
     pub echo_cancellation: bool,
     pub noise_suppression: bool,
     pub auto_gain: bool,
+    /// AI noise removal in place of the normal noise suppression, once its model is
+    /// downloaded. Not synced: the download is per device.
+    pub ai_noise: bool,
     /// Camera name; `None` uses the first camera.
     pub camera: Option<String>,
     pub camera_height: u32,
@@ -156,6 +163,7 @@ impl Default for Settings {
             echo_cancellation: true,
             noise_suppression: true,
             auto_gain: true,
+            ai_noise: false,
             camera: None,
             camera_height: 720,
             camera_fps: 30,
@@ -179,6 +187,18 @@ impl Default for Settings {
             screen_cursor: true,
         }
     }
+}
+
+/// The AI noise removal model on this device.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Model {
+    Missing,
+    /// Bytes received so far.
+    Downloading(u64),
+    /// The last download failed.
+    Failed,
+    /// Downloaded; it's verified again each time it loads.
+    Ready,
 }
 
 #[derive(Clone)]
@@ -243,6 +263,10 @@ struct Shared {
     devices: Mutex<(Vec<DeviceInfo>, Vec<DeviceInfo>)>,
     /// A device problem the UI shows until the device works again.
     problem: Mutex<Option<String>>,
+    model_file: PathBuf,
+    model: Mutex<Model>,
+    /// AI noise removal is wanted but couldn't run, so the normal pipeline does.
+    ai_failed: AtomicBool,
     source: NativeAudioSource,
     start: Instant,
 }
@@ -265,8 +289,6 @@ struct Track {
     primed: bool,
     loud: u64,
 }
-
-type Filter = Box<dyn FnMut(&mut [i16])>;
 
 /// Fixed-size messages, so audio callbacks never allocate.
 enum Mic {
@@ -303,9 +325,12 @@ impl Audio {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .thread_name("rusttalk-playback")
+            // The model download needs the network driver.
+            .enable_all()
             .build()
             .context("start playback runtime")?;
         let file = data.join("voice.json");
+        let model_file = denoise::path(data);
         let settings = crate::load_json(&file).unwrap_or_else(|error| {
             tracing::warn!(error = %format_args!("{error:#}"), "voice settings unreadable, using defaults");
             Settings::default()
@@ -333,6 +358,13 @@ impl Audio {
             mixer: Mutex::default(),
             devices: Mutex::default(),
             problem: Mutex::new(None),
+            model: Mutex::new(if model_file.exists() {
+                Model::Ready
+            } else {
+                Model::Missing
+            }),
+            model_file,
+            ai_failed: AtomicBool::new(false),
             // Queue size 0: we hand over exact 10 ms frames, nothing is buffered.
             source: NativeAudioSource::new(off, RATE, 1, 0),
             start: Instant::now(),
@@ -384,7 +416,14 @@ impl Audio {
         if *current == settings {
             return;
         }
-        let toggles = |s: &Settings| (s.echo_cancellation, s.noise_suppression, s.auto_gain);
+        let toggles = |s: &Settings| {
+            (
+                s.echo_cancellation,
+                s.noise_suppression,
+                s.auto_gain,
+                s.ai_noise,
+            )
+        };
         if toggles(&current) != toggles(&settings) {
             self.shared().processing.fetch_add(1, Relaxed);
         }
@@ -415,6 +454,45 @@ impl Audio {
 
     pub fn problem(&self) -> Option<String> {
         lock(&self.shared().problem).clone()
+    }
+
+    pub fn model(&self) -> Model {
+        *lock(&self.shared().model)
+    }
+
+    /// AI noise removal is on but couldn't start or stopped working.
+    pub fn ai_failed(&self) -> bool {
+        self.shared().ai_failed.load(Relaxed)
+    }
+
+    /// Fetch the AI noise removal model in the background; the microphone picks it up
+    /// once it's verified.
+    pub fn download_model(&self) {
+        {
+            let mut model = lock(&self.shared().model);
+            if matches!(*model, Model::Downloading(_) | Model::Ready) {
+                return;
+            }
+            *model = Model::Downloading(0);
+        }
+        let shared = self.0.shared.clone();
+        let Some(runtime) = &self.0.runtime else {
+            return;
+        };
+        runtime.spawn(async move {
+            let result = denoise::download(&shared.model_file, |bytes| {
+                *lock(&shared.model) = Model::Downloading(bytes);
+            })
+            .await;
+            *lock(&shared.model) = match result {
+                Ok(()) => Model::Ready,
+                Err(error) => {
+                    tracing::warn!(error = %format_args!("{error:#}"), "downloading the noise model failed");
+                    Model::Failed
+                }
+            };
+            shared.processing.fetch_add(1, Relaxed);
+        });
     }
 
     pub fn set_key_down(&self, down: bool) {
@@ -983,25 +1061,22 @@ fn mix_tracks(mixer: &mut Mixer, deafened: bool) -> [i16; FRAME] {
 fn process(shared: &Shared, frames: &Receiver<Mic>) {
     let mut built = u64::MAX;
     let mut apm = None;
-    // Captured samples at the device rate, then 48 kHz samples waiting for a full frame.
-    let mut pending = Vec::new();
-    let mut near = Vec::new();
-    let mut resampler = AudioResampler::default();
+    let mut denoiser = None;
+    let mut framer = Framer::default();
     let mut gate = Gate::default();
     let mut noise = NoiseFloor::default();
-    // A stronger AI noise filter can go here later, after the WebRTC processing.
-    let mut filter: Option<Filter> = None;
     while let Ok(message) = frames.recv() {
         let wanted = shared.processing.load(Relaxed);
         if wanted != built {
             let s = shared.settings();
             built = wanted;
-            apm = Some(AudioProcessingModule::new(
-                s.echo_cancellation,
-                s.auto_gain,
-                true,
-                s.noise_suppression,
-            ));
+            denoiser = if s.ai_noise {
+                denoiser.take().or_else(|| load_denoiser(shared))
+            } else {
+                shared.ai_failed.store(false, Relaxed);
+                None
+            };
+            apm = Some(build_apm(&s, denoiser.is_some()));
         }
         let apm = apm.as_mut().expect("built above");
         match message {
@@ -1011,35 +1086,24 @@ fn process(shared: &Shared, frames: &Receiver<Mic>) {
                 }
                 continue;
             }
-            Mic::Near { samples, len, rate } => {
-                let step = rate as usize / 100;
-                pending.extend_from_slice(&samples[..len]);
-                while pending.len() >= step {
-                    let chunk: Vec<_> = pending.drain(..step).collect();
-                    if rate == RATE {
-                        near.extend(chunk);
-                    } else {
-                        near.extend(resampler.remix_and_resample(
-                            &chunk,
-                            step as u32,
-                            1,
-                            rate,
-                            1,
-                            RATE,
-                        ));
-                    }
-                }
-            }
+            Mic::Near { samples, len, rate } => framer.push(&samples[..len], rate),
         }
-        while near.len() >= FRAME {
-            let mut frame: Vec<i16> = near.drain(..FRAME).collect();
+        while let Some(mut frame) = framer.next() {
             let delay = shared.input_delay.load(Relaxed) + shared.output_delay.load(Relaxed);
             let _ = apm.set_stream_delay_ms(delay as i32);
             if let Err(error) = apm.process_stream(&mut frame, RATE as i32, 1) {
                 tracing::warn!(%error, "audio processing failed");
             }
-            if let Some(filter) = &mut filter {
-                filter(&mut frame);
+            // After the echo canceller, which needs the untouched signal and leaves only
+            // what the model should judge; the model replaces WebRTC's noise suppression.
+            if let Some(model) = &mut denoiser
+                && let Err(error) = model.process(&mut frame)
+            {
+                tracing::warn!(error = %format_args!("{error:#}"), "AI noise removal failed");
+                shared.ai_failed.store(true, Relaxed);
+                denoiser = None;
+                // The normal noise suppression takes over from the next frame.
+                *apm = build_apm(&shared.settings(), false);
             }
             let db = level_db(&frame);
             shared.level.store(db.to_bits(), Relaxed);
@@ -1074,6 +1138,79 @@ fn process(shared: &Shared, frames: &Receiver<Mic>) {
                 send(&shared.source, &frame);
             }
         }
+    }
+}
+
+fn build_apm(s: &Settings, ai_noise: bool) -> AudioProcessingModule {
+    // Two noise filters in a row only add artifacts; the model is the stronger one.
+    AudioProcessingModule::new(
+        s.echo_cancellation,
+        s.auto_gain,
+        true,
+        s.noise_suppression && !ai_noise,
+    )
+}
+
+/// The downloaded model, or `None` with the failure noted for the settings page.
+fn load_denoiser(shared: &Shared) -> Option<Denoiser> {
+    if *lock(&shared.model) != Model::Ready {
+        // Waiting for the download.
+        return None;
+    }
+    let started = Instant::now();
+    match denoise::load(&shared.model_file) {
+        Ok(model) => {
+            tracing::info!(ms = started.elapsed().as_millis(), "AI noise removal on");
+            shared.ai_failed.store(false, Relaxed);
+            Some(model)
+        }
+        Err(error) => {
+            tracing::warn!(error = %format_args!("{error:#}"), "loading AI noise removal failed");
+            shared.ai_failed.store(true, Relaxed);
+            // Damaged or replaced on disk: offer the download again.
+            if let Err(error) = fs::remove_file(&shared.model_file) {
+                tracing::warn!(%error, "removing the noise model failed");
+            }
+            *lock(&shared.model) = Model::Missing;
+            None
+        }
+    }
+}
+
+/// Cuts captured audio, in whatever block sizes the device delivers, into 10 ms
+/// frames at 48 kHz for processing and the model.
+#[derive(Default)]
+struct Framer {
+    /// Samples at the device rate, waiting for 10 ms to resample.
+    pending: Vec<i16>,
+    /// 48 kHz samples waiting for a full frame.
+    near: VecDeque<i16>,
+    resampler: AudioResampler,
+}
+
+impl Framer {
+    fn push(&mut self, samples: &[i16], rate: u32) {
+        let step = rate as usize / 100;
+        self.pending.extend_from_slice(samples);
+        while self.pending.len() >= step {
+            let chunk: Vec<_> = self.pending.drain(..step).collect();
+            if rate == RATE {
+                self.near.extend(chunk);
+            } else {
+                self.near.extend(self.resampler.remix_and_resample(
+                    &chunk,
+                    step as u32,
+                    1,
+                    rate,
+                    1,
+                    RATE,
+                ));
+            }
+        }
+    }
+
+    fn next(&mut self) -> Option<Vec<i16>> {
+        (self.near.len() >= FRAME).then(|| self.near.drain(..FRAME).collect())
     }
 }
 
@@ -1175,6 +1312,40 @@ mod tests {
         let saved: Settings = serde_json::from_str(r#"{"threshold": -30.0}"#).unwrap();
         assert!(!saved.auto_threshold);
         assert_eq!(saved.threshold, -30.0);
+    }
+
+    #[test]
+    fn framer_cuts_any_callback_size_into_frames() {
+        // 48 kHz devices: the samples come out in order, in whole frames.
+        let mut framer = Framer::default();
+        let input: Vec<i16> = (0..20 * FRAME as i16).collect();
+        let mut output = Vec::new();
+        let mut rest = &input[..];
+        for size in [128, 441, 1, 480, 1024, 7].into_iter().cycle() {
+            if rest.is_empty() {
+                break;
+            }
+            let (block, tail) = rest.split_at(size.min(rest.len()));
+            rest = tail;
+            framer.push(block, RATE);
+            while let Some(frame) = framer.next() {
+                assert_eq!(frame.len(), FRAME);
+                output.extend(frame);
+            }
+        }
+        assert_eq!(output, input);
+
+        // Other rates are resampled 10 ms at a time; nothing waits longer than that.
+        let mut framer = Framer::default();
+        let mut frames = 0;
+        for _ in 0..100 {
+            framer.push(&[1000; 441], 44_100);
+            while let Some(frame) = framer.next() {
+                assert_eq!(frame.len(), FRAME);
+                frames += 1;
+            }
+        }
+        assert_eq!(frames, 100);
     }
 
     #[test]

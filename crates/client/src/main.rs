@@ -7,6 +7,7 @@ mod audio;
 mod call;
 mod camera;
 mod crop;
+mod denoise;
 mod device_sync;
 mod emoji;
 mod files;

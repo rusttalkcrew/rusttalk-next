@@ -176,6 +176,20 @@ starts and when the person signs out.
 autocomplete. It stays on this device.
 `updates.json` holds the chosen release directory URL and the automatic
 check preference (on by default in release builds) on this device.
+`deepfilternet3.tar.gz` is the AI noise removal model, present only after the
+person downloads it; `voice.json` keeps whether it's on (`ai_noise`), on this
+device only.
+
+### AI noise removal
+
+AI noise removal (Settings → Voice & audio) runs the DeepFilterNet3 model on
+the person's own computer, in the client's microphone pipeline. Microphone
+audio never leaves the device for it: what it cleans goes out only in the
+normal encrypted call. The model is not part of the app. It is downloaded only
+when the person selects **Download**, from a fixed upstream commit (see
+Outbound connections), and the client checks its size and pinned SHA-256
+before saving it and again every time it loads it. A file that fails the check
+is deleted and never used; the normal noise suppression keeps working.
 
 ## Outbound connections
 
@@ -203,6 +217,12 @@ check preference (on by default in release builds) on this device.
   signature, then requests your platform’s artifact if you choose to update.
   The host sees your IP address, requested files and timing. Requests carry no
   account, device or server identifiers. Redirects stay on HTTPS.
+- **AI noise removal model (opt-in):** Only when the person selects
+  **Download** in Settings → Voice & audio, the desktop client fetches
+  `models/DeepFilterNet3_onnx.tar.gz` of `Rikorose/DeepFilterNet` at commit
+  `d375b2d` from `github.com`, which redirects to `raw.githubusercontent.com`
+  (HTTPS only). GitHub sees your IP address and timing. The request carries no
+  account, device or server identifiers and no audio.
 - **API:** Queries LiveKit RoomService on 7880/TCP using the internal
   Docker hostname `livekit`. When the owner enables public listing and
   saves an index URL, the API posts a signed listing to that HTTPS URL at

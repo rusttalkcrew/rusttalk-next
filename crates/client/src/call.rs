@@ -17,7 +17,7 @@ use rusttalk_core::client::voice::VoiceStatus;
 use crate::{
     audio::{self, Audio, Settings, StreamId},
     camera::{Camera, Change},
-    files,
+    denoise, files,
     home::{Home, Tab, face},
     net::Command,
     screen::{self, Kind, Options, Target, Video},
@@ -872,6 +872,7 @@ pub fn settings_tab(ui: &mut Ui, voice: &mut Voice) {
         "Noise suppression",
         "Filters out background noise like fans and typing.",
     );
+    ai_noise(ui, &audio, &mut s);
     ui::toggle_row(
         ui,
         &mut s.auto_gain,
@@ -879,6 +880,57 @@ pub fn settings_tab(ui: &mut Ui, voice: &mut Voice) {
         "Keeps your voice at an even volume.",
     );
     audio.set_settings(s);
+}
+
+/// The AI noise removal row: download its model first, then an on/off switch.
+fn ai_noise(ui: &mut Ui, audio: &Audio, s: &mut Settings) {
+    const LABEL: &str = "AI noise removal";
+    const HELP: &str = "Stronger filter for typing, other voices and sudden sounds.";
+    match audio.model() {
+        audio::Model::Ready => {
+            ui::toggle_row(ui, &mut s.ai_noise, LABEL, HELP);
+        }
+        audio::Model::Downloading(bytes) => {
+            ui::setting_row(ui, LABEL, "Downloading…", |ui| {
+                let done = bytes as f32 / denoise::SIZE as f32;
+                ui.add(
+                    egui::ProgressBar::new(done)
+                        .desired_width(PICKER_WIDTH)
+                        .show_percentage(),
+                );
+            });
+            ui.ctx().request_repaint_after(Duration::from_millis(100));
+        }
+        model @ (audio::Model::Missing | audio::Model::Failed) => {
+            let help = format!(
+                "{HELP} Downloads {} MB once.",
+                denoise::SIZE.div_ceil(1_000_000)
+            );
+            ui::setting_row(ui, LABEL, &help, |ui| {
+                let button = ui::secondary(ui, "Download");
+                button.widget_info(|| {
+                    egui::WidgetInfo::labeled(Role::Button, true, "Download AI noise removal")
+                });
+                if button.clicked() {
+                    // It turns on as soon as the download is checked.
+                    s.ai_noise = true;
+                    audio.download_model();
+                }
+            });
+            if model == audio::Model::Failed {
+                ui::error_text(
+                    ui,
+                    Some("Download failed. Check your connection and try again."),
+                );
+            }
+        }
+    }
+    if s.ai_noise && audio.ai_failed() {
+        ui::error_text(
+            ui,
+            Some("AI noise removal couldn't start, so normal noise suppression is on."),
+        );
+    }
 }
 
 fn device_picker(
