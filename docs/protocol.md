@@ -578,8 +578,15 @@ another window, keys while neither the shared window (or a window on the
 shared monitor) has the focus, and anything aimed at RustTalk's own windows
 are dropped; releases always go through. Windows never lets an app inject
 Ctrl+Alt+Del, and it keeps input from reaching apps running as
-administrator unless RustTalk does too. Linux sharers answer `unsupported`
-for now; injection there needs the desktop portal's RemoteDesktop session.
+administrator unless RustTalk does too.
+
+Linux sharers answer `unsupported` for both monitor and window shares. The
+[RemoteDesktop portal](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.RemoteDesktop.html)
+scopes absolute pointer motion to a ScreenCast stream. Clicks and scrolls
+are separate calls that target the compositor's current pointer location,
+which local input can change after the move. Keystrokes follow the
+compositor's keyboard focus, which RustTalk cannot verify against the
+shared source. RustTalk requires input to stay within the shared source.
 
 The API gets the active roster from LiveKit's internal RoomService,
 cached for one second per room, and maps device identities to current

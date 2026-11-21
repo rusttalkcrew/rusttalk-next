@@ -140,6 +140,11 @@ media key and bound to both devices, so LiveKit can't read, forge or
 redirect them, and replayed input is dropped. Nothing about remote control is stored by the API, by
 LiveKit or on either device.
 
+On Linux, RustTalk shares monitor and window video through the ScreenCast
+portal. Remote control is unavailable because the RemoteDesktop portal can
+send clicks, scrolls and keystrokes outside the selected source. RustTalk
+requests only screen capture permission on Linux.
+
 For live files, only the encrypted offer is retained as a chat message.
 The API sees its normal message metadata plus the live routing notice's
 opaque transfer ID, offering and accepting device IDs, nonce, signature,
