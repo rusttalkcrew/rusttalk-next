@@ -98,6 +98,29 @@ const ROLE_NAME: &[u8] = b"W06 Agate Private Role";
 const DEVICE_NAME: &str = "W06 Aster Private Device";
 const HISTORY_ID: &[u8] = b"w06 local history probe";
 
+/// The peer of a DM someone else made pins it, which starts epoch 2 for just the two
+/// of them; both then hold it, so either can post. Done up front, because the
+/// peer's client would otherwise re-key at its next key work, mid-scenario.
+async fn pin_dm_as_peer(
+    peer: &mut KeyClient<'_>,
+    maker: &mut KeyClient<'_>,
+    dm: Scope,
+) -> Result<()> {
+    let maker_person = *maker.identity.certificate.person_id();
+    ensure!(
+        peer.bind_dm(dm.id, maker_person),
+        "the peer couldn't pin the DM"
+    );
+    peer.sync().await?;
+    receive_key(peer, dm, 2).await?;
+    receive_key(maker, dm, 2).await?;
+    ensure!(
+        peer.dm_private(&dm.id, &maker_person),
+        "the peer's re-keyed DM was not private"
+    );
+    Ok(())
+}
+
 async fn receive_key(client: &mut KeyClient<'_>, scope: Scope, epoch: i64) -> Result<()> {
     tokio::time::timeout(Duration::from_secs(5), async {
         while client.key(scope, epoch).is_none() {

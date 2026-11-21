@@ -293,19 +293,27 @@ read: list a channel with that person as the DM, or ask honest apps to wrap
 the DM key to that person's device. The app pins each DM channel to the person
 it was first listed with and doesn't use it if the server relabels it. For a
 pinned DM it accepts an epoch key only from, and wraps it only to, a
-root-certified device of one of the two people, and it sends to a copy only
-when the current epoch key came from such a device. Keys taken before the
-channel was known as a DM are checked again once it is. Both people's apps
-must enforce this: an older app still wraps the key to any device the server
-names. An app that never saw the channel listed as a DM, because the server
-showed it as an ordinary channel, can't apply the check either.
+root-certified device of one of the two people. A key from before the pin may
+already be held by others, for example when the channel was an ordinary
+channel before, so the app re-keys a DM once it pins it: it starts the next
+epoch itself, with a fresh random key, and wraps it only to the pair. It sends
+only on epochs started after its pin whose key came from one of the two
+people. A DM it creates is pinned before the first key is wrapped. If the
+saved pins can't be read, the app blocks that server's DMs instead of pinning
+them again from the server's catalog.
+
+This relies on both people's apps. An older app still wraps the key, also a
+re-keyed one, to any device the server names, so a dishonest server can still
+read along with a peer on an older app. This remains a high risk until both
+people update.
 
 A record that fails to verify or decrypt never merges with a readable copy, so
 a server can't use one to change a message's time or servers, use up its
-notification, or have the author's delete go to that server. Deletes are not
-signed: a server's delete event removes only that server's copy. Only the
-author's own delete, kept on the author's devices and synced between them,
-removes the message from every copy.
+notification, have the author's delete go to that server, or change friend
+state. Deletes are not signed: a server's delete event removes only that
+server's copy. Only the author's own delete of a readable copy, kept on the
+author's devices and synced between them, removes the message from every
+copy.
 
 An archived sender is a device that is no longer in the current directory,
 for example after revocation or removal of its person. Clients accept its

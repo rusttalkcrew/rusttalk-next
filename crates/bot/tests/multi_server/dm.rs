@@ -11,7 +11,7 @@ use rusttalk_core::{
 };
 use serde_json::json;
 
-use super::super::{compose, compose_bytes, receive_key, rejected};
+use super::super::{compose, compose_bytes, pin_dm_as_peer, receive_key, rejected};
 
 const BOTH: &str = "W70 Beryl DM on both servers";
 const REPLY: &str = "W70 Iolite DM reply on both servers";
@@ -85,28 +85,6 @@ fn pinned(client: &mut KeyClient<'_>, dm: Scope, other: [u8; 32]) -> Result<()> 
     Ok(())
 }
 
-/// The peer didn't make the DM, so pinning it starts a new epoch only the two hold;
-/// the maker then gets that epoch.
-async fn rekeyed(
-    peer: &mut KeyClient<'_>,
-    maker: &mut KeyClient<'_>,
-    dm: Scope,
-    maker_person: [u8; 32],
-) -> Result<()> {
-    ensure!(
-        peer.bind_dm(dm.id, maker_person),
-        "the peer couldn't pin the DM"
-    );
-    peer.sync().await?;
-    receive_key(peer, dm, 2).await?;
-    receive_key(maker, dm, 2).await?;
-    ensure!(
-        peer.dm_private(&dm.id, &maker_person),
-        "the peer's re-keyed DM was not private"
-    );
-    Ok(())
-}
-
 /// Wait until the restarted API answers again.
 async fn reachable(server: &Server) -> Result<()> {
     tokio::time::timeout(Duration::from_secs(60), async {
@@ -135,8 +113,8 @@ pub async fn replicas(
     let dms = [dm_a, dm_b];
     assert_ne!(dm_a.id, dm_b.id);
     let owner_person = *owner.0.identity.certificate.person_id();
-    rekeyed(peer.0, owner.0, dm_a, owner_person).await?;
-    rekeyed(peer.1, owner.1, dm_b, owner_person).await?;
+    pin_dm_as_peer(peer.0, owner.0, dm_a).await?;
+    pin_dm_as_peer(peer.1, owner.1, dm_b).await?;
     pinned(owner.0, dm_a, peer_person)?;
     pinned(owner.1, dm_b, peer_person)?;
     pinned(peer.0, dm_a, owner_person)?;
