@@ -55,7 +55,7 @@ pub(super) async fn exercise(
         set_flags(owner, channel, "member", 1).await?;
         refused?;
         println!(
-            "W11 encrypted simulcast camera decoded by a viewer, and refused for a member without video"
+            "W11 encrypted camera decoded by a viewer, and refused for a member without video"
         );
         Ok::<_, anyhow::Error>(())
     };

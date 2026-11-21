@@ -609,14 +609,16 @@ still move a valid label to another track in the same room and epoch,
 as it can move frame-encrypted tracks themselves.
 Volume and mute are local and keyed by track ID.
 
-A screen or window is published as `screen_share` with VP8 simulcast and
+A screen or window is published as `screen_share` with one VP9 layer and
 the same epoch-bound LiveKit GCM frame encryption as audio. Screen labels
 use the app audio wire format with the distinct HKDF info and associated
 data prefix `rusttalk-screen-track-name-v1`. Receivers display “Shared
 screen” if label decryption fails. The desktop portal supplies no title,
 so Linux uses “Shared screen” or “Shared window” based on the source kind.
-A camera is published as `camera` with VP8 simulcast and the same frame
-encryption. Its LiveKit track name is the fixed string `camera`, so the
+A camera is published as `camera` with one VP9 layer and the same frame
+encryption. (With the LiveKit SDK's libwebrtc the top VP8 simulcast and VP9
+SVC layers encode at only a few frames per second; a 60 fps screen keeps its
+frame rate and gives up resolution first.) Its LiveKit track name is the fixed string `camera`, so the
 device name never leaves the sender; receivers show “Camera”. Clients
 offer 480p, 720p or 1080p at 15 or 30 fps and open the camera's closest
 mode. App audio remains a separate publication. Clients join with automatic

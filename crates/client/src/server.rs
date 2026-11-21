@@ -113,6 +113,7 @@ pub struct TrackStats {
     /// The shared app, for an app track.
     pub app: Option<String>,
     pub kbps: f64,
+    pub video: Option<rusttalk_core::client::voice::VideoFormat>,
 }
 
 #[derive(Clone, PartialEq)]

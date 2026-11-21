@@ -129,7 +129,7 @@ voice roster in memory for one second per room and drops expired rooms on the
 next roster lookup. It keeps no voice roster or
 LiveKit join tokens in SQLite. LiveKit sees opaque room and device IDs,
 track IDs and source kinds, viewer subscriptions, routing and timing
-information, negotiated video codec, dimensions and simulcast layers,
+information, negotiated video codec, dimensions and video layers,
 ciphertext sizes, and encrypted media. It can tell that a device shared
 a screen, a camera or an app audio track and see its encrypted track
 label. Camera tracks carry the fixed label `camera`, never the device

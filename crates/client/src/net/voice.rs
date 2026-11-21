@@ -913,6 +913,7 @@ pub(super) async fn voice_stats(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, st
                         })
                         .cloned(),
                     kbps: t.bitrate_bps? / 1000.0,
+                    video: t.video,
                 })
             })
             .collect(),

@@ -181,7 +181,7 @@ a synced setting. Japanese glyphs come from a bundled Noto Sans CJK subset
   verifies an idle viewer receives no video, and checks that a subscribed
   viewer with the wrong key gets no decoded frames and can decode the
   pattern after installing the correct key on the same subscription. The
-  camera scenario publishes the same pattern as a simulcast camera track,
+  camera scenario publishes the same pattern as a camera track,
   decodes it on a second bot, and checks that a member who may speak but
   not share video gets a token LiveKit refuses a camera for. The live file
   scenario revokes data publishing by taking `write`, transfers a 20 MiB

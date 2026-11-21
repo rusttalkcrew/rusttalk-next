@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, ensure};
 use livekit::{
     e2ee::EncryptionType,
-    options::{TrackPublishOptions, VideoCodec, VideoEncoding},
+    options::{DegradationPreference, TrackPublishOptions, VideoCodec, VideoEncoding},
     prelude::{LocalTrack, LocalVideoTrack, RemoteTrack, TrackKind},
     webrtc::video_source::RtcVideoSource,
 };
@@ -31,7 +31,7 @@ impl VoiceRoom {
         self.can_publish_source(livekit_protocol::TrackSource::ScreenShare)
     }
 
-    /// Publish a VP8 simulcast screen track. Its label uses the publication epoch.
+    /// Publish a single-layer VP9 screen track. Its label uses the publication epoch.
     pub async fn publish_screen(
         &self,
         name: &str,
@@ -56,7 +56,7 @@ impl VoiceRoom {
         self.can_publish_source(livekit_protocol::TrackSource::Camera)
     }
 
-    /// Publish a VP8 simulcast camera track. The track name never names the device.
+    /// Publish a single-layer VP9 camera track. The track name never names the device.
     /// Fails at once unless the token grants the camera source (see `can_use_camera`).
     pub async fn publish_camera(
         &self,
@@ -80,6 +80,10 @@ impl VoiceRoom {
         let max_bitrate =
             (u64::from(resolution.width) * u64::from(resolution.height) * u64::from(fps) / 12)
                 .clamp(300_000, 12_000_000);
+        // A 60 fps share is chosen for motion: lose detail before smoothness. Below that,
+        // LiveKit keeps a screen's resolution (readable text) and a camera's frame rate.
+        let degradation_preference = (kind == TrackSource::Screenshare && fps >= 60)
+            .then_some(DegradationPreference::MaintainFramerate);
         let track = LocalVideoTrack::create_video_track(name, RtcVideoSource::Native(source));
         let publication = self
             .room
@@ -88,12 +92,16 @@ impl VoiceRoom {
                 LocalTrack::Video(track),
                 TrackPublishOptions {
                     source: kind,
-                    video_codec: VideoCodec::VP8,
+                    // Measured with the SDK's libwebrtc: the top VP8 simulcast or VP9 SVC
+                    // layer encodes at 1-4 fps, while one VP9 layer holds 1080p60. Every
+                    // client uses the same SDK, so every viewer can decode VP9.
+                    video_codec: VideoCodec::VP9,
                     video_encoding: Some(VideoEncoding {
                         max_bitrate,
                         max_framerate: fps.into(),
                     }),
-                    simulcast: true,
+                    simulcast: false,
+                    degradation_preference,
                     ..Default::default()
                 },
             )

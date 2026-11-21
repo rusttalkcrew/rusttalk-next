@@ -22,6 +22,16 @@ pub struct TrackStats {
     /// Received packets, inbound tracks only; cumulative like the loss.
     pub packets_received: Option<u64>,
     pub bitrate_bps: Option<f64>,
+    /// Video only: the picture received, or the biggest layer sent.
+    pub video: Option<VideoFormat>,
+}
+
+/// The size and frame rate a video track is running at.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VideoFormat {
+    pub width: u32,
+    pub height: u32,
+    pub fps: f64,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -158,6 +168,7 @@ impl VoiceStats {
             packets_lost: None,
             packets_received: None,
             bitrate_bps: None,
+            video: None,
         };
         let bytes = measure(report, &mut track, counters);
         self.traffic.add(source, outbound, &track, bytes);
@@ -170,15 +181,27 @@ fn measure(report: &[RtcStats], track: &mut TrackStats, samples: &mut Samples) -
     let max = |a: Option<f64>, b: f64| Some(a.map_or(b, |a| a.max(b)));
     let mut new_bytes = 0;
     let now = Instant::now();
+    // Audio reports no frame size. Of several sent layers, show the biggest.
+    let video = |track: &mut TrackStats, width, height, fps| {
+        if width > track.video.map_or(0, |video| video.width) {
+            track.video = Some(VideoFormat { width, height, fps });
+        }
+    };
     for stat in report {
         let (id, bytes) = match stat {
             RtcStats::InboundRtp(stat) if !track.outbound => {
+                let i = &stat.inbound;
+                video(track, i.frame_width, i.frame_height, i.frames_per_second);
                 track.jitter_ms = max(track.jitter_ms, stat.received.jitter * 1000.0);
                 *track.packets_lost.get_or_insert(0) += stat.received.packets_lost;
                 *track.packets_received.get_or_insert(0) += stat.received.packets_received;
                 (&stat.rtc.id, stat.inbound.bytes_received)
             }
-            RtcStats::OutboundRtp(stat) if track.outbound => (&stat.rtc.id, stat.sent.bytes_sent),
+            RtcStats::OutboundRtp(stat) if track.outbound => {
+                let o = &stat.outbound;
+                video(track, o.frame_width, o.frame_height, o.frames_per_second);
+                (&stat.rtc.id, stat.sent.bytes_sent)
+            }
             RtcStats::RemoteInboundRtp(stat) if track.outbound => {
                 track.jitter_ms = max(track.jitter_ms, stat.received.jitter * 1000.0);
                 *track.packets_lost.get_or_insert(0) += stat.received.packets_lost;
@@ -231,6 +254,13 @@ mod tests {
         let mut stat = OutboundRtpStats::default();
         stat.rtc.id = id.into();
         stat.sent.bytes_sent = bytes;
+        if id == "h" {
+            (stat.outbound.frame_width, stat.outbound.frame_height) = (1920, 1080);
+            stat.outbound.frames_per_second = 60.0;
+        } else if id == "q" {
+            (stat.outbound.frame_width, stat.outbound.frame_height) = (960, 540);
+            stat.outbound.frames_per_second = 30.0;
+        }
         RtcStats::OutboundRtp(stat)
     }
 
@@ -275,6 +305,14 @@ mod tests {
         let mut stats = snapshot(CallTraffic::default());
         record(&mut stats, TrackSource::Camera, true, &report, &mut samples);
         assert_eq!(stats.tracks[0].packets_lost, Some(5));
+        assert_eq!(
+            stats.tracks[0].video,
+            Some(VideoFormat {
+                width: 1920,
+                height: 1080,
+                fps: 60.0
+            })
+        );
         let bitrate = stats.tracks[0].bitrate_bps.unwrap();
         assert!((75_000.0..=80_000.0).contains(&bitrate), "{bitrate}");
         assert_eq!(stats.traffic.total()[0].bps, bitrate);
@@ -320,6 +358,8 @@ mod tests {
                 &[RtcStats::InboundRtp(inbound)],
                 &mut app_audio,
             );
+            // Audio has no picture.
+            assert_eq!(stats.tracks.last().unwrap().video, None);
             traffic = stats.traffic;
             assert_eq!(traffic.total().map(|value| value.bytes), [expected, 200]);
             assert_eq!(

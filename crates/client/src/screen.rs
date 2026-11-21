@@ -6,14 +6,14 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use eframe::egui::{self, ColorImage};
+use eframe::egui::{self, Color32, ColorImage};
 use futures_util::StreamExt;
 use livekit::webrtc::{prelude::RtcVideoTrack, video_stream::native::NativeVideoStream};
-use rusttalk_core::screen::frame_to_rgba;
 pub use rusttalk_core::screen::{
     Cancelled, ScreenCapture as Capture, ScreenOptions as Options, ScreenSource as Target,
     ScreenSourceKind as Kind, list_sources as targets, start, start_into,
 };
+use rusttalk_core::screen::{frame_bytes, frame_to_rgba_into};
 
 use crate::audio::lock;
 
@@ -106,12 +106,14 @@ impl Video {
             let mut stream = NativeVideoStream::new(track);
             while let Some(frame) = stream.next().await {
                 let converted = tokio::task::spawn_blocking(move || {
-                    let size = [
-                        frame.buffer.width() as usize,
-                        frame.buffer.height() as usize,
-                    ];
-                    frame_to_rgba(frame.buffer.as_ref())
-                        .map(|pixels| ColorImage::from_rgba_unmultiplied(size, &pixels))
+                    let (width, height) = (frame.buffer.width(), frame.buffer.height());
+                    frame_bytes(width, height)?;
+                    // Decoded straight into the image: 1080p frames used to take ~4 ms
+                    // more for a second, per-pixel copy.
+                    let mut image =
+                        ColorImage::filled([width as usize, height as usize], Color32::BLACK);
+                    frame_to_rgba_into(frame.buffer.as_ref(), image.as_raw_mut())?;
+                    anyhow::Ok(image)
                 })
                 .await;
                 let image = match converted {

@@ -16,7 +16,7 @@ use livekit::webrtc::{
 };
 use tokio::{
     task::JoinHandle,
-    time::{MissedTickBehavior, interval, timeout},
+    time::{Instant, sleep_until, timeout},
 };
 
 #[cfg(windows)]
@@ -104,7 +104,8 @@ struct BgraFrame {
     pixels: Vec<u8>,
 }
 
-fn frame_bytes(width: u32, height: u32) -> Result<usize> {
+/// The RGBA size of a frame, refused when out of range: check before allocating one.
+pub fn frame_bytes(width: u32, height: u32) -> Result<usize> {
     ensure!(
         (1..=8192).contains(&width)
             && (1..=8192).contains(&height)
@@ -235,8 +236,19 @@ pub(crate) fn letterbox(frame: I420Buffer, canvas: (u32, u32)) -> I420Buffer {
 
 /// Convert a decoded frame into tightly packed RGBA for display.
 pub fn frame_to_rgba(frame: &dyn VideoBuffer) -> Result<Vec<u8>> {
+    let mut rgba = vec![0; frame_bytes(frame.width(), frame.height())?];
+    frame_to_rgba_into(frame, &mut rgba)?;
+    Ok(rgba)
+}
+
+/// Like `frame_to_rgba`, into a buffer of exactly `frame_bytes`, such as an egui image:
+/// that saves copying every received frame once more.
+pub fn frame_to_rgba_into(frame: &dyn VideoBuffer, rgba: &mut [u8]) -> Result<()> {
     let (width, height) = (frame.width(), frame.height());
-    let size = frame_bytes(width, height)?;
+    ensure!(
+        rgba.len() == frame_bytes(width, height)?,
+        "RGBA buffer does not match the frame size"
+    );
     let converted;
     let frame = if let Some(i420) = frame.as_i420() {
         i420
@@ -244,7 +256,6 @@ pub fn frame_to_rgba(frame: &dyn VideoBuffer) -> Result<Vec<u8>> {
         converted = frame.to_i420();
         &converted
     };
-    let mut rgba = vec![0; size];
     let (ys, us, vs) = frame.strides();
     let (y, u, v) = frame.data();
     // Libyuv names formats by word order: ABGR is R, G, B, A in memory.
@@ -255,12 +266,12 @@ pub fn frame_to_rgba(frame: &dyn VideoBuffer) -> Result<Vec<u8>> {
         us,
         v,
         vs,
-        &mut rgba,
+        rgba,
         width * 4,
         width as i32,
         height as i32,
     );
-    Ok(rgba)
+    Ok(())
 }
 
 /// A screen source owns capture until dropped. Dropping it requests shutdown.
@@ -411,16 +422,19 @@ pub async fn start_into(
         let feeder = source.clone();
         let sizes = size.clone();
         let task = tokio::spawn(async move {
-            let mut tick = interval(options.period());
-            tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+            let period = options.period();
+            let mut next = Instant::now();
             loop {
-                tick.tick().await;
+                // Send each captured frame as it arrives. Resampling on a timer of the
+                // same rate repeated and skipped frames (judder) and added up to a period
+                // of delay. A still screen repeats its last frame every period or so.
+                let changed = timeout(period, frames.changed()).await;
                 if backend.is_finished() {
                     tracing::warn!("screen capture ended");
                     break;
                 }
-                match frames.has_changed() {
-                    Ok(true) => {
+                match changed {
+                    Ok(Ok(())) => {
                         let pending = frames.borrow_and_update();
                         if let Some(next) = pending.as_ref() {
                             sizes.store(pack(next), Relaxed);
@@ -433,10 +447,14 @@ pub async fn start_into(
                             }
                         }
                     }
-                    Ok(false) => (),
-                    Err(_) => break,
+                    Ok(Err(_)) => break,
+                    Err(_) => (),
                 }
                 feeder.capture_frame(&frame);
+                // Thin a faster capture to the chosen rate, on a steady schedule that lets
+                // a frame come a quarter period early (as the PipeWire helper does).
+                next = next.max(Instant::now() - period / 2) + period;
+                sleep_until(next - period / 4).await;
             }
         });
         Ok(ScreenCapture {
@@ -479,6 +497,8 @@ mod tests {
         let frame = bgra_to_i420(5, 3, &pixels, None).unwrap();
         let rgba = frame_to_rgba(&frame).unwrap();
         assert_eq!(rgba.len(), 5 * 3 * 4);
+        let mut wrong = vec![0; 5 * 3 * 4 - 4];
+        assert!(frame_to_rgba_into(&frame, &mut wrong).is_err());
         assert!(rgba[0] > 200 && rgba[1] < 50 && rgba[2] < 50);
         // The same red read back through the RGBA path used for cameras.
         let again = frame_to_rgba(&rgba_to_i420(5, 3, &rgba).unwrap()).unwrap();
