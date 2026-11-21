@@ -115,6 +115,10 @@ fn run() -> Result<()> {
         viewport: ViewportBuilder::default()
             .with_app_id(app_id)
             .with_title("RustTalk")
+            .with_icon(
+                eframe::icon_data::from_png_bytes(include_bytes!("../assets/rusttalk.png"))
+                    .expect("bundled app icon is a valid PNG"),
+            )
             .with_inner_size([1100.0, 700.0])
             .with_min_inner_size([760.0, 480.0]),
         ..Default::default()
