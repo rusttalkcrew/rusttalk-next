@@ -197,12 +197,15 @@ fn capture(fd: OwnedFd, node: u32, serial: Option<u64>, fps: u32) -> Result<()> 
                 return;
             };
             let now = Instant::now();
-            if now < next || CLOSED.load(Relaxed) {
+            let Some(after) = due(now, next, period) else {
+                return;
+            };
+            if CLOSED.load(Relaxed) {
                 return;
             }
             if let Some(data) = buffer.datas_mut().first_mut() {
                 match write_frame(&mut output, info.size(), data) {
-                    Ok(true) => next = now + period,
+                    Ok(true) => next = after,
                     Ok(false) => (),
                     Err(error) => {
                         eprintln!("screen frame: {error:#}");
@@ -238,6 +241,14 @@ fn capture(fd: OwnedFd, node: u32, serial: Option<u64>, fps: u32) -> Result<()> 
         iterate(&loop_)?;
     }
     Ok(())
+}
+
+/// Whether a frame arriving `now` is due, and when the one after it is. A frame may come
+/// a quarter period early and the schedule keeps its own pace, so a screen refreshing at
+/// exactly the chosen rate keeps every frame despite timing jitter (pacing from the last
+/// arrival dropped every early one: half of them). A faster screen is thinned to the rate.
+fn due(now: Instant, next: Instant, period: Duration) -> Option<Instant> {
+    (now + period / 4 >= next).then(|| next.max(now - period / 2) + period)
 }
 
 fn write_frame(
@@ -374,4 +385,33 @@ fn shared_memory() -> Result<Vec<u8>> {
             ))),
         )],
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Frames kept from 10 s of a screen refreshing at `hz` with up to ±1.5 ms of jitter.
+    fn kept(hz: u32, fps: u32) -> u32 {
+        let (start, period) = (Instant::now(), Duration::from_secs(1) / fps);
+        let (mut next, mut kept, mut seed) = (start, 0, 7u32);
+        for frame in 0..hz * 10 {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            let jitter = Duration::from_micros(u64::from(seed >> 16) % 3000);
+            let now = start + Duration::from_secs(1) * frame / hz + jitter;
+            if let Some(after) = due(now, next, period) {
+                next = after;
+                kept += 1;
+            }
+        }
+        kept
+    }
+
+    #[test]
+    fn keeps_the_chosen_rate_despite_jitter() {
+        assert_eq!(kept(60, 60), 600);
+        assert_eq!(kept(30, 30), 300);
+        assert!((595..=605).contains(&kept(144, 60)), "{}", kept(144, 60));
+        assert!((295..=305).contains(&kept(60, 30)), "{}", kept(60, 30));
+    }
 }

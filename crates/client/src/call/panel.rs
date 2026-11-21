@@ -582,7 +582,12 @@ fn details(ui: &mut Ui, stats: &Stats, server: Option<&Server>) {
                     Some(app) => ui.label(format!("{name} · {app}")),
                     None => ui.label(name),
                 };
-                ui.label(format!("{:.0} kbps", track.kbps));
+                let rate = format!("{:.0} kbps", track.kbps);
+                ui.label(match track.video {
+                    // What a video really runs at: a share set to 60 fps may arrive slower.
+                    Some(v) => format!("{}×{} · {:.0} fps · {rate}", v.width, v.height, v.fps),
+                    None => rate,
+                });
                 ui.end_row();
             }
         });

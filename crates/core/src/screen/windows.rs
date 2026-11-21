@@ -126,8 +126,10 @@ pub async fn open(
         } else {
             CursorCaptureSettings::WithoutCursor
         };
+        // A little under the period, so a display refreshing at exactly the chosen rate
+        // is not thinned by timing jitter; the feeder keeps frames to the rate.
         let interval = if GraphicsCaptureApi::is_minimum_update_interval_supported()? {
-            MinimumUpdateIntervalSettings::Custom(options.period())
+            MinimumUpdateIntervalSettings::Custom(options.period() * 3 / 4)
         } else {
             MinimumUpdateIntervalSettings::Default
         };
