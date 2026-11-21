@@ -9,7 +9,7 @@ use std::{
     collections::HashMap,
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering::Relaxed},
+        atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed},
     },
     time::Duration,
 };
@@ -175,6 +175,11 @@ impl<G: Grants> Reconciler<G> {
     /// Follow room changes, wake-ups and, while restricted, a regular refresh that
     /// repairs a lost or failed update. Ends with the room's events.
     pub(super) async fn run(self: Arc<Self>, mut events: UnboundedReceiver<RoomEvent>) {
+        // One clock for the whole run: busy rooms (speakers change all the time) must
+        // not keep pushing the repair back.
+        let first = tokio::time::Instant::now() + self.refresh;
+        let mut refresh = tokio::time::interval_at(first, self.refresh);
+        refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             let refresh = tokio::select! {
                 event = events.recv() => match event {
@@ -183,7 +188,7 @@ impl<G: Grants> Reconciler<G> {
                     Some(_) => continue,
                 },
                 () = self.wake.notified() => false,
-                () = tokio::time::sleep(self.refresh) => true,
+                _ = refresh.tick() => true,
             };
             let force = refresh && self.grants.desired().is_some();
             if let Err(error) = self.apply(force).await {
@@ -214,12 +219,27 @@ pub(super) struct GrantKeys {
     pub(super) watch_keys: HashMap<i64, Key>,
 }
 
+/// Whether our stream sound is published or on its way, which restricts the others.
+#[derive(Default)]
+pub(super) struct Sound {
+    /// Publications in progress: restrict before the track exists.
+    pub(super) publishing: AtomicUsize,
+    /// Published and not stopped by us. A bitrate change or a reconnect republishes
+    /// the track, and it must not reach non-viewers while it briefly has none.
+    pub(super) wanted: AtomicBool,
+}
+
+impl Sound {
+    fn restricts(&self) -> bool {
+        self.publishing.load(Relaxed) > 0 || self.wanted.load(Relaxed)
+    }
+}
+
 /// The real room's permissions: see the module comment.
 pub(super) struct RoomGrants {
     pub(super) room: Arc<Room>,
     pub(super) keys: std::sync::Mutex<GrantKeys>,
-    /// Stream sound being published: restrict before it exists.
-    pub(super) publishing: AtomicUsize,
+    pub(super) sound: Sound,
 }
 
 impl Grants for RoomGrants {
@@ -246,7 +266,7 @@ impl Grants for RoomGrants {
                 (member.identity(), watching)
             })
             .collect();
-        permissions(self.publishing.load(Relaxed) > 0, &local, &members)
+        permissions(self.sound.restricts(), &local, &members)
     }
 
     async fn send(&self, permissions: Permissions) -> Result<()> {
@@ -423,6 +443,65 @@ mod tests {
         // No event, no wake-up: the refresh alone gets it through.
         reconciler.grants.fail.store(false, Relaxed);
         until(|| !reconciler.grants.sent.lock().unwrap().is_empty()).await;
+    }
+
+    #[test]
+    fn a_republished_sound_stays_away_from_non_viewers() {
+        let sound = Sound::default();
+        let members = [(id("viewer"), true), (id("other"), false)];
+        let mic = (sid("mic"), false);
+        {
+            let _publishing = Publishing::start(&sound.publishing);
+            assert!(sound.restricts(), "restricted before the track exists");
+        }
+        sound.wanted.store(true, Relaxed);
+        let before = permissions(
+            sound.restricts(),
+            &[mic.clone(), (sid("sound"), true)],
+            &members,
+        );
+        // A bitrate change: the old track is gone, the new one not yet listed.
+        let between = permissions(sound.restricts(), std::slice::from_ref(&mic), &members);
+        assert_eq!(between, before);
+        let other = &between.as_ref().unwrap()[0];
+        assert_eq!(other, &(id("other"), Some(vec![sid("mic")])));
+        // Republished under a new ID, which the non-viewer's list does not hold.
+        let after = permissions(
+            sound.restricts(),
+            &[mic.clone(), (sid("new"), true)],
+            &members,
+        );
+        assert_eq!(after, before);
+        // Only our own stop lifts it.
+        sound.wanted.store(false, Relaxed);
+        assert_eq!(permissions(sound.restricts(), &[mic], &members), None);
+    }
+
+    #[tokio::test]
+    async fn repair_happens_while_other_events_keep_coming() {
+        let fake = Fake::new(restricted(false));
+        fake.fail.store(true, Relaxed);
+        fake.gate.add_permits(10_000);
+        let reconciler = Arc::new(Reconciler::with_refresh(fake, Duration::from_millis(50)));
+        let (events, receiver) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(reconciler.clone().run(receiver));
+        reconciler.wake();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        reconciler.grants.fail.store(false, Relaxed);
+        // Speakers change every 10 ms, faster than the refresh period.
+        let noise = tokio::spawn(async move {
+            loop {
+                let busy = RoomEvent::ActiveSpeakersChanged {
+                    speakers: Vec::new(),
+                };
+                if events.send(busy).is_err() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+        until(|| !reconciler.grants.sent.lock().unwrap().is_empty()).await;
+        noise.abort();
     }
 
     #[tokio::test]

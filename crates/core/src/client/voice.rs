@@ -8,7 +8,10 @@ mod stream_audio;
 mod track_name;
 mod watch;
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{Arc, atomic::Ordering::Relaxed},
+};
 
 use anyhow::{Context, Result, ensure};
 use hkdf::Hkdf;
@@ -207,7 +210,7 @@ impl KeyClient<'_> {
                 stream_names: stream_names.clone(),
                 watch_keys: watch_keys.clone(),
             }),
-            publishing: Default::default(),
+            sound: Default::default(),
         }));
         let grants_task = tokio::spawn(grants.clone().run(room.subscribe()));
         Ok(VoiceRoom {
@@ -526,10 +529,15 @@ impl VoiceRoom {
             .context("missing current media key")?;
         let name = track_name::encrypt(key, track_name::STREAM_AUDIO, self.epoch, name)?;
         // Keep it from people who don't watch before it exists.
-        let _publishing = stream_audio::Publishing::start(&self.grants.grants.publishing);
+        let _publishing = stream_audio::Publishing::start(&self.grants.grants.sound.publishing);
         self.grants.apply(false).await?;
-        self.publish_audio_track(&name, source, TrackSource::ScreenshareAudio)
-            .await
+        let publication = self
+            .publish_audio_track(&name, source, TrackSource::ScreenshareAudio)
+            .await?;
+        // Stays restricted until we unpublish our last stream sound ourselves, also while
+        // a bitrate change or a reconnect republishes it.
+        self.grants.grants.sound.wanted.store(true, Relaxed);
+        Ok(publication)
     }
 
     /// The display name for a subscribed app track, if this is app or stream audio.
@@ -610,7 +618,17 @@ impl VoiceRoom {
 
     /// Stop an audio publication, such as one shared app, while keeping the voice session open.
     pub async fn unpublish_audio(&self, sid: &TrackSid) -> Result<()> {
-        self.room.local_participant().unpublish_track(sid).await?;
+        let local = self.room.local_participant();
+        local.unpublish_track(sid).await?;
+        let sound_left = local.track_publications().values().any(|p| {
+            p.source() == TrackSource::ScreenshareAudio
+                && track_name::decrypt(&self.stream_names, track_name::STREAM_AUDIO, &p.name())
+                    .is_some()
+        });
+        if !sound_left {
+            self.grants.grants.sound.wanted.store(false, Relaxed);
+            self.grants.wake();
+        }
         Ok(())
     }
 
