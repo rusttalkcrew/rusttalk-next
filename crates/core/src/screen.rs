@@ -1,6 +1,12 @@
 //! Screen selection, capture and pixel conversion for native video tracks.
 
-use std::time::Duration;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering::Relaxed},
+    },
+    time::Duration,
+};
 
 use anyhow::{Context, Result, ensure};
 use livekit::webrtc::{
@@ -13,12 +19,19 @@ use tokio::{
     time::{MissedTickBehavior, interval, timeout},
 };
 
+#[cfg(windows)]
+#[path = "screen/input_windows.rs"]
+mod input;
 #[cfg(target_os = "linux")]
 #[path = "screen/linux.rs"]
 mod platform;
 #[cfg(windows)]
 #[path = "screen/windows.rs"]
 mod platform;
+
+/// Whether this system can put a remote controller's input into a share. Linux needs
+/// the desktop portal's RemoteDesktop session, which is not wired up yet.
+pub const REMOTE_CONTROL: bool = cfg!(windows);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ScreenSourceKind {
@@ -255,12 +268,78 @@ pub struct ScreenCapture {
     pub name: String,
     pub source: NativeVideoSource,
     task: JoinHandle<()>,
+    #[cfg(windows)]
+    target: input::Target,
+    /// The published size, when frames are letterboxed into an earlier share's track.
+    canvas: Option<(u32, u32)>,
+    /// The newest captured frame's size, packed as width << 32 | height.
+    size: Arc<AtomicU64>,
 }
 
 impl ScreenCapture {
     pub fn is_finished(&self) -> bool {
         self.task.is_finished()
     }
+
+    /// Puts a remote controller's input into this share. It only acts where
+    /// `REMOTE_CONTROL` is true.
+    pub fn remote(&self) -> Remote {
+        Remote {
+            #[cfg(windows)]
+            target: self.target,
+            canvas: self.canvas,
+            size: self.size.clone(),
+        }
+    }
+}
+
+/// Puts a remote controller's input into what is shared, and nowhere else.
+pub struct Remote {
+    #[cfg(windows)]
+    target: input::Target,
+    canvas: Option<(u32, u32)>,
+    size: Arc<AtomicU64>,
+}
+
+impl Remote {
+    /// Where a point on the published picture (0 to 1 each way) is on the captured
+    /// screen or window; `None` on the black bars of a letterboxed share.
+    pub fn point(&self, x: f32, y: f32) -> Option<(f32, f32)> {
+        let size = self.size.load(Relaxed);
+        to_source((x, y), ((size >> 32) as u32, size as u32), self.canvas)
+    }
+
+    /// Inject one validated input event. Positions outside the share, and keys while
+    /// something else has the focus, are dropped.
+    pub fn inject(&self, event: &crate::control::Input) -> Result<()> {
+        ensure!(event.valid(), "invalid remote input");
+        #[cfg(windows)]
+        return input::inject(self.target, event, |x, y| self.point(x, y));
+        #[cfg(not(windows))]
+        anyhow::bail!("remote control is not supported on this system yet")
+    }
+}
+
+/// Undo `letterbox`: a point on the canvas (0 to 1) as a point on the source frame.
+fn to_source(
+    point: (f32, f32),
+    source: (u32, u32),
+    canvas: Option<(u32, u32)>,
+) -> Option<(f32, f32)> {
+    let Some(canvas) = canvas else {
+        return Some(point);
+    };
+    if source.0 == 0 || source.1 == 0 {
+        return None;
+    }
+    let (w, h, x, y) = fit(source, canvas);
+    let sx = (point.0 * canvas.0 as f32 - x as f32) / w as f32;
+    let sy = (point.1 * canvas.1 as f32 - y as f32) / h as f32;
+    ((0.0..=1.0).contains(&sx) && (0.0..=1.0).contains(&sy)).then_some((sx, sy))
+}
+
+fn pack(frame: &BgraFrame) -> u64 {
+    u64::from(frame.width) << 32 | u64::from(frame.height)
 }
 
 impl Drop for ScreenCapture {
@@ -292,6 +371,8 @@ pub async fn start_into(
     #[cfg(any(target_os = "linux", windows))]
     {
         options.validate()?;
+        #[cfg(windows)]
+        let target = input::Target::from(source.target);
         let (name, mut frames, backend) = platform::open(source, options, restore_token).await?;
         timeout(Duration::from_secs(8), frames.changed())
             .await
@@ -308,12 +389,13 @@ pub async fn start_into(
                 None => frame,
             })
         };
-        let first = convert(
-            frames
-                .borrow_and_update()
-                .as_ref()
-                .context("missing first screen frame")?,
-        )?;
+        let size = Arc::new(AtomicU64::new(0));
+        let first = {
+            let frame = frames.borrow_and_update();
+            let frame = frame.as_ref().context("missing first screen frame")?;
+            size.store(pack(frame), Relaxed);
+            convert(frame)?
+        };
         let source = into.unwrap_or_else(|| {
             NativeVideoSource::new(
                 VideoResolution {
@@ -327,6 +409,7 @@ pub async fn start_into(
         let mut frame = VideoFrame::new(VideoRotation::VideoRotation0, first);
         source.capture_frame(&frame);
         let feeder = source.clone();
+        let sizes = size.clone();
         let task = tokio::spawn(async move {
             let mut tick = interval(options.period());
             tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -340,6 +423,7 @@ pub async fn start_into(
                     Ok(true) => {
                         let pending = frames.borrow_and_update();
                         if let Some(next) = pending.as_ref() {
+                            sizes.store(pack(next), Relaxed);
                             match convert(next) {
                                 Ok(next) => frame.buffer = next,
                                 Err(error) => {
@@ -355,7 +439,15 @@ pub async fn start_into(
                 feeder.capture_frame(&frame);
             }
         });
-        Ok(ScreenCapture { name, source, task })
+        Ok(ScreenCapture {
+            name,
+            source,
+            task,
+            #[cfg(windows)]
+            target,
+            canvas,
+            size,
+        })
     }
     #[cfg(not(any(target_os = "linux", windows)))]
     {
@@ -435,6 +527,33 @@ mod tests {
         let (w, h, x, y) = fit((7, 1081), (1919, 1079));
         assert!(w % 2 == 0 && h % 2 == 0 && x % 2 == 0 && y % 2 == 0);
         assert!(w + x <= 1919 && h + y <= 1079);
+    }
+
+    #[test]
+    fn remote_points_map_to_the_source() {
+        // Not letterboxed: the picture is the source.
+        assert_eq!(
+            to_source((0.25, 1.0), (1920, 1080), None),
+            Some((0.25, 1.0))
+        );
+        // A 4:3 window shown in a 16:9 track: bars at the sides.
+        let canvas = Some((1920, 1080));
+        let (w, _, x, _) = fit((1440, 1080), (1920, 1080));
+        assert_eq!((w, x), (1440, 240));
+        assert_eq!(
+            to_source((0.5, 0.5), (1440, 1080), canvas),
+            Some((0.5, 0.5))
+        );
+        let left_edge = 240.0 / 1920.0;
+        assert_eq!(
+            to_source((left_edge, 0.0), (1440, 1080), canvas),
+            Some((0.0, 0.0))
+        );
+        // On the bars: nothing to click.
+        assert_eq!(to_source((0.05, 0.5), (1440, 1080), canvas), None);
+        assert_eq!(to_source((0.95, 0.5), (1440, 1080), canvas), None);
+        // No frame yet.
+        assert_eq!(to_source((0.5, 0.5), (0, 0), canvas), None);
     }
 
     #[test]

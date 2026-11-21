@@ -7,6 +7,8 @@ pub mod camera;
 pub mod capture;
 #[cfg(feature = "client")]
 pub mod client;
+#[cfg(feature = "voice")]
+pub mod control;
 pub mod identity;
 pub mod index;
 pub mod keys;

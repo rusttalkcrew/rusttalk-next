@@ -1,5 +1,6 @@
 //! Pinned, end-to-end encrypted voice sessions and caller-owned audio I/O.
 
+mod control;
 mod live_file;
 mod screen;
 mod stats;
@@ -163,6 +164,7 @@ impl KeyClient<'_> {
         let url = signaling_url(server)?;
         let name_keys = self.name_keys(channel, track_name::APP_AUDIO);
         let screen_names = self.name_keys(channel, track_name::SCREEN);
+        let control_keys = self.name_keys(channel, control::LABEL);
         let key = media_key(key, &server.server_id, channel, epoch);
         let provider = KeyProvider::with_shared_key(
             KeyProviderOptions {
@@ -198,6 +200,7 @@ impl KeyClient<'_> {
             provider,
             name_keys,
             screen_names,
+            control_keys,
             stats: stats::Sampler::default(),
             files: live_file::LiveFiles::default(),
         })
@@ -261,6 +264,8 @@ pub struct VoiceRoom {
     provider: KeyProvider,
     name_keys: HashMap<i64, Key>,
     screen_names: HashMap<i64, Key>,
+    /// Seal remote control messages; only the current epoch's is used.
+    control_keys: HashMap<i64, Key>,
     stats: stats::Sampler,
     files: live_file::LiveFiles,
 }
@@ -307,6 +312,7 @@ impl VoiceRoom {
         let (epoch, key) = keys.current_key(scope(&self.channel))?;
         self.name_keys = keys.name_keys(&self.channel, track_name::APP_AUDIO);
         self.screen_names = keys.name_keys(&self.channel, track_name::SCREEN);
+        self.control_keys = keys.name_keys(&self.channel, control::LABEL);
         if epoch <= self.epoch {
             return Ok(false);
         }
@@ -343,7 +349,13 @@ impl VoiceRoom {
                     continue;
                 }
                 RoomEvent::Disconnected { .. } => self.files.disconnect(),
-                // Only the file protocol authenticates its data payloads independently.
+                // Sealed remote control messages; open them with `open_control`.
+                RoomEvent::DataReceived {
+                    topic: Some(topic),
+                    participant: Some(_),
+                    ..
+                } if topic == control::TOPIC => {}
+                // Only the file and control protocols authenticate their data payloads.
                 RoomEvent::DataReceived { .. }
                 | RoomEvent::ChatMessage { .. }
                 | RoomEvent::TranscriptionReceived { .. }

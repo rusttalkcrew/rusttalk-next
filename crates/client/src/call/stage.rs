@@ -11,12 +11,17 @@ use eframe::egui::{
 };
 use rusttalk_core::client::voice::VoiceStatus;
 
-use super::{Voice, join, ring, sound_badges, stop_watching, stream_menu, upload, watch};
+use super::{
+    Voice, call_server, join, remote::Control, ring, sound_badges, stop_watching, stream_menu,
+    upload, watch,
+};
 use crate::{
     home::{Home, face},
+    net::Command,
     server::{Id, Peer, Screen, Server},
     ui::{self, Look},
 };
+use rusttalk_core::control::Input;
 
 /// Tiles keep this shape in the grid and the strip.
 const ASPECT: f32 = 16.0 / 9.0;
@@ -179,13 +184,18 @@ fn cover_uv(size: Vec2, area: Vec2) -> Rect {
     }
 }
 
+/// Where a picture of `size` shows whole in `rect`.
+fn fitted(rect: Rect, size: Vec2) -> Rect {
+    let scale = (rect.width() / size.x).min(rect.height() / size.y);
+    Rect::from_center_size(rect.center(), size * scale)
+}
+
 fn paint_picture(ui: &Ui, rect: Rect, picture: Picture) {
     let (rect, mut uv) = if picture.cover {
         (rect, cover_uv(picture.size, rect.size()))
     } else {
-        let scale = (rect.width() / picture.size.x).min(rect.height() / picture.size.y);
-        let fitted = Rect::from_center_size(rect.center(), picture.size * scale);
-        (fitted, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)))
+        let whole = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+        (fitted(rect, picture.size), whole)
     };
     if picture.mirrored {
         uv = Rect::from_min_max(pos2(uv.max.x, uv.min.y), pos2(uv.min.x, uv.max.y));
@@ -274,6 +284,10 @@ enum Act {
     Watch(Screen),
     StopWatching,
     ShowVideo(Id, bool),
+    RequestControl(String),
+    ReleaseControl,
+    /// Input for the screen we control.
+    Control(Vec<Input>),
 }
 
 /// The tiles in this room: shared screens first, then people.
@@ -461,18 +475,23 @@ pub fn stage(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
         );
     }
     let audio = home.voice.audio.clone();
-    let stage = &home.voice.stage;
+    let (stage, control) = (&home.voice.stage, &mut home.voice.control);
     for (at, (entry, target)) in shown.iter().zip(&targets).enumerate() {
         let rect = animate(&ctx, &entry.tile, *target, rect);
         let is_big = big == Some(at);
         let focused = stage.focus.as_ref() == Some(&entry.tile);
+        let remote = match &entry.tile {
+            Tile::Screen(sid) if joined && !entry.me => control.screen(sid),
+            _ => None,
+        };
         let state = TileState {
             joined,
             big: is_big,
             spotlight: big.is_some(),
             focused,
+            remote,
         };
-        tile(ui, rect, entry, state, server, &audio, &mut acts);
+        tile(ui, rect, entry, state, server, &audio, control, &mut acts);
     }
     for (at, entry) in bubbles.iter().enumerate() {
         let spot = bubble(at, rect, GAP);
@@ -554,10 +573,13 @@ struct TileState {
     /// Someone is big, so the others are in the strip.
     spotlight: bool,
     focused: bool,
+    /// This screen is ours to control (`true`), or we asked to.
+    remote: Option<bool>,
 }
 
 /// One tile: picture or video, speaking outline, name and badges, and its actions
 /// while hovered.
+#[allow(clippy::too_many_arguments)]
 fn tile(
     ui: &mut Ui,
     rect: Rect,
@@ -565,6 +587,7 @@ fn tile(
     state: TileState,
     server: &Server,
     audio: &crate::audio::Audio,
+    control: &mut Control,
     acts: &mut Vec<Act>,
 ) {
     let c = ui::colors(ui);
@@ -618,7 +641,21 @@ fn tile(
         Tile::Person(_) => None,
     };
     let watch_click = screen.filter(|_| !entry.watched && state.joined);
-    if state.spotlight && !state.big {
+    let controlling = state.remote == Some(true);
+    if controlling {
+        // Clicks and keys here go to the shared screen, not to the stage.
+        let label = format!("Control {}", entry.name);
+        response.widget_info(|| WidgetInfo::labeled(Role::Group, true, &label));
+        if let Some(picture) = &entry.picture {
+            let (inputs, stop) = control.capture(ui, &response, fitted(rect, picture.size));
+            if !inputs.is_empty() {
+                acts.push(Act::Control(inputs));
+            }
+            if stop {
+                acts.push(Act::ReleaseControl);
+            }
+        }
+    } else if state.spotlight && !state.big {
         let label = format!("Focus {}", entry.name);
         response.widget_info(|| WidgetInfo::labeled(Role::Button, true, &label));
         if response.clicked() {
@@ -633,7 +670,7 @@ fn tile(
     } else {
         response.widget_info(|| WidgetInfo::labeled(Role::Group, true, &entry.name));
     }
-    if response.double_clicked() {
+    if response.double_clicked() && !controlling {
         acts.push(if state.focused {
             Act::Unfocus
         } else {
@@ -653,8 +690,48 @@ fn tile(
             }
         });
     }
+    if let Some(on) = state.remote {
+        let sharer = entry.peer.name(server);
+        remote_tag(ui, rect, entry, on, response.has_focus(), &sharer);
+    }
     name_tag(ui, rect, entry, audio);
     tools(ui, rect, entry, state, audio, acts);
+}
+
+/// While asking for or having control of a screen: an outline, and what is going on.
+fn remote_tag(ui: &Ui, rect: Rect, entry: &Entry, on: bool, focused: bool, sharer: &str) {
+    let accent = ui::accent(ui).base;
+    if on {
+        let width = if focused { 3.0 } else { 2.0 };
+        ui.painter().rect_stroke(
+            rect,
+            ui::RADIUS,
+            Stroke::new(width, accent),
+            StrokeKind::Inside,
+        );
+    }
+    let text = match (on, focused) {
+        (false, _) => format!("Asking {sharer} for control…"),
+        (true, true) => format!("You are controlling {} · Hold Esc to stop", entry.name),
+        (true, false) => format!("Click to control {}", entry.name),
+    };
+    let room = rect.width() - 2.0 * GAP - 16.0;
+    if room < ui::TEXT_SMALL || rect.height() < 2.0 * TOOL.y + 2.0 * GAP {
+        return;
+    }
+    let mut job =
+        LayoutJob::simple_singleline(text, FontId::proportional(ui::TEXT_SMALL), ui::ON_FILL);
+    job.wrap = TextWrapping::truncate_at_width(room);
+    let painter = ui.painter();
+    let galley = painter.layout_job(job);
+    let pad = vec2(8.0, 3.0);
+    // Just above the name tag, which has the same height, clear of the hover tools.
+    let size = galley.size() + 2.0 * pad;
+    let at = pos2(rect.left() + GAP, rect.bottom() - GAP - 2.0 * size.y - 4.0);
+    let tag = Rect::from_min_size(at, size);
+    let fill = if on { accent } else { ui::OVERLAY_BUTTON };
+    painter.rect_filled(tag, ui::RADIUS_S, fill);
+    painter.galley(tag.min + pad, galley, ui::ON_FILL);
 }
 
 /// Where a tile without video shows the person's picture: centred, or at the left
@@ -787,8 +864,10 @@ fn tools(
     let volume = is_person && !entry.me && !entry.peer.unknown && state.joined;
     let full = entry.picture.is_some();
     let stop = entry.watched;
+    // You need to see a screen to control it.
+    let remote = !is_person && !entry.me && state.joined && entry.watched && full;
     // In order of importance; the first ones win on a small tile.
-    let wanted = [true, is_person, full, volume, stop];
+    let wanted = [true, is_person, full, remote, volume, stop];
     let count = wanted.iter().filter(|on| **on).count().min(fits);
     let width = count as f32 * (TOOL.x + 4.0);
     let bar = Rect::from_min_size(
@@ -827,6 +906,20 @@ fn tools(
     }
     if full && room() && ui::icon_button(ui, "⛶", "Full screen", Look::Plain, TOOL).clicked() {
         acts.push(Act::Full(entry.tile.clone()));
+    }
+    if remote && room() {
+        let on = Look::On(ui::accent(ui).base);
+        let (tip, look) = match state.remote {
+            None => ("Request control", Look::Plain),
+            Some(false) => ("Cancel request", on),
+            Some(true) => ("Stop control", on),
+        };
+        if ui::icon_button(ui, "🖱", tip, look, TOOL).clicked() {
+            acts.push(match (&entry.tile, state.remote) {
+                (Tile::Screen(sid), None) => Act::RequestControl(sid.clone()),
+                _ => Act::ReleaseControl,
+            });
+        }
     }
     if volume && room() {
         let button = ui::icon_button(ui, "🔊", "Volume", Look::Plain, TOOL);
@@ -876,7 +969,16 @@ fn apply(home: &mut Home, acts: Vec<Act>) {
             Act::ShowVideo(person, false) => {
                 home.voice.hidden.insert(person);
             }
+            Act::RequestControl(sid) => send(home, Command::RequestControl(sid)),
+            Act::ReleaseControl => send(home, Command::ReleaseControl),
+            Act::Control(inputs) => send(home, Command::ControlInput(inputs)),
         }
+    }
+}
+
+fn send(home: &Home, command: Command) {
+    if let Some(server) = call_server(home) {
+        server.send(command);
     }
 }
 
@@ -920,20 +1022,58 @@ pub fn full_view(ui: &mut Ui, home: &mut Home) {
         voice.stage.full = None;
         return;
     }
-    let mut exit = ui.input(|input| input.key_pressed(Key::Escape));
+    let controlling = match &tile {
+        Tile::Screen(sid) => voice.control.screen(sid) == Some(true),
+        Tile::Person(_) => false,
+    };
+    // While controlling, Escape belongs to the shared screen.
+    let mut exit = !controlling && ui.input(|input| input.key_pressed(Key::Escape));
+    let heading = if controlling {
+        format!("You are controlling {name} · Hold Esc to stop")
+    } else {
+        name
+    };
     ui.horizontal(|ui| {
-        ui.label(ui::bold(&name));
+        ui.label(ui::bold(&heading));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             exit |= ui::secondary(ui, "Exit full screen").clicked();
         });
     });
     ui.add_space(ui::SPACE_S);
-    let (rect, _) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
+    let sense = if controlling {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(ui.available_size(), sense);
     match picture {
         Some(mut picture) => {
             // Whole, not cropped, now that it has the room.
             picture.cover = false;
             paint_picture(ui, rect, picture);
+            if controlling {
+                let (inputs, stop) =
+                    voice
+                        .control
+                        .capture(ui, &response, fitted(rect, picture.size));
+                let accent = ui::accent(ui).base;
+                ui.painter().rect_stroke(
+                    fitted(rect, picture.size),
+                    0.0,
+                    Stroke::new(2.0, accent),
+                    StrokeKind::Outside,
+                );
+                if !inputs.is_empty() {
+                    send(home, Command::ControlInput(inputs));
+                }
+                if stop {
+                    send(home, Command::ReleaseControl);
+                }
+                if exit {
+                    home.voice.stage.full = None;
+                }
+                return;
+            }
         }
         None => {
             ui.painter().text(

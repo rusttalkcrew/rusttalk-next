@@ -396,7 +396,8 @@ base64url of SHA-256 over `"rusttalk-voice-device-v1" || server_id ||
 device_signing_public_key`, with each ID as 32 raw bytes. It carries
 no display name or metadata. It permits subscription. Data publication
 requires channel `write`. Clients consume byte streams only through the
-independently authenticated live file protocol and drop other data events.
+independently authenticated live file protocol, and data packets only
+on the remote control topic (see below), and drop other data events.
 Track publication requires
 the relevant flag from at least one assigned role. The `speak` grant
 allows `microphone` and `screen_share_audio`. The independent `video`
@@ -433,6 +434,69 @@ subscription disabled, subscribe to encrypted audio when announced, and
 subscribe to each encrypted video track only while the viewer chooses it:
 a watched screen, or a camera while its person's tile is on screen and
 the viewer has not turned that person's video off.
+
+### Remote control
+
+A viewer of a shared screen can ask its sharer for control of the mouse and
+keyboard. The sharer must allow each request, only one person asks or
+controls at a time, and nothing is ever accepted automatically. Messages are
+LiveKit data packets with topic `rusttalk.control`, sent with
+`destination_identities` set to the one other device. Each payload is the
+channel-key epoch as a big-endian i64, then a 24-byte random nonce and the
+XChaCha20-Poly1305 ciphertext and tag of a JSON message. The key is 32 bytes
+of HKDF-SHA256 from that epoch's room media key with no salt and info
+`rusttalk-control-v1`. The associated data is that literal, the epoch as a
+big-endian i64, then the sender's and the recipient's LiveKit identity, each
+preceded by its byte length as a big-endian u32. Receivers accept only the
+current epoch and payloads up to 1024 bytes, open with the sender identity
+LiveKit reports and their own, and drop anything that fails to authenticate,
+decode or validate. Mouse moves go lossy; everything else is reliable.
+The SFU alone can't read or forge these messages. As with media frames,
+another member of the channel who holds the media key and controls the SFU
+could claim a different sender identity.
+
+| Message (`t`) | From | Fields |
+| --- | --- | --- |
+| `request` | Viewer | `request` (16 random bytes), `screen` (the screen's track ID, at most 64 bytes) |
+| `withdraw` | Viewer | `request`: stop asking, or stop controlling |
+| `grant` | Sharer | `request`, `session` (16 fresh random bytes) |
+| `deny` | Sharer | `request`, `reason`: `denied`, `busy` or `unsupported` |
+| `revoke` | Sharer | `request`: control taken back |
+| `input` | Viewer | `session`, `seq` (u64), `input` |
+
+`input` is one of `move {x, y}`, `button {button, down, x, y}` with button
+`left`, `right` or `middle`, `scroll {x, y}` in wheel notches (positive
+`y` scrolls up, positive `x` left, each at most 10 either way), and
+`key {key, down}`. Positions run from 0 to 1 across the published picture.
+`key` names a physical key by its US-layout position; only the keys listed in
+`rusttalk_core::control::KEYS` (letters, digits, punctuation, F1–F12,
+modifiers, navigation and editing keys) are valid, so the sharer's own
+layout picks the character. The Windows key, media keys, Print Screen and
+Pause are never sent.
+
+The sharer denies a request for a screen it isn't sharing, from a device it
+can't match to a member, or while another request is open or someone is in
+control (`busy`). A system that can't inject input answers `unsupported`
+without asking. An unanswered request lapses after 30 seconds. An answer
+names the request it answers, so a late "Allow" never grants a newer
+request. The sharer injects `input` only from the granted device with the
+granted `session`, and only when `seq` is higher than the last one seen on
+the same lane (moves, or everything else), which drops replays and stale
+moves. Control ends when the sharer stops it, the viewer withdraws or stops
+watching, either leaves, or the share stops or switches to another source.
+The sharer then releases every key and button the controller still held.
+
+The viewer sends input only while the screen's tile (or its full screen
+view) has the keyboard focus; holding Escape for one second stops
+controlling. On Windows the sharer injects with `SendInput`: positions map
+to the shared monitor, or to the shared window's visible frame, undoing any
+letterboxing after a change of source. Pointer events that would land on
+another window, keys while neither the shared window (or a window on the
+shared monitor) has the focus, and anything aimed at RustTalk's own windows
+are dropped; releases always go through. Windows never lets an app inject
+Ctrl+Alt+Del, and it keeps input from reaching apps running as
+administrator unless RustTalk does too. Linux sharers answer `unsupported`
+for now; injection there needs the desktop portal's RemoteDesktop session.
 
 The API gets the active roster from LiveKit's internal RoomService,
 cached for one second per room, and maps device identities to current
