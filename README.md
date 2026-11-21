@@ -59,3 +59,7 @@ Optional automatic patch updates (off by default, no backup or rollback):
 - [Work order](docs/work-order.md)
 
 License: [MIT](LICENSE). The bundled [Inter](https://rsms.me/inter/) font is under the [SIL Open Font License 1.1](crates/client/assets/fonts/Inter-LICENSE.txt).
+[Twemoji](https://github.com/jdecked/twemoji) graphics by Twitter, Inc. and other
+contributors are licensed under [CC BY 4.0](crates/client/assets/emoji/TWEMOJI-LICENSE.txt).
+The bundled [Emojibase data](crates/client/assets/emoji/README.md) is under the
+[MIT license](crates/client/assets/emoji/EMOJIBASE-LICENSE.txt).

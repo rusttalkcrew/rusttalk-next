@@ -9,11 +9,13 @@ use eframe::egui::{
     RichText, Shadow, Stroke, Style, TextStyle, Theme, Ui, Vec2, Visuals, style::Selection,
 };
 
+mod completion;
 mod menu;
 mod page;
 mod theme;
 mod widgets;
 
+pub use completion::completion;
 pub use menu::{
     Item, Menu, context_menu, is_open as menu_open, menu, menu_above, menu_below, menu_wide,
 };
@@ -121,6 +123,7 @@ pub fn accent(ui: &Ui) -> &'static Accent {
 /// Set fonts, sizes and spacing once at start, and the default look.
 pub fn install(ctx: &Context) {
     ctx.set_fonts(fonts());
+    crate::emoji::install(ctx);
     ctx.all_styles_mut(base_style);
     apply(ctx, Appearance::default());
 }
@@ -170,6 +173,12 @@ fn fonts() -> FontDefinitions {
         .families
         .insert(FontFamily::Proportional, family(INTER));
     fonts.families.insert(bold_family(), family(INTER_SEMIBOLD));
+    fonts
+        .families
+        .insert(crate::emoji::family(false), family(INTER));
+    fonts
+        .families
+        .insert(crate::emoji::family(true), family(INTER_SEMIBOLD));
     fonts
 }
 
@@ -262,7 +271,9 @@ fn theme(visuals: &mut Visuals, c: &Palette, accent: &Accent) {
 
 /// SemiBold text, for names and short emphasis.
 pub fn bold(text: impl Into<String>) -> RichText {
-    RichText::new(text).family(bold_family()).strong()
+    RichText::new(text)
+        .family(crate::emoji::family(true))
+        .strong()
 }
 
 /// A pane or card title.
