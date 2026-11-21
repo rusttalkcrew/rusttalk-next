@@ -1191,7 +1191,8 @@ impl Home {
                 }
             }
             Update::Unsent(address, draft) => {
-                let Some(index) = self.index(&address) else {
+                // A poke's note doesn't belong in the composer, where it would go out as text.
+                let Some(index) = self.index(&address).filter(|_| !draft.poke) else {
                     return;
                 };
                 let me = self.servers[index].dir.me;
