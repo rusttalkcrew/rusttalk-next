@@ -246,7 +246,7 @@ async fn run() -> Result<()> {
 async fn serve(app: App) -> io::Result<()> {
     let expiry = tokio::spawn(store::expire_records(app.db.clone()));
     // Apply mutes and access changes that a restart or LiveKit outage left unapplied.
-    voice::enforce(&app, None);
+    voice::start_enforcer(&app);
     let publisher = tokio::spawn(index::refresh(app.clone(), app.listing_changed.subscribe()));
     let file_expiry = tokio::spawn(files::expire(app.clone()));
     let app = Router::new()

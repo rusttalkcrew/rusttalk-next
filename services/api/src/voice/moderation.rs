@@ -20,7 +20,7 @@ use serde::Deserialize;
 use serde_json::json;
 use sqlx::{SqliteConnection, query, query_scalar};
 
-use super::{Outcome, configured, enforce, require_voice_read};
+use super::{Outcome, configured, enforce_person, require_voice_read};
 use crate::{
     ApiError, ApiResult, App,
     auth::{authenticate, authenticate_read},
@@ -104,7 +104,7 @@ async fn set_muted(
     }
     // LiveKit takes or gives back the sources now, also for devices already in a room.
     // Setting it again reapplies it, should an earlier attempt have failed.
-    enforce(app, None);
+    enforce_person(app, &person);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -177,8 +177,8 @@ async fn confirm(
     Ok(())
 }
 
-/// Disconnect a person's devices from a voice room, after telling those devices where to go
-/// if moved. Audited once LiveKit removed at least one device; any failure is returned.
+/// Disconnect a person's devices from a voice room, then tell each removed device where to
+/// go if moved. Audited once LiveKit removed at least one device; any failure is returned.
 async fn take_out(
     app: &App,
     headers: &HeaderMap,
@@ -210,22 +210,26 @@ async fn take_out(
     }
     confirm(app, headers, &channel, &person, to.as_deref()).await?;
 
-    if let Some(to) = &to {
-        // Sent before the removal so those devices switch rooms instead of reporting it.
-        app.notify(Event::VoiceMoved {
-            devices: present.iter().map(|(_, device)| encode(device)).collect(),
-            from: channel.clone(),
-            to: to.clone(),
-        });
-    }
     let (mut removed, mut failure) = (false, None);
-    for (identity, _) in &present {
+    for (identity, device) in &present {
         let body = json!({ "room": channel, "identity": identity });
         match livekit
             .try_moderate(&channel, "RemoveParticipant", body)
             .await
         {
-            Ok(outcome) => removed |= outcome == Outcome::Applied,
+            Ok(Outcome::Applied) => {
+                removed = true;
+                // After its removal, so a device that leaves by itself first still counts;
+                // clients accept a move for the room they were just removed from.
+                if let Some(to) = &to {
+                    app.notify(Event::VoiceMoved {
+                        devices: vec![encode(device)],
+                        from: channel.clone(),
+                        to: to.clone(),
+                    });
+                }
+            }
+            Ok(Outcome::AlreadyAbsent) => {}
             Err(error) => {
                 tracing::warn!(reason = error.code, "could not remove a voice participant");
                 failure = Some(error);

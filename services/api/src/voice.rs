@@ -29,7 +29,10 @@ use zeroize::Zeroizing;
 
 use crate::{ApiError, ApiResult, App, auth::authenticate_read, channels, messages, payload};
 
+mod enforcer;
 pub mod moderation;
+
+pub use enforcer::{enforce, enforce_person, start as start_enforcer};
 
 const DEV_SECRET: &str = "dev-only-livekit-secret-do-not-deploy";
 const DATA_PREFIX: &str = "file-";
@@ -52,7 +55,9 @@ pub struct LiveKit {
     /// Active identities per room and when they were asked for; `None` marks a room
     /// LiveKit reported a change in at that time, so older answers are not used again.
     rosters: Mutex<HashMap<String, (Instant, Option<Active>)>>,
-    enforcing: tokio::sync::Mutex<()>,
+    /// Access checks waiting for the enforcement worker, and its wake-up.
+    pending: Mutex<enforcer::Pending>,
+    wake: tokio::sync::Notify,
 }
 
 impl LiveKit {
@@ -81,7 +86,8 @@ impl LiveKit {
                 .timeout(Duration::from_secs(3))
                 .build()?,
             rosters: Mutex::default(),
-            enforcing: Default::default(),
+            pending: Mutex::default(),
+            wake: Default::default(),
         }))
     }
 
@@ -415,28 +421,6 @@ pub async fn participants(
     Ok(Json(presence))
 }
 
-/// Disconnect devices that lost read access and revoke lost publication grants.
-/// Runs after the change commits and never blocks it; LiveKit keeps the grants a device
-/// joined with, and refreshes its token with them, until told otherwise.
-pub fn enforce(app: &App, room: Option<String>) {
-    let Some(livekit) = app.voice.clone() else {
-        return;
-    };
-    let app = app.clone();
-    tokio::spawn(async move {
-        // LiveKit can be briefly unreachable, and lost access must still be taken away.
-        for delay in [1, 2, 4, 8, 16, 32] {
-            match enforce_rooms(&app, &livekit, room.clone()).await {
-                Ok(true) => return,
-                Ok(false) => {}
-                Err(error) => tracing::warn!(reason = error.code, "could not check voice access"),
-            }
-            tokio::time::sleep(Duration::from_secs(delay)).await;
-        }
-        tracing::warn!("gave up checking voice access until the next change");
-    });
-}
-
 /// End the LiveKit room of a deleted voice channel, which `enforce` no longer visits.
 /// Runs after the delete commits and never blocks it.
 pub fn close_rooms(app: &App, channel: String, voice: bool) {
@@ -519,48 +503,6 @@ async fn decide(
     } else {
         Action::Update(permission)
     })
-}
-
-/// Returns whether every room was checked and every change went through.
-async fn enforce_rooms(app: &App, livekit: &LiveKit, room: Option<String>) -> ApiResult<bool> {
-    // One run at a time: a decision made before a later change must not land after it.
-    let _turn = livekit.enforcing.lock().await;
-    let mut complete = true;
-    let rooms = match room {
-        Some(channel) => vec![format!("{DATA_PREFIX}{channel}"), channel],
-        None => livekit.rooms().await?,
-    };
-    for room in rooms {
-        let Some((channel, data)) = room_channel(&room) else {
-            continue;
-        };
-        let participants = match livekit.list(&room).await {
-            Ok(participants) => participants,
-            Err(error) => {
-                tracing::warn!(reason = error.code, "could not check voice access");
-                complete = false;
-                continue;
-            }
-        };
-        for participant in participants {
-            // Decided right before each change, without holding a connection across it.
-            let body = match decide(app, channel, data, &participant).await? {
-                Action::Keep => continue,
-                Action::Remove => {
-                    let body = json!({ "room": room, "identity": participant.identity });
-                    complete &= livekit.moderate(&room, "RemoveParticipant", body).await;
-                    continue;
-                }
-                Action::Update(permission) => json!({
-                    "room": room,
-                    "identity": participant.identity,
-                    "permission": permission,
-                }),
-            };
-            complete &= livekit.moderate(&room, "UpdateParticipant", body).await;
-        }
-    }
-    Ok(complete)
 }
 
 /// Relay a device-signed acceptance to the offerer through the existing live events socket.
@@ -714,7 +656,8 @@ mod tests {
                 webhook: WebhookReceiver::new(TokenVerifier::with_api_key(api_key, api_secret)),
                 http: reqwest::Client::new(),
                 rosters: Mutex::default(),
-                enforcing: Default::default(),
+                pending: Mutex::default(),
+                wake: Default::default(),
             })),
             session_ttl: 3600,
             listing_changed: tokio::sync::watch::channel(()).0,
@@ -775,7 +718,8 @@ mod tests {
             webhook: WebhookReceiver::new(TokenVerifier::with_api_key("test-key", secret)),
             http: reqwest::Client::new(),
             rosters: Mutex::default(),
-            enforcing: Default::default(),
+            pending: Mutex::default(),
+            wake: Default::default(),
         };
         let cached = |livekit: &LiveKit| {
             let rosters = livekit.rosters.lock().unwrap();

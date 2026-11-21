@@ -584,7 +584,7 @@ to voice channels only.
 | POST `/v1/voice/{channel}/token` | Empty | 200, `{token, audio_kbps}`. LiveKit JWT valid for ten minutes for this room, and the channel's Opus bitrate in kbps |
 | GET `/v1/voice/{channel}/participants` | Empty | 200, `{people, unknown}`: sorted unique person IDs and a count of unmatched devices |
 | DELETE `/v1/voice/{channel}/participants/{person}` | Empty | `move_members`. 204, disconnects their devices from the room |
-| POST `/v1/voice/{channel}/participants/{person}/move` | `{to}` | `move_members` and `read` on `to`. 204, sends `voice_moved` to their devices in the room, then disconnects them |
+| POST `/v1/voice/{channel}/participants/{person}/move` | `{to}` | `move_members` and `read` on `to`. 204, disconnects their devices from the room and sends each removed device `voice_moved` |
 
 A voice mute is server-wide and stored on the member, so it holds across
 channels and rejoins until lifted. Leaving or being removed from the server
@@ -593,9 +593,12 @@ leave out the `microphone` and `screen_share_audio` sources, so LiveKit refuses
 and drops those publications: the person is fully silent, as shared audio could
 otherwise carry the microphone. Enforcement sets each device's grants to what
 its current flags and mute allow, in both directions, so lifting a mute gives
-the sources back to devices still in the room without a rejoin. Runs are
-serialised and decide each device from the database right before changing it,
-so an older decision cannot land after a newer change. The API enforces on
+the sources back to devices still in the room without a rejoin. A single
+worker applies it, one check at a time, deciding each device from the database
+right before changing it, so an older decision cannot land after a newer
+change. Pending checks coalesce: a person whose mute changed, then a full pass,
+then single rooms, each queued at most once, so a burst of joins in one room
+cannot hold up a mute elsewhere. The API enforces on
 startup, on every LiveKit join notice (whatever the token allowed), after each
 mute change, and retries with backoff while LiveKit fails; muting again
 reapplies it without a second audit entry. Clients follow LiveKit's own

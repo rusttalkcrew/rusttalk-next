@@ -1108,6 +1108,21 @@ async fn voice_next(
     }
 }
 
+/// Whether a move notice from `from` is for this device: its own call there, or the room
+/// LiveKit just removed it from (the server sends the notice right after the removal), so a
+/// notice can't start a call on an idle device.
+fn move_applies(
+    call: Option<Id>,
+    removed: Option<(Id, std::time::Instant)>,
+    from: Id,
+    now: std::time::Instant,
+) -> bool {
+    call == Some(from)
+        || removed.is_some_and(|(channel, at)| {
+            channel == from && now.duration_since(at) < std::time::Duration::from_secs(10)
+        })
+}
+
 /// Reload what the UI shows after (re)connecting, since events may have been missed.
 async fn resume(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, state: &mut State) -> Result<()> {
     // Sync first, beside the rest: on a device restored from the words this first server
@@ -1285,16 +1300,9 @@ async fn on_event(
         }
         Event::VoiceMoved { from, to, .. } => {
             let (from, to) = (decode(&from)?, decode(&to)?);
-            // Only for this device's own call, or the room LiveKit just removed it from, so a
-            // notice can't start a call on an idle device.
-            let in_call = state
-                .voice
-                .as_ref()
-                .is_some_and(|live| live.channel == from);
-            let removed = (state.removed_from.take()).is_some_and(|(channel, at)| {
-                channel == from && at.elapsed() < std::time::Duration::from_secs(10)
-            });
-            if in_call || removed {
+            let call = state.voice.as_ref().map(|live| live.channel);
+            let removed = state.removed_from.take();
+            if move_applies(call, removed, from, std::time::Instant::now()) {
                 ctx.send(Update::VoiceMoved(url.clone(), from, to));
             } else {
                 tracing::warn!("ignored a voice move for a call this device is not in");
@@ -1801,6 +1809,23 @@ fn now() -> i64 {
 #[cfg(test)]
 mod protocol_tests {
     use super::*;
+
+    #[test]
+    fn a_move_counts_only_for_this_devices_call_or_its_fresh_removal() {
+        use std::time::{Duration, Instant};
+        let (from, other) = ([1; 32], [2; 32]);
+        let now = Instant::now();
+        // The server removes first, so the notice can be handled right after the removal.
+        assert!(move_applies(None, Some((from, now)), from, now));
+        // Or before it, while the call is still there.
+        assert!(move_applies(Some(from), None, from, now));
+        // Not on an idle device, another call, another room's removal, or much later.
+        assert!(!move_applies(None, None, from, now));
+        assert!(!move_applies(Some(other), None, from, now));
+        assert!(!move_applies(None, Some((other, now)), from, now));
+        let later = now + Duration::from_secs(11);
+        assert!(!move_applies(None, Some((from, now)), from, later));
+    }
 
     #[test]
     fn a_friend_message_keeps_its_signed_send_time() {
