@@ -378,6 +378,8 @@ pub fn room_list(ui: &mut Ui, home: &Home, server: &Server, channel: &Id) {
     let Some(peers) = server.voice.get(channel) else {
         return;
     };
+    // The speaking ring reaches 3 points past the picture: keep rows clear of each other.
+    ui.spacing_mut().item_spacing.y = ui::SPACE_S;
     for peer in peers {
         let name = peer.name(server);
         let row = ui.horizontal(|ui| {

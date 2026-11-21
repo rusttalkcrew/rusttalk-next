@@ -380,6 +380,7 @@ pub(super) fn leave_voice(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &
 /// and close the room. Returns the call's channel.
 pub(super) fn close(ctx: &Ctx, state: &mut State) -> Option<Id> {
     let mut live = state.voice.take()?;
+    state.held.clear();
     control::leave(&mut live);
     // The call's live files go with it.
     state.transfers.retain(|_, transfer| transfer.chat);
@@ -443,6 +444,50 @@ pub(super) async fn next_voice(voice: &mut Option<Live>) -> Next {
         event = live.room.next_event() => Next::Event(event),
         capture = starting => Next::Capture(capture.map_err(anyhow::Error::from).and_then(|c| c)),
         capture = swapping => Next::Swap(capture.map_err(anyhow::Error::from).and_then(|c| c)),
+    }
+}
+
+/// A voice room event while the API connection is down. The call goes on meanwhile, so
+/// handle what needs no API now: remote control, video, leaving. Without this a viewer's
+/// "stop" sat unread and the sharer kept the "controlling your screen" bar (#142).
+pub(super) async fn offline_voice(ctx: &Ctx, url: &Url, state: &mut State, next: Next) {
+    let Some(live) = &mut state.voice else {
+        return;
+    };
+    match next {
+        Next::Event(Some(RoomEvent::DataReceived {
+            payload,
+            participant: Some(participant),
+            ..
+        })) => {
+            // Without the API nobody can be named, so a new request is turned down.
+            control::received(ctx, live, &participant.identity(), None, &payload).await;
+        }
+        // Whose voice it is, and our own video stopping, need the API: wait for it.
+        next @ Next::Event(Some(
+            RoomEvent::TrackSubscribed {
+                track: RemoteTrack::Audio(_),
+                ..
+            }
+            | RoomEvent::ParticipantPermissionChanged { .. }
+            | RoomEvent::LocalTrackUnpublished { .. },
+        )) => state.held.push_back(next),
+        Next::Event(event) => {
+            if let Some(RoomEvent::TrackUnsubscribed { track, .. }) = &event {
+                state.held.retain(|held| {
+                    !matches!(held, Next::Event(Some(RoomEvent::TrackSubscribed { track: t, .. }))
+                        if t.sid() == track.sid())
+                });
+            }
+            on_voice(ctx, url, None, state, event).await;
+        }
+        // Like a new share while offline: publishing needs the API.
+        Next::Capture(_) => {
+            live.starting = None;
+            ctx.send(Update::Sharing(false));
+            ctx.send(Update::Failed(t!("admin.offline").into()));
+        }
+        Next::Swap(capture) => screen_changed(ctx, state, capture),
     }
 }
 
@@ -631,10 +676,12 @@ pub(super) fn send_room(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &St
     ctx.send(Update::Room(url.clone(), channel, peers, call_sounds));
 }
 
+/// Handle a voice room event. Without `client` (the API connection is down) the people
+/// in the call are not sent to the window; reconnecting reloads them.
 pub(super) async fn on_voice(
     ctx: &Ctx,
     url: &Url,
-    client: &KeyClient<'_>,
+    client: Option<&KeyClient<'_>>,
     state: &mut State,
     event: Option<RoomEvent>,
 ) {
@@ -649,7 +696,9 @@ pub(super) async fn on_voice(
     let Some(event) = event else {
         tracing::warn!("voice room closed");
         end(state, t!("voice.disconnected"));
-        send_room(ctx, url, client, state, channel);
+        if let Some(client) = client {
+            send_room(ctx, url, client, state, channel);
+        }
         return;
     };
     match event {
@@ -658,7 +707,8 @@ pub(super) async fn on_voice(
             participant,
             ..
         } => {
-            let ids = identities(client, &state.server_id);
+            let ids =
+                (client.map(|client| identities(client, &state.server_id))).unwrap_or_default();
             let person = ids.get(participant.identity().as_str()).copied();
             if person.is_none() {
                 tracing::warn!("voice track from a device this client doesn't know yet");
@@ -767,7 +817,9 @@ pub(super) async fn on_voice(
         | RoomEvent::ConnectionStateChanged(_) => {}
         _ => return,
     }
-    send_room(ctx, url, client, state, channel);
+    if let Some(client) = client {
+        send_room(ctx, url, client, state, channel);
+    }
 }
 
 /// Stop the camera and screen once LiveKit no longer carries them: `video` was removed

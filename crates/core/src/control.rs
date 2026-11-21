@@ -818,6 +818,34 @@ mod tests {
         assert!(host.controller().is_none());
     }
 
+    /// While the sharer's server connection is down the client can't name the sender and
+    /// passes no shared screen (#142): ending control must still work, starting it must not.
+    #[test]
+    fn control_ends_without_the_screen_or_the_sender() {
+        let now = Instant::now();
+        let mut host = Host::default();
+        let mut guest = granted(&mut host, now);
+        let (_, withdraw) = guest.release().unwrap();
+        assert_eq!(
+            host.receive(ADA, withdraw, None, false, now),
+            Step::Ended(Vec::new())
+        );
+        assert!(host.controller().is_none());
+
+        let mut guest = granted(&mut host, now);
+        assert_eq!(host.left(ADA), Some(Vec::new()));
+        assert!(host.controller().is_none());
+        assert!(guest.gone(Some("sharer"), None));
+        assert_eq!(guest.screen(), None);
+
+        let request = guest.ask("sharer", SCREEN);
+        assert!(matches!(
+            host.receive(ADA, request, None, true, now),
+            Step::Reply(Message::Deny { .. })
+        ));
+        assert!(host.asker(now).is_none());
+    }
+
     #[test]
     fn refusals_without_a_prompt() {
         let now = Instant::now();
