@@ -153,7 +153,6 @@ home.members.one = {count} lid
 home.members.other = {count} leden
 home.drop_to_send = Loslaten om te sturen in {channel}
 home.chat_start = Dit is het begin van {channel}
-home.a_message = een bericht
 home.replying_to = Antwoord aan {name}
 home.cancel_reply = Antwoord annuleren
 home.editing_message = Bericht bewerken
@@ -424,6 +423,8 @@ admin.invalid_role_count = Iedereen heeft minstens één rol nodig.
 admin.key_changing = De sleutel van de server verandert. Probeer het zo opnieuw.
 
 # crates/client/src/net/directory.rs
+net.dm_pins_unreadable = DM's op {server} zijn gepauzeerd: dit apparaat kan niet lezen met wie ze zijn.
+net.dm_skipped = Een DM op {server} is overgeslagen: iemand anders kan het lezen.
 role.owner = Eigenaar
 role.admin = Beheerder
 role.moderator = Moderator
@@ -682,6 +683,8 @@ app.recovery_words = Herstelwoorden
 app.sign_in = Aanmelden
 
 # crates/client/src/net.rs
+net.dm_pins_unsaved = DM's op {server} zijn gepauzeerd: dit apparaat kon niet opslaan met wie ze zijn.
+net.dm_not_private = Niet via {server} verstuurd: iemand anders kan dit DM daar lezen.
 net.server_changed = Deze server is veranderd. Ga alleen verder als de eigenaar je dat heeft verteld.
 net.sync_conflict = Je andere apparaat vertrouwt een andere sleutel voor {server}. Overleg met de eigenaar van de server.
 net.saved_servers_failed = Kon je opgeslagen servers niet lezen.

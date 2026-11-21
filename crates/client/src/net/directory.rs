@@ -165,7 +165,7 @@ async fn managed_categories(
 pub(super) async fn directory(
     ctx: &Ctx,
     url: &Url,
-    client: &KeyClient<'_>,
+    client: &mut KeyClient<'_>,
     state: &mut State,
 ) -> Result<()> {
     let catalog = client.catalog().await?;
@@ -175,7 +175,7 @@ pub(super) async fn directory(
     let space = get(client, "/v1/space").await?;
     let emoji = emoji_list(client).await?;
     let pictures = pictures(client, &members, &space, &emoji, &state.pictures).await?;
-    let dir = build(
+    let mut dir = build(
         client,
         catalog,
         &members,
@@ -186,6 +186,24 @@ pub(super) async fn directory(
         &|id: &Id, hash: Option<&str>| pictures.get(&picture_key(id, hash?)).cloned(),
     )
     .await?;
+    // A DM channel stays with the person it was first listed with. One the server
+    // now lists with someone else is not shown, so nothing is sent there.
+    dir.dms.retain(|dm| {
+        let kept = client.bind_dm(dm.channel, dm.peer);
+        if !kept && state.relabelled.insert(dm.channel) {
+            tracing::warn!(
+                lost = state.pins_lost,
+                "not using a DM the server relabelled, or whose pin was lost"
+            );
+            let server = url.host_str().unwrap_or(t!("net.a_server"));
+            ctx.send(Update::Failed(match state.pins_lost {
+                true => t!("net.dm_pins_unreadable", server = server),
+                false => t!("net.dm_skipped", server = server),
+            }));
+        }
+        kept
+    });
+    super::save_pins(ctx, url, client, state);
     state.pictures = pictures;
     if let Some(before) = &state.last {
         for (person, action, detail) in changes(before, &dir) {
@@ -214,6 +232,7 @@ pub(super) async fn directory(
                 live: None,
                 sticker: None,
                 replicas: Vec::new(),
+                copy_files: Vec::new(),
             };
             ctx.send(Update::Notice(url.clone(), person, msg));
         }

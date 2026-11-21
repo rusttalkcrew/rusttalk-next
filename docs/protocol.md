@@ -222,7 +222,7 @@ in a state response indicating that the first epoch is still pending.
 | GET `/v1/keys` | Empty | Any member. 200, `{scopes, envelopes, pending}` |
 | POST `/v1/keys` | `{scope, epoch, device, envelope}` | A reader of the scope. 204. The recipient must also be a current device of a reader |
 | POST `/v1/keys/reject` | `{scope, epoch, sender, envelope}` | A reader of the scope. 204. Deletes a matching envelope addressed to the caller's device |
-| POST `/v1/keys/epochs` | `{scope, epoch, commitment, envelope}` | A reader of a rotating scope, or the owner for the initial space epoch. 201. The envelope is addressed to the caller's device |
+| POST `/v1/keys/epochs` | `{scope, epoch, commitment, envelope}` | A reader of a rotating scope, the owner for the initial space epoch, or either person in a DM at any time. 201. The envelope is addressed to the caller's device |
 | GET `/v1/space` | Empty | Any member. 200, `{name_ct, description_ct, icon_hash}` |
 | GET `/v1/space/icon` | Empty | Any member. 200, `{icon_ct}`, or `404 icon_not_found` |
 | PUT `/v1/space` | `{name_ct?, description_ct?, icon_ct?}` | `manage_server`. 204 |
@@ -356,12 +356,72 @@ random message ID, to every shared server that is online. Copies are encrypted
 separately for each server (see [Crypto](crypto.md#direct-messages-on-several-servers)).
 Readers load every copy, merge records by person and message ID, and order
 them by the earliest server timestamp, keeping server order for equal times.
-An edit goes to the servers holding the original. A delete goes to every
-online server holding the message; the author's app deletes a copy that shows
-up later on a server that was offline. Older pages load from each copy
-separately. Without a shared server, the app keeps showing what it loaded and
-disables sending. The API is unchanged and still sees each copy as a separate
-DM, so older apps show one DM per server.
+Only copies that open count: a record that fails to verify or decrypt stays a
+placeholder for its own server. It doesn't change a readable copy's time or
+servers, doesn't notify or mark the DM unread, and is replaced whole once a
+readable copy arrives. A DM shows records from its two people only.
+
+Before sending, the app pins each DM channel to the person the catalog first
+listed it with, in `dm_pins/<server ID>.json` on the device, with the anchor:
+the newest epoch it knows only the two people hold, and its commitment. A DM
+the app creates is pinned before its key is wrapped, so epoch 1 is the anchor.
+Later epochs are trusted through key links: before starting a DM's next
+epoch, the app sends a key link message in the current epoch with the next
+epoch and its commitment (see [Crypto](crypto.md#direct-messages-on-several-servers)).
+Apps hide key links; they don't notify or mark anything unread. When the
+current epoch doesn't chain to the anchor, the app reads the DM's recent
+history for its link, and otherwise sends a link and starts the next epoch
+itself, which either person may do at any time, wrapped only to the two
+people's devices. A channel the server later lists with someone else is
+skipped, with a warning. If the pin file can't be read, the app leaves it as
+it is and pauses that server's DMs, also new ones, with a warning, instead of
+trusting the next catalog. A message, friend message or live-file offer goes
+to a copy only when its current epoch is trusted and its key came from a
+device of one of the two people. Otherwise the app refuses with "Not sent over
+<server>: someone else could read this DM there." If a send or live-file offer
+meets `409` because the other person just re-keyed, the app takes the new key
+and tries once more; if that fails too, a message goes back to the composer.
+DM epoch commitments name the two people (see
+[Crypto](crypto.md#channel-and-space-keys)), so DMs need both people on this
+version. No API or protocol change is needed. If the pins can't be saved, the
+app pauses that server's DMs with a warning. A server without DM re-keying refuses the new epoch, so its copies
+stay unused.
+
+An edit goes to the servers holding the original. A `message_deleted` event
+removes only that server's copy, because a server can't show who deleted a
+record and retention prunes each server separately. The message disappears
+once no server that showed it holds it. People can delete only a readable
+copy of their own message, since a copy that doesn't open proves nothing about
+its author. Their app deletes it, and each copy's stored files, on every
+online server holding it, and keeps the delete in the synced setting
+`dm_deleted`: per message ID (base64url), the servers that may still hold a
+copy (`left`) and those whose copy is gone (`done`). Devices merge these as
+sets across every sync copy, so a delete can't be lost when two devices publish
+to different servers. Copies are kept by server and DM channel. A copy counts
+as gone only once a fresh request for it in that DM channel returns 404, not on
+the server's delete event alone. Their apps on every
+device hide that message and delete any readable copy that shows up later,
+with its stored files, also after a restart. Each device keeps every delete
+that still waits for a server, and the newest 1,000 others, in
+`dm_deleted.json`; the sync copy holds the newest that fit in 64 KiB, resolved
+ones dropped first. A server can still claim a copy is gone and keep it; that
+copy is deleted again whenever it shows up, until its delete is among the
+oldest dropped. A copy of the other person's deleted message on a server that
+was offline shows again until that person's app deletes it there.
+
+After reconnecting, a DM counts as unread only when its newest record opens,
+comes from the pinned peer and isn't a key link. Unread marks and mention
+counts are kept per server and channel, so a channel on another server under
+the same ID can't change a DM's mark. Each copy keeps its own attachment
+references, and downloads switch to the next copy's when a server drops the
+shown one.
+
+Older pages load from each copy separately, and the view asks each copy on
+its own, so a slow server doesn't hold up the others. A page that fails stops
+only that copy's paging until its server reconnects; when its cursor is gone
+(404), that copy loads from its newest page again. Without a shared server, the app keeps
+showing what it loaded and disables sending. The API is unchanged and still
+sees each copy as a separate DM, so older apps show one DM per server.
 
 ### Friends
 
@@ -381,8 +441,8 @@ with, like a DM. The kinds are:
 
 Blocking someone sends Remove, Cancel or Decline as fits, so it looks like one
 of those, and then ignores their friend messages. Each list entry keeps the
-server time of the newest friend message handled from that person and the IDs
-of the last eight. A copy on another server, a reload, or an older message
+signed send time of the newest friend message handled from that person (from
+the message itself, not the server) and the IDs of the last eight. A copy on another server, a reload, or an older message
 loaded later (pages load newest first) changes nothing. Applying the same
 action twice changes nothing either. The app reads each DM's newest page when
 it connects, so requests sent while it was away show up; one older than that
@@ -458,7 +518,15 @@ Retention drops also emit a delete event.
 
 An edit is a new record with an encrypted `edit_of` reference. Clients
 verify the original's signature, channel and author before accepting the edit.
-Multiple edits can refer directly to the same original. If retention or a
+Multiple edits can refer directly to the same original. An edit's reply-to
+field, which apps ignore on edits, carries its revision: 24 zero bytes, then
+a big-endian u64. The app sets it to its clock in milliseconds, or one above
+the revision it shows if that is higher. The edit with the highest revision
+wins, then the higher edit ID. An edit without a revision, from an older app,
+loses to one with a revision and is ordered by server time against others
+without one. Edit state is kept per person and original ID. A reply names
+only the original's ID, so when two people's loaded messages share it the app
+shows no preview. If retention or a
 delete removes the original, clients suppress edits that still reference that
 ID. Deletes apply per stored record, because the API cannot see which records
 are edits. When a client deletes a message, including a moderator delete, it

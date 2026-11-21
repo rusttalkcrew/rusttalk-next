@@ -11,7 +11,7 @@ use rusttalk_core::{
 };
 use serde_json::json;
 
-use super::super::{compose, compose_bytes, receive_key, rejected};
+use super::super::{compose, compose_bytes, pin_dm_as_peer, receive_key, rejected};
 
 const BOTH: &str = "W70 Beryl DM on both servers";
 const REPLY: &str = "W70 Iolite DM reply on both servers";
@@ -44,8 +44,11 @@ async fn history(
 ) -> Result<Vec<(i64, [u8; 32], [u8; 32], String)>> {
     let mut items = Vec::new();
     for record in client.message_page(&dm.id, None, 100).await?.iter().rev() {
-        let text = client.open_message(&dm.id, record).await?.text;
-        items.push((record.at, record.person, record.id, text));
+        let body = client.open_message(&dm.id, record).await?;
+        // Key links are key work, not messages.
+        if body.key_link.is_none() {
+            items.push((record.at, record.person, record.id, body.text));
+        }
     }
     Ok(items)
 }
@@ -68,6 +71,21 @@ async fn merged(person: Pair<'_, '_, '_>, dms: [Scope; 2]) -> Result<Vec<String>
     }
     all.sort_by_key(|item| item.0);
     Ok(all.into_iter().map(|item| item.3).collect())
+}
+
+/// The DM is pinned to the other person and its current epoch is the pair's, so a
+/// message may go there; it can't be pinned to anyone else afterwards.
+fn pinned(client: &mut KeyClient<'_>, dm: Scope, other: [u8; 32]) -> Result<()> {
+    ensure!(
+        client.bind_dm(dm.id, other) && client.dm_private(&dm.id, &other),
+        "a DM was not private to the two people"
+    );
+    let stranger = [0xab; 32];
+    ensure!(
+        !client.bind_dm(dm.id, stranger) && !client.dm_private(&dm.id, &stranger),
+        "a pinned DM was relabelled"
+    );
+    Ok(())
 }
 
 /// Wait until the restarted API answers again.
@@ -97,6 +115,14 @@ pub async fn replicas(
     receive_key(peer.1, dm_b, 1).await?;
     let dms = [dm_a, dm_b];
     assert_ne!(dm_a.id, dm_b.id);
+    let owner_person = *owner.0.identity.certificate.person_id();
+    pin_dm_as_peer(peer.0, owner.0, dm_a).await?;
+    pin_dm_as_peer(peer.1, owner.1, dm_b).await?;
+    pinned(owner.0, dm_a, peer_person)?;
+    pinned(owner.1, dm_b, peer_person)?;
+    pinned(peer.0, dm_a, owner_person)?;
+    pinned(peer.1, dm_b, owner_person)?;
+    println!("W70 each DM copy is pinned to the two people and re-keyed for them");
 
     assert_eq!(
         post((&mut *owner.0, &mut *owner.1), dms, BOTH).await?,
@@ -170,6 +196,8 @@ pub async fn friends(
 ) -> Result<()> {
     let signal = |friend| MessageBody {
         friend: Some(friend),
+        friend_sent: 0,
+        key_link: None,
         ..Default::default()
     };
     let request = *keys::random_key()?;

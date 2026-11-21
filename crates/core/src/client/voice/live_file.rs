@@ -401,11 +401,11 @@ impl LiveFiles {
             acceptance.recipient == encode(local.as_bytes()),
             "file acceptance has wrong recipient"
         );
-        let peer = client
+        let certificate = client
             .devices
             .get(device)
-            .context("file acceptance has unknown device")?
-            .signing_key();
+            .context("file acceptance has unknown device")?;
+        let peer = certificate.signing_key();
         acceptance
             .verify(&client.space().id, channel_id, peer)
             .context("invalid signed file acceptance")?;
@@ -415,6 +415,8 @@ impl LiveFiles {
         let Some(offer) = self.offers.get_mut(&transfer) else {
             return Ok(());
         };
+        // A verified cancellation of a transfer already running for that device and
+        // nonce always goes through, also while DMs here are paused.
         if acceptance.cancel {
             if let Some((accepted_nonce, task)) = offer.recipients.get(peer.as_bytes())
                 && *accepted_nonce == nonce
@@ -423,6 +425,11 @@ impl LiveFiles {
             }
             return Ok(());
         }
+        // A new transfer in a DM: only the pinned other person, and not while paused.
+        ensure!(
+            client.dm_peer_is(channel_id, certificate.person_id()),
+            "file acceptance from someone other than the DM's other person"
+        );
         ensure!(
             offer.created.elapsed() < OFFER_LIFETIME,
             "live file offer expired"
@@ -563,6 +570,11 @@ async fn prepare_accept(
     ensure!(
         body.edit_of.is_none(),
         "live file offer must be an original message"
+    );
+    // In a DM only from one of the two, and not while this server's DMs are paused.
+    ensure!(
+        client.may_accept_offer(channel, &record.person),
+        "live file offer from outside the DM, or DMs here are paused"
     );
     let sender = client
         .devices

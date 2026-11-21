@@ -171,6 +171,20 @@ impl EnvelopeContext {
         context
     }
 
+    /// For a DM epoch: the commitment also names the two people (`dm_pair`), so a
+    /// key made for one pair can't pass as another's.
+    pub fn new_dm(
+        server_id: [u8; 32],
+        scope: Scope,
+        epoch: i64,
+        key: &Key,
+        pair: [[u8; 32]; 2],
+    ) -> Self {
+        let mut context = Self::new(server_id, scope, epoch, key);
+        context.commitment = context.dm_mac(key, pair).finalize().into_bytes().into();
+        context
+    }
+
     fn key_mac(&self, key: &Key) -> Hmac<Sha256> {
         let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key.as_ref())
             .expect("HMAC accepts any key length");
@@ -180,6 +194,26 @@ impl EnvelopeContext {
         mac.update(&self.scope.id);
         mac.update(&self.epoch.to_be_bytes());
         mac
+    }
+
+    fn dm_mac(&self, key: &Key, pair: [[u8; 32]; 2]) -> Hmac<Sha256> {
+        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key.as_ref())
+            .expect("HMAC accepts any key length");
+        mac.update(b"rusttalk-dm-key-commit-v1");
+        mac.update(&self.server_id);
+        mac.update(&[self.scope.kind as u8]);
+        mac.update(&self.scope.id);
+        mac.update(&self.epoch.to_be_bytes());
+        mac.update(&pair[0]);
+        mac.update(&pair[1]);
+        mac
+    }
+
+    /// Whether this envelope's commitment is the DM commitment of `key` for `pair`.
+    pub fn commits_dm(&self, key: &Key, pair: [[u8; 32]; 2]) -> bool {
+        self.dm_mac(key, pair)
+            .verify_slice(&self.commitment)
+            .is_ok()
     }
 
     fn info(&self, recipient: &[u8; 32]) -> Vec<u8> {
@@ -250,6 +284,21 @@ impl EnvelopeContext {
         sender: &DeviceCertificate,
         bytes: &[u8],
     ) -> Result<Key, KeyError> {
+        let key = self.open(recipient, sender, bytes)?;
+        self.key_mac(&key)
+            .verify_slice(&self.commitment)
+            .map_err(|_| KeyError::Commitment)?;
+        Ok(key)
+    }
+
+    /// Verify and decrypt an envelope, leaving the commitment check to the caller
+    /// (`unwrap` for the plain one, `commits_dm` for a DM's).
+    pub fn open(
+        &self,
+        recipient: &DeviceIdentity,
+        sender: &DeviceCertificate,
+        bytes: &[u8],
+    ) -> Result<Key, KeyError> {
         let device = recipient.certificate.signing_key().as_bytes();
         self.verify(device, sender, bytes)?;
         let info = self.info(device);
@@ -268,12 +317,20 @@ impl EnvelopeContext {
             )
             .map_err(|_| KeyError::Authentication)?,
         );
-        let key = Key::new(key.as_slice().try_into().map_err(|_| KeyError::Encoding)?);
-        self.key_mac(&key)
-            .verify_slice(&self.commitment)
-            .map_err(|_| KeyError::Commitment)?;
-        Ok(key)
+        Ok(Key::new(
+            key.as_slice().try_into().map_err(|_| KeyError::Encoding)?,
+        ))
     }
+
+    /// Whether this envelope's commitment is the plain (non-DM) one for `key`.
+    pub fn commits(&self, key: &Key) -> bool {
+        self.key_mac(key).verify_slice(&self.commitment).is_ok()
+    }
+}
+
+/// The two people of a DM in a fixed order, as DM commitments name them.
+pub fn dm_pair(a: [u8; 32], b: [u8; 32]) -> [[u8; 32]; 2] {
+    if a <= b { [a, b] } else { [b, a] }
 }
 
 #[derive(Clone, Copy)]

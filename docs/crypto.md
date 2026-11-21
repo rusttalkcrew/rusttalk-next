@@ -110,6 +110,22 @@ HMAC-SHA256 keyed by the epoch key over these bytes.
 scope_id (32 bytes) || epoch (8 bytes, big endian)
 ```
 
+A DM epoch's commitment also names its two people, so a key made for one pair
+can't pass as another pair's. The person IDs are sorted bytewise.
+
+```text
+"rusttalk-dm-key-commit-v1" || server_id (32 bytes) || kind (1 byte) ||
+scope_id (32 bytes) || epoch (8 bytes, big endian) || person_low (32 bytes) ||
+person_high (32 bytes)
+```
+
+The API stores and signs over the commitment without reading it, so it needs
+no change. A receiving app checks the commitment against the people its pin
+names. A DM epoch with the plain commitment, from an app before pair binding,
+stays readable but is never trusted for sending or wrapped to anyone; the app
+re-keys instead. Apps before pair binding reject DM keys with the new
+commitment, so a DM works only once both people are on this version.
+
 ### Envelopes
 
 Use [RFC 9180](https://www.rfc-editor.org/rfc/rfc9180.html) base mode
@@ -198,12 +214,14 @@ Format version 2 (the envelope's first byte) has this plaintext, in order.
 
 | Field | Encoding | Maximum bytes |
 | --- | --- | --- |
-| Flags | Bit 0 reply-to, bit 1 edit-of, bit 2 live offer, bit 3 sticker, bit 4 friend message. Other bits clear | 1 |
+| Flags | Bit 0 reply-to, bit 1 edit-of, bit 2 live offer, bit 3 sticker, bit 4 friend message, bit 5 key link. Other bits clear | 1 |
 | Text | Two-byte big-endian UTF-8 length, then text of at most 2,000 Unicode scalar values | 2 + 8,000 |
 | Reply ID | 32 bytes, present with bit 0 | 32 |
 | Original ID | 32 bytes, present with bit 1 | 32 |
 | Sticker ID | 32 bytes, present with bit 3 | 32 |
 | Friend kind | One byte, present with bit 4: request (1), accept (2), decline (3), cancel (4), remove (5) | 1 |
+| Friend send time | Eight-byte big-endian sender clock in milliseconds, present with bit 4 | 8 |
+| Key link | Present with bit 5: the next epoch (eight-byte big-endian, positive) and its 32-byte commitment | 40 |
 | Stored files | One-byte count 0–4, then that many [references](protocol.md#files) of at most 529 bytes | 1 + 2,116 |
 | Live offer | Present with bit 2, [offer fields](protocol.md#live-transfer) | 460 |
 
@@ -211,9 +229,10 @@ A sticker message has no stored files and no live offer; its text is the
 sticker's name, shown when the sticker is not available. Server emoji travel
 in the text as `<:name:id>` tokens (see [Protocol](protocol.md#server-emoji-and-stickers)).
 A friend message sets bit 4 alone, has empty text and no stored files, so its
-plaintext is exactly five bytes; readers reject anything else with bit 4 or an
-unknown kind (see [Protocol](protocol.md#friends)). Apps before this format
-show such a message as one they can't open.
+plaintext is exactly 13 bytes; readers reject anything else with bit 4 or an
+unknown kind (see [Protocol](protocol.md#friends)). A key link sets bit 5
+alone, with empty text and no stored files (44 bytes). Apps before this format
+show either as a message they can't open.
 Nothing may follow the last field. The largest plaintext is 10,644 bytes
 and the largest envelope is 10,751 bytes. Every length is checked against
 its field maximum before reading. Readers reject version 1 envelopes.
@@ -275,8 +294,95 @@ participant's record from replacing the other's under a reused ID, and an edit
 applies only to the original with the same person. Ordering uses server
 timestamps, because the plaintext carries no send time; adding one would
 change the plaintext format that current apps parse. Readers use the earliest
-timestamp seen for a message across all copies. Server clocks can differ, so
-messages sent within that difference can appear out of order.
+timestamp seen for a readable copy. Server clocks can differ, so messages
+sent within that difference can appear out of order. A dishonest server can
+also date its copy early and move the message up in the history; the message
+stays readable there.
+
+Edits don't depend on server time. The author's app puts a revision in the
+signed and encrypted edit (see [Protocol](protocol.md#messages)), so no server
+can make an older edit win. The revision is the author's clock in
+milliseconds, raised above the shown edit's revision. If the author edits
+again from a device whose clock is behind, before that device has loaded the
+latest edit, the earlier edit can stay shown. Edits from older apps carry no
+revision and are still ordered by server time.
+
+A dishonest server could try to route a DM into a channel a third person can
+read: list a channel with that person as the DM, or ask honest apps to wrap
+the DM key to that person's device. The app pins each DM channel to the person
+it was first listed with and doesn't use it if the server relabels it. For a
+pinned DM it accepts an epoch key only from, and wraps it only to, a
+root-certified device of one of the two people, and it wraps a DM key only
+when its commitment names the pinned pair. If a dishonest server gives two
+devices of one person different pins for the same channel, a device can't
+take a key made for the other pair, so it can't pass it on to the person its
+own pin names. Asked for a DM it already has, the server may answer with a
+channel pinned to someone else; the app then reports an error and doesn't
+use that channel.
+
+A key from before the pin may already be held by others, for example when the
+channel was an ordinary channel before. An epoch number doesn't show that a
+key is new: a dishonest server could hand out an older shared key under a
+higher number, wrapped by one of the two people who received it earlier. So
+the app trusts a DM epoch only through a chain of keys:
+
+- **Anchor.** The epoch of a key this device generated itself after pinning
+  the DM, with its commitment. A DM it creates is pinned before its first key
+  is wrapped, so that epoch 1 is the anchor. The anchor is saved with the pin
+  and moves up as the chain grows.
+- **Link.** Before people start a DM's next epoch, their app sends a key link
+  in the current epoch: the next epoch number and the new key's commitment,
+  inside the signed, encrypted message. The app trusts epoch N when a link
+  naming N, with N's actual commitment, was sent by one of the two people in
+  an epoch it already trusts. A commitment can only be made with the key, so
+  an older key under a new number doesn't match.
+- **Re-key.** When the current epoch doesn't chain to the anchor, the app looks
+  for the link in recent history (four pages). If there is none, it sends a
+  link and starts the next epoch itself, wrapped only to the pair. A device
+  that never got the current key (for example, both people on new devices)
+  waits one round for it, then starts the next epoch without a link. Only that
+  device trusts the unlinked epoch at first, because it made the key after
+  pinning. The other person can't trust it, so their app re-keys from it with a
+  link, which the first device then trusts. Nobody else's unlinked epoch is
+  ever trusted.
+
+The app sends a message, friend message or live-file offer to a DM copy only
+when its current epoch is trusted this way and its key came from one of the
+two people. In a DM it takes a live-file acceptance only from a certified
+device of the pinned other person and accepts an offer only from one of the
+two. A failed recovery (no link found, a re-key refused or raced) is tried
+again 15 seconds later, then waiting twice as long each time (up to 16
+minutes). The connection syncs at that time even without a server event, and
+a message waiting to go out tries again at once. If the
+pins can't be saved, the app pauses that server's DMs, live-file acceptances
+included. If
+the saved pins can't be read, the app blocks that server's DMs, including new
+ones, instead of pinning them again from the server's catalog. Either person
+can start a DM epoch at any time, so either can disrupt delivery by re-keying
+over and over; that is accepted.
+
+Device revocation still follows the server's device list (issue #109). A
+dishonest server can keep a revoked device eligible for future DM keys until
+#109 is fixed. This predates DMs over several servers and applies to every
+channel.
+
+This relies on both people's apps. An older app still wraps the key, also a
+re-keyed one, to any device the server names, so a dishonest server can still
+read along with a peer on an older app. This remains a high risk until both
+people update. A server without DM re-keying refuses the new epoch, and its DM
+copies stay unused.
+
+Friend messages are ordered by their signed send time, not the server's. If
+someone's devices disagree on the time, a later friend message from the device
+whose clock is behind can be ignored.
+
+A record that fails to verify or decrypt never merges with a readable copy, so
+a server can't use one to change a message's time or servers, use up its
+notification, have the author's delete go to that server, or change friend
+state. Deletes are not signed: a server's delete event removes only that
+server's copy. Only the author's own delete of a readable copy, kept on the
+author's devices and synced between them, removes the message from every
+copy.
 
 An archived sender is a device that is no longer in the current directory,
 for example after revocation or removal of its person. Clients accept its

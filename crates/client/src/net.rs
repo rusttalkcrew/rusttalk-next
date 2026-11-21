@@ -20,7 +20,7 @@ use rusttalk_core::{
     },
     camera::CameraOptions,
     client::{
-        BlobRef, Event, FriendSignal, KeyClient, MessageBody, MessageError, MessageRecord,
+        BlobRef, DmPin, Event, FriendSignal, KeyClient, MessageBody, MessageError, MessageRecord,
         Server as Api, invite_name,
         voice::{DataLiveFiles, LiveFileEvent, NativeVideoSource, RoomEvent, VoiceRoster},
     },
@@ -70,6 +70,8 @@ pub enum Command {
     Send(Draft),
     /// Channel, message, and the IDs of its stored files to remove too.
     Delete(Id, Id, Id, Vec<Id>),
+    /// Check that a deleted DM copy (channel, message) is really gone here.
+    CheckGone(Id, Id),
     /// Download and decode a picture: a thumbnail, or the full image (`true`).
     Image(BlobRef, bool),
     /// Download a file and save it here.
@@ -148,14 +150,17 @@ pub struct Draft {
     /// The other person, for a DM.
     pub peer: Option<Id>,
     pub text: String,
-    pub reply_to: Option<Id>,
+    /// The message replied to: person and ID. Only the ID goes on the wire.
+    pub reply_to: Option<(Id, Id)>,
     pub edit_of: Option<Id>,
+    /// An edit's revision (see `server::revision_id`); unused otherwise.
+    pub revision: u64,
     /// Uploaded first, then sent with the message.
     pub files: Vec<PathBuf>,
     /// A server sticker to send; `text` is its name.
     pub sticker: Option<Id>,
     /// A friend request or answer, sent with nothing else.
-    pub friend: Option<FriendSignal>,
+    pub friend: Option<(FriendSignal, u64)>,
 }
 
 pub struct LiveOffer {
@@ -225,10 +230,14 @@ pub enum Update {
         at_start: Option<bool>,
     },
     Deleted(Url, Id, Id),
+    /// A deleted DM copy is missing: server, DM channel and message.
+    CopyGone(Url, Id, Id),
+    /// Loading a page of a channel failed; `true` when its cursor is gone from the server.
+    PageFailed(Url, Id, bool),
     /// A new message in any readable channel or DM, for unread marks and notifications.
     Arrived(Url, Id, Msg),
     /// The newest message time from someone else per channel, after (re)connecting.
-    Latest(Vec<(Id, i64)>),
+    Latest(Url, Vec<(Id, i64)>),
     /// This person left the server; remove it here too.
     Left(Url),
     /// A member came online, went away or offline.
@@ -342,6 +351,11 @@ impl Net {
     /// Friends as last synced.
     pub fn contacts(&self) -> std::collections::BTreeMap<String, serde_json::Value> {
         self.ctx.sync.contacts()
+    }
+
+    /// This person's deleted DM messages as last saved, at start.
+    pub fn dm_deleted(&self) -> crate::dm::Tombstones {
+        self.ctx.sync.dm_deleted()
     }
 
     /// Check an invite's server and read its name, without joining yet.
@@ -530,6 +544,12 @@ struct State {
     chat_files: HashMap<Id, DataLiveFiles>,
     /// Decoded pictures in the last directory, by hash.
     pictures: HashMap<[u8; 32], Picture>,
+    /// The DM pins `dm_pins` last saved, to save again when they change.
+    pins_saved: HashMap<Id, DmPin>,
+    /// `dm_pins` couldn't be read: it is left as it is, and DMs here stay blocked.
+    pins_lost: bool,
+    /// DMs the server relabelled, already warned about.
+    relabelled: HashSet<Id>,
 }
 
 enum Failure {
@@ -572,7 +592,10 @@ async fn run(
                         tracing::error!(error = %format_args!("{error:#}"), "saving joined server failed");
                     }
                 }
-                match KeyClient::connect(api, &ctx.identity, &session).await {
+                let pins = load_pins(&ctx.data, &server.server_id);
+                state.pins_lost = pins.is_none();
+                state.pins_saved = pins.clone().unwrap_or_default();
+                match KeyClient::connect_with_dms(api, &ctx.identity, &session, pins).await {
                     Ok(mut client) => {
                         delay = 1;
                         state.order_unavailable = false;
@@ -624,7 +647,7 @@ async fn run(
                     None => return,
                     // The voice room outlives the API connection, so its shares can still stop.
                     // The status is sent again once connected, when it differs.
-                    Some(Command::SetStatus(_)) => {}
+                    Some(Command::SetStatus(_) | Command::CheckGone(..)) => {}
                     Some(command) if voice_only(&command) => {
                         if let Err(error) = voice_command(&ctx, &mut state, command).await {
                             tracing::warn!(error = %format_args!("{error:#}"), "voice request failed");
@@ -776,6 +799,14 @@ async fn serve(
     loop {
         // Refresh ten minutes before the 12-hour token expires.
         let refresh = Duration::from_secs((client.expires_at() - 600 - now()).max(0) as u64);
+        // A DM epoch that isn't trusted yet is tried again then, also without an event.
+        let rekey = client.next_rekey();
+        let rekey_due = async move {
+            match rekey {
+                Some(at) => tokio::time::sleep_until(at.into()).await,
+                None => std::future::pending().await,
+            }
+        };
         tokio::select! {
             event = client.next_update() => match event {
                 Ok(Some(Pushed::Presence(PresenceEvent::PresenceChanged { person_id, status }))) => {
@@ -807,6 +838,16 @@ async fn serve(
                         _ => t!("admin.failed"),
                     };
                     ctx.send(Update::Failed(text.into()));
+                }
+            }
+            () = rekey_due => {
+                match client.sync().await {
+                    Ok(()) => save_pins(ctx, url, client, state),
+                    Err(error) => {
+                        tracing::warn!(error = %format_args!("{error:#}"), "DM key recovery failed");
+                        // Wait before the next try, so a fast failure can't spin.
+                        client.rekey_failed();
+                    }
                 }
             }
             () = tokio::time::sleep(refresh) => {
@@ -860,7 +901,7 @@ async fn resume(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, state: &mut St
         page(ctx, url, client, state, channel, None).await;
     }
     set_display_name(ctx, url, client, state).await;
-    latest(ctx, client, state).await;
+    latest(ctx, url, client, state).await;
     let voice: Vec<Id> = state
         .last
         .iter()
@@ -887,29 +928,39 @@ async fn resume(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, state: &mut St
 /// while away shows as unread.
 // shortcut: one request per channel on each (re)connect; the newest record may be an
 // edit, which then also counts as new.
-async fn latest(ctx: &Ctx, client: &mut KeyClient<'_>, state: &State) {
+async fn latest(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, state: &State) {
     let Some(dir) = &state.last else {
         return;
     };
+    // A DM's newest record counts only once it opens and comes from its pinned peer:
+    // the server could put anything there.
     let channels = (dir.categories.iter())
         .flat_map(|category| &category.channels)
-        .map(|channel| channel.id)
-        .chain(dir.dms.iter().map(|dm| dm.channel));
+        .map(|channel| (channel.id, None))
+        .chain(dir.dms.iter().map(|dm| (dm.channel, Some(dm.peer))));
     let me = *client.identity.certificate.person_id();
     let mut found = Vec::new();
-    for channel in channels {
+    for (channel, peer) in channels {
         match client.message_page(&channel, None, 1).await {
-            Ok(records) => found.extend(
-                (records.first())
-                    .filter(|record| record.person != me)
-                    .map(|record| (channel, record.at)),
-            ),
+            Ok(records) => {
+                let Some(record) = records.first().filter(|record| record.person != me) else {
+                    continue;
+                };
+                if let Some(peer) = peer
+                    && (record.person != peer
+                        || !(client.open_message(&channel, record).await)
+                            .is_ok_and(|body| body.key_link.is_none()))
+                {
+                    continue;
+                }
+                found.push((channel, record.at));
+            }
             Err(error) => {
                 tracing::warn!(error = %format_args!("{error:#}"), "loading the newest message failed");
             }
         }
     }
-    ctx.send(Update::Latest(found));
+    ctx.send(Update::Latest(url.clone(), found));
 }
 
 /// Merge with this person's other devices and show the result.
@@ -941,7 +992,9 @@ async fn on_event(
             let (channel, id) = (decode(&channel)?, decode(&id)?);
             let record = client.message(&channel, &id).await?;
             if state.loaded.contains(&channel) {
-                let msg = open(client, state, &channel, &record).await;
+                let Some(msg) = open(client, state, &channel, &record).await else {
+                    return Ok(());
+                };
                 ctx.send(Update::Arrived(url.clone(), channel, msg.clone()));
                 send_messages(ctx, url, channel, vec![msg], false, None);
                 return Ok(());
@@ -952,6 +1005,7 @@ async fn on_event(
                 tracing::warn!(error = %format_args!("{error:#}"), "message could not be opened");
             }
             let msg = match &body {
+                Ok(body) if body.key_link.is_some() => return Ok(()),
                 Ok(body) => to_msg(&record, body),
                 Err(_) => unreadable(&record),
             };
@@ -990,6 +1044,8 @@ async fn on_event(
             directory(ctx, url, client, state).await?;
         }
         Event::KeysNeeded(_) => {
+            // Key work may have re-keyed a DM.
+            save_pins(ctx, url, client, state);
             // Names stay unreadable until the space key arrives, which can be after the first load.
             if !state.named && client.has_space_key() {
                 directory(ctx, url, client, state).await?;
@@ -1001,7 +1057,7 @@ async fn on_event(
                     let Ok(record) = client.message(&channel, &id).await else {
                         continue;
                     };
-                    items.push(open(client, state, &channel, &record).await);
+                    items.extend(open(client, state, &channel, &record).await);
                 }
                 send_messages(ctx, url, channel, items, false, None);
             }
@@ -1043,21 +1099,62 @@ async fn on_command(
                     return Err(error);
                 }
             };
+            // Only to a DM that just the two people can read: pinned to this person,
+            // with a key from one of their devices. A missing key fails below as before.
+            let scope = rusttalk_core::keys::Scope {
+                kind: rusttalk_core::keys::Kind::Channel,
+                id: channel,
+            };
+            if let Some(peer) = draft.peer
+                && client.current_key(scope).is_ok()
+                && !client.dm_private(&channel, &peer)
+                && !recovered(ctx, url, client, state, &channel, &peer).await
+            {
+                tracing::warn!("not sending a DM where someone else could read it");
+                let server = url.host_str().unwrap_or(t!("net.a_server"));
+                ctx.send(Update::Unsent(url.clone(), draft));
+                ctx.send(Update::Failed(t!("net.dm_not_private", server = server)));
+                return Ok(());
+            }
             let body = MessageBody {
                 text: draft.text.clone(),
-                reply_to: draft.reply_to,
+                // Edits carry their revision there; current apps ignore it on edits.
+                reply_to: match draft.edit_of {
+                    Some(_) => Some(crate::server::revision_id(draft.revision)),
+                    None => draft.reply_to.map(|(_, id)| id),
+                },
                 edit_of: draft.edit_of,
                 attachments: Vec::new(),
                 live: None,
                 sticker: draft.sticker,
-                friend: draft.friend,
+                friend: draft.friend.map(|(signal, _)| signal),
+                friend_sent: draft.friend.map_or(0, |(_, sent)| sent),
+                key_link: None,
             };
             let files = draft.files.clone();
-            let sent = files::send(ctx, url, client, (channel, draft.id), body, files).await;
+            let target = (channel, draft.id);
+            let mut sent = files::send(ctx, url, client, target, body.clone(), files.clone()).await;
+            // The other person re-keyed the DM just now: take the new key and send
+            // once more, whatever this was (text, sticker, file or friend message).
+            if draft.peer.is_some() && sent.as_ref().is_err_and(files::conflict) {
+                // A failed key sync still puts the draft back below.
+                sent = match client.sync().await {
+                    Ok(()) => files::send(ctx, url, client, target, body, files).await,
+                    Err(error) => Err(error),
+                };
+            }
             if !matches!(sent, Ok(true)) {
                 ctx.send(Update::Unsent(url.clone(), draft));
             }
             sent?;
+        }
+        Command::CheckGone(channel, id) => {
+            // The server's word that it deleted it isn't enough; it must be missing.
+            if let Err(error) = client.message(&channel, &id).await
+                && files::gone(&error)
+            {
+                ctx.send(Update::CopyGone(url.clone(), channel, id));
+            }
         }
         Command::Delete(channel, id, sender, blobs) => {
             files::delete(ctx, url, client, (channel, id, sender), blobs).await?;
@@ -1222,9 +1319,101 @@ async fn dm_channel(
     if let Some(dm) = existing {
         return Ok(dm.channel);
     }
+    // Pinned there, before any key is wrapped.
     let scope = client.create_dm(&peer).await?;
     directory(ctx, url, client, state).await?;
     Ok(scope.id)
+}
+
+/// A DM message waits on an epoch that isn't trusted yet: try to recover it now
+/// instead of at the next scheduled attempt. Whether the DM is private afterwards.
+async fn recovered(
+    ctx: &Ctx,
+    url: &Url,
+    client: &mut KeyClient<'_>,
+    state: &mut State,
+    channel: &Id,
+    peer: &Id,
+) -> bool {
+    client.rekey_now();
+    if let Err(error) = client.sync().await {
+        tracing::warn!(error = %format_args!("{error:#}"), "DM key recovery failed");
+        return false;
+    }
+    save_pins(ctx, url, client, state);
+    client.dm_private(channel, peer)
+}
+
+/// `dm_pins/<server ID>.json`: each DM channel on this server and who it is with, so
+/// the server can't later relabel a DM as being with someone else.
+fn pins_path(data: &Path, server_id: &Id) -> PathBuf {
+    data.join("dm_pins")
+        .join(format!("{}.json", hex::encode(server_id)))
+}
+
+/// A pin as saved: the person, and the newest epoch known to be the pair's, with
+/// its commitment.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SavedPin {
+    peer: String,
+    #[serde(default)]
+    anchor: Option<(i64, String)>,
+}
+
+/// `None` when the file is there but can't be read: trusting the next catalog again
+/// would let the server relabel DMs, so they stay blocked instead.
+fn load_pins(data: &Path, server_id: &Id) -> Option<HashMap<Id, DmPin>> {
+    let saved: HashMap<String, SavedPin> = match crate::load_json(&pins_path(data, server_id)) {
+        Ok(saved) => saved,
+        Err(error) => {
+            tracing::warn!(error = %format_args!("{error:#}"), "DM pins unreadable");
+            return None;
+        }
+    };
+    (saved.iter())
+        .map(|(channel, pin)| {
+            let peer = decode(&pin.peer).ok()?;
+            let anchor = match &pin.anchor {
+                Some((epoch, commitment)) => Some((*epoch, decode(commitment).ok()?)),
+                None => None,
+            };
+            Some((decode(channel).ok()?, DmPin::With { peer, anchor }))
+        })
+        .collect()
+}
+
+/// Save the DM pins when they changed. Never over a file that couldn't be read.
+fn save_pins(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, state: &mut State) {
+    if state.pins_lost || *client.dms() == state.pins_saved {
+        return;
+    }
+    let path = pins_path(&ctx.data, &state.server_id);
+    let pins: HashMap<String, SavedPin> = (client.dms().iter())
+        .filter_map(|(channel, pin)| match pin {
+            DmPin::With { peer, anchor } => Some((
+                encode(channel),
+                SavedPin {
+                    peer: encode(peer),
+                    anchor: anchor.map(|(epoch, commitment)| (epoch, encode(&commitment))),
+                },
+            )),
+            DmPin::Blocked => None,
+        })
+        .collect();
+    let saved = std::fs::create_dir_all(path.parent().expect("in a folder"))
+        .map_err(anyhow::Error::from)
+        .and_then(|()| rusttalk_core::client::save_json(&ctx.data, &path, &pins));
+    match saved {
+        Ok(()) => state.pins_saved = client.dms().clone(),
+        // A pin that isn't kept would be trusted afresh next time: pause DMs here.
+        Err(error) => {
+            tracing::warn!(error = %format_args!("{error:#}"), "saving DM pins failed");
+            client.pause_dms();
+            state.pins_lost = true;
+            let server = url.host_str().unwrap_or(t!("net.a_server"));
+            ctx.send(Update::Failed(t!("net.dm_pins_unsaved", server = server)));
+        }
+    }
 }
 
 /// Load one page, newest first on the wire, and send it oldest first.
@@ -1240,7 +1429,11 @@ async fn page(
         Ok(records) => records,
         Err(error) => {
             tracing::warn!(error = %format_args!("{error:#}"), "loading messages failed");
-            // Leave the chat loading: reconnecting reloads opened channels, and paging stays paused until then.
+            // A channel stays loading: reconnecting reloads opened channels, and paging
+            // stays paused until then. A DM keeps paging its other copies.
+            let missing = (error.downcast_ref::<reqwest::Error>()).and_then(reqwest::Error::status)
+                == Some(StatusCode::NOT_FOUND);
+            ctx.send(Update::PageFailed(url.clone(), channel, missing));
             ctx.send(Update::Failed(t!("net.messages_failed").into()));
             return;
         }
@@ -1248,7 +1441,7 @@ async fn page(
     let at_start = records.len() < PAGE as usize;
     let mut items = Vec::with_capacity(records.len());
     for record in records.iter().rev() {
-        items.push(open(client, state, &channel, record).await);
+        items.extend(open(client, state, &channel, record).await);
     }
     send_messages(ctx, url, channel, items, before.is_some(), Some(at_start));
 }
@@ -1258,21 +1451,23 @@ async fn open(
     state: &mut State,
     channel: &Id,
     record: &MessageRecord,
-) -> Msg {
+) -> Option<Msg> {
     match client.open_message(channel, record).await {
+        // Key work only (the client noted it); not a message to show.
+        Ok(body) if body.key_link.is_some() => None,
         Ok(body) => {
             if let Some(file) = &body.live {
                 let transfer = state.transfers.entry(file.id);
                 transfer.or_insert(Transfer::chat(*channel)).offer = Some(record.clone());
             }
-            to_msg(record, &body)
+            Some(to_msg(record, &body))
         }
         Err(error) => {
             if error.downcast_ref::<MessageError>() == Some(&MessageError::MissingKey) {
                 state.waiting.entry(*channel).or_default().insert(record.id);
             }
             tracing::warn!(error = %format_args!("{error:#}"), "message could not be opened");
-            unreadable(record)
+            Some(unreadable(record))
         }
     }
 }
@@ -1289,6 +1484,7 @@ fn unreadable(record: &MessageRecord) -> Msg {
         live: None,
         sticker: None,
         replicas: Vec::new(),
+        copy_files: Vec::new(),
     }
 }
 
@@ -1300,13 +1496,14 @@ fn to_msg(record: &MessageRecord, body: &MessageBody) -> Msg {
         reply_to: body.reply_to,
         edit_of: body.edit_of,
         body: match body.friend {
-            Some(signal) => Body::Friend(signal),
+            Some(signal) => Body::Friend(signal, body.friend_sent),
             None => Body::Text(body.text.clone()),
         },
         files: body.attachments.clone(),
         live: (body.live.as_ref()).map(|file| (file.id, file.name.clone(), file.size)),
         sticker: body.sticker,
         replicas: Vec::new(),
+        copy_files: Vec::new(),
     }
 }
 
@@ -1359,6 +1556,27 @@ fn now() -> i64 {
 #[cfg(test)]
 mod protocol_tests {
     use super::*;
+
+    #[test]
+    fn a_friend_message_keeps_its_signed_send_time() {
+        let record = MessageRecord {
+            id: [1; 32],
+            epoch: 1,
+            person: [2; 32],
+            sender_device: [3; 32],
+            at: 5,
+            size: 0,
+            envelope: String::new(),
+        };
+        let body = MessageBody {
+            friend: Some(FriendSignal::Request),
+            friend_sent: 9_000,
+            ..MessageBody::default()
+        };
+        // The server's time stays for the chat; friend state uses the signed one.
+        let msg = to_msg(&record, &body);
+        assert!(msg.body == Body::Friend(FriendSignal::Request, 9_000) && msg.at == 5);
+    }
 
     #[test]
     fn checks_server_protocol_against_supported_range() {

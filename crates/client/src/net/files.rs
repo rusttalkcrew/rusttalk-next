@@ -74,8 +74,11 @@ pub(super) async fn delete(
     (channel, id, sender): (Id, Id, Id),
     files: Vec<Id>,
 ) -> Result<()> {
-    client.delete_message(&channel, &id).await?;
-    ctx.send(Update::Deleted(url.clone(), channel, id));
+    match client.delete_message(&channel, &id).await {
+        // Already gone there counts as deleted, so a DM delete can finish.
+        Err(error) if !gone(&error) => return Err(error),
+        _ => ctx.send(Update::Deleted(url.clone(), channel, id)),
+    }
     for file in files {
         if let Err(error) = client.delete_message_file(&file, &sender).await
             && !gone(&error)
@@ -204,6 +207,11 @@ fn media_type(path: &Path) -> &'static str {
     }
 }
 
+/// The server answered 409, as for a message sent in an epoch that just ended.
+pub(super) fn conflict(error: &anyhow::Error) -> bool {
+    status(error) == Some(StatusCode::CONFLICT)
+}
+
 fn status(error: &anyhow::Error) -> Option<StatusCode> {
     error
         .downcast_ref::<UploadRejected>()
@@ -216,7 +224,7 @@ fn status(error: &anyhow::Error) -> Option<StatusCode> {
 }
 
 /// The server no longer has this file: it expired or was deleted.
-fn gone(error: &anyhow::Error) -> bool {
+pub(super) fn gone(error: &anyhow::Error) -> bool {
     status(error) == Some(StatusCode::NOT_FOUND)
 }
 

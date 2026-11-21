@@ -77,7 +77,14 @@ pub struct VersionConflict(pub i64);
 /// Fetch every peer and return the newest authenticated snapshot and any per-server failures.
 /// Equal versions are ordered by origin so a tie does not depend on response order.
 pub async fn load<'a>(peers: &[Peer<'a>], key: &[u8; 32]) -> (Option<Snapshot>, Failures<'a>) {
-    let mut newest: Option<(&Server, Snapshot)> = None;
+    let (all, failures) = load_all(peers, key).await;
+    (all.into_iter().next(), failures)
+}
+
+/// Every peer's authenticated snapshot, newest first (equal versions by origin), and
+/// any per-server failures. The others matter for fields merged as sets.
+pub async fn load_all<'a>(peers: &[Peer<'a>], key: &[u8; 32]) -> (Vec<Snapshot>, Failures<'a>) {
+    let mut found: Vec<(&Server, Snapshot)> = Vec::new();
     let mut failures = Vec::new();
     // Futures built in a loop, not a closure, so callers can spawn this:
     // a closure here makes the future not provably `Send`.
@@ -88,19 +95,18 @@ pub async fn load<'a>(peers: &[Peer<'a>], key: &[u8; 32]) -> (Option<Snapshot>, 
     let mut replies = stream::iter(requests).buffer_unordered(8);
     while let Some((server, result)) = replies.next().await {
         match result {
-            Ok(Some(snapshot)) => {
-                if newest.as_ref().is_none_or(|(chosen, current)| {
-                    (snapshot.version, &server.known_server().address)
-                        > (current.version, &chosen.known_server().address)
-                }) {
-                    newest = Some((server, snapshot));
-                }
-            }
+            Ok(Some(snapshot)) => found.push((server, snapshot)),
             Ok(None) => {}
             Err(error) => failures.push((server, error)),
         }
     }
-    (newest.map(|(_, snapshot)| snapshot), failures)
+    found.sort_by(|(a, x), (b, y)| {
+        (y.version, &b.known_server().address).cmp(&(x.version, &a.known_server().address))
+    });
+    (
+        found.into_iter().map(|(_, snapshot)| snapshot).collect(),
+        failures,
+    )
 }
 
 /// Merge per origin and per field: the newer snapshot wins for anything both sides mention,

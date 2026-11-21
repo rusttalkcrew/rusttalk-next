@@ -1,4 +1,4 @@
-use super::{receive_key, rejected};
+use super::{pin_dm_as_peer, receive_key, rejected};
 use anyhow::{Context, Result, ensure};
 use reqwest::{Method, StatusCode};
 use rusttalk_core::{
@@ -114,7 +114,9 @@ pub(super) async fn scenario(
     let a_person = *a.identity.certificate.person_id();
     let dm = a.create_dm(&b_person).await?;
     receive_key(b, dm, 1).await?;
+    // B asking for the same DM gets A's, pins it and re-keys it for the two of them.
     assert_eq!(b.create_dm(&a_person).await?, dm);
+    pin_dm_as_peer(b, a, dm).await?;
     let [dm_message, _] = exchange(a, b, dm, [DM_A, DM_B]).await?;
     for (client, peer) in [(&*a, b_person), (&*b, a_person)] {
         let direct = client

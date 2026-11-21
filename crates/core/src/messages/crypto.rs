@@ -23,6 +23,20 @@ pub struct MessageBody {
     pub sticker: Option<[u8; 32]>,
     /// A friend request or answer instead of chat text; sent with nothing else.
     pub friend: Option<FriendSignal>,
+    /// With a friend message: the sender's clock in milliseconds, so friend messages
+    /// are ordered by something no server can change.
+    pub friend_sent: u64,
+    /// A DM key link instead of chat text, sent with nothing else: the next epoch
+    /// and its commitment, announced in the epoch before it (see `KeyLink`).
+    pub key_link: Option<KeyLink>,
+}
+
+/// Sent by the person who starts a DM's next epoch, in the epoch before it, so the
+/// other person can tell that epoch's key is new and only theirs to share.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KeyLink {
+    pub epoch: i64,
+    pub commitment: [u8; 32],
 }
 
 /// What a friend message says. Only the two people in the DM can read it.
@@ -53,6 +67,7 @@ const EDIT: u8 = 2;
 const LIVE: u8 = 4;
 const STICKER: u8 = 8;
 const FRIEND: u8 = 16;
+const LINK: u8 = 32;
 
 impl MessageBody {
     /// Format version 2: flags, text, references, stored attachments, then the live offer.
@@ -69,11 +84,14 @@ impl MessageBody {
             | if self.edit_of.is_some() { EDIT } else { 0 }
             | if self.live.is_some() { LIVE } else { 0 }
             | if self.sticker.is_some() { STICKER } else { 0 }
-            | if self.friend.is_some() { FRIEND } else { 0 };
-        if self.friend.is_some()
-            && (flags != FRIEND || !self.text.is_empty() || !self.attachments.is_empty())
-        {
-            return Err(MessageError::Encoding);
+            | if self.friend.is_some() { FRIEND } else { 0 }
+            | if self.key_link.is_some() { LINK } else { 0 };
+        for alone in [FRIEND, LINK] {
+            if flags & alone != 0
+                && (flags != alone || !self.text.is_empty() || !self.attachments.is_empty())
+            {
+                return Err(MessageError::Encoding);
+            }
         }
         // Full capacity up front, so no plaintext copy is left behind by a reallocation.
         let mut body = Zeroizing::new(Vec::with_capacity(MAX_PLAINTEXT));
@@ -83,7 +101,14 @@ impl MessageBody {
         body.extend(self.reply_to.iter().flatten());
         body.extend(self.edit_of.iter().flatten());
         body.extend(self.sticker.iter().flatten());
-        body.extend(self.friend.map(|signal| signal as u8));
+        if let Some(signal) = self.friend {
+            body.push(signal as u8);
+            body.extend_from_slice(&self.friend_sent.to_be_bytes());
+        }
+        if let Some(link) = self.key_link {
+            body.extend_from_slice(&link.epoch.to_be_bytes());
+            body.extend_from_slice(&link.commitment);
+        }
         body.push(self.attachments.len() as u8);
         for attachment in &self.attachments {
             attachment.encode(&mut body)?;
@@ -100,7 +125,7 @@ impl MessageBody {
             return Err(MessageError::Encoding);
         }
         let ([flags, high, low], rest) = bytes.split_first_chunk().ok_or(MessageError::Encoding)?;
-        if flags & !(REPLY | EDIT | LIVE | STICKER | FRIEND) != 0 {
+        if flags & !(REPLY | EDIT | LIVE | STICKER | FRIEND | LINK) != 0 {
             return Err(MessageError::Encoding);
         }
         let length = u16::from_be_bytes([*high, *low]) as usize;
@@ -122,14 +147,39 @@ impl MessageBody {
         let reply_to = reference(REPLY)?;
         let edit_of = reference(EDIT)?;
         let sticker = reference(STICKER)?;
-        let friend = if flags & FRIEND != 0 {
-            // A friend message is the flag, empty text, its kind and zero files: nothing else.
-            let (&kind, rest) = tail.split_first().ok_or(MessageError::Encoding)?;
-            tail = rest;
-            if *flags != FRIEND || length != 0 {
+        // A friend message or key link is its flag, empty text, its fields and zero
+        // files: nothing else.
+        for alone in [FRIEND, LINK] {
+            if flags & alone != 0 && (*flags != alone || length != 0) {
                 return Err(MessageError::Encoding);
             }
-            Some(FriendSignal::from_byte(kind).ok_or(MessageError::Encoding)?)
+        }
+        let (friend, friend_sent) = if flags & FRIEND != 0 {
+            let ([kind, sent @ ..], rest) = tail
+                .split_first_chunk::<9>()
+                .ok_or(MessageError::Encoding)?;
+            tail = rest;
+            let signal = FriendSignal::from_byte(*kind).ok_or(MessageError::Encoding)?;
+            (Some(signal), u64::from_be_bytes(*sent))
+        } else {
+            (None, 0)
+        };
+        let key_link = if flags & LINK != 0 {
+            let (epoch, rest) = tail
+                .split_first_chunk::<8>()
+                .ok_or(MessageError::Encoding)?;
+            let (commitment, rest) = rest
+                .split_first_chunk::<32>()
+                .ok_or(MessageError::Encoding)?;
+            tail = rest;
+            let epoch = i64::from_be_bytes(*epoch);
+            if epoch <= 0 {
+                return Err(MessageError::Encoding);
+            }
+            Some(KeyLink {
+                epoch,
+                commitment: *commitment,
+            })
         } else {
             None
         };
@@ -137,7 +187,7 @@ impl MessageBody {
         // A sticker never has files or a live offer, so it stays within the plaintext limit.
         if count as usize > MAX_ATTACHMENTS
             || (sticker.is_some() && (count != 0 || flags & LIVE != 0))
-            || (friend.is_some() && count != 0)
+            || ((friend.is_some() || key_link.is_some()) && count != 0)
         {
             return Err(MessageError::Attachment);
         }
@@ -164,6 +214,8 @@ impl MessageBody {
             live,
             sticker,
             friend,
+            friend_sent,
+            key_link,
         })
     }
 }
@@ -262,6 +314,8 @@ mod tests {
             live: None,
             sticker: None,
             friend: None,
+            friend_sent: 0,
+            key_link: None,
         };
         let envelope = context.seal(&key, &sender, &body).unwrap();
         assert_eq!(
@@ -414,6 +468,8 @@ mod tests {
             live: None,
             sticker: None,
             friend: None,
+            friend_sent: 0,
+            key_link: None,
         };
         let encoded = body.encode().unwrap();
         assert_eq!(encoded.len(), MAX_PLAINTEXT - live::MAX_ATTACHMENT);
@@ -442,6 +498,30 @@ mod tests {
     }
 
     #[test]
+    fn key_links_round_trip_alone() {
+        let body = MessageBody {
+            key_link: Some(KeyLink {
+                epoch: 7,
+                commitment: [3; 32],
+            }),
+            ..MessageBody::default()
+        };
+        let encoded = body.encode().unwrap();
+        assert!(MessageBody::decode(&encoded).unwrap() == body);
+        let with_text = MessageBody {
+            text: "x".into(),
+            ..body.clone()
+        };
+        assert_eq!(with_text.encode().err(), Some(MessageError::Encoding));
+        let mut bad_epoch = encoded.to_vec();
+        bad_epoch[3..11].copy_from_slice(&0i64.to_be_bytes());
+        assert_eq!(
+            MessageBody::decode(&bad_epoch).err(),
+            Some(MessageError::Encoding)
+        );
+    }
+
+    #[test]
     fn friend_signals_round_trip_alone() {
         for signal in [
             FriendSignal::Request,
@@ -452,27 +532,36 @@ mod tests {
         ] {
             let body = MessageBody {
                 friend: Some(signal),
+                friend_sent: 0x0102,
                 ..Default::default()
             };
             let encoded = body.encode().unwrap();
-            // Flags, an empty text, the kind and a zero file count.
-            assert_eq!(*encoded, [FRIEND, 0, 0, signal as u8, 0]);
+            // Flags, an empty text, the kind, the send time and a zero file count.
+            let sent = [0, 0, 0, 0, 0, 0, 1, 2];
+            assert_eq!(
+                *encoded,
+                [&[FRIEND, 0, 0, signal as u8][..], &sent, &[0]].concat()
+            );
             assert!(MessageBody::decode(&encoded).unwrap() == body);
         }
+        let sent = [0u8; 8];
         for bad in [
-            [FRIEND, 0, 0, 0, 0].as_slice(),
-            &[FRIEND, 0, 0, 6, 0],
-            &[FRIEND, 0, 0, 1, 1],
-            &[FRIEND, 0, 0, 1],
-            &[FRIEND, 0, 0, 1, 0, 0],
-            &[FRIEND, 0, 1, b'x', 1, 0],
-            &[FRIEND | REPLY, 0, 0, 1, 0],
+            [&[FRIEND, 0, 0, 0][..], &sent, &[0]].concat(),
+            [&[FRIEND, 0, 0, 6][..], &sent, &[0]].concat(),
+            [&[FRIEND, 0, 0, 1][..], &sent, &[1]].concat(),
+            [&[FRIEND, 0, 0, 1][..], &sent].concat(),
+            [&[FRIEND, 0, 0, 1][..], &sent, &[0, 0]].concat(),
+            vec![FRIEND, 0, 0, 1, 0],
+            [&[FRIEND, 0, 1, b'x', 1][..], &sent, &[0]].concat(),
+            [&[FRIEND | REPLY, 0, 0, 1][..], &sent, &[0]].concat(),
         ] {
-            assert!(MessageBody::decode(bad).is_err(), "{bad:?}");
+            assert!(MessageBody::decode(&bad).is_err(), "{bad:?}");
         }
         let with_text = MessageBody {
             text: "hi".into(),
             friend: Some(FriendSignal::Request),
+            friend_sent: 0,
+            key_link: None,
             ..Default::default()
         };
         assert_eq!(with_text.encode().err(), Some(MessageError::Encoding));
@@ -574,6 +663,8 @@ mod tests {
             }),
             sticker: None,
             friend: None,
+            friend_sent: 0,
+            key_link: None,
         };
         let encoded = body.encode().unwrap();
         assert_eq!(encoded.len(), MAX_PLAINTEXT);

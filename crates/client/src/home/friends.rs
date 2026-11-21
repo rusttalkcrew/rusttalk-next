@@ -60,9 +60,10 @@ impl Home {
                 text: String::new(),
                 reply_to: None,
                 edit_of: None,
+                revision: 0,
                 files: Vec::new(),
                 sticker: None,
-                friend: Some(signal),
+                friend: Some((signal, now_ms().max(0) as u64)),
             }));
         }
     }
@@ -70,7 +71,7 @@ impl Home {
     /// A friend message in the DM with `peer`, live or loaded: update the list and
     /// answer it when needed. Ours were handled when sent.
     pub(super) fn friend_message(&mut self, peer: Id, msg: &Msg) {
-        let Body::Friend(signal) = msg.body else {
+        let Body::Friend(signal, sent) = msg.body else {
             return;
         };
         if msg.person != peer {
@@ -79,7 +80,13 @@ impl Home {
         let name = self.peer_name(&peer);
         let answer = self
             .friends
-            .receive(peer, (msg.id, msg.at, signal), &name, now_ms());
+            // Ordered by the signed send time, not the server's.
+            .receive(
+                peer,
+                (msg.id, sent.min(i64::MAX as u64) as i64, signal),
+                &name,
+                now_ms(),
+            );
         if let Some(answer) = answer {
             self.signal(peer, answer, &self.reachable(&peer));
         }

@@ -192,6 +192,7 @@ pub(super) async fn data_only(
 
     let dm = a.create_dm(b.identity.certificate.person_id()).await?;
     super::receive_key(b, dm, 1).await?;
+    super::super::pin_dm_as_peer(b, a, dm).await?;
     super::receive_key(b, text, 1).await?;
     super::receive_key(c, text, 1).await?;
 

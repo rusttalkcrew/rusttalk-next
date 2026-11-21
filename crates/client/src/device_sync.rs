@@ -20,7 +20,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use url::Url;
 
-use crate::audio::Settings;
+use crate::{
+    audio::Settings,
+    dm::{SYNC_BUDGET, Tombstones},
+};
 
 /// Voice and video preferences, dismissed official servers, the appearance and language, that follow the person to their other devices.
 /// The microphone, speakers and camera differ per computer and stay in `voice.json` only.
@@ -60,6 +63,10 @@ struct Saved {
     warned: HashSet<Url>,
 }
 
+/// The synced setting with this person's deleted DM messages (`dm::Tombstones`), so
+/// copies on servers that were away get deleted there too and are never shown.
+pub const DM_DELETED: &str = "dm_deleted";
+
 #[derive(Serialize, Deserialize)]
 pub enum Edit {
     Join(KnownServer),
@@ -67,6 +74,11 @@ pub enum Edit {
     Setting(String, Value),
     /// A friend, by hex person ID (see `friends`).
     Contact(String, Value),
+    /// One of this person's DM messages, deleted, and copies (`dm::copy`) that may remain.
+    /// Added to the other deletes rather than replacing them.
+    DeletedDm([u8; 32], Vec<String>),
+    /// That copy (`dm::copy`) of a deleted DM message is gone.
+    DmCopyGone([u8; 32], String),
 }
 
 impl Edit {
@@ -87,8 +99,38 @@ impl Edit {
                     state.contacts.insert(key.clone(), value.clone());
                 }
             }
+            Self::DeletedDm(id, servers) => {
+                let mut deletes = dm_deleted(&state.settings);
+                deletes.add(*id, servers.iter().cloned());
+                set_dm_deleted(state, &deletes);
+            }
+            Self::DmCopyGone(id, server) => {
+                let mut deletes = dm_deleted(&state.settings);
+                deletes.gone(id, server);
+                set_dm_deleted(state, &deletes);
+            }
         }
     }
+}
+
+/// This person's deleted DM messages in the synced settings.
+pub fn dm_deleted(settings: &BTreeMap<String, Value>) -> Tombstones {
+    (settings.get(DM_DELETED).cloned())
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default()
+}
+
+fn set_dm_deleted(state: &mut State, deletes: &Tombstones) {
+    let value = serde_json::to_value(deletes.bounded(SYNC_BUDGET)).expect("deletes serialize");
+    state.settings.insert(DM_DELETED.into(), value);
+}
+
+/// Keep every delete seen in any copy: the settings merge takes one snapshot's field
+/// whole, and a device that already published has no pending edit to apply again.
+fn keep_deletes(state: &mut State, seen: &Tombstones) {
+    let mut deletes = dm_deleted(&state.settings);
+    deletes.merge(seen);
+    set_dm_deleted(state, &deletes);
 }
 
 /// The merged state for the UI.
@@ -117,6 +159,11 @@ impl DeviceSync {
     /// Friends and other contacts as last merged, for the start. Not for async code.
     pub fn contacts(&self) -> BTreeMap<String, Value> {
         self.saved.blocking_lock().snapshot.state.contacts.clone()
+    }
+
+    /// Deleted DM messages as last saved, at start. Not for async code.
+    pub fn dm_deleted(&self) -> Tombstones {
+        dm_deleted(&self.saved.blocking_lock().snapshot.state.settings)
     }
 
     pub fn set_peer(&self, address: &Url, peer: Option<(Api, Session)>) {
@@ -161,9 +208,13 @@ impl DeviceSync {
         let mut conflicts = Vec::new();
         // A version conflict means another device published in between: load and merge again.
         for _ in 0..3 {
-            let (remote, failures) = sync::load(&peers, key).await;
+            let (snapshots, failures) = sync::load_all(&peers, key).await;
             log("load", &failures);
-            if let Some(remote) = remote {
+            let mut deletes = dm_deleted(&saved.snapshot.state.settings);
+            for snapshot in &snapshots {
+                deletes.merge(&dm_deleted(&snapshot.state.settings));
+            }
+            if let Some(remote) = snapshots.into_iter().next() {
                 for conflict in sync::merge(data, &mut saved.snapshot, remote)? {
                     tracing::warn!(reason = %conflict.reason, "a synced server pin differs; not adopted");
                     if saved.warned.insert(conflict.address.clone()) {
@@ -177,6 +228,7 @@ impl DeviceSync {
                     edit.apply(&mut snapshot.state);
                 }
             }
+            keep_deletes(&mut saved.snapshot.state, &deletes);
             let version = saved.snapshot.version;
             let failures = sync::push_all(&peers, key, &mut saved.snapshot).await?;
             if saved.snapshot.version > version {
@@ -290,5 +342,34 @@ mod tests {
         assert_eq!(look.mode, crate::ui::Mode::Light);
         assert_eq!(look.light.id, "paper");
         assert_eq!(look.accent.id, "teal");
+    }
+
+    #[test]
+    fn deletes_published_to_different_servers_both_stay() {
+        let url =
+            |n: u8| crate::dm::copy(&format!("https://10.0.0.{n}/").parse().unwrap(), &[n; 32]);
+        // Device A deleted X while only server 1 was reachable, device B deleted Y
+        // while only server 2 was; both published, so neither has a pending edit.
+        let mut a = State::default();
+        Edit::DeletedDm([1; 32], vec![url(1), url(2)]).apply(&mut a);
+        Edit::DmCopyGone([1; 32], url(1)).apply(&mut a);
+        let mut b = State::default();
+        Edit::DeletedDm([2; 32], vec![url(2)]).apply(&mut b);
+        // A loads both copies; B's snapshot wins the settings merge, as in `run`.
+        let mut seen = dm_deleted(&a.settings);
+        seen.merge(&dm_deleted(&b.settings));
+        a.settings = b.settings.clone();
+        keep_deletes(&mut a, &seen);
+        let deletes = dm_deleted(&a.settings);
+        assert!(deletes.contains(&[1; 32]) && deletes.contains(&[2; 32]));
+        // Saved and loaded again, like after a restart: still there.
+        let saved: BTreeMap<String, Value> =
+            serde_json::from_str(&serde_json::to_string(&a.settings).unwrap()).unwrap();
+        assert_eq!(dm_deleted(&saved), deletes);
+        // Server 1's copy stays gone even if an older snapshot still lists it.
+        let mut older = State::default();
+        Edit::DeletedDm([1; 32], vec![url(1)]).apply(&mut older);
+        keep_deletes(&mut a, &dm_deleted(&older.settings));
+        assert!(!dm_deleted(&a.settings).gone(&[1; 32], &url(1)));
     }
 }
