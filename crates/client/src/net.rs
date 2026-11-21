@@ -599,8 +599,6 @@ struct State {
     pins_saved: HashMap<Id, DmPin>,
     /// `dm_pins` couldn't be read: it is left as it is, and DMs here stay blocked.
     pins_lost: bool,
-    /// Commands that came while connecting, for when it is done.
-    queued: VecDeque<Command>,
     /// Who each voice participant (LiveKit identity) is, as last known from the API: the
     /// call's people and their videos still show while the API connection is down.
     identities: HashMap<String, Id>,
@@ -637,6 +635,9 @@ async fn run(
     let mut delay = 1;
     // Verified once, then reused: each verification spends one of the server's rate-limited challenges.
     let mut api = None;
+    // Commands that came while connecting, for when it is done. Not in `State`: some
+    // hold Windows handles, and `State` is borrowed across awaits so must stay `Sync`.
+    let mut queued = VecDeque::new();
     loop {
         ctx.send(Update::Status(url.clone(), Status::Connecting));
         let connecting = {
@@ -656,8 +657,15 @@ async fn run(
                 Ok::<_, Failure>((client, pins))
             }
         };
-        let Some(connected) =
-            offline(&ctx, &url, &mut state, &mut commands, connecting, true).await
+        let Some(connected) = offline(
+            &ctx,
+            &url,
+            &mut state,
+            &mut commands,
+            connecting,
+            Some(&mut queued),
+        )
+        .await
         else {
             return;
         };
@@ -671,7 +679,15 @@ async fn run(
                         state.order_unavailable = false;
                         tracing::info!(server = %fingerprint(&server.server_id), "connected to server");
                         ctx.send(Update::Status(url.clone(), Status::Online));
-                        let end = serve(&ctx, &url, &mut client, &mut state, &mut commands).await;
+                        let end = serve(
+                            &ctx,
+                            &url,
+                            &mut client,
+                            &mut state,
+                            &mut commands,
+                            &mut queued,
+                        )
+                        .await;
                         state.identities = voice::identities(&client, &state.server_id);
                         ctx.sync.set_peer(&url, None);
                         match end {
@@ -709,12 +725,12 @@ async fn run(
             Err(Failure::Retry) => {}
         }
         // What was asked while connecting can't be done now.
-        for command in std::mem::take(&mut state.queued) {
+        for command in std::mem::take(&mut queued) {
             refuse(&ctx, &url, command);
         }
         ctx.send(Update::Status(url.clone(), Status::Offline));
         let wait = tokio::time::sleep(Duration::from_secs(delay));
-        if offline(&ctx, &url, &mut state, &mut commands, wait, false)
+        if offline(&ctx, &url, &mut state, &mut commands, wait, None)
             .await
             .is_none()
         {
@@ -726,15 +742,15 @@ async fn run(
 
 /// Wait for `until` without the API connection. The voice room outlives it, so the call
 /// keeps going: remote control and leaving work now (the other side may still be online),
-/// and other room events wait for the connection. Other commands wait for it too while
-/// `connecting`, and are refused otherwise. `None` when the window closed.
+/// and other room events wait for the connection. Other commands wait in `queued` while
+/// connecting, and are refused otherwise. `None` when the window closed.
 async fn offline<T>(
     ctx: &Ctx,
     url: &Url,
     state: &mut State,
     commands: &mut UnboundedReceiver<Command>,
     until: impl Future<Output = T>,
-    connecting: bool,
+    mut queued: Option<&mut VecDeque<Command>>,
 ) -> Option<T> {
     tokio::pin!(until);
     // A capture that ends by itself (its window closed) still stops sharing, and control.
@@ -748,7 +764,9 @@ async fn offline<T>(
             }
             command = commands.recv() => match command? {
                 command if voice_only(&command) => {
-                    cancel_queued(&mut state.queued, &command);
+                    if let Some(queued) = queued.as_deref_mut() {
+                        cancel_queued(queued, &command);
+                    }
                     match voice_command(ctx, url, state, command).await {
                         Ok(Some(channel)) => voice::roster(ctx, url, None, state, channel),
                         Ok(None) => {}
@@ -757,8 +775,10 @@ async fn offline<T>(
                         }
                     }
                 }
-                command if connecting => state.queued.push_back(command),
-                command => refuse(ctx, url, command),
+                command => match queued.as_deref_mut() {
+                    Some(queued) => queued.push_back(command),
+                    None => refuse(ctx, url, command),
+                },
             },
         }
     }
@@ -925,6 +945,7 @@ async fn serve(
     client: &mut KeyClient<'_>,
     state: &mut State,
     commands: &mut UnboundedReceiver<Command>,
+    queued: &mut VecDeque<Command>,
 ) -> End {
     if let Err(error) = resume(ctx, url, client, state).await {
         tracing::warn!(error = %format_args!("{error:#}"), "loading server state failed");
@@ -932,7 +953,7 @@ async fn serve(
     }
     voice::name_audio(ctx, client, state);
     // What was asked while connecting.
-    for command in std::mem::take(&mut state.queued) {
+    for command in std::mem::take(queued) {
         run_command(ctx, url, client, state, command).await;
     }
     let mut stats = tokio::time::interval(Duration::from_secs(2));
