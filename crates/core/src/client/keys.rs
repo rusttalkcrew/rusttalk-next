@@ -38,9 +38,13 @@ pub struct KeyClient<'a> {
     >,
     /// Each verified key with its envelope and the person whose device wrapped it.
     keys: HashMap<(Scope, i64), (Key, String, PersonId)>,
-    /// The person each DM channel is with, pinned once seen so the server can't
-    /// relabel it. A DM key is only taken from, and wrapped to, those two people.
-    dms: HashMap<[u8; 32], PersonId>,
+    /// What this device knows about each DM channel, pinned once seen so the server
+    /// can't relabel it. A DM key is only taken from, and wrapped to, those two people.
+    pub(super) dms: HashMap<[u8; 32], DmPin>,
+    /// The saved pins were lost: DMs not pinned yet are blocked, not trusted on first use.
+    pins_lost: bool,
+    /// DMs this session already tried to re-key, so a refusal isn't retried in a loop.
+    rekeyed: HashSet<[u8; 32]>,
     pub(super) devices: HashMap<String, DeviceCertificate>,
     pub(super) historical_devices: HashMap<HistoricalDevice, DeviceCertificate>,
     scopes: Vec<ScopeState>,
@@ -60,16 +64,16 @@ impl<'a> KeyClient<'a> {
         identity: &'a DeviceIdentity,
         session: &Session,
     ) -> Result<Self> {
-        Self::connect_with_dms(server, identity, session, HashMap::new()).await
+        Self::connect_with_dms(server, identity, session, Some(HashMap::new())).await
     }
 
-    /// Like `connect`, with the DM channels pinned earlier (channel and peer), so
-    /// the first key sync already applies them.
+    /// Like `connect`, with the DM pins saved earlier, so the first key sync already
+    /// applies them. `None` when they couldn't be read: DMs are then blocked.
     pub async fn connect_with_dms(
         server: &'a Server,
         identity: &'a DeviceIdentity,
         session: &Session,
-        dms: HashMap<[u8; 32], PersonId>,
+        dms: Option<HashMap<[u8; 32], DmPin>>,
     ) -> Result<Self> {
         let events = pinned_tls::events_socket(server.known_server(), &session.token)
             .await
@@ -80,7 +84,9 @@ impl<'a> KeyClient<'a> {
             session: session.clone(),
             events,
             keys: HashMap::new(),
-            dms,
+            pins_lost: dms.is_none(),
+            dms: dms.unwrap_or_default(),
+            rekeyed: HashSet::new(),
             devices: HashMap::new(),
             historical_devices: HashMap::new(),
             scopes: Vec::new(),
@@ -247,6 +253,7 @@ impl<'a> KeyClient<'a> {
                 })
             });
             self.scopes = state.scopes;
+            refetch |= self.rekey_dms().await?;
 
             for scope in &self.scopes {
                 if scope.rotate || (scope.epoch == 0 && self.is_owner().await?) {
@@ -379,42 +386,50 @@ impl<'a> KeyClient<'a> {
         self.devices.values()
     }
 
-    /// Pin a DM channel to the person it is with. `false` when it is already pinned
-    /// to someone else: the server relabelled it, and it must not be used.
+    /// Pin a DM channel to the person it is with. `false` when it is pinned to
+    /// someone else (the server relabelled it) or blocked: it must not be used.
     pub fn bind_dm(&mut self, channel: [u8; 32], peer: PersonId) -> bool {
-        match self.dms.get(&channel) {
-            Some(bound) => *bound == peer,
-            None => {
-                self.dms.insert(channel, peer);
-                let me = *self.identity.certificate.person_id();
-                // Keys taken before this channel was known as a DM must pass the check too.
-                self.keys.retain(|(scope, _), (.., person)| {
-                    scope.kind != Kind::Channel
-                        || scope.id != channel
-                        || dm_member(&me, &peer, person)
-                });
-                true
-            }
+        if let Some(pin) = self.dms.get(&channel) {
+            return matches!(pin, DmPin::With { peer: bound, .. } if *bound == peer);
         }
+        if self.pins_lost {
+            self.dms.insert(channel, DmPin::Blocked);
+            return false;
+        }
+        self.dms.insert(channel, DmPin::With { peer, from: None });
+        let me = *self.identity.certificate.person_id();
+        // Keys taken before this channel was known as a DM must pass the check too.
+        self.keys.retain(|(scope, _), (.., person)| {
+            scope.kind != Kind::Channel || scope.id != channel || dm_member(&me, &peer, person)
+        });
+        true
     }
 
-    /// DM channels pinned so far, with the person each is with.
-    pub fn dms(&self) -> &HashMap<[u8; 32], PersonId> {
+    /// DM channels pinned so far.
+    pub fn dms(&self) -> &HashMap<[u8; 32], DmPin> {
         &self.dms
     }
 
     /// Whether this DM channel can take a message only the two people can read:
-    /// pinned to `peer`, and its current key came from one of their devices.
+    /// pinned to `peer`, re-keyed since, and its current key came from one of them.
     pub fn dm_private(&self, channel: &[u8; 32], peer: &PersonId) -> bool {
         let scope = Scope {
             kind: Kind::Channel,
             id: *channel,
         };
         let me = self.identity.certificate.person_id();
-        self.dms.get(channel) == Some(peer)
+        let Some(DmPin::With {
+            peer: bound,
+            from: Some(from),
+        }) = self.dms.get(channel)
+        else {
+            return false;
+        };
+        bound == peer
             && self.current_key(scope).is_ok_and(|(epoch, _)| {
-                (self.keys.get(&(scope, epoch)))
-                    .is_some_and(|(.., person)| dm_member(me, peer, person))
+                epoch >= *from
+                    && (self.keys.get(&(scope, epoch)))
+                        .is_some_and(|(.., person)| dm_member(me, peer, person))
             })
     }
 
@@ -427,6 +442,31 @@ impl<'a> KeyClient<'a> {
             scope,
             person,
         )
+    }
+
+    /// Start a new epoch, wrapped only to the pair, on each DM pinned since its last
+    /// epoch: an earlier key may have reached others while the channel wasn't known
+    /// as a DM. Messages go out only from that epoch on. Returns whether one started.
+    async fn rekey_dms(&mut self) -> Result<bool> {
+        let mut started = false;
+        let readable: Vec<_> = (self.scopes.iter())
+            .filter(|state| state.scope.kind == Kind::Channel)
+            .map(|state| (state.scope, state.epoch))
+            .collect();
+        for (scope, epoch) in readable {
+            let Some(DmPin::With { from, .. }) = self.dms.get_mut(&scope.id) else {
+                continue;
+            };
+            if from.is_some() || !self.rekeyed.insert(scope.id) {
+                continue;
+            }
+            let next = epoch.checked_add(1).context("epoch overflow")?;
+            *from = Some(next);
+            // A server without DM re-keying refuses; this DM then stays unused there.
+            self.publish_epoch(scope, next).await?;
+            started = true;
+        }
+        Ok(started)
     }
 
     /// Pin the DMs the catalog lists. One pinned to someone else keeps its pin.
@@ -693,14 +733,29 @@ fn dm_member(me: &PersonId, peer: &PersonId, person: &PersonId) -> bool {
     person == me || person == peer
 }
 
+/// What a device knows about a DM channel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum DmPin {
+    /// With this person. Epochs from `from` on were started after the pin, so only
+    /// the two people hold them. `None` until it is re-keyed.
+    With { peer: PersonId, from: Option<i64> },
+    /// Its person is unknown because the saved pins were lost: its keys go to nobody
+    /// else and nothing is sent there.
+    Blocked,
+}
+
 fn dm_allows(
-    dms: &HashMap<[u8; 32], PersonId>,
+    dms: &HashMap<[u8; 32], DmPin>,
     me: &PersonId,
     scope: Scope,
     person: &PersonId,
 ) -> bool {
-    scope.kind != Kind::Channel
-        || (dms.get(&scope.id)).is_none_or(|peer| dm_member(me, peer, person))
+    match dms.get(&scope.id) {
+        _ if scope.kind != Kind::Channel => true,
+        None => true,
+        Some(DmPin::With { peer, .. }) => dm_member(me, peer, person),
+        Some(DmPin::Blocked) => person == me,
+    }
 }
 
 async fn key_state_raced(reply: Response) -> Result<bool> {
@@ -778,9 +833,16 @@ mod tests {
             kind: Kind::Space,
             id: [9; 32],
         };
-        let dms = HashMap::from([(dm.id, peer)]);
+        let blocked = Scope { id: [7; 32], ..dm };
+        let dms = HashMap::from([
+            (dm.id, DmPin::With { peer, from: None }),
+            (blocked.id, DmPin::Blocked),
+        ]);
         assert!(dm_allows(&dms, &me, dm, &me) && dm_allows(&dms, &me, dm, &peer));
         assert!(!dm_allows(&dms, &me, dm, &mallory));
+        // A DM whose pin was lost keeps its keys to this person's own devices.
+        assert!(dm_allows(&dms, &me, blocked, &me));
+        assert!(!dm_allows(&dms, &me, blocked, &peer));
         // Channels and the space follow the server's membership, as before.
         assert!(dm_allows(&dms, &me, channel, &mallory));
         assert!(dm_allows(&dms, &me, space, &mallory));

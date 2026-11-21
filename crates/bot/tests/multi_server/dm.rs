@@ -70,8 +70,8 @@ async fn merged(person: Pair<'_, '_, '_>, dms: [Scope; 2]) -> Result<Vec<String>
     Ok(all.into_iter().map(|item| item.3).collect())
 }
 
-/// The DM is pinned to the other person and its key came from one of the two, so
-/// a message may go there; it can't be pinned to anyone else afterwards.
+/// The DM is pinned to the other person and its current epoch is the pair's, so a
+/// message may go there; it can't be pinned to anyone else afterwards.
 fn pinned(client: &mut KeyClient<'_>, dm: Scope, other: [u8; 32]) -> Result<()> {
     ensure!(
         client.bind_dm(dm.id, other) && client.dm_private(&dm.id, &other),
@@ -81,6 +81,28 @@ fn pinned(client: &mut KeyClient<'_>, dm: Scope, other: [u8; 32]) -> Result<()> 
     ensure!(
         !client.bind_dm(dm.id, stranger) && !client.dm_private(&dm.id, &stranger),
         "a pinned DM was relabelled"
+    );
+    Ok(())
+}
+
+/// The peer didn't make the DM, so pinning it starts a new epoch only the two hold;
+/// the maker then gets that epoch.
+async fn rekeyed(
+    peer: &mut KeyClient<'_>,
+    maker: &mut KeyClient<'_>,
+    dm: Scope,
+    maker_person: [u8; 32],
+) -> Result<()> {
+    ensure!(
+        peer.bind_dm(dm.id, maker_person),
+        "the peer couldn't pin the DM"
+    );
+    peer.sync().await?;
+    receive_key(peer, dm, 2).await?;
+    receive_key(maker, dm, 2).await?;
+    ensure!(
+        peer.dm_private(&dm.id, &maker_person),
+        "the peer's re-keyed DM was not private"
     );
     Ok(())
 }
@@ -113,11 +135,13 @@ pub async fn replicas(
     let dms = [dm_a, dm_b];
     assert_ne!(dm_a.id, dm_b.id);
     let owner_person = *owner.0.identity.certificate.person_id();
+    rekeyed(peer.0, owner.0, dm_a, owner_person).await?;
+    rekeyed(peer.1, owner.1, dm_b, owner_person).await?;
     pinned(owner.0, dm_a, peer_person)?;
     pinned(owner.1, dm_b, peer_person)?;
     pinned(peer.0, dm_a, owner_person)?;
     pinned(peer.1, dm_b, owner_person)?;
-    println!("W70 each DM copy is pinned to the two people and keyed by one of them");
+    println!("W70 each DM copy is pinned to the two people and re-keyed for them");
 
     assert_eq!(
         post((&mut *owner.0, &mut *owner.1), dms, BOTH).await?,

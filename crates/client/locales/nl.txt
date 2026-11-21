@@ -423,6 +423,7 @@ admin.invalid_role_count = Iedereen heeft minstens één rol nodig.
 admin.key_changing = De sleutel van de server verandert. Probeer het zo opnieuw.
 
 # crates/client/src/net/directory.rs
+net.dm_pins_unreadable = DM's op {server} zijn gepauzeerd: dit apparaat kan niet lezen met wie ze zijn.
 net.dm_skipped = Een DM op {server} is overgeslagen: iemand anders kan het lezen.
 role.owner = Eigenaar
 role.admin = Beheerder

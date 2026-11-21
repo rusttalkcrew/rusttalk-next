@@ -375,7 +375,15 @@ async fn start_epoch(
         ..
     } = context;
     let (current, rotate) = read_epoch(db, actor, scope).await?;
-    if current.checked_add(1) != Some(epoch) || (current != 0 && !rotate) {
+    // read_epoch already checked that the actor reads this scope, so for a DM they are one of its two people.
+    let dm = scope.kind == Kind::Channel
+        && query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM channels WHERE id = ? AND kind = 'dm')",
+        )
+        .bind(encode(&scope.id))
+        .fetch_one(&mut *db)
+        .await?;
+    if !may_start_epoch(current, epoch, rotate, dm) {
         return Err(conflict("epoch_changed"));
     }
     if scope.kind == Kind::Space && current == 0 {
@@ -417,6 +425,13 @@ async fn start_epoch(
         .execute(db)
         .await?;
     Ok(())
+}
+
+/// The next epoch can start when the scope has none yet or needs a rotation. Either
+/// person in a DM may also start one at any time: their app re-keys a DM once it has
+/// pinned who it is with, so no key shared before then can read later messages.
+fn may_start_epoch(current: i64, epoch: i64, rotate: bool, dm: bool) -> bool {
+    current.checked_add(1) == Some(epoch) && (current == 0 || rotate || dm)
 }
 
 #[derive(Deserialize)]
@@ -583,6 +598,17 @@ pub fn changed(app: &App, person: &[u8], device: Option<&[u8]>) {
 mod tests {
     use super::*;
     use rusttalk_core::identity::DeviceIdentity;
+
+    #[test]
+    fn a_dm_can_be_rekeyed_by_its_people_but_a_channel_only_when_flagged() {
+        assert!(may_start_epoch(0, 1, false, false));
+        assert!(may_start_epoch(3, 4, true, false));
+        assert!(!may_start_epoch(3, 4, false, false));
+        assert!(may_start_epoch(3, 4, false, true));
+        // Still only the next epoch.
+        assert!(!may_start_epoch(3, 5, false, true));
+        assert!(!may_start_epoch(3, 3, true, true));
+    }
 
     #[tokio::test]
     async fn device_cap_allows_registered_devices_and_reuses_freed_slots() {

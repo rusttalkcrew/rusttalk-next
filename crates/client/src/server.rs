@@ -351,6 +351,9 @@ pub struct Msg {
     /// In a DM: the servers holding a copy, the shown copy's server first.
     /// Empty in channels.
     pub replicas: Vec<Url>,
+    /// In a DM: each other copy's stored files, by server. Every copy has its own
+    /// blobs, so downloads switch to these when the shown copy's server drops it.
+    pub copy_files: Vec<(Url, Vec<Attachment>)>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -456,6 +459,11 @@ impl Chat {
                 // DM copies on several servers: keep the earliest server time.
                 (false, false) => {
                     old.at = old.at.min(msg.at);
+                    for server in &msg.replicas {
+                        if !old.replicas.contains(server) {
+                            old.copy_files.push((server.clone(), msg.files.clone()));
+                        }
+                    }
                     add_replicas(&mut old.replicas, msg.replicas);
                 }
                 // So a delete on that server clears the placeholder.
@@ -561,6 +569,7 @@ mod tests {
             live: None,
             sticker: None,
             replicas: Vec::new(),
+            copy_files: Vec::new(),
         }
     }
 

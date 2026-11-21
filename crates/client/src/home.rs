@@ -76,8 +76,8 @@ pub struct Home {
     /// Friends, requests and blocks; synced between this person's devices only.
     friends: Friends,
     friends_tab: friends::Tab,
-    /// IDs of this person's DM messages they deleted, on any device, oldest first.
-    dm_deleted: Vec<Id>,
+    /// This person's DM messages they deleted, on any device.
+    dm_deleted: dm::Tombstones,
     view: View,
     invite: String,
     join: Join,
@@ -425,14 +425,15 @@ impl Home {
     /// once it shows it again, also after a restart (see `Thread::add`).
     fn delete_dm(&mut self, peer: Id, id: Id, now: f64) {
         let me = *self.identity.certificate.person_id();
+        // Only a readable copy shows I wrote it; a placeholder could be anyone's forgery.
         let Some(msg) = (self.threads.get(&peer)).and_then(|thread| {
-            (thread.chat.messages.iter()).find(|m| m.id == id && m.person == me)
+            (thread.chat.messages.iter())
+                .find(|m| m.id == id && m.person == me && m.body != Body::Unreadable)
         }) else {
             return;
         };
         let msg = msg.clone();
-        // Each copy has its own stored files; only the shown copy's are known here.
-        // shortcut: the other copies' files stay until they expire (30 days).
+        // Each copy has its own stored files: the shown copy's, then the others'.
         let files: Vec<Id> = (msg.files.iter())
             .flat_map(|file| std::iter::once(&file.file).chain(&file.thumbnail))
             .map(|blob| blob.id)
@@ -446,7 +447,13 @@ impl Home {
             let files = if msg.replicas[0] == server.address {
                 files.clone()
             } else {
-                Vec::new()
+                // Each copy has its own blobs.
+                (msg.copy_files.iter())
+                    .filter(|(held, _)| *held == server.address)
+                    .flat_map(|(_, attachments)| attachments)
+                    .flat_map(|file| std::iter::once(&file.file).chain(&file.thumbnail))
+                    .map(|blob| blob.id)
+                    .collect()
             };
             server.send(Command::Delete(channel, id, me, files));
             sent = true;
@@ -454,9 +461,9 @@ impl Home {
         if !sent {
             self.toast = Some((t!("home.waiting_try_again").into(), now + 6.0));
         }
-        if !self.dm_deleted.contains(&id) {
-            self.dm_deleted.push(id);
-            self.net.sync(vec![Edit::DeletedDm(id)]);
+        if self.dm_deleted.add(id, msg.replicas.clone()) {
+            self.net
+                .sync(vec![Edit::DeletedDm(id, msg.replicas.clone())]);
         }
         if let Some(thread) = self.threads.get_mut(&peer) {
             thread.deleted(&me, &id);
@@ -834,6 +841,11 @@ impl Home {
                     for id in thread.add(&server, channel, items, older, at_start, &pair) {
                         let stale = Command::Delete(channel, id, me, Vec::new());
                         self.servers[index].send(stale);
+                        // Kept until that server confirms, also across restarts.
+                        if self.dm_deleted.add(id, [server.clone()]) {
+                            self.net
+                                .sync(vec![Edit::DeletedDm(id, vec![server.clone()])]);
+                        }
                     }
                     return;
                 }
@@ -863,6 +875,10 @@ impl Home {
                 };
                 let me = *self.identity.certificate.person_id();
                 let dm = self.dm_peer(index, &channel);
+                // One of my deletes is done on that server.
+                if dm.is_some() && self.dm_deleted.gone(&id, &address) {
+                    self.net.sync(vec![Edit::DmCopyGone(id, address.clone())]);
+                }
                 let chat = match dm {
                     Some(peer) => self.threads.get_mut(&peer).map(|thread| {
                         thread.remove(&address, &id);
@@ -1058,15 +1074,16 @@ impl Home {
                     }
                 }
                 // Deletes from my other devices; mine stay too, as `run` applies them again.
-                for id in device_sync::dm_deleted(&synced.settings) {
-                    if !self.dm_deleted.contains(&id) {
-                        self.dm_deleted.push(id);
-                        let me = *self.identity.certificate.person_id();
+                let synced_deletes = device_sync::dm_deleted(&synced.settings);
+                let me = *self.identity.certificate.person_id();
+                for id in synced_deletes.ids() {
+                    if !self.dm_deleted.contains(id) {
                         for thread in self.threads.values_mut() {
-                            thread.deleted(&me, &id);
+                            thread.deleted(&me, id);
                         }
                     }
                 }
+                self.dm_deleted.merge(&synced_deletes);
                 let audio = &self.voice.audio;
                 let adopted = device_sync::adopt(&audio.settings(), &synced.settings);
                 self.synced = device_sync::synced(&adopted);
@@ -2878,19 +2895,23 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
         }
     });
     let content = output.content_size.y;
-    if let Some(before) = chat.keep_scroll
-        && content > before
-    {
-        chat.keep_scroll = None;
-        chat.scroll_to = Some(output.state.clamped_offset().y + content - before);
-        ui.ctx().request_repaint();
-    }
     // Only page once the layout has settled; the first frame always starts at the top.
     let settled = chat.content_height == content;
+    if let Some(before) = chat.keep_scroll {
+        if content > before {
+            chat.keep_scroll = None;
+            chat.scroll_to = Some(output.state.clamped_offset().y + content - before);
+            ui.ctx().request_repaint();
+        } else if settled {
+            // The page added nothing new (a DM copy of what was loaded): page on.
+            chat.keep_scroll = None;
+        }
+    }
     chat.content_height = content;
+    // A DM asks each copy on its own, so one slow server doesn't hold up the others.
     if settled
         && output.state.clamped_offset().y < 4.0
-        && !chat.loading
+        && (!chat.loading || matches!(at, At::Dm(_)))
         && !chat.at_start
         && chat.keep_scroll.is_none()
     {
@@ -3492,8 +3513,12 @@ fn message(
     };
     let can_reply = text.is_some();
     let can_edit = mine && text.is_some() && msg.sticker.is_none();
+    // A DM copy that didn't open proves nothing about who wrote it, and deleting a
+    // DM message reaches every server, so only a readable copy of mine can be deleted.
+    let dm_copy = !msg.replicas.is_empty();
+    let authored = mine && !(dm_copy && msg.body == Body::Unreadable);
     let can_delete =
-        mine || (dir.perms.delete_messages && !dir.dms.iter().any(|dm| dm.channel == channel));
+        authored || (dir.perms.delete_messages && !dir.dms.iter().any(|dm| dm.channel == channel));
     let mut pick = None;
     ui::context_menu(&row.response, |m| {
         if can_reply && m.item("↩", t!("common.reply")).clicked() {

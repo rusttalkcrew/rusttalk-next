@@ -191,9 +191,15 @@ pub(super) async fn directory(
     dir.dms.retain(|dm| {
         let kept = client.bind_dm(dm.channel, dm.peer);
         if !kept && state.relabelled.insert(dm.channel) {
-            tracing::warn!("the server relabelled a pinned DM; not using it");
+            tracing::warn!(
+                lost = state.pins_lost,
+                "not using a DM the server relabelled, or whose pin was lost"
+            );
             let server = url.host_str().unwrap_or(t!("net.a_server"));
-            ctx.send(Update::Failed(t!("net.dm_skipped", server = server)));
+            ctx.send(Update::Failed(match state.pins_lost {
+                true => t!("net.dm_pins_unreadable", server = server),
+                false => t!("net.dm_skipped", server = server),
+            }));
         }
         kept
     });
@@ -226,6 +232,7 @@ pub(super) async fn directory(
                 live: None,
                 sticker: None,
                 replicas: Vec::new(),
+                copy_files: Vec::new(),
             };
             ctx.send(Update::Notice(url.clone(), person, msg));
         }

@@ -603,6 +603,7 @@ mod tests {
                 live: None,
                 sticker: None,
                 replicas: Vec::new(),
+                copy_files: Vec::new(),
             };
             mention(&Message::new(&msg, &dir, chat), &me, &roles)
         };

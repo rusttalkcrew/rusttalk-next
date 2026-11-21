@@ -4,7 +4,7 @@
 //! A message goes to every replica that is online with the same random ID, so the
 //! copies merge here by person and ID.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use url::Url;
 
@@ -30,12 +30,117 @@ struct Page {
     failed: bool,
 }
 
-/// Who a DM is between, and the IDs of this person's own messages they deleted on
-/// any of their devices.
+/// Who a DM is between, and this person's own messages they deleted on any device.
 pub struct Pair<'a> {
     pub me: Id,
     pub peer: Id,
-    pub deleted: &'a [Id],
+    pub deleted: &'a Tombstones,
+}
+
+/// Resolved deletes kept for copies that show up on a server not known to hold one.
+const KEEP_RESOLVED: usize = 1_000;
+/// Unresolved deletes are never dropped below this; it keeps the sync copy in its size limit.
+// shortcut: past this many deletes still waiting for an offline server, the oldest go.
+const MAX_UNRESOLVED: usize = 2_000;
+
+/// This person's deleted DM messages, oldest first, synced between their devices.
+/// Each merges as a set, so two devices deleting on different servers keep both.
+#[derive(Clone, Default, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Tombstones(Vec<Tombstone>);
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Tombstone {
+    #[serde(with = "base64_id")]
+    id: Id,
+    /// Servers that may still hold a copy.
+    left: BTreeSet<Url>,
+    /// Servers whose copy is gone.
+    done: BTreeSet<Url>,
+}
+
+impl Tombstones {
+    pub fn contains(&self, id: &Id) -> bool {
+        self.0.iter().any(|stone| stone.id == *id)
+    }
+
+    pub fn ids(&self) -> impl Iterator<Item = &Id> {
+        self.0.iter().map(|stone| &stone.id)
+    }
+
+    /// Record a delete, or more servers that may hold a copy. `false` when nothing changed.
+    pub fn add(&mut self, id: Id, servers: impl IntoIterator<Item = Url>) -> bool {
+        let before = self.clone();
+        let at = match self.0.iter().position(|stone| stone.id == id) {
+            Some(at) => at,
+            None => {
+                self.0.push(Tombstone {
+                    id,
+                    left: BTreeSet::new(),
+                    done: BTreeSet::new(),
+                });
+                self.0.len() - 1
+            }
+        };
+        let stone = &mut self.0[at];
+        stone.left.extend(servers);
+        stone.left.retain(|server| !stone.done.contains(server));
+        self.compact();
+        *self != before
+    }
+
+    /// A server's copy is gone. `false` when that changes nothing or isn't a delete of mine.
+    pub fn gone(&mut self, id: &Id, server: &Url) -> bool {
+        let Some(stone) = self.0.iter_mut().find(|stone| stone.id == *id) else {
+            return false;
+        };
+        stone.left.remove(server);
+        let changed = stone.done.insert(server.clone());
+        self.compact();
+        changed
+    }
+
+    /// Add another device's or snapshot's deletes: every ID, and what each knows
+    /// about the servers; a copy gone anywhere is gone.
+    pub fn merge(&mut self, other: &Self) {
+        for theirs in &other.0 {
+            match self.0.iter_mut().find(|stone| stone.id == theirs.id) {
+                Some(mine) => {
+                    mine.done.extend(theirs.done.iter().cloned());
+                    mine.left.extend(theirs.left.iter().cloned());
+                    let done = &mine.done;
+                    mine.left.retain(|server| !done.contains(server));
+                }
+                None => self.0.push(theirs.clone()),
+            }
+        }
+        self.compact();
+    }
+
+    /// Drop the oldest deletes that no known server still holds, past `KEEP_RESOLVED`.
+    fn compact(&mut self) {
+        let resolved = self.0.iter().filter(|stone| stone.left.is_empty()).count();
+        let mut extra = resolved.saturating_sub(KEEP_RESOLVED);
+        self.0.retain(|stone| {
+            let drop = extra > 0 && stone.left.is_empty();
+            extra -= usize::from(drop);
+            !drop
+        });
+        let extra = self.0.len().saturating_sub(KEEP_RESOLVED + MAX_UNRESOLVED);
+        self.0.drain(..extra);
+    }
+}
+
+mod base64_id {
+    use rusttalk_core::auth::{decode, encode};
+
+    pub fn serialize<S: serde::Serializer>(id: &[u8; 32], out: S) -> Result<S::Ok, S::Error> {
+        out.serialize_str(&encode(id))
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(input: D) -> Result<[u8; 32], D::Error> {
+        let text: String = serde::Deserialize::deserialize(input)?;
+        decode(&text).map_err(serde::de::Error::custom)
+    }
 }
 
 impl Thread {
@@ -96,7 +201,8 @@ impl Thread {
                 return false;
             }
             let deleted = msg.person == pair.me && pair.deleted.contains(&msg.id);
-            if deleted {
+            // Only a copy that opened is mine for sure, so only that one is deleted.
+            if deleted && msg.body != Body::Unreadable {
                 stale.push(msg.id);
             }
             !deleted
@@ -115,11 +221,21 @@ impl Thread {
     pub fn remove(&mut self, server: &Url, id: &Id) {
         let mut gone = Vec::new();
         for msg in (self.chat.messages.iter_mut()).filter(|msg| msg.id == *id) {
-            if msg.replicas.contains(server) {
-                msg.replicas.retain(|held| held != server);
-                if msg.replicas.is_empty() {
-                    gone.push(msg.person);
+            if !msg.replicas.contains(server) {
+                continue;
+            }
+            let shown = msg.replicas[0] == *server;
+            msg.replicas.retain(|held| held != server);
+            msg.copy_files.retain(|(held, _)| held != server);
+            match msg.replicas.first() {
+                None => gone.push(msg.person),
+                // The next copy shows now, with its own files.
+                Some(next) if shown => {
+                    if let Some(at) = msg.copy_files.iter().position(|(held, _)| held == next) {
+                        msg.files = msg.copy_files.remove(at).1;
+                    }
                 }
+                Some(_) => {}
             }
         }
         for person in gone {
@@ -183,6 +299,7 @@ impl Thread {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusttalk_core::client::{Attachment, BlobRef};
 
     const ME: Id = [7; 32];
     const PEER: Id = [8; 32];
@@ -205,6 +322,7 @@ mod tests {
             live: None,
             sticker: None,
             replicas: Vec::new(),
+            copy_files: Vec::new(),
         }
     }
 
@@ -215,7 +333,7 @@ mod tests {
         }
     }
 
-    fn pair(deleted: &[Id]) -> Pair<'_> {
+    fn pair(deleted: &Tombstones) -> Pair<'_> {
         Pair {
             me: ME,
             peer: PEER,
@@ -240,10 +358,24 @@ mod tests {
         assert!(!thread.open(&a, [1; 32]));
         // Server B was down for "2" and its clock runs ahead.
         let page = vec![msg(1, 7, 10, "1"), msg(2, 8, 20, "2"), msg(3, 7, 30, "3")];
-        thread.add(&a, [1; 32], page, false, Some(true), &pair(&[]));
+        thread.add(
+            &a,
+            [1; 32],
+            page,
+            false,
+            Some(true),
+            &pair(&Tombstones::default()),
+        );
         assert!(thread.chat.loading);
         let page = vec![msg(1, 7, 12, "1"), msg(3, 7, 31, "3")];
-        thread.add(&b, [2; 32], page, false, Some(true), &pair(&[]));
+        thread.add(
+            &b,
+            [2; 32],
+            page,
+            false,
+            Some(true),
+            &pair(&Tombstones::default()),
+        );
         assert!(!thread.chat.loading && thread.chat.at_start);
         assert_eq!(texts(&thread), ["1", "2", "3"]);
         let first = &thread.chat.messages[0];
@@ -259,7 +391,14 @@ mod tests {
             ..msg(4, 8, 40, "forged")
         };
         let items = vec![msg(3, 8, 32, "theirs"), edit];
-        thread.add(&b, [2; 32], items, false, None, &pair(&[]));
+        thread.add(
+            &b,
+            [2; 32],
+            items,
+            false,
+            None,
+            &pair(&Tombstones::default()),
+        );
         assert_eq!(texts(&thread), ["1", "2", "3", "forged"]);
     }
 
@@ -273,7 +412,7 @@ mod tests {
             vec![unreadable(1, 8, 10)],
             false,
             None,
-            &pair(&[]),
+            &pair(&Tombstones::default()),
         );
         thread.add(
             &a,
@@ -281,7 +420,7 @@ mod tests {
             vec![msg(1, 8, 11, "hi")],
             false,
             None,
-            &pair(&[]),
+            &pair(&Tombstones::default()),
         );
         assert_eq!(texts(&thread), ["hi"]);
         // The placeholder's server and time are gone with it.
@@ -298,12 +437,33 @@ mod tests {
         // early, arrives first.
         let forged = unreadable(1, 8, 1);
         assert!(!thread.first_arrival(&forged));
-        thread.add(&b, [2; 32], vec![forged.clone()], false, None, &pair(&[]));
+        thread.add(
+            &b,
+            [2; 32],
+            vec![forged.clone()],
+            false,
+            None,
+            &pair(&Tombstones::default()),
+        );
         // The real copy still notifies once, and keeps its own time and server.
         assert!(thread.first_arrival(&real));
         assert!(!thread.first_arrival(&real));
-        thread.add(&a, [1; 32], vec![real], false, None, &pair(&[]));
-        thread.add(&b, [2; 32], vec![forged], false, None, &pair(&[]));
+        thread.add(
+            &a,
+            [1; 32],
+            vec![real],
+            false,
+            None,
+            &pair(&Tombstones::default()),
+        );
+        thread.add(
+            &b,
+            [2; 32],
+            vec![forged],
+            false,
+            None,
+            &pair(&Tombstones::default()),
+        );
         let shown = &thread.chat.messages[0];
         assert_eq!((shown.at, shown.replicas.clone()), (50, vec![a.clone()]));
         // So a delete on B doesn't touch it either.
@@ -316,7 +476,7 @@ mod tests {
             vec![msg(2, 9, 60, "intruder")],
             false,
             None,
-            &pair(&[]),
+            &pair(&Tombstones::default()),
         );
         assert_eq!(texts(&thread), ["hi"]);
     }
@@ -326,8 +486,22 @@ mod tests {
         let (a, b) = (server(1), server(2));
         let mut thread = Thread::default();
         let both = vec![msg(1, 7, 10, "mine"), msg(2, 8, 11, "theirs")];
-        thread.add(&a, [1; 32], both.clone(), false, None, &pair(&[]));
-        thread.add(&b, [2; 32], both.clone(), false, None, &pair(&[]));
+        thread.add(
+            &a,
+            [1; 32],
+            both.clone(),
+            false,
+            None,
+            &pair(&Tombstones::default()),
+        );
+        thread.add(
+            &b,
+            [2; 32],
+            both.clone(),
+            false,
+            None,
+            &pair(&Tombstones::default()),
+        );
         // Retention, or a dishonest server, deletes both on B.
         thread.remove(&b, &[1; 32]);
         thread.remove(&b, &[2; 32]);
@@ -342,7 +516,14 @@ mod tests {
         assert!(thread.chat.messages.is_empty());
         // B's copies come back on reload, and none is deleted there: no server
         // proved that I deleted it.
-        let stale = thread.add(&b, [2; 32], both, false, Some(true), &pair(&[]));
+        let stale = thread.add(
+            &b,
+            [2; 32],
+            both,
+            false,
+            Some(true),
+            &pair(&Tombstones::default()),
+        );
         assert!(stale.is_empty());
         assert_eq!(texts(&thread), ["mine", "theirs"]);
     }
@@ -350,7 +531,8 @@ mod tests {
     #[test]
     fn my_deletes_hide_every_copy_and_survive_a_restart() {
         let (a, b) = (server(1), server(2));
-        let deleted = [[1; 32]];
+        let mut deleted = Tombstones::default();
+        deleted.add([1; 32], [a.clone()]);
         let mut thread = Thread::default();
         thread.add(
             &a,
@@ -358,7 +540,7 @@ mod tests {
             vec![msg(1, 7, 10, "mine")],
             false,
             None,
-            &pair(&[]),
+            &pair(&Tombstones::default()),
         );
         thread.deleted(&ME, &[1; 32]);
         assert!(thread.chat.messages.is_empty());
@@ -369,6 +551,82 @@ mod tests {
         let stale = restarted.add(&b, [2; 32], items, false, Some(true), &pair(&deleted));
         assert_eq!(stale, [[1; 32]]);
         assert_eq!(texts(&restarted), ["theirs"]);
+    }
+
+    #[test]
+    fn only_a_readable_copy_of_mine_is_deleted_again() {
+        let b = server(2);
+        let mut deleted = Tombstones::default();
+        deleted.add([1; 32], []);
+        let mut thread = Thread::default();
+        // A copy under my deleted ID that doesn't open could be anyone's forgery:
+        // it stays hidden, but nothing is deleted for it.
+        let stale = thread.add(
+            &b,
+            [2; 32],
+            vec![unreadable(1, 7, 10)],
+            false,
+            None,
+            &pair(&deleted),
+        );
+        assert!(stale.is_empty() && thread.chat.messages.is_empty());
+    }
+
+    #[test]
+    fn unresolved_deletes_are_never_dropped_for_newer_ones() {
+        let (a, b) = (server(1), server(2));
+        let mut deleted = Tombstones::default();
+        // B was away for the first delete; A confirmed the rest.
+        deleted.add([0; 32], [b.clone()]);
+        for n in 1..=KEEP_RESOLVED as u16 + 50 {
+            let mut id = [9; 32];
+            id[..2].copy_from_slice(&n.to_be_bytes());
+            deleted.add(id, [a.clone()]);
+            assert!(deleted.gone(&id, &a));
+        }
+        assert!(deleted.contains(&[0; 32]));
+        assert_eq!(deleted.ids().count(), KEEP_RESOLVED + 1);
+        // B's copy is gone at last: now it may go too, oldest first.
+        assert!(deleted.gone(&[0; 32], &b) && !deleted.gone(&[0; 32], &b));
+        assert!(!deleted.contains(&[0; 32]));
+    }
+
+    #[test]
+    fn files_follow_the_copy_that_is_shown() {
+        let (a, b) = (server(1), server(2));
+        let file = |id: u8| Attachment {
+            file: BlobRef::for_tests([id; 32]),
+            name: "a.txt".into(),
+            media_type: "text/plain".into(),
+            thumbnail: None,
+        };
+        let copy = |blob: u8| Msg {
+            files: vec![file(blob)],
+            ..msg(1, 8, 10, "hi")
+        };
+        let mut thread = Thread::default();
+        thread.add(
+            &a,
+            [1; 32],
+            vec![copy(1)],
+            false,
+            None,
+            &pair(&Tombstones::default()),
+        );
+        thread.add(
+            &b,
+            [2; 32],
+            vec![copy(2)],
+            false,
+            None,
+            &pair(&Tombstones::default()),
+        );
+        assert_eq!(thread.chat.messages[0].files[0].file.id, [1; 32]);
+        // A drops its copy: B's copy shows, with B's own blob.
+        thread.remove(&a, &[1; 32]);
+        let shown = &thread.chat.messages[0];
+        assert_eq!(shown.replicas, std::slice::from_ref(&b));
+        assert_eq!(shown.files[0].file.id, [2; 32]);
     }
 
     #[test]
@@ -383,7 +641,7 @@ mod tests {
             vec![msg(5, 7, 50, "5")],
             false,
             Some(false),
-            &pair(&[]),
+            &pair(&Tombstones::default()),
         );
         // B's first page fails: the chat isn't loading for good, and A still pages.
         thread.page_failed(&b, [2; 32], false);
@@ -398,7 +656,7 @@ mod tests {
             vec![msg(4, 7, 40, "4")],
             true,
             Some(false),
-            &pair(&[]),
+            &pair(&Tombstones::default()),
         );
         // B loads again on reconnect.
         thread.add(
@@ -407,13 +665,28 @@ mod tests {
             vec![msg(6, 7, 60, "6")],
             false,
             Some(false),
-            &pair(&[]),
+            &pair(&Tombstones::default()),
         );
         // A's cursor was deleted there meanwhile: A starts over from its newest page,
         // and B pages on.
         let mut asks = thread.older(|_| true);
         asks.sort_by_key(|(server, ..)| server.port());
         assert_eq!(asks[1], (b.clone(), [2; 32], Some([6; 32])));
+        // B answers while A is still loading: B pages on without waiting for A.
+        let older = vec![msg(3, 7, 30, "3")];
+        thread.add(
+            &b,
+            [2; 32],
+            older,
+            true,
+            Some(false),
+            &pair(&Tombstones::default()),
+        );
+        assert!(thread.chat.loading);
+        assert_eq!(
+            thread.older(|_| true),
+            [(b.clone(), [2; 32], Some([3; 32]))]
+        );
         thread.page_failed(&a, [1; 32], true);
         assert!(thread.chat.loading);
         assert_eq!(thread.older(|_| true), [(a.clone(), [1; 32], None)]);
@@ -423,9 +696,9 @@ mod tests {
             vec![msg(5, 7, 50, "5")],
             false,
             Some(true),
-            &pair(&[]),
+            &pair(&Tombstones::default()),
         );
-        assert_eq!(texts(&thread), ["4", "5", "6"]);
+        assert_eq!(texts(&thread), ["3", "4", "5", "6"]);
     }
 
     #[test]
@@ -440,7 +713,7 @@ mod tests {
             vec![msg(5, 7, 50, "5")],
             false,
             Some(false),
-            &pair(&[]),
+            &pair(&Tombstones::default()),
         );
         thread.add(
             &b,
@@ -448,7 +721,7 @@ mod tests {
             vec![msg(6, 7, 60, "6")],
             false,
             Some(true),
-            &pair(&[]),
+            &pair(&Tombstones::default()),
         );
         assert!(!thread.chat.at_start);
         // Only online servers, and only replicas with more to load.
@@ -464,7 +737,7 @@ mod tests {
             vec![msg(4, 7, 40, "4")],
             true,
             Some(true),
-            &pair(&[]),
+            &pair(&Tombstones::default()),
         );
         assert!(thread.chat.at_start && !thread.chat.loading);
         assert_eq!(texts(&thread), ["4", "5", "6"]);
@@ -475,7 +748,7 @@ mod tests {
             vec![msg(7, 7, 70, "7")],
             false,
             None,
-            &pair(&[]),
+            &pair(&Tombstones::default()),
         );
         // One sent on a replica not opened yet leaves it to be opened.
         thread.add(
@@ -484,7 +757,7 @@ mod tests {
             vec![msg(8, 7, 80, "8")],
             false,
             None,
-            &pair(&[]),
+            &pair(&Tombstones::default()),
         );
         assert!(thread.open(&a, [3; 32]));
         thread.add(
@@ -493,7 +766,7 @@ mod tests {
             vec![msg(8, 7, 80, "8")],
             false,
             Some(true),
-            &pair(&[]),
+            &pair(&Tombstones::default()),
         );
         thread.forget(&a);
         assert!(thread.chat.at_start && thread.unanswered(&a).is_empty());

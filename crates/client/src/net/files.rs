@@ -74,8 +74,11 @@ pub(super) async fn delete(
     (channel, id, sender): (Id, Id, Id),
     files: Vec<Id>,
 ) -> Result<()> {
-    client.delete_message(&channel, &id).await?;
-    ctx.send(Update::Deleted(url.clone(), channel, id));
+    match client.delete_message(&channel, &id).await {
+        // Already gone there counts as deleted, so a DM delete can finish.
+        Err(error) if !gone(&error) => return Err(error),
+        _ => ctx.send(Update::Deleted(url.clone(), channel, id)),
+    }
     for file in files {
         if let Err(error) = client.delete_message_file(&file, &sender).await
             && !gone(&error)

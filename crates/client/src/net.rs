@@ -20,7 +20,7 @@ use rusttalk_core::{
     },
     camera::CameraOptions,
     client::{
-        BlobRef, Event, FriendSignal, KeyClient, MessageBody, MessageError, MessageRecord,
+        BlobRef, DmPin, Event, FriendSignal, KeyClient, MessageBody, MessageError, MessageRecord,
         Server as Api, invite_name,
         voice::{DataLiveFiles, LiveFileEvent, NativeVideoSource, RoomEvent, VoiceRoster},
     },
@@ -350,7 +350,7 @@ impl Net {
     }
 
     /// This person's deleted DM messages as last saved, at start.
-    pub fn dm_deleted(&self) -> Vec<Id> {
+    pub fn dm_deleted(&self) -> crate::dm::Tombstones {
         self.ctx.sync.dm_deleted()
     }
 
@@ -540,8 +540,10 @@ struct State {
     chat_files: HashMap<Id, DataLiveFiles>,
     /// Decoded pictures in the last directory, by hash.
     pictures: HashMap<[u8; 32], Picture>,
-    /// How many DM pins `dm_pins` last saved, to save again when there are more.
-    pins_saved: usize,
+    /// The DM pins `dm_pins` last saved, to save again when they change.
+    pins_saved: HashMap<Id, DmPin>,
+    /// `dm_pins` couldn't be read: it is left as it is, and DMs here stay blocked.
+    pins_lost: bool,
     /// DMs the server relabelled, already warned about.
     relabelled: HashSet<Id>,
 }
@@ -587,7 +589,8 @@ async fn run(
                     }
                 }
                 let pins = load_pins(&ctx.data, &server.server_id);
-                state.pins_saved = pins.len();
+                state.pins_lost = pins.is_none();
+                state.pins_saved = pins.clone().unwrap_or_default();
                 match KeyClient::connect_with_dms(api, &ctx.identity, &session, pins).await {
                     Ok(mut client) => {
                         delay = 1;
@@ -907,19 +910,28 @@ async fn latest(ctx: &Ctx, client: &mut KeyClient<'_>, state: &State) {
     let Some(dir) = &state.last else {
         return;
     };
+    // A DM's newest record counts only once it opens and comes from its pinned peer:
+    // the server could put anything there.
     let channels = (dir.categories.iter())
         .flat_map(|category| &category.channels)
-        .map(|channel| channel.id)
-        .chain(dir.dms.iter().map(|dm| dm.channel));
+        .map(|channel| (channel.id, None))
+        .chain(dir.dms.iter().map(|dm| (dm.channel, Some(dm.peer))));
     let me = *client.identity.certificate.person_id();
     let mut found = Vec::new();
-    for channel in channels {
+    for (channel, peer) in channels {
         match client.message_page(&channel, None, 1).await {
-            Ok(records) => found.extend(
-                (records.first())
-                    .filter(|record| record.person != me)
-                    .map(|record| (channel, record.at)),
-            ),
+            Ok(records) => {
+                let Some(record) = records.first().filter(|record| record.person != me) else {
+                    continue;
+                };
+                if let Some(peer) = peer
+                    && (record.person != peer
+                        || client.open_message(&channel, record).await.is_err())
+                {
+                    continue;
+                }
+                found.push((channel, record.at));
+            }
             Err(error) => {
                 tracing::warn!(error = %format_args!("{error:#}"), "loading the newest message failed");
             }
@@ -1006,6 +1018,8 @@ async fn on_event(
             directory(ctx, url, client, state).await?;
         }
         Event::KeysNeeded(_) => {
+            // Key work may have re-keyed a DM.
+            save_pins(ctx, client, state);
             // Names stay unreadable until the space key arrives, which can be after the first load.
             if !state.named && client.has_space_key() {
                 directory(ctx, url, client, state).await?;
@@ -1258,9 +1272,8 @@ async fn dm_channel(
     if let Some(dm) = existing {
         return Ok(dm.channel);
     }
+    // Pinned there, before any key is wrapped.
     let scope = client.create_dm(&peer).await?;
-    // Made just now with a key of ours, or one the server already had; checked before use.
-    client.bind_dm(scope.id, peer);
     directory(ctx, url, client, state).await?;
     Ok(scope.id)
 }
@@ -1272,31 +1285,55 @@ fn pins_path(data: &Path, server_id: &Id) -> PathBuf {
         .join(format!("{}.json", hex::encode(server_id)))
 }
 
-fn load_pins(data: &Path, server_id: &Id) -> HashMap<Id, Id> {
-    let saved: HashMap<String, String> = crate::load_json(&pins_path(data, server_id))
-        .unwrap_or_else(|error| {
+/// A pin as saved: the person, and the first epoch started after pinning.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SavedPin {
+    peer: String,
+    from: Option<i64>,
+}
+
+/// `None` when the file is there but can't be read: trusting the next catalog again
+/// would let the server relabel DMs, so they stay blocked instead.
+fn load_pins(data: &Path, server_id: &Id) -> Option<HashMap<Id, DmPin>> {
+    let saved: HashMap<String, SavedPin> = match crate::load_json(&pins_path(data, server_id)) {
+        Ok(saved) => saved,
+        Err(error) => {
             tracing::warn!(error = %format_args!("{error:#}"), "DM pins unreadable");
-            HashMap::new()
-        });
+            return None;
+        }
+    };
     (saved.iter())
-        .filter_map(|(channel, peer)| Some((decode(channel).ok()?, decode(peer).ok()?)))
+        .map(|(channel, pin)| {
+            let peer = decode(&pin.peer).ok()?;
+            let from = pin.from;
+            Some((decode(channel).ok()?, DmPin::With { peer, from }))
+        })
         .collect()
 }
 
-/// Save the DM pins when the client learned new ones.
+/// Save the DM pins when they changed. Never over a file that couldn't be read.
 fn save_pins(ctx: &Ctx, client: &KeyClient<'_>, state: &mut State) {
-    if client.dms().len() == state.pins_saved {
+    if state.pins_lost || *client.dms() == state.pins_saved {
         return;
     }
     let path = pins_path(&ctx.data, &state.server_id);
-    let pins: HashMap<String, String> = (client.dms().iter())
-        .map(|(channel, peer)| (encode(channel), encode(peer)))
+    let pins: HashMap<String, SavedPin> = (client.dms().iter())
+        .filter_map(|(channel, pin)| match pin {
+            DmPin::With { peer, from } => Some((
+                encode(channel),
+                SavedPin {
+                    peer: encode(peer),
+                    from: *from,
+                },
+            )),
+            DmPin::Blocked => None,
+        })
         .collect();
     let saved = std::fs::create_dir_all(path.parent().expect("in a folder"))
         .map_err(anyhow::Error::from)
         .and_then(|()| rusttalk_core::client::save_json(&ctx.data, &path, &pins));
     match saved {
-        Ok(()) => state.pins_saved = pins.len(),
+        Ok(()) => state.pins_saved = client.dms().clone(),
         Err(error) => tracing::warn!(error = %format_args!("{error:#}"), "saving DM pins failed"),
     }
 }
@@ -1367,6 +1404,7 @@ fn unreadable(record: &MessageRecord) -> Msg {
         live: None,
         sticker: None,
         replicas: Vec::new(),
+        copy_files: Vec::new(),
     }
 }
 
@@ -1385,6 +1423,7 @@ fn to_msg(record: &MessageRecord, body: &MessageBody) -> Msg {
         live: (body.live.as_ref()).map(|file| (file.id, file.name.clone(), file.size)),
         sticker: body.sticker,
         replicas: Vec::new(),
+        copy_files: Vec::new(),
     }
 }
 

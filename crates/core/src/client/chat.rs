@@ -13,7 +13,7 @@ use crate::{
     messages::{MAX_MESSAGE_BYTES, MessageContext, MessageError},
 };
 
-use super::KeyClient;
+use super::{KeyClient, keys::DmPin};
 pub use crate::messages::{MAX_TEXT_CHARS, MessageBody, MessageRecord};
 
 // shortcut: replay protection forgets the oldest IDs past this cap, same as server retention; persist with W14 sync.
@@ -141,17 +141,31 @@ impl KeyClient<'_> {
         let key = keys::random_key()?;
         let context = EnvelopeContext::new(self.server.known_server().server_id, scope, 1, &key);
         let envelope = self.wrap_for_self(context, &key)?;
-        let response: CreatedDm = self
-            .request(Method::POST, "/v1/dms")
-            .json(&json!({
-                "id": encode(&scope.id), "peer": encode(peer),
-                "commitment": encode(&context.commitment), "envelope": envelope,
-            }))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
+        // Pinned before anything is wrapped: this key is new, so epoch 1 holds for the pair.
+        self.dms.insert(
+            scope.id,
+            DmPin::With {
+                peer: *peer,
+                from: Some(1),
+            },
+        );
+        let request = self.request(Method::POST, "/v1/dms").json(&json!({
+            "id": encode(&scope.id), "peer": encode(peer),
+            "commitment": encode(&context.commitment), "envelope": envelope,
+        }));
+        let response: Result<CreatedDm> =
+            async { Ok(request.send().await?.error_for_status()?.json().await?) }.await;
+        // The server had one already, or refused: that one isn't new, so it is pinned
+        // as usual and re-keyed before use.
+        if response
+            .as_ref()
+            .is_ok_and(|created| created.id != scope.id)
+            || response.is_err()
+        {
+            self.dms.remove(&scope.id);
+        }
+        let response = response?;
+        self.bind_dm(response.id, *peer);
         self.sync().await?;
         Ok(Scope {
             id: response.id,

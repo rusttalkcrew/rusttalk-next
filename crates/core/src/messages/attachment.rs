@@ -22,6 +22,17 @@ pub struct BlobRef {
 }
 
 impl BlobRef {
+    /// A reference that only carries an ID, for other crates' tests; it opens nothing.
+    #[doc(hidden)]
+    pub fn for_tests(id: [u8; 32]) -> Self {
+        Self {
+            id,
+            size: 0,
+            chunk_size: 64 * 1024,
+            key: Key::new([0; 32]),
+        }
+    }
+
     pub(crate) fn ciphertext_len(&self) -> Result<usize> {
         if !(16 * 1024..=1024 * 1024).contains(&self.chunk_size)
             || !self.chunk_size.is_power_of_two()
