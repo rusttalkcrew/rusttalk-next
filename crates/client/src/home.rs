@@ -1217,7 +1217,8 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
     let categories = &server.dir.categories;
     let can_manage = perms.manage_channels && online;
     let can_move = can_manage && reorder::order(categories).is_some();
-    ScrollArea::vertical().show(ui, |ui| {
+    let area = ScrollArea::vertical().animated(false);
+    area.show_viewport(ui, |ui, viewport| {
         ui.spacing_mut().item_spacing.y = 2.0;
         let list_id = UiId::unique(("channel order", &server.address));
         let mut list = reorder::List::begin(ui, list_id, categories, can_move);
@@ -1314,7 +1315,7 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
                 }
             }
         }
-        moved = moved.or(list.end(ui, categories));
+        moved = moved.or(list.end(ui, categories, viewport));
     });
     if let Some((item, slot)) = moved {
         let server = &mut home.servers[index];
