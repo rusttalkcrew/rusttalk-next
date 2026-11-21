@@ -145,9 +145,9 @@ Service. Development profiles use separate entries. The client logs the
 person fingerprint locally. Creating an account shows the recovery words once
 in the app window. The client never stores or logs the words or the root
 signing key. "Sign out of this device" deletes the keystore entry and the
-profile's `sync.json`, `servers.json`, `saved.json` and `emoji-recent.json`,
-so the next person on that profile starts without the servers, pins, saved
-file places or recent emoji.
+profile's `sync.json`, `servers.json`, `saved.json`, `notify.json` and
+`emoji-recent.json`, so the next person on that profile starts without the
+servers, pins, saved file places, read marks, notification choices or recent emoji.
 Device settings (`voice.json`, `updates.json`) stay.
 
 Next to the settings, `servers.json` holds each server's address, server ID
@@ -162,7 +162,14 @@ the server IDs of official servers dismissed from the join page
 list, and how a voice channel splits its call and chat). Of these, only the voice options (push to talk
 and its key, activation level, echo cancellation, noise suppression, auto
 gain), the camera resolution and frame rate, and the dismissed official
-servers sync to the person's other devices; the chosen microphone, speakers and camera stay on this device. Decrypted names, messages and pictures stay in
+servers sync to the person's other devices; the chosen microphone, speakers and camera stay on this device.
+`notify.json` holds the notification choices (desktop notifications, sound,
+"only when not focused", and per server address and channel ID the level,
+@everyone suppression and mute end time) and, per channel ID, the time of the
+newest message read. Both sync to the person's other devices inside the
+encrypted sync blob. Desktop notifications show the sender, channel and a short
+preview decrypted on this device; they go only to the operating system's
+notification service (D-Bus on Linux, toasts on Windows). Decrypted names, messages and pictures stay in
 memory only; the log never contains them, file names or invite links. A
 downloaded file is written only where the person picks in the save dialog,
 through a temporary file in that folder that is removed if the download fails.

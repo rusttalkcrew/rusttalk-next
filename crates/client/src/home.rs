@@ -39,6 +39,7 @@ use crate::{
         Admin, AdminUpdate, Admission, Command, Compatibility, Draft, Listed, Net, PAGE_SIZE,
         Preview, Update,
     },
+    notify::{self, Arrival, Notify},
     official, reorder,
     screen::Video,
     server::{Body, Chat, Directory, Id, Member, Msg, Picture, Server, Status, member_name},
@@ -94,6 +95,9 @@ pub struct Home {
     /// When the person last used the window, in egui time.
     active_at: f64,
     pub layout: layout::Layout,
+    pub notify: Notify,
+    /// The window has focus: the open channel counts as read.
+    focused: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -191,6 +195,7 @@ pub enum Tab {
     Video,
     Privacy,
     Devices,
+    Notifications,
     Updates,
     About,
 }
@@ -251,6 +256,8 @@ impl Home {
             auto_away: false,
             active_at: 0.0,
             layout,
+            notify: Notify::open(&data_dir, notify::unix_now()),
+            focused: true,
         })
     }
 
@@ -317,7 +324,8 @@ impl Home {
 
     /// Publish the synced settings that changed since the last sync.
     pub fn publish_settings(&mut self) {
-        let current = device_sync::synced(&self.voice.audio.settings());
+        let mut current = device_sync::synced(&self.voice.audio.settings());
+        current.extend(self.notify.synced());
         let edits: Vec<_> = current
             .iter()
             .filter(|(key, value)| self.synced.get(*key) != Some(value))
@@ -327,6 +335,110 @@ impl Home {
             self.net.sync(edits);
             self.synced = current;
         }
+    }
+
+    /// The chat on screen: server index and channel or DM.
+    fn viewing(&self) -> Option<(usize, Id)> {
+        match self.view {
+            View::Server(index) => self.servers[index].open.map(|channel| (index, channel)),
+            View::Direct(chat) => chat,
+            View::Join | View::Find => None,
+        }
+    }
+
+    /// Show a chat, like after a click on its notification.
+    fn open_chat(&mut self, address: &url::Url, channel: Id) {
+        let Some(index) = self.index(address) else {
+            return;
+        };
+        let server = &mut self.servers[index];
+        if server.dir.dms.iter().any(|dm| dm.channel == channel) {
+            self.view = View::Direct(Some((index, channel)));
+        } else if server.channel(&channel).is_some() {
+            server.open = Some(channel);
+            self.view = View::Server(index);
+        }
+    }
+
+    /// A new message: mark it unread, count a mention and notify, as the person chose.
+    fn arrived(&mut self, ctx: &egui::Context, index: usize, channel: Id, msg: Msg) {
+        let server = &self.servers[index];
+        let me = self.identity.certificate.person_id();
+        if msg.person == *me || msg.edit_of.is_some() || matches!(msg.body, Body::Notice { .. }) {
+            return;
+        }
+        let dm = server.dir.dms.iter().any(|dm| dm.channel == channel);
+        let my_roles = server.member(me).map_or(&[][..], |member| &member.roles);
+        let message = mentions::Message::new(&msg, &server.dir, channel);
+        let arrival = Arrival {
+            dm,
+            mention: notify::mention(&message, me, my_roles),
+        };
+        let prefs = self.notify.prefs();
+        let rule = prefs.effective(&server.address, &channel, dm, notify::unix_now());
+        let viewing = self.viewing() == Some((index, channel));
+        let mention = !(viewing && self.focused) && notify::counts(rule, arrival);
+        if notify::should_notify(prefs, rule, arrival, self.focused, viewing) {
+            let sender = server.member_name(&msg.person);
+            let title = match server.channel(&channel) {
+                Some(found) if !dm => format!("{sender} in #{} · {}", found.name, server.name()),
+                _ => sender,
+            };
+            // Mentions read as names, like in the chat.
+            let body = match &msg.body {
+                Body::Text(text) if !text.trim().is_empty() => message.plain(&server.dir),
+                _ if !msg.files.is_empty() || msg.live.is_some() => "Sent a file".into(),
+                _ => "New message".into(),
+            };
+            let target = (server.address.clone(), channel);
+            self.notify.show(ctx, &title, &body, target);
+        }
+        self.notify.arrived(channel, msg.at, mention);
+    }
+
+    /// Change a server's notification rule, or a channel's.
+    fn set_rule(&mut self, index: usize, channel: Option<Id>, rule: notify::Rule) {
+        let mut prefs = self.notify.prefs().clone();
+        prefs.set(&self.servers[index].address, channel.as_ref(), rule);
+        self.notify.set_prefs(prefs);
+        self.publish_settings();
+    }
+
+    /// Unread channels and mentions in a server's channel list; muted channels don't count.
+    fn server_marks(&self, index: usize) -> (bool, u32) {
+        let server = &self.servers[index];
+        let (prefs, now) = (self.notify.prefs(), notify::unix_now());
+        let channels = (server.dir.categories.iter())
+            .flat_map(|category| &category.channels)
+            .filter(|channel| {
+                !prefs
+                    .effective(&server.address, &channel.id, false, now)
+                    .muted
+            });
+        channels.fold((false, 0), |(unread, mentions), channel| {
+            (
+                unread || self.notify.unread(&channel.id),
+                mentions + self.notify.mentions(&channel.id),
+            )
+        })
+    }
+
+    /// The same for the DMs on every server.
+    fn dm_marks(&self) -> (bool, u32) {
+        let (prefs, now) = (self.notify.prefs(), notify::unix_now());
+        let dms = (self.servers.iter()).flat_map(|server| {
+            (server.dir.dms.iter()).filter(move |dm| {
+                !prefs
+                    .effective(&server.address, &dm.channel, true, now)
+                    .muted
+            })
+        });
+        dms.fold((false, 0), |(unread, mentions), dm| {
+            (
+                unread || self.notify.unread(&dm.channel),
+                mentions + self.notify.mentions(&dm.channel),
+            )
+        })
     }
 
     pub(crate) fn edit_channel(&mut self, index: usize, id: Id, edit: ChannelEdit) {
@@ -514,6 +626,16 @@ impl Home {
                     chat.at_start |= at_start;
                 }
             }
+            Update::Arrived(address, channel, msg) => {
+                if let Some(index) = self.index(&address) {
+                    self.arrived(ctx, index, channel, msg);
+                }
+            }
+            Update::Latest(found) => {
+                for (channel, at) in found {
+                    self.notify.arrived(channel, at, false);
+                }
+            }
             Update::Deleted(address, channel, id) => {
                 let Some(index) = self.index(&address) else {
                     return;
@@ -688,6 +810,12 @@ impl Home {
                 let adopted = device_sync::adopt(&audio.settings(), &synced.settings);
                 self.synced = device_sync::synced(&adopted);
                 audio.set_settings(adopted);
+                self.notify.adopt(&synced.settings);
+                for key in notify::SYNCED {
+                    if let Some(value) = synced.settings.get(key) {
+                        self.synced.insert(key.into(), value.clone());
+                    }
+                }
             }
             Update::Unsent(address, draft) => {
                 let Some(index) = self.index(&address) else {
@@ -753,8 +881,20 @@ fn panel_frame(fill: Color32) -> Frame {
 
 pub fn show(ui: &mut Ui, home: &mut Home, updates: &mut crate::update::Updater) -> Option<Action> {
     let now = ui.input(|input| input.time);
+    let focused = ui.input(|input| input.viewport().focused).unwrap_or(true);
+    if home.focused && !focused {
+        // Stepping away: read marks reach the other devices.
+        home.publish_settings();
+    }
+    home.focused = focused;
     while let Ok(update) = home.net.updates.try_recv() {
         home.apply(ui.ctx(), update, now);
+    }
+    while let Some((address, channel)) = home.notify.clicked() {
+        home.open_chat(&address, channel);
+    }
+    if focused && let Some((_, channel)) = home.viewing() {
+        home.notify.mark_read(&channel);
     }
     home.track_activity(ui);
     ui::apply(ui.ctx(), home.voice.audio.settings().appearance());
@@ -1014,18 +1154,15 @@ fn rail_button(ui: &mut Ui, text: &str, label: &str, selected: bool) -> Response
 fn server_rail(ui: &mut Ui, home: &mut Home) {
     ui.vertical_centered(|ui| {
         ui.add_space(4.0);
-        if rail_button(
-            ui,
-            "💬",
-            "Direct messages",
-            matches!(home.view, View::Direct(_)),
-        )
-        .clicked()
-        {
+        let dms = matches!(home.view, View::Direct(_));
+        let button = rail_button(ui, "💬", "Direct messages", dms);
+        rail_marks(ui, &button, dms, home.dm_marks());
+        if button.clicked() {
             home.view = View::Direct(None);
         }
         ui.separator();
         for index in 0..home.servers.len() {
+            let marks = home.server_marks(index);
             let server = &home.servers[index];
             let selected = home.view == View::Server(index);
             let button = match &server.dir.icon {
@@ -1041,9 +1178,11 @@ fn server_rail(ui: &mut Ui, home: &mut Home) {
                 }
                 None => rail_button(ui, &initials(server.name()), server.name(), selected),
             };
+            rail_marks(ui, &button, selected, marks);
             if button.clicked() {
                 home.view = View::Server(index);
             }
+            ui::context_menu(&button, |m| server_menu(m, home, index));
         }
         let adding = matches!(home.view, View::Join | View::Find);
         let plus = rail_button(ui, "+", "Add a server", adding);
@@ -1057,6 +1196,40 @@ fn server_rail(ui: &mut Ui, home: &mut Home) {
             }
         });
     });
+}
+
+/// The unread pill beside a rail button (unless it is open) and its mention count.
+fn rail_marks(ui: &Ui, button: &Response, selected: bool, (unread, mentions): (bool, u32)) {
+    if unread && !selected {
+        ui::unread_pill(
+            ui,
+            button.rect,
+            button.rect.left() - ui.max_rect().left() + 6.0,
+        );
+    }
+    if mentions > 0 {
+        let at = button.rect.right_bottom() - Vec2::splat(5.0);
+        ui::mention_badge(ui, at, mentions, ui::colors(ui).rail);
+    }
+}
+
+/// The same on a channel or DM row, unless that chat is muted.
+fn chat_marks(ui: &Ui, home: &Home, server: &url::Url, channel: &Id, dm: bool, row: Rect) {
+    let prefs = home.notify.prefs();
+    if prefs
+        .effective(server, channel, dm, notify::unix_now())
+        .muted
+    {
+        return;
+    }
+    if home.notify.unread(channel) {
+        ui::unread_pill(ui, row, 4.0);
+    }
+    let mentions = home.notify.mentions(channel);
+    if mentions > 0 {
+        let at = egui::pos2(row.right() - 16.0, row.center().y);
+        ui::mention_badge(ui, at, mentions, ui::colors(ui).side);
+    }
 }
 
 fn sidebar(ui: &mut Ui, home: &mut Home, updates: &mut crate::update::Updater) {
@@ -1170,6 +1343,7 @@ fn dm_list(ui: &mut Ui, home: &mut Home) {
                         ui.add(Label::new(ui::caption(server.name())).truncate());
                     });
                 });
+                chat_marks(ui, home, &server.address, &dm.channel, true, row.rect);
                 if row.clicked() {
                     home.view = View::Direct(Some((index, dm.channel)));
                 }
@@ -1273,6 +1447,7 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
     let mut moved = None;
     let mut channel_edit = None;
     let mut category_dialog = None;
+    let mut rule_change = None;
     let categories = &server.dir.categories;
     let can_manage = perms.manage_channels && online;
     let can_move = can_manage && !server.order_unavailable && reorder::order(categories).is_some();
@@ -1341,6 +1516,7 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
                             ui::nav_row(ui, icon, &channel.name, selected, Role::Button, &label)
                         })
                         .inner;
+                    chat_marks(ui, home, &server.address, &channel.id, false, row.rect);
                     if channel.voice {
                         call::room_list(ui, home, server, &channel.id);
                     }
@@ -1353,8 +1529,13 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
                         pick = Some(channel.id);
                     }
                 }
-                if perms.manage_channels {
-                    ui::context_menu(&button, |m| {
+                ui::context_menu(&button, |m| {
+                    let rule = home.notify.prefs().channel(&channel.id);
+                    if let Some(rule) = notify::rule_menu(m, &rule, true, notify::unix_now()) {
+                        rule_change = Some((channel.id, rule));
+                    }
+                    if perms.manage_channels {
+                        m.separator();
                         if m.item("⚙", "Channel settings").clicked() {
                             configure = Some(channel.id);
                         }
@@ -1370,8 +1551,8 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
                                 channel_edit = Some((channel.id, ChannelEdit::Delete));
                             }
                         }
-                    });
-                }
+                    }
+                });
             }
         }
         moved = moved.or(list.end(ui, categories, viewport));
@@ -1383,6 +1564,9 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
         {
             server.send(Command::Reorder(order));
         }
+    }
+    if let Some((channel, rule)) = rule_change {
+        home.set_rule(index, Some(channel), rule);
     }
     if let Some(channel) = configure {
         admin::open(home, index, admin::Tab::Channel(channel));
@@ -1442,6 +1626,11 @@ fn server_menu(m: &mut ui::Menu, home: &mut Home, index: usize) {
     if grouped {
         m.separator();
     }
+    let rule = home.notify.prefs().server(&home.servers[index].address);
+    if let Some(rule) = notify::rule_menu(m, &rule, false, notify::unix_now()) {
+        home.set_rule(index, None, rule);
+    }
+    m.separator();
     if m.item("🏷", "Change my name").clicked() {
         let server = &home.servers[index];
         let mine = server

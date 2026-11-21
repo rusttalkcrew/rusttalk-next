@@ -15,6 +15,7 @@ mod home;
 mod keystore;
 mod log_file;
 mod net;
+mod notify;
 mod official;
 mod reorder;
 mod screen;
