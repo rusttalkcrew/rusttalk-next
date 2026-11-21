@@ -2,3 +2,5 @@
 !Cargo.*
 !crates/
 !services/
+!LICENSE
+!NOTICE

@@ -10,7 +10,7 @@ ponytail mode: invoke `/ponytail` at the start of every session and task (use th
 slash command, not the skill tool). Prefer a proven library over our own
 implementation, and our own small code over a large framework.
 
-License: MIT (`LICENSE`). Add no dependency whose license is incompatible with MIT.
+License: Apache-2.0 (`LICENSE`, `NOTICE`). Add no dependency whose license is incompatible with Apache-2.0.
 
 ## 1. Principles (binding)
 

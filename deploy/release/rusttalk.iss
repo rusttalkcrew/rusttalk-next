@@ -22,6 +22,9 @@ UninstallDisplayIcon={app}\rusttalk-client.exe
 
 [Files]
 Source: "{#Client}"; DestDir: "{app}"; Flags: ignoreversion
+; Apache-2.0 requires the license and NOTICE in every copy.
+Source: "..\..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
+Source: "..\..\NOTICE"; DestDir: "{app}"; DestName: "NOTICE.txt"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\RustTalk"; Filename: "{app}\rusttalk-client.exe"
