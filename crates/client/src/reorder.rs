@@ -458,6 +458,7 @@ mod tests {
             name: format!("c{id}"),
             channels: (channels.iter())
                 .map(|&ch| Channel {
+                    topic: String::new(),
                     id: [ch; 32],
                     name: format!("{ch}"),
                     voice: false,

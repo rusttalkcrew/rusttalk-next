@@ -14,7 +14,9 @@ use eframe::egui;
 use livekit::prelude::Participant;
 use reqwest::{Method, StatusCode};
 use rusttalk_core::{
-    auth::{Fingerprint, InviteCode, InviteLink, KnownServer, ProtocolError, Session, decode},
+    auth::{
+        Fingerprint, InviteCode, InviteLink, KnownServer, ProtocolError, Session, decode, encode,
+    },
     camera::CameraOptions,
     client::{
         BlobRef, Event, KeyClient, MessageBody, MessageError, MessageRecord, Server as Api,
@@ -85,6 +87,14 @@ pub enum Command {
         name: String,
     },
     CreateCategory(String),
+    RenameChannel {
+        id: Id,
+        name: String,
+        topic: Option<String>,
+    },
+    RenameCategory(Id, String),
+    DeleteChannel(Id),
+    DeleteCategory(Id),
     /// Save a new order: categories, each with its channels, as this person sees them.
     Reorder(Vec<(Id, Vec<Id>)>),
     SetServerName(String),
@@ -953,6 +963,37 @@ async fn on_command(
         }
         Command::CreateCategory(name) => {
             client.create_category(name.as_bytes()).await?;
+            directory(ctx, url, client, state).await?;
+        }
+        Command::RenameChannel { id, name, topic } => {
+            directory::rename_channel(client, &id, &name, topic.as_deref()).await?;
+            directory(ctx, url, client, state).await?;
+        }
+        Command::RenameCategory(id, name) => {
+            directory::rename_category(client, &id, &name).await?;
+            directory(ctx, url, client, state).await?;
+        }
+        Command::DeleteChannel(id) => {
+            client
+                .request(Method::DELETE, &format!("/v1/channels/{}", encode(&id)))
+                .send()
+                .await?
+                .error_for_status()?;
+            directory(ctx, url, client, state).await?;
+        }
+        Command::DeleteCategory(id) => {
+            let reply = client
+                .request(Method::DELETE, &format!("/v1/categories/{}", encode(&id)))
+                .send()
+                .await?;
+            if reply.status() == StatusCode::CONFLICT {
+                tracing::warn!(category = %encode(&id), "category still contains channels");
+                ctx.send(Update::Failed(
+                    "Move the channels out of this category first.".into(),
+                ));
+                return Ok(());
+            }
+            reply.error_for_status()?;
             directory(ctx, url, client, state).await?;
         }
         Command::Reorder(order) => {

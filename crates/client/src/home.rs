@@ -137,11 +137,25 @@ enum Dialog {
         category: Option<Id>,
         new_category: String,
     },
+    RenameChannel {
+        server: usize,
+        id: Id,
+        name: String,
+        topic: String,
+        topic_changed: bool,
+    },
+    RenameCategory(usize, Id, String),
+    DeleteItem(usize, reorder::Item, String),
     Invite(Invite),
     Member(usize, Id),
     Delete(usize, Id, Id),
     /// Leave a server, with the reason it didn't work.
     Leave(usize, Option<String>),
+}
+
+pub(crate) enum ChannelEdit {
+    Rename,
+    Delete,
 }
 
 struct Invite {
@@ -293,6 +307,27 @@ impl Home {
         if !edits.is_empty() {
             self.net.sync(edits);
             self.synced = current;
+        }
+    }
+
+    pub(crate) fn edit_channel(&mut self, index: usize, id: Id, edit: ChannelEdit) {
+        let server = &self.servers[index];
+        if !server.dir.perms.manage_channels || server.status != Status::Online {
+            return;
+        }
+        if let Some(channel) = server.channel(&id) {
+            self.dialog = Some(match edit {
+                ChannelEdit::Rename => Dialog::RenameChannel {
+                    server: index,
+                    id,
+                    name: channel.name.clone(),
+                    topic: channel.topic.clone(),
+                    topic_changed: false,
+                },
+                ChannelEdit::Delete => {
+                    Dialog::DeleteItem(index, reorder::Item::Channel(id), channel.name.clone())
+                }
+            });
         }
     }
 
@@ -1128,8 +1163,11 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
     let mut talk = None;
     let mut configure = None;
     let mut moved = None;
+    let mut channel_edit = None;
+    let mut category_dialog = None;
     let categories = &server.dir.categories;
-    let can_move = perms.manage_channels && online && reorder::order(categories).is_some();
+    let can_manage = perms.manage_channels && online;
+    let can_move = can_manage && reorder::order(categories).is_some();
     ScrollArea::vertical().show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 2.0;
         let list_id = UiId::unique(("channel order", &server.address));
@@ -1161,9 +1199,25 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
                     })
                     .inner
                 });
-                if can_move {
+                if can_manage {
+                    let header = if can_move {
+                        header
+                    } else {
+                        header.interact(Sense::click())
+                    };
                     ui::context_menu(&header, |m| {
-                        moved = moved.or(reorder::menu(m, categories, item));
+                        if m.item("✏", "Rename category").clicked() {
+                            category_dialog =
+                                Some(Dialog::RenameCategory(index, id, category.name.clone()));
+                        }
+                        if can_move {
+                            moved = moved.or(reorder::menu(m, categories, item));
+                        }
+                        m.separator();
+                        if m.danger("🗑", "Delete category").clicked() {
+                            category_dialog =
+                                Some(Dialog::DeleteItem(index, item, category.name.clone()));
+                        }
                     });
                 }
             }
@@ -1195,9 +1249,17 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
                         if m.item("⚙", "Channel settings").clicked() {
                             configure = Some(channel.id);
                         }
-                        if can_move {
+                        if can_manage {
+                            if m.item("✏", "Rename channel").clicked() {
+                                channel_edit = Some((channel.id, ChannelEdit::Rename));
+                            }
+                            if can_move {
+                                moved = moved.or(reorder::menu(m, categories, item));
+                            }
                             m.separator();
-                            moved = moved.or(reorder::menu(m, categories, item));
+                            if m.danger("🗑", "Delete channel").clicked() {
+                                channel_edit = Some((channel.id, ChannelEdit::Delete));
+                            }
                         }
                     });
                 }
@@ -1215,6 +1277,12 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
     }
     if let Some(channel) = configure {
         admin::open(home, index, admin::Tab::Channel(channel));
+    }
+    if let Some((id, edit)) = channel_edit {
+        home.edit_channel(index, id, edit);
+    }
+    if category_dialog.is_some() {
+        home.dialog = category_dialog;
     }
     if let Some(channel) = pick {
         home.servers[index].open = Some(channel);
@@ -2360,6 +2428,10 @@ fn dialog_title(home: &Home, dialog: &Dialog) -> String {
         Dialog::MyName(..) => "Your name here".into(),
         Dialog::Category(..) => "Create category".into(),
         Dialog::Channel { .. } => "Create channel".into(),
+        Dialog::RenameChannel { .. } => "Rename channel".into(),
+        Dialog::RenameCategory(..) => "Rename category".into(),
+        Dialog::DeleteItem(_, reorder::Item::Channel(_), _) => "Delete channel?".into(),
+        Dialog::DeleteItem(_, reorder::Item::Category(_), _) => "Delete category?".into(),
         Dialog::Invite(invite) => {
             format!("Invite people to {}", home.servers[invite.server].name())
         }
@@ -2373,6 +2445,16 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
     let Some(dialog) = &home.dialog else {
         return;
     };
+    let managed = match dialog {
+        Dialog::RenameChannel { server, .. }
+        | Dialog::RenameCategory(server, ..)
+        | Dialog::DeleteItem(server, ..) => Some(*server),
+        _ => None,
+    };
+    if managed.is_some_and(|index| !home.servers[index].dir.perms.manage_channels) {
+        home.dialog = None;
+        return;
+    }
     let title = dialog_title(home, dialog);
     let Some(dialog) = &mut home.dialog else {
         return;
@@ -2456,6 +2538,66 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
                     },
                 ));
             }
+        }
+        Dialog::RenameChannel {
+            server,
+            id,
+            name,
+            topic,
+            topic_changed,
+        } => {
+            let label = ui.label("Channel name").id;
+            let name_field = name_field(ui, name).labelled_by(label);
+            let label = ui.label("Topic (optional)").id;
+            let field = ui
+                .add(
+                    ui::field(topic)
+                        .char_limit(250)
+                        .desired_width(f32::INFINITY),
+                )
+                .labelled_by(label);
+            *topic_changed |= field.changed();
+            let submitted = submitted(ui, &name_field) || submitted(ui, &field);
+            if text_footer(ui, "Save", submitted, &mut close) && !name.trim().is_empty() {
+                command = Some((
+                    *server,
+                    Command::RenameChannel {
+                        id: *id,
+                        name: name.trim().to_owned(),
+                        topic: topic_changed.then(|| topic.trim().to_owned()),
+                    },
+                ));
+            }
+        }
+        Dialog::RenameCategory(index, id, name) => {
+            let label = ui.label("Category name").id;
+            let field = name_field(ui, name).labelled_by(label);
+            let submitted = submitted(ui, &field);
+            if text_footer(ui, "Save", submitted, &mut close) && !name.trim().is_empty() {
+                command = Some((*index, Command::RenameCategory(*id, name.trim().to_owned())));
+            }
+        }
+        Dialog::DeleteItem(index, item, name) => {
+            let (prompt, detail, delete) = match *item {
+                reorder::Item::Channel(id) => (
+                    format!("Delete “{name}” for everyone?"),
+                    "This permanently deletes the channel and its message history.",
+                    Command::DeleteChannel(id),
+                ),
+                reorder::Item::Category(id) => (
+                    format!("Delete “{name}”?"),
+                    "Only empty categories can be deleted. Move any channels to another category first.",
+                    Command::DeleteCategory(id),
+                ),
+            };
+            ui.label(prompt);
+            ui.label(detail);
+            ui::footer(ui, |ui| {
+                if ui::danger(ui, "Delete").clicked() {
+                    command = Some((*index, delete));
+                }
+                close |= ui::secondary(ui, "Cancel").clicked();
+            });
         }
         Dialog::Invite(invite) => {
             let server = &home.servers[invite.server];
@@ -2566,16 +2708,25 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
 
 /// A name field with a confirm button; returns true when confirmed with a non-empty name.
 fn text_dialog(ui: &mut Ui, text: &mut String, confirm: &str, close: &mut bool) -> bool {
+    let field = name_field(ui, text);
+    let submitted = submitted(ui, &field);
+    text_footer(ui, confirm, submitted, close) && !text.trim().is_empty()
+}
+
+fn name_field(ui: &mut Ui, text: &mut String) -> Response {
     let field = ui.add(ui::field(text).char_limit(100).desired_width(f32::INFINITY));
     if ui.memory(|memory| memory.focused().is_none()) {
         field.request_focus();
     }
-    let mut done = submitted(ui, &field);
+    field
+}
+
+fn text_footer(ui: &mut Ui, confirm: &str, mut done: bool, close: &mut bool) -> bool {
     ui::footer(ui, |ui| {
         done |= ui::primary(ui, confirm).clicked();
         *close |= ui::secondary(ui, "Cancel").clicked();
     });
-    done && !text.trim().is_empty()
+    done
 }
 
 #[cfg(test)]

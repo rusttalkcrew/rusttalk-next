@@ -141,12 +141,16 @@ impl Server {
         let _ = self.commands.send(command);
     }
 
-    pub fn is_voice(&self, id: &Id) -> bool {
+    pub fn channel(&self, id: &Id) -> Option<&Channel> {
         self.dir
             .categories
             .iter()
             .flat_map(|category| &category.channels)
-            .any(|channel| channel.id == *id && channel.voice)
+            .find(|channel| channel.id == *id)
+    }
+
+    pub fn is_voice(&self, id: &Id) -> bool {
+        self.channel(id).is_some_and(|channel| channel.voice)
     }
 
     /// Find a text channel or DM by ID: (title, is a DM).
@@ -154,11 +158,7 @@ impl Server {
         if let Some(dm) = self.dir.dms.iter().find(|dm| dm.channel == *id) {
             return Some((self.member_name(&dm.peer), true));
         }
-        self.dir
-            .categories
-            .iter()
-            .flat_map(|category| &category.channels)
-            .find(|channel| channel.id == *id)
+        self.channel(id)
             .map(|channel| (channel.name.clone(), false))
     }
 }
@@ -246,6 +246,7 @@ pub struct Category {
 pub struct Channel {
     pub id: Id,
     pub name: String,
+    pub topic: String,
     pub voice: bool,
     /// Per role: read (1), write (2), speak (4) and video (8).
     pub flags: Vec<(String, u8)>,

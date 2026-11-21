@@ -11,9 +11,9 @@ use rusttalk_core::{
 
 use crate::{
     files::Ask,
-    home::{Home, face, frame},
+    home::{ChannelEdit, Home, face, frame},
     net::{Admin, AdminUpdate, AuditEntry, Ban, Command, PublicListing},
-    server::{Id, PERMISSIONS, Perms, Server},
+    server::{Id, PERMISSIONS, Perms, Server, Status},
     settings::{self as panel, Group, Page},
     ui::{self, Item, danger, error_text, section},
 };
@@ -191,12 +191,28 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
     };
     let mut request = None;
     let mut icon = false;
+    let mut channel_edit = None;
     let close = if let Tab::Channel(channel) = settings.tab {
+        if !server.dir.perms.manage_channels {
+            home.server_settings = None;
+            return;
+        }
         let title = channel_title(server, channel);
         let mut close = false;
         let ((), dismissed) = ui::dialog(ctx, "channel-settings", &title, |ui| {
             ui.set_width(560.0);
             request = channel_tab(ui, server, channel);
+            if server.status == Status::Online && server.channel(&channel).is_some() {
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui::secondary(ui, "Rename channel").clicked() {
+                        channel_edit = Some((settings.server, channel, ChannelEdit::Rename));
+                    }
+                    if ui::danger(ui, "Delete channel").clicked() {
+                        channel_edit = Some((settings.server, channel, ChannelEdit::Delete));
+                    }
+                });
+            }
             message(ui, settings);
             ui::footer(ui, |ui| close = ui::secondary(ui, "Close").clicked());
         });
@@ -288,8 +304,11 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
         settings.message = None;
         home.files.ask(ctx, Ask::Icon(server.address.clone()));
     }
-    if close {
+    if close || channel_edit.is_some() {
         home.server_settings = None;
+    }
+    if let Some((index, id, edit)) = channel_edit {
+        home.edit_channel(index, id, edit);
     }
 }
 
@@ -606,9 +625,11 @@ fn sentence(server: &Server, entry: &AuditEntry) -> String {
         "role_deleted" => format!("{actor} deleted a role"),
         "default_role_changed" => format!("{actor} changed the role for new members"),
         "channel_created" => format!("{actor} made a channel"),
+        "channel_updated" => format!("{actor} edited a channel"),
         "channel_deleted" => format!("{actor} deleted a channel"),
         "channel_permissions_changed" => format!("{actor} changed who can use a channel"),
         "category_created" => format!("{actor} made a category"),
+        "category_updated" => format!("{actor} renamed a category"),
         "category_deleted" => format!("{actor} deleted a category"),
         "channels_reordered" => format!("{actor} changed the channel order"),
         "invite_created" => format!("{actor} made an invite"),
@@ -726,13 +747,7 @@ fn check_listing(listing: &mut PublicListing) -> Result<(), &'static str> {
 
 /// Read, write, speak and video per role. Changes save right away.
 fn channel_tab(ui: &mut Ui, server: &Server, channel: Id) -> Option<Admin> {
-    let Some(found) = server
-        .dir
-        .categories
-        .iter()
-        .flat_map(|category| &category.channels)
-        .find(|c| c.id == channel)
-    else {
+    let Some(found) = server.channel(&channel) else {
         ui.label("This channel was deleted.");
         return None;
     };
@@ -776,16 +791,13 @@ fn channel_tab(ui: &mut Ui, server: &Server, channel: Id) -> Option<Admin> {
 
 /// The channel settings title, like "# general settings".
 fn channel_title(server: &Server, channel: Id) -> String {
-    (server.dir.categories.iter())
-        .flat_map(|category| &category.channels)
-        .find(|c| c.id == channel)
-        .map_or_else(
-            || "Channel settings".into(),
-            |found| {
-                let prefix = if found.voice { "🔊" } else { "#" };
-                format!("{prefix} {} settings", found.name)
-            },
-        )
+    server.channel(&channel).map_or_else(
+        || "Channel settings".into(),
+        |found| {
+            let prefix = if found.voice { "🔊" } else { "#" };
+            format!("{prefix} {} settings", found.name)
+        },
+    )
 }
 
 fn date(at: i64) -> String {
