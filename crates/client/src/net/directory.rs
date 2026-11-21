@@ -232,6 +232,7 @@ pub(super) async fn directory(
                 person,
                 at: now(),
                 reply_to: None,
+                quoted_author: None,
                 edit_of: None,
                 body: Body::Notice {
                     name,

@@ -20,6 +20,8 @@ use url::Url;
 /// A verified RustTalk HTTPS origin and its pinned transport.
 #[derive(Clone)]
 pub struct Server {
+    /// Protocol advertised by this origin, used to choose the outgoing message format.
+    pub protocol: u32,
     http: Client,
     server: KnownServer,
 }
@@ -48,6 +50,7 @@ impl Server {
         Ok(Self {
             http,
             server: observed,
+            protocol: crate::auth::PROTOCOL_VERSION,
         })
     }
 
@@ -60,7 +63,11 @@ impl Server {
         validate_origin(&address)?;
         let http = pinned_tls::https_client(tls_fingerprint).map_err(anyhow::Error::from_boxed)?;
         let server = verified_server(&http, address, tls_fingerprint, trusted).await?;
-        Ok(Self { http, server })
+        Ok(Self {
+            http,
+            server,
+            protocol: crate::auth::PROTOCOL_VERSION,
+        })
     }
 
     /// Return the saved pins for an origin, if this data folder has connected to it before.

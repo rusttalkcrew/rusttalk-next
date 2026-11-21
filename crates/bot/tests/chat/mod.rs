@@ -89,6 +89,7 @@ pub(super) async fn exchange(
 
     let mut reply = body(texts[1]);
     reply.reply_to = Some(first.id);
+    reply.quoted_author = Some(first.person);
     let second = b.send_message(&channel.id, &reply).await?;
     wait_event(a, channel, &second.id, false).await?;
     let recent = a.message_page(&channel.id, None, 1).await?;

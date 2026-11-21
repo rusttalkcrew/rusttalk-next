@@ -508,6 +508,7 @@ mod tests {
             person,
             at: 0,
             reply_to: None,
+            quoted_author: None,
             edit_of: None,
             body: Body::Text(text.into()),
             files: vec![],

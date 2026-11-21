@@ -7,8 +7,7 @@ use thiserror::Error;
 use crate::keys::wire_id;
 
 const DOMAIN: &[u8] = b"rusttalk-message-v1";
-/// Envelope and plaintext format version. Version 2 carries stored and live attachments.
-const VERSION: u8 = 2;
+const VERSION: u8 = 3;
 const NONCE: usize = 24;
 const TAG: usize = 16;
 const SIGNATURE: usize = 64;
@@ -136,7 +135,7 @@ impl MessageContext {
         if self.epoch <= 0
             || !(HEADER + TAG + MIN_PLAINTEXT + SIGNATURE..=MAX_MESSAGE_BYTES)
                 .contains(&envelope.len())
-            || envelope[0] != VERSION
+            || !matches!(envelope[0], 2 | VERSION)
         {
             return Err(MessageError::Encoding);
         }

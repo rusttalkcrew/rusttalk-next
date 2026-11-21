@@ -4104,7 +4104,7 @@ fn message(
             ui.vertical(|ui| {
                 ui.set_width(ui.available_width());
                 if let Some(reply) = msg.reply_to {
-                    let quoted = chat.quoted(&reply);
+                    let quoted = chat.quoted(&reply, msg.quoted_author);
                     let line = match quoted {
                         Some(quoted) if quoted.sticker.is_some() => {
                             format!(
@@ -4124,7 +4124,12 @@ fn message(
                             };
                             format!("↪ {}: {}", names(&person), snippet.replace('\n', " "))
                         }
-                        _ => format!("↪ {}", t!("home.earlier_message")),
+                        _ => match msg.quoted_author {
+                            Some(person) => {
+                                format!("↪ {}: {}", names(&person), t!("home.earlier_message"))
+                            }
+                            None => format!("↪ {}", t!("home.earlier_message")),
+                        },
                     };
                     ui.label(emoji::text(line).size(ui::TEXT_CAPTION).weak());
                 }

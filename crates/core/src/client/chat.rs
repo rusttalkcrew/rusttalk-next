@@ -278,7 +278,22 @@ impl KeyClient<'_> {
             sender_device: cert.signing_key().to_bytes(),
             person: *cert.person_id(),
         };
-        let envelope = encode(&context.seal(key, self.identity, body)?);
+        // Cache the same body that a recipient can open on a protocol 1 server.
+        let legacy;
+        let body = if self.server.protocol < 2 && body.quoted_author.is_some() {
+            legacy = MessageBody {
+                quoted_author: None,
+                ..body.clone()
+            };
+            &legacy
+        } else {
+            body
+        };
+        let envelope = encode(&if self.server.protocol < 2 {
+            context.seal_version(key, self.identity, body, 2)?
+        } else {
+            context.seal(key, self.identity, body)?
+        });
         let record: MessageRecord = self
             .request(Method::POST, &message_path(channel))
             .json(&json!({ "id": encode(&id), "epoch": epoch, "envelope": envelope }))
