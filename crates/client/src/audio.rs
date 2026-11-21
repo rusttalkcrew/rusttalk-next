@@ -116,6 +116,9 @@ pub struct Settings {
     pub accent: String,
     /// A language ID (see `i18n`), or "system" for the computer's language.
     pub language: String,
+    /// Allow DMs from friends only: others land under "Message requests" without
+    /// notifications. Enforced here, since servers don't know who is a friend.
+    pub friends_only: bool,
     /// Sidebar widths and the member list toggle; this device only, never synced.
     pub channels_width: f32,
     pub members_width: f32,
@@ -177,6 +180,7 @@ impl Default for Settings {
             light_theme: "daylight".into(),
             accent: "rust".into(),
             language: "system".into(),
+            friends_only: false,
             channels_width: crate::home::layout::CHANNELS_WIDTH,
             members_width: crate::home::layout::MEMBERS_WIDTH,
             members_hidden: false,

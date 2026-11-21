@@ -63,6 +63,14 @@ learns that the two people have a DM, plus the size and time of each copy
 it stores, as it would for a DM on one server. Copies share a random
 message ID, so servers that compare their data can tell which records are
 the same message. A server that was offline misses messages sent meanwhile.
+Friend requests and answers are encrypted DM messages, and the friend list,
+blocks and the "Allow DMs from" choice live only in the encrypted sync blob.
+Servers don't learn who is friends with whom, who is blocked, or that a
+message is a friend request. They still see what they see for any DM: that
+the two people have one, and each message's size and time. A friend message
+is as large as a one-character text message.
+Blocking and "Friends only" work in the app: servers keep delivering those
+messages, and the app hides them or keeps them quiet.
 The API volume stores file blobs, including in-progress uploads and thumbnails,
 as ciphertext under opaque disk names. Committed blobs are named only by their
 random IDs. File names, types, keys, plaintext lengths and references linking
@@ -169,7 +177,8 @@ Device settings (`voice.json`, `updates.json`) stay.
 Next to the settings, `servers.json` holds each server's address, server ID
 and TLS fingerprint. `sync.json` holds the last merged device sync snapshot
 with its version: joined servers with their pins, servers left, synced
-settings, and local edits not yet uploaded. `voice.json` holds the
+settings, friends (with pending requests, blocks and each person's last seen
+name), and local edits not yet uploaded. `voice.json` holds the
 chosen audio devices, voice options, the chosen camera's name,
 resolution and frame rate, and the server directory address and
 certificate pin used by "Find servers" (`index_url`, `index_fingerprint`),
@@ -177,8 +186,8 @@ the server IDs of official servers dismissed from the join page
 (`dismissed_official`), and the window layout (sidebar widths, the member
 list, and how a voice channel splits its call and chat). Of these, only the voice options (push to talk
 and its key, activation level, echo cancellation, noise suppression, auto
-gain), the camera resolution and frame rate, and the dismissed official
-servers sync to the person's other devices; the chosen microphone, speakers and camera stay on this device.
+gain), the camera resolution and frame rate, the dismissed official
+servers and "Allow DMs from" (`friends_only`) sync to the person's other devices; the chosen microphone, speakers and camera stay on this device.
 `notify.json` holds the notification choices (desktop notifications, sound,
 "only when not focused", and per server address and channel ID the level,
 @everyone suppression and mute end time) and, per channel ID, the time of the

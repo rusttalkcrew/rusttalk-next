@@ -21,12 +21,38 @@ pub struct MessageBody {
     pub live: Option<LiveAttachment>,
     /// A server sticker by ID; the text holds its name. Sent without files or a live offer.
     pub sticker: Option<[u8; 32]>,
+    /// A friend request or answer instead of chat text; sent with nothing else.
+    pub friend: Option<FriendSignal>,
+}
+
+/// What a friend message says. Only the two people in the DM can read it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FriendSignal {
+    Request = 1,
+    Accept = 2,
+    Decline = 3,
+    Cancel = 4,
+    Remove = 5,
+}
+
+impl FriendSignal {
+    fn from_byte(byte: u8) -> Option<Self> {
+        Some(match byte {
+            1 => Self::Request,
+            2 => Self::Accept,
+            3 => Self::Decline,
+            4 => Self::Cancel,
+            5 => Self::Remove,
+            _ => return None,
+        })
+    }
 }
 
 const REPLY: u8 = 1;
 const EDIT: u8 = 2;
 const LIVE: u8 = 4;
 const STICKER: u8 = 8;
+const FRIEND: u8 = 16;
 
 impl MessageBody {
     /// Format version 2: flags, text, references, stored attachments, then the live offer.
@@ -42,7 +68,13 @@ impl MessageBody {
         let flags = if self.reply_to.is_some() { REPLY } else { 0 }
             | if self.edit_of.is_some() { EDIT } else { 0 }
             | if self.live.is_some() { LIVE } else { 0 }
-            | if self.sticker.is_some() { STICKER } else { 0 };
+            | if self.sticker.is_some() { STICKER } else { 0 }
+            | if self.friend.is_some() { FRIEND } else { 0 };
+        if self.friend.is_some()
+            && (flags != FRIEND || !self.text.is_empty() || !self.attachments.is_empty())
+        {
+            return Err(MessageError::Encoding);
+        }
         // Full capacity up front, so no plaintext copy is left behind by a reallocation.
         let mut body = Zeroizing::new(Vec::with_capacity(MAX_PLAINTEXT));
         body.push(flags);
@@ -51,6 +83,7 @@ impl MessageBody {
         body.extend(self.reply_to.iter().flatten());
         body.extend(self.edit_of.iter().flatten());
         body.extend(self.sticker.iter().flatten());
+        body.extend(self.friend.map(|signal| signal as u8));
         body.push(self.attachments.len() as u8);
         for attachment in &self.attachments {
             attachment.encode(&mut body)?;
@@ -67,7 +100,7 @@ impl MessageBody {
             return Err(MessageError::Encoding);
         }
         let ([flags, high, low], rest) = bytes.split_first_chunk().ok_or(MessageError::Encoding)?;
-        if flags & !(REPLY | EDIT | LIVE | STICKER) != 0 {
+        if flags & !(REPLY | EDIT | LIVE | STICKER | FRIEND) != 0 {
             return Err(MessageError::Encoding);
         }
         let length = u16::from_be_bytes([*high, *low]) as usize;
@@ -89,10 +122,22 @@ impl MessageBody {
         let reply_to = reference(REPLY)?;
         let edit_of = reference(EDIT)?;
         let sticker = reference(STICKER)?;
+        let friend = if flags & FRIEND != 0 {
+            // A friend message is the flag, empty text, its kind and zero files: nothing else.
+            let (&kind, rest) = tail.split_first().ok_or(MessageError::Encoding)?;
+            tail = rest;
+            if *flags != FRIEND || length != 0 {
+                return Err(MessageError::Encoding);
+            }
+            Some(FriendSignal::from_byte(kind).ok_or(MessageError::Encoding)?)
+        } else {
+            None
+        };
         let (&count, mut tail) = tail.split_first().ok_or(MessageError::Encoding)?;
         // A sticker never has files or a live offer, so it stays within the plaintext limit.
         if count as usize > MAX_ATTACHMENTS
             || (sticker.is_some() && (count != 0 || flags & LIVE != 0))
+            || (friend.is_some() && count != 0)
         {
             return Err(MessageError::Attachment);
         }
@@ -118,6 +163,7 @@ impl MessageBody {
             attachments,
             live,
             sticker,
+            friend,
         })
     }
 }
@@ -215,6 +261,7 @@ mod tests {
             attachments: Vec::new(),
             live: None,
             sticker: None,
+            friend: None,
         };
         let envelope = context.seal(&key, &sender, &body).unwrap();
         assert_eq!(
@@ -366,6 +413,7 @@ mod tests {
             attachments: vec![attachment; MAX_ATTACHMENTS],
             live: None,
             sticker: None,
+            friend: None,
         };
         let encoded = body.encode().unwrap();
         assert_eq!(encoded.len(), MAX_PLAINTEXT - live::MAX_ATTACHMENT);
@@ -391,6 +439,43 @@ mod tests {
             invalid[attachment + offset] = byte;
             assert!(MessageBody::decode(&invalid).is_err(), "offset {offset}");
         }
+    }
+
+    #[test]
+    fn friend_signals_round_trip_alone() {
+        for signal in [
+            FriendSignal::Request,
+            FriendSignal::Accept,
+            FriendSignal::Decline,
+            FriendSignal::Cancel,
+            FriendSignal::Remove,
+        ] {
+            let body = MessageBody {
+                friend: Some(signal),
+                ..Default::default()
+            };
+            let encoded = body.encode().unwrap();
+            // Flags, an empty text, the kind and a zero file count.
+            assert_eq!(*encoded, [FRIEND, 0, 0, signal as u8, 0]);
+            assert!(MessageBody::decode(&encoded).unwrap() == body);
+        }
+        for bad in [
+            [FRIEND, 0, 0, 0, 0].as_slice(),
+            &[FRIEND, 0, 0, 6, 0],
+            &[FRIEND, 0, 0, 1, 1],
+            &[FRIEND, 0, 0, 1],
+            &[FRIEND, 0, 0, 1, 0, 0],
+            &[FRIEND, 0, 1, b'x', 1, 0],
+            &[FRIEND | REPLY, 0, 0, 1, 0],
+        ] {
+            assert!(MessageBody::decode(bad).is_err(), "{bad:?}");
+        }
+        let with_text = MessageBody {
+            text: "hi".into(),
+            friend: Some(FriendSignal::Request),
+            ..Default::default()
+        };
+        assert_eq!(with_text.encode().err(), Some(MessageError::Encoding));
     }
 
     #[test]
@@ -488,6 +573,7 @@ mod tests {
                 chunk_size: LIVE_CHUNK_SIZE as u32,
             }),
             sticker: None,
+            friend: None,
         };
         let encoded = body.encode().unwrap();
         assert_eq!(encoded.len(), MAX_PLAINTEXT);

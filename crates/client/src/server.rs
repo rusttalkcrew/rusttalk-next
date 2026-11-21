@@ -356,6 +356,8 @@ pub struct Msg {
 #[derive(Clone, PartialEq)]
 pub enum Body {
     Text(String),
+    /// A friend request or answer; shown as a card or a short line, not as text.
+    Friend(rusttalk_core::client::FriendSignal),
     /// Could not be verified or decrypted (yet).
     Unreadable,
     /// A member or device change, with fingerprints for the details view.

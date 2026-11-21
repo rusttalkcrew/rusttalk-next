@@ -104,7 +104,8 @@ pub async fn load<'a>(peers: &[Peer<'a>], key: &[u8; 32]) -> (Option<Snapshot>, 
 }
 
 /// Merge per origin and per field: the newer snapshot wins for anything both sides mention,
-/// with local winning ties, and entries only one side mentions are kept. Leaves are kept as
+/// with local winning ties, and entries only one side mentions are kept. A contact both
+/// sides hold with a `changed` time keeps the later change instead. Leaves are kept as
 /// tombstones in `State::left`; remove a setting or contact by setting it to `null`. So an
 /// older or replayed blob cannot bring back a removed server or field. A remote server whose
 /// pin differs from a local or saved pin is reported and never adopted.
@@ -138,20 +139,32 @@ pub fn merge(data: &Path, local: &mut Snapshot, remote: Snapshot) -> Result<Vec<
             local.state.join(candidate);
         }
     }
-    for (local_fields, remote_fields) in [
-        (&mut local.state.settings, remote.state.settings),
-        (&mut local.state.contacts, remote.state.contacts),
-    ] {
-        for (field, value) in remote_fields {
-            if newer {
-                local_fields.insert(field, value);
-            } else {
-                local_fields.entry(field).or_insert(value);
+    for (field, value) in remote.state.settings {
+        if newer {
+            local.state.settings.insert(field, value);
+        } else {
+            local.state.settings.entry(field).or_insert(value);
+        }
+    }
+    for (field, value) in remote.state.contacts {
+        let keep = local.state.contacts.get(&field).is_some_and(|mine| {
+            match (changed(mine), changed(&value)) {
+                // Two devices changed the same contact: the later change wins.
+                (Some(mine), Some(theirs)) => mine > theirs || (mine == theirs && !newer),
+                _ => !newer,
             }
+        });
+        if !keep {
+            local.state.contacts.insert(field, value);
         }
     }
     local.version = local.version.max(remote.version);
     Ok(conflicts)
+}
+
+/// When a contact last changed, for contacts that record it.
+pub fn changed(contact: &Value) -> Option<i64> {
+    contact.get("changed")?.as_i64()
 }
 
 /// Seal one new version and try every peer. Update the local version if any peer accepts it.
@@ -403,6 +416,55 @@ mod tests {
         assert_eq!(local.state.settings["theme"], "night");
         assert_eq!(local.state.settings["local"], true);
         assert_eq!(local.version, 2);
+    }
+
+    #[test]
+    fn contacts_keep_the_later_change_whichever_snapshot_is_newer() {
+        let dir = tempfile::tempdir().unwrap();
+        let contact =
+            |relation: &str, changed: i64| json!({"relation": relation, "changed": changed});
+        let mut local = Snapshot {
+            version: 3,
+            state: State {
+                contacts: [
+                    ("ana".into(), contact("blocked", 20)),
+                    ("bo".into(), contact("friend", 10)),
+                    ("cy".into(), json!({"name": "Cy"})),
+                ]
+                .into(),
+                ..State::default()
+            },
+        };
+        // Another device published later, but changed Ana before this device blocked her.
+        let remote = Snapshot {
+            version: 4,
+            state: State {
+                contacts: [
+                    ("ana".into(), contact("friend", 15)),
+                    ("bo".into(), contact("none", 30)),
+                    ("cy".into(), json!({"name": "Cyrus"})),
+                    ("di".into(), contact("incoming", 5)),
+                ]
+                .into(),
+                ..State::default()
+            },
+        };
+        merge(dir.path(), &mut local, remote).unwrap();
+        let contacts = &local.state.contacts;
+        assert_eq!(contacts["ana"], contact("blocked", 20));
+        assert_eq!(contacts["bo"], contact("none", 30));
+        assert_eq!(contacts["cy"]["name"], "Cyrus");
+        assert_eq!(contacts["di"], contact("incoming", 5));
+        // A later change wins even from an older snapshot.
+        let old = Snapshot {
+            version: 1,
+            state: State {
+                contacts: [("bo".into(), contact("friend", 40))].into(),
+                ..State::default()
+            },
+        };
+        merge(dir.path(), &mut local, old).unwrap();
+        assert_eq!(local.state.contacts["bo"], contact("friend", 40));
     }
 
     #[test]

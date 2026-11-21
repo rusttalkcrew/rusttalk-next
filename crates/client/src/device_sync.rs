@@ -24,7 +24,7 @@ use crate::audio::Settings;
 
 /// Voice and video preferences, dismissed official servers, the appearance and language, that follow the person to their other devices.
 /// The microphone, speakers and camera differ per computer and stay in `voice.json` only.
-const SYNCED: [&str; 15] = [
+const SYNCED: [&str; 16] = [
     "push_to_talk",
     "key",
     "threshold",
@@ -40,6 +40,7 @@ const SYNCED: [&str; 15] = [
     "light_theme",
     "accent",
     "language",
+    "friends_only",
 ];
 
 pub struct DeviceSync {
@@ -64,10 +65,12 @@ pub enum Edit {
     Join(KnownServer),
     Leave(Url),
     Setting(String, Value),
+    /// A friend, by hex person ID (see `friends`).
+    Contact(String, Value),
 }
 
 impl Edit {
-    fn apply(&self, state: &mut State) {
+    pub(crate) fn apply(&self, state: &mut State) {
         match self {
             // Re-applying an unchanged join must not move the server to the end of the list.
             Self::Join(server) if state.servers.contains(server) => {}
@@ -75,6 +78,14 @@ impl Edit {
             Self::Leave(address) => state.leave(address),
             Self::Setting(key, value) => {
                 state.settings.insert(key.clone(), value.clone());
+            }
+            // Re-applied after each merge: a later change from another device stays.
+            Self::Contact(key, value) => {
+                let later = (state.contacts.get(key))
+                    .is_some_and(|current| sync::changed(current) > sync::changed(value));
+                if !later {
+                    state.contacts.insert(key.clone(), value.clone());
+                }
             }
         }
     }
@@ -84,6 +95,7 @@ impl Edit {
 pub struct Synced {
     pub servers: Vec<KnownServer>,
     pub settings: BTreeMap<String, Value>,
+    pub contacts: BTreeMap<String, Value>,
     /// Servers another device pinned differently. They are never adopted.
     pub conflicts: Vec<Url>,
 }
@@ -100,6 +112,11 @@ impl DeviceSync {
     /// Joined servers, to reconnect at start. Not for async code.
     pub fn servers(&self) -> Vec<KnownServer> {
         self.saved.blocking_lock().snapshot.state.servers.clone()
+    }
+
+    /// Friends and other contacts as last merged, for the start. Not for async code.
+    pub fn contacts(&self) -> BTreeMap<String, Value> {
+        self.saved.blocking_lock().snapshot.state.contacts.clone()
     }
 
     pub fn set_peer(&self, address: &Url, peer: Option<(Api, Session)>) {
@@ -178,6 +195,7 @@ impl DeviceSync {
         show(Synced {
             servers: state.servers.clone(),
             settings: state.settings.clone(),
+            contacts: state.contacts.clone(),
             conflicts,
         });
         Ok(())

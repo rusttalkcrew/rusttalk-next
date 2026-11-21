@@ -139,6 +139,13 @@ pub async fn exercise(
     // Server B's API restarted, which closed the event streams there.
     owner_b = KeyClient::connect(&server_b, owner_a.identity, &owner_token).await?;
     peer_b = KeyClient::connect(&server_b, &peer, &peer_b_token).await?;
+    dm::friends(
+        (&mut *owner_a, &mut owner_b),
+        (&mut peer_a, &mut peer_b),
+        dms,
+    )
+    .await
+    .context("W71 friends over a DM")?;
 
     #[cfg(feature = "media")]
     {

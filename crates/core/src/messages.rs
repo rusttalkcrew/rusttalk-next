@@ -173,7 +173,7 @@ pub struct MessageRecord {
 #[cfg(any(feature = "client", test))]
 mod crypto;
 #[cfg(any(feature = "client", test))]
-pub use crypto::MessageBody;
+pub use crypto::{FriendSignal, MessageBody};
 
 #[cfg(any(feature = "client", test))]
 mod attachment;
