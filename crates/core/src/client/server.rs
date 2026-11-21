@@ -47,11 +47,17 @@ impl Server {
         let http = pinned_tls::https_client(tls_fingerprint).map_err(anyhow::Error::from_boxed)?;
         let observed = verified_server(&http, address, tls_fingerprint, trusted).await?;
         save_pin(data, &pins, &observed)?;
-        Ok(Self {
+        let mut server = Self {
             http,
             server: observed,
-            protocol: crate::auth::PROTOCOL_VERSION,
-        })
+            protocol: 1,
+        };
+        match server.info().await {
+            Ok(info) => server.protocol = info.protocol.unwrap_or(1),
+            Err(error) if pinned_tls::is_pin_mismatch(error.as_ref()) => return Err(error),
+            Err(_) => tracing::warn!("server protocol unavailable, using protocol 1"),
+        }
+        Ok(server)
     }
 
     /// Verify a server proof against `trusted` pins without saving them or sending device credentials.
@@ -66,7 +72,7 @@ impl Server {
         Ok(Self {
             http,
             server,
-            protocol: crate::auth::PROTOCOL_VERSION,
+            protocol: 1,
         })
     }
 

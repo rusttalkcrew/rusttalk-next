@@ -15,7 +15,8 @@ const HEADER: usize = 1 + NONCE + 2;
 /// Flags, text length and attachment count.
 const MIN_PLAINTEXT: usize = 1 + 2 + 1;
 const MAX_TEXT_BYTES: usize = MAX_TEXT_CHARS * 4;
-/// Every field at its maximum: text, both references, four stored files and a live offer.
+/// Maximum text, two references (reply ID and quoted author, or revision and edit ID),
+/// four stored files and a live offer.
 const MAX_PLAINTEXT: usize = MIN_PLAINTEXT
     + MAX_TEXT_BYTES
     + 2 * 32

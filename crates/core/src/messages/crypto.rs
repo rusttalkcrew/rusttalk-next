@@ -829,6 +829,12 @@ mod tests {
         };
         let encoded = body.encode().unwrap();
         assert_eq!(encoded.len(), MAX_PLAINTEXT);
+        let full_reply = MessageBody {
+            edit_of: None,
+            quoted_author: Some([7; 32]),
+            ..body.clone()
+        };
+        assert_eq!(full_reply.encode().unwrap().len(), MAX_PLAINTEXT);
         assert!(MessageBody::decode(VERSION, &encoded).unwrap() == body);
         assert!(MessageBody::decode(VERSION, &[&encoded[..], &[0]].concat()).is_err());
         assert!(MessageBody::decode(VERSION, &encoded[..encoded.len() - 1]).is_err());

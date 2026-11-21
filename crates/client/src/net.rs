@@ -931,6 +931,7 @@ async fn session<'a>(
             .json()
             .await
             .map_err(|error| stop_or_retry(error.without_url().into()))?;
+        // Refresh only at sign-in. Missing server info keeps this session on v2 envelopes.
         api.protocol = protocol.flatten().unwrap_or(1);
         return Ok((api, session));
     }

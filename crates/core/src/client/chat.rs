@@ -1,4 +1,7 @@
-use std::collections::{HashMap, VecDeque};
+use std::{
+    borrow::Cow,
+    collections::{HashMap, VecDeque},
+};
 
 use anyhow::{Result, ensure};
 use reqwest::{Method, StatusCode};
@@ -8,7 +11,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     auth::{decode_bytes, encode},
-    identity::{DeviceCertificate, PersonId},
+    identity::{DeviceCertificate, DeviceIdentity, PersonId},
     keys::{self, EnvelopeContext, Key, Kind, Scope, wire_id},
     messages::{MAX_MESSAGE_BYTES, MessageContext, MessageError},
 };
@@ -278,22 +281,14 @@ impl KeyClient<'_> {
             sender_device: cert.signing_key().to_bytes(),
             person: *cert.person_id(),
         };
-        // Cache the same body that a recipient can open on a protocol 1 server.
-        let legacy;
-        let body = if self.server.protocol < 2 && body.quoted_author.is_some() {
-            legacy = MessageBody {
-                quoted_author: None,
-                ..body.clone()
-            };
-            &legacy
-        } else {
-            body
-        };
-        let envelope = encode(&if self.server.protocol < 2 {
-            context.seal_version(key, self.identity, body, 2)?
-        } else {
-            context.seal(key, self.identity, body)?
-        });
+        let mut body = Cow::Borrowed(body);
+        let envelope = encode(&seal_for_protocol(
+            self.server.protocol,
+            context,
+            key,
+            self.identity,
+            &mut body,
+        )?);
         let record: MessageRecord = self
             .request(Method::POST, &message_path(channel))
             .json(&json!({ "id": encode(&id), "epoch": epoch, "envelope": envelope }))
@@ -313,7 +308,7 @@ impl KeyClient<'_> {
         self.opened
             .entry(*channel)
             .or_default()
-            .insert(&record, body);
+            .insert(&record, &body);
         if let Some(link) = body.key_link {
             self.note_link(channel, epoch, &context.person, link);
         }
@@ -459,6 +454,25 @@ impl KeyClient<'_> {
     }
 }
 
+/// Downgrade the cached body together with its envelope so reopening a sent record
+/// returns exactly the fields a recipient sees.
+fn seal_for_protocol(
+    protocol: u32,
+    context: MessageContext,
+    key: &Key,
+    sender: &DeviceIdentity,
+    body: &mut Cow<'_, MessageBody>,
+) -> Result<Vec<u8>, MessageError> {
+    if protocol < 2 {
+        if body.quoted_author.is_some() {
+            body.to_mut().quoted_author = None;
+        }
+        context.seal_version(key, sender, body, 2)
+    } else {
+        context.seal(key, sender, body)
+    }
+}
+
 fn message_path(channel: &[u8; 32]) -> String {
     format!("/v1/channels/{}/messages", encode(channel))
 }
@@ -510,6 +524,37 @@ mod tests {
             opened.get(&record(1, "other")).err(),
             Some(MessageError::Replay)
         );
+    }
+
+    #[test]
+    fn sends_replies_in_the_servers_message_format() {
+        let (_, sender) = DeviceIdentity::create("bot").unwrap();
+        let context = MessageContext {
+            server_id: [1; 32],
+            channel_id: [2; 32],
+            epoch: 1,
+            id: [3; 32],
+            sender_device: sender.certificate.signing_key().to_bytes(),
+            person: *sender.certificate.person_id(),
+        };
+        let key = Key::new([4; 32]);
+        let reply = MessageBody {
+            text: "reply".into(),
+            reply_to: Some([5; 32]),
+            quoted_author: Some([6; 32]),
+            ..Default::default()
+        };
+        for (protocol, version, author) in [(1, 2, None), (2, 3, reply.quoted_author)] {
+            let mut cached = Cow::Borrowed(&reply);
+            let envelope =
+                seal_for_protocol(protocol, context, &key, &sender, &mut cached).unwrap();
+            assert_eq!(envelope[0], version);
+            let opened = context.open(&key, &sender.certificate, &envelope).unwrap();
+            assert_eq!(opened.quoted_author, author);
+            assert_eq!(opened.reply_to, reply.reply_to);
+            assert_eq!(opened.text, reply.text);
+            assert!(opened == *cached);
+        }
     }
 
     #[test]
