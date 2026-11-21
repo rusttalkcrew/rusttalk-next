@@ -114,6 +114,8 @@ pub struct Home {
     pub notify: Notify,
     /// The window has focus: the open channel counts as read.
     focused: bool,
+    /// Set up from the recovery words in this session: the join page helps find the servers.
+    pub restored: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -296,6 +298,7 @@ impl Home {
             layout,
             notify: Notify::open(&data_dir, notify::unix_now()),
             focused: true,
+            restored: false,
         })
     }
 
@@ -2343,14 +2346,25 @@ fn join(ui: &mut Ui, home: &mut Home) {
         ui.set_max_width(440.0);
         match &mut home.join {
             Join::Idle(error) => {
-                ui.label(ui::heading(if home.servers.is_empty() {
-                    t!("home.no_servers")
+                // A device restored from the words knows no servers until it signs in to one,
+                // whose synced list brings back the rest.
+                let empty = home.servers.is_empty();
+                if empty && home.restored {
+                    ui.label(ui::heading(t!("home.find_yours")));
+                    ui.label(t!("home.find_yours_help"));
                 } else {
-                    t!("home.join_server")
-                }));
-                ui.label(t!("home.paste_invite"));
+                    ui.label(ui::heading(if empty {
+                        t!("home.no_servers")
+                    } else {
+                        t!("home.join_server")
+                    }));
+                    ui.label(t!("home.paste_invite"));
+                    if empty {
+                        ui.label(ui::caption(t!("home.other_device_hint")));
+                    }
+                }
                 ui.add_space(12.0);
-                let label = ui.label(t!("home.invite_link"));
+                let label = ui.label(t!("home.invite_or_address"));
                 let field = ui
                     .add(
                         ui::field(&mut home.invite)
@@ -2359,17 +2373,20 @@ fn join(ui: &mut Ui, home: &mut Home) {
                     )
                     .labelled_by(label.id);
                 error_text(ui, error.as_deref());
-                if ui::primary_large(ui, t!("home.join_server")).clicked() || submitted(ui, &field)
-                {
-                    match InviteLink::parse(home.invite.trim()) {
-                        Ok(link) => {
-                            home.net.preview(link);
-                            home.join = Join::Checking;
-                        }
-                        Err(error) => {
-                            tracing::warn!(%error, "invite link rejected");
-                            *error_slot(&mut home.join) = Some(t!("home.not_invite").into());
-                        }
+                if ui::primary_large(ui, t!("home.continue")).clicked() || submitted(ui, &field) {
+                    let text = home.invite.trim();
+                    // Already joined here: no membership check, which would replace the live session.
+                    if let Ok(link) = InviteLink::parse(text) {
+                        let probe = home.index(&link.server.address).is_none();
+                        home.net.preview(link, probe);
+                        home.join = Join::Checking;
+                    } else if let Some(address) = server_address(text) {
+                        let probe = home.index(&address).is_none();
+                        home.net.check_address(address, probe);
+                        home.join = Join::Checking;
+                    } else {
+                        tracing::warn!("invite link or address rejected");
+                        *error_slot(&mut home.join) = Some(t!("home.not_invite").into());
                     }
                 }
                 official_servers(ui, home);
@@ -2400,29 +2417,45 @@ fn join(ui: &mut Ui, home: &mut Home) {
                     }
                     return;
                 }
-                match &preview.name {
-                    Some(server) => ui.label(ui::heading(t!("home.join_named", server = server))),
-                    None => ui.label(ui::heading(t!("home.join_this"))),
+                let member = preview.member;
+                match (&preview.name, member) {
+                    (Some(server), false) => {
+                        ui.label(ui::heading(t!("home.join_named", server = server)))
+                    }
+                    (None, false) => ui.label(ui::heading(t!("home.join_this"))),
+                    (Some(server), true) => {
+                        ui.label(ui::heading(t!("home.sign_in_named", server = server)))
+                    }
+                    (None, true) => ui.label(ui::heading(t!("home.sign_in_this"))),
                 };
                 ui.weak(host(&address));
                 ui.add_space(12.0);
-                let label = ui.label(t!("home.your_name_here"));
-                let field = ui
-                    .add(
-                        ui::field(name)
-                            .hint_text(t!("home.name_hint"))
-                            .desired_width(300.0),
-                    )
-                    .labelled_by(label.id);
+                // A member keeps the name and picture they have there.
+                let field = if member {
+                    ui.label(t!("home.already_member"));
+                    None
+                } else {
+                    let label = ui.label(t!("home.your_name_here"));
+                    let field = ui
+                        .add(
+                            ui::field(name)
+                                .hint_text(t!("home.name_hint"))
+                                .desired_width(300.0),
+                        )
+                        .labelled_by(label.id);
+                    Some(field)
+                };
                 ui.add_space(8.0);
-                if preview.invite.is_none() && !preview.open {
+                if preview.invite.is_none() && !preview.open && !member {
                     ui.label(t!("home.needs_invite"));
                     if ui::secondary_large(ui, t!("common.back")).clicked() {
                         home.join = Join::Idle(None);
                     }
                     return;
                 }
-                if preview.invite.is_none() {
+                if member {
+                    // Said above already.
+                } else if preview.invite.is_none() {
                     ui.label(t!("home.open_server"));
                 } else if !preview.known {
                     ui.label(t!("home.first_time"));
@@ -2443,16 +2476,23 @@ fn join(ui: &mut Ui, home: &mut Home) {
                     ui.weak(t!("home.pins_help"));
                 });
                 ui.add_space(8.0);
-                if ui::primary_large(ui, t!("common.join")).clicked() || submitted(ui, &field) {
+                let button = if member {
+                    t!("home.sign_in")
+                } else {
+                    t!("common.join")
+                };
+                let submit = field.is_some_and(|field| submitted(ui, &field));
+                if ui::primary_large(ui, button).clicked() || submit {
                     let name = name.trim();
-                    let admission = match preview.invite {
-                        Some(code) => Admission::Invite(code),
-                        None => Admission::Open,
+                    let admission = match (member, preview.invite) {
+                        (true, _) => Admission::Member,
+                        (false, Some(code)) => Admission::Invite(code),
+                        (false, None) => Admission::Open,
                     };
                     let commands = home.net.start(
                         preview.server.clone(),
                         Some(admission),
-                        (!name.is_empty()).then(|| name.to_owned()),
+                        (!member && !name.is_empty()).then(|| name.to_owned()),
                     );
                     let label = preview.name.as_deref().unwrap_or(t!("home.new_server"));
                     home.servers
@@ -2525,7 +2565,8 @@ fn official_servers(ui: &mut Ui, home: &mut Home) {
     }
     if let Some(listed) = pick {
         home.join = Join::Checking;
-        home.net.check_listed(listed);
+        let probe = home.index(&listed.server.address).is_none();
+        home.net.check_listed(listed, probe);
     }
 }
 
@@ -2687,7 +2728,11 @@ fn find(ui: &mut Ui, home: &mut Home) {
         if let Some(listed) = pick {
             find.checking = true;
             find.error = None;
-            home.net.check_listed(listed);
+            let joined = home.servers.iter();
+            let probe = !joined
+                .map(|s| &s.address)
+                .any(|a| *a == listed.server.address);
+            home.net.check_listed(listed, probe);
         }
         if let Some(page) = page {
             match directory(&settings) {
@@ -2724,6 +2769,17 @@ fn new_server(
         names: HashMap::new(),
         commands,
     }
+}
+
+/// A server address typed on the join page: `https://host[:port]`, or just `host[:port]`.
+fn server_address(text: &str) -> Option<url::Url> {
+    let text = text.strip_suffix('/').unwrap_or(text);
+    let url = match text.starts_with("https://") {
+        true => https_url(text),
+        false if text.contains("://") => None,
+        false => https_url(&format!("https://{text}")),
+    }?;
+    (url.path() == "/").then_some(url)
 }
 
 fn error_slot(join: &mut Join) -> &mut Option<String> {
@@ -4271,6 +4327,30 @@ fn text_footer(ui: &mut Ui, confirm: &str, mut done: bool, close: &mut bool) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn join_page_takes_a_server_address() {
+        let address = |text| server_address(text).map(|url| url.to_string());
+        for text in [
+            "chat.example.org",
+            "https://chat.example.org",
+            "https://chat.example.org/",
+        ] {
+            assert_eq!(address(text).as_deref(), Some("https://chat.example.org/"));
+        }
+        assert_eq!(
+            address("127.0.0.1:8443").as_deref(),
+            Some("https://127.0.0.1:8443/")
+        );
+        for text in [
+            "http://chat.example.org",
+            "https://chat.example.org/x",
+            "a b",
+            "",
+        ] {
+            assert_eq!(address(text), None, "{text}");
+        }
+    }
 
     #[test]
     fn directory_defaults_to_official() {

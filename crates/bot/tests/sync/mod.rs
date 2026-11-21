@@ -98,6 +98,22 @@ pub async fn exercise(
     );
     assert_eq!(second.version, 2);
 
+    // A device restored from the words knows no servers. Signing in to one it is a member
+    // of needs no invite (so the app asks no name), and that server's copy brings back the rest.
+    let dir_c = data.join("sync-c");
+    let c = connect(&dir_c).await?;
+    let device_c = DeviceIdentity::add_device(words, "W14 restored device C")?;
+    let token_c = session(c.sign_in(&device_c, None).await?, secrets).await?;
+    let mut restored = sync::Snapshot::default();
+    let (remote, failures) = sync::load(&[(&c, &token_c)], &device_c.sync_key).await;
+    assert!(failures.is_empty());
+    let remote = remote.context("restored device C found no sync blob")?;
+    assert!(sync::merge(&dir_c, &mut restored, remote)?.is_empty());
+    assert!(restored.state == second.state);
+    println!(
+        "W14 a restored device signed in without an invite and got the whole server list back"
+    );
+
     let stale = a
         .request(Method::PUT, PATH)
         .bearer_auth(&token_a.token)

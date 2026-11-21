@@ -10,7 +10,7 @@ use rusttalk_core::{
 };
 use url::Url;
 
-use super::{Ctx, Preview, open_joining};
+use super::{Ctx, Preview, member, open_joining, pin_changed};
 
 /// Results per page, as the index serves them.
 pub const PAGE_SIZE: usize = 25;
@@ -85,7 +85,7 @@ fn listed(listing: Listing) -> Option<Listed> {
 }
 
 /// Check that the listed address is the listed server, and whether it lets anyone join.
-pub(super) async fn preview(ctx: &Ctx, listed: Listed) -> Result<Preview, String> {
+pub(super) async fn preview(ctx: &Ctx, listed: Listed, probe: bool) -> Result<Preview, String> {
     let known = Api::pinned(&ctx.data, &listed.server.address).map_err(|error| {
         tracing::error!(error = %format_args!("{error:#}"), "reading server pins failed");
         t!("net.saved_servers_failed").to_owned()
@@ -99,13 +99,46 @@ pub(super) async fn preview(ctx: &Ctx, listed: Listed) -> Result<Preview, String
     let api = Api::probe(expected.address.clone(), tls, Some(&expected))
         .await
         .map_err(|error| problem(&error, tls.is_some()))?;
-    tracing::info!(known = known.is_some(), "listed server checked");
+    let member = probe && member(ctx, &api).await;
+    tracing::info!(known = known.is_some(), member, "listed server checked");
     Ok(Preview {
         server: api.known_server().clone(),
         invite: None,
         name: Some(listed.name),
         known: known.is_some(),
         open: open_joining(&api).await,
+        member,
+    })
+}
+
+/// Check a server typed in by address. Pins saved for it still apply; a new one is trusted
+/// on first use, with its fingerprint shown before joining. Without a saved pin only a
+/// publicly trusted certificate passes.
+pub(super) async fn address(ctx: &Ctx, address: Url, probe: bool) -> Result<Preview, String> {
+    let known = Api::pinned(&ctx.data, &address).map_err(|error| {
+        tracing::error!(error = %format_args!("{error:#}"), "reading server pins failed");
+        t!("net.saved_servers_failed").to_owned()
+    })?;
+    let tls = known.as_ref().and_then(|known| known.tls_fingerprint);
+    let api = Api::probe(address, tls, known.as_ref())
+        .await
+        .map_err(|error| match pin_changed(&error) {
+            // Only saved pins can differ here: there is no listing to compare with.
+            true => {
+                tracing::error!(error = %format_args!("{error:#}"), "server pins differ");
+                t!("net.server_changed").into()
+            }
+            false => problem(&error, false),
+        })?;
+    let member = probe && member(ctx, &api).await;
+    tracing::info!(known = known.is_some(), member, "server address checked");
+    Ok(Preview {
+        server: api.known_server().clone(),
+        invite: None,
+        name: None,
+        known: known.is_some(),
+        open: open_joining(&api).await,
+        member,
     })
 }
 

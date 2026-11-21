@@ -145,6 +145,9 @@ impl<'a> App<'a> {
                         None => {
                             tracing::info!("added this device to an existing account");
                             self.screen = self.home(identity);
+                            if let Screen::Home(home) = &mut self.screen {
+                                home.restored = true;
+                            }
                             return;
                         }
                         error => error,
