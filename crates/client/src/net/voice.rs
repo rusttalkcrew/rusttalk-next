@@ -46,6 +46,9 @@ pub(super) struct Live {
     shares: Vec<Share>,
     /// Decrypted names of subscribed remote app tracks.
     apps: HashMap<TrackSid, String>,
+    /// Audio tracks from devices not known when they arrived, with their identity, to
+    /// give them their person once known.
+    nameless: HashMap<String, String>,
     /// A capture waiting for the person to pick (Linux) or for its first frame.
     pub(super) starting:
         Option<tokio::task::JoinHandle<Result<(screen::Capture, screen::Options)>>>,
@@ -467,6 +470,26 @@ pub(super) async fn control_received(
     }
 }
 
+/// Give audio from devices that weren't known when it arrived its person, now that the
+/// API names them (after reconnecting, or once their device is synced).
+pub(super) fn name_audio(ctx: &Ctx, client: &KeyClient<'_>, state: &mut State) {
+    let Some(live) = &mut state.voice else {
+        return;
+    };
+    if live.nameless.is_empty() {
+        return;
+    }
+    let ids = identities(client, &state.server_id);
+    live.nameless
+        .retain(|sid, identity| match ids.get(identity.as_str()) {
+            Some(person) => {
+                ctx.audio.set_person(sid, *person);
+                false
+            }
+            None => true,
+        });
+}
+
 /// LiveKit identity of every known device, to find the person behind a voice participant.
 pub(super) fn identities(client: &KeyClient<'_>, server: &Id) -> HashMap<String, Id> {
     client
@@ -510,6 +533,8 @@ fn send_roster(ctx: &Ctx, url: &Url, ids: &HashMap<String, Id>, state: &State, c
     let mut people = roster.people;
     let mut peers = Vec::new();
     let mut call_sounds = None;
+    // Devices in our call that can't be named (yet), shown as unknown like the server's.
+    let mut nameless = 0;
     match state.voice.as_ref().filter(|live| live.channel == channel) {
         None => peers.extend(people.into_iter().map(|person| Peer {
             person,
@@ -532,7 +557,11 @@ fn send_roster(ctx: &Ctx, url: &Url, ids: &HashMap<String, Id>, state: &State, c
                 ..Snapshot::default()
             };
             for (participant, voice) in live.room.participants() {
-                if let Some(person) = ids.get(participant.identity().as_str()) {
+                let person = ids.get(participant.identity().as_str());
+                if person.is_none() && voice != VoiceState::Disconnected {
+                    nameless += 1;
+                }
+                if let Some(person) = person {
                     *live_people.entry(*person).or_default() |= voice == VoiceState::Connected;
                     if *person != me && voice != VoiceState::Disconnected {
                         sounds.people.insert(*person);
@@ -633,7 +662,8 @@ fn send_roster(ctx: &Ctx, url: &Url, ids: &HashMap<String, Id>, state: &State, c
             }
         }
     }
-    peers.extend((0..roster.unknown).map(|_| Peer {
+    // The server's unknown people are likely the same devices: count them once.
+    peers.extend((0..roster.unknown.max(nameless)).map(|_| Peer {
         person: [0; 32],
         connecting: false,
         unknown: true,
@@ -696,11 +726,15 @@ pub(super) async fn on_voice(
             }
             let sid = track.sid();
             let mut app = None;
-            if let Some(live) = &mut state.voice
-                && let Some(name) = live.room.app_audio_name(&track)
-            {
-                live.apps.insert(sid.clone(), name);
-                app = Some(sid.clone());
+            if let Some(live) = &mut state.voice {
+                if person.is_none() {
+                    let identity = participant.identity().to_string();
+                    live.nameless.insert(sid.to_string(), identity);
+                }
+                if let Some(name) = live.room.app_audio_name(&track) {
+                    live.apps.insert(sid.clone(), name);
+                    app = Some(sid.clone());
+                }
             }
             ctx.audio.add_track(
                 sid.to_string(),
@@ -731,6 +765,7 @@ pub(super) async fn on_voice(
         RoomEvent::TrackUnsubscribed { track, .. } => {
             if let Some(live) = &mut state.voice {
                 live.apps.remove(&track.sid());
+                live.nameless.remove(track.sid().as_str());
                 if matches!(track, RemoteTrack::Video(_)) {
                     sync_video_watches(live).await;
                 }
@@ -844,7 +879,7 @@ pub(super) async fn stop_lost_video(
 pub(super) async fn stop_finished_shares(
     ctx: &Ctx,
     url: &Url,
-    client: &KeyClient<'_>,
+    client: Option<&KeyClient<'_>>,
     state: &mut State,
 ) {
     let Some(live) = &mut state.voice else {
@@ -873,7 +908,7 @@ pub(super) async fn stop_finished_shares(
         ctx.send(Update::AppStopped(share.app.id.clone()));
     }
     let channel = live.channel;
-    send_room(ctx, url, client, state, channel);
+    roster(ctx, url, client, state, channel);
 }
 
 /// The connection panel's numbers, from the SDK's WebRTC stats.
@@ -1093,6 +1128,7 @@ pub(super) async fn start_call(
         deafened: Some(false),
         shares: Vec::new(),
         apps: HashMap::new(),
+        nameless: HashMap::new(),
         starting: None,
         screen: None,
         swap: screen::Swap::Idle,

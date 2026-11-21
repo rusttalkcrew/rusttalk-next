@@ -684,6 +684,20 @@ impl Audio {
     pub fn remove_track(&self, sid: &str) {
         lock(&self.shared().mixer).tracks.remove(sid);
     }
+
+    /// Whose a playing track is, once known: a device that joined while it couldn't be
+    /// named plays as nobody until then, out of reach of their volume and mute.
+    pub fn set_person(&self, sid: &str, person: Id) {
+        lock(&self.shared().mixer).set_person(sid, person);
+    }
+}
+
+impl Mixer {
+    fn set_person(&mut self, sid: &str, person: Id) {
+        if let Some(track) = self.tracks.get_mut(sid) {
+            track.stream.0 = person;
+        }
+    }
 }
 
 /// Threshold for voice activation from a quiet and a speaking recording, in dBFS.
@@ -1362,6 +1376,28 @@ fn send(source: &NativeAudioSource, frame: &[i16]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_track_gets_its_person_later() {
+        let mut mixer = Mixer::default();
+        let track = |stream| Track {
+            serial: 1,
+            stream,
+            queue: VecDeque::new(),
+            primed: false,
+            loud: 0,
+        };
+        let app: TrackSid = "TR_app".to_owned().try_into().unwrap();
+        mixer.tracks.insert("voice".into(), track(([0; 32], None)));
+        mixer
+            .tracks
+            .insert("app".into(), track(([0; 32], Some(app.clone()))));
+        mixer.set_person("voice", [7; 32]);
+        mixer.set_person("app", [7; 32]);
+        mixer.set_person("gone", [7; 32]);
+        assert_eq!(mixer.tracks["voice"].stream, ([7; 32], None));
+        assert_eq!(mixer.tracks["app"].stream, ([7; 32], Some(app)));
+    }
 
     /// Feeds `seconds` of 10 ms frames at `db` and returns how many opened the gate.
     fn feed(noise: &mut NoiseFloor, gate: &mut Gate, db: f32, seconds: f32) -> usize {

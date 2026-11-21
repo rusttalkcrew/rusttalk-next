@@ -737,10 +737,15 @@ async fn offline<T>(
     connecting: bool,
 ) -> Option<T> {
     tokio::pin!(until);
+    // A capture that ends by itself (its window closed) still stops sharing, and control.
+    let mut finished = tokio::time::interval(Duration::from_secs(2));
     loop {
         tokio::select! {
             done = &mut until => return Some(done),
             next = next_voice(&mut state.voice) => voice_next(ctx, url, None, state, next).await,
+            _ = finished.tick(), if state.voice.is_some() => {
+                stop_finished_shares(ctx, url, None, state).await;
+            }
             command = commands.recv() => match command? {
                 command if voice_only(&command) => {
                     cancel_queued(&mut state.queued, &command);
@@ -925,6 +930,7 @@ async fn serve(
         tracing::warn!(error = %format_args!("{error:#}"), "loading server state failed");
         return End::Error;
     }
+    voice::name_audio(ctx, client, state);
     // What was asked while connecting.
     for command in std::mem::take(&mut state.queued) {
         run_command(ctx, url, client, state, command).await;
@@ -993,7 +999,8 @@ async fn serve(
                 if let Some(live) = &mut state.voice {
                     voice::sync_video_watches(live).await;
                 }
-                stop_finished_shares(ctx, url, client, state).await;
+                stop_finished_shares(ctx, url, Some(client), state).await;
+                voice::name_audio(ctx, client, state);
                 voice_stats(ctx, url, client, state).await;
             }
         }
