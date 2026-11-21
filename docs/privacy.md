@@ -175,7 +175,7 @@ starts and when the person signs out.
 `emoji-recent.json` holds up to 32 emoji selected through the picker or
 autocomplete. It stays on this device.
 `updates.json` holds the chosen release directory URL and the automatic
-check preference on this device.
+check preference (on by default in release builds) on this device.
 
 ## Outbound connections
 
@@ -195,12 +195,14 @@ check preference on this device.
   built into the client; it contacts one only when the person picks Join. On Linux it accesses Secret
   Service, and opens file dialogs through xdg-desktop-portal, over the local
   session bus.
-- **Update host (opt-in):** The desktop client contacts the HTTPS directory
-  configured in Settings when you select **Check now** or opt in to a startup
-  check. It requests the release manifest and its detached signature, then
-  requests your platform’s artifact if you choose to install. The host sees
-  your IP address, requested files and timing. Requests carry no account,
-  device or server identifiers. Redirects are disabled.
+- **Update host:** Release builds contact the HTTPS directory configured in
+  Settings (by default the GitHub release directory of the RustTalk
+  repository, `github.com`) at startup, every six hours and when you select
+  **Check now**. Turn the automatic checks off in **Settings → Updates**
+  (**Check automatically**). It requests the release manifest and its detached
+  signature, then requests your platform’s artifact if you choose to update.
+  The host sees your IP address, requested files and timing. Requests carry no
+  account, device or server identifiers. Redirects stay on HTTPS.
 - **API:** Queries LiveKit RoomService on 7880/TCP using the internal
   Docker hostname `livekit`. When the owner enables public listing and
   saves an index URL, the API posts a signed listing to that HTTPS URL at

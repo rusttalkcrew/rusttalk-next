@@ -63,7 +63,7 @@ impl<'a> App<'a> {
         window_started: &'a Cell<bool>,
     ) -> Self {
         ui::install(&cc.egui_ctx);
-        let updates = crate::update::Updater::new(&data, &cc.egui_ctx);
+        let updates = crate::update::Updater::new(&data);
         let mut app = Self {
             keystore,
             screen: Screen::Welcome,

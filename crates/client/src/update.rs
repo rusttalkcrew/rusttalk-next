@@ -3,8 +3,12 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     process::Command,
-    sync::mpsc::{self, Receiver, TryRecvError},
-    time::Duration,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+        mpsc::{self, Receiver, TryRecvError},
+    },
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, anyhow, ensure};
@@ -25,9 +29,12 @@ const LOCAL_TEST: bool = match option_env!("RUSTTALK_LOCAL_UPDATE_TEST") {
 #[cfg(target_os = "linux")]
 static RESTART: std::sync::OnceLock<Target> = std::sync::OnceLock::new();
 
+/// How often a running app looks for a new version.
+const CHECK_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
+
 #[derive(Deserialize, Serialize)]
 struct Settings {
-    #[serde(default)]
+    #[serde(default = "default_automatic")]
     automatic: bool,
     #[serde(default = "default_url")]
     url: String,
@@ -36,7 +43,7 @@ struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            automatic: false,
+            automatic: default_automatic(),
             url: default_url(),
         }
     }
@@ -47,6 +54,31 @@ fn default_url() -> String {
     option_env!("RUSTTALK_DEFAULT_UPDATE_URL")
         .unwrap_or_default()
         .to_owned()
+}
+
+/// Release builds check by default; a saved choice always wins over this.
+fn default_automatic() -> bool {
+    !default_url().is_empty()
+}
+
+/// The release page for `version`, when the update directory is a GitHub release
+/// download directory (`github.com/<owner>/<repo>/releases/.../download/`); other
+/// hosts have no page we can name.
+fn release_notes(base: &Url, version: &Version) -> Option<Url> {
+    let mut parts = base.path_segments()?.filter(|part| !part.is_empty());
+    let (owner, repo, releases) = (parts.next()?, parts.next()?, parts.next()?);
+    if base.scheme() != "https" || base.host_str() != Some("github.com") || releases != "releases" {
+        return None;
+    }
+    Url::parse(&format!(
+        "https://github.com/{owner}/{repo}/releases/tag/v{version}"
+    ))
+    .ok()
+}
+
+/// Whether the scheduled check should run now.
+fn check_due(next: Option<Instant>, now: Instant) -> bool {
+    next.is_none_or(|next| now >= next)
 }
 
 impl Settings {
@@ -243,7 +275,7 @@ impl Target {
         }
     }
 
-    async fn install(self, update: Update) -> Result<State> {
+    async fn install(self, update: Update, done: Arc<AtomicU64>) -> Result<State> {
         let mut file =
             NamedTempFile::new_in(self.path.parent().context("locate update directory")?)?;
         let mut response = get(&update.client, update.base.join(&update.artifact.file)?).await?;
@@ -258,6 +290,7 @@ impl Target {
             ensure!(size <= update.artifact.size, "update size mismatch");
             hasher.update(&chunk);
             file.write_all(&chunk)?;
+            done.store(size, Ordering::Relaxed);
         }
         update.artifact.verify(size, &hasher.finalize())?;
         #[cfg(target_os = "linux")]
@@ -511,7 +544,7 @@ pub fn check_now(config: &Path) -> Result<()> {
     runtime()?.block_on(async {
         if let Some(update) = check(&url).await? {
             let version = update.version.clone();
-            target.install(update).await?;
+            target.install(update, Arc::default()).await?;
             println!("Installed RustTalk {version}");
         } else {
             println!("RustTalk is up to date");
@@ -520,9 +553,22 @@ pub fn check_now(config: &Path) -> Result<()> {
     })
 }
 
+/// How much of the download is on disk.
+struct Progress {
+    done: Arc<AtomicU64>,
+    total: u64,
+}
+
+impl Progress {
+    fn fraction(&self) -> f32 {
+        (self.done.load(Ordering::Relaxed) as f64 / self.total as f64) as f32
+    }
+}
+
 enum State {
     Idle,
-    Working(Receiver<Result<State>>),
+    /// A check (no progress) or an install (with progress) runs in the background.
+    Working(Receiver<Result<State>>, Option<Progress>),
     Available(Update),
     Current,
     #[cfg(target_os = "linux")]
@@ -537,10 +583,13 @@ pub struct Updater {
     settings: Settings,
     target: Result<Target>,
     state: State,
+    next_check: Option<Instant>,
+    /// The confirmation dialog is open, and stays open to show progress or a failure.
+    asking: bool,
 }
 
 impl Updater {
-    pub fn new(config: &Path, ctx: &egui::Context) -> Self {
+    pub fn new(config: &Path) -> Self {
         let path = config.join("updates.json");
         let (settings, state) = match Settings::load(&path) {
             Ok(settings) => (settings, State::Idle),
@@ -549,43 +598,106 @@ impl Updater {
                 failure(error.context("load update settings")),
             ),
         };
-        let mut updater = Self {
+        Self {
             config: path,
             settings,
             target: Target::new(config),
             state,
-        };
-        if updater.settings.automatic
-            && !updater.settings.url.trim().is_empty()
-            && updater.target.is_ok()
-        {
-            updater.start_check(ctx);
+            next_check: None,
+            asking: false,
         }
-        updater
     }
 
     fn start_check(&mut self, ctx: &egui::Context) {
         let url = self.settings.url.clone();
-        self.state = background(ctx, move || {
+        self.state = background(ctx, None, move || {
             Ok(runtime()?
                 .block_on(check(&url))?
                 .map_or(State::Current, State::Available))
         });
     }
 
-    pub fn poll(&mut self, _ctx: &egui::Context) {
-        if let State::Working(receiver) = &self.state {
+    /// Runs the install of the available update in the background.
+    fn start_install(
+        &mut self,
+        ctx: &egui::Context,
+        work: impl FnOnce(Update, Arc<AtomicU64>) -> Result<State> + Send + 'static,
+    ) {
+        let State::Available(update) = std::mem::replace(&mut self.state, State::Idle) else {
+            return;
+        };
+        let done = Arc::<AtomicU64>::default();
+        let progress = Progress {
+            done: done.clone(),
+            total: update.artifact.size,
+        };
+        self.state = background(ctx, Some(progress), move || work(update, done));
+    }
+
+    fn confirm(&mut self, ctx: &egui::Context) {
+        if let Ok(target) = &self.target {
+            let target = target.clone();
+            self.start_install(ctx, move |update, done| {
+                runtime()?.block_on(target.install(update, done))
+            });
+        }
+    }
+
+    /// Closes the dialog; after a failure it looks again, so a retry is one click away.
+    fn dismiss(&mut self, ctx: &egui::Context) {
+        self.asking = false;
+        if matches!(self.state, State::Failed(_)) && !self.settings.url.trim().is_empty() {
+            self.start_check(ctx);
+        }
+    }
+
+    /// Whether a background job or the restart owns the app right now.
+    fn busy(&self) -> bool {
+        match self.state {
+            State::Working(..) => true,
+            #[cfg(target_os = "linux")]
+            State::Installed(..) => true,
+            #[cfg(target_os = "windows")]
+            State::InstallerStarted(_) => true,
+            _ => false,
+        }
+    }
+
+    pub fn poll(&mut self, ctx: &egui::Context) {
+        if let State::Working(receiver, _) = &self.state {
             match receiver.try_recv() {
                 Ok(result) => self.state = result.unwrap_or_else(failure),
                 Err(TryRecvError::Disconnected) => {
                     self.state = failure(anyhow!("update worker stopped"))
                 }
-                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Empty) => ctx.request_repaint_after(Duration::from_millis(100)),
             }
         }
+        // The new app starts once this one has exited (`restart_if_requested`).
+        #[cfg(target_os = "linux")]
+        if let State::Installed(_, target) = &self.state {
+            let _ = RESTART.set(target.clone());
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        // The installer restarts RustTalk itself once it is closed.
         #[cfg(target_os = "windows")]
         if matches!(self.state, State::InstallerStarted(_)) {
-            _ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        let ready = self.settings.automatic
+            && !self.settings.url.trim().is_empty()
+            && self.target.is_ok()
+            && !self.busy()
+            && !self.asking
+            && !self.available();
+        if ready {
+            let now = Instant::now();
+            if check_due(self.next_check, now) {
+                self.next_check = Some(now + CHECK_EVERY);
+                self.start_check(ctx);
+            } else if let Some(next) = self.next_check {
+                ctx.request_repaint_after(next.saturating_duration_since(now));
+            }
         }
     }
 
@@ -593,20 +705,72 @@ impl Updater {
         matches!(self.state, State::Available(_))
     }
 
-    pub fn settings(&mut self, ui: &mut egui::Ui) {
-        let can_check = match self.state {
-            State::Working(_) => false,
-            #[cfg(target_os = "linux")]
-            State::Installed(..) => false,
-            _ => true,
+    /// The Update button, shown while a verified newer version waits.
+    pub fn button(&mut self, ui: &mut egui::Ui) {
+        if let State::Available(update) = &self.state {
+            let label = format!("Update to v{}", update.version);
+            ui.with_layout(
+                egui::Layout::top_down_justified(egui::Align::Center),
+                |ui| {
+                    if crate::ui::primary(ui, &label).clicked() {
+                        self.asking = true;
+                    }
+                },
+            );
+        }
+    }
+
+    /// The confirmation, then the download's progress, then any failure.
+    pub fn dialog(&mut self, ctx: &egui::Context) {
+        if !self.asking {
+            return;
+        }
+        let title = match &self.state {
+            State::Available(update) => format!("Update RustTalk to v{}?", update.version),
+            State::Failed(_) => "Couldn't update".to_owned(),
+            State::Working(..) => "Updating RustTalk".to_owned(),
+            _ => "Restarting RustTalk".to_owned(),
         };
+        let (mut go, mut later) = (false, false);
+        let (_, closed) = crate::ui::dialog(ctx, "update", &title, |ui| match &self.state {
+            State::Available(update) => {
+                ui.label("RustTalk restarts after the update.");
+                if let Some(url) = release_notes(&update.base, &update.version) {
+                    ui.hyperlink_to("What's new", url);
+                }
+                crate::ui::footer(ui, |ui| {
+                    go = crate::ui::primary(ui, "Update").clicked();
+                    later = crate::ui::secondary(ui, "Later").clicked();
+                });
+            }
+            State::Failed(error) => {
+                crate::ui::error_text(ui, Some(error));
+                crate::ui::footer(ui, |ui| later = crate::ui::secondary(ui, "Close").clicked());
+            }
+            State::Working(_, Some(progress)) => {
+                ui.add(egui::ProgressBar::new(progress.fraction()).show_percentage());
+            }
+            _ => {
+                ui.spinner();
+            }
+        });
+        let working = matches!(self.state, State::Working(..));
+        if go {
+            self.confirm(ctx);
+        } else if later || (closed && !working) {
+            self.dismiss(ctx);
+        }
+    }
+
+    pub fn settings(&mut self, ui: &mut egui::Ui) {
+        let can_check = !self.busy();
         crate::ui::page_section(ui, "Updates");
         ui.add_enabled_ui(can_check, |ui| {
             let changed = crate::ui::toggle_row(
                 ui,
                 &mut self.settings.automatic,
                 "Check automatically",
-                "Looks for a new version when RustTalk starts.",
+                "Looks for a new version when RustTalk starts and every few hours.",
             )
             .changed();
             let url = crate::ui::setting_row(
@@ -647,31 +811,23 @@ impl Updater {
         }
         match &self.state {
             State::Idle => {}
-            State::Working(_) => {
+            State::Working(_, None) => {
                 ui.spinner();
             }
+            State::Working(_, Some(progress)) => {
+                ui.add(egui::ProgressBar::new(progress.fraction()).show_percentage());
+            }
             State::Available(update) => {
-                if crate::ui::primary(ui, &format!("Install RustTalk {}", update.version)).clicked()
-                    && let State::Available(update) =
-                        std::mem::replace(&mut self.state, State::Idle)
-                    && let Ok(target) = &self.target
-                {
-                    let target = target.clone();
-                    self.state = background(ui.ctx(), move || {
-                        runtime()?.block_on(target.install(update))
-                    });
+                if crate::ui::primary(ui, &format!("Update to v{}", update.version)).clicked() {
+                    self.asking = true;
                 }
             }
             State::Current => {
                 ui.label("RustTalk is up to date.");
             }
             #[cfg(target_os = "linux")]
-            State::Installed(version, target) => {
-                ui.label(format!("RustTalk {version} installed."));
-                if crate::ui::primary(ui, "Restart now").clicked() {
-                    let _ = RESTART.set(target.clone());
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-                }
+            State::Installed(version, _) => {
+                ui.label(format!("RustTalk {version} installed. Restarting."));
             }
             #[cfg(target_os = "windows")]
             State::InstallerStarted(version) => {
@@ -684,7 +840,11 @@ impl Updater {
     }
 }
 
-fn background(ctx: &egui::Context, work: impl FnOnce() -> Result<State> + Send + 'static) -> State {
+fn background(
+    ctx: &egui::Context,
+    progress: Option<Progress>,
+    work: impl FnOnce() -> Result<State> + Send + 'static,
+) -> State {
     let (send, receive) = mpsc::channel();
     let ctx = ctx.clone();
     match std::thread::Builder::new()
@@ -693,7 +853,7 @@ fn background(ctx: &egui::Context, work: impl FnOnce() -> Result<State> + Send +
             let _ = send.send(work());
             ctx.request_repaint();
         }) {
-        Ok(_) => State::Working(receive),
+        Ok(_) => State::Working(receive, progress),
         Err(error) => failure(anyhow::Error::new(error).context("start update worker")),
     }
 }
@@ -730,6 +890,165 @@ mod tests {
             .unwrap();
         manifest[hash_start] = b'c';
         assert!(verify(&key.verifying_key(), &manifest, &sig).is_err());
+    }
+
+    fn fake_update(base: &str) -> Update {
+        Update {
+            client: reqwest::Client::new(),
+            base: Url::parse(base).unwrap(),
+            version: Version::new(0, 2, 0),
+            artifact: Artifact {
+                file: "app".into(),
+                size: 4,
+                sha256: String::new(),
+            },
+        }
+    }
+
+    fn updater(state: State) -> Updater {
+        Updater {
+            config: PathBuf::new(),
+            settings: Settings {
+                automatic: true,
+                url: "https://example.com/".into(),
+            },
+            target: Err(anyhow!("no target in tests")),
+            state,
+            next_check: None,
+            asking: false,
+        }
+    }
+
+    /// Polls until the background job has answered.
+    fn settle(updater: &mut Updater, ctx: &egui::Context) {
+        for _ in 0..200 {
+            updater.poll(ctx);
+            if !matches!(updater.state, State::Working(..)) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("update job did not finish");
+    }
+
+    #[test]
+    fn schedule_checks_at_startup_then_every_six_hours() {
+        let start = Instant::now();
+        assert!(check_due(None, start));
+        let next = Some(start + CHECK_EVERY);
+        assert!(!check_due(
+            next,
+            start + CHECK_EVERY - Duration::from_secs(1)
+        ));
+        assert!(check_due(next, start + CHECK_EVERY));
+        assert_eq!(CHECK_EVERY, Duration::from_secs(21_600));
+    }
+
+    #[test]
+    fn poll_starts_one_scheduled_check_and_respects_the_switch() {
+        let ctx = egui::Context::default();
+        // No usable target, so even a due check must not start.
+        let mut idle = updater(State::Idle);
+        idle.poll(&ctx);
+        assert!(idle.next_check.is_none());
+        // With a target the first poll starts the check and arms the next one.
+        let dir = tempfile::tempdir().unwrap();
+        let mut ready = updater(State::Idle);
+        ready.target = Ok(Target {
+            path: dir.path().join("app"),
+            #[cfg(target_os = "linux")]
+            inode: (0, 0),
+        });
+        ready.settings.url = "http://invalid.test/".into();
+        ready.poll(&ctx);
+        assert!(ready.next_check.is_some());
+        assert!(matches!(ready.state, State::Working(..)));
+        settle(&mut ready, &ctx);
+        assert!(matches!(ready.state, State::Failed(_)));
+        // Not due again yet: the state stays put.
+        ready.poll(&ctx);
+        assert!(matches!(ready.state, State::Failed(_)));
+        // Turned off: never due, even when the time has come.
+        ready.settings.automatic = false;
+        ready.next_check = None;
+        ready.poll(&ctx);
+        assert!(ready.next_check.is_none());
+    }
+
+    #[test]
+    fn saved_choice_beats_the_default() {
+        let saved: Settings = serde_json::from_str(r#"{"automatic":false,"url":"u"}"#).unwrap();
+        assert!(!saved.automatic);
+        let unset: Settings = serde_json::from_str(r#"{"url":"u"}"#).unwrap();
+        assert_eq!(unset.automatic, default_automatic());
+    }
+
+    #[test]
+    fn update_flow_goes_from_available_to_failed() {
+        let ctx = egui::Context::default();
+        let mut updater = updater(State::Available(fake_update("https://example.com/")));
+        assert!(updater.available());
+        updater.asking = true;
+        updater.start_install(&ctx, |_, done| {
+            done.store(2, Ordering::Relaxed);
+            Err(anyhow!("update size mismatch"))
+        });
+        assert!(matches!(updater.state, State::Working(_, Some(_))));
+        assert!(!updater.available());
+        settle(&mut updater, &ctx);
+        assert!(matches!(&updater.state, State::Failed(e) if e == "update size mismatch"));
+        // The dialog stays open to show the error; Close looks again.
+        assert!(updater.asking);
+        updater.dismiss(&ctx);
+        assert!(!updater.asking);
+        assert!(matches!(updater.state, State::Working(_, None)));
+    }
+
+    #[test]
+    fn later_keeps_the_update_waiting() {
+        let ctx = egui::Context::default();
+        let mut updater = updater(State::Available(fake_update("https://example.com/")));
+        updater.asking = true;
+        updater.dismiss(&ctx);
+        assert!(!updater.asking && updater.available());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn finished_install_goes_to_restart() {
+        let ctx = egui::Context::default();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app");
+        fs::write(&path, b"app").unwrap();
+        let target = Target {
+            inode: file_id(&fs::metadata(&path).unwrap()),
+            path,
+        };
+        let mut updater = updater(State::Available(fake_update("https://example.com/")));
+        updater.asking = true;
+        updater.start_install(&ctx, move |update, _| {
+            Ok(State::Installed(update.version, target))
+        });
+        settle(&mut updater, &ctx);
+        assert!(matches!(&updater.state, State::Installed(v, _) if *v == Version::new(0, 2, 0)));
+        // Restarting is not interrupted by a scheduled check.
+        assert!(updater.busy());
+    }
+
+    #[test]
+    fn release_notes_come_from_the_github_release_directory() {
+        let version = Version::new(0, 2, 0);
+        let notes = |base: &str| release_notes(&Url::parse(base).unwrap(), &version);
+        assert_eq!(
+            notes("https://github.com/rusttalkcrew/rusttalk-next/releases/latest/download/")
+                .unwrap()
+                .as_str(),
+            "https://github.com/rusttalkcrew/rusttalk-next/releases/tag/v0.2.0"
+        );
+        assert!(notes("https://example.com/updates/").is_none());
+        assert!(notes("https://github.com/rusttalkcrew/").is_none());
+        assert!(notes("https://github.com/a/b/issues/").is_none());
+        assert!(notes("http://github.com/a/b/releases/latest/download/").is_none());
     }
 
     #[test]
