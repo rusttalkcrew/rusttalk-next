@@ -206,6 +206,10 @@ pub enum Update {
         at_start: Option<bool>,
     },
     Deleted(Url, Id, Id),
+    /// A new message in any readable channel or DM, for unread marks and notifications.
+    Arrived(Url, Id, Msg),
+    /// The newest message time from someone else per channel, after (re)connecting.
+    Latest(Vec<(Id, i64)>),
     /// This person left the server; remove it here too.
     Left(Url),
     /// A member came online, went away or offline.
@@ -835,6 +839,7 @@ async fn resume(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, state: &mut St
         page(ctx, url, client, state, channel, None).await;
     }
     set_display_name(ctx, url, client, state).await;
+    latest(ctx, client, state).await;
     let voice: Vec<Id> = state
         .last
         .iter()
@@ -855,6 +860,35 @@ async fn resume(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, state: &mut St
     let ctx = ctx.clone();
     tokio::spawn(async move { sync(&ctx, Vec::new()).await });
     Ok(())
+}
+
+/// The newest message from someone else in every channel and DM, so what came in
+/// while away shows as unread.
+// shortcut: one request per channel on each (re)connect; the newest record may be an
+// edit, which then also counts as new.
+async fn latest(ctx: &Ctx, client: &mut KeyClient<'_>, state: &State) {
+    let Some(dir) = &state.last else {
+        return;
+    };
+    let channels = (dir.categories.iter())
+        .flat_map(|category| &category.channels)
+        .map(|channel| channel.id)
+        .chain(dir.dms.iter().map(|dm| dm.channel));
+    let me = *client.identity.certificate.person_id();
+    let mut found = Vec::new();
+    for channel in channels {
+        match client.message_page(&channel, None, 1).await {
+            Ok(records) => found.extend(
+                (records.first())
+                    .filter(|record| record.person != me)
+                    .map(|record| (channel, record.at)),
+            ),
+            Err(error) => {
+                tracing::warn!(error = %format_args!("{error:#}"), "loading the newest message failed");
+            }
+        }
+    }
+    ctx.send(Update::Latest(found));
 }
 
 /// Merge with this person's other devices and show the result.
@@ -886,32 +920,43 @@ async fn on_event(
     match event {
         Event::MessageCreated { channel, id } => {
             let (channel, id) = (decode(&channel)?, decode(&id)?);
+            let record = client.message(&channel, &id).await?;
             if state.loaded.contains(&channel) {
-                let record = client.message(&channel, &id).await?;
                 let msg = open(client, state, &channel, &record).await;
+                ctx.send(Update::Arrived(url.clone(), channel, msg.clone()));
                 send_messages(ctx, url, channel, vec![msg], false, None);
-            } else if let Some(live) = state.voice.as_mut().filter(|live| live.channel == channel) {
-                // Live file offers arrive as messages in the voice channel.
-                let record = client.message(&channel, &id).await?;
-                let me = *client.identity.certificate.person_id();
-                if record.person != me
-                    && let Some(file) = client.open_message(&channel, &record).await?.live
-                {
-                    let channel = live.channel;
-                    let transfer = Transfer {
-                        channel,
-                        offer: Some(record.clone()),
-                        ..Transfer::default()
-                    };
-                    state.transfers.insert(file.id, transfer);
-                    ctx.send(Update::LiveOffer(LiveOffer {
-                        id: file.id,
-                        from: Some(record.person),
-                        name: file.name,
-                        size: file.size,
-                        chat: false,
-                    }));
-                }
+                return Ok(());
+            }
+            // Not opened: decrypt only for the unread mark and notification, keeping no state.
+            let body = client.open_message(&channel, &record).await;
+            if let Err(error) = &body {
+                tracing::warn!(error = %format_args!("{error:#}"), "message could not be opened");
+            }
+            let msg = match &body {
+                Ok(body) => to_msg(&record, body),
+                Err(_) => unreadable(&record),
+            };
+            ctx.send(Update::Arrived(url.clone(), channel, msg));
+            let me = *client.identity.certificate.person_id();
+            // Live file offers arrive as messages in the voice channel.
+            if let Some(live) = state.voice.as_mut().filter(|live| live.channel == channel)
+                && record.person != me
+                && let Ok(Some(file)) = body.map(|body| body.live)
+            {
+                let channel = live.channel;
+                let transfer = Transfer {
+                    channel,
+                    offer: Some(record.clone()),
+                    ..Transfer::default()
+                };
+                state.transfers.insert(file.id, transfer);
+                ctx.send(Update::LiveOffer(LiveOffer {
+                    id: file.id,
+                    from: Some(record.person),
+                    name: file.name,
+                    size: file.size,
+                    chat: false,
+                }));
             }
         }
         Event::MessageDeleted { channel, id } => {
@@ -1190,17 +1235,21 @@ async fn open(
                 state.waiting.entry(*channel).or_default().insert(record.id);
             }
             tracing::warn!(error = %format_args!("{error:#}"), "message could not be opened");
-            Msg {
-                id: record.id,
-                person: record.person,
-                at: record.at,
-                reply_to: None,
-                edit_of: None,
-                body: Body::Unreadable,
-                files: Vec::new(),
-                live: None,
-            }
+            unreadable(record)
         }
+    }
+}
+
+fn unreadable(record: &MessageRecord) -> Msg {
+    Msg {
+        id: record.id,
+        person: record.person,
+        at: record.at,
+        reply_to: None,
+        edit_of: None,
+        body: Body::Unreadable,
+        files: Vec::new(),
+        live: None,
     }
 }
 

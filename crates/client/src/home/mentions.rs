@@ -179,6 +179,11 @@ pub fn mentions_me(message: &Message<'_>, me: &Id, my_roles: &[String]) -> bool 
     })
 }
 
+/// Whether this person is named directly; muting @everyone never silences that.
+pub fn names_me(message: &Message<'_>, me: &Id) -> bool {
+    tokens(message.text).any(|(_, mention)| mention == Mention::Person(*me))
+}
+
 /// The visible names chosen in one draft. Keep each alias bound to its ID for
 /// the life of the draft, even if directory names change while it is open.
 #[derive(Clone, Default)]

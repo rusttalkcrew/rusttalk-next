@@ -840,6 +840,35 @@ pub fn badge(ui: &mut Ui, text: &str, fill: Color32) -> Response {
         .inner
 }
 
+/// The unread mark: a short pill `gap` left of a row or server button.
+pub fn unread_pill(ui: &Ui, row: Rect, gap: f32) {
+    let pill = Rect::from_center_size(
+        egui::pos2(row.left() - gap, row.center().y),
+        Vec2::new(4.0, 8.0),
+    );
+    ui.painter().rect_filled(pill, 2.0, colors(ui).strong);
+}
+
+/// A red count of mentions centred on `at`, ringed in `ring`, the surface it sits on.
+pub fn mention_badge(ui: &Ui, at: Pos2, count: u32, ring: Color32) {
+    let text = if count > 99 {
+        "99+".to_owned()
+    } else {
+        count.to_string()
+    };
+    let painter = ui.painter();
+    let galley = painter.layout_no_wrap(
+        text,
+        FontId::new(TEXT_CAPTION - 1.0, bold_family()),
+        ON_FILL,
+    );
+    let size = Vec2::new((galley.size().x + 8.0).max(16.0), 16.0);
+    let rect = Rect::from_center_size(at, size);
+    let fill = colors(ui).danger;
+    painter.rect(rect, 8.0, fill, Stroke::new(2.0, ring), StrokeKind::Outside);
+    painter.galley(rect.center() - galley.size() / 2.0, galley, ON_FILL);
+}
+
 /// A floating copy of a row that follows the pointer, like a dragged channel.
 pub fn drag_preview(ctx: &Context, id: Id, at: Pos2, width: f32, label: &str) {
     Area::new(id)

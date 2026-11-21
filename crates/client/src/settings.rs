@@ -359,6 +359,7 @@ pub fn show(
                 page(Tab::Appearance, "🎨", "Appearance"),
                 page(Tab::Voice, "🎤", "Voice & audio"),
                 page(Tab::Video, "🎥", "Video"),
+                page(Tab::Notifications, "🔔", "Notifications"),
                 page(
                     Tab::Updates,
                     "🔄",
@@ -400,6 +401,7 @@ pub fn show(
                     camera::settings_tab(ui, &mut home.voice.camera, &mut s);
                     audio.set_settings(s);
                 }
+                Tab::Notifications => notifications_page(ui, home),
                 Tab::Privacy => privacy_tab(ui, home),
                 Tab::Devices => devices_page(ui, home),
                 Tab::Updates => updates.settings(ui),
@@ -498,6 +500,36 @@ fn account_page(ui: &mut Ui, home: &mut Home) {
     ui::card(ui, |ui| {
         ui.monospace(fingerprint(home.identity.certificate.person_id()));
     });
+}
+
+/// Settings → Notifications: the switches for every server. Servers and channels
+/// pick their own level and mute from their right-click menus.
+fn notifications_page(ui: &mut Ui, home: &mut Home) {
+    let mut prefs = home.notify.prefs().clone();
+    ui::page_section(ui, "Desktop notifications");
+    ui::toggle_row(
+        ui,
+        &mut prefs.desktop,
+        "Desktop notifications",
+        "Show new messages on your desktop. Previews never leave this computer.",
+    );
+    ui.add_enabled_ui(prefs.desktop, |ui| {
+        ui::toggle_row(
+            ui,
+            &mut prefs.sound,
+            "Sound",
+            "Play a sound with each notification.",
+        );
+        ui::toggle_row(
+            ui,
+            &mut prefs.unfocused_only,
+            "Only when RustTalk isn't focused",
+            "Stay quiet while you're using RustTalk.",
+        );
+    });
+    ui::page_section(ui, "Servers and channels");
+    ui.weak("Right-click a server or channel to mute it or choose what notifies you.");
+    home.notify.set_prefs(prefs);
 }
 
 fn devices_page(ui: &mut Ui, home: &mut Home) {
