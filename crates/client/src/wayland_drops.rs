@@ -38,20 +38,22 @@ pub fn install(cc: &eframe::CreationContext) {
     });
 }
 
+/// More files than anyone drops at once; the rest of a list is ignored.
+const MAX_FILES: usize = 100;
+
 fn update(drag: Drag, ours: usize) {
-    let mut drops = DROPS.lock().unwrap_or_else(|poison| poison.into_inner());
-    match drag {
-        Drag::Enter(surface) => drops.hovering = surface == ours,
-        Drag::Leave => drops.hovering = false,
-        Drag::Drop(surface, list) => {
-            drops.hovering = false;
-            if surface == ours {
-                let files = crate::paste::file_paths(&list);
-                tracing::info!(files = files.len(), "files dropped on the window");
-                drops.dropped.extend(files);
-            }
+    let files = match &drag {
+        Drag::Drop(surface, list) if *surface == ours => {
+            let mut files = crate::paste::file_paths(list);
+            files.truncate(MAX_FILES);
+            tracing::info!(files = files.len(), "files dropped on the window");
+            files
         }
-    }
+        _ => Vec::new(),
+    };
+    let mut drops = DROPS.lock().unwrap_or_else(|poison| poison.into_inner());
+    drops.hovering = matches!(drag, Drag::Enter(surface) if surface == ours);
+    drops.dropped.extend(files);
 }
 
 /// Add the drag to this frame's input, as winit would.
@@ -108,5 +110,8 @@ mod tests {
         assert_eq!(frame(), (0, vec![]), "a drop is delivered once");
         update(Drag::Drop(other, b"file:///tmp/a\r\n".to_vec()), ours);
         assert_eq!(frame(), (0, vec![]), "drops on other surfaces are ignored");
+        let many: String = (0..150).map(|i| format!("file:///tmp/{i}\r\n")).collect();
+        update(Drag::Drop(ours, many.into_bytes()), ours);
+        assert_eq!(frame().1.len(), MAX_FILES);
     }
 }

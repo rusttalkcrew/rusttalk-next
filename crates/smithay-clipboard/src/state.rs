@@ -436,27 +436,32 @@ impl DataDeviceHandler for State {
             Ok(pipe) if set_non_blocking(pipe.as_raw_fd()).is_ok() => pipe,
             _ => return offer.destroy(),
         };
-        // Read without blocking the clipboard thread on a slow drag source.
+        // Read without blocking the clipboard thread on a slow drag source, a
+        // few reads per wakeup so a source that keeps writing can't hog it, and
+        // give up on lists far beyond any real file drag.
+        const MAX_LIST: usize = 1 << 20;
         let mut buffer = [0; 4096];
         let mut list = Vec::new();
         let _ = self.loop_handle.insert_source(pipe, move |_, file, _| {
             let file = unsafe { file.get_mut() };
-            loop {
+            for _ in 0..16 {
                 match file.read(&mut buffer) {
                     Ok(0) => {
                         offer.finish();
                         offer.destroy();
                         send_drag(Drag::Drop(surface, mem::take(&mut list)));
-                        break PostAction::Remove;
+                        return PostAction::Remove;
                     },
-                    Ok(n) => list.extend_from_slice(&buffer[..n]),
-                    Err(err) if err.kind() == ErrorKind::WouldBlock => break PostAction::Continue,
-                    Err(_) => {
+                    Ok(n) if list.len() + n <= MAX_LIST => list.extend_from_slice(&buffer[..n]),
+                    Err(err) if err.kind() == ErrorKind::WouldBlock => return PostAction::Continue,
+                    // Too long, or the read failed.
+                    _ => {
                         offer.destroy();
-                        break PostAction::Remove;
+                        return PostAction::Remove;
                     },
                 }
             }
+            PostAction::Continue
         });
     }
 
