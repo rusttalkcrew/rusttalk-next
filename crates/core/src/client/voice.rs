@@ -17,7 +17,7 @@ use livekit::{
         E2eeOptions, EncryptionType,
         key_provider::{KeyProvider, KeyProviderOptions},
     },
-    options::TrackPublishOptions,
+    options::{AudioEncoding, TrackPublishOptions},
     participant::ParticipantState,
     prelude::{LocalTrack, RemoteTrack, RemoteTrackPublication, TrackKind},
     rtc_engine::SimulateScenario,
@@ -128,7 +128,12 @@ struct Roster {
 #[derive(Deserialize)]
 struct Token {
     token: String,
+    /// Missing on servers from before channel bitrates.
+    audio_kbps: Option<u32>,
 }
+
+/// The bitrate for channels and servers that set none.
+pub const DEFAULT_AUDIO_KBPS: u32 = 64;
 
 fn scope(id: &[u8; 32]) -> Scope {
     Scope {
@@ -198,6 +203,7 @@ impl KeyClient<'_> {
             events,
             server: server.clone(),
             channel: *channel,
+            audio_kbps: reply.audio_kbps.unwrap_or(DEFAULT_AUDIO_KBPS),
             epoch,
             provider,
             name_keys,
@@ -263,6 +269,8 @@ pub struct VoiceRoom {
     events: mpsc::UnboundedReceiver<RoomEvent>,
     server: KnownServer,
     channel: [u8; 32],
+    /// Opus bitrate for microphone and app audio published from here.
+    audio_kbps: u32,
     epoch: i64,
     provider: KeyProvider,
     name_keys: HashMap<i64, Key>,
@@ -517,12 +525,45 @@ impl VoiceRoom {
                 LocalTrack::Audio(track),
                 TrackPublishOptions {
                     source: kind,
+                    audio_encoding: Some(AudioEncoding {
+                        max_bitrate: u64::from(self.audio_kbps) * 1000,
+                    }),
                     ..Default::default()
                 },
             )
             .await?;
         self.switch_senders();
         Ok(publication)
+    }
+
+    /// Use a new Opus bitrate. Tracks already published are republished to apply it, so
+    /// their IDs change: the result pairs each old ID with its new one.
+    pub async fn set_audio_kbps(&mut self, kbps: u32) -> Result<Vec<(TrackSid, TrackSid)>> {
+        if kbps == self.audio_kbps {
+            return Ok(Vec::new());
+        }
+        self.audio_kbps = kbps;
+        let local = self.room.local_participant();
+        let mut replaced = Vec::new();
+        for publication in local.track_publications().into_values() {
+            let Some(LocalTrack::Audio(track)) = publication.track() else {
+                continue;
+            };
+            let RtcAudioSource::Native(source) = track.rtc_source() else {
+                continue;
+            };
+            let muted = track.is_muted();
+            let old = publication.sid();
+            local.unpublish_track(&old).await?;
+            let new = self
+                .publish_audio_track(&publication.name(), source, publication.source())
+                .await?;
+            if muted && let Some(LocalTrack::Audio(track)) = new.track() {
+                track.mute();
+            }
+            replaced.push((old, new.sid()));
+        }
+        Ok(replaced)
     }
 
     /// Stop an audio publication, such as one shared app, while keeping the voice session open.

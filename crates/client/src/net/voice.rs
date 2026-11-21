@@ -335,6 +335,25 @@ pub(super) async fn join_voice(
     Ok(room)
 }
 
+/// Apply the channel's audio bitrate to the call, republishing our audio tracks if it changed.
+pub(super) async fn set_audio_kbps(state: &mut State, kbps: u32) {
+    let Some(live) = &mut state.voice else {
+        return;
+    };
+    match live.room.set_audio_kbps(kbps).await {
+        Ok(replaced) => {
+            for (old, new) in replaced {
+                if let Some(share) = live.shares.iter_mut().find(|share| share.sid == old) {
+                    share.sid = new;
+                }
+            }
+        }
+        Err(error) => {
+            tracing::warn!(error = %format_args!("{error:#}"), "applying audio bitrate failed")
+        }
+    }
+}
+
 pub(super) async fn sync_voice_status(ctx: &Ctx, state: &mut State) {
     let Some(live) = &mut state.voice else {
         return;

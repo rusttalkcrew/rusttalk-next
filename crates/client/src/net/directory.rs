@@ -16,6 +16,8 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use url::Url;
 
+use rusttalk_core::client::voice::DEFAULT_AUDIO_KBPS;
+
 use super::{Ctx, State, Update, leave_voice, now};
 use crate::server::{
     Body, Category, Channel, CustomEmoji, Device, Directory, Dm, Id, Member, Msg, Perms, Picture,
@@ -76,6 +78,7 @@ pub(super) async fn rename_channel(
     id: &Id,
     name: &str,
     topic: Option<&str>,
+    audio_kbps: Option<u32>,
 ) -> Result<()> {
     // The update also replaces category and position. Read them just before saving.
     let catalog = client.catalog().await?;
@@ -94,9 +97,12 @@ pub(super) async fn rename_channel(
         None
     };
     let topic = topic.map(str::as_bytes).or(current_topic.as_deref());
-    let body = channel_update(channel, name, topic, |kind, text| {
+    let mut body = channel_update(channel, name, topic, |kind, text| {
         client.encrypt_metadata(kind, id, text)
     })?;
+    if let Some(kbps) = audio_kbps {
+        body["audio_kbps"] = kbps.into();
+    }
     client
         .request(Method::PUT, &format!("/v1/channels/{}", encode(id)))
         .json(&body)
@@ -169,6 +175,10 @@ pub(super) async fn directory(
     state: &mut State,
 ) -> Result<()> {
     let catalog = client.catalog().await?;
+    let joined_kbps = state.voice.as_ref().and_then(|live| {
+        let channel = catalog.channels.iter().find(|c| c.id == live.channel)?;
+        channel.audio_kbps
+    });
     let members = get(client, "/v1/members").await?;
     let me = get(client, "/v1/me").await?;
     let roles = get(client, "/v1/roles").await?;
@@ -236,6 +246,10 @@ pub(super) async fn directory(
             };
             ctx.send(Update::Notice(url.clone(), person, msg));
         }
+    }
+    // Everyone in the call follows the channel's bitrate, also after a manager changes it.
+    if let Some(kbps) = joined_kbps {
+        super::voice::set_audio_kbps(state, kbps).await;
     }
     let joined = state.voice.as_ref().map(|live| live.channel);
     let deleted = joined.filter(|joined| {
@@ -398,6 +412,7 @@ async fn build(
             )
             .unwrap_or_default(),
             voice: channel.kind == "voice",
+            audio_kbps: channel.audio_kbps.unwrap_or(DEFAULT_AUDIO_KBPS),
             flags: (channel.flags.iter())
                 .map(|entry| (entry.role_id.clone(), entry.flags))
                 .collect(),
@@ -696,6 +711,7 @@ mod tests {
             name_ct: None,
             topic_ct: None,
             peer: None,
+            audio_kbps: None,
             flags: Vec::new(),
         };
         let encrypt =

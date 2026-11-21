@@ -103,6 +103,8 @@ pub enum Command {
         id: Id,
         name: String,
         topic: Option<String>,
+        /// Voice channels only.
+        audio_kbps: Option<u32>,
     },
     RenameCategory(Id, String),
     DeleteChannel(Id),
@@ -1248,8 +1250,13 @@ async fn on_command(
             client.create_category(name.as_bytes()).await?;
             directory(ctx, url, client, state).await?;
         }
-        Command::RenameChannel { id, name, topic } => {
-            directory::rename_channel(client, &id, &name, topic.as_deref()).await?;
+        Command::RenameChannel {
+            id,
+            name,
+            topic,
+            audio_kbps,
+        } => {
+            directory::rename_channel(client, &id, &name, topic.as_deref(), audio_kbps).await?;
             directory(ctx, url, client, state).await?;
         }
         Command::RenameCategory(id, name) => {

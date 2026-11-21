@@ -31,7 +31,13 @@ pub struct ChannelFields {
     position: i64,
     name_ct: String,
     topic_ct: Option<String>,
+    /// Voice channels only; left as it is when missing, so older clients keep working.
+    #[serde(default)]
+    audio_kbps: Option<i64>,
 }
+
+/// Voice bitrate limits in kbps, enforced here and again by the table.
+const AUDIO_KBPS: std::ops::RangeInclusive<i64> = 8..=128;
 
 #[derive(Deserialize)]
 pub struct NewChannel {
@@ -52,6 +58,7 @@ struct ChannelRow {
     name_ct: Option<Vec<u8>>,
     topic_ct: Option<Vec<u8>>,
     peer: Option<Vec<u8>>,
+    audio_kbps: i64,
 }
 
 #[derive(Serialize)]
@@ -64,6 +71,8 @@ pub struct Channel {
     topic_ct: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     peer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    audio_kbps: Option<i64>,
     flags: Vec<RoleFlags>,
 }
 
@@ -140,7 +149,8 @@ pub async fn has_flag(
 async fn channels(db: &mut SqliteConnection, person: Option<&[u8]>) -> ApiResult<Vec<Channel>> {
     let rows: Vec<ChannelRow> = query_as(
         "SELECT id, kind, category_id, position, name_ct, topic_ct,
-                CASE WHEN dm_first = ? THEN dm_second ELSE dm_first END AS peer
+                CASE WHEN dm_first = ? THEN dm_second ELSE dm_first END AS peer,
+                audio_kbps
          FROM channels c
          WHERE (? IS NULL AND kind <> 'dm') OR EXISTS
              (SELECT 1 FROM channel_readers r WHERE r.channel_id = c.id AND r.person_id = ?)
@@ -159,6 +169,7 @@ async fn channels(db: &mut SqliteConnection, person: Option<&[u8]>) -> ApiResult
         .bind(&row.id)
         .fetch_all(&mut *db)
         .await?;
+        let audio_kbps = (row.kind == "voice").then_some(row.audio_kbps);
         channels.push(Channel {
             id: row.id,
             kind: row.kind,
@@ -167,6 +178,7 @@ async fn channels(db: &mut SqliteConnection, person: Option<&[u8]>) -> ApiResult
             name_ct: metadata::encoded(row.name_ct),
             peer: metadata::encoded(row.peer),
             topic_ct: metadata::encoded(row.topic_ct),
+            audio_kbps,
             flags,
         });
     }
@@ -326,6 +338,20 @@ pub async fn update_channel(
     let fields = payload(body)?;
     let (mut tx, actor) = authenticate(&app, &headers).await?;
     manage(&mut tx, &actor).await?;
+    if let Some(kbps) = fields.audio_kbps {
+        if !AUDIO_KBPS.contains(&kbps) {
+            return Err(ApiError::bad_request("invalid_audio_kbps"));
+        }
+        let voice = query("UPDATE channels SET audio_kbps = ? WHERE id = ? AND kind = 'voice'")
+            .bind(kbps)
+            .bind(&id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        if voice == 0 {
+            return Err(ApiError::bad_request("not_a_voice_channel"));
+        }
+    }
     category_exists(&mut tx, &fields.category_id).await?;
     let epoch = keys::space_epoch(&mut tx, &app).await?;
     let changed = query(
@@ -780,6 +806,112 @@ mod tests {
             events.try_recv(),
             Ok(Change::Update(Update::Event(Event::ChannelChanged)))
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn audio_bitrate_is_a_managers_voice_only_setting_in_range() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let db = store::open(dir.path()).await?;
+        let app = App {
+            emoji: crate::emoji::Emoji::open(dir.path(), &db).await?.into(),
+            files: crate::files::Files::open(dir.path(), &db).await?.into(),
+            db,
+            key: std::sync::Arc::new(ed25519_dalek::SigningKey::from_bytes(&[7; 32])),
+            changes: tokio::sync::broadcast::channel(128).0,
+            presence: Default::default(),
+            voice: None,
+            session_ttl: 3600,
+            listing_changed: tokio::sync::watch::channel(()).0,
+        };
+        // Person 1 owns the server; person 2 is a member without any role.
+        let person = |byte: u8| vec![byte; 32];
+        query("INSERT INTO members (person_id, joined_at) VALUES (?, 0), (?, 0)")
+            .bind(person(1))
+            .bind(person(2))
+            .execute(&app.db)
+            .await?;
+        query("UPDATE server_settings SET owner_person_id = ?")
+            .bind(person(1))
+            .execute(&app.db)
+            .await?;
+        for byte in [1_u8, 2] {
+            query("INSERT INTO sessions (token_hash, person_id, device_id, ip, expires_at, session_id) VALUES (?, ?, ?, '192.0.2.1', ?, ?)")
+                .bind(store::hash(&[byte; 32]).as_slice()).bind(person(byte)).bind(vec![byte])
+                .bind(i64::MAX).bind(vec![byte]).execute(&app.db).await?;
+        }
+        query("INSERT INTO categories (id, position, name_ct) VALUES (?, 0, x'00')")
+            .bind(id(10))
+            .execute(&app.db)
+            .await?;
+        for (channel, kind) in [(20_u8, "text"), (21, "voice")] {
+            query("INSERT INTO channels (id, kind, category_id, position, name_ct) VALUES (?, ?, ?, 0, x'00')")
+                .bind(id(channel)).bind(kind).bind(id(10)).execute(&app.db).await?;
+        }
+        let as_person = |person: u8| {
+            let mut headers = HeaderMap::new();
+            let token = format!("Bearer {}", encode(&[person; 32]));
+            headers.insert("authorization", token.parse().unwrap());
+            headers.insert("x-forwarded-for", "192.0.2.1".parse().unwrap());
+            headers
+        };
+        let kbps = |value: Option<i64>| {
+            // The name is replaced only when it validates as sealed metadata, so reuse the stored one.
+            Ok(Json(ChannelFields {
+                category_id: id(10),
+                position: 0,
+                name_ct: String::new(),
+                topic_ct: None,
+                audio_kbps: value,
+            }))
+        };
+        let stored = || async {
+            anyhow::Ok(
+                query_scalar::<_, i64>("SELECT audio_kbps FROM channels WHERE id = ?")
+                    .bind(id(21))
+                    .fetch_one(&app.db)
+                    .await?,
+            )
+        };
+        assert_eq!(stored().await?, 64, "new channels start at 64 kbps");
+
+        // A member without Manage channels cannot change it.
+        let denied = update_channel(
+            State(app.clone()),
+            as_person(2),
+            Path(id(21)),
+            kbps(Some(96)),
+        )
+        .await;
+        assert_eq!(denied.unwrap_err().code, "permission_denied");
+        assert_eq!(stored().await?, 64);
+
+        // Out-of-range values and text channels are refused before anything changes.
+        for (channel, value, code) in [
+            (21_u8, 7, "invalid_audio_kbps"),
+            (21, 129, "invalid_audio_kbps"),
+            (20, 96, "not_a_voice_channel"),
+        ] {
+            let result = update_channel(
+                State(app.clone()),
+                as_person(1),
+                Path(id(channel)),
+                kbps(Some(value)),
+            )
+            .await;
+            assert_eq!(result.unwrap_err().code, code);
+        }
+        assert_eq!(stored().await?, 64);
+
+        // Readers see it in the listing, for voice channels only.
+        let mut tx = app.db.begin().await?;
+        let listed = channels(&mut tx, Some(person(1).as_slice())).await?;
+        let shown: Vec<_> = listed
+            .iter()
+            .map(|c| (c.kind.as_str(), c.audio_kbps))
+            .collect();
+        assert_eq!(shown, [("text", None), ("voice", Some(64))]);
+        drop(tx);
         Ok(())
     }
 }

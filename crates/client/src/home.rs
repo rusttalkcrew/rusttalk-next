@@ -165,6 +165,9 @@ enum Join {
     Joining(url::Url),
 }
 
+/// Voice channel bitrates a manager can pick, in kbps.
+const AUDIO_KBPS: std::ops::RangeInclusive<u32> = 8..=128;
+
 enum Dialog {
     ServerName(usize, String),
     MyName(usize, String),
@@ -182,6 +185,8 @@ enum Dialog {
         name: String,
         topic: String,
         topic_changed: bool,
+        /// Voice channels only: the bitrate in kbps, and whether it was moved.
+        audio: Option<(u32, bool)>,
     },
     RenameCategory(usize, Id, String),
     DeleteItem(usize, reorder::Item, String),
@@ -700,6 +705,7 @@ impl Home {
                     name: channel.name.clone(),
                     topic: channel.topic.clone(),
                     topic_changed: false,
+                    audio: channel.voice.then_some((channel.audio_kbps, false)),
                 },
                 ChannelEdit::Delete => {
                     Dialog::DeleteItem(index, reorder::Item::Channel(id), channel.name.clone())
@@ -4090,6 +4096,7 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
             name,
             topic,
             topic_changed,
+            audio,
         } => {
             let label = ui.label(t!("home.channel_name")).id;
             let name_field = name_field(ui, name).labelled_by(label);
@@ -4102,6 +4109,23 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
                 )
                 .labelled_by(label);
             *topic_changed |= field.changed();
+            if let Some((kbps, changed)) = audio {
+                ui.label(t!("home.audio_quality", kbps = *kbps));
+                ui.spacing_mut().slider_width = ui.available_width();
+                let slider = ui.add(
+                    egui::Slider::new(kbps, AUDIO_KBPS)
+                        .show_value(false)
+                        .integer(),
+                );
+                slider.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::Role::Slider,
+                        true,
+                        t!("home.audio_quality_label"),
+                    )
+                });
+                *changed |= slider.changed();
+            }
             let submitted = submitted(ui, &name_field) || submitted(ui, &field);
             if text_footer(ui, t!("common.save"), submitted, &mut close) && !name.trim().is_empty()
             {
@@ -4111,6 +4135,7 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
                         id: *id,
                         name: name.trim().to_owned(),
                         topic: topic_changed.then(|| topic.trim().to_owned()),
+                        audio_kbps: audio.and_then(|(kbps, changed)| changed.then_some(kbps)),
                     },
                 ));
             }

@@ -204,7 +204,7 @@ errors may have an empty body. The API logs a request ID, status and reason.
 
 | Status | Codes |
 | --- | --- |
-| 400 | `invalid_json`, `invalid_encoding`, `invalid_query`, `invalid_forwarded_ip`, `invalid_revocation`, `invalid_invite_limits`, `invalid_role_rank`, `invalid_role_count`, `role_id_required`, `already_owner`, `unexpected_invite`, `invite_name_required`, `invalid_member_cap`, `invalid_certificate`, `invalid_metadata`, `invalid_envelope`, `invalid_channel_flags`, `invalid_order`, `invalid_dm_peer`, `not_a_voice_channel`, `invalid_message`, `invalid_file_body`, `invalid_file_acceptance`, `invalid_event_query`, `invalid_sync_blob`, `invalid_listing`, `invalid_listing_settings`, `invalid_index_url`, `invalid_index_tls_fingerprint` |
+| 400 | `invalid_json`, `invalid_encoding`, `invalid_query`, `invalid_forwarded_ip`, `invalid_revocation`, `invalid_invite_limits`, `invalid_role_rank`, `invalid_role_count`, `role_id_required`, `already_owner`, `unexpected_invite`, `invite_name_required`, `invalid_member_cap`, `invalid_certificate`, `invalid_metadata`, `invalid_envelope`, `invalid_channel_flags`, `invalid_audio_kbps`, `invalid_order`, `invalid_dm_peer`, `not_a_voice_channel`, `invalid_message`, `invalid_file_body`, `invalid_file_acceptance`, `invalid_event_query`, `invalid_sync_blob`, `invalid_listing`, `invalid_listing_settings`, `invalid_index_url`, `invalid_index_tls_fingerprint` |
 | 401 | `invalid_challenge`, `invalid_certificate`, `invalid_device_signature`, `invalid_session`, `token_expired`, `invalid_livekit_webhook` |
 | 403 | `invite_required`, `invalid_invite`, `person_banned`, `ip_banned`, `device_revoked`, `device_certificate_required`, `permission_denied`, `role_hierarchy`, `cannot_grant_permission`, `built_in_role`, `owner_required`, `open_joining_disabled`, `scope_read_denied`, `recipient_read_denied`, `channel_read_denied`, `channel_write_denied`, `live_file_peer_not_in_room` |
 | 404 | `invite_not_found`, `member_not_found`, `ban_not_found`, `role_not_found`, `category_not_found`, `channel_not_found`, `message_not_found`, `message_device_not_found`, `file_not_found`, `avatar_not_found`, `icon_not_found`, `emoji_not_found` |
@@ -319,7 +319,7 @@ any category; the body may be up to 64 KiB. A repeated ID returns
 | GET `/v1/catalog` | Empty | Any member. 200, `{channels, categories}` filtered to channels they can read and their categories |
 | GET `/v1/channels` | Empty | `manage_channels`. 200, channel list |
 | POST `/v1/channels` | `{id, kind, category_id, position, name_ct, topic_ct?, commitment, envelope}` | `manage_channels`. 201. Envelope initializes epoch 1 for the caller |
-| PUT `/v1/channels/{id}` | `{category_id, position, name_ct, topic_ct?}` | `manage_channels`. 204 |
+| PUT `/v1/channels/{id}` | `{category_id, position, name_ct, topic_ct?, audio_kbps?}` | `manage_channels`. 204. `audio_kbps` (voice channels only, 8 to 128, default 64) is the Opus bitrate everyone publishing in the call uses; when absent it stays as it was. The catalog and channel list return it as `audio_kbps` for voice channels, and `POST /v1/voice/{channel}/token` returns it too. A change sends `channel_changed`, and clients in the call republish their audio at the new bitrate |
 | DELETE `/v1/channels/{id}` | Empty | `manage_channels`. 204 |
 | PUT `/v1/channels/{id}/permissions/{role}` | `{flags}` | `manage_channels` and a lower-ranked target role. The Owner can also change the Owner role. 204 |
 | GET `/v1/categories` | Empty | `manage_channels`. 200, category list |
@@ -578,7 +578,7 @@ to voice channels only.
 
 | Method and path | Body | Success |
 | --- | --- | --- |
-| POST `/v1/voice/{channel}/token` | Empty | 200, `{token}`. LiveKit JWT valid for ten minutes for this room |
+| POST `/v1/voice/{channel}/token` | Empty | 200, `{token, audio_kbps}`. LiveKit JWT valid for ten minutes for this room, and the channel's Opus bitrate in kbps |
 | GET `/v1/voice/{channel}/participants` | Empty | 200, `{people, unknown}`: sorted unique person IDs and a count of unmatched devices |
 
 The room name is the encoded channel ID. The token's identity is
