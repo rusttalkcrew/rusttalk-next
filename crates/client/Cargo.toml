@@ -11,17 +11,23 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # The PulseAudio protocol (also served by PipeWire) gives real device names on Linux;
 # ALSA stays the fallback. Not cpal's PipeWire host: WebRTC's own PipeWire stubs shadow it.
 cpal = { version = "0.18", features = ["pulseaudio"] }
+# DeepFilterNet3 noise removal (tract, pure Rust); its weights are downloaded on request.
+deep-filter-rt = "0.2"
 ed25519-dalek = { version = "2.2", default-features = false, features = ["fast"] }
 eframe = "0.37"
 # Bundled emoji glyphs, so icons and chat emoji render without system fonts.
 egui = { version = "0.37", default-features = false, features = ["monochrome_emoji_fonts"] }
 etcetera = "0.11"
+# Unpacks the downloaded DeepFilterNet model archive.
+flate2 = "1"
 futures-util = "0.3"
 hex = "0.4"
 # Crops and re-encodes picked profile pictures and server icons.
 image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png"] }
 keyring = { version = "4.2", default-features = false, features = ["v1"] }
 livekit = "=0.11.0"
+# The frames DeepFilterNet takes.
+ndarray = "0.17"
 # Opens saved files and their folders in the system's apps.
 open = "5"
 rfd = { version = "0.18", default-features = false, features = ["xdg-portal"] }
@@ -31,6 +37,7 @@ semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+tar = { version = "0.4", default-features = false }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tracing = "0.1"
