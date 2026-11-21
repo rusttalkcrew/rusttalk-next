@@ -259,6 +259,55 @@ as the API and works on Windows with the console disabled.
 
 IP bans match one IPv4 address or one IPv6 /64, so a person cannot rotate within their own IPv6 prefix to rejoin through open joining. Bans created before W15 still match their exact address. The api only sees real client addresses when Docker forwards the original source IP to Caddy (the default bridge networking with iptables does; rootless Docker or a userland proxy shows every client as the gateway IP, and an IP ban would then hit everyone). Abuse limits: 32 open sign-in challenges per IP (256 in total), 16 sessions and 64 stored revocations per person.
 
+## Automatic updates
+
+Off by default. Without it you update by hand (see [Production](#production)).
+The optional `updater` service (a pinned [Watchtower](https://github.com/nicholas-fedor/watchtower)
+fork) checks the registry on a schedule and recreates the `api` and `index`
+containers when their image tag has a new image. It touches only containers
+labelled for it, never LiveKit, Caddy or your own services.
+
+Turn on:
+
+1. Back up first ([Production](#production)).
+2. In `deploy/.env` set `RUSTTALK_VERSION=<major>.<minor>` (for example `0.1`)
+   and keep `RUSTTALK_IMAGE_PREFIX=ghcr.io/rusttalkcrew/`. Pulling needs the
+   published images, not a local build.
+3. `docker compose --profile auto-update up -d --wait` (add
+   `-f docker-compose.yml -f compose.proxy.yml` behind your own proxy).
+4. Optional: `RUSTTALK_UPDATE_SCHEDULE` sets the check time, six fields with
+   seconds first, server local time. Default `0 0 4 * * *` (04:00 daily).
+
+Turn off: `docker compose --profile auto-update stop updater` and
+`docker compose --profile auto-update rm -f updater`, then pin an exact
+`RUSTTALK_VERSION` again if you want.
+
+What it does and does not do:
+
+- **Patch releases only.** `<major>.<minor>` moves with patch releases. A new
+  minor (0.2) never installs by itself: change `RUSTTALK_VERSION` yourself,
+  after a backup, because it may migrate the database and cannot be rolled
+  back by switching the version.
+- **Images come from `ghcr.io/rusttalkcrew`**, published by the release
+  workflow. The updater does not verify signatures; trust is the registry and
+  the tag.
+- **No quiet-moment check.** It restarts the API at the scheduled time, which
+  drops everyone in a call and their connection for a few seconds. Pick an
+  hour nobody uses.
+- **No backup and no rollback.** A bad patch stays installed until you set
+  `RUSTTALK_VERSION` to the previous exact version and run `docker compose up -d`.
+  Back up regularly.
+- **Docker socket.** The updater mounts `/var/run/docker.sock`, which gives it
+  root-level control of the host. Leave the profile off if you do not accept that.
+
+Check the running version:
+
+```sh
+curl https://<host>/v1/server-info
+```
+
+The `version` field is the API version. Updates do not show in the app yet.
+
 ## Releases and updates
 
 A release is one command on an up-to-date `main` whose `Cargo.toml` version
