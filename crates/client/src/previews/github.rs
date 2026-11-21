@@ -75,9 +75,8 @@ impl Provider for GitHub {
     }
 
     fn fetch(&self, get: &Get, key: &str, _: Lang, _: Option<&str>) -> Result<Details, Failure> {
-        // The pulls endpoint tells merged apart; the page says `pull`.
-        let path = key.replacen("/pull/", "/pulls/", 1);
-        let url = Url::parse(&format!("https://{API}/repos/{path}")).map_err(|_| Failure::Item)?;
+        let url = Url::parse(&format!("https://{API}/repos/{}", api_path(key)))
+            .map_err(|_| Failure::Item)?;
         let bytes = get.request(
             &url,
             MAX_JSON,
@@ -93,6 +92,15 @@ impl Provider for GitHub {
 
     fn fresh(&self) -> u64 {
         12 * 60 * 60
+    }
+}
+
+/// The API path for a key: the pulls endpoint tells merged apart, and the page says
+/// `pull`. Only the kind part changes, never an owner or repository named `pull`.
+fn api_path(key: &str) -> String {
+    match key.split('/').collect::<Vec<_>>().as_slice() {
+        [owner, repo, "pull", number] => format!("{owner}/{repo}/pulls/{number}"),
+        _ => key.to_owned(),
     }
 }
 
@@ -175,6 +183,20 @@ mod tests {
         ] {
             assert_eq!(key(link), None, "{link}");
         }
+    }
+
+    #[test]
+    fn only_the_kind_part_becomes_pulls() {
+        let key = |s: &str| GitHub.key(&Url::parse(s).unwrap()).unwrap();
+        assert_eq!(api_path(&key("https://github.com/pull/pull")), "pull/pull");
+        assert_eq!(
+            api_path(&key("https://github.com/someone/pull/pull/7")),
+            "someone/pull/pulls/7"
+        );
+        assert_eq!(
+            api_path(&key("https://github.com/someone/pull/issues/7")),
+            "someone/pull/issues/7"
+        );
     }
 
     #[test]

@@ -26,21 +26,27 @@ impl Provider for Wikipedia {
         let host = url.host_str()?.strip_suffix(".wikipedia.org")?;
         let lang = host.strip_suffix(".m").unwrap_or(host);
         let mut path = url.path_segments()?;
-        let (Some("wiki"), Some(title)) = (path.next(), path.next()) else {
+        if path.next() != Some("wiki") {
             return None;
-        };
-        // The title stays as the link encoded it: one path segment, so no `/`, `?` or `#`.
+        }
+        // Titles may hold `/` (`AC/DC`): everything after `/wiki/` is the title, kept as
+        // the link encoded it and joined into one path segment with `%2F`.
+        let mut parts: Vec<&str> = path.collect();
+        while parts.last() == Some(&"") {
+            parts.pop();
+        }
+        let title = parts.join("%2F");
         (token(lang, 12, |b| b.is_ascii_lowercase() || b == b'-')
             && lang != "www"
-            && token(title, 300, |b| b.is_ascii_graphic()))
+            && !parts.contains(&"")
+            && token(&title, 300, |b| b.is_ascii_graphic() && b != b'/'))
         .then(|| format!("{lang}/{title}"))
     }
 
     fn fetch(&self, get: &Get, key: &str, _: Lang, _: Option<&str>) -> Result<Details, Failure> {
         let (lang, title) = key.split_once('/').ok_or(Failure::Item)?;
         let host = format!("{lang}.wikipedia.org");
-        let url = Url::parse(&format!("https://{host}/api/rest_v1/page/summary/{title}"))
-            .map_err(|_| Failure::Item)?;
+        let url = summary(lang, title).ok_or(Failure::Item)?;
         let bytes = get.request(&url, MAX_JSON, |h| h == host, None)?;
         parse(&bytes, key).ok_or(Failure::Item)
     }
@@ -52,6 +58,14 @@ impl Provider for Wikipedia {
     fn fresh(&self) -> u64 {
         12 * 60 * 60
     }
+}
+
+/// The summary API address; `title` is one encoded path segment.
+fn summary(lang: &str, title: &str) -> Option<Url> {
+    Url::parse(&format!(
+        "https://{lang}.wikipedia.org/api/rest_v1/page/summary/{title}"
+    ))
+    .ok()
 }
 
 pub fn parse(bytes: &[u8], key: &str) -> Option<Details> {
@@ -82,6 +96,25 @@ mod tests {
         assert_eq!(
             key("https://en.m.wikipedia.org/wiki/Caf%C3%A9#History").as_deref(),
             Some("en/Caf%C3%A9")
+        );
+        assert_eq!(
+            key("https://en.wikipedia.org/wiki/AC/DC").as_deref(),
+            Some("en/AC%2FDC")
+        );
+        let ac_dc = parse(br#"{"title":"AC/DC"}"#, "en/AC%2FDC").unwrap();
+        assert_eq!(ac_dc.url, "https://en.wikipedia.org/wiki/AC%2FDC");
+        assert_eq!(
+            summary("en", "AC%2FDC").unwrap().as_str(),
+            "https://en.wikipedia.org/api/rest_v1/page/summary/AC%2FDC"
+        );
+        assert_eq!(
+            summary("en", "AC%2FDC")
+                .unwrap()
+                .path_segments()
+                .unwrap()
+                .count(),
+            5,
+            "one segment for the title"
         );
         for link in [
             "https://www.wikipedia.org/wiki/Rust",
