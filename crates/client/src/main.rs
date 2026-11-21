@@ -9,6 +9,7 @@ mod camera;
 mod crop;
 mod denoise;
 mod device_sync;
+mod dm;
 mod emoji;
 mod files;
 mod home;

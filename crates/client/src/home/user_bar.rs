@@ -73,7 +73,8 @@ pub(super) fn show(ui: &mut Ui, home: &mut Home, update_available: bool) {
 fn identity(ui: &mut Ui, home: &Home, status: Choice) -> eframe::egui::Response {
     let me = home.identity.certificate.person_id();
     let open = match home.view {
-        View::Server(index) | View::Direct(Some((index, _))) => home.servers.get(index),
+        View::Server(index) => home.servers.get(index),
+        View::Direct(Some(peer)) => home.dm_server(&peer).and_then(|i| home.servers.get(i)),
         _ => None,
     };
     // The name is per server; without an open one, use any server's.

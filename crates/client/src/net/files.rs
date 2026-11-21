@@ -26,7 +26,7 @@ pub(super) async fn send(
     ctx: &Ctx,
     url: &Url,
     client: &mut KeyClient<'_>,
-    channel: Id,
+    (channel, id): (Id, Id),
     mut body: MessageBody,
     files: Vec<PathBuf>,
 ) -> Result<bool> {
@@ -55,7 +55,7 @@ pub(super) async fn send(
             return Ok(false);
         }
     }
-    let record = match client.send_message(&channel, &body).await {
+    let record = match client.post_message(&channel, id, &body).await {
         Ok(record) => record,
         Err(error) => {
             discard(client, &body.attachments).await;

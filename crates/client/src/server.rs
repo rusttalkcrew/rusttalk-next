@@ -341,6 +341,9 @@ pub struct Msg {
     pub live: Option<(Id, String, u64)>,
     /// A server sticker by ID; the text is its name.
     pub sticker: Option<Id>,
+    /// In a DM: the servers holding a copy, the shown copy's server first.
+    /// Empty in channels.
+    pub replicas: Vec<Url>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -402,12 +405,33 @@ impl Chat {
     pub fn merge(&mut self, items: Vec<Msg>, older: bool) {
         let (edits, plain): (Vec<_>, Vec<_>) =
             items.into_iter().partition(|msg| msg.edit_of.is_some());
-        let mut fresh = Vec::new();
+        let mut fresh: Vec<Msg> = Vec::new();
         for msg in plain {
-            match self.messages.iter_mut().find(|old| old.id == msg.id) {
-                // A retry after a missing key replaces the placeholder.
-                Some(old) if old.body == Body::Unreadable => *old = msg,
-                Some(_) => {}
+            // The person is part of the key: in a DM another server could hold their
+            // record under an ID of yours.
+            let same = |old: &&mut Msg| old.id == msg.id && old.person == msg.person;
+            match (self.messages.iter_mut().chain(&mut fresh)).find(same) {
+                Some(old) => {
+                    // DM copies on several servers: keep the earliest server time.
+                    let at = old.at.min(msg.at);
+                    let mut replicas = std::mem::take(&mut old.replicas);
+                    // A retry after a missing key, or a readable copy, replaces the placeholder.
+                    if old.body == Body::Unreadable && msg.body != Body::Unreadable {
+                        replicas.retain(|server| !msg.replicas.contains(server));
+                        *old = Msg {
+                            replicas: [msg.replicas, replicas].concat(),
+                            ..msg
+                        };
+                    } else {
+                        for server in msg.replicas {
+                            if !replicas.contains(&server) {
+                                replicas.push(server);
+                            }
+                        }
+                        old.replicas = replicas;
+                    }
+                    old.at = at;
+                }
                 None => fresh.push(msg),
             }
         }
@@ -433,7 +457,9 @@ impl Chat {
             }
         }
         self.pending_edits.retain(|original, edit| {
-            let Some(target) = self.messages.iter_mut().find(|msg| msg.id == *original) else {
+            let Some(target) = (self.messages.iter_mut())
+                .find(|msg| msg.id == *original && msg.person == edit.person)
+            else {
                 return true;
             };
             // Wait for an unreadable original to be retried, then apply.
@@ -474,6 +500,7 @@ mod tests {
             files: Vec::new(),
             live: None,
             sticker: None,
+            replicas: Vec::new(),
         }
     }
 

@@ -142,8 +142,14 @@ pub enum Command {
 }
 
 /// A message to send, and what goes back to the composer when sending fails.
+#[derive(Clone)]
 pub struct Draft {
+    /// Random; a DM sends the same ID to every shared server.
+    pub id: Id,
+    /// Unused for a DM, which this server's DM channel with `peer` gets.
     pub channel: Id,
+    /// The other person, for a DM.
+    pub peer: Option<Id>,
     pub text: String,
     pub reply_to: Option<Id>,
     pub edit_of: Option<Id>,
@@ -1036,6 +1042,17 @@ async fn on_command(
             page(ctx, url, client, state, channel, Some(before)).await;
         }
         Command::Send(draft) => {
+            let channel = match draft.peer {
+                Some(peer) => dm_channel(ctx, url, client, state, peer).await,
+                None => Ok(draft.channel),
+            };
+            let channel = match channel {
+                Ok(channel) => channel,
+                Err(error) => {
+                    ctx.send(Update::Unsent(url.clone(), draft));
+                    return Err(error);
+                }
+            };
             let body = MessageBody {
                 text: draft.text.clone(),
                 reply_to: draft.reply_to,
@@ -1044,8 +1061,8 @@ async fn on_command(
                 live: None,
                 sticker: draft.sticker,
             };
-            let sent =
-                files::send(ctx, url, client, draft.channel, body, draft.files.clone()).await;
+            let files = draft.files.clone();
+            let sent = files::send(ctx, url, client, (channel, draft.id), body, files).await;
             if !matches!(sent, Ok(true)) {
                 ctx.send(Update::Unsent(url.clone(), draft));
             }
@@ -1170,20 +1187,7 @@ async fn on_command(
             ctx.send(Update::Left(url.clone()));
         }
         Command::OpenDm(peer) => {
-            let existing = state
-                .last
-                .iter()
-                .flat_map(|dir| &dir.dms)
-                .find(|dm| dm.peer == peer)
-                .map(|dm| dm.channel);
-            let channel = match existing {
-                Some(channel) => channel,
-                None => {
-                    let scope = client.create_dm(&peer).await?;
-                    directory(ctx, url, client, state).await?;
-                    scope.id
-                }
-            };
+            let channel = dm_channel(ctx, url, client, state, peer).await?;
             ctx.send(Update::DmReady(url.clone(), channel));
         }
         Command::Invite(uses, seconds) => {
@@ -1217,6 +1221,25 @@ async fn on_command(
         | Command::ControlInput(_) => unreachable!("handled by voice_command"),
     }
     Ok(())
+}
+
+/// This server's DM channel with a person, made when there is none yet.
+async fn dm_channel(
+    ctx: &Ctx,
+    url: &Url,
+    client: &mut KeyClient<'_>,
+    state: &mut State,
+    peer: Id,
+) -> Result<Id> {
+    let existing = (state.last.iter())
+        .flat_map(|dir| &dir.dms)
+        .find(|dm| dm.peer == peer);
+    if let Some(dm) = existing {
+        return Ok(dm.channel);
+    }
+    let scope = client.create_dm(&peer).await?;
+    directory(ctx, url, client, state).await?;
+    Ok(scope.id)
 }
 
 /// Load one page, newest first on the wire, and send it oldest first.
@@ -1280,6 +1303,7 @@ fn unreadable(record: &MessageRecord) -> Msg {
         files: Vec::new(),
         live: None,
         sticker: None,
+        replicas: Vec::new(),
     }
 }
 
@@ -1294,6 +1318,7 @@ fn to_msg(record: &MessageRecord, body: &MessageBody) -> Msg {
         files: body.attachments.clone(),
         live: (body.live.as_ref()).map(|file| (file.id, file.name.clone(), file.size)),
         sticker: body.sticker,
+        replicas: Vec::new(),
     }
 }
 

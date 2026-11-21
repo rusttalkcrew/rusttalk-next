@@ -490,6 +490,7 @@ mod tests {
             files: vec![],
             live: None,
             sticker: None,
+            replicas: Vec::new(),
         }
     }
 

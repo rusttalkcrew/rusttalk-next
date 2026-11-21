@@ -196,7 +196,8 @@ pub(super) async fn directory(
                 member_name(before, &person)
             };
             state.notices += 1;
-            let mut id = [0xff; 32];
+            // The server ID keeps notices from different servers apart in a DM.
+            let mut id = state.server_id;
             id[..8].copy_from_slice(&state.notices.to_be_bytes());
             let msg = Msg {
                 id,
@@ -212,6 +213,7 @@ pub(super) async fn directory(
                 files: Vec::new(),
                 live: None,
                 sticker: None,
+                replicas: Vec::new(),
             };
             ctx.send(Update::Notice(url.clone(), person, msg));
         }
