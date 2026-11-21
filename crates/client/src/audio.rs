@@ -269,7 +269,7 @@ enum Control {
 }
 
 struct Shared {
-    file: PathBuf,
+    file: Mutex<Option<PathBuf>>,
     settings: Mutex<Settings>,
     /// Bumped when the processing toggles change, so the mic thread rebuilds its module.
     processing: AtomicU64,
@@ -380,7 +380,7 @@ impl Audio {
             auto_gain_control: false,
         };
         let shared = Arc::new(Shared {
-            file,
+            file: Mutex::new(Some(file)),
             settings: Mutex::new(settings),
             processing: AtomicU64::new(0),
             ai_session: AtomicU64::new(0),
@@ -450,6 +450,11 @@ impl Audio {
 
     pub fn settings(&self) -> Settings {
         self.shared().settings()
+    }
+
+    /// Wait for any settings write and prevent the old device thread from saving again.
+    pub fn stop_saving(&self) {
+        lock(&self.shared().file).take();
     }
 
     pub fn set_settings(&self, settings: Settings) {
@@ -925,8 +930,10 @@ fn devices(
 }
 
 fn save(shared: &Shared) {
-    let dir = shared.file.parent().unwrap_or(Path::new("."));
-    if let Err(error) = save_json(dir, &shared.file, &shared.settings()) {
+    let file = lock(&shared.file);
+    let Some(path) = file.as_ref() else { return };
+    let dir = path.parent().unwrap_or(Path::new("."));
+    if let Err(error) = save_json(dir, path, &shared.settings()) {
         tracing::error!(error = %format_args!("{error:#}"), "saving voice settings failed");
     }
 }

@@ -460,6 +460,11 @@ impl Net {
         });
     }
 
+    /// Finish cancellation before sign-out removes files these tasks can write.
+    pub fn stop_for_sign_out(&mut self) {
+        drop(self.runtime.take());
+    }
+
     /// The network runtime, for LiveKit objects created off it (camera sources).
     pub fn handle(&self) -> tokio::runtime::Handle {
         self.runtime
