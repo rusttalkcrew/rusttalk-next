@@ -354,6 +354,8 @@ pub enum Metadata {
     EmojiImage,
     /// A role's colour and whether it is listed separately; see the client's role display.
     RoleDisplay,
+    /// A member's profile bio: a few lines of plain text.
+    Bio,
 }
 
 impl Metadata {

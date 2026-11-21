@@ -124,6 +124,9 @@ pub struct Home {
     pub server_settings: Option<admin::Settings>,
     /// The crop step for a picked profile picture or server icon.
     crop: Option<crate::crop::Crop>,
+    /// My account: the default name being edited, and the bio as typed, unsaved.
+    pub name_draft: Option<String>,
+    pub bio_draft: Option<String>,
     /// The synced voice and video settings as last published or received.
     synced: BTreeMap<String, serde_json::Value>,
     /// Servers left in this session, so a sync that started before can't bring them back.
@@ -326,6 +329,8 @@ impl Home {
             key_storage: Default::default(),
             server_settings: None,
             crop: None,
+            name_draft: None,
+            bio_draft: None,
             synced,
             left: HashSet::new(),
             status: None,
@@ -378,6 +383,7 @@ impl Home {
         let server = self.servers.remove(index);
         let mut settings = self.voice.audio.settings();
         settings.hide_offline.left(&server.address);
+        settings.left(&server.address);
         self.voice.audio.set_settings(settings);
         for thread in self.threads.values_mut() {
             thread.forget(&server.address);
@@ -568,6 +574,69 @@ impl Home {
             self.net.sync(edits);
             self.synced = current;
         }
+    }
+
+    /// Each server's name for me, or `None` while it hasn't loaded, for `migrate`.
+    fn migrate_names(&self, settings: &mut crate::audio::Settings) {
+        let names: Vec<_> = (self.servers.iter())
+            .map(|server| {
+                let loaded = server.dir.me != [0; 32];
+                let name = server
+                    .member(&server.dir.me)
+                    .and_then(|m| m.name.as_deref());
+                (&server.address, loaded.then_some(name))
+            })
+            .collect();
+        settings.migrate(&names);
+    }
+
+    /// Change my name or bio settings, migrating first if that never happened, and
+    /// sync them. `change` returns what to tell which servers now; offline servers
+    /// hear it from what stays pending once they load.
+    pub fn change_profile(
+        &mut self,
+        change: impl FnOnce(&mut crate::audio::Settings, Vec<url::Url>) -> Vec<(url::Url, Command)>,
+    ) {
+        let mut settings = self.voice.audio.settings();
+        if settings.display_name.is_empty() {
+            self.migrate_names(&mut settings);
+        }
+        let servers = self.servers.iter().map(|s| s.address.clone()).collect();
+        for (address, command) in change(&mut settings, servers) {
+            if let Some(index) = self.index(&address)
+                && self.servers[index].status == Status::Online
+            {
+                self.servers[index].send(command);
+            }
+        }
+        self.voice.audio.set_settings(settings);
+        self.publish_settings();
+    }
+
+    /// A server loaded my name and bio there: migrate once every server has loaded,
+    /// and send what it still has to hear.
+    fn profile_loaded(&mut self, index: usize) {
+        let mut settings = self.voice.audio.settings();
+        if settings.display_name.is_empty() && self.servers.iter().all(|s| s.dir.me != [0; 32]) {
+            self.migrate_names(&mut settings);
+        }
+        let server = &self.servers[index];
+        if let Some(mine) = server.member(&server.dir.me) {
+            let (name, bio) = settings.reported(
+                &server.address,
+                mine.name.as_deref(),
+                mine.bio.as_deref(),
+                server.dir.bios,
+            );
+            if let Some(name) = name {
+                server.send(Command::SetDisplayName(name));
+            }
+            if let Some(bio) = bio {
+                server.send(Command::SetBio(bio));
+            }
+        }
+        self.voice.audio.set_settings(settings);
+        self.publish_settings();
     }
 
     /// The chat on screen: server index and channel or DM.
@@ -812,7 +881,7 @@ impl Home {
                 self.join = match result {
                     Ok(preview) => Join::Preview {
                         preview,
-                        name: String::new(),
+                        name: self.voice.audio.settings().display_name,
                     },
                     Err(error) => Join::Idle(Some(error)),
                 }
@@ -839,7 +908,7 @@ impl Home {
                     Ok(preview) => {
                         self.join = Join::Preview {
                             preview,
-                            name: String::new(),
+                            name: self.voice.audio.settings().display_name,
                         };
                         self.view = View::Join;
                     }
@@ -944,6 +1013,8 @@ impl Home {
                     let muted = (dir.members.iter()).any(|m| m.person == me && m.voice_muted);
                     let changed = server.voice_muted(&me) != muted;
                     server.dir = *dir;
+                    self.profile_loaded(index);
+                    let server = &mut self.servers[index];
                     // The microphone itself comes back from LiveKit when the mute is lifted.
                     if changed
                         && muted
@@ -1321,7 +1392,8 @@ impl Home {
                     }
                 }
                 let audio = &self.voice.audio;
-                let adopted = device_sync::adopt(&audio.settings(), &synced.settings);
+                let mut adopted = device_sync::adopt(&audio.settings(), &synced.settings);
+                adopted.adopt_pending();
                 self.synced = device_sync::synced(&adopted);
                 audio.set_settings(adopted);
                 self.notify.adopt(&synced.settings);
@@ -2661,6 +2733,11 @@ fn join(ui: &mut Ui, home: &mut Home) {
                         let mut settings = home.voice.audio.settings();
                         settings.hide_offline.joined(&address);
                         home.voice.audio.set_settings(settings);
+                        let name = name.to_owned();
+                        home.change_profile(|settings, _| {
+                            settings.joined(&address, &name);
+                            Vec::new()
+                        });
                     }
                     home.left.remove(&address);
                     home.join = Join::Joining(address);
@@ -3160,6 +3237,9 @@ fn dm_pane(ui: &mut Ui, home: &mut Home, peer: Id) {
             server.send(Command::Open(channel));
         }
     }
+    if let Some((index, pick)) = dm_title(ui, home, peer) {
+        person::apply(home, index, peer, pick, ui.input(|input| input.time));
+    }
     let mut chat = std::mem::take(&mut home.threads.entry(peer).or_default().chat);
     let act = chat_view(ui, home, At::Dm(peer), &mut chat);
     let thread = home.threads.entry(peer).or_default();
@@ -3233,6 +3313,7 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
                 avatar: None,
                 presence: Presence::Offline,
                 hide_offline: false,
+                bio: None,
                 voice_muted: false,
             })
             .collect(),
@@ -3262,7 +3343,8 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
     let dir = named.map_or(&fallback, |index| &servers[index].dir);
     let online = !read_only && targets.iter().any(|i| servers[*i].status == Status::Online);
     let now = ui.input(|input| input.time);
-    if !in_voice {
+    // A DM has its own title, with their profile (`dm_title`).
+    if !in_voice && !dm {
         pane_title(ui, "chat-title", &title, in_server.then_some(layout), false);
     }
     let act = friends::dm_card(ui, relation, request, &name);
@@ -3697,6 +3779,46 @@ pub fn pane_title(
                 }
             });
         });
+}
+
+/// A DM's title: their picture and name, which open their profile card like
+/// anywhere else, and a profile button doing the same.
+fn dm_title(ui: &mut Ui, home: &Home, peer: Id) -> Option<(usize, person::Pick)> {
+    let name = home.peer_name(&peer);
+    let index = (home.dm_server(&peer)).filter(|i| home.servers[*i].member(&peer).is_some());
+    let mut pick = None;
+    Panel::top("chat-title")
+        .frame(Frame::new().inner_margin(Margin {
+            left: 4,
+            right: 4,
+            top: 2,
+            bottom: 10,
+        }))
+        .show_separator_line(true)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let Some(index) = index else {
+                    ui.label(ui::title(format!("@ {name}")));
+                    return;
+                };
+                let server = &home.servers[index];
+                let target = person::Person::of(home, server, peer);
+                let row = ui.scope_builder(UiBuilder::new().sense(Sense::CLICK), |ui| {
+                    face(ui, &server.dir, &peer, &name, 24.0, true);
+                    ui.label(ui::title(&name));
+                });
+                let row = row.response.on_hover_cursor(egui::CursorIcon::PointingHand);
+                pick = person::interact(ui, &row, &target, false);
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let size = Vec2::splat(ui::ICON_BUTTON);
+                    let button =
+                        ui::icon_button(ui, "👤", t!("person.profile"), ui::Look::Plain, size);
+                    let card = ui::card_popup(ui, &button, &name, false, |ui| target.card(ui));
+                    pick = pick.take().or(card.flatten());
+                });
+            });
+        });
+    pick.map(|pick| (index.unwrap_or_default(), pick))
 }
 
 enum Pick {
@@ -4509,6 +4631,9 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
     let mut poke = None;
     // Message (`None`) or a friend action, from a person's details.
     let mut person_action = None;
+    // A server's own name, or `None` for "Use my default name".
+    let mut name_choice: Option<(usize, Option<String>)> = None;
+    let default_name = home.voice.audio.settings().display_name;
     let ((), dismissed) = ui::dialog(ctx, "dialog", &title, |ui| match dialog {
         Dialog::ServerName(index, name) => {
             ui.label(t!("home.server_name_help"));
@@ -4518,8 +4643,18 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
         }
         Dialog::MyName(index, name) => {
             ui.label(t!("home.my_name_help"));
-            if text_dialog(ui, name, t!("common.save"), &mut close) {
-                command = Some((*index, Command::SetDisplayName(name.trim().to_owned())));
+            let field = name_field(ui, name);
+            let submitted = submitted(ui, &field);
+            if !default_name.is_empty() {
+                ui.add_space(ui::SPACE_S);
+                let label = t!("home.use_default_name", name = default_name);
+                if ui::secondary(ui, &label).clicked() {
+                    name_choice = Some((*index, None));
+                }
+            }
+            if text_footer(ui, t!("common.save"), submitted, &mut close) && !name.trim().is_empty()
+            {
+                name_choice = Some((*index, Some(name.trim().to_owned())));
             }
         }
         Dialog::Category(index, name) => {
@@ -4810,6 +4945,22 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
             });
         }
     });
+    if let Some((index, choice)) = name_choice {
+        let address = home.servers[index].address.clone();
+        let mut name = None;
+        home.change_profile(|settings, _| {
+            name = match choice {
+                Some(name) => {
+                    settings.name_on(&address, &name);
+                    Some(name)
+                }
+                None => settings.use_default_name(&address),
+            };
+            Vec::new()
+        });
+        // Sent even while offline, so the person hears it didn't work.
+        command = name.map(|name| (index, Command::SetDisplayName(name)));
+    }
     if let Some((index, command)) = command {
         home.servers[index].send(command);
         close = true;

@@ -474,6 +474,7 @@ async fn build(
             avatar: picture(&person, row["avatar_hash"].as_str()),
             presence: serde_json::from_value(row["presence"].clone()).unwrap_or_default(),
             hide_offline: row["hide_offline"].as_bool().unwrap_or_default(),
+            bio: text(Metadata::Bio, &person, row["bio_ct"].as_str()),
             voice_muted: row["voice_muted"].as_bool().unwrap_or_default(),
         });
     }
@@ -504,6 +505,7 @@ async fn build(
         icon: picture(&server_id, space["icon_hash"].as_str()),
         status: serde_json::from_value(me["status"].clone()).ok(),
         hide_offline: me["hide_offline"].as_bool(),
+        bios: (members.as_array().into_iter().flatten()).any(|row| row.get("bio_ct").is_some()),
         me: *client.identity.certificate.person_id(),
         perms,
         categories,
@@ -778,6 +780,7 @@ mod tests {
             avatar: None,
             presence: Default::default(),
             hide_offline: false,
+            bio: None,
             voice_muted: false,
         }
     }

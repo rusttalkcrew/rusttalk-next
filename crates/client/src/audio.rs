@@ -159,6 +159,14 @@ pub struct Settings {
     pub mix: crate::call::mixer::Mix,
     /// The warning before sharing a terminal was accepted once. This device only.
     pub terminal_warned: bool,
+    /// The name used on every server without a name of its own, and the profile bio
+    /// (see `profile`). Synced, like the overrides.
+    pub display_name: String,
+    pub bio: String,
+    /// Addresses of the servers where this person picked a name of their own.
+    pub name_overrides: Vec<String>,
+    /// What servers still have to be told about name and bio changes made here.
+    pub profile_pending: crate::profile::Pending,
 }
 
 impl Settings {
@@ -228,6 +236,10 @@ impl Default for Settings {
             hotkeys: Default::default(),
             mix: Default::default(),
             terminal_warned: false,
+            display_name: String::new(),
+            bio: String::new(),
+            name_overrides: Vec::new(),
+            profile_pending: Default::default(),
         }
     }
 }

@@ -208,6 +208,8 @@ pub struct Directory {
     pub status: Option<Choice>,
     /// Whether this person hides from member lists here while offline.
     pub hide_offline: Option<bool>,
+    /// The server stores bios (older servers drop them).
+    pub bios: bool,
     pub me: Id,
     pub perms: Perms,
     pub categories: Vec<Category>,
@@ -340,6 +342,8 @@ pub struct Member {
     pub presence: Presence,
     /// They asked to be left out of member lists while offline.
     pub hide_offline: bool,
+    /// Their profile bio as they typed it, `:shortcodes:` included.
+    pub bio: Option<String>,
     /// A moderator muted them in every voice channel.
     pub voice_muted: bool,
 }
@@ -740,6 +744,7 @@ mod tests {
             avatar: None,
             presence,
             hide_offline,
+            bio: None,
             voice_muted: false,
         };
         assert!(member(false, Presence::Offline).listed());

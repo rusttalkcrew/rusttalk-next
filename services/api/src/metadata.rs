@@ -195,6 +195,8 @@ pub struct Profile {
     display_name_ct: Option<Option<String>>,
     #[serde(default, deserialize_with = "patch_field")]
     avatar_ct: Option<Option<String>>,
+    #[serde(default, deserialize_with = "patch_field")]
+    bio_ct: Option<Option<String>>,
 }
 
 pub async fn update_profile(
@@ -205,6 +207,7 @@ pub async fn update_profile(
     let Profile {
         display_name_ct,
         avatar_ct,
+        bio_ct,
     } = payload(body)?;
     let (mut tx, actor) = authenticate(&app, &headers).await?;
     let epoch = keys::space_epoch(&mut tx, &app).await?;
@@ -213,7 +216,8 @@ pub async fn update_profile(
         "UPDATE members SET
             display_name_ct = CASE WHEN ? THEN ? ELSE display_name_ct END,
             avatar_ct = CASE WHEN ? THEN ? ELSE avatar_ct END,
-            avatar_hash = CASE WHEN ? THEN ? ELSE avatar_hash END
+            avatar_hash = CASE WHEN ? THEN ? ELSE avatar_hash END,
+            bio_ct = CASE WHEN ? THEN ? ELSE bio_ct END
          WHERE person_id = ?",
     )
     .bind(display_name_ct.is_some())
@@ -226,6 +230,8 @@ pub async fn update_profile(
     .bind(avatar.as_deref())
     .bind(avatar_ct.is_some())
     .bind(avatar.as_deref().map(picture_hash))
+    .bind(bio_ct.is_some())
+    .bind(optional(Metadata::Bio, epoch, bio_ct.flatten())?)
     .bind(actor.person.as_slice())
     .execute(&mut *tx)
     .await?;
@@ -240,6 +246,8 @@ pub struct Member {
     presence: Presence,
     display_name_ct: Option<String>,
     avatar_hash: Option<String>,
+    /// Always present (null without a bio), so clients can tell this server stores bios.
+    bio_ct: Option<String>,
     role_ids: Vec<String>,
     /// Clients leave this member out of member lists while they are offline.
     hide_offline: bool,
@@ -248,13 +256,14 @@ pub struct Member {
     voice_muted: bool,
 }
 
-/// Person, display name, avatar hash, `hide_offline` and `voice_muted`.
-type MemberRow = (Vec<u8>, Ciphertext, Option<String>, bool, bool);
+/// Person, display name, avatar hash, bio, `hide_offline` and `voice_muted`.
+type MemberRow = (Vec<u8>, Ciphertext, Option<String>, Ciphertext, bool, bool);
 
 pub async fn members(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Vec<Member>>> {
     let (mut tx, _) = authenticate_read(&app, &headers).await?;
     let rows: Vec<MemberRow> = query_as(
-        "SELECT person_id, display_name_ct, avatar_hash, hide_offline, voice_muted FROM members
+        "SELECT person_id, display_name_ct, avatar_hash, bio_ct, hide_offline, voice_muted
+         FROM members
          ORDER BY person_id",
     )
     .fetch_all(&mut *tx)
@@ -275,13 +284,14 @@ pub async fn members(State(app): State<App>, headers: HeaderMap) -> ApiResult<Js
     Ok(Json(
         rows.into_iter()
             .map(
-                |(person, display_name, avatar_hash, hide_offline, voice_muted)| {
+                |(person, display_name, avatar_hash, bio, hide_offline, voice_muted)| {
                     let person_id = encode(&person);
                     Member {
                         presence: presence.get(&person_id).copied().unwrap_or_default(),
                         person_id,
                         display_name_ct: encoded(display_name),
                         avatar_hash,
+                        bio_ct: encoded(bio),
                         role_ids: roles.remove(&person).unwrap_or_default(),
                         hide_offline,
                         voice_muted,
@@ -313,6 +323,77 @@ mod tests {
             .unwrap();
         assert_eq!(hash, Some(picture_hash(&[9; 64])));
         assert_eq!(hash.unwrap().len(), 22);
+    }
+
+    #[tokio::test]
+    async fn members_set_their_own_encrypted_bio_within_the_metadata_cap() -> anyhow::Result<()> {
+        use crate::testing::{app, as_person};
+        let dir = tempfile::tempdir()?;
+        let app = app(dir.path(), 2).await?;
+        let server = keys::space(&app).id;
+        let mut conn = app.db.acquire().await?;
+        keys::init_space(&mut conn, &server).await?;
+        query("INSERT INTO key_epochs (scope_id, epoch, commitment) VALUES (?, 1, zeroblob(32))")
+            .bind(encode(&server))
+            .execute(&mut *conn)
+            .await?;
+        drop(conn);
+        let key = rusttalk_core::keys::random_key()?;
+        let me = crate::testing::person(2);
+        let sealed = |clear: &[u8]| {
+            Metadata::Bio
+                .seal(&server, &me, 1, &key, clear)
+                .map(|ct| encode(&ct))
+        };
+        let set = |headers, body: Value| {
+            update_profile(
+                State(app.clone()),
+                headers,
+                Ok(Json(serde_json::from_value(body).unwrap())),
+            )
+        };
+        let bio_of = |row: usize| {
+            let app = app.clone();
+            async move {
+                let Json(rows) = members(State(app), as_person(1)).await.unwrap();
+                serde_json::to_value(&rows[row]).unwrap()["bio_ct"].clone()
+            }
+        };
+        // Present but null before anyone writes one, so clients know bios are stored.
+        assert_eq!(bio_of(1).await, Value::Null);
+
+        let bio = sealed("Hi :wave:\nsecond line".as_bytes())?;
+        let status = set(as_person(2), json!({ "bio_ct": bio })).await?;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(bio_of(1).await, json!(bio));
+        // Only the caller's own row changes, and other fields stay.
+        assert_eq!(bio_of(0).await, Value::Null);
+        set(as_person(2), json!({ "display_name_ct": sealed(b"x")? })).await?;
+        assert_eq!(bio_of(1).await, json!(bio));
+
+        // The plaintext cap is the metadata cap (1024 bytes); the server sees only ciphertext.
+        let fits = sealed(&[b'a'; rusttalk_core::keys::SMALL_METADATA])?;
+        assert_eq!(
+            set(as_person(2), json!({ "bio_ct": fits })).await?,
+            StatusCode::NO_CONTENT
+        );
+        let mut too_long = Metadata::Bio.seal(&server, &me, 1, &key, b"a")?;
+        too_long.resize(rusttalk_core::keys::SMALL_METADATA + 100, 0);
+        let error = set(as_person(2), json!({ "bio_ct": encode(&too_long) }))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "invalid_metadata");
+
+        // No session, no write.
+        let error = set(axum::http::HeaderMap::new(), json!({ "bio_ct": bio }))
+            .await
+            .unwrap_err();
+        assert_eq!(error.status, StatusCode::UNAUTHORIZED);
+
+        // Null clears it.
+        set(as_person(2), json!({ "bio_ct": null })).await?;
+        assert_eq!(bio_of(1).await, Value::Null);
+        Ok(())
     }
 
     #[tokio::test]

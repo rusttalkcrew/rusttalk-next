@@ -218,6 +218,31 @@ pub async fn icons(a: &KeyClient<'_>, b: &KeyClient<'_>) -> Result<()> {
 
 /// Server emoji: the Manage emoji permission, encrypted names and pictures, limits,
 /// rename, delete, audit entries and the change event.
+/// B sets the name and bio their client publishes to every server (#201); A, on the
+/// same server, decrypts both from the member directory, which holds only ciphertext.
+pub async fn profile(a: &KeyClient<'_>, b: &KeyClient<'_>) -> Result<()> {
+    let person_id = b.identity.certificate.person_id();
+    let person = encode(person_id);
+    let bio = "Hi :wave: 👋\nhttps://example.org";
+    b.set_display_name(b"Bea").await?;
+    b.set_bio(bio).await?;
+    let row = member(a, &person).await?;
+    let open = |kind, field: &str| -> Result<Vec<u8>> {
+        let ct = row[field].as_str().context("missing profile field")?;
+        ensure!(
+            !ct.contains("Bea") && !ct.contains("wave"),
+            "profile field is not encrypted"
+        );
+        a.decrypt_metadata(kind, person_id, ct)
+    };
+    assert_eq!(open(Metadata::DisplayName, "display_name_ct")?, b"Bea");
+    assert_eq!(open(Metadata::Bio, "bio_ct")?, bio.as_bytes());
+    b.set_bio("").await?;
+    assert_eq!(member(a, &person).await?["bio_ct"], Value::Null);
+    println!("B4b a peer decrypted another member's name and bio, and saw the bio cleared");
+    Ok(())
+}
+
 pub async fn emoji(a: &mut KeyClient<'_>, b: &KeyClient<'_>) -> Result<()> {
     let mut png = Cursor::new(Vec::new());
     DynamicImage::new_rgba8(4, 4).write_to(&mut png, ImageFormat::Png)?;

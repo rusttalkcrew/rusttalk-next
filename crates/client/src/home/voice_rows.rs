@@ -65,6 +65,7 @@ fn window() -> (Harness<'static, Option<Home>>, UnboundedReceiver<Command>) {
         avatar: None,
         presence: Presence::Online,
         hide_offline: false,
+        bio: None,
         voice_muted: false,
     }];
     let ann = Peer {

@@ -504,6 +504,62 @@ fn show_line(
     });
 }
 
+/// A profile bio: plain lines (no Markdown) with emoji, `:shortcodes:` as this
+/// server's emoji or Unicode ones, and web links that open like links in chat.
+pub(super) fn bio(ui: &mut Ui, dir: &Directory, text: &str) {
+    let text = emoji::replace(text, &dir.emoji);
+    let mut finder = linkify::LinkFinder::new();
+    finder.kinds(&[linkify::LinkKind::Url]);
+    let color = ui.visuals().text_color();
+    let format = TextFormat::simple(FontId::new(ui::TEXT_BODY, emoji::family(false)), color);
+    // Lines sit closer than paragraphs.
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = ui::SPACE_XS;
+        for line in text.lines() {
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.;
+                let mut job = LayoutJob::default();
+                // An empty line keeps its height.
+                if line.is_empty() {
+                    job.append(" ", 0., format.clone());
+                }
+                let flush = |ui: &mut Ui, job: &mut LayoutJob| {
+                    if !job.is_empty() {
+                        ui.add(Label::new(std::mem::take(job)).wrap());
+                    }
+                };
+                for piece in finder.spans(line) {
+                    if piece.kind().is_some()
+                        && let Some(url) = web_link(piece.as_str())
+                    {
+                        flush(ui, &mut job);
+                        ui.style_mut().url_in_tooltip = true;
+                        ui.hyperlink_to(piece.as_str(), url);
+                        continue;
+                    }
+                    for part in emoji::parts(piece.as_str()) {
+                        match part {
+                            emoji::Part::Text(text) => job.append(text, 0., format.clone()),
+                            emoji::Part::Custom { name, id, .. } => {
+                                let label = format!(":{name}:");
+                                match dir.emoji_by_id(&id).and_then(|e| e.picture.as_ref()) {
+                                    Some(picture) => {
+                                        flush(ui, &mut job);
+                                        emoji_image(ui, picture, ui::TEXT_BODY + 6., &label)
+                                            .on_hover_text(label);
+                                    }
+                                    None => job.append(&label, 0., format.clone()),
+                                }
+                            }
+                        }
+                    }
+                }
+                flush(ui, &mut job);
+            });
+        }
+    });
+}
+
 #[derive(Default)]
 struct Parse;
 impl ComputerMut<&str, Arc<Document>> for Parse {

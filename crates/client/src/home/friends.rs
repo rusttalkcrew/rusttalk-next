@@ -3,7 +3,10 @@
 use eframe::egui::{Align, Label, Layout, ScrollArea, Ui, Vec2};
 use rusttalk_core::{client::FriendSignal, presence::Presence};
 
-use super::{Home, Status, View, empty, face, pane_title};
+use super::{
+    Home, Status, View, empty, face, pane_title,
+    person::{self, Person},
+};
 use crate::{
     friends::{Act, Relation, now_ms},
     net::{Command, Draft},
@@ -190,6 +193,7 @@ pub fn view(ui: &mut Ui, home: &mut Home) {
         return;
     }
     let mut todo = None;
+    let mut card = None;
     let none = Directory::default();
     ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
         for (person, relation, name) in &people {
@@ -248,17 +252,32 @@ pub fn view(ui: &mut Ui, home: &mut Home) {
                     Relation::None => {}
                 }
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                    face(ui, dir, person, name, 34.0, *relation == Relation::Friend);
-                    ui.vertical(|ui| {
-                        ui.spacing_mut().item_spacing.y = 0.0;
-                        ui.add(Label::new(ui::bold(name)).truncate());
-                        ui.add(Label::new(ui::caption(caption)).truncate());
+                    let row = ui::row_button(ui, ROW - 4.0, name, |ui| {
+                        face(ui, dir, person, name, 34.0, *relation == Relation::Friend);
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 0.0;
+                            ui.add(Label::new(ui::bold(name)).truncate());
+                            ui.add(Label::new(ui::caption(caption)).truncate());
+                        });
                     });
+                    // Their profile card, as on a server you share.
+                    if let Some(index) = home
+                        .dm_server(person)
+                        .filter(|i| home.servers[*i].member(person).is_some())
+                    {
+                        let target = Person::of(home, &home.servers[index], *person);
+                        if let Some(pick) = person::interact(ui, &row, &target, false) {
+                            card = Some((index, *person, pick));
+                        }
+                    }
                 });
             });
             ui.separator();
         }
     });
+    if let Some((index, person, pick)) = card {
+        person::apply(home, index, person, pick, now);
+    }
     match todo {
         Some((person, Some(act))) => home.befriend(person, act, now),
         Some((person, None)) => home.open_dm(person, now),

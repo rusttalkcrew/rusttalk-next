@@ -471,6 +471,7 @@ mod tests {
             avatar: None,
             presence: Default::default(),
             hide_offline: false,
+            bio: None,
             voice_muted: false,
         };
         let role = |id: &str, name: &str, permissions| Role {
