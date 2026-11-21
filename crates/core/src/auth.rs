@@ -87,6 +87,22 @@ pub struct ServerInfo {
     pub protocol: Option<u32>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileLimits {
+    pub max_file_bytes: i64,
+    pub member_storage_bytes: i64,
+    pub server_storage_bytes: i64,
+    pub retention_secs: i64,
+    pub max_stickers: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FileSettings {
+    pub limits: FileLimits,
+    pub ceilings: FileLimits,
+    pub used_bytes: i64,
+}
+
 /// Operational update status visible to the server owner.
 #[derive(Default, Serialize, Deserialize)]
 pub struct ServerUpdates {

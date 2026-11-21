@@ -3,7 +3,7 @@
 
 use reqwest::Method;
 use rusttalk_core::{
-    auth::{ServerUpdates, decode, encode},
+    auth::{FileLimits, FileSettings, ServerUpdates, decode, encode},
     client::KeyClient,
     keys::{Metadata, random_key},
 };
@@ -45,6 +45,8 @@ pub enum Admin {
     Audit(Option<String>),
     /// Open joining on or off, with a member limit.
     Joining(bool, u32),
+    LoadFiles,
+    SaveFiles(FileLimits),
     /// Active invites, as far as this person may see them.
     Invites,
     RevokeInvite(String),
@@ -106,6 +108,7 @@ pub enum AdminUpdate {
     /// Soonest to expire first.
     Invites(Vec<Invite>),
     Joining(bool, u32),
+    Files(FileSettings),
     /// Whether the server is listed, and the saved details.
     Listing(bool, Option<PublicListing>),
     ServerUpdates(ServerUpdates),
@@ -147,6 +150,19 @@ pub(super) async fn run(
             }
             return;
         }
+        Admin::LoadFiles => {
+            match file_settings(client, Method::GET, None).await {
+                Ok(settings) => send(AdminUpdate::Files(settings)),
+                Err(text) => send(AdminUpdate::Failed(text)),
+            }
+            return;
+        }
+        Admin::SaveFiles(limits) => file_settings(client, Method::PUT, Some(json!(limits)))
+            .await
+            .map(|settings| {
+                send(AdminUpdate::Files(settings));
+                t!("admin.done_file_limits")
+            }),
         Admin::LoadUpdates => {
             match get(client, "/v1/settings/updates").await {
                 Ok(value) => match serde_json::from_value(value) {
@@ -553,6 +569,27 @@ async fn call(
     path: &str,
     body: Option<Value>,
 ) -> Result<(), String> {
+    request(client, method, path, body).await.map(|_| ())
+}
+
+async fn file_settings(
+    client: &KeyClient<'_>,
+    method: Method,
+    body: Option<Value>,
+) -> Result<FileSettings, String> {
+    request(client, method, "/v1/settings/files", body)
+        .await?
+        .json()
+        .await
+        .map_err(|error| failed(&error.into()))
+}
+
+async fn request(
+    client: &KeyClient<'_>,
+    method: Method,
+    path: &str,
+    body: Option<Value>,
+) -> Result<reqwest::Response, String> {
     let mut request = client.request(method, path);
     if let Some(body) = body {
         request = request.json(&body);
@@ -563,7 +600,7 @@ async fn call(
     })?;
     let status = reply.status();
     if status.is_success() {
-        return Ok(());
+        return Ok(reply);
     }
     let code = reply
         .json::<Value>()
@@ -592,6 +629,7 @@ fn problem(code: &str) -> &'static str {
         "ban_not_found" => t!("admin.ban_not_found"),
         "invite_not_found" => t!("admin.invite_not_found"),
         "invalid_member_cap" => t!("admin.invalid_member_cap"),
+        "invalid_file_limits" => t!("admin.invalid_file_limits"),
         "invalid_listing" | "invalid_listing_settings" => {
             t!("admin.invalid_listing")
         }

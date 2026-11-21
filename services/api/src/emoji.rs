@@ -24,6 +24,7 @@ use tokio::fs;
 use crate::{
     ApiError, ApiResult, App,
     auth::authenticate,
+    file_settings,
     files::setting,
     keys,
     metadata::{checked, picture_hash},
@@ -35,7 +36,6 @@ use crate::{
 pub struct Emoji {
     dir: PathBuf,
     max_emoji: i64,
-    max_stickers: i64,
     max_bytes: i64,
 }
 
@@ -44,7 +44,6 @@ impl Emoji {
         let emoji = Self {
             dir: data.join("emoji"),
             max_emoji: setting("RUSTTALK_EMOJI_MAX", 100)?,
-            max_stickers: setting("RUSTTALK_STICKER_MAX", 50)?,
             max_bytes: setting("RUSTTALK_EMOJI_MAX_BYTES", IMAGE_CIPHERTEXT as i64)?,
         };
         ensure!(
@@ -117,6 +116,9 @@ pub struct List {
 
 pub async fn list(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<List>> {
     let (mut tx, _) = authenticate(&app, &headers).await?;
+    let max_stickers = file_settings::effective(&mut tx, app.files.ceilings)
+        .await?
+        .max_stickers;
     let rows: Vec<Row> = query_as(
         "SELECT id, kind, owner, size, image_hash, name_ct FROM emoji ORDER BY created_at, id",
     )
@@ -126,7 +128,7 @@ pub async fn list(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<
     let limits = &app.emoji;
     Ok(Json(List {
         max_emoji: limits.max_emoji,
-        max_stickers: limits.max_stickers,
+        max_stickers,
         max_bytes: limits.max_bytes,
         items: rows
             .into_iter()
@@ -210,7 +212,13 @@ pub async fn add(
     let image = checked(Metadata::EmojiImage, epoch, image_ct)?;
     let (kind_name, max, full) = match kind {
         Kind::Emoji => ("emoji", limits.max_emoji, "emoji_limit"),
-        Kind::Sticker => ("sticker", limits.max_stickers, "sticker_limit"),
+        Kind::Sticker => (
+            "sticker",
+            file_settings::effective(&mut tx, app.files.ceilings)
+                .await?
+                .max_stickers,
+            "sticker_limit",
+        ),
     };
     let count: i64 = query_scalar("SELECT COUNT(*) FROM emoji WHERE kind = ?")
         .bind(kind_name)
@@ -352,6 +360,55 @@ pub async fn delete(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::{app, as_person};
+
+    #[tokio::test]
+    async fn saved_sticker_limit_keeps_existing_stickers_and_blocks_new_ones() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let app = app(dir.path(), 2).await?;
+        let server = keys::space(&app).id;
+        let mut conn = app.db.acquire().await?;
+        keys::init_space(&mut conn, &server).await?;
+        query("INSERT INTO key_epochs (scope_id, epoch, commitment) VALUES (?, 1, zeroblob(32))")
+            .bind(encode(&server))
+            .execute(&mut *conn)
+            .await?;
+        drop(conn);
+        let key = rusttalk_core::keys::random_key()?;
+        let add_sticker = |byte| -> Result<New> {
+            let id = [byte; 32];
+            let seal = |kind: Metadata| {
+                kind.seal(&server, &id, 1, &key, b"sample")
+                    .map(|ct| encode(&ct))
+            };
+            Ok(New {
+                id: encode(&id),
+                kind: Kind::Sticker,
+                name_ct: seal(Metadata::EmojiName)?,
+                image_ct: seal(Metadata::EmojiImage)?,
+            })
+        };
+        add(State(app.clone()), as_person(1), Ok(Json(add_sticker(3)?))).await?;
+        add(State(app.clone()), as_person(1), Ok(Json(add_sticker(4)?))).await?;
+        let Json(saved) = file_settings::set(
+            State(app.clone()),
+            as_person(1),
+            Ok(Json(rusttalk_core::auth::FileLimits {
+                max_stickers: 1,
+                ..app.files.ceilings
+            })),
+        )
+        .await?;
+        assert_eq!(saved.limits.max_stickers, 1);
+        let Json(list) = list(State(app.clone()), as_person(2)).await?;
+        assert_eq!(list.max_stickers, 1);
+        assert_eq!(list.items.len(), 2);
+        let error = add(State(app), as_person(1), Ok(Json(add_sticker(5)?)))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "sticker_limit");
+        Ok(())
+    }
 
     #[tokio::test]
     async fn startup_removes_images_without_rows() -> Result<()> {

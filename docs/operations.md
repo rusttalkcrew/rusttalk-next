@@ -205,9 +205,12 @@ Keep the API behind this trusted edge.
 
 ## Stored file limits
 
-Set these positive integer environment variables on the API. The dev Compose
-file passes them through, and `make e2e` applies smaller quota and lifetime
-values to its disposable stack.
+Set these positive integer environment variables on the API to set the host
+ceilings. They are also the defaults until a member with Manage Server saves
+limits in **Server settings → Files**. The server clamps saved limits to the
+current ceilings when saving and when using them. The dev Compose file passes
+the variables through, and `make e2e` applies smaller quota and lifetime values
+to its disposable stack.
 
 | Variable | Default |
 | --- | --- |
@@ -223,8 +226,10 @@ server configured to accept more. Allow disk space for the database, WAL and
 up to four concurrent staging blobs in addition to the quota. The API refuses
 downloads at expiry and sweeps eligible blobs and their rows at least every
 30 seconds while idle, in batches of 64. Expired blobs count toward quotas
-until swept. Changing the lifetime applies to new uploads. Run one API
-instance per volume. On startup it removes leftover staging blobs and
+until swept. Lowering a size or quota limit keeps existing files and limits
+new uploads. Shorter retention also applies to existing files at the next
+cleanup. Files keep their original expiry if retention increases. Run one
+API instance per volume. On startup it removes leftover staging blobs and
 uncommitted blobs.
 
 ## Server emoji limits
@@ -235,9 +240,11 @@ uncommitted blobs.
 | `RUSTTALK_STICKER_MAX` | 50 stickers |
 | `RUSTTALK_EMOJI_MAX_BYTES` | 262,144 (256 KiB per encrypted picture, also the maximum) |
 
-Pictures live in `emoji/` on the API volume. Lowering a count keeps existing
-emoji and stops new ones until the count is below the limit. On startup the API
-removes pictures without a database row.
+`RUSTTALK_STICKER_MAX` is the host ceiling for the sticker limit in
+**Server settings → Files** and the default until a limit is saved. Pictures
+live in `emoji/` on the API volume. Lowering a count keeps existing pictures
+and stops new uploads of that kind until the count is below the limit. On
+startup the API removes pictures without a database row.
 
 ## Logs and health
 
