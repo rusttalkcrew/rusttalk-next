@@ -23,7 +23,7 @@ use sqlx::{SqliteConnection, query, query_scalar};
 use super::{Outcome, configured, enforce, require_voice_read};
 use crate::{
     ApiError, ApiResult, App,
-    auth::authenticate,
+    auth::{authenticate, authenticate_read},
     keys, payload,
     roles::{self, Permission},
     store::{self, audit},
@@ -171,7 +171,7 @@ async fn confirm(
     person: &[u8],
     to: Option<&str>,
 ) -> ApiResult<()> {
-    let (mut tx, actor) = authenticate(app, headers).await?;
+    let (mut tx, actor) = authenticate_read(app, headers).await?;
     may_take_out(&mut tx, &actor.person, channel, person, to).await?;
     tx.commit().await?;
     Ok(())
@@ -187,7 +187,7 @@ async fn take_out(
     to: Option<String>,
 ) -> ApiResult<StatusCode> {
     let person = decode::<32>(person)?;
-    let (mut tx, actor) = authenticate(app, headers).await?;
+    let (mut tx, actor) = authenticate_read(app, headers).await?;
     may_take_out(&mut tx, &actor.person, &channel, &person, to.as_deref()).await?;
     let devices: Vec<Vec<u8>> =
         query_scalar("SELECT device_id FROM member_devices WHERE person_id = ?")
