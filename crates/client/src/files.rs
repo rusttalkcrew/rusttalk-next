@@ -9,25 +9,33 @@ use std::{
     path::{Path, PathBuf},
     sync::{Mutex, mpsc},
     thread,
+    time::Duration,
 };
 
 use eframe::egui::{
     self, Align, Frame, Id as UiId, Image, Layout, Margin, Modal, Rect, Response, RichText, Role,
-    ScrollArea, Sense, TextureHandle, TextureOptions, Ui, Vec2, WidgetInfo,
+    ScrollArea, Sense, TextureHandle, TextureOptions, Ui, UiBuilder, Vec2, WidgetInfo,
 };
 use rusttalk_core::client::{Attachment, save_json};
 use tokio::sync::mpsc::UnboundedSender;
 use url::Url;
 
 use crate::{
-    net::{Command, MAX_FILE, file_name},
+    home::frame_at,
+    net::{Command, Fetch, MAX_FILE, file_name},
     server::{Chat, Id, Staged},
     ui::{self, ON_FILL, OVERLAY, OVERLAY_BUTTON, OVERLAY_TEXT},
 };
 
 /// Files per message, as the message format allows.
 pub const MAX_FILES: usize = 4;
-const THUMBNAIL: f32 = 320.0;
+pub(crate) const THUMBNAIL: f32 = 320.0;
+/// Animated GIFs and WebPs up to this size load by themselves and play in the chat.
+const INLINE_MAX: u64 = 8 * MIB;
+/// Animations playing in the chat at once; the ones scrolled away drop first.
+const MAX_INLINE: usize = 8;
+/// An animation unseen this long (seconds) may be dropped when others need the room.
+const INLINE_IDLE: f64 = 1.0;
 /// Pictures kept before the cache is emptied; shown ones load again on demand.
 const MAX_PICTURES: usize = 200;
 
@@ -44,6 +52,8 @@ pub type Opener = fn(&Path, bool);
 pub struct Files {
     /// Thumbnails and the viewer's full picture, by blob ID.
     images: HashMap<Id, Picture>,
+    /// Small looping copies of animated files shown in the chat, by file blob ID.
+    inline: HashMap<Id, Inline>,
     /// Downloads to disk, by blob ID.
     saves: HashMap<Id, Saving>,
     /// Where stored files were saved on this device, by blob ID. Kept in `saved.json`
@@ -61,9 +71,37 @@ pub struct Files {
     pastes: (mpsc::Sender<Answer>, mpsc::Receiver<Answer>),
 }
 
+/// A decoded picture: one texture, or an animation's textures and delays in ms.
+/// Dropping it frees the textures.
+struct Anim {
+    frames: Vec<TextureHandle>,
+    delays: Vec<u32>,
+}
+
+impl Anim {
+    /// The texture to show now. Only a visible animation in a focused window plays and
+    /// asks for repaints, so a hidden one costs nothing.
+    fn current(&self, ui: &Ui, visible: bool) -> &TextureHandle {
+        if visible && ui.input(|input| input.focused) && self.frames.len() > 1 {
+            let now = (ui.input(|input| input.time) * 1000.0) as u64;
+            if let Some((at, left)) = frame_at(self.delays.iter().copied(), now) {
+                ui.ctx().request_repaint_after(Duration::from_millis(left));
+                return &self.frames[at];
+            }
+        }
+        &self.frames[0]
+    }
+}
+
+struct Inline {
+    picture: Picture,
+    /// When it was last visible, in egui time.
+    seen: f64,
+}
+
 enum Picture {
     Loading,
-    Ready(TextureHandle),
+    Ready(Anim),
     Gone,
     Failed,
 }
@@ -122,6 +160,7 @@ impl Files {
             .collect();
         Self {
             images: HashMap::new(),
+            inline: HashMap::new(),
             saves: HashMap::new(),
             paths,
             data: data.to_owned(),
@@ -139,16 +178,55 @@ impl Files {
         }
     }
 
-    pub fn image(&mut self, ctx: &egui::Context, id: Id, image: Result<egui::ColorImage, bool>) {
-        let Some(slot) = self.images.get_mut(&id) else {
-            // The viewer closed meanwhile.
+    pub fn image(
+        &mut self,
+        ctx: &egui::Context,
+        id: Id,
+        fetch: Fetch,
+        frames: Result<Vec<(egui::ColorImage, u32)>, bool>,
+    ) {
+        let slot = match fetch {
+            Fetch::Inline => self.inline.get_mut(&id).map(|inline| &mut inline.picture),
+            Fetch::Thumbnail | Fetch::Full => self.images.get_mut(&id),
+        };
+        let Some(slot) = slot else {
+            // The viewer closed or the message scrolled away meanwhile.
             return;
         };
-        *slot = match image {
-            Ok(image) => Picture::Ready(ctx.load_texture("file", image, TextureOptions::LINEAR)),
+        *slot = match frames {
+            Ok(frames) => {
+                let delays = frames.iter().map(|(_, ms)| *ms).collect();
+                let frames = (frames.into_iter())
+                    .map(|(image, _)| ctx.load_texture("file", image, TextureOptions::LINEAR))
+                    .collect();
+                Picture::Ready(Anim { frames, delays })
+            }
             Err(true) => Picture::Gone,
             Err(false) => Picture::Failed,
         };
+    }
+
+    /// Start loading the playing copy of an animated file once it is on screen, after
+    /// dropping the ones scrolled away if too many are kept.
+    fn want_inline(&mut self, ui: &Ui, commands: &UnboundedSender<Command>, file: &Attachment) {
+        let area = Rect::from_min_size(ui.cursor().min, Vec2::splat(THUMBNAIL));
+        if !ui.is_rect_visible(area) {
+            return;
+        }
+        let now = ui.input(|input| input.time);
+        if self.inline.len() >= MAX_INLINE && !self.inline.contains_key(&file.file.id) {
+            self.inline.retain(|_, inline| {
+                matches!(inline.picture, Picture::Loading) || now - inline.seen < INLINE_IDLE
+            });
+        }
+        let inline = self.inline.entry(file.file.id).or_insert_with(|| {
+            let _ = commands.send(Command::Image(file.file.clone(), Fetch::Inline));
+            Inline {
+                picture: Picture::Loading,
+                seen: now,
+            }
+        });
+        inline.seen = now;
     }
 
     pub fn saved(&mut self, id: Id, saved: Result<(), bool>) {
@@ -438,7 +516,27 @@ pub fn staged(ui: &mut Ui, chat: &mut Chat) {
     }
 }
 
+/// "GIF" or "WebP" for a file that may animate, by its name or type; the contents
+/// decide whether it really does.
+fn animated_kind(name: &str, media_type: &str) -> Option<&'static str> {
+    let name = name.to_ascii_lowercase();
+    if media_type == "image/gif" || name.ends_with(".gif") {
+        Some("GIF")
+    } else if media_type == "image/webp" || name.ends_with(".webp") {
+        Some("WebP")
+    } else {
+        None
+    }
+}
+
+/// Whether a file loads by itself and plays in the chat: it may animate and is small.
+fn plays_inline(name: &str, media_type: &str, size: u64) -> bool {
+    size <= INLINE_MAX && animated_kind(name, media_type).is_some()
+}
+
 /// A message's files: a preview for pictures, a card with Download for the rest.
+/// Small animated GIFs and WebPs play right in the message, loaded by themselves;
+/// bigger ones show their first frame with a badge and play in the viewer.
 pub fn attachments(
     ui: &mut Ui,
     files: &mut Files,
@@ -447,48 +545,86 @@ pub fn attachments(
     list: &[Attachment],
 ) {
     for file in list {
-        let Some(thumb) = &file.thumbnail else {
+        let play = plays_inline(&file.name, &file.media_type, file.file.size.into());
+        // Files sent before thumbnails existed for GIFs have none; they still play.
+        if file.thumbnail.is_none() && !play {
             card(ui, files, address, file);
             continue;
-        };
-        if files.images.len() > MAX_PICTURES {
-            let open = files.viewer.as_ref().map(|view| view.file.file.id);
-            // Loading entries stay so their pending answers still land.
-            files
-                .images
-                .retain(|id, picture| Some(*id) == open || matches!(picture, Picture::Loading));
         }
-        let picture = files.images.entry(thumb.id).or_insert_with(|| {
-            let _ = commands.send(Command::Image(thumb.clone(), false));
-            Picture::Loading
-        });
+        if play {
+            files.want_inline(ui, commands, file);
+        }
+        let inline = files
+            .inline
+            .get(&file.file.id)
+            .map(|inline| &inline.picture);
+        match inline {
+            Some(Picture::Gone) => {
+                gone(ui, file);
+                continue;
+            }
+            Some(Picture::Failed) if file.thumbnail.is_none() => {
+                card(ui, files, address, file);
+                continue;
+            }
+            _ => {}
+        }
+        let playing = matches!(inline, Some(Picture::Ready(_)));
+        if let Some(thumb) = file.thumbnail.as_ref().filter(|_| !playing) {
+            if files.images.len() > MAX_PICTURES {
+                let open = files.viewer.as_ref().map(|view| view.file.file.id);
+                // Loading entries stay so their pending answers still land.
+                files
+                    .images
+                    .retain(|id, picture| Some(*id) == open || matches!(picture, Picture::Loading));
+            }
+            files.images.entry(thumb.id).or_insert_with(|| {
+                let _ = commands.send(Command::Image(thumb.clone(), Fetch::Thumbnail));
+                Picture::Loading
+            });
+        }
+        let picture = if playing {
+            inline
+        } else {
+            (file.thumbnail.as_ref()).and_then(|thumb| files.images.get(&thumb.id))
+        };
         let (mut show, mut retry) = (false, false);
         match picture {
-            Picture::Ready(texture) => {
+            Some(Picture::Ready(anim)) => {
+                let visible = ui
+                    .is_rect_visible(Rect::from_min_size(ui.cursor().min, Vec2::splat(THUMBNAIL)));
                 let shown = ui
                     .add(
-                        Image::new(&*texture)
+                        Image::new(anim.current(ui, visible))
                             .max_size(Vec2::splat(THUMBNAIL))
                             .corner_radius(ui::RADIUS)
                             .sense(Sense::click()),
                     )
                     .on_hover_text(&file.name);
+                if let Some(kind) = animated_kind(&file.name, &file.media_type).filter(|_| !playing)
+                {
+                    let corner = shown.rect.left_bottom() + Vec2::new(6.0, -22.0);
+                    let area = Rect::from_min_size(corner, Vec2::new(60.0, 18.0));
+                    ui.scope_builder(UiBuilder::new().max_rect(area), |ui| {
+                        ui::badge(ui, kind, OVERLAY_BUTTON);
+                    });
+                }
                 show = shown.clicked();
                 if let Some(path) = files.saved_at(file) {
                     saved_menu(&shown, path);
                 }
             }
-            Picture::Loading => {
-                ui.allocate_ui(Vec2::splat(64.0), |ui| ui.spinner());
-            }
-            Picture::Gone => gone(ui, file),
-            Picture::Failed => {
+            Some(Picture::Gone) => gone(ui, file),
+            Some(Picture::Failed) => {
                 retry = ui::secondary(ui, t!("files.retry_picture")).clicked();
+            }
+            _ => {
+                ui.allocate_ui(Vec2::splat(64.0), |ui| ui.spinner());
             }
         }
         if show {
             files.images.insert(file.file.id, Picture::Loading);
-            let _ = commands.send(Command::Image(file.file.clone(), true));
+            let _ = commands.send(Command::Image(file.file.clone(), Fetch::Full));
             files.viewer = Some(Viewer {
                 address: address.clone(),
                 file: file.clone(),
@@ -497,7 +633,7 @@ pub fn attachments(
                 turns: 0,
             });
         }
-        if retry {
+        if retry && let Some(thumb) = &file.thumbnail {
             files.images.remove(&thumb.id);
         }
     }
@@ -640,7 +776,8 @@ pub fn viewer(ctx: &egui::Context, files: &mut Files) {
                 let room = ui.available_size();
                 let view = files.viewer.as_ref().expect("checked above");
                 match files.images.get(&file.file.id) {
-                    Some(Picture::Ready(texture)) => {
+                    Some(Picture::Ready(anim)) => {
+                        let texture = anim.current(ui, true);
                         let size = texture.size_vec2();
                         let turned = view.turns % 2 == 1;
                         let outline = if turned {
@@ -678,5 +815,25 @@ pub fn viewer(ctx: &egui::Context, files: &mut Files) {
         // The full picture can be large; keep only thumbnails around.
         files.images.remove(&file.file.id);
         files.viewer = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn small_gifs_and_webps_play_in_the_chat_big_ones_wait_for_a_click() {
+        let limit = INLINE_MAX;
+        assert!(plays_inline("cat.gif", "image/gif", limit));
+        assert!(plays_inline("CAT.GIF", "application/octet-stream", 1));
+        assert!(plays_inline("x", "image/webp", 1024));
+        assert!(plays_inline("dance.WebP", "", 1024));
+        assert!(!plays_inline("cat.gif", "image/gif", limit + 1));
+        assert!(!plays_inline("photo.png", "image/png", 10));
+        assert!(!plays_inline("notes.pdf", "application/pdf", 10));
+        assert_eq!(animated_kind("a.gif", ""), Some("GIF"));
+        assert_eq!(animated_kind("a.webp", ""), Some("WebP"));
+        assert_eq!(animated_kind("a.png", "image/png"), None);
     }
 }

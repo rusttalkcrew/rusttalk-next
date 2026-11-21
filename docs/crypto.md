@@ -402,7 +402,7 @@ reported by the API would add no protection under the same assumption.
 ## Server-stored file encryption
 
 The sender generates a fresh random 32-byte key and independent random 32-byte
-ID for each blob. PNG and JPEG files that decode within the image limits
+ID for each blob. PNG, JPEG, GIF and WebP files (first frame) that decode within the image limits
 (4096 pixels per edge, 64 MiB of pixels) get a separate encrypted PNG thumbnail
 with a longest edge of at most 320 pixels. Other files, including other image
 formats, are sent without one. Receivers decode a thumbnail only as a PNG of at

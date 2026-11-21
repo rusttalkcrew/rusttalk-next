@@ -1128,7 +1128,7 @@ impl Home {
                     self.chat(index, channel).uploading = what;
                 }
             }
-            Update::Image(id, image) => self.files.image(ctx, id, image),
+            Update::Image(id, fetch, frames) => self.files.image(ctx, id, fetch, frames),
             Update::Saved(id, saved) => self.files.saved(id, saved),
             Update::Synced(synced) => {
                 for known in &synced.servers {
@@ -1704,6 +1704,21 @@ fn crop_dialog(ctx: &egui::Context, home: &mut Home) {
     }
 }
 
+/// Which frame of a looping animation shows `now` ms in, and the ms until the next one.
+/// `None` when the delays add up to nothing.
+pub fn frame_at(delays: impl Iterator<Item = u32> + Clone, now: u64) -> Option<(usize, u64)> {
+    let total: u64 = delays.clone().map(u64::from).sum();
+    let mut at = now.checked_rem(total)?;
+    for (index, ms) in delays.enumerate() {
+        let ms = u64::from(ms);
+        if at < ms {
+            return Some((index, ms - at));
+        }
+        at -= ms;
+    }
+    None
+}
+
 /// The texture for a picture's current frame, so animated GIFs play.
 // shortcut: textures stay in egui's memory until restart; evict them if people change pictures often.
 pub fn frame(ui: &Ui, picture: &Picture) -> TextureHandle {
@@ -1721,17 +1736,12 @@ pub fn frame(ui: &Ui, picture: &Picture) -> TextureHandle {
         ui.data_mut(|data| data.insert_temp(id, made.clone()));
         made
     });
-    let total: u64 = picture.frames.iter().map(|(_, ms)| u64::from(*ms)).sum();
-    if textures.len() > 1 && total > 0 {
-        let mut at = (ui.input(|input| input.time) * 1000.0) as u64 % total;
-        for (texture, (_, ms)) in textures.iter().zip(picture.frames.iter()) {
-            let ms = u64::from(*ms);
-            if at < ms {
-                ui.ctx()
-                    .request_repaint_after(Duration::from_millis(ms - at));
-                return texture.clone();
-            }
-            at -= ms;
+    if textures.len() > 1 {
+        let now = (ui.input(|input| input.time) * 1000.0) as u64;
+        let delays = picture.frames.iter().map(|(_, ms)| *ms);
+        if let Some((at, left)) = frame_at(delays, now) {
+            ui.ctx().request_repaint_after(Duration::from_millis(left));
+            return textures[at].clone();
         }
     }
     textures[0].clone()
@@ -4274,6 +4284,18 @@ mod tests {
             directory(&settings).unwrap().0.as_str(),
             "https://index.example/"
         );
+    }
+
+    #[test]
+    fn animation_frame_follows_the_clock_and_loops() {
+        let delays = [100, 50, 50];
+        let at = |now| frame_at(delays.iter().copied(), now);
+        assert_eq!(at(0), Some((0, 100)));
+        assert_eq!(at(120), Some((1, 30)));
+        assert_eq!(at(199), Some((2, 1)));
+        // Back to the first frame after 200 ms.
+        assert_eq!(at(200 * 7 + 10), Some((0, 90)));
+        assert_eq!(frame_at([0u32, 0].into_iter(), 5), None);
     }
 
     #[test]

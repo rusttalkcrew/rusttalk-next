@@ -588,6 +588,16 @@ async fn pictures(
     Ok(pictures)
 }
 
+/// A decoded frame as an image and how long it shows, in ms.
+pub(super) fn frame_image(frame: image::Frame) -> (ColorImage, u32) {
+    let (numer, denom) = frame.delay().numer_denom_ms();
+    // Browsers also slow down GIF frames shorter than 20 ms.
+    let ms = (numer / denom.max(1)).max(20);
+    let image = frame.into_buffer();
+    let size = [image.width() as usize, image.height() as usize];
+    (ColorImage::from_rgba_unmultiplied(size, image.as_raw()), ms)
+}
+
 /// Decode a profile picture, server icon, emoji or sticker.
 fn picture(bytes: &[u8]) -> Option<Picture> {
     let key: [u8; 32] = Sha256::digest(bytes).into();
@@ -598,17 +608,7 @@ fn picture(bytes: &[u8]) -> Option<Picture> {
             return None;
         }
     };
-    let frames: Vec<_> = frames
-        .into_iter()
-        .map(|frame| {
-            let (numer, denom) = frame.delay().numer_denom_ms();
-            // Browsers also slow down GIF frames shorter than 20 ms.
-            let ms = (numer / denom.max(1)).max(20);
-            let image = frame.into_buffer();
-            let size = [image.width() as usize, image.height() as usize];
-            (ColorImage::from_rgba_unmultiplied(size, image.as_raw()), ms)
-        })
-        .collect();
+    let frames: Vec<_> = frames.into_iter().map(frame_image).collect();
     Some(Picture {
         key,
         frames: frames.into(),

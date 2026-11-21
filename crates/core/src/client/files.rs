@@ -13,7 +13,10 @@ use chacha20poly1305::{
     aead::{Aead, Payload},
 };
 use futures_util::stream;
-use image::{DynamicImage, ImageFormat, ImageReader, Limits};
+use image::{
+    AnimationDecoder, DynamicImage, Frame, ImageDecoder, ImageFormat, ImageReader, Limits,
+    codecs::{gif::GifDecoder, webp::WebPDecoder},
+};
 use reqwest::{Body, Method, StatusCode, header::CONTENT_TYPE};
 use serde::Deserialize;
 use tokio::time;
@@ -197,14 +200,80 @@ impl KeyClient<'_> {
     }
 }
 
-/// Decode only JPEG or PNG, with dimension and allocation limits for hostile input.
+const PICTURE_FORMATS: &[ImageFormat] = &[
+    ImageFormat::Png,
+    ImageFormat::Jpeg,
+    ImageFormat::Gif,
+    ImageFormat::WebP,
+];
+const PICTURE_EDGE: u32 = 4096;
+const PICTURE_ALLOC: u64 = 64 * 1024 * 1024;
+/// Frames of one animation, however small they are.
+const MAX_ANIMATION_FRAMES: usize = 400;
+
+/// Decode a PNG, JPEG, GIF or WebP (its first frame), with dimension and allocation
+/// limits for hostile input.
 pub fn decode_image(bytes: &[u8]) -> Result<DynamicImage> {
-    decode_limited(
-        bytes,
-        &[ImageFormat::Png, ImageFormat::Jpeg],
-        4096,
-        64 * 1024 * 1024,
-    )
+    decode_limited(bytes, PICTURE_FORMATS, PICTURE_EDGE, PICTURE_ALLOC)
+}
+
+/// One frame, for pictures that are not animated.
+fn still(bytes: &[u8], fit: Option<u32>) -> Result<Vec<Frame>> {
+    let mut image = decode_image(bytes)?;
+    if let Some(fit) = fit {
+        image = image.thumbnail(fit, fit);
+    }
+    Ok(vec![Frame::new(image.into_rgba8())])
+}
+
+/// Decode every frame of a picture with its delay, for animated GIF and WebP (other
+/// formats give one frame). Frames larger than `fit` pixels per edge shrink to it, and
+/// the decoded frames together stay within `budget` bytes, else this fails: received
+/// pictures are hostile.
+pub fn decode_frames(bytes: &[u8], fit: Option<u32>, budget: usize) -> Result<Vec<Frame>> {
+    ensure!(bytes.len() <= MAX_CIPHERTEXT, "image input too large");
+    let format = image::guess_format(bytes).context("unknown image format")?;
+    ensure!(
+        PICTURE_FORMATS.contains(&format),
+        "unsupported image format"
+    );
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(PICTURE_EDGE);
+    limits.max_image_height = Some(PICTURE_EDGE);
+    limits.max_alloc = Some(PICTURE_ALLOC);
+    let frames = match format {
+        ImageFormat::Gif => {
+            let mut decoder = GifDecoder::new(Cursor::new(bytes))?;
+            decoder.set_limits(limits)?;
+            decoder.into_frames()
+        }
+        ImageFormat::WebP => {
+            let mut decoder = WebPDecoder::new(Cursor::new(bytes))?;
+            decoder.set_limits(limits)?;
+            // A still WebP has no animation frames to iterate.
+            if decoder.has_animation() {
+                decoder.into_frames()
+            } else {
+                return still(bytes, fit);
+            }
+        }
+        _ => return still(bytes, fit),
+    };
+    let (mut out, mut used) = (Vec::new(), 0usize);
+    for frame in frames {
+        ensure!(out.len() < MAX_ANIMATION_FRAMES, "too many frames");
+        let mut frame = frame?;
+        if let Some(fit) = fit {
+            let (delay, left, top) = (frame.delay(), frame.left(), frame.top());
+            let small = DynamicImage::ImageRgba8(frame.into_buffer()).thumbnail(fit, fit);
+            frame = Frame::from_parts(small.into_rgba8(), left, top, delay);
+        }
+        used += frame.buffer().as_raw().len();
+        ensure!(used <= budget, "picture too big to play");
+        out.push(frame);
+    }
+    ensure!(!out.is_empty(), "picture has no frames");
+    Ok(out)
 }
 
 /// Decode a received thumbnail: only the PNG this client makes, at most 320 pixels per edge.
@@ -232,7 +301,7 @@ pub(super) fn decode_limited(
     Ok(reader.decode()?)
 }
 
-/// A PNG thumbnail for a decodable PNG or JPEG. Anything else, including images
+/// A PNG thumbnail (of the first frame) for a decodable PNG, JPEG, GIF or WebP. Anything else, including images
 /// over the decode limits, is still sent, just without a thumbnail.
 fn make_thumbnail(bytes: &[u8]) -> Option<Vec<u8>> {
     let image = decode_image(bytes).ok()?;
@@ -395,6 +464,56 @@ mod tests {
         Ok(png.into_inner())
     }
 
+    fn gif(width: u32, height: u32, frames: usize) -> Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        let mut encoder = image::codecs::gif::GifEncoder::new(&mut bytes);
+        encoder.encode_frames((0..frames).map(|at| {
+            let color = image::Rgba([(at * 60) as u8, 0, 200, 255]);
+            Frame::from_parts(
+                image::RgbaImage::from_pixel(width, height, color),
+                0,
+                0,
+                image::Delay::from_numer_denom_ms(100, 1),
+            )
+        }))?;
+        drop(encoder);
+        Ok(bytes)
+    }
+
+    fn webp(width: u32, height: u32) -> Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        DynamicImage::new_rgba8(width, height)
+            .write_to(&mut Cursor::new(&mut bytes), ImageFormat::WebP)?;
+        Ok(bytes)
+    }
+
+    #[test]
+    fn gif_and_webp_get_a_first_frame_thumbnail() -> Result<()> {
+        for bytes in [gif(640, 240, 1)?, gif(640, 240, 3)?, webp(640, 240)?] {
+            let thumbnail = make_thumbnail(&bytes).context("missing thumbnail")?;
+            let decoded = decode_thumbnail(&thumbnail)?;
+            assert_eq!((decoded.width(), decoded.height()), (320, 120));
+        }
+        // Over the decode limits: still sent, without a thumbnail.
+        assert!(make_thumbnail(&gif(4097, 1, 1)?).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn animations_decode_with_limits() -> Result<()> {
+        let still = decode_frames(&gif(64, 64, 1)?, None, 1 << 20)?;
+        assert_eq!(still.len(), 1);
+        let frames = decode_frames(&gif(640, 240, 3)?, Some(320), 1 << 20)?;
+        assert_eq!(frames.len(), 3);
+        assert_eq!(frames[0].buffer().dimensions(), (320, 120));
+        assert_eq!(decode_frames(&webp(32, 32)?, None, 1 << 20)?.len(), 1);
+        // The memory budget and the frame count stop a picture that decodes too big.
+        assert!(decode_frames(&gif(64, 64, 3)?, None, 64 * 64 * 4 * 2).is_err());
+        assert!(decode_frames(&gif(1, 1, MAX_ANIMATION_FRAMES + 1)?, None, usize::MAX).is_err());
+        assert!(decode_frames(b"not an image", None, 1 << 20).is_err());
+        Ok(())
+    }
+
     #[test]
     fn thumbnails_are_best_effort_and_bounded() -> Result<()> {
         let thumbnail = make_thumbnail(&png(640, 240)?).context("missing thumbnail")?;
@@ -405,6 +524,7 @@ mod tests {
         assert!(make_thumbnail(jpeg.get_ref()).is_some());
         // Unsupported, oversized or broken images are uploaded without a thumbnail.
         assert!(make_thumbnail(b"GIF89a\x01\x00\x01\x00").is_none());
+        assert!(make_thumbnail(b"RIFF\x00\x00\x00\x00WEBPVP8 ").is_none());
         assert!(make_thumbnail(&png(4097, 1)?).is_none());
         assert!(make_thumbnail(&png(64, 64)?[..40]).is_none());
 
