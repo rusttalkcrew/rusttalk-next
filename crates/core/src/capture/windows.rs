@@ -184,17 +184,23 @@ fn record(
     stop: &AtomicBool,
 ) -> Result<()> {
     let _mta = Mta::enter()?;
-    let pid = id
-        .split_once(':')
-        .context("invalid audio process ID")?
-        .0
-        .parse()?;
-    // Hold the process handle so a recycled PID cannot redirect the selected capture.
-    let process = process(pid).context("selected audio process exited")?;
-    ensure!(
-        process_id(pid, &process)? == id,
-        "selected audio process exited"
-    );
+    // All system audio is every process except ours, so the call never echoes.
+    let (pid, include, process) = if id == super::SYSTEM {
+        (std::process::id(), false, None)
+    } else {
+        let pid = id
+            .split_once(':')
+            .context("invalid audio process ID")?
+            .0
+            .parse()?;
+        // Hold the process handle so a recycled PID cannot redirect the selected capture.
+        let process = process(pid).context("selected audio process exited")?;
+        ensure!(
+            process_id(pid, &process)? == id,
+            "selected audio process exited"
+        );
+        (pid, true, Some(process))
+    };
 
     let format = WaveFormat::new(
         16,
@@ -204,7 +210,7 @@ fn record(
         CHANNELS as usize,
         None,
     );
-    let mut client = AudioClient::new_application_loopback_client(pid, true)?;
+    let mut client = AudioClient::new_application_loopback_client(pid, include)?;
     client.initialize_client(
         &format,
         Direction::Capture,
@@ -221,9 +227,11 @@ fn record(
     let mut frame = [0; FRAME_BYTES];
     client.start_stream()?;
     if ready.send(Ok(())).is_ok() {
-        while !stop.load(Relaxed)
-            && unsafe { WaitForSingleObject(HANDLE(process.as_raw_handle()), 0) } == WAIT_TIMEOUT
-        {
+        let running = |process: &OwnedHandle| {
+            let state = unsafe { WaitForSingleObject(HANDLE(process.as_raw_handle()), 0) };
+            state == WAIT_TIMEOUT
+        };
+        while !stop.load(Relaxed) && process.as_ref().is_none_or(running) {
             match event.wait_for_event(50) {
                 Ok(()) | Err(wasapi::WasapiError::EventTimeout) => (),
                 Err(error) => return Err(error.into()),

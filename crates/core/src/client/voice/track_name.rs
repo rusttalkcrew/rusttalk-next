@@ -12,6 +12,8 @@ use crate::{
 
 pub(super) const APP_AUDIO: &[u8] = b"rusttalk-track-name-v1";
 pub(super) const SCREEN: &[u8] = b"rusttalk-screen-track-name-v1";
+/// Sound that is part of a screen share, heard only by people watching it.
+pub(super) const STREAM_AUDIO: &[u8] = b"rusttalk-stream-audio-name-v1";
 const MAX_NAME_BYTES: usize = 128;
 // "-9223372036854775808." plus base64url of nonce, name and tag.
 const MAX_WIRE_BYTES: usize = 21 + (MAX_NAME_BYTES + 24 + 16).div_ceil(3) * 4;

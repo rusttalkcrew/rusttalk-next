@@ -17,7 +17,10 @@ pub const SAMPLE_RATE: u32 = 48_000;
 pub const CHANNELS: u32 = 2;
 pub const FRAME_SAMPLES: usize = (SAMPLE_RATE / 100 * CHANNELS) as usize;
 
-/// A currently playing local audio stream. The opaque ID is local to the OS.
+/// The ID of "All system audio": everything this computer plays except RustTalk itself.
+pub const SYSTEM: &str = "system";
+
+/// A currently playing local audio stream, or `SYSTEM`. The opaque ID is local to the OS.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 pub struct App {
     pub id: String,

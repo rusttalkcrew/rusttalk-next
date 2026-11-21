@@ -4,10 +4,14 @@ mod control;
 mod live_file;
 mod screen;
 mod stats;
+mod stream_audio;
 mod track_name;
 mod watch;
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{Arc, atomic::Ordering::Relaxed},
+};
 
 use anyhow::{Context, Result, ensure};
 use hkdf::Hkdf;
@@ -19,7 +23,7 @@ use livekit::{
     },
     options::{AudioEncoding, TrackPublishOptions},
     participant::ParticipantState,
-    prelude::{LocalTrack, RemoteTrack, RemoteTrackPublication, TrackKind},
+    prelude::{LocalTrack, RemoteTrack},
     rtc_engine::SimulateScenario,
     webrtc::audio_source::RtcAudioSource,
 };
@@ -170,6 +174,7 @@ impl KeyClient<'_> {
         let url = signaling_url(server)?;
         let name_keys = self.name_keys(channel, track_name::APP_AUDIO);
         let screen_names = self.name_keys(channel, track_name::SCREEN);
+        let stream_names = self.name_keys(channel, track_name::STREAM_AUDIO);
         let control_keys = self.name_keys(channel, control::LABEL);
         let watch_keys = self.name_keys(channel, watch::LABEL);
         let key = media_key(key, &server.server_id, channel, epoch);
@@ -195,11 +200,21 @@ impl KeyClient<'_> {
             .context("connect to pinned LiveKit room")?;
         for participant in room.remote_participants().into_values() {
             for publication in participant.track_publications().into_values() {
-                subscribe_audio(&publication);
+                stream_audio::subscribe_audio(&publication, &name_keys, &stream_names, false);
             }
         }
+        let room = Arc::new(room);
+        let grants = Arc::new(stream_audio::Reconciler::new(stream_audio::RoomGrants {
+            room: room.clone(),
+            keys: std::sync::Mutex::new(stream_audio::GrantKeys {
+                stream_names: stream_names.clone(),
+                watch_keys: watch_keys.clone(),
+            }),
+            sound: Default::default(),
+        }));
+        let grants_task = tokio::spawn(grants.clone().run(room.subscribe()));
         Ok(VoiceRoom {
-            room: Arc::new(room),
+            room,
             events,
             server: server.clone(),
             channel: *channel,
@@ -208,10 +223,13 @@ impl KeyClient<'_> {
             provider,
             name_keys,
             screen_names,
+            stream_names,
             control_keys,
             watch_keys,
             stats: stats::Sampler::default(),
             files: live_file::LiveFiles::default(),
+            grants,
+            _grants_task: stream_audio::AbortOnDrop(grants_task),
         })
     }
 
@@ -275,20 +293,15 @@ pub struct VoiceRoom {
     provider: KeyProvider,
     name_keys: HashMap<i64, Key>,
     screen_names: HashMap<i64, Key>,
+    stream_names: HashMap<i64, Key>,
     /// Seal remote control messages; only the current epoch's is used.
     control_keys: HashMap<i64, Key>,
     watch_keys: HashMap<i64, Key>,
     stats: stats::Sampler,
     files: live_file::LiveFiles,
-}
-
-fn subscribe_audio(publication: &RemoteTrackPublication) {
-    if publication.kind() == TrackKind::Audio
-        && publication.encryption_type() == EncryptionType::Gcm
-        && !publication.is_desired()
-    {
-        publication.set_subscribed(true);
-    }
+    /// Keeps who may receive our tracks up to date; see `stream_audio`.
+    grants: Arc<stream_audio::Reconciler<stream_audio::RoomGrants>>,
+    _grants_task: stream_audio::AbortOnDrop,
 }
 
 impl VoiceRoom {
@@ -324,8 +337,17 @@ impl VoiceRoom {
         let (epoch, key) = keys.current_key(scope(&self.channel))?;
         self.name_keys = keys.name_keys(&self.channel, track_name::APP_AUDIO);
         self.screen_names = keys.name_keys(&self.channel, track_name::SCREEN);
+        self.stream_names = keys.name_keys(&self.channel, track_name::STREAM_AUDIO);
         self.control_keys = keys.name_keys(&self.channel, control::LABEL);
         self.watch_keys = keys.name_keys(&self.channel, watch::LABEL);
+        // Tracks published under the new epoch's names could not be told apart before,
+        // and a viewer's watch announcement may only open now.
+        self.reconcile_audio();
+        *self.grants.grants.keys.lock().expect("grant keys") = stream_audio::GrantKeys {
+            stream_names: self.stream_names.clone(),
+            watch_keys: self.watch_keys.clone(),
+        };
+        self.grants.wake();
         if epoch <= self.epoch {
             return Ok(false);
         }
@@ -384,7 +406,7 @@ impl VoiceRoom {
                     tracing::warn!("refused unencrypted voice track");
                     continue;
                 }
-                RoomEvent::TrackPublished { publication, .. } => subscribe_audio(publication),
+                RoomEvent::TrackPublished { .. } => self.reconcile_audio(),
                 RoomEvent::LocalTrackPublished { .. } | RoomEvent::LocalTrackRepublished { .. } => {
                     self.switch_senders();
                 }
@@ -494,13 +516,41 @@ impl VoiceRoom {
             .await
     }
 
-    /// The display name for a subscribed app track, if this is app audio.
+    /// Publish one app (or all system audio) as part of our screen share: only people
+    /// watching the share receive it. Feed PCM after this succeeds.
+    pub async fn publish_stream_audio(
+        &self,
+        name: &str,
+        source: NativeAudioSource,
+    ) -> Result<LocalTrackPublication> {
+        let key = self
+            .stream_names
+            .get(&self.epoch)
+            .context("missing current media key")?;
+        let name = track_name::encrypt(key, track_name::STREAM_AUDIO, self.epoch, name)?;
+        // Keep it from people who don't watch before it exists.
+        let _publishing = stream_audio::Publishing::start(&self.grants.grants.sound.publishing);
+        self.grants.apply(false).await?;
+        let publication = self
+            .publish_audio_track(&name, source, TrackSource::ScreenshareAudio)
+            .await?;
+        // Stays restricted until we unpublish our last stream sound ourselves, also while
+        // a bitrate change or a reconnect republishes it.
+        self.grants.grants.sound.wanted.store(true, Relaxed);
+        Ok(publication)
+    }
+
+    /// The display name for a subscribed app track, if this is app or stream audio.
     pub fn app_audio_name(&self, track: &RemoteAudioTrack) -> Option<String> {
         if track.source() != TrackSource::ScreenshareAudio {
             return None;
         }
+        let name = track.name();
         Some(
-            track_name::decrypt(&self.name_keys, track_name::APP_AUDIO, &track.name())
+            track_name::decrypt(&self.name_keys, track_name::APP_AUDIO, &name)
+                .or_else(|| {
+                    track_name::decrypt(&self.stream_names, track_name::STREAM_AUDIO, &name)
+                })
                 .unwrap_or_else(|| {
                     tracing::warn!("could not decrypt shared audio track name");
                     "Shared audio".into()
@@ -568,7 +618,17 @@ impl VoiceRoom {
 
     /// Stop an audio publication, such as one shared app, while keeping the voice session open.
     pub async fn unpublish_audio(&self, sid: &TrackSid) -> Result<()> {
-        self.room.local_participant().unpublish_track(sid).await?;
+        let local = self.room.local_participant();
+        local.unpublish_track(sid).await?;
+        let sound_left = local.track_publications().values().any(|p| {
+            p.source() == TrackSource::ScreenshareAudio
+                && track_name::decrypt(&self.stream_names, track_name::STREAM_AUDIO, &p.name())
+                    .is_some()
+        });
+        if !sound_left {
+            self.grants.grants.sound.wanted.store(false, Relaxed);
+            self.grants.wake();
+        }
         Ok(())
     }
 

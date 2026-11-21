@@ -2,6 +2,8 @@
 mod linux;
 #[cfg(target_os = "linux")]
 mod screen;
+#[cfg(target_os = "linux")]
+mod system;
 
 fn main() -> std::process::ExitCode {
     #[cfg(target_os = "linux")]

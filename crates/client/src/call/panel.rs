@@ -2,7 +2,7 @@
 //! quality and hang-up, one row of share buttons, the "now sharing" card above it
 //! and the connection popup.
 
-use std::collections::VecDeque;
+use std::{collections::VecDeque, sync::Mutex};
 
 use eframe::egui::{
     self, Align, Color32, CursorIcon, Frame, Grid, Label, Layout, Margin, Response, RichText, Role,
@@ -157,6 +157,8 @@ enum Stop {
     /// Pick another screen to share.
     Change,
     App(String),
+    /// The screen share's sound changed to these.
+    Sound(Vec<App>),
 }
 
 /// The voice panel, while in a voice room.
@@ -192,6 +194,13 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
         Quality::Unknown
     };
     let stopped = sharing_card(ui, &home.voice);
+    if let Some(Stop::Sound(apps)) = &stopped
+        && let Some(server) = (home.voice.call.as_ref())
+            .and_then(|call| home.servers.iter().find(|s| s.address == call.server))
+    {
+        home.voice.stream_audio = apps.clone();
+        server.send(Command::StreamAudio(apps.clone()));
+    }
     let mut live = None;
     let mut leave_now = false;
     let mut share = Vec::new();
@@ -607,7 +616,9 @@ fn app_button(
     } else {
         Look::On(ui::colors(ui).success)
     };
-    let usable = voice.supported && enabled;
+    // Live, the stream carries the sound: pick it under t!("call.now_sharing").
+    let live = voice.sharing != Sharing::Off;
+    let usable = voice.supported && enabled && !live;
     let button = ui
         .add_enabled_ui(usable, |ui| {
             ui::icon_button(ui, "🎵", t!("call.share_app_audio"), look, size)
@@ -621,6 +632,8 @@ fn app_button(
         })
     } else if !can_talk {
         button.on_disabled_hover_text(t!("call.no_talk_here"))
+    } else if live {
+        button.on_disabled_hover_text(t!("call.sound_in_stream"))
     } else {
         button
     };
@@ -633,37 +646,11 @@ fn app_button(
     let mut refresh = false;
     ui::menu_above(&button, |m| {
         m.caption(t!("call.share_app_audio"));
-        match &*audio::lock(&voice.apps) {
-            Listing::Loading => {
-                m.ui().horizontal(|ui| {
-                    ui.add_space(10.0);
-                    ui.spinner();
-                    ui.weak(t!("call.looking_for_apps"));
-                });
-            }
-            Listing::Failed => empty(m.ui(), t!("call.apps_failed")),
-            Listing::Found(apps) if apps.is_empty() => {
-                empty(m.ui(), t!("call.apps_empty"));
-            }
-            Listing::Found(apps) => {
-                let c = ui::colors(m.ui());
-                // A soft pulse on each dot: these apps are playing right now.
-                let time = m.ui().input(|input| input.time);
-                let pulse = 0.65 + 0.35 * (time * 3.0).sin().abs() as f32;
-                m.ui().ctx().request_repaint_after_secs(0.05);
-                for app in apps {
-                    let was = voice.shares.iter().any(|shared| shared.id == app.id);
-                    let item = ui::Item::dot(c.success.gamma_multiply(pulse), &app.name)
-                        .hint(t!("call.playing"))
-                        .checked(was);
-                    if m.add(item).clicked() {
-                        changes.push((app.clone(), !was));
-                    }
-                }
-            }
+        let (picked, again) = sound_rows(m, &voice.apps, &voice.shares, false);
+        refresh = again;
+        if let Some(picked) = picked {
+            changes = diff(&voice.shares, &picked);
         }
-        m.separator();
-        refresh = m.item("🔄", t!("call.refresh")).clicked();
         if !voice.shares.is_empty() && m.danger("⏹", t!("call.stop_sharing_all")).clicked() {
             changes.extend(voice.shares.iter().map(|app| (app.clone(), false)));
         }
@@ -672,6 +659,118 @@ fn app_button(
         list(ui);
     }
     changes
+}
+
+/// The screen share's sound picker under `button`: t!("call.no_sound"), all system
+/// audio or apps. Returns the new pick and whether to list the apps again.
+pub(super) fn sound_menu(
+    button: &Response,
+    apps: &Mutex<Listing<App>>,
+    chosen: &[App],
+) -> (Option<Vec<App>>, bool) {
+    ui::menu_above(button, |m| {
+        m.caption(t!("call.stream_sound"));
+        sound_rows(m, apps, chosen, true)
+    })
+    .unwrap_or_default()
+}
+
+/// t!("call.all_system_audio") and each app playing now, with a check on the `chosen`
+/// ones, then a refresh. `none` adds t!("call.no_sound") on top.
+fn sound_rows(
+    m: &mut ui::Menu,
+    apps: &Mutex<Listing<App>>,
+    chosen: &[App],
+    none: bool,
+) -> (Option<Vec<App>>, bool) {
+    let mut picked = None;
+    if none
+        && m.add(ui::Item::new("🔇", t!("call.no_sound")).picked(chosen.is_empty()))
+            .clicked()
+    {
+        picked = Some(Vec::new());
+    }
+    let system = share::system();
+    let on = chosen.iter().any(share::is_system);
+    let item = ui::Item::new("🔊", &system.name)
+        .hint(t!("call.all_system_audio_hint"))
+        .checked(on);
+    if m.add(item).clicked() {
+        picked = Some(pick(chosen, &system));
+    }
+    m.separator();
+    match &*audio::lock(apps) {
+        Listing::Loading => {
+            m.ui().horizontal(|ui| {
+                ui.add_space(10.0);
+                ui.spinner();
+                ui.weak(t!("call.looking_for_apps"));
+            });
+        }
+        Listing::Failed => empty(m.ui(), t!("call.apps_failed")),
+        Listing::Found(apps) if apps.is_empty() => {
+            empty(m.ui(), t!("call.apps_empty"));
+        }
+        Listing::Found(apps) => {
+            let c = ui::colors(m.ui());
+            // A soft pulse on each dot: these apps are playing right now.
+            let time = m.ui().input(|input| input.time);
+            let pulse = 0.65 + 0.35 * (time * 3.0).sin().abs() as f32;
+            m.ui().ctx().request_repaint_after_secs(0.05);
+            for app in apps {
+                let was = chosen.iter().any(|shared| shared.id == app.id);
+                let item = ui::Item::dot(c.success.gamma_multiply(pulse), &app.name)
+                    .hint(t!("call.playing"))
+                    .checked(was);
+                if m.add(item).clicked() {
+                    picked = Some(pick(chosen, app));
+                }
+            }
+        }
+    }
+    m.separator();
+    let refresh = m.item("🔄", t!("call.refresh")).clicked();
+    (picked, refresh)
+}
+
+/// Toggle `app` in `chosen`. All system audio already holds every app, so it is
+/// either the only pick or not picked at all.
+fn pick(chosen: &[App], app: &App) -> Vec<App> {
+    let on = chosen.iter().any(|c| c.id == app.id);
+    if share::is_system(app) {
+        return if on { Vec::new() } else { vec![app.clone()] };
+    }
+    let mut next: Vec<_> = (chosen.iter())
+        .filter(|c| !share::is_system(c) && c.id != app.id)
+        .cloned()
+        .collect();
+    if !on {
+        next.push(app.clone());
+    }
+    next
+}
+
+/// What to turn off and on to get from `before` to `after`.
+fn diff(before: &[App], after: &[App]) -> Vec<(App, bool)> {
+    let missing = |list: &[App], app: &App| !list.iter().any(|a| a.id == app.id);
+    (before.iter().filter(|a| missing(after, a)))
+        .map(|a| (a.clone(), false))
+        .chain(
+            after
+                .iter()
+                .filter(|a| missing(before, a))
+                .map(|a| (a.clone(), true)),
+        )
+        .collect()
+}
+
+/// The stream's sound in a few words, for its picker button.
+pub(super) fn sound_summary(chosen: &[App]) -> String {
+    if chosen.is_empty() {
+        return t!("call.no_sound").into();
+    }
+    let names: Vec<_> = chosen.iter().map(|app| app.name.as_str()).collect();
+    names.join(", ")
 }
 
 /// A line of help in the app picker when there is nothing to pick.
@@ -715,6 +814,31 @@ fn sharing_card(ui: &mut Ui, voice: &Voice) -> Option<Stop> {
                     stop = Some(which);
                 }
                 if screen_row && voice.sharing != Sharing::Starting {
+                    let (glyph, look) = if voice.stream_audio.is_empty() {
+                        ("🔇", Look::Plain)
+                    } else {
+                        ("🔊", Look::On(ui::colors(ui).success))
+                    };
+                    let tip = format!(
+                        "{}: {}",
+                        t!("call.stream_sound"),
+                        sound_summary(&voice.stream_audio)
+                    );
+                    let sound = ui
+                        .add_enabled_ui(voice.supported, |ui| {
+                            ui::icon_button(ui, glyph, &tip, look, STOP_SIZE)
+                        })
+                        .inner;
+                    if sound.clicked() {
+                        fill(ui.ctx(), &voice.apps, "apps", share::list);
+                    }
+                    let (picked, refresh) = sound_menu(&sound, &voice.apps, &voice.stream_audio);
+                    if let Some(picked) = picked {
+                        stop = Some(Stop::Sound(picked));
+                    }
+                    if refresh {
+                        fill(ui.ctx(), &voice.apps, "apps", share::list);
+                    }
                     let picking = voice.sharing == Sharing::Changing;
                     let change = ui.add_enabled_ui(!picking, |ui| {
                         ui::icon_button(ui, "🔄", t!("call.change_share"), Look::Plain, STOP_SIZE)
@@ -786,6 +910,47 @@ mod tests {
         assert_eq!(link.loss, Some(0.0));
         link.push(&stats(None, None, None));
         assert_eq!(link.loss, None);
+    }
+
+    fn app(id: &str) -> App {
+        App {
+            id: id.into(),
+            name: id.into(),
+        }
+    }
+
+    #[test]
+    fn system_audio_and_apps_exclude_each_other() {
+        // Picks by ID: "system" is all system audio.
+        let apps = |ids: &[&str]| -> Vec<App> {
+            (ids.iter())
+                .map(|id| {
+                    if *id == "system" {
+                        share::system()
+                    } else {
+                        app(id)
+                    }
+                })
+                .collect()
+        };
+        let ids = |apps: Vec<App>| -> Vec<String> { apps.into_iter().map(|a| a.id).collect() };
+        let toggle = |chosen: &[&str], id: &str| ids(pick(&apps(chosen), &apps(&[id])[0]));
+        assert_eq!(toggle(&[], "a"), ["a"]);
+        assert_eq!(toggle(&["a"], "b"), ["a", "b"]);
+        assert_eq!(toggle(&["a", "b"], "a"), ["b"]);
+        // All system audio replaces the apps, and an app replaces it.
+        assert_eq!(toggle(&["a", "b"], "system"), ["system"]);
+        assert_eq!(toggle(&["system"], "a"), ["a"]);
+        assert!(toggle(&["system"], "system").is_empty());
+        // The app picker turns those into stops and starts.
+        let changes: Vec<_> = diff(&apps(&["a", "b"]), &apps(&["system"]))
+            .into_iter()
+            .map(|(app, on)| (app.id, on))
+            .collect();
+        let expected = [("a", false), ("b", false), ("system", true)];
+        assert_eq!(changes, expected.map(|(id, on)| (id.to_owned(), on)));
+        assert_eq!(sound_summary(&[]), "No sound");
+        assert_eq!(sound_summary(&apps(&["Spotify", "Game"])), "Spotify, Game");
     }
 
     #[test]

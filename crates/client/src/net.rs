@@ -131,8 +131,11 @@ pub enum Command {
     ShareApp(App),
     /// Stop sharing an app, by its ID.
     StopApp(String),
-    /// Share a screen or window, or open the system picker (Linux).
-    ShareScreen(screen::Target, screen::Options),
+    /// Share a screen or window, or open the system picker (Linux), with the sound of
+    /// these apps (or all system audio) as part of the stream.
+    ShareScreen(screen::Target, screen::Options, Vec<App>),
+    /// Change what sound the screen share carries.
+    StreamAudio(Vec<App>),
     StopScreen,
     /// Pick another screen or window while sharing, keeping the quality; no reconnect.
     ChangeScreen(screen::Target),
@@ -275,8 +278,10 @@ pub enum Update {
     /// Everyone in one voice channel.
     Room(Url, Id, Vec<Peer>, Option<crate::sounds::Snapshot>),
     CallVideoStopped(Url, Id, livekit::prelude::TrackSid),
-    /// Sharing this app stopped or never started.
+    /// Sharing this app on its own stopped or never started.
     AppStopped(String),
+    /// What the screen share's sound is now, after a change or a failure.
+    StreamAudio(Vec<App>),
     /// This device's screen share went live (`true`), or stopped or never started.
     Sharing(bool),
     /// This device's camera stopped publishing or never started.
@@ -1490,7 +1495,9 @@ async fn on_command(
             }
         }
         Command::ShareApp(app) => voice::share_app(ctx, url, client, state, app).await?,
-        Command::ShareScreen(target, options) => voice::pick_screen(ctx, state, target, options)?,
+        Command::ShareScreen(target, options, audio) => {
+            voice::pick_screen(ctx, state, target, options, audio)?;
+        }
         Command::ShareCamera(source, options) => {
             voice::share_camera(ctx, url, client, state, source, options).await?;
         }
@@ -1498,6 +1505,7 @@ async fn on_command(
         | Command::SyncVoiceStatus
         | Command::StopApp(_)
         | Command::StopScreen
+        | Command::StreamAudio(_)
         | Command::ChangeScreen(_)
         | Command::Watch(..)
         | Command::StopCamera

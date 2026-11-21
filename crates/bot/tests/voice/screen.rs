@@ -11,7 +11,7 @@ use livekit::{
     prelude::RemoteTrack,
 };
 use reqwest::Method;
-use rusttalk_bot::screen;
+use rusttalk_bot::{screen, voice::hear_tone};
 use rusttalk_core::{
     client::{
         KeyClient, Server,
@@ -28,12 +28,18 @@ pub(super) async fn exercise(
     mut listener: VoiceRoom,
     server: &Server,
     c: &mut KeyClient<'_>,
+    newcomer: &mut KeyClient<'_>,
     channel_id: &[u8; 32],
 ) -> Result<VoiceRoom> {
     assert!(a.can_share_screen() && !listener.can_share_screen());
     let source = screen::source();
     let sid = a
         .publish_screen(screen::NAME, screen::options(), source.clone())
+        .await?
+        .sid();
+    // The share's sound: only people watching the share may receive it.
+    let sound = a
+        .publish_stream_audio(STREAM_SOUND, rusttalk_core::capture::audio_source())
         .await?
         .sid();
     let result = async {
@@ -45,16 +51,38 @@ pub(super) async fn exercise(
         tokio::time::timeout(LIMIT, screen::hear(b, TrackSource::Screenshare))
             .await
             .context("screen pattern with current key")??;
+        // Watching is announced, as the app does once the video arrives; only then does
+        // the publisher allow the sound.
+        b.set_video_watches(std::slice::from_ref(&sid)).await?;
+        tokio::time::timeout(LIMIT, stream_sound(b, true))
+            .await
+            .context("stream sound arriving with the watched share")??;
+        // A member who joins now is not on the permission list yet, but must still
+        // receive everything except the share's sound.
+        let mut late = newcomer.join_voice(channel_id).await?;
+        tokio::time::timeout(
+            LIMIT,
+            hear_tone(&mut late, Some(&a.identity()), super::A_HZ),
+        )
+        .await
+        .context("a newcomer hearing the sharer's microphone")??;
+        ensure!(
+            !(late.remote_audio_tracks().iter()).any(|(_, sid, _)| sid == &sound),
+            "a newcomer not watching received the stream's sound"
+        );
+        late.leave().await?;
         if let Ok(error) = tokio::time::timeout(Duration::from_millis(400), async {
             while let Some(event) = listener.next_event().await {
-                if matches!(
-                    event,
-                    RoomEvent::TrackSubscribed {
-                        track: RemoteTrack::Video(_),
-                        ..
+                if let RoomEvent::TrackSubscribed { track, .. } = event {
+                    match track {
+                        RemoteTrack::Video(_) => return "an idle viewer received video",
+                        RemoteTrack::Audio(audio)
+                            if audio.source() == TrackSource::ScreenshareAudio =>
+                        {
+                            return "an idle viewer received the stream's sound";
+                        }
+                        RemoteTrack::Audio(_) => {}
                     }
-                ) {
-                    return "an idle viewer received video";
                 }
             }
             "idle viewer disconnected"
@@ -69,20 +97,49 @@ pub(super) async fn exercise(
                 .iter()
                 .all(|video| video.track.is_none())
         );
+        ensure!(
+            !(listener.remote_audio_tracks().iter())
+                .any(|(_, _, track)| track.source() == TrackSource::ScreenshareAudio),
+            "an idle viewer holds the stream's sound"
+        );
         listener.leave().await?;
-        wrong_key(server, c, channel_id, a, &sid).await?;
+        wrong_key(server, c, channel_id, a, &sid, &sound).await?;
         b.set_subscribed(&sid, false)?;
+        b.set_video_watches(&[]).await?;
+        tokio::time::timeout(LIMIT, stream_sound(b, false))
+            .await
+            .context("stream sound leaving with the share")??;
         println!(
             "W10 encrypted 320x180 synthetic screen, decrypted name and color bars, no video without subscription or with the wrong key"
         );
+        println!("Stream sound received only while watching the share");
         Ok::<_, anyhow::Error>(())
     };
     tokio::select! {
         result = result => result?,
         result = screen::send(source) => result?,
     }
+    a.unpublish_audio(&sound).await?;
     a.unpublish_video(&sid).await?;
     c.join_voice(channel_id).await
+}
+
+const STREAM_SOUND: &str = "All system audio";
+
+/// Wait until `room` holds (or no longer holds) the share's decrypted sound track.
+async fn stream_sound(room: &mut VoiceRoom, held: bool) -> Result<()> {
+    loop {
+        let found = (room.remote_audio_tracks().iter()).any(|(_, _, track)| {
+            room.app_audio_name(track).as_deref() == Some(STREAM_SOUND)
+                && track.name() != STREAM_SOUND
+        });
+        if found == held {
+            return Ok(());
+        }
+        room.next_event()
+            .await
+            .context("room closed waiting for the stream's sound")?;
+    }
 }
 
 async fn wrong_key(
@@ -91,6 +148,7 @@ async fn wrong_key(
     channel: &[u8; 32],
     sender: &VoiceRoom,
     sid: &TrackSid,
+    sound: &TrackSid,
 ) -> Result<()> {
     let encoded = rusttalk_core::auth::encode(channel);
     let reply: serde_json::Value = c
@@ -133,15 +191,24 @@ async fn wrong_key(
             .remove(sid)
             .context("missing screen publication")?;
         publication.set_subscribed(true);
+        // Like an older client that takes every audio track, without saying it watches.
+        peer.track_publications()
+            .remove(sound)
+            .context("missing stream sound publication")?
+            .set_subscribed(true);
         let mut video = tokio::time::timeout(LIMIT, async {
             while let Some(event) = events.recv().await {
-                if let RoomEvent::TrackSubscribed {
-                    track: RemoteTrack::Video(track),
-                    ..
-                } = event
-                    && &track.sid() == sid
-                {
-                    return Ok(NativeVideoStream::new(track.rtc_track()));
+                match event {
+                    RoomEvent::TrackSubscribed {
+                        track: RemoteTrack::Video(track),
+                        ..
+                    } if &track.sid() == sid => {
+                        return Ok(NativeVideoStream::new(track.rtc_track()));
+                    }
+                    RoomEvent::TrackSubscribed { track, .. } if &track.sid() == sound => {
+                        anyhow::bail!("a member not watching received the stream's sound");
+                    }
+                    _ => {}
                 }
             }
             anyhow::bail!("event stream closed")
@@ -154,6 +221,24 @@ async fn wrong_key(
                 .is_err(),
             "wrong-key viewer decoded video or its stream closed"
         );
+        // The publisher allows the sound only to members who announced they watch.
+        if let Ok(subscribed) = tokio::time::timeout(Duration::from_secs(2), async {
+            while let Some(event) = events.recv().await {
+                if let RoomEvent::TrackSubscribed { track, .. } = event
+                    && &track.sid() == sound
+                {
+                    return true;
+                }
+            }
+            false
+        })
+        .await
+        {
+            ensure!(
+                !subscribed,
+                "a member not watching received the stream's sound"
+            );
+        }
         let (epoch, channel_key) = c.current_key(Scope {
             kind: Kind::Channel,
             id: *channel,
