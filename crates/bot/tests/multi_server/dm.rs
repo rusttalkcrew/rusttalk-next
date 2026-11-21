@@ -6,7 +6,7 @@ use anyhow::{Context, Result, ensure};
 use reqwest::{Method, StatusCode};
 use rusttalk_core::{
     auth::encode,
-    client::{KeyClient, MessageBody, Server},
+    client::{FriendSignal, KeyClient, MessageBody, Server},
     keys::{self, Scope},
 };
 use serde_json::json;
@@ -159,6 +159,53 @@ pub async fn replicas(
         "W70 merged DM history converged after server B came back, and copies stay bound to their server"
     );
     Ok(dms)
+}
+
+/// W71: a friend request and its answer travel as friend messages inside the DM, one
+/// ID on both servers. Servers store them like any other DM message.
+pub async fn friends(
+    owner: Pair<'_, '_, '_>,
+    peer: Pair<'_, '_, '_>,
+    dms: [Scope; 2],
+) -> Result<()> {
+    let signal = |friend| MessageBody {
+        friend: Some(friend),
+        ..Default::default()
+    };
+    let request = *keys::random_key()?;
+    owner
+        .0
+        .post_message(&dms[0].id, request, &signal(FriendSignal::Request))
+        .await?;
+    owner
+        .1
+        .post_message(&dms[1].id, request, &signal(FriendSignal::Request))
+        .await?;
+    newest_request(peer.0, dms[0], request).await?;
+    newest_request(peer.1, dms[1], request).await?;
+    let accept = *keys::random_key()?;
+    peer.0
+        .post_message(&dms[0].id, accept, &signal(FriendSignal::Accept))
+        .await?;
+    let page = owner.0.message_page(&dms[0].id, None, 1).await?;
+    ensure!(
+        owner.0.open_message(&dms[0].id, &page[0]).await?.friend == Some(FriendSignal::Accept),
+        "the friend answer did not arrive"
+    );
+    println!("W71 two bots became friends over their DM, as ordinary encrypted DM messages");
+    Ok(())
+}
+
+/// The newest message in a DM is this friend request, with no text.
+async fn newest_request(client: &mut KeyClient<'_>, dm: Scope, id: [u8; 32]) -> Result<()> {
+    let page = client.message_page(&dm.id, None, 1).await?;
+    let body = client.open_message(&dm.id, &page[0]).await?;
+    ensure!(
+        page[0].id == id && body.friend == Some(FriendSignal::Request),
+        "the friend request did not arrive as one on both servers"
+    );
+    ensure!(body.text.is_empty(), "a friend request carried text");
+    Ok(())
 }
 
 /// After the peer left server B, the DM still works over server A. Neither server

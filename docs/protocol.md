@@ -363,6 +363,45 @@ separately. Without a shared server, the app keeps showing what it loaded and
 disables sending. The API is unchanged and still sees each copy as a separate
 DM, so older apps show one DM per server.
 
+### Friends
+
+Friendship is only between the two apps; the API has no friend routes. A
+request or answer is a friend message (see [Crypto](crypto.md#messages)) in
+the DM, sent like any DM message: one random ID, posted to every shared server
+that is online. So a request reaches only people the sender shares a server
+with, like a DM. The kinds are:
+
+| Kind | Sender's list | Receiver's list |
+| --- | --- | --- |
+| Request | Outgoing | Incoming. If the receiver had asked too, both become friends. If they were friends already, the receiver answers with Accept |
+| Accept | Friend | Friend, if it had asked |
+| Decline | None | None, if it had asked |
+| Cancel | None | None, if it was asked |
+| Remove | None | None, if they were friends |
+
+Blocking someone sends Remove, Cancel or Decline as fits, so it looks like one
+of those, and then ignores their friend messages. Each list entry keeps the
+server time of the newest friend message handled from that person and the IDs
+of the last eight. A copy on another server, a reload, or an older message
+loaded later (pages load newest first) changes nothing. Applying the same
+action twice changes nothing either. The app reads each DM's newest page when
+it connects, so requests sent while it was away show up; one older than that
+page shows when the chat is scrolled back.
+
+The list itself is in the person's sync blob under `contacts`: per hex person
+ID, `{relation, name, changed, since, seen}`. `relation` is `none`,
+`outgoing`, `incoming`, `friend` or `blocked`; `name` is the last name seen;
+`changed` is when the relation last changed, in Unix milliseconds. When two
+devices changed the same person, the later `changed` wins, whichever blob is
+newer (see [Sync](#sync)).
+
+"Allow DMs from: Friends only" is a synced setting (`friends_only`) that the
+receiving app enforces: DMs from people who aren't friends (or asked by this
+person) go under "Message requests", without notifications or unread marks.
+Blocked people's DMs are hidden and never notify. The servers still deliver
+these messages; refusing them there would mean telling the server who is a
+friend.
+
 ## Messages
 
 These routes require a bearer header and apply to text channels, voice channels and DMs.
@@ -745,7 +784,8 @@ Core takes the highest authenticated version from the member servers it can
 reach, breaking ties between replicas by lexicographically greatest origin.
 Merge works per origin and per field: the newer snapshot wins for anything
 both sides mention, local wins ties, and entries present on only one side are
-retained. Leaving a server records its origin in `left`, and removing a
+retained. A contact that both sides hold with a `changed` time keeps the later
+change instead. Leaving a server records its origin in `left`, and removing a
 setting or contact sets it to `null`, so an older or replayed blob cannot bring
 it back. Pin conflicts are reported and never adopted; local and saved pins
 stay. Devices persist their snapshot and version so a server cannot roll them

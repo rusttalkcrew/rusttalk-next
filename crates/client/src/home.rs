@@ -17,7 +17,7 @@ use eframe::egui::{
 };
 use rusttalk_core::{
     auth::{Fingerprint, InviteLink, decode},
-    client::{MAX_TEXT_CHARS, voice::LiveFileEvent},
+    client::{FriendSignal, MAX_TEXT_CHARS, voice::LiveFileEvent},
     identity::{DeviceIdentity, fingerprint},
     index::https_url,
     presence::{Presence, Status as Choice},
@@ -36,6 +36,7 @@ use crate::{
         picker::{self, Picked, Picker},
     },
     files::{self, Ask, Files},
+    friends::{Act, Friends, Relation},
     net::{
         Admin, AdminUpdate, Admission, Command, Compatibility, Draft, Listed, Net, PAGE_SIZE,
         Preview, Update,
@@ -61,6 +62,7 @@ const MESSAGE_AVATAR: f32 = 38.0;
 const STICKER_SIZE: f32 = 160.0;
 const TOOLBAR_BUTTON: Vec2 = Vec2::new(30.0, 26.0);
 
+mod friends;
 pub mod layout;
 pub mod mentions;
 mod user_bar;
@@ -71,6 +73,9 @@ pub struct Home {
     pub servers: Vec<Server>,
     /// DMs by the other person, merged over every server they were on.
     threads: HashMap<Id, Thread>,
+    /// Friends, requests and blocks; synced between this person's devices only.
+    friends: Friends,
+    friends_tab: friends::Tab,
     view: View,
     invite: String,
     join: Join,
@@ -233,12 +238,16 @@ impl Home {
         let layout = layout::Layout::new(&audio.settings());
         // Without servers yet, start by browsing the directory.
         let browse = servers.is_empty();
+        let mut friends = Friends::default();
+        friends.adopt(&net.contacts());
         Ok(Self {
             identity,
             net,
             view: if browse { View::Find } else { View::Server(0) },
             servers,
             threads: HashMap::new(),
+            friends,
+            friends_tab: friends::Tab::default(),
             invite: String::new(),
             join: Join::Idle(None),
             find: Find {
@@ -390,6 +399,23 @@ impl Home {
         }
     }
 
+    /// Load every DM on a server that is online, so friend requests sent while this
+    /// device was away show up without opening each chat.
+    // shortcut: only each DM's newest page is read; a request buried under a long chat waits
+    // until that chat is scrolled back.
+    fn load_dms(&mut self, index: usize) {
+        let server = &self.servers[index];
+        if server.status != Status::Online {
+            return;
+        }
+        for dm in &server.dir.dms {
+            let thread = self.threads.entry(dm.peer).or_default();
+            if thread.open(&server.address, dm.channel) {
+                server.send(Command::Open(dm.channel));
+            }
+        }
+    }
+
     /// Delete my DM message on every server holding it that is online. A server
     /// that is away deletes it once it shows it again (see `Thread::add`).
     fn delete_dm(&mut self, peer: Id, id: Id, now: f64) {
@@ -470,24 +496,39 @@ impl Home {
 
     /// A new message: mark it unread, count a mention and notify, as the person chose.
     fn arrived(&mut self, ctx: &egui::Context, index: usize, channel: Id, msg: Msg) {
-        let me = self.identity.certificate.person_id();
-        if msg.person == *me || msg.edit_of.is_some() || matches!(msg.body, Body::Notice { .. }) {
+        let me = *self.identity.certificate.person_id();
+        if msg.person == me || msg.edit_of.is_some() || matches!(msg.body, Body::Notice { .. }) {
             return;
         }
         let peer = self.dm_peer(index, &channel);
         let dm = peer.is_some();
-        // A DM arrives once per server holding a copy: count and notify it once.
-        if let Some(peer) = peer
-            && !(self.threads.entry(peer).or_default()).first_arrival(msg.person, msg.id)
-        {
+        // Friend messages only mean something in a DM.
+        if !dm && matches!(msg.body, Body::Friend(_)) {
             return;
         }
+        if let Some(peer) = peer {
+            self.friend_message(peer, &msg);
+            // Nothing from blocked people; friend answers only change the list. With
+            // "friends only", other people's messages wait quietly under requests.
+            let relation = self.friends.relation(&peer);
+            let quiet = match msg.body {
+                _ if relation == Relation::Blocked => true,
+                Body::Friend(signal) => {
+                    signal != FriendSignal::Request || relation != Relation::Incoming
+                }
+                _ => self.friends.is_request(&peer, self.friends_only()),
+            };
+            // A DM arrives once per server holding a copy: count and notify it once.
+            if quiet || !(self.threads.entry(peer).or_default()).first_arrival(msg.person, msg.id) {
+                return;
+            }
+        }
         let server = &self.servers[index];
-        let my_roles = server.member(me).map_or(&[][..], |member| &member.roles);
+        let my_roles = server.member(&me).map_or(&[][..], |member| &member.roles);
         let message = mentions::Message::new(&msg, &server.dir, channel);
         let arrival = Arrival {
             dm,
-            mention: notify::mention(&message, me, my_roles),
+            mention: notify::mention(&message, &me, my_roles),
         };
         let prefs = self.notify.prefs();
         let rule = prefs.effective(&server.address, &channel, dm, notify::unix_now());
@@ -506,6 +547,7 @@ impl Home {
             };
             // Mentions read as names, like in the chat.
             let body = match &msg.body {
+                Body::Friend(_) => t!("notify.friend_request").into(),
                 Body::Text(_) if msg.sticker.is_some() => t!("notify.sent_sticker").into(),
                 Body::Text(text) if !text.trim().is_empty() => {
                     emoji::plain(&message.plain(&server.dir)).into_owned()
@@ -546,14 +588,17 @@ impl Home {
         })
     }
 
-    /// The same for the DMs on every server.
+    /// The same for the DMs on every server; blocked people and message requests don't count.
     fn dm_marks(&self) -> (bool, u32) {
         let (prefs, now) = (self.notify.prefs(), notify::unix_now());
+        let friends_only = self.friends_only();
         let dms = (self.servers.iter()).flat_map(|server| {
             (server.dir.dms.iter()).filter(move |dm| {
                 !prefs
                     .effective(&server.address, &dm.channel, true, now)
                     .muted
+                    && self.friends.relation(&dm.peer) != Relation::Blocked
+                    && !self.friends.is_request(&dm.peer, friends_only)
             })
         });
         dms.fold((false, 0), |(unread, mentions), dm| {
@@ -684,6 +729,7 @@ impl Home {
                     }
                 }
                 server.status = status;
+                self.load_dms(index);
             }
             Update::Compatibility(address, compatibility) => {
                 if let Some(index) = self.index(&address) {
@@ -718,6 +764,7 @@ impl Home {
                         _ => {}
                     }
                     server.dir = *dir;
+                    self.load_dms(index);
                 }
             }
             Update::Left(address) => {
@@ -745,6 +792,9 @@ impl Home {
                     return;
                 };
                 if let Some(peer) = self.dm_peer(index, &channel) {
+                    for msg in &items {
+                        self.friend_message(peer, msg);
+                    }
                     let me = self.servers[index].dir.me;
                     let thread = self.threads.entry(peer).or_default();
                     if older && !items.is_empty() {
@@ -966,6 +1016,7 @@ impl Home {
                 self.synced = device_sync::synced(&adopted);
                 audio.set_settings(adopted);
                 self.notify.adopt(&synced.settings);
+                self.friends.adopt(&synced.contacts);
                 for key in notify::SYNCED {
                     if let Some(value) = synced.settings.get(key) {
                         self.synced.insert(key.into(), value.clone());
@@ -1203,11 +1254,7 @@ pub fn show(ui: &mut Ui, home: &mut Home, updates: &mut crate::update::Updater) 
         .show(ui, |ui| match home.view {
             View::Join => join(ui, home),
             View::Find => find(ui, home),
-            View::Direct(None) => empty(
-                ui,
-                t!("home.direct_messages"),
-                t!("home.direct_messages_empty"),
-            ),
+            View::Direct(None) => friends::view(ui, home),
             View::Direct(Some(peer)) => dm_pane(ui, home, peer),
             View::Server(index) => {
                 if !show_compatibility(ui, home, index) {
@@ -1515,6 +1562,20 @@ fn dm_list(ui: &mut Ui, home: &mut Home) {
         ui.label(ui::title(t!("home.direct_messages")));
     });
     ui.separator();
+    let waiting = (home.friends.contacts())
+        .filter(|(_, contact)| contact.relation == Relation::Incoming)
+        .count();
+    let friends = home.view == View::Direct(None);
+    let label = t!("friends.title");
+    let row = ui::nav_row(ui, "👥", label, friends, Role::Button, label);
+    if waiting > 0 {
+        let at = egui::pos2(row.rect.right() - 16.0, row.rect.center().y);
+        ui::mention_badge(ui, at, waiting as u32, ui::colors(ui).side);
+    }
+    if row.clicked() {
+        home.view = View::Direct(None);
+    }
+    ui.add_space(ui::SPACE_XS);
     // One row per person, however many servers hold a copy.
     let mut peers: Vec<Id> = Vec::new();
     let known = (home.servers.iter())
@@ -1525,47 +1586,65 @@ fn dm_list(ui: &mut Ui, home: &mut Home) {
             peers.push(peer);
         }
     }
-    let none = Directory::default();
+    let (shown, requests) = home.friends.split(&peers, home.friends_only());
     ScrollArea::vertical().show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 2.0;
-        for peer in &peers {
-            let selected = home.view == View::Direct(Some(*peer));
-            let name = home.peer_name(peer);
-            let dir = home.dm_server(peer).map_or(&none, |i| &home.servers[i].dir);
-            let shared: Vec<&str> = (home.shared(peer).into_iter())
-                .map(|i| home.servers[i].name())
-                .collect();
-            let caption = if shared.is_empty() {
-                t!("home.no_shared_server").to_owned()
-            } else {
-                shared.join(", ")
-            };
-            if selected {
-                let rect =
-                    Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), 44.0));
-                ui.painter()
-                    .rect_filled(rect, ui::RADIUS_ROW, ui::colors(ui).selected);
-            }
-            let row = ui::row_button(ui, 44.0, &name, |ui| {
-                face(ui, dir, peer, &name, 30.0, true);
-                ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = 0.0;
-                    ui.add(Label::new(ui::bold(&name)).truncate());
-                    ui.add(Label::new(ui::caption(&caption)).truncate());
+        for peer in &shown {
+            dm_row(ui, home, peer, false);
+        }
+        if !requests.is_empty() {
+            CollapsingHeader::new(t!("friends.message_requests", number = requests.len()))
+                .id_salt("message-requests")
+                .default_open(false)
+                .show(ui, |ui| {
+                    for peer in &requests {
+                        dm_row(ui, home, peer, true);
+                    }
                 });
-            });
-            let replicas = home.replicas(peer);
-            let chats: Vec<_> = (replicas.iter())
-                .map(|(index, channel)| (&home.servers[*index].address, *channel))
-                .collect();
-            chat_marks(ui, home, &chats, true, row.rect);
-            if row.clicked() {
-                home.view = View::Direct(Some(*peer));
-            }
         }
     });
-    if peers.is_empty() {
+    if shown.is_empty() && requests.is_empty() {
         ui.weak(t!("home.no_chats"));
+    }
+}
+
+/// A DM in the list: picture, name and the servers it goes over. A message request
+/// stays quiet: no unread marks.
+fn dm_row(ui: &mut Ui, home: &mut Home, peer: &Id, request: bool) {
+    let none = Directory::default();
+    let selected = home.view == View::Direct(Some(*peer));
+    let name = home.peer_name(peer);
+    let dir = home.dm_server(peer).map_or(&none, |i| &home.servers[i].dir);
+    let shared: Vec<&str> = (home.shared(peer).into_iter())
+        .map(|i| home.servers[i].name())
+        .collect();
+    let caption = if shared.is_empty() {
+        t!("home.no_shared_server").to_owned()
+    } else {
+        shared.join(", ")
+    };
+    if selected {
+        let rect = Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), 44.0));
+        ui.painter()
+            .rect_filled(rect, ui::RADIUS_ROW, ui::colors(ui).selected);
+    }
+    let row = ui::row_button(ui, 44.0, &name, |ui| {
+        face(ui, dir, peer, &name, 30.0, true);
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            ui.add(Label::new(ui::bold(&name)).truncate());
+            ui.add(Label::new(ui::caption(&caption)).truncate());
+        });
+    });
+    if !request {
+        let replicas = home.replicas(peer);
+        let chats: Vec<_> = (replicas.iter())
+            .map(|(index, channel)| (&home.servers[*index].address, *channel))
+            .collect();
+        chat_marks(ui, home, &chats, true, row.rect);
+    }
+    if row.clicked() {
+        home.view = View::Direct(Some(*peer));
     }
 }
 
@@ -1978,6 +2057,7 @@ fn member_list(ui: &mut Ui, home: &mut Home, index: usize) {
     });
     let perms = server.dir.perms;
     let mut action = None;
+    let mut befriend = None;
     let (mut manage, mut moderate) = (None, None);
     ScrollArea::vertical().show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 2.0;
@@ -2005,6 +2085,12 @@ fn member_list(ui: &mut Ui, home: &mut Home, index: usize) {
                 if m.item("ℹ", t!("common.details")).clicked() {
                     home.dialog = Some(Dialog::Member(index, member.person));
                 }
+                if !me {
+                    let relation = home.friends.relation(&member.person);
+                    if let Some(act) = friends::menu_items(m, relation) {
+                        befriend = Some((member.person, act));
+                    }
+                }
                 if !me && home.voice.call.is_some() {
                     m.separator();
                     call::stream_menu(m, &home.voice.audio, &(member.person, None));
@@ -2019,6 +2105,9 @@ fn member_list(ui: &mut Ui, home: &mut Home, index: usize) {
     });
     if let Some(command) = action {
         home.servers[index].send(command);
+    }
+    if let Some((person, act)) = befriend {
+        home.befriend(person, act, ui.input(|input| input.time));
     }
     if let (Some(person), Some(choice)) = (manage, moderate) {
         admin::moderate(home, index, person, choice);
@@ -2220,6 +2309,29 @@ fn official_servers(ui: &mut Ui, home: &mut Home) {
 pub fn privacy_tab(ui: &mut Ui, home: &mut Home) {
     let audio = home.voice.audio.clone();
     let mut settings = audio.settings();
+    ui::page_section(ui, t!("home.direct_messages"));
+    ui::caption_label(ui, t!("home.allow_dms_from"));
+    ui.add_space(ui::SPACE_XS);
+    let changed = ui::segmented(
+        ui,
+        &mut settings.friends_only,
+        &[
+            (
+                false,
+                t!("home.allow_dms_everyone"),
+                t!("home.allow_dms_everyone_help"),
+            ),
+            (
+                true,
+                t!("home.allow_dms_friends"),
+                t!("home.allow_dms_friends_help"),
+            ),
+        ],
+    );
+    if changed {
+        audio.set_settings(settings.clone());
+        home.publish_settings();
+    }
     ui::page_section(ui, t!("home.server_directory"));
     ui::banner(ui, "privacy-directory", t!("home.directory_help"));
     ui::setting_row(
@@ -2483,6 +2595,16 @@ fn chat_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
 }
 
 fn dm_pane(ui: &mut Ui, home: &mut Home, peer: Id) {
+    if home.friends.relation(&peer) == Relation::Blocked {
+        let name = home.peer_name(&peer);
+        empty(ui, &name, t!("friends.blocked_dm"));
+        ui.vertical_centered(|ui| {
+            if ui::secondary(ui, t!("friends.unblock")).clicked() {
+                home.befriend(peer, Act::Unblock, ui.input(|input| input.time));
+            }
+        });
+        return;
+    }
     // Load every copy, also ones made after the DM was opened.
     for (index, channel) in home.replicas(&peer) {
         let server = &home.servers[index];
@@ -2492,13 +2614,17 @@ fn dm_pane(ui: &mut Ui, home: &mut Home, peer: Id) {
         }
     }
     let mut chat = std::mem::take(&mut home.threads.entry(peer).or_default().chat);
-    chat_view(ui, home, At::Dm(peer), &mut chat);
+    let act = chat_view(ui, home, At::Dm(peer), &mut chat);
     let thread = home.threads.entry(peer).or_default();
     thread.chat = chat;
     thread.refresh();
+    if let Some(act) = act {
+        home.befriend(peer, act, ui.input(|input| input.time));
+    }
 }
 
-fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) {
+/// Shows a chat. In a DM, also returns what the person picked on the friend card.
+fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Act> {
     let (title, dm, in_voice) = match at {
         At::Channel(index, channel) => {
             let server = &home.servers[index];
@@ -2535,6 +2661,13 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) {
     };
     // Every shared server is gone: what was loaded stays readable.
     let read_only = matches!(at, At::Dm(peer) if home.shared(&peer).is_empty());
+    let (relation, request) = match at {
+        At::Dm(peer) => (
+            home.friends.relation(&peer),
+            home.friends.is_request(&peer, home.friends_only()),
+        ),
+        At::Channel(..) => (Relation::None, false),
+    };
     let in_server = matches!(home.view, View::Server(_));
     // Without a server for the DM, names come from what the servers remember.
     let me = *home.identity.certificate.person_id();
@@ -2573,6 +2706,7 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) {
     if !in_voice {
         pane_title(ui, "chat-title", &title, in_server.then_some(layout), false);
     }
+    let act = friends::dm_card(ui, relation, request, &name);
     let (hovered, dropped) = ui.input(|input| {
         let dropped: Vec<_> = (input.raw.dropped_files.iter())
             .map(|file| file.path().to_owned())
@@ -2660,9 +2794,12 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) {
         }
         let mut last: Option<&Msg> = None;
         for msg in &chat.messages {
+            if matches!(msg.body, Body::Friend(signal) if !friends::shown(signal)) {
+                continue;
+            }
             let start = !last.is_some_and(|prev| {
                 prev.person == msg.person
-                    && !matches!(prev.body, Body::Notice { .. })
+                    && !matches!(prev.body, Body::Notice { .. } | Body::Friend(_))
                     && msg.at - prev.at < 300
                     && msg.reply_to.is_none()
             });
@@ -2795,6 +2932,7 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) {
         }
         None => {}
     }
+    act
 }
 
 /// Send a DM to every shared server that is online, with one ID so the copies merge.
@@ -3093,6 +3231,7 @@ fn composer(
             edit_of: None,
             files: Vec::new(),
             sticker: Some(id),
+            friend: None,
         });
         field.request_focus();
         return (Some(command), attach);
@@ -3141,6 +3280,7 @@ fn composer(
         edit_of: chat.editing.take(),
         files,
         sticker: None,
+        friend: None,
     });
     chat.clear_draft();
     field.request_focus();
@@ -3186,6 +3326,17 @@ fn message(
                 .sense(Sense::hover()),
             )
             .on_hover_text(detail);
+        });
+        ui.add_space(4.0);
+        return None;
+    }
+    if let Body::Friend(signal) = msg.body {
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.weak("•");
+            let line = friends::line(signal, &names(&msg.person));
+            ui.label(emoji::text(line).weak().italics());
+            ui.weak(time(msg.at));
         });
         ui.add_space(4.0);
         return None;
@@ -3502,6 +3653,8 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
     let mut close = false;
     let mut command = None;
     let mut delete_dm = None;
+    // Message (`None`) or a friend action, from a person's details.
+    let mut person_action = None;
     let ((), dismissed) = ui::dialog(ctx, "dialog", &title, |ui| match dialog {
         Dialog::ServerName(index, name) => {
             ui.label(t!("home.server_name_help"));
@@ -3700,6 +3853,15 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
         }
         Dialog::Member(index, person) => {
             let server = &home.servers[*index];
+            let other = *person != server.dir.me;
+            if other {
+                let mutual: Vec<&str> = (home.servers.iter())
+                    .filter(|server| server.member(person).is_some())
+                    .map(Server::name)
+                    .collect();
+                ui.label(t!("friends.shared_servers", servers = mutual.join(", ")));
+                ui.add_space(6.0);
+            }
             ui.label(t!("home.compare_ids"));
             ui.add_space(6.0);
             ui.label(t!("home.detail_id", fingerprint = fingerprint(person)));
@@ -3710,7 +3872,22 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
                 }
             }
             ui::footer(ui, |ui| {
-                close |= ui::secondary(ui, t!("common.close")).clicked()
+                if other {
+                    if ui::primary(ui, t!("home.message")).clicked() {
+                        person_action = Some((*person, None));
+                    }
+                    let ask = match home.friends.relation(person) {
+                        Relation::None => Some((t!("friends.add"), Act::Add)),
+                        Relation::Incoming => Some((t!("friends.accept_request"), Act::Accept)),
+                        _ => None,
+                    };
+                    if let Some((label, act)) = ask
+                        && ui::secondary(ui, label).clicked()
+                    {
+                        person_action = Some((*person, Some(act)));
+                    }
+                }
+                close |= ui::secondary(ui, t!("common.close")).clicked();
             });
         }
         Dialog::Delete(index, channel, id) => {
@@ -3762,6 +3939,15 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
     if let Some((peer, id)) = delete_dm {
         home.delete_dm(peer, id, ctx.input(|input| input.time));
         close = true;
+    }
+    let now = ctx.input(|input| input.time);
+    match person_action {
+        Some((person, Some(act))) => home.befriend(person, act, now),
+        Some((person, None)) => {
+            home.open_dm(person, now);
+            close = true;
+        }
+        None => {}
     }
     if close || dismissed {
         home.dialog = None;

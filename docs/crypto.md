@@ -62,7 +62,8 @@ fingerprint in the startup log.
 ### Device sync
 
 Devices encrypt a JSON object containing settings and contacts keyed by field
-and joined server entries with their pins. XChaCha20-Poly1305 uses the
+and joined server entries with their pins. Contacts hold the friend list, keyed
+by hex person ID (see [Protocol](protocol.md#friends)). XChaCha20-Poly1305 uses the
 32-byte identity sync key and a fresh 24-byte OS-random nonce for each
 version. Associated data is the ASCII bytes `rusttalk-sync-v1` followed by
 the eight-byte big-endian version from the header. This authenticates the
@@ -197,17 +198,22 @@ Format version 2 (the envelope's first byte) has this plaintext, in order.
 
 | Field | Encoding | Maximum bytes |
 | --- | --- | --- |
-| Flags | Bit 0 reply-to, bit 1 edit-of, bit 2 live offer, bit 3 sticker. Other bits clear | 1 |
+| Flags | Bit 0 reply-to, bit 1 edit-of, bit 2 live offer, bit 3 sticker, bit 4 friend message. Other bits clear | 1 |
 | Text | Two-byte big-endian UTF-8 length, then text of at most 2,000 Unicode scalar values | 2 + 8,000 |
 | Reply ID | 32 bytes, present with bit 0 | 32 |
 | Original ID | 32 bytes, present with bit 1 | 32 |
 | Sticker ID | 32 bytes, present with bit 3 | 32 |
+| Friend kind | One byte, present with bit 4: request (1), accept (2), decline (3), cancel (4), remove (5) | 1 |
 | Stored files | One-byte count 0–4, then that many [references](protocol.md#files) of at most 529 bytes | 1 + 2,116 |
 | Live offer | Present with bit 2, [offer fields](protocol.md#live-transfer) | 460 |
 
 A sticker message has no stored files and no live offer; its text is the
 sticker's name, shown when the sticker is not available. Server emoji travel
 in the text as `<:name:id>` tokens (see [Protocol](protocol.md#server-emoji-and-stickers)).
+A friend message sets bit 4 alone, has empty text and no stored files, so its
+plaintext is exactly five bytes; readers reject anything else with bit 4 or an
+unknown kind (see [Protocol](protocol.md#friends)). Apps before this format
+show such a message as one they can't open.
 Nothing may follow the last field. The largest plaintext is 10,644 bytes
 and the largest envelope is 10,751 bytes. Every length is checked against
 its field maximum before reading. Readers reject version 1 envelopes.

@@ -20,8 +20,8 @@ use rusttalk_core::{
     },
     camera::CameraOptions,
     client::{
-        BlobRef, Event, KeyClient, MessageBody, MessageError, MessageRecord, Server as Api,
-        invite_name,
+        BlobRef, Event, FriendSignal, KeyClient, MessageBody, MessageError, MessageRecord,
+        Server as Api, invite_name,
         voice::{DataLiveFiles, LiveFileEvent, NativeVideoSource, RoomEvent, VoiceRoster},
     },
     identity::{DeviceIdentity, fingerprint},
@@ -154,6 +154,8 @@ pub struct Draft {
     pub files: Vec<PathBuf>,
     /// A server sticker to send; `text` is its name.
     pub sticker: Option<Id>,
+    /// A friend request or answer, sent with nothing else.
+    pub friend: Option<FriendSignal>,
 }
 
 pub struct LiveOffer {
@@ -335,6 +337,11 @@ impl Net {
     /// Servers this profile joined earlier, to reconnect at start.
     pub fn joined(&self) -> Vec<KnownServer> {
         self.ctx.sync.servers()
+    }
+
+    /// Friends as last synced.
+    pub fn contacts(&self) -> std::collections::BTreeMap<String, serde_json::Value> {
+        self.ctx.sync.contacts()
     }
 
     /// Check an invite's server and read its name, without joining yet.
@@ -1043,6 +1050,7 @@ async fn on_command(
                 attachments: Vec::new(),
                 live: None,
                 sticker: draft.sticker,
+                friend: draft.friend,
             };
             let files = draft.files.clone();
             let sent = files::send(ctx, url, client, (channel, draft.id), body, files).await;
@@ -1291,7 +1299,10 @@ fn to_msg(record: &MessageRecord, body: &MessageBody) -> Msg {
         at: record.at,
         reply_to: body.reply_to,
         edit_of: body.edit_of,
-        body: Body::Text(body.text.clone()),
+        body: match body.friend {
+            Some(signal) => Body::Friend(signal),
+            None => Body::Text(body.text.clone()),
+        },
         files: body.attachments.clone(),
         live: (body.live.as_ref()).map(|file| (file.id, file.name.clone(), file.size)),
         sticker: body.sticker,

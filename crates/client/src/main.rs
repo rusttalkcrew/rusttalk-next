@@ -15,6 +15,7 @@ mod device_sync;
 mod dm;
 mod emoji;
 mod files;
+mod friends;
 mod home;
 mod keystore;
 mod log_file;
