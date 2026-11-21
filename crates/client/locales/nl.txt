@@ -63,6 +63,11 @@ settings.accent_help = Voor knoppen, links en wat geselecteerd is.
 settings.language = Taal
 settings.app_language = Taal van de app
 settings.language_help = Namen en berichten blijven zoals mensen ze schreven.
+settings.motion = Beweging
+settings.animated_emoji = Geanimeerde emoji
+settings.animated_emoji_help = Serveremoji en stickers die bewegen. Bij aanwijzen is rustiger en bespaart stroom.
+settings.always = Altijd
+settings.on_hover = Bij aanwijzen
 common.system_default = Systeemstandaard
 
 # crates/client/src/home.rs

@@ -19,7 +19,7 @@ use rusttalk_core::{
 use crate::{
     files::Ask,
     home::{
-        ChannelEdit, Home, frame, initials,
+        ChannelEdit, Home, initials, paint_hovered,
         person::{self, Person, Pick},
     },
     net::{Admin, AdminUpdate, AuditEntry, Ban, Command, Invite, PublicListing},
@@ -677,7 +677,7 @@ fn emoji_tab(
                     let (rect, _) =
                         ui.allocate_exact_size(egui::Vec2::splat(32.0), egui::Sense::hover());
                     if let Some(picture) = &item.picture {
-                        egui::Image::new(&frame(ui, picture)).paint_at(ui, rect);
+                        paint_hovered(ui, rect, picture, 0.0);
                     }
                     match &mut settings.emoji_renaming {
                         Some((id, name)) if *id == item.id => {

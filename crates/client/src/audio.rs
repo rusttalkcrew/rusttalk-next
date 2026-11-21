@@ -147,6 +147,9 @@ pub struct Settings {
     pub screen_cursor: bool,
     /// Hide from member lists while offline; this device's copy of the per-server flag.
     pub hide_offline: crate::server::HideOffline,
+    /// Server emoji and stickers in chat play only under the pointer, not all the time.
+    /// This device only, never synced.
+    pub emoji_on_hover: bool,
     /// Link previews by site (see `previews`): missing until the person answers the
     /// first card's question. This device only, never synced.
     pub link_previews: std::collections::BTreeMap<String, bool>,
@@ -216,6 +219,7 @@ impl Default for Settings {
             screen_fps: 30,
             screen_cursor: true,
             hide_offline: Default::default(),
+            emoji_on_hover: false,
             link_previews: Default::default(),
             create_link_previews: None,
         }

@@ -735,9 +735,13 @@ fn tile(ui: &mut Ui, sequence: &str, label: &str) -> Response {
 pub fn picture_tile(ui: &mut Ui, emoji: &CustomEmoji, cell: f32) -> Response {
     let label = format!(":{}:", emoji.name);
     let response = match &emoji.picture {
+        // Large sets stay cheap: only the emoji under the pointer plays.
         Some(picture) => {
-            let image = egui::Image::new(&crate::home::frame(ui, picture))
-                .fit_to_exact_size(Vec2::splat(cell - 8.0));
+            let picture = picture.clone();
+            let size = Vec2::splat(cell - 8.0);
+            let image = egui::Atom::paint(size, move |ui, args| {
+                crate::home::paint_hovered(ui, args.rect, &picture, 0.0);
+            });
             ui::choice_button(ui, false, image, Vec2::splat(cell))
         }
         None => ui::choice_button(ui, false, ui::caption(&emoji.name), Vec2::splat(cell)),

@@ -14,7 +14,7 @@ use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd, TextMer
 use rusttalk_core::auth::InviteLink;
 mod highlight;
 
-use super::{frame, mentions::Message};
+use super::{emoji_image, mentions::Message};
 use crate::{emoji, server::Directory, ui};
 
 #[derive(Clone, Default)]
@@ -487,12 +487,7 @@ fn show_line(
                             {
                                 flush(ui, &mut job);
                                 let size = if jumbo { 48. } else { size + 6. };
-                                ui.add(
-                                    egui::Image::new(&frame(ui, picture))
-                                        .fit_to_exact_size(egui::Vec2::splat(size))
-                                        .alt_text(&label),
-                                )
-                                .on_hover_text(label);
+                                emoji_image(ui, picture, size, &label).on_hover_text(label);
                             } else {
                                 job.append(&label, 0., format.clone());
                             }

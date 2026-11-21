@@ -63,6 +63,11 @@ settings.accent_help = ボタン、リンク、選択中の項目に使われま
 settings.language = 言語
 settings.app_language = アプリの言語
 settings.language_help = 名前やメッセージは書かれたまま表示されます。
+settings.motion = モーション
+settings.animated_emoji = アニメーション絵文字
+settings.animated_emoji_help = 動くサーバー絵文字とステッカー。ポインターを合わせたときだけ動かすと、落ち着いて見られて省電力です。
+settings.always = 常に
+settings.on_hover = ポインターを合わせたとき
 common.system_default = システムの既定
 
 # crates/client/src/home.rs
