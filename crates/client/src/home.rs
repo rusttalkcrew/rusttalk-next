@@ -252,6 +252,11 @@ pub enum Tab {
 }
 
 impl Home {
+    pub fn stop_for_sign_out(&mut self) {
+        self.net.stop_for_sign_out();
+        self.voice.audio.stop_saving();
+    }
+
     pub fn new(identity: DeviceIdentity, ctx: &egui::Context, data: PathBuf) -> Result<Self> {
         let identity = Arc::new(identity);
         let data_dir = data.clone();

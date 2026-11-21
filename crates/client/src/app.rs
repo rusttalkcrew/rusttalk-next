@@ -168,9 +168,11 @@ impl<'a> App<'a> {
             (Action::SignOut, Screen::Home(mut home)) => match keystore.delete() {
                 Ok(()) => {
                     // Stop the network first, so nothing writes these files again.
+                    home.stop_for_sign_out();
+                    let settings = home.voice.audio.settings();
                     drop(home);
-                    forget_profile(&self.data);
-                    crate::previews::forget(&self.data);
+                    crate::files::clear_opened();
+                    forget_profile(&self.data, settings);
                     crate::files::forget_previews(&self.ctx);
                     tracing::info!("signed out of this device");
                     Screen::Welcome
@@ -187,27 +189,63 @@ impl<'a> App<'a> {
     }
 }
 
-/// Remove what this profile remembers about the person who signed out: joined servers
-/// and their sync state, server pins, recent emoji, where files were saved or opened,
-/// read marks, notification choices and pokes. Link previews go separately.
-/// Device settings stay.
-fn forget_profile(data: &std::path::Path) {
-    crate::files::clear_opened();
+/// Keep device setup in this shared config directory, including both process locks.
+fn forget_profile(data: &std::path::Path, settings: crate::audio::Settings) {
+    use std::fs;
+    let remove = |name, result: std::io::Result<()>| {
+        if let Err(error) = result
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::error!(%error, file = name, "removing profile data at sign out failed");
+        }
+    };
     for name in [
         "sync.json",
         "servers.json",
         "saved.json",
         "notify.json",
         "pokes.json",
+        "dm_deleted.json",
         crate::emoji::picker::RECENT_FILE,
         crate::emoji::picker::FAVOURITES_FILE,
+        "rusttalk.log.1",
+        "rusttalk.log",
     ] {
-        match std::fs::remove_file(data.join(name)) {
-            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
-                tracing::error!(%error, file = name, "removing profile data at sign out failed");
-            }
-            _ => {}
-        }
+        remove(name, fs::remove_file(data.join(name)));
+    }
+    remove("dm_pins", fs::remove_dir_all(data.join("dm_pins")));
+    crate::previews::forget(data);
+
+    // Only carry hardware and window preferences into the next account.
+    let device = crate::audio::Settings {
+        input: settings.input,
+        output: settings.output,
+        camera: settings.camera,
+        call_sounds: settings.call_sounds,
+        ai_noise: settings.ai_noise,
+        noise_strength: settings.noise_strength,
+        mic_hint: settings.mic_hint,
+        channels_width: settings.channels_width,
+        members_width: settings.members_width,
+        members_hidden: settings.members_hidden,
+        call_side_by_side: settings.call_side_by_side,
+        call_split: settings.call_split,
+        call_chat_hidden: settings.call_chat_hidden,
+        call_stage_hidden: settings.call_stage_hidden,
+        call_video_only: settings.call_video_only,
+        call_show_fps: settings.call_show_fps,
+        call_nerd_stats: settings.call_nerd_stats,
+        screen_height: settings.screen_height,
+        screen_fps: settings.screen_fps,
+        screen_cursor: settings.screen_cursor,
+        ..Default::default()
+    };
+    let path = data.join("voice.json");
+    if device == Default::default() {
+        remove("voice.json", fs::remove_file(path));
+    } else if let Err(error) = rusttalk_core::client::save_json(data, &path, &device) {
+        tracing::error!(%error, "saving device preferences at sign out failed");
+        remove("voice.json", fs::remove_file(path));
     }
 }
 
@@ -382,4 +420,70 @@ fn restore(ui: &mut Ui, words: &mut Zeroizing<String>, error: Option<&str>) -> O
     secondary(ui, t!("common.back"))
         .clicked()
         .then_some(Action::StartOver)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn sign_out_removes_account_data_and_preserves_device_setup() {
+        let profile = tempfile::tempdir().unwrap();
+        let dir = profile.path();
+        let account = [
+            "sync.json",
+            "servers.json",
+            "saved.json",
+            "notify.json",
+            "pokes.json",
+            "dm_deleted.json",
+            "emoji-recent.json",
+            "emoji-favourites.json",
+            "rusttalk.log",
+            "rusttalk.log.1",
+        ];
+        let device = [
+            "identity.lock",
+            "servers.lock",
+            "updates.json",
+            "deepfilternet3.tar.gz",
+            "rusttalk-update.exe",
+        ];
+        for file in account.into_iter().chain(device) {
+            fs::write(dir.join(file), b"original").unwrap();
+        }
+        for file in [
+            "dm_pins/server.json",
+            "previews/card.json",
+            "previews/card.img",
+        ] {
+            let path = dir.join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"private").unwrap();
+        }
+        let voice = crate::audio::Settings {
+            input: Some("desk mic".into()),
+            dismissed_official: vec!["private server".into()],
+            friends_only: true,
+            create_link_previews: Some(true),
+            ..Default::default()
+        };
+        rusttalk_core::client::save_json(dir, &dir.join("voice.json"), &voice).unwrap();
+        forget_profile(dir, voice);
+        for file in account.into_iter().chain(["dm_pins", "previews"]) {
+            assert!(!dir.join(file).exists(), "{file} survived sign-out");
+        }
+        for file in device {
+            assert_eq!(fs::read(dir.join(file)).unwrap(), b"original", "{file}");
+        }
+        let clean: crate::audio::Settings = crate::load_json(&dir.join("voice.json")).unwrap();
+        assert!(
+            clean
+                == crate::audio::Settings {
+                    input: Some("desk mic".into()),
+                    ..Default::default()
+                }
+        );
+    }
 }

@@ -231,10 +231,11 @@ person fingerprint locally. Creating an account shows the recovery words once
 in the app window. The client never stores or logs the words or the root
 signing key. "Sign out of this device" deletes the keystore entry and the
 profile's `sync.json`, `servers.json`, `saved.json`, `notify.json`,
-`pokes.json`, `emoji-recent.json` and `emoji-favourites.json`, so the next
-person on that profile starts without the servers, pins, saved file places,
-read marks, notification choices, pokes, recent or favourite emoji.
-Device settings (`voice.json`, `updates.json`) stay.
+`pokes.json`, `dm_deleted.json`, `dm_pins/`, recent and favourite emoji,
+cached link previews and both local logs. This clears the previous person's
+fingerprint, DM history markers, server records and preview consent.
+Hardware, local sound and window preferences in `voice.json`, the downloaded
+noise removal model and updater settings stay on the device.
 
 Next to the settings, `servers.json` holds each server's address, server ID
 and TLS fingerprint. `sync.json` holds the last merged device sync snapshot
