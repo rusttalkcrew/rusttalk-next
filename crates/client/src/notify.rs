@@ -578,6 +578,7 @@ mod tests {
                 files: vec![],
                 live: None,
                 sticker: None,
+                replicas: Vec::new(),
             };
             mention(&Message::new(&msg, &dir, chat), &me, &roles)
         };

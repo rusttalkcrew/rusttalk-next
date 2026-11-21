@@ -58,6 +58,11 @@ Text, replies, attachment references and edit targets are inside message
 ciphertext. Explicit deletes and the retention cap remove message rows.
 Public sender certificates and audit IDs are retained for history and
 accountability.
+A DM is copied to every server both people share. Each of those servers
+learns that the two people have a DM, plus the size and time of each copy
+it stores, as it would for a DM on one server. Copies share a random
+message ID, so servers that compare their data can tell which records are
+the same message. A server that was offline misses messages sent meanwhile.
 The API volume stores file blobs, including in-progress uploads and thumbnails,
 as ciphertext under opaque disk names. Committed blobs are named only by their
 random IDs. File names, types, keys, plaintext lengths and references linking

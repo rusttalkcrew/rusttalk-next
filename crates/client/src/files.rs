@@ -89,6 +89,8 @@ struct Viewer {
 pub enum Ask {
     /// Attach to the composer of a channel.
     Attach(Url, Id),
+    /// Attach to the composer of a DM, by the other person.
+    AttachDm(Id),
     /// Save a stored file.
     Save(Url, Attachment),
     /// Save a live file: transfer ID and suggested name.
@@ -196,11 +198,14 @@ impl Files {
             let name = match &ask {
                 Ask::Save(_, file) => Some(file.name.replace(['/', '\\'], "_")),
                 Ask::Accept(_, _, name) => Some(name.replace(['/', '\\'], "_")),
-                Ask::Attach(..) | Ask::Live(..) | Ask::Picture | Ask::Icon(_) | Ask::Emoji(..) => {
-                    None
-                }
+                Ask::Attach(..)
+                | Ask::AttachDm(_)
+                | Ask::Live(..)
+                | Ask::Picture
+                | Ask::Icon(_)
+                | Ask::Emoji(..) => None,
             };
-            let single = !matches!(ask, Ask::Attach(..));
+            let single = !matches!(ask, Ask::Attach(..) | Ask::AttachDm(_));
             let pictures = matches!(ask, Ask::Picture | Ask::Icon(_) | Ask::Emoji(..));
             let test = *TEST_ANSWER.lock().unwrap_or_else(|e| e.into_inner());
             let paths = match (test, name) {
