@@ -39,6 +39,8 @@ use crate::{
 };
 
 /// The name shown until a server has one, or until its key arrives.
+/// Text fields in settings rows.
+const FIELD_WIDTH: f32 = 280.0;
 const NEW_SERVER: &str = "New server";
 /// Show the character count once a message gets this long.
 const COUNT_FROM: usize = 1_800;
@@ -700,7 +702,7 @@ fn host(address: &url::Url) -> String {
     address.host_str().unwrap_or("server").to_owned()
 }
 
-fn initials(name: &str) -> String {
+pub fn initials(name: &str) -> String {
     let letters: String = name
         .split_whitespace()
         .filter_map(|word| word.chars().find(|c| c.is_alphanumeric()))
@@ -1714,22 +1716,37 @@ fn official_servers(ui: &mut Ui, home: &mut Home) {
 pub fn privacy_tab(ui: &mut Ui, home: &mut Home) {
     let audio = home.voice.audio.clone();
     let mut settings = audio.settings();
-    ui::section(ui, "Server directory");
-    ui.label("A directory lists public servers you can find and join.");
-    ui.weak("RustTalk only contacts it while you have Find servers open.");
-    let label = ui.label("Directory address");
-    ui.add(
-        ui::field(&mut settings.index_url)
-            .hint_text(official::DIRECTORY)
-            .desired_width(f32::INFINITY),
-    )
-    .labelled_by(label.id);
-    ui.weak("Leave it empty to use the official directory.");
-    CollapsingHeader::new("Details").show(ui, |ui| {
-        let label = ui.label("Certificate fingerprint, only for a directory without a domain");
-        ui.add(ui::field(&mut settings.index_fingerprint).desired_width(f32::INFINITY))
-            .labelled_by(label.id);
-    });
+    ui::page_section(ui, "Server directory");
+    ui::banner(
+        ui,
+        "privacy-directory",
+        "A directory lists public servers you can find and join. RustTalk only contacts it \
+         while you have Find servers open.",
+    );
+    ui::setting_row(
+        ui,
+        "Directory address",
+        "Leave it empty to use the official directory.",
+        |ui| {
+            ui.add(
+                ui::field(&mut settings.index_url)
+                    .hint_text(official::DIRECTORY)
+                    .desired_width(FIELD_WIDTH),
+            )
+            .widget_info(|| WidgetInfo::labeled(Role::TextInput, true, "Directory address"));
+        },
+    );
+    ui::setting_row(
+        ui,
+        "Certificate fingerprint",
+        "Only for a directory without a domain.",
+        |ui| {
+            ui.add(ui::field(&mut settings.index_fingerprint).desired_width(FIELD_WIDTH))
+                .widget_info(|| {
+                    WidgetInfo::labeled(Role::TextInput, true, "Certificate fingerprint")
+                });
+        },
+    );
     if !settings.index_url.trim().is_empty()
         && let Err(problem) = directory(&settings)
     {
