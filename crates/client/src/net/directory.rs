@@ -8,11 +8,11 @@ use futures_util::future::join_all;
 use reqwest::Method;
 use rusttalk_core::{
     auth::{decode, encode},
-    client::{Catalog, KeyClient, decode_profile_image},
+    client::{Catalog, Channel as WireChannel, KeyClient, decode_profile_image},
     identity::fingerprint,
     keys::Metadata,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use url::Url;
 
@@ -59,6 +59,96 @@ pub(super) async fn save_order(client: &KeyClient<'_>, shown: &[(Id, Vec<Id>)]) 
     Ok(())
 }
 
+pub(super) async fn rename_channel(
+    client: &KeyClient<'_>,
+    id: &Id,
+    name: &str,
+    topic: Option<&str>,
+) -> Result<()> {
+    // The update also replaces category and position. Read them just before saving.
+    let catalog = client.catalog().await?;
+    let channel = catalog
+        .channels
+        .iter()
+        .find(|channel| &channel.id == id)
+        .context("channel no longer visible")?;
+    let current_topic = if topic.is_none() {
+        channel
+            .topic_ct
+            .as_deref()
+            .map(|ct| client.decrypt_metadata(Metadata::ChannelTopic, id, ct))
+            .transpose()?
+    } else {
+        None
+    };
+    let topic = topic.map(str::as_bytes).or(current_topic.as_deref());
+    let body = channel_update(channel, name, topic, |kind, text| {
+        client.encrypt_metadata(kind, id, text)
+    })?;
+    client
+        .request(Method::PUT, &format!("/v1/channels/{}", encode(id)))
+        .json(&body)
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(())
+}
+
+fn channel_update(
+    channel: &WireChannel,
+    name: &str,
+    topic: Option<&[u8]>,
+    encrypt: impl Fn(Metadata, &[u8]) -> Result<String>,
+) -> Result<Value> {
+    Ok(json!({
+        "category_id": channel.category_id.as_deref().context("channel has no category")?,
+        "position": channel.position,
+        "name_ct": encrypt(Metadata::ChannelName, name.as_bytes())?,
+        "topic_ct": topic.map(|topic| encrypt(Metadata::ChannelTopic, topic)).transpose()?,
+    }))
+}
+
+pub(super) async fn rename_category(client: &KeyClient<'_>, id: &Id, name: &str) -> Result<()> {
+    let categories = managed_categories(client).await?;
+    let category = categories
+        .iter()
+        .find(|category| &category.id == id)
+        .context("category no longer exists")?;
+    let body = category_update(category.position, name, |kind, text| {
+        client.encrypt_metadata(kind, id, text)
+    })?;
+    client
+        .request(Method::PUT, &format!("/v1/categories/{}", encode(id)))
+        .json(&body)
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(())
+}
+
+fn category_update(
+    position: i64,
+    name: &str,
+    encrypt: impl Fn(Metadata, &[u8]) -> Result<String>,
+) -> Result<Value> {
+    Ok(json!({
+        "position": position,
+        "name_ct": encrypt(Metadata::CategoryName, name.as_bytes())?,
+    }))
+}
+
+async fn managed_categories(
+    client: &KeyClient<'_>,
+) -> Result<Vec<rusttalk_core::client::Category>> {
+    Ok(client
+        .request(Method::GET, "/v1/categories")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?)
+}
+
 /// Fetch and decrypt names, channels, members and permissions, and report member changes.
 pub(super) async fn directory(
     ctx: &Ctx,
@@ -74,13 +164,14 @@ pub(super) async fn directory(
     let pictures = pictures(client, &members, &space, &state.pictures).await?;
     let dir = build(
         client,
-        &catalog,
+        catalog,
         &members,
         &me,
         &roles,
         &space,
         &|id: &Id, hash: Option<&str>| pictures.get(&picture_key(id, hash?)).cloned(),
-    )?;
+    )
+    .await?;
     state.pictures = pictures;
     if let Some(before) = &state.last {
         for (person, action, detail) in changes(before, &dir) {
@@ -127,9 +218,9 @@ pub(super) async fn directory(
     Ok(())
 }
 
-fn build(
+async fn build(
     client: &KeyClient<'_>,
-    catalog: &Catalog,
+    mut catalog: Catalog,
     members: &Value,
     me: &Value,
     roles: &Value,
@@ -204,6 +295,10 @@ fn build(
     // Highest rank first, as the server lists them.
     role_list.sort_by_key(|role| -role.rank);
 
+    // The readable catalog omits categories with no readable channels, including empty ones.
+    if perms.manage_channels {
+        catalog.categories = managed_categories(client).await?;
+    }
     let mut categories: Vec<Category> = (catalog.categories.iter())
         .map(|category| Category {
             id: Some(category.id),
@@ -239,6 +334,12 @@ fn build(
                 channel.name_ct.as_deref(),
             )
             .unwrap_or_else(|| "channel".into()),
+            topic: text(
+                Metadata::ChannelTopic,
+                &channel.id,
+                channel.topic_ct.as_deref(),
+            )
+            .unwrap_or_default(),
             voice: channel.kind == "voice",
             flags: (channel.flags.iter())
                 .map(|entry| (entry.role_id.clone(), entry.flags))
@@ -484,6 +585,67 @@ fn changes(before: &Directory, after: &Directory) -> Vec<(Id, &'static str, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn channel_update_keeps_order_and_encrypts_name_and_topic() {
+        use rusttalk_core::{auth::decode_bytes, keys::random_key};
+
+        let server = [1; 32];
+        let id = [2; 32];
+        let key = random_key().unwrap();
+        let category_id = encode(&[3; 32]);
+        let channel = WireChannel {
+            id,
+            kind: "text".into(),
+            category_id: Some(category_id.clone()),
+            position: 7,
+            name_ct: None,
+            topic_ct: None,
+            peer: None,
+            flags: Vec::new(),
+        };
+        let encrypt =
+            |kind: Metadata, text: &[u8]| Ok(encode(&kind.seal(&server, &id, 4, &key, text)?));
+        let body = channel_update(&channel, "Release notes", Some(b"What's new"), encrypt).unwrap();
+        assert_eq!(body["category_id"], category_id);
+        assert_eq!(body["position"], 7);
+        for (field, kind, expected) in [
+            (
+                "name_ct",
+                Metadata::ChannelName,
+                b"Release notes".as_slice(),
+            ),
+            ("topic_ct", Metadata::ChannelTopic, b"What's new".as_slice()),
+        ] {
+            let bytes = decode_bytes(body[field].as_str().unwrap()).unwrap();
+            assert_eq!(kind.epoch(&bytes).unwrap(), 4);
+            assert_eq!(kind.open(&server, &id, &key, &bytes).unwrap(), expected);
+        }
+        assert!(
+            channel_update(&channel, "Release notes", None, encrypt).unwrap()["topic_ct"].is_null()
+        );
+    }
+
+    #[test]
+    fn category_update_keeps_position_and_encrypts_name() {
+        use rusttalk_core::{auth::decode_bytes, keys::random_key};
+
+        let server = [1; 32];
+        let id = [3; 32];
+        let key = random_key().unwrap();
+        let body = category_update(11, "Projects", |kind, text| {
+            Ok(encode(&kind.seal(&server, &id, 4, &key, text)?))
+        })
+        .unwrap();
+        assert_eq!(body["position"], 11);
+        let bytes = decode_bytes(body["name_ct"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            Metadata::CategoryName
+                .open(&server, &id, &key, &bytes)
+                .unwrap(),
+            b"Projects",
+        );
+    }
 
     fn member(person: u8, devices: &[&str]) -> Member {
         Member {

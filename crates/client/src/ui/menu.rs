@@ -224,7 +224,11 @@ fn row(ui: &mut Ui, item: &Item) -> Response {
             );
         }
     }
-    let label_room = (width - LABEL_X - 44.0).max(0.0);
+    let right_padding = match item.trailing {
+        Trailing::None => 12.0,
+        _ => 44.0,
+    };
+    let label_room = (width - LABEL_X - right_padding).max(0.0);
     let label = one_line(
         ui,
         item.label,
