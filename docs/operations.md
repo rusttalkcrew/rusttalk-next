@@ -448,8 +448,12 @@ shows a short error and the current version keeps running.
 On macOS one universal DMG serves both `macos-aarch64` and `macos-x86_64` in
 `latest.json`. The app is ad-hoc signed only (no Developer ID, not
 notarized), so the first start needs right-click → **Open** (see the README).
-An update mounts the verified DMG read-only, copies its `RustTalk.app` next
-to the running bundle, swaps the two with renames and reopens RustTalk. The
+An update downloads and verifies the DMG in the user's private
+`~/Library/Caches/io.github.rusttalkcrew.rusttalk`, mounts it read-only and
+copies its `RustTalk.app` next to the running bundle. The copy must carry the
+RustTalk bundle id, the signed version and a valid signature. One window at a
+time installs, and only over the bundle it started from. The two bundles are
+exchanged in one step (`renamex_np`), and RustTalk reopens. The
 folder holding `RustTalk.app` must allow the current user to create and
 rename files; an app that macOS runs from a translocated copy (opened
 straight from Downloads) asks to be moved to Applications first. Because
