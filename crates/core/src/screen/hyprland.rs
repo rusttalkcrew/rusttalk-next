@@ -50,18 +50,47 @@ use scope::{Monitor, Scope, Verified};
 const IO_TIMEOUT: Duration = Duration::from_millis(100);
 const LOCAL_PAUSE: Duration = Duration::from_millis(500);
 const HELD_CHECK: Duration = Duration::from_millis(100);
-const POINTER_SNAPSHOT: &str = "[[BATCH]]j/monitors;j/locked;j/cursorpos";
+const MOVE_SNAPSHOT: &str = "[[BATCH]]j/monitors;j/locked;j/cursorpos";
+const POINTER_SNAPSHOT: &str = "[[BATCH]]j/monitors;j/locked;j/cursorpos;j/submap;j/binds";
 const BIND_SNAPSHOT: &str = "[[BATCH]]j/submap;j/binds";
 // j/layers omits interactivity on releases that expose it through Lua's layer objects.
 // This fixed read-only query joins by layer address and accepts no interpolated input.
 const KEY_SNAPSHOT: &str = concat!(
     "[[BATCH]]j/monitors;j/locked;j/cursorpos;j/activewindow;j/layers;j/submap;j/binds;",
+    // Hyprland resolves keysym binds with a keymap built from these, not the device keymap.
+    "j/getoption input:kb_rules;j/getoption input:kb_model;j/getoption input:kb_layout;",
+    "j/getoption input:kb_variant;j/getoption input:kb_options;j/getoption input:kb_file;",
     r#"repl return (function() local out = {} for _, layer in ipairs(hl.get_layers()) do "#,
     r#"local mode = layer.keyboard_interactivity or layer.interactivity "#,
     r#"if layer.mapped and type(mode) == "number" then "#,
     r#"table.insert(out, string.format('"%s":%d', layer.address, mode)) end end "#,
     r#"return "{" .. table.concat(out, ",") .. "}" end)()"#,
 );
+
+fn button_code(button: Button) -> u32 {
+    match button {
+        Button::Left => 0x110,
+        Button::Right => 0x111,
+        Button::Middle => 0x112,
+    }
+}
+
+/// Hyprland's bind names for a button or scroll. Either scroll direction counts, so a
+/// natural-scroll inversion can't turn an allowed direction into a bound one.
+fn pointer_triggers(input: &Input) -> Vec<String> {
+    match *input {
+        Input::Button { button, .. } => vec![format!("mouse:{}", button_code(button))],
+        Input::Scroll { x, y } => [
+            (x, ["mouse_left", "mouse_right"]),
+            (y, ["mouse_up", "mouse_down"]),
+        ]
+        .into_iter()
+        .filter(|(n, _)| *n != 0.0)
+        .flat_map(|(_, names)| names.map(String::from))
+        .collect(),
+        _ => Vec::new(),
+    }
+}
 
 fn event_time() -> u32 {
     let now = clock_gettime(ClockId::Monotonic);
@@ -550,11 +579,7 @@ impl Devices {
     }
 
     fn button(&self, time: u32, button: Button, down: bool) {
-        let code = match button {
-            Button::Left => 0x110,
-            Button::Right => 0x111,
-            Button::Middle => 0x112,
-        };
+        let code = button_code(button);
         let state = if down {
             wl_pointer::ButtonState::Pressed
         } else {
@@ -586,14 +611,28 @@ impl Devices {
         !self.keys.is_empty() || !self.buttons.is_empty()
     }
 
+    fn held_buttons(&self) -> Vec<String> {
+        self.buttons
+            .iter()
+            .map(|button| format!("mouse:{}", button_code(*button)))
+            .collect()
+    }
+
     fn valid(&self, verified: &Verified) -> bool {
         self.focus
             .as_ref()
             .is_none_or(|focus| verified.focus.as_ref() == Some(focus))
-            && verified
-                .binds
-                .as_ref()
-                .is_some_and(|binds| binds.allows(&self.xkb, &self.keys, None))
+            && verified.binds.as_ref().is_some_and(|binds| {
+                binds.allows(&self.xkb, &self.keys, &self.held_buttons(), None)
+            })
+    }
+
+    /// A button or scroll must not complete a compositor bind with the virtual modifiers.
+    fn pointer_allowed(&self, input: &Input, verified: &Verified) -> bool {
+        verified.binds.as_ref().is_some_and(|binds| {
+            binds.allows_pointer(&self.xkb, &pointer_triggers(input))
+                && binds.allows_pointer(&self.xkb, &self.held_buttons())
+        })
     }
 }
 
@@ -666,10 +705,13 @@ fn run_input(
     let mut devices: Option<Devices> = None;
     let mut activity = wayland.state.activity;
     let mut next_held_check = Instant::now();
+    // Compiling a keymap is slow; the layout options rarely change during control.
+    let resolve = std::cell::RefCell::new(None::<(keys::Layout, xkb::Keymap)>);
     let verify = |scope| {
         let command = match scope {
             Scope::Keyboard => KEY_SNAPSHOT,
-            _ => POINTER_SNAPSHOT,
+            Scope::Pointer => POINTER_SNAPSHOT,
+            Scope::Move => MOVE_SNAPSHOT,
         };
         match query(socket, server, command) {
             Ok(snapshot) => {
@@ -679,6 +721,13 @@ fn run_input(
                 {
                     let text = query(socket, server, "binds").ok()?;
                     binds.fill_display_keys(&text)?;
+                }
+                if let (Some(binds), Some(layout)) = (&mut verified.binds, &verified.layout) {
+                    let mut cached = resolve.borrow_mut();
+                    if cached.as_ref().is_none_or(|(known, _)| known != layout) {
+                        *cached = Some((layout.clone(), layout.keymap()?));
+                    }
+                    binds.resolve_with(&cached.as_ref()?.1);
                 }
                 Some(verified)
             }
@@ -807,7 +856,12 @@ fn run_input(
             };
             if (down && scope::blocked_combo(code, &active.keys))
                 || !verified.binds.as_ref().is_some_and(|binds| {
-                    binds.allows(&active.xkb, &active.keys, Some((code, down)))
+                    binds.allows(
+                        &active.xkb,
+                        &active.keys,
+                        &active.held_buttons(),
+                        Some((code, down)),
+                    )
                 })
             {
                 if !down && active.keys.contains(&code) {
@@ -816,7 +870,22 @@ fn run_input(
                 }
                 continue;
             }
-            active.focus = verified.focus;
+            active.focus = verified.focus.take();
+        }
+        if matches!(event.input, Input::Button { .. } | Input::Scroll { .. })
+            && !active.pointer_allowed(&event.input, &verified)
+        {
+            if let Input::Button {
+                button,
+                down: false,
+                ..
+            } = event.input
+                && active.buttons.contains(&button)
+            {
+                drop(devices.take());
+                observe(wayland, &mut activity, &mut paused, 1)?;
+            }
+            continue;
         }
         if let Input::Button {
             down: true, x, y, ..
@@ -824,7 +893,8 @@ fn run_input(
         {
             active.motion(time, x, y);
             observe(wayland, &mut activity, &mut paused, 1)?;
-            let scoped = verify(scope()).is_some();
+            let scoped =
+                verify(scope()).is_some_and(|fresh| active.pointer_allowed(&event.input, &fresh));
             observe(wayland, &mut activity, &mut paused, 0)?;
             if !scoped
                 || paused.is_some()
@@ -873,6 +943,7 @@ mod tests {
                 include_str!("fixtures/layers.json"),
                 r#""default""#,
                 include_str!("fixtures/binds.json"),
+                include_str!("fixtures/getoption.json"),
             ]
             .join("\n")
         };

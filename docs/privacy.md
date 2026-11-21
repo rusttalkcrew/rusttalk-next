@@ -170,9 +170,11 @@ on the shared monitor. Window shares and other Linux compositors cannot
 grant control.
 
 RustTalk uses local Hyprland IPC to check monitor geometry, pointer position,
-the active window, keyboard-interactive layer surfaces, lock state and
-compositor keybinds. It matches those binds against the virtual keyboard's
-XKB state. Layer and bind data stay on the sharer's device, and RustTalk
+the active window, keyboard-interactive layer surfaces, lock state,
+compositor keybinds, including mouse button and scroll binds, and the
+keyboard layout options Hyprland matches binds with. It matches those binds
+against the virtual keyboard's XKB state. Layer, bind and layout data stay
+on the sharer's device, and RustTalk
 does not collect what the sharer types. It pauses after observed local input
 and rechecks the scope and binds about every 100 ms while a remote key or
 button is held. If a check fails, RustTalk releases the held input and

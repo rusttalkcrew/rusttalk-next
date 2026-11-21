@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
-use super::keys::Binds;
+use super::keys::{Binds, Layout};
 
 use crate::control::{Input, scan_code};
 
@@ -143,6 +143,7 @@ pub(super) enum Scope {
 pub(super) struct Verified {
     pub focus: Option<String>,
     pub binds: Option<Binds>,
+    pub layout: Option<Layout>,
 }
 
 /// A missing or changed output, malformed snapshot or locked desktop blocks input.
@@ -157,6 +158,7 @@ pub(super) fn verify(snapshot: &str, target: &Monitor, scope: Scope) -> Option<V
     let mut verified = Verified {
         focus: None,
         binds: None,
+        layout: None,
     };
     if matches!(scope, Scope::Move) {
         return Some(verified);
@@ -165,6 +167,8 @@ pub(super) fn verify(snapshot: &str, target: &Monitor, scope: Scope) -> Option<V
         return None;
     }
     if !matches!(scope, Scope::Keyboard) {
+        // Buttons and scrolls can trigger compositor binds too.
+        verified.binds = Some(Binds::parse(&mut fields)?);
         return Some(verified);
     }
     let focus = Focus::deserialize(&mut fields).ok()?;
@@ -183,6 +187,7 @@ pub(super) fn verify(snapshot: &str, target: &Monitor, scope: Scope) -> Option<V
     // activewindow can stay set while a layer surface owns keyboard focus.
     let outputs = BTreeMap::<String, OutputLayers>::deserialize(&mut fields).ok()?;
     let binds = Binds::parse(&mut fields)?;
+    let layout = Layout::parse(&mut fields)?;
     let modes = BTreeMap::<String, u8>::deserialize(&mut fields).unwrap_or_default();
     if monitors
         .iter()
@@ -203,6 +208,7 @@ pub(super) fn verify(snapshot: &str, target: &Monitor, scope: Scope) -> Option<V
     }
     verified.focus = Some(focus.address);
     verified.binds = Some(binds);
+    verified.layout = Some(layout);
     Some(verified)
 }
 
@@ -255,6 +261,7 @@ mod tests {
     const LOCK: &str = include_str!("fixtures/locked.json");
     const LAYERS: &str = include_str!("fixtures/layers.json");
     const BINDS: &str = include_str!("fixtures/binds.json");
+    const OPTIONS: &str = include_str!("fixtures/getoption.json");
 
     #[test]
     fn only_targeted_events_pass() {
@@ -272,8 +279,21 @@ mod tests {
         };
         let moved = Input::Move { x: 0.5, y: 0.5 };
         let check = |monitors: &str, lock: &str, cursor: &str, focus: &str, input: &Input| {
-            let snapshot =
-                [monitors, lock, cursor, focus, LAYERS, r#""default""#, BINDS].join("\n\n\n");
+            let snapshot = match Scope::from(input) {
+                Scope::Move => [monitors, lock, cursor].join("\n"),
+                Scope::Pointer => [monitors, lock, cursor, r#""default""#, BINDS].join("\n\n\n"),
+                Scope::Keyboard => [
+                    monitors,
+                    lock,
+                    cursor,
+                    focus,
+                    LAYERS,
+                    r#""default""#,
+                    BINDS,
+                    OPTIONS,
+                ]
+                .join("\n\n\n"),
+            };
             verify(&snapshot, &monitor, input.into()).is_some()
         };
         for event in [&click, &scroll, &key, &moved] {
@@ -301,6 +321,25 @@ mod tests {
             &FOCUS.replace("\"monitor\": 1", "\"monitor\": 2"),
             &key
         ));
+        // Unreadable layout options, or a keymap file Hyprland resolves itself, block keys.
+        let snapshot = |options: &str| {
+            [
+                MONITORS,
+                LOCK,
+                CURSOR,
+                FOCUS,
+                LAYERS,
+                r#""default""#,
+                BINDS,
+                options,
+            ]
+            .join("\n")
+        };
+        let keyboard = |options: &str| verify(&snapshot(options), &monitor, Scope::Keyboard);
+        assert!(keyboard(OPTIONS).is_some_and(|verified| verified.layout.is_some()));
+        assert!(keyboard("unavailable").is_none());
+        assert!(keyboard(&OPTIONS.replace("[[EMPTY]]", "~/.config/hypr/keymap.xkb")).is_none());
+        assert!(keyboard(&OPTIONS.replace("kb_variant", "kb_options")).is_none());
     }
 
     #[test]
@@ -315,6 +354,7 @@ mod tests {
                 layers,
                 r#""default""#,
                 BINDS,
+                OPTIONS,
                 modes,
             ]
             .join("\n");
