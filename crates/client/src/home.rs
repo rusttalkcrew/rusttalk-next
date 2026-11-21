@@ -20,6 +20,7 @@ use rusttalk_core::{
     client::{FriendSignal, MAX_TEXT_CHARS, voice::LiveFileEvent},
     identity::{DeviceIdentity, fingerprint},
     index::https_url,
+    messages::PollPart,
     presence::{Presence, Status as Choice},
 };
 
@@ -81,6 +82,7 @@ mod markdown;
 pub mod mentions;
 pub mod person;
 mod pokes;
+pub mod polls;
 pub(crate) mod user_bar;
 #[cfg(test)]
 mod voice_rows;
@@ -602,7 +604,10 @@ impl Home {
     /// A new message: mark it unread, count a mention and notify, as the person chose.
     fn arrived(&mut self, ctx: &egui::Context, index: usize, channel: Id, msg: Msg) {
         let me = *self.identity.certificate.person_id();
-        if msg.person == me || msg.edit_of.is_some() || matches!(msg.body, Body::Notice { .. }) {
+        if msg.person == me
+            || msg.edit_of.is_some()
+            || matches!(msg.body, Body::Notice { .. } | Body::PollPart(_))
+        {
             return;
         }
         let peer = self.dm_peer(index, &channel);
@@ -665,6 +670,7 @@ impl Home {
             let body = match &msg.body {
                 Body::Friend(..) => t!("notify.friend_request").into(),
                 Body::Text(_) if msg.sticker.is_some() => t!("notify.sent_sticker").into(),
+                Body::Poll(question, _) => format!("📊 {question}"),
                 Body::Text(text) if !text.trim().is_empty() => message.plain(&server.dir),
                 _ if !msg.files.is_empty() || msg.live.is_some() => t!("notify.sent_file").into(),
                 _ => t!("notify.new_message").into(),
@@ -1334,7 +1340,10 @@ impl Home {
             }
             Update::Unsent(address, draft) => {
                 // A poke's note doesn't belong in the composer, where it would go out as text.
-                let Some(index) = self.index(&address).filter(|_| !draft.poke) else {
+                // Nor do votes, or a poll's question.
+                let Some(index) =
+                    (self.index(&address)).filter(|_| !draft.poke && draft.poll.is_none())
+                else {
                     return;
                 };
                 let me = self.servers[index].dir.me;
@@ -3323,9 +3332,11 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
             // message sent meanwhile waits behind it.
             let command = match command {
                 Some(Command::Send(draft)) => {
-                    let link = (draft.edit_of.is_none() && draft.sticker.is_none())
-                        .then(|| link_cards::candidate(markdown::cached(ui, &draft.text).links()))
-                        .flatten();
+                    let link = (draft.edit_of.is_none()
+                        && draft.sticker.is_none()
+                        && draft.poll.is_none())
+                    .then(|| link_cards::candidate(markdown::cached(ui, &draft.text).links()))
+                    .flatten();
                     // Asked the first time (and each time until Always or Never).
                     let preview = match (link, voice.audio.settings().create_link_previews) {
                         (Some(url), Some(true)) => {
@@ -3407,7 +3418,7 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
         let mut last: Option<&Msg> = None;
         for msg in &chat.messages {
             if matches!(msg.body, Body::Friend(signal, _) if !friends::shown(signal))
-                || matches!(msg.body, Body::Poke(_))
+                || matches!(msg.body, Body::Poke(_) | Body::PollPart(_))
             {
                 continue;
             }
@@ -3561,6 +3572,14 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
                 At::Dm(peer) => Dialog::DeleteDm(peer, id),
             });
         }
+        Some(Pick::Poll(part)) => {
+            if let Some(draft) = poll_draft(key, String::new(), part) {
+                match at {
+                    At::Channel(index, _) => servers[index].send(Command::Send(draft)),
+                    At::Dm(peer) => send_dm(servers, &targets, chat, toast, now, (me, peer), draft),
+                }
+            }
+        }
         Some(Pick::Previews(id, allow)) => {
             let mut settings = voice.audio.settings();
             settings.link_previews.insert(id.into(), allow);
@@ -3587,6 +3606,29 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
         None => {}
     }
     act
+}
+
+/// A poll, vote or poll end to send; `None` without randomness for its ID.
+fn poll_draft(channel: Id, text: String, part: PollPart) -> Option<Draft> {
+    let Ok(id) = rusttalk_core::keys::random_key() else {
+        tracing::warn!("no randomness for a message ID");
+        return None;
+    };
+    Some(Draft {
+        id: *id,
+        channel,
+        peer: None,
+        text,
+        reply_to: None,
+        edit_of: None,
+        revision: 0,
+        files: Vec::new(),
+        sticker: None,
+        friend: None,
+        poke: false,
+        poll: Some(Box::new(part)),
+        preview: None,
+    })
 }
 
 /// Send a DM to every shared server that is online, with one ID so the copies merge.
@@ -3618,7 +3660,9 @@ fn send_dm(
         }));
         sent = true;
     }
-    if !sent {
+    if !sent && draft.poll.is_some() {
+        *toast = Some((t!("home.waiting_try_again").into(), now + 6.0));
+    } else if !sent {
         chat.draft = draft.text;
         chat.reply_to = draft.reply_to;
         chat.editing = draft.edit_of;
@@ -3708,6 +3752,8 @@ enum Pick {
     Invite(String),
     /// Allow (or not) link previews from a site, by its ID.
     Previews(&'static str, bool),
+    /// A vote or a poll's end to send.
+    Poll(PollPart),
 }
 
 fn composer_id(channel: Id) -> UiId {
@@ -3738,6 +3784,19 @@ fn composer(
     hint: &str,
     emoji_picker: &mut Picker,
 ) -> (Option<Command>, Option<bool>) {
+    if let Some(editor) = &mut chat.poll_editor {
+        match polls::editor(ui, editor) {
+            Some(polls::Action::Cancel) => chat.poll_editor = None,
+            Some(polls::Action::Post) if online => {
+                let (question, part) = editor.poll(polls::now());
+                chat.poll_editor = None;
+                let draft = poll_draft(channel, question, part);
+                return (draft.map(Command::Send), None);
+            }
+            _ => {}
+        }
+        return (None, None);
+    }
     let mut cancel = false;
     if let Some((person, _)) = chat.reply_to {
         let author = member_name(dir, &person);
@@ -3804,6 +3863,10 @@ fn composer(
                         Item::new("📡", t!("home.send_live")).hint(t!("home.send_live_help"));
                     if m.add(live).on_hover_text(t!("call.direct_chat")).clicked() {
                         attach = Some(true);
+                    }
+                    let poll = Item::new("📊", t!("polls.create")).hint(t!("polls.create_help"));
+                    if m.add(poll).clicked() {
+                        chat.poll_editor = Some(Default::default());
                     }
                 });
                 // Room for the buttons right of the box: emoji, sticker and send.
@@ -3911,6 +3974,7 @@ fn composer(
             sticker: Some(id),
             friend: None,
             poke: false,
+            poll: None,
             preview: None,
         });
         field.request_focus();
@@ -3969,6 +4033,7 @@ fn composer(
         sticker: None,
         friend: None,
         poke: false,
+        poll: None,
         preview: None,
     });
     chat.clear_draft();
@@ -4157,6 +4222,16 @@ fn message(
                     Body::Text(name) if msg.sticker.is_some() => {
                         sticker(ui, dir, msg.sticker.as_ref(), name);
                     }
+                    Body::Poll(question, poll) => {
+                        let tally = chat.tally(msg).unwrap_or_default();
+                        if let Some(choices) = polls::card(ui, question, poll, &tally, &me, names) {
+                            invite = Some(Pick::Poll(PollPart::Vote {
+                                poll: msg.id,
+                                sent: polls::now_ms(),
+                                choices,
+                            }));
+                        }
+                    }
                     Body::Text(text) => {
                         if !text.is_empty() {
                             ui.vertical(|ui| {
@@ -4207,6 +4282,11 @@ fn message(
             .map_source(text, |s| emoji::plain(s).into_owned())
     };
     let can_reply = text.is_some();
+    let can_end_poll = mine
+        && matches!(msg.body, Body::Poll(..))
+        && chat
+            .tally(msg)
+            .is_some_and(|tally| tally.open(polls::now()));
     let can_edit = mine && text.is_some() && msg.sticker.is_none();
     // A DM copy that didn't open proves nothing about who wrote it, and deleting a
     // DM message reaches every server, so only a readable copy of mine can be deleted.
@@ -4227,6 +4307,9 @@ fn message(
         }
         if can_reply && m.item("📋", t!("home.copy_text")).clicked() {
             m.ui().ctx().copy_text(mention.plain(dir));
+        }
+        if can_end_poll && m.item("🏁", t!("polls.end")).clicked() {
+            pick = Some(Pick::Poll(PollPart::End { poll: msg.id }));
         }
         if can_delete {
             m.separator();

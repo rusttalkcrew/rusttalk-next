@@ -5,7 +5,7 @@ use rusttalk_core::{
     auth::encode,
     client::{Event, KeyClient, MessageBody, MessageError},
     keys::{self, KeyState, Scope},
-    messages::MessageContext,
+    messages::{Ballot, MessageContext, Poll, PollPart, tally},
 };
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -20,7 +20,10 @@ const DELETE: &str = "W07 Pearl Author Deleted Message";
 const MOD_DELETE: &str = "W07 Amber Moderator Deleted Message";
 const VOICE_A: &str = "W61 Jade Voice Chat from A";
 const VOICE_B: &str = "W61 Onyx Voice Chat from B";
-pub(super) const TEXTS: [&str; 10] = [
+const POLL_QUESTION: &str = "W204 Malachite Poll Question";
+const POLL_FIRST: &str = "W204 Beryl Poll Answer";
+const POLL_SECOND: &str = "W204 Zircon Poll Answer";
+pub(super) const TEXTS: [&str; 13] = [
     TEXT_A,
     TEXT_B,
     DM_A,
@@ -31,6 +34,9 @@ pub(super) const TEXTS: [&str; 10] = [
     MOD_DELETE,
     VOICE_A,
     VOICE_B,
+    POLL_QUESTION,
+    POLL_FIRST,
+    POLL_SECOND,
 ];
 
 fn body(text: &str) -> MessageBody {
@@ -324,7 +330,81 @@ pub(super) async fn scenario(
     .await?
     .error_for_status()?;
     println!("W61 verified two-way chat, replies and paging in a voice channel");
+    poll(a, b, c, text).await?;
     Ok((dm, b_message))
+}
+
+/// A posts a poll, B and C vote (B changes their mind), and A counts the votes it reads.
+async fn poll(
+    a: &mut KeyClient<'_>,
+    b: &mut KeyClient<'_>,
+    c: &mut KeyClient<'_>,
+    text: Scope,
+) -> Result<()> {
+    let open = MessageBody {
+        text: POLL_QUESTION.into(),
+        poll: Some(PollPart::Open(Poll {
+            options: vec![POLL_FIRST.into(), POLL_SECOND.into()],
+            multiple: false,
+            ends_at: 0,
+        })),
+        ..Default::default()
+    };
+    let posted = a.send_message(&text.id, &open).await?;
+    wait_event(b, text, &posted.id, false).await?;
+    let received = b.message(&text.id, &posted.id).await?;
+    assert!(b.open_message(&text.id, &received).await? == open);
+    let vote = |sent, choices: &[u8]| MessageBody {
+        poll: Some(PollPart::Vote {
+            poll: posted.id,
+            sent,
+            choices: choices.to_vec(),
+        }),
+        ..Default::default()
+    };
+    b.send_message(&text.id, &vote(1, &[0])).await?;
+    b.send_message(&text.id, &vote(2, &[1])).await?;
+    let last = c.send_message(&text.id, &vote(1, &[1])).await?;
+    wait_event(a, text, &last.id, false).await?;
+    let end = MessageBody {
+        poll: Some(PollPart::End { poll: posted.id }),
+        ..Default::default()
+    };
+    a.send_message(&text.id, &end).await?;
+
+    // A counts from what it reads back, as the app does.
+    let (mut ballots, mut ends) = (Vec::new(), Vec::new());
+    let mut question = None;
+    for record in a.message_page(&text.id, None, 10).await? {
+        match a.open_message(&text.id, &record).await?.poll {
+            Some(PollPart::Open(poll)) if record.id == posted.id => question = Some(poll),
+            Some(PollPart::Vote {
+                poll,
+                sent,
+                choices,
+            }) if poll == posted.id => ballots.push(Ballot {
+                person: record.person,
+                at: record.at,
+                sent,
+                id: record.id,
+                choices,
+            }),
+            Some(PollPart::End { poll }) if poll == posted.id => {
+                ends.push((record.person, record.at))
+            }
+            _ => (),
+        }
+    }
+    let poll = question.context("the poll was not in the page")?;
+    let result = tally(&poll, a.identity.certificate.person_id(), &ballots, &ends);
+    let counts: Vec<usize> = result.voters.iter().map(Vec::len).collect();
+    ensure!(
+        counts == [0, 2] && result.people == 2,
+        "unexpected counts {counts:?}"
+    );
+    ensure!(result.ended, "the creator's end did not count");
+    println!("W204 verified an encrypted poll: two votes, a changed vote and the creator's end");
+    Ok(())
 }
 
 pub(super) async fn after_kick(

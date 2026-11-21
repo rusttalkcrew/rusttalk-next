@@ -49,6 +49,7 @@ impl Home {
                 sticker: None,
                 friend: None,
                 poke: true,
+                poll: None,
                 preview: None,
             }));
         }

@@ -74,6 +74,10 @@ messages, and the app hides them or keeps them quiet.
 Pokes are encrypted DM messages as well, so servers don't learn that a
 message is a poke or what its note says; they see a DM message's size and
 time. The poke history stays on the device (`pokes.json`) and is not synced.
+Polls, votes and ending a poll are encrypted messages too: servers see a
+message's size and time, not the question, the answers or who picked what.
+A vote is a small message posted soon after a poll, and its size grows with
+the number of answers picked.
 The app stores on the device which person each DM channel is with, and the
 newest epoch it trusts there with its commitment (`dm_pins/`), and its own
 deleted DM messages (`dm_deleted.json`). Servers see each key link as one more

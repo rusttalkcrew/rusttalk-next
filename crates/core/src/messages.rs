@@ -12,12 +12,15 @@ const NONCE: usize = 24;
 const TAG: usize = 16;
 const SIGNATURE: usize = 64;
 const HEADER: usize = 1 + NONCE + 2;
-/// Flags, text length and attachment count.
+/// Flags, text length and attachment count: format 2's smallest message.
 const MIN_PLAINTEXT: usize = 1 + 2 + 1;
+/// Format 3's kind byte after the flags.
+const KIND: usize = 1;
 const MAX_TEXT_BYTES: usize = MAX_TEXT_CHARS * 4;
-/// Maximum text, two references (reply ID and quoted author, or revision and edit ID),
-/// four stored files and a live offer.
+/// The kind byte, maximum text, two references (reply ID and quoted author, or
+/// revision and edit ID), four stored files and a live offer.
 const MAX_PLAINTEXT: usize = MIN_PLAINTEXT
+    + KIND
     + MAX_TEXT_BYTES
     + 2 * 32
     + MAX_ATTACHMENTS * MAX_ATTACHMENT_BYTES
@@ -31,8 +34,8 @@ const MAX_FILE_NAME: usize = 255;
 /// Media type length in ASCII bytes, for stored and live files.
 const MAX_MEDIA_TYPE: usize = 127;
 
-const _: () = assert!(MAX_PLAINTEXT == 10_644);
-const _: () = assert!(MAX_MESSAGE_BYTES == 10_751);
+const _: () = assert!(MAX_PLAINTEXT == 10_645);
+const _: () = assert!(MAX_MESSAGE_BYTES == 10_752);
 
 mod live;
 #[cfg(any(feature = "client", test))]
@@ -176,6 +179,17 @@ pub struct MessageRecord {
 mod crypto;
 #[cfg(any(feature = "client", test))]
 pub use crypto::{FriendSignal, KeyLink, MessageBody};
+
+#[cfg(any(feature = "client", test))]
+mod poll;
+#[cfg(any(feature = "client", test))]
+pub use poll::{
+    Ballot, MAX_POLL_OPTION, MAX_POLL_OPTIONS, MAX_POLL_QUESTION, MIN_POLL_OPTIONS, Poll, PollPart,
+    Tally, tally, valid_poll,
+};
+// A poll is sent alone, so its kind, fields and question fit the plaintext limit.
+#[cfg(any(feature = "client", test))]
+const _: () = assert!(MIN_PLAINTEXT + MAX_POLL_QUESTION * 4 + poll::MAX_BYTES <= MAX_PLAINTEXT);
 
 #[cfg(any(feature = "client", test))]
 mod attachment;

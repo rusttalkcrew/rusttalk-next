@@ -386,7 +386,7 @@ pub async fn delete(
     Ok(StatusCode::NO_CONTENT)
 }
 
-const _: () = assert!(BODY_LIMIT == 14_847);
+const _: () = assert!(BODY_LIMIT == 14_848);
 
 #[cfg(test)]
 mod tests {
