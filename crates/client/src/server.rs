@@ -1,7 +1,11 @@
 //! What the UI shows for each server. The network task in net.rs decrypts the
 //! server's metadata and messages and sends these; the UI only reads and merges them.
 
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::{BTreeSet, HashMap},
+    path::PathBuf,
+    sync::Arc,
+};
 
 use eframe::egui::{Color32, ColorImage};
 
@@ -13,6 +17,7 @@ use rusttalk_core::{
     identity::fingerprint,
     presence::{Presence, Status as Choice},
 };
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 use url::Url;
 
@@ -332,6 +337,40 @@ impl Member {
     }
 }
 
+/// "Hide me when I'm offline": each server stores the flag, and this device keeps
+/// its last known value plus the servers it still has to tell about a change made
+/// here. Saved, so a restart doesn't let a stale server undo that change.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HideOffline {
+    pub on: bool,
+    /// Server addresses that haven't confirmed this device's last change yet.
+    pub pending: BTreeSet<String>,
+}
+
+impl HideOffline {
+    /// The person changed it here: every server has to be told.
+    pub fn choose<'a>(&mut self, on: bool, servers: impl Iterator<Item = &'a Url>) {
+        self.on = on;
+        self.pending = servers.map(Url::to_string).collect();
+    }
+
+    /// A server reported its stored flag; returns what to send it, if anything.
+    /// Without a change pending for that server, its value is the newest one (made
+    /// on another device) and is taken over, so two devices never write back and forth.
+    pub fn reported(&mut self, server: &Url, theirs: bool) -> Option<bool> {
+        if !self.pending.contains(server.as_str()) {
+            self.on = theirs;
+            None
+        } else if theirs == self.on {
+            self.pending.remove(server.as_str());
+            None
+        } else {
+            Some(self.on)
+        }
+    }
+}
+
 /// A decoded profile picture or server icon: each frame and how long it shows, in ms.
 #[derive(Clone)]
 pub struct Picture {
@@ -576,6 +615,51 @@ fn add_replicas(replicas: &mut Vec<Url>, more: Vec<Url>) {
 
 #[cfg(test)]
 mod tests {
+    use super::HideOffline;
+
+    /// A server that stores the flag, like the API.
+    fn server(n: u8) -> url::Url {
+        format!("https://server{n}.test/").parse().unwrap()
+    }
+
+    #[test]
+    fn two_devices_converge_without_writing_back_and_forth() {
+        let a = server(1);
+        let (mut first, mut second) = (HideOffline::default(), HideOffline::default());
+        first.choose(true, [&a].into_iter());
+        let mut stored = first.on;
+        // The write tells everyone to reload; both devices read the server again.
+        let mut writes = 0;
+        for _ in 0..3 {
+            for device in [&mut first, &mut second] {
+                if let Some(on) = device.reported(&a, stored) {
+                    stored = on;
+                    writes += 1;
+                }
+            }
+        }
+        assert_eq!(writes, 0);
+        assert!(stored && first.on && second.on);
+        assert!(first.pending.is_empty());
+    }
+
+    #[test]
+    fn a_change_made_offline_survives_a_restart_and_a_stale_server() {
+        let (a, b) = (server(1), server(2));
+        let mut device = HideOffline::default();
+        device.choose(true, [&a, &b].into_iter());
+        // A took it; B was offline.
+        assert_eq!(device.reported(&a, true), None);
+        let saved = serde_json::to_string(&device).unwrap();
+        let mut restarted: HideOffline = serde_json::from_str(&saved).unwrap();
+        // B answers first after the restart, with its old value: it gets told again.
+        assert_eq!(restarted.reported(&b, false), Some(true));
+        assert!(restarted.on);
+        assert_eq!(restarted.reported(&a, true), None);
+        assert_eq!(restarted.reported(&b, true), None);
+        assert!(restarted.pending.is_empty());
+    }
+
     #[test]
     fn hidden_members_leave_the_list_only_while_offline() {
         use rusttalk_core::presence::Presence;

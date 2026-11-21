@@ -109,7 +109,8 @@ A member can choose to be left out of member lists while they appear offline
 row and returns it with the member directory, so clients can still show the
 member's name and picture on their messages, mentions and DMs; clients leave
 the member out of the member list while their visible status is offline. The
-admin member management view still lists them.
+admin member management view still lists them. This only hides the member in
+other people's apps; it is not an access-control or anonymity guarantee.
 
 Public listing is off by default. The owner explicitly supplies the name
 and description they want to make public. The API encrypts this separate

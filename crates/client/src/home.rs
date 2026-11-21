@@ -107,8 +107,6 @@ pub struct Home {
     left: HashSet<url::Url>,
     /// This person's status on every server; `None` until a server reports it.
     pub status: Option<Choice>,
-    /// Hide from member lists while offline, on every server; `None` until a server reports it.
-    hide_offline: Option<bool>,
     /// "Away" was set by itself after no input, so input sets "Online" again.
     auto_away: bool,
     /// When the person last used the window, in egui time.
@@ -301,7 +299,6 @@ impl Home {
             synced,
             left: HashSet::new(),
             status: None,
-            hide_offline: None,
             auto_away: false,
             active_at: 0.0,
             layout,
@@ -316,14 +313,6 @@ impl Home {
         self.status = Some(choice);
         for server in &self.servers {
             server.send(Command::SetStatus(choice));
-        }
-    }
-
-    /// Hide from (or show in) member lists while offline, on every server.
-    fn set_hide_offline(&mut self, hide: bool) {
-        self.hide_offline = Some(hide);
-        for server in &self.servers {
-            server.send(Command::SetHideOffline(hide));
         }
     }
 
@@ -857,13 +846,12 @@ impl Home {
                         }
                         _ => {}
                     }
-                    // Like the status: the first server's choice counts, others follow it.
-                    match (self.hide_offline, dir.hide_offline) {
-                        (None, stored) => self.hide_offline = stored,
-                        (Some(mine), Some(theirs)) if mine != theirs => {
-                            server.send(Command::SetHideOffline(mine));
+                    if let Some(theirs) = dir.hide_offline {
+                        let mut settings = self.voice.audio.settings();
+                        if let Some(on) = settings.hide_offline.reported(&address, theirs) {
+                            server.send(Command::SetHideOffline(on));
                         }
-                        _ => {}
+                        self.voice.audio.set_settings(settings);
                     }
                     server.dir = *dir;
                     self.load_dms(index);
@@ -2637,7 +2625,7 @@ pub fn privacy_tab(ui: &mut Ui, home: &mut Home) {
         home.publish_settings();
     }
     ui::page_section(ui, t!("home.member_lists"));
-    let mut hide = home.hide_offline.unwrap_or_default();
+    let mut hide = settings.hide_offline.on;
     let toggle = ui.add_enabled_ui(!home.servers.is_empty(), |ui| {
         ui::toggle_row(
             ui,
@@ -2647,7 +2635,11 @@ pub fn privacy_tab(ui: &mut Ui, home: &mut Home) {
         )
     });
     if toggle.inner.changed() {
-        home.set_hide_offline(hide);
+        let servers = home.servers.iter().map(|server| &server.address);
+        settings.hide_offline.choose(hide, servers);
+        for server in &home.servers {
+            server.send(Command::SetHideOffline(hide));
+        }
     }
     ui::page_section(ui, t!("home.server_directory"));
     ui::banner(ui, "privacy-directory", t!("home.directory_help"));

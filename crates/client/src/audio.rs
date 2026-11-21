@@ -141,6 +141,8 @@ pub struct Settings {
     pub screen_height: Option<u32>,
     pub screen_fps: u32,
     pub screen_cursor: bool,
+    /// Hide from member lists while offline; this device's copy of the per-server flag.
+    pub hide_offline: crate::server::HideOffline,
 }
 
 impl Settings {
@@ -200,6 +202,7 @@ impl Default for Settings {
             screen_height: Some(1080),
             screen_fps: 30,
             screen_cursor: true,
+            hide_offline: Default::default(),
         }
     }
 }
