@@ -599,10 +599,11 @@ struct State {
     pins_saved: HashMap<Id, DmPin>,
     /// `dm_pins` couldn't be read: it is left as it is, and DMs here stay blocked.
     pins_lost: bool,
-    /// Voice room events and commands that came while offline or connecting, for when
-    /// the connection is back.
-    held: VecDeque<Next>,
+    /// Commands that came while connecting, for when it is done.
     queued: VecDeque<Command>,
+    /// Who each voice participant (LiveKit identity) is, as last known from the API: the
+    /// call's people and their videos still show while the API connection is down.
+    identities: HashMap<String, Id>,
     /// DMs the server relabelled, already warned about.
     relabelled: HashSet<Id>,
 }
@@ -671,6 +672,7 @@ async fn run(
                         tracing::info!(server = %fingerprint(&server.server_id), "connected to server");
                         ctx.send(Update::Status(url.clone(), Status::Online));
                         let end = serve(&ctx, &url, &mut client, &mut state, &mut commands).await;
+                        state.identities = voice::identities(&client, &state.server_id);
                         ctx.sync.set_peer(&url, None);
                         match end {
                             End::Quit => return,
@@ -738,11 +740,16 @@ async fn offline<T>(
     loop {
         tokio::select! {
             done = &mut until => return Some(done),
-            next = next_voice(&mut state.voice) => voice::offline_voice(ctx, url, state, next).await,
+            next = next_voice(&mut state.voice) => voice_next(ctx, url, None, state, next).await,
             command = commands.recv() => match command? {
                 command if voice_only(&command) => {
-                    if let Err(error) = voice_command(ctx, url, state, command).await {
-                        tracing::warn!(error = %format_args!("{error:#}"), "voice request failed");
+                    cancel_queued(&mut state.queued, &command);
+                    match voice_command(ctx, url, state, command).await {
+                        Ok(Some(channel)) => voice::roster(ctx, url, None, state, channel),
+                        Ok(None) => {}
+                        Err(error) => {
+                            tracing::warn!(error = %format_args!("{error:#}"), "voice request failed");
+                        }
                     }
                 }
                 command if connecting => state.queued.push_back(command),
@@ -750,6 +757,24 @@ async fn offline<T>(
             },
         }
     }
+}
+
+/// Leaving or stopping while connecting also drops the join or share still waiting for
+/// the connection, so it doesn't start again once connected.
+fn cancel_queued(queued: &mut VecDeque<Command>, command: &Command) {
+    queued.retain(|queued| match (command, queued) {
+        (
+            Command::LeaveVoice,
+            Command::JoinVoice(_)
+            | Command::ShareScreen(..)
+            | Command::ShareCamera(..)
+            | Command::ShareApp(_),
+        ) => false,
+        (Command::StopScreen, Command::ShareScreen(..)) => false,
+        (Command::StopCamera, Command::ShareCamera(..)) => false,
+        (Command::StopApp(id), Command::ShareApp(app)) => app.id != *id,
+        _ => true,
+    });
 }
 
 /// Turn down a command that needs the API connection, which is down.
@@ -900,10 +925,7 @@ async fn serve(
         tracing::warn!(error = %format_args!("{error:#}"), "loading server state failed");
         return End::Error;
     }
-    // What happened in the call, and what was asked, while connecting.
-    for next in std::mem::take(&mut state.held) {
-        voice_next(ctx, url, client, state, next).await;
-    }
+    // What was asked while connecting.
     for command in std::mem::take(&mut state.queued) {
         run_command(ctx, url, client, state, command).await;
     }
@@ -965,7 +987,7 @@ async fn serve(
                     tracing::warn!(error = %format_args!("{error:#}"), "reloading after refresh failed");
                 }
             }
-            next = next_voice(&mut state.voice) => voice_next(ctx, url, client, state, next).await,
+            next = next_voice(&mut state.voice) => voice_next(ctx, url, Some(client), state, next).await,
             _ = stats.tick(), if state.voice.is_some() => {
                 voice::sync_voice_status(ctx, state).await;
                 if let Some(live) = &mut state.voice {
@@ -995,7 +1017,15 @@ async fn run_command(
     }
 }
 
-async fn voice_next(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &mut State, next: Next) {
+/// A voice room event or finished screen pick. Without `client` the API connection is
+/// down; the call goes on with the people last known.
+async fn voice_next(
+    ctx: &Ctx,
+    url: &Url,
+    client: Option<&KeyClient<'_>>,
+    state: &mut State,
+    next: Next,
+) {
     match next {
         Next::Event(Some(RoomEvent::DataReceived {
             payload,
@@ -1013,12 +1043,22 @@ async fn voice_next(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &mut St
                 }
                 _ => None,
             };
-            on_voice(ctx, url, Some(client), state, event).await;
+            on_voice(ctx, url, client, state, event).await;
             if let Some(unpublished) = lost {
                 stop_lost_video(ctx, url, client, state, unpublished).await;
             }
         }
-        Next::Capture(capture) => share_screen(ctx, url, client, state, capture).await,
+        Next::Capture(capture) => match client {
+            Some(client) => share_screen(ctx, url, client, state, capture).await,
+            // Like a new share while offline: publishing needs the API.
+            None => {
+                if let Some(live) = &mut state.voice {
+                    live.starting = None;
+                }
+                ctx.send(Update::Sharing(false));
+                ctx.send(Update::Failed(t!("admin.offline").into()));
+            }
+        },
         Next::Swap(capture) => screen_changed(ctx, state, capture),
     }
 }
@@ -1738,5 +1778,36 @@ mod protocol_tests {
             Compatibility::for_protocol(Some(PROTOCOL_VERSION + 1)),
             Compatibility::AppTooOld
         );
+    }
+
+    /// Joining or sharing while connecting, then leaving or stopping: once connected, the
+    /// join or share must not run after all (#142).
+    #[test]
+    fn leaving_while_connecting_drops_the_waiting_join_and_shares() {
+        let app = |id: &str| {
+            Command::ShareApp(App {
+                id: id.into(),
+                name: "Music".into(),
+            })
+        };
+        let mut queued = VecDeque::from([
+            Command::JoinVoice([1; 32]),
+            Command::Open([2; 32]),
+            app("a"),
+            app("b"),
+        ]);
+        cancel_queued(&mut queued, &Command::StopApp("a".into()));
+        assert_eq!(queued.len(), 3);
+        assert!(
+            !queued
+                .iter()
+                .any(|command| matches!(command, Command::ShareApp(app) if app.id == "a"))
+        );
+        cancel_queued(&mut queued, &Command::LeaveVoice);
+        // What reconnecting runs: only what has nothing to do with the call.
+        assert_eq!(queued.len(), 1);
+        assert!(matches!(queued[0], Command::Open(_)));
+        cancel_queued(&mut queued, &Command::StopControl);
+        assert_eq!(queued.len(), 1);
     }
 }
