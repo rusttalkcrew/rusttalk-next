@@ -147,8 +147,9 @@ pub struct Settings {
     /// Link previews by site (see `previews`): missing until the person answers the
     /// first card's question. This device only, never synced.
     pub link_previews: std::collections::BTreeMap<String, bool>,
-    /// Make previews of other links when sending them (see `link_cards`).
-    pub create_link_previews: bool,
+    /// Make previews of other links when sending them (see `link_cards`): `None` asks
+    /// each time until the person picks Always (`true`) or Never (`false`).
+    pub create_link_previews: Option<bool>,
 }
 
 impl Settings {
@@ -211,7 +212,7 @@ impl Default for Settings {
             screen_cursor: true,
             hide_offline: Default::default(),
             link_previews: Default::default(),
-            create_link_previews: true,
+            create_link_previews: None,
         }
     }
 }

@@ -926,8 +926,9 @@ and its plaintext at most 4,096 bytes of UTF-8 JSON:
 at most 2,048 bytes) and a non-empty `title` are required; `description` and
 `site` may be missing. The optional thumbnail is the page's picture, made like
 any other thumbnail. Apps that know the type download the file, show it as a
-card under the text instead of as a file (at most one per message), show the
-address's host on it, treat every field as plain text and cut the title to 200,
+card under the text instead of as a file (at most one per message) only when
+`url`, parsed, equals one of the message text's parsed link destinations,
+show the address's host on it, treat every field as plain text and cut the title to 200,
 the description to 300 and the site to 80 characters. They ignore a file of
 this type that is bigger, unreadable or invalid. Older apps show it as a small
 file. Senders only make previews for links that no reader-side link preview

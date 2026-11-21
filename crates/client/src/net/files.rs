@@ -24,6 +24,8 @@ use crate::{
     link_cards::{Card, FILE_NAME, MAX_CARD_BYTES, MEDIA_TYPE, Made},
     server::Id,
 };
+use rusttalk_core::client::prepare_file;
+use std::time::Instant;
 
 /// Upload the files, then send the message with them; `false` when an upload failed.
 /// A link preview that fails to upload is left out, without failing the message.
@@ -60,18 +62,10 @@ pub(super) async fn send(
             return Ok(false);
         }
     }
-    if let Some(made) = preview.filter(|_| body.attachments.len() < crate::files::MAX_FILES) {
-        let json = made.card.encode();
-        let picture = made.picture.as_deref().unwrap_or_default();
-        match client
-            .upload_file_with(&channel, FILE_NAME, MEDIA_TYPE, &json, picture, None)
-            .await
-        {
-            Ok(attachment) => body.attachments.push(attachment),
-            Err(error) => {
-                tracing::info!(error = %format_args!("{error:#}"), "uploading a link preview failed");
-            }
-        }
+    if let Some(made) = preview.filter(|_| body.attachments.len() < crate::files::MAX_FILES)
+        && let Some(attachment) = upload_preview(client, &channel, made).await
+    {
+        body.attachments.push(attachment);
     }
     let record = match client.post_message(&channel, id, &body).await {
         Ok(record) => record,
@@ -82,6 +76,52 @@ pub(super) async fn send(
     };
     send_messages(ctx, url, channel, vec![to_msg(&record, &body)], false, None);
     Ok(true)
+}
+
+/// Upload a link preview within what is left of its time; past that, or on any
+/// problem, the message goes without it and a partial upload is removed.
+async fn upload_preview(
+    client: &KeyClient<'_>,
+    channel: &Id,
+    made: Arc<Made>,
+) -> Option<Attachment> {
+    let json = preview_file(&made)?;
+    let prepared = {
+        let (json, made) = (json.clone(), made.clone());
+        // The thumbnail decodes the page's picture: with limits, off the async workers.
+        tokio::task::spawn_blocking(move || {
+            prepare_file(
+                FILE_NAME,
+                MEDIA_TYPE,
+                &json,
+                made.picture.as_deref().unwrap_or_default(),
+            )
+        })
+    };
+    let (attachment, thumbnail) = match prepared.await {
+        Ok(Ok(prepared)) => prepared,
+        _ => return None,
+    };
+    let left = made.deadline.saturating_duration_since(Instant::now());
+    let upload = client.upload_prepared(channel, &attachment, &json, thumbnail.as_deref(), None);
+    match tokio::time::timeout(left, upload).await {
+        Ok(Ok(())) => Some(attachment),
+        Ok(Err(error)) => {
+            tracing::info!(error = %format_args!("{error:#}"), "uploading a link preview failed");
+            None
+        }
+        Err(_) => {
+            tracing::info!("uploading a link preview took too long");
+            discard(client, std::slice::from_ref(&attachment)).await;
+            None
+        }
+    }
+}
+
+/// The preview's file, unless it is too big or its time is up.
+fn preview_file(made: &Made) -> Option<Vec<u8>> {
+    let json = made.card.encode();
+    (json.len() <= MAX_CARD_BYTES as usize && Instant::now() < made.deadline).then_some(json)
 }
 
 /// Delete a message, then its stored files.
@@ -307,6 +347,25 @@ fn save_file(path: &Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_late_or_oversized_preview_is_left_out() {
+        let made = |deadline, url: String| Made {
+            card: Card {
+                url,
+                title: "t".into(),
+                description: String::new(),
+                site: String::new(),
+            },
+            picture: None,
+            deadline,
+        };
+        let later = Instant::now() + std::time::Duration::from_secs(5);
+        assert!(preview_file(&made(later, "https://example.org/".into())).is_some());
+        assert!(preview_file(&made(Instant::now(), "https://example.org/".into())).is_none());
+        let long = format!("https://example.org/{}", "a".repeat(5000));
+        assert!(preview_file(&made(later, long)).is_none());
+    }
 
     #[test]
     fn upload_problems_name_the_limit_that_was_hit() {

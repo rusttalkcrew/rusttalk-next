@@ -738,6 +738,12 @@ impl Home {
 
     /// Send queued messages whose preview is done, failed or removed, in order per chat.
     fn send_queued(&mut self, ctx: &egui::Context, now: f64) {
+        // Turned off meanwhile: stop what is being made, and don't ask.
+        if self.voice.audio.settings().create_link_previews == Some(false) {
+            for out in &mut self.sending {
+                out.preview = None;
+            }
+        }
         let mut waiting: Vec<To> = Vec::new();
         let mut at = 0;
         while at < self.sending.len() {
@@ -745,7 +751,8 @@ impl Home {
             let done = match &out.preview {
                 _ if waiting.contains(&out.to) => None,
                 None => Some(None),
-                Some(job) => job.poll(),
+                Some(Making::Ask(_)) => None,
+                Some(Making::Job(job)) => job.poll(),
             };
             let Some(made) = done else {
                 waiting.push(out.to.clone());
@@ -2744,12 +2751,17 @@ pub fn privacy_tab(ui: &mut Ui, home: &mut Home) {
             home.previews.allow(provider.id(), on);
         }
     }
-    ui::toggle_row(
+    let mut create = settings.create_link_previews == Some(true);
+    if ui::toggle_row(
         ui,
-        &mut settings.create_link_previews,
+        &mut create,
         t!("previews.create"),
         t!("previews.create_help"),
-    );
+    )
+    .changed()
+    {
+        settings.create_link_previews = Some(create);
+    }
     ui::page_section(ui, t!("home.server_directory"));
     ui::banner(ui, "privacy-directory", t!("home.directory_help"));
     ui::setting_row(
@@ -3013,7 +3025,57 @@ struct Outgoing {
     to: To,
     draft: Draft,
     /// The preview being made; `None` once removed, or for a message only waiting its turn.
-    preview: Option<link_cards::Job>,
+    preview: Option<Making>,
+}
+
+enum Making {
+    /// Waiting for the person to say whether the app may visit the link.
+    Ask(url::Url),
+    /// Being made; dropping it stops the fetch.
+    Job(link_cards::Job),
+}
+
+/// Above the composer: the question whether to make a preview, or that one is being made.
+fn preview_status(ui: &mut Ui, voice: &Voice, out: &mut Outgoing) {
+    match &out.preview {
+        Some(Making::Ask(url)) => {
+            let url = url.clone();
+            let host = url.host_str().unwrap_or_default().to_owned();
+            ui.weak(t!("previews.ask_create", host = host));
+            ui.horizontal(|ui| {
+                let mut answer = None;
+                if ui::primary(ui, t!("previews.always")).clicked() {
+                    answer = Some(Some(true));
+                }
+                if ui::secondary(ui, t!("previews.not_now")).clicked() {
+                    answer = Some(None);
+                }
+                if ui::secondary(ui, t!("previews.never")).clicked() {
+                    answer = Some(Some(false));
+                }
+                let Some(choice) = answer else {
+                    return;
+                };
+                if choice.is_some() {
+                    let mut settings = voice.audio.settings();
+                    settings.create_link_previews = choice;
+                    voice.audio.set_settings(settings);
+                }
+                out.preview = (choice == Some(true))
+                    .then(|| Making::Job(link_cards::Job::start(url, ui.ctx())));
+            });
+        }
+        Some(Making::Job(_)) => {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.weak(t!("previews.adding"));
+                if ui::small_close(ui, t!("previews.remove")).clicked() {
+                    out.preview = None;
+                }
+            });
+        }
+        None => {}
+    }
 }
 
 /// Which chat a pane shows.
@@ -3217,25 +3279,24 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
                 .iter_mut()
                 .find(|o| o.to == to && o.preview.is_some())
             {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.weak(t!("previews.adding"));
-                    if ui::small_close(ui, t!("previews.remove")).clicked() {
-                        out.preview = None;
-                    }
-                });
+                preview_status(ui, voice, out);
             }
             let (command, attach) = composer(ui, chat, dir, online, key, &hint, emoji_picker);
             // A new message with a link to some other site waits for its preview; any
             // message sent meanwhile waits behind it.
             let command = match command {
                 Some(Command::Send(draft)) => {
-                    let preview = (voice.audio.settings().create_link_previews
-                        && draft.edit_of.is_none()
-                        && draft.sticker.is_none())
-                    .then(|| link_cards::candidate(markdown::cached(ui, &draft.text).links()))
-                    .flatten()
-                    .map(|url| link_cards::Job::start(url, ui.ctx()));
+                    let link = (draft.edit_of.is_none() && draft.sticker.is_none())
+                        .then(|| link_cards::candidate(markdown::cached(ui, &draft.text).links()))
+                        .flatten();
+                    // Asked the first time (and each time until Always or Never).
+                    let preview = match (link, voice.audio.settings().create_link_previews) {
+                        (Some(url), Some(true)) => {
+                            Some(Making::Job(link_cards::Job::start(url, ui.ctx())))
+                        }
+                        (Some(url), None) => Some(Making::Ask(url)),
+                        _ => None,
+                    };
                     if preview.is_some() || sending.iter().any(|o| o.to == to) {
                         sending.push_back(Outgoing {
                             to: to.clone(),
@@ -3321,7 +3382,16 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
             });
             let shown = message(ui, chat, msg, start, dir, &embeds, key, |ui| {
                 if let Some(server) = holder(msg) {
-                    files::attachments(ui, files, &server.address, &server.commands, &msg.files);
+                    // A link preview must be about one of the message's own links.
+                    let links: Vec<String> = match &msg.body {
+                        Body::Text(text) => markdown::cached(ui, text)
+                            .links()
+                            .map(String::from)
+                            .collect(),
+                        _ => Vec::new(),
+                    };
+                    let server = (&server.address, &server.commands);
+                    files::attachments(ui, files, server, &msg.files, &links);
                 }
                 // The server isn't borrowed whole here, so look the offer up by its parts.
                 if msg.live.is_some() {

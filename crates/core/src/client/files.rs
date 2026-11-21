@@ -60,36 +60,26 @@ impl KeyClient<'_> {
         bytes: &[u8],
         progress: Option<Progress>,
     ) -> Result<Attachment> {
-        self.upload_file_with(channel, name, media_type, bytes, bytes, progress)
-            .await
+        let (attachment, thumbnail) = prepare_file(name, media_type, bytes, bytes)?;
+        self.upload_prepared(channel, &attachment, bytes, thumbnail.as_deref(), progress)
+            .await?;
+        Ok(attachment)
     }
 
-    /// Like `upload_file`, with the thumbnail made from `picture` instead of the file,
-    /// as for a link preview whose file is text and whose thumbnail is the page's picture.
-    pub async fn upload_file_with(
+    /// Upload a file made by `prepare_file`. On failure the file blob is removed again; a
+    /// caller that gives up midway removes both blobs by the references it already has.
+    pub async fn upload_prepared(
         &self,
         channel: &[u8; 32],
-        name: &str,
-        media_type: &str,
+        attachment: &Attachment,
         bytes: &[u8],
-        picture: &[u8],
+        thumbnail: Option<&[u8]>,
         progress: Option<Progress>,
-    ) -> Result<Attachment> {
-        let mut attachment = Attachment {
-            file: blob_ref(bytes.len())?,
-            name: name.into(),
-            media_type: media_type.into(),
-            thumbnail: None,
-        };
-        attachment.validate()?;
-        let thumbnail = make_thumbnail(picture);
-        if let Some(png) = &thumbnail {
-            attachment.thumbnail = Some(blob_ref(png.len())?);
-        }
+    ) -> Result<()> {
         self.upload_blob(channel, &attachment.file, bytes, progress)
             .await?;
         if let (Some(reference), Some(bytes)) = (&attachment.thumbnail, thumbnail)
-            && let Err(error) = self.upload_blob(channel, reference, &bytes, None).await
+            && let Err(error) = self.upload_blob(channel, reference, bytes, None).await
         {
             if let Err(cleanup) = self.delete_file(&attachment.file.id).await {
                 tracing::warn!(status = ?cleanup.downcast_ref::<reqwest::Error>().and_then(reqwest::Error::status),
@@ -97,7 +87,7 @@ impl KeyClient<'_> {
             }
             return Err(error);
         }
-        Ok(attachment)
+        Ok(())
     }
 
     async fn upload_blob(
@@ -338,6 +328,28 @@ fn make_thumbnail(bytes: &[u8]) -> Option<Vec<u8>> {
         .ok()?;
     let png = png.into_inner();
     (png.len() <= MAX_THUMBNAIL_BYTES).then_some(png)
+}
+
+/// A new file's references and its PNG thumbnail (made from `picture`, which is the
+/// file itself for pictures, or a link preview's page picture), before any upload.
+pub fn prepare_file(
+    name: &str,
+    media_type: &str,
+    bytes: &[u8],
+    picture: &[u8],
+) -> Result<(Attachment, Option<Vec<u8>>)> {
+    let mut attachment = Attachment {
+        file: blob_ref(bytes.len())?,
+        name: name.into(),
+        media_type: media_type.into(),
+        thumbnail: None,
+    };
+    attachment.validate()?;
+    let thumbnail = make_thumbnail(picture);
+    if let Some(png) = &thumbnail {
+        attachment.thumbnail = Some(blob_ref(png.len())?);
+    }
+    Ok((attachment, thumbnail))
 }
 
 fn file_path(id: &[u8; 32]) -> String {

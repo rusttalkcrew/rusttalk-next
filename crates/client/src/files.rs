@@ -863,12 +863,14 @@ fn plays_inline(name: &str, media_type: &str, size: u64) -> bool {
 /// A message's files: a preview for pictures, a card with Download for the rest.
 /// Small animated GIFs and WebPs play right in the message, loaded by themselves;
 /// bigger ones show their first frame with a badge and play in the viewer.
+/// A message's files; `links` are its text's link destinations, which a link preview
+/// must be about.
 pub fn attachments(
     ui: &mut Ui,
     files: &mut Files,
-    address: &Url,
-    commands: &UnboundedSender<Command>,
+    (address, commands): (&Url, &UnboundedSender<Command>),
     list: &[Attachment],
+    links: &[String],
 ) {
     let (cards, list): (Vec<&Attachment>, Vec<&Attachment>) =
         list.iter().partition(|file| is_card(file));
@@ -899,13 +901,10 @@ pub fn attachments(
         }
         let playing = matches!(inline, Some(Picture::Ready(_)));
         if let Some(thumb) = file.thumbnail.as_ref().filter(|_| !playing) {
-            if files.images.len() > MAX_PICTURES {
-                let open = files.viewer.as_ref().map(|view| view.file.file.id);
-                // Loading entries stay so their pending answers still land.
-                files
-                    .images
-                    .retain(|id, picture| Some(*id) == open || matches!(picture, Picture::Loading));
-            }
+            bound_pictures(
+                &mut files.images,
+                files.viewer.as_ref().map(|v| v.file.file.id),
+            );
             files.images.entry(thumb.id).or_insert_with(|| {
                 let _ = commands.send(Command::Image(thumb.clone(), Fetch::Thumbnail));
                 Picture::Loading
@@ -967,7 +966,7 @@ pub fn attachments(
     }
     // One preview per message, as senders make.
     if let Some(card) = cards.first() {
-        link_card(ui, files, commands, card);
+        link_card(ui, files, commands, card, links);
     }
 }
 
@@ -978,9 +977,11 @@ fn link_card(
     files: &mut Files,
     commands: &UnboundedSender<Command>,
     file: &Attachment,
+    links: &[String],
 ) {
     let area = Rect::from_min_size(ui.cursor().min, Vec2::splat(THUMBNAIL));
     if ui.is_rect_visible(area) {
+        bound_cards(&mut files.cards);
         files.cards.entry(file.file.id).or_insert_with(|| {
             let _ = commands.send(Command::LinkCard(file.file.clone()));
             Card::Loading
@@ -989,8 +990,16 @@ fn link_card(
     let Some(Card::Ready(card)) = files.cards.get(&file.file.id) else {
         return;
     };
+    // A sender can't attach a card for a page the message doesn't link to.
+    if !link_cards::matches(card, links.iter().map(String::as_str)) {
+        return;
+    }
     let card = card.clone();
     if let Some(thumb) = &file.thumbnail {
+        bound_pictures(
+            &mut files.images,
+            files.viewer.as_ref().map(|v| v.file.file.id),
+        );
         files.images.entry(thumb.id).or_insert_with(|| {
             let _ = commands.send(Command::Image(thumb.clone(), Fetch::Thumbnail));
             Picture::Loading
@@ -1023,6 +1032,22 @@ fn link_card(
     .show(ui);
     if clicked.is_some() {
         ui.ctx().open_url(egui::OpenUrl::new_tab(card.url));
+    }
+}
+
+/// Empty the picture cache once it holds too many, except the viewer's (`open`);
+/// shown ones load again on demand.
+fn bound_pictures(images: &mut HashMap<Id, Picture>, open: Option<Id>) {
+    if images.len() > MAX_PICTURES {
+        // Loading entries stay so their pending answers still land.
+        images.retain(|id, picture| Some(*id) == open || matches!(picture, Picture::Loading));
+    }
+}
+
+/// The same bound for loaded link previews.
+fn bound_cards(cards: &mut HashMap<Id, Card>) {
+    if cards.len() > MAX_PICTURES {
+        cards.retain(|_, card| matches!(card, Card::Loading));
     }
 }
 
@@ -1208,6 +1233,36 @@ pub fn viewer(ctx: &egui::Context, files: &mut Files) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pictures_and_link_previews_stay_bounded() {
+        let mut images: HashMap<Id, Picture> = (0..=MAX_PICTURES as u8)
+            .map(|i| ([i; 32], Picture::Failed))
+            .collect();
+        images.insert([254; 32], Picture::Loading);
+        bound_pictures(&mut images, Some([3; 32]));
+        let mut kept: Vec<_> = images.keys().copied().collect();
+        kept.sort();
+        assert_eq!(
+            kept,
+            [[3; 32], [254; 32]],
+            "the viewer's and loading ones stay"
+        );
+        let card = || {
+            Card::Ready(link_cards::Card {
+                url: "https://example.org/".into(),
+                title: "t".into(),
+                description: String::new(),
+                site: String::new(),
+            })
+        };
+        let mut cards: HashMap<Id, Card> = (0..=MAX_PICTURES as u8)
+            .map(|i| ([i; 32], card()))
+            .collect();
+        cards.insert([254; 32], Card::Loading);
+        bound_cards(&mut cards);
+        assert_eq!(cards.len(), 1);
+    }
 
     #[test]
     fn only_small_files_of_the_preview_type_become_cards() {

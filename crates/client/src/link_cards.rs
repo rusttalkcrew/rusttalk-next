@@ -9,6 +9,10 @@ use std::{
     cell::{Cell, RefCell},
     io::Read,
     net::{IpAddr, SocketAddr, ToSocketAddrs},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -71,6 +75,34 @@ impl Card {
     }
 }
 
+impl Card {
+    /// Shortened until its file fits `MAX_CARD_BYTES`: the description first, then the
+    /// title, then the site. `None` when even that isn't enough.
+    pub fn fit(mut self) -> Option<Self> {
+        let fields: [fn(&mut Self) -> &mut String; 3] =
+            [|c| &mut c.description, |c| &mut c.title, |c| &mut c.site];
+        for field in fields {
+            while self.encode().len() > MAX_CARD_BYTES as usize && field(&mut self).pop().is_some()
+            {
+            }
+        }
+        (self.encode().len() <= MAX_CARD_BYTES as usize && !self.title.trim().is_empty())
+            .then_some(self)
+    }
+}
+
+/// Whether a received card is about one of the links in its message, so a sender can't
+/// attach a card for some other page. Both sides are compared as parsed addresses.
+pub fn matches<'a>(card: &Card, links: impl IntoIterator<Item = &'a str>) -> bool {
+    let Some(url) = web_url(&card.url) else {
+        return false;
+    };
+    links
+        .into_iter()
+        .filter_map(web_url)
+        .any(|link| link == url)
+}
+
 /// An `http` or `https` address with a host and no user name or password.
 pub fn web_url(text: &str) -> Option<Url> {
     let url = Url::parse(text).ok().filter(|_| text.len() <= MAX_URL)?;
@@ -90,19 +122,35 @@ pub fn candidate<'a>(links: impl Iterator<Item = &'a str>) -> Option<Url> {
 }
 
 /// Making a preview with a fresh `Fetcher` on its own thread, while the message waits.
+/// Dropping it (removed, timed out, turned off, signed out) stops the fetch.
 pub struct Job {
     done: std::sync::mpsc::Receiver<Option<Made>>,
-    started: Instant,
+    deadline: Instant,
+    cancel: Arc<AtomicBool>,
 }
 
 impl Job {
     pub fn start(url: Url, ctx: &eframe::egui::Context) -> Self {
         let (sender, done) = std::sync::mpsc::channel();
         let ctx = ctx.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let started = Instant::now();
+        let deadline = started + GIVE_UP;
+        let stop = Stop {
+            cancel: cancel.clone(),
+            deadline: started + TIMEOUT,
+        };
         let spawned = std::thread::Builder::new()
             .name("link-preview".into())
             .spawn(move || {
-                let _ = sender.send(Fetcher::new().make(&url));
+                let made = Fetcher::new()
+                    .make(&url, &stop)
+                    .map(|(card, picture)| Made {
+                        card,
+                        picture,
+                        deadline,
+                    });
+                let _ = sender.send(made);
                 ctx.request_repaint();
             });
         if let Err(error) = spawned {
@@ -110,7 +158,8 @@ impl Job {
         }
         Self {
             done,
-            started: Instant::now(),
+            deadline,
+            cancel,
         }
     }
 
@@ -119,19 +168,41 @@ impl Job {
     pub fn poll(&self) -> Option<Option<Made>> {
         match self.done.try_recv() {
             Ok(made) => Some(made),
-            Err(std::sync::mpsc::TryRecvError::Empty) if self.started.elapsed() < GIVE_UP => None,
+            Err(std::sync::mpsc::TryRecvError::Empty) if Instant::now() < self.deadline => None,
             Err(_) => Some(None),
         }
     }
 }
 
-/// The message goes without a preview after this long, whatever the page does.
+impl Drop for Job {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::SeqCst);
+    }
+}
+
+/// The whole preview, upload included, has this long; then the message goes without.
 const GIVE_UP: Duration = Duration::from_secs(8);
 
-/// A finished preview: the card and the page's picture as downloaded.
+/// A finished preview: the card, the page's picture as downloaded, and when uploading it
+/// must have finished.
 pub struct Made {
     pub card: Card,
     pub picture: Option<Vec<u8>>,
+    pub deadline: Instant,
+}
+
+/// When a fetch must stop: cancelled, or out of time.
+pub struct Stop {
+    pub cancel: Arc<AtomicBool>,
+    pub deadline: Instant,
+}
+
+impl Stop {
+    /// The time left for the next step, or `None` to stop now.
+    fn left(&self) -> Option<Duration> {
+        let left = self.deadline.saturating_duration_since(Instant::now());
+        (!self.cancel.load(Ordering::SeqCst) && !left.is_zero()).then_some(left)
+    }
 }
 
 /// Fetches pages for previews, only from public addresses.
@@ -151,10 +222,9 @@ impl Fetcher {
         Self { allow_local: true }
     }
 
-    /// The preview for `url`, or `None` when the page can't give one in time.
-    pub fn make(&self, url: &Url) -> Option<Made> {
-        let deadline = Instant::now() + TIMEOUT;
-        let (page, html) = self.get(url, MAX_HTML, deadline, true)?;
+    /// The card and picture for `url`, or `None` when the page can't give one in time.
+    pub fn make(&self, url: &Url, stop: &Stop) -> Option<(Card, Option<Vec<u8>>)> {
+        let (page, html) = self.get(url, MAX_HTML, stop, true)?;
         let meta = parse(&String::from_utf8_lossy(&html));
         let title = plain(&meta.title?, MAX_TITLE);
         if title.is_empty() {
@@ -163,29 +233,26 @@ impl Fetcher {
         let picture = (meta.image.as_deref())
             .and_then(|src| page.join(src).ok())
             .and_then(|src| web_url(src.as_str()))
-            .and_then(|src| self.get(&src, MAX_IMAGE, deadline, false))
+            .and_then(|src| self.get(&src, MAX_IMAGE, stop, false))
             .map(|(_, bytes)| bytes);
-        Some(Made {
-            card: Card {
-                url: url.as_str().into(),
-                title,
-                description: plain(&meta.description.unwrap_or_default(), MAX_DESCRIPTION),
-                site: plain(&meta.site.unwrap_or_default(), MAX_SITE),
-            },
-            picture,
-        })
+        let card = Card {
+            url: url.as_str().into(),
+            title,
+            description: plain(&meta.description.unwrap_or_default(), MAX_DESCRIPTION),
+            site: plain(&meta.site.unwrap_or_default(), MAX_SITE),
+        };
+        Some((card.fit()?, picture))
     }
 
     /// Follow up to `MAX_REDIRECTS` redirects, checking every address, and read at most
     /// `max` bytes (a page may be cut there, a picture may not be bigger).
-    fn get(&self, url: &Url, max: u64, deadline: Instant, page: bool) -> Option<(Url, Vec<u8>)> {
+    fn get(&self, url: &Url, max: u64, stop: &Stop, page: bool) -> Option<(Url, Vec<u8>)> {
         let mut url = url.clone();
         for _ in 0..=MAX_REDIRECTS {
-            let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                return None;
-            }
+            stop.left()?;
             let addresses = self.resolve(&url)?;
+            // Name lookup can take long; check again, and give the request only what's left.
+            let left = stop.left()?;
             let mut client = reqwest::blocking::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .referer(false)
@@ -265,17 +332,16 @@ pub fn public(ip: IpAddr) -> bool {
             if let Some(v4) = ip.to_ipv4_mapped() {
                 return public(v4.into());
             }
+            // Only global unicast (2000::/3), without its special-use blocks: all of
+            // 2001::/23 (Teredo, benchmarking, ORCHID and others), documentation
+            // (2001:db8::/32), 6to4 (2002::/16) and 3fff::/20 (documentation too). Everything outside
+            // 2000::/3 (loopback, ULA, link-local, multicast, NAT64, discard) is refused.
             let [first, second, ..] = ip.segments();
-            !(ip.is_loopback()
-                || ip.is_unspecified()
-                || ip.is_multicast()
-                || first & 0xfe00 == 0xfc00
-                || first & 0xffc0 == 0xfe80
-                || first & 0xffc0 == 0xfec0
-                || (first == 0x2001 && second == 0x0db8)
-                || (first == 0x0064 && second == 0xff9b)
-                || first == 0x2002
-                || first == 0)
+            first & 0xe000 == 0x2000
+                && !(first == 0x2001 && second < 0x0200)
+                && !(first == 0x2001 && second == 0x0db8)
+                && first != 0x2002
+                && !(first == 0x3fff && second < 0x1000)
         }
     }
 }
@@ -412,6 +478,13 @@ mod tests {
 
     use super::*;
 
+    fn stop() -> Stop {
+        Stop {
+            cancel: Arc::new(AtomicBool::new(false)),
+            deadline: Instant::now() + TIMEOUT,
+        }
+    }
+
     #[test]
     fn open_graph_beats_twitter_beats_the_title() {
         let meta = parse(
@@ -500,11 +573,30 @@ mod tests {
             "::ffff:127.0.0.1",
             "::ffff:10.0.0.1",
             "64:ff9b::7f00:1",
+            "64:ff9b:1::1",
             "2002:7f00:1::",
+            "100::1",
+            "2001::1",
+            "2001:2::1",
+            "2001:10::1",
+            "2001:1ff::1",
+            "2001:db8::1",
+            "3fff::1",
+            "4000::1",
+            "ff02::1",
+            "fec0::1",
+            "::",
+            "::2",
         ] {
             assert!(!public(ip.parse().unwrap()), "{ip}");
         }
-        for ip in ["93.184.216.34", "1.1.1.1", "2606:4700:4700::1111"] {
+        for ip in [
+            "93.184.216.34",
+            "1.1.1.1",
+            "2606:4700:4700::1111",
+            "2001:4860:4860::8888",
+            "2a00:1450::1",
+        ] {
             assert!(public(ip.parse().unwrap()), "{ip}");
         }
         // The real guard: these never get a connection, and `localhost` resolves locally.
@@ -519,7 +611,10 @@ mod tests {
                 fetcher.resolve(&Url::parse(url).unwrap()).is_none(),
                 "{url}"
             );
-            assert!(fetcher.make(&Url::parse(url).unwrap()).is_none(), "{url}");
+            assert!(
+                fetcher.make(&Url::parse(url).unwrap(), &stop()).is_none(),
+                "{url}"
+            );
         }
     }
 
@@ -594,17 +689,17 @@ mod tests {
             ),
         ]);
         let url = Url::parse(&format!("http://127.0.0.1:{port}/start")).unwrap();
-        let made = Fetcher::local().make(&url).unwrap();
-        assert_eq!(made.card.title, "Big news");
-        assert_eq!(made.card.description, "Something happened.");
+        let made = Fetcher::local().make(&url, &stop()).unwrap();
+        assert_eq!(made.0.title, "Big news");
+        assert_eq!(made.0.description, "Something happened.");
         assert_eq!(
-            made.card.url,
+            made.0.url,
             url.as_str(),
             "the link as sent, not where it led"
         );
-        assert_eq!(made.picture, Some(png()));
+        assert_eq!(made.1, Some(png()));
         assert!(
-            Fetcher::new().make(&url).is_none(),
+            Fetcher::new().make(&url, &stop()).is_none(),
             "the guard holds outside tests"
         );
     }
@@ -635,9 +730,84 @@ mod tests {
         let fetcher = Fetcher::local();
         for path in ["/1", "/pdf", "/away", "/missing"] {
             let url = Url::parse(&format!("http://127.0.0.1:{port}{path}")).unwrap();
-            assert!(fetcher.make(&url).is_none(), "{path}");
+            assert!(fetcher.make(&url, &stop()).is_none(), "{path}");
         }
         let url = Url::parse(&format!("http://127.0.0.1:{port}/2")).unwrap();
-        assert!(fetcher.make(&url).is_some(), "three redirects are fine");
+        assert!(
+            fetcher.make(&url, &stop()).is_some(),
+            "three redirects are fine"
+        );
+    }
+
+    #[test]
+    fn a_cancelled_or_late_preview_makes_no_request() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = Url::parse(&format!(
+            "http://127.0.0.1:{}/",
+            listener.local_addr().unwrap().port()
+        ))
+        .unwrap();
+        let cancelled = Stop {
+            cancel: Arc::new(AtomicBool::new(true)),
+            deadline: Instant::now() + TIMEOUT,
+        };
+        let late = Stop {
+            cancel: Arc::new(AtomicBool::new(false)),
+            deadline: Instant::now(),
+        };
+        for stop in [cancelled, late] {
+            assert!(Fetcher::local().make(&url, &stop).is_none());
+        }
+        assert!(listener.accept().is_err(), "nothing connected");
+    }
+
+    #[test]
+    fn cards_are_shortened_to_fit_their_file() {
+        let card = Card {
+            url: format!("https://example.org/{}", "a".repeat(MAX_URL - 20)),
+            title: "\u{1F980}".repeat(MAX_TITLE),
+            description: "\u{1F980}".repeat(MAX_DESCRIPTION),
+            site: "\u{1F980}".repeat(MAX_SITE),
+        };
+        assert!(card.encode().len() > MAX_CARD_BYTES as usize);
+        let fitted = card.clone().fit().unwrap();
+        assert!(fitted.encode().len() <= MAX_CARD_BYTES as usize);
+        assert!(!fitted.title.is_empty());
+        assert!(fitted.description.len() < card.description.len());
+        let hopeless = Card {
+            url: format!("https://example.org/{}", "a".repeat(4100)),
+            ..card
+        };
+        assert!(hopeless.fit().is_none());
+    }
+
+    #[test]
+    fn previews_are_asked_for_until_chosen() {
+        assert_eq!(crate::audio::Settings::default().create_link_previews, None);
+    }
+
+    #[test]
+    fn a_card_must_be_about_a_link_in_its_message() {
+        let card = Card {
+            url: "https://news.example.org/story".into(),
+            title: "Story".into(),
+            description: String::new(),
+            site: String::new(),
+        };
+        assert!(matches(&card, ["https://news.example.org/story"]));
+        assert!(
+            matches(&card, ["HTTPS://News.Example.org:443/story"]),
+            "normalised"
+        );
+        assert!(
+            !matches(&card, ["https://news.example.org/other"]),
+            "same host, other page"
+        );
+        assert!(!matches(&card, ["https://news.example.org/story/"]));
+        assert!(
+            !matches(&card, std::iter::empty::<&str>()),
+            "no link at all"
+        );
     }
 }
