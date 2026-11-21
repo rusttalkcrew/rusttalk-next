@@ -17,6 +17,8 @@ PrivilegesRequired=lowest
 CloseApplications=force
 RestartApplications=no
 SetupMutex=RustTalkSetup
+SetupIconFile=..\..\crates\client\assets\rusttalk.ico
+UninstallDisplayIcon={app}\rusttalk-client.exe
 
 [Files]
 Source: "{#Client}"; DestDir: "{app}"; Flags: ignoreversion

@@ -97,6 +97,19 @@ struct Find {
     /// Checking a picked server.
     checking: bool,
     error: Option<String>,
+    /// Just opened: list servers without waiting for a click.
+    opened: bool,
+}
+
+impl Find {
+    fn open(&mut self) {
+        self.opened = true;
+    }
+
+    /// The page to load on its own: the first, once per opening.
+    fn auto_page(&mut self) -> Option<u32> {
+        std::mem::take(&mut self.opened).then_some(1)
+    }
 }
 
 enum Join {
@@ -171,18 +184,19 @@ impl Home {
             .collect();
         let runtime = net.handle();
         let synced = device_sync::synced(&audio.settings());
+        // Without servers yet, start by browsing the directory.
+        let browse = servers.is_empty();
         Ok(Self {
             identity,
             net,
-            view: if servers.is_empty() {
-                View::Join
-            } else {
-                View::Server(0)
-            },
+            view: if browse { View::Find } else { View::Server(0) },
             servers,
             invite: String::new(),
             join: Join::Idle(None),
-            find: Find::default(),
+            find: Find {
+                opened: browse,
+                ..Find::default()
+            },
             dialog: None,
             toast: None,
             settings: None,
@@ -240,7 +254,8 @@ impl Home {
         self.view = match self.view {
             View::Server(i) | View::Direct(Some((i, _))) if i == index => {
                 if self.servers.is_empty() {
-                    View::Join
+                    self.find.open();
+                    View::Find
                 } else {
                     View::Server(0)
                 }
@@ -917,6 +932,7 @@ fn server_rail(ui: &mut Ui, home: &mut Home) {
             }
             if ui.button("Find servers").clicked() {
                 home.view = View::Find;
+                home.find.open();
             }
         });
     });
@@ -1633,9 +1649,12 @@ fn find(ui: &mut Ui, home: &mut Home) {
         ui.add_space(24.0);
         ui.set_max_width(640.0);
         ui.heading("Find servers");
+        if ui.link("Join with an invite").clicked() {
+            home.view = View::Join;
+        }
         let settings = home.voice.audio.settings();
         let find = &mut home.find;
-        let mut page = None;
+        let mut page = find.auto_page();
         ui.horizontal(|ui| {
             let field = ui.add(
                 TextEdit::singleline(&mut find.query)
@@ -1648,6 +1667,9 @@ fn find(ui: &mut Ui, home: &mut Home) {
             }
         });
         error_text(ui, find.error.as_deref());
+        if find.error.is_some() && !find.searching && ui.button("Try again").clicked() {
+            page = Some(1);
+        }
         if find.searching || find.checking {
             ui.spinner();
         } else if find.results.is_empty() && find.page > 0 {
@@ -2546,5 +2568,16 @@ mod tests {
             directory(&settings).unwrap().0.as_str(),
             "https://index.example/"
         );
+    }
+
+    #[test]
+    fn find_loads_once_per_opening() {
+        let mut find = Find::default();
+        assert_eq!(find.auto_page(), None);
+        find.open();
+        assert_eq!(find.auto_page(), Some(1));
+        assert_eq!(find.auto_page(), None);
+        find.open();
+        assert_eq!(find.auto_page(), Some(1));
     }
 }
