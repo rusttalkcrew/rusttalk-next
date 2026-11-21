@@ -9,8 +9,9 @@ use std::{
 };
 
 use eframe::egui::{
-    self, Align, ColorImage, ComboBox, Event, Frame, Key, Label, Layout, Margin, RichText, Role,
-    Sense, Slider, Stroke, TextureHandle, TextureOptions, Ui, UiBuilder, Vec2, WidgetInfo,
+    self, Align, ColorImage, ComboBox, Event, Frame, Key, Label, Layout, Margin, Rect, Response,
+    RichText, Role, Sense, Slider, Stroke, TextureHandle, TextureOptions, Ui, UiBuilder, Vec2,
+    WidgetInfo,
 };
 use rusttalk_core::client::voice::VoiceStatus;
 
@@ -22,7 +23,7 @@ use crate::{
     mic_check::Verdict,
     net::{Command, Update},
     screen::{self, Kind, Options, Target, Video},
-    server::{Call, CallState, Id, Screen, Server, Stats},
+    server::{Call, CallState, Id, Screen, Server, Stats, Status},
     share::{self, App},
     sounds,
     ui::{self, section},
@@ -384,6 +385,30 @@ fn stop_watching(home: &mut Home) {
     {
         server.send(Command::Watch(watching.sid, false));
     }
+}
+
+/// Room the Join button takes at a voice row's right edge, so the name is cut short first.
+pub const JOIN_SLOT: f32 = 30.0;
+
+/// The Join button on a voice channel's row: shown while the row is hovered or open,
+/// hidden when this is the call you are in (the call bar has Leave). True when clicked.
+pub fn join_button(
+    ui: &mut Ui,
+    home: &Home,
+    server: &Server,
+    channel: &Id,
+    row: &Response,
+    selected: bool,
+) -> bool {
+    let shown = selected || ui.rect_contains_pointer(row.rect);
+    if !shown || server.status != Status::Online || home.voice.in_call(server, channel) {
+        return false;
+    }
+    let size = Vec2::splat(ui::SPACE_XL);
+    let center = egui::pos2(row.rect.right() - JOIN_SLOT / 2.0, row.rect.center().y);
+    // A child Ui, so the button doesn't move the layout cursor away from the row's end.
+    let mut at = ui.new_child(UiBuilder::new().max_rect(Rect::from_center_size(center, size)));
+    ui::icon_button(&mut at, "📞", t!("call.join_voice"), ui::Look::Ghost, size).clicked()
 }
 
 /// The people in a voice channel, under its name in the channel list.

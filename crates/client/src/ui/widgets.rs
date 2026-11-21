@@ -5,7 +5,7 @@ use eframe::egui::{
     self, Align, Align2, Area, Button, Color32, Context, CornerRadius, CursorIcon, FontId, Frame,
     Id, Layout, Margin, Modal, Order, Popup, PopupCloseBehavior, PopupKind, Pos2, Rect, RectAlign,
     Response, RichText, Sense, Shape, Stroke, StrokeKind, TextBuffer, TextEdit, Ui, UiBuilder,
-    Vec2, Widget, WidgetInfo, WidgetText, accesskit::Role,
+    Vec2, Widget, WidgetInfo, WidgetText, accesskit::Role, text::LayoutJob,
 };
 
 use super::{
@@ -572,6 +572,20 @@ pub fn nav_row(
     role: Role,
     accessible: &str,
 ) -> Response {
+    nav_row_trailing(ui, icon, label, selected, role, accessible, 0.0)
+}
+
+/// `nav_row` that keeps `trailing` points at its right edge free for a button; a
+/// longer label is cut short with an ellipsis instead.
+pub fn nav_row_trailing(
+    ui: &mut Ui,
+    icon: &str,
+    label: &str,
+    selected: bool,
+    role: Role,
+    accessible: &str,
+    trailing: f32,
+) -> Response {
     let (rect, response) = ui.allocate_exact_size(
         Vec2::new(ui.available_width().max(0.0), super::ROW_HEIGHT),
         Sense::click(),
@@ -605,12 +619,15 @@ pub fn nav_row(
         if selected { c.strong } else { c.muted },
     );
     let label_font = FontId::new(TEXT_BODY, crate::emoji::family(selected));
-    let galley = painter.layout(
+    let mut job = LayoutJob::simple(
         label.to_owned(),
         label_font,
         text,
-        (rect.width() - 44.0).max(0.0),
+        (rect.width() - 44.0 - trailing).max(0.0),
     );
+    job.wrap.max_rows = 1;
+    job.wrap.break_anywhere = true;
+    let galley = painter.layout_job(job);
     let at = egui::pos2(rect.left() + 34.0, rect.center().y - galley.size().y / 2.0);
     painter.with_clip_rect(rect).galley(at, galley, text);
     response.widget_info(|| WidgetInfo::selected(role, enabled, selected, accessible));

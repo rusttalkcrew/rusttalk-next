@@ -82,3 +82,7 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 # Pasting: registered picture formats and copied files, and bitmaps as a last resort.
 arboard = { version = "3.7", default-features = false, features = ["image-data"] }
 clipboard-win = "5.4"
+
+[dev-dependencies]
+# Drives the window off-screen, to click rows and buttons in tests.
+egui_kittest = "0.37"

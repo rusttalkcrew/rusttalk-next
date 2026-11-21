@@ -70,6 +70,8 @@ mod markdown;
 pub mod mentions;
 mod pokes;
 mod user_bar;
+#[cfg(test)]
+mod voice_rows;
 
 pub struct Home {
     pub identity: Arc<DeviceIdentity>,
@@ -2034,24 +2036,32 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
                 let button = list.row(ui, item, block, |ui| {
                     let icon = if channel.voice { "🔊" } else { "#" };
                     let label = format!("{icon}  {}", channel.name);
+                    // Voice rows keep room for the Join button.
+                    let trailing = if channel.voice { call::JOIN_SLOT } else { 0.0 };
                     let row = ui
                         .add_enabled_ui(online || !channel.voice, |ui| {
-                            ui::nav_row(ui, icon, &channel.name, selected, Role::Button, &label)
+                            let (name, role) = (&channel.name, Role::Button);
+                            ui::nav_row_trailing(ui, icon, name, selected, role, &label, trailing)
                         })
                         .inner;
                     let chats = [(&server.address, channel.id)];
-                    chat_marks(ui, home, &chats, false, row.rect);
+                    let marks = row.rect.with_max_x(row.rect.right() - trailing);
+                    chat_marks(ui, home, &chats, false, marks);
                     if channel.voice {
+                        if call::join_button(ui, home, server, &channel.id, &row, selected) {
+                            talk = Some(channel.id);
+                        }
                         call::room_list(ui, home, server, &channel.id);
                     }
                     row
                 });
+                // A click only opens the chat; a voice channel is joined with its button or
+                // a double-click.
                 if button.clicked() {
-                    if channel.voice {
-                        talk = Some(channel.id);
-                    } else {
-                        pick = Some(channel.id);
-                    }
+                    pick = Some(channel.id);
+                }
+                if channel.voice && online && button.double_clicked() {
+                    talk = Some(channel.id);
                 }
                 ui::context_menu(&button, |m| {
                     let rule = home.notify.prefs().channel(&channel.id);
