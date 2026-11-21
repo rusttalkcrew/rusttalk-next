@@ -11,7 +11,8 @@ use eframe::egui::{
 use rusttalk_core::client::voice::{CallTraffic, TrackSource, Traffic};
 
 use super::{
-    Listing, LiveAction, Sharing, Voice, audio, fill, leave, live_files, open_screen_dialog, screen,
+    Listing, LiveAction, Sharing, Voice, audio, change_screen as change_screen_now, fill, leave,
+    live_files, open_screen_dialog, screen,
 };
 use crate::{
     files::Ask,
@@ -145,13 +146,15 @@ fn camera_tip(on: bool) -> &'static str {
 fn screen_tip(sharing: Sharing) -> &'static str {
     match sharing {
         Sharing::Off => "Share your screen",
-        Sharing::Starting | Sharing::On => "Stop sharing",
+        Sharing::Starting | Sharing::Changing | Sharing::On => "Stop sharing",
     }
 }
 
-/// What the "now sharing" card stops.
+/// What a button on the "now sharing" card does.
 enum Stop {
     Screen,
+    /// Pick another screen to share.
+    Change,
     App(String),
 }
 
@@ -187,6 +190,7 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
     let mut leave_now = false;
     let mut share = Vec::new();
     let mut stop_screen = matches!(stopped, Some(Stop::Screen));
+    let mut change_screen = matches!(stopped, Some(Stop::Change));
     let mut voice_settings = false;
     Frame::new()
         .fill(c.field)
@@ -243,6 +247,16 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
                             ui::icon_button(ui, "🖥", screen_tip(voice.sharing), look, size)
                         })
                         .inner;
+                    if voice.sharing == Sharing::On {
+                        ui::context_menu(&button, |m| {
+                            if m.item("🖥", "Change what I share").clicked() {
+                                change_screen = true;
+                            }
+                            if m.danger("⏹", "Stop sharing").clicked() {
+                                stop_screen = true;
+                            }
+                        });
+                    }
                     if !can_share_video {
                         button.on_disabled_hover_text("You can't share your screen here");
                     } else if button.clicked() {
@@ -277,6 +291,9 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
     if let (Some(server), Some(Stop::App(id))) = (server, stopped) {
         home.voice.shares.retain(|shared| shared.id != id);
         server.send(Command::StopApp(id));
+    }
+    if let (Some(server), true) = (server, change_screen) {
+        change_screen_now(ui.ctx(), &mut home.voice, server);
     }
     if let (Some(server), true) = (server, stop_screen) {
         home.voice.sharing = Sharing::Off;
@@ -572,7 +589,7 @@ fn sharing_card(ui: &mut Ui, voice: &Voice) -> Option<Stop> {
         let screen = match voice.sharing {
             Sharing::Off => None,
             Sharing::Starting => Some("Starting your screen…".to_owned()),
-            Sharing::On => Some("Your screen".to_owned()),
+            Sharing::Changing | Sharing::On => Some("Your screen".to_owned()),
         };
         let rows = screen
             .map(|text| {
@@ -590,8 +607,18 @@ fn sharing_card(ui: &mut Ui, voice: &Voice) -> Option<Stop> {
             }));
         for (icon, text, tip, which) in rows {
             ui::right_row(ui, STOP_SIZE.y, |ui| {
+                let screen_row = matches!(which, Stop::Screen);
                 if ui::icon_button(ui, "⏹", &tip, Look::Plain, STOP_SIZE).clicked() {
                     stop = Some(which);
+                }
+                if screen_row && voice.sharing != Sharing::Starting {
+                    let picking = voice.sharing == Sharing::Changing;
+                    let change = ui.add_enabled_ui(!picking, |ui| {
+                        ui::icon_button(ui, "🔄", "Change what you share", Look::Plain, STOP_SIZE)
+                    });
+                    if change.inner.clicked() {
+                        stop = Some(Stop::Change);
+                    }
                 }
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                     ui::dot(ui, ui::colors(ui).success);
@@ -664,6 +691,7 @@ mod tests {
         assert_eq!(camera_tip(true), "Turn off camera");
         assert_eq!(screen_tip(Sharing::Off), "Share your screen");
         assert_eq!(screen_tip(Sharing::Starting), "Stop sharing");
+        assert_eq!(screen_tip(Sharing::Changing), "Stop sharing");
         assert_eq!(screen_tip(Sharing::On), "Stop sharing");
     }
 }

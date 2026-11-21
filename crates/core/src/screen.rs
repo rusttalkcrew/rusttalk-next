@@ -153,6 +153,73 @@ pub fn bgra_to_i420(
     Ok(frame)
 }
 
+/// Where a frame of `source` size sits in a `canvas`: the biggest even size of its shape
+/// that fits, and its even offset, so the chroma planes stay aligned. (width, height, x, y)
+pub(crate) fn fit(source: (u32, u32), canvas: (u32, u32)) -> (u32, u32, u32, u32) {
+    let ((sw, sh), (cw, ch)) = (source, canvas);
+    if source == canvas {
+        return (cw, ch, 0, 0);
+    }
+    let (w, h) = if u64::from(sw) * u64::from(ch) <= u64::from(sh) * u64::from(cw) {
+        (u64::from(sw) * u64::from(ch) / u64::from(sh), u64::from(ch))
+    } else {
+        (u64::from(cw), u64::from(sh) * u64::from(cw) / u64::from(sw))
+    };
+    let even = |n: u64, max: u32| ((n as u32).max(2) & !1).min(max & !1).max(1);
+    let (w, h) = (even(w, cw), even(h, ch));
+    (w, h, ((cw - w) / 2) & !1, ((ch - h) / 2) & !1)
+}
+
+/// Fit a frame into a canvas of a track that is already published: scale it to fit and
+/// pad the rest with black. The published size never changes, so viewers need no new
+/// negotiation when the source changes to one of another size.
+pub(crate) fn letterbox(frame: I420Buffer, canvas: (u32, u32)) -> I420Buffer {
+    let mut frame = frame;
+    let (w, h, x, y) = fit((frame.width(), frame.height()), canvas);
+    if (frame.width(), frame.height()) == canvas {
+        return frame;
+    }
+    let scaled = if (frame.width(), frame.height()) == (w, h) {
+        frame
+    } else {
+        frame.scale(w as i32, h as i32)
+    };
+    let mut out = I420Buffer::new_black(canvas.0, canvas.1);
+    let (ss, sus, svs) = scaled.strides();
+    let (sy, su, sv) = scaled.data();
+    let (os, ous, ovs) = out.strides();
+    let (oy, ou, ov) = out.data_mut();
+    let copy = |from: &[u8],
+                from_stride: u32,
+                to: &mut [u8],
+                to_stride: u32,
+                rows: u32,
+                row: usize,
+                left: usize,
+                width: usize| {
+        for r in 0..rows as usize {
+            let a = r * from_stride as usize;
+            let b = (row + r) * to_stride as usize + left;
+            to[b..b + width].copy_from_slice(&from[a..a + width]);
+        }
+    };
+    let (x, y) = (x as usize, y as usize);
+    copy(
+        sy,
+        ss,
+        oy,
+        os,
+        scaled.height(),
+        y,
+        x,
+        scaled.width() as usize,
+    );
+    let (cw, ch) = (scaled.chroma_width(), scaled.chroma_height());
+    copy(su, sus, ou, ous, ch, y / 2, x / 2, cw as usize);
+    copy(sv, svs, ov, ovs, ch, y / 2, x / 2, cw as usize);
+    out
+}
+
 /// Convert a decoded frame into tightly packed RGBA for display.
 pub fn frame_to_rgba(frame: &dyn VideoBuffer) -> Result<Vec<u8>> {
     let (width, height) = (frame.width(), frame.height());
@@ -210,6 +277,18 @@ pub async fn start(
     options: ScreenOptions,
     restore_token: &mut Option<String>,
 ) -> Result<ScreenCapture> {
+    start_into(source, options, restore_token, None).await
+}
+
+/// Like `start`, but feeds frames into the source of a track that is already published,
+/// fitted to its size, so viewers keep watching while the screen being shared changes.
+/// Drop the old capture once this one is returned.
+pub async fn start_into(
+    source: ScreenSource,
+    options: ScreenOptions,
+    restore_token: &mut Option<String>,
+    into: Option<NativeVideoSource>,
+) -> Result<ScreenCapture> {
     #[cfg(any(target_os = "linux", windows))]
     {
         options.validate()?;
@@ -218,8 +297,16 @@ pub async fn start(
             .await
             .context("timed out waiting for the first screen frame")?
             .context("screen capture ended before supplying video")?;
+        let canvas = into.as_ref().map(|into| {
+            let size = into.video_resolution();
+            (size.width, size.height)
+        });
         let convert = move |frame: &BgraFrame| {
-            bgra_to_i420(frame.width, frame.height, &frame.pixels, options.max_height)
+            let frame = bgra_to_i420(frame.width, frame.height, &frame.pixels, options.max_height)?;
+            Ok::<_, anyhow::Error>(match canvas {
+                Some(canvas) => letterbox(frame, canvas),
+                None => frame,
+            })
         };
         let first = convert(
             frames
@@ -227,13 +314,15 @@ pub async fn start(
                 .as_ref()
                 .context("missing first screen frame")?,
         )?;
-        let source = NativeVideoSource::new(
-            VideoResolution {
-                width: first.width(),
-                height: first.height(),
-            },
-            true,
-        );
+        let source = into.unwrap_or_else(|| {
+            NativeVideoSource::new(
+                VideoResolution {
+                    width: first.width(),
+                    height: first.height(),
+                },
+                true,
+            )
+        });
         // Seed the source before publication. Reuse converted pixels for static content.
         let mut frame = VideoFrame::new(VideoRotation::VideoRotation0, first);
         source.capture_frame(&frame);
@@ -270,7 +359,7 @@ pub async fn start(
     }
     #[cfg(not(any(target_os = "linux", windows)))]
     {
-        let _ = (source, options, restore_token);
+        let _ = (source, options, restore_token, into);
         anyhow::bail!("screen capture is unavailable on this platform")
     }
 }
@@ -333,5 +422,35 @@ mod tests {
         let pixels = [0; 4].repeat(1920 * 1080);
         let same = bgra_to_i420(1920, 1080, &pixels, Some(1440)).unwrap();
         assert_eq!((same.width(), same.height()), (1920, 1080));
+    }
+
+    #[test]
+    fn frames_fit_the_published_size() {
+        // Same shape: fills it. Wider: bars above and below. Taller: bars at the sides.
+        assert_eq!(fit((1920, 1080), (1920, 1080)), (1920, 1080, 0, 0));
+        assert_eq!(fit((1280, 720), (1920, 1080)), (1920, 1080, 0, 0));
+        assert_eq!(fit((2560, 1080), (1920, 1080)), (1920, 810, 0, 134));
+        assert_eq!(fit((1080, 1920), (1920, 1080)), (606, 1080, 656, 0));
+        // Odd sizes stay even and inside the canvas.
+        let (w, h, x, y) = fit((7, 1081), (1919, 1079));
+        assert!(w % 2 == 0 && h % 2 == 0 && x % 2 == 0 && y % 2 == 0);
+        assert!(w + x <= 1919 && h + y <= 1079);
+    }
+
+    #[test]
+    fn letterbox_keeps_the_canvas_size() {
+        // A bright square source, narrower than the canvas, ends up centred on black.
+        let pixels = [255; 4].repeat(100 * 100);
+        let source = bgra_to_i420(100, 100, &pixels, None).unwrap();
+        let out = letterbox(source, (200, 100));
+        assert_eq!((out.width(), out.height()), (200, 100));
+        let (y, _, _) = out.data();
+        let stride = out.strides().0 as usize;
+        assert!(y[50 * stride] < 30, "left bar is black");
+        assert!(y[50 * stride + 100] > 200, "middle is the picture");
+        assert!(y[50 * stride + 199] < 30, "right bar is black");
+        // The same size passes through untouched.
+        let same = bgra_to_i420(8, 8, &[0; 4].repeat(64), None).unwrap();
+        assert_eq!(letterbox(same, (8, 8)).width(), 8);
     }
 }

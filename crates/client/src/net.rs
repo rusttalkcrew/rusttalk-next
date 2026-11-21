@@ -53,8 +53,9 @@ use directory::{directory, get};
 pub use files::{MAX_FILE, file_name};
 pub use find::{Listed, PAGE_SIZE};
 use voice::{
-    Live, Next, Transfer, leave_voice, next_voice, on_voice, room_changed, send_room, share_screen,
-    stop_finished_shares, stop_lost_video, sync_voice_key, voice_command, voice_only, voice_stats,
+    Live, Next, Transfer, leave_voice, next_voice, on_voice, room_changed, screen_changed,
+    send_room, share_screen, stop_finished_shares, stop_lost_video, sync_voice_key, voice_command,
+    voice_only, voice_stats,
 };
 
 const PAGE: u32 = 50;
@@ -118,6 +119,8 @@ pub enum Command {
     /// Share a screen or window, or open the system picker (Linux).
     ShareScreen(screen::Target, screen::Options),
     StopScreen,
+    /// Pick another screen or window while sharing, keeping the quality; no reconnect.
+    ChangeScreen(screen::Target),
     /// Start or stop receiving a screen or camera, by track.
     Watch(String, bool),
     /// Publish a running camera, replacing an earlier one.
@@ -813,6 +816,7 @@ async fn serve(
                     }
                 }
                 Next::Capture(capture) => share_screen(ctx, url, client, state, capture).await,
+                Next::Swap(capture) => screen_changed(ctx, state, capture),
             },
             _ = stats.tick(), if state.voice.is_some() => {
                 stop_finished_shares(ctx, url, client, state).await;
@@ -1130,6 +1134,7 @@ async fn on_command(
         Command::LeaveVoice
         | Command::StopApp(_)
         | Command::StopScreen
+        | Command::ChangeScreen(_)
         | Command::Watch(..)
         | Command::StopCamera
         | Command::CancelFile(_) => unreachable!("handled by voice_command"),

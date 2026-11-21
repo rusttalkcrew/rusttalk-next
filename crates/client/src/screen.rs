@@ -12,10 +12,59 @@ use livekit::webrtc::{prelude::RtcVideoTrack, video_stream::native::NativeVideoS
 use rusttalk_core::screen::frame_to_rgba;
 pub use rusttalk_core::screen::{
     Cancelled, ScreenCapture as Capture, ScreenOptions as Options, ScreenSource as Target,
-    ScreenSourceKind as Kind, list_sources as targets, start,
+    ScreenSourceKind as Kind, list_sources as targets, start, start_into,
 };
 
 use crate::audio::lock;
+
+/// Changing what is shared while sharing: one picker at a time. The old share keeps
+/// running through every state, so a cancelled or failed pick loses nothing.
+/// `H` is the picker's task handle.
+pub enum Swap<H> {
+    Idle,
+    Picking(H),
+}
+
+/// How a pick ended.
+#[derive(Debug)]
+pub enum Outcome<C> {
+    /// The new source is capturing: use it in place of the old one.
+    Swapped(C),
+    /// The person closed the picker.
+    Cancelled,
+    Failed(anyhow::Error),
+}
+
+impl<H> Swap<H> {
+    /// Start picking. Refused, handing the handle back, while a picker is open.
+    pub fn begin(&mut self, picker: H) -> Result<(), H> {
+        match self {
+            Self::Idle => {
+                *self = Self::Picking(picker);
+                Ok(())
+            }
+            Self::Picking(_) => Err(picker),
+        }
+    }
+
+    /// The picker's result. Back to idle whatever it was.
+    pub fn finish<C>(&mut self, result: anyhow::Result<C>) -> Outcome<C> {
+        *self = Self::Idle;
+        match result {
+            Ok(capture) => Outcome::Swapped(capture),
+            Err(error) if error.is::<Cancelled>() => Outcome::Cancelled,
+            Err(error) => Outcome::Failed(error),
+        }
+    }
+
+    /// Stopping or leaving: forget the picker and give it back to close.
+    pub fn abort(&mut self) -> Option<H> {
+        match std::mem::replace(self, Self::Idle) {
+            Self::Idle => None,
+            Self::Picking(picker) => Some(picker),
+        }
+    }
+}
 
 pub const SUPPORTED: bool = cfg!(any(target_os = "linux", windows));
 
@@ -95,5 +144,39 @@ impl Video {
     /// The newest frame since the last call, to upload as a texture.
     pub fn take(&self, sid: &str) -> Option<ColorImage> {
         lock(&self.frames).get_mut(sid)?.image.take()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn swap_walks_through_picking() {
+        let mut swap = Swap::Idle;
+        assert!(swap.begin(1).is_ok());
+        // A second picker is refused while one is open.
+        assert_eq!(swap.begin(2), Err(2));
+        assert!(matches!(swap.finish(Ok("new")), Outcome::Swapped("new")));
+        assert!(matches!(swap, Swap::Idle));
+        // Closed without choosing: keep the old share.
+        swap.begin(3).unwrap();
+        let closed: anyhow::Result<()> = Err(Cancelled.into());
+        assert!(matches!(swap.finish(closed), Outcome::Cancelled));
+        assert!(matches!(swap, Swap::Idle));
+        // Failed to start: reported, and a new pick can begin.
+        swap.begin(4).unwrap();
+        let failed: anyhow::Result<()> = Err(anyhow::anyhow!("no frames"));
+        assert!(matches!(swap.finish(failed), Outcome::Failed(_)));
+        assert!(swap.begin(5).is_ok());
+    }
+
+    #[test]
+    fn stopping_closes_the_picker() {
+        let mut swap: Swap<u8> = Swap::Idle;
+        assert_eq!(swap.abort(), None);
+        swap.begin(7).unwrap();
+        assert_eq!(swap.abort(), Some(7));
+        assert!(matches!(swap, Swap::Idle));
     }
 }
