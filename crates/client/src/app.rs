@@ -63,6 +63,8 @@ impl<'a> App<'a> {
         window_started: &'a Cell<bool>,
     ) -> Self {
         ui::install(&cc.egui_ctx);
+        #[cfg(target_os = "linux")]
+        crate::wayland_drops::install(cc);
         let updates = crate::update::Updater::new(&data);
         let mut app = Self {
             keystore,
@@ -223,6 +225,8 @@ fn problem(what: &str, error: &IdentityError) -> Screen {
 impl eframe::App for App<'_> {
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         crate::paste::keys(ctx, raw_input);
+        #[cfg(target_os = "linux")]
+        crate::wayland_drops::input(raw_input);
     }
 
     fn logic(&mut self, _ctx: &egui::Context, frame: &mut eframe::Frame) {

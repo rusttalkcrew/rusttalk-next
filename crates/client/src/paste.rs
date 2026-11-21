@@ -80,7 +80,7 @@ fn read(source: &mut impl Source) -> Option<Clip> {
 
 /// Local files in a `text/uri-list` (GNOME's own list starts with "copy" or "cut",
 /// which is skipped like any other line that is not a file address).
-fn file_paths(list: &[u8]) -> Vec<PathBuf> {
+pub(crate) fn file_paths(list: &[u8]) -> Vec<PathBuf> {
     String::from_utf8_lossy(list)
         .lines()
         .map(|line| line.trim_matches(|c: char| c.is_whitespace() || c == '\0'))

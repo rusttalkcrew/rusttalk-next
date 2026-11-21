@@ -63,6 +63,10 @@ embed-resource = "3"
 [target.'cfg(target_os = "linux")'.dependencies]
 # statvfs, to match the AppImage mount against the AppImage file before an update.
 libc = "0.2"
+# Wayland file drops: our window's surface, and egui's clipboard patched to take
+# drags (see the workspace Cargo.toml).
+raw-window-handle = "0.6"
+smithay-clipboard = "0.7"
 # Pasting: the window reads only text, these read any format the copying app offers.
 wl-clipboard-rs = "0.9"
 x11-clipboard = "0.9"

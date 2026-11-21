@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/*", "services/*"]
+# Vendored from crates.io with a small patch (see its README); not our code to lint.
+exclude = ["crates/smithay-clipboard"]
 
 [workspace.package]
 version = "0.1.5"
@@ -14,3 +16,9 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.tract-linalg]
 opt-level = 3
+
+# egui's Wayland clipboard, patched to take file drops too: winit 0.30 has no Wayland
+# drag and drop, and compositors such as Hyprland offer a drag to only one data device
+# per app, so it has to be this one. Remove once winit delivers Wayland file drops.
+[patch.crates-io]
+smithay-clipboard = { path = "crates/smithay-clipboard" }

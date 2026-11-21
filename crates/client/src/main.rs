@@ -33,6 +33,8 @@ mod share;
 mod sounds;
 mod ui;
 mod update;
+#[cfg(target_os = "linux")]
+mod wayland_drops;
 
 use std::{
     cell::Cell,
