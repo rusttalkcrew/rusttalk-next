@@ -75,8 +75,6 @@ pub struct Call {
     pub can_talk: bool,
     /// False when this device may not publish a screen or camera.
     pub can_share_video: bool,
-    /// False when this device may not send files in the call.
-    pub can_send_files: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]

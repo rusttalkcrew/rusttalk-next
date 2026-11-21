@@ -310,4 +310,28 @@ mod tests {
         let scaled = bgra_to_i420(7, 1081, &pixels, Some(1080)).unwrap();
         assert_eq!((scaled.width(), scaled.height()), (6, 1080));
     }
+
+    #[test]
+    fn quality_steps() {
+        for max_height in [Some(720), Some(1080), Some(1440), None] {
+            let options = ScreenOptions {
+                max_height,
+                ..ScreenOptions::default()
+            };
+            assert!(options.validate().is_ok());
+        }
+        let odd = ScreenOptions {
+            max_height: Some(900),
+            ..ScreenOptions::default()
+        };
+        assert!(odd.validate().is_err());
+        // 1440p scales a bigger screen down to fit, keeping its shape...
+        let pixels = [0; 4].repeat(2560 * 1600);
+        let scaled = bgra_to_i420(2560, 1600, &pixels, Some(1440)).unwrap();
+        assert_eq!((scaled.width(), scaled.height()), (2304, 1440));
+        // ...and leaves a smaller screen as it is.
+        let pixels = [0; 4].repeat(1920 * 1080);
+        let same = bgra_to_i420(1920, 1080, &pixels, Some(1440)).unwrap();
+        assert_eq!((same.width(), same.height()), (1920, 1080));
+    }
 }

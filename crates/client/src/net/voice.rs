@@ -700,42 +700,6 @@ pub(super) async fn voice_stats(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, st
     };
     ctx.send(Update::Stats(url.clone(), stats));
 }
-/// Offer a file to everyone in the voice room.
-pub(super) async fn offer_file(
-    ctx: &Ctx,
-    client: &mut KeyClient<'_>,
-    state: &mut State,
-    path: PathBuf,
-) -> Result<()> {
-    let Some(live) = &mut state.voice else {
-        return Ok(());
-    };
-    let record = live.room.offer_live_file(client, &path).await?;
-    let file = client
-        .open_message(&live.channel, &record)
-        .await?
-        .live
-        .context("offer without a file")?;
-    tracing::info!("offered a live file");
-    let channel = live.channel;
-    state.transfers.insert(
-        file.id,
-        Transfer {
-            channel,
-            mine: true,
-            ..Transfer::default()
-        },
-    );
-    ctx.send(Update::LiveOffer(LiveOffer {
-        id: file.id,
-        from: None,
-        name: file.name,
-        size: file.size,
-        chat: false,
-    }));
-    Ok(())
-}
-
 /// Offer a file to whoever is online in a text channel or DM, shown as a message.
 pub(super) async fn offer_chat_file(
     ctx: &Ctx,
@@ -865,7 +829,6 @@ pub(super) async fn start_call(
     tracing::info!(server = %fingerprint(&state.server_id), "joined voice");
     let listening = !room.can_publish();
     let no_video = !room.can_use_camera();
-    let no_files = !room.can_publish_data();
     state.voice = Some(Live {
         room,
         channel,
@@ -886,9 +849,6 @@ pub(super) async fn start_call(
     }
     if no_video {
         ctx.send(Update::NoVideo(url.clone(), channel));
-    }
-    if no_files {
-        ctx.send(Update::NoFiles(url.clone(), channel));
     }
     send_room(ctx, url, client, state, channel);
     Ok(())

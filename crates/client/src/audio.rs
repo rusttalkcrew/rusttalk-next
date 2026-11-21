@@ -93,6 +93,11 @@ pub struct Settings {
     pub channels_width: f32,
     pub members_width: f32,
     pub members_hidden: bool,
+    /// The last "Share your screen" choices, kept on this device only: the height
+    /// cap (`None` shares at the screen's own size), frame rate and cursor.
+    pub screen_height: Option<u32>,
+    pub screen_fps: u32,
+    pub screen_cursor: bool,
 }
 
 impl Settings {
@@ -138,6 +143,9 @@ impl Default for Settings {
             channels_width: crate::home::layout::CHANNELS_WIDTH,
             members_width: crate::home::layout::MEMBERS_WIDTH,
             members_hidden: false,
+            screen_height: Some(1080),
+            screen_fps: 30,
+            screen_cursor: true,
         }
     }
 }

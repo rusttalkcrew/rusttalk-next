@@ -315,6 +315,68 @@ pub fn checkbox(ui: &mut Ui, checked: &mut bool, text: impl Into<WidgetText>) ->
     ui.add(Checkbox::new(checked, text))
 }
 
+/// One of a few choices side by side, like "720p | 1080p | Native", the picked one in
+/// the accent and its hint (if any) under the row. Each choice is a radio button for
+/// screen readers. Choices are (value, label, hint). True when changed.
+pub fn segmented<T: Copy + PartialEq>(
+    ui: &mut Ui,
+    value: &mut T,
+    choices: &[(T, &str, &str)],
+) -> bool {
+    let width = ui.available_width();
+    let (rect, row) = ui.allocate_exact_size(Vec2::new(width, CONTROL_HEIGHT), Sense::hover());
+    let c = colors(ui);
+    let a = accent(ui);
+    ui.painter().rect_filled(rect, RADIUS, c.field);
+    let inner = rect.shrink(3.0);
+    let step = inner.width() / choices.len().max(1) as f32;
+    let mut changed = false;
+    for (at, (choice, label, _)) in choices.iter().enumerate() {
+        let cell = Rect::from_min_size(
+            inner.min + Vec2::new(at as f32 * step, 0.0),
+            Vec2::new(step, inner.height()),
+        );
+        let response = ui.interact(cell, row.id.with(at), Sense::click());
+        if response.clicked() && *value != *choice {
+            *value = *choice;
+            changed = true;
+        }
+        let on = *value == *choice;
+        let t = ui
+            .ctx()
+            .animate_bool_with_time(response.id.with("on"), on, STATE_SECONDS);
+        let hover = ui.ctx().animate_bool_with_time(
+            response.id.with("hover"),
+            response.hovered() && !on,
+            HOVER_SECONDS,
+        );
+        let fill = Color32::TRANSPARENT
+            .lerp_to_gamma(c.hover, hover)
+            .lerp_to_gamma(a.base, t);
+        let text = c.text.lerp_to_gamma(ON_FILL, t);
+        let painter = ui.painter();
+        painter.rect_filled(cell, RADIUS_S + 2, fill);
+        painter.text(
+            cell.center(),
+            Align2::CENTER_CENTER,
+            *label,
+            FontId::new(TEXT_SMALL, bold_family()),
+            text,
+        );
+        focus_ring(ui, &response, RADIUS_S + 2);
+        response
+            .widget_info(|| WidgetInfo::selected(Role::RadioButton, ui.is_enabled(), on, *label));
+        response.on_hover_cursor(CursorIcon::PointingHand);
+    }
+    if let Some((_, _, hint)) = choices.iter().find(|c| c.0 == *value)
+        && !hint.is_empty()
+    {
+        ui.add_space(2.0);
+        ui.label(RichText::new(*hint).size(TEXT_CAPTION).color(c.muted));
+    }
+    changed
+}
+
 /// A group header like "TEXT CHANNELS", with room above it.
 pub fn section(ui: &mut Ui, text: &str) -> Response {
     ui.add_space(SPACE_S + 2.0);

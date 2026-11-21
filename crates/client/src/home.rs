@@ -565,14 +565,6 @@ impl Home {
                     call.can_share_video = false;
                 }
             }
-            Update::NoFiles(address, channel) => {
-                if let Some(call) = &mut self.voice.call
-                    && call.server == address
-                    && call.channel == channel
-                {
-                    call.can_send_files = false;
-                }
-            }
             Update::LiveOffer(offer) => self.voice.live_files.push(LiveFile {
                 id: offer.id,
                 chat: offer.chat,
@@ -750,7 +742,6 @@ pub fn show(ui: &mut Ui, home: &mut Home, updates: &mut crate::update::Updater) 
         }
         let (Ask::Attach(address, _)
         | Ask::Save(address, _)
-        | Ask::Offer(address)
         | Ask::Live(address, _)
         | Ask::Icon(address)
         | Ask::Accept(address, ..)) = &ask
@@ -786,16 +777,14 @@ pub fn show(ui: &mut Ui, home: &mut Home, updates: &mut crate::update::Updater) 
                     }
                 }
             }
-            Ask::Offer(_) | Ask::Live(..) => {
+            Ask::Live(_, channel) => {
                 let Some(path) = paths.into_iter().next() else {
                     continue;
                 };
                 if std::fs::metadata(&path).is_ok_and(|meta| meta.len() > call::MAX_LIVE_FILE) {
                     home.toast = Some(("Live files can be up to 2 GB.".into(), now + 6.0));
-                } else if let Ask::Live(_, channel) = ask {
-                    server.send(Command::SendLive(channel, path));
                 } else {
-                    server.send(Command::OfferFile(path));
+                    server.send(Command::SendLive(channel, path));
                 }
             }
             Ask::Picture => {}

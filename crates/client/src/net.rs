@@ -73,8 +73,6 @@ pub enum Command {
     Image(BlobRef, bool),
     /// Download a file and save it here.
     Save(BlobRef, PathBuf),
-    /// Offer a file to everyone in the voice room, sent through the call.
-    OfferFile(PathBuf),
     /// Receive an offered file into this path.
     AcceptFile(Id, PathBuf),
     /// Stop our offer, or our download, of a live file.
@@ -220,8 +218,6 @@ pub enum Update {
     LiveReceiver(Id, Id, bool),
     /// How receiving a live file goes.
     LiveProgress(Id, LiveFileEvent),
-    /// This device may not send files in the call.
-    NoFiles(Url, Id),
     /// The joined servers and synced settings after a device sync.
     Synced(Box<Synced>),
     /// Sending this message failed; put it back in the composer.
@@ -937,7 +933,6 @@ async fn on_command(
         }
         Command::Image(file, full) => files::image(ctx, client, file, full).await,
         Command::Save(file, path) => files::save(ctx, client, file, path).await,
-        Command::OfferFile(path) => voice::offer_file(ctx, client, state, path).await?,
         Command::SendLive(channel, path) => {
             voice::offer_chat_file(ctx, url, client, state, channel, path).await?;
         }
