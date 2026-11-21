@@ -18,8 +18,8 @@ mod screen;
 mod server;
 mod settings;
 mod share;
+mod ui;
 mod update;
-mod widgets;
 
 use std::{
     env, fs,

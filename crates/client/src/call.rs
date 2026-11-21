@@ -9,25 +9,22 @@ use std::{
 };
 
 use eframe::egui::{
-    self, Align, Button, Color32, ColorImage, ComboBox, Event, Frame, Grid, Image, Key, Layout,
-    Margin, Modal, Popup, RichText, Role, Sense, Slider, Stroke, TextureHandle, TextureOptions, Ui,
-    Vec2,
+    self, Align, ColorImage, ComboBox, Event, Frame, Grid, Image, Key, Layout, Margin, RichText,
+    Role, Sense, Slider, Stroke, TextureHandle, TextureOptions, Ui, Vec2,
 };
 
 use crate::{
     audio::{self, Audio, Settings, StreamId},
     camera::{Camera, Change},
     files,
-    home::{Home, Tab, face, palette, section, toast_line},
+    home::{Home, Tab, face, pane_title, toast_line},
     net::Command,
     screen::{self, Kind, Options, Target, Video},
     server::{Call, CallState, Id, Screen, Server, Stats},
-    settings,
     share::{self, App},
+    ui::{self, Look, section},
 };
 
-const GREEN: Color32 = Color32::from_rgb(0x23, 0xa5, 0x5a);
-const RED: Color32 = Color32::from_rgb(0xda, 0x37, 0x3c);
 /// Meter range in dBFS.
 const FLOOR: f32 = -70.0;
 const CEILING: f32 = -10.0;
@@ -339,9 +336,9 @@ pub fn room_list(ui: &mut Ui, home: &Home, server: &Server, channel: &Id) {
             if home.voice.speaking(server, &peer.person) {
                 ring(ui, face.rect);
             }
-            ui.label(RichText::new(&name).small());
+            ui.label(RichText::new(&name).size(ui::TEXT_SMALL));
             if peer.connecting {
-                ui.label(RichText::new("Connecting…").small().weak());
+                ui.label(ui::caption("Connecting…"));
             }
             if !peer.screens.is_empty() {
                 live_badge(ui);
@@ -351,21 +348,22 @@ pub fn room_list(ui: &mut Ui, home: &Home, server: &Server, channel: &Id) {
         let listening =
             peer.person != server.dir.me && !peer.unknown && home.voice.in_call(server, channel);
         if listening {
-            Popup::context_menu(&row)
-                .show(|ui| stream_menu(ui, &home.voice.audio, &(peer.person, None)));
+            ui::context_menu(&row, |m| {
+                stream_menu(m, &home.voice.audio, &(peer.person, None))
+            });
         }
         for (sid, app) in &peer.apps {
             let stream = (peer.person, Some(sid.clone()));
             let row = ui.horizontal(|ui| {
                 ui.add_space(52.0);
-                ui.label(RichText::new(format!("🎵 {app}")).small());
+                ui.label(RichText::new(format!("🎵 {app}")).size(ui::TEXT_SMALL));
                 if listening && home.voice.audio.volume(&stream).1 {
-                    ui.label(RichText::new("Muted").small().weak());
+                    ui.label(ui::caption("Muted"));
                 }
             });
             if listening {
                 let row = row.response.interact(Sense::click());
-                Popup::context_menu(&row).show(|ui| stream_menu(ui, &home.voice.audio, &stream));
+                ui::context_menu(&row, |m| stream_menu(m, &home.voice.audio, &stream));
             }
         }
     }
@@ -375,17 +373,23 @@ fn ring(ui: &Ui, rect: egui::Rect) {
     ui.painter().circle_stroke(
         rect.center(),
         rect.width() / 2.0 + 2.0,
-        Stroke::new(2.0, GREEN),
+        Stroke::new(2.0, ui::colors(ui).success),
     );
 }
 
-/// Volume and mute for a person's voice or one app they share, in its context menu.
-pub fn stream_menu(ui: &mut Ui, audio: &Audio, stream: &StreamId) {
+/// Volume and mute for a person's voice or one app they share, in its menu.
+pub fn stream_menu(m: &mut ui::Menu, audio: &Audio, stream: &StreamId) {
     let (mut volume, mut muted) = audio.volume(stream);
     let before = (volume, muted);
-    ui.label("Volume");
-    volume_slider(ui, &mut volume);
-    ui.checkbox(&mut muted, "Mute");
+    m.caption("Volume");
+    m.ui().horizontal(|ui| {
+        ui.add_space(ui::SPACE_S);
+        ui.spacing_mut().slider_width = ui.available_width() - 64.0;
+        volume_slider(ui, &mut volume);
+    });
+    if m.add(ui::Item::new("🔇", "Mute").checked(muted)).clicked() {
+        muted = !muted;
+    }
     if (volume, muted) != before {
         audio.set_volume(stream.clone(), volume, muted);
     }
@@ -409,9 +413,9 @@ fn live_files(ui: &mut Ui, list: &[LiveFile], server: Option<&Server>) -> Option
     for file in list.iter().filter(|file| !file.chat) {
         let size = files::size(file.size);
         Frame::new()
-            .fill(ui.visuals().faint_bg_color)
-            .corner_radius(4)
-            .inner_margin(Margin::same(6))
+            .fill(ui::colors(ui).side)
+            .corner_radius(ui::RADIUS_ROW)
+            .inner_margin(Margin::same(ui::SPACE_S as i8))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 match (file.from, &file.state) {
@@ -442,7 +446,7 @@ fn live_files(ui: &mut Ui, list: &[LiveFile], server: Option<&Server>) -> Option
                             } else {
                                 format!("{} didn't arrive.", file.name)
                             });
-                            if ui.small_button("×").on_hover_text("Dismiss").clicked() {
+                            if ui::small_close(ui, "Dismiss").clicked() {
                                 action = Some(LiveAction::Remove(file.id, false));
                             }
                         });
@@ -456,15 +460,11 @@ fn live_files(ui: &mut Ui, list: &[LiveFile], server: Option<&Server>) -> Option
 /// Who receives our live file, and "Stop sending".
 fn sending(ui: &mut Ui, file: &LiveFile, name: impl Fn(&Id) -> String) -> Option<LiveAction> {
     let who: Vec<_> = file.receivers.iter().map(name).collect();
-    ui.label(
-        RichText::new(match who.len() {
-            0 => "Waiting for someone to save it".to_owned(),
-            _ => format!("{} receiving", who.join(", ")),
-        })
-        .small()
-        .weak(),
-    );
-    let stop = ui.small_button("Stop sending").clicked();
+    ui.label(ui::caption(match who.len() {
+        0 => "Waiting for someone to save it".to_owned(),
+        _ => format!("{} receiving", who.join(", ")),
+    }));
+    let stop = ui::secondary(ui, "Stop sending").clicked();
     stop.then_some(LiveAction::Remove(file.id, true))
 }
 
@@ -475,10 +475,10 @@ fn receiving(ui: &mut Ui, id: Id, name: &str, size: u64, saved: Option<u64>) -> 
     match saved {
         None => {
             ui.horizontal(|ui| {
-                if ui.small_button("Save").clicked() {
+                if ui::primary(ui, "Save").clicked() {
                     action = Some(LiveAction::Save(id, name.to_owned()));
                 }
-                if ui.small_button("Decline").clicked() {
+                if ui::secondary(ui, "Decline").clicked() {
                     action = Some(LiveAction::Remove(id, false));
                 }
             });
@@ -486,7 +486,7 @@ fn receiving(ui: &mut Ui, id: Id, name: &str, size: u64, saved: Option<u64>) -> 
         Some(bytes) => {
             let done = bytes as f32 / size.max(1) as f32;
             ui.add(egui::ProgressBar::new(done).show_percentage());
-            if ui.small_button("Cancel").clicked() {
+            if ui::secondary(ui, "Cancel").clicked() {
                 action = Some(LiveAction::Remove(id, true));
             }
         }
@@ -506,48 +506,43 @@ pub fn chat_live(
     let mine = msg.person == dir.me;
     let fresh = chrono::Utc::now().timestamp() - msg.at < OFFER_SECONDS;
     let mut action = None;
-    Frame::new()
-        .fill(ui.visuals().faint_bg_color)
-        .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
-        .corner_radius(6)
-        .inner_margin(Margin::same(8))
-        .show(ui, |ui| {
-            ui.set_max_width(360.0);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("📡").size(22.0))
+    files::attachment_frame(ui).show(ui, |ui| {
+        ui.set_max_width(360.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("📡").size(ui::TEXT_ICON_LARGE))
+                .on_hover_text(DIRECT_CHAT);
+            ui.vertical(|ui| {
+                ui.label(ui::bold(name));
+                ui.label(ui::caption(format!("{} · Live", files::size(*size))))
                     .on_hover_text(DIRECT_CHAT);
-                ui.vertical(|ui| {
-                    ui.label(RichText::new(name).strong());
-                    ui.weak(format!("{} · Live", files::size(*size)))
-                        .on_hover_text(DIRECT_CHAT);
-                    let state = entry.map(|file| &file.state);
-                    match (mine, state) {
-                        (true, Some(LiveState::Sending)) => {
-                            let file = entry.expect("matched a state");
-                            action = sending(ui, file, |p| crate::server::member_name(dir, p));
-                        }
-                        (_, Some(LiveState::Saving(bytes))) => {
-                            action = receiving(ui, *id, name, *size, Some(*bytes));
-                        }
-                        (_, Some(LiveState::Saved)) => {
-                            ui.weak("Saved");
-                        }
-                        (_, Some(LiveState::Failed)) => {
-                            ui.colored_label(ui.visuals().error_fg_color, "Didn't arrive.");
-                        }
-                        (false, None | Some(LiveState::Offered)) if fresh => {
-                            action = receiving(ui, *id, name, *size, None);
-                        }
-                        (_, Some(LiveState::Ended)) => {
-                            ui.weak("Stopped");
-                        }
-                        _ => {
-                            ui.weak("No longer available");
-                        }
+                let state = entry.map(|file| &file.state);
+                match (mine, state) {
+                    (true, Some(LiveState::Sending)) => {
+                        let file = entry.expect("matched a state");
+                        action = sending(ui, file, |p| crate::server::member_name(dir, p));
                     }
-                });
+                    (_, Some(LiveState::Saving(bytes))) => {
+                        action = receiving(ui, *id, name, *size, Some(*bytes));
+                    }
+                    (_, Some(LiveState::Saved)) => {
+                        ui.weak("Saved");
+                    }
+                    (_, Some(LiveState::Failed)) => {
+                        ui::error_text(ui, Some("Didn't arrive."));
+                    }
+                    (false, None | Some(LiveState::Offered)) if fresh => {
+                        action = receiving(ui, *id, name, *size, None);
+                    }
+                    (_, Some(LiveState::Ended)) => {
+                        ui.weak("Stopped");
+                    }
+                    _ => {
+                        ui.weak("No longer available");
+                    }
+                }
             });
         });
+    });
     action
 }
 
@@ -599,9 +594,7 @@ pub fn screen_dialog(ctx: &egui::Context, home: &mut Home) {
     };
     let mut close = false;
     let mut share = None;
-    let modal = Modal::new(egui::Id::unique("share screen")).show(ctx, |ui| {
-        ui.set_width(400.0);
-        ui.heading("Share your screen");
+    let ((), dismissed) = ui::dialog(ctx, "share screen", "Share your screen", |ui| {
         let targets = audio::lock(&voice.targets);
         // Linux lists one entry that opens the system's own picker.
         let portal = match &*targets {
@@ -650,9 +643,8 @@ pub fn screen_dialog(ctx: &egui::Context, home: &mut Home) {
             }
         });
         ui.add_space(6.0);
-        ui.checkbox(&mut options.cursor, "Show my cursor");
-        ui.add_space(10.0);
-        ui.horizontal(|ui| {
+        ui::checkbox(ui, &mut options.cursor, "Show my cursor");
+        ui::footer(ui, |ui| {
             let label = if portal.is_some() {
                 "Choose what to share"
             } else {
@@ -662,11 +654,11 @@ pub fn screen_dialog(ctx: &egui::Context, home: &mut Home) {
                 Listing::Found(found) => portal.or(*picked).and_then(|at| found.get(at)),
                 _ => None,
             };
-            let button = Button::new(label).fill(ui.visuals().selection.bg_fill);
-            if ui.add_enabled(target.is_some(), button).clicked() {
+            let button = ui.add_enabled_ui(target.is_some(), |ui| ui::primary(ui, label));
+            if button.inner.clicked() {
                 share = target.cloned();
             }
-            close |= ui.button("Cancel").clicked();
+            close |= ui::secondary(ui, "Cancel").clicked();
         });
     });
     if let Some(target) = share {
@@ -677,20 +669,14 @@ pub fn screen_dialog(ctx: &egui::Context, home: &mut Home) {
         }
         close = true;
     }
-    if close || modal.should_close() {
+    if close || dismissed {
         home.voice.share_screen = None;
     }
 }
 
 /// A red "LIVE" tag for someone sharing their screen.
 fn live_badge(ui: &mut Ui) {
-    ui.label(
-        RichText::new(" LIVE ")
-            .small()
-            .strong()
-            .color(Color32::WHITE)
-            .background_color(RED),
-    );
+    ui::badge(ui, "LIVE", ui::colors(ui).danger);
 }
 
 /// The watched screen: title, full window toggle, Stop watching, and the picture.
@@ -705,15 +691,15 @@ pub fn screen_view(ui: &mut Ui, home: &mut Home) {
     }
     let mut stop = false;
     ui.horizontal(|ui| {
-        ui.label(RichText::new(&watching.title).strong());
+        ui.label(ui::bold(&watching.title));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            stop = ui.button("Stop watching").clicked();
+            stop = ui::secondary(ui, "Stop watching").clicked();
             let label = if watching.full {
                 "Exit full window"
             } else {
                 "Full window"
             };
-            if ui.button(label).clicked() {
+            if ui::secondary(ui, label).clicked() {
                 watching.full ^= true;
             }
         });
@@ -749,17 +735,6 @@ pub fn screen_view(ui: &mut Ui, home: &mut Home) {
     }
 }
 
-/// An icon button; `on` fills it, with `fill` or the selection color.
-fn toggle(ui: &mut Ui, icon: &str, label: &str, on: Option<Color32>) -> egui::Response {
-    let mut button = Button::new(RichText::new(icon).size(16.0)).min_size(Vec2::splat(30.0));
-    if let Some(fill) = on {
-        button = button.fill(fill);
-    }
-    let response = ui.add(button).on_hover_text(label);
-    response.widget_info(|| egui::WidgetInfo::labeled(Role::Button, true, label));
-    response
-}
-
 /// The main pane for a voice channel: everyone in it, with speaking rings.
 pub fn room(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
     let server = &home.servers[index];
@@ -768,10 +743,10 @@ pub fn room(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
         .map(|(name, _)| name)
         .unwrap_or_default();
     let joined = home.voice.in_call(server, &channel);
-    ui.label(RichText::new(format!("🔊 {title}")).strong().size(17.0));
-    ui.separator();
+    pane_title(ui, "room-title", &format!("🔊 {title}"));
     // Problems from the call bar and the room show here; the chat has its own line.
     toast_line(ui, &mut home.toast);
+    ui.add_space(ui::SPACE_S);
     let peers = server.voice.get(&channel).cloned().unwrap_or_default();
     if joined && home.voice.watching.is_some() {
         screen_view(ui, home);
@@ -804,9 +779,9 @@ pub fn room(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
                 _ => None,
             };
             let tile = Frame::new()
-                .fill(palette(ui).side)
-                .corner_radius(8)
-                .inner_margin(Margin::same(12))
+                .fill(ui::colors(ui).side)
+                .corner_radius(ui::RADIUS)
+                .inner_margin(Margin::same(ui::SPACE_M as i8))
                 .show(ui, |ui| {
                     ui.set_width(if picture.is_some() {
                         VIDEO_WIDTH
@@ -824,14 +799,14 @@ pub fn room(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
                                 ui.painter().rect_stroke(
                                     face.rect,
                                     4.0,
-                                    Stroke::new(2.0, GREEN),
+                                    Stroke::new(2.0, ui::colors(ui).success),
                                     egui::StrokeKind::Outside,
                                 );
                             } else {
                                 ring(ui, face.rect);
                             }
                         }
-                        ui.label(RichText::new(&name).strong());
+                        ui.label(ui::bold(&name));
                         if !peer.screens.is_empty() {
                             live_badge(ui);
                         }
@@ -859,12 +834,13 @@ pub fn room(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
                 }
             }
             if !me && !peer.unknown && joined {
-                Popup::context_menu(&tile).show(|ui| {
-                    stream_menu(ui, &home.voice.audio, &(peer.person, None));
+                ui::context_menu(&tile, |m| {
+                    stream_menu(m, &home.voice.audio, &(peer.person, None));
                     if peer.camera.is_some() {
-                        let mut show = !home.voice.hidden.contains(&peer.person);
-                        if ui.checkbox(&mut show, "Show video").changed() {
-                            hide = Some((peer.person, !show));
+                        let show = !home.voice.hidden.contains(&peer.person);
+                        let item = ui::Item::new("📷", "Show video").checked(show);
+                        if m.add(item).clicked() {
+                            hide = Some((peer.person, show));
                         }
                     }
                 });
@@ -907,7 +883,7 @@ pub fn room(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
                 if joined {
                     for app in &home.voice.shares {
                         ui.label(format!("You · {}", app.name));
-                        if ui.button("Stop sharing").clicked() {
+                        if ui::secondary(ui, "Stop sharing").clicked() {
                             stop = Some(app.id.clone());
                         }
                         ui.label("");
@@ -925,7 +901,7 @@ pub fn room(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
     }
     if !joined {
         ui.add_space(12.0);
-        if crate::app::primary(ui, "Join voice").clicked() {
+        if ui::primary_large(ui, "Join voice").clicked() {
             join(home, index, channel);
         }
     }
@@ -952,8 +928,14 @@ fn stream_row(ui: &mut Ui, audio: &Audio, stream: StreamId, name: &str) {
     slider.widget_info(|| egui::WidgetInfo::labeled(Role::Slider, true, format!("{name} volume")));
     let icon = if muted { "🔇" } else { "🔊" };
     let label = if muted { "Unmute" } else { "Mute" };
-    let fill = muted.then_some(RED.gamma_multiply(0.6));
-    let mute = toggle(ui, icon, &format!("{label} {name}"), fill);
+    let look = if muted { Look::Struck } else { Look::Plain };
+    let mute = ui::icon_button(
+        ui,
+        icon,
+        &format!("{label} {name}"),
+        look,
+        Vec2::splat(30.0),
+    );
     if slider.changed() || mute.clicked() {
         audio.set_volume(stream, volume, muted ^ mute.clicked());
     }
@@ -968,7 +950,7 @@ pub fn settings_tab(ui: &mut Ui, voice: &mut Voice) {
     device_picker(ui, "Microphone", &mut s.input, &inputs);
     device_picker(ui, "Speakers", &mut s.output, &outputs);
     if let Some(problem) = audio.problem() {
-        ui.colored_label(ui.visuals().error_fg_color, problem);
+        ui::error_text(ui, Some(&problem));
     }
     section(ui, "Input mode");
     ui.horizontal_wrapped(|ui| {
@@ -978,7 +960,7 @@ pub fn settings_tab(ui: &mut Ui, voice: &mut Voice) {
         ];
         for (push_to_talk, icon, title, help) in cards {
             let selected = s.push_to_talk == push_to_talk;
-            if settings::choice_card(ui, selected, icon, title, help).clicked() {
+            if ui::choice_card(ui, selected, icon, title, help).clicked() {
                 s.push_to_talk = push_to_talk;
             }
         }
@@ -996,9 +978,9 @@ pub fn settings_tab(ui: &mut Ui, voice: &mut Voice) {
         calibrate(ui, voice, &mut s);
     }
     section(ui, "Voice processing");
-    ui.checkbox(&mut s.echo_cancellation, "Echo cancellation");
-    ui.checkbox(&mut s.noise_suppression, "Noise suppression");
-    ui.checkbox(&mut s.auto_gain, "Automatic gain");
+    ui::checkbox(ui, &mut s.echo_cancellation, "Echo cancellation");
+    ui::checkbox(ui, &mut s.noise_suppression, "Noise suppression");
+    ui::checkbox(ui, &mut s.auto_gain, "Automatic gain");
     audio.set_settings(s);
 }
 
@@ -1033,7 +1015,8 @@ fn meter(ui: &mut Ui, audio: &Audio, s: &Settings) {
     let width = METER_WIDTH;
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 10.0), Sense::hover());
     let painter = ui.painter();
-    painter.rect_filled(rect, 4.0, ui.visuals().extreme_bg_color);
+    let c = ui::colors(ui);
+    painter.rect_filled(rect, ui::RADIUS_S, c.field);
     let open = if s.push_to_talk {
         audio.talking()
     } else {
@@ -1041,14 +1024,14 @@ fn meter(ui: &mut Ui, audio: &Audio, s: &Settings) {
     };
     let mut filled = rect;
     filled.set_width(rect.width() * fraction(level));
-    painter.rect_filled(filled, 4.0, if open { GREEN } else { Color32::GRAY });
+    painter.rect_filled(
+        filled,
+        ui::RADIUS_S,
+        if open { c.success } else { c.offline },
+    );
     if !s.push_to_talk {
         let x = rect.left() + rect.width() * fraction(s.threshold);
-        painter.vline(
-            x,
-            rect.y_range(),
-            Stroke::new(2.0, ui.visuals().strong_text_color()),
-        );
+        painter.vline(x, rect.y_range(), Stroke::new(2.0, c.strong));
     }
     response.widget_info(|| egui::WidgetInfo::labeled(Role::Meter, true, "Mic level"));
 }
@@ -1075,7 +1058,7 @@ fn key_picker(ui: &mut Ui, voice: &mut Voice, s: &mut Settings) {
             }
         } else {
             ui.label(format!("Talk key: {}", s.key));
-            if ui.button("Change").clicked() {
+            if ui::secondary(ui, "Change").clicked() {
                 voice.picking_key = true;
             }
         }
@@ -1113,14 +1096,14 @@ fn calibrate(ui: &mut Ui, voice: &mut Voice, s: &mut Settings) {
         Some(Calibration::Speak(..)) => {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label(RichText::new("Say something, like counting to five.").strong());
+                ui.label(ui::bold("Say something, like counting to five."));
             });
         }
         done => {
             if let Some(Calibration::Done(text)) = done {
                 ui.label(text.as_str());
             }
-            if ui.button("Calibrate").clicked() {
+            if ui::secondary(ui, "Calibrate").clicked() {
                 audio.record(true);
                 voice.calibration = Some(Calibration::Quiet(now + Duration::from_secs(2)));
             }

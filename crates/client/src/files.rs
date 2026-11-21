@@ -12,8 +12,8 @@ use std::{
 };
 
 use eframe::egui::{
-    self, Align, Color32, Frame, Id as UiId, Image, Layout, Margin, Modal, Rect, Response,
-    RichText, Role, ScrollArea, Sense, TextureHandle, TextureOptions, Ui, Vec2, WidgetInfo,
+    self, Align, Frame, Id as UiId, Image, Layout, Margin, Modal, Rect, Response, RichText, Role,
+    ScrollArea, Sense, TextureHandle, TextureOptions, Ui, Vec2, WidgetInfo,
 };
 use rusttalk_core::client::{Attachment, save_json};
 use tokio::sync::mpsc::UnboundedSender;
@@ -22,6 +22,7 @@ use url::Url;
 use crate::{
     net::{Command, MAX_FILE, file_name},
     server::{Chat, Id, Staged},
+    ui::{self, ON_FILL, OVERLAY, OVERLAY_BUTTON, OVERLAY_TEXT},
 };
 
 /// Files per message, as the message format allows.
@@ -322,11 +323,11 @@ fn show_in_folder(path: &Path) -> io::Result<()> {
 
 /// "Show in folder" and "Open" for a file saved on this device.
 fn saved_menu(response: &Response, path: &Path) {
-    response.context_menu(|ui| {
-        if ui.button("Show in folder").clicked() {
+    ui::context_menu(response, |m| {
+        if m.item("🗁", "Show in folder").clicked() {
             open(path, true);
         }
-        if ui.button("Open").clicked() {
+        if m.item("↗", "Open").clicked() {
             open(path, false);
         }
     });
@@ -371,13 +372,13 @@ pub fn staged(ui: &mut Ui, chat: &mut Chat) {
     ui.horizontal_wrapped(|ui| {
         for (at, file) in chat.staged.iter().enumerate() {
             Frame::new()
-                .fill(ui.visuals().faint_bg_color)
-                .corner_radius(4)
-                .inner_margin(Margin::symmetric(6, 3))
+                .fill(ui::colors(ui).field)
+                .corner_radius(ui::RADIUS)
+                .inner_margin(Margin::symmetric(8, 4))
                 .show(ui, |ui| {
                     ui.label(format!("📎 {}", file.name));
-                    ui.weak(size(file.size));
-                    if ui.small_button("×").on_hover_text("Remove").clicked() {
+                    ui.label(ui::caption(size(file.size)));
+                    if ui::small_close(ui, "Remove").clicked() {
                         remove = Some(at);
                     }
                 });
@@ -419,7 +420,7 @@ pub fn attachments(
                     .add(
                         Image::new(&*texture)
                             .max_size(Vec2::splat(THUMBNAIL))
-                            .corner_radius(4)
+                            .corner_radius(ui::RADIUS)
                             .sense(Sense::click()),
                     )
                     .on_hover_text(&file.name);
@@ -433,7 +434,7 @@ pub fn attachments(
             }
             Picture::Gone => gone(ui, file),
             Picture::Failed => {
-                retry = ui.small_button("Couldn't load picture. Retry").clicked();
+                retry = ui::secondary(ui, "Couldn't load picture. Retry").clicked();
             }
         }
         if show {
@@ -466,27 +467,33 @@ fn card(ui: &mut Ui, files: &mut Files, address: &Url, file: &Attachment) {
         gone(ui, file);
         return;
     }
-    let shown = Frame::new()
-        .fill(ui.visuals().faint_bg_color)
-        .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
-        .corner_radius(6)
-        .inner_margin(Margin::same(8))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("📄").size(22.0));
-                ui.vertical(|ui| {
-                    ui.label(RichText::new(&file.name).strong());
-                    ui.weak(size(file.file.size.into()));
-                });
-                ui.add_space(12.0);
-                download(ui, files, address, file);
+    let shown = attachment_frame(ui).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("📄").size(ui::TEXT_ICON_LARGE));
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                ui.label(ui::bold(&file.name));
+                ui.label(ui::caption(size(file.file.size.into())));
             });
+            ui.add_space(12.0);
+            download(ui, files, address, file);
         });
+    });
     if let Some(path) = files.saved_at(file) {
         let card = shown.response.interact(Sense::click());
         card.widget_info(|| WidgetInfo::labeled(Role::Button, true, &file.name));
         saved_menu(&card, path);
     }
+}
+
+/// The box around a file or a live file in a message.
+pub fn attachment_frame(ui: &Ui) -> Frame {
+    let c = ui::colors(ui);
+    Frame::new()
+        .fill(c.side)
+        .stroke(egui::Stroke::new(1.0, c.border))
+        .corner_radius(ui::RADIUS)
+        .inner_margin(Margin::same(ui::SPACE_M as i8))
 }
 
 /// Download, or how the last download went.
@@ -508,11 +515,11 @@ fn download(ui: &mut Ui, files: &mut Files, address: &Url, file: &Attachment) {
             return;
         }
         Some(Saving::Failed) => {
-            ui.colored_label(ui.visuals().error_fg_color, "Couldn't save.");
+            ui::error_text(ui, Some("Couldn't save."));
         }
         None => {}
     }
-    if ui.button("Download").clicked() {
+    if ui::secondary(ui, "Download").clicked() {
         files.ask(ui.ctx(), Ask::Save(address.clone(), file.clone()));
     }
 }
@@ -521,8 +528,8 @@ fn download(ui: &mut Ui, files: &mut Files, address: &Url, file: &Attachment) {
 fn tool(ui: &mut Ui, icon: &str, label: &str) -> Response {
     let button = ui
         .add(
-            egui::Button::new(RichText::new(icon).size(18.0).color(Color32::WHITE))
-                .fill(Color32::from_black_alpha(160))
+            egui::Button::new(RichText::new(icon).size(18.0).color(ON_FILL))
+                .fill(OVERLAY_BUTTON)
                 .corner_radius(18)
                 .min_size(Vec2::splat(36.0)),
         )
@@ -541,14 +548,14 @@ pub fn viewer(ctx: &egui::Context, files: &mut Files) {
     let (mut close, mut open_it) = (false, false);
     let modal = Modal::new(UiId::unique("viewer"))
         .frame(Frame::NONE)
-        .backdrop_color(Color32::from_black_alpha(225))
+        .backdrop_color(OVERLAY)
         .show(ctx, |ui| {
             let screen = ctx.content_rect();
             ui.set_min_size(screen.size());
             ui.set_max_size(screen.size());
             Frame::new().inner_margin(Margin::same(12)).show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(&file.name).strong().color(Color32::WHITE));
+                    ui.label(ui::bold(&file.name).color(ON_FILL));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         close = tool(ui, "×", "Close").clicked();
                         ui.add_space(12.0);
@@ -571,10 +578,10 @@ pub fn viewer(ctx: &egui::Context, files: &mut Files) {
                                 ui.add(egui::ProgressBar::new(*done).desired_width(100.0));
                             }
                             Some(Saving::Done) => {
-                                ui.label(RichText::new("Saved").color(Color32::LIGHT_GRAY));
+                                ui.label(RichText::new("Saved").color(OVERLAY_TEXT));
                             }
                             Some(Saving::Failed) => {
-                                ui.colored_label(ui.visuals().error_fg_color, "Couldn't save.");
+                                ui::error_text(ui, Some("Couldn't save."));
                             }
                             _ => {}
                         }
@@ -604,12 +611,12 @@ pub fn viewer(ctx: &egui::Context, files: &mut Files) {
                         });
                     }
                     Some(Picture::Gone) => {
-                        ui.label(RichText::new("No longer available").color(Color32::LIGHT_GRAY));
+                        ui.label(RichText::new("No longer available").color(OVERLAY_TEXT));
                     }
                     Some(Picture::Failed) => {
                         ui.label(
                             RichText::new("Couldn't open this picture. You can still save it.")
-                                .color(Color32::LIGHT_GRAY),
+                                .color(OVERLAY_TEXT),
                         );
                     }
                     _ => {

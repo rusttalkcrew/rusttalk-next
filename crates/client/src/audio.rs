@@ -83,6 +83,31 @@ pub struct Settings {
     pub index_fingerprint: String,
     /// Server IDs of official servers the person dismissed from the join page.
     pub dismissed_official: Vec<String>,
+    /// "dark", "light" or "system".
+    pub theme_mode: String,
+    /// The dark and light theme and the accent colour, by ID (see `ui::theme`).
+    pub dark_theme: String,
+    pub light_theme: String,
+    pub accent: String,
+}
+
+impl Settings {
+    /// The look these settings pick; unknown IDs fall back to the defaults.
+    pub fn appearance(&self) -> crate::ui::Appearance {
+        crate::ui::Appearance::from_ids(
+            &self.theme_mode,
+            &self.dark_theme,
+            &self.light_theme,
+            &self.accent,
+        )
+    }
+
+    pub fn set_appearance(&mut self, look: crate::ui::Appearance) {
+        self.theme_mode = look.mode.id().into();
+        self.dark_theme = look.dark.id.into();
+        self.light_theme = look.light.id.into();
+        self.accent = look.accent.id.into();
+    }
 }
 
 impl Default for Settings {
@@ -102,6 +127,10 @@ impl Default for Settings {
             index_url: String::new(),
             index_fingerprint: String::new(),
             dismissed_official: Vec::new(),
+            theme_mode: "system".into(),
+            dark_theme: "midnight".into(),
+            light_theme: "daylight".into(),
+            accent: "rust".into(),
         }
     }
 }

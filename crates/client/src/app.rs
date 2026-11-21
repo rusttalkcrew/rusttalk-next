@@ -2,13 +2,16 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use eframe::egui::{
-    self, Button, CentralPanel, CollapsingHeader, Frame, Grid, Key, Response, RichText, ScrollArea,
-    TextEdit, TextStyle, Ui, Vec2,
+    self, CentralPanel, CollapsingHeader, Grid, Key, Response, ScrollArea, Ui, Vec2,
 };
 use rusttalk_core::identity::{DeviceIdentity, IdentityError, WordConfirmation};
 use zeroize::Zeroizing;
 
-use crate::{home::Home, keystore::Keystore};
+use crate::{
+    home::Home,
+    keystore::Keystore,
+    ui::{self, error_text, primary_large as primary, secondary_large as secondary},
+};
 
 const DEVICE_NAME: &str = "Desktop";
 const CARD_WIDTH: f32 = 560.0;
@@ -58,24 +61,7 @@ impl App {
         opened: Result<(Keystore, Option<DeviceIdentity>)>,
         data: PathBuf,
     ) -> Self {
-        cc.egui_ctx.all_styles_mut(|style| {
-            for (text_style, font) in &mut style.text_styles {
-                font.size = match text_style {
-                    TextStyle::Heading => 24.0,
-                    TextStyle::Small => 12.0,
-                    _ => 15.0,
-                };
-            }
-            style.spacing.item_spacing = Vec2::new(8.0, 8.0);
-            style.spacing.button_padding = Vec2::new(10.0, 6.0);
-        });
-        // Brighter body text, so chat reads easily.
-        cc.egui_ctx.style_mut_of(egui::Theme::Dark, |style| {
-            style.visuals.widgets.noninteractive.fg_stroke.color = egui::Color32::from_gray(215);
-        });
-        cc.egui_ctx.style_mut_of(egui::Theme::Light, |style| {
-            style.visuals.widgets.noninteractive.fg_stroke.color = egui::Color32::from_gray(35);
-        });
+        ui::install(&cc.egui_ctx);
         let updates = crate::update::Updater::new(&data, &cc.egui_ctx);
         let mut app = Self {
             keystore: None,
@@ -277,24 +263,6 @@ fn card(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> Option<Action>) -> Option<Acti
         .inner
 }
 
-pub fn primary(ui: &mut Ui, text: &str) -> Response {
-    ui.add(
-        Button::new(RichText::new(text).size(16.0))
-            .fill(ui.visuals().selection.bg_fill)
-            .min_size(Vec2::new(240.0, 40.0)),
-    )
-}
-
-pub fn secondary(ui: &mut Ui, text: &str) -> Response {
-    ui.add(Button::new(RichText::new(text).size(16.0)).min_size(Vec2::new(240.0, 40.0)))
-}
-
-pub fn error_text(ui: &mut Ui, error: Option<&str>) {
-    if let Some(error) = error {
-        ui.colored_label(ui.visuals().error_fg_color, error);
-    }
-}
-
 pub fn submitted(ui: &Ui, field: &Response) -> bool {
     field.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter))
 }
@@ -320,10 +288,10 @@ fn show_words(ui: &mut Ui, words: &str) -> Option<Action> {
         .spacing(Vec2::new(10.0, 10.0))
         .show(ui, |ui| {
             for (index, word) in words.split_whitespace().enumerate() {
-                Frame::group(ui.style()).show(ui, |ui| {
+                ui::card_frame(ui).show(ui, |ui| {
                     ui.set_width(110.0);
-                    ui.label(RichText::new(format!("{}", index + 1)).weak());
-                    ui.label(RichText::new(word).strong().size(16.0));
+                    ui.label(ui::caption(format!("{}", index + 1)));
+                    ui.label(ui::bold(word).size(16.0));
                 });
                 if index % 4 == 3 {
                     ui.end_row();
@@ -349,7 +317,7 @@ fn confirm(
     for (slot, (answer, index)) in answers.iter_mut().zip(check.indices()).enumerate() {
         let label = ui.label(format!("Word {}", index + 1));
         let field = ui
-            .add(TextEdit::singleline(&mut **answer).desired_width(260.0))
+            .add(ui::field(&mut **answer).desired_width(260.0))
             .labelled_by(label.id);
         if slot == 0 && ui.memory(|memory| memory.focused().is_none()) {
             field.request_focus();
@@ -373,7 +341,7 @@ fn restore(ui: &mut Ui, words: &mut Zeroizing<String>, error: Option<&str>) -> O
     let label = ui.label("Recovery words");
     let field = ui
         .add(
-            TextEdit::multiline(&mut **words)
+            ui::text_area(&mut **words)
                 .desired_rows(4)
                 .desired_width(f32::INFINITY),
         )

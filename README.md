@@ -55,4 +55,4 @@ Owner invite, backups and upgrades: [Production](docs/operations.md#production).
 - [Development](docs/development.md)
 - [Work order](docs/work-order.md)
 
-License: [MIT](LICENSE).
+License: [MIT](LICENSE). The bundled [Inter](https://rsms.me/inter/) font is under the [SIL Open Font License 1.1](crates/client/assets/fonts/Inter-LICENSE.txt).

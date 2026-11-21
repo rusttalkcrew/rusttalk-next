@@ -1,29 +1,34 @@
 //! The bar at the bottom left: your picture, name and status (opening the status
 //! picker), mic and sound buttons while in a call, and Settings.
 
-use eframe::egui::{Align, Color32, Label, Layout, RichText, Ui, Vec2};
-use rusttalk_core::presence::Status as Choice;
+use eframe::egui::{Align, Color32, Label, Layout, Ui, Vec2};
+use rusttalk_core::presence::{Presence, Status as Choice};
 
-use super::{AWAY, Directory, Home, OFFLINE, ONLINE, Tab, View, face, palette};
-use crate::widgets::{self, AMBER, BUTTON_HEIGHT, GAP, Look};
+use super::{Directory, Home, Tab, View, face, presence_color};
+use crate::ui::{self, ICON_BUTTON, Item, Look, Palette};
 
 const AVATAR_SIZE: f32 = 32.0;
 const BAR_HEIGHT: f32 = 40.0;
-const STATUS_ROW_HEIGHT: f32 = 44.0;
-const BUTTON_SIZE: Vec2 = Vec2::new(30.0, BUTTON_HEIGHT);
-const UPDATE_BADGE: Color32 = AMBER;
+const BUTTON_SIZE: Vec2 = Vec2::new(30.0, ICON_BUTTON);
 
-/// Colour, label and one-line hint of a status.
-fn status_look(choice: Choice) -> (Color32, &'static str, &'static str) {
+/// Label and one-line hint of a status.
+fn status_text(choice: Choice) -> (&'static str, &'static str) {
     match choice {
-        Choice::Online => (ONLINE, "Online", "People see that you're here"),
-        Choice::Away => (AWAY, "Away", "People see that you stepped away"),
-        Choice::Invisible => (
-            OFFLINE,
-            "Invisible",
-            "You appear offline but can still use RustTalk",
-        ),
+        Choice::Online => ("Online", "People see that you're here"),
+        Choice::Away => ("Away", "People see that you stepped away"),
+        Choice::Invisible => ("Invisible", "You appear offline but can still use RustTalk"),
     }
+}
+
+fn status_color(c: &Palette, choice: Choice) -> Color32 {
+    presence_color(
+        c,
+        match choice {
+            Choice::Online => Presence::Online,
+            Choice::Away => Presence::Away,
+            Choice::Invisible => Presence::Offline,
+        },
+    )
 }
 
 fn mute_tip(muted: bool) -> &'static str {
@@ -37,8 +42,8 @@ fn deafen_tip(deafened: bool) -> &'static str {
 pub(super) fn show(ui: &mut Ui, home: &mut Home, update_available: bool) {
     let status = home.status.unwrap_or(Choice::Online);
     let mut picked = None;
-    widgets::right_row(ui, BAR_HEIGHT, |ui| {
-        ui.spacing_mut().item_spacing.x = GAP;
+    ui::right_row(ui, BAR_HEIGHT, |ui| {
+        ui.spacing_mut().item_spacing.x = ui::SPACE_XS;
         if settings_button(ui, update_available).clicked() {
             home.settings = Some(if update_available {
                 Tab::Updates
@@ -51,7 +56,7 @@ pub(super) fn show(ui: &mut Ui, home: &mut Home, update_available: bool) {
         }
         ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
             let me = identity(ui, home, status);
-            widgets::popup(&me, |ui| picked = status_picker(ui, status));
+            ui::menu_wide(&me, |m| picked = status_picker(m, status));
         });
     });
     if let Some(choice) = picked {
@@ -75,50 +80,37 @@ fn identity(ui: &mut Ui, home: &Home, status: Choice) -> eframe::egui::Response 
     let dir = (home.servers.iter())
         .find(|s| s.member(me).is_some_and(|m| m.avatar.is_some()))
         .map_or(&none, |s| &s.dir);
-    let (color, label, _) = status_look(status);
-    widgets::row_button(
+    let c = ui::colors(ui);
+    let color = status_color(c, status);
+    let (label, _) = status_text(status);
+    ui::row_button(
         ui,
         BAR_HEIGHT,
         &format!("{name}, {label}. Change status"),
         |ui| {
             let avatar = face(ui, dir, me, &name, AVATAR_SIZE, false);
-            let radius = 5.0;
-            let center = avatar.rect.right_bottom() - Vec2::splat(radius * 0.8);
-            ui.painter()
-                .circle(center, radius, color, (2.0, palette(ui).side));
+            ui::presence_dot(ui, avatar.rect, 5.0, color, c.side);
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
-                ui.add(Label::new(RichText::new(&name).strong()).truncate());
-                ui.add(Label::new(RichText::new(label).small().weak()).truncate());
+                ui.add(Label::new(ui::bold(&name)).truncate());
+                ui.add(Label::new(ui::caption(label)).truncate());
             });
         },
     )
 }
 
 /// Rows with each status, its hint and a check on the current one.
-fn status_picker(ui: &mut Ui, current: Choice) -> Option<Choice> {
+fn status_picker(m: &mut ui::Menu, current: Choice) -> Option<Choice> {
     let mut picked = None;
-    ui.label(RichText::new("Set your status").strong());
+    m.caption("Set your status");
+    let c = ui::colors(m.ui());
     for choice in [Choice::Online, Choice::Away, Choice::Invisible] {
-        let (color, label, hint) = status_look(choice);
-        let row = widgets::row_button(ui, STATUS_ROW_HEIGHT, label, |ui| {
-            widgets::right_row(ui, STATUS_ROW_HEIGHT, |ui| {
-                // Always take the space, so rows line up.
-                let check = if choice == current { "✔" } else { " " };
-                ui.label(RichText::new(check).color(color));
-                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                    widgets::dot(ui, color);
-                    ui.vertical(|ui| {
-                        ui.spacing_mut().item_spacing.y = 0.0;
-                        ui.label(label);
-                        ui.add(Label::new(RichText::new(hint).small().weak()).truncate());
-                    });
-                });
-            });
-        });
-        if row.clicked() {
+        let (label, hint) = status_text(choice);
+        let item = Item::dot(status_color(c, choice), label)
+            .hint(hint)
+            .picked(choice == current);
+        if m.add(item).clicked() {
             picked = Some(choice);
-            ui.close();
         }
     }
     picked
@@ -130,11 +122,11 @@ fn sound_buttons(ui: &mut Ui, home: &Home) {
     let deafened = audio.deafened();
     let muted = audio.muted() || deafened;
     let look = |off: bool| if off { Look::Struck } else { Look::Plain };
-    let ears = widgets::icon_button(ui, "🎧", deafen_tip(deafened), look(deafened), BUTTON_SIZE);
+    let ears = ui::icon_button(ui, "🎧", deafen_tip(deafened), look(deafened), BUTTON_SIZE);
     if ears.clicked() {
         audio.set_deafened(!deafened);
     }
-    let mic = widgets::icon_button(ui, "🎤", mute_tip(muted), look(muted), BUTTON_SIZE);
+    let mic = ui::icon_button(ui, "🎤", mute_tip(muted), look(muted), BUTTON_SIZE);
     if mic.clicked() {
         audio.set_muted(!muted);
         if muted {
@@ -150,10 +142,11 @@ fn settings_button(ui: &mut Ui, update_available: bool) -> eframe::egui::Respons
     } else {
         "Settings"
     };
-    let button = widgets::icon_button(ui, "⚙", tip, Look::Plain, BUTTON_SIZE);
+    let button = ui::icon_button(ui, "⚙", tip, Look::Plain, BUTTON_SIZE);
     if update_available {
         let center = button.rect.right_top() + Vec2::new(-6.0, 6.0);
-        ui.painter().circle_filled(center, 4.0, UPDATE_BADGE);
+        ui.painter()
+            .circle_filled(center, 4.0, ui::colors(ui).warning);
     }
     button
 }
@@ -172,7 +165,7 @@ mod tests {
 
     #[test]
     fn invisible_explains_itself() {
-        let (_, label, hint) = status_look(Choice::Invisible);
+        let (label, hint) = status_text(Choice::Invisible);
         assert_eq!(label, "Invisible");
         assert!(hint.contains("appear offline"));
     }

@@ -6,17 +6,12 @@
 
 use std::collections::{HashMap, HashSet};
 
-use eframe::egui::{
-    Area, Button, CursorIcon, Frame, Id as UiId, Key, Order, Rect, Response, Sense, Ui, UiBuilder,
-    vec2,
+use eframe::egui::{CursorIcon, Id as UiId, Key, Rect, Response, Sense, Ui, UiBuilder, vec2};
+
+use crate::{
+    server::{Category, Id},
+    ui::{self, Item as MenuItem, SLIDE_SECONDS},
 };
-
-use crate::server::{Category, Id};
-
-/// How long rows take to slide, in seconds.
-const SLIDE: f32 = 0.15;
-/// The dragged row's own place shows as empty space.
-const GAP_OPACITY: f32 = 0.0;
 
 /// A row in the channel list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -98,13 +93,41 @@ pub fn step(categories: &[Category], item: Item, up: bool) -> Option<Slot> {
     }
 }
 
-/// "Move up" and "Move down" menu buttons; returns the chosen move.
-pub fn menu(ui: &mut Ui, categories: &[Category], item: Item) -> Option<(Item, Slot)> {
+/// "Move up" and "Move down" menu items, dimmed at either end, and for a channel
+/// "Move to" with the other categories; returns the chosen move.
+pub fn menu(m: &mut ui::Menu, categories: &[Category], item: Item) -> Option<(Item, Slot)> {
     let mut chosen = None;
-    for (label, up) in [("Move up", true), ("Move down", false)] {
+    for (icon, label, up) in [("⬆", "Move up", true), ("⬇", "Move down", false)] {
         let slot = step(categories, item, up);
-        if ui.add_enabled(slot.is_some(), Button::new(label)).clicked() {
+        if m.add(MenuItem::new(icon, label).enabled(slot.is_some()))
+            .clicked()
+        {
             chosen = slot.map(|slot| (item, slot));
+        }
+    }
+    if let Item::Channel(id) = item {
+        let here = find(categories, id).map(|(c, _)| c);
+        let others: Vec<_> = (categories.iter().enumerate())
+            .filter(|(at, c)| Some(*at) != here && c.id.is_some())
+            .collect();
+        if !others.is_empty() {
+            let picked = m.submenu("↪", "Move to", |m| {
+                let mut picked = None;
+                for (at, category) in others {
+                    let name = if category.name.is_empty() {
+                        "No category"
+                    } else {
+                        &category.name
+                    };
+                    if m.item("🗀", name).clicked() {
+                        picked = Some(Slot::Channel(at, category.channels.len()));
+                    }
+                }
+                picked
+            });
+            if let Some(slot) = picked.flatten() {
+                chosen = Some((item, slot));
+            }
         }
     }
     chosen
@@ -328,11 +351,12 @@ impl List {
         let shift = (self.target.as_ref())
             .and_then(|target| target.offsets.get(&item).copied())
             .unwrap_or(0.0);
-        let dy = ctx.animate_value_with_time(slide, shift, SLIDE);
+        let dy = ctx.animate_value_with_time(slide, shift, SLIDE_SECONDS);
         let rect = ui.available_rect_before_wrap().translate(vec2(0.0, dy));
         let mut child = ui.new_child(UiBuilder::new().id_salt(item).max_rect(rect));
         if (self.target.as_ref()).is_some_and(|target| target.hidden.contains(&item)) {
-            gap(&mut child);
+            // The dragged row's own place shows as empty space: the drop slot.
+            child.multiply_opacity(0.0);
         }
         let handle = add(&mut child);
         let laid = Rect::from_min_size(top, child.min_rect().size());
@@ -362,7 +386,14 @@ impl List {
             match pointer {
                 Some(pointer) if !stopped && !escape => {
                     ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
-                    floating(ui, self.id, &drag, pointer - drag.grab);
+                    let at = pointer - drag.grab;
+                    ui::drag_preview(
+                        ui.ctx(),
+                        self.id.with("floating"),
+                        at,
+                        drag.width,
+                        &drag.label,
+                    );
                     self.state.drag = Some(drag);
                 }
                 _ => {
@@ -414,25 +445,6 @@ fn label(categories: &[Category], item: Item) -> String {
         }
     }
     String::new()
-}
-
-/// How the dragged row's own place looks while dragging: the drop slot.
-fn gap(ui: &mut Ui) {
-    ui.multiply_opacity(GAP_OPACITY);
-}
-
-/// The copy of the dragged row that follows the pointer.
-fn floating(ui: &Ui, id: UiId, drag: &Drag, at: eframe::egui::Pos2) {
-    Area::new(id.with("floating"))
-        .order(Order::Tooltip)
-        .fixed_pos(at)
-        .interactable(false)
-        .show(ui.ctx(), |ui| {
-            Frame::popup(ui.style()).show(ui, |ui| {
-                ui.set_width(drag.width);
-                ui.label(&drag.label);
-            });
-        });
 }
 
 #[cfg(test)]
