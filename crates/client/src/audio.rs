@@ -114,6 +114,8 @@ pub struct Settings {
     pub dark_theme: String,
     pub light_theme: String,
     pub accent: String,
+    /// A language ID (see `i18n`), or "system" for the computer's language.
+    pub language: String,
     /// Sidebar widths and the member list toggle; this device only, never synced.
     pub channels_width: f32,
     pub members_width: f32,
@@ -174,6 +176,7 @@ impl Default for Settings {
             dark_theme: "midnight".into(),
             light_theme: "daylight".into(),
             accent: "rust".into(),
+            language: "system".into(),
             channels_width: crate::home::layout::CHANNELS_WIDTH,
             members_width: crate::home::layout::MEMBERS_WIDTH,
             members_hidden: false,
@@ -761,7 +764,7 @@ fn devices(
                     Ok(stream) => input = Some((id, stream)),
                     Err(error) => {
                         tracing::warn!(error = %format_args!("{error:#}"), "opening microphone failed");
-                        problem = Some("Can't use your microphone. Pick another one in Settings.");
+                        problem = Some(t!("audio.mic_failed"));
                     }
                 }
             }
@@ -780,7 +783,7 @@ fn devices(
                     Ok(stream) => output = Some((id, stream)),
                     Err(error) => {
                         tracing::warn!(error = %format_args!("{error:#}"), "opening speakers failed");
-                        problem = Some("Can't use your speakers. Pick others in Settings.");
+                        problem = Some(t!("audio.speakers_failed"));
                     }
                 }
             }

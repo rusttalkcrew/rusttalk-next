@@ -80,10 +80,10 @@ impl Quality {
 
     fn label(self) -> &'static str {
         match self {
-            Quality::Unknown => "Measuring…",
-            Quality::Poor => "Poor",
-            Quality::Fair => "Okay",
-            Quality::Good => "Good",
+            Quality::Unknown => t!("call.measuring"),
+            Quality::Poor => t!("call.quality_poor"),
+            Quality::Fair => t!("call.quality_okay"),
+            Quality::Good => t!("call.quality_good"),
         }
     }
 }
@@ -137,16 +137,16 @@ impl Link {
 
 fn camera_tip(on: bool) -> &'static str {
     if on {
-        "Turn off camera"
+        t!("call.camera_off")
     } else {
-        "Turn on camera"
+        t!("call.camera_on")
     }
 }
 
 fn screen_tip(sharing: Sharing) -> &'static str {
     match sharing {
-        Sharing::Off => "Share your screen",
-        Sharing::Starting | Sharing::Changing | Sharing::On => "Stop sharing",
+        Sharing::Off => t!("call.share_screen"),
+        Sharing::Starting | Sharing::Changing | Sharing::On => t!("call.stop_sharing"),
     }
 }
 
@@ -172,9 +172,9 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
         .unwrap_or_default();
     let c = ui::colors(ui);
     let (text, color) = match call.state {
-        CallState::Connecting => ("Connecting…", c.warning),
-        CallState::Connected => ("Voice connected", c.success),
-        CallState::Reconnecting => ("Reconnecting…", c.warning),
+        CallState::Connecting => (t!("common.connecting"), c.warning),
+        CallState::Connected => (t!("call.voice_connected"), c.success),
+        CallState::Reconnecting => (t!("call.reconnecting"), c.warning),
     };
     let connected = call.state == CallState::Connected;
     let can_talk = call.can_talk;
@@ -200,7 +200,7 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui::right_row(ui, ICON_BUTTON, |ui| {
-                let hang = ui::icon_button(ui, "📞", "Leave call", Look::Danger, SIGNAL_SIZE);
+                let hang = ui::icon_button(ui, "📞", t!("call.leave"), Look::Danger, SIGNAL_SIZE);
                 leave_now = hang.clicked();
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                     let signal = signal_button(ui, quality);
@@ -234,7 +234,7 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
                     })
                     .inner;
                 if !can_share_video {
-                    button.on_disabled_hover_text("You can't share video here");
+                    button.on_disabled_hover_text(t!("call.no_video_here"));
                 } else if button.clicked() {
                     camera.on ^= true;
                 }
@@ -251,16 +251,16 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
                         .inner;
                     if voice.sharing == Sharing::On {
                         ui::context_menu(&button, |m| {
-                            if m.item("🖥", "Change what I share").clicked() {
+                            if m.item("🖥", t!("call.change_my_share")).clicked() {
                                 change_screen = true;
                             }
-                            if m.danger("⏹", "Stop sharing").clicked() {
+                            if m.danger("⏹", t!("call.stop_sharing")).clicked() {
                                 stop_screen = true;
                             }
                         });
                     }
                     if !can_share_video {
-                        button.on_disabled_hover_text("You can't share your screen here");
+                        button.on_disabled_hover_text(t!("call.no_screen_here"));
                     } else if button.clicked() {
                         if voice.sharing == Sharing::Off {
                             open_screen_dialog(ui.ctx(), voice);
@@ -351,9 +351,12 @@ fn signal_button(ui: &mut Ui, quality: Quality) -> Response {
             egui::Rect::from_min_max(egui::pos2(x, bottom - height), egui::pos2(x + bar, bottom));
         painter.rect_filled(bar, 1, color);
     }
-    response.widget_info(|| WidgetInfo::labeled(Role::Button, true, "Connection info"));
+    response.widget_info(|| WidgetInfo::labeled(Role::Button, true, t!("call.connection_info")));
     response
-        .on_hover_text(format!("Connection info · {}", quality.label()))
+        .on_hover_text(t!(
+            "call.connection_info_quality",
+            quality = quality.label()
+        ))
         .on_hover_cursor(CursorIcon::PointingHand)
 }
 
@@ -385,21 +388,24 @@ fn connection_contents(
     let ms = |value: Option<f64>| value.map_or("—".into(), |v| format!("{v:.0} ms"));
     let color = quality.color(ui::colors(ui));
     ui.horizontal(|ui| {
-        ui.label(ui::bold("Connection"));
+        ui.label(ui::bold(t!("call.connection")));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.label(RichText::new(quality.label()).color(color));
             ui::dot(ui, color);
         });
     });
     Grid::new("connection").num_columns(2).show(ui, |ui| {
-        ui.label("Ping");
+        ui.label(t!("call.ping"));
         ui.label(ms(stats.ping_ms));
         ui.end_row();
-        ui.label("Average");
+        ui.label(t!("call.average"));
         ui.label(ms(link.average()));
         ui.end_row();
-        ui.label("Packet loss");
-        ui.label(link.loss.map_or("—".into(), |v| format!("{v:.1} %")));
+        ui.label(t!("call.packet_loss"));
+        ui.label(
+            link.loss
+                .map_or("—".into(), |v| format!("{} %", crate::i18n::number(v, 1))),
+        );
         ui.end_row();
     });
     ui.add_space(4.0);
@@ -407,9 +413,9 @@ fn connection_contents(
     let size = Vec2::new(ui.available_width(), CHART_HEIGHT);
     ui::line_chart(ui, &pings, HISTORY, size, color);
     ui.horizontal(|ui| {
-        ui.label(ui::caption("5 min ago"));
+        ui.label(ui::caption(t!("call.five_min_ago")));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.label(ui::caption("now"));
+            ui.label(ui::caption(t!("call.now")));
         });
     });
     ui.separator();
@@ -417,20 +423,20 @@ fn connection_contents(
         && let Some(peers) = server.voice.get(channel)
         && peers.iter().any(|peer| peer.person != server.dir.me)
     {
-        egui::CollapsingHeader::new("People in call").show(ui, |ui| {
+        egui::CollapsingHeader::new(t!("call.people_in_call")).show(ui, |ui| {
             for peer in peers.iter().filter(|peer| peer.person != server.dir.me) {
                 ui.horizontal(|ui| status_name(ui, &peer.name(server), peer.status));
             }
         });
     }
     traffic(ui, &stats.traffic, link);
-    egui::CollapsingHeader::new("Details")
+    egui::CollapsingHeader::new(t!("common.details"))
         .id_salt("connection details")
         .show(ui, |ui| details(ui, stats, server));
     ui.separator();
-    ui.label("🔒  End-to-end encrypted")
-        .on_hover_text("Only people in the call can hear and see it, not the server.");
-    ui::secondary(ui, "⚙  Voice settings").clicked()
+    ui.label(format!("🔒  {}", t!("call.e2ee")))
+        .on_hover_text(t!("call.e2ee_help"));
+    ui::secondary(ui, &format!("⚙  {}", t!("call.voice_settings"))).clicked()
 }
 
 fn traffic(ui: &mut Ui, traffic: &CallTraffic, link: &Link) {
@@ -440,34 +446,37 @@ fn traffic(ui: &mut Ui, traffic: &CallTraffic, link: &Link) {
         .min_row_height(ui::TEXT_BODY)
         .spacing(Vec2::new(ui::SPACE_S, SPACE_XS))
         .show(ui, |ui| {
-            ui.label(ui::bold("Traffic").size(ui::TEXT_CAPTION));
-            ui.label(ui::caption("Upload"));
-            ui.label(ui::caption("Download"));
+            ui.label(ui::bold(t!("call.traffic")).size(ui::TEXT_CAPTION));
+            ui.label(ui::caption(t!("call.upload")));
+            ui.label(ui::caption(t!("call.download_traffic")));
             ui.end_row();
             let mut row = |label: &str, pair: [Traffic; 2]| {
                 ui.label(ui::caption(label).color(c.text));
                 for value in pair {
                     let rate = if value.bps >= 1_000_000.0 {
-                        format!("{:.1} Mbps", value.bps / 1_000_000.0)
+                        format!("{} Mbps", crate::i18n::number(value.bps / 1_000_000.0, 1))
                     } else {
                         format!("{:.0} kbps", value.bps / 1000.0)
                     };
                     let mb = value.bytes as f64 / 1_000_000.0;
-                    ui.label(ui::caption(format!("{rate} · {mb:.2} MB")).color(c.text));
+                    ui.label(
+                        ui::caption(format!("{rate} · {} MB", crate::i18n::number(mb, 2)))
+                            .color(c.text),
+                    );
                 }
                 ui.end_row();
             };
-            row("Total", traffic.total());
+            row(t!("call.total"), traffic.total());
             for (label, source) in [
-                ("Voice", TrackSource::Microphone),
-                ("Camera", TrackSource::Camera),
-                ("Screen", TrackSource::Screenshare),
-                ("App audio", TrackSource::ScreenshareAudio),
+                (t!("call.track_voice"), TrackSource::Microphone),
+                (t!("call.track_camera"), TrackSource::Camera),
+                (t!("call.track_screen"), TrackSource::Screenshare),
+                (t!("call.track_app_audio"), TrackSource::ScreenshareAudio),
             ] {
                 row(label, traffic.for_source(source));
             }
         });
-    ui.label(ui::caption("Upload + download · last 5 min"));
+    ui.label(ui::caption(t!("call.traffic_caption")));
     let rates: Vec<_> = link.traffic_kbps.iter().copied().collect();
     let size = Vec2::new(ui.available_width(), TRAFFIC_CHART_HEIGHT);
     ui::line_chart(ui, &rates, HISTORY, size, ui::accent(ui).text(c.dark));
@@ -480,18 +489,18 @@ fn details(ui: &mut Ui, stats: &Stats, server: Option<&Server>) {
     Grid::new("connection details")
         .num_columns(2)
         .show(ui, |ui| {
-            ui.label("Jitter");
+            ui.label(t!("call.jitter"));
             ui.label(ms(stats.jitter_ms));
             ui.end_row();
-            ui.label("Lost packets in");
+            ui.label(t!("call.lost_in"));
             ui.label(count(stats.lost_in));
             ui.end_row();
-            ui.label("Lost packets out");
+            ui.label(t!("call.lost_out"));
             ui.label(count(stats.lost_out));
             ui.end_row();
             for track in &stats.tracks {
                 let name = match (track.mine, server) {
-                    (true, _) => "You".to_owned(),
+                    (true, _) => t!("common.you").to_owned(),
                     (false, Some(server)) => server.member_name(&track.person),
                     (false, None) => String::new(),
                 };
@@ -506,7 +515,7 @@ fn details(ui: &mut Ui, stats: &Stats, server: Option<&Server>) {
 }
 
 /// The app audio button and its picker: each app playing sound with a check, a
-/// refresh and "Stop sharing all". Returns the apps turned on or off.
+/// refresh and t!("call.stop_sharing_all"). Returns the apps turned on or off.
 fn app_button(
     ui: &mut Ui,
     voice: &mut Voice,
@@ -522,13 +531,13 @@ fn app_button(
     let usable = voice.supported && enabled;
     let button = ui
         .add_enabled_ui(usable, |ui| {
-            ui::icon_button(ui, "🎵", "Share app audio", look, size)
+            ui::icon_button(ui, "🎵", t!("call.share_app_audio"), look, size)
         })
         .inner;
     let button = if !voice.supported {
-        button.on_disabled_hover_text("Needs Windows 11")
+        button.on_disabled_hover_text(t!("call.needs_windows_11"))
     } else if !can_talk {
-        button.on_disabled_hover_text("You can't talk here")
+        button.on_disabled_hover_text(t!("call.no_talk_here"))
     } else {
         button
     };
@@ -540,21 +549,18 @@ fn app_button(
     let mut changes = Vec::new();
     let mut refresh = false;
     ui::menu_above(&button, |m| {
-        m.caption("Share app audio");
+        m.caption(t!("call.share_app_audio"));
         match &*audio::lock(&voice.apps) {
             Listing::Loading => {
                 m.ui().horizontal(|ui| {
                     ui.add_space(10.0);
                     ui.spinner();
-                    ui.weak("Looking for apps…");
+                    ui.weak(t!("call.looking_for_apps"));
                 });
             }
-            Listing::Failed => empty(m.ui(), "Couldn't look for apps."),
+            Listing::Failed => empty(m.ui(), t!("call.apps_failed")),
             Listing::Found(apps) if apps.is_empty() => {
-                empty(
-                    m.ui(),
-                    "Start playing something in an app, then pick it here.",
-                );
+                empty(m.ui(), t!("call.apps_empty"));
             }
             Listing::Found(apps) => {
                 let c = ui::colors(m.ui());
@@ -565,7 +571,7 @@ fn app_button(
                 for app in apps {
                     let was = voice.shares.iter().any(|shared| shared.id == app.id);
                     let item = ui::Item::dot(c.success.gamma_multiply(pulse), &app.name)
-                        .hint("Playing")
+                        .hint(t!("call.playing"))
                         .checked(was);
                     if m.add(item).clicked() {
                         changes.push((app.clone(), !was));
@@ -574,8 +580,8 @@ fn app_button(
             }
         }
         m.separator();
-        refresh = m.item("🔄", "Refresh").clicked();
-        if !voice.shares.is_empty() && m.danger("⏹", "Stop sharing all").clicked() {
+        refresh = m.item("🔄", t!("call.refresh")).clicked();
+        if !voice.shares.is_empty() && m.danger("⏹", t!("call.stop_sharing_all")).clicked() {
             changes.extend(voice.shares.iter().map(|app| (app.clone(), false)));
         }
     });
@@ -593,30 +599,30 @@ fn empty(ui: &mut Ui, text: &str) {
     });
 }
 
-/// "Now sharing" above the panel while this device shares its screen or app audio,
+/// t!("call.now_sharing") above the panel while this device shares its screen or app audio,
 /// each with a stop button.
 fn sharing_card(ui: &mut Ui, voice: &Voice) -> Option<Stop> {
     let shown = voice.sharing != Sharing::Off || !voice.shares.is_empty();
     let mut stop = None;
     ui::fade_card(ui, "now sharing", shown, |ui| {
-        ui.label(ui::caption("Now sharing"));
+        ui.label(ui::caption(t!("call.now_sharing")));
         let screen = match voice.sharing {
             Sharing::Off => None,
-            Sharing::Starting => Some("Starting your screen…".to_owned()),
-            Sharing::Changing | Sharing::On => Some("Your screen".to_owned()),
+            Sharing::Starting => Some(t!("call.starting_screen").to_owned()),
+            Sharing::Changing | Sharing::On => Some(t!("call.your_screen").to_owned()),
         };
         let rows = screen
             .map(|text| {
                 (
                     "🖥",
                     text,
-                    "Stop sharing your screen".to_owned(),
+                    t!("call.stop_sharing_screen").to_owned(),
                     Stop::Screen,
                 )
             })
             .into_iter()
             .chain(voice.shares.iter().map(|app| {
-                let tip = format!("Stop sharing {}", app.name);
+                let tip = t!("call.stop_sharing_app", app = app.name);
                 ("🎵", app.name.clone(), tip, Stop::App(app.id.clone()))
             }));
         for (icon, text, tip, which) in rows {
@@ -628,7 +634,7 @@ fn sharing_card(ui: &mut Ui, voice: &Voice) -> Option<Stop> {
                 if screen_row && voice.sharing != Sharing::Starting {
                     let picking = voice.sharing == Sharing::Changing;
                     let change = ui.add_enabled_ui(!picking, |ui| {
-                        ui::icon_button(ui, "🔄", "Change what you share", Look::Plain, STOP_SIZE)
+                        ui::icon_button(ui, "🔄", t!("call.change_share"), Look::Plain, STOP_SIZE)
                     });
                     if change.inner.clicked() {
                         stop = Some(Stop::Change);

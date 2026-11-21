@@ -58,6 +58,7 @@ pub fn bold_family() -> FontFamily {
 }
 const SEMIBOLD: &str = "semibold";
 const INTER: &str = "Inter";
+const JAPANESE: &str = "Noto Sans JP";
 const INTER_SEMIBOLD: &str = "Inter-SemiBold";
 
 // Sizes.
@@ -146,11 +147,17 @@ pub fn apply(ctx: &Context, look: Appearance) {
 }
 
 /// Inter for all proportional text, with egui's own fonts after it for anything Inter
-/// lacks (emoji, icons and other scripts).
+/// lacks (emoji, icons), then Japanese: egui has no CJK and not every Linux install
+/// has a Japanese font. Other scripts come from the system's fonts.
 fn fonts() -> FontDefinitions {
     let mut fonts = FontDefinitions::default();
     let regular = include_bytes!("../../assets/fonts/Inter-Regular.ttf");
     let semibold = include_bytes!("../../assets/fonts/Inter-SemiBold.ttf");
+    let japanese = include_bytes!("../../assets/fonts/NotoSansJP-Subset.otf");
+    fonts.font_data.insert(
+        JAPANESE.into(),
+        Arc::new(FontData::from_static(japanese.as_slice())),
+    );
     fonts.font_data.insert(
         INTER.into(),
         Arc::new(FontData::from_static(regular.as_slice())),
@@ -159,11 +166,12 @@ fn fonts() -> FontDefinitions {
         INTER_SEMIBOLD.into(),
         Arc::new(FontData::from_static(semibold.as_slice())),
     );
-    let fallback = fonts
+    let mut fallback = fonts
         .families
         .get(&FontFamily::Proportional)
         .cloned()
         .unwrap_or_default();
+    fallback.push(JAPANESE.to_owned());
     let family = |first: &str| {
         std::iter::once(first.to_owned())
             .chain(fallback.clone())
@@ -173,6 +181,7 @@ fn fonts() -> FontDefinitions {
         .families
         .insert(FontFamily::Proportional, family(INTER));
     fonts.families.insert(bold_family(), family(INTER_SEMIBOLD));
+    (fonts.families.entry(FontFamily::Monospace).or_default()).push(JAPANESE.to_owned());
     fonts
         .families
         .insert(crate::emoji::family(false), family(INTER));
@@ -296,7 +305,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn inter_comes_first_with_egui_fonts_as_fallback() {
+    fn inter_comes_first_with_egui_and_japanese_fonts_as_fallback() {
         let fonts = fonts();
         let default = FontDefinitions::default();
         let fallback = &default.families[&FontFamily::Proportional];
@@ -306,9 +315,11 @@ mod tests {
         ] {
             let list = &fonts.families[&family];
             assert_eq!(list[0], first);
-            assert_eq!(&list[1..], fallback.as_slice());
+            assert_eq!(&list[1..list.len() - 1], fallback.as_slice());
+            assert_eq!(list.last().map(String::as_str), Some(JAPANESE));
         }
         assert!(fonts.font_data.contains_key(INTER));
+        assert!(fonts.font_data.contains_key(JAPANESE));
         assert!(fonts.font_data.contains_key(INTER_SEMIBOLD));
     }
 

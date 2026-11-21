@@ -21,30 +21,33 @@ const COLUMNS: usize = 8;
 const CELL: f32 = 32.0;
 const STICKER_COLUMNS: usize = 4;
 const STICKER_CELL: f32 = 68.0;
-const CATEGORIES: [(&str, Category); 12] = [
-    ("Recent", Category::Recent),
-    ("Server", Category::Server),
-    ("Stickers", Category::Stickers),
-    ("Smileys", Category::Unicode(0)),
-    ("People", Category::Unicode(1)),
-    ("Animals", Category::Unicode(3)),
-    ("Food", Category::Unicode(4)),
-    ("Travel", Category::Unicode(5)),
-    ("Activity", Category::Unicode(6)),
-    ("Objects", Category::Unicode(7)),
-    ("Symbols", Category::Unicode(8)),
-    ("Flags", Category::Unicode(9)),
-];
+fn categories() -> [(&'static str, Category); 12] {
+    [
+        (t!("picker.recent"), Category::Recent),
+        (t!("picker.server"), Category::Server),
+        (t!("picker.stickers"), Category::Stickers),
+        (t!("picker.smileys"), Category::Unicode(0)),
+        (t!("picker.people"), Category::Unicode(1)),
+        (t!("picker.animals"), Category::Unicode(3)),
+        (t!("picker.food"), Category::Unicode(4)),
+        (t!("picker.travel"), Category::Unicode(5)),
+        (t!("picker.activity"), Category::Unicode(6)),
+        (t!("picker.objects"), Category::Unicode(7)),
+        (t!("picker.symbols"), Category::Unicode(8)),
+        (t!("picker.flags"), Category::Unicode(9)),
+    ]
+}
 
-const TONES: [(&str, &str); 6] = [
-    ("👋", "Default skin tone"),
-    ("👋🏻", "Light skin tone"),
-    ("👋🏼", "Medium-light skin tone"),
-    ("👋🏽", "Medium skin tone"),
-    ("👋🏾", "Medium-dark skin tone"),
-    ("👋🏿", "Dark skin tone"),
-];
-
+fn tones() -> [(&'static str, &'static str); 6] {
+    [
+        ("👋", t!("picker.tone_default")),
+        ("👋🏻", t!("picker.tone_light")),
+        ("👋🏼", t!("picker.tone_medium_light")),
+        ("👋🏽", t!("picker.tone_medium")),
+        ("👋🏾", t!("picker.tone_medium_dark")),
+        ("👋🏿", t!("picker.tone_dark")),
+    ]
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Category {
     Recent,
@@ -144,15 +147,15 @@ impl Picker {
             ui.spacing_mut().item_spacing.x = ui::SPACE_XS;
             let search = ui.add(
                 ui::field(&mut self.query)
-                    .hint_text("Search emoji")
+                    .hint_text(t!("picker.search"))
                     .desired_width(ui.available_width()),
             );
             if anchor.clicked() {
                 search.request_focus();
             }
             let has = |sticker: bool| custom.iter().any(|e| e.sticker == sticker);
-            let categories: Vec<_> = CATEGORIES
-                .iter()
+            let categories: Vec<_> = categories()
+                .into_iter()
                 .filter(|(_, category)| match category {
                     Category::Server => has(false),
                     Category::Stickers => has(true),
@@ -181,8 +184,8 @@ impl Picker {
                 _ => {}
             }
             ui.horizontal(|ui| {
-                ui.label(ui::caption("Skin tone"));
-                for (index, (sequence, label)) in TONES.iter().enumerate() {
+                ui.label(ui::caption(t!("picker.skin_tone")));
+                for (index, (sequence, label)) in tones().iter().enumerate() {
                     if tile(ui, sequence, label, Some(self.tone == index)).clicked() {
                         self.tone = index;
                     }
@@ -192,9 +195,9 @@ impl Picker {
             let results = self.results();
             if results.is_empty() {
                 ui.label(if self.query.trim().is_empty() {
-                    "Your recent emoji will appear here."
+                    t!("picker.recent_empty")
                 } else {
-                    "No emoji found."
+                    t!("picker.none_found")
                 });
                 return None;
             }
@@ -241,7 +244,7 @@ impl Picker {
             .filter(|e| e.sticker == sticker && e.name.contains(&query))
             .collect();
         if items.is_empty() {
-            ui.label("Nothing found.");
+            ui.label(t!("settings.nothing_found"));
             return None;
         }
         let (columns, cell) = if sticker {
@@ -408,7 +411,8 @@ pub fn suggestions(
         .filter(|e| !e.sticker && e.name.starts_with(&prefix))
         .map(|e| {
             let code = format!(":{}:", e.name);
-            egui::Suggestion::new(&code).content(text(format!("{code}  · server")))
+            egui::Suggestion::new(&code)
+                .content(text(format!("{code}  · {}", t!("picker.from_server"))))
         });
     server
         .chain(matching(&prefix).map(|(name, sequence)| {

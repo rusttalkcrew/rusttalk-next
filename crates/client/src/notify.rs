@@ -23,14 +23,16 @@ use crate::{
 /// `muted_until` for "Until I turn it back on".
 pub const FOREVER: i64 = i64::MAX;
 /// The mute choices in the menus: label and length in seconds.
-pub const MUTE_FOR: [(&str, i64); 6] = [
-    ("For 15 minutes", 15 * 60),
-    ("For 1 hour", 60 * 60),
-    ("For 3 hours", 3 * 60 * 60),
-    ("For 8 hours", 8 * 60 * 60),
-    ("For 24 hours", 24 * 60 * 60),
-    ("Until I turn it back on", FOREVER),
-];
+fn mute_for() -> [(&'static str, i64); 6] {
+    [
+        (t!("notify.mute_15m"), 15 * 60),
+        (t!("notify.mute_1h"), 60 * 60),
+        (t!("notify.mute_3h"), 3 * 60 * 60),
+        (t!("notify.mute_8h"), 8 * 60 * 60),
+        (t!("notify.mute_24h"), 24 * 60 * 60),
+        (t!("notify.mute_forever"), FOREVER),
+    ]
+}
 /// Synced settings keys.
 const PREFS_KEY: &str = "notifications";
 const READ_KEY: &str = "read";
@@ -51,11 +53,13 @@ pub enum Level {
 }
 
 impl Level {
-    pub const ALL: [(Self, &'static str); 3] = [
-        (Self::All, "All messages"),
-        (Self::Mentions, "Only @mentions"),
-        (Self::Nothing, "Nothing"),
-    ];
+    pub fn all() -> [(Self, &'static str); 3] {
+        [
+            (Self::All, t!("notify.level_all")),
+            (Self::Mentions, t!("notify.level_mentions")),
+            (Self::Nothing, t!("notify.level_nothing")),
+        ]
+    }
 }
 
 /// A server's or channel's own choices; unset fields follow the server, then the defaults.
@@ -206,24 +210,36 @@ pub fn should_notify(
     }
 }
 
-/// The "Mute" and "Notifications" submenus of a server (`channel` false) or channel.
+/// The "Mute" and t!("settings.notifications") submenus of a server (`channel` false) or channel.
 /// Returns the changed rule.
 pub fn rule_menu(m: &mut crate::ui::Menu, rule: &Rule, channel: bool, now: i64) -> Option<Rule> {
     use crate::ui::Item;
-    let what = if channel { "channel" } else { "server" };
     let mut changed = None;
     if rule.muted(now) {
         let until = match rule.muted_until {
-            Some(FOREVER) | None => "Until you turn it back on".to_owned(),
+            Some(FOREVER) | None => t!("notify.until_back_on").to_owned(),
             Some(until) => {
                 chrono::DateTime::from_timestamp(until, 0).map_or_else(String::new, |at| {
                     let at = at.with_timezone(&chrono::Local);
-                    format!("Muted until {}", at.format("%H:%M"))
+                    t!(
+                        "notify.muted_until",
+                        time = crate::i18n::time(at, "time.clock")
+                    )
                 })
             }
         };
-        if m.add(Item::new("🔔", &format!("Unmute {what}")).hint(&until))
-            .clicked()
+        if m.add(
+            Item::new(
+                "🔔",
+                if channel {
+                    t!("notify.unmute_channel")
+                } else {
+                    t!("notify.unmute_server")
+                },
+            )
+            .hint(&until),
+        )
+        .clicked()
         {
             changed = Some(Rule {
                 muted_until: None,
@@ -231,20 +247,28 @@ pub fn rule_menu(m: &mut crate::ui::Menu, rule: &Rule, channel: bool, now: i64) 
             });
         }
     } else {
-        m.submenu("🔕", &format!("Mute {what}"), |m| {
-            for (label, seconds) in MUTE_FOR {
-                if m.item("", label).clicked() {
-                    changed = Some(Rule {
-                        muted_until: Some(now.saturating_add(seconds)),
-                        ..rule.clone()
-                    });
+        m.submenu(
+            "🔕",
+            if channel {
+                t!("notify.mute_channel")
+            } else {
+                t!("notify.mute_server")
+            },
+            |m| {
+                for (label, seconds) in mute_for() {
+                    if m.item("", label).clicked() {
+                        changed = Some(Rule {
+                            muted_until: Some(now.saturating_add(seconds)),
+                            ..rule.clone()
+                        });
+                    }
                 }
-            }
-        });
+            },
+        );
     }
-    m.submenu("🔔", "Notifications", |m| {
+    m.submenu("🔔", t!("settings.notifications"), |m| {
         if channel
-            && m.add(Item::new("", "Same as server").picked(rule.level.is_none()))
+            && m.add(Item::new("", t!("notify.same_as_server")).picked(rule.level.is_none()))
                 .clicked()
         {
             changed = Some(Rule {
@@ -257,7 +281,7 @@ pub fn rule_menu(m: &mut crate::ui::Menu, rule: &Rule, channel: bool, now: i64) 
         } else {
             Some(rule.level.unwrap_or(Level::All))
         };
-        for (level, label) in Level::ALL {
+        for (level, label) in Level::all() {
             if m.add(Item::new("", label).picked(current == Some(level)))
                 .clicked()
             {
@@ -268,8 +292,8 @@ pub fn rule_menu(m: &mut crate::ui::Menu, rule: &Rule, channel: bool, now: i64) 
             }
         }
         m.separator();
-        let suppress = Item::new("", "Mute @everyone")
-            .hint("And @here and @role")
+        let suppress = Item::new("", t!("notify.mute_everyone"))
+            .hint(t!("notify.mute_everyone_help"))
             .checked(rule.suppress_everyone);
         if m.add(suppress).clicked() {
             changed = Some(Rule {
@@ -492,7 +516,7 @@ fn popup(
         .body(body)
         .icon("rusttalk")
         .hint(Hint::DesktopEntry("rusttalk".into()))
-        .action("default", "Open");
+        .action("default", t!("notify.open"));
     if sound {
         note.hint(Hint::SoundName("message-new-instant".into()));
     } else {

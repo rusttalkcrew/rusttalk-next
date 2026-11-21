@@ -89,7 +89,8 @@ impl Mention<'_> {
         };
         format!(
             "@{}",
-            name.filter(|name| !name.is_empty()).unwrap_or("unknown")
+            name.filter(|name| !name.is_empty())
+                .unwrap_or(t!("mentions.unknown"))
         )
     }
 }
@@ -419,7 +420,7 @@ pub fn choices<'a>(
             if matches(&role.name) {
                 let token = format!("<@&{}>", role.id);
                 let label = Mention::Role(&role.id).label(dir);
-                add(label, token, None, Some("Role"));
+                add(label, token, None, Some(t!("mentions.role")));
             }
         }
         for word in BROADCASTS {

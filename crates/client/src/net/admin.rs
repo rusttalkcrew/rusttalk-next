@@ -166,15 +166,15 @@ pub(super) async fn run(
             None,
         )
         .await
-        .map(|()| "Removed from the server."),
+        .map(|()| t!("admin.done_kicked")),
         Admin::Ban(person, network) => {
             let path = format!("/v1/bans/{}", encode(&person));
             call(client, Method::PUT, &path, Some(json!({"ban_ip": network})))
                 .await
-                .map(|()| "Banned.")
+                .map(|()| t!("admin.done_banned"))
                 .map_err(|text| match text == problem("role_hierarchy") && network {
                     // Also refused when you or someone ranked as high as you uses that network.
-                    true => "Can't block their network: you or someone with a role as high as yours uses it too. Ban without blocking it.".into(),
+                    true => t!("admin.ban_network_conflict").into(),
                     false => text,
                 })
         }
@@ -185,12 +185,12 @@ pub(super) async fn run(
             None,
         )
         .await
-        .map(|()| "Unbanned. They can join again with an invite."),
+        .map(|()| t!("admin.done_unbanned")),
         Admin::SetRoles(person, roles) => {
             let path = format!("/v1/members/{}/roles", encode(&person));
             call(client, Method::PUT, &path, Some(json!({"role_ids": roles})))
                 .await
-                .map(|()| "Roles saved.")
+                .map(|()| t!("admin.done_roles"))
         }
         Admin::CreateRole { name, permissions } => create_role(client, &name, &permissions).await,
         Admin::RenameRole(id, name) => match name_ct(client, &id, &name) {
@@ -203,7 +203,7 @@ pub(super) async fn run(
                     Some(json!({"name_ct": name_ct})),
                 )
                 .await
-                .map(|()| "Role renamed.")
+                .map(|()| t!("admin.done_role_renamed"))
             }
             Err(text) => Err(text),
         },
@@ -216,13 +216,13 @@ pub(super) async fn run(
                 let body = json!({"permissions": permissions, "name_ct": name_ct});
                 call(client, Method::PUT, &format!("/v1/roles/{id}"), Some(body))
                     .await
-                    .map(|()| "Role saved.")
+                    .map(|()| t!("admin.done_role_saved"))
             }
             Err(text) => Err(text),
         },
         Admin::DeleteRole(id) => call(client, Method::DELETE, &format!("/v1/roles/{id}"), None)
             .await
-            .map(|()| "Role deleted."),
+            .map(|()| t!("admin.done_role_deleted")),
         Admin::DefaultRole(id) => call(
             client,
             Method::PUT,
@@ -230,18 +230,18 @@ pub(super) async fn run(
             Some(json!({"role_id": id})),
         )
         .await
-        .map(|()| "New members now get this role."),
+        .map(|()| t!("admin.done_default_role")),
         Admin::ChannelFlags(channel, role, flags) => {
             let path = format!("/v1/channels/{}/permissions/{role}", encode(&channel));
             call(client, Method::PUT, &path, Some(json!({"flags": flags})))
                 .await
-                .map(|()| "Channel permissions saved.")
+                .map(|()| t!("admin.done_channel_permissions"))
         }
         Admin::Joining(open, cap) => {
             let body = json!({"open_joining": open, "member_cap": cap});
             call(client, Method::PUT, "/v1/settings/open-joining", Some(body))
                 .await
-                .map(|()| "Joining settings saved.")
+                .map(|()| t!("admin.done_joining"))
         }
         Admin::SaveListing(listing) => {
             let body = match listing {
@@ -265,10 +265,10 @@ pub(super) async fn run(
                 Some(body),
             )
             .await
-            .map(|()| "Listing saved. It shows up in the directory within a minute.")
+            .map(|()| t!("admin.done_listing"))
         }
         Admin::SetIcon(bytes) => match client.set_server_icon(&bytes).await {
-            Ok(()) => Ok("Server icon changed."),
+            Ok(()) => Ok(t!("admin.done_icon")),
             Err(error) => Err(failed(&error)),
         },
         Admin::AddEmoji {
@@ -287,7 +287,7 @@ pub(super) async fn run(
                         Some(json!({"name_ct": name_ct})),
                     )
                     .await
-                    .map(|()| "Renamed.")
+                    .map(|()| t!("admin.done_renamed"))
                 }
                 Err(text) => Err(text),
             }
@@ -299,10 +299,10 @@ pub(super) async fn run(
             None,
         )
         .await
-        .map(|()| "Deleted."),
+        .map(|()| t!("admin.done_deleted")),
         Admin::RevokeInvite(id) => call(client, Method::DELETE, &format!("/v1/invites/{id}"), None)
             .await
-            .map(|()| "That invite link no longer works."),
+            .map(|()| t!("admin.done_revoked")),
     };
     match result {
         Ok(done) => {
@@ -455,7 +455,7 @@ async fn create_role(
 ) -> Result<&'static str, String> {
     let id = random_key().map_err(|error| {
         tracing::error!(%error, "making a role ID failed");
-        FAILED.to_owned()
+        t!("admin.failed").to_owned()
     })?;
     // The API takes 16-byte role IDs.
     let id = encode(&id[..16]);
@@ -467,7 +467,7 @@ async fn create_role(
     });
     call(client, Method::POST, "/v1/roles", Some(body))
         .await
-        .map(|()| "Role created.")
+        .map(|()| t!("admin.done_role_created"))
 }
 
 async fn add_emoji(
@@ -478,7 +478,7 @@ async fn add_emoji(
 ) -> Result<&'static str, String> {
     let id = random_key().map_err(|error| {
         tracing::error!(%error, "making an emoji ID failed");
-        FAILED.to_owned()
+        t!("admin.failed").to_owned()
     })?;
     let body = json!({
         "id": encode(id.as_ref()),
@@ -490,9 +490,9 @@ async fn add_emoji(
         .await
         .map(|()| {
             if sticker {
-                "Sticker added."
+                t!("admin.done_sticker")
             } else {
-                "Emoji added."
+                t!("admin.done_emoji")
             }
         })
 }
@@ -505,7 +505,7 @@ fn emoji_ct(
 ) -> Result<String, String> {
     client.encrypt_metadata(kind, id, clear).map_err(|error| {
         tracing::warn!(error = %format_args!("{error:#}"), "encrypting an emoji failed");
-        "The server's key hasn't arrived yet. Try again in a moment.".to_owned()
+        t!("admin.key_missing").to_owned()
     })
 }
 
@@ -514,11 +514,9 @@ fn name_ct(client: &KeyClient<'_>, id: &str, name: &str) -> Result<String, Strin
         .encrypt_metadata(Metadata::RoleName, id.as_bytes(), name.as_bytes())
         .map_err(|error| {
             tracing::warn!(error = %format_args!("{error:#}"), "encrypting a role name failed");
-            "The server's key hasn't arrived yet. Try again in a moment.".to_owned()
+            t!("admin.key_missing").to_owned()
         })
 }
-
-const FAILED: &str = "That didn't work. Try again.";
 
 fn failed(error: &anyhow::Error) -> String {
     tracing::warn!(error = %format_args!("{error:#}"), "server settings request failed");
@@ -526,8 +524,8 @@ fn failed(error: &anyhow::Error) -> String {
         .downcast_ref::<reqwest::Error>()
         .and_then(reqwest::Error::status)
     {
-        Some(reqwest::StatusCode::FORBIDDEN) => "You don't have permission to do that.".into(),
-        _ => FAILED.into(),
+        Some(reqwest::StatusCode::FORBIDDEN) => t!("admin.no_permission").into(),
+        _ => t!("admin.failed").into(),
     }
 }
 
@@ -544,7 +542,7 @@ async fn call(
     }
     let reply = request.send().await.map_err(|error| {
         tracing::warn!(error = %error.without_url(), "server settings request failed");
-        "You're offline. Try again in a moment.".to_owned()
+        t!("admin.offline").to_owned()
     })?;
     let status = reply.status();
     if status.is_success() {
@@ -562,35 +560,35 @@ async fn call(
 
 fn problem(code: &str) -> &'static str {
     match code {
-        "role_hierarchy" => "You can only do this to people and roles below your own role.",
-        "cannot_grant_permission" => "You can't give permissions you don't have yourself.",
-        "permission_denied" => "You don't have permission to do that.",
-        "owner_required" => "Only the server owner can do that.",
-        "built_in_role" => "Built-in roles can't be deleted.",
-        "role_in_use" => "Someone still has this role, or new members get it. Change that first.",
-        "role_limit" => "This server has as many roles as it can have.",
-        "already_banned" => "They're already banned.",
+        "role_hierarchy" => t!("admin.role_hierarchy"),
+        "cannot_grant_permission" => t!("admin.cannot_grant"),
+        "permission_denied" => t!("admin.no_permission"),
+        "owner_required" => t!("admin.owner_required"),
+        "built_in_role" => t!("admin.built_in_role"),
+        "role_in_use" => t!("admin.role_in_use"),
+        "role_limit" => t!("admin.role_limit"),
+        "already_banned" => t!("admin.already_banned"),
         "no_active_ip" => {
-            "Their network isn't known right now. Ban them without blocking their network."
+            t!("admin.no_active_ip")
         }
-        "member_not_found" => "They're no longer in this server.",
-        "ban_not_found" => "They aren't banned anymore.",
-        "invite_not_found" => "That invite link already stopped working.",
-        "invalid_member_cap" => "The member limit must be 1 or more.",
+        "member_not_found" => t!("admin.member_not_found"),
+        "ban_not_found" => t!("admin.ban_not_found"),
+        "invite_not_found" => t!("admin.invite_not_found"),
+        "invalid_member_cap" => t!("admin.invalid_member_cap"),
         "invalid_listing" | "invalid_listing_settings" => {
-            "Check the listing: a name, a description of up to 1,000 characters, and an https:// address."
+            t!("admin.invalid_listing")
         }
-        "invalid_index_url" => "The directory address must start with https://.",
-        "invalid_index_tls_fingerprint" => "That certificate fingerprint isn't right.",
-        "invalid_channel_flags" => "Write, Speak and Video also need Read.",
-        "emoji_limit" => "This server has as many emoji as it can have. Delete one first.",
-        "sticker_limit" => "This server has as many stickers as it can have. Delete one first.",
-        "emoji_too_large" | "body_too_large" => "That picture is too big. Try a smaller one.",
-        "emoji_not_found" => "That was already deleted.",
-        "invalid_role_count" => "Everyone needs at least one role.",
+        "invalid_index_url" => t!("admin.directory_https"),
+        "invalid_index_tls_fingerprint" => t!("home.bad_fingerprint"),
+        "invalid_channel_flags" => t!("admin.invalid_channel_flags"),
+        "emoji_limit" => t!("admin.emoji_limit"),
+        "sticker_limit" => t!("admin.sticker_limit"),
+        "emoji_too_large" | "body_too_large" => t!("admin.emoji_too_large"),
+        "emoji_not_found" => t!("admin.emoji_not_found"),
+        "invalid_role_count" => t!("admin.invalid_role_count"),
         "space_key_unavailable" | "metadata_epoch_changed" => {
-            "The server's key is changing. Try again in a moment."
+            t!("admin.key_changing")
         }
-        _ => FAILED,
+        _ => t!("admin.failed"),
     }
 }

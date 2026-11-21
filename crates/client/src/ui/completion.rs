@@ -129,9 +129,9 @@ pub fn completion(
             .width(width)
             .layout(Layout::top_down_justified(Align::Min))
             .accessible_name(if word.starts_with('@') {
-                "Mention suggestions"
+                t!("completion.mentions")
             } else {
-                "Emoji suggestions"
+                t!("completion.emoji")
             })
             .show(|ui| {
                 ui.set_width(width);

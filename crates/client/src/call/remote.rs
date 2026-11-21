@@ -224,8 +224,8 @@ pub fn frame(home: &mut Home, now: f64) {
             commands.push(Command::ReleaseControl);
         }
         if unanswered {
-            let name = sharer_name(home, &sid).unwrap_or_else(|| "They".into());
-            home.toast = Some((format!("{name} didn't answer."), now + 6.0));
+            let name = sharer_name(home, &sid).unwrap_or_else(|| t!("remote.they").into());
+            home.toast = Some((t!("remote.no_answer", name = name), now + 6.0));
         }
     }
     if let Some(server) = call_server(home) {
@@ -248,12 +248,12 @@ fn sharer_name(home: &Home, sid: &str) -> Option<String> {
 
 /// The note when asking for, or controlling, a screen ended.
 pub fn ended(home: &Home, sid: &str, why: Option<Refusal>) -> String {
-    let name = sharer_name(home, sid).unwrap_or_else(|| "The sharer".into());
+    let name = sharer_name(home, sid).unwrap_or_else(|| t!("remote.the_sharer").into());
     match why {
-        Some(Refusal::Denied) => format!("{name} didn't allow control."),
-        Some(Refusal::Busy) => format!("Someone else has control of {name}'s screen."),
-        Some(Refusal::Unsupported) => format!("{name}'s computer can't be controlled yet."),
-        None => format!("{name} took back control."),
+        Some(Refusal::Denied) => t!("remote.denied", name = name),
+        Some(Refusal::Busy) => t!("remote.busy", name = name),
+        Some(Refusal::Unsupported) => t!("remote.unsupported", name = name),
+        None => t!("remote.taken_back", name = name),
     }
 }
 
@@ -283,10 +283,10 @@ pub fn sharer(ui: &mut Ui, home: &mut Home) {
             )
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
-                    let text = format!("🖱 {name} is controlling your screen");
+                    let text = format!("🖱 {}", t!("remote.controlling_you", name = name));
                     ui.label(ui::bold(text).color(ui::ON_FILL));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui::secondary(ui, "Stop remote control").clicked() {
+                        if ui::secondary(ui, t!("remote.stop")).clicked() {
                             command = Some(Command::StopControl);
                         }
                     });
@@ -299,25 +299,19 @@ pub fn sharer(ui: &mut Ui, home: &mut Home) {
         if !ready {
             ui.ctx().request_repaint();
         }
-        let title = format!("{name} wants to control your screen");
+        let title = t!("remote.request_title", name = name);
         let (answer, closed) = ui::dialog(ui.ctx(), "remote control", &title, |ui| {
-            ui.add(
-                egui::Label::new(
-                    "They can use your mouse and keyboard in what you share. \
-                     You can take it back at any time.",
-                )
-                .wrap(),
-            );
+            ui.add(egui::Label::new(t!("remote.allow_help")).wrap());
             let mut answer = None;
             ui::footer(ui, |ui| {
                 if ui
-                    .add_enabled_ui(ready, |ui| ui::primary(ui, "Allow"))
+                    .add_enabled_ui(ready, |ui| ui::primary(ui, t!("remote.allow")))
                     .inner
                     .clicked()
                 {
                     answer = Some(true);
                 }
-                if ui::secondary(ui, "Deny").clicked() {
+                if ui::secondary(ui, t!("remote.deny")).clicked() {
                     answer = Some(false);
                 }
             });

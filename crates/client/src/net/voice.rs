@@ -274,7 +274,7 @@ pub(super) async fn share_screen(
         Err(error) => {
             tracing::warn!(error = %format_args!("{error:#}"), "sharing screen failed");
             ctx.send(Update::Sharing(false));
-            ctx.send(Update::Failed("Couldn't share your screen.".into()));
+            ctx.send(Update::Failed(t!("voice.screen_failed").into()));
         }
     }
 }
@@ -292,7 +292,7 @@ pub(super) async fn join_voice(
             return Err(error);
         }
     } else {
-        ctx.send(Update::Failed("You can listen here, but not talk.".into()));
+        ctx.send(Update::Failed(t!("voice.listen_only").into()));
     }
     room.set_microphone_muted(ctx.audio.muted() || ctx.audio.deafened());
     Ok(room)
@@ -514,7 +514,7 @@ pub(super) fn send_room(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &St
                     me,
                     vec![Screen {
                         sid: sid.to_string(),
-                        name: "Your screen".into(),
+                        name: t!("call.your_screen").into(),
                     }],
                 );
             }
@@ -570,7 +570,7 @@ pub(super) fn on_voice(
     };
     let Some(event) = event else {
         tracing::warn!("voice room closed");
-        end(state, "Voice disconnected.");
+        end(state, t!("voice.disconnected"));
         send_room(ctx, url, client, state, channel);
         return;
     };
@@ -646,7 +646,7 @@ pub(super) fn on_voice(
         }
         RoomEvent::Disconnected { reason } => {
             tracing::info!(?reason, "voice disconnected");
-            end(state, "Voice disconnected.");
+            end(state, t!("voice.disconnected"));
         }
         RoomEvent::ParticipantDisconnected(participant) => {
             if let Some(live) = &mut state.voice {
@@ -762,8 +762,12 @@ pub(super) async fn voice_stats(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, st
     let screens: HashMap<TrackSid, String> = live
         .screen
         .iter()
-        .map(|(sid, ..)| (sid.clone(), "Screen".into()))
-        .chain(live.camera.iter().map(|sid| (sid.clone(), "Camera".into())))
+        .map(|(sid, ..)| (sid.clone(), t!("call.track_screen").into()))
+        .chain(
+            live.camera
+                .iter()
+                .map(|sid| (sid.clone(), t!("call.track_camera").into())),
+        )
         .chain(
             live.room
                 .remote_video_tracks()
@@ -1005,7 +1009,7 @@ pub(super) async fn share_app(
         }
         Err(error) => {
             tracing::warn!(error = %format_args!("{error:#}"), "sharing app audio failed");
-            let text = format!("Couldn't share {}. Is it still playing?", app.name);
+            let text = t!("voice.app_failed", app = app.name);
             ctx.send(Update::AppStopped(app.id));
             ctx.send(Update::Failed(text));
         }
@@ -1067,7 +1071,7 @@ pub(super) fn screen_changed(ctx: &Ctx, state: &mut State, result: Result<screen
         screen::Outcome::Cancelled => tracing::info!("screen change cancelled"),
         screen::Outcome::Failed(error) => {
             tracing::warn!(error = %format_args!("{error:#}"), "changing the shared screen failed");
-            ctx.send(Update::Failed("Couldn't switch what you share.".into()));
+            ctx.send(Update::Failed(t!("voice.switch_failed").into()));
         }
     }
     if live.screen.is_some() {
@@ -1097,7 +1101,7 @@ pub(super) async fn share_camera(
         Err(error) => {
             tracing::warn!(error = %format_args!("{error:#}"), "sharing camera failed");
             ctx.send(Update::CameraStopped);
-            ctx.send(Update::Failed("Couldn't turn on your camera.".into()));
+            ctx.send(Update::Failed(t!("voice.camera_failed").into()));
         }
     }
     let channel = live.channel;

@@ -15,7 +15,7 @@ use crate::{
     files::Ask,
     home::{ChannelEdit, Home, face, frame, initials},
     net::{Admin, AdminUpdate, AuditEntry, Ban, Command, Invite, PublicListing},
-    server::{Id, PERMISSIONS, Perms, Server, Status},
+    server::{Id, Perms, Server, Status, permissions},
     settings::{self as panel, Group, Page},
     ui::{self, Item, danger, error_text},
 };
@@ -23,21 +23,26 @@ use crate::{
 const ICON_SIZE: f32 = 80.0;
 const HEADER_ICON: f32 = 40.0;
 
-/// Audit log entries shown per "Show older".
+/// Audit log entries shown per t!("admin.show_older").
 const AUDIT_PAGE: usize = 50;
 
 /// Audit log filters: API action and label.
-const FILTERS: [(&str, &str); 9] = [
-    ("member_banned", "Bans"),
-    ("member_unbanned", "Unbans"),
-    ("member_kicked", "Kicks"),
-    ("left", "Leaves"),
-    ("member_roles_changed", "Role changes"),
-    ("joined", "Joins without an invite"),
-    ("message_deleted", "Deleted messages"),
-    ("invite_created", "New invites"),
-    ("channel_permissions_changed", "Channel permissions"),
-];
+fn filters() -> [(&'static str, &'static str); 9] {
+    [
+        ("member_banned", t!("audit.filter_bans")),
+        ("member_unbanned", t!("audit.filter_unbans")),
+        ("member_kicked", t!("audit.filter_kicks")),
+        ("left", t!("audit.filter_leaves")),
+        ("member_roles_changed", t!("audit.filter_roles")),
+        ("joined", t!("audit.filter_joins")),
+        ("message_deleted", t!("audit.filter_deleted")),
+        ("invite_created", t!("audit.filter_invites")),
+        (
+            "channel_permissions_changed",
+            t!("audit.filter_channel_permissions"),
+        ),
+    ]
+}
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Tab {
@@ -81,7 +86,7 @@ pub struct Settings {
     /// The custom role being edited: its ID, name and permissions.
     editing: Option<(String, String, Vec<&'static str>)>,
     invites: Vec<Invite>,
-    /// The invite waiting for "Revoke" to be confirmed.
+    /// The invite waiting for t!("admin.revoke") to be confirmed.
     revoking: Option<String>,
     /// The server name being typed in Overview; `None` until edited.
     server_name: Option<String>,
@@ -178,13 +183,13 @@ pub enum Moderate {
 
 /// Menu items to kick, ban or change the roles of someone else, as allowed.
 pub fn member_menu(m: &mut ui::Menu, choice: &mut Option<Moderate>, perms: Perms) {
-    if perms.manage_roles && m.item("🏷", "Change roles").clicked() {
+    if perms.manage_roles && m.item("🏷", t!("admin.change_roles")).clicked() {
         *choice = Some(Moderate::Roles);
     }
-    if perms.kick && m.add(Item::new("👢", "Kick").danger()).clicked() {
+    if perms.kick && m.add(Item::new("👢", t!("admin.kick")).danger()).clicked() {
         *choice = Some(Moderate::Kick);
     }
-    if perms.ban && m.add(Item::new("🚫", "Ban").danger()).clicked() {
+    if perms.ban && m.add(Item::new("🚫", t!("admin.ban")).danger()).clicked() {
         *choice = Some(Moderate::Ban);
     }
 }
@@ -245,16 +250,18 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
             if server.status == Status::Online && server.channel(&channel).is_some() {
                 ui.separator();
                 ui.horizontal(|ui| {
-                    if ui::secondary(ui, "Rename channel").clicked() {
+                    if ui::secondary(ui, t!("home.rename_channel")).clicked() {
                         channel_edit = Some((settings.server, channel, ChannelEdit::Rename));
                     }
-                    if ui::danger(ui, "Delete channel").clicked() {
+                    if ui::danger(ui, t!("home.delete_channel")).clicked() {
                         channel_edit = Some((settings.server, channel, ChannelEdit::Delete));
                     }
                 });
             }
             message(ui, settings);
-            ui::footer(ui, |ui| close = ui::secondary(ui, "Close").clicked());
+            ui::footer(ui, |ui| {
+                close = ui::secondary(ui, t!("common.close")).clicked()
+            });
         });
         close || dismissed
     } else {
@@ -266,31 +273,41 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
         };
         let groups = [
             group(
-                "Server",
+                t!("admin.server"),
                 vec![
-                    page(Tab::Overview, "🖼", "Overview", perms.manage_server),
-                    page(Tab::Joining, "🚪", "Joining", perms.admin),
-                    page(Tab::Emoji, "😀", "Emoji & stickers", perms.manage_emoji),
-                    page(Tab::Listing, "🌐", "Public listing", perms.owner),
+                    page(
+                        Tab::Overview,
+                        "🖼",
+                        t!("admin.overview"),
+                        perms.manage_server,
+                    ),
+                    page(Tab::Joining, "🚪", t!("admin.joining"), perms.admin),
+                    page(
+                        Tab::Emoji,
+                        "😀",
+                        t!("admin.emoji_stickers"),
+                        perms.manage_emoji,
+                    ),
+                    page(Tab::Listing, "🌐", t!("admin.public_listing"), perms.owner),
                 ],
             ),
             group(
-                "People",
+                t!("admin.people"),
                 vec![
                     page(
                         Tab::Members,
                         "👥",
-                        "Members",
+                        t!("admin.members"),
                         perms.kick || perms.ban || perms.manage_roles,
                     ),
-                    page(Tab::Roles, "🏷", "Roles", perms.manage_roles),
-                    page(Tab::Invites, "✉", "Invites", perms.invite),
-                    page(Tab::Bans, "🚫", "Bans", perms.ban),
+                    page(Tab::Roles, "🏷", t!("admin.roles"), perms.manage_roles),
+                    page(Tab::Invites, "✉", t!("admin.invites"), perms.invite),
+                    page(Tab::Bans, "🚫", t!("admin.bans"), perms.ban),
                 ],
             ),
             group(
-                "Moderation",
-                vec![page(Tab::Audit, "📜", "Audit log", perms.audit)],
+                t!("admin.moderation"),
+                vec![page(Tab::Audit, "📜", t!("admin.audit_log"), perms.audit)],
             ),
         ];
         let before = settings.tab;
@@ -302,7 +319,7 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
             &mut tab,
             settings,
             |ui, _| {
-                panel::sidebar_header(ui, server.name(), "Server settings", |ui| {
+                panel::sidebar_header(ui, server.name(), t!("home.server_settings"), |ui| {
                     server_icon(ui, server, HEADER_ICON);
                 })
             },
@@ -395,7 +412,7 @@ fn message(ui: &mut Ui, settings: &Settings) {
 
 /// What was asked for in Overview.
 struct Overview {
-    /// "Change icon" was clicked.
+    /// t!("admin.change_icon") was clicked.
     icon: bool,
     /// The new server name to save.
     rename: Option<String>,
@@ -408,17 +425,17 @@ fn overview_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Overvi
         rename: None,
     };
     let saved = server.dir.name.clone().unwrap_or_default();
-    ui::page_section(ui, "Server");
+    ui::page_section(ui, t!("admin.server"));
     ui.horizontal_top(|ui| {
         ui.vertical(|ui| {
             server_icon(ui, server, ICON_SIZE);
-            picked.icon = ui::secondary(ui, "Change icon")
-                .on_hover_text("PNG, JPG or GIF. GIFs play.")
+            picked.icon = ui::secondary(ui, t!("admin.change_icon"))
+                .on_hover_text(t!("admin.icon_types"))
                 .clicked();
         });
         ui.add_space(ui::SPACE_L);
         ui.vertical(|ui| {
-            let label = ui.label(ui::bold("Server name"));
+            let label = ui.label(ui::bold(t!("home.server_name")));
             let name = settings.server_name.get_or_insert_with(|| saved.clone());
             let field = ui
                 .add(
@@ -429,9 +446,9 @@ fn overview_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Overvi
                 .labelled_by(label.id);
             let trimmed = name.trim();
             let changed = !trimmed.is_empty() && trimmed != saved;
-            ui.weak("Everyone in the server sees this name and icon.");
+            ui.weak(t!("admin.server_name_help"));
             let save = ui
-                .add_enabled_ui(changed, |ui| ui::primary(ui, "Save"))
+                .add_enabled_ui(changed, |ui| ui::primary(ui, t!("common.save")))
                 .inner
                 .clicked();
             if changed && (save || crate::app::submitted(ui, &field)) {
@@ -499,9 +516,9 @@ fn emoji_tab(
     let mut upload = None;
     let mut request = None;
     let count = |sticker: bool| dir.emoji.iter().filter(|e| e.sticker == sticker).count();
-    ui::page_section(ui, "Upload");
+    ui::page_section(ui, t!("admin.upload"));
     ui.horizontal(|ui| {
-        for (sticker, label) in [(false, "Emoji"), (true, "Sticker")] {
+        for (sticker, label) in [(false, t!("admin.emoji")), (true, t!("admin.sticker"))] {
             if ui::choice_button(
                 ui,
                 settings.emoji_sticker == sticker,
@@ -515,7 +532,7 @@ fn emoji_tab(
         }
     });
     let sticker = settings.emoji_sticker;
-    let label = ui.label(ui::bold("Name"));
+    let label = ui.label(ui::bold(t!("common.name")));
     ui.horizontal(|ui| {
         let field = ui
             .add(ui::field(&mut settings.emoji_name).hint_text("party_parrot"))
@@ -536,31 +553,36 @@ fn emoji_tab(
         let full = count(sticker) >= max;
         let ready = emoji_name_ok(name) && !taken && !full;
         let pick = ui
-            .add_enabled_ui(ready, |ui| ui::primary(ui, "Pick a picture"))
+            .add_enabled_ui(ready, |ui| ui::primary(ui, t!("admin.pick_picture")))
             .inner
             .clicked();
         if pick || (ready && crate::app::submitted(ui, &field)) {
             upload = Some((name.to_owned(), sticker));
         }
         if taken {
-            ui.label(RichText::new("That name is taken.").color(ui::colors(ui).danger_text));
+            ui.label(RichText::new(t!("admin.name_taken")).color(ui::colors(ui).danger_text));
         } else if full {
-            ui.label(
-                RichText::new("This server has as many as it can have.")
-                    .color(ui::colors(ui).danger_text),
-            );
+            ui.label(RichText::new(t!("admin.emoji_full")).color(ui::colors(ui).danger_text));
         }
     });
     ui.weak(if sticker {
-        "PNG, JPG or GIF. Stickers are sent as their own message, shown large."
+        t!("admin.sticker_help")
     } else {
-        "PNG, JPG or GIF. People type it as :name: or pick it in the emoji picker."
+        t!("admin.emoji_help")
     });
     for (sticker, title, max) in [
-        (false, "Emoji", dir.emoji_max.0),
-        (true, "Stickers", dir.emoji_max.1),
+        (false, t!("admin.emoji"), dir.emoji_max.0),
+        (true, t!("admin.stickers"), dir.emoji_max.1),
     ] {
-        ui::page_section(ui, &format!("{title} · {} of {max}", count(sticker)));
+        ui::page_section(
+            ui,
+            &t!(
+                "admin.emoji_count",
+                kind = title,
+                count = count(sticker),
+                max = max
+            ),
+        );
         let mut empty = true;
         for item in dir.emoji.iter().filter(|e| e.sticker == sticker) {
             empty = false;
@@ -582,13 +604,13 @@ fn emoji_tab(
                                 .any(|e| e.sticker == sticker && e.name == *name && e.id != *id);
                             let ok = emoji_name_ok(name) && !taken;
                             if ui
-                                .add_enabled_ui(ok, |ui| ui::primary(ui, "Save"))
+                                .add_enabled_ui(ok, |ui| ui::primary(ui, t!("common.save")))
                                 .inner
                                 .clicked()
                             {
                                 request = Some(Admin::RenameEmoji(*id, name.clone()));
                             }
-                            if ui::secondary(ui, "Cancel").clicked() {
+                            if ui::secondary(ui, t!("common.cancel")).clicked() {
                                 settings.emoji_renaming = None;
                             }
                         }
@@ -597,10 +619,10 @@ fn emoji_tab(
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    if danger(ui, "Delete").clicked() {
+                                    if danger(ui, t!("common.delete")).clicked() {
                                         request = Some(Admin::DeleteEmoji(item.id));
                                     }
-                                    if ui::secondary(ui, "Rename").clicked() {
+                                    if ui::secondary(ui, t!("common.rename")).clicked() {
                                         settings.emoji_renaming =
                                             Some((item.id, item.name.clone()));
                                     }
@@ -612,7 +634,7 @@ fn emoji_tab(
             });
         }
         if empty {
-            ui.weak("None yet.");
+            ui.weak(t!("admin.none_yet"));
         }
     }
     (upload, request)
@@ -627,7 +649,7 @@ fn role_names(server: &Server, roles: &[String]) -> String {
         .map(|role| role.name.as_str())
         .collect();
     if names.is_empty() {
-        names.push("No role");
+        names.push(t!("admin.no_role"));
     }
     names.join(", ")
 }
@@ -635,7 +657,7 @@ fn role_names(server: &Server, roles: &[String]) -> String {
 fn members_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Option<Admin> {
     let perms = server.dir.perms;
     let mut request = None;
-    ui::page_section(ui, "Members");
+    ui::page_section(ui, t!("admin.members"));
     if let Some((person, action)) = &mut settings.member {
         let name = server.member_name(person);
         let person = *person;
@@ -643,29 +665,29 @@ fn members_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Option<
         ui::card(ui, |ui| {
             match action {
                 MemberAction::Kick => {
-                    ui.label(ui::bold(format!("Kick {name}?")));
-                    ui.label("They leave the server now. They can come back with a new invite.");
+                    ui.label(ui::bold(t!("admin.kick_title", name = name)));
+                    ui.label(t!("admin.kick_help"));
                     ui.horizontal(|ui| {
-                        if danger(ui, "Kick").clicked() {
+                        if danger(ui, t!("admin.kick")).clicked() {
                             request = Some(Admin::Kick(person));
                         }
-                        cancel = ui::secondary(ui, "Cancel").clicked();
+                        cancel = ui::secondary(ui, t!("common.cancel")).clicked();
                     });
                 }
                 MemberAction::Ban { network } => {
-                    ui.label(ui::bold(format!("Ban {name}?")));
-                    ui.label("They leave the server and can't come back until you unban them.");
-                    ui::checkbox(ui, network, "Also block their network");
-                    ui.weak("Stops anyone on their internet connection from joining too.");
+                    ui.label(ui::bold(t!("admin.ban_title", name = name)));
+                    ui.label(t!("admin.ban_help"));
+                    ui::checkbox(ui, network, t!("admin.ban_network"));
+                    ui.weak(t!("admin.ban_network_help"));
                     ui.horizontal(|ui| {
-                        if danger(ui, "Ban").clicked() {
+                        if danger(ui, t!("admin.ban")).clicked() {
                             request = Some(Admin::Ban(person, *network));
                         }
-                        cancel = ui::secondary(ui, "Cancel").clicked();
+                        cancel = ui::secondary(ui, t!("common.cancel")).clicked();
                     });
                 }
                 MemberAction::Roles(chosen) => {
-                    ui.label(ui::bold(format!("Roles for {name}")));
+                    ui.label(ui::bold(t!("admin.roles_for", name = name)));
                     for role in server.dir.roles.iter().filter(|r| r.id != "owner") {
                         let mut on = chosen.contains(&role.id);
                         // Only roles below your own can be given or taken away.
@@ -681,10 +703,10 @@ fn members_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Option<
                         }
                     }
                     ui.horizontal(|ui| {
-                        if ui::primary(ui, "Save").clicked() {
+                        if ui::primary(ui, t!("common.save")).clicked() {
                             request = Some(Admin::SetRoles(person, chosen.clone()));
                         }
-                        cancel = ui::secondary(ui, "Cancel").clicked();
+                        cancel = ui::secondary(ui, t!("common.cancel")).clicked();
                     });
                 }
             }
@@ -693,7 +715,7 @@ fn members_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Option<
             settings.member = None;
         }
     }
-    ui.weak("Right-click someone to kick, ban or change their roles.");
+    ui.weak(t!("admin.members_help"));
     let mut pick = None;
     for member in &server.dir.members {
         let name = server.member_name(&member.person);
@@ -729,11 +751,11 @@ fn roles_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Option<Ad
         .iter()
         .find(|role| role.id == dir.default_role)
         .map_or("", |role| role.name.as_str());
-    ui::page_section(ui, "New members");
+    ui::page_section(ui, t!("admin.new_members"));
     ui::setting_row(
         ui,
-        "New members get",
-        "The role people get when they join.",
+        t!("admin.default_role"),
+        t!("admin.default_role_help"),
         |ui| {
             let combo = ComboBox::from_id_salt("default role")
                 .selected_text(default)
@@ -748,17 +770,17 @@ fn roles_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Option<Ad
                         }
                     }
                 });
-            combo
-                .response
-                .widget_info(|| egui::WidgetInfo::labeled(Role::ComboBox, true, "New members get"));
+            combo.response.widget_info(|| {
+                egui::WidgetInfo::labeled(Role::ComboBox, true, t!("admin.default_role"))
+            });
         },
     );
-    ui::page_section(ui, "Roles");
+    ui::page_section(ui, t!("admin.roles"));
     for role in &dir.roles {
         CollapsingHeader::new(&role.name)
             .id_salt(&role.id)
             .show(ui, |ui| {
-                for (permission, label) in PERMISSIONS {
+                for (permission, label) in permissions() {
                     let mut on = role.permissions.iter().any(|p| p == permission);
                     ui.add_enabled(false, ui::Checkbox::new(&mut on, label));
                 }
@@ -766,7 +788,9 @@ fn roles_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Option<Ad
                     Some((id, name)) if *id == role.id => {
                         ui.horizontal(|ui| {
                             ui.add(ui::field(name).char_limit(100));
-                            if ui::primary(ui, "Save").clicked() && !name.trim().is_empty() {
+                            if ui::primary(ui, t!("common.save")).clicked()
+                                && !name.trim().is_empty()
+                            {
                                 request = Some(Admin::RenameRole(id.clone(), name.trim().into()));
                             }
                         });
@@ -774,7 +798,7 @@ fn roles_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Option<Ad
                     _ => {
                         ui.horizontal(|ui| {
                             if !role.custom {
-                                if ui::secondary(ui, "Rename").clicked() {
+                                if ui::secondary(ui, t!("common.rename")).clicked() {
                                     settings.renaming = Some((role.id.clone(), role.name.clone()));
                                 }
                                 return;
@@ -782,11 +806,11 @@ fn roles_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Option<Ad
                             // Only roles below your own can be changed.
                             let below = role.rank < dir.perms.rank;
                             if ui
-                                .add_enabled_ui(below, |ui| ui::secondary(ui, "Edit"))
+                                .add_enabled_ui(below, |ui| ui::secondary(ui, t!("common.edit")))
                                 .inner
                                 .clicked()
                             {
-                                let permissions = PERMISSIONS
+                                let permissions = permissions()
                                     .into_iter()
                                     .map(|(permission, _)| permission)
                                     .filter(|p| role.permissions.iter().any(|r| r == p))
@@ -795,7 +819,7 @@ fn roles_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Option<Ad
                                     Some((role.id.clone(), role.name.clone(), permissions));
                                 settings.message = None;
                             }
-                            if danger(ui, "Delete").clicked() {
+                            if danger(ui, t!("common.delete")).clicked() {
                                 request = Some(Admin::DeleteRole(role.id.clone()));
                             }
                         });
@@ -803,14 +827,16 @@ fn roles_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Option<Ad
                 }
             });
     }
-    ui::page_section(ui, "Make a role");
-    let label = ui.label("Role name");
+    ui::page_section(ui, t!("admin.make_role"));
+    let label = ui.label(t!("admin.role_name"));
     ui.add(ui::field(&mut settings.new_role).char_limit(100))
         .labelled_by(label.id);
     permission_boxes(ui, &mut settings.new_permissions);
     let name = settings.new_role.trim();
     if ui
-        .add_enabled_ui(!name.is_empty(), |ui| ui::primary(ui, "Create role"))
+        .add_enabled_ui(!name.is_empty(), |ui| {
+            ui::primary(ui, t!("admin.create_role"))
+        })
         .inner
         .clicked()
     {
@@ -826,7 +852,7 @@ fn roles_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Option<Ad
 /// A checkbox per permission, in two columns.
 fn permission_boxes(ui: &mut Ui, chosen: &mut Vec<&'static str>) {
     ui.columns(2, |columns| {
-        for (at, (permission, label)) in PERMISSIONS.into_iter().enumerate() {
+        for (at, (permission, label)) in permissions().into_iter().enumerate() {
             let ui = &mut columns[at % 2];
             let mut on = chosen.contains(&permission);
             if ui::checkbox(ui, &mut on, label).changed() {
@@ -844,8 +870,8 @@ fn role_editor(ctx: &egui::Context, settings: &mut Settings) -> Option<Admin> {
     let (id, name, permissions) = settings.editing.as_mut()?;
     let mut request = None;
     let mut cancel = false;
-    let ((), dismissed) = ui::dialog(ctx, "edit-role", "Edit role", |ui| {
-        let label = ui.label(ui::bold("Role name"));
+    let ((), dismissed) = ui::dialog(ctx, "edit-role", t!("admin.edit_role"), |ui| {
+        let label = ui.label(ui::bold(t!("admin.role_name")));
         ui.add(
             ui::field(name)
                 .char_limit(100)
@@ -853,7 +879,7 @@ fn role_editor(ctx: &egui::Context, settings: &mut Settings) -> Option<Admin> {
         )
         .labelled_by(label.id);
         ui.add_space(ui::SPACE_S);
-        ui.label(ui::bold("Permissions"));
+        ui.label(ui::bold(t!("admin.permissions")));
         permission_boxes(ui, permissions);
         if let Some((text, true)) = &settings.message {
             error_text(ui, Some(text));
@@ -861,7 +887,7 @@ fn role_editor(ctx: &egui::Context, settings: &mut Settings) -> Option<Admin> {
         ui::footer(ui, |ui| {
             let name = name.trim();
             if ui
-                .add_enabled_ui(!name.is_empty(), |ui| ui::primary(ui, "Save"))
+                .add_enabled_ui(!name.is_empty(), |ui| ui::primary(ui, t!("common.save")))
                 .inner
                 .clicked()
             {
@@ -871,7 +897,7 @@ fn role_editor(ctx: &egui::Context, settings: &mut Settings) -> Option<Admin> {
                     permissions: permissions.clone(),
                 });
             }
-            cancel = ui::secondary(ui, "Cancel").clicked();
+            cancel = ui::secondary(ui, t!("common.cancel")).clicked();
         });
     });
     if cancel || dismissed {
@@ -881,25 +907,26 @@ fn role_editor(ctx: &egui::Context, settings: &mut Settings) -> Option<Admin> {
     request
 }
 
-/// Active invites with who made them, uses left and expiry, each with "Revoke".
+/// Active invites with who made them, uses left and expiry, each with t!("admin.revoke").
 fn invites_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Option<Admin> {
-    ui::page_section(ui, "Active invites");
+    ui::page_section(ui, t!("admin.active_invites"));
     if settings.invites.is_empty() {
-        ui.weak("No invite links are active.");
+        ui.weak(t!("admin.no_invites"));
         return None;
     }
     for invite in &settings.invites {
-        let by = invite
-            .creator
-            .map_or_else(|| "Someone".into(), |person| server.member_name(&person));
-        let uses = match invite.uses {
-            1 => "1 use left".to_owned(),
-            n => format!("{n} uses left"),
-        };
-        let help = format!("{uses} · Expires {}", date(invite.expires_at));
+        let by = invite.creator.map_or_else(
+            || t!("admin.someone").into(),
+            |person| server.member_name(&person),
+        );
+        let help = t!(
+            "admin.invite_uses",
+            count = invite.uses,
+            date = date(invite.expires_at)
+        );
         ui.push_id(&invite.id, |ui| {
-            ui::setting_row(ui, &format!("Made by {by}"), &help, |ui| {
-                if danger(ui, "Revoke").clicked() {
+            ui::setting_row(ui, &t!("admin.made_by", name = by), &help, |ui| {
+                if danger(ui, t!("admin.revoke")).clicked() {
                     settings.revoking = Some(invite.id.clone());
                     settings.message = None;
                 }
@@ -909,21 +936,21 @@ fn invites_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Option<
     None
 }
 
-/// "Revoke" asks first: the link stops working for everyone it was sent to.
+/// t!("admin.revoke") asks first: the link stops working for everyone it was sent to.
 fn revoke_dialog(ctx: &egui::Context, settings: &mut Settings) -> Option<Admin> {
     let id = settings.revoking.clone()?;
     let mut request = None;
     let mut cancel = false;
-    let ((), dismissed) = ui::dialog(ctx, "revoke-invite", "Revoke this invite?", |ui| {
-        ui.label("The link stops working right away. People who already joined stay.");
+    let ((), dismissed) = ui::dialog(ctx, "revoke-invite", t!("admin.revoke_title"), |ui| {
+        ui.label(t!("admin.revoke_help"));
         if let Some((text, true)) = &settings.message {
             error_text(ui, Some(text));
         }
         ui::footer(ui, |ui| {
-            if danger(ui, "Revoke").clicked() {
+            if danger(ui, t!("admin.revoke")).clicked() {
                 request = Some(Admin::RevokeInvite(id));
             }
-            cancel = ui::secondary(ui, "Cancel").clicked();
+            cancel = ui::secondary(ui, t!("common.cancel")).clicked();
         });
     });
     if cancel || dismissed {
@@ -934,21 +961,22 @@ fn revoke_dialog(ctx: &egui::Context, settings: &mut Settings) -> Option<Admin> 
 }
 
 fn bans_tab(ui: &mut Ui, server: &Server, settings: &Settings) -> Option<Admin> {
-    ui::page_section(ui, "Bans");
+    ui::page_section(ui, t!("admin.bans"));
     if settings.bans.is_empty() {
-        ui.weak("Nobody is banned.");
+        ui.weak(t!("admin.no_bans"));
         return None;
     }
     let mut request = None;
     for ban in &settings.bans {
-        let mut when = format!("Banned {}", date(ban.at));
-        if ban.network {
-            when.push_str(" · network blocked");
-        }
+        let when = if ban.network {
+            t!("admin.banned_network", date = date(ban.at))
+        } else {
+            t!("admin.banned_at", date = date(ban.at))
+        };
         let name = server.member_name(&ban.person);
         ui.push_id(ban.person, |ui| {
             ui::setting_row(ui, &name, &when, |ui| {
-                if ui::secondary(ui, "Unban").clicked() {
+                if ui::secondary(ui, t!("admin.unban")).clicked() {
                     request = Some(Admin::Unban(ban.person));
                 }
             });
@@ -961,34 +989,29 @@ fn audit_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Option<Ad
     let mut request = None;
     let shown = settings
         .audit_filter
-        .and_then(|action| FILTERS.iter().find(|(a, _)| *a == action))
-        .map_or("Everything", |(_, label)| label);
-    ui::page_section(ui, "Audit log");
-    ui::setting_row(
-        ui,
-        "Show",
-        "What the server's admins did, newest first.",
-        |ui| {
-            let combo = ComboBox::from_id_salt("audit filter")
-                .selected_text(shown)
-                .show_ui(ui, |ui| {
-                    let mut filter = settings.audit_filter;
-                    ui.selectable_value(&mut filter, None, "Everything");
-                    for (action, label) in FILTERS {
-                        ui.selectable_value(&mut filter, Some(action), label);
-                    }
-                    if filter != settings.audit_filter {
-                        settings.audit_filter = filter;
-                        request = Some(Admin::Audit(filter.map(str::to_owned)));
-                    }
-                });
-            combo
-                .response
-                .widget_info(|| egui::WidgetInfo::labeled(Role::ComboBox, true, "Show"));
-        },
-    );
+        .and_then(|action| filters().into_iter().find(|(a, _)| *a == action))
+        .map_or(t!("admin.everything"), |(_, label)| label);
+    ui::page_section(ui, t!("admin.audit_log"));
+    ui::setting_row(ui, t!("admin.show"), t!("admin.audit_help"), |ui| {
+        let combo = ComboBox::from_id_salt("audit filter")
+            .selected_text(shown)
+            .show_ui(ui, |ui| {
+                let mut filter = settings.audit_filter;
+                ui.selectable_value(&mut filter, None, t!("admin.everything"));
+                for (action, label) in filters() {
+                    ui.selectable_value(&mut filter, Some(action), label);
+                }
+                if filter != settings.audit_filter {
+                    settings.audit_filter = filter;
+                    request = Some(Admin::Audit(filter.map(str::to_owned)));
+                }
+            });
+        combo
+            .response
+            .widget_info(|| egui::WidgetInfo::labeled(Role::ComboBox, true, t!("admin.show")));
+    });
     if settings.audit.is_empty() {
-        ui.weak("Nothing here yet.");
+        ui.weak(t!("admin.nothing_yet"));
         return request;
     }
     for entry in settings.audit.iter().take(settings.audit_shown) {
@@ -997,7 +1020,9 @@ fn audit_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Option<Ad
             ui.weak(date(entry.at));
         });
     }
-    if settings.audit.len() > settings.audit_shown && ui::secondary(ui, "Show older").clicked() {
+    if settings.audit.len() > settings.audit_shown
+        && ui::secondary(ui, t!("admin.show_older")).clicked()
+    {
         settings.audit_shown += AUDIT_PAGE;
     }
     request
@@ -1006,46 +1031,51 @@ fn audit_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Option<Ad
 /// One audit entry as a plain sentence, with names decrypted on this device.
 fn sentence(server: &Server, entry: &AuditEntry) -> String {
     let actor = server.member_name(&entry.actor);
-    let target = entry
-        .target
-        .map_or_else(|| "someone".into(), |person| server.member_name(&person));
+    let target = entry.target.map_or_else(
+        || t!("admin.someone_lower").into(),
+        |person| server.member_name(&person),
+    );
     match entry.action.as_str() {
-        "member_banned" => format!("{actor} banned {target}"),
-        "member_unbanned" => format!("{actor} unbanned {target}"),
-        "member_kicked" => format!("{actor} kicked {target}"),
-        "left" => format!("{actor} left"),
-        "member_roles_changed" => format!("{actor} changed {target}'s roles"),
-        "ownership_transferred" => format!("{actor} made {target} the owner"),
-        "joined" => format!("{actor} joined"),
-        "role_created" => format!("{actor} made a role"),
-        "role_renamed" => format!("{actor} renamed a role"),
-        "role_changed" => format!("{actor} edited a role"),
-        "role_deleted" => format!("{actor} deleted a role"),
-        "default_role_changed" => format!("{actor} changed the role for new members"),
-        "channel_created" => format!("{actor} made a channel"),
-        "channel_updated" => format!("{actor} edited a channel"),
-        "channel_deleted" => format!("{actor} deleted a channel"),
-        "channel_permissions_changed" => format!("{actor} changed who can use a channel"),
-        "category_created" => format!("{actor} made a category"),
-        "category_updated" => format!("{actor} renamed a category"),
-        "category_deleted" => format!("{actor} deleted a category"),
-        "channels_reordered" => format!("{actor} changed the channel order"),
-        "invite_created" => format!("{actor} made an invite"),
-        "invite_revoked" => format!("{actor} stopped an invite"),
-        "open_joining_changed" => format!("{actor} changed who can join"),
-        "message_deleted" => format!("{actor} deleted a message"),
-        "file_deleted" => format!("{actor} deleted a file"),
-        "emoji_added" => format!("{actor} added an emoji or sticker"),
-        "emoji_renamed" => format!("{actor} renamed an emoji or sticker"),
-        "emoji_deleted" => format!("{actor} deleted an emoji or sticker"),
-        "device_certificate_changed" => format!("{actor} changed their devices"),
-        "owner_claimed" => format!("{actor} set up the server"),
+        "member_banned" => t!("audit.member_banned", actor = actor, target = target),
+        "member_unbanned" => t!("audit.member_unbanned", actor = actor, target = target),
+        "member_kicked" => t!("audit.member_kicked", actor = actor, target = target),
+        "left" => t!("audit.left", actor = actor),
+        "member_roles_changed" => t!("audit.member_roles_changed", actor = actor, target = target),
+        "ownership_transferred" => t!(
+            "audit.ownership_transferred",
+            actor = actor,
+            target = target
+        ),
+        "joined" => t!("audit.joined", actor = actor),
+        "role_created" => t!("audit.role_created", actor = actor),
+        "role_renamed" => t!("audit.role_renamed", actor = actor),
+        "role_changed" => t!("audit.role_changed", actor = actor),
+        "role_deleted" => t!("audit.role_deleted", actor = actor),
+        "default_role_changed" => t!("audit.default_role_changed", actor = actor),
+        "channel_created" => t!("audit.channel_created", actor = actor),
+        "channel_updated" => t!("audit.channel_updated", actor = actor),
+        "channel_deleted" => t!("audit.channel_deleted", actor = actor),
+        "channel_permissions_changed" => t!("audit.channel_permissions_changed", actor = actor),
+        "category_created" => t!("audit.category_created", actor = actor),
+        "category_updated" => t!("audit.category_updated", actor = actor),
+        "category_deleted" => t!("audit.category_deleted", actor = actor),
+        "channels_reordered" => t!("audit.channels_reordered", actor = actor),
+        "invite_created" => t!("audit.invite_created", actor = actor),
+        "invite_revoked" => t!("audit.invite_revoked", actor = actor),
+        "open_joining_changed" => t!("audit.open_joining_changed", actor = actor),
+        "message_deleted" => t!("audit.message_deleted", actor = actor),
+        "file_deleted" => t!("audit.file_deleted", actor = actor),
+        "emoji_added" => t!("audit.emoji_added", actor = actor),
+        "emoji_renamed" => t!("audit.emoji_renamed", actor = actor),
+        "emoji_deleted" => t!("audit.emoji_deleted", actor = actor),
+        "device_certificate_changed" => t!("audit.device_certificate_changed", actor = actor),
+        "owner_claimed" => t!("audit.owner_claimed", actor = actor),
         other => format!("{actor}: {}", other.replace('_', " ")),
     }
 }
 
 fn joining_tab(ui: &mut Ui, settings: &mut Settings) -> Option<Admin> {
-    ui::page_section(ui, "Joining");
+    ui::page_section(ui, t!("admin.joining"));
     let Some((open, cap)) = &mut settings.joining else {
         ui.spinner();
         return None;
@@ -1053,37 +1083,39 @@ fn joining_tab(ui: &mut Ui, settings: &mut Settings) -> Option<Admin> {
     ui::toggle_row(
         ui,
         open,
-        "Join without an invite",
-        "Anyone who has this server's address can join, up to the member limit.",
+        t!("admin.open_joining"),
+        t!("admin.open_joining_help"),
     );
     ui::setting_row(
         ui,
-        "Member limit",
-        "The most members this server can have.",
+        t!("admin.member_limit"),
+        t!("admin.member_limit_help"),
         |ui| {
             ui.add(DragValue::new(cap).range(1..=100_000))
-                .widget_info(|| egui::WidgetInfo::labeled(Role::SpinButton, true, "Member limit"));
+                .widget_info(|| {
+                    egui::WidgetInfo::labeled(Role::SpinButton, true, t!("admin.member_limit"))
+                });
         },
     );
-    ui::primary(ui, "Save")
+    ui::primary(ui, t!("common.save"))
         .clicked()
         .then_some(Admin::Joining(*open, *cap))
 }
 
 fn listing_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Option<Admin> {
-    ui::page_section(ui, "Public listing");
+    ui::page_section(ui, t!("admin.public_listing"));
     let Some((on, listing)) = &mut settings.listing else {
         ui.spinner();
         return None;
     };
     let help = if *on {
-        "People can find this server in the directory."
+        t!("admin.listed_on")
     } else {
-        "Off: this server doesn't appear in any directory."
+        t!("admin.listed_off")
     };
-    ui::toggle_row(ui, on, "List this server publicly", help);
+    ui::toggle_row(ui, on, t!("admin.list_publicly"), help);
     if !*on {
-        return ui::primary(ui, "Save")
+        return ui::primary(ui, t!("common.save"))
             .clicked()
             .then_some(Admin::SaveListing(None));
     }
@@ -1093,13 +1125,8 @@ fn listing_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Option<
         listing.address = server.address.to_string();
         listing.index_url = crate::official::DIRECTORY.into();
     }
-    ui::banner(
-        ui,
-        "public-listing",
-        "Anyone can see this name and description in the directory, even people who aren't \
-         members. Everything else in this server stays private and encrypted.",
-    );
-    ui::page_section(ui, "Details");
+    ui::banner(ui, "public-listing", t!("admin.listing_banner"));
+    ui::page_section(ui, t!("common.details"));
     let field = |ui: &mut Ui, label: &str, text: &mut String, limit: usize, lines: bool| {
         let label = ui.label(label);
         let edit = if lines {
@@ -1110,26 +1137,38 @@ fn listing_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Option<
         ui.add(edit.char_limit(limit).desired_width(f32::INFINITY))
             .labelled_by(label.id);
     };
-    field(ui, "Public name", &mut listing.name, 100, false);
+    field(ui, t!("admin.public_name"), &mut listing.name, 100, false);
     field(
         ui,
-        "Public description",
+        t!("admin.public_description"),
         &mut listing.description,
         1_000,
         true,
     );
-    field(ui, "Server address", &mut listing.address, 512, false);
-    field(ui, "Directory address", &mut listing.index_url, 512, false);
-    CollapsingHeader::new("Details").show(ui, |ui| {
+    field(
+        ui,
+        t!("admin.server_address"),
+        &mut listing.address,
+        512,
+        false,
+    );
+    field(
+        ui,
+        t!("home.directory_address"),
+        &mut listing.index_url,
+        512,
+        false,
+    );
+    CollapsingHeader::new(t!("common.details")).show(ui, |ui| {
         field(
             ui,
-            "Directory certificate fingerprint, only for a directory without a domain",
+            t!("admin.directory_fingerprint"),
             &mut listing.index_fingerprint,
             64,
             false,
         );
     });
-    if !ui::primary(ui, "Save").clicked() {
+    if !ui::primary(ui, t!("common.save")).clicked() {
         return None;
     }
     match check_listing(listing) {
@@ -1151,13 +1190,11 @@ fn check_listing(listing: &mut PublicListing) -> Result<(), &'static str> {
     ] {
         *text = text.trim().to_owned();
     }
-    validate_details(&listing.name, &listing.description, &listing.address).map_err(|_| {
-        "Use a name of up to 100 characters, a description of up to 1,000, no hidden or \
-         control characters, and an https:// server address."
-    })?;
-    https_url(&listing.index_url).ok_or("The directory address must start with https://.")?;
+    validate_details(&listing.name, &listing.description, &listing.address)
+        .map_err(|_| t!("admin.listing_invalid"))?;
+    https_url(&listing.index_url).ok_or(t!("admin.directory_https"))?;
     if !listing.index_fingerprint.is_empty() && decode::<32>(&listing.index_fingerprint).is_err() {
-        return Err("That certificate fingerprint isn't right.");
+        return Err(t!("home.bad_fingerprint"));
     }
     Ok(())
 }
@@ -1165,14 +1202,19 @@ fn check_listing(listing: &mut PublicListing) -> Result<(), &'static str> {
 /// Read, write, speak and video per role. Changes save right away.
 fn channel_tab(ui: &mut Ui, server: &Server, channel: Id) -> Option<Admin> {
     let Some(found) = server.channel(&channel) else {
-        ui.label("This channel was deleted.");
+        ui.label(t!("admin.channel_deleted"));
         return None;
     };
-    ui.label("Who can use this channel");
+    ui.label(t!("admin.who_can_use_channel"));
     let columns: &[(u8, &str)] = if found.voice {
-        &[(1, "Read"), (2, "Write"), (4, "Speak"), (8, "Video")]
+        &[
+            (1, t!("admin.flag_read")),
+            (2, t!("admin.flag_write")),
+            (4, t!("admin.flag_speak")),
+            (8, t!("admin.flag_video")),
+        ]
     } else {
-        &[(1, "Read"), (2, "Write")]
+        &[(1, t!("admin.flag_read")), (2, t!("admin.flag_write"))]
     };
     let mut request = None;
     Grid::new("channel-flags").striped(true).show(ui, |ui| {
@@ -1209,18 +1251,16 @@ fn channel_tab(ui: &mut Ui, server: &Server, channel: Id) -> Option<Admin> {
 /// The channel settings title, like "# general settings".
 fn channel_title(server: &Server, channel: Id) -> String {
     server.channel(&channel).map_or_else(
-        || "Channel settings".into(),
+        || t!("home.channel_settings").into(),
         |found| {
             let prefix = if found.voice { "🔊" } else { "#" };
-            format!("{prefix} {} settings", found.name)
+            t!("admin.channel_title", icon = prefix, channel = found.name)
         },
     )
 }
 
 fn date(at: i64) -> String {
     DateTime::from_timestamp(at, 0).map_or_else(String::new, |at| {
-        at.with_timezone(&Local)
-            .format("%-d %b %Y %H:%M")
-            .to_string()
+        crate::i18n::time(at.with_timezone(&Local), "time.date_clock")
     })
 }

@@ -1,5 +1,5 @@
 //! The call stage in a voice channel: a tile per person and per shared screen, focus,
-//! minimized bubbles, "Show only video", presentation mode and full screen.
+//! minimized bubbles, t!("call.show_only_video"), presentation mode and full screen.
 
 use std::ops::RangeInclusive;
 
@@ -268,7 +268,7 @@ struct Entry<'p> {
     name: String,
     me: bool,
     picture: Option<Picture>,
-    /// A camera that is on, or a screen; what "Show only video" keeps.
+    /// A camera that is on, or a screen; what t!("call.show_only_video") keeps.
     video: bool,
     /// A screen that is received now.
     watched: bool,
@@ -316,7 +316,7 @@ fn entries<'p>(
                 screens.push(Entry {
                     tile: Tile::Screen(screen.sid.clone()),
                     peer,
-                    name: format!("{name}'s screen"),
+                    name: t!("call.someones_screen", name = name),
                     me,
                     picture: screen_picture(ctx, voice, &screen.sid),
                     video: true,
@@ -341,7 +341,7 @@ fn entries<'p>(
 }
 
 /// The stage for a voice channel, filling `ui`: tiles, bubbles, its toolbar and,
-/// before joining, "Join voice".
+/// before joining, t!("call.join_voice").
 pub fn stage(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
     let (rect, _) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
     let c = ui::colors(ui);
@@ -376,24 +376,24 @@ pub fn stage(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
             ui.spacing_mut().item_spacing.x = 4.0;
             let on = Look::On(ui::accent(ui).base);
             let (tip, look) = if stage.presenting {
-                ("Leave presentation", on)
+                (t!("call.leave_presentation"), on)
             } else {
-                ("Presentation mode", Look::Plain)
+                (t!("call.presentation_mode"), Look::Plain)
             };
             let present = ui.add_enabled_ui(joined && presentable.is_some(), |ui| {
                 ui::icon_button(ui, "🖥", tip, look, TOOL)
             });
             let present = present
                 .inner
-                .on_disabled_hover_text("Shows a shared screen big");
+                .on_disabled_hover_text(t!("call.presentation_help"));
             if present.clicked() {
                 stage.presenting ^= true;
                 stage.focus = None;
             }
             let (tip, look) = if *video_only {
-                ("Show everyone", on)
+                (t!("call.show_everyone"), on)
             } else {
-                ("Show only video", Look::Plain)
+                (t!("call.show_only_video"), Look::Plain)
             };
             if ui::icon_button(ui, "📷", tip, look, TOOL).clicked() {
                 *video_only ^= true;
@@ -460,11 +460,11 @@ pub fn stage(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
 
     if shown.is_empty() {
         let text = if *video_only && !all.is_empty() {
-            "No one has video on."
+            t!("call.no_video")
         } else if joined {
-            "Connecting…"
+            t!("common.connecting")
         } else {
-            "No one is here yet."
+            t!("call.nobody_here")
         };
         ui.painter().text(
             area.center(),
@@ -507,7 +507,7 @@ pub fn stage(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
         if entry.speaking {
             ring(ui, picture.rect);
         }
-        let label = format!("Show {}", entry.name);
+        let label = t!("call.show_name", name = entry.name);
         let response = ui
             .interact(
                 spot,
@@ -534,7 +534,7 @@ pub fn stage(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
                 UiBuilder::new()
                     .max_rect(spot)
                     .layout(Layout::top_down(Align::Center)),
-                |ui| ui::primary_large(ui, "Join voice").clicked(),
+                |ui| ui::primary_large(ui, t!("call.join_voice")).clicked(),
             )
             .inner;
         if join_now {
@@ -606,9 +606,9 @@ fn tile(
         }
         (None, Tile::Screen(_)) => {
             let text = if entry.watched {
-                "Waiting for the picture…"
+                t!("call.waiting_picture")
             } else if rect.height() > 90.0 {
-                "Click to watch"
+                t!("call.click_to_watch")
             } else {
                 ""
             };
@@ -644,7 +644,7 @@ fn tile(
     let controlling = state.remote == Some(true);
     if controlling {
         // Clicks and keys here go to the shared screen, not to the stage.
-        let label = format!("Control {}", entry.name);
+        let label = t!("call.control_name", name = entry.name);
         response.widget_info(|| WidgetInfo::labeled(Role::Group, true, &label));
         if let Some(picture) = &entry.picture {
             let (inputs, stop) = control.capture(ui, &response, fitted(rect, picture.size));
@@ -656,13 +656,13 @@ fn tile(
             }
         }
     } else if state.spotlight && !state.big {
-        let label = format!("Focus {}", entry.name);
+        let label = t!("call.focus_name", name = entry.name);
         response.widget_info(|| WidgetInfo::labeled(Role::Button, true, &label));
         if response.clicked() {
             acts.push(Act::Focus(entry.tile.clone()));
         }
     } else if let Some(screen) = watch_click {
-        let label = format!("Watch {}", entry.name);
+        let label = t!("call.watch_name", name = entry.name);
         response.widget_info(|| WidgetInfo::labeled(Role::Button, true, &label));
         if response.clicked() {
             acts.push(Act::Watch(screen.clone()));
@@ -683,7 +683,7 @@ fn tile(
             stream_menu(m, audio, &(person, None));
             if entry.peer.camera.is_some() {
                 let show = entry.video;
-                let item = ui::Item::new("📷", "Show video").checked(show);
+                let item = ui::Item::new("📷", t!("call.show_video")).checked(show);
                 if m.add(item).clicked() {
                     acts.push(Act::ShowVideo(person, !show));
                 }
@@ -711,9 +711,9 @@ fn remote_tag(ui: &Ui, rect: Rect, entry: &Entry, on: bool, focused: bool, share
         );
     }
     let text = match (on, focused) {
-        (false, _) => format!("Asking {sharer} for control…"),
-        (true, true) => format!("You are controlling {} · Hold Esc to stop", entry.name),
-        (true, false) => format!("Click to control {}", entry.name),
+        (false, _) => t!("call.asking_control", name = sharer),
+        (true, true) => t!("call.controlling", name = entry.name),
+        (true, false) => t!("call.click_to_control", name = entry.name),
     };
     let room = rect.width() - 2.0 * GAP - 16.0;
     if room < ui::TEXT_SMALL || rect.height() < 2.0 * TOOL.y + 2.0 * GAP {
@@ -763,10 +763,10 @@ fn name_tag(ui: &mut Ui, rect: Rect, entry: &Entry, audio: &crate::audio::Audio)
         _ => entry.peer.status,
     };
     let local_mute = is_person && !entry.me && audio.volume(&(person, None)).1;
-    let badges = sound_badges(status).chain(local_mute.then_some(("🔊", "Muted by you")));
+    let badges = sound_badges(status).chain(local_mute.then_some(("🔊", t!("call.muted_by_you"))));
     let badges_width = BADGE * badges.clone().count() as f32;
     let text = if entry.peer.connecting && is_person {
-        format!("{} · Connecting…", entry.name)
+        t!("call.name_connecting", name = entry.name)
     } else {
         entry.name.clone()
     };
@@ -827,7 +827,7 @@ fn name_tag(ui: &mut Ui, rect: Rect, entry: &Entry, audio: &crate::audio::Audio)
     let live = is_person && !entry.peer.screens.is_empty();
     if live && rect.height() > 2.0 * height + GAP {
         let galley = ui.painter().layout_no_wrap(
-            "LIVE".into(),
+            t!("call.live_badge").into(),
             FontId::new(ui::TEXT_CAPTION - 1.0, ui::bold_family()),
             ui::ON_FILL,
         );
@@ -889,9 +889,9 @@ fn tools(
     };
     if room() {
         let (glyph, tip) = if state.focused {
-            ("🗗", "Unfocus")
+            ("🗗", t!("call.unfocus"))
         } else {
-            ("🗖", "Focus")
+            ("🗖", t!("call.focus"))
         };
         if ui::icon_button(ui, glyph, tip, Look::Plain, TOOL).clicked() {
             acts.push(if state.focused {
@@ -901,18 +901,24 @@ fn tools(
             });
         }
     }
-    if is_person && room() && ui::icon_button(ui, "🗕", "Minimize", Look::Plain, TOOL).clicked() {
+    if is_person
+        && room()
+        && ui::icon_button(ui, "🗕", t!("call.minimize"), Look::Plain, TOOL).clicked()
+    {
         acts.push(Act::Minimize(person));
     }
-    if full && room() && ui::icon_button(ui, "⛶", "Full screen", Look::Plain, TOOL).clicked() {
+    if full
+        && room()
+        && ui::icon_button(ui, "⛶", t!("call.full_screen"), Look::Plain, TOOL).clicked()
+    {
         acts.push(Act::Full(entry.tile.clone()));
     }
     if remote && room() {
         let on = Look::On(ui::accent(ui).base);
         let (tip, look) = match state.remote {
-            None => ("Request control", Look::Plain),
-            Some(false) => ("Cancel request", on),
-            Some(true) => ("Stop control", on),
+            None => (t!("call.request_control"), Look::Plain),
+            Some(false) => (t!("call.cancel_request"), on),
+            Some(true) => (t!("call.stop_control"), on),
         };
         if ui::icon_button(ui, "🖱", tip, look, TOOL).clicked() {
             acts.push(match (&entry.tile, state.remote) {
@@ -922,7 +928,7 @@ fn tools(
         }
     }
     if volume && room() {
-        let button = ui::icon_button(ui, "🔊", "Volume", Look::Plain, TOOL);
+        let button = ui::icon_button(ui, "🔊", t!("call.volume"), Look::Plain, TOOL);
         ui::menu(&button, |m| {
             stream_menu(m, audio, &(person, None));
             for (sid, app) in &entry.peer.apps {
@@ -933,7 +939,10 @@ fn tools(
         let open = ui::menu_open(&button);
         ui.data_mut(|data| data.insert_temp(menu_id, open));
     }
-    if stop && room() && ui::icon_button(ui, "⏹", "Stop watching", Look::Plain, TOOL).clicked() {
+    if stop
+        && room()
+        && ui::icon_button(ui, "⏹", t!("call.stop_watching"), Look::Plain, TOOL).clicked()
+    {
         acts.push(Act::StopWatching);
     }
 }
@@ -982,7 +991,7 @@ fn send(home: &Home, command: Command) {
     }
 }
 
-/// A camera or screen covering the whole window, with its name and "Exit full screen".
+/// A camera or screen covering the whole window, with its name and t!("call.exit_full_screen").
 pub fn full_view(ui: &mut Ui, home: &mut Home) {
     let Some(tile) = home.voice.stage.full.clone() else {
         return;
@@ -1002,7 +1011,11 @@ pub fn full_view(ui: &mut Ui, home: &mut Home) {
                     let peer = peers
                         .iter()
                         .find(|p| p.screens.iter().any(|s| s.sid == *sid))?;
-                    Some((format!("{}'s screen", peer.name(server)), None, false))
+                    Some((
+                        t!("call.someones_screen", name = peer.name(server)),
+                        None,
+                        false,
+                    ))
                 }
             }
         });
@@ -1029,14 +1042,14 @@ pub fn full_view(ui: &mut Ui, home: &mut Home) {
     // While controlling, Escape belongs to the shared screen.
     let mut exit = !controlling && ui.input(|input| input.key_pressed(Key::Escape));
     let heading = if controlling {
-        format!("You are controlling {name} · Hold Esc to stop")
+        t!("call.controlling", name = name)
     } else {
         name
     };
     ui.horizontal(|ui| {
         ui.label(ui::bold(&heading));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            exit |= ui::secondary(ui, "Exit full screen").clicked();
+            exit |= ui::secondary(ui, t!("call.exit_full_screen")).clicked();
         });
     });
     ui.add_space(ui::SPACE_S);
@@ -1079,7 +1092,7 @@ pub fn full_view(ui: &mut Ui, home: &mut Home) {
             ui.painter().text(
                 rect.center(),
                 Align2::CENTER_CENTER,
-                "Waiting for the picture…",
+                t!("call.waiting_picture"),
                 FontId::proportional(ui::TEXT_BODY),
                 ui::colors(ui).muted,
             );

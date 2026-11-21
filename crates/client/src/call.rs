@@ -34,8 +34,6 @@ const METER_WIDTH: f32 = 360.0;
 pub const PICKER_WIDTH: f32 = 260.0;
 /// The live transfer limit.
 pub const MAX_LIVE_FILE: u64 = rusttalk_core::messages::MAX_LIVE_FILE_SIZE;
-const DIRECT: &str = "Sent directly through the call. Nothing is stored.";
-pub const DIRECT_CHAT: &str = "Sent directly to people online now. Nothing is stored.";
 /// How long a live offer can be accepted.
 const OFFER_SECONDS: i64 = 10 * 60;
 
@@ -357,7 +355,7 @@ pub fn room_list(ui: &mut Ui, home: &Home, server: &Server, channel: &Id) {
             };
             status_name(ui, &name, status);
             if peer.connecting {
-                ui.label(ui::caption("Connecting…"));
+                ui.label(ui::caption(t!("common.connecting")));
             }
             if !peer.screens.is_empty() {
                 live_badge(ui);
@@ -377,7 +375,7 @@ pub fn room_list(ui: &mut Ui, home: &Home, server: &Server, channel: &Id) {
                 ui.add_space(52.0);
                 ui.label(RichText::new(format!("🎵 {app}")).size(ui::TEXT_SMALL));
                 if listening && home.voice.audio.volume(&stream).1 {
-                    ui.label(ui::caption("Muted"));
+                    ui.label(ui::caption(t!("call.muted")));
                 }
             });
             if listening {
@@ -390,8 +388,8 @@ pub fn room_list(ui: &mut Ui, home: &Home, server: &Server, channel: &Id) {
 
 fn sound_badges(status: VoiceStatus) -> impl Iterator<Item = (&'static str, &'static str)> + Clone {
     [
-        status.muted.then_some(("🎤", "Muted")),
-        status.deafened.then_some(("🎧", "Deafened")),
+        status.muted.then_some(("🎤", t!("call.muted"))),
+        status.deafened.then_some(("🎧", t!("call.deafened"))),
     ]
     .into_iter()
     .flatten()
@@ -427,13 +425,15 @@ fn ring(ui: &Ui, rect: egui::Rect) {
 pub fn stream_menu(m: &mut ui::Menu, audio: &Audio, stream: &StreamId) {
     let (mut volume, mut muted) = audio.volume(stream);
     let before = (volume, muted);
-    m.caption("Volume");
+    m.caption(t!("call.volume"));
     m.ui().horizontal(|ui| {
         ui.add_space(ui::SPACE_S);
         ui.spacing_mut().slider_width = ui.available_width() - 64.0;
         volume_slider(ui, &mut volume);
     });
-    if m.add(ui::Item::new("🔇", "Mute").checked(muted)).clicked() {
+    if m.add(ui::Item::new("🔇", t!("call.mute")).checked(muted))
+        .clicked()
+    {
         muted = !muted;
     }
     if (volume, muted) != before {
@@ -466,17 +466,18 @@ fn live_files(ui: &mut Ui, list: &[LiveFile], server: Option<&Server>) -> Option
                 ui.set_width(ui.available_width());
                 match (file.from, &file.state) {
                     (None, _) => {
-                        ui.label(format!("Sending {} ({size})", file.name))
-                            .on_hover_text(DIRECT);
+                        ui.label(t!("call.live_sending", file = file.name, size = size))
+                            .on_hover_text(t!("call.direct"));
                         action = sending(ui, file, name).or(action.take());
                     }
                     (Some(from), LiveState::Offered) => {
-                        ui.label(format!(
-                            "{} wants to send {} ({size})",
-                            name(&from),
-                            file.name
+                        ui.label(t!(
+                            "call.live_offer",
+                            name = name(&from),
+                            file = file.name,
+                            size = size
                         ))
-                        .on_hover_text(DIRECT);
+                        .on_hover_text(t!("call.direct"));
                         action =
                             receiving(ui, file.id, &file.name, file.size, None).or(action.take());
                     }
@@ -488,11 +489,11 @@ fn live_files(ui: &mut Ui, list: &[LiveFile], server: Option<&Server>) -> Option
                     (Some(_), state) => {
                         ui.horizontal(|ui| {
                             ui.label(if *state == LiveState::Saved {
-                                format!("Saved {}", file.name)
+                                t!("call.live_saved", file = file.name)
                             } else {
-                                format!("{} didn't arrive.", file.name)
+                                t!("call.live_failed", file = file.name)
                             });
-                            if ui::small_close(ui, "Dismiss").clicked() {
+                            if ui::small_close(ui, t!("common.dismiss")).clicked() {
                                 action = Some(LiveAction::Remove(file.id, false));
                             }
                         });
@@ -503,28 +504,28 @@ fn live_files(ui: &mut Ui, list: &[LiveFile], server: Option<&Server>) -> Option
     action
 }
 
-/// Who receives our live file, and "Stop sending".
+/// Who receives our live file, and t!("call.stop_sending").
 fn sending(ui: &mut Ui, file: &LiveFile, name: impl Fn(&Id) -> String) -> Option<LiveAction> {
     let who: Vec<_> = file.receivers.iter().map(name).collect();
     ui.label(ui::caption(match who.len() {
-        0 => "Waiting for someone to save it".to_owned(),
-        _ => format!("{} receiving", who.join(", ")),
+        0 => t!("call.live_waiting").to_owned(),
+        _ => t!("call.live_receiving", names = who.join(", ")),
     }));
-    let stop = ui::secondary(ui, "Stop sending").clicked();
+    let stop = ui::secondary(ui, t!("call.stop_sending")).clicked();
     stop.then_some(LiveAction::Remove(file.id, true))
 }
 
-/// "Save" and "Decline" for a live file offered to us, or, with the bytes `saved`
-/// so far, its progress and "Cancel". Used in the call and in chats.
+/// t!("common.save") and t!("call.decline") for a live file offered to us, or, with the bytes `saved`
+/// so far, its progress and t!("common.cancel"). Used in the call and in chats.
 fn receiving(ui: &mut Ui, id: Id, name: &str, size: u64, saved: Option<u64>) -> Option<LiveAction> {
     let mut action = None;
     match saved {
         None => {
             ui.horizontal(|ui| {
-                if ui::primary(ui, "Save").clicked() {
+                if ui::primary(ui, t!("common.save")).clicked() {
                     action = Some(LiveAction::Save(id, name.to_owned()));
                 }
-                if ui::secondary(ui, "Decline").clicked() {
+                if ui::secondary(ui, t!("call.decline")).clicked() {
                     action = Some(LiveAction::Remove(id, false));
                 }
             });
@@ -532,7 +533,7 @@ fn receiving(ui: &mut Ui, id: Id, name: &str, size: u64, saved: Option<u64>) -> 
         Some(bytes) => {
             let done = bytes as f32 / size.max(1) as f32;
             ui.add(egui::ProgressBar::new(done).show_percentage());
-            if ui::secondary(ui, "Cancel").clicked() {
+            if ui::secondary(ui, t!("common.cancel")).clicked() {
                 action = Some(LiveAction::Remove(id, true));
             }
         }
@@ -556,11 +557,11 @@ pub fn chat_live(
         ui.set_max_width(360.0);
         ui.horizontal(|ui| {
             ui.label(RichText::new("📡").size(ui::TEXT_ICON_LARGE))
-                .on_hover_text(DIRECT_CHAT);
+                .on_hover_text(t!("call.direct_chat"));
             ui.vertical(|ui| {
                 ui.label(ui::bold(name));
-                ui.label(ui::caption(format!("{} · Live", files::size(*size))))
-                    .on_hover_text(DIRECT_CHAT);
+                ui.label(ui::caption(t!("call.live_size", size = files::size(*size))))
+                    .on_hover_text(t!("call.direct_chat"));
                 let state = entry.map(|file| &file.state);
                 match (mine, state) {
                     (true, Some(LiveState::Sending)) => {
@@ -571,19 +572,19 @@ pub fn chat_live(
                         action = receiving(ui, *id, name, *size, Some(*bytes));
                     }
                     (_, Some(LiveState::Saved)) => {
-                        ui.weak("Saved");
+                        ui.weak(t!("call.saved"));
                     }
                     (_, Some(LiveState::Failed)) => {
-                        ui::error_text(ui, Some("Didn't arrive."));
+                        ui::error_text(ui, Some(t!("call.didnt_arrive")));
                     }
                     (false, None | Some(LiveState::Offered)) if fresh => {
                         action = receiving(ui, *id, name, *size, None);
                     }
                     (_, Some(LiveState::Ended)) => {
-                        ui.weak("Stopped");
+                        ui.weak(t!("call.stopped"));
                     }
                     _ => {
-                        ui.weak("No longer available");
+                        ui.weak(t!("call.no_longer_available"));
                     }
                 }
             });
@@ -628,29 +629,34 @@ pub fn upload(
     }
 }
 
-/// The quality steps of "Share your screen": height cap, label and hint. The picture
+/// The quality steps of t!("call.share_screen"): height cap, label and hint. The picture
 /// keeps its shape and is only ever scaled down, so a smaller screen stays as it is.
-const SCREEN_QUALITIES: [(Option<u32>, &str, &str); 4] = [
-    (Some(720), "720p", "720p — light on slow connections"),
-    (Some(1080), "1080p", "1080p — sharp text, the usual pick"),
-    (
-        Some(1440),
-        "1440p",
-        "1440p — extra sharp, needs a fast connection",
-    ),
-    (None, "Native", "Native — your screen's full size"),
-];
-const SCREEN_RATES: [(u32, &str, &str); 3] = [
-    (15, "15", "15 fps — fine for slides and documents"),
-    (30, "30", "30 fps — smooth for most things"),
-    (60, "60", "60 fps — for games and video"),
-];
+fn screen_qualities() -> [(Option<u32>, &'static str, &'static str); 4] {
+    [
+        (Some(720), "720p", t!("call.quality_720")),
+        (Some(1080), "1080p", t!("call.quality_1080")),
+        (Some(1440), "1440p", t!("call.quality_1440")),
+        (
+            None,
+            t!("call.quality_native"),
+            t!("call.quality_native_help"),
+        ),
+    ]
+}
+
+fn screen_rates() -> [(u32, &'static str, &'static str); 3] {
+    [
+        (15, "15", t!("call.fps_15")),
+        (30, "30", t!("call.fps_30")),
+        (60, "60", t!("call.fps_60")),
+    ]
+}
 
 /// The last choices from Settings, or the defaults for values this version no longer offers.
 fn screen_options(s: &Settings) -> Options {
     let default = Options::default();
-    let height = SCREEN_QUALITIES.iter().map(|q| q.0);
-    let fps = SCREEN_RATES.iter().map(|r| r.0);
+    let height = screen_qualities().into_iter().map(|q| q.0);
+    let fps = screen_rates().into_iter().map(|r| r.0);
     Options {
         max_height: height
             .clone()
@@ -690,13 +696,13 @@ fn change_screen(ctx: &egui::Context, voice: &mut Voice, server: &Server) {
     }
 }
 
-/// Open "Share your screen" with the last choices and look for what to share.
+/// Open t!("call.share_screen") with the last choices and look for what to share.
 fn open_screen_dialog(ctx: &egui::Context, voice: &mut Voice) {
     voice.share_screen = Some((screen_options(&voice.audio.settings()), None));
     fill(ctx, &voice.targets, "screens", screen::targets);
 }
 
-/// The "Share your screen" dialog: what to share (Windows), quality, frame rate, cursor.
+/// The t!("call.share_screen") dialog: what to share (Windows), quality, frame rate, cursor.
 pub fn screen_dialog(ctx: &egui::Context, home: &mut Home) {
     let voice = &mut home.voice;
     let Some((options, picked)) = &mut voice.share_screen else {
@@ -706,9 +712,9 @@ pub fn screen_dialog(ctx: &egui::Context, home: &mut Home) {
     let mut share = None;
     let changing = voice.changing_screen;
     let title = if changing {
-        "Change what you share"
+        t!("call.change_share")
     } else {
-        "Share your screen"
+        t!("call.share_screen")
     };
     let ((), dismissed) = ui::dialog(ctx, "share screen", title, |ui| {
         let targets = audio::lock(&voice.targets);
@@ -719,13 +725,16 @@ pub fn screen_dialog(ctx: &egui::Context, home: &mut Home) {
                 None
             }
             Listing::Failed => {
-                ui.weak("Couldn't look for screens. Try again.");
+                ui.weak(t!("call.screens_failed"));
                 None
             }
             Listing::Found(found) => {
                 let portal = found.iter().position(|t| t.kind == Kind::Portal);
                 if portal.is_none() {
-                    for (heading, kind) in [("Screens", Kind::Monitor), ("Windows", Kind::Window)] {
+                    for (heading, kind) in [
+                        (t!("call.screens"), Kind::Monitor),
+                        (t!("call.windows"), Kind::Window),
+                    ] {
                         section(ui, heading);
                         egui::ScrollArea::vertical()
                             .id_salt(heading)
@@ -748,27 +757,27 @@ pub fn screen_dialog(ctx: &egui::Context, home: &mut Home) {
         };
         // A change keeps the quality, frame rate and cursor the share started with.
         if !changing {
-            section(ui, "Quality");
+            section(ui, t!("call.quality"));
             ui.add_space(ui::SPACE_XS);
-            ui::segmented(ui, &mut options.max_height, &SCREEN_QUALITIES);
-            section(ui, "Frame rate");
+            ui::segmented(ui, &mut options.max_height, &screen_qualities());
+            section(ui, t!("call.frame_rate"));
             ui.add_space(ui::SPACE_XS);
-            ui::segmented(ui, &mut options.fps, &SCREEN_RATES);
+            ui::segmented(ui, &mut options.fps, &screen_rates());
             ui.add_space(ui::SPACE_S);
             ui::toggle_row(
                 ui,
                 &mut options.cursor,
-                "Show my cursor",
-                "Others see your mouse pointer",
+                t!("call.show_cursor"),
+                t!("call.show_cursor_help"),
             );
         }
         ui::footer(ui, |ui| {
             let label = if portal.is_some() {
-                "Choose what to share"
+                t!("call.choose_share")
             } else if changing {
-                "Switch"
+                t!("call.switch")
             } else {
-                "Share"
+                t!("call.share")
             };
             let target = match &*targets {
                 Listing::Found(found) => portal.or(*picked).and_then(|at| found.get(at)),
@@ -778,7 +787,7 @@ pub fn screen_dialog(ctx: &egui::Context, home: &mut Home) {
             if button.inner.clicked() {
                 share = target.cloned();
             }
-            close |= ui::secondary(ui, "Cancel").clicked();
+            close |= ui::secondary(ui, t!("common.cancel")).clicked();
         });
     });
     if let Some(target) = share {
@@ -805,9 +814,9 @@ pub fn screen_dialog(ctx: &egui::Context, home: &mut Home) {
     }
 }
 
-/// A red "LIVE" tag for someone sharing their screen.
+/// A red t!("call.live_badge") tag for someone sharing their screen.
 fn live_badge(ui: &mut Ui) {
-    ui::badge(ui, "LIVE", ui::colors(ui).danger);
+    ui::badge(ui, t!("call.live_badge"), ui::colors(ui).danger);
 }
 
 /// Settings → Voice & audio.
@@ -815,17 +824,27 @@ pub fn settings_tab(ui: &mut Ui, voice: &mut Voice) {
     let audio = voice.audio.clone();
     let mut s = audio.settings();
     let (inputs, outputs) = audio.devices();
-    ui::page_section(ui, "Devices");
-    device_picker(ui, "Microphone", &mut s.input, &inputs);
-    device_picker(ui, "Speakers", &mut s.output, &outputs);
+    ui::page_section(ui, t!("call.devices"));
+    device_picker(ui, t!("call.microphone"), &mut s.input, &inputs);
+    device_picker(ui, t!("call.speakers"), &mut s.output, &outputs);
     if let Some(problem) = audio.problem() {
         ui::error_text(ui, Some(&problem));
     }
-    ui::page_section(ui, "Input mode");
+    ui::page_section(ui, t!("call.input_mode"));
     ui.horizontal_wrapped(|ui| {
         let cards = [
-            (false, "🔊", "Voice activity", "Talk when you speak"),
-            (true, "⌨", "Push to talk", "Hold a key to talk"),
+            (
+                false,
+                "🔊",
+                t!("call.voice_activity"),
+                t!("call.voice_activity_help"),
+            ),
+            (
+                true,
+                "⌨",
+                t!("call.push_to_talk"),
+                t!("call.push_to_talk_help"),
+            ),
         ];
         for (push_to_talk, icon, title, help) in cards {
             let selected = s.push_to_talk == push_to_talk;
@@ -848,56 +867,54 @@ pub fn settings_tab(ui: &mut Ui, voice: &mut Voice) {
                 false,
                 Slider::new(&mut live, FLOOR..=CEILING).show_value(false),
             );
-            slider.widget_info(|| egui::WidgetInfo::labeled(Role::Slider, false, "Sensitivity"));
-            ui.weak("Your mic turns on when the level passes the line.");
+            slider.widget_info(|| {
+                egui::WidgetInfo::labeled(Role::Slider, false, t!("call.sensitivity"))
+            });
+            ui.weak(t!("call.sensitivity_help"));
         } else {
             let slider = ui.add(Slider::new(&mut s.threshold, FLOOR..=CEILING).show_value(false));
-            slider.widget_info(|| egui::WidgetInfo::labeled(Role::Slider, true, "Sensitivity"));
-            ui.weak("Your mic turns on when the level passes the line. Drag to change it.");
+            slider.widget_info(|| {
+                egui::WidgetInfo::labeled(Role::Slider, true, t!("call.sensitivity"))
+            });
+            ui.weak(t!("call.sensitivity_drag_help"));
         }
         ui::toggle_row(
             ui,
             &mut s.auto_threshold,
-            "Adjust automatically",
-            "Follows the noise around you, like a fan or an open window.",
+            t!("call.auto_threshold"),
+            t!("call.auto_threshold_help"),
         );
         if !s.auto_threshold {
             calibrate(ui, voice, &mut s);
         }
     }
-    ui::page_section(ui, "Voice processing");
+    ui::page_section(ui, t!("call.voice_processing"));
     ui::toggle_row(
         ui,
         &mut s.echo_cancellation,
-        "Echo cancellation",
-        "Stops others from hearing themselves through your speakers.",
+        t!("call.echo"),
+        t!("call.echo_help"),
     );
     ui::toggle_row(
         ui,
         &mut s.noise_suppression,
-        "Noise suppression",
-        "Filters out background noise like fans and typing.",
+        t!("call.noise"),
+        t!("call.noise_help"),
     );
     ai_noise(ui, &audio, &mut s);
-    ui::toggle_row(
-        ui,
-        &mut s.auto_gain,
-        "Automatic gain",
-        "Keeps your voice at an even volume.",
-    );
+    ui::toggle_row(ui, &mut s.auto_gain, t!("call.gain"), t!("call.gain_help"));
     audio.set_settings(s);
 }
 
 /// The AI noise removal row: download its model first, then an on/off switch.
 fn ai_noise(ui: &mut Ui, audio: &Audio, s: &mut Settings) {
-    const LABEL: &str = "AI noise removal";
-    const HELP: &str = "Stronger filter for typing, other voices and sudden sounds.";
+    let label = t!("call.ai_noise");
     match audio.model() {
         audio::Model::Ready => {
-            ui::toggle_row(ui, &mut s.ai_noise, LABEL, HELP);
+            ui::toggle_row(ui, &mut s.ai_noise, label, t!("call.ai_noise_help"));
         }
         audio::Model::Downloading(bytes) => {
-            ui::setting_row(ui, LABEL, "Downloading…", |ui| {
+            ui::setting_row(ui, label, t!("call.downloading"), |ui| {
                 let done = bytes as f32 / denoise::SIZE as f32;
                 ui.add(
                     egui::ProgressBar::new(done)
@@ -908,14 +925,14 @@ fn ai_noise(ui: &mut Ui, audio: &Audio, s: &mut Settings) {
             ui.ctx().request_repaint_after(Duration::from_millis(100));
         }
         model @ (audio::Model::Missing | audio::Model::Failed) => {
-            let help = format!(
-                "{HELP} Downloads {} MB once.",
-                denoise::SIZE.div_ceil(1_000_000)
+            let help = t!(
+                "call.ai_noise_download_help",
+                size = denoise::SIZE.div_ceil(1_000_000)
             );
-            ui::setting_row(ui, LABEL, &help, |ui| {
-                let button = ui::secondary(ui, "Download");
+            ui::setting_row(ui, label, &help, |ui| {
+                let button = ui::secondary(ui, t!("call.download"));
                 button.widget_info(|| {
-                    egui::WidgetInfo::labeled(Role::Button, true, "Download AI noise removal")
+                    egui::WidgetInfo::labeled(Role::Button, true, t!("call.download_ai_noise"))
                 });
                 if button.clicked() {
                     // It turns on as soon as the download is checked.
@@ -924,18 +941,12 @@ fn ai_noise(ui: &mut Ui, audio: &Audio, s: &mut Settings) {
                 }
             });
             if model == audio::Model::Failed {
-                ui::error_text(
-                    ui,
-                    Some("Download failed. Check your connection and try again."),
-                );
+                ui::error_text(ui, Some(t!("call.download_failed")));
             }
         }
     }
     if s.ai_noise && audio.ai_failed() {
-        ui::error_text(
-            ui,
-            Some("AI noise removal couldn't start, so normal noise suppression is on."),
-        );
+        ui::error_text(ui, Some(t!("call.ai_noise_failed")));
     }
 }
 
@@ -946,18 +957,18 @@ fn device_picker(
     devices: &[audio::DeviceInfo],
 ) {
     let current = match chosen {
-        None => "System default",
+        None => t!("common.system_default"),
         Some(id) => devices
             .iter()
             .find(|d| d.id == *id)
-            .map_or("Not connected", |d| d.name.as_str()),
+            .map_or(t!("call.not_connected"), |d| d.name.as_str()),
     };
     ui::setting_row(ui, label, "", |ui| {
         let combo = ComboBox::from_id_salt(label)
             .width(PICKER_WIDTH)
             .selected_text(current)
             .show_ui(ui, |ui| {
-                ui.selectable_value(chosen, None, "System default");
+                ui.selectable_value(chosen, None, t!("common.system_default"));
                 for device in devices {
                     ui.selectable_value(chosen, Some(device.id.clone()), &device.name);
                 }
@@ -998,13 +1009,13 @@ fn meter(ui: &mut Ui, audio: &Audio, s: &Settings) {
         let x = rect.left() + rect.width() * fraction(threshold);
         painter.vline(x, rect.y_range(), Stroke::new(2.0, c.strong));
     }
-    response.widget_info(|| egui::WidgetInfo::labeled(Role::Meter, true, "Mic level"));
+    response.widget_info(|| egui::WidgetInfo::labeled(Role::Meter, true, t!("call.mic_level")));
 }
 
 fn key_picker(ui: &mut Ui, voice: &mut Voice, s: &mut Settings) {
     ui.horizontal(|ui| {
         if voice.picking_key {
-            ui.label("Press a key…");
+            ui.label(t!("call.press_key"));
             let pressed = ui.input(|input| {
                 input.events.iter().find_map(|event| match event {
                     Event::Key {
@@ -1022,13 +1033,13 @@ fn key_picker(ui: &mut Ui, voice: &mut Voice, s: &mut Settings) {
                 None => {}
             }
         } else {
-            ui.label(format!("Talk key: {}", s.key));
-            if ui::secondary(ui, "Change").clicked() {
+            ui.label(t!("call.talk_key", key = s.key));
+            if ui::secondary(ui, t!("common.change")).clicked() {
                 voice.picking_key = true;
             }
         }
     });
-    ui.weak("Hold it to talk while RustTalk is the active window and you're not typing.");
+    ui.weak(t!("call.talk_key_help"));
 }
 
 fn calibrate(ui: &mut Ui, voice: &mut Voice, s: &mut Settings) {
@@ -1044,9 +1055,9 @@ fn calibrate(ui: &mut Ui, voice: &mut Voice, s: &mut Settings) {
             Some(Calibration::Done(match audio::calibrate(&quiet, &speech) {
                 Some(threshold) => {
                     s.threshold = threshold.clamp(FLOOR, CEILING);
-                    "Done. Your mic now opens when you talk.".into()
+                    t!("call.calibrated").into()
                 }
-                None => "Couldn't hear you clearly. Check your mic and try again.".into(),
+                None => t!("call.calibrate_failed").into(),
             }))
         }
         other => other,
@@ -1055,20 +1066,20 @@ fn calibrate(ui: &mut Ui, voice: &mut Voice, s: &mut Settings) {
         Some(Calibration::Quiet(_)) => {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label("Stay quiet for a moment…");
+                ui.label(t!("call.calibrate_quiet"));
             });
         }
         Some(Calibration::Speak(..)) => {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label(ui::bold("Say something, like counting to five."));
+                ui.label(ui::bold(t!("call.calibrate_speak")));
             });
         }
         done => {
             if let Some(Calibration::Done(text)) = done {
                 ui.label(text.as_str());
             }
-            if ui::secondary(ui, "Calibrate").clicked() {
+            if ui::secondary(ui, t!("call.calibrate")).clicked() {
                 audio.record(true);
                 voice.calibration = Some(Calibration::Quiet(now + Duration::from_secs(2)));
             }
@@ -1083,8 +1094,8 @@ mod tests {
     #[test]
     fn screen_choices_are_remembered() {
         assert_eq!(screen_options(&Settings::default()), Options::default());
-        for (max_height, _, _) in SCREEN_QUALITIES {
-            for (fps, _, _) in SCREEN_RATES {
+        for (max_height, _, _) in screen_qualities() {
+            for (fps, _, _) in screen_rates() {
                 for cursor in [false, true] {
                     let options = Options {
                         max_height,
@@ -1100,7 +1111,7 @@ mod tests {
                 }
             }
         }
-        assert!(SCREEN_QUALITIES.iter().any(|q| q.0 == Some(1440)));
+        assert!(screen_qualities().into_iter().any(|q| q.0 == Some(1440)));
     }
 
     #[test]

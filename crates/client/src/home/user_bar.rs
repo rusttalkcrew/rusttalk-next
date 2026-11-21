@@ -18,9 +18,9 @@ const BUTTON_SIZE: Vec2 = Vec2::new(30.0, ICON_BUTTON);
 /// Label and one-line hint of a status.
 fn status_text(choice: Choice) -> (&'static str, &'static str) {
     match choice {
-        Choice::Online => ("Online", "People see that you're here"),
-        Choice::Away => ("Away", "People see that you stepped away"),
-        Choice::Invisible => ("Invisible", "You appear offline but can still use RustTalk"),
+        Choice::Online => (t!("status.online"), t!("status.online_help")),
+        Choice::Away => (t!("status.away"), t!("status.away_help")),
+        Choice::Invisible => (t!("status.invisible"), t!("status.invisible_help")),
     }
 }
 
@@ -36,11 +36,19 @@ fn status_color(c: &Palette, choice: Choice) -> Color32 {
 }
 
 fn mute_tip(muted: bool) -> &'static str {
-    if muted { "Unmute" } else { "Mute" }
+    if muted {
+        t!("call.unmute")
+    } else {
+        t!("call.mute")
+    }
 }
 
 fn deafen_tip(deafened: bool) -> &'static str {
-    if deafened { "Undeafen" } else { "Deafen" }
+    if deafened {
+        t!("call.undeafen")
+    } else {
+        t!("call.deafen")
+    }
 }
 
 pub(super) fn show(ui: &mut Ui, home: &mut Home, update_available: bool) {
@@ -79,7 +87,7 @@ fn identity(ui: &mut Ui, home: &Home, status: Choice) -> eframe::egui::Response 
     };
     // The name is per server; without an open one, use any server's.
     let server = open.or_else(|| home.servers.iter().find(|s| s.member(me).is_some()));
-    let name = server.map_or_else(|| "You".to_owned(), |s| s.member_name(me));
+    let name = server.map_or_else(|| t!("common.you").to_owned(), |s| s.member_name(me));
     // The picture is the same everywhere; show it from any server that has it.
     let none = Directory::default();
     let dir = (home.servers.iter())
@@ -91,7 +99,7 @@ fn identity(ui: &mut Ui, home: &Home, status: Choice) -> eframe::egui::Response 
     ui::row_button(
         ui,
         BAR_HEIGHT,
-        &format!("{name}, {label}. Change status"),
+        &t!("status.button", name = name, status = label),
         |ui| {
             let avatar = face(ui, dir, me, &name, AVATAR_SIZE, false);
             ui::presence_dot(ui, avatar.rect, 5.0, color, c.side);
@@ -107,7 +115,7 @@ fn identity(ui: &mut Ui, home: &Home, status: Choice) -> eframe::egui::Response 
 /// Rows with each status, its hint and a check on the current one.
 fn status_picker(m: &mut ui::Menu, current: Choice) -> Option<Choice> {
     let mut picked = None;
-    m.caption("Set your status");
+    m.caption(t!("status.set"));
     let c = ui::colors(m.ui());
     for choice in [Choice::Online, Choice::Away, Choice::Invisible] {
         let (label, hint) = status_text(choice);
@@ -148,9 +156,9 @@ fn sound_buttons(ui: &mut Ui, home: &Home) {
 /// The gear, with a dot while an update waits.
 fn settings_button(ui: &mut Ui, update_available: bool) -> eframe::egui::Response {
     let tip = if update_available {
-        "Settings · Update available"
+        t!("settings.title_update")
     } else {
-        "Settings"
+        t!("settings.title")
     };
     let button = ui::icon_button(ui, "⚙", tip, Look::Plain, BUTTON_SIZE);
     if update_available {

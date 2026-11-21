@@ -147,7 +147,7 @@ pub(super) async fn command(ctx: &Ctx, live: &mut Live, command: Command) {
                 let request = live.guest.ask(&sharer, &screen);
                 if !send(live, sharer, &request).await {
                     live.guest = Default::default();
-                    ctx.send(Update::Failed("Couldn't ask for control.".into()));
+                    ctx.send(Update::Failed(t!("remote.ask_failed").into()));
                 }
             }
             show(ctx, live);

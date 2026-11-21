@@ -708,7 +708,7 @@ impl Updater {
     /// The Update button, shown while a verified newer version waits.
     pub fn button(&mut self, ui: &mut egui::Ui) {
         if let State::Available(update) = &self.state {
-            let label = format!("Update to v{}", update.version);
+            let label = t!("update.update_to", version = update.version);
             ui.with_layout(
                 egui::Layout::top_down_justified(egui::Align::Center),
                 |ui| {
@@ -726,26 +726,28 @@ impl Updater {
             return;
         }
         let title = match &self.state {
-            State::Available(update) => format!("Update RustTalk to v{}?", update.version),
-            State::Failed(_) => "Couldn't update".to_owned(),
-            State::Working(..) => "Updating RustTalk".to_owned(),
-            _ => "Restarting RustTalk".to_owned(),
+            State::Available(update) => t!("update.title", version = update.version),
+            State::Failed(_) => t!("update.failed").to_owned(),
+            State::Working(..) => t!("update.updating").to_owned(),
+            _ => t!("update.restarting").to_owned(),
         };
         let (mut go, mut later) = (false, false);
         let (_, closed) = crate::ui::dialog(ctx, "update", &title, |ui| match &self.state {
             State::Available(update) => {
-                ui.label("RustTalk restarts after the update.");
+                ui.label(t!("update.restarts"));
                 if let Some(url) = release_notes(&update.base, &update.version) {
-                    ui.hyperlink_to("What's new", url);
+                    ui.hyperlink_to(t!("update.whats_new"), url);
                 }
                 crate::ui::footer(ui, |ui| {
-                    go = crate::ui::primary(ui, "Update").clicked();
-                    later = crate::ui::secondary(ui, "Later").clicked();
+                    go = crate::ui::primary(ui, t!("update.update")).clicked();
+                    later = crate::ui::secondary(ui, t!("update.later")).clicked();
                 });
             }
             State::Failed(error) => {
                 crate::ui::error_text(ui, Some(error));
-                crate::ui::footer(ui, |ui| later = crate::ui::secondary(ui, "Close").clicked());
+                crate::ui::footer(ui, |ui| {
+                    later = crate::ui::secondary(ui, t!("common.close")).clicked()
+                });
             }
             State::Working(_, Some(progress)) => {
                 ui.add(egui::ProgressBar::new(progress.fraction()).show_percentage());
@@ -764,29 +766,29 @@ impl Updater {
 
     pub fn settings(&mut self, ui: &mut egui::Ui) {
         let can_check = !self.busy();
-        crate::ui::page_section(ui, "Updates");
+        crate::ui::page_section(ui, t!("settings.updates"));
         ui.add_enabled_ui(can_check, |ui| {
             let changed = crate::ui::toggle_row(
                 ui,
                 &mut self.settings.automatic,
-                "Check automatically",
-                "Looks for a new version when RustTalk starts and every few hours.",
+                t!("update.automatic"),
+                t!("update.automatic_help"),
             )
             .changed();
-            let url = crate::ui::setting_row(
-                ui,
-                "Update address",
-                "Where RustTalk looks for new versions.",
-                |ui| {
+            let url =
+                crate::ui::setting_row(ui, t!("update.address"), t!("update.address_help"), |ui| {
                     ui.add(
                         crate::ui::field(&mut self.settings.url)
-                            .hint_text("HTTPS update URL")
+                            .hint_text(t!("update.address_hint"))
                             .desired_width(280.0),
                     )
-                },
-            );
+                });
             url.widget_info(|| {
-                egui::WidgetInfo::labeled(egui::accesskit::Role::TextInput, true, "Update address")
+                egui::WidgetInfo::labeled(
+                    egui::accesskit::Role::TextInput,
+                    true,
+                    t!("update.address"),
+                )
             });
             if url.changed() && self.available() {
                 self.state = State::Idle;
@@ -794,7 +796,7 @@ impl Updater {
             let check = ui
                 .add_enabled_ui(
                     self.target.is_ok() && !self.settings.url.trim().is_empty(),
-                    |ui| crate::ui::secondary(ui, "Check now"),
+                    |ui| crate::ui::secondary(ui, t!("update.check_now")),
                 )
                 .inner
                 .clicked();
@@ -818,20 +820,22 @@ impl Updater {
                 ui.add(egui::ProgressBar::new(progress.fraction()).show_percentage());
             }
             State::Available(update) => {
-                if crate::ui::primary(ui, &format!("Update to v{}", update.version)).clicked() {
+                if crate::ui::primary(ui, &t!("update.update_to", version = update.version))
+                    .clicked()
+                {
                     self.asking = true;
                 }
             }
             State::Current => {
-                ui.label("RustTalk is up to date.");
+                ui.label(t!("update.up_to_date"));
             }
             #[cfg(target_os = "linux")]
             State::Installed(version, _) => {
-                ui.label(format!("RustTalk {version} installed. Restarting."));
+                ui.label(t!("update.installed", version = version));
             }
             #[cfg(target_os = "windows")]
             State::InstallerStarted(version) => {
-                ui.label(format!("Starting RustTalk {version} installer."));
+                ui.label(t!("update.installer", version = version));
             }
             State::Failed(error) => {
                 ui.label(error);

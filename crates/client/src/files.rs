@@ -216,7 +216,7 @@ impl Files {
                     .into_iter()
                     .collect(),
                 (None, None) if pictures => rfd::FileDialog::new()
-                    .add_filter("Pictures", &["png", "jpg", "jpeg", "gif"])
+                    .add_filter(t!("files.pictures"), &["png", "jpg", "jpeg", "gif"])
                     .pick_file()
                     .into_iter()
                     .collect(),
@@ -326,13 +326,13 @@ fn show_in_folder(path: &Path) -> io::Result<()> {
     open::that_detached(path.parent().unwrap_or(path))
 }
 
-/// "Show in folder" and "Open" for a file saved on this device.
+/// t!("files.show_in_folder") and "Open" for a file saved on this device.
 fn saved_menu(response: &Response, path: &Path) {
     ui::context_menu(response, |m| {
-        if m.item("🗁", "Show in folder").clicked() {
+        if m.item("🗁", t!("files.show_in_folder")).clicked() {
             open(path, true);
         }
-        if m.item("↗", "Open").clicked() {
+        if m.item("↗", t!("notify.open")).clicked() {
             open(path, false);
         }
     });
@@ -346,14 +346,14 @@ pub fn stage(chat: &mut Chat, paths: Vec<PathBuf>) -> Option<String> {
         let size = match fs::metadata(&path) {
             Ok(meta) if meta.is_file() => meta.len(),
             _ => {
-                problem = Some(format!("Couldn't open {name}."));
+                problem = Some(t!("files.open_failed", name = name));
                 continue;
             }
         };
         if size > MAX_FILE {
-            problem = Some(format!("{name} is too big. Files can be up to 32 MB."));
+            problem = Some(t!("files.too_big", name = name));
         } else if chat.staged.len() >= MAX_FILES {
-            problem = Some(format!("You can send up to {MAX_FILES} files at once."));
+            problem = Some(t!("files.too_many", max = MAX_FILES));
         } else {
             chat.staged.push(Staged { path, name, size });
         }
@@ -364,10 +364,10 @@ pub fn stage(chat: &mut Chat, paths: Vec<PathBuf>) -> Option<String> {
 pub fn size(bytes: u64) -> String {
     let bytes = bytes as f64;
     match bytes {
-        b if b >= 1e9 => format!("{:.1} GB", b / 1e9),
-        b if b >= 1e6 => format!("{:.1} MB", b / 1e6),
+        b if b >= 1e9 => format!("{} GB", crate::i18n::number(b / 1e9, 1)),
+        b if b >= 1e6 => format!("{} MB", crate::i18n::number(b / 1e6, 1)),
         b if b >= 1e3 => format!("{:.0} KB", b / 1e3),
-        b => format!("{b} bytes"),
+        b => t!("files.bytes", count = b),
     }
 }
 
@@ -383,7 +383,7 @@ pub fn staged(ui: &mut Ui, chat: &mut Chat) {
                 .show(ui, |ui| {
                     ui.label(format!("📎 {}", file.name));
                     ui.label(ui::caption(size(file.size)));
-                    if ui::small_close(ui, "Remove").clicked() {
+                    if ui::small_close(ui, t!("common.remove")).clicked() {
                         remove = Some(at);
                     }
                 });
@@ -439,7 +439,7 @@ pub fn attachments(
             }
             Picture::Gone => gone(ui, file),
             Picture::Failed => {
-                retry = ui::secondary(ui, "Couldn't load picture. Retry").clicked();
+                retry = ui::secondary(ui, t!("files.retry_picture")).clicked();
             }
         }
         if show {
@@ -461,7 +461,7 @@ pub fn attachments(
 
 fn gone(ui: &mut Ui, file: &Attachment) {
     ui.label(
-        RichText::new(format!("📄 {} · No longer available", file.name))
+        RichText::new(format!("📄 {}", t!("files.gone_named", name = file.name)))
             .weak()
             .italics(),
     );
@@ -513,18 +513,18 @@ fn download(ui: &mut Ui, files: &mut Files, address: &Url, file: &Attachment) {
             return;
         }
         Some(Saving::Done) => {
-            ui.weak("Saved");
+            ui.weak(t!("call.saved"));
         }
         Some(Saving::Gone) => {
-            ui.weak("No longer available");
+            ui.weak(t!("call.no_longer_available"));
             return;
         }
         Some(Saving::Failed) => {
-            ui::error_text(ui, Some("Couldn't save."));
+            ui::error_text(ui, Some(t!("files.save_failed")));
         }
         None => {}
     }
-    if ui::secondary(ui, "Download").clicked() {
+    if ui::secondary(ui, t!("files.download")).clicked() {
         files.ask(ui.ctx(), Ask::Save(address.clone(), file.clone()));
     }
 }
@@ -562,20 +562,20 @@ pub fn viewer(ctx: &egui::Context, files: &mut Files) {
                 ui.horizontal(|ui| {
                     ui.label(ui::bold(&file.name).color(ON_FILL));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        close = tool(ui, "×", "Close").clicked();
+                        close = tool(ui, "×", t!("common.close")).clicked();
                         ui.add_space(12.0);
-                        open_it = tool(ui, "↗", "Open in default app").clicked();
-                        if tool(ui, "⬇", "Save").clicked() {
+                        open_it = tool(ui, "↗", t!("files.open_default")).clicked();
+                        if tool(ui, "⬇", t!("common.save")).clicked() {
                             files.ask(ui.ctx(), Ask::Save(address.clone(), file.clone()));
                         }
                         let view = files.viewer.as_mut().expect("checked above");
-                        if tool(ui, "🔄", "Rotate").clicked() {
+                        if tool(ui, "🔄", t!("files.rotate")).clicked() {
                             view.turns = (view.turns + 1) % 4;
                         }
-                        if tool(ui, "➖", "Zoom out").clicked() {
+                        if tool(ui, "➖", t!("files.zoom_out")).clicked() {
                             view.zoom = (view.zoom / 1.25).max(0.25);
                         }
-                        if tool(ui, "➕", "Zoom in").clicked() {
+                        if tool(ui, "➕", t!("files.zoom_in")).clicked() {
                             view.zoom = (view.zoom * 1.25).min(8.0);
                         }
                         match files.saves.get(&file.file.id) {
@@ -583,10 +583,10 @@ pub fn viewer(ctx: &egui::Context, files: &mut Files) {
                                 ui.add(egui::ProgressBar::new(*done).desired_width(100.0));
                             }
                             Some(Saving::Done) => {
-                                ui.label(RichText::new("Saved").color(OVERLAY_TEXT));
+                                ui.label(RichText::new(t!("call.saved")).color(OVERLAY_TEXT));
                             }
                             Some(Saving::Failed) => {
-                                ui::error_text(ui, Some("Couldn't save."));
+                                ui::error_text(ui, Some(t!("files.save_failed")));
                             }
                             _ => {}
                         }
@@ -616,13 +616,10 @@ pub fn viewer(ctx: &egui::Context, files: &mut Files) {
                         });
                     }
                     Some(Picture::Gone) => {
-                        ui.label(RichText::new("No longer available").color(OVERLAY_TEXT));
+                        ui.label(RichText::new(t!("call.no_longer_available")).color(OVERLAY_TEXT));
                     }
                     Some(Picture::Failed) => {
-                        ui.label(
-                            RichText::new("Couldn't open this picture. You can still save it.")
-                                .color(OVERLAY_TEXT),
-                        );
+                        ui.label(RichText::new(t!("files.picture_failed")).color(OVERLAY_TEXT));
                     }
                     _ => {
                         ui.centered_and_justified(|ui| ui.spinner());

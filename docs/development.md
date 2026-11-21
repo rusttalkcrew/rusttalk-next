@@ -133,6 +133,22 @@ native dialog on the desktop.
 Debug builds open a console on Windows; release builds do not, so check
 `rusttalk.log` for startup errors there.
 
+### Translations
+
+Every text the app shows comes from `crates/client/locales/<lang>.txt`
+(English, Deutsch, Nederlands, 日本語), built into the binary. In code, write
+`t!("area.key")`, `t!("area.key", name = value)` for `{name}` placeholders, or
+`t!("area.key", count = n)` to pick `area.key.one` / `area.key.other`. Add the
+English text to `en.txt` and the same key to every other file; `make test`
+fails when code uses a key `en.txt` lacks, a language misses a key, or
+placeholders differ between languages.
+Never build a sentence from translated pieces: give the whole sentence a key
+with placeholders. User content, server and channel names, logs and protocol
+strings stay untranslated. Settings → Appearance → Language picks the
+language ("System default" follows the computer, else English); the choice is
+a synced setting. Japanese glyphs come from a bundled Noto Sans CJK subset
+(JIS X 0208, about 1.5 MB).
+
 ## Checks
 
 - `make lint`: clippy with warnings as errors, plus `rustfmt --check`.

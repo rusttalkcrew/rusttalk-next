@@ -35,6 +35,8 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 rusttalk-core = { path = "../core", features = ["client", "voice", "capture"] }
 semver = "1"
 serde = { version = "1", features = ["derive"] }
+# The computer's language, for the "System" language choice (already used by eframe).
+sys-locale = "0.3"
 serde_json = "1"
 sha2 = "0.10"
 tar = { version = "0.4", default-features = false }
