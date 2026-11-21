@@ -169,9 +169,64 @@ async fn docker_keys(
     )?;
     println!("W06 owner uploaded encrypted server, category, channel, topic and display names");
 
-    let (_, link) = invite(a, secrets).await?;
+    let (invite_id, link) = invite(a, secrets).await?;
     assert_eq!(invite_name(bot, &link).await?.as_deref(), Some(SERVER_NAME));
     println!("W06 B decrypted the server name from its invite before sign-in");
+    let listed: Value = a
+        .request(Method::GET, "/v1/invites")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let row = listed
+        .as_array()
+        .and_then(|rows| rows.iter().find(|row| row["id"] == invite_id.as_str()))
+        .context("new invite not listed")?;
+    assert_eq!(
+        row["created_by"],
+        encode(a.identity.certificate.person_id()).as_str()
+    );
+    assert_eq!(row["remaining_uses"], 1);
+    assert!(row.get("code").is_none());
+    println!("#68 the owner listed its invite with creator and uses, without the code");
+
+    // Edit a named custom role: new flags and a new encrypted name in one change.
+    let role_id = encode(&[68; 16]);
+    let first = a.encrypt_metadata(Metadata::RoleName, role_id.as_bytes(), b"Hosts")?;
+    a.request(Method::POST, "/v1/roles")
+        .json(&json!({"id": role_id, "rank": 5, "permissions": ["invite"], "name_ct": first}))
+        .send()
+        .await?
+        .error_for_status()?;
+    let renamed = a.encrypt_metadata(Metadata::RoleName, role_id.as_bytes(), b"Event hosts")?;
+    a.request(Method::PUT, &format!("/v1/roles/{role_id}"))
+        .json(&json!({"permissions": ["kick", "manage_channels"], "name_ct": renamed}))
+        .send()
+        .await?
+        .error_for_status()?;
+    let roles: Value = a
+        .request(Method::GET, "/v1/roles")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let role = roles["roles"]
+        .as_array()
+        .and_then(|rows| rows.iter().find(|row| row["id"] == role_id.as_str()))
+        .context("edited role missing")?;
+    assert_eq!(role["permissions"], json!(["kick", "manage_channels"]));
+    let name = role["name_ct"].as_str().context("role name missing")?;
+    assert_eq!(
+        a.decrypt_metadata(Metadata::RoleName, role_id.as_bytes(), name)?,
+        b"Event hosts"
+    );
+    a.request(Method::DELETE, &format!("/v1/roles/{role_id}"))
+        .send()
+        .await?
+        .error_for_status()?;
+    println!("#68 the owner edited a custom role's flags and encrypted name");
 
     let (_, b_identity) = DeviceIdentity::create(DEVICE_NAME)?;
     let b_token = session(bot.sign_in(&b_identity, Some(&link.code)).await?, secrets).await?;

@@ -31,6 +31,12 @@ pub enum Admin {
         permissions: Vec<&'static str>,
     },
     RenameRole(String, String),
+    /// A custom role's new name and permissions.
+    EditRole {
+        id: String,
+        name: String,
+        permissions: Vec<&'static str>,
+    },
     DeleteRole(String),
     DefaultRole(String),
     /// Channel, role and its read/write/speak/video flags there.
@@ -39,6 +45,8 @@ pub enum Admin {
     Audit(Option<String>),
     /// Open joining on or off, with a member limit.
     Joining(bool, u32),
+    /// Active invites, as far as this person may see them.
+    Invites,
     RevokeInvite(String),
     /// Replace the server icon (PNG, JPEG or GIF bytes).
     SetIcon(Vec<u8>),
@@ -67,6 +75,14 @@ pub struct Ban {
     pub network: bool,
 }
 
+pub struct Invite {
+    pub id: String,
+    /// Unknown for invites made before the server recorded it.
+    pub creator: Option<Id>,
+    pub uses: i64,
+    pub expires_at: i64,
+}
+
 pub struct AuditEntry {
     pub actor: Id,
     pub action: String,
@@ -78,6 +94,8 @@ pub enum AdminUpdate {
     Bans(Vec<Ban>),
     /// Newest first.
     Audit(Vec<AuditEntry>),
+    /// Soonest to expire first.
+    Invites(Vec<Invite>),
     Joining(bool, u32),
     /// Whether the server is listed, and the saved details.
     Listing(bool, Option<PublicListing>),
@@ -99,6 +117,7 @@ pub(super) async fn run(
 ) {
     let send = |update| ctx.send(Update::Admin(url.clone(), update));
     let bans_changed = matches!(request, Admin::Ban(..) | Admin::Unban(_));
+    let invites_changed = matches!(request, Admin::RevokeInvite(_));
     let result = match request {
         Admin::Load {
             joining,
@@ -115,6 +134,13 @@ pub(super) async fn run(
             match get(client, "/v1/settings/public-listing").await {
                 Ok(value) => send(listing(&value)),
                 Err(error) => send(AdminUpdate::Failed(failed(&error))),
+            }
+            return;
+        }
+        Admin::Invites => {
+            match invites(client).await {
+                Ok(list) => send(AdminUpdate::Invites(list)),
+                Err(text) => send(AdminUpdate::Failed(text)),
             }
             return;
         }
@@ -170,6 +196,19 @@ pub(super) async fn run(
                 )
                 .await
                 .map(|()| "Role renamed.")
+            }
+            Err(text) => Err(text),
+        },
+        Admin::EditRole {
+            id,
+            name,
+            permissions,
+        } => match name_ct(client, &id, &name) {
+            Ok(name_ct) => {
+                let body = json!({"permissions": permissions, "name_ct": name_ct});
+                call(client, Method::PUT, &format!("/v1/roles/{id}"), Some(body))
+                    .await
+                    .map(|()| "Role saved.")
             }
             Err(text) => Err(text),
         },
@@ -240,6 +279,12 @@ pub(super) async fn run(
                     Err(text) => send(AdminUpdate::Failed(text)),
                 }
             }
+            if invites_changed {
+                match invites(client).await {
+                    Ok(list) => send(AdminUpdate::Invites(list)),
+                    Err(text) => send(AdminUpdate::Failed(text)),
+                }
+            }
         }
         Err(text) => send(AdminUpdate::Failed(text)),
     }
@@ -300,6 +345,25 @@ async fn bans(client: &KeyClient<'_>) -> Result<Vec<Ban>, String> {
                 person: decode(row["person_id"].as_str()?).ok()?,
                 at: row["banned_at"].as_i64()?,
                 network: row["ban_ip"].as_bool().unwrap_or_default(),
+            })
+        })
+        .collect())
+}
+
+async fn invites(client: &KeyClient<'_>) -> Result<Vec<Invite>, String> {
+    let rows = get(client, "/v1/invites")
+        .await
+        .map_err(|error| failed(&error))?;
+    Ok(rows
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|row| {
+            Some(Invite {
+                id: row["id"].as_str()?.to_owned(),
+                creator: row["created_by"].as_str().and_then(|id| decode(id).ok()),
+                uses: row["remaining_uses"].as_i64()?,
+                expires_at: row["expires_at"].as_i64()?,
             })
         })
         .collect())

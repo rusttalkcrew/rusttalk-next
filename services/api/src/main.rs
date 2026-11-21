@@ -12,6 +12,8 @@ mod presence;
 mod roles;
 mod store;
 mod sync;
+#[cfg(test)]
+mod testing;
 mod voice;
 
 use std::{
@@ -292,7 +294,7 @@ async fn serve(app: App) -> io::Result<()> {
             put(channels::update_category).delete(channels::delete_category),
         )
         .route("/v1/me/revocations", post(auth::revoke))
-        .route("/v1/invites", post(members::invite))
+        .route("/v1/invites", get(members::invites).post(members::invite))
         .route("/v1/invites/{id}", delete(members::revoke_invite))
         .route("/v1/members/{person}", delete(members::kick))
         .route("/v1/members/{person}/roles", put(roles::assign))
@@ -302,7 +304,7 @@ async fn serve(app: App) -> io::Result<()> {
         )
         .route("/v1/roles", get(roles::list).post(roles::create))
         .route("/v1/roles/default", put(roles::set_default))
-        .route("/v1/roles/{id}", delete(roles::delete))
+        .route("/v1/roles/{id}", put(roles::edit).delete(roles::delete))
         .route("/v1/roles/{id}/name", put(roles::rename))
         .route("/v1/owner", put(roles::transfer))
         .route("/v1/bans", get(members::bans))

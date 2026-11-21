@@ -170,9 +170,10 @@ pub async fn invite(
         return Err(ApiError::bad_request("invite_name_required"));
     }
     let (id, code) = create_invite(&mut tx, false, uses, expires_at).await?;
-    query("UPDATE invites SET space_key_ct = ?, name_ct = ? WHERE id = ?")
+    query("UPDATE invites SET space_key_ct = ?, name_ct = ?, created_by = ? WHERE id = ?")
         .bind(blob.as_slice())
         .bind(name)
+        .bind(actor.person.as_slice())
         .bind(&id)
         .execute(&mut *tx)
         .await?;
@@ -238,6 +239,50 @@ pub async fn preview(
     }))
 }
 
+#[derive(Debug, Serialize)]
+pub struct ActiveInvite {
+    id: String,
+    /// Null for invites made before creators were recorded.
+    created_by: Option<String>,
+    remaining_uses: i64,
+    expires_at: i64,
+}
+
+/// Active invites: your own, or everyone's with Manage server. Codes are stored hashed and
+/// never leave the server again.
+pub async fn invites(
+    State(app): State<App>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Vec<ActiveInvite>>> {
+    let (mut tx, actor) = authenticate(&app, &headers).await?;
+    let auth = roles::authority(&mut tx, &actor.person).await?;
+    auth.require(Permission::Invite)?;
+    let everyone = auth.require(Permission::ManageServer).is_ok();
+    let rows: Vec<(String, Option<Vec<u8>>, i64, i64)> = query_as(
+        "SELECT id, created_by, remaining_uses, expires_at FROM invites
+         WHERE is_owner = FALSE AND expires_at > ? AND (? OR created_by = ?)
+         ORDER BY expires_at, id",
+    )
+    .bind(actor.at)
+    .bind(everyone)
+    .bind(actor.person.as_slice())
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(Json(
+        rows.into_iter()
+            .map(
+                |(id, created_by, remaining_uses, expires_at)| ActiveInvite {
+                    id,
+                    created_by: metadata::encoded(created_by),
+                    remaining_uses,
+                    expires_at,
+                },
+            )
+            .collect(),
+    ))
+}
+
 pub async fn revoke_invite(
     State(app): State<App>,
     headers: HeaderMap,
@@ -245,16 +290,22 @@ pub async fn revoke_invite(
 ) -> ApiResult<StatusCode> {
     decode::<16>(&id)?;
     let (mut tx, actor) = authenticate(&app, &headers).await?;
-    roles::authority(&mut tx, &actor.person)
-        .await?
-        .require(Permission::Invite)?;
-    let result = query("DELETE FROM invites WHERE id = ? AND is_owner = FALSE")
+    let auth = roles::authority(&mut tx, &actor.person).await?;
+    auth.require(Permission::Invite)?;
+    let creator: Option<Option<Vec<u8>>> =
+        query_scalar("SELECT created_by FROM invites WHERE id = ? AND is_owner = FALSE")
+            .bind(&id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let creator = creator.ok_or(ApiError::not_found("invite_not_found"))?;
+    // Stopping someone else's invite (or an unattributed one) is a server-wide action.
+    if creator.as_deref() != Some(actor.person.as_slice()) {
+        auth.require(Permission::ManageServer)?;
+    }
+    query("DELETE FROM invites WHERE id = ?")
         .bind(&id)
         .execute(&mut *tx)
         .await?;
-    if result.rows_affected() == 0 {
-        return Err(ApiError::not_found("invite_not_found"));
-    }
     audit(
         &mut tx,
         &actor.person,
@@ -568,7 +619,75 @@ pub async fn audit_log(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::{app, as_person, person};
     use axum::{body::to_bytes, response::IntoResponse};
+
+    #[tokio::test]
+    async fn invites_list_and_revoke_own_or_with_manage_server() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let app = app(dir.path(), 3).await?;
+        // Person 2 may invite; person 3 has no role.
+        query(
+            "INSERT INTO roles (id, kind, rank, permissions) VALUES ('inviter', 'custom', 10, 1)",
+        )
+        .execute(&app.db)
+        .await?;
+        query("INSERT INTO member_roles (person_id, role_id) VALUES (?, 'inviter')")
+            .bind(person(2))
+            .execute(&app.db)
+            .await?;
+        let id = |byte: u8| encode(&[byte; 16]);
+        let at = now()?;
+        // Person 2's, person 1's, an unattributed one, the owner invite and an expired one.
+        for (byte, owner, creator, expires_at) in [
+            (1, false, Some(person(2)), at + 60),
+            (2, false, Some(person(1)), at + 120),
+            (3, false, None, at + 180),
+            (4, true, None, at + 60),
+            (5, false, Some(person(2)), at - 1),
+        ] {
+            query("INSERT INTO invites (id, code_hash, is_owner, remaining_uses, expires_at, created_by)
+                   VALUES (?, ?, ?, 3, ?, ?)")
+                .bind(id(byte)).bind(vec![byte; 32]).bind(owner).bind(expires_at).bind(creator)
+                .execute(&app.db).await?;
+        }
+        let listed = |who: u8| invites(State(app.clone()), as_person(who));
+        let ids = |list: Json<Vec<ActiveInvite>>| -> Vec<String> {
+            list.0.into_iter().map(|invite| invite.id).collect()
+        };
+        assert_eq!(listed(3).await.unwrap_err().code, "permission_denied");
+        let own = listed(2).await.unwrap();
+        assert_eq!(own.0[0].created_by, Some(encode(&person(2))));
+        assert_eq!(own.0[0].remaining_uses, 3);
+        assert_eq!(ids(own), [id(1)]);
+        assert_eq!(ids(listed(1).await.unwrap()), [id(1), id(2), id(3)]);
+
+        let revoke =
+            |who: u8, byte: u8| revoke_invite(State(app.clone()), as_person(who), Path(id(byte)));
+        for (who, byte, code) in [
+            (3, 1, "permission_denied"),
+            (2, 2, "permission_denied"),
+            (2, 3, "permission_denied"),
+            (1, 4, "invite_not_found"),
+        ] {
+            assert_eq!(
+                revoke(who, byte).await.unwrap_err().code,
+                code,
+                "{who} stopping {byte}"
+            );
+        }
+        assert_eq!(revoke(2, 1).await.unwrap(), StatusCode::NO_CONTENT);
+        assert_eq!(revoke(1, 2).await.unwrap(), StatusCode::NO_CONTENT);
+        assert_eq!(revoke(1, 3).await.unwrap(), StatusCode::NO_CONTENT);
+        assert_eq!(revoke(1, 1).await.unwrap_err().code, "invite_not_found");
+        assert!(ids(listed(1).await.unwrap()).is_empty());
+        let audited: i64 =
+            query_scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'invite_revoked'")
+                .fetch_one(&app.db)
+                .await?;
+        assert_eq!(audited, 3);
+        Ok(())
+    }
 
     #[tokio::test]
     async fn server_info_reports_version_protocol_and_admission() {

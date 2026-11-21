@@ -307,6 +307,65 @@ pub async fn rename(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(Deserialize)]
+pub struct RoleEdit {
+    permissions: Vec<Permission>,
+    /// Omitted keeps the current name.
+    name_ct: Option<String>,
+}
+
+pub async fn edit(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: Result<Json<RoleEdit>, JsonRejection>,
+) -> ApiResult<StatusCode> {
+    let RoleEdit {
+        permissions,
+        name_ct,
+    } = payload(body)?;
+    let permissions = permissions
+        .into_iter()
+        .fold(0, |mask, flag| mask | flag as i64);
+    let (mut tx, actor) = authenticate(&app, &headers).await?;
+    let auth = authority(&mut tx, &actor.person).await?;
+    auth.require(Permission::ManageRoles)?;
+    let role = by_id(&mut tx, &id).await?;
+    // The same checks as deleting the role and making it again: the actor must outrank it,
+    // hold what it grants now, and hold everything it will grant.
+    auth.can_grant(role.rank, role.permissions)?;
+    auth.can_grant(role.rank, permissions)?;
+    if role.kind != "custom" {
+        return Err(ApiError::forbidden("built_in_role"));
+    }
+    let name = match name_ct {
+        Some(name) => {
+            let epoch = keys::space_epoch(&mut tx, &app).await?;
+            Some(metadata::checked(Metadata::RoleName, epoch, name)?)
+        }
+        None => role.name_ct,
+    };
+    query("UPDATE roles SET permissions = ?, name_ct = ? WHERE id = ?")
+        .bind(permissions)
+        .bind(name)
+        .bind(&id)
+        .execute(&mut *tx)
+        .await?;
+    audit(
+        &mut tx,
+        &actor.person,
+        "role_changed",
+        None,
+        Some(&id),
+        actor.at,
+    )
+    .await?;
+    tx.commit().await?;
+    // Clients reload roles and their own permissions with the directory.
+    app.notify(rusttalk_core::keys::Event::ChannelChanged);
+    Ok(StatusCode::NO_CONTENT)
+}
+
 pub async fn delete(
     State(app): State<App>,
     headers: HeaderMap,
@@ -481,6 +540,86 @@ pub async fn transfer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        Change,
+        testing::{app, as_person, person},
+    };
+    use rusttalk_core::{keys::Event, presence::Update};
+
+    #[tokio::test]
+    async fn editing_a_role_follows_the_grant_rules() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let app = app(dir.path(), 3).await?;
+        // Person 2 manages roles and invites at rank 50; person 3 has no role.
+        for (id, rank, permissions) in [
+            ("lead", 50, 9),
+            ("low", 10, 1),
+            ("high", 60, 0),
+            ("kickers", 10, 2),
+        ] {
+            query("INSERT INTO roles (id, kind, rank, permissions) VALUES (?, 'custom', ?, ?)")
+                .bind(id)
+                .bind(rank)
+                .bind(permissions)
+                .execute(&app.db)
+                .await?;
+        }
+        query("INSERT INTO member_roles (person_id, role_id) VALUES (?, 'lead')")
+            .bind(person(2))
+            .execute(&app.db)
+            .await?;
+        let edit_as = |who: u8, id: &str, permissions: &[Permission]| {
+            edit(
+                State(app.clone()),
+                as_person(who),
+                Path(id.to_owned()),
+                Ok(Json(RoleEdit {
+                    permissions: permissions.to_vec(),
+                    name_ct: None,
+                })),
+            )
+        };
+        let mut events = app.changes.subscribe();
+        for (who, id, permissions, code) in [
+            (3, "low", &[Permission::Invite][..], "permission_denied"),
+            // Granting a permission you don't have.
+            (2, "low", &[Permission::Ban], "cannot_grant_permission"),
+            // Taking away a permission you don't have.
+            (2, "kickers", &[], "cannot_grant_permission"),
+            // A role at or above your own.
+            (2, "high", &[], "role_hierarchy"),
+            (2, "lead", &[Permission::Invite], "role_hierarchy"),
+            (1, "moderator", &[], "built_in_role"),
+            (1, "member", &[Permission::Invite], "built_in_role"),
+            (1, "missing", &[], "role_not_found"),
+        ] {
+            let refused = edit_as(who, id, permissions).await.unwrap_err();
+            assert_eq!(refused.code, code, "{who} editing {id}");
+        }
+        assert!(events.try_recv().is_err(), "refusals change nothing");
+
+        let saved = edit_as(2, "low", &[Permission::Invite, Permission::ManageRoles]).await;
+        assert_eq!(saved.unwrap(), StatusCode::NO_CONTENT);
+        let saved = edit_as(1, "kickers", &[Permission::ManageServer]).await;
+        assert_eq!(saved.unwrap(), StatusCode::NO_CONTENT);
+        let stored: Vec<(String, i64)> = query_as(
+            "SELECT id, permissions FROM roles WHERE id IN ('low', 'kickers') ORDER BY id",
+        )
+        .fetch_all(&app.db)
+        .await?;
+        assert_eq!(stored, [("kickers".into(), 128), ("low".into(), 9)]);
+        let audited: i64 = query_scalar(
+            "SELECT COUNT(*) FROM audit_log WHERE action = 'role_changed' AND target_id = 'low'",
+        )
+        .fetch_one(&app.db)
+        .await?;
+        assert_eq!(audited, 1);
+        assert!(matches!(
+            events.try_recv(),
+            Ok(Change::Update(Update::Event(Event::ChannelChanged)))
+        ));
+        Ok(())
+    }
 
     #[test]
     fn hierarchy_protects_owner_and_peers_and_caps_grants() {
