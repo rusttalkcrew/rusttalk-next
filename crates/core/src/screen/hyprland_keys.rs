@@ -208,8 +208,9 @@ impl Binds {
             {
                 return false;
             }
-            // Older IPC omits the ignore-mods flag. A reported trigger may match any modifier mask.
-            if bind.ignore_mods == Some(false) && bind.modmask != mods {
+            // Hyprland's JSON omits the ignore-mods flag. Binds need exact modifiers unless
+            // explicitly flagged (Hyprland's default), so a flagged bind can't be detected then.
+            if bind.ignore_mods != Some(true) && bind.modmask != mods {
                 return false;
             }
             bind.catch_all || trigger(bind)
@@ -391,8 +392,14 @@ mod tests {
         let resize = fixture("resize");
         assert!(resize.allows(&state, &held, &[], Some((18, true))));
         assert!(!resize.allows(&state, &held, &[], Some((19, true))));
+        // A universal bind without the ignore-mods flag needs its exact modifiers.
         let state = xkb::State::new(&keymap(None));
-        assert!(!resize.allows(&state, &BTreeSet::new(), &[], Some((48, true))));
+        assert!(resize.allows(&state, &BTreeSet::new(), &[], Some((48, true))));
+        let flagged = include_str!("fixtures/binds.json").replace(
+            r#""catch_all": false}"#,
+            r#""catch_all": false, "ignore_mods": true}"#,
+        );
+        assert!(!binds("resize", &flagged).allows(&state, &BTreeSet::new(), &[], Some((48, true))));
     }
 
     #[test]
@@ -405,16 +412,26 @@ mod tests {
 
     #[test]
     fn a_display_key_fills_an_opaque_json_bind() {
-        let opaque = r#"[{"modmask":64,"key":"","keycode":0,"submap":"","submap_universal":"false","catch_all":false}]"#;
+        let opaque = r#"[{"modmask":4,"key":"","keycode":0,"submap":"","submap_universal":"false","catch_all":false}]"#;
         let mut binds = binds("default", opaque);
         assert!(binds.needs_display_keys());
-        let reply = "bindd\n\tmodmask: 64\n\tsubmap: \n\tkey: SUPER + code:10\n\tkeycode: 0\n\tcatchall: false\n";
-        assert!(binds.fill_display_keys(&reply.replace("64", "4")).is_none());
+        let reply = "bindd\n\tmodmask: 4\n\tsubmap: \n\tkey: CTRL + code:10\n\tkeycode: 0\n\tcatchall: false\n";
+        assert!(
+            binds
+                .fill_display_keys(&reply.replace("modmask: 4", "modmask: 5"))
+                .is_none()
+        );
         binds.fill_display_keys(reply).unwrap();
         assert!(!binds.needs_display_keys());
-        let state = xkb::State::new(&keymap(None));
-        assert!(!binds.allows(&state, &BTreeSet::new(), &[], Some((2, true))));
-        assert!(binds.allows(&state, &BTreeSet::new(), &[], Some((3, true))));
+        let state = pressed(&keymap(None), &[29]);
+        assert!(!binds.allows(&state, &[29].into(), &[], Some((2, true))));
+        assert!(binds.allows(
+            &xkb::State::new(&keymap(None)),
+            &BTreeSet::new(),
+            &[],
+            Some((2, true))
+        ));
+        assert!(binds.allows(&state, &[29].into(), &[], Some((3, true))));
     }
 
     #[test]
@@ -445,6 +462,19 @@ mod tests {
         assert!(drag.allows(&idle, &BTreeSet::new(), &[], Some((29, true))));
         assert!(!drag.allows(&idle, &BTreeSet::new(), &left, Some((29, true))));
         assert!(!drag.allows(&ctrl, &[29].into(), &left, None));
+
+        // Hyprland's JSON has no ignore-mods flag: SUPER + mouse:272 (bindm movewindow)
+        // must leave plain clicks alone, while Super itself stays blocked for keys.
+        let unflagged =
+            |modmask: u8, key: &str| bind(modmask, key).replace(r#","ignore_mods":false"#, "");
+        let window = binds("default", &unflagged(64, "mouse:272"));
+        assert!(window.allows_pointer(&idle, &left));
+        assert!(!window.allows_pointer(&pressed(&us, &[125]), &left));
+        assert!(!window.allows(&idle, &BTreeSet::new(), &[], Some((125, true))));
+        assert!(!binds("default", &unflagged(0, "mouse:272")).allows_pointer(&idle, &left));
+        let scroll = binds("default", &unflagged(4, "mouse_down"));
+        assert!(scroll.allows_pointer(&idle, &wheel));
+        assert!(!scroll.allows_pointer(&ctrl, &wheel));
 
         let catch_all = r#"[{"modmask":0,"key":"","keycode":0,"submap":"","submap_universal":"false","catch_all":true,"ignore_mods":false}]"#;
         assert!(!binds("default", catch_all).allows_pointer(&idle, &right));

@@ -715,9 +715,11 @@ direction, with the virtual keyboard's modifiers, including release, click
 and drag binds and `bindm`. Catch-all binds in the active submap block
 pointer input too. A new modifier is checked against held buttons, and held
 buttons are rechecked with held keys. RustTalk cross-checks the text bind
-list for triggers omitted from JSON. If the compositor omits the flag that
-says whether modifiers are required, RustTalk conservatively blocks that
-trigger, key or pointer, in the relevant submap. Super, Logo and Mod4,
+list for triggers omitted from JSON. Hyprland's JSON bind list omits the
+flag that says a bind ignores modifiers, so RustTalk assumes Hyprland's
+default: a bind fires only with exactly its modifiers. A bind explicitly
+flagged to ignore modifiers is not detected and can still fire with other
+modifiers held. Super, Logo and Mod4,
 including remapped keys, and Ctrl+Alt with Delete or a function key are
 blocked. VT switch keysyms (`XF86Switch_VT_1` to `XF86Switch_VT_12`),
 `Terminate_Server` and the other server-private `XF86` keysyms that the
