@@ -230,8 +230,8 @@ pub enum Update {
         at_start: Option<bool>,
     },
     Deleted(Url, Id, Id),
-    /// A deleted DM copy is missing from this server: server and message.
-    CopyGone(Url, Id),
+    /// A deleted DM copy is missing: server, DM channel and message.
+    CopyGone(Url, Id, Id),
     /// Loading a page of a channel failed; `true` when its cursor is gone from the server.
     PageFailed(Url, Id, bool),
     /// A new message in any readable channel or DM, for unread marks and notifications.
@@ -1027,7 +1027,7 @@ async fn on_event(
         }
         Event::KeysNeeded(_) => {
             // Key work may have re-keyed a DM.
-            save_pins(ctx, client, state);
+            save_pins(ctx, url, client, state);
             // Names stay unreadable until the space key arrives, which can be after the first load.
             if !state.named && client.has_space_key() {
                 directory(ctx, url, client, state).await?;
@@ -1118,8 +1118,11 @@ async fn on_command(
             // The other person re-keyed the DM just now: take the new key and send
             // once more, whatever this was (text, sticker, file or friend message).
             if draft.peer.is_some() && sent.as_ref().is_err_and(files::conflict) {
-                client.sync().await?;
-                sent = files::send(ctx, url, client, target, body, files).await;
+                // A failed key sync still puts the draft back below.
+                sent = match client.sync().await {
+                    Ok(()) => files::send(ctx, url, client, target, body, files).await,
+                    Err(error) => Err(error),
+                };
             }
             if !matches!(sent, Ok(true)) {
                 ctx.send(Update::Unsent(url.clone(), draft));
@@ -1131,7 +1134,7 @@ async fn on_command(
             if let Err(error) = client.message(&channel, &id).await
                 && files::gone(&error)
             {
-                ctx.send(Update::CopyGone(url.clone(), id));
+                ctx.send(Update::CopyGone(url.clone(), channel, id));
             }
         }
         Command::Delete(channel, id, sender, blobs) => {
@@ -1342,7 +1345,7 @@ fn load_pins(data: &Path, server_id: &Id) -> Option<HashMap<Id, DmPin>> {
 }
 
 /// Save the DM pins when they changed. Never over a file that couldn't be read.
-fn save_pins(ctx: &Ctx, client: &KeyClient<'_>, state: &mut State) {
+fn save_pins(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, state: &mut State) {
     if state.pins_lost || *client.dms() == state.pins_saved {
         return;
     }
@@ -1364,7 +1367,14 @@ fn save_pins(ctx: &Ctx, client: &KeyClient<'_>, state: &mut State) {
         .and_then(|()| rusttalk_core::client::save_json(&ctx.data, &path, &pins));
     match saved {
         Ok(()) => state.pins_saved = client.dms().clone(),
-        Err(error) => tracing::warn!(error = %format_args!("{error:#}"), "saving DM pins failed"),
+        // A pin that isn't kept would be trusted afresh next time: pause DMs here.
+        Err(error) => {
+            tracing::warn!(error = %format_args!("{error:#}"), "saving DM pins failed");
+            client.pause_dms();
+            state.pins_lost = true;
+            let server = url.host_str().unwrap_or(t!("net.a_server"));
+            ctx.send(Update::Failed(t!("net.dm_pins_unsaved", server = server)));
+        }
     }
 }
 

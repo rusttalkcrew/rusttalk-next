@@ -74,11 +74,11 @@ pub enum Edit {
     Setting(String, Value),
     /// A friend, by hex person ID (see `friends`).
     Contact(String, Value),
-    /// One of this person's DM messages, deleted, and servers that may hold a copy.
+    /// One of this person's DM messages, deleted, and copies (`dm::copy`) that may remain.
     /// Added to the other deletes rather than replacing them.
-    DeletedDm([u8; 32], Vec<Url>),
-    /// That server's copy of a deleted DM message is gone.
-    DmCopyGone([u8; 32], Url),
+    DeletedDm([u8; 32], Vec<String>),
+    /// That copy (`dm::copy`) of a deleted DM message is gone.
+    DmCopyGone([u8; 32], String),
 }
 
 impl Edit {
@@ -346,7 +346,8 @@ mod tests {
 
     #[test]
     fn deletes_published_to_different_servers_both_stay() {
-        let url = |n: u8| -> Url { format!("https://10.0.0.{n}/").parse().unwrap() };
+        let url =
+            |n: u8| crate::dm::copy(&format!("https://10.0.0.{n}/").parse().unwrap(), &[n; 32]);
         // Device A deleted X while only server 1 was reachable, device B deleted Y
         // while only server 2 was; both published, so neither has a pending edit.
         let mut a = State::default();

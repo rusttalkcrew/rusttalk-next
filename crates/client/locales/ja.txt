@@ -683,6 +683,7 @@ app.recovery_words = 復元ワード
 app.sign_in = サインイン
 
 # crates/client/src/net.rs
+net.dm_pins_unsaved = {server} のDMは一時停止中です: 相手の記録をこのデバイスに保存できませんでした。
 net.dm_not_private = {server} 経由では送信していません: そこでは他の人がこのDMを読める可能性があります。
 net.server_changed = このサーバーは変更されています。オーナーから事前に知らされていない限り、続行しないでください。
 net.sync_conflict = あなたの別のデバイスは {server} について異なる鍵を信頼しています。サーバーのオーナーに確認してください。

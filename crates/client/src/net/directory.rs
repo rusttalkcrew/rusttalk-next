@@ -203,7 +203,7 @@ pub(super) async fn directory(
         }
         kept
     });
-    super::save_pins(ctx, client, state);
+    super::save_pins(ctx, url, client, state);
     state.pictures = pictures;
     if let Some(before) = &state.last {
         for (person, action, detail) in changes(before, &dir) {

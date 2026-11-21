@@ -686,6 +686,7 @@ app.recovery_words = Recovery words
 app.sign_in = Sign in
 
 # crates/client/src/net.rs
+net.dm_pins_unsaved = DMs on {server} are paused: this device couldn't save who they are with.
 net.dm_not_private = Not sent over {server}: someone else could read this DM there.
 net.server_changed = This server changed. Don't continue unless the owner told you it would.
 net.sync_conflict = Your other device trusts a different key for {server}. Check with the server owner.

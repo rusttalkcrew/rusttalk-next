@@ -110,6 +110,22 @@ HMAC-SHA256 keyed by the epoch key over these bytes.
 scope_id (32 bytes) || epoch (8 bytes, big endian)
 ```
 
+A DM epoch's commitment also names its two people, so a key made for one pair
+can't pass as another pair's. The person IDs are sorted bytewise.
+
+```text
+"rusttalk-dm-key-commit-v1" || server_id (32 bytes) || kind (1 byte) ||
+scope_id (32 bytes) || epoch (8 bytes, big endian) || person_low (32 bytes) ||
+person_high (32 bytes)
+```
+
+The API stores and signs over the commitment without reading it, so it needs
+no change. A receiving app checks the commitment against the people its pin
+names. A DM epoch with the plain commitment, from an app before pair binding,
+stays readable but is never trusted for sending or wrapped to anyone; the app
+re-keys instead. Apps before pair binding reject DM keys with the new
+commitment, so a DM works only once both people are on this version.
+
 ### Envelopes
 
 Use [RFC 9180](https://www.rfc-editor.org/rfc/rfc9180.html) base mode
@@ -296,7 +312,13 @@ read: list a channel with that person as the DM, or ask honest apps to wrap
 the DM key to that person's device. The app pins each DM channel to the person
 it was first listed with and doesn't use it if the server relabels it. For a
 pinned DM it accepts an epoch key only from, and wraps it only to, a
-root-certified device of one of the two people.
+root-certified device of one of the two people, and it wraps a DM key only
+when its commitment names the pinned pair. If a dishonest server gives two
+devices of one person different pins for the same channel, a device can't
+take a key made for the other pair, so it can't pass it on to the person its
+own pin names. Asked for a DM it already has, the server may answer with a
+channel pinned to someone else; the app then reports an error and doesn't
+use that channel.
 
 A key from before the pin may already be held by others, for example when the
 channel was an ordinary channel before. An epoch number doesn't show that a
@@ -321,7 +343,10 @@ the app trusts a DM epoch only through a chain of keys:
 The app sends a message, friend message or live-file offer to a DM copy only
 when its current epoch is trusted this way and its key came from one of the
 two people. In a DM it takes a live-file acceptance only from a certified
-device of the other person and accepts an offer only from one of the two. If
+device of the pinned other person and accepts an offer only from one of the
+two. A failed recovery (no link found, a re-key refused or raced) is tried
+again later, waiting longer each time, rather than once per session. If the
+pins can't be saved, the app pauses that server's DMs. If
 the saved pins can't be read, the app blocks that server's DMs, including new
 ones, instead of pinning them again from the server's catalog. Either person
 can start a DM epoch at any time, so either can disrupt delivery by re-keying

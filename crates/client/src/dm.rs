@@ -43,6 +43,12 @@ const KEEP_RESOLVED: usize = 1_000;
 /// Every delete stays in this device's own copy (`dm_deleted.json`) regardless.
 pub const SYNC_BUDGET: usize = 64 * 1024;
 
+/// A delete's copy: the server and the DM channel there, so a 404 in another DM
+/// on that server under the same ID can't count as this one being gone.
+pub fn copy(server: &Url, channel: &Id) -> String {
+    format!("{server} {}", rusttalk_core::auth::encode(channel))
+}
+
 /// This person's deleted DM messages, oldest first, synced between their devices.
 /// Each merges as a set, so two devices deleting on different servers keep both.
 #[derive(Clone, Default, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -52,10 +58,10 @@ pub struct Tombstones(Vec<Tombstone>);
 pub struct Tombstone {
     #[serde(with = "base64_id")]
     id: Id,
-    /// Servers that may still hold a copy.
-    left: BTreeSet<Url>,
-    /// Servers whose copy is gone.
-    done: BTreeSet<Url>,
+    /// Copies (`copy`: server and DM channel) that may still be there.
+    left: BTreeSet<String>,
+    /// Copies that are gone.
+    done: BTreeSet<String>,
 }
 
 impl Tombstones {
@@ -68,7 +74,7 @@ impl Tombstones {
     }
 
     /// Record a delete, or more servers that may hold a copy. `false` when nothing changed.
-    pub fn add(&mut self, id: Id, servers: impl IntoIterator<Item = Url>) -> bool {
+    pub fn add(&mut self, id: Id, copies: impl IntoIterator<Item = String>) -> bool {
         let before = self.clone();
         let at = match self.0.iter().position(|stone| stone.id == id) {
             Some(at) => at,
@@ -82,19 +88,19 @@ impl Tombstones {
             }
         };
         let stone = &mut self.0[at];
-        stone.left.extend(servers);
+        stone.left.extend(copies);
         stone.left.retain(|server| !stone.done.contains(server));
         self.compact();
         *self != before
     }
 
     /// A server's copy is gone. `false` when that changes nothing or isn't a delete of mine.
-    pub fn gone(&mut self, id: &Id, server: &Url) -> bool {
+    pub fn gone(&mut self, id: &Id, copy: &str) -> bool {
         let Some(stone) = self.0.iter_mut().find(|stone| stone.id == *id) else {
             return false;
         };
-        stone.left.remove(server);
-        let changed = stone.done.insert(server.clone());
+        stone.left.remove(copy);
+        let changed = stone.done.insert(copy.to_owned());
         self.compact();
         changed
     }
@@ -567,7 +573,7 @@ mod tests {
     fn my_deletes_hide_every_copy_and_survive_a_restart() {
         let (a, b) = (server(1), server(2));
         let mut deleted = Tombstones::default();
-        deleted.add([1; 32], [a.clone()]);
+        deleted.add([1; 32], [copy(&a, &[1; 32])]);
         let mut thread = Thread::default();
         thread.add(
             &a,
@@ -614,7 +620,7 @@ mod tests {
 
     #[test]
     fn unresolved_deletes_are_never_dropped_for_newer_ones() {
-        let (a, b) = (server(1), server(2));
+        let (a, b) = (copy(&server(1), &[1; 32]), copy(&server(2), &[2; 32]));
         let mut deleted = Tombstones::default();
         // B was away for the first delete; A confirmed the rest.
         deleted.add([0; 32], [b.clone()]);
@@ -626,6 +632,9 @@ mod tests {
         }
         assert!(deleted.contains(&[0; 32]));
         assert_eq!(deleted.ids().count(), KEEP_RESOLVED + 1);
+        // A 404 for that ID in another DM on B's server isn't B's copy being gone.
+        deleted.gone(&[0; 32], &copy(&server(2), &[3; 32]));
+        assert!(deleted.contains(&[0; 32]));
         // B's copy is gone at last: now it may go too, oldest first.
         assert!(deleted.gone(&[0; 32], &b) && !deleted.gone(&[0; 32], &b));
         assert!(!deleted.contains(&[0; 32]));
@@ -633,7 +642,7 @@ mod tests {
 
     #[test]
     fn the_synced_copy_of_deletes_stays_within_its_budget() {
-        let servers: Vec<Url> = (1..=6).map(server).collect();
+        let servers: Vec<String> = (1..=6).map(|n| copy(&server(n), &[n; 32])).collect();
         let mut deleted = Tombstones::default();
         for n in 0..2_000u16 {
             let mut id = [7; 32];

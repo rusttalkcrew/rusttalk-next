@@ -136,9 +136,13 @@ pub async fn exercise(
     )
     .await
     .context("W70 DM over two servers")?;
-    // Server B's API restarted, which closed the event streams there.
-    owner_b = KeyClient::connect(&server_b, owner_a.identity, &owner_token).await?;
-    peer_b = KeyClient::connect(&server_b, &peer, &peer_b_token).await?;
+    // Server B's API restarted, which closed the event streams there. Reconnect with
+    // the DM pins kept, as the app does, so nothing needs re-keying.
+    let (owner_pins, peer_pins) = (owner_b.dms().clone(), peer_b.dms().clone());
+    owner_b =
+        KeyClient::connect_with_dms(&server_b, owner_a.identity, &owner_token, Some(owner_pins))
+            .await?;
+    peer_b = KeyClient::connect_with_dms(&server_b, &peer, &peer_b_token, Some(peer_pins)).await?;
     dm::friends(
         (&mut *owner_a, &mut owner_b),
         (&mut peer_a, &mut peer_b),

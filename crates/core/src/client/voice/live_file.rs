@@ -405,14 +405,10 @@ impl LiveFiles {
             .devices
             .get(device)
             .context("file acceptance has unknown device")?;
-        // In a DM only the other person may take the file.
-        let scope = Scope {
-            kind: Kind::Channel,
-            id: *channel_id,
-        };
+        // In a DM only the pinned other person may take the file.
         ensure!(
-            client.dm_allows(scope, certificate.person_id()),
-            "file acceptance from outside the DM"
+            client.dm_peer_is(channel_id, certificate.person_id()),
+            "file acceptance from someone other than the DM's other person"
         );
         let peer = certificate.signing_key();
         acceptance

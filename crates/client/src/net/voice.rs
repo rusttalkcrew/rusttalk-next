@@ -830,7 +830,14 @@ pub(super) async fn offer_chat_file(
 ) -> Result<()> {
     let files =
         (state.chat_files.entry(channel)).or_insert_with(|| DataLiveFiles::new(client, channel));
-    let record = files.offer_live_file(client, &path).await?;
+    let record = match files.offer_live_file(client, &path).await {
+        // The other person re-keyed the DM just now: take the new key and offer once more.
+        Err(error) if super::files::conflict(&error) => {
+            client.sync().await?;
+            files.offer_live_file(client, &path).await?
+        }
+        offered => offered?,
+    };
     let body = client.open_message(&channel, &record).await?;
     let file = body.live.as_ref().context("offer without a file")?;
     tracing::info!("offered a live file in a chat");

@@ -683,6 +683,7 @@ app.recovery_words = Wiederherstellungswörter
 app.sign_in = Anmelden
 
 # crates/client/src/net.rs
+net.dm_pins_unsaved = DMs auf {server} sind pausiert: Dieses Gerät konnte nicht speichern, mit wem sie sind.
 net.dm_not_private = Nicht über {server} gesendet: Dort könnte jemand anderes diese DM lesen.
 net.server_changed = Dieser Server hat sich geändert. Mach nur weiter, wenn der Besitzer dir das angekündigt hat.
 net.sync_conflict = Dein anderes Gerät vertraut einem anderen Schlüssel für {server}. Frag beim Besitzer des Servers nach.

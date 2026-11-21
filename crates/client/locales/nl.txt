@@ -683,6 +683,7 @@ app.recovery_words = Herstelwoorden
 app.sign_in = Aanmelden
 
 # crates/client/src/net.rs
+net.dm_pins_unsaved = DM's op {server} zijn gepauzeerd: dit apparaat kon niet opslaan met wie ze zijn.
 net.dm_not_private = Niet via {server} verstuurd: iemand anders kan dit DM daar lezen.
 net.server_changed = Deze server is veranderd. Ga alleen verder als de eigenaar je dat heeft verteld.
 net.sync_conflict = Je andere apparaat vertrouwt een andere sleutel voor {server}. Overleg met de eigenaar van de server.

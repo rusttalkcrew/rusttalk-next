@@ -141,7 +141,10 @@ impl KeyClient<'_> {
             id: *keys::random_key()?,
         };
         let key = keys::random_key()?;
-        let context = EnvelopeContext::new(self.server.known_server().server_id, scope, 1, &key);
+        let me = *self.identity.certificate.person_id();
+        let pair = keys::dm_pair(me, *peer);
+        let context =
+            EnvelopeContext::new_dm(self.server.known_server().server_id, scope, 1, &key, pair);
         let envelope = self.wrap_for_self(context, &key)?;
         // Pinned before anything is wrapped: this key is new, so epoch 1 holds for the pair.
         self.dms.insert(
@@ -167,7 +170,11 @@ impl KeyClient<'_> {
             self.dms.remove(&scope.id);
         }
         let response = response?;
-        self.bind_dm(response.id, *peer);
+        // The server's existing DM is pinned to someone else: not the one asked for.
+        ensure!(
+            self.bind_dm(response.id, *peer),
+            "the server's DM with this person is pinned to someone else"
+        );
         self.sync().await?;
         Ok(Scope {
             id: response.id,

@@ -378,9 +378,13 @@ it is and pauses that server's DMs, also new ones, with a warning, instead of
 trusting the next catalog. A message, friend message or live-file offer goes
 to a copy only when its current epoch is trusted and its key came from a
 device of one of the two people. Otherwise the app refuses with "Not sent over
-<server>: someone else could read this DM there." If a send meets `409`
-because the other person just re-keyed, the app takes the new key and sends
-once more. A server without DM re-keying refuses the new epoch, so its copies
+<server>: someone else could read this DM there." If a send or live-file offer
+meets `409` because the other person just re-keyed, the app takes the new key
+and tries once more; if that fails too, a message goes back to the composer.
+DM epoch commitments name the two people (see
+[Crypto](crypto.md#channel-and-space-keys)), so DMs need both people on this
+version. No API or protocol change is needed. If the pins can't be saved, the
+app pauses that server's DMs with a warning. A server without DM re-keying refuses the new epoch, so its copies
 stay unused.
 
 An edit goes to the servers holding the original. A `message_deleted` event
@@ -393,8 +397,9 @@ online server holding it, and keeps the delete in the synced setting
 `dm_deleted`: per message ID (base64url), the servers that may still hold a
 copy (`left`) and those whose copy is gone (`done`). Devices merge these as
 sets across every sync copy, so a delete can't be lost when two devices publish
-to different servers. A server's copy counts as gone only once a fresh request
-for it returns 404, not on the server's delete event alone. Their apps on every
+to different servers. Copies are kept by server and DM channel. A copy counts
+as gone only once a fresh request for it in that DM channel returns 404, not on
+the server's delete event alone. Their apps on every
 device hide that message and delete any readable copy that shows up later,
 with its stored files, also after a restart. Each device keeps every delete
 that still waits for a server, and the newest 1,000 others, in

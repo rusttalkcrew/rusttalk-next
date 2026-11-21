@@ -470,8 +470,14 @@ impl Home {
         if !sent {
             self.toast = Some((t!("home.waiting_try_again").into(), now + 6.0));
         }
-        if self.dm_deleted.add(id, msg.replicas.clone()) {
-            self.record_delete(Edit::DeletedDm(id, msg.replicas.clone()));
+        // Each copy by server and DM channel there.
+        let copies: Vec<String> = (self.replicas(&peer).into_iter())
+            .map(|(index, channel)| (&self.servers[index].address, channel))
+            .filter(|(server, _)| msg.replicas.contains(server))
+            .map(|(server, channel)| dm::copy(server, &channel))
+            .collect();
+        if self.dm_deleted.add(id, copies.clone()) {
+            self.record_delete(Edit::DeletedDm(id, copies));
         }
         if let Some(thread) = self.threads.get_mut(&peer) {
             thread.deleted(&me, &id);
@@ -861,8 +867,9 @@ impl Home {
                         let stale = Command::Delete(channel, id, me, files);
                         self.servers[index].send(stale);
                         // Kept until that server confirms, also across restarts.
-                        if self.dm_deleted.add(id, [server.clone()]) {
-                            let edit = Edit::DeletedDm(id, vec![server.clone()]);
+                        let copy = dm::copy(&server, &channel);
+                        if self.dm_deleted.add(id, [copy.clone()]) {
+                            let edit = Edit::DeletedDm(id, vec![copy]);
                             self.record_delete(edit);
                         }
                     }
@@ -925,9 +932,10 @@ impl Home {
                     }
                 }
             }
-            Update::CopyGone(address, id) => {
-                if self.dm_deleted.gone(&id, &address) {
-                    self.record_delete(Edit::DmCopyGone(id, address));
+            Update::CopyGone(address, channel, id) => {
+                let copy = dm::copy(&address, &channel);
+                if self.dm_deleted.gone(&id, &copy) {
+                    self.record_delete(Edit::DmCopyGone(id, copy));
                 }
             }
             Update::PageFailed(address, channel, missing) => {
