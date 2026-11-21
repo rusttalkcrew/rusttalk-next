@@ -166,6 +166,11 @@ portal. Remote control is unavailable because the RemoteDesktop portal can
 send clicks, scrolls and keystrokes outside the selected source. RustTalk
 requests only screen capture permission on Linux.
 
+On macOS, RustTalk captures displays and windows with ScreenCaptureKit,
+which needs the Screen & System Audio Recording permission. Listing sources
+reads the titles of on-screen windows of other apps; they stay on the
+device except for the chosen name, which is encrypted like any share label.
+
 For live files, only the encrypted offer is retained as a chat message.
 The API sees its normal message metadata plus the live routing notice's
 opaque transfer ID, offering and accepting device IDs, nonce, signature,

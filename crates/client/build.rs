@@ -1,8 +1,15 @@
-//! Embeds the app icon in the Windows executable.
+//! Embeds the app icon in the Windows executable, and keeps WebRTC's Objective-C
+//! categories when linking on macOS.
 
 fn main() {
     println!("cargo:rerun-if-changed=rusttalk.rc");
     println!("cargo:rerun-if-changed=assets/rusttalk.ico");
+    // WebRTC adds methods such as `+[NSString stringForStdString:]` in Objective-C
+    // categories, which the linker drops from a static library without `-ObjC`. The
+    // flag webrtc-sys prints applies only to its own targets, so the binary sets it.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        println!("cargo:rustc-link-arg=-ObjC");
+    }
     // Windows release builds run on a Windows host; other hosts skip the icon.
     #[cfg(windows)]
     embed_resource::compile("rusttalk.rc", embed_resource::NONE)

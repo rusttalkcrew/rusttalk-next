@@ -1,8 +1,7 @@
 use std::{
-    env, fs,
+    env,
     io::Write,
     path::{Path, PathBuf},
-    process::Command,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -10,6 +9,8 @@ use std::{
     },
     time::{Duration, Instant},
 };
+#[cfg(not(target_os = "macos"))]
+use std::{fs, process::Command};
 
 use anyhow::{Context, Result, anyhow, ensure};
 use ed25519_dalek::{Signature, VerifyingKey};
@@ -273,6 +274,11 @@ impl Target {
                 path: config.join("rusttalk-update.exe"),
             })
         }
+        #[cfg(target_os = "macos")]
+        {
+            let _ = config;
+            anyhow::bail!("in-app updates are not available on macOS yet")
+        }
     }
 
     async fn install(self, update: Update, done: Arc<AtomicU64>) -> Result<State> {
@@ -327,6 +333,11 @@ impl Target {
                 .spawn()
                 .context("start verified RustTalk installer")?;
             Ok(State::InstallerStarted(update.version))
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let _ = (file, update);
+            anyhow::bail!("in-app updates are not available on macOS yet")
         }
     }
 

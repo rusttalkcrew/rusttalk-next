@@ -596,6 +596,7 @@ call.lost_in = Lost packets in
 call.lost_out = Lost packets out
 call.share_app_audio = Share app audio
 call.needs_windows_11 = Needs Windows 11
+call.not_on_mac_yet = Not available on macOS yet
 call.no_talk_here = You can't talk here
 call.looking_for_apps = Looking for apps…
 call.apps_failed = Couldn't look for apps.

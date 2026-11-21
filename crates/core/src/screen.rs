@@ -25,6 +25,9 @@ mod input;
 #[cfg(target_os = "linux")]
 #[path = "screen/linux.rs"]
 mod platform;
+#[cfg(target_os = "macos")]
+#[path = "screen/macos.rs"]
+mod platform;
 #[cfg(windows)]
 #[path = "screen/windows.rs"]
 mod platform;
@@ -44,7 +47,7 @@ pub enum ScreenSourceKind {
 pub struct ScreenSource {
     pub name: String,
     pub kind: ScreenSourceKind,
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     target: platform::Target,
 }
 
@@ -84,12 +87,12 @@ impl ScreenOptions {
     }
 }
 
-/// Windows enumerates the interactive user's monitors and windows.
+/// Windows and macOS enumerate the user's monitors and windows.
 /// Linux offers one entry that opens the desktop's picker.
 pub fn list_sources() -> Result<Vec<ScreenSource>> {
-    #[cfg(any(target_os = "linux", windows))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     return platform::list_sources();
-    #[cfg(not(any(target_os = "linux", windows)))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     anyhow::bail!("screen capture is unavailable on this platform")
 }
 
@@ -379,7 +382,7 @@ pub async fn start_into(
     restore_token: &mut Option<String>,
     into: Option<NativeVideoSource>,
 ) -> Result<ScreenCapture> {
-    #[cfg(any(target_os = "linux", windows))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     {
         options.validate()?;
         #[cfg(windows)]
@@ -467,7 +470,7 @@ pub async fn start_into(
             size,
         })
     }
-    #[cfg(not(any(target_os = "linux", windows)))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         let _ = (source, options, restore_token, into);
         anyhow::bail!("screen capture is unavailable on this platform")

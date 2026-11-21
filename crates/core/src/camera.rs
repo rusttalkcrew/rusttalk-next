@@ -1,5 +1,6 @@
 //! Camera selection and capture for native video tracks (V4L2 on Linux, Media Foundation on
-//! Windows). Frames are converted to I420 on a capture thread and fed to a LiveKit source.
+//! Windows, AVFoundation on macOS). Frames are converted to I420 on a capture thread and fed
+//! to a LiveKit source.
 
 use std::{
     sync::{
@@ -72,9 +73,36 @@ fn init_com() {
 #[cfg(not(windows))]
 fn init_com() {}
 
+/// macOS asks the person for camera access once; AVFoundation lists no cameras and opens
+/// none until they allow it. Waits for their answer.
+#[cfg(target_os = "macos")]
+fn camera_access() -> Result<()> {
+    if nokhwa::nokhwa_check() {
+        return Ok(());
+    }
+    let (answer, answered) = mpsc::sync_channel(1);
+    nokhwa::nokhwa_initialize(move |granted| {
+        let _ = answer.try_send(granted);
+    });
+    let granted = answered
+        .recv_timeout(Duration::from_secs(120))
+        .unwrap_or(false);
+    ensure!(
+        granted,
+        "camera access is off for RustTalk; allow it in System Settings, Privacy & Security, Camera"
+    );
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn camera_access() -> Result<()> {
+    Ok(())
+}
+
 /// Cameras with their system names, one entry per name in device order. Blocks briefly;
 /// call off the UI thread.
 pub fn list_cameras() -> Result<Vec<CameraDevice>> {
+    camera_access()?;
     let found = std::thread::spawn(|| {
         init_com();
         nokhwa::query(ApiBackend::Auto)
@@ -99,6 +127,35 @@ fn group(mut found: Vec<CameraInfo>) -> Vec<CameraDevice> {
         }
     }
     cameras
+}
+
+// shortcut: nokhwa 0.10's AVFoundation backend has three bugs worked around here. Its
+// mode list (`compatible_camera_formats`) filters out the camera's own pixel format and is
+// always empty, so modes come from its bindings instead. It lists both ends of each frame
+// rate range but can only set the top one, so a 15 fps choice runs at the range's top. And
+// with no request it opens the first listed mode, a range bottom, which fails. Replace it
+// with direct AVFoundation calls if a camera still misbehaves.
+#[cfg(target_os = "macos")]
+const FIRST_REQUEST: RequestedFormatType = RequestedFormatType::AbsoluteHighestFrameRate;
+#[cfg(not(target_os = "macos"))]
+const FIRST_REQUEST: RequestedFormatType = RequestedFormatType::None;
+
+/// The fastest rate of each size and pixel format: the top of its range, which is the only
+/// rate nokhwa can set on macOS.
+#[cfg(target_os = "macos")]
+fn settable(formats: Vec<CameraFormat>) -> Vec<CameraFormat> {
+    let fastest = |of: &CameraFormat| {
+        formats
+            .iter()
+            .filter(|f| f.resolution() == of.resolution() && f.format() == of.format())
+            .map(CameraFormat::frame_rate)
+            .max()
+    };
+    formats
+        .iter()
+        .copied()
+        .filter(|f| fastest(f) == Some(f.frame_rate()))
+        .collect()
 }
 
 /// The closest mode in height, then one that reaches the frame rate, then the one closest
@@ -178,6 +235,7 @@ type Opened = (VideoResolution, (u32, u32, u32), Vec<u32>);
 /// needs one).
 pub fn start(device: CameraDevice, options: CameraOptions) -> Result<CameraCapture> {
     options.validate()?;
+    camera_access()?;
     let (ready, opened) = mpsc::sync_channel::<Result<Opened>>(1);
     let (give, take) = mpsc::sync_channel::<NativeVideoSource>(1);
     let stop = Arc::new(AtomicBool::new(false));
@@ -189,10 +247,13 @@ pub fn start(device: CameraDevice, options: CameraOptions) -> Result<CameraCaptu
         .spawn(move || {
             init_com();
             let open = |index: CameraIndex| -> Result<(Camera, I420Buffer, Opened)> {
-                let mut camera = Camera::new(
-                    index,
-                    RequestedFormat::new::<RgbAFormat>(RequestedFormatType::None),
-                )?;
+                #[cfg(target_os = "macos")]
+                let formats = settable(
+                    nokhwa_bindings_macos::AVCaptureDevice::new(&index)?.supported_formats()?,
+                );
+                let mut camera =
+                    Camera::new(index, RequestedFormat::new::<RgbAFormat>(FIRST_REQUEST))?;
+                #[cfg(not(target_os = "macos"))]
                 let formats = camera.compatible_camera_formats()?;
                 let format = pick(&formats, options).context("camera offers no usable mode")?;
                 camera.set_camera_requset(RequestedFormat::with_formats(

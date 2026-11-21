@@ -437,8 +437,18 @@ fn show_in_folder(path: &Path) -> io::Result<()> {
         .map(drop)
 }
 
+/// Finder opens the folder with the file selected.
+#[cfg(target_os = "macos")]
+fn show_in_folder(path: &Path) -> io::Result<()> {
+    std::process::Command::new("open")
+        .arg("-R")
+        .arg(path)
+        .spawn()
+        .map(drop)
+}
+
 /// Opens the folder; selecting the file differs per Linux file manager.
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 fn show_in_folder(path: &Path) -> io::Result<()> {
     open::that_detached(path.parent().unwrap_or(path))
 }
