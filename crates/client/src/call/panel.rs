@@ -187,6 +187,14 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
     };
     let connected = call.state == CallState::Connected;
     let can_talk = call.can_talk;
+    // A moderator's mute also takes shared app audio.
+    let blocked = if server.is_some_and(|server| server.voice_muted(&server.dir.me)) {
+        Some(t!("call.server_muted"))
+    } else if !can_talk {
+        Some(t!("call.no_talk_here"))
+    } else {
+        None
+    };
     let can_share_video = call.can_share_video;
     let stats = call.stats.clone();
     let channel = call.channel;
@@ -195,7 +203,7 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
     } else {
         Quality::Unknown
     };
-    let stopped = sharing_card(ui, &home.voice);
+    let stopped = sharing_card(ui, &home.voice, blocked);
     if let Some(Stop::Sound(apps)) = &stopped
         && let Some(server) = (home.voice.call.as_ref())
             .and_then(|call| home.servers.iter().find(|s| s.address == call.server))
@@ -293,7 +301,7 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
                         }
                     }
                 }
-                share = app_button(ui, voice, connected && can_talk, can_talk, size);
+                share = app_button(ui, voice, connected && blocked.is_none(), blocked, size);
             });
             if let Some(action) = live_files(ui, &home.voice.live_files, server) {
                 live = Some(action);
@@ -519,7 +527,8 @@ fn connection_contents(
     {
         egui::CollapsingHeader::new(t!("call.people_in_call")).show(ui, |ui| {
             for peer in peers.iter().filter(|peer| peer.person != server.dir.me) {
-                ui.horizontal(|ui| status_name(ui, &peer.name(server), peer.status));
+                let muted = server.voice_muted(&peer.person);
+                ui.horizontal(|ui| status_name(ui, &peer.name(server), peer.status, muted));
             }
         });
     }
@@ -619,7 +628,7 @@ fn app_button(
     ui: &mut Ui,
     voice: &mut Voice,
     enabled: bool,
-    can_talk: bool,
+    blocked: Option<&str>,
     size: Vec2,
 ) -> Vec<(App, bool)> {
     let look = if voice.shares.is_empty() {
@@ -641,8 +650,8 @@ fn app_button(
         } else {
             t!("call.needs_windows_11")
         })
-    } else if !can_talk {
-        button.on_disabled_hover_text(t!("call.no_talk_here"))
+    } else if let Some(why) = blocked {
+        button.on_disabled_hover_text(why)
     } else if live {
         button.on_disabled_hover_text(t!("call.sound_in_stream"))
     } else {
@@ -794,7 +803,8 @@ fn empty(ui: &mut Ui, text: &str) {
 
 /// t!("call.now_sharing") above the panel while this device shares its screen or app audio,
 /// each with a stop button.
-fn sharing_card(ui: &mut Ui, voice: &Voice) -> Option<Stop> {
+/// `blocked` says why the stream's sound can't be picked now, if it can't.
+fn sharing_card(ui: &mut Ui, voice: &Voice, blocked: Option<&str>) -> Option<Stop> {
     let shown = voice.sharing != Sharing::Off || !voice.shares.is_empty();
     let mut stop = None;
     ui::fade_card(ui, "now sharing", shown, |ui| {
@@ -833,7 +843,7 @@ fn sharing_card(ui: &mut Ui, voice: &Voice) -> Option<Stop> {
             });
             if tools {
                 ui::right_row(ui, STOP_SIZE.y, |ui| {
-                    stop = screen_tools(ui, voice).or(stop.take());
+                    stop = screen_tools(ui, voice, blocked).or(stop.take());
                 });
             }
         }
@@ -843,8 +853,9 @@ fn sharing_card(ui: &mut Ui, voice: &Voice) -> Option<Stop> {
 }
 
 /// The screen share's buttons on the "now sharing" card: its sound, the preview and
-/// changing what is shared, laid out right to left.
-fn screen_tools(ui: &mut Ui, voice: &Voice) -> Option<Stop> {
+/// changing what is shared, laid out right to left. `blocked` says why the sound can't be
+/// picked now, if it can't.
+fn screen_tools(ui: &mut Ui, voice: &Voice, blocked: Option<&str>) -> Option<Stop> {
     let mut stop = None;
     let (glyph, look) = if voice.stream_audio.is_empty() {
         ("🔇", Look::Plain)
@@ -857,10 +868,14 @@ fn screen_tools(ui: &mut Ui, voice: &Voice) -> Option<Stop> {
         sound_summary(&voice.stream_audio)
     );
     let sound = ui
-        .add_enabled_ui(voice.supported, |ui| {
+        .add_enabled_ui(voice.supported && blocked.is_none(), |ui| {
             ui::icon_button(ui, glyph, &tip, look, STOP_SIZE)
         })
         .inner;
+    let sound = match blocked {
+        Some(why) => sound.on_disabled_hover_text(why),
+        None => sound,
+    };
     if sound.clicked() {
         fill(ui.ctx(), &voice.apps, "apps", share::list);
     }

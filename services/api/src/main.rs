@@ -245,6 +245,8 @@ async fn run() -> Result<()> {
 
 async fn serve(app: App) -> io::Result<()> {
     let expiry = tokio::spawn(store::expire_records(app.db.clone()));
+    // Apply mutes and access changes that a restart or LiveKit outage left unapplied.
+    voice::start_enforcer(&app);
     let publisher = tokio::spawn(index::refresh(app.clone(), app.listing_changed.subscribe()));
     let file_expiry = tokio::spawn(files::expire(app.clone()));
     let app = Router::new()
@@ -280,6 +282,14 @@ async fn serve(app: App) -> io::Result<()> {
         .route("/v1/catalog", get(channels::catalog))
         .route("/v1/voice/{id}/token", post(voice::token))
         .route("/v1/voice/{id}/participants", get(voice::participants))
+        .route(
+            "/v1/voice/{id}/participants/{person}",
+            delete(voice::moderation::remove),
+        )
+        .route(
+            "/v1/voice/{id}/participants/{person}/move",
+            post(voice::moderation::move_to),
+        )
         .route("/v1/voice/{id}/live-file", post(voice::live_file))
         .route(
             "/v1/channels/{id}/live-file/token/{nonce}",
@@ -320,6 +330,10 @@ async fn serve(app: App) -> io::Result<()> {
         .route("/v1/invites/{id}", delete(members::revoke_invite))
         .route("/v1/members/{person}", delete(members::kick))
         .route("/v1/members/{person}/roles", put(roles::assign))
+        .route(
+            "/v1/members/{person}/voice-mute",
+            put(voice::moderation::mute).delete(voice::moderation::unmute),
+        )
         .route(
             "/v1/bans/{person}",
             put(members::ban).delete(members::unban),

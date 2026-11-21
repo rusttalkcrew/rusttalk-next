@@ -170,7 +170,9 @@ a synced setting. Japanese glyphs come from a bundled Noto Sans CJK subset
   scenario checks duplex PCM tones, signed presence notices, a refused
   listen-only publish, recovery after a forced reconnect, and new audio
   after a key rotation that excludes a kicked reader. It also checks that
-  taking `speak` from a role stops that speaker's audio. The app-audio check
+  taking `speak` from a role stops that speaker's audio, that a moderator's
+  voice mute silences the speaker and holds across a rejoin, and that removing
+  and moving disconnect them, with the move notice reaching only them. The app-audio check
   uses two `pw-play` processes at 440 and 660 Hz on a disposable
   `rusttalk_e2e_<pid>` null sink created with `pactl load-module module-null-sink`.
   The receiving bot verifies two encrypted names and track sources and both

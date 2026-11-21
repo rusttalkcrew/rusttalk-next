@@ -147,6 +147,10 @@ impl Server {
         }
     }
 
+    pub fn voice_muted(&self, person: &Id) -> bool {
+        self.member(person).is_some_and(|member| member.voice_muted)
+    }
+
     pub fn member(&self, person: &Id) -> Option<&Member> {
         self.dir.members.iter().find(|m| m.person == *person)
     }
@@ -238,6 +242,9 @@ pub struct Perms {
     pub audit: bool,
     pub manage_server: bool,
     pub manage_emoji: bool,
+    pub mute_members: bool,
+    /// Remove people from a voice channel or move them to another.
+    pub move_members: bool,
     /// This person's highest role rank; they can only manage people and roles below it.
     pub rank: i64,
 }
@@ -322,6 +329,8 @@ pub struct Member {
     pub presence: Presence,
     /// They asked to be left out of member lists while offline.
     pub hide_offline: bool,
+    /// A moderator muted them in every voice channel.
+    pub voice_muted: bool,
 }
 
 impl Member {
@@ -707,6 +716,7 @@ mod tests {
             avatar: None,
             presence,
             hide_offline,
+            voice_muted: false,
         };
         assert!(member(false, Presence::Offline).listed());
         assert!(member(true, Presence::Online).listed());

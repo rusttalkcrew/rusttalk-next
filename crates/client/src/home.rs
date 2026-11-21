@@ -858,7 +858,26 @@ impl Home {
                         }
                         self.voice.audio.set_settings(settings);
                     }
+                    let me = dir.me;
+                    let muted = (dir.members.iter()).any(|m| m.person == me && m.voice_muted);
+                    let changed = server.voice_muted(&me) != muted;
                     server.dir = *dir;
+                    // The microphone itself comes back from LiveKit when the mute is lifted.
+                    if changed
+                        && muted
+                        && (self.voice.call.as_ref()).is_some_and(|call| call.server == address)
+                    {
+                        self.toast = Some((t!("call.server_muted").into(), now + 6.0));
+                        // LiveKit drops shared app audio and a stream's sound too; stop
+                        // capturing them.
+                        for app in self.voice.shares.drain(..) {
+                            server.send(Command::StopApp(app.id));
+                        }
+                        if !self.voice.stream_audio.is_empty() {
+                            self.voice.stream_audio.clear();
+                            server.send(Command::StreamAudio(Vec::new()));
+                        }
+                    }
                     self.load_dms(index);
                 }
             }
@@ -1041,12 +1060,27 @@ impl Home {
                     None => self.voice.end_call(),
                 }
             }
-            Update::Listening(address, channel) => {
+            Update::CanTalk(address, channel, can_talk) => {
                 if let Some(call) = &mut self.voice.call
                     && call.server == address
                     && call.channel == channel
                 {
-                    call.can_talk = false;
+                    call.can_talk = can_talk;
+                }
+            }
+            Update::VoiceMoved(address, from, to) => {
+                let Some(index) = self.index(&address) else {
+                    return;
+                };
+                // The removal from the old room may have ended the call already; the network
+                // task only passes moves for this device's call.
+                if (self.voice.call.as_ref())
+                    .is_none_or(|call| call.server == address && call.channel == from)
+                    && self.servers[index].is_voice(&to)
+                {
+                    call::join(self, index, to);
+                    let name = (self.servers[index].channel(&to)).map_or("", |c| c.name.as_str());
+                    self.toast = Some((t!("voice.moved", channel = name), now + 6.0));
                 }
             }
             Update::NoVideo(address, channel) => {
@@ -1966,6 +2000,7 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
     let mut pick = None;
     let mut add = None;
     let mut talk = None;
+    let mut moderation = None;
     let mut configure = None;
     let mut moved = None;
     let mut channel_edit = None;
@@ -2049,7 +2084,9 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
                         if call::join_button(ui, home, server, &channel.id, &row, selected) {
                             talk = Some(channel.id);
                         }
-                        call::room_list(ui, home, server, &channel.id);
+                        if let Some(request) = call::room_list(ui, home, server, &channel.id) {
+                            moderation = Some(request);
+                        }
                     }
                     row
                 });
@@ -2114,6 +2151,9 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
     }
     if let Some(channel) = talk {
         call::join(home, index, channel);
+    }
+    if let Some(request) = moderation {
+        home.servers[index].send(Command::Admin(request));
     }
     if let Some(category) = add {
         home.dialog = Some(new_channel(&home.servers[index], index, category));
@@ -3030,6 +3070,7 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
                 avatar: None,
                 presence: Presence::Offline,
                 hide_offline: false,
+                voice_muted: false,
             })
             .collect(),
         ..Directory::default()

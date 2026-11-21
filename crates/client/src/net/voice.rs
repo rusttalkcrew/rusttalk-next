@@ -7,7 +7,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use livekit::prelude::RemoteTrack;
+use livekit::{DisconnectReason, prelude::RemoteTrack};
 use rusttalk_core::{
     auth::{decode, encode, voice_identity},
     camera::CameraOptions,
@@ -896,7 +896,18 @@ pub(super) async fn on_voice(
         }
         RoomEvent::Disconnected { reason } => {
             tracing::info!(?reason, "voice disconnected");
-            end(state, t!("voice.disconnected"));
+            // A move to another channel can follow as its own notice and replaces this text.
+            if reason == DisconnectReason::ParticipantRemoved {
+                state.removed_from = Some((channel, std::time::Instant::now()));
+            }
+            end(
+                state,
+                if reason == DisconnectReason::ParticipantRemoved {
+                    t!("voice.removed")
+                } else {
+                    t!("voice.disconnected")
+                },
+            );
         }
         RoomEvent::ParticipantDisconnected(participant) => {
             if let Some(live) = &mut state.voice {
@@ -934,6 +945,30 @@ pub(super) async fn on_voice(
         _ => return,
     }
     roster(ctx, url, client, state, channel);
+}
+
+/// Follow LiveKit's microphone grant: publish the microphone again when a moderator's mute
+/// is lifted. LiveKit tells the call directly, so this works even if the API connection
+/// missed the change.
+pub(super) async fn sync_microphone(ctx: &Ctx, url: &Url, state: &mut State) {
+    let Some(live) = &mut state.voice else {
+        return;
+    };
+    let can_talk = live.room.can_publish();
+    if can_talk && !live.room.has_microphone() {
+        match live.room.publish_audio(ctx.audio.source()).await {
+            Ok(_) => {
+                tracing::info!("microphone allowed again");
+                live.room
+                    .set_microphone_muted(ctx.audio.muted() || ctx.audio.deafened());
+            }
+            Err(error) => {
+                tracing::warn!(error = %format_args!("{error:#}"), "publishing the microphone again failed");
+                return;
+            }
+        }
+    }
+    ctx.send(Update::CanTalk(url.clone(), live.channel, can_talk));
 }
 
 /// Stop the camera and screen once LiveKit no longer carries them: `video` was removed
@@ -1251,7 +1286,7 @@ pub(super) async fn start_call(
         Some(CallState::Connected),
     ));
     if listening {
-        ctx.send(Update::Listening(url.clone(), channel));
+        ctx.send(Update::CanTalk(url.clone(), channel, false));
     }
     if no_video {
         ctx.send(Update::NoVideo(url.clone(), channel));

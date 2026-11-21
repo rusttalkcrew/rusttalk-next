@@ -171,6 +171,11 @@ async fn stream(
             {
                 continue;
             }
+            if let Event::VoiceMoved { devices, .. } = &notice
+                && !devices.contains(&device)
+            {
+                continue;
+            }
             let channel = match &notice {
                 Event::DmCreated { channel }
                 | Event::VoiceChanged { channel }
@@ -243,6 +248,7 @@ fn queue(notices: &mut Vec<Update>, change: Change) -> Recheck {
                     Event::MessageCreated { .. }
                     | Event::MessageDeleted { .. }
                     | Event::VoiceChanged { .. }
+                    | Event::VoiceMoved { .. }
                     | Event::LiveFileAccepted { .. },
                 ) => Recheck::None,
                 Update::Event(_) => Recheck::Access,

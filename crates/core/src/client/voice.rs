@@ -34,7 +34,7 @@ use tokio::sync::mpsc;
 use zeroize::Zeroizing;
 
 pub use livekit::{
-    ConnectionState, RoomEvent,
+    ConnectionState, DisconnectReason, RoomEvent,
     prelude::{
         LocalTrackPublication, ParticipantIdentity, RemoteAudioTrack, RemoteParticipant, TrackSid,
         TrackSource,
@@ -467,6 +467,12 @@ impl VoiceRoom {
     pub async fn publish_audio(&self, source: NativeAudioSource) -> Result<LocalTrackPublication> {
         self.publish_audio_track("microphone", source, TrackSource::Microphone)
             .await
+    }
+
+    /// Whether this device publishes a microphone.
+    pub fn has_microphone(&self) -> bool {
+        (self.room.local_participant().track_publications().values())
+            .any(|publication| publication.source() == TrackSource::Microphone)
     }
 
     /// Set the published microphone's mute state, leaving shared audio alone.

@@ -157,7 +157,7 @@ async fn run(args: Args) -> Result<()> {
                     .find(|target| target.kind == capture::ScreenSourceKind::Portal)
                     .context("desktop portal capture requires Linux")?;
                 let options = capture::ScreenOptions::default();
-                let capture = capture::start(target, options, &mut None).await?;
+                let capture = capture::start(target, options, &mut None, Default::default()).await?;
                 room.publish_screen(&capture.name, options, capture.source.clone()).await?;
                 portal_capture = Some(capture);
             }

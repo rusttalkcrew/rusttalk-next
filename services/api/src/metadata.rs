@@ -243,12 +243,18 @@ pub struct Member {
     role_ids: Vec<String>,
     /// Clients leave this member out of member lists while they are offline.
     hide_offline: bool,
+    /// A moderator muted them in every voice channel.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    voice_muted: bool,
 }
+
+/// Person, display name, avatar hash, `hide_offline` and `voice_muted`.
+type MemberRow = (Vec<u8>, Ciphertext, Option<String>, bool, bool);
 
 pub async fn members(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Vec<Member>>> {
     let (mut tx, _) = authenticate_read(&app, &headers).await?;
-    let rows: Vec<(Vec<u8>, Ciphertext, Option<String>, bool)> = query_as(
-        "SELECT person_id, display_name_ct, avatar_hash, hide_offline FROM members
+    let rows: Vec<MemberRow> = query_as(
+        "SELECT person_id, display_name_ct, avatar_hash, hide_offline, voice_muted FROM members
          ORDER BY person_id",
     )
     .fetch_all(&mut *tx)
@@ -268,17 +274,20 @@ pub async fn members(State(app): State<App>, headers: HeaderMap) -> ApiResult<Js
     let presence = app.presence.snapshot();
     Ok(Json(
         rows.into_iter()
-            .map(|(person, display_name, avatar_hash, hide_offline)| {
-                let person_id = encode(&person);
-                Member {
-                    presence: presence.get(&person_id).copied().unwrap_or_default(),
-                    person_id,
-                    display_name_ct: encoded(display_name),
-                    avatar_hash,
-                    role_ids: roles.remove(&person).unwrap_or_default(),
-                    hide_offline,
-                }
-            })
+            .map(
+                |(person, display_name, avatar_hash, hide_offline, voice_muted)| {
+                    let person_id = encode(&person);
+                    Member {
+                        presence: presence.get(&person_id).copied().unwrap_or_default(),
+                        person_id,
+                        display_name_ct: encoded(display_name),
+                        avatar_hash,
+                        role_ids: roles.remove(&person).unwrap_or_default(),
+                        hide_offline,
+                        voice_muted,
+                    }
+                },
+            )
             .collect(),
     ))
 }

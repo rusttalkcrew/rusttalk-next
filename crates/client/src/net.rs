@@ -274,8 +274,10 @@ pub enum Update {
     Admin(Url, AdminUpdate),
     /// The call in a voice channel changed state; `None` when it ended.
     Call(Url, Id, Option<CallState>),
-    /// This device joined the call without permission to talk.
-    Listening(Url, Id),
+    /// Whether this device may talk in the call, as LiveKit currently grants it.
+    CanTalk(Url, Id, bool),
+    /// A moderator moved this person's call from one voice channel to another.
+    VoiceMoved(Url, Id, Id),
     /// This device may not share its screen or camera in the call.
     NoVideo(Url, Id),
     /// Everyone in one voice channel.
@@ -612,6 +614,9 @@ struct State {
     identities: HashMap<String, Id>,
     /// DMs the server relabelled, already warned about.
     relabelled: HashSet<Id>,
+    /// The voice room LiveKit last removed this device from, and when: a move notice for
+    /// it may arrive just after.
+    removed_from: Option<(Id, std::time::Instant)>,
 }
 
 enum Failure {
@@ -1081,7 +1086,11 @@ async fn voice_next(
             };
             on_voice(ctx, url, client, state, event).await;
             if let Some(unpublished) = lost {
+                let permission = unpublished.is_none();
                 stop_lost_video(ctx, url, client, state, unpublished).await;
+                if permission {
+                    voice::sync_microphone(ctx, url, state).await;
+                }
             }
         }
         Next::Capture(capture) => match client {
@@ -1097,6 +1106,21 @@ async fn voice_next(
         },
         Next::Swap(capture) => screen_changed(ctx, state, capture),
     }
+}
+
+/// Whether a move notice from `from` is for this device: its own call there, or the room
+/// LiveKit just removed it from (the server sends the notice right after the removal), so a
+/// notice can't start a call on an idle device.
+fn move_applies(
+    call: Option<Id>,
+    removed: Option<(Id, std::time::Instant)>,
+    from: Id,
+    now: std::time::Instant,
+) -> bool {
+    call == Some(from)
+        || removed.is_some_and(|(channel, at)| {
+            channel == from && now.duration_since(at) < std::time::Duration::from_secs(10)
+        })
 }
 
 /// Reload what the UI shows after (re)connecting, since events may have been missed.
@@ -1273,6 +1297,16 @@ async fn on_event(
         }
         Event::VoiceChanged { channel } => {
             room_changed(ctx, url, client, state, decode(&channel)?).await?;
+        }
+        Event::VoiceMoved { from, to, .. } => {
+            let (from, to) = (decode(&from)?, decode(&to)?);
+            let call = state.voice.as_ref().map(|live| live.channel);
+            let removed = state.removed_from.take();
+            if move_applies(call, removed, from, std::time::Instant::now()) {
+                ctx.send(Update::VoiceMoved(url.clone(), from, to));
+            } else {
+                tracing::warn!("ignored a voice move for a call this device is not in");
+            }
         }
         Event::LiveFileAccepted { .. } => voice::live_file_accepted(ctx, client, state, &event)?,
         Event::RotateNeeded { .. } => {}
@@ -1775,6 +1809,23 @@ fn now() -> i64 {
 #[cfg(test)]
 mod protocol_tests {
     use super::*;
+
+    #[test]
+    fn a_move_counts_only_for_this_devices_call_or_its_fresh_removal() {
+        use std::time::{Duration, Instant};
+        let (from, other) = ([1; 32], [2; 32]);
+        let now = Instant::now();
+        // The server removes first, so the notice can be handled right after the removal.
+        assert!(move_applies(None, Some((from, now)), from, now));
+        // Or before it, while the call is still there.
+        assert!(move_applies(Some(from), None, from, now));
+        // Not on an idle device, another call, another room's removal, or much later.
+        assert!(!move_applies(None, None, from, now));
+        assert!(!move_applies(Some(other), None, from, now));
+        assert!(!move_applies(None, Some((other, now)), from, now));
+        let later = now + Duration::from_secs(11);
+        assert!(!move_applies(None, Some((from, now)), from, later));
+    }
 
     #[test]
     fn a_friend_message_keeps_its_signed_send_time() {
