@@ -99,6 +99,8 @@ pub enum Ask {
     Picture,
     /// A new server icon.
     Icon(Url),
+    /// A new server emoji or (`true`) sticker with this name.
+    Emoji(Url, String, bool),
 }
 
 pub type Answer = (Ask, Vec<PathBuf>);
@@ -194,10 +196,12 @@ impl Files {
             let name = match &ask {
                 Ask::Save(_, file) => Some(file.name.replace(['/', '\\'], "_")),
                 Ask::Accept(_, _, name) => Some(name.replace(['/', '\\'], "_")),
-                Ask::Attach(..) | Ask::Live(..) | Ask::Picture | Ask::Icon(_) => None,
+                Ask::Attach(..) | Ask::Live(..) | Ask::Picture | Ask::Icon(_) | Ask::Emoji(..) => {
+                    None
+                }
             };
             let single = !matches!(ask, Ask::Attach(..));
-            let pictures = matches!(ask, Ask::Picture | Ask::Icon(_));
+            let pictures = matches!(ask, Ask::Picture | Ask::Icon(_) | Ask::Emoji(..));
             let test = *TEST_ANSWER.lock().unwrap_or_else(|e| e.into_inner());
             let paths = match (test, name) {
                 (Some(answer), name) => answer(name.as_deref()),

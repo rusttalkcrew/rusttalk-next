@@ -18,8 +18,8 @@ use url::Url;
 
 use super::{Ctx, State, Update, leave_voice, now};
 use crate::server::{
-    Body, Category, Channel, Device, Directory, Dm, Id, Member, Msg, Perms, Picture, Role,
-    member_name,
+    Body, Category, Channel, CustomEmoji, Device, Directory, Dm, Id, Member, Msg, Perms, Picture,
+    Role, member_name,
 };
 
 pub(super) async fn get(client: &KeyClient<'_>, path: &str) -> Result<Value> {
@@ -173,7 +173,8 @@ pub(super) async fn directory(
     let me = get(client, "/v1/me").await?;
     let roles = get(client, "/v1/roles").await?;
     let space = get(client, "/v1/space").await?;
-    let pictures = pictures(client, &members, &space, &state.pictures).await?;
+    let emoji = emoji_list(client).await?;
+    let pictures = pictures(client, &members, &space, &emoji, &state.pictures).await?;
     let dir = build(
         client,
         catalog,
@@ -181,6 +182,7 @@ pub(super) async fn directory(
         &me,
         &roles,
         &space,
+        &emoji,
         &|id: &Id, hash: Option<&str>| pictures.get(&picture_key(id, hash?)).cloned(),
     )
     .await?;
@@ -209,6 +211,7 @@ pub(super) async fn directory(
                 },
                 files: Vec::new(),
                 live: None,
+                sticker: None,
             };
             ctx.send(Update::Notice(url.clone(), person, msg));
         }
@@ -230,6 +233,16 @@ pub(super) async fn directory(
     Ok(())
 }
 
+/// The server's emoji and stickers, or none on servers from before them.
+async fn emoji_list(client: &KeyClient<'_>) -> Result<Value> {
+    let reply = client.request(Method::GET, "/v1/emoji").send().await?;
+    if reply.status() == StatusCode::NOT_FOUND {
+        return Ok(Value::Null);
+    }
+    Ok(reply.error_for_status()?.json().await?)
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn build(
     client: &KeyClient<'_>,
     mut catalog: Catalog,
@@ -237,6 +250,7 @@ async fn build(
     me: &Value,
     roles: &Value,
     space: &Value,
+    emoji: &Value,
     picture: &impl Fn(&Id, Option<&str>) -> Option<Picture>,
 ) -> Result<Directory> {
     let bytes = |kind: Metadata, id: &[u8], ct: Option<&str>| {
@@ -283,6 +297,7 @@ async fn build(
                     "manage_roles" => perms.manage_roles = true,
                     "view_audit_log" => perms.audit = true,
                     "manage_server" => perms.manage_server = true,
+                    "manage_emoji" => perms.manage_emoji = true,
                     _ => {}
                 }
             }
@@ -419,6 +434,21 @@ async fn build(
             member.name.as_ref().map(|n| n.to_lowercase()),
         )
     });
+    let mut emoji_items = Vec::new();
+    for row in emoji["items"].as_array().into_iter().flatten() {
+        let id: Id = decode(row["id"].as_str().context("emoji without ID")?)?;
+        // Without a readable name it can't be typed or shown, so leave it out.
+        let Some(name) = text(Metadata::EmojiName, &id, row["name_ct"].as_str()) else {
+            continue;
+        };
+        emoji_items.push(CustomEmoji {
+            id,
+            name,
+            sticker: row["kind"] == "sticker",
+            picture: picture(&id, row["image_hash"].as_str()),
+        });
+    }
+    let limit = |key: &str| emoji[key].as_u64().unwrap_or_default() as usize;
     let server_id = client.space().id;
     Ok(Directory {
         name: text(Metadata::ServerName, &server_id, space["name_ct"].as_str()),
@@ -431,6 +461,8 @@ async fn build(
         dms,
         roles: role_list,
         default_role: roles["default_role_id"].as_str().unwrap_or_default().into(),
+        emoji: emoji_items,
+        emoji_max: (limit("max_emoji"), limit("max_stickers")),
     })
 }
 
@@ -450,6 +482,7 @@ async fn pictures(
     client: &KeyClient<'_>,
     members: &Value,
     space: &Value,
+    emoji: &Value,
     last: &HashMap<[u8; 32], Picture>,
 ) -> Result<HashMap<[u8; 32], Picture>> {
     let mut wanted = Vec::new();
@@ -468,6 +501,18 @@ async fn pictures(
             path,
             "icon_ct",
         ));
+    }
+    for row in emoji["items"].as_array().into_iter().flatten() {
+        if let (Some(id), Some(hash)) = (row["id"].as_str(), row["image_hash"].as_str()) {
+            let path = format!("/v1/emoji/{id}/image");
+            wanted.push((
+                Metadata::EmojiImage,
+                decode::<32>(id)?,
+                hash,
+                path,
+                "image_ct",
+            ));
+        }
     }
     let mut pictures = HashMap::new();
     let mut missing = Vec::new();
@@ -514,7 +559,7 @@ async fn pictures(
     Ok(pictures)
 }
 
-/// Decode a profile picture or server icon.
+/// Decode a profile picture, server icon, emoji or sticker.
 fn picture(bytes: &[u8]) -> Option<Picture> {
     let key: [u8; 32] = Sha256::digest(bytes).into();
     let frames = match decode_profile_image(bytes) {

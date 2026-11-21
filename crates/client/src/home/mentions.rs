@@ -149,6 +149,15 @@ impl<'a> Message<'a> {
         self.parts(dir).into_iter().map(|(text, _)| text).collect()
     }
 
+    /// The layout of one run of this message's text, for messages that also hold server emoji.
+    pub fn layout_text(&self, ui: &Ui, dir: &Directory, text: &str) -> Option<LayoutJob> {
+        Message {
+            text,
+            wide: self.wide,
+        }
+        .layout(ui, dir)
+    }
+
     pub fn layout(&self, ui: &Ui, dir: &Directory) -> Option<LayoutJob> {
         tokens(self.text).next()?;
         let mut job = LayoutJob::default();
@@ -480,6 +489,7 @@ mod tests {
             body: Body::Text(text.into()),
             files: vec![],
             live: None,
+            sticker: None,
         }
     }
 

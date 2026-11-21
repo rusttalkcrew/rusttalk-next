@@ -6,7 +6,10 @@ use eframe::egui::{
     self, ColorImage, FontFamily, FontId, FontPriority, GlyphBitmap, GlyphRasterizer,
     GlyphRasterizerRequest, RasterizedGlyph, RichText, vec2,
 };
+use rusttalk_core::auth::{decode, encode};
 use unicode_segmentation::UnicodeSegmentation as _;
+
+use crate::server::{CustomEmoji, Id};
 
 pub mod picker;
 
@@ -99,13 +102,20 @@ pub fn runs(text: &str) -> impl Iterator<Item = (&str, bool)> {
     })
 }
 
+/// One to three emoji, Unicode or server, and nothing else: shown large.
 pub fn jumbo(text: &str) -> bool {
     let mut count = 0;
-    for (part, emoji) in runs(text) {
-        if emoji {
+    for part in parts(text) {
+        let Part::Text(text) = part else {
             count += 1;
-        } else if !part.trim().is_empty() {
-            return false;
+            continue;
+        };
+        for (part, emoji) in runs(text) {
+            if emoji {
+                count += 1;
+            } else if !part.trim().is_empty() {
+                return false;
+            }
         }
     }
     (1..=3).contains(&count)
@@ -138,8 +148,29 @@ fn lookup(name: &str) -> Option<&'static str> {
         .map(|(_, emoji)| emoji)
 }
 
-pub fn replace(text: &str) -> Cow<'_, str> {
-    // Server emoji can supply an additional lookup here when their wire format is defined.
+/// Turn typed `:shortcodes:` into emoji: server emoji become `<:name:id>` tokens, the rest
+/// Unicode. Tokens already in the text stay as they are.
+pub fn replace<'a>(text: &'a str, custom: &[CustomEmoji]) -> Cow<'a, str> {
+    let mut result = String::new();
+    let mut changed = false;
+    for part in parts(text) {
+        match part {
+            Part::Text(text) => {
+                let replaced = replace_codes(text, custom);
+                changed |= matches!(replaced, Cow::Owned(_));
+                result.push_str(&replaced);
+            }
+            Part::Custom { token, .. } => result.push_str(token),
+        }
+    }
+    if changed {
+        Cow::Owned(result)
+    } else {
+        Cow::Borrowed(text)
+    }
+}
+
+fn replace_codes<'a>(text: &'a str, custom: &[CustomEmoji]) -> Cow<'a, str> {
     let mut result = String::new();
     let mut rest = text;
     while let Some((before, candidate)) = rest.split_once(':') {
@@ -147,10 +178,18 @@ pub fn replace(text: &str) -> Cow<'_, str> {
         let end = candidate
             .find(|c| !shortcode_char(c))
             .unwrap_or(candidate.len());
-        if let Some(after) = candidate[end..].strip_prefix(':')
-            && let Some(emoji) = lookup(&candidate[..end])
-        {
-            result.push_str(emoji);
+        let name = &candidate[..end];
+        let found = candidate[end..].strip_prefix(':').and_then(|after| {
+            let server = custom
+                .iter()
+                .find(|emoji| !emoji.sticker && emoji.name.eq_ignore_ascii_case(name));
+            match server {
+                Some(emoji) => Some((token(&emoji.name, &emoji.id), after)),
+                None => lookup(name).map(|emoji| (emoji.to_owned(), after)),
+            }
+        });
+        if let Some((emoji, after)) = found {
+            result.push_str(&emoji);
             rest = after;
         } else {
             result.push(':');
@@ -162,6 +201,79 @@ pub fn replace(text: &str) -> Cow<'_, str> {
     }
     result.push_str(rest);
     Cow::Owned(result)
+}
+
+/// How a server emoji travels inside encrypted message text.
+pub fn token(name: &str, id: &Id) -> String {
+    format!("<:{name}:{}>", encode(id))
+}
+
+/// Text, or a server emoji token with its name and ID.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Part<'a> {
+    Text(&'a str),
+    Custom {
+        token: &'a str,
+        name: &'a str,
+        id: Id,
+    },
+}
+
+/// Split message text into plain runs and server emoji tokens.
+pub fn parts(text: &str) -> Vec<Part<'_>> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut search = 0;
+    while let Some(at) = text[search..].find("<:").map(|at| search + at) {
+        match parse_token(&text[at..]) {
+            Some((len, name, id)) => {
+                if at > start {
+                    out.push(Part::Text(&text[start..at]));
+                }
+                out.push(Part::Custom {
+                    token: &text[at..at + len],
+                    name,
+                    id,
+                });
+                start = at + len;
+                search = start;
+            }
+            None => search = at + 2,
+        }
+    }
+    if start < text.len() {
+        out.push(Part::Text(&text[start..]));
+    }
+    out
+}
+
+/// `<:name:id>` at the start of `text`: its length, name and ID.
+fn parse_token(text: &str) -> Option<(usize, &str, Id)> {
+    let rest = text.strip_prefix("<:")?;
+    let (name, rest) = rest.split_once(':')?;
+    let (id, _) = rest.split_once('>')?;
+    if name.is_empty() || name.len() > 32 || !name.chars().all(shortcode_char) {
+        return None;
+    }
+    let len = 2 + name.len() + 1 + id.len() + 1;
+    Some((len, name, decode(id).ok()?))
+}
+
+/// Text with server emoji tokens shown as `:name:`, for editing, copying and quotes.
+pub fn plain(text: &str) -> Cow<'_, str> {
+    let parts = parts(text);
+    if !parts.iter().any(|part| matches!(part, Part::Custom { .. })) {
+        return Cow::Borrowed(text);
+    }
+    Cow::Owned(
+        parts
+            .into_iter()
+            .map(|part| match part {
+                Part::Text(text) => text.to_owned(),
+                Part::Custom { name, .. } => format!(":{name}:"),
+            })
+            .collect(),
+    )
 }
 
 pub struct Entry {
@@ -201,11 +313,58 @@ mod tests {
         assert_eq!(lookup("thumbsup_tone5"), Some("👍🏿"));
         assert_eq!(lookup("smi"), None);
         assert_eq!(
-            replace("Hi :smile::+1: :missing: at 12:30"),
+            replace("Hi :smile::+1: :missing: at 12:30", &[]),
             "Hi 😄👍 :missing: at 12:30"
         );
-        assert_eq!(replace("::heart: :incomplete"), ":❤️ :incomplete");
-        assert_eq!(replace("Plain 😄 text"), "Plain 😄 text");
+        assert_eq!(replace("::heart: :incomplete", &[]), ":❤️ :incomplete");
+        assert_eq!(replace("Plain 😄 text", &[]), "Plain 😄 text");
+    }
+
+    #[test]
+    fn server_emoji_tokens_round_trip() {
+        let party = CustomEmoji {
+            id: [7; 32],
+            name: "party".into(),
+            sticker: false,
+            picture: None,
+        };
+        let smile = CustomEmoji {
+            name: "smile".into(),
+            ..party.clone()
+        };
+        let sticker = CustomEmoji {
+            name: "big_hug".into(),
+            sticker: true,
+            ..party.clone()
+        };
+        let token = token("party", &[7; 32]);
+        let sent = replace(
+            ":party: :Party: :heart: :big_hug:",
+            &[party.clone(), sticker],
+        );
+        // Stickers are not typed into text.
+        assert_eq!(sent, format!("{token} {token} ❤️ :big_hug:"));
+        // Server emoji win over Unicode names, and tokens are never replaced again.
+        assert_eq!(
+            replace(":smile:", std::slice::from_ref(&smile)),
+            token.replace("party", "smile")
+        );
+        assert_eq!(replace(&sent, &[party]), sent);
+        assert_eq!(plain(&sent), ":party: :party: ❤️ :big_hug:");
+        assert_eq!(
+            parts(&format!("a{token}<:bad:x>")),
+            [
+                Part::Text("a"),
+                Part::Custom {
+                    token: &token,
+                    name: "party",
+                    id: [7; 32]
+                },
+                Part::Text("<:bad:x>"),
+            ]
+        );
+        assert!(jumbo(&format!(" {token}😀 ")));
+        assert!(!jumbo(&format!("hi {token}")));
     }
 
     #[test]

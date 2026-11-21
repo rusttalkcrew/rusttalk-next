@@ -32,7 +32,7 @@ use crate::{
     device_sync::{self, Edit},
     emoji::{
         self,
-        picker::{self, Picker},
+        picker::{self, Picked, Picker},
     },
     files::{self, Ask, Files},
     net::{
@@ -59,6 +59,7 @@ const RAIL_WIDTH: f32 = 72.0;
 const RAIL_BUTTON: f32 = 48.0;
 const SERVER_HEADER: f32 = 44.0;
 const MESSAGE_AVATAR: f32 = 38.0;
+const STICKER_SIZE: f32 = 160.0;
 const TOOLBAR_BUTTON: Vec2 = Vec2::new(30.0, 26.0);
 
 pub mod layout;
@@ -386,7 +387,10 @@ impl Home {
             };
             // Mentions read as names, like in the chat.
             let body = match &msg.body {
-                Body::Text(text) if !text.trim().is_empty() => message.plain(&server.dir),
+                Body::Text(_) if msg.sticker.is_some() => "Sent a sticker".into(),
+                Body::Text(text) if !text.trim().is_empty() => {
+                    emoji::plain(&message.plain(&server.dir)).into_owned()
+                }
                 _ if !msg.files.is_empty() || msg.live.is_some() => "Sent a file".into(),
                 _ => "New message".into(),
             };
@@ -912,6 +916,7 @@ pub fn show(ui: &mut Ui, home: &mut Home, updates: &mut crate::update::Updater) 
         | Ask::Save(address, _)
         | Ask::Live(address, _)
         | Ask::Icon(address)
+        | Ask::Emoji(address, ..)
         | Ask::Accept(address, ..)) = &ask
         else {
             continue;
@@ -932,11 +937,20 @@ pub fn show(ui: &mut Ui, home: &mut Home, updates: &mut crate::update::Updater) 
                     home.files.save(&server.commands, &file, path);
                 }
             }
-            Ask::Icon(address) => {
+            Ask::Icon(_) | Ask::Emoji(..) => {
                 let Some(path) = paths.into_iter().next() else {
                     continue;
                 };
-                match Crop::open(Target::Icon(address), &path) {
+                let target = match ask {
+                    Ask::Emoji(address, name, sticker) => Target::Emoji {
+                        address,
+                        name,
+                        sticker,
+                    },
+                    Ask::Icon(address) => Target::Icon(address),
+                    _ => unreachable!("matched above"),
+                };
+                match Crop::open(target, &path) {
                     Ok(crop) => home.crop = Some(crop),
                     Err(problem) => {
                         if let Some(settings) = &mut home.server_settings {
@@ -1276,6 +1290,20 @@ fn crop_dialog(ctx: &egui::Context, home: &mut Home) {
         Target::Icon(address) => {
             if let Some(index) = home.index(&address) {
                 home.servers[index].send(Command::Admin(Admin::SetIcon(bytes)));
+            }
+        }
+        Target::Emoji {
+            address,
+            name,
+            sticker,
+        } => {
+            if let Some(index) = home.index(&address) {
+                let add = Admin::AddEmoji {
+                    name,
+                    sticker,
+                    bytes,
+                };
+                home.servers[index].send(Command::Admin(add));
             }
         }
     }
@@ -2530,6 +2558,7 @@ fn composer(
     let input = ui::colors(ui).field;
     let wide = mentions::can_mention_everyone(dir, channel, dir.me);
     let mut attach = None;
+    let mut sticker = None;
     let field = ui
         .horizontal_top(|ui| {
             let plus = ui
@@ -2553,7 +2582,7 @@ fn composer(
                     ui::icon_button(ui, "😀", "Emoji picker", Look::Plain, Vec2::splat(36.0))
                 })
                 .inner;
-            let picked = emoji_picker.show(&emoji_button, composer_id(channel));
+            let picked = emoji_picker.show(&emoji_button, composer_id(channel), &dir.emoji);
             ScrollArea::vertical()
                 .id_salt("composer-scroll")
                 .max_height(180.0)
@@ -2598,7 +2627,7 @@ fn composer(
                                     );
                                     choices.iter().map(|choice| choice.suggestion(ui)).collect()
                                 } else {
-                                    picker::suggestions(query)
+                                    picker::suggestions(query, &dir.emoji)
                                 }
                             },
                         );
@@ -2608,8 +2637,12 @@ fn composer(
                         {
                             emoji_picker.remember(&accepted.insert);
                         }
-                        if let Some(sequence) = picked {
-                            emoji_picker.insert(&field, &mut chat.draft, &sequence);
+                        match picked {
+                            Some(Picked::Text(sequence)) => {
+                                emoji_picker.insert(&field, &mut chat.draft, &sequence);
+                            }
+                            Some(Picked::Sticker(id, name)) => sticker = Some((id, name)),
+                            None => {}
                         }
                         field
                     })
@@ -2630,8 +2663,10 @@ fn composer(
     // Up in an empty box edits your last message here, like other chat apps.
     if field.has_focus() && up && chat.draft.is_empty() && chat.editing.is_none() {
         let last = chat.messages.iter().rev().find_map(|msg| match &msg.body {
-            Body::Text(text) if msg.person == dir.me && msg.live.is_none() => {
-                Some((msg.id, text.clone()))
+            Body::Text(text)
+                if msg.person == dir.me && msg.live.is_none() && msg.sticker.is_none() =>
+            {
+                Some((msg.id, emoji::plain(text).into_owned()))
             }
             _ => None,
         });
@@ -2653,8 +2688,21 @@ fn composer(
             chat.clear_draft();
         }
     }
+    // A sticker goes out on its own, leaving the draft as it is.
+    if let Some((id, name)) = sticker {
+        let command = Command::Send(Draft {
+            channel,
+            text: name,
+            reply_to: chat.reply_to.take(),
+            edit_of: None,
+            files: Vec::new(),
+            sticker: Some(id),
+        });
+        field.request_focus();
+        return (Some(command), attach);
+    }
     let encoded = chat.mentions.encode(&chat.draft);
-    let converted = emoji::replace(&encoded);
+    let converted = emoji::replace(&encoded, &dir.emoji);
     let count = converted.chars().count();
     if count >= COUNT_FROM {
         let color = if count > MAX_TEXT_CHARS {
@@ -2693,6 +2741,7 @@ fn composer(
         reply_to: chat.reply_to.take(),
         edit_of: chat.editing.take(),
         files,
+        sticker: None,
     });
     chat.clear_draft();
     field.request_focus();
@@ -2764,10 +2813,13 @@ fn message(
                 if let Some(reply) = msg.reply_to {
                     let quoted = chat.messages.iter().find(|m| m.id == reply);
                     let line = match quoted {
+                        Some(quoted) if quoted.sticker.is_some() => {
+                            format!("↪ {}: a sticker", names(&quoted.person))
+                        }
                         Some(quoted) if matches!(quoted.body, Body::Text(_)) => {
                             let text = mentions::Message::new(quoted, dir, channel).plain(dir);
                             let person = quoted.person;
-                            let snippet: String = text.chars().take(80).collect();
+                            let snippet: String = emoji::plain(&text).chars().take(80).collect();
                             let snippet = if snippet.is_empty() {
                                 "a file".into()
                             } else {
@@ -2786,19 +2838,16 @@ fn message(
                     });
                 }
                 match &msg.body {
+                    Body::Text(name) if msg.sticker.is_some() => {
+                        sticker(ui, dir, msg.sticker.as_ref(), name);
+                    }
                     Body::Text(text) => {
                         if !text.is_empty() {
                             ui.horizontal_wrapped(|ui| {
-                                let mut body = emoji::text(text);
-                                if emoji::jumbo(text) && msg.files.is_empty() && msg.live.is_none()
-                                {
-                                    body = body.size(36.0);
-                                }
-                                if let Some(job) = mention.layout(ui, dir) {
-                                    ui.add(Label::new(job).wrap());
-                                } else {
-                                    ui.add(Label::new(body).wrap());
-                                }
+                                let jumbo = emoji::jumbo(text)
+                                    && msg.files.is_empty()
+                                    && msg.live.is_none();
+                                message_text(ui, dir, &mention, text, jumbo);
                                 if chat.edited.contains_key(&msg.id) {
                                     ui.label(RichText::new("(edited)").small().weak());
                                 }
@@ -2820,11 +2869,11 @@ fn message(
     let rect = row.response.rect;
     let mine = msg.person == me;
     let text = match &msg.body {
-        Body::Text(text) => Some(text.clone()),
+        Body::Text(text) => Some(emoji::plain(text).into_owned()),
         _ => None,
     };
     let can_reply = text.is_some();
-    let can_edit = mine && text.is_some();
+    let can_edit = mine && text.is_some() && msg.sticker.is_none();
     let can_delete =
         mine || (dir.perms.delete_messages && !dir.dms.iter().any(|dm| dm.channel == channel));
     let mut pick = None;
@@ -2839,7 +2888,9 @@ fn message(
             pick = Some(Pick::Edit(msg.id, text.clone()));
         }
         if can_reply && m.item("📋", "Copy text").clicked() {
-            m.ui().ctx().copy_text(mention.plain(dir));
+            m.ui()
+                .ctx()
+                .copy_text(emoji::plain(&mention.plain(dir)).into_owned());
         }
         if can_delete {
             m.separator();
@@ -2905,6 +2956,76 @@ fn message(
         pick = Some(Pick::Delete(msg.id));
     }
     pick
+}
+
+/// Message text with mentions as chips and server emoji drawn as pictures, or as
+/// `:name:` when not available.
+fn message_text(
+    ui: &mut Ui,
+    dir: &Directory,
+    mention: &mentions::Message<'_>,
+    text: &str,
+    jumbo: bool,
+) {
+    let parts = emoji::parts(text);
+    let size = if jumbo { 36.0 } else { ui::TEXT_BODY };
+    let label = |ui: &Ui, text: &str| match mention.layout_text(ui, dir, text) {
+        Some(job) => Label::new(job).wrap(),
+        None => {
+            let body = emoji::text(text);
+            Label::new(if jumbo { body.size(size) } else { body }).wrap()
+        }
+    };
+    if let [emoji::Part::Text(text)] = parts.as_slice() {
+        ui.add(label(ui, text));
+        return;
+    }
+    ui.spacing_mut().item_spacing.x = 0.0;
+    for part in parts {
+        match part {
+            emoji::Part::Text(text) => {
+                ui.add(label(ui, text));
+            }
+            emoji::Part::Custom { name, id, .. } => {
+                let code = format!(":{name}:");
+                match dir.emoji_by_id(&id).and_then(|e| e.picture.as_ref()) {
+                    Some(picture) => {
+                        let side = if jumbo { 48.0 } else { size + 6.0 };
+                        ui.add(
+                            egui::Image::new(&frame(ui, picture))
+                                .fit_to_exact_size(Vec2::splat(side))
+                                .alt_text(&code),
+                        )
+                        .on_hover_text(code);
+                    }
+                    None => {
+                        ui.add(label(ui, &code));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A sticker message: the picture, large, or its name when not available.
+fn sticker(ui: &mut Ui, dir: &Directory, id: Option<&Id>, name: &str) {
+    let code = format!(":{name}:");
+    match id
+        .and_then(|id| dir.emoji_by_id(id))
+        .and_then(|e| e.picture.as_ref())
+    {
+        Some(picture) => {
+            ui.add(
+                egui::Image::new(&frame(ui, picture))
+                    .fit_to_exact_size(Vec2::splat(STICKER_SIZE))
+                    .alt_text(format!("Sticker {code}")),
+            )
+            .on_hover_text(code);
+        }
+        None => {
+            ui.label(emoji::text(format!("Sticker {code}")).italics().weak());
+        }
+    }
 }
 
 fn dialog_title(home: &Home, dialog: &Dialog) -> String {

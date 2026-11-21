@@ -227,6 +227,18 @@ until swept. Changing the lifetime applies to new uploads. Run one API
 instance per volume. On startup it removes leftover staging blobs and
 uncommitted blobs.
 
+## Server emoji limits
+
+| Variable | Default |
+| --- | --- |
+| `RUSTTALK_EMOJI_MAX` | 100 emoji |
+| `RUSTTALK_STICKER_MAX` | 50 stickers |
+| `RUSTTALK_EMOJI_MAX_BYTES` | 262,144 (256 KiB per encrypted picture, also the maximum) |
+
+Pictures live in `emoji/` on the API volume. Lowering a count keeps existing
+emoji and stops new ones until the count is below the limit. On startup the API
+removes pictures without a database row.
+
 ## Logs and health
 
 Check the API through Caddy with:

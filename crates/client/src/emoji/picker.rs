@@ -4,20 +4,27 @@ use std::{
 };
 
 use eframe::egui::{
-    self, Id, PointerButton, Response, ScrollArea, TextBuffer as _, TextEdit, Ui, Vec2,
+    self, PointerButton, Response, ScrollArea, TextBuffer as _, TextEdit, Ui, Vec2,
     text::{CCursor, CCursorRange},
 };
 use rusttalk_core::client::save_json;
 
 use super::{PICKER, SHORTCODES, matching, shortcode_char, sprite, text};
-use crate::ui;
+use crate::{
+    server::{CustomEmoji, Id},
+    ui,
+};
 
 pub const RECENT_FILE: &str = "emoji-recent.json";
 const RECENT_LIMIT: usize = 32;
 const COLUMNS: usize = 8;
 const CELL: f32 = 32.0;
-const CATEGORIES: [(&str, Category); 10] = [
+const STICKER_COLUMNS: usize = 4;
+const STICKER_CELL: f32 = 68.0;
+const CATEGORIES: [(&str, Category); 12] = [
     ("Recent", Category::Recent),
+    ("Server", Category::Server),
+    ("Stickers", Category::Stickers),
     ("Smileys", Category::Unicode(0)),
     ("People", Category::Unicode(1)),
     ("Animals", Category::Unicode(3)),
@@ -41,7 +48,17 @@ const TONES: [(&str, &str); 6] = [
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Category {
     Recent,
+    /// This server's emoji.
+    Server,
+    /// This server's stickers.
+    Stickers,
     Unicode(u8),
+}
+
+/// What was picked: text to insert, or a sticker to send (ID and name).
+pub enum Picked {
+    Text(String),
+    Sticker(Id, String),
 }
 
 pub struct Picker {
@@ -85,7 +102,9 @@ impl Picker {
     }
 
     pub fn remember(&mut self, sequence: &str) {
-        if self.recent.first().is_some_and(|first| first == sequence) {
+        // Server emoji belong to one server, so only Unicode emoji are recent.
+        if sprite(sequence).is_none() || self.recent.first().is_some_and(|first| first == sequence)
+        {
             return;
         }
         promote(&mut self.recent, sequence);
@@ -94,7 +113,12 @@ impl Picker {
         }
     }
 
-    pub fn show(&mut self, anchor: &Response, editor: Id) -> Option<String> {
+    pub fn show(
+        &mut self,
+        anchor: &Response,
+        editor: egui::Id,
+        custom: &[CustomEmoji],
+    ) -> Option<Picked> {
         let cursor = || {
             TextEdit::load_state(&anchor.ctx, editor).and_then(|state| state.cursor.char_range())
         };
@@ -126,7 +150,20 @@ impl Picker {
             if anchor.clicked() {
                 search.request_focus();
             }
-            for row in CATEGORIES.chunks(5) {
+            let has = |sticker: bool| custom.iter().any(|e| e.sticker == sticker);
+            let categories: Vec<_> = CATEGORIES
+                .iter()
+                .filter(|(_, category)| match category {
+                    Category::Server => has(false),
+                    Category::Stickers => has(true),
+                    _ => true,
+                })
+                .collect();
+            // This server may have no emoji or stickers, unlike the last one.
+            if !categories.iter().any(|(_, c)| *c == self.category) {
+                self.category = Category::Unicode(0);
+            }
+            for row in categories.chunks(5) {
                 ui.horizontal(|ui| {
                     for (name, category) in row {
                         if ui::choice_button(ui, self.category == *category, *name, Vec2::ZERO)
@@ -137,6 +174,11 @@ impl Picker {
                         }
                     }
                 });
+            }
+            match self.category {
+                Category::Server => return self.custom(ui, custom, false),
+                Category::Stickers => return self.custom(ui, custom, true),
+                _ => {}
             }
             ui.horizontal(|ui| {
                 ui.label(ui::caption("Skin tone"));
@@ -181,12 +223,56 @@ impl Picker {
                     selected
                 })
                 .inner
+                .map(Picked::Text)
         })
         .flatten();
-        if let Some(sequence) = &selected {
+        if let Some(Picked::Text(sequence)) = &selected {
             self.remember(sequence);
         }
         selected
+    }
+
+    /// This server's emoji or stickers as pictures, filtered by the search.
+    fn custom(&self, ui: &mut Ui, custom: &[CustomEmoji], sticker: bool) -> Option<Picked> {
+        ui.separator();
+        let query = self.query.trim().trim_matches(':').to_lowercase();
+        let items: Vec<_> = custom
+            .iter()
+            .filter(|e| e.sticker == sticker && e.name.contains(&query))
+            .collect();
+        if items.is_empty() {
+            ui.label("Nothing found.");
+            return None;
+        }
+        let (columns, cell) = if sticker {
+            (STICKER_COLUMNS, STICKER_CELL)
+        } else {
+            (COLUMNS, CELL)
+        };
+        let mut picked = None;
+        ScrollArea::vertical()
+            .id_salt((self.category, query.is_empty()))
+            .max_height(216.0)
+            .auto_shrink([false, true])
+            .show_rows(ui, cell, items.len().div_ceil(columns), |ui, rows| {
+                for row in rows {
+                    ui.horizontal(|ui| {
+                        for item in items.iter().skip(row * columns).take(columns) {
+                            if picture_tile(ui, item, cell).clicked() {
+                                picked = Some(if sticker {
+                                    Picked::Sticker(item.id, item.name.clone())
+                                } else {
+                                    Picked::Text(format!(":{}:", item.name))
+                                });
+                            }
+                        }
+                    });
+                }
+            });
+        if picked.is_some() {
+            ui.close();
+        }
+        picked
     }
 
     pub fn insert(&mut self, field: &Response, draft: &mut String, sequence: &str) {
@@ -274,13 +360,31 @@ fn tile(ui: &mut Ui, sequence: &str, label: &str, selected: Option<bool>) -> Res
     response.on_hover_text(label)
 }
 
+/// A server emoji or sticker: its picture, or its name until the picture arrives.
+pub fn picture_tile(ui: &mut Ui, emoji: &CustomEmoji, cell: f32) -> Response {
+    let label = format!(":{}:", emoji.name);
+    let response = match &emoji.picture {
+        Some(picture) => {
+            let image = egui::Image::new(&crate::home::frame(ui, picture))
+                .fit_to_exact_size(Vec2::splat(cell - 8.0));
+            ui::choice_button(ui, false, image, Vec2::splat(cell))
+        }
+        None => ui::choice_button(ui, false, ui::caption(&emoji.name), Vec2::splat(cell)),
+    };
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), &label));
+    response.on_hover_text(label)
+}
+
 fn promote(recent: &mut Vec<String>, sequence: &str) {
     recent.retain(|item| item != sequence);
     recent.insert(0, sequence.to_owned());
     recent.truncate(RECENT_LIMIT);
 }
 
-pub fn suggestions(query: &egui::CompletionQuery<'_>) -> Vec<egui::Suggestion> {
+pub fn suggestions(
+    query: &egui::CompletionQuery<'_>,
+    custom: &[CustomEmoji],
+) -> Vec<egui::Suggestion> {
     let Some(prefix) = query.word.strip_prefix(':') else {
         return Vec::new();
     };
@@ -297,11 +401,20 @@ pub fn suggestions(query: &egui::CompletionQuery<'_>) -> Vec<egui::Suggestion> {
     {
         return Vec::new();
     }
-    matching(&prefix.to_ascii_lowercase())
-        .take(8)
-        .map(|(name, sequence)| {
+    let prefix = prefix.to_ascii_lowercase();
+    // Server emoji first; they become images when the message is sent.
+    let server = custom
+        .iter()
+        .filter(|e| !e.sticker && e.name.starts_with(&prefix))
+        .map(|e| {
+            let code = format!(":{}:", e.name);
+            egui::Suggestion::new(&code).content(text(format!("{code}  · server")))
+        });
+    server
+        .chain(matching(&prefix).map(|(name, sequence)| {
             egui::Suggestion::new(sequence).content(text(format!("{sequence}  :{name}:")))
-        })
+        }))
+        .take(8)
         .collect()
 }
 

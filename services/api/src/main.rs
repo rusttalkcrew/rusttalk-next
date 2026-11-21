@@ -1,6 +1,7 @@
 mod auth;
 mod channels;
 mod dms;
+mod emoji;
 mod events;
 mod files;
 mod index;
@@ -61,6 +62,7 @@ struct App {
     voice: Option<Arc<voice::LiveKit>>,
     listing_changed: watch::Sender<()>,
     files: Arc<files::Files>,
+    emoji: Arc<emoji::Emoji>,
     session_ttl: i64,
 }
 
@@ -195,8 +197,10 @@ async fn run() -> Result<()> {
                 );
             }
             let files = Arc::new(files::Files::open(&dir, &db).await?);
+            let emoji = Arc::new(emoji::Emoji::open(&dir, &db).await?);
             serve(App {
                 files,
+                emoji,
                 db,
                 key: Arc::new(key),
                 changes: broadcast::channel(128).0,
@@ -310,6 +314,10 @@ async fn serve(app: App) -> io::Result<()> {
         .route("/v1/bans", get(members::bans))
         .route("/v1/audit", get(members::audit_log))
         .route("/v1/files/{id}", get(files::download).delete(files::delete))
+        .route("/v1/emoji", get(emoji::list))
+        .route("/v1/emoji/{id}", delete(emoji::delete))
+        .route("/v1/emoji/{id}/image", get(emoji::image))
+        .route("/v1/emoji/{id}/name", put(emoji::rename))
         .layer(RequestBodyLimitLayer::new(4096))
         .merge(
             Router::new()
@@ -331,6 +339,7 @@ async fn serve(app: App) -> io::Result<()> {
             Router::new()
                 .route("/v1/space", put(metadata::update_space))
                 .route("/v1/me/profile", put(metadata::update_profile))
+                .route("/v1/emoji", post(emoji::add))
                 .layer(RequestBodyLimitLayer::new(metadata::IMAGE_BODY_LIMIT)),
         )
         .merge(

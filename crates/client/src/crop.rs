@@ -29,11 +29,21 @@ const MAX_ZOOM: f32 = 8.0;
 const QUALITIES: [u8; 6] = [90, 82, 74, 66, 58, 50];
 const VIEW: f32 = 300.0;
 
+/// Server emoji and stickers are saved at most this large: plenty for how they show.
+const EMOJI_EDGE: u32 = 128;
+const STICKER_EDGE: u32 = 320;
+
 /// What the picture is for.
 #[derive(Clone)]
 pub enum Target {
     Avatar,
     Icon(url::Url),
+    /// A new server emoji or (`sticker`) sticker with this name.
+    Emoji {
+        address: url::Url,
+        name: String,
+        sticker: bool,
+    },
 }
 
 /// The square crop, in picture pixels: its centre and the zoom (1 shows the
@@ -159,6 +169,8 @@ impl Crop {
         let title = match self.target {
             Target::Avatar => "Crop your picture",
             Target::Icon(_) => "Crop the server icon",
+            Target::Emoji { sticker: false, .. } => "Crop the emoji",
+            Target::Emoji { sticker: true, .. } => "Crop the sticker",
         };
         let mut outcome = Outcome::Open;
         let ((), dismissed) = ui::dialog(ctx, "crop", title, |ui| {
@@ -236,8 +248,13 @@ impl Crop {
                     painter.circle_stroke(rect.center(), r + wide / 2.0, Stroke::new(wide, dim));
                     painter.circle_stroke(rect.center(), r - 1.0, edge);
                 }
-                Target::Icon(_) => {
-                    let round = CornerRadius::same((VIEW * 0.25) as u8);
+                Target::Icon(_) | Target::Emoji { .. } => {
+                    let corner = if matches!(self.target, Target::Icon(_)) {
+                        0.25
+                    } else {
+                        0.08
+                    };
+                    let round = CornerRadius::same((VIEW * corner) as u8);
                     painter.rect_stroke(
                         rect,
                         round,
@@ -272,7 +289,13 @@ impl Crop {
         }
         let (x, y, side) = self.square.pixels();
         let crop = image::imageops::crop_imm(&self.image, x, y, side, side).to_image();
-        encode(crop)
+        // Server emoji and stickers are PNG or GIF only, so they never fall back to JPEG.
+        match self.target {
+            Target::Emoji { sticker, .. } => {
+                encode(crop, if sticker { STICKER_EDGE } else { EMOJI_EDGE }, false)
+            }
+            _ => encode(crop, EDGE, true),
+        }
     }
 }
 
@@ -312,11 +335,11 @@ fn gif_frames(bytes: &[u8]) -> usize {
         .unwrap_or(0)
 }
 
-/// Scale a square to at most 512 × 512 and encode it to fit the size limit:
-/// PNG when it fits, otherwise JPEG at falling quality, then smaller.
-fn encode(mut image: RgbaImage) -> Result<Vec<u8>> {
-    if image.width() > EDGE || image.height() > EDGE {
-        image = image::imageops::resize(&image, EDGE, EDGE, FilterType::Lanczos3);
+/// Scale a square to at most `edge` pixels and encode it to fit the size limit:
+/// PNG when it fits, otherwise (with `jpeg`) JPEG at falling quality, then smaller.
+fn encode(mut image: RgbaImage, edge: u32, jpeg: bool) -> Result<Vec<u8>> {
+    if image.width() > edge || image.height() > edge {
+        image = image::imageops::resize(&image, edge, edge, FilterType::Lanczos3);
     }
     loop {
         let mut png = Cursor::new(Vec::new());
@@ -325,6 +348,12 @@ fn encode(mut image: RgbaImage) -> Result<Vec<u8>> {
             return Ok(png.into_inner());
         }
         // JPEG has no transparency; large enough pictures to get here are photos.
+        if !jpeg {
+            ensure!(image.width() > 16, "picture does not compress");
+            let side = image.width() * 3 / 4;
+            image = image::imageops::resize(&image, side, side, FilterType::Lanczos3);
+            continue;
+        }
         let rgb = DynamicImage::ImageRgba8(image.clone()).into_rgb8();
         for quality in QUALITIES {
             let mut jpeg = Vec::new();
@@ -390,7 +419,10 @@ mod tests {
             let [a, b, c, _] = seed.to_le_bytes();
             image::Rgba([a, b, c, 255])
         });
-        let bytes = encode(noise)?;
+        let png = encode(noise.clone(), STICKER_EDGE, false)?;
+        assert!(png.len() <= IMAGE_PLAINTEXT);
+        assert_eq!(image::guess_format(&png)?, ImageFormat::Png);
+        let bytes = encode(noise, EDGE, true)?;
         assert!(bytes.len() <= IMAGE_PLAINTEXT);
         assert_eq!(image::guess_format(&bytes)?, ImageFormat::Jpeg);
         let frames = decode_profile_image(&bytes)?;
@@ -401,7 +433,7 @@ mod tests {
     #[test]
     fn plain_pictures_stay_png() -> Result<()> {
         let plain = RgbaImage::from_pixel(900, 900, image::Rgba([10, 120, 200, 128]));
-        let bytes = encode(plain)?;
+        let bytes = encode(plain, EDGE, true)?;
         assert_eq!(image::guess_format(&bytes)?, ImageFormat::Png);
         assert_eq!(
             decode_profile_image(&bytes)?[0].buffer().dimensions(),

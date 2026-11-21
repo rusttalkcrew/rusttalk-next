@@ -50,6 +50,14 @@ pub enum Admin {
     RevokeInvite(String),
     /// Replace the server icon (PNG, JPEG or GIF bytes).
     SetIcon(Vec<u8>),
+    /// Add a server emoji or (`sticker`) a sticker from PNG or GIF bytes.
+    AddEmoji {
+        name: String,
+        sticker: bool,
+        bytes: Vec<u8>,
+    },
+    RenameEmoji(Id, String),
+    DeleteEmoji(Id),
     /// The owner's public listing setting.
     LoadListing,
     /// List the server publicly with these details, or stop (`None`).
@@ -263,6 +271,35 @@ pub(super) async fn run(
             Ok(()) => Ok("Server icon changed."),
             Err(error) => Err(failed(&error)),
         },
+        Admin::AddEmoji {
+            name,
+            sticker,
+            bytes,
+        } => add_emoji(client, &name, sticker, &bytes).await,
+        Admin::RenameEmoji(id, name) => {
+            match emoji_ct(client, &id, Metadata::EmojiName, name.as_bytes()) {
+                Ok(name_ct) => {
+                    let path = format!("/v1/emoji/{}/name", encode(&id));
+                    call(
+                        client,
+                        Method::PUT,
+                        &path,
+                        Some(json!({"name_ct": name_ct})),
+                    )
+                    .await
+                    .map(|()| "Renamed.")
+                }
+                Err(text) => Err(text),
+            }
+        }
+        Admin::DeleteEmoji(id) => call(
+            client,
+            Method::DELETE,
+            &format!("/v1/emoji/{}", encode(&id)),
+            None,
+        )
+        .await
+        .map(|()| "Deleted."),
         Admin::RevokeInvite(id) => call(client, Method::DELETE, &format!("/v1/invites/{id}"), None)
             .await
             .map(|()| "That invite link no longer works."),
@@ -433,6 +470,45 @@ async fn create_role(
         .map(|()| "Role created.")
 }
 
+async fn add_emoji(
+    client: &KeyClient<'_>,
+    name: &str,
+    sticker: bool,
+    bytes: &[u8],
+) -> Result<&'static str, String> {
+    let id = random_key().map_err(|error| {
+        tracing::error!(%error, "making an emoji ID failed");
+        FAILED.to_owned()
+    })?;
+    let body = json!({
+        "id": encode(id.as_ref()),
+        "kind": if sticker { "sticker" } else { "emoji" },
+        "name_ct": emoji_ct(client, &id[..], Metadata::EmojiName, name.as_bytes())?,
+        "image_ct": emoji_ct(client, &id[..], Metadata::EmojiImage, bytes)?,
+    });
+    call(client, Method::POST, "/v1/emoji", Some(body))
+        .await
+        .map(|()| {
+            if sticker {
+                "Sticker added."
+            } else {
+                "Emoji added."
+            }
+        })
+}
+
+fn emoji_ct(
+    client: &KeyClient<'_>,
+    id: &[u8],
+    kind: Metadata,
+    clear: &[u8],
+) -> Result<String, String> {
+    client.encrypt_metadata(kind, id, clear).map_err(|error| {
+        tracing::warn!(error = %format_args!("{error:#}"), "encrypting an emoji failed");
+        "The server's key hasn't arrived yet. Try again in a moment.".to_owned()
+    })
+}
+
 fn name_ct(client: &KeyClient<'_>, id: &str, name: &str) -> Result<String, String> {
     client
         .encrypt_metadata(Metadata::RoleName, id.as_bytes(), name.as_bytes())
@@ -507,6 +583,10 @@ fn problem(code: &str) -> &'static str {
         "invalid_index_url" => "The directory address must start with https://.",
         "invalid_index_tls_fingerprint" => "That certificate fingerprint isn't right.",
         "invalid_channel_flags" => "Write, Speak and Video also need Read.",
+        "emoji_limit" => "This server has as many emoji as it can have. Delete one first.",
+        "sticker_limit" => "This server has as many stickers as it can have. Delete one first.",
+        "emoji_too_large" | "body_too_large" => "That picture is too big. Try a smaller one.",
+        "emoji_not_found" => "That was already deleted.",
         "invalid_role_count" => "Everyone needs at least one role.",
         "space_key_unavailable" | "metadata_epoch_changed" => {
             "The server's key is changing. Try again in a moment."
