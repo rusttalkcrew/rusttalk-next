@@ -126,7 +126,7 @@ impl<'a> App<'a> {
                 let error = if check.matches(&words, answers.each_ref().map(|a| a.as_str())) {
                     save(keystore, &identity)
                 } else {
-                    Some("Those words don't match your list. Check them and try again.".into())
+                    Some(t!("app.words_mismatch").into())
                 };
                 match error {
                     None => self.home(identity),
@@ -151,11 +151,11 @@ impl<'a> App<'a> {
                     },
                     Err(IdentityError::InvalidWords) => {
                         tracing::info!("recovery words rejected");
-                        Some("Those words don't look right. Check the spelling and that there are 24.".into())
+                        Some(t!("app.words_invalid").into())
                     }
                     Err(error) => {
                         tracing::error!(%error, "add device failed");
-                        Some(format!("Couldn't add this device: {error}"))
+                        Some(t!("app.add_device_failed", error = error))
                     }
                 };
                 Screen::Restore { words, error }
@@ -171,7 +171,7 @@ impl<'a> App<'a> {
                 Err(error) => {
                     tracing::error!(error = %format_args!("{error:#}"), "sign out failed");
                     home.confirm_sign_out = false;
-                    home.error = Some("Couldn't sign out. Try again.".into());
+                    home.error = Some(t!("app.sign_out_failed").into());
                     Screen::Home(home)
                 }
             },
@@ -206,7 +206,7 @@ fn forget_profile(data: &std::path::Path) {
 fn save(keystore: &Keystore, identity: &DeviceIdentity) -> Option<String> {
     let error = keystore.save(identity).err()?;
     tracing::error!(error = %format_args!("{error:#}"), "saving identity failed");
-    Some("Couldn't save your account on this computer. Try again.".into())
+    Some(t!("app.save_failed").into())
 }
 
 fn problem(what: &str, error: &IdentityError) -> Screen {
@@ -226,9 +226,10 @@ impl eframe::App for App<'_> {
         self.updates.poll(ui.ctx());
         let action = match &mut self.screen {
             Screen::Problem(details) => card(ui, |ui| {
-                ui.heading("RustTalk couldn't start");
-                ui.label("Close RustTalk and open it again. If this keeps happening, check that your system keyring is unlocked.");
-                CollapsingHeader::new("Details").show(ui, |ui| ui.label(details.as_str()));
+                ui.heading(t!("app.problem_title"));
+                ui.label(t!("app.problem_help"));
+                CollapsingHeader::new(t!("common.details"))
+                    .show(ui, |ui| ui.label(details.as_str()));
                 None
             }),
             Screen::Welcome => card(ui, welcome),
@@ -276,20 +277,20 @@ pub fn submitted(ui: &Ui, field: &Response) -> bool {
 }
 
 fn welcome(ui: &mut Ui) -> Option<Action> {
-    ui.heading("Welcome to RustTalk");
-    ui.label("Talk and chat with your friends. Private and encrypted.");
+    ui.heading(t!("app.welcome"));
+    ui.label(t!("app.welcome_text"));
     ui.add_space(24.0);
-    if primary(ui, "Create account").clicked() {
+    if primary(ui, t!("app.create_account")).clicked() {
         return Some(Action::Create);
     }
-    secondary(ui, "I already have an account")
+    secondary(ui, t!("app.have_account"))
         .clicked()
         .then_some(Action::Restore)
 }
 
 fn show_words(ui: &mut Ui, words: &str) -> Option<Action> {
-    ui.heading("Your recovery words");
-    ui.label("Write these 24 words on paper, in this order, and keep them safe. They are the only way back into your account. You will see them only once.");
+    ui.heading(t!("app.words_title"));
+    ui.label(t!("app.words_text"));
     ui.add_space(12.0);
     Grid::new("recovery-words")
         .num_columns(4)
@@ -307,7 +308,7 @@ fn show_words(ui: &mut Ui, words: &str) -> Option<Action> {
             }
         });
     ui.add_space(16.0);
-    primary(ui, "I wrote them down")
+    primary(ui, t!("app.wrote_them"))
         .clicked()
         .then_some(Action::Continue)
 }
@@ -318,12 +319,12 @@ fn confirm(
     answers: &mut [Zeroizing<String>; 3],
     error: Option<&str>,
 ) -> Option<Action> {
-    ui.heading("Check your words");
-    ui.label("Type these words from your list.");
+    ui.heading(t!("app.check_title"));
+    ui.label(t!("app.check_text"));
     ui.add_space(12.0);
     let mut done = false;
     for (slot, (answer, index)) in answers.iter_mut().zip(check.indices()).enumerate() {
-        let label = ui.label(format!("Word {}", index + 1));
+        let label = ui.label(t!("app.word_number", number = index + 1));
         let field = ui
             .add(ui::field(&mut **answer).desired_width(260.0))
             .labelled_by(label.id);
@@ -334,19 +335,19 @@ fn confirm(
     }
     error_text(ui, error);
     ui.add_space(12.0);
-    if primary(ui, "Confirm").clicked() || done {
+    if primary(ui, t!("app.confirm")).clicked() || done {
         return Some(Action::Continue);
     }
-    secondary(ui, "Start over")
+    secondary(ui, t!("app.start_over"))
         .clicked()
         .then_some(Action::StartOver)
 }
 
 fn restore(ui: &mut Ui, words: &mut Zeroizing<String>, error: Option<&str>) -> Option<Action> {
-    ui.heading("Sign in with your recovery words");
-    ui.label("Type your 24 recovery words in order, with a space between them. This computer becomes a new device on your account.");
+    ui.heading(t!("app.restore_title"));
+    ui.label(t!("app.restore_text"));
     ui.add_space(12.0);
-    let label = ui.label("Recovery words");
+    let label = ui.label(t!("app.recovery_words"));
     let field = ui
         .add(
             ui::text_area(&mut **words)
@@ -359,8 +360,10 @@ fn restore(ui: &mut Ui, words: &mut Zeroizing<String>, error: Option<&str>) -> O
     }
     error_text(ui, error);
     ui.add_space(12.0);
-    if primary(ui, "Sign in").clicked() {
+    if primary(ui, t!("app.sign_in")).clicked() {
         return Some(Action::Continue);
     }
-    secondary(ui, "Back").clicked().then_some(Action::StartOver)
+    secondary(ui, t!("common.back"))
+        .clicked()
+        .then_some(Action::StartOver)
 }

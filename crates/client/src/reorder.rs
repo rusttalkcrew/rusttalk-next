@@ -101,10 +101,13 @@ pub fn step(categories: &[Category], item: Item, up: bool) -> Option<Slot> {
 }
 
 /// "Move up" and "Move down" menu items, dimmed at either end, and for a channel
-/// "Move to" with the other categories; returns the chosen move.
+/// t!("reorder.move_to") with the other categories; returns the chosen move.
 pub fn menu(m: &mut ui::Menu, categories: &[Category], item: Item) -> Option<(Item, Slot)> {
     let mut chosen = None;
-    for (icon, label, up) in [("⬆", "Move up", true), ("⬇", "Move down", false)] {
+    for (icon, label, up) in [
+        ("⬆", t!("reorder.up"), true),
+        ("⬇", t!("reorder.down"), false),
+    ] {
         let slot = step(categories, item, up);
         if m.add(MenuItem::new(icon, label).enabled(slot.is_some()))
             .clicked()
@@ -118,11 +121,11 @@ pub fn menu(m: &mut ui::Menu, categories: &[Category], item: Item) -> Option<(It
             .filter(|(at, c)| Some(*at) != here && c.id.is_some())
             .collect();
         if !others.is_empty() {
-            let picked = m.submenu("↪", "Move to", |m| {
+            let picked = m.submenu("↪", t!("reorder.move_to"), |m| {
                 let mut picked = None;
                 for (at, category) in others {
                     let name = if category.name.is_empty() {
-                        "No category"
+                        t!("reorder.no_category")
                     } else {
                         &category.name
                     };

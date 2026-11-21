@@ -3,8 +3,8 @@
 //! one long scrolling page.
 
 use eframe::egui::{
-    self, Align, CornerRadius, Frame, Id as UiId, Layout, Rect, RichText, ScrollArea, Sense, Ui,
-    UiBuilder, Vec2, accesskit::Role,
+    self, Align, ComboBox, CornerRadius, Frame, Id as UiId, Layout, Rect, RichText, ScrollArea,
+    Sense, Ui, UiBuilder, Vec2, accesskit::Role,
 };
 use rusttalk_core::identity::fingerprint;
 
@@ -13,6 +13,7 @@ use crate::{
     call, camera,
     files::Ask,
     home::{Home, Tab, face, privacy_tab},
+    i18n::{LANGS, Lang},
     server::Directory,
     ui::{
         self, CONTROL_HEIGHT, DARK_THEMES, LIGHT_THEMES, Mode, RADIUS_WINDOW, SPACE_S, TEXT_BODY,
@@ -244,10 +245,11 @@ fn sidebar<T: Copy + PartialEq>(
     ui.add_space(SPACE_S);
     let search = ui.add(
         ui::field(&mut nav.search)
-            .hint_text("Search")
+            .hint_text(t!("common.search"))
             .desired_width(f32::INFINITY),
     );
-    search.widget_info(|| egui::WidgetInfo::labeled(Role::SearchInput, true, "Search settings"));
+    search
+        .widget_info(|| egui::WidgetInfo::labeled(Role::SearchInput, true, t!("settings.search")));
     let query = nav.search.trim().to_lowercase();
     let mut jump = None;
     ui.add_space(SPACE_S);
@@ -294,7 +296,7 @@ fn sidebar<T: Copy + PartialEq>(
                 }
             }
             if !any {
-                ui.weak("Nothing found.");
+                ui.weak(t!("settings.nothing_found"));
             }
         });
     if jump.is_some() {
@@ -346,34 +348,34 @@ pub fn show(
     let page = |id, icon, label| Page { id, icon, label };
     let groups = [
         Group {
-            title: "User settings",
+            title: t!("settings.group_user"),
             pages: vec![
-                page(Tab::Profile, "👤", "My account"),
-                page(Tab::Privacy, "🔒", "Privacy"),
-                page(Tab::Devices, "💻", "Devices"),
+                page(Tab::Profile, "👤", t!("settings.my_account")),
+                page(Tab::Privacy, "🔒", t!("settings.privacy")),
+                page(Tab::Devices, "💻", t!("settings.devices")),
             ],
         },
         Group {
-            title: "App settings",
+            title: t!("settings.group_app"),
             pages: vec![
-                page(Tab::Appearance, "🎨", "Appearance"),
-                page(Tab::Voice, "🎤", "Voice & audio"),
-                page(Tab::Video, "🎥", "Video"),
-                page(Tab::Notifications, "🔔", "Notifications"),
+                page(Tab::Appearance, "🎨", t!("settings.appearance")),
+                page(Tab::Voice, "🎤", t!("settings.voice")),
+                page(Tab::Video, "🎥", t!("settings.video")),
+                page(Tab::Notifications, "🔔", t!("settings.notifications")),
                 page(
                     Tab::Updates,
                     "🔄",
                     if updates.available() {
-                        "Updates (new)"
+                        t!("settings.updates_new")
                     } else {
-                        "Updates"
+                        t!("settings.updates")
                     },
                 ),
             ],
         },
         Group {
-            title: "Info",
-            pages: vec![page(Tab::About, "ℹ", "About RustTalk")],
+            title: t!("settings.group_info"),
+            pages: vec![page(Tab::About, "ℹ", t!("settings.about"))],
         },
     ];
     let before = tab;
@@ -386,7 +388,7 @@ pub fn show(
         |ui, home| {
             let (dir, name) = me(home);
             let me = *home.identity.certificate.person_id();
-            sidebar_header(ui, &name, "Edit profile", |ui| {
+            sidebar_header(ui, &name, t!("settings.edit_profile"), |ui| {
                 face(ui, dir, &me, &name, HEADER_PICTURE, false);
             })
         },
@@ -407,13 +409,16 @@ pub fn show(
                 Tab::Updates => updates.settings(ui),
                 Tab::About => {
                     ui::page_section(ui, &format!("RustTalk {}", env!("CARGO_PKG_VERSION")));
-                    ui.label("Free and open source, under the MIT license.");
-                    ui.hyperlink_to("Source code on GitHub", REPOSITORY);
+                    ui.label(t!("settings.about_license"));
+                    ui.hyperlink_to(t!("settings.about_source"), REPOSITORY);
                     ui.add_space(SPACE_S);
-                    ui.label("Twemoji graphics by Twitter, Inc. and other contributors.");
-                    ui.hyperlink_to("Twemoji source", "https://github.com/jdecked/twemoji");
+                    ui.label(t!("settings.about_twemoji"));
                     ui.hyperlink_to(
-                        "CC BY 4.0 license",
+                        t!("settings.about_twemoji_source"),
+                        "https://github.com/jdecked/twemoji",
+                    );
+                    ui.hyperlink_to(
+                        t!("settings.about_twemoji_license"),
                         "https://creativecommons.org/licenses/by/4.0/",
                     );
                 }
@@ -433,13 +438,13 @@ pub fn show(
     }
     let mut action = None;
     let mut cancel = false;
-    let ((), dismissed) = ui::dialog(ctx, "sign-out", "Sign out of this device?", |ui| {
-        ui.label("This removes your account from this computer. To sign in again, you need your 24 recovery words.");
+    let ((), dismissed) = ui::dialog(ctx, "sign-out", t!("settings.sign_out_title"), |ui| {
+        ui.label(t!("settings.sign_out_text"));
         ui::footer(ui, |ui| {
-            if ui::danger(ui, "Sign out").clicked() {
+            if ui::danger(ui, t!("common.sign_out")).clicked() {
                 action = Some(Action::SignOut);
             }
-            cancel = ui::secondary(ui, "Cancel").clicked();
+            cancel = ui::secondary(ui, t!("common.cancel")).clicked();
         });
     });
     if cancel || dismissed {
@@ -458,12 +463,12 @@ fn me(home: &Home) -> (&Directory, String) {
         .map_or(&*NONE, |s| &s.dir);
     let name = (home.servers.iter())
         .find_map(|s| s.member(me).and_then(|m| m.name.clone()))
-        .unwrap_or_else(|| "You".into());
+        .unwrap_or_else(|| t!("common.you").into());
     (dir, name)
 }
 
 fn account_page(ui: &mut Ui, home: &mut Home) {
-    ui::page_section(ui, "Profile");
+    ui::page_section(ui, t!("settings.profile"));
     ui.horizontal(|ui| {
         let (dir, name) = me(home);
         let me = *home.identity.certificate.person_id();
@@ -472,15 +477,15 @@ fn account_page(ui: &mut Ui, home: &mut Home) {
         ui.vertical(|ui| {
             ui::setting_row(
                 ui,
-                "Picture",
-                "Shown on all your servers. GIFs play.",
+                t!("settings.picture"),
+                t!("settings.picture_help"),
                 |ui| {
                     let change = ui
                         .add_enabled_ui(!home.servers.is_empty(), |ui| {
-                            ui::secondary(ui, "Change picture")
+                            ui::secondary(ui, t!("settings.change_picture"))
                         })
                         .inner
-                        .on_hover_text("PNG, JPG or GIF.");
+                        .on_hover_text(t!("settings.picture_types"));
                     if change.clicked() {
                         home.error = None;
                         home.files.ask(ui.ctx(), Ask::Picture);
@@ -489,14 +494,9 @@ fn account_page(ui: &mut Ui, home: &mut Home) {
             );
         });
     });
-    ui::setting_row(
-        ui,
-        "Name",
-        "You pick your name on each server. Change it from the server's menu.",
-        |_| {},
-    );
-    ui::page_section(ui, "Your ID");
-    ui.weak("Friends can compare this to make sure it's really you.");
+    ui::setting_row(ui, t!("settings.name"), t!("settings.name_help"), |_| {});
+    ui::page_section(ui, t!("settings.your_id"));
+    ui.weak(t!("settings.your_id_help"));
     ui::card(ui, |ui| {
         ui.monospace(fingerprint(home.identity.certificate.person_id()));
     });
@@ -506,47 +506,47 @@ fn account_page(ui: &mut Ui, home: &mut Home) {
 /// pick their own level and mute from their right-click menus.
 fn notifications_page(ui: &mut Ui, home: &mut Home) {
     let mut prefs = home.notify.prefs().clone();
-    ui::page_section(ui, "Desktop notifications");
+    ui::page_section(ui, t!("settings.desktop_notifications"));
     ui::toggle_row(
         ui,
         &mut prefs.desktop,
-        "Desktop notifications",
-        "Show new messages on your desktop. Previews never leave this computer.",
+        t!("settings.desktop_notifications"),
+        t!("settings.desktop_notifications_help"),
     );
     ui.add_enabled_ui(prefs.desktop, |ui| {
         ui::toggle_row(
             ui,
             &mut prefs.sound,
-            "Sound",
-            "Play a sound with each notification.",
+            t!("settings.sound"),
+            t!("settings.sound_help"),
         );
         ui::toggle_row(
             ui,
             &mut prefs.unfocused_only,
-            "Only when RustTalk isn't focused",
-            "Stay quiet while you're using RustTalk.",
+            t!("settings.unfocused_only"),
+            t!("settings.unfocused_only_help"),
         );
     });
-    ui::page_section(ui, "Servers and channels");
-    ui.weak("Right-click a server or channel to mute it or choose what notifies you.");
+    ui::page_section(ui, t!("settings.servers_and_channels"));
+    ui.weak(t!("settings.servers_and_channels_help"));
     home.notify.set_prefs(prefs);
 }
 
 fn devices_page(ui: &mut Ui, home: &mut Home) {
-    ui::page_section(ui, "This device");
+    ui::page_section(ui, t!("settings.this_device"));
     ui::setting_row(
         ui,
         home.identity.certificate.name(),
-        "This computer",
+        t!("settings.this_computer"),
         |_| {},
     );
     ui::danger_zone(ui, |ui| {
         ui::setting_row(
             ui,
-            "Sign out of this device",
-            "Removes your account from this computer. You need your 24 recovery words to sign in again.",
+            t!("settings.sign_out_device"),
+            t!("settings.sign_out_device_help"),
             |ui| {
-                if ui::danger(ui, "Sign out").clicked() {
+                if ui::danger(ui, t!("common.sign_out")).clicked() {
                     home.confirm_sign_out = true;
                 }
             },
@@ -555,17 +555,55 @@ fn devices_page(ui: &mut Ui, home: &mut Home) {
 }
 
 /// Settings → Appearance: dark, light or the system's mode, a theme for each, and
-/// the accent colour. Changes show at once.
+/// the accent colour, and the language. Changes show at once.
 fn appearance_page(ui: &mut Ui, home: &mut Home) {
     let audio = home.voice.audio.clone();
     let mut settings = audio.settings();
     let before = settings.appearance();
     let mut look = before;
-    ui::page_section(ui, "Mode");
+    let language = settings.language.clone();
+    ui::page_section(ui, t!("settings.language"));
+    ui::setting_row(
+        ui,
+        t!("settings.app_language"),
+        t!("settings.language_help"),
+        |ui| {
+            let current =
+                Lang::from_id(&settings.language).map_or(t!("common.system_default"), Lang::name);
+            let combo = ComboBox::from_id_salt("language")
+                .selected_text(current)
+                .show_ui(ui, |ui| {
+                    let choice = &mut settings.language;
+                    ui.selectable_value(choice, "system".into(), t!("common.system_default"));
+                    for lang in LANGS {
+                        ui.selectable_value(choice, lang.id().into(), lang.name());
+                    }
+                });
+            combo.response.widget_info(|| {
+                egui::WidgetInfo::labeled(Role::ComboBox, true, t!("settings.app_language"))
+            });
+        },
+    );
+    ui::page_section(ui, t!("settings.mode"));
     let modes = [
-        (Mode::Dark, "🌙", "Dark", "Always dark"),
-        (Mode::Light, "☀", "Light", "Always light"),
-        (Mode::System, "🖥", "System", "Like your computer"),
+        (
+            Mode::Dark,
+            "🌙",
+            t!("settings.dark"),
+            t!("settings.dark_help"),
+        ),
+        (
+            Mode::Light,
+            "☀",
+            t!("settings.light"),
+            t!("settings.light_help"),
+        ),
+        (
+            Mode::System,
+            "🖥",
+            t!("settings.system"),
+            t!("settings.system_help"),
+        ),
     ];
     let width = ((ui.available_width() - 2.0 * SPACE_S) / 3.0).clamp(140.0, 200.0);
     ui.horizontal_wrapped(|ui| {
@@ -577,8 +615,8 @@ fn appearance_page(ui: &mut Ui, home: &mut Home) {
         }
     });
     for (caption, themes, dark) in [
-        ("Dark theme", DARK_THEMES, true),
-        ("Light theme", LIGHT_THEMES, false),
+        (t!("settings.dark_theme"), DARK_THEMES, true),
+        (t!("settings.light_theme"), LIGHT_THEMES, false),
     ] {
         ui::page_section(ui, caption);
         ui.horizontal_wrapped(|ui| {
@@ -595,8 +633,8 @@ fn appearance_page(ui: &mut Ui, home: &mut Home) {
             }
         });
     }
-    ui::page_section(ui, "Accent colour");
-    ui.weak("Used for buttons, links and what's selected.");
+    ui::page_section(ui, t!("settings.accent"));
+    ui.weak(t!("settings.accent_help"));
     ui.horizontal_wrapped(|ui| {
         ui.set_min_height(CONTROL_HEIGHT);
         for accent in ui::ACCENTS {
@@ -605,7 +643,8 @@ fn appearance_page(ui: &mut Ui, home: &mut Home) {
             }
         }
     });
-    if look != before {
+    if look != before || settings.language != language {
+        crate::i18n::set(&settings.language);
         settings.set_appearance(look);
         audio.set_settings(settings);
     }

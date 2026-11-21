@@ -61,9 +61,6 @@ use voice::{
 };
 
 const PAGE: u32 = 50;
-const CHANGED: &str = "This server changed. Don't continue unless the owner told you it would.";
-const OFFLINE: &str = "You're offline. Try again in a moment.";
-const FAILED: &str = "That didn't work. Try again.";
 
 pub enum Command {
     /// Load the newest page and follow live messages.
@@ -423,7 +420,7 @@ impl Drop for Net {
 async fn preview(ctx: &Ctx, link: &InviteLink) -> Result<Preview, String> {
     let known = Api::pinned(&ctx.data, &link.server.address).map_err(|error| {
         tracing::error!(error = %format_args!("{error:#}"), "reading server pins failed");
-        "Couldn't read your saved servers.".to_owned()
+        t!("net.saved_servers_failed").to_owned()
     })?;
     let trusted = known.as_ref().unwrap_or(&link.server);
     let api = Api::probe(
@@ -452,9 +449,7 @@ async fn preview(ctx: &Ctx, link: &InviteLink) -> Result<Preview, String> {
             }
             Err(error) => {
                 tracing::warn!(error = %format_args!("{error:#}"), "invite preview failed");
-                return Err(
-                    "This invite has expired or was already used. Ask for a new one.".into(),
-                );
+                return Err(t!("net.invite_expired").into());
             }
         },
     };
@@ -485,15 +480,15 @@ fn explain(error: &anyhow::Error, known: bool) -> String {
         mismatch(known)
     } else {
         tracing::warn!(error = %format_args!("{error:#}"), "server unreachable");
-        "Can't reach this server. Check the link and your connection.".into()
+        t!("net.unreachable").into()
     }
 }
 
 fn mismatch(known: bool) -> String {
     if known {
-        CHANGED.into()
+        t!("net.server_changed").into()
     } else {
-        "This invite doesn't match the server. Ask for a new invite.".into()
+        t!("net.invite_mismatch").into()
     }
 }
 
@@ -585,9 +580,9 @@ async fn run(
                             {
                                 tracing::info!(%reason, "server ended membership");
                                 let text = match reason.as_str() {
-                                    "kicked" => "You were removed from this server.",
-                                    "banned" => "You're banned from this server.",
-                                    _ => "This device was removed from your account.",
+                                    "kicked" => t!("net.kicked"),
+                                    "banned" => t!("net.banned"),
+                                    _ => t!("net.device_revoked"),
                                 };
                                 ctx.send(Update::Status(url, Status::Stopped(text.into())));
                                 return;
@@ -630,34 +625,34 @@ async fn run(
                     }
                     Some(Command::ShareApp(app)) => {
                         ctx.send(Update::AppStopped(app.id));
-                        ctx.send(Update::Failed(OFFLINE.into()));
+                        ctx.send(Update::Failed(t!("admin.offline").into()));
                     }
                     Some(Command::ShareScreen(..)) => {
                         ctx.send(Update::Sharing(false));
-                        ctx.send(Update::Failed(OFFLINE.into()));
+                        ctx.send(Update::Failed(t!("admin.offline").into()));
                     }
                     Some(Command::ShareCamera(..)) => {
                         ctx.send(Update::CameraStopped);
-                        ctx.send(Update::Failed(OFFLINE.into()));
+                        ctx.send(Update::Failed(t!("admin.offline").into()));
                     }
                     Some(Command::Admin(_)) => {
-                        ctx.send(Update::Admin(url.clone(), AdminUpdate::Failed(OFFLINE.into())));
+                        ctx.send(Update::Admin(url.clone(), AdminUpdate::Failed(t!("admin.offline").into())));
                     }
                     Some(Command::Send(draft)) => {
                         ctx.send(Update::Unsent(url.clone(), draft));
-                        ctx.send(Update::Failed(OFFLINE.into()));
+                        ctx.send(Update::Failed(t!("admin.offline").into()));
                     }
                     Some(Command::Image(file, _)) => ctx.send(Update::Image(file.id, Err(false))),
                     Some(Command::Save(file, _)) => ctx.send(Update::Saved(file.id, Err(false))),
                     Some(Command::AcceptFile(id, _)) => {
-                        let reason = OFFLINE.into();
+                        let reason = t!("admin.offline").into();
                         ctx.send(Update::LiveProgress(id, LiveFileEvent::Failed { reason }));
                     }
                     Some(command) => {
                         if let Command::JoinVoice(channel) = command {
                             ctx.send(Update::Call(url.clone(), channel, None));
                         }
-                        ctx.send(Update::Failed(OFFLINE.into()));
+                        ctx.send(Update::Failed(t!("admin.offline").into()));
                     }
                 },
             }
@@ -675,7 +670,7 @@ async fn session<'a>(
     let stop_or_retry = |error: anyhow::Error| {
         if pin_changed(&error) {
             tracing::error!(error = %format_args!("{error:#}"), "server pins differ");
-            Failure::Stop(CHANGED.into())
+            Failure::Stop(t!("net.server_changed").into())
         } else {
             tracing::warn!(error = %format_args!("{error:#}"), "server unreachable");
             Failure::Retry
@@ -714,7 +709,7 @@ async fn session<'a>(
         ctx.send(Update::Compatibility(server.address.clone(), compatibility));
         if compatibility == Compatibility::AppTooOld {
             tracing::warn!(?protocol, "server requires a newer protocol");
-            return Err(Failure::Stop("This server needs a newer RustTalk.".into()));
+            return Err(Failure::Stop(t!("net.needs_newer").into()));
         }
     }
     let reply = match admission {
@@ -739,33 +734,23 @@ async fn session<'a>(
         .unwrap_or_default();
     tracing::warn!(%status, code, "sign-in refused");
     Err(match code.as_str() {
-        "invite_required" if admission.is_none() => {
-            Failure::Stop("You're no longer a member of this server.".into())
-        }
+        "invite_required" if admission.is_none() => Failure::Stop(t!("net.not_member").into()),
         "invite_required" | "invalid_invite" | "invite_not_found" => {
-            Failure::Stop("This invite has expired or was already used. Ask for a new one.".into())
+            Failure::Stop(t!("net.invite_expired").into())
         }
-        "person_banned" | "ip_banned" => Failure::Stop("You're banned from this server.".into()),
-        "open_joining_disabled" => {
-            Failure::Stop("This server needs an invite now. Ask someone for one.".into())
-        }
-        "member_cap_reached" => {
-            Failure::Stop("This server is full. Ask someone there for an invite.".into())
-        }
-        "open_join_limit" => Failure::Stop(
-            "Too many people joined this server recently. Try again in an hour.".into(),
-        ),
-        "device_revoked" => Failure::Stop("This device was removed from your account.".into()),
-        "device_limit" => Failure::Stop(
-            "Your account already has 10 devices on this server. Remove one first.".into(),
-        ),
+        "person_banned" | "ip_banned" => Failure::Stop(t!("net.banned").into()),
+        "open_joining_disabled" => Failure::Stop(t!("net.needs_invite").into()),
+        "member_cap_reached" => Failure::Stop(t!("net.full").into()),
+        "open_join_limit" => Failure::Stop(t!("net.join_limit").into()),
+        "device_revoked" => Failure::Stop(t!("net.device_revoked").into()),
+        "device_limit" => Failure::Stop(t!("net.device_limit").into()),
         _ if status.is_server_error()
             || status == StatusCode::TOO_MANY_REQUESTS
             || status == StatusCode::UNAUTHORIZED =>
         {
             Failure::Retry
         }
-        _ => Failure::Stop("Couldn't sign in to this server.".into()),
+        _ => Failure::Stop(t!("net.sign_in_failed").into()),
     })
 }
 
@@ -811,8 +796,8 @@ async fn serve(
                 if let Err(error) = on_command(ctx, url, client, state, command).await {
                     tracing::warn!(error = %format_args!("{error:#}"), "server request failed");
                     let text = match error.downcast_ref::<MessageError>() {
-                        Some(MessageError::TextLimit) => "Messages can be up to 2,000 characters.",
-                        _ => FAILED,
+                        Some(MessageError::TextLimit) => t!("net.text_limit"),
+                        _ => t!("admin.failed"),
                     };
                     ctx.send(Update::Failed(text.into()));
                 }
@@ -926,10 +911,8 @@ async fn sync(ctx: &Ctx, edits: Vec<Edit>) {
         .sync
         .run(&ctx.data, &ctx.identity.sync_key, edits, |synced| {
             for address in &synced.conflicts {
-                let server = address.host_str().unwrap_or("a server");
-                ctx.send(Update::Failed(format!(
-                    "Your other device trusts a different key for {server}. Check with the server owner."
-                )));
+                let server = address.host_str().unwrap_or(t!("net.a_server"));
+                ctx.send(Update::Failed(t!("net.sync_conflict", server = server)));
             }
             ctx.send(Update::Synced(Box::new(synced)));
         })
@@ -1123,9 +1106,7 @@ async fn on_command(
                 .await?;
             if reply.status() == StatusCode::CONFLICT {
                 tracing::warn!(category = %encode(&id), "category still contains channels");
-                ctx.send(Update::Failed(
-                    "Move the channels out of this category first.".into(),
-                ));
+                ctx.send(Update::Failed(t!("net.category_not_empty").into()));
                 return Ok(());
             }
             reply.error_for_status()?;
@@ -1139,9 +1120,7 @@ async fn on_command(
                         tracing::info!("server does not support channel ordering");
                         state.order_unavailable = true;
                         ctx.send(Update::ChannelOrderUnavailable(url.clone()));
-                        ctx.send(Update::Failed(
-                            "Update the server to move channels and categories.".into(),
-                        ));
+                        ctx.send(Update::Failed(t!("net.reorder_unsupported").into()));
                     }
                     Err(error) => {
                         // Back to the server's order before the error shows.
@@ -1165,9 +1144,7 @@ async fn on_command(
         Command::SetAvatar(bytes) => {
             if let Err(error) = client.set_avatar(&bytes).await {
                 tracing::warn!(error = %format_args!("{error:#}"), "setting picture failed");
-                ctx.send(Update::Failed(
-                    "Couldn't change your picture. Try again.".into(),
-                ));
+                ctx.send(Update::Failed(t!("net.picture_failed").into()));
                 return Ok(());
             }
             directory(ctx, url, client, state).await?;
@@ -1179,7 +1156,7 @@ async fn on_command(
                 .send()
                 .await?;
             if reply.status() == StatusCode::CONFLICT {
-                ctx.send(Update::Failed("Make someone else the owner first.".into()));
+                ctx.send(Update::Failed(t!("net.owner_leave").into()));
                 return Ok(());
             }
             reply.error_for_status()?;
@@ -1256,7 +1233,7 @@ async fn page(
         Err(error) => {
             tracing::warn!(error = %format_args!("{error:#}"), "loading messages failed");
             // Leave the chat loading: reconnecting reloads opened channels, and paging stays paused until then.
-            ctx.send(Update::Failed("Couldn't load messages. Try again.".into()));
+            ctx.send(Update::Failed(t!("net.messages_failed").into()));
             return;
         }
     };
@@ -1357,9 +1334,7 @@ async fn set_display_name(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, stat
         Err(error) => {
             tracing::warn!(error = %format_args!("{error:#}"), "setting display name failed");
             state.display_name = None;
-            ctx.send(Update::Failed(
-                "Couldn't change your name. Try again.".into(),
-            ));
+            ctx.send(Update::Failed(t!("net.name_failed").into()));
         }
     }
 }

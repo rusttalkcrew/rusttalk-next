@@ -306,11 +306,11 @@ async fn build(
         }
         let kind = role["kind"].as_str().unwrap_or_default();
         let builtin = match kind {
-            "owner" => "Owner",
-            "admin" => "Admin",
-            "moderator" => "Moderator",
-            "member" => "Member",
-            _ => "New role",
+            "owner" => t!("role.owner"),
+            "admin" => t!("role.admin"),
+            "moderator" => t!("role.moderator"),
+            "member" => t!("role.member"),
+            _ => t!("role.new"),
         };
         let name = text(Metadata::RoleName, id.as_bytes(), role["name_ct"].as_str());
         role_list.push(Role {
@@ -337,7 +337,7 @@ async fn build(
                 &category.id,
                 Some(&category.name_ct),
             )
-            .unwrap_or_else(|| "Channels".into()),
+            .unwrap_or_else(|| t!("server.default_category").into()),
             channels: Vec::new(),
         })
         .collect();
@@ -363,7 +363,7 @@ async fn build(
                 &channel.id,
                 channel.name_ct.as_deref(),
             )
-            .unwrap_or_else(|| "channel".into()),
+            .unwrap_or_else(|| t!("server.default_channel").into()),
             topic: text(
                 Metadata::ChannelTopic,
                 &channel.id,
@@ -592,7 +592,7 @@ fn picture(bytes: &[u8]) -> Option<Picture> {
 fn changes(before: &Directory, after: &Directory) -> Vec<(Id, &'static str, String)> {
     let mut out = Vec::new();
     for member in &after.members {
-        let id = format!("ID {}", fingerprint(&member.person));
+        let id = t!("home.detail_id", fingerprint = fingerprint(&member.person));
         let Some(old) = before
             .members
             .iter()
@@ -611,7 +611,12 @@ fn changes(before: &Directory, after: &Directory) -> Vec<(Id, &'static str, Stri
                 .iter()
                 .all(|d| d.fingerprint != device.fingerprint)
             {
-                let detail = format!("{id}\nNew device {} ({})", device.fingerprint, device.name);
+                let detail = t!(
+                    "notice.new_device_detail",
+                    id = id,
+                    fingerprint = device.fingerprint,
+                    device = device.name
+                );
                 out.push((member.person, "added a new device", detail));
             }
         }
@@ -621,9 +626,11 @@ fn changes(before: &Directory, after: &Directory) -> Vec<(Id, &'static str, Stri
                 .iter()
                 .all(|d| d.fingerprint != device.fingerprint)
             {
-                let detail = format!(
-                    "{id}\nRemoved device {} ({})",
-                    device.fingerprint, device.name
+                let detail = t!(
+                    "notice.removed_device_detail",
+                    id = id,
+                    fingerprint = device.fingerprint,
+                    device = device.name
                 );
                 out.push((member.person, "removed a device", detail));
             }
@@ -635,7 +642,7 @@ fn changes(before: &Directory, after: &Directory) -> Vec<(Id, &'static str, Stri
             .iter()
             .all(|member| member.person != old.person)
         {
-            let id = format!("ID {}", fingerprint(&old.person));
+            let id = t!("home.detail_id", fingerprint = fingerprint(&old.person));
             out.push((old.person, "left", id));
         }
     }

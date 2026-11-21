@@ -55,6 +55,19 @@ pub struct Accent {
 }
 
 impl Accent {
+    /// The colour's name in the app's language.
+    pub fn label(&self) -> &'static str {
+        match self.id {
+            "rust" => t!("accent.rust"),
+            "blue" => t!("accent.blue"),
+            "green" => t!("accent.green"),
+            "violet" => t!("accent.violet"),
+            "rose" => t!("accent.rose"),
+            "teal" => t!("accent.teal"),
+            _ => self.name,
+        }
+    }
+
     /// Accent text and icons on a theme's surfaces.
     pub fn text(&self, dark: bool) -> Color32 {
         if dark { self.tint } else { self.base }
@@ -339,6 +352,21 @@ impl Default for Appearance {
             dark: DARK_THEMES[0],
             light: LIGHT_THEMES[0],
             accent: &RUST,
+        }
+    }
+}
+
+impl Palette {
+    /// The theme's name in the app's language.
+    pub fn label(&self) -> &'static str {
+        match self.id {
+            "midnight" => t!("theme.midnight"),
+            "graphite" => t!("theme.graphite"),
+            "deep-sea" => t!("theme.deep_sea"),
+            "daylight" => t!("theme.daylight"),
+            "paper" => t!("theme.paper"),
+            "mist" => t!("theme.mist"),
+            _ => self.name,
         }
     }
 }

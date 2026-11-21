@@ -10,7 +10,7 @@ use rusttalk_core::{
 };
 use url::Url;
 
-use super::{CHANGED, Ctx, Preview, open_joining};
+use super::{Ctx, Preview, open_joining};
 
 /// Results per page, as the index serves them.
 pub const PAGE_SIZE: usize = 25;
@@ -36,7 +36,7 @@ pub(super) async fn search(
 ) -> Result<Vec<Listed>, String> {
     let unreachable = |error: &dyn std::fmt::Display| {
         tracing::warn!(%error, "searching the server directory failed");
-        "Couldn't reach the server directory. Check its address in Settings → Privacy.".to_owned()
+        t!("find.unreachable").to_owned()
     };
     let mut base = index.clone();
     if !base.path().ends_with('/') {
@@ -88,7 +88,7 @@ fn listed(listing: Listing) -> Option<Listed> {
 pub(super) async fn preview(ctx: &Ctx, listed: Listed) -> Result<Preview, String> {
     let known = Api::pinned(&ctx.data, &listed.server.address).map_err(|error| {
         tracing::error!(error = %format_args!("{error:#}"), "reading server pins failed");
-        "Couldn't read your saved servers.".to_owned()
+        t!("net.saved_servers_failed").to_owned()
     })?;
     // A listing carries no certificate pin; one saved for this address still applies.
     let tls = known.as_ref().and_then(|known| known.tls_fingerprint);
@@ -114,14 +114,14 @@ fn problem(error: &anyhow::Error, pinned: bool) -> String {
     let text = format!("{error:#}");
     match error.downcast_ref::<ProtocolError>() {
         Some(ProtocolError::ServerIdChanged | ProtocolError::ServerProof) => {
-            "This server doesn't match its listing.".into()
+            t!("find.mismatch").into()
         }
-        Some(ProtocolError::TlsChanged) => CHANGED.into(),
-        _ if pinned && rusttalk_core::pinned_tls::is_pin_mismatch(error.as_ref()) => CHANGED.into(),
+        Some(ProtocolError::TlsChanged) => t!("net.server_changed").into(),
+        _ if pinned && rusttalk_core::pinned_tls::is_pin_mismatch(error.as_ref()) => {
+            t!("net.server_changed").into()
+        }
         // Without a pin only a publicly trusted certificate can be checked.
-        _ if !pinned && text.contains("certificate") => {
-            "Can't check this server's certificate. Ask someone there for an invite link.".into()
-        }
-        _ => "Can't reach this server right now. Try again later.".into(),
+        _ if !pinned && text.contains("certificate") => t!("find.certificate").into(),
+        _ => t!("find.server_unreachable").into(),
     }
 }

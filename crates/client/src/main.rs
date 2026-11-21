@@ -1,6 +1,9 @@
 // Release builds open no console window on Windows.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[macro_use]
+mod i18n;
+
 mod admin;
 mod app;
 mod audio;
@@ -74,8 +77,8 @@ fn main() -> ExitCode {
                 .downcast_ref::<String>()
                 .map(String::as_str)
                 .or_else(|| payload.downcast_ref::<&str>().copied())
-                .unwrap_or("Unknown error");
-            format!("Unexpected error: {reason}")
+                .unwrap_or(t!("startup.unknown_error"));
+            t!("startup.unexpected", reason = reason)
         }
     };
 
@@ -99,10 +102,10 @@ fn main() -> ExitCode {
 
 fn startup_message(log_path: Option<&Path>, error: &str) -> String {
     let log = match log_path {
-        Some(path) => format!("Log file (if available): {}", path.display()),
-        None => "The log file location is unavailable.".to_owned(),
+        Some(path) => t!("startup.log_file", path = path.display()),
+        None => t!("startup.no_log_file").to_owned(),
     };
-    format!("RustTalk couldn't start.\n\n{error}\n\n{log}")
+    t!("startup.message", error = error, log = log)
 }
 
 fn run(

@@ -247,7 +247,7 @@ pub fn banner(ui: &mut Ui, id: &str, text: &str) {
                     ui.add(Label::new(RichText::new(text).color(colors(ui).text)).wrap());
                 });
                 ui.add_space(ui.available_width() - CLOSE);
-                close = small_close(ui, "Dismiss").clicked();
+                close = small_close(ui, t!("common.dismiss")).clicked();
             });
         });
     ui.add_space(SPACE_S);
@@ -258,7 +258,7 @@ pub fn banner(ui: &mut Ui, id: &str, text: &str) {
 
 /// The last section of a page: things that can't be undone, in a red outline.
 pub fn danger_zone<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
-    page_section(ui, "Danger zone");
+    page_section(ui, t!("page.danger_zone"));
     let c = colors(ui);
     Frame::new()
         .stroke(Stroke::new(1.0, c.danger))

@@ -33,7 +33,7 @@ pub(super) async fn send(
     if let Some(first) = files.first() {
         let label = match files.len() {
             1 => file_name(first),
-            count => format!("{count} files"),
+            count => t!("files.count", count = count),
         };
         // shortcut: uploads run inside this server's loop, so its events wait until they
         // finish (at most 4 × 32 MiB); give them their own task if that gets noticed.
@@ -183,7 +183,7 @@ async fn discard(client: &KeyClient<'_>, files: &[Attachment]) {
 
 pub fn file_name(path: &Path) -> String {
     path.file_name().map_or_else(
-        || "file".into(),
+        || t!("files.unnamed").into(),
         |name| fit_file_name(&name.to_string_lossy()),
     )
 }
@@ -225,17 +225,17 @@ fn upload_problem(error: &anyhow::Error) -> &'static str {
         .downcast_ref::<UploadRejected>()
         .map(|r| r.code.as_str());
     match (status(error), code) {
-        (_, Some("file_too_large")) => "File too large.",
-        (_, Some("file_member_quota")) => "You reached your storage limit.",
-        (_, Some("file_server_quota")) => "This server is full.",
+        (_, Some("file_too_large")) => t!("files.err_too_large"),
+        (_, Some("file_member_quota")) => t!("files.err_member_quota"),
+        (_, Some("file_server_quota")) => t!("files.err_server_quota"),
         (Some(StatusCode::PAYLOAD_TOO_LARGE), _) => {
-            "There's no room for this file. You or this server reached the storage limit."
+            t!("files.err_no_room")
         }
         (Some(StatusCode::SERVICE_UNAVAILABLE), _) => {
-            "Too many uploads right now. Try again in a moment."
+            t!("files.err_busy")
         }
-        (Some(StatusCode::FORBIDDEN), _) => "You can't send files here.",
-        _ => "Couldn't send the file. Try again.",
+        (Some(StatusCode::FORBIDDEN), _) => t!("files.err_forbidden"),
+        _ => t!("files.err_failed"),
     }
 }
 

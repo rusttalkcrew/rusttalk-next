@@ -22,9 +22,9 @@ use url::Url;
 
 use crate::audio::Settings;
 
-/// Voice and video preferences, dismissed official servers and the appearance, that follow the person to their other devices.
+/// Voice and video preferences, dismissed official servers, the appearance and language, that follow the person to their other devices.
 /// The microphone, speakers and camera differ per computer and stay in `voice.json` only.
-const SYNCED: [&str; 14] = [
+const SYNCED: [&str; 15] = [
     "push_to_talk",
     "key",
     "threshold",
@@ -39,6 +39,7 @@ const SYNCED: [&str; 14] = [
     "dark_theme",
     "light_theme",
     "accent",
+    "language",
 ];
 
 pub struct DeviceSync {
@@ -252,13 +253,22 @@ mod tests {
     fn appearance_follows_to_other_devices() {
         let local = Settings::default();
         let mut other = synced(&local);
-        for key in ["theme_mode", "dark_theme", "light_theme", "accent"] {
+        for key in [
+            "theme_mode",
+            "dark_theme",
+            "light_theme",
+            "accent",
+            "language",
+        ] {
             assert!(other.contains_key(key), "{key} is synced");
         }
         other.insert("theme_mode".into(), json!("light"));
         other.insert("light_theme".into(), json!("paper"));
         other.insert("accent".into(), json!("teal"));
-        let look = adopt(&local, &other).appearance();
+        other.insert("language".into(), json!("ja"));
+        let adopted = adopt(&local, &other);
+        assert_eq!(adopted.language, "ja");
+        let look = adopted.appearance();
         assert_eq!(look.mode, crate::ui::Mode::Light);
         assert_eq!(look.light.id, "paper");
         assert_eq!(look.accent.id, "teal");

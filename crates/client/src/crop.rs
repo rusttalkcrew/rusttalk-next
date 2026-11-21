@@ -143,11 +143,11 @@ impl Crop {
     pub fn open(target: Target, path: &std::path::Path) -> Result<Self, &'static str> {
         let bytes = std::fs::read(path).map_err(|error| {
             tracing::warn!(%error, "reading a picture failed");
-            "Couldn't open that file."
+            t!("crop.open_failed")
         })?;
         let (image, animated_gif) = decode(&bytes).map_err(|error| {
             tracing::info!(error = %format_args!("{error:#}"), "picture refused");
-            "That file isn't a picture. Pick a PNG, JPG or GIF."
+            t!("crop.not_picture")
         })?;
         let fits = animated_gif && decode_profile_image(&bytes).is_ok();
         let square = Square::new(image.width(), image.height());
@@ -167,36 +167,32 @@ impl Crop {
     /// square for server icons.
     pub fn show(&mut self, ctx: &Context) -> Outcome {
         let title = match self.target {
-            Target::Avatar => "Crop your picture",
-            Target::Icon(_) => "Crop the server icon",
-            Target::Emoji { sticker: false, .. } => "Crop the emoji",
-            Target::Emoji { sticker: true, .. } => "Crop the sticker",
+            Target::Avatar => t!("crop.avatar"),
+            Target::Icon(_) => t!("crop.icon"),
+            Target::Emoji { sticker: false, .. } => t!("crop.emoji"),
+            Target::Emoji { sticker: true, .. } => t!("crop.sticker"),
         };
         let mut outcome = Outcome::Open;
         let ((), dismissed) = ui::dialog(ctx, "crop", title, |ui| {
             let still = !self.keep_animation;
             ui.add_enabled_ui(still, |ui| self.editor(ui));
             if self.animated.is_some() {
-                ui::checkbox(
-                    ui,
-                    &mut self.keep_animation,
-                    "Keep the GIF as it is (animated)",
-                );
+                ui::checkbox(ui, &mut self.keep_animation, t!("crop.keep_gif"));
             } else if self.stills {
-                ui.label(ui::caption("Cropping makes this GIF a still picture."));
+                ui.label(ui::caption(t!("crop.gif_still")));
             }
             ui::error_text(ui, self.error);
             ui::footer(ui, |ui| {
-                if ui::primary(ui, "Save").clicked() {
+                if ui::primary(ui, t!("common.save")).clicked() {
                     match self.save() {
                         Ok(bytes) => outcome = Outcome::Save(bytes),
                         Err(error) => {
                             tracing::warn!(error = %format_args!("{error:#}"), "saving a crop failed");
-                            self.error = Some("Couldn't save that picture. Try another one.");
+                            self.error = Some(t!("crop.save_failed"));
                         }
                     }
                 }
-                if ui::secondary(ui, "Cancel").clicked() {
+                if ui::secondary(ui, t!("common.cancel")).clicked() {
                     outcome = Outcome::Cancel;
                 }
             });
@@ -217,7 +213,7 @@ impl Crop {
         ui.vertical_centered(|ui| {
             let (rect, response) = ui.allocate_exact_size(Vec2::splat(VIEW), Sense::drag());
             response.widget_info(|| {
-                egui::WidgetInfo::labeled(Role::Image, ui.is_enabled(), "Drag to move the picture")
+                egui::WidgetInfo::labeled(Role::Image, ui.is_enabled(), t!("crop.drag"))
             });
             if ui.is_enabled() {
                 if response.dragged() {
@@ -266,7 +262,7 @@ impl Crop {
             }
             ui.add_space(ui::SPACE_S);
             ui.horizontal(|ui| {
-                ui.label("Zoom");
+                ui.label(t!("crop.zoom"));
                 ui.spacing_mut().slider_width = ui.available_width();
                 let mut zoom = self.square.zoom;
                 let slider = ui.add(
@@ -274,7 +270,8 @@ impl Crop {
                         .logarithmic(true)
                         .show_value(false),
                 );
-                slider.widget_info(|| egui::WidgetInfo::labeled(Role::Slider, true, "Zoom"));
+                slider
+                    .widget_info(|| egui::WidgetInfo::labeled(Role::Slider, true, t!("crop.zoom")));
                 if slider.changed() {
                     self.square.zoom_to(zoom);
                 }

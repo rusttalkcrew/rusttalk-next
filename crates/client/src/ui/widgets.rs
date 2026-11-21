@@ -623,9 +623,9 @@ pub fn close_button(ui: &mut Ui, size: f32) -> Response {
         painter.line_segment([center + a, center + b], Stroke::new(1.5, color));
     }
     focus_ring(ui, &response, (size / 2.0) as u8);
-    response.widget_info(|| WidgetInfo::labeled(Role::Button, true, "Close"));
+    response.widget_info(|| WidgetInfo::labeled(Role::Button, true, t!("common.close")));
     response
-        .on_hover_text("Close (Esc)")
+        .on_hover_text(t!("common.close_esc"))
         .on_hover_cursor(CursorIcon::PointingHand)
 }
 
@@ -780,9 +780,9 @@ pub fn theme_card(ui: &mut Ui, theme: &Palette, accent: &Accent, selected: bool)
     painter.rect_stroke(preview, RADIUS, border, StrokeKind::Outside);
     focus_ring(ui, &response, RADIUS);
     let label = if selected {
-        bold(theme.name).color(c.strong)
+        bold(theme.label()).color(c.strong)
     } else {
-        RichText::new(theme.name).color(c.text)
+        RichText::new(theme.label()).color(c.text)
     };
     let label: WidgetText = label.into();
     let galley = label.into_galley(
@@ -793,7 +793,7 @@ pub fn theme_card(ui: &mut Ui, theme: &Palette, accent: &Accent, selected: bool)
     );
     let at = egui::pos2(rect.left() + 2.0, preview.bottom() + SPACE_S);
     ui.painter().galley(at, galley, c.text);
-    response.widget_info(|| WidgetInfo::selected(Role::RadioButton, true, selected, theme.name));
+    response.widget_info(|| WidgetInfo::selected(Role::RadioButton, true, selected, theme.label()));
     response.on_hover_cursor(CursorIcon::PointingHand)
 }
 
@@ -820,9 +820,10 @@ pub fn swatch(ui: &mut Ui, accent: &Accent, selected: bool) -> Response {
         );
     }
     focus_ring(ui, &response, 18);
-    response.widget_info(|| WidgetInfo::selected(Role::RadioButton, true, selected, accent.name));
     response
-        .on_hover_text(accent.name)
+        .widget_info(|| WidgetInfo::selected(Role::RadioButton, true, selected, accent.label()));
+    response
+        .on_hover_text(accent.label())
         .on_hover_cursor(CursorIcon::PointingHand)
 }
 

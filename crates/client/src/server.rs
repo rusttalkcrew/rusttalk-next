@@ -64,7 +64,7 @@ pub struct Screen {
 impl Peer {
     pub fn name(&self, server: &Server) -> String {
         if self.unknown {
-            "Unknown device".into()
+            t!("server.unknown_device").into()
         } else {
             server.member_name(&self.person)
         }
@@ -171,7 +171,7 @@ impl Server {
 pub fn member_name(dir: &Directory, person: &Id) -> String {
     match dir.members.iter().find(|member| member.person == *person) {
         Some(member) => member.display_name(),
-        None => format!("Member {}", &fingerprint(person)[..4]),
+        None => t!("server.member_unnamed", id = &fingerprint(person)[..4]),
     }
 }
 
@@ -247,18 +247,20 @@ impl Perms {
 pub const MENTION_EVERYONE: &str = "mention_everyone";
 
 /// The permissions a role can grant, as the API names them, with their labels.
-pub const PERMISSIONS: [(&str, &str); 10] = [
-    ("invite", "Invite people"),
-    ("kick", "Kick"),
-    ("ban", "Ban"),
-    ("manage_roles", "Manage roles"),
-    ("view_audit_log", "See audit log"),
-    ("delete_messages", "Delete messages"),
-    ("manage_channels", "Manage channels"),
-    ("manage_server", "Manage server"),
-    (MENTION_EVERYONE, "Mention everyone"),
-    ("manage_emoji", "Manage emoji"),
-];
+pub fn permissions() -> [(&'static str, &'static str); 10] {
+    [
+        ("invite", t!("perm.invite")),
+        ("kick", t!("perm.kick")),
+        ("ban", t!("perm.ban")),
+        ("manage_roles", t!("perm.manage_roles")),
+        ("view_audit_log", t!("perm.view_audit_log")),
+        ("delete_messages", t!("perm.delete_messages")),
+        ("manage_channels", t!("perm.manage_channels")),
+        ("manage_server", t!("perm.manage_server")),
+        (MENTION_EVERYONE, t!("perm.mention_everyone")),
+        ("manage_emoji", t!("perm.manage_emoji")),
+    ]
+}
 
 #[derive(Clone)]
 pub struct Role {
@@ -266,7 +268,7 @@ pub struct Role {
     pub name: String,
     pub name_known: bool,
     pub rank: i64,
-    /// API permission names, see `PERMISSIONS`.
+    /// API permission names, see `permissions`.
     pub permissions: Vec<String>,
     /// Made by people, not one of the four built-in roles.
     pub custom: bool,
@@ -303,7 +305,12 @@ pub struct Member {
 impl Member {
     /// Their chosen name, or a placeholder from their fingerprint.
     pub fn display_name(&self) -> String {
-        (self.name.clone()).unwrap_or_else(|| format!("Member {}", &fingerprint(&self.person)[..4]))
+        (self.name.clone()).unwrap_or_else(|| {
+            t!(
+                "server.member_unnamed",
+                id = &fingerprint(&self.person)[..4]
+            )
+        })
     }
 }
 

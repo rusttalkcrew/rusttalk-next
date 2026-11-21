@@ -116,7 +116,7 @@ impl Camera {
             match &*slot {
                 // Reported on the next frame by the arm below.
                 Some(Ok(capture)) if capture.is_finished() => {
-                    *slot = Some(Err("Your camera stopped.".into()));
+                    *slot = Some(Err(t!("camera.stopped").into()));
                 }
                 Some(Err(error)) if self.on => failed = Some(error.clone()),
                 Some(Ok(_)) => ctx.request_repaint_after(std::time::Duration::from_millis(33)),
@@ -236,9 +236,9 @@ fn launch(
         *lock(&slot) = Some(started.map_err(|error| {
             tracing::warn!(error = %format_args!("{error:#}"), "starting camera failed");
             if format!("{error:#}").contains("no camera found") {
-                "No camera found.".to_owned()
+                t!("camera.none").to_owned()
             } else {
-                "Couldn't start your camera. Is another app using it?".to_owned()
+                t!("camera.start_failed").to_owned()
             }
         }));
         ctx.request_repaint();
@@ -264,53 +264,53 @@ pub fn settings_tab(ui: &mut Ui, camera: &mut Camera, s: &mut Settings) {
         Listing::Found(found) => found.clone(),
         _ => Vec::new(),
     };
-    ui::page_section(ui, "Camera");
-    ui::setting_row(ui, "Camera", "", |ui| {
+    ui::page_section(ui, t!("camera.camera"));
+    ui::setting_row(ui, t!("camera.camera"), "", |ui| {
         let combo = ComboBox::from_id_salt("camera")
             .width(crate::call::PICKER_WIDTH)
-            .selected_text(s.camera.as_deref().unwrap_or("First camera"))
+            .selected_text(s.camera.as_deref().unwrap_or(t!("camera.first")))
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut s.camera, None, "First camera");
+                ui.selectable_value(&mut s.camera, None, t!("camera.first"));
                 for name in found {
                     ui.selectable_value(&mut s.camera, Some(name.clone()), name);
                 }
             });
         combo
             .response
-            .widget_info(|| egui::WidgetInfo::labeled(Role::ComboBox, true, "Camera"));
+            .widget_info(|| egui::WidgetInfo::labeled(Role::ComboBox, true, t!("camera.camera")));
     });
     let offered = match camera.ready().as_deref() {
         Some(Some(Ok(capture))) => Some(capture.heights.clone()),
         _ => None,
     };
+    ui::setting_row(ui, t!("call.quality"), t!("camera.quality_help"), |ui| {
+        for height in HEIGHTS {
+            let label = format!("{height}p");
+            let usable = offered
+                .as_ref()
+                .is_none_or(|heights| heights.is_empty() || heights.contains(&height));
+            ui.add_enabled_ui(usable, |ui| {
+                ui.selectable_value(&mut s.camera_height, height, label)
+                    .on_disabled_hover_text(t!("camera.not_offered"));
+            });
+        }
+    });
     ui::setting_row(
         ui,
-        "Quality",
-        "Higher looks sharper and uses more data.",
+        t!("call.frame_rate"),
+        t!("camera.frame_rate_help"),
         |ui| {
-            for height in HEIGHTS {
-                let label = format!("{height}p");
-                let usable = offered
-                    .as_ref()
-                    .is_none_or(|heights| heights.is_empty() || heights.contains(&height));
-                ui.add_enabled_ui(usable, |ui| {
-                    ui.selectable_value(&mut s.camera_height, height, label)
-                        .on_disabled_hover_text("Your camera doesn't offer this");
-                });
+            for fps in FRAME_RATES {
+                ui.selectable_value(&mut s.camera_fps, fps, fps.to_string());
             }
         },
     );
-    ui::setting_row(ui, "Frame rate", "Frames per second.", |ui| {
-        for fps in FRAME_RATES {
-            ui.selectable_value(&mut s.camera_fps, fps, fps.to_string());
-        }
-    });
-    ui::page_section(ui, "Preview");
+    ui::page_section(ui, t!("camera.preview"));
     let mode = match camera.ready().as_deref() {
         None | Some(None) => {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.weak("Starting your camera…");
+                ui.weak(t!("camera.starting"));
             });
             return;
         }
@@ -324,5 +324,13 @@ pub fn settings_tab(ui: &mut Ui, camera: &mut Camera, s: &mut Settings) {
         ui.add(image);
     }
     let (width, height, fps) = mode;
-    ui.label(RichText::new(format!("Your camera sends {width}×{height} at {fps} fps")).weak());
+    ui.label(
+        RichText::new(t!(
+            "camera.sends",
+            width = width,
+            height = height,
+            fps = fps
+        ))
+        .weak(),
+    );
 }

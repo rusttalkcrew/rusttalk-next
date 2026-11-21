@@ -192,9 +192,9 @@ fn width(stored: f32, default: f32, range: RangeInclusive<f32>) -> f32 {
 pub fn members_button(ui: &mut Ui, layout: &mut Layout) {
     let shown = layout.members_shown();
     let tip = if shown {
-        "Hide members"
+        t!("layout.hide_members")
     } else {
-        "Show members"
+        t!("layout.show_members")
     };
     // A soft fill while the list is open, like a pressed toggle.
     let look = if shown { Look::Plain } else { Look::Ghost };
@@ -207,9 +207,9 @@ pub fn members_button(ui: &mut Ui, layout: &mut Layout) {
 /// hide the call. Hiding one always shows the other.
 pub fn split_buttons(ui: &mut Ui, split: &mut Split) {
     let (glyph, tip) = if split.side_by_side {
-        ("⬍", "Chat below call")
+        ("⬍", t!("layout.chat_below"))
     } else {
-        ("⬌", "Chat beside call")
+        ("⬌", t!("layout.chat_beside"))
     };
     let both = !split.chat_hidden && !split.stage_hidden;
     if ui
@@ -222,9 +222,9 @@ pub fn split_buttons(ui: &mut Ui, split: &mut Split) {
         split.side_by_side ^= true;
     }
     let tip = if split.chat_hidden {
-        "Show chat"
+        t!("layout.show_chat")
     } else {
-        "Hide chat"
+        t!("layout.hide_chat")
     };
     let look = if split.chat_hidden {
         Look::Ghost
@@ -236,9 +236,9 @@ pub fn split_buttons(ui: &mut Ui, split: &mut Split) {
         split.stage_hidden = false;
     }
     let tip = if split.stage_hidden {
-        "Show call"
+        t!("layout.show_call")
     } else {
-        "Hide call"
+        t!("layout.hide_call")
     };
     let look = if split.stage_hidden {
         Look::Ghost
@@ -255,7 +255,7 @@ pub fn split_buttons(ui: &mut Ui, split: &mut Split) {
 /// returns whether it is being dragged.
 pub fn split_divider(ui: &Ui, divider: Rect, area: Rect, split: &mut Split) -> bool {
     let response = ui.interact(divider, Id::unique("call split"), Sense::click_and_drag());
-    response.widget_info(|| WidgetInfo::labeled(Role::Splitter, true, "Resize call"));
+    response.widget_info(|| WidgetInfo::labeled(Role::Splitter, true, t!("layout.resize_call")));
     if response.double_clicked() {
         split.ratio = SPLIT;
     } else if response.dragged()
