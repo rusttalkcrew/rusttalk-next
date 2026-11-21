@@ -62,58 +62,108 @@ pub(super) async fn send(
             return Ok(false);
         }
     }
-    if let Some(made) = preview.filter(|_| body.attachments.len() < crate::files::MAX_FILES)
-        && let Some(attachment) = upload_preview(client, &channel, made).await
-    {
-        body.attachments.push(attachment);
+    // A preview that didn't make it is removed only after the message went out.
+    let mut leftover = Vec::new();
+    if let Some(made) = preview.filter(|_| body.attachments.len() < crate::files::MAX_FILES) {
+        match upload_preview(client, &channel, made).await {
+            Preview::Sent(attachment) => body.attachments.push(attachment),
+            Preview::Left(prepared) => leftover.extend(prepared),
+        }
     }
     let record = match client.post_message(&channel, id, &body).await {
         Ok(record) => record,
         Err(error) => {
             discard(client, &body.attachments).await;
+            at_most(CLEANUP, discard(client, &leftover)).await;
             return Err(error);
         }
     };
     send_messages(ctx, url, channel, vec![to_msg(&record, &body)], false, None);
+    at_most(CLEANUP, discard(client, &leftover)).await;
     Ok(true)
 }
 
-/// Upload a link preview within what is left of its time; past that, or on any
-/// problem, the message goes without it and a partial upload is removed.
-async fn upload_preview(
-    client: &KeyClient<'_>,
-    channel: &Id,
-    made: Arc<Made>,
-) -> Option<Attachment> {
-    let json = preview_file(&made)?;
-    let prepared = {
+/// How long removing a preview that didn't make it may hold up this server's loop.
+const CLEANUP: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Run `work`, giving up after `limit`.
+async fn at_most(limit: std::time::Duration, work: impl Future<Output = ()>) {
+    if tokio::time::timeout(limit, work).await.is_err() {
+        tracing::info!("removing an unsent link preview took too long");
+    }
+}
+
+/// Upload a link preview within what is left of its time. Otherwise the message goes
+/// without it; the error holds the prepared file (when there was one) to remove,
+/// since part of it, or all of it with a lost answer, may be stored.
+async fn upload_preview(client: &KeyClient<'_>, channel: &Id, made: Arc<Made>) -> Preview {
+    let Some(json) = preview_file(&made) else {
+        return Preview::Left(None);
+    };
+    let prepare = {
         let (json, made) = (json.clone(), made.clone());
         // The thumbnail decodes the page's picture: with limits, off the async workers.
-        tokio::task::spawn_blocking(move || {
-            prepare_file(
-                FILE_NAME,
-                MEDIA_TYPE,
-                &json,
-                made.picture.as_deref().unwrap_or_default(),
-            )
-        })
-    };
-    let (attachment, thumbnail) = match prepared.await {
-        Ok(Ok(prepared)) => prepared,
-        _ => return None,
-    };
-    let left = made.deadline.saturating_duration_since(Instant::now());
-    let upload = client.upload_prepared(channel, &attachment, &json, thumbnail.as_deref(), None);
-    match tokio::time::timeout(left, upload).await {
-        Ok(Ok(())) => Some(attachment),
-        Ok(Err(error)) => {
-            tracing::info!(error = %format_args!("{error:#}"), "uploading a link preview failed");
-            None
+        async move {
+            tokio::task::spawn_blocking(move || {
+                prepare_file(
+                    FILE_NAME,
+                    MEDIA_TYPE,
+                    &json,
+                    made.picture.as_deref().unwrap_or_default(),
+                )
+            })
+            .await
+            .ok()?
+            .ok()
         }
+    };
+    let upload = |attachment: Attachment, thumbnail: Option<Vec<u8>>| {
+        let json = &json;
+        async move {
+            client
+                .upload_prepared(channel, &attachment, json, thumbnail.as_deref(), None)
+                .await
+        }
+    };
+    within(made.deadline, prepare, upload).await
+}
+
+/// How a link preview's upload went.
+enum Preview {
+    Sent(Attachment),
+    /// Left out; the prepared file, if it got that far, is removed after sending.
+    Left(Option<Attachment>),
+}
+
+/// Prepare and upload under one deadline: the uploaded file, or the prepared one (if
+/// it got that far) to remove after a failure or when time ran out.
+async fn within<F>(
+    deadline: Instant,
+    prepare: impl Future<Output = Option<(Attachment, Option<Vec<u8>>)>>,
+    upload: impl FnOnce(Attachment, Option<Vec<u8>>) -> F,
+) -> Preview
+where
+    F: Future<Output = Result<()>>,
+{
+    let mut prepared = None;
+    let work = async {
+        let (attachment, thumbnail) = prepare.await?;
+        prepared = Some(attachment.clone());
+        match upload(attachment.clone(), thumbnail).await {
+            Ok(()) => Some(attachment),
+            Err(error) => {
+                tracing::info!(error = %format_args!("{error:#}"), "uploading a link preview failed");
+                None
+            }
+        }
+    };
+    let left = deadline.saturating_duration_since(Instant::now());
+    match tokio::time::timeout(left, work).await {
+        Ok(Some(attachment)) => Preview::Sent(attachment),
+        Ok(None) => Preview::Left(prepared),
         Err(_) => {
             tracing::info!("uploading a link preview took too long");
-            discard(client, std::slice::from_ref(&attachment)).await;
-            None
+            Preview::Left(prepared)
         }
     }
 }
@@ -347,6 +397,71 @@ fn save_file(path: &Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn prepared() -> Option<(Attachment, Option<Vec<u8>>)> {
+        let (attachment, thumbnail) = prepare_file(FILE_NAME, MEDIA_TYPE, b"{}", b"").unwrap();
+        Some((attachment, thumbnail))
+    }
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_stalled_preview_upload_and_cleanup_end_on_time() {
+        let started = Instant::now();
+        let deadline = started + std::time::Duration::from_millis(200);
+        let result = runtime().block_on(async {
+            let result = within(deadline, async { prepared() }, |_, _| {
+                std::future::pending::<Result<()>>()
+            })
+            .await;
+            // The DELETEs stall too; removing gives up on its own limit.
+            at_most(
+                std::time::Duration::from_millis(100),
+                std::future::pending(),
+            )
+            .await;
+            result
+        });
+        let elapsed = started.elapsed();
+        assert!(
+            matches!(result, Preview::Left(Some(_))),
+            "the prepared IDs are kept for removal"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(1000),
+            "{elapsed:?}"
+        );
+        let stalled_prepare = runtime().block_on(within(
+            Instant::now() + std::time::Duration::from_millis(50),
+            std::future::pending(),
+            |_, _| async { Ok(()) },
+        ));
+        assert!(
+            matches!(stalled_prepare, Preview::Left(None)),
+            "preparing counts toward the deadline"
+        );
+    }
+
+    #[test]
+    fn a_stored_preview_whose_answer_was_lost_is_removed() {
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        let result = runtime().block_on(within(deadline, async { prepared() }, |_, _| async {
+            anyhow::bail!("connection closed before the answer")
+        }));
+        let Preview::Left(Some(attachment)) = result else {
+            panic!("the prepared file must come back for removal");
+        };
+        assert_eq!(attachment.media_type, MEDIA_TYPE);
+        let ok = runtime().block_on(within(deadline, async { prepared() }, |_, _| async {
+            Ok(())
+        }));
+        assert!(matches!(ok, Preview::Sent(_)));
+    }
 
     #[test]
     fn a_late_or_oversized_preview_is_left_out() {
