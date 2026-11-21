@@ -10,10 +10,12 @@ use eframe::egui::{
 };
 
 mod menu;
+mod page;
 mod theme;
 mod widgets;
 
 pub use menu::{Item, Menu, context_menu, is_open as menu_open, menu, menu_below, menu_wide};
+pub use page::*;
 pub use theme::{ACCENTS, Accent, Appearance, DARK_THEMES, LIGHT_THEMES, Mode, Palette};
 pub use widgets::*;
 

@@ -600,15 +600,30 @@ impl Updater {
             State::Installed(..) => false,
             _ => true,
         };
+        crate::ui::page_section(ui, "Updates");
         ui.add_enabled_ui(can_check, |ui| {
-            let changed = crate::ui::checkbox(
+            let changed = crate::ui::toggle_row(
                 ui,
                 &mut self.settings.automatic,
-                "Check for updates automatically",
+                "Check automatically",
+                "Looks for a new version when RustTalk starts.",
             )
             .changed();
-            let url =
-                ui.add(crate::ui::field(&mut self.settings.url).hint_text("HTTPS update URL"));
+            let url = crate::ui::setting_row(
+                ui,
+                "Update address",
+                "Where RustTalk looks for new versions.",
+                |ui| {
+                    ui.add(
+                        crate::ui::field(&mut self.settings.url)
+                            .hint_text("HTTPS update URL")
+                            .desired_width(280.0),
+                    )
+                },
+            );
+            url.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::accesskit::Role::TextInput, true, "Update address")
+            });
             if url.changed() && self.available() {
                 self.state = State::Idle;
             }

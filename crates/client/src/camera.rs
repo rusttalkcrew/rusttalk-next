@@ -7,7 +7,8 @@ use std::{
 };
 
 use eframe::egui::{
-    self, ColorImage, ComboBox, Image, Rect, RichText, TextureHandle, Ui, Vec2, pos2,
+    self, ColorImage, ComboBox, Image, Rect, RichText, TextureHandle, Ui, Vec2, accesskit::Role,
+    pos2,
 };
 pub use rusttalk_core::camera::{CameraCapture as Capture, CameraOptions as Options};
 use rusttalk_core::{
@@ -18,7 +19,7 @@ use rusttalk_core::{
 use crate::{
     audio::{Settings, lock},
     call::{Listing, fill, upload},
-    ui::section,
+    ui,
 };
 
 pub struct Camera {
@@ -258,39 +259,48 @@ pub fn settings_tab(ui: &mut Ui, camera: &mut Camera, s: &mut Settings) {
         Listing::Found(found) => found.clone(),
         _ => Vec::new(),
     };
-    ComboBox::from_label("Camera")
-        .width(280.0)
-        .selected_text(s.camera.as_deref().unwrap_or("First camera"))
-        .show_ui(ui, |ui| {
-            ui.selectable_value(&mut s.camera, None, "First camera");
-            for name in found {
-                ui.selectable_value(&mut s.camera, Some(name.clone()), name);
-            }
-        });
+    ui::page_section(ui, "Camera");
+    ui::setting_row(ui, "Camera", "", |ui| {
+        let combo = ComboBox::from_id_salt("camera")
+            .width(crate::call::PICKER_WIDTH)
+            .selected_text(s.camera.as_deref().unwrap_or("First camera"))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut s.camera, None, "First camera");
+                for name in found {
+                    ui.selectable_value(&mut s.camera, Some(name.clone()), name);
+                }
+            });
+        combo
+            .response
+            .widget_info(|| egui::WidgetInfo::labeled(Role::ComboBox, true, "Camera"));
+    });
     let offered = match camera.ready().as_deref() {
         Some(Some(Ok(capture))) => Some(capture.heights.clone()),
         _ => None,
     };
-    section(ui, "Quality");
-    ui.horizontal(|ui| {
-        for height in HEIGHTS {
-            let label = format!("{height}p");
-            let usable = offered
-                .as_ref()
-                .is_none_or(|heights| heights.is_empty() || heights.contains(&height));
-            ui.add_enabled_ui(usable, |ui| {
-                ui.selectable_value(&mut s.camera_height, height, label)
-                    .on_disabled_hover_text("Your camera doesn't offer this");
-            });
-        }
-    });
-    section(ui, "Frame rate");
-    ui.horizontal(|ui| {
+    ui::setting_row(
+        ui,
+        "Quality",
+        "Higher looks sharper and uses more data.",
+        |ui| {
+            for height in HEIGHTS {
+                let label = format!("{height}p");
+                let usable = offered
+                    .as_ref()
+                    .is_none_or(|heights| heights.is_empty() || heights.contains(&height));
+                ui.add_enabled_ui(usable, |ui| {
+                    ui.selectable_value(&mut s.camera_height, height, label)
+                        .on_disabled_hover_text("Your camera doesn't offer this");
+                });
+            }
+        },
+    );
+    ui::setting_row(ui, "Frame rate", "Frames per second.", |ui| {
         for fps in FRAME_RATES {
             ui.selectable_value(&mut s.camera_fps, fps, fps.to_string());
         }
     });
-    ui.add_space(8.0);
+    ui::page_section(ui, "Preview");
     let mode = match camera.ready().as_deref() {
         None | Some(None) => {
             ui.horizontal(|ui| {

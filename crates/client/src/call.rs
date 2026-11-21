@@ -29,6 +29,8 @@ use crate::{
 const FLOOR: f32 = -70.0;
 const CEILING: f32 = -10.0;
 const METER_WIDTH: f32 = 360.0;
+/// Device pickers in Settings.
+pub const PICKER_WIDTH: f32 = 260.0;
 /// Width of a person's tile while it shows their camera.
 const VIDEO_WIDTH: f32 = 240.0;
 /// The live transfer limit.
@@ -946,13 +948,13 @@ pub fn settings_tab(ui: &mut Ui, voice: &mut Voice) {
     let audio = voice.audio.clone();
     let mut s = audio.settings();
     let (inputs, outputs) = audio.devices();
-    section(ui, "Devices");
+    ui::page_section(ui, "Devices");
     device_picker(ui, "Microphone", &mut s.input, &inputs);
     device_picker(ui, "Speakers", &mut s.output, &outputs);
     if let Some(problem) = audio.problem() {
         ui::error_text(ui, Some(&problem));
     }
-    section(ui, "Input mode");
+    ui::page_section(ui, "Input mode");
     ui.horizontal_wrapped(|ui| {
         let cards = [
             (false, "🔊", "Voice activity", "Talk when you speak"),
@@ -977,10 +979,25 @@ pub fn settings_tab(ui: &mut Ui, voice: &mut Voice) {
         ui.weak("Your mic turns on when the level passes the line. Drag to change it.");
         calibrate(ui, voice, &mut s);
     }
-    section(ui, "Voice processing");
-    ui::checkbox(ui, &mut s.echo_cancellation, "Echo cancellation");
-    ui::checkbox(ui, &mut s.noise_suppression, "Noise suppression");
-    ui::checkbox(ui, &mut s.auto_gain, "Automatic gain");
+    ui::page_section(ui, "Voice processing");
+    ui::toggle_row(
+        ui,
+        &mut s.echo_cancellation,
+        "Echo cancellation",
+        "Stops others from hearing themselves through your speakers.",
+    );
+    ui::toggle_row(
+        ui,
+        &mut s.noise_suppression,
+        "Noise suppression",
+        "Filters out background noise like fans and typing.",
+    );
+    ui::toggle_row(
+        ui,
+        &mut s.auto_gain,
+        "Automatic gain",
+        "Keeps your voice at an even volume.",
+    );
     audio.set_settings(s);
 }
 
@@ -997,15 +1014,20 @@ fn device_picker(
             .find(|d| d.id == *id)
             .map_or("Not connected", |d| d.name.as_str()),
     };
-    ComboBox::from_label(label)
-        .width(280.0)
-        .selected_text(current)
-        .show_ui(ui, |ui| {
-            ui.selectable_value(chosen, None, "System default");
-            for device in devices {
-                ui.selectable_value(chosen, Some(device.id.clone()), &device.name);
-            }
-        });
+    ui::setting_row(ui, label, "", |ui| {
+        let combo = ComboBox::from_id_salt(label)
+            .width(PICKER_WIDTH)
+            .selected_text(current)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(chosen, None, "System default");
+                for device in devices {
+                    ui.selectable_value(chosen, Some(device.id.clone()), &device.name);
+                }
+            });
+        combo
+            .response
+            .widget_info(|| egui::WidgetInfo::labeled(Role::ComboBox, true, label));
+    });
 }
 
 /// The live input level, with the voice activation line.
