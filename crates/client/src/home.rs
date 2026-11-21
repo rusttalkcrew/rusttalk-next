@@ -10,10 +10,10 @@ use std::{
 use anyhow::Result;
 use chrono::{DateTime, Local};
 use eframe::egui::{
-    self, Align, Align2, Button, CentralPanel, CollapsingHeader, Color32, FontId, Frame,
-    Id as UiId, Key, KeyboardShortcut, Label, Layout, Margin, Modal, Modifiers, Panel, Popup, Rect,
-    Response, RichText, Role, ScrollArea, Sense, Shape, TextEdit, TextureHandle, TextureOptions,
-    Ui, UiBuilder, Vec2, WidgetInfo, ecolor::Hsva,
+    self, Align, Align2, CentralPanel, CollapsingHeader, Color32, FontId, Frame, Id as UiId, Key,
+    KeyboardShortcut, Label, Layout, Margin, Modifiers, Panel, Rect, Response, RichText, Role,
+    ScrollArea, Sense, Shape, TextEdit, TextureHandle, TextureOptions, Ui, UiBuilder, Vec2,
+    WidgetInfo, ecolor::Hsva,
 };
 use rusttalk_core::{
     auth::{Fingerprint, InviteLink, decode},
@@ -25,7 +25,7 @@ use rusttalk_core::{
 
 use crate::{
     admin,
-    app::{Action, error_text, primary, secondary, submitted},
+    app::{Action, submitted},
     audio::Audio,
     call::{self, LiveAction, LiveFile, LiveState, Voice},
     device_sync::{self, Edit},
@@ -34,6 +34,7 @@ use crate::{
     official, reorder,
     screen::Video,
     server::{Body, Chat, Directory, Id, Member, Msg, Picture, Server, Status, member_name},
+    ui::{self, Item, Look, Palette, error_text},
 };
 
 /// The name shown until a server has one, or until its key arrives.
@@ -43,9 +44,13 @@ const COUNT_FROM: usize = 1_800;
 const DAY: u32 = 24 * 60 * 60;
 /// Seconds without any input before "Online" turns into "Away" by itself.
 const AWAY_AFTER: f64 = 10.0 * 60.0;
-const ONLINE: Color32 = Color32::from_rgb(0x23, 0xa5, 0x5a);
-const AWAY: Color32 = Color32::from_rgb(0xf0, 0xb2, 0x32);
-const OFFLINE: Color32 = Color32::from_rgb(0x80, 0x84, 0x8e);
+const RAIL_WIDTH: f32 = 72.0;
+const SIDEBAR_WIDTH: f32 = 240.0;
+const MEMBERS_WIDTH: f32 = 220.0;
+const RAIL_BUTTON: f32 = 48.0;
+const SERVER_HEADER: f32 = 44.0;
+const MESSAGE_AVATAR: f32 = 38.0;
+const TOOLBAR_BUTTON: Vec2 = Vec2::new(30.0, 26.0);
 
 mod user_bar;
 
@@ -152,6 +157,7 @@ struct Invite {
 #[derive(Clone, Copy, PartialEq)]
 pub enum Tab {
     Profile,
+    Appearance,
     Voice,
     Video,
     Privacy,
@@ -667,36 +673,19 @@ fn initials(name: &str) -> String {
     }
 }
 
-pub struct Palette {
-    rail: Color32,
-    pub side: Color32,
-    pub main: Color32,
-    hover: Color32,
-    input: Color32,
-}
-
-pub fn palette(ui: &Ui) -> Palette {
-    if ui.visuals().dark_mode {
-        Palette {
-            rail: Color32::from_rgb(0x1e, 0x1f, 0x22),
-            side: Color32::from_rgb(0x2b, 0x2d, 0x31),
-            main: Color32::from_rgb(0x31, 0x33, 0x38),
-            hover: Color32::from_rgb(0x2e, 0x30, 0x35),
-            input: Color32::from_rgb(0x38, 0x3a, 0x40),
-        }
-    } else {
-        Palette {
-            rail: Color32::from_rgb(0xe3, 0xe5, 0xe8),
-            side: Color32::from_rgb(0xf2, 0xf3, 0xf5),
-            main: Color32::WHITE,
-            hover: Color32::from_rgb(0xf5, 0xf6, 0xf7),
-            input: Color32::from_rgb(0xeb, 0xed, 0xef),
-        }
+/// The presence colour: green, yellow or grey.
+pub fn presence_color(c: &Palette, presence: Presence) -> Color32 {
+    match presence {
+        Presence::Online => c.success,
+        Presence::Away => c.warning,
+        Presence::Offline => c.offline,
     }
 }
 
 fn panel_frame(fill: Color32) -> Frame {
-    Frame::new().fill(fill).inner_margin(Margin::same(8))
+    Frame::new()
+        .fill(fill)
+        .inner_margin(Margin::same(ui::SPACE_S as i8))
 }
 
 pub fn show(ui: &mut Ui, home: &mut Home, updates: &mut crate::update::Updater) -> Option<Action> {
@@ -705,6 +694,7 @@ pub fn show(ui: &mut Ui, home: &mut Home, updates: &mut crate::update::Updater) 
         home.apply(ui.ctx(), update, now);
     }
     home.track_activity(ui);
+    ui::apply(ui.ctx(), home.voice.audio.settings().appearance());
     for (ask, paths) in home.files.answers() {
         if let Ask::Picture = ask {
             if let Some(path) = paths.into_iter().next() {
@@ -794,7 +784,7 @@ pub fn show(ui: &mut Ui, home: &mut Home, updates: &mut crate::update::Updater) 
     if home.toast.as_ref().is_some_and(|(_, until)| *until < now) {
         home.toast = None;
     }
-    let colors = palette(ui);
+    let colors = ui::colors(ui);
     if home.voice.watching.as_ref().is_some_and(|w| w.full) {
         CentralPanel::default()
             .frame(panel_frame(colors.main))
@@ -804,12 +794,12 @@ pub fn show(ui: &mut Ui, home: &mut Home, updates: &mut crate::update::Updater) 
     }
     Panel::left("servers")
         .resizable(false)
-        .exact_size(72.0)
+        .exact_size(RAIL_WIDTH)
         .frame(panel_frame(colors.rail))
         .show(ui, |ui| server_rail(ui, home));
     Panel::left("channels")
         .resizable(false)
-        .exact_size(240.0)
+        .exact_size(SIDEBAR_WIDTH)
         .frame(panel_frame(colors.side))
         .show(ui, |ui| sidebar(ui, home, updates.available()));
     if let View::Server(index) = home.view
@@ -817,7 +807,7 @@ pub fn show(ui: &mut Ui, home: &mut Home, updates: &mut crate::update::Updater) 
     {
         Panel::right("members")
             .resizable(false)
-            .exact_size(220.0)
+            .exact_size(MEMBERS_WIDTH)
             .frame(panel_frame(colors.side))
             .show(ui, |ui| member_list(ui, home, index));
     }
@@ -825,7 +815,7 @@ pub fn show(ui: &mut Ui, home: &mut Home, updates: &mut crate::update::Updater) 
         .frame(
             Frame::new()
                 .fill(colors.main)
-                .inner_margin(Margin::same(12)),
+                .inner_margin(Margin::same(ui::SPACE_M as i8)),
         )
         .show(ui, |ui| match home.view {
             View::Join => join(ui, home),
@@ -868,28 +858,37 @@ pub fn show(ui: &mut Ui, home: &mut Home, updates: &mut crate::update::Updater) 
 fn empty(ui: &mut Ui, title: &str, hint: &str) {
     ui.vertical_centered(|ui| {
         ui.add_space(ui.available_height() * 0.3);
-        ui.heading(title);
+        ui.label(ui::heading(title));
         ui.weak(hint);
     });
 }
 
+/// A round server button that turns into a rounded square when hovered or open.
 fn rail_button(ui: &mut Ui, text: &str, label: &str, selected: bool) -> Response {
-    let fill = if selected {
-        ui.visuals().selection.bg_fill
-    } else {
-        palette(ui).main
-    };
-    let response = ui
-        .add(
-            Button::new(RichText::new(text).size(17.0).strong())
-                .min_size(Vec2::splat(48.0))
-                .corner_radius(if selected { 16 } else { 24 })
-                .fill(fill)
-                .stroke(egui::Stroke::NONE),
-        )
-        .on_hover_text(label);
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(RAIL_BUTTON), Sense::click());
+    let c = ui::colors(ui);
+    let accent = ui::accent(ui);
+    let hover = ui.ctx().animate_bool_with_time(
+        response.id.with("hover"),
+        response.hovered() || selected,
+        ui::HOVER_SECONDS,
+    );
+    let radius = RAIL_BUTTON / 2.0 - hover * (RAIL_BUTTON / 2.0 - 16.0);
+    let fill = c.main.lerp_to_gamma(accent.base, hover);
+    let glyph = c.text.lerp_to_gamma(ui::ON_FILL, hover);
+    ui.painter().rect_filled(rect, radius, fill);
+    ui.painter().text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        text,
+        FontId::new(17.0, ui::bold_family()),
+        glyph,
+    );
+    ui::focus_ring(ui, &response, radius as u8);
     response.widget_info(|| WidgetInfo::labeled(Role::Button, true, label));
     response
+        .on_hover_text(label)
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 fn server_rail(ui: &mut Ui, home: &mut Home) {
@@ -912,7 +911,7 @@ fn server_rail(ui: &mut Ui, home: &mut Home) {
             let button = match &server.dir.icon {
                 Some(icon) => {
                     let image = egui::Image::new(&frame(ui, icon))
-                        .fit_to_exact_size(Vec2::splat(48.0))
+                        .fit_to_exact_size(Vec2::splat(RAIL_BUTTON))
                         .corner_radius(if selected { 16 } else { 24 })
                         .sense(Sense::click());
                     let button = ui.add(image).on_hover_text(server.name());
@@ -928,11 +927,11 @@ fn server_rail(ui: &mut Ui, home: &mut Home) {
         }
         let adding = matches!(home.view, View::Join | View::Find);
         let plus = rail_button(ui, "+", "Add a server", adding);
-        Popup::menu(&plus).show(|ui| {
-            if ui.button("Join with an invite").clicked() {
+        ui::menu(&plus, |m| {
+            if m.item("🔗", "Join with an invite").clicked() {
                 home.view = View::Join;
             }
-            if ui.button("Find servers").clicked() {
+            if m.item("🔍", "Find servers").clicked() {
                 home.view = View::Find;
                 home.find.open();
             }
@@ -1001,39 +1000,36 @@ pub fn frame(ui: &Ui, picture: &Picture) -> TextureHandle {
     textures[0].clone()
 }
 
-pub fn section(ui: &mut Ui, text: &str) -> Response {
-    ui.add_space(10.0);
-    let text = RichText::new(text.to_uppercase()).small().strong().weak();
-    ui.add(Label::new(text).selectable(false))
-}
-
 fn dm_list(ui: &mut Ui, home: &mut Home) {
     ui.add_space(6.0);
-    ui.label(RichText::new("Direct messages").strong().size(16.0));
+    ui.horizontal(|ui| {
+        ui.add_space(ui::SPACE_S);
+        ui.label(ui::title("Direct messages"));
+    });
     ui.separator();
     let mut any = false;
     ScrollArea::vertical().show(ui, |ui| {
+        ui.spacing_mut().item_spacing.y = 2.0;
         for (index, server) in home.servers.iter().enumerate() {
             for dm in &server.dir.dms {
                 any = true;
                 let selected = home.view == View::Direct(Some((index, dm.channel)));
                 let name = server.member_name(&dm.peer);
-                let row = ui
-                    .horizontal(|ui| {
-                        face(ui, &server.dir, &dm.peer, &name, 28.0, true);
-                        ui.vertical(|ui| {
-                            ui.add(
-                                Button::selectable(selected, name.as_str())
-                                    .frame_when_inactive(false),
-                            )
-                            .clicked()
-                                | ui.label(RichText::new(server.name()).small().weak())
-                                    .clicked()
-                        })
-                        .inner
-                    })
-                    .inner;
-                if row {
+                if selected {
+                    let rect =
+                        Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), 44.0));
+                    ui.painter()
+                        .rect_filled(rect, ui::RADIUS_ROW, ui::colors(ui).selected);
+                }
+                let row = ui::row_button(ui, 44.0, &name, |ui| {
+                    face(ui, &server.dir, &dm.peer, &name, 30.0, true);
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        ui.add(Label::new(ui::bold(&name)).truncate());
+                        ui.add(Label::new(ui::caption(server.name())).truncate());
+                    });
+                });
+                if row.clicked() {
                     home.view = View::Direct(Some((index, dm.channel)));
                 }
             }
@@ -1044,62 +1040,62 @@ fn dm_list(ui: &mut Ui, home: &mut Home) {
     }
 }
 
+/// The top of the channel list: the server name and a chevron on one row, all of it
+/// a button that opens the server menu below it.
+fn server_header(ui: &mut Ui, name: &str) -> Response {
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width(), SERVER_HEADER),
+        Sense::click(),
+    );
+    let c = ui::colors(ui);
+    let open = ui::menu_open(&response);
+    let hover = ui.ctx().animate_bool_with_time(
+        response.id.with("hover"),
+        response.hovered() || open,
+        ui::HOVER_SECONDS,
+    );
+    let turn = ui
+        .ctx()
+        .animate_bool_with_time(response.id.with("open"), open, ui::STATE_SECONDS);
+    let painter = ui.painter();
+    painter.rect_filled(
+        rect,
+        ui::RADIUS_ROW,
+        Color32::TRANSPARENT.lerp_to_gamma(c.hover_row(), hover),
+    );
+    ui::focus_ring(ui, &response, ui::RADIUS_ROW);
+    let text = c.text.lerp_to_gamma(c.strong, hover);
+    let galley = painter.layout(
+        name.to_owned(),
+        FontId::new(ui::TEXT_TITLE - 1.0, ui::bold_family()),
+        c.strong,
+        (rect.width() - 44.0).max(0.0),
+    );
+    let at = egui::pos2(rect.left() + 10.0, rect.center().y - galley.size().y / 2.0);
+    painter.galley(at, galley, c.strong);
+    // A chevron that turns up while the menu is open.
+    let center = egui::pos2(rect.right() - 18.0, rect.center().y);
+    let (w, h) = (5.0, 3.0 * (1.0 - 2.0 * turn));
+    painter.line(
+        vec![
+            center + Vec2::new(-w, -h),
+            center + Vec2::new(0.0, h),
+            center + Vec2::new(w, -h),
+        ],
+        egui::Stroke::new(1.8, text),
+    );
+    let label = format!("{name}, server menu");
+    response.widget_info(|| WidgetInfo::labeled(Role::Button, true, &label));
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
     let server = &home.servers[index];
     let perms = server.dir.perms;
     let online = server.status == Status::Online;
-    ui.add_space(4.0);
-    let header = ui.add(
-        Button::new(
-            RichText::new(format!("{}  ⏷", server.name()))
-                .strong()
-                .size(16.0),
-        )
-        .frame_when_inactive(false)
-        .min_size(Vec2::new(ui.available_width(), 32.0)),
-    );
-    Popup::menu(&header).show(|ui| {
-        ui.set_min_width(200.0);
-        if perms.invite && ui.button("Invite people").clicked() {
-            home.dialog = Some(Dialog::Invite(Invite {
-                server: index,
-                uses: 10,
-                seconds: DAY * 7,
-                making: false,
-                link: None,
-            }));
-        }
-        if perms.settings() && ui.button("Server settings").clicked() {
-            admin::open(home, index, admin::Tab::Members);
-        }
-        if perms.manage_channels {
-            if ui.button("Create channel").clicked() {
-                home.dialog = Some(new_channel(&home.servers[index], index, None));
-            }
-            if ui.button("Create category").clicked() {
-                home.dialog = Some(Dialog::Category(index, String::new()));
-            }
-        }
-        if perms.manage_server && ui.button("Rename server").clicked() {
-            let name = home.servers[index].dir.name.clone().unwrap_or_default();
-            home.dialog = Some(Dialog::ServerName(index, name));
-        }
-        if ui.button("Change my name").clicked() {
-            let server = &home.servers[index];
-            let mine = server
-                .dir
-                .members
-                .iter()
-                .find(|m| m.person == server.dir.me);
-            home.dialog = Some(Dialog::MyName(
-                index,
-                mine.and_then(|m| m.name.clone()).unwrap_or_default(),
-            ));
-        }
-        if ui.button("Leave server").clicked() {
-            home.dialog = Some(Dialog::Leave(index, None));
-        }
-    });
+    let header = server_header(ui, server.name());
+    ui::menu_below(&header, |m| server_menu(m, home, index));
+    ui.add_space(2.0);
     let server = &home.servers[index];
     match &server.status {
         Status::Connecting => {
@@ -1112,8 +1108,8 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
             ui.weak("Offline. Trying again…");
         }
         Status::Stopped(reason) => {
-            ui.colored_label(ui.visuals().error_fg_color, reason.as_str());
-            if ui.button("Remove server").clicked() {
+            error_text(ui, Some(reason));
+            if ui::secondary(ui, "Remove server").clicked() {
                 home.leave_server(index);
                 return;
             }
@@ -1122,10 +1118,7 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
     }
     if online && perms.owner && server.dir.name.is_none() {
         ui.add_space(6.0);
-        if ui
-            .add(Button::new("Name your server").fill(ui.visuals().selection.bg_fill))
-            .clicked()
-        {
+        if ui::primary(ui, "Name your server").clicked() {
             home.dialog = Some(Dialog::ServerName(index, String::new()));
         }
     }
@@ -1138,6 +1131,7 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
     let categories = &server.dir.categories;
     let can_move = perms.manage_channels && online && reorder::order(categories).is_some();
     ScrollArea::vertical().show(ui, |ui| {
+        ui.spacing_mut().item_spacing.y = 2.0;
         let list_id = UiId::unique(("channel order", &server.address));
         let mut list = reorder::List::begin(ui, list_id, categories, can_move);
         for category in categories {
@@ -1145,18 +1139,19 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
             if let Some(id) = category.id.filter(|_| !category.name.is_empty()) {
                 let item = reorder::Item::Category(id);
                 let header = list.row(ui, item, block, |ui| {
+                    ui.add_space(ui::SPACE_S);
                     ui.horizontal(|ui| {
-                        let label = section(ui, &category.name);
+                        ui.add_space(ui::SPACE_XS);
+                        let label = ui::caption_label(ui, &category.name);
                         if perms.manage_channels {
-                            ui.with_layout(Layout::right_to_left(Align::Max), |ui| {
-                                let plus = ui.small_button("+").on_hover_text("Create channel");
-                                plus.widget_info(|| {
-                                    WidgetInfo::labeled(
-                                        Role::Button,
-                                        true,
-                                        format!("Create channel in {}", category.name),
-                                    )
-                                });
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                let plus = ui::icon_button(
+                                    ui,
+                                    "+",
+                                    &format!("Create channel in {}", category.name),
+                                    Look::Ghost,
+                                    Vec2::splat(22.0),
+                                );
                                 if plus.clicked() {
                                     add = Some(category.id);
                                 }
@@ -1167,8 +1162,8 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
                     .inner
                 });
                 if can_move {
-                    header.context_menu(|ui| {
-                        moved = moved.or(reorder::menu(ui, categories, item));
+                    ui::context_menu(&header, |m| {
+                        moved = moved.or(reorder::menu(m, categories, item));
                     });
                 }
             }
@@ -1176,17 +1171,17 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
                 let item = reorder::Item::Channel(channel.id);
                 let selected = server.open == Some(channel.id);
                 let button = list.row(ui, item, block, |ui| {
-                    let width = ui.available_width();
+                    let icon = if channel.voice { "🔊" } else { "#" };
+                    let label = format!("{icon}  {}", channel.name);
+                    let row = ui
+                        .add_enabled_ui(online || !channel.voice, |ui| {
+                            ui::nav_row(ui, icon, &channel.name, selected, Role::Button, &label)
+                        })
+                        .inner;
                     if channel.voice {
-                        let button = Button::selectable(selected, format!("🔊  {}", channel.name))
-                            .min_size(Vec2::new(width, 0.0));
-                        let button = ui.add_enabled(online, button);
                         call::room_list(ui, home, server, &channel.id);
-                        return button;
                     }
-                    let button = Button::selectable(selected, format!("#  {}", channel.name))
-                        .min_size(Vec2::new(width, 0.0));
-                    ui.add(button)
+                    row
                 });
                 if button.clicked() {
                     if channel.voice {
@@ -1196,12 +1191,13 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
                     }
                 }
                 if perms.manage_channels {
-                    button.context_menu(|ui| {
-                        if ui.button("Channel settings").clicked() {
+                    ui::context_menu(&button, |m| {
+                        if m.item("⚙", "Channel settings").clicked() {
                             configure = Some(channel.id);
                         }
                         if can_move {
-                            moved = moved.or(reorder::menu(ui, categories, item));
+                            m.separator();
+                            moved = moved.or(reorder::menu(m, categories, item));
                         }
                     });
                 }
@@ -1228,6 +1224,62 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
     }
     if let Some(category) = add {
         home.dialog = Some(new_channel(&home.servers[index], index, category));
+    }
+}
+
+/// The server header menu, with only what this person may do.
+fn server_menu(m: &mut ui::Menu, home: &mut Home, index: usize) {
+    let perms = home.servers[index].dir.perms;
+    let mut grouped = false;
+    if perms.invite && m.item("👤", "Invite people").clicked() {
+        home.dialog = Some(Dialog::Invite(Invite {
+            server: index,
+            uses: 10,
+            seconds: DAY * 7,
+            making: false,
+            link: None,
+        }));
+    }
+    if perms.settings() && m.item("⚙", "Server settings").clicked() {
+        admin::open(home, index, admin::Tab::Members);
+    }
+    grouped |= perms.invite || perms.settings();
+    if perms.manage_channels || perms.manage_server {
+        if grouped {
+            m.separator();
+        }
+        if perms.manage_channels {
+            if m.item("#", "Create channel").clicked() {
+                home.dialog = Some(new_channel(&home.servers[index], index, None));
+            }
+            if m.item("🗀", "Create category").clicked() {
+                home.dialog = Some(Dialog::Category(index, String::new()));
+            }
+        }
+        if perms.manage_server && m.item("✏", "Rename server").clicked() {
+            let name = home.servers[index].dir.name.clone().unwrap_or_default();
+            home.dialog = Some(Dialog::ServerName(index, name));
+        }
+        grouped = true;
+    }
+    if grouped {
+        m.separator();
+    }
+    if m.item("🏷", "Change my name").clicked() {
+        let server = &home.servers[index];
+        let mine = server
+            .dir
+            .members
+            .iter()
+            .find(|m| m.person == server.dir.me);
+        home.dialog = Some(Dialog::MyName(
+            index,
+            mine.and_then(|m| m.name.clone()).unwrap_or_default(),
+        ));
+    }
+    m.separator();
+    if m.danger("🚪", "Leave server").clicked() {
+        home.dialog = Some(Dialog::Leave(index, None));
     }
 }
 
@@ -1267,8 +1319,8 @@ pub fn avatar(ui: &mut Ui, person: &Id, name: &str, size: f32) -> Response {
         rect.center(),
         Align2::CENTER_CENTER,
         initials(name),
-        FontId::proportional(size * 0.38),
-        Color32::WHITE,
+        FontId::new(size * 0.38, ui::bold_family()),
+        ui::ON_FILL,
     );
     response
 }
@@ -1305,15 +1357,10 @@ fn member_face(
         None => avatar(ui, person, name, size),
     };
     if dot {
-        let color = match member.map_or(Presence::Offline, |m| m.presence) {
-            Presence::Online => ONLINE,
-            Presence::Away => AWAY,
-            Presence::Offline => OFFLINE,
-        };
+        let c = ui::colors(ui);
+        let color = presence_color(c, member.map_or(Presence::Offline, |m| m.presence));
         let radius = (size * 0.16).max(4.0);
-        let center = response.rect.right_bottom() - Vec2::splat(radius * 0.8);
-        ui.painter()
-            .circle(center, radius, color, (2.0, palette(ui).side));
+        ui::presence_dot(ui, response.rect, radius, color, c.side);
     }
     response
 }
@@ -1321,44 +1368,47 @@ fn member_face(
 fn member_list(ui: &mut Ui, home: &mut Home, index: usize) {
     let server = &home.servers[index];
     ui.add_space(6.0);
-    section(ui, &format!("Members — {}", server.dir.members.len()));
+    ui.horizontal(|ui| {
+        ui.add_space(ui::SPACE_XS);
+        ui::caption_label(ui, &format!("Members — {}", server.dir.members.len()));
+    });
     let perms = server.dir.perms;
     let mut action = None;
     let (mut manage, mut moderate) = (None, None);
     ScrollArea::vertical().show(ui, |ui| {
+        ui.spacing_mut().item_spacing.y = 2.0;
         for member in &server.dir.members {
             let name = member.display_name();
             let me = member.person == server.dir.me;
-            let row = ui
-                .horizontal(|ui| {
-                    member_face(ui, Some(member), &member.person, &name, 30.0, true);
-                    let label = if me {
-                        format!("{name} (you)")
-                    } else {
-                        name.clone()
-                    };
-                    ui.add(
-                        Button::selectable(false, label)
-                            .right_text("")
-                            .min_size(Vec2::new(ui.available_width(), 30.0)),
-                    )
-                })
-                .inner;
-            Popup::menu(&row).show(|ui| {
-                if !me && ui.button("Message").clicked() {
+            let label = if me {
+                format!("{name} (you)")
+            } else {
+                name.clone()
+            };
+            let row = ui::row_button(ui, 40.0, &label, |ui| {
+                member_face(ui, Some(member), &member.person, &name, 30.0, true);
+                let text = if member.presence == Presence::Offline {
+                    RichText::new(&label).color(ui::colors(ui).muted)
+                } else {
+                    RichText::new(&label)
+                };
+                ui.add(Label::new(text).truncate());
+            });
+            ui::menu(&row, |m| {
+                if !me && m.item("💬", "Message").clicked() {
                     action = Some(Command::OpenDm(member.person));
                 }
-                if ui.button("Details").clicked() {
+                if m.item("ℹ", "Details").clicked() {
                     home.dialog = Some(Dialog::Member(index, member.person));
                 }
                 if !me && home.voice.call.is_some() {
-                    ui.separator();
-                    call::stream_menu(ui, &home.voice.audio, &(member.person, None));
+                    m.separator();
+                    call::stream_menu(m, &home.voice.audio, &(member.person, None));
                 }
                 if !me && (perms.kick || perms.ban || perms.manage_roles) {
-                    ui.separator();
+                    m.separator();
                     manage = Some(member.person);
-                    admin::member_menu(ui, &mut moderate, perms);
+                    admin::member_menu(m, &mut moderate, perms);
                 }
             });
         }
@@ -1377,23 +1427,23 @@ fn join(ui: &mut Ui, home: &mut Home) {
         ui.set_max_width(440.0);
         match &mut home.join {
             Join::Idle(error) => {
-                ui.heading(if home.servers.is_empty() {
+                ui.label(ui::heading(if home.servers.is_empty() {
                     "No servers yet"
                 } else {
                     "Join a server"
-                });
+                }));
                 ui.label("Paste an invite link from a friend.");
                 ui.add_space(12.0);
                 let label = ui.label("Invite link");
                 let field = ui
                     .add(
-                        TextEdit::singleline(&mut home.invite)
+                        ui::field(&mut home.invite)
                             .hint_text("rusttalk://…")
                             .desired_width(400.0),
                     )
                     .labelled_by(label.id);
                 error_text(ui, error.as_deref());
-                if primary(ui, "Join a server").clicked() || submitted(ui, &field) {
+                if ui::primary_large(ui, "Join a server").clicked() || submitted(ui, &field) {
                     match InviteLink::parse(home.invite.trim()) {
                         Ok(link) => {
                             home.net.preview(link);
@@ -1421,23 +1471,23 @@ fn join(ui: &mut Ui, home: &mut Home) {
             Join::Preview { preview, name } => {
                 let address = preview.server.address.clone();
                 if let Some(index) = home.servers.iter().position(|s| s.address == address) {
-                    ui.heading("You're already in this server");
-                    if primary(ui, "Open it").clicked() {
+                    ui.label(ui::heading("You're already in this server"));
+                    if ui::primary_large(ui, "Open it").clicked() {
                         home.view = View::Server(index);
                         home.join = Join::Idle(None);
                     }
                     return;
                 }
                 match &preview.name {
-                    Some(server) => ui.heading(format!("Join {server}?")),
-                    None => ui.heading("Join this server?"),
+                    Some(server) => ui.label(ui::heading(format!("Join {server}?"))),
+                    None => ui.label(ui::heading("Join this server?")),
                 };
                 ui.weak(host(&address));
                 ui.add_space(12.0);
                 let label = ui.label("Your name on this server");
                 let field = ui
                     .add(
-                        TextEdit::singleline(name)
+                        ui::field(name)
                             .hint_text("What friends call you")
                             .desired_width(300.0),
                     )
@@ -1445,7 +1495,7 @@ fn join(ui: &mut Ui, home: &mut Home) {
                 ui.add_space(8.0);
                 if preview.invite.is_none() && !preview.open {
                     ui.label("This server needs an invite. Ask someone there for a link.");
-                    if secondary(ui, "Back").clicked() {
+                    if ui::secondary_large(ui, "Back").clicked() {
                         home.join = Join::Idle(None);
                     }
                     return;
@@ -1467,7 +1517,7 @@ fn join(ui: &mut Ui, home: &mut Home) {
                     ui.weak("RustTalk remembers these and stops if they ever change.");
                 });
                 ui.add_space(8.0);
-                if primary(ui, "Join").clicked() || submitted(ui, &field) {
+                if ui::primary_large(ui, "Join").clicked() || submitted(ui, &field) {
                     let name = name.trim();
                     let admission = match preview.invite {
                         Some(code) => Admission::Invite(code),
@@ -1483,7 +1533,7 @@ fn join(ui: &mut Ui, home: &mut Home) {
                         .push(new_server(address.clone(), label, commands));
                     home.left.remove(&address);
                     home.join = Join::Joining(address);
-                } else if secondary(ui, "Cancel").clicked() {
+                } else if ui::secondary_large(ui, "Cancel").clicked() {
                     home.join = Join::Idle(None);
                 }
             }
@@ -1500,25 +1550,25 @@ fn official_servers(ui: &mut Ui, home: &mut Home) {
     let mut pick = None;
     let mut changed = false;
     if !shown.is_empty() {
-        ui.add_space(24.0);
-        ui.label(RichText::new("Official servers").strong());
+        ui.add_space(ui::SPACE_XL);
+        ui.label(ui::title("Official servers"));
     }
     for listed in shown {
-        Frame::group(ui.style()).show(ui, |ui| {
-            ui.set_width(ui.available_width());
+        ui::card(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
-                    ui.label(&listed.name);
-                    ui.weak(host(&listed.server.address));
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    ui.label(ui::bold(&listed.name));
+                    ui.label(ui::caption(host(&listed.server.address)));
                 });
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let dismiss = ui.button("Dismiss");
-                    dismiss.widget_info(|| {
-                        WidgetInfo::labeled(Role::Button, true, format!("Dismiss {}", listed.name))
-                    });
-                    let join = primary_small(ui, "Join");
+                    let join = ui::primary(ui, "Join");
                     join.widget_info(|| {
                         WidgetInfo::labeled(Role::Button, true, format!("Join {}", listed.name))
+                    });
+                    let dismiss = ui::secondary(ui, "Dismiss");
+                    dismiss.widget_info(|| {
+                        WidgetInfo::labeled(Role::Button, true, format!("Dismiss {}", listed.name))
                     });
                     if dismiss.clicked() {
                         settings.dismissed_official.push(official::id(&listed));
@@ -1547,12 +1597,12 @@ fn official_servers(ui: &mut Ui, home: &mut Home) {
 pub fn privacy_tab(ui: &mut Ui, home: &mut Home) {
     let audio = home.voice.audio.clone();
     let mut settings = audio.settings();
-    section(ui, "Server directory");
+    ui::section(ui, "Server directory");
     ui.label("A directory lists public servers you can find and join.");
     ui.weak("RustTalk only contacts it while you have Find servers open.");
     let label = ui.label("Directory address");
     ui.add(
-        TextEdit::singleline(&mut settings.index_url)
+        ui::field(&mut settings.index_url)
             .hint_text(official::DIRECTORY)
             .desired_width(f32::INFINITY),
     )
@@ -1560,7 +1610,7 @@ pub fn privacy_tab(ui: &mut Ui, home: &mut Home) {
     ui.weak("Leave it empty to use the official directory.");
     CollapsingHeader::new("Details").show(ui, |ui| {
         let label = ui.label("Certificate fingerprint, only for a directory without a domain");
-        ui.add(TextEdit::singleline(&mut settings.index_fingerprint).desired_width(f32::INFINITY))
+        ui.add(ui::field(&mut settings.index_fingerprint).desired_width(f32::INFINITY))
             .labelled_by(label.id);
     });
     if !settings.index_url.trim().is_empty()
@@ -1590,9 +1640,9 @@ fn directory(settings: &crate::audio::Settings) -> Result<(url::Url, Option<Fing
 
 fn find(ui: &mut Ui, home: &mut Home) {
     ui.vertical_centered(|ui| {
-        ui.add_space(24.0);
+        ui.add_space(ui::SPACE_XL);
         ui.set_max_width(640.0);
-        ui.heading("Find servers");
+        ui.label(ui::heading("Find servers"));
         if ui.link("Join with an invite").clicked() {
             home.view = View::Join;
         }
@@ -1601,17 +1651,17 @@ fn find(ui: &mut Ui, home: &mut Home) {
         let mut page = find.auto_page();
         ui.horizontal(|ui| {
             let field = ui.add(
-                TextEdit::singleline(&mut find.query)
+                ui::field(&mut find.query)
                     .hint_text("Search by name or description")
                     .desired_width(ui.available_width() - 90.0),
             );
             field.widget_info(|| WidgetInfo::labeled(Role::TextInput, true, "Search"));
-            if primary_small(ui, "Search").clicked() || submitted(ui, &field) {
+            if ui::primary(ui, "Search").clicked() || submitted(ui, &field) {
                 page = Some(1);
             }
         });
         error_text(ui, find.error.as_deref());
-        if find.error.is_some() && !find.searching && ui.button("Try again").clicked() {
+        if find.error.is_some() && !find.searching && ui::secondary(ui, "Try again").clicked() {
             page = Some(1);
         }
         if find.searching || find.checking {
@@ -1623,20 +1673,16 @@ fn find(ui: &mut Ui, home: &mut Home) {
         ScrollArea::vertical().show(ui, |ui| {
             ui.with_layout(Layout::top_down(Align::Min), |ui| {
                 for listed in &find.results {
-                    Frame::group(ui.style()).show(ui, |ui| {
-                        ui.set_width(ui.available_width());
+                    ui::card(ui, |ui| {
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new(&listed.name).strong().size(16.0));
+                            ui.label(ui::title(&listed.name));
                             if listed.open {
-                                ui.label(
-                                    RichText::new(" Open joining ")
-                                        .small()
-                                        .background_color(ui.visuals().selection.bg_fill),
-                                );
+                                ui::badge(ui, "Open joining", ui::accent(ui).base);
                             }
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                let join = Button::new("Join").fill(ui.visuals().selection.bg_fill);
-                                let join = ui.add_enabled(!find.checking, join);
+                                let join = ui
+                                    .add_enabled_ui(!find.checking, |ui| ui::primary(ui, "Join"))
+                                    .inner;
                                 join.widget_info(|| {
                                     WidgetInfo::labeled(
                                         Role::Button,
@@ -1656,10 +1702,10 @@ fn find(ui: &mut Ui, home: &mut Home) {
                             1 => "1 member".to_owned(),
                             count => format!("{count} members"),
                         };
-                        ui.weak(members);
+                        ui.label(ui::caption(members));
                     });
                 }
-                if find.more && !find.searching && ui.button("Show more").clicked() {
+                if find.more && !find.searching && ui::secondary(ui, "Show more").clicked() {
                     page = Some(find.page + 1);
                 }
             });
@@ -1763,11 +1809,7 @@ fn chat_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
         chat.loading = true;
         chat
     });
-    Panel::top("chat-title")
-        .frame(Frame::new().inner_margin(Margin::symmetric(4, 6)))
-        .show(ui, |ui| {
-            ui.label(RichText::new(&title).strong().size(17.0));
-        });
+    pane_title(ui, "chat-title", &title);
     let online = *status == Status::Online;
     let (hovered, dropped) = ui.input(|input| {
         let dropped: Vec<_> = (input.raw.dropped_files.iter())
@@ -1798,17 +1840,15 @@ fn chat_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
     }
     if online && hovered {
         let rect = ui.max_rect();
-        ui.painter().rect_filled(
-            rect,
-            8.0,
-            ui.visuals().selection.bg_fill.gamma_multiply(0.35),
-        );
+        let accent = ui::accent(ui);
+        ui.painter()
+            .rect_filled(rect, ui::RADIUS, accent.base.gamma_multiply(0.35));
         ui.painter().text(
             rect.center(),
             Align2::CENTER_CENTER,
             format!("Drop to send in {title}"),
-            FontId::proportional(20.0),
-            ui.visuals().strong_text_color(),
+            FontId::new(20.0, ui::bold_family()),
+            ui::colors(ui).strong,
         );
     }
     let can_moderate = dir.perms.delete_messages && !dm;
@@ -1824,13 +1864,9 @@ fn chat_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
     let output = area.show(ui, |ui| {
         ui.set_width(ui.available_width());
         if chat.at_start {
-            ui.add_space(12.0);
-            ui.label(
-                RichText::new(format!("This is the start of {title}"))
-                    .strong()
-                    .size(18.0),
-            );
-            ui.add_space(12.0);
+            ui.add_space(ui::SPACE_M);
+            ui.label(ui::heading(format!("This is the start of {title}")));
+            ui.add_space(ui::SPACE_M);
         } else if chat.loading {
             ui.vertical_centered(|ui| ui.spinner());
         }
@@ -1940,6 +1976,21 @@ fn chat_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
     }
 }
 
+/// The title bar of a pane, like "# general", with a line under it.
+pub fn pane_title(ui: &mut Ui, id: &'static str, title: &str) {
+    Panel::top(id)
+        .frame(Frame::new().inner_margin(Margin {
+            left: 4,
+            right: 4,
+            top: 2,
+            bottom: 10,
+        }))
+        .show_separator_line(true)
+        .show(ui, |ui| {
+            ui.label(ui::title(title));
+        });
+}
+
 enum Pick {
     Reply(Id),
     Edit(Id, String),
@@ -1955,8 +2006,8 @@ pub fn toast_line(ui: &mut Ui, toast: &mut Option<(String, f64)>) {
     if let Some((text, _)) = toast.as_ref() {
         let mut close = false;
         ui.horizontal(|ui| {
-            ui.colored_label(ui.visuals().error_fg_color, text.as_str());
-            close = ui.small_button("×").clicked();
+            ui.colored_label(ui::colors(ui).danger_text, text.as_str());
+            close = ui::small_close(ui, "Dismiss").clicked();
         });
         if close {
             *toast = None;
@@ -1984,13 +2035,13 @@ fn composer(
             .map_or_else(|| "a message".into(), |msg| member_name(dir, &msg.person));
         ui.horizontal(|ui| {
             ui.weak(format!("Replying to {author}"));
-            cancel = ui.small_button("×").on_hover_text("Cancel reply").clicked();
+            cancel = ui::small_close(ui, "Cancel reply").clicked();
         });
     }
     if chat.editing.is_some() {
         ui.horizontal(|ui| {
             ui.weak("Editing message");
-            cancel = ui.small_button("×").on_hover_text("Cancel edit").clicked();
+            cancel = ui::small_close(ui, "Cancel edit").clicked();
         });
     }
     if let Some((what, done)) = &chat.uploading {
@@ -2004,30 +2055,23 @@ fn composer(
         });
     }
     files::staged(ui, chat);
-    let input = palette(ui).input;
+    let input = ui::colors(ui).field;
     let mut attach = None;
     let field = ui
         .horizontal_top(|ui| {
             let plus = ui
-                .add_enabled(
-                    online && chat.editing.is_none(),
-                    Button::new(RichText::new("➕").size(16.0)).min_size(Vec2::splat(34.0)),
-                )
-                .on_hover_text("Attach files");
-            plus.widget_info(|| WidgetInfo::labeled(Role::Button, plus.enabled(), "Attach files"));
-            Popup::menu(&plus).show(|ui| {
-                if ui
-                    .button("📎  Upload a file")
-                    .on_hover_text("Stored on the server, up to 32 MB.")
-                    .clicked()
-                {
+                .add_enabled_ui(online && chat.editing.is_none(), |ui| {
+                    ui::icon_button(ui, "➕", "Attach files", Look::Plain, Vec2::splat(36.0))
+                })
+                .inner;
+            ui::menu_wide(&plus, |m| {
+                let upload =
+                    Item::new("📎", "Upload a file").hint("Stored on the server, up to 32 MB");
+                if m.add(upload).clicked() {
                     attach = Some(false);
                 }
-                if ui
-                    .button("📡  Send file live")
-                    .on_hover_text(call::DIRECT_CHAT)
-                    .clicked()
-                {
+                let live = Item::new("📡", "Send file live").hint("Directly to people online now");
+                if m.add(live).on_hover_text(call::DIRECT_CHAT).clicked() {
                     attach = Some(true);
                 }
             });
@@ -2039,7 +2083,7 @@ fn composer(
                         online,
                         TextEdit::multiline(&mut chat.draft)
                             .background_color(input)
-                            .margin(Margin::symmetric(10, 8))
+                            .margin(Margin::symmetric(12, 9))
                             .id(composer_id(channel))
                             .hint_text(if online {
                                 format!("Message {title}")
@@ -2054,6 +2098,7 @@ fn composer(
                 .inner
         })
         .inner;
+    ui::field_focus(ui, &field);
     let (enter, escape, up) = ui.input(|input| {
         (
             input.key_pressed(Key::Enter) && !input.modifiers.shift,
@@ -2091,7 +2136,7 @@ fn composer(
     let count = chat.draft.chars().count();
     if count >= COUNT_FROM {
         let color = if count > MAX_TEXT_CHARS {
-            ui.visuals().error_fg_color
+            ui::colors(ui).danger_text
         } else {
             ui.visuals().weak_text_color()
         };
@@ -2166,332 +2211,369 @@ fn message(
     if start {
         ui.add_space(10.0);
     }
-    let row = ui.horizontal_top(|ui| {
-        if start {
-            face(ui, dir, &msg.person, &name, 38.0, false);
-        } else {
-            ui.add_space(38.0);
-        }
-        ui.add_space(4.0);
-        ui.vertical(|ui| {
-            ui.set_width(ui.available_width());
-            if let Some(reply) = msg.reply_to {
-                let quoted = chat.messages.iter().find(|m| m.id == reply);
-                let line = match quoted.map(|m| (&m.body, m.person)) {
-                    Some((Body::Text(text), person)) => {
-                        let snippet: String = text.chars().take(80).collect();
-                        let snippet = if snippet.is_empty() {
-                            "a file".into()
-                        } else {
-                            snippet
-                        };
-                        format!("↪ {}: {}", names(&person), snippet.replace('\n', " "))
-                    }
-                    _ => "↪ Earlier message".into(),
-                };
-                ui.label(RichText::new(line).small().weak());
-            }
+    // The row senses clicks behind its contents, for the right-click menu. Not a Tab
+    // stop: the hover toolbar has the same actions as buttons.
+    let row = ui.scope_builder(UiBuilder::new().sense(Sense::CLICK), |ui| {
+        ui.horizontal_top(|ui| {
             if start {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(&name).strong());
-                    ui.label(RichText::new(time(msg.at)).small().weak());
-                });
+                face(ui, dir, &msg.person, &name, MESSAGE_AVATAR, false);
+            } else {
+                ui.add_space(MESSAGE_AVATAR);
             }
-            match &msg.body {
-                Body::Text(text) => {
-                    if !text.is_empty() {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.add(Label::new(text.as_str()).wrap());
-                            if chat.edited.contains_key(&msg.id) {
-                                ui.label(RichText::new("(edited)").small().weak());
-                            }
-                        });
+            ui.add_space(4.0);
+            ui.vertical(|ui| {
+                ui.set_width(ui.available_width());
+                if let Some(reply) = msg.reply_to {
+                    let quoted = chat.messages.iter().find(|m| m.id == reply);
+                    let line = match quoted.map(|m| (&m.body, m.person)) {
+                        Some((Body::Text(text), person)) => {
+                            let snippet: String = text.chars().take(80).collect();
+                            let snippet = if snippet.is_empty() {
+                                "a file".into()
+                            } else {
+                                snippet
+                            };
+                            format!("↪ {}: {}", names(&person), snippet.replace('\n', " "))
+                        }
+                        _ => "↪ Earlier message".into(),
+                    };
+                    ui.label(ui::caption(line));
+                }
+                if start {
+                    ui.horizontal(|ui| {
+                        ui.label(ui::bold(&name));
+                        ui.label(ui::caption(time(msg.at)));
+                    });
+                }
+                match &msg.body {
+                    Body::Text(text) => {
+                        if !text.is_empty() {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.add(Label::new(text.as_str()).wrap());
+                                if chat.edited.contains_key(&msg.id) {
+                                    ui.label(RichText::new("(edited)").small().weak());
+                                }
+                            });
+                        }
+                        attachments(ui);
                     }
-                    attachments(ui);
+                    _ => {
+                        ui.label(
+                            RichText::new("This message couldn't be opened.")
+                                .italics()
+                                .weak(),
+                        );
+                    }
                 }
-                _ => {
-                    ui.label(
-                        RichText::new("This message couldn't be opened.")
-                            .italics()
-                            .weak(),
-                    );
-                }
-            }
+            });
         });
     });
     let rect = row.response.rect;
-    if !ui.rect_contains_pointer(rect) {
-        return None;
-    }
-    ui.painter().set(
-        background,
-        Shape::rect_filled(rect.expand(2.0), 4.0, palette(ui).hover),
-    );
     let mine = msg.person == me;
     let text = match &msg.body {
         Body::Text(text) => Some(text.clone()),
         _ => None,
     };
-    let bar = Rect::from_min_size(
-        rect.right_top() + Vec2::new(-170.0, -4.0),
-        Vec2::new(170.0, 24.0),
-    );
+    let can_reply = text.is_some();
+    let can_edit = mine && text.is_some();
+    let can_delete = mine || can_moderate;
     let mut pick = None;
+    ui::context_menu(&row.response, |m| {
+        if can_reply && m.item("↩", "Reply").clicked() {
+            pick = Some(Pick::Reply(msg.id));
+        }
+        if can_edit
+            && let Some(text) = &text
+            && m.item("✏", "Edit").clicked()
+        {
+            pick = Some(Pick::Edit(msg.id, text.clone()));
+        }
+        if let Some(text) = &text
+            && m.item("📋", "Copy text").clicked()
+        {
+            m.ui().ctx().copy_text(text.clone());
+        }
+        if can_delete {
+            m.separator();
+            if m.danger("🗑", "Delete").clicked() {
+                pick = Some(Pick::Delete(msg.id));
+            }
+        }
+    });
+    if !ui.rect_contains_pointer(rect) {
+        return pick;
+    }
+    ui.painter().set(
+        background,
+        Shape::rect_filled(rect.expand(2.0), ui::RADIUS_S, ui::colors(ui).hover_soft),
+    );
+    // A small floating toolbar on the top right of the row.
+    let buttons = [can_reply, can_edit, can_delete]
+        .into_iter()
+        .filter(|on| *on)
+        .count() as f32;
+    if buttons == 0.0 {
+        return pick;
+    }
+    let size = Vec2::new(
+        buttons * TOOLBAR_BUTTON.x + (buttons - 1.0) * 2.0 + 8.0,
+        TOOLBAR_BUTTON.y + 8.0,
+    );
+    let bar = Rect::from_min_size(rect.right_top() + Vec2::new(-size.x - 8.0, -14.0), size);
+    let c = ui::colors(ui);
+    ui.painter()
+        .add(ui.visuals().popup_shadow.as_shape(bar, ui::RADIUS));
+    ui.painter().rect(
+        bar,
+        ui::RADIUS,
+        c.raised,
+        egui::Stroke::new(1.0, c.border),
+        egui::StrokeKind::Inside,
+    );
     // A child that takes no space, so the toolbar floats over the row.
     let mut ui = ui.new_child(
         UiBuilder::new()
-            .max_rect(bar)
-            .layout(Layout::right_to_left(Align::Min)),
+            .max_rect(bar.shrink(4.0))
+            .layout(Layout::left_to_right(Align::Center)),
     );
+    ui.spacing_mut().item_spacing.x = 2.0;
+    if can_reply && ui::icon_button(&mut ui, "↩", "Reply", Look::Ghost, TOOLBAR_BUTTON).clicked()
     {
-        let ui = &mut ui;
-        {
-            if (mine || can_moderate) && ui.small_button("Delete").clicked() {
-                pick = Some(Pick::Delete(msg.id));
-            }
-            if mine
-                && let Some(text) = &text
-                && ui.small_button("Edit").clicked()
-            {
-                pick = Some(Pick::Edit(msg.id, text.clone()));
-            }
-            if text.is_some() && ui.small_button("Reply").clicked() {
-                pick = Some(Pick::Reply(msg.id));
-            }
-        }
+        pick = Some(Pick::Reply(msg.id));
+    }
+    if can_edit
+        && let Some(text) = &text
+        && ui::icon_button(&mut ui, "✏", "Edit", Look::Ghost, TOOLBAR_BUTTON).clicked()
+    {
+        pick = Some(Pick::Edit(msg.id, text.clone()));
+    }
+    if can_delete && ui::icon_button(&mut ui, "🗑", "Delete", Look::Ghost, TOOLBAR_BUTTON).clicked()
+    {
+        pick = Some(Pick::Delete(msg.id));
     }
     pick
 }
 
+fn dialog_title(home: &Home, dialog: &Dialog) -> String {
+    match dialog {
+        Dialog::ServerName(..) => "Server name".into(),
+        Dialog::MyName(..) => "Your name here".into(),
+        Dialog::Category(..) => "Create category".into(),
+        Dialog::Channel { .. } => "Create channel".into(),
+        Dialog::Invite(invite) => {
+            format!("Invite people to {}", home.servers[invite.server].name())
+        }
+        Dialog::Member(index, person) => home.servers[*index].member_name(person),
+        Dialog::Delete(..) => "Delete message?".into(),
+        Dialog::Leave(index, _) => format!("Leave {}?", home.servers[*index].name()),
+    }
+}
+
 fn dialogs(ctx: &egui::Context, home: &mut Home) {
+    let Some(dialog) = &home.dialog else {
+        return;
+    };
+    let title = dialog_title(home, dialog);
     let Some(dialog) = &mut home.dialog else {
         return;
     };
     let mut close = false;
     let mut command = None;
-    let modal = Modal::new(UiId::unique("dialog")).show(ctx, |ui| {
-        ui.set_width(400.0);
-        match dialog {
-            Dialog::ServerName(index, name) => {
-                ui.heading("Server name");
-                ui.label("Everyone in the server sees this name.");
-                if text_dialog(ui, name, "Save", &mut close) {
-                    command = Some((*index, Command::SetServerName(name.trim().to_owned())));
+    let ((), dismissed) = ui::dialog(ctx, "dialog", &title, |ui| match dialog {
+        Dialog::ServerName(index, name) => {
+            ui.label("Everyone in the server sees this name.");
+            if text_dialog(ui, name, "Save", &mut close) {
+                command = Some((*index, Command::SetServerName(name.trim().to_owned())));
+            }
+        }
+        Dialog::MyName(index, name) => {
+            ui.label("People in this server see you by this name.");
+            if text_dialog(ui, name, "Save", &mut close) {
+                command = Some((*index, Command::SetDisplayName(name.trim().to_owned())));
+            }
+        }
+        Dialog::Category(index, name) => {
+            if text_dialog(ui, name, "Create", &mut close) {
+                command = Some((*index, Command::CreateCategory(name.trim().to_owned())));
+            }
+        }
+        Dialog::Channel {
+            server,
+            name,
+            voice,
+            category,
+            new_category,
+        } => {
+            let was_voice = *voice;
+            ui.horizontal(|ui| {
+                ui.selectable_value(voice, false, "# Text");
+                ui.selectable_value(voice, true, "🔊 Voice");
+            });
+            let data = &home.servers[*server];
+            // Switching kind moves a default pick along, but keeps one the person made.
+            if *voice != was_voice && *category == default_category(data, was_voice) {
+                *category = default_category(data, *voice);
+                if *new_category == category_name(was_voice) {
+                    *new_category = category_name(*voice).into();
                 }
             }
-            Dialog::MyName(index, name) => {
-                ui.heading("Your name here");
-                ui.label("People in this server see you by this name.");
-                if text_dialog(ui, name, "Save", &mut close) {
-                    command = Some((*index, Command::SetDisplayName(name.trim().to_owned())));
-                }
-            }
-            Dialog::Category(index, name) => {
-                ui.heading("Create category");
-                if text_dialog(ui, name, "Create", &mut close) {
-                    command = Some((*index, Command::CreateCategory(name.trim().to_owned())));
-                }
-            }
-            Dialog::Channel {
-                server,
-                name,
-                voice,
-                category,
-                new_category,
-            } => {
-                ui.heading("Create channel");
-                let was_voice = *voice;
-                ui.horizontal(|ui| {
-                    ui.selectable_value(voice, false, "# Text");
-                    ui.selectable_value(voice, true, "🔊 Voice");
-                });
-                let data = &home.servers[*server];
-                // Switching kind moves a default pick along, but keeps one the person made.
-                if *voice != was_voice && *category == default_category(data, was_voice) {
-                    *category = default_category(data, *voice);
-                    if *new_category == category_name(was_voice) {
-                        *new_category = category_name(*voice).into();
-                    }
-                }
-                let categories: Vec<_> = data
-                    .dir
-                    .categories
+            let categories: Vec<_> = data
+                .dir
+                .categories
+                .iter()
+                .filter_map(|c| Some((c.id?, c.name.clone())))
+                .collect();
+            if !categories.is_empty() {
+                let current = categories
                     .iter()
-                    .filter_map(|c| Some((c.id?, c.name.clone())))
-                    .collect();
-                if !categories.is_empty() {
-                    let current = categories
-                        .iter()
-                        .find(|(id, _)| Some(*id) == *category)
-                        .map_or("New category", |(_, name)| name.as_str());
-                    egui::ComboBox::from_label("Category")
-                        .selected_text(current)
-                        .show_ui(ui, |ui| {
-                            for (id, name) in &categories {
-                                ui.selectable_value(category, Some(*id), name.as_str());
-                            }
-                            ui.selectable_value(category, None, "New category");
-                        });
-                }
-                if category.is_none() {
-                    let label = ui.label("New category name");
-                    ui.text_edit_singleline(new_category).labelled_by(label.id);
-                }
-                ui.label("Name");
-                if text_dialog(ui, name, "Create", &mut close)
-                    && (category.is_some() || !new_category.trim().is_empty())
-                {
-                    command = Some((
-                        *server,
-                        Command::CreateChannel {
-                            category: *category,
-                            new_category: new_category.trim().to_owned(),
-                            voice: *voice,
-                            name: name.trim().to_owned(),
-                        },
-                    ));
-                }
+                    .find(|(id, _)| Some(*id) == *category)
+                    .map_or("New category", |(_, name)| name.as_str());
+                egui::ComboBox::from_label("Category")
+                    .selected_text(current)
+                    .show_ui(ui, |ui| {
+                        for (id, name) in &categories {
+                            ui.selectable_value(category, Some(*id), name.as_str());
+                        }
+                        ui.selectable_value(category, None, "New category");
+                    });
             }
-            Dialog::Invite(invite) => {
-                let server = &home.servers[invite.server];
-                ui.heading(format!("Invite people to {}", server.name()));
-                match &invite.link {
-                    None => {
-                        let uses = [(1, "1 person"), (10, "10 people"), (1000, "Unlimited")];
-                        let times = [
-                            (60 * 60, "1 hour"),
-                            (DAY, "1 day"),
-                            (DAY * 7, "7 days"),
-                            (DAY * 30, "30 days"),
-                        ];
-                        ui.label("Who can use it");
-                        ui.horizontal(|ui| {
-                            for (value, label) in uses {
-                                ui.selectable_value(&mut invite.uses, value, label);
-                            }
-                        });
-                        ui.label("Stops working after");
-                        ui.horizontal(|ui| {
-                            for (value, label) in times {
-                                ui.selectable_value(&mut invite.seconds, value, label);
-                            }
-                        });
-                        ui.add_space(6.0);
-                        ui.horizontal(|ui| {
-                            if invite.making {
-                                ui.spinner();
-                            } else if primary_small(ui, "Create link").clicked() {
-                                invite.making = true;
-                                server.send(Command::Invite(invite.uses, invite.seconds));
-                            }
-                            close |= ui.button("Cancel").clicked();
-                        });
-                    }
-                    Some((id, link)) => {
-                        ui.label("Send this link to a friend.");
-                        let mut shown = link.as_str();
-                        ui.add(TextEdit::singleline(&mut shown).desired_width(f32::INFINITY));
-                        ui.horizontal(|ui| {
-                            if primary_small(ui, "Copy link").clicked() {
-                                ui.ctx().copy_text(link.clone());
-                            }
-                            if ui.button("Stop this link").clicked() {
-                                command = Some((
-                                    invite.server,
-                                    Command::Admin(Admin::RevokeInvite(id.clone())),
-                                ));
-                            }
-                            close |= ui.button("Done").clicked();
-                        });
-                    }
+            if category.is_none() {
+                let label = ui.label("New category name");
+                ui.add(ui::field(new_category).desired_width(f32::INFINITY))
+                    .labelled_by(label.id);
+            }
+            ui.label("Name");
+            if text_dialog(ui, name, "Create", &mut close)
+                && (category.is_some() || !new_category.trim().is_empty())
+            {
+                command = Some((
+                    *server,
+                    Command::CreateChannel {
+                        category: *category,
+                        new_category: new_category.trim().to_owned(),
+                        voice: *voice,
+                        name: name.trim().to_owned(),
+                    },
+                ));
+            }
+        }
+        Dialog::Invite(invite) => {
+            let server = &home.servers[invite.server];
+            match &invite.link {
+                None => {
+                    let uses = [(1, "1 person"), (10, "10 people"), (1000, "Unlimited")];
+                    let times = [
+                        (60 * 60, "1 hour"),
+                        (DAY, "1 day"),
+                        (DAY * 7, "7 days"),
+                        (DAY * 30, "30 days"),
+                    ];
+                    ui.label(ui::bold("Who can use it"));
+                    ui.horizontal(|ui| {
+                        for (value, label) in uses {
+                            ui.selectable_value(&mut invite.uses, value, label);
+                        }
+                    });
+                    ui.label(ui::bold("Stops working after"));
+                    ui.horizontal(|ui| {
+                        for (value, label) in times {
+                            ui.selectable_value(&mut invite.seconds, value, label);
+                        }
+                    });
+                    ui::footer(ui, |ui| {
+                        if invite.making {
+                            ui.spinner();
+                        } else if ui::primary(ui, "Create link").clicked() {
+                            invite.making = true;
+                            server.send(Command::Invite(invite.uses, invite.seconds));
+                        }
+                        close |= ui::secondary(ui, "Cancel").clicked();
+                    });
+                }
+                Some((id, link)) => {
+                    ui.label("Send this link to a friend.");
+                    let mut shown = link.as_str();
+                    ui.add(ui::field(&mut shown).desired_width(f32::INFINITY));
+                    ui::footer(ui, |ui| {
+                        if ui::primary(ui, "Copy link").clicked() {
+                            ui.ctx().copy_text(link.clone());
+                        }
+                        if ui::secondary(ui, "Stop this link").clicked() {
+                            command = Some((
+                                invite.server,
+                                Command::Admin(Admin::RevokeInvite(id.clone())),
+                            ));
+                        }
+                        close |= ui::secondary(ui, "Done").clicked();
+                    });
                 }
             }
-            Dialog::Member(index, person) => {
-                let server = &home.servers[*index];
-                ui.heading(server.member_name(person));
-                ui.label("Compare these with your friend to be sure it's really them.");
-                ui.add_space(6.0);
-                ui.label(format!("ID  {}", fingerprint(person)));
-                if let Some(member) = server.dir.members.iter().find(|m| m.person == *person) {
-                    section(ui, "Devices");
-                    for device in &member.devices {
-                        ui.label(format!("{}  {}", device.name, device.fingerprint));
-                    }
+        }
+        Dialog::Member(index, person) => {
+            let server = &home.servers[*index];
+            ui.label("Compare these with your friend to be sure it's really them.");
+            ui.add_space(6.0);
+            ui.label(format!("ID  {}", fingerprint(person)));
+            if let Some(member) = server.dir.members.iter().find(|m| m.person == *person) {
+                ui::section(ui, "Devices");
+                for device in &member.devices {
+                    ui.label(format!("{}  {}", device.name, device.fingerprint));
                 }
-                ui.add_space(6.0);
-                close |= ui.button("Close").clicked();
             }
-            Dialog::Delete(index, channel, id) => {
-                ui.heading("Delete message?");
-                ui.label("It's removed for everyone. This can't be undone.");
-                ui.horizontal(|ui| {
-                    if ui
-                        .add(Button::new("Delete").fill(ui.visuals().error_fg_color))
-                        .clicked()
-                    {
-                        let msg = home.servers[*index]
-                            .chats
-                            .get(channel)
-                            .and_then(|chat| chat.messages.iter().find(|msg| msg.id == *id));
-                        let files = msg
-                            .into_iter()
-                            .flat_map(|msg| &msg.files)
-                            .flat_map(|file| std::iter::once(&file.file).chain(&file.thumbnail))
-                            .map(|blob| blob.id)
-                            .collect();
-                        let sender = msg.map_or([0; 32], |msg| msg.person);
-                        command = Some((*index, Command::Delete(*channel, *id, sender, files)));
-                    }
-                    close |= ui.button("Cancel").clicked();
-                });
-            }
-            Dialog::Leave(index, error) => {
-                ui.heading(format!("Leave {}?", home.servers[*index].name()));
-                ui.label(
-                    "It's removed from all your devices. To come back, you need a new invite.",
-                );
-                error_text(ui, error.as_deref());
-                ui.horizontal(|ui| {
-                    if ui
-                        .add(Button::new("Leave").fill(ui.visuals().error_fg_color))
-                        .clicked()
-                    {
-                        // Stays open until the server confirms; then the server is removed.
-                        *error = None;
-                        home.servers[*index].send(Command::Leave);
-                    }
-                    close |= ui.button("Cancel").clicked();
-                });
-            }
+            ui::footer(ui, |ui| close |= ui::secondary(ui, "Close").clicked());
+        }
+        Dialog::Delete(index, channel, id) => {
+            ui.label("It's removed for everyone. This can't be undone.");
+            ui::footer(ui, |ui| {
+                if ui::danger(ui, "Delete").clicked() {
+                    let msg = home.servers[*index]
+                        .chats
+                        .get(channel)
+                        .and_then(|chat| chat.messages.iter().find(|msg| msg.id == *id));
+                    let files = msg
+                        .into_iter()
+                        .flat_map(|msg| &msg.files)
+                        .flat_map(|file| std::iter::once(&file.file).chain(&file.thumbnail))
+                        .map(|blob| blob.id)
+                        .collect();
+                    let sender = msg.map_or([0; 32], |msg| msg.person);
+                    command = Some((*index, Command::Delete(*channel, *id, sender, files)));
+                }
+                close |= ui::secondary(ui, "Cancel").clicked();
+            });
+        }
+        Dialog::Leave(index, error) => {
+            ui.label("It's removed from all your devices. To come back, you need a new invite.");
+            error_text(ui, error.as_deref());
+            ui::footer(ui, |ui| {
+                if ui::danger(ui, "Leave").clicked() {
+                    // Stays open until the server confirms; then the server is removed.
+                    *error = None;
+                    home.servers[*index].send(Command::Leave);
+                }
+                close |= ui::secondary(ui, "Cancel").clicked();
+            });
         }
     });
     if let Some((index, command)) = command {
         home.servers[index].send(command);
         close = true;
     }
-    if close || modal.should_close() {
+    if close || dismissed {
         home.dialog = None;
     }
 }
 
-fn primary_small(ui: &mut Ui, text: &str) -> Response {
-    ui.add(Button::new(text).fill(ui.visuals().selection.bg_fill))
-}
-
 /// A name field with a confirm button; returns true when confirmed with a non-empty name.
 fn text_dialog(ui: &mut Ui, text: &mut String, confirm: &str, close: &mut bool) -> bool {
-    let field = ui.add(
-        TextEdit::singleline(text)
-            .char_limit(100)
-            .desired_width(f32::INFINITY),
-    );
+    let field = ui.add(ui::field(text).char_limit(100).desired_width(f32::INFINITY));
     if ui.memory(|memory| memory.focused().is_none()) {
         field.request_focus();
     }
     let mut done = submitted(ui, &field);
-    ui.horizontal(|ui| {
-        done |= primary_small(ui, confirm).clicked();
-        *close |= ui.button("Cancel").clicked();
+    ui::footer(ui, |ui| {
+        done |= ui::primary(ui, confirm).clicked();
+        *close |= ui::secondary(ui, "Cancel").clicked();
     });
     done && !text.trim().is_empty()
 }

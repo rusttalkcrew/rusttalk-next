@@ -18,7 +18,7 @@ use rusttalk_core::{
 use crate::{
     audio::{Settings, lock},
     call::{Listing, fill, upload},
-    home::section,
+    ui::section,
 };
 
 pub struct Camera {

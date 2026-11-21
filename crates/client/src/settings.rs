@@ -2,28 +2,30 @@
 //! sidebar on the left and the open page on the right, like the old client's settings.
 
 use eframe::egui::{
-    self, Align, Align2, Button, CollapsingHeader, Color32, CornerRadius, FontId, Frame,
-    Id as UiId, Layout, Modal, Rect, Response, RichText, Role, ScrollArea, Sense, Stroke,
-    StrokeKind, Ui, UiBuilder, Vec2, WidgetInfo,
+    self, Align, CollapsingHeader, CornerRadius, Frame, Id as UiId, Layout, Rect, RichText,
+    ScrollArea, Sense, Ui, UiBuilder, Vec2, accesskit::Role,
 };
 use rusttalk_core::identity::fingerprint;
 
 use crate::{
-    app::{Action, error_text},
+    app::Action,
     call, camera,
     files::Ask,
-    home::{Home, Tab, face, palette, privacy_tab},
+    home::{Home, Tab, face, privacy_tab},
     server::Directory,
+    ui::{
+        self, CONTROL_HEIGHT, DARK_THEMES, LIGHT_THEMES, Mode, RADIUS_WINDOW, SPACE_S,
+        TEXT_CAPTION, TEXT_HEADING, TEXT_TITLE, error_text, section,
+    },
 };
 
-// Look of the settings windows, kept together for the shared UI kit (#52).
+// The layout of the settings windows; #56 redesigns it on top of the kit.
 /// The biggest the window grows; smaller windows leave `WINDOW_MARGIN` around it.
 const MAX_SIZE: Vec2 = Vec2::new(1040.0, 720.0);
 const MIN_SIZE: Vec2 = Vec2::new(300.0, 240.0);
 const WINDOW_MARGIN: f32 = 24.0;
 /// Below this width the window uses the narrow spacing.
 const NARROW: f32 = 600.0;
-const WINDOW_RADIUS: u8 = 10;
 const SIDEBAR_SHARE: f32 = 0.28;
 const SIDEBAR_MIN: f32 = 150.0;
 const SIDEBAR_MAX: f32 = 232.0;
@@ -39,28 +41,9 @@ const CONTENT_GAP_NARROW: f32 = 16.0;
 const CONTENT_TOP: f32 = 28.0;
 /// Widest the page content grows, for easy reading.
 const CONTENT_MAX_WIDTH: f32 = 700.0;
-const ROW_HEIGHT: f32 = 32.0;
-const ROW_RADIUS: u8 = 6;
-/// Indent of the row icon, the row label and the group captions.
-const ROW_ICON_X: f32 = 10.0;
-const ROW_LABEL_X: f32 = 36.0;
-const CARD_RADIUS: u8 = 8;
-const CARD_HEIGHT: f32 = 64.0;
-const CARD_MAX_WIDTH: f32 = 240.0;
-const CARD_MIN_WIDTH: f32 = 150.0;
-const HEADING_SIZE: f32 = 16.0;
-const TITLE_SIZE: f32 = 22.0;
-const CAPTION_SIZE: f32 = 11.5;
-const ROW_ICON_SIZE: f32 = 16.0;
-const ROW_TEXT_SIZE: f32 = 14.5;
-const CARD_ICON_SIZE: f32 = 22.0;
-const CARD_TITLE_SIZE: f32 = 15.0;
-const CARD_HELP_SIZE: f32 = 12.5;
-/// Sidebar row fills, Discord-like, for dark and light mode.
-const SELECTED_DARK: Color32 = Color32::from_rgb(0x40, 0x42, 0x49);
-const SELECTED_LIGHT: Color32 = Color32::from_rgb(0xd7, 0xd9, 0xdc);
-const HOVER_DARK: Color32 = Color32::from_rgb(0x35, 0x37, 0x3c);
-const HOVER_LIGHT: Color32 = Color32::from_rgb(0xe3, 0xe5, 0xe8);
+/// Indent of the group captions, in line with the row icons.
+const CAPTION_X: f32 = 10.0;
+const PICTURE_SIZE: f32 = 64.0;
 const REPOSITORY: &str = "https://github.com/rusttalkcrew/rusttalk-next";
 
 pub struct Page<T> {
@@ -91,15 +74,15 @@ pub fn window<T: Copy + PartialEq, R>(
         .max(MIN_SIZE);
     let narrow = size.x < NARROW;
     let mut close = false;
-    let modal = Modal::new(UiId::unique(id))
+    let modal = egui::Modal::new(UiId::unique(id))
         .frame(
             Frame::new()
-                .corner_radius(WINDOW_RADIUS)
-                .shadow(ctx.global_style().visuals.popup_shadow),
+                .corner_radius(RADIUS_WINDOW)
+                .shadow(ctx.global_style().visuals.window_shadow),
         )
         .show(ctx, |ui| {
             let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
-            let colors = palette(ui);
+            let colors = ui::colors(ui);
             let side_width = (size.x * SIDEBAR_SHARE).clamp(SIDEBAR_MIN, SIDEBAR_MAX);
             let close_width = if narrow {
                 CLOSE_COLUMN_NARROW
@@ -110,12 +93,12 @@ pub fn window<T: Copy + PartialEq, R>(
                 rect.min,
                 egui::pos2(rect.left() + side_width, rect.bottom()),
             );
-            ui.painter().rect_filled(rect, WINDOW_RADIUS, colors.main);
+            ui.painter().rect_filled(rect, RADIUS_WINDOW, colors.main);
             ui.painter().rect_filled(
                 side,
                 CornerRadius {
-                    nw: WINDOW_RADIUS,
-                    sw: WINDOW_RADIUS,
+                    nw: RADIUS_WINDOW,
+                    sw: RADIUS_WINDOW,
                     ne: 0,
                     se: 0,
                 },
@@ -172,15 +155,10 @@ fn page_body<R>(
     ui: &mut Ui,
     id: impl std::hash::Hash + std::fmt::Debug,
     title: &str,
-    fields: Color32,
+    fields: egui::Color32,
     content: impl FnOnce(&mut Ui) -> R,
 ) -> R {
-    ui.label(
-        RichText::new(title)
-            .size(TITLE_SIZE)
-            .strong()
-            .color(ui.visuals().strong_text_color()),
-    );
+    ui.label(ui::heading(title).size(TEXT_HEADING));
     ui.add_space(10.0);
     ScrollArea::vertical()
         .id_salt(id)
@@ -204,11 +182,8 @@ fn sidebar<T: Copy + PartialEq>(
     open: &mut T,
 ) {
     ui.horizontal(|ui| {
-        ui.add_space(ROW_ICON_X);
-        let text = RichText::new(heading)
-            .size(HEADING_SIZE)
-            .strong()
-            .color(ui.visuals().strong_text_color());
+        ui.add_space(CAPTION_X);
+        let text = ui::bold(heading).size(TEXT_TITLE - 1.0);
         ui.add(egui::Label::new(text).truncate());
     });
     ui.add_space(8.0);
@@ -222,7 +197,10 @@ fn sidebar<T: Copy + PartialEq>(
                 group_caption(ui, group.title);
                 ui.add_space(2.0);
                 for page in &group.pages {
-                    if nav_row(ui, page.icon, page.label, *open == page.id).clicked() {
+                    let selected = *open == page.id;
+                    let row =
+                        ui::nav_row(ui, page.icon, page.label, selected, Role::Tab, page.label);
+                    if row.clicked() {
                         *open = page.id;
                     }
                 }
@@ -233,151 +211,20 @@ fn sidebar<T: Copy + PartialEq>(
 /// A group header in the sidebar, like "USER SETTINGS".
 fn group_caption(ui: &mut Ui, text: &str) {
     ui.horizontal(|ui| {
-        ui.add_space(ROW_ICON_X);
-        let text = RichText::new(text.to_uppercase())
-            .size(CAPTION_SIZE)
-            .strong();
-        ui.label(text.color(ui.visuals().weak_text_color()));
+        ui.add_space(CAPTION_X);
+        ui::caption_label(ui, text);
     });
-}
-
-/// One page in the sidebar: icon and label, highlighted when open.
-fn nav_row(ui: &mut Ui, icon: &str, label: &str, selected: bool) -> Response {
-    let (rect, response) = ui.allocate_exact_size(
-        Vec2::new(ui.available_width().max(0.0), ROW_HEIGHT),
-        Sense::click(),
-    );
-    let dark = ui.visuals().dark_mode;
-    let hovered = response.hovered();
-    let fill = match (selected, hovered, dark) {
-        (true, _, true) => SELECTED_DARK,
-        (true, _, false) => SELECTED_LIGHT,
-        (false, true, true) => HOVER_DARK,
-        (false, true, false) => HOVER_LIGHT,
-        (false, false, _) => Color32::TRANSPARENT,
-    };
-    let text = if selected || hovered {
-        ui.visuals().strong_text_color()
-    } else {
-        ui.visuals().weak_text_color()
-    };
-    let painter = ui.painter();
-    painter.rect_filled(rect, ROW_RADIUS, fill);
-    if response.has_focus() {
-        painter.rect_stroke(
-            rect,
-            ROW_RADIUS,
-            ui.visuals().selection.stroke,
-            StrokeKind::Inside,
-        );
-    }
-    let left = rect.left_center();
-    let font = |size| FontId::proportional(size);
-    painter.text(
-        left + Vec2::new(ROW_ICON_X, 0.0),
-        Align2::LEFT_CENTER,
-        icon,
-        font(ROW_ICON_SIZE),
-        text,
-    );
-    painter.text(
-        left + Vec2::new(ROW_LABEL_X, 0.0),
-        Align2::LEFT_CENTER,
-        label,
-        font(ROW_TEXT_SIZE),
-        text,
-    );
-    response.widget_info(|| WidgetInfo::selected(Role::Tab, true, selected, label));
-    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// The round × with "ESC" under it. True when clicked.
 fn close_button(ui: &mut Ui) -> bool {
-    let weak = ui.visuals().weak_text_color();
-    let button = ui
-        .add(
-            Button::new(RichText::new("×").size(TITLE_SIZE).color(weak))
-                .fill(Color32::TRANSPARENT)
-                .stroke(Stroke::new(1.5, weak))
-                .corner_radius(CLOSE_SIZE / 2.0)
-                .min_size(Vec2::splat(CLOSE_SIZE)),
-        )
-        .on_hover_text("Close (Esc)")
-        .on_hover_cursor(egui::CursorIcon::PointingHand);
-    button.widget_info(|| WidgetInfo::labeled(Role::Button, true, "Close"));
-    ui.label(RichText::new("ESC").size(CAPTION_SIZE).strong().color(weak));
-    button.clicked()
-}
-
-/// A pick-one card with an icon, a title and a line of help, like the input mode cards.
-pub fn choice_card(ui: &mut Ui, selected: bool, icon: &str, title: &str, help: &str) -> Response {
-    let width = ((ui.available_width() - 8.0) / 2.0).clamp(CARD_MIN_WIDTH, CARD_MAX_WIDTH);
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, CARD_HEIGHT), Sense::click());
-    let visuals = ui.visuals();
-    let accent = visuals.selection.bg_fill;
-    let fill = if response.hovered() || selected {
-        visuals.widgets.hovered.weak_bg_fill
-    } else {
-        visuals.extreme_bg_color
-    };
-    let painter = ui.painter();
-    painter.rect_filled(rect, CARD_RADIUS, fill);
-    if selected {
-        painter.rect_stroke(
-            rect,
-            CARD_RADIUS,
-            Stroke::new(2.0, accent),
-            StrokeKind::Inside,
-        );
-    } else if response.has_focus() {
-        painter.rect_stroke(
-            rect,
-            CARD_RADIUS,
-            visuals.selection.stroke,
-            StrokeKind::Inside,
-        );
-    }
-    let (strong, weak) = (visuals.strong_text_color(), visuals.weak_text_color());
-    let icon_color = if selected { accent } else { weak };
-    let font = |size| FontId::proportional(size);
-    let mid = rect.center().y;
-    painter.text(
-        rect.left_center() + Vec2::new(24.0, 0.0),
-        Align2::CENTER_CENTER,
-        icon,
-        font(CARD_ICON_SIZE),
-        icon_color,
-    );
-    let x = rect.left() + 46.0;
-    painter.text(
-        egui::pos2(x, mid - 1.0),
-        Align2::LEFT_BOTTOM,
-        title,
-        font(CARD_TITLE_SIZE),
-        strong,
-    );
-    painter.text(
-        egui::pos2(x, mid + 2.0),
-        Align2::LEFT_TOP,
-        help,
-        font(CARD_HELP_SIZE),
-        weak,
-    );
-    response.widget_info(|| WidgetInfo::selected(Role::RadioButton, true, selected, title));
-    response.on_hover_cursor(egui::CursorIcon::PointingHand)
-}
-
-/// A rounded box that sets a group of settings apart.
-fn card<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
-    Frame::new()
-        .fill(ui.visuals().extreme_bg_color)
-        .corner_radius(CARD_RADIUS)
-        .inner_margin(16)
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            add(ui)
-        })
-        .inner
+    let clicked = ui::close_button(ui, CLOSE_SIZE).clicked();
+    let text = RichText::new("ESC")
+        .size(TEXT_CAPTION)
+        .family(ui::bold_family())
+        .color(ui::colors(ui).muted);
+    ui.label(text);
+    clicked
 }
 
 /// The Settings window, and the sign-out question it can ask.
@@ -400,6 +247,7 @@ pub fn show(
         Group {
             title: "App settings",
             pages: vec![
+                page(Tab::Appearance, "🎨", "Appearance"),
                 page(Tab::Voice, "🎤", "Voice & audio"),
                 page(Tab::Video, "🎥", "Video"),
                 page(
@@ -422,6 +270,7 @@ pub fn show(
     let ((), close) = window(ctx, "settings", "Settings", &groups, &mut tab, |ui| {
         match before {
             Tab::Profile => account_page(ui, home),
+            Tab::Appearance => appearance_page(ui, home),
             Tab::Voice => call::settings_tab(ui, &mut home.voice),
             Tab::Video => {
                 let audio = home.voice.audio.clone();
@@ -433,21 +282,17 @@ pub fn show(
             Tab::Devices => {
                 ui.label(format!("This device: {}", home.identity.certificate.name()));
                 ui.add_space(12.0);
-                card(ui, |ui| {
-                    ui.label(RichText::new("Sign out of this device").strong());
+                ui::card(ui, |ui| {
+                    ui.label(ui::bold("Sign out of this device"));
                     ui.label("Removes your account from this computer. You need your 24 recovery words to sign in again.");
-                    if ui.button("Sign out of this device").clicked() {
+                    if ui::danger(ui, "Sign out of this device").clicked() {
                         home.confirm_sign_out = true;
                     }
                 });
             }
             Tab::Updates => updates.settings(ui),
             Tab::About => {
-                ui.label(
-                    RichText::new(format!("RustTalk {}", env!("CARGO_PKG_VERSION")))
-                        .size(16.0)
-                        .strong(),
-                );
+                ui.label(ui::title(format!("RustTalk {}", env!("CARGO_PKG_VERSION"))));
                 ui.label("Free and open source, under the MIT license.");
                 ui.hyperlink_to("Source code on GitHub", REPOSITORY);
             }
@@ -466,25 +311,23 @@ pub fn show(
     }
     let mut action = None;
     let mut cancel = false;
-    let modal = Modal::new(UiId::unique("sign-out")).show(ctx, |ui| {
-        ui.set_width(380.0);
-        ui.heading("Sign out of this device?");
+    let ((), dismissed) = ui::dialog(ctx, "sign-out", "Sign out of this device?", |ui| {
         ui.label("This removes your account from this computer. To sign in again, you need your 24 recovery words.");
-        ui.horizontal(|ui| {
-            if ui.button("Sign out").clicked() {
+        ui::footer(ui, |ui| {
+            if ui::danger(ui, "Sign out").clicked() {
                 action = Some(Action::SignOut);
             }
-            cancel = ui.button("Cancel").clicked();
+            cancel = ui::secondary(ui, "Cancel").clicked();
         });
     });
-    if cancel || modal.should_close() {
+    if cancel || dismissed {
         home.confirm_sign_out = false;
     }
     action
 }
 
 fn account_page(ui: &mut Ui, home: &mut Home) {
-    card(ui, |ui| {
+    ui::card(ui, |ui| {
         ui.horizontal(|ui| {
             let me = home.identity.certificate.person_id();
             // The picture is the same everywhere; show it from any server that has it.
@@ -492,12 +335,15 @@ fn account_page(ui: &mut Ui, home: &mut Home) {
             let dir = (home.servers.iter())
                 .find(|s| s.member(me).is_some_and(|m| m.avatar.is_some()))
                 .map_or(&none, |s| &s.dir);
-            face(ui, dir, me, "?", CARD_HEIGHT, false);
+            face(ui, dir, me, "?", PICTURE_SIZE, false);
             ui.add_space(8.0);
             ui.vertical(|ui| {
                 ui.label("Your picture, on all your servers.");
                 let change = ui
-                    .add_enabled(!home.servers.is_empty(), Button::new("Change picture"))
+                    .add_enabled_ui(!home.servers.is_empty(), |ui| {
+                        ui::secondary(ui, "Change picture")
+                    })
+                    .inner
                     .on_hover_text("PNG, JPG or GIF. GIFs play.");
                 if change.clicked() {
                     home.error = None;
@@ -513,4 +359,61 @@ fn account_page(ui: &mut Ui, home: &mut Home) {
         ui.monospace(fingerprint(home.identity.certificate.person_id()));
         ui.weak("Friends can compare this to make sure it's really you.");
     });
+}
+
+/// Settings → Appearance: dark, light or the system's mode, a theme for each, and
+/// the accent colour. Changes show at once.
+fn appearance_page(ui: &mut Ui, home: &mut Home) {
+    let audio = home.voice.audio.clone();
+    let mut settings = audio.settings();
+    let before = settings.appearance();
+    let mut look = before;
+    section(ui, "Mode");
+    let modes = [
+        (Mode::Dark, "🌙", "Dark", "Always dark"),
+        (Mode::Light, "☀", "Light", "Always light"),
+        (Mode::System, "🖥", "System", "Like your computer"),
+    ];
+    let width = ((ui.available_width() - 2.0 * SPACE_S) / 3.0).clamp(140.0, 200.0);
+    ui.horizontal_wrapped(|ui| {
+        for (mode, icon, title, help) in modes {
+            let selected = look.mode == mode;
+            if ui::choice_card_sized(ui, width, selected, icon, title, help).clicked() {
+                look.mode = mode;
+            }
+        }
+    });
+    for (caption, themes, dark) in [
+        ("Dark theme", DARK_THEMES, true),
+        ("Light theme", LIGHT_THEMES, false),
+    ] {
+        section(ui, caption);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 12.0;
+            for theme in themes {
+                let selected = look.palette(dark) == theme;
+                if ui::theme_card(ui, theme, look.accent, selected).clicked() {
+                    if dark {
+                        look.dark = theme;
+                    } else {
+                        look.light = theme;
+                    }
+                }
+            }
+        });
+    }
+    section(ui, "Accent colour");
+    ui.horizontal_wrapped(|ui| {
+        ui.set_min_height(CONTROL_HEIGHT);
+        for accent in ui::ACCENTS {
+            if ui::swatch(ui, accent, look.accent == accent).clicked() {
+                look.accent = accent;
+            }
+        }
+    });
+    ui.weak("Used for buttons, links and what's selected.");
+    if look != before {
+        settings.set_appearance(look);
+        audio.set_settings(settings);
+    }
 }

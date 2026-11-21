@@ -601,23 +601,23 @@ impl Updater {
             _ => true,
         };
         ui.add_enabled_ui(can_check, |ui| {
-            let changed = ui
-                .checkbox(
-                    &mut self.settings.automatic,
-                    "Check for updates automatically",
-                )
-                .changed();
-            let url = ui.add(
-                egui::TextEdit::singleline(&mut self.settings.url).hint_text("HTTPS update URL"),
-            );
+            let changed = crate::ui::checkbox(
+                ui,
+                &mut self.settings.automatic,
+                "Check for updates automatically",
+            )
+            .changed();
+            let url =
+                ui.add(crate::ui::field(&mut self.settings.url).hint_text("HTTPS update URL"));
             if url.changed() && self.available() {
                 self.state = State::Idle;
             }
             let check = ui
-                .add_enabled(
+                .add_enabled_ui(
                     self.target.is_ok() && !self.settings.url.trim().is_empty(),
-                    egui::Button::new("Check now"),
+                    |ui| crate::ui::secondary(ui, "Check now"),
                 )
+                .inner
                 .clicked();
             if changed || url.lost_focus() || check {
                 if let Err(error) = self.settings.save(&self.config) {
@@ -636,9 +636,7 @@ impl Updater {
                 ui.spinner();
             }
             State::Available(update) => {
-                if ui
-                    .button(format!("Install RustTalk {}", update.version))
-                    .clicked()
+                if crate::ui::primary(ui, &format!("Install RustTalk {}", update.version)).clicked()
                     && let State::Available(update) =
                         std::mem::replace(&mut self.state, State::Idle)
                     && let Ok(target) = &self.target
@@ -655,7 +653,7 @@ impl Updater {
             #[cfg(target_os = "linux")]
             State::Installed(version, target) => {
                 ui.label(format!("RustTalk {version} installed."));
-                if ui.button("Restart now").clicked() {
+                if crate::ui::primary(ui, "Restart now").clicked() {
                     let _ = RESTART.set(target.clone());
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                 }

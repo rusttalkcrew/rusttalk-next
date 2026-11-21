@@ -5,8 +5,8 @@
 use std::collections::VecDeque;
 
 use eframe::egui::{
-    self, Align, Button, Color32, CursorIcon, Frame, Grid, Label, Layout, Margin, Response,
-    RichText, Role, Sense, Ui, Vec2, WidgetInfo,
+    self, Align, Color32, CursorIcon, Frame, Grid, Label, Layout, Margin, Response, RichText, Role,
+    Sense, Ui, Vec2, WidgetInfo,
 };
 
 use super::{
@@ -18,9 +18,7 @@ use crate::{
     net::Command,
     server::{CallState, Server, Stats},
     share::{self, App},
-    widgets::{
-        self, AMBER, BUTTON_HEIGHT, GAP, GREEN, GREY, HOVER_SECONDS, LIVE, Look, RADIUS, RED,
-    },
+    ui::{self, HOVER_SECONDS, ICON_BUTTON, Look, Palette, RADIUS, SPACE_XS},
 };
 
 /// Ping samples kept for the chart: five minutes at one every two seconds.
@@ -30,7 +28,7 @@ const GOOD_PING_MS: f64 = 150.0;
 const FAIR_PING_MS: f64 = 300.0;
 const GOOD_LOSS_PERCENT: f64 = 2.0;
 const FAIR_LOSS_PERCENT: f64 = 8.0;
-const SIGNAL_SIZE: Vec2 = Vec2::splat(BUTTON_HEIGHT);
+const SIGNAL_SIZE: Vec2 = Vec2::splat(ICON_BUTTON);
 const CHART_HEIGHT: f32 = 56.0;
 const STOP_SIZE: Vec2 = Vec2::splat(24.0);
 
@@ -58,12 +56,12 @@ pub fn quality(ping_ms: Option<f64>, loss_percent: Option<f64>) -> Quality {
 }
 
 impl Quality {
-    fn color(self) -> Color32 {
+    fn color(self, c: &Palette) -> Color32 {
         match self {
-            Quality::Unknown => GREY,
-            Quality::Poor => RED,
-            Quality::Fair => AMBER,
-            Quality::Good => GREEN,
+            Quality::Unknown => c.offline,
+            Quality::Poor => c.danger_text,
+            Quality::Fair => c.warning,
+            Quality::Good => c.success,
         }
     }
 
@@ -160,10 +158,11 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
             Some(format!("{name} / {}", server.name()))
         })
         .unwrap_or_default();
+    let c = ui::colors(ui);
     let (text, color) = match call.state {
-        CallState::Connecting => ("Connecting…", AMBER),
-        CallState::Connected => ("Voice connected", GREEN),
-        CallState::Reconnecting => ("Reconnecting…", AMBER),
+        CallState::Connecting => ("Connecting…", c.warning),
+        CallState::Connected => ("Voice connected", c.success),
+        CallState::Reconnecting => ("Reconnecting…", c.warning),
     };
     let connected = call.state == CallState::Connected;
     let can_talk = call.can_talk;
@@ -182,42 +181,42 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
     let mut stop_screen = matches!(stopped, Some(Stop::Screen));
     let mut voice_settings = false;
     Frame::new()
-        .fill(ui.visuals().extreme_bg_color)
+        .fill(c.field)
         .corner_radius(RADIUS)
-        .inner_margin(Margin::same(8))
+        .inner_margin(Margin::same(ui::SPACE_S as i8))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            widgets::right_row(ui, BUTTON_HEIGHT, |ui| {
-                let hang = widgets::icon_button(ui, "📞", "Leave call", Look::Danger, SIGNAL_SIZE);
+            ui::right_row(ui, ICON_BUTTON, |ui| {
+                let hang = ui::icon_button(ui, "📞", "Leave call", Look::Danger, SIGNAL_SIZE);
                 leave_now = hang.clicked();
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                     let signal = signal_button(ui, quality);
-                    widgets::popup(&signal, |ui| {
+                    ui::popup(&signal, |ui| {
                         voice_settings = connection(ui, &stats, &home.voice.link, quality, server);
                     });
                     ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing.y = 0.0;
-                        ui.add(Label::new(RichText::new(text).strong().color(color)).truncate());
-                        ui.add(Label::new(RichText::new(&place).small().weak()).truncate());
+                        ui.add(Label::new(ui::bold(text).color(color)).truncate());
+                        ui.add(Label::new(ui::caption(&place)).truncate());
                     });
                 });
             });
             ui.add_space(6.0);
             let count = if screen::SUPPORTED { 4.0 } else { 3.0 };
-            let width = (ui.available_width() - GAP * (count - 1.0)) / count;
-            let size = Vec2::new(width, BUTTON_HEIGHT);
+            let width = (ui.available_width() - SPACE_XS * (count - 1.0)) / count;
+            let size = Vec2::new(width, ICON_BUTTON);
             ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = GAP;
+                ui.spacing_mut().item_spacing.x = SPACE_XS;
                 let voice = &mut home.voice;
                 let camera = &mut voice.camera;
                 let look = if camera.on {
-                    Look::On(LIVE)
+                    Look::On(c.success)
                 } else {
                     Look::Plain
                 };
                 let button = ui
                     .add_enabled_ui(connected && can_share_video, |ui| {
-                        widgets::icon_button(ui, "📷", camera_tip(camera.on), look, size)
+                        ui::icon_button(ui, "📷", camera_tip(camera.on), look, size)
                     })
                     .inner;
                 if !can_share_video {
@@ -229,11 +228,11 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
                     let look = if voice.sharing == Sharing::Off {
                         Look::Plain
                     } else {
-                        Look::On(LIVE)
+                        Look::On(c.success)
                     };
                     let button = ui
                         .add_enabled_ui(connected && can_share_video, |ui| {
-                            widgets::icon_button(ui, "🖥", screen_tip(voice.sharing), look, size)
+                            ui::icon_button(ui, "🖥", screen_tip(voice.sharing), look, size)
                         })
                         .inner;
                     if !can_share_video {
@@ -250,7 +249,7 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
                 share = app_button(ui, voice, connected && can_talk, can_talk, size);
                 let button = ui
                     .add_enabled_ui(connected && can_send_files, |ui| {
-                        widgets::icon_button(ui, "📎", "Send a file", Look::Plain, size)
+                        ui::icon_button(ui, "📎", "Send a file", Look::Plain, size)
                     })
                     .inner;
                 if !can_send_files {
@@ -317,8 +316,8 @@ fn signal_button(ui: &mut Ui, quality: Quality) -> Response {
         response.hovered(),
         HOVER_SECONDS,
     );
-    let visuals = ui.visuals();
-    let fill = Color32::TRANSPARENT.lerp_to_gamma(visuals.widgets.hovered.weak_bg_fill, hover);
+    let c = ui::colors(ui);
+    let fill = Color32::TRANSPARENT.lerp_to_gamma(c.hover, hover);
     let painter = ui.painter();
     painter.rect_filled(rect, RADIUS, fill);
     let (bar, gap, tall) = (3.0, 2.0, 14.0);
@@ -328,9 +327,9 @@ fn signal_button(ui: &mut Ui, quality: Quality) -> Response {
         let height = tall * (at + 1) as f32 / 4.0;
         let x = left + at as f32 * (bar + gap);
         let color = if at < quality.bars() {
-            quality.color()
+            quality.color(c)
         } else {
-            GREY.gamma_multiply(0.45)
+            c.offline.gamma_multiply(0.45)
         };
         let bar =
             egui::Rect::from_min_max(egui::pos2(x, bottom - height), egui::pos2(x + bar, bottom));
@@ -352,11 +351,12 @@ fn connection(
     server: Option<&Server>,
 ) -> bool {
     let ms = |value: Option<f64>| value.map_or("—".into(), |v| format!("{v:.0} ms"));
+    let color = quality.color(ui::colors(ui));
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Connection").strong());
+        ui.label(ui::bold("Connection"));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.label(RichText::new(quality.label()).color(quality.color()));
-            widgets::dot(ui, quality.color());
+            ui.label(RichText::new(quality.label()).color(color));
+            ui::dot(ui, color);
         });
     });
     Grid::new("connection").num_columns(2).show(ui, |ui| {
@@ -373,11 +373,11 @@ fn connection(
     ui.add_space(4.0);
     let pings: Vec<f64> = link.pings.iter().copied().collect();
     let size = Vec2::new(ui.available_width(), CHART_HEIGHT);
-    widgets::line_chart(ui, &pings, HISTORY, size, quality.color());
+    ui::line_chart(ui, &pings, HISTORY, size, color);
     ui.horizontal(|ui| {
-        ui.small(RichText::new("5 min ago").weak());
+        ui.label(ui::caption("5 min ago"));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.small(RichText::new("now").weak());
+            ui.label(ui::caption("now"));
         });
     });
     egui::CollapsingHeader::new("Details")
@@ -386,8 +386,7 @@ fn connection(
     ui.separator();
     ui.label("🔒  End-to-end encrypted")
         .on_hover_text("Only people in the call can hear and see it, not the server.");
-    ui.add(Button::new("⚙  Voice settings").frame_when_inactive(false))
-        .clicked()
+    ui::secondary(ui, "⚙  Voice settings").clicked()
 }
 
 /// Jitter, lost packets and bitrates: what the connection window used to show.
@@ -433,12 +432,12 @@ fn app_button(
     let look = if voice.shares.is_empty() {
         Look::Plain
     } else {
-        Look::On(LIVE)
+        Look::On(ui::colors(ui).success)
     };
     let usable = voice.supported && enabled;
     let button = ui
         .add_enabled_ui(usable, |ui| {
-            widgets::icon_button(ui, "🎵", "Share app audio", look, size)
+            ui::icon_button(ui, "🎵", "Share app audio", look, size)
         })
         .inner;
     let button = if !voice.supported {
@@ -453,8 +452,8 @@ fn app_button(
         fill(ui.ctx(), &voice.apps, "apps", share::list);
     }
     let mut share = None;
-    widgets::popup(&button, |ui| {
-        ui.label(RichText::new("Pick apps to share").strong());
+    ui::popup(&button, |ui| {
+        ui.label(ui::bold("Pick apps to share"));
         match &*audio::lock(&voice.apps) {
             Listing::Loading => {
                 ui.spinner();
@@ -469,7 +468,7 @@ fn app_button(
                 for app in apps {
                     let was = voice.shares.iter().any(|shared| shared.id == app.id);
                     let mut on = was;
-                    ui.checkbox(&mut on, &app.name);
+                    ui::checkbox(ui, &mut on, &app.name);
                     if on != was {
                         share = Some((app.clone(), on));
                     }
@@ -485,8 +484,8 @@ fn app_button(
 fn sharing_card(ui: &mut Ui, voice: &Voice) -> Option<Stop> {
     let shown = voice.sharing != Sharing::Off || !voice.shares.is_empty();
     let mut stop = None;
-    widgets::card(ui, "now sharing", shown, |ui| {
-        ui.label(RichText::new("Now sharing").small().weak());
+    ui::fade_card(ui, "now sharing", shown, |ui| {
+        ui.label(ui::caption("Now sharing"));
         let screen = match voice.sharing {
             Sharing::Off => None,
             Sharing::Starting => Some("Starting your screen…".to_owned()),
@@ -507,12 +506,12 @@ fn sharing_card(ui: &mut Ui, voice: &Voice) -> Option<Stop> {
                 ("🎵", app.name.clone(), tip, Stop::App(app.id.clone()))
             }));
         for (icon, text, tip, which) in rows {
-            widgets::right_row(ui, STOP_SIZE.y, |ui| {
-                if widgets::icon_button(ui, "⏹", &tip, Look::Plain, STOP_SIZE).clicked() {
+            ui::right_row(ui, STOP_SIZE.y, |ui| {
+                if ui::icon_button(ui, "⏹", &tip, Look::Plain, STOP_SIZE).clicked() {
                     stop = Some(which);
                 }
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                    widgets::dot(ui, LIVE);
+                    ui::dot(ui, ui::colors(ui).success);
                     ui.add(Label::new(format!("{icon}  {text}")).truncate());
                 });
             });
