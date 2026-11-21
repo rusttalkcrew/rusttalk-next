@@ -1,7 +1,7 @@
 //! The signed-in window: server rail, channels, chat and members.
 
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     path::PathBuf,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -37,6 +37,7 @@ use crate::{
     },
     files::{self, Ask, Files},
     friends::{Act, Friends, Relation},
+    link_cards,
     net::{
         Admin, AdminUpdate, Admission, Command, Compatibility, Draft, Listed, Net, PAGE_SIZE,
         Preview, Update,
@@ -73,7 +74,7 @@ struct Embeds<'a> {
 }
 const TOOLBAR_BUTTON: Vec2 = Vec2::new(30.0, 26.0);
 
-mod embed;
+pub(crate) mod embed;
 mod friends;
 pub mod layout;
 mod markdown;
@@ -112,6 +113,9 @@ pub struct Home {
     pub files: Files,
     /// Link previews fetched on this device.
     pub previews: Previews,
+    /// Messages waiting for their link preview, and any sent after them to the same
+    /// chat, so they still go out in order.
+    sending: VecDeque<Outgoing>,
     emoji_picker: Picker,
     pub confirm_sign_out: bool,
     pub error: Option<String>,
@@ -306,6 +310,7 @@ impl Home {
             voice: Voice::new(audio, video, runtime),
             files: Files::new(&data_dir),
             previews: Previews::new(ctx, &data_dir),
+            sending: VecDeque::new(),
             emoji_picker: Picker::new(&data_dir),
             confirm_sign_out: false,
             error: None,
@@ -728,6 +733,60 @@ impl Home {
                     Dialog::DeleteItem(index, reorder::Item::Channel(id), channel.name.clone())
                 }
             });
+        }
+    }
+
+    /// Send queued messages whose preview is done, failed or removed, in order per chat.
+    fn send_queued(&mut self, ctx: &egui::Context, now: f64) {
+        // Turned off meanwhile: stop what is being made, and don't ask.
+        if self.voice.audio.settings().create_link_previews == Some(false) {
+            for out in &mut self.sending {
+                out.preview = None;
+            }
+        }
+        let mut waiting: Vec<To> = Vec::new();
+        let mut at = 0;
+        while at < self.sending.len() {
+            let out = &self.sending[at];
+            let done = match &out.preview {
+                _ if waiting.contains(&out.to) => None,
+                None => Some(None),
+                Some(Making::Ask(_)) => None,
+                Some(Making::Job(job)) => job.poll(),
+            };
+            let Some(made) = done else {
+                waiting.push(out.to.clone());
+                ctx.request_repaint_after(std::time::Duration::from_millis(250));
+                at += 1;
+                continue;
+            };
+            let Some(Outgoing { to, mut draft, .. }) = self.sending.remove(at) else {
+                break;
+            };
+            draft.preview = made.map(Arc::new);
+            match to {
+                To::Channel(address) => {
+                    if let Some(index) = self.index(&address) {
+                        self.servers[index].send(Command::Send(draft));
+                    }
+                }
+                To::Dm(peer) => {
+                    let targets: Vec<usize> = (self.shared(&peer).into_iter())
+                        .filter(|index| self.servers[*index].status == Status::Online)
+                        .collect();
+                    let me = *self.identity.certificate.person_id();
+                    let chat = &mut self.threads.entry(peer).or_default().chat;
+                    send_dm(
+                        &self.servers,
+                        &targets,
+                        chat,
+                        &mut self.toast,
+                        now,
+                        (me, peer),
+                        draft,
+                    );
+                }
+            }
         }
     }
 
@@ -1199,6 +1258,7 @@ impl Home {
                 }
             }
             Update::Image(id, fetch, frames) => self.files.image(ctx, id, fetch, frames),
+            Update::LinkCard(id, card) => self.files.link_card(id, card),
             Update::Saved(id, saved) => self.files.saved(id, saved),
             Update::Synced(synced) => {
                 for known in &synced.servers {
@@ -1340,6 +1400,7 @@ pub fn show(ui: &mut Ui, home: &mut Home, updates: &mut crate::update::Updater) 
     while let Ok(update) = home.net.updates.try_recv() {
         home.apply(ui.ctx(), update, now);
     }
+    home.send_queued(ui.ctx(), now);
     while let Some((address, channel)) = home.notify.clicked() {
         home.open_chat(&address, channel);
     }
@@ -2690,6 +2751,17 @@ pub fn privacy_tab(ui: &mut Ui, home: &mut Home) {
             home.previews.allow(provider.id(), on);
         }
     }
+    let mut create = settings.create_link_previews == Some(true);
+    if ui::toggle_row(
+        ui,
+        &mut create,
+        t!("previews.create"),
+        t!("previews.create_help"),
+    )
+    .changed()
+    {
+        settings.create_link_previews = Some(create);
+    }
     ui::page_section(ui, t!("home.server_directory"));
     ui::banner(ui, "privacy-directory", t!("home.directory_help"));
     ui::setting_row(
@@ -2942,6 +3014,70 @@ fn voice_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
     ui.allocate_rect(area, Sense::hover());
 }
 
+/// Where a queued message goes: a channel by its server's address, or a DM.
+#[derive(Clone, PartialEq)]
+enum To {
+    Channel(url::Url),
+    Dm(Id),
+}
+
+struct Outgoing {
+    to: To,
+    draft: Draft,
+    /// The preview being made; `None` once removed, or for a message only waiting its turn.
+    preview: Option<Making>,
+}
+
+enum Making {
+    /// Waiting for the person to say whether the app may visit the link.
+    Ask(url::Url),
+    /// Being made; dropping it stops the fetch.
+    Job(link_cards::Job),
+}
+
+/// Above the composer: the question whether to make a preview, or that one is being made.
+fn preview_status(ui: &mut Ui, voice: &Voice, out: &mut Outgoing) {
+    match &out.preview {
+        Some(Making::Ask(url)) => {
+            let url = url.clone();
+            let host = url.host_str().unwrap_or_default().to_owned();
+            ui.weak(t!("previews.ask_create", host = host));
+            ui.horizontal(|ui| {
+                let mut answer = None;
+                if ui::primary(ui, t!("previews.always")).clicked() {
+                    answer = Some(Some(true));
+                }
+                if ui::secondary(ui, t!("previews.not_now")).clicked() {
+                    answer = Some(None);
+                }
+                if ui::secondary(ui, t!("previews.never")).clicked() {
+                    answer = Some(Some(false));
+                }
+                let Some(choice) = answer else {
+                    return;
+                };
+                if choice.is_some() {
+                    let mut settings = voice.audio.settings();
+                    settings.create_link_previews = choice;
+                    voice.audio.set_settings(settings);
+                }
+                out.preview = (choice == Some(true))
+                    .then(|| Making::Job(link_cards::Job::start(url, ui.ctx())));
+            });
+        }
+        Some(Making::Job(_)) => {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.weak(t!("previews.adding"));
+                if ui::small_close(ui, t!("previews.remove")).clicked() {
+                    out.preview = None;
+                }
+            });
+        }
+        None => {}
+    }
+}
+
 /// Which chat a pane shows.
 #[derive(Clone, Copy)]
 enum At {
@@ -3079,8 +3215,13 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
         net,
         join: joining,
         previews,
+        sending,
         ..
     } = home;
+    let to = match at {
+        At::Channel(index, _) => To::Channel(servers[index].address.clone()),
+        At::Dm(peer) => To::Dm(peer),
+    };
     let dir = named.map_or(&fallback, |index| &servers[index].dir);
     let online = !read_only && targets.iter().any(|i| servers[*i].status == Status::Online);
     let now = ui.input(|input| input.time);
@@ -3134,7 +3275,41 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
             } else {
                 format!("#{name}")
             };
+            if let Some(out) = sending
+                .iter_mut()
+                .find(|o| o.to == to && o.preview.is_some())
+            {
+                preview_status(ui, voice, out);
+            }
             let (command, attach) = composer(ui, chat, dir, online, key, &hint, emoji_picker);
+            // A new message with a link to some other site waits for its preview; any
+            // message sent meanwhile waits behind it.
+            let command = match command {
+                Some(Command::Send(draft)) => {
+                    let link = (draft.edit_of.is_none() && draft.sticker.is_none())
+                        .then(|| link_cards::candidate(markdown::cached(ui, &draft.text).links()))
+                        .flatten();
+                    // Asked the first time (and each time until Always or Never).
+                    let preview = match (link, voice.audio.settings().create_link_previews) {
+                        (Some(url), Some(true)) => {
+                            Some(Making::Job(link_cards::Job::start(url, ui.ctx())))
+                        }
+                        (Some(url), None) => Some(Making::Ask(url)),
+                        _ => None,
+                    };
+                    if preview.is_some() || sending.iter().any(|o| o.to == to) {
+                        sending.push_back(Outgoing {
+                            to: to.clone(),
+                            draft,
+                            preview,
+                        });
+                        None
+                    } else {
+                        Some(Command::Send(draft))
+                    }
+                }
+                other => other,
+            };
             match (at, command) {
                 (At::Dm(peer), Some(Command::Send(draft))) => {
                     send_dm(servers, &targets, chat, toast, now, (me, peer), draft);
@@ -3207,7 +3382,16 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
             });
             let shown = message(ui, chat, msg, start, dir, &embeds, key, |ui| {
                 if let Some(server) = holder(msg) {
-                    files::attachments(ui, files, &server.address, &server.commands, &msg.files);
+                    // A link preview must be about one of the message's own links.
+                    let links: Vec<String> = match &msg.body {
+                        Body::Text(text) => markdown::cached(ui, text)
+                            .links()
+                            .map(String::from)
+                            .collect(),
+                        _ => Vec::new(),
+                    };
+                    let server = (&server.address, &server.commands);
+                    files::attachments(ui, files, server, &msg.files, &links);
                 }
                 // The server isn't borrowed whole here, so look the offer up by its parts.
                 if msg.live.is_some() {
@@ -3690,6 +3874,7 @@ fn composer(
             sticker: Some(id),
             friend: None,
             poke: false,
+            preview: None,
         });
         field.request_focus();
         return (Some(command), attach);
@@ -3747,6 +3932,7 @@ fn composer(
         sticker: None,
         friend: None,
         poke: false,
+        preview: None,
     });
     chat.clear_draft();
     field.request_focus();

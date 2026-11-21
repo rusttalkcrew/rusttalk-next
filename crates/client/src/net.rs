@@ -86,6 +86,8 @@ pub enum Command {
     CheckGone(Id, Id),
     /// Download and decode a picture, as a thumbnail, the full image or a small looping copy.
     Image(BlobRef, Fetch),
+    /// Download and read a link preview file.
+    LinkCard(BlobRef),
     /// Download a file and save it here.
     Save(BlobRef, PathBuf),
     /// Receive an offered file into this path.
@@ -182,6 +184,8 @@ pub struct Draft {
     pub friend: Option<(FriendSignal, u64)>,
     /// A poke: `text` is its note, sent with nothing else.
     pub poke: bool,
+    /// A link preview made while sending, uploaded as a hidden file (see `link_cards`).
+    pub preview: Option<std::sync::Arc<crate::link_cards::Made>>,
 }
 
 pub struct LiveOffer {
@@ -303,6 +307,8 @@ pub enum Update {
     /// A picture's frames with their delays in ms, by blob ID, or why not: `true` when it
     /// expired or was deleted.
     Image(Id, Fetch, Result<Vec<(egui::ColorImage, u32)>, bool>),
+    /// A link preview file by blob ID, or why not: `true` when it expired or was deleted.
+    LinkCard(Id, Result<crate::link_cards::Card, bool>),
     /// A file by blob ID was saved, or why not: `true` when it expired or was deleted.
     Saved(Id, Result<(), bool>),
     /// A file offered in the voice room, by someone else or by us.
@@ -1374,7 +1380,7 @@ async fn on_command(
                 key_link: None,
                 poke: draft.poke,
             };
-            let files = draft.files.clone();
+            let files = (draft.files.clone(), draft.preview.clone());
             let target = (channel, draft.id);
             let mut sent = files::send(ctx, url, client, target, body.clone(), files.clone()).await;
             // The other person re-keyed the DM just now: take the new key and send
@@ -1403,6 +1409,7 @@ async fn on_command(
             files::delete(ctx, url, client, (channel, id, sender), blobs).await?;
         }
         Command::Image(file, fetch) => files::image(ctx, client, file, fetch).await,
+        Command::LinkCard(file) => files::link_card(ctx, client, file).await,
         Command::Save(file, path) => files::save(ctx, client, file, path).await,
         Command::SendLive(channel, path) => {
             voice::offer_chat_file(ctx, url, client, state, channel, path).await?;

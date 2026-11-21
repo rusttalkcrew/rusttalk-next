@@ -911,6 +911,29 @@ Readers accept power-of-two chunk sizes from 16 KiB through 1 MiB, with
 Recipients treat the name as display text and choose a local save path
 independently. The filename and media type are never part of the HTTP request.
 
+#### Link previews
+
+A sender may attach a preview of one link in the message text as an ordinary
+stored file, so the format and the API are unchanged. Its media type is
+`application/vnd.rusttalk.link-preview+json`, its name `link-preview.json`,
+and its plaintext at most 4,096 bytes of UTF-8 JSON:
+
+```json
+{"url": "https://example.org/story", "title": "…", "description": "…", "site": "…"}
+```
+
+`url` (an `http` or `https` address with a host and no user name or password,
+at most 2,048 bytes) and a non-empty `title` are required; `description` and
+`site` may be missing. The optional thumbnail is the page's picture, made like
+any other thumbnail. Apps that know the type download the file, show it as a
+card under the text instead of as a file (at most one per message) only when
+`url`, parsed, equals one of the message text's parsed link destinations,
+show the address's host on it, treat every field as plain text and cut the title to 200,
+the description to 300 and the site to 80 characters. They ignore a file of
+this type that is bigger, unreadable or invalid. Older apps show it as a small
+file. Senders only make previews for links that no reader-side link preview
+(see [Privacy](privacy.md)) covers.
+
 Message deletion and history pruning do not reveal the encrypted reference
 list to the API. When deleting a message, the client calls DELETE for its
 attachment IDs, including thumbnail IDs, while it still has the references.

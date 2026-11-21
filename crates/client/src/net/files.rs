@@ -20,16 +20,22 @@ use rusttalk_core::{
 use url::Url;
 
 use super::{Ctx, Fetch, Update, directory::frame_image, send_messages, to_msg};
-use crate::server::Id;
+use crate::{
+    link_cards::{Card, FILE_NAME, MAX_CARD_BYTES, MEDIA_TYPE, Made},
+    server::Id,
+};
+use rusttalk_core::client::prepare_file;
+use std::time::Instant;
 
 /// Upload the files, then send the message with them; `false` when an upload failed.
+/// A link preview that fails to upload is left out, without failing the message.
 pub(super) async fn send(
     ctx: &Ctx,
     url: &Url,
     client: &mut KeyClient<'_>,
     (channel, id): (Id, Id),
     mut body: MessageBody,
-    files: Vec<PathBuf>,
+    (files, preview): (Vec<PathBuf>, Option<Arc<Made>>),
 ) -> Result<bool> {
     if let Some(first) = files.first() {
         let label = match files.len() {
@@ -56,15 +62,116 @@ pub(super) async fn send(
             return Ok(false);
         }
     }
+    // A preview that didn't make it is removed only after the message went out.
+    let mut leftover = Vec::new();
+    if let Some(made) = preview.filter(|_| body.attachments.len() < crate::files::MAX_FILES) {
+        match upload_preview(client, &channel, made).await {
+            Preview::Sent(attachment) => body.attachments.push(attachment),
+            Preview::Left(prepared) => leftover.extend(prepared),
+        }
+    }
     let record = match client.post_message(&channel, id, &body).await {
         Ok(record) => record,
         Err(error) => {
             discard(client, &body.attachments).await;
+            at_most(CLEANUP, discard(client, &leftover)).await;
             return Err(error);
         }
     };
     send_messages(ctx, url, channel, vec![to_msg(&record, &body)], false, None);
+    at_most(CLEANUP, discard(client, &leftover)).await;
     Ok(true)
+}
+
+/// How long removing a preview that didn't make it may hold up this server's loop.
+const CLEANUP: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Run `work`, giving up after `limit`.
+async fn at_most(limit: std::time::Duration, work: impl Future<Output = ()>) {
+    if tokio::time::timeout(limit, work).await.is_err() {
+        tracing::info!("removing an unsent link preview took too long");
+    }
+}
+
+/// Upload a link preview within what is left of its time. Otherwise the message goes
+/// without it; the error holds the prepared file (when there was one) to remove,
+/// since part of it, or all of it with a lost answer, may be stored.
+async fn upload_preview(client: &KeyClient<'_>, channel: &Id, made: Arc<Made>) -> Preview {
+    let Some(json) = preview_file(&made) else {
+        return Preview::Left(None);
+    };
+    let prepare = {
+        let (json, made) = (json.clone(), made.clone());
+        // The thumbnail decodes the page's picture: with limits, off the async workers.
+        async move {
+            tokio::task::spawn_blocking(move || {
+                prepare_file(
+                    FILE_NAME,
+                    MEDIA_TYPE,
+                    &json,
+                    made.picture.as_deref().unwrap_or_default(),
+                )
+            })
+            .await
+            .ok()?
+            .ok()
+        }
+    };
+    let upload = |attachment: Attachment, thumbnail: Option<Vec<u8>>| {
+        let json = &json;
+        async move {
+            client
+                .upload_prepared(channel, &attachment, json, thumbnail.as_deref(), None)
+                .await
+        }
+    };
+    within(made.deadline, prepare, upload).await
+}
+
+/// How a link preview's upload went.
+enum Preview {
+    Sent(Attachment),
+    /// Left out; the prepared file, if it got that far, is removed after sending.
+    Left(Option<Attachment>),
+}
+
+/// Prepare and upload under one deadline: the uploaded file, or the prepared one (if
+/// it got that far) to remove after a failure or when time ran out.
+async fn within<F>(
+    deadline: Instant,
+    prepare: impl Future<Output = Option<(Attachment, Option<Vec<u8>>)>>,
+    upload: impl FnOnce(Attachment, Option<Vec<u8>>) -> F,
+) -> Preview
+where
+    F: Future<Output = Result<()>>,
+{
+    let mut prepared = None;
+    let work = async {
+        let (attachment, thumbnail) = prepare.await?;
+        prepared = Some(attachment.clone());
+        match upload(attachment.clone(), thumbnail).await {
+            Ok(()) => Some(attachment),
+            Err(error) => {
+                tracing::info!(error = %format_args!("{error:#}"), "uploading a link preview failed");
+                None
+            }
+        }
+    };
+    let left = deadline.saturating_duration_since(Instant::now());
+    match tokio::time::timeout(left, work).await {
+        Ok(Some(attachment)) => Preview::Sent(attachment),
+        Ok(None) => Preview::Left(prepared),
+        Err(_) => {
+            tracing::info!("uploading a link preview took too long");
+            Preview::Left(prepared)
+        }
+    }
+}
+
+/// The preview's file, unless it is too big or its time is up.
+fn preview_file(made: &Made) -> Option<Vec<u8>> {
+    let json = made.card.encode();
+    (json.len() <= MAX_CARD_BYTES as usize && Instant::now() < made.deadline).then_some(json)
 }
 
 /// Delete a message, then its stored files.
@@ -88,6 +195,21 @@ pub(super) async fn delete(
         }
     }
     Ok(())
+}
+
+/// Download and read a link preview file, refusing anything too big to be one.
+pub(super) async fn link_card(ctx: &Ctx, client: &KeyClient<'_>, file: BlobRef) {
+    let id = file.id;
+    let card = async {
+        anyhow::ensure!(file.size <= MAX_CARD_BYTES, "link preview too big");
+        let bytes = client.download_file(&file, None).await?;
+        Card::decode(&bytes).context("unreadable link preview")
+    };
+    let card = card.await.map_err(|error| {
+        tracing::info!(error = %format_args!("{error:#}"), "loading a link preview failed");
+        gone(&error)
+    });
+    ctx.send(Update::LinkCard(id, card));
 }
 
 /// Decoded memory one picture may use: in the viewer, and playing small in the chat.
@@ -275,6 +397,90 @@ fn save_file(path: &Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn prepared() -> Option<(Attachment, Option<Vec<u8>>)> {
+        let (attachment, thumbnail) = prepare_file(FILE_NAME, MEDIA_TYPE, b"{}", b"").unwrap();
+        Some((attachment, thumbnail))
+    }
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_stalled_preview_upload_and_cleanup_end_on_time() {
+        let started = Instant::now();
+        let deadline = started + std::time::Duration::from_millis(200);
+        let result = runtime().block_on(async {
+            let result = within(deadline, async { prepared() }, |_, _| {
+                std::future::pending::<Result<()>>()
+            })
+            .await;
+            // The DELETEs stall too; removing gives up on its own limit.
+            at_most(
+                std::time::Duration::from_millis(100),
+                std::future::pending(),
+            )
+            .await;
+            result
+        });
+        let elapsed = started.elapsed();
+        assert!(
+            matches!(result, Preview::Left(Some(_))),
+            "the prepared IDs are kept for removal"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(1000),
+            "{elapsed:?}"
+        );
+        let stalled_prepare = runtime().block_on(within(
+            Instant::now() + std::time::Duration::from_millis(50),
+            std::future::pending(),
+            |_, _| async { Ok(()) },
+        ));
+        assert!(
+            matches!(stalled_prepare, Preview::Left(None)),
+            "preparing counts toward the deadline"
+        );
+    }
+
+    #[test]
+    fn a_stored_preview_whose_answer_was_lost_is_removed() {
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        let result = runtime().block_on(within(deadline, async { prepared() }, |_, _| async {
+            anyhow::bail!("connection closed before the answer")
+        }));
+        let Preview::Left(Some(attachment)) = result else {
+            panic!("the prepared file must come back for removal");
+        };
+        assert_eq!(attachment.media_type, MEDIA_TYPE);
+        let ok = runtime().block_on(within(deadline, async { prepared() }, |_, _| async {
+            Ok(())
+        }));
+        assert!(matches!(ok, Preview::Sent(_)));
+    }
+
+    #[test]
+    fn a_late_or_oversized_preview_is_left_out() {
+        let made = |deadline, url: String| Made {
+            card: Card {
+                url,
+                title: "t".into(),
+                description: String::new(),
+                site: String::new(),
+            },
+            picture: None,
+            deadline,
+        };
+        let later = Instant::now() + std::time::Duration::from_secs(5);
+        assert!(preview_file(&made(later, "https://example.org/".into())).is_some());
+        assert!(preview_file(&made(Instant::now(), "https://example.org/".into())).is_none());
+        let long = format!("https://example.org/{}", "a".repeat(5000));
+        assert!(preview_file(&made(later, long)).is_none());
+    }
 
     #[test]
     fn upload_problems_name_the_limit_that_was_hit() {

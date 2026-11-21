@@ -65,6 +65,7 @@ impl Home {
                 sticker: None,
                 friend: Some((signal, now_ms().max(0) as u64)),
                 poke: false,
+                preview: None,
             }));
         }
     }
