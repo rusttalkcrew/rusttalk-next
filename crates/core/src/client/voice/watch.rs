@@ -60,12 +60,17 @@ impl VoiceRoom {
     /// Open a viewer's latest subscriptions. The sender identity is authenticated
     /// so a relay cannot attach one device's snapshot to another device.
     pub fn video_watches(&self, viewer: &RemoteParticipant) -> Vec<TrackSid> {
-        viewer
-            .attributes()
-            .get(ATTRIBUTE)
-            .and_then(|value| open(&self.watch_keys, viewer.identity().as_str(), value))
-            .unwrap_or_default()
+        watches(&self.watch_keys, viewer)
     }
+}
+
+/// A viewer's latest subscriptions; empty until the key of their epoch is here.
+pub(super) fn watches(keys: &HashMap<i64, Key>, viewer: &RemoteParticipant) -> Vec<TrackSid> {
+    viewer
+        .attributes()
+        .get(ATTRIBUTE)
+        .and_then(|value| open(keys, viewer.identity().as_str(), value))
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

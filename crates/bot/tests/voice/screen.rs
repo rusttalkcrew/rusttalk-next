@@ -11,7 +11,7 @@ use livekit::{
     prelude::RemoteTrack,
 };
 use reqwest::Method;
-use rusttalk_bot::screen;
+use rusttalk_bot::{screen, voice::hear_tone};
 use rusttalk_core::{
     client::{
         KeyClient, Server,
@@ -28,6 +28,7 @@ pub(super) async fn exercise(
     mut listener: VoiceRoom,
     server: &Server,
     c: &mut KeyClient<'_>,
+    newcomer: &mut KeyClient<'_>,
     channel_id: &[u8; 32],
 ) -> Result<VoiceRoom> {
     assert!(a.can_share_screen() && !listener.can_share_screen());
@@ -53,18 +54,23 @@ pub(super) async fn exercise(
         // Watching is announced, as the app does once the video arrives; only then does
         // the publisher allow the sound.
         b.set_video_watches(std::slice::from_ref(&sid)).await?;
-        tokio::time::timeout(LIMIT, async {
-            loop {
-                // The sender has no event loop here; let it read the announcement.
-                a.update_stream_viewers().await?;
-                let wait = Duration::from_millis(500);
-                if let Ok(heard) = tokio::time::timeout(wait, stream_sound(b, true)).await {
-                    return heard;
-                }
-            }
-        })
+        tokio::time::timeout(LIMIT, stream_sound(b, true))
+            .await
+            .context("stream sound arriving with the watched share")??;
+        // A member who joins now is not on the permission list yet, but must still
+        // receive everything except the share's sound.
+        let mut late = newcomer.join_voice(channel_id).await?;
+        tokio::time::timeout(
+            LIMIT,
+            hear_tone(&mut late, Some(&a.identity()), super::A_HZ),
+        )
         .await
-        .context("stream sound arriving with the watched share")??;
+        .context("a newcomer hearing the sharer's microphone")??;
+        ensure!(
+            !(late.remote_audio_tracks().iter()).any(|(_, sid, _)| sid == &sound),
+            "a newcomer not watching received the stream's sound"
+        );
+        late.leave().await?;
         if let Ok(error) = tokio::time::timeout(Duration::from_millis(400), async {
             while let Some(event) = listener.next_event().await {
                 if let RoomEvent::TrackSubscribed { track, .. } = event {

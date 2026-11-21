@@ -200,8 +200,18 @@ impl KeyClient<'_> {
                 stream_audio::subscribe_audio(&publication, &name_keys, &stream_names, false);
             }
         }
+        let room = Arc::new(room);
+        let grants = Arc::new(stream_audio::Reconciler::new(stream_audio::RoomGrants {
+            room: room.clone(),
+            keys: std::sync::Mutex::new(stream_audio::GrantKeys {
+                stream_names: stream_names.clone(),
+                watch_keys: watch_keys.clone(),
+            }),
+            publishing: Default::default(),
+        }));
+        let grants_task = tokio::spawn(grants.clone().run(room.subscribe()));
         Ok(VoiceRoom {
-            room: Arc::new(room),
+            room,
             events,
             server: server.clone(),
             channel: *channel,
@@ -215,7 +225,8 @@ impl KeyClient<'_> {
             watch_keys,
             stats: stats::Sampler::default(),
             files: live_file::LiveFiles::default(),
-            permissions: std::sync::Mutex::new(None),
+            grants,
+            _grants_task: stream_audio::AbortOnDrop(grants_task),
         })
     }
 
@@ -285,8 +296,9 @@ pub struct VoiceRoom {
     watch_keys: HashMap<i64, Key>,
     stats: stats::Sampler,
     files: live_file::LiveFiles,
-    /// The track permissions last sent; see `stream_audio`.
-    permissions: std::sync::Mutex<Option<stream_audio::Permissions>>,
+    /// Keeps who may receive our tracks up to date; see `stream_audio`.
+    grants: Arc<stream_audio::Reconciler<stream_audio::RoomGrants>>,
+    _grants_task: stream_audio::AbortOnDrop,
 }
 
 impl VoiceRoom {
@@ -325,8 +337,14 @@ impl VoiceRoom {
         self.stream_names = keys.name_keys(&self.channel, track_name::STREAM_AUDIO);
         self.control_keys = keys.name_keys(&self.channel, control::LABEL);
         self.watch_keys = keys.name_keys(&self.channel, watch::LABEL);
-        // Tracks published under the new epoch's names could not be told apart before.
+        // Tracks published under the new epoch's names could not be told apart before,
+        // and a viewer's watch announcement may only open now.
         self.reconcile_audio();
+        *self.grants.grants.keys.lock().expect("grant keys") = stream_audio::GrantKeys {
+            stream_names: self.stream_names.clone(),
+            watch_keys: self.watch_keys.clone(),
+        };
+        self.grants.wake();
         if epoch <= self.epoch {
             return Ok(false);
         }
@@ -388,31 +406,12 @@ impl VoiceRoom {
                 RoomEvent::TrackPublished { .. } => self.reconcile_audio(),
                 RoomEvent::LocalTrackPublished { .. } | RoomEvent::LocalTrackRepublished { .. } => {
                     self.switch_senders();
-                    self.sync_permissions().await;
                 }
-                // Who watches our share, or who is here, changed.
-                RoomEvent::LocalTrackUnpublished { .. }
-                | RoomEvent::ParticipantConnected(_)
-                | RoomEvent::ParticipantDisconnected(_)
-                | RoomEvent::ParticipantAttributesChanged { .. }
-                | RoomEvent::Reconnected => self.sync_permissions().await,
                 _ => (),
             }
             return Some(event);
         }
         None
-    }
-
-    async fn sync_permissions(&self) {
-        if let Err(error) = self.update_stream_viewers().await {
-            tracing::warn!(%error, "updating who may receive our tracks failed");
-        }
-    }
-
-    /// Allow our share's sound to whoever watches it now. `next_event` does this when
-    /// viewers change; call it directly only without an event loop (headless tests).
-    pub async fn update_stream_viewers(&self) -> Result<()> {
-        self.sync_stream_permissions(false).await
     }
 
     /// Current local connection state.
@@ -527,7 +526,8 @@ impl VoiceRoom {
             .context("missing current media key")?;
         let name = track_name::encrypt(key, track_name::STREAM_AUDIO, self.epoch, name)?;
         // Keep it from people who don't watch before it exists.
-        self.sync_stream_permissions(true).await?;
+        let _publishing = stream_audio::Publishing::start(&self.grants.grants.publishing);
+        self.grants.apply(false).await?;
         self.publish_audio_track(&name, source, TrackSource::ScreenshareAudio)
             .await
     }

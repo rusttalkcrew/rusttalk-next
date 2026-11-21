@@ -133,6 +133,15 @@ pub async fn exercise(
     )
     .await?;
     let mut c = KeyClient::connect(server, &c_device, &c_session).await?;
+    // Joins while a screen share's sound is restricted to its viewers.
+    let (_, d_invite) = invite(a, secrets).await?;
+    let (_, d_device) = DeviceIdentity::create("Voice newcomer")?;
+    let d_session = session(
+        server.sign_in(&d_device, Some(&d_invite.code)).await?,
+        secrets,
+    )
+    .await?;
+    let mut d = KeyClient::connect(server, &d_device, &d_session).await?;
 
     live_file::data_only(a, &mut b, &mut c, text, voice).await?;
 
@@ -152,6 +161,7 @@ pub async fn exercise(
     a.sync().await?;
     receive_key(&mut b, voice, 1).await?;
     receive_key(&mut c, voice, 1).await?;
+    receive_key(&mut d, voice, 1).await?;
     assert_eq!(
         a.voice_participants(&voice.id).await?,
         VoiceRoster::default()
@@ -299,8 +309,16 @@ pub async fn exercise(
         .context("waiting for two per-app tracks")??;
     capture.stop(&room_a).await?;
 
-    let listener =
-        screen::exercise(&room_a, &mut room_b, listener, server, &mut c, &voice.id).await?;
+    let listener = screen::exercise(
+        &room_a,
+        &mut room_b,
+        listener,
+        server,
+        &mut c,
+        &mut d,
+        &voice.id,
+    )
+    .await?;
     let mut listener = camera::exercise(
         &room_a,
         &mut room_b,
