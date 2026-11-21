@@ -77,6 +77,8 @@ deleted DM messages (`dm_deleted.json`). Servers see each key link as one more
 small DM message, sent just before a new epoch starts. A person's own deleted DM
 messages are part of the encrypted device sync copy that every joined server
 holds: their IDs and the addresses of the servers that held a copy.
+A dishonest server can keep a revoked device eligible for future DM keys,
+because the app takes the current device list from the server (issue #109).
 The API volume stores file blobs, including in-progress uploads and thumbnails,
 as ciphertext under opaque disk names. Committed blobs are named only by their
 random IDs. File names, types, keys, plaintext lengths and references linking

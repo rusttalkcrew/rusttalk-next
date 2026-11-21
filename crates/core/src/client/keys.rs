@@ -596,11 +596,7 @@ impl<'a> KeyClient<'a> {
     /// only the pinned other person (not even this person's own other devices).
     #[cfg(feature = "voice")]
     pub(super) fn dm_peer_is(&self, channel: &[u8; 32], person: &PersonId) -> bool {
-        match self.dms.get(channel) {
-            Some(DmPin::With { peer, .. }) => peer == person,
-            Some(DmPin::Blocked) => false,
-            None => true,
-        }
+        dm_peer_is(&self.dms, self.pins_lost, channel, person)
     }
 
     /// Whether a key of this scope may come from or go to this person: anyone for
@@ -626,6 +622,16 @@ impl<'a> KeyClient<'a> {
             .filter(|state| state.scope.kind == Kind::Channel && !state.rotate && state.epoch > 0)
             .map(|state| (state.scope, state.epoch))
             .collect();
+        // Forget attempts for epochs that moved on, so no deadline stays in the past.
+        self.rekeyed.retain(|(channel, epoch), _| {
+            readable.contains(&(
+                Scope {
+                    kind: Kind::Channel,
+                    id: *channel,
+                },
+                *epoch,
+            ))
+        });
         for (scope, epoch) in readable {
             if !matches!(self.dms.get(&scope.id), Some(DmPin::With { .. })) {
                 continue;
@@ -640,37 +646,37 @@ impl<'a> KeyClient<'a> {
             if self.rekeyed.get(&slot).is_some_and(|(_, next)| now < *next) {
                 continue;
             }
-            // Try again later, waiting longer each time (15 s doubling, up to 16 min),
-            // until this epoch is trusted.
+            // Try again later, waiting longer each time, until this epoch is trusted.
             let tries = self.rekeyed.get(&slot).map_or(0, |(tries, _)| *tries) + 1;
-            let wait = Duration::from_secs(15 << tries.min(6));
-            self.rekeyed.insert(slot, (tries, now + wait));
+            self.rekeyed.insert(slot, (tries, now + backoff(tries)));
             self.scan_links(scope, epoch).await;
             if self.trusted_epoch(scope) == Some(epoch) {
                 self.rekeyed.remove(&slot);
                 continue;
             }
-            // The link goes out sealed with this epoch's key; without it, wait for it.
-            let Some(current) = self.key(scope, epoch).cloned() else {
-                continue;
+            let current = self.key(scope, epoch).cloned();
+            let linked = match recovery(current.is_some(), tries) {
+                Recovery::Wait => continue,
+                Recovery::Link => true,
+                Recovery::Fresh => false,
             };
             let next = epoch.checked_add(1).context("epoch overflow")?;
             let key = keys::random_key()?;
             let context = self.epoch_context(scope, next, &key);
-            let link = KeyLink {
-                epoch: next,
-                commitment: context.commitment,
-            };
-            let body = MessageBody {
-                key_link: Some(link),
-                ..MessageBody::default()
-            };
-            if let Err(error) = self
-                .post_at(&scope.id, *keys::random_key()?, epoch, &current, &body)
-                .await
-            {
-                tracing::warn!(error = %format_args!("{error:#}"), "announcing a DM key failed");
-                continue;
+            if linked && let Some(current) = current {
+                let link = KeyLink {
+                    epoch: next,
+                    commitment: context.commitment,
+                };
+                let body = MessageBody {
+                    key_link: Some(link),
+                    ..MessageBody::default()
+                };
+                let id = *keys::random_key()?;
+                if let Err(error) = self.post_at(&scope.id, id, epoch, &current, &body).await {
+                    tracing::warn!(error = %format_args!("{error:#}"), "announcing a DM key failed");
+                    continue;
+                }
             }
             // A server without DM re-keying refuses; this DM then stays unused there.
             if let Some(commitment) = self.publish_key(scope, next, &key).await?
@@ -682,6 +688,20 @@ impl<'a> KeyClient<'a> {
             changed = true;
         }
         Ok(changed)
+    }
+
+    /// The earliest time a DM epoch that isn't trusted yet should be tried again,
+    /// so the connection can sync then even without an event.
+    pub fn next_rekey(&self) -> Option<std::time::Instant> {
+        self.rekeyed.values().map(|(_, next)| *next).min()
+    }
+
+    /// Something is waiting to go out: try untrusted DM epochs on the next sync.
+    pub fn rekey_now(&mut self) {
+        let now = std::time::Instant::now();
+        for (_, next) in self.rekeyed.values_mut() {
+            *next = (*next).min(now);
+        }
     }
 
     /// Open the DM's recent history from before `epoch`, which notes its key links.
@@ -1023,6 +1043,50 @@ fn may_wrap(
     dm_allows(dms, me, scope, person) && (!dm || pair_bound)
 }
 
+/// How to recover a DM epoch that doesn't chain to a trusted one.
+#[derive(Debug, PartialEq)]
+enum Recovery {
+    /// Announce the next key in a link sealed with the current one, then start it.
+    Link,
+    /// Start the next epoch without a link. Only this device trusts it at first,
+    /// having made it after pinning; the other person can't, and re-keys from it
+    /// with a link this device then trusts.
+    Fresh,
+    /// The current key may still arrive.
+    Wait,
+}
+
+/// With the current key, link from it. Without it (say, two new devices that never
+/// held the old key), give it one wait for a late envelope, then start fresh.
+fn recovery(have_current: bool, tries: u32) -> Recovery {
+    match (have_current, tries) {
+        (true, _) => Recovery::Link,
+        (false, 1) => Recovery::Wait,
+        (false, _) => Recovery::Fresh,
+    }
+}
+
+/// The wait before the next recovery attempt: 15 s, doubling up to 16 min.
+fn backoff(tries: u32) -> Duration {
+    Duration::from_secs(15 << tries.saturating_sub(1).min(6))
+}
+
+/// Whether this person may take a live file in this channel: in a DM, only the
+/// pinned other person, and nobody while this server's DMs are paused.
+#[cfg(any(feature = "voice", test))]
+fn dm_peer_is(
+    dms: &HashMap<[u8; 32], DmPin>,
+    paused: bool,
+    channel: &[u8; 32],
+    person: &PersonId,
+) -> bool {
+    match dms.get(channel) {
+        Some(DmPin::With { peer, .. }) => !paused && peer == person,
+        Some(DmPin::Blocked) => false,
+        None => true,
+    }
+}
+
 fn dm_allows(
     dms: &HashMap<[u8; 32], DmPin>,
     me: &PersonId,
@@ -1100,6 +1164,36 @@ pub async fn invite_name(server: &Server, link: &InviteLink) -> Result<Option<Ve
 mod tests {
     use super::*;
     use crate::identity::DeviceIdentity;
+
+    #[test]
+    fn recovery_waits_once_for_a_missing_key_then_starts_fresh() {
+        assert_eq!(backoff(1), Duration::from_secs(15));
+        assert_eq!(backoff(2), Duration::from_secs(30));
+        assert_eq!(backoff(99), Duration::from_secs(960));
+        assert_eq!(recovery(true, 1), Recovery::Link);
+        assert_eq!(recovery(true, 5), Recovery::Link);
+        // Two new devices that never got the old key: wait one round, then re-key
+        // without a link rather than never.
+        assert_eq!(recovery(false, 1), Recovery::Wait);
+        assert_eq!(recovery(false, 2), Recovery::Fresh);
+    }
+
+    #[test]
+    fn a_dm_live_file_goes_only_to_the_pinned_peer_and_not_while_paused() {
+        let (me, peer, other) = ([1; 32], [2; 32], [3; 32]);
+        let dms = HashMap::from([
+            ([9; 32], DmPin::With { peer, anchor: None }),
+            ([7; 32], DmPin::Blocked),
+        ]);
+        assert!(dm_peer_is(&dms, false, &[9; 32], &peer));
+        assert!(!dm_peer_is(&dms, false, &[9; 32], &me));
+        assert!(!dm_peer_is(&dms, false, &[9; 32], &other));
+        // Pins couldn't be saved: outstanding offers stop too.
+        assert!(!dm_peer_is(&dms, true, &[9; 32], &peer));
+        assert!(!dm_peer_is(&dms, false, &[7; 32], &peer));
+        // An ordinary channel is anyone's.
+        assert!(dm_peer_is(&dms, true, &[8; 32], &other));
+    }
 
     #[test]
     fn two_devices_with_conflicting_pins_dont_leak_the_key() {

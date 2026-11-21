@@ -338,19 +338,33 @@ the app trusts a DM epoch only through a chain of keys:
   an older key under a new number doesn't match.
 - **Re-key.** When the current epoch doesn't chain to the anchor, the app looks
   for the link in recent history (four pages). If there is none, it sends a
-  link and starts the next epoch itself, wrapped only to the pair.
+  link and starts the next epoch itself, wrapped only to the pair. A device
+  that never got the current key (for example, both people on new devices)
+  waits one round for it, then starts the next epoch without a link. Only that
+  device trusts the unlinked epoch at first, because it made the key after
+  pinning. The other person can't trust it, so their app re-keys from it with a
+  link, which the first device then trusts. Nobody else's unlinked epoch is
+  ever trusted.
 
 The app sends a message, friend message or live-file offer to a DM copy only
 when its current epoch is trusted this way and its key came from one of the
 two people. In a DM it takes a live-file acceptance only from a certified
 device of the pinned other person and accepts an offer only from one of the
 two. A failed recovery (no link found, a re-key refused or raced) is tried
-again later, waiting longer each time, rather than once per session. If the
-pins can't be saved, the app pauses that server's DMs. If
+again 15 seconds later, then waiting twice as long each time (up to 16
+minutes). The connection syncs at that time even without a server event, and
+a message waiting to go out tries again at once. If the
+pins can't be saved, the app pauses that server's DMs, live-file acceptances
+included. If
 the saved pins can't be read, the app blocks that server's DMs, including new
 ones, instead of pinning them again from the server's catalog. Either person
 can start a DM epoch at any time, so either can disrupt delivery by re-keying
 over and over; that is accepted.
+
+Device revocation still follows the server's device list (issue #109). A
+dishonest server can keep a revoked device eligible for future DM keys until
+#109 is fixed. This predates DMs over several servers and applies to every
+channel.
 
 This relies on both people's apps. An older app still wraps the key, also a
 re-keyed one, to any device the server names, so a dishonest server can still

@@ -799,6 +799,14 @@ async fn serve(
     loop {
         // Refresh ten minutes before the 12-hour token expires.
         let refresh = Duration::from_secs((client.expires_at() - 600 - now()).max(0) as u64);
+        // A DM epoch that isn't trusted yet is tried again then, also without an event.
+        let rekey = client.next_rekey();
+        let rekey_due = async move {
+            match rekey {
+                Some(at) => tokio::time::sleep_until(at.into()).await,
+                None => std::future::pending().await,
+            }
+        };
         tokio::select! {
             event = client.next_update() => match event {
                 Ok(Some(Pushed::Presence(PresenceEvent::PresenceChanged { person_id, status }))) => {
@@ -830,6 +838,12 @@ async fn serve(
                         _ => t!("admin.failed"),
                     };
                     ctx.send(Update::Failed(text.into()));
+                }
+            }
+            () = rekey_due => {
+                match client.sync().await {
+                    Ok(()) => save_pins(ctx, url, client, state),
+                    Err(error) => tracing::warn!(error = %format_args!("{error:#}"), "DM key recovery failed"),
                 }
             }
             () = tokio::time::sleep(refresh) => {
@@ -1090,6 +1104,7 @@ async fn on_command(
             if let Some(peer) = draft.peer
                 && client.current_key(scope).is_ok()
                 && !client.dm_private(&channel, &peer)
+                && !recovered(ctx, url, client, state, &channel, &peer).await
             {
                 tracing::warn!("not sending a DM where someone else could read it");
                 let server = url.host_str().unwrap_or(t!("net.a_server"));
@@ -1304,6 +1319,25 @@ async fn dm_channel(
     let scope = client.create_dm(&peer).await?;
     directory(ctx, url, client, state).await?;
     Ok(scope.id)
+}
+
+/// A DM message waits on an epoch that isn't trusted yet: try to recover it now
+/// instead of at the next scheduled attempt. Whether the DM is private afterwards.
+async fn recovered(
+    ctx: &Ctx,
+    url: &Url,
+    client: &mut KeyClient<'_>,
+    state: &mut State,
+    channel: &Id,
+    peer: &Id,
+) -> bool {
+    client.rekey_now();
+    if let Err(error) = client.sync().await {
+        tracing::warn!(error = %format_args!("{error:#}"), "DM key recovery failed");
+        return false;
+    }
+    save_pins(ctx, url, client, state);
+    client.dm_private(channel, peer)
 }
 
 /// `dm_pins/<server ID>.json`: each DM channel on this server and who it is with, so
