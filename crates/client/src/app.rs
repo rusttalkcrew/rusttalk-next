@@ -170,6 +170,7 @@ impl<'a> App<'a> {
                     // Stop the network first, so nothing writes these files again.
                     drop(home);
                     forget_profile(&self.data);
+                    crate::previews::forget(&self.data);
                     crate::files::forget_previews(&self.ctx);
                     tracing::info!("signed out of this device");
                     Screen::Welcome
@@ -188,7 +189,7 @@ impl<'a> App<'a> {
 
 /// Remove what this profile remembers about the person who signed out: joined servers
 /// and their sync state, server pins, recent emoji, where files were saved or opened,
-/// read marks, notification choices and pokes.
+/// read marks, notification choices and pokes. Link previews go separately.
 /// Device settings stay.
 fn forget_profile(data: &std::path::Path) {
     crate::files::clear_opened();

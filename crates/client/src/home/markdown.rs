@@ -280,6 +280,17 @@ impl Document {
         &self.invites
     }
 
+    /// Web links, in order, also repeated ones.
+    pub(super) fn links(&self) -> impl Iterator<Item = &str> {
+        self.blocks
+            .iter()
+            .flat_map(|block| match block {
+                Block::Line(spans) => spans.as_slice(),
+                _ => &[],
+            })
+            .filter_map(|s| s.style.link.as_deref())
+    }
+
     pub(super) fn prose(&self) -> impl Iterator<Item = &str> {
         self.blocks
             .iter()

@@ -25,6 +25,7 @@ mod notify;
 mod official;
 mod paste;
 mod pokes;
+mod previews;
 mod reorder;
 mod screen;
 mod server;
