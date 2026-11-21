@@ -156,6 +156,8 @@ pub struct Settings {
     /// Make previews of other links when sending them (see `link_cards`): `None` asks
     /// each time until the person picks Always (`true`) or Never (`false`).
     pub create_link_previews: Option<bool>,
+    /// Global shortcuts (see `hotkeys`). This device only: keyboards and desktops differ.
+    pub hotkeys: crate::hotkeys::Bindings,
 }
 
 impl Settings {
@@ -222,6 +224,7 @@ impl Default for Settings {
             emoji_on_hover: false,
             link_previews: Default::default(),
             create_link_previews: None,
+            hotkeys: Default::default(),
         }
     }
 }
@@ -285,6 +288,9 @@ struct Shared {
     testing: AtomicBool,
     /// Push-to-talk key held while the window has focus.
     key_down: AtomicBool,
+    /// The global push-to-talk shortcut is held, set straight from its listener so it
+    /// doesn't wait for a frame while the window is hidden.
+    hotkey_down: AtomicBool,
     muted: AtomicBool,
     deafened: AtomicBool,
     /// Last processed microphone frame, in dBFS (f32 bits).
@@ -391,6 +397,7 @@ impl Audio {
             voice: AtomicBool::new(false),
             testing: AtomicBool::new(false),
             key_down: AtomicBool::new(false),
+            hotkey_down: AtomicBool::new(false),
             muted: AtomicBool::new(false),
             deafened: AtomicBool::new(false),
             level: AtomicU32::new((-100f32).to_bits()),
@@ -561,6 +568,10 @@ impl Audio {
 
     pub fn set_key_down(&self, down: bool) {
         self.shared().key_down.store(down, Relaxed);
+    }
+
+    pub fn set_hotkey_down(&self, down: bool) {
+        self.shared().hotkey_down.store(down, Relaxed);
     }
 
     pub fn muted(&self) -> bool {
@@ -1494,7 +1505,7 @@ fn process(shared: &Shared, frames: &Receiver<Mic>) {
             let open = !shared.muted.load(Relaxed)
                 && !shared.deafened.load(Relaxed)
                 && if push_to_talk {
-                    shared.key_down.load(Relaxed)
+                    shared.key_down.load(Relaxed) || shared.hotkey_down.load(Relaxed)
                 } else {
                     voiced
                 };

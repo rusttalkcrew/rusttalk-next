@@ -17,6 +17,7 @@ mod emoji;
 mod files;
 mod friends;
 mod home;
+mod hotkeys;
 mod keystore;
 mod link_cards;
 mod log_file;
@@ -70,6 +71,20 @@ fn main() -> ExitCode {
     if command.as_deref() == Some("--version".as_ref()) {
         println!("{}", env!("CARGO_PKG_VERSION"));
         return ExitCode::SUCCESS;
+    }
+    // `rusttalk --toggle-mute` and friends: hand the shortcut to the running app.
+    #[cfg(target_os = "linux")]
+    if let Some(message) = (command.as_ref().and_then(|c| c.to_str()))
+        .and_then(|c| c.strip_prefix("--"))
+        .filter(|message| hotkeys::command(message).is_some())
+    {
+        return match hotkeys::send(message) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("{error:#}");
+                ExitCode::FAILURE
+            }
+        };
     }
     let check_update =
         cfg!(target_os = "linux") && command.as_deref() == Some("--check-update-now".as_ref());

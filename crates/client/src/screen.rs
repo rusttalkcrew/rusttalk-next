@@ -12,8 +12,9 @@ use livekit::webrtc::{
     prelude::RtcVideoTrack, video_frame::VideoBuffer, video_stream::native::NativeVideoStream,
 };
 pub use rusttalk_core::screen::{
-    Cancelled, Preview, ScreenCapture as Capture, ScreenOptions as Options, ScreenSource as Target,
-    ScreenSourceKind as Kind, list_sources as targets, start, start_into,
+    Cancelled, NoAccess, Preview, ScreenCapture as Capture, ScreenOptions as Options,
+    ScreenSource as Target, ScreenSourceKind as Kind, focused_window, list_sources as targets,
+    start, start_into,
 };
 use rusttalk_core::screen::{frame_bytes, frame_to_rgba_into};
 

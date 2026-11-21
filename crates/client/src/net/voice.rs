@@ -1357,7 +1357,9 @@ pub(super) fn pick_screen(
     // The system picker waits for the person; keep the server loop running meanwhile.
     live.starting = Some(tokio::spawn(async move {
         // shortcut: always opens a fresh picker; keep the portal's restore token
-        // if people ask to skip it when sharing the same screen again.
+        // if people ask to skip it when sharing the same screen again. The
+        // "share the window I'm using" shortcut relies on the picker asking: with
+        // a token it would share the last pick without a word.
         let capture = screen::start(target, options, &mut None, preview).await?;
         Ok((capture, options))
     }));
@@ -1373,6 +1375,7 @@ fn change_screen(ctx: &Ctx, live: &mut Live, target: screen::Target, remote_cont
     let (into, mut options) = (capture.source.clone(), *options);
     options.remote_control = remote_control;
     let preview = ctx.video.preview.clone();
+    // No restore token, so the shortcut's picker always asks (see `pick_screen`).
     let picker = tokio::spawn(async move {
         screen::start_into(target, options, &mut None, Some(into), preview).await
     });

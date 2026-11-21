@@ -135,12 +135,10 @@ fn sound_buttons(ui: &mut Ui, home: &Home) {
     let deafened = audio.deafened();
     let muted = audio.muted() || deafened;
     let look = |off: bool| if off { Look::Struck } else { Look::Plain };
-    let ears = ui::icon_button(ui, "🎧", deafen_tip(deafened), look(deafened), BUTTON_SIZE);
-    if ears.clicked() {
-        audio.set_deafened(!deafened);
+    if ui::icon_button(ui, "🎧", deafen_tip(deafened), look(deafened), BUTTON_SIZE).clicked() {
+        toggle_deafen(home);
     }
-    // A moderator's mute holds until they lift it; the person can't unmute themselves.
-    let server_muted = call_server(home).is_some_and(|server| server.voice_muted(&server.dir.me));
+    let server_muted = server_muted(home);
     let mic = ui
         .add_enabled_ui(!server_muted, |ui| {
             let off = muted || server_muted;
@@ -149,14 +147,37 @@ fn sound_buttons(ui: &mut Ui, home: &Home) {
         .inner
         .on_disabled_hover_text(t!("call.server_muted"));
     if mic.clicked() {
-        audio.set_muted(!muted);
-        if muted {
-            audio.set_deafened(false);
-        }
+        toggle_mute(home);
     }
-    if (ears.clicked() || mic.clicked())
-        && let Some(server) = call_server(home)
-    {
+}
+
+/// A moderator's mute holds until they lift it; the person can't unmute themselves.
+pub fn server_muted(home: &Home) -> bool {
+    call_server(home).is_some_and(|server| server.voice_muted(&server.dir.me))
+}
+
+/// The mic button, also for the global shortcut. Unmuting also undeafens.
+pub fn toggle_mute(home: &Home) {
+    if server_muted(home) {
+        return;
+    }
+    let audio = &home.voice.audio;
+    let muted = audio.muted() || audio.deafened();
+    audio.set_muted(!muted);
+    if muted {
+        audio.set_deafened(false);
+    }
+    sync_voice_status(home);
+}
+
+pub fn toggle_deafen(home: &Home) {
+    let audio = &home.voice.audio;
+    audio.set_deafened(!audio.deafened());
+    sync_voice_status(home);
+}
+
+fn sync_voice_status(home: &Home) {
+    if let Some(server) = call_server(home) {
         server.send(Command::SyncVoiceStatus);
     }
 }

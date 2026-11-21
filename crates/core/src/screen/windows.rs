@@ -47,6 +47,30 @@ pub fn list_sources() -> Result<Vec<ScreenSource>> {
     Ok(sources)
 }
 
+pub fn focused_window() -> Result<Option<ScreenSource>> {
+    let own = std::process::id();
+    let other = |window: &Window| {
+        window.is_valid()
+            && window.process_id().is_ok_and(|id| id != own)
+            && window.title().is_ok_and(|title| !title.trim().is_empty())
+    };
+    let window = match Window::foreground() {
+        // Pressed while RustTalk is in front: the window under it. EnumWindows goes
+        // front to back.
+        Ok(window) if window.process_id().is_ok_and(|id| id == own) => {
+            Window::enumerate()?.into_iter().find(|w| other(w))
+        }
+        Ok(window) if other(&window) => Some(window),
+        // The lock screen, a UAC prompt or the taskbar: never guess another window.
+        _ => None,
+    };
+    Ok(window.map(|window| ScreenSource {
+        name: window.title().unwrap_or_default(),
+        kind: ScreenSourceKind::Window,
+        target: Target::Window(window),
+    }))
+}
+
 struct Handler {
     output: watch::Sender<Option<BgraFrame>>,
     padding: Vec<u8>,

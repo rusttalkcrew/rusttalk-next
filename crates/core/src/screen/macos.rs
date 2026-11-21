@@ -22,8 +22,10 @@ use objc2::{
     rc::Retained,
     runtime::{NSObject, NSObjectProtocol, ProtocolObject},
 };
+use objc2_core_foundation::{CFArray, CFDictionary, CFNumber, CFRetained, CFString, CFType};
 use objc2_core_graphics::{
     CGDisplayIsBuiltin, CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess,
+    CGWindowListCopyWindowInfo, CGWindowListOption, kCGNullWindowID, kCGWindowNumber,
 };
 use objc2_core_media::{CMSampleBuffer, CMTime};
 use objc2_core_video::{
@@ -48,16 +50,13 @@ pub enum Target {
     Window(u32),
 }
 
-const DENIED: &str = "screen recording is off for RustTalk; allow it in System Settings, \
-                      Privacy & Security, Screen & System Audio Recording, then reopen RustTalk";
-
 /// macOS asks once; after allowing, the app must restart before capture works.
 fn ensure_access() -> Result<()> {
     if CGPreflightScreenCaptureAccess() {
         return Ok(());
     }
     CGRequestScreenCaptureAccess();
-    bail!(DENIED)
+    Err(super::NoAccess.into())
 }
 
 /// What can be captured now, from ScreenCaptureKit's completion handler.
@@ -139,6 +138,32 @@ pub fn list_sources() -> Result<Vec<ScreenSource>> {
         });
     }
     Ok(sources)
+}
+
+/// The frontmost window that a pick could also share. CGWindowList gives on-screen
+/// windows front to back; `list_sources` already leaves out our own and non-app windows.
+pub fn focused_window() -> Result<Option<ScreenSource>> {
+    let sources = list_sources()?;
+    let options =
+        CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements;
+    let Some(list) = CGWindowListCopyWindowInfo(options, kCGNullWindowID) else {
+        return Ok(None);
+    };
+    // SAFETY: the list holds one dictionary with string keys per window.
+    let list =
+        unsafe { CFRetained::cast_unchecked::<CFArray<CFDictionary<CFString, CFType>>>(list) };
+    for info in &*list {
+        let id = unsafe { info.get(kCGWindowNumber) }
+            .and_then(|value| value.downcast::<CFNumber>().ok())
+            .and_then(|number| number.as_i64());
+        if let Some(source) = id.and_then(|id| {
+            let target = Target::Window(u32::try_from(id).ok()?);
+            sources.iter().find(|source| source.target == target)
+        }) {
+            return Ok(Some(source.clone()));
+        }
+    }
+    Ok(None)
 }
 
 struct Ivars {

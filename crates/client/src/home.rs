@@ -81,7 +81,7 @@ mod markdown;
 pub mod mentions;
 pub mod person;
 mod pokes;
-mod user_bar;
+pub(crate) mod user_bar;
 #[cfg(test)]
 mod voice_rows;
 
@@ -110,6 +110,7 @@ pub struct Home {
     pub toast: Option<(String, f64)>,
     pub settings: Option<Tab>,
     pub voice: Voice,
+    pub hotkeys: crate::hotkeys::Hotkeys,
     pub files: Files,
     /// Link previews fetched on this device.
     pub previews: Previews,
@@ -247,6 +248,7 @@ pub enum Tab {
     Privacy,
     Devices,
     Notifications,
+    Shortcuts,
     Updates,
     About,
 }
@@ -312,6 +314,7 @@ impl Home {
             dialog: None,
             toast: None,
             settings: None,
+            hotkeys: crate::hotkeys::Hotkeys::new(ctx, audio.clone()),
             voice: Voice::new(audio, video, runtime),
             files: Files::new(&data_dir),
             previews: Previews::new(ctx, &data_dir),
@@ -2940,7 +2943,7 @@ fn find(ui: &mut Ui, home: &mut Home) {
     });
 }
 
-fn new_server(
+pub(crate) fn new_server(
     known: KnownServer,
     label: &str,
     commands: tokio::sync::mpsc::UnboundedSender<Command>,
