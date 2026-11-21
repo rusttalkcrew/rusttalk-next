@@ -5,12 +5,35 @@ The default request body limit is 4096 bytes. Binary fields use canonical unpadd
 base64url. Times are Unix seconds. Auth and membership responses carry
 `Cache-Control: no-store`.
 
+## Release compatibility
+
+The public `GET /v1/server-info` response reports the server's release
+`version` and integer API `protocol`. The app currently supports protocol 1.
+If the endpoint returns 404 or the protocol field is missing, the app assumes
+protocol 1. The app reads this information over the verified connection.
+Protocol metadata never changes TLS or server pin checks, device authentication,
+or encryption.
+
+Keep adjacent releases working together in both directions. Add optional
+fields and endpoints without changing the protocol number. If a feature's
+endpoint is unavailable, the app should disable that feature and explain
+that the server needs an update. For example, a server without channel
+ordering leaves the existing order in place and the app disables the move
+controls after the first unsupported response.
+
+Increase `protocol` only for a breaking API change. Stage such changes over
+multiple releases so the new server still serves the previous app's API and
+the new app still understands the previous server's API. Ship client support
+before a server advertises a protocol outside the previous app's range.
+Below the supported range the app warns that the server needs updating and
+tries to connect. Above it the app directs people to Settings → Updates.
+
 ## Sign-in
 
 | Method and path | Request | Success |
 | --- | --- | --- |
 | GET `/v1/health` | Empty | 200, `ok` |
-| GET `/v1/server-info` | Empty | 200, `{open_joining}` |
+| GET `/v1/server-info` | Empty | 200, `{open_joining, version, protocol}` |
 | GET `/v1/auth/challenge` | Empty | 200, `{challenge, server_id, signature}` |
 | POST `/v1/auth/sign-in` | `{person_id, certificate, challenge, signature, invite?}` | 200, `{token, expires_at}` |
 | POST `/v1/auth/join` | `{person_id, certificate, challenge, signature}` | 200, `{token, expires_at}` |
@@ -54,7 +77,7 @@ At the cap, invitations and existing member sign-ins still work. Successful
 open admissions are limited to five per IPv4 address or IPv6 /64 and 25
 across the server in a rolling hour. An open join receives the current
 default role, and online members wrap the space and channel keys for the
-new device. The public response contains only the admission flag.
+new device.
 
 ## Invite links and server pins
 
