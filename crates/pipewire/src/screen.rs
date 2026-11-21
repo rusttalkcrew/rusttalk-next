@@ -116,9 +116,13 @@ async fn select(fps: u32, cursor: CursorMode, token: Option<String>) -> Result<(
     } else {
         "Shared screen"
     };
+    // Hyprland publishes the selected output's connector as the monitor mapping ID.
+    let monitor = (stream.source_type() == Some(SourceType::MONITOR))
+        .then(|| stream.mapping_id())
+        .flatten();
     // Save a replacement even if opening the PipeWire stream subsequently fails.
     report(&serde_json::json!({
-        "name": name, "restore_token": selection.restore_token(),
+        "name": name, "restore_token": selection.restore_token(), "monitor": monitor,
     }))?;
     let fd = portal
         .open_pipe_wire_remote(&session, Default::default())

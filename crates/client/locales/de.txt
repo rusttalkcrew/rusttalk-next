@@ -637,6 +637,8 @@ call.stop_watching = Nicht mehr ansehen
 call.exit_full_screen = Vollbild beenden
 
 # crates/client/src/call/remote.rs
+remote.share_opt_in = Steuerungsanfragen erlauben
+remote.share_warning = Nur für Monitore. Wer deine Erlaubnis hat, kann Apps auf dem geteilten Bildschirm bedienen. Nur RustTalk fragt nach deiner Erlaubnis.
 remote.allow_help = Die Person kann in dem, was du teilst, deine Maus und Tastatur benutzen. Du kannst das jederzeit zurücknehmen.
 remote.they = Die Person
 remote.no_answer = {name} hat nicht geantwortet.

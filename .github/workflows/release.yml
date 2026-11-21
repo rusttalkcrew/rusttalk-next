@@ -53,7 +53,7 @@ jobs:
       # The client links LiveKit's WebRTC (clang 21+) and opens audio devices (ALSA).
       - run: |
           wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 21
-          sudo apt-get install -y libasound2-dev libglib2.0-dev libpipewire-0.3-dev libclang-dev
+          sudo apt-get install -y libasound2-dev libglib2.0-dev libpipewire-0.3-dev libclang-dev libxkbcommon-dev
           echo "CXX=clang++-21" >> "$GITHUB_ENV"
       - run: cargo build --release --locked -p rusttalk-client -p rusttalk-pipewire
       - name: AppImage

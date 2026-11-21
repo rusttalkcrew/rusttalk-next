@@ -29,9 +29,17 @@ mod platform;
 #[path = "screen/windows.rs"]
 mod platform;
 
-/// Whether this system can put a remote controller's input into a share. Linux needs
-/// the desktop portal's RemoteDesktop session, which is not wired up yet.
-pub const REMOTE_CONTROL: bool = cfg!(windows);
+#[cfg(target_os = "linux")]
+#[path = "screen/hyprland.rs"]
+mod hyprland;
+
+/// Whether to offer the per-share Linux opt-in.
+pub fn linux_remote_control() -> bool {
+    #[cfg(target_os = "linux")]
+    return hyprland::socket().is_some_and(|path| path.exists());
+    #[cfg(not(target_os = "linux"))]
+    false
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ScreenSourceKind {
@@ -54,6 +62,7 @@ pub struct ScreenOptions {
     pub max_height: Option<u32>,
     pub fps: u32,
     pub cursor: bool,
+    pub remote_control: bool,
 }
 
 impl Default for ScreenOptions {
@@ -62,6 +71,7 @@ impl Default for ScreenOptions {
             max_height: Some(1080),
             fps: 30,
             cursor: true,
+            remote_control: false,
         }
     }
 }
@@ -270,6 +280,8 @@ pub struct ScreenCapture {
     task: JoinHandle<()>,
     #[cfg(windows)]
     target: input::Target,
+    #[cfg(target_os = "linux")]
+    control: Option<hyprland::Control>,
     /// The published size, when frames are letterboxed into an earlier share's track.
     canvas: Option<(u32, u32)>,
     /// The newest captured frame's size, packed as width << 32 | height.
@@ -281,27 +293,26 @@ impl ScreenCapture {
         self.task.is_finished()
     }
 
-    /// Puts a remote controller's input into this share. It only acts where
-    /// `REMOTE_CONTROL` is true.
-    pub fn remote(&self) -> Remote {
-        Remote {
-            #[cfg(windows)]
-            target: self.target,
-            canvas: self.canvas,
-            size: self.size.clone(),
-        }
+    pub fn supports_control(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        return !self.is_finished()
+            && self
+                .control
+                .as_ref()
+                .is_some_and(hyprland::Control::available);
+        #[cfg(not(target_os = "linux"))]
+        cfg!(windows)
     }
-}
 
-/// Puts a remote controller's input into what is shared, and nowhere else.
-pub struct Remote {
-    #[cfg(windows)]
-    target: input::Target,
-    canvas: Option<(u32, u32)>,
-    size: Arc<AtomicU64>,
-}
+    pub fn set_control_active(&self, active: bool) {
+        #[cfg(target_os = "linux")]
+        if let Some(control) = &self.control {
+            control.set_active(active);
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = active;
+    }
 
-impl Remote {
     /// Where a point on the published picture (0 to 1 each way) is on the captured
     /// screen or window; `None` on the black bars of a letterboxed share.
     pub fn point(&self, x: f32, y: f32) -> Option<(f32, f32)> {
@@ -315,8 +326,17 @@ impl Remote {
         ensure!(event.valid(), "invalid remote input");
         #[cfg(windows)]
         return input::inject(self.target, event, |x, y| self.point(x, y));
-        #[cfg(not(windows))]
-        anyhow::bail!("remote control is not supported on this system yet")
+        #[cfg(target_os = "linux")]
+        {
+            ensure!(!self.is_finished(), "screen capture ended");
+            return self
+                .control
+                .as_ref()
+                .context("share does not support control")?
+                .inject(event, |x, y| self.point(x, y));
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
+        anyhow::bail!("remote control is unsupported")
     }
 }
 
@@ -373,7 +393,11 @@ pub async fn start_into(
         options.validate()?;
         #[cfg(windows)]
         let target = input::Target::from(source.target);
+        #[cfg(windows)]
         let (name, mut frames, backend) = platform::open(source, options, restore_token).await?;
+        #[cfg(target_os = "linux")]
+        let (name, mut frames, backend, control) =
+            platform::open(source, options, restore_token).await?;
         timeout(Duration::from_secs(8), frames.changed())
             .await
             .context("timed out waiting for the first screen frame")?
@@ -445,6 +469,8 @@ pub async fn start_into(
             task,
             #[cfg(windows)]
             target,
+            #[cfg(target_os = "linux")]
+            control,
             canvas,
             size,
         })

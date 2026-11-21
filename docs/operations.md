@@ -445,7 +445,7 @@ was started from that file. Extracted AppImages and
 the AppImage atomically and RustTalk restarts from it by itself. Any failure
 shows a short error and the current version keeps running.
 
-The AppImage uses the host's desktop stack, ALSA and PipeWire libraries and
+The AppImage uses the host's desktop stack, ALSA, PipeWire and libxkbcommon libraries and
 is built on Ubuntu 24.04 (glibc 2.39). It packs the
 [AppImage runtime](https://github.com/AppImage/type2-runtime) pinned by
 SHA-256 in the workflow; `--appimage-license` displays its component notices.

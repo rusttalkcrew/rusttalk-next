@@ -161,10 +161,21 @@ media key and bound to both devices, so LiveKit can't read, forge or
 redirect them, and replayed input is dropped. Nothing about remote control is stored by the API, by
 LiveKit or on either device.
 
-On Linux, RustTalk shares monitor and window video through the ScreenCast
-portal. Remote control is unavailable because the RemoteDesktop portal can
-send clicks, scrolls and keystrokes outside the selected source. RustTalk
-requests only screen capture permission on Linux.
+On Linux, RustTalk shares video through the ScreenCast portal. Hyprland
+monitor shares can opt into control requests for that share, and the sharer
+must still approve each request in RustTalk. The portal grants screen
+capture permission only. Hyprland's Wayland virtual input protocols do not
+show a separate permission prompt. The approved viewer can use apps visible
+on the shared monitor. Window shares and other Linux compositors cannot
+grant control.
+
+RustTalk uses local Hyprland IPC to check monitor geometry, pointer position,
+keyboard focus and lock state. It uses Wayland idle notifications to pause
+after local input. RustTalk keeps these checks on the sharer's device and
+does not collect what the sharer types. Pointer or focus changes between the
+check and input delivery can still send input outside the shared area.
+Local and injected activity can also arrive together, and compositor
+shortcuts may affect other outputs.
 
 For live files, only the encrypted offer is retained as a chat message.
 The API sees its normal message metadata plus the live routing notice's

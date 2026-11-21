@@ -47,7 +47,8 @@ On Linux, building the bot or the client requires Clang 21 or later,
 `pkg-config`, and GLib and ALSA development headers. The SDK downloads
 prebuilt WebRTC during the first build. Building `rusttalk-pipewire`
 also needs PipeWire development headers (`libpipewire-0.3-dev` on Debian
-or Ubuntu), and libclang for bindgen. `make client` and `make bot` put the
+or Ubuntu), and libclang for bindgen. The Linux desktop client also needs
+libxkbcommon (`libxkbcommon-dev` on Debian or Ubuntu). `make client` and `make bot` put the
 helper next to the app and bot. Ship it as a sibling binary in Linux packages.
 
 ## Native client
