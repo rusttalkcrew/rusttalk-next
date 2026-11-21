@@ -25,7 +25,7 @@ const BUTTON: Vec2 = Vec2::splat(ui::ICON_BUTTON);
 
 impl Home {
     /// Shared servers that are online, where a friend message can go now.
-    fn reachable(&self, person: &Id) -> Vec<usize> {
+    pub(super) fn reachable(&self, person: &Id) -> Vec<usize> {
         (self.shared(person).into_iter())
             .filter(|index| self.servers[*index].status == Status::Online)
             .collect()
@@ -64,6 +64,7 @@ impl Home {
                 files: Vec::new(),
                 sticker: None,
                 friend: Some((signal, now_ms().max(0) as u64)),
+                poke: false,
             }));
         }
     }

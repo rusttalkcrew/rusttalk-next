@@ -65,6 +65,7 @@ const TOOLBAR_BUTTON: Vec2 = Vec2::new(30.0, 26.0);
 mod friends;
 pub mod layout;
 pub mod mentions;
+mod pokes;
 mod user_bar;
 
 pub struct Home {
@@ -76,6 +77,10 @@ pub struct Home {
     /// Friends, requests and blocks; synced between this person's devices only.
     friends: Friends,
     friends_tab: friends::Tab,
+    /// Pokes received and sent; kept on this device only.
+    pokes: crate::pokes::Pokes,
+    /// The pop-up for the newest poke.
+    popup: Option<pokes::Popup>,
     /// This person's DM messages they deleted, on any device. All of them stay in
     /// `dm_deleted.json` here; the device sync copy holds the newest that fit.
     dm_deleted: dm::Tombstones,
@@ -118,6 +123,8 @@ enum View {
     Find,
     /// A DM, by the other person.
     Direct(Option<Id>),
+    /// Pokes received and sent.
+    Pokes,
     Server(usize),
 }
 
@@ -183,6 +190,8 @@ enum Dialog {
     DeleteDm(Id, Id),
     /// Leave a server, with the reason it didn't work.
     Leave(usize, Option<String>),
+    /// Poke someone, with a short note.
+    Poke(Id, String),
 }
 
 pub(crate) enum ChannelEdit {
@@ -259,6 +268,8 @@ impl Home {
             threads: HashMap::new(),
             friends,
             friends_tab: friends::Tab::default(),
+            pokes: crate::pokes::Pokes::open(data_dir.join("pokes.json")),
+            popup: None,
             dm_deleted,
             dm_deleted_path,
             invite: String::new(),
@@ -526,7 +537,7 @@ impl Home {
                 .collect(),
             // A DM shows its copy on every server.
             View::Direct(Some(peer)) => self.replicas(&peer),
-            View::Direct(None) | View::Join | View::Find => Vec::new(),
+            View::Direct(None) | View::Pokes | View::Join | View::Find => Vec::new(),
         }
     }
 
@@ -554,6 +565,13 @@ impl Home {
         }
         let peer = self.dm_peer(index, &channel);
         let dm = peer.is_some();
+        // Pokes are listed apart from the chat; they too only mean something in a DM.
+        if matches!(msg.body, Body::Poke(_)) {
+            if let Some(peer) = peer {
+                self.poke_arrived(ctx, (index, channel), peer, &msg, true);
+            }
+            return;
+        }
         // Friend messages only mean something in a DM.
         if !dm && matches!(msg.body, Body::Friend(..)) {
             return;
@@ -851,6 +869,10 @@ impl Home {
                 if let Some(peer) = self.dm_peer(index, &channel) {
                     for msg in &items {
                         self.friend_message(peer, msg);
+                        // The newest page holds pokes sent while this device was away.
+                        if !older {
+                            self.poke_arrived(ctx, (index, channel), peer, msg, false);
+                        }
                     }
                     let me = *self.identity.certificate.person_id();
                     let thread = self.threads.entry(peer).or_default();
@@ -1169,7 +1191,8 @@ impl Home {
                 }
             }
             Update::Unsent(address, draft) => {
-                let Some(index) = self.index(&address) else {
+                // A poke's note doesn't belong in the composer, where it would go out as text.
+                let Some(index) = self.index(&address).filter(|_| !draft.poke) else {
                     return;
                 };
                 let me = self.servers[index].dir.me;
@@ -1413,6 +1436,7 @@ pub fn show(ui: &mut Ui, home: &mut Home, updates: &mut crate::update::Updater) 
             View::Join => join(ui, home),
             View::Find => find(ui, home),
             View::Direct(None) => friends::view(ui, home),
+            View::Pokes => pokes::view(ui, home),
             View::Direct(Some(peer)) => dm_pane(ui, home, peer),
             View::Server(index) => {
                 if !show_compatibility(ui, home, index) {
@@ -1465,6 +1489,7 @@ pub fn show(ui: &mut Ui, home: &mut Home, updates: &mut crate::update::Updater) 
         home.layout.save(&home.voice.audio);
     }
     dialogs(ui.ctx(), home);
+    pokes::popup(ui.ctx(), home);
     admin::window(ui.ctx(), home);
     files::viewer(ui.ctx(), &mut home.files);
     call::screen_dialog(ui.ctx(), home);
@@ -1732,6 +1757,7 @@ fn dm_list(ui: &mut Ui, home: &mut Home) {
     if row.clicked() {
         home.view = View::Direct(None);
     }
+    pokes::nav_row(ui, home);
     ui.add_space(ui::SPACE_XS);
     // One row per person, however many servers hold a copy.
     let mut peers: Vec<Id> = Vec::new();
@@ -2214,7 +2240,7 @@ fn member_list(ui: &mut Ui, home: &mut Home, index: usize) {
     });
     let perms = server.dir.perms;
     let mut action = None;
-    let mut befriend = None;
+    let (mut befriend, mut poke) = (None, None);
     let (mut manage, mut moderate) = (None, None);
     ScrollArea::vertical().show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 2.0;
@@ -2239,6 +2265,10 @@ fn member_list(ui: &mut Ui, home: &mut Home, index: usize) {
                 if !me && m.item("💬", t!("home.message")).clicked() {
                     action = Some(Command::OpenDm(member.person));
                 }
+                let blocked = home.friends.relation(&member.person) == Relation::Blocked;
+                if !me && !blocked && m.item("👉", t!("pokes.poke")).clicked() {
+                    poke = Some(member.person);
+                }
                 if m.item("ℹ", t!("common.details")).clicked() {
                     home.dialog = Some(Dialog::Member(index, member.person));
                 }
@@ -2262,6 +2292,9 @@ fn member_list(ui: &mut Ui, home: &mut Home, index: usize) {
     });
     if let Some(command) = action {
         home.servers[index].send(command);
+    }
+    if let Some(person) = poke {
+        home.dialog = Some(Dialog::Poke(person, String::new()));
     }
     if let Some((person, act)) = befriend {
         home.befriend(person, act, ui.input(|input| input.time));
@@ -2951,7 +2984,9 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
         }
         let mut last: Option<&Msg> = None;
         for msg in &chat.messages {
-            if matches!(msg.body, Body::Friend(signal, _) if !friends::shown(signal)) {
+            if matches!(msg.body, Body::Friend(signal, _) if !friends::shown(signal))
+                || matches!(msg.body, Body::Poke(_))
+            {
                 continue;
             }
             let start = !last.is_some_and(|prev| {
@@ -3392,6 +3427,7 @@ fn composer(
             files: Vec::new(),
             sticker: Some(id),
             friend: None,
+            poke: false,
         });
         field.request_focus();
         return (Some(command), attach);
@@ -3446,6 +3482,7 @@ fn composer(
         files,
         sticker: None,
         friend: None,
+        poke: false,
     });
     chat.clear_draft();
     field.request_focus();
@@ -3798,6 +3835,7 @@ fn dialog_title(home: &Home, dialog: &Dialog) -> String {
         Dialog::Member(index, person) => home.servers[*index].member_name(person),
         Dialog::Delete(..) | Dialog::DeleteDm(..) => t!("home.delete_message_title").into(),
         Dialog::Leave(index, _) => t!("home.leave_title", server = home.servers[*index].name()),
+        Dialog::Poke(person, _) => t!("pokes.poke_title", name = home.peer_name(person)),
     }
 }
 
@@ -3822,6 +3860,7 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
     let mut close = false;
     let mut command = None;
     let mut delete_dm = None;
+    let mut poke = None;
     // Message (`None`) or a friend action, from a person's details.
     let mut person_action = None;
     let ((), dismissed) = ui::dialog(ctx, "dialog", &title, |ui| match dialog {
@@ -4088,6 +4127,11 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
                 close |= ui::secondary(ui, t!("common.cancel")).clicked();
             });
         }
+        Dialog::Poke(person, note) => {
+            if let Some(text) = pokes::dialog(ui, note, &mut close) {
+                poke = Some((*person, text));
+            }
+        }
         Dialog::Leave(index, error) => {
             ui.label(t!("home.leave_help"));
             error_text(ui, error.as_deref());
@@ -4110,6 +4154,10 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
         close = true;
     }
     let now = ctx.input(|input| input.time);
+    if let Some((person, text)) = poke {
+        home.poke(person, text, now);
+        close = true;
+    }
     match person_action {
         Some((person, Some(act))) => home.befriend(person, act, now),
         Some((person, None)) => {

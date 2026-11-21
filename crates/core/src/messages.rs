@@ -41,6 +41,8 @@ pub use live::{LIVE_CHUNK_SIZE, LiveFileAcceptance, MAX_LIVE_FILE_SIZE};
 
 /// Maximum message length in Unicode scalar values.
 pub const MAX_TEXT_CHARS: usize = 2_000;
+/// Maximum length of a poke's note in Unicode scalar values.
+pub const MAX_POKE_CHARS: usize = 100;
 /// Maximum signed binary envelope length.
 pub const MAX_MESSAGE_BYTES: usize = HEADER + MAX_PLAINTEXT + TAG + SIGNATURE;
 

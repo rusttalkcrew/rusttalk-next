@@ -18,6 +18,7 @@ const REPLY: &str = "W70 Iolite DM reply on both servers";
 const DOWN: &str = "W70 Spinel DM while server B is down";
 const BACK: &str = "W70 Zircon DM after server B came back";
 const LEFT: &str = "W70 Topaz DM after leaving server B";
+const POKE: &str = "W112 Opal poke";
 
 /// One person's two clients, on server A and server B.
 pub type Pair<'a, 'b, 'c> = (&'a mut KeyClient<'b>, &'a mut KeyClient<'c>);
@@ -221,6 +222,29 @@ pub async fn friends(
         "the friend answer did not arrive"
     );
     println!("W71 two bots became friends over their DM, as ordinary encrypted DM messages");
+    // A poke is a DM message too: one ID on both servers, its note sealed inside.
+    let poke = MessageBody {
+        text: POKE.into(),
+        poke: true,
+        ..Default::default()
+    };
+    let id = *keys::random_key()?;
+    owner.0.post_message(&dms[0].id, id, &poke).await?;
+    owner.1.post_message(&dms[1].id, id, &poke).await?;
+    newest_poke(peer.0, dms[0], id).await?;
+    newest_poke(peer.1, dms[1], id).await?;
+    println!("W112 a poke arrived on both servers as an encrypted DM message");
+    Ok(())
+}
+
+/// The newest message in a DM is this poke, with its note.
+async fn newest_poke(client: &mut KeyClient<'_>, dm: Scope, id: [u8; 32]) -> Result<()> {
+    let page = client.message_page(&dm.id, None, 1).await?;
+    let body = client.open_message(&dm.id, &page[0]).await?;
+    ensure!(
+        page[0].id == id && body.poke && body.text == POKE,
+        "the poke did not arrive as one on both servers"
+    );
     Ok(())
 }
 
@@ -267,7 +291,7 @@ pub async fn after_leaving(
         let raw = compose_bytes(project, &["exec", "-T", "api", "sh", "-ec", dump])?;
         let logs = compose_bytes(project, &["logs", "--no-color"])?;
         for bytes in [raw, logs] {
-            for text in [BOTH, REPLY, DOWN, BACK, LEFT] {
+            for text in [BOTH, REPLY, DOWN, BACK, LEFT, POKE] {
                 let encoded = encode(text.as_bytes());
                 for needle in [text.as_bytes(), encoded.as_bytes()] {
                     ensure!(

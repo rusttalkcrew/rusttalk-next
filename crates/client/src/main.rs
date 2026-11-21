@@ -23,6 +23,7 @@ mod mic_check;
 mod net;
 mod notify;
 mod official;
+mod pokes;
 mod reorder;
 mod screen;
 mod server;
