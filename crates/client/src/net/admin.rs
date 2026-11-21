@@ -11,7 +11,8 @@ use serde_json::{Value, json};
 use url::Url;
 
 use super::{Ctx, State, Update, directory, get, now};
-use crate::server::Id;
+use crate::server::{Id, role_display};
+use eframe::egui::Color32;
 
 pub enum Admin {
     /// What the window shows, as far as this person may see it.
@@ -28,14 +29,20 @@ pub enum Admin {
     SetRoles(Id, Vec<String>),
     CreateRole {
         name: String,
-        permissions: Vec<&'static str>,
+        rank: i64,
     },
-    RenameRole(String, String),
-    /// A custom role's new name and permissions.
+    /// Any role's colour and grouping, and its new name if `Some`.
+    StyleRole {
+        id: String,
+        name: Option<String>,
+        color: Option<Color32>,
+        separate: bool,
+    },
+    /// A custom role's permissions, and its new rank if `Some`.
     EditRole {
         id: String,
-        name: String,
-        permissions: Vec<&'static str>,
+        permissions: Vec<String>,
+        rank: Option<i64>,
     },
     DeleteRole(String),
     DefaultRole(String),
@@ -116,10 +123,6 @@ pub enum AdminUpdate {
     Done(&'static str),
     Failed(String),
 }
-
-/// Ranks for new roles: above Member (0), below Moderator (50).
-// shortcut: every new role gets the same rank; add role ordering if people ask for it.
-const NEW_ROLE_RANK: i64 = 25;
 
 pub(super) async fn run(
     ctx: &Ctx,
@@ -225,34 +228,26 @@ pub(super) async fn run(
                 .await
                 .map(|()| t!("admin.done_roles"))
         }
-        Admin::CreateRole { name, permissions } => create_role(client, &name, &permissions).await,
-        Admin::RenameRole(id, name) => match name_ct(client, &id, &name) {
-            Ok(name_ct) => {
-                let path = format!("/v1/roles/{id}/name");
-                call(
-                    client,
-                    Method::PUT,
-                    &path,
-                    Some(json!({"name_ct": name_ct})),
-                )
-                .await
-                .map(|()| t!("admin.done_role_renamed"))
-            }
-            Err(text) => Err(text),
-        },
-        Admin::EditRole {
+        Admin::CreateRole { name, rank } => create_role(client, &name, rank).await,
+        Admin::StyleRole {
             id,
             name,
+            color,
+            separate,
+        } => style_role(client, &id, name.as_deref(), color, separate).await,
+        Admin::EditRole {
+            id,
             permissions,
-        } => match name_ct(client, &id, &name) {
-            Ok(name_ct) => {
-                let body = json!({"permissions": permissions, "name_ct": name_ct});
-                call(client, Method::PUT, &format!("/v1/roles/{id}"), Some(body))
-                    .await
-                    .map(|()| t!("admin.done_role_saved"))
+            rank,
+        } => {
+            let mut body = json!({"permissions": permissions});
+            if let Some(rank) = rank {
+                body["rank"] = rank.into();
             }
-            Err(text) => Err(text),
-        },
+            call(client, Method::PUT, &format!("/v1/roles/{id}"), Some(body))
+                .await
+                .map(|()| t!("admin.done_role_saved"))
+        }
         Admin::DeleteRole(id) => call(client, Method::DELETE, &format!("/v1/roles/{id}"), None)
             .await
             .map(|()| t!("admin.done_role_deleted")),
@@ -484,7 +479,7 @@ async fn audit_log(
 async fn create_role(
     client: &KeyClient<'_>,
     name: &str,
-    permissions: &[&str],
+    rank: i64,
 ) -> Result<&'static str, String> {
     let id = random_key().map_err(|error| {
         tracing::error!(%error, "making a role ID failed");
@@ -494,13 +489,44 @@ async fn create_role(
     let id = encode(&id[..16]);
     let body = json!({
         "id": id,
-        "rank": NEW_ROLE_RANK,
-        "permissions": permissions,
+        "rank": rank,
+        "permissions": [],
         "name_ct": name_ct(client, &id, name)?,
     });
     call(client, Method::POST, "/v1/roles", Some(body))
         .await
         .map(|()| t!("admin.done_role_created"))
+}
+
+async fn style_role(
+    client: &KeyClient<'_>,
+    id: &str,
+    name: Option<&str>,
+    color: Option<Color32>,
+    separate: bool,
+) -> Result<&'static str, String> {
+    let display = client
+        .encrypt_metadata(
+            Metadata::RoleDisplay,
+            id.as_bytes(),
+            &role_display(color, separate),
+        )
+        .map_err(|error| {
+            tracing::warn!(error = %format_args!("{error:#}"), "encrypting a role colour failed");
+            t!("admin.key_missing").to_owned()
+        })?;
+    let mut body = json!({"display_ct": display});
+    if let Some(name) = name {
+        body["name_ct"] = name_ct(client, id, name)?.into();
+    }
+    call(
+        client,
+        Method::PUT,
+        &format!("/v1/roles/{id}/name"),
+        Some(body),
+    )
+    .await
+    .map(|()| t!("admin.done_role_saved"))
 }
 
 async fn add_emoji(

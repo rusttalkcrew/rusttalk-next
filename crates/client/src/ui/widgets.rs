@@ -845,6 +845,41 @@ pub fn swatch(ui: &mut Ui, accent: &Accent, selected: bool) -> Response {
         .on_hover_cursor(CursorIcon::PointingHand)
 }
 
+/// A round colour choice; `None` is "no colour", drawn as a struck ring. `label` names
+/// it for screen readers and the tooltip.
+pub fn color_swatch(ui: &mut Ui, color: Option<Color32>, selected: bool, label: &str) -> Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(30.0), Sense::click());
+    let c = colors(ui);
+    let painter = ui.painter();
+    let center = rect.center();
+    let grow = if response.hovered() { 1.0 } else { 0.0 };
+    match color {
+        Some(fill) => {
+            painter.circle_filled(center, 11.0 + grow, fill);
+        }
+        None => {
+            painter.circle_stroke(center, 10.0 + grow, Stroke::new(2.0, c.muted));
+            let d = Vec2::splat(7.0);
+            painter.line_segment([center - d, center + d], Stroke::new(2.0, c.muted));
+        }
+    }
+    if selected {
+        painter.circle_stroke(center, 14.0, Stroke::new(2.0, c.strong));
+    }
+    focus_ring(ui, &response, 15);
+    response.widget_info(|| WidgetInfo::selected(Role::RadioButton, true, selected, label));
+    response
+        .on_hover_text(label)
+        .on_hover_cursor(CursorIcon::PointingHand)
+}
+
+/// A small filled circle in a role's colour, or the muted text colour without one.
+pub fn color_dot(ui: &mut Ui, color: Option<Color32>) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
+    let fill = color.unwrap_or(colors(ui).muted);
+    ui.painter().circle_filled(rect.center(), 5.0, fill);
+}
+
 /// A small filled tag, like "LIVE" or "Open joining".
 pub fn badge(ui: &mut Ui, text: &str, fill: Color32) -> Response {
     let text = RichText::new(text)

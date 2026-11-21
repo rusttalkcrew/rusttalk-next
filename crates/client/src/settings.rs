@@ -3,8 +3,8 @@
 //! one long scrolling page.
 
 use eframe::egui::{
-    self, Align, ComboBox, CornerRadius, Frame, Id as UiId, Layout, Rect, RichText, ScrollArea,
-    Sense, Ui, UiBuilder, Vec2, accesskit::Role,
+    self, Align, ComboBox, CornerRadius, Frame, Id as UiId, Key, Layout, Rect, RichText,
+    ScrollArea, Sense, Ui, UiBuilder, Vec2, accesskit::Role, scroll_area::ScrollBarVisibility,
 };
 use rusttalk_core::identity::fingerprint;
 
@@ -196,6 +196,37 @@ fn child(ui: &mut Ui, rect: Rect, align: Align) -> Ui {
     )
 }
 
+/// How far the arrow keys scroll a page.
+const ARROW_STEP: f32 = 40.0;
+
+/// Scrolling by keyboard, as the scroll bars are hidden: arrows, Page Up and Down, Home
+/// and End, while nothing has focus (a focused field or button keeps its keys).
+fn keyboard_scroll(ui: &mut Ui, view: f32) {
+    if ui.memory(|memory| memory.focused().is_some()) {
+        return;
+    }
+    let page = (view - 2.0 * ARROW_STEP).max(ARROW_STEP);
+    let delta = ui.input(|input| {
+        [
+            (Key::ArrowUp, ARROW_STEP),
+            (Key::ArrowDown, -ARROW_STEP),
+            (Key::PageUp, page),
+            (Key::PageDown, -page),
+            (Key::Home, f32::INFINITY),
+            (Key::End, f32::NEG_INFINITY),
+        ]
+        .into_iter()
+        .filter(|(key, _)| input.key_pressed(*key))
+        .map(|(_, delta)| delta)
+        .sum::<f32>()
+    });
+    if delta != 0.0 && !delta.is_nan() {
+        // Home and End go as far as the content goes.
+        let delta = delta.clamp(-1e6, 1e6);
+        ui.scroll_with_delta(Vec2::new(0.0, delta));
+    }
+}
+
 /// The page in a scroll area of reading width: its title, then its sections. Records
 /// the sections in `nav` and which one is in view.
 fn page_body<R>(
@@ -207,10 +238,14 @@ fn page_body<R>(
     nav: &mut Nav,
     content: impl FnOnce(&mut Ui) -> R,
 ) -> R {
+    let view = ui.available_height();
+    // The scroll bar stays hidden for a cleaner page; wheel, touchpad and keys still scroll.
     let output = ScrollArea::vertical()
         .id_salt(id)
         .auto_shrink([false, false])
+        .scroll_bar_visibility(ScrollBarVisibility::AlwaysHidden)
         .show(ui, |ui| {
+            keyboard_scroll(ui, view);
             ui.set_max_width((ui.available_width() - 12.0).clamp(0.0, CONTENT_MAX_WIDTH));
             // Text fields and cards stand out from the page.
             ui.visuals_mut().extreme_bg_color = fields;
@@ -256,6 +291,7 @@ fn sidebar<T: Copy + PartialEq>(
     ScrollArea::vertical()
         .id_salt((id, "pages"))
         .auto_shrink([false, false])
+        .scroll_bar_visibility(ScrollBarVisibility::AlwaysHidden)
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
             let shown = groups.iter().filter_map(|group| {

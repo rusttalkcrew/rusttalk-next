@@ -1,5 +1,6 @@
 //! Pieces of long, sectioned pages like Settings: section titles the sidebar can
-//! jump to, label-and-control rows, a toggle, info banners and a danger zone.
+//! jump to, label-and-control rows, a toggle, tabs, info banners, an unsaved-changes
+//! bar and a danger zone.
 
 use eframe::egui::{
     self, Align, Color32, CursorIcon, FontId, Frame, Id, Label, Layout, Margin, Rect, Response,
@@ -8,8 +9,8 @@ use eframe::egui::{
 
 use super::{
     CONTROL_HEIGHT, HOVER_SECONDS, ON_FILL, RADIUS, RADIUS_ROW, SPACE_L, SPACE_M, SPACE_S,
-    SPACE_XL, SPACE_XS, STATE_SECONDS, TEXT_BODY, TEXT_SMALL, accent, bold, bold_family, colors,
-    focus_ring, small_close,
+    SPACE_XL, SPACE_XS, STATE_SECONDS, TEXT_BODY, TEXT_SMALL, accent, badge, bold, bold_family,
+    colors, focus_ring, primary, secondary, small_close,
 };
 
 /// Section titles in a page: bigger than pane titles, smaller than page headings.
@@ -113,6 +114,17 @@ pub fn setting_row<R>(
     help: &str,
     control: impl FnOnce(&mut Ui) -> R,
 ) -> R {
+    tagged_row(ui, label, None, help, control)
+}
+
+/// A `setting_row` with a red `tag` after the label, for settings that need care.
+pub fn tagged_row<R>(
+    ui: &mut Ui,
+    label: &str,
+    tag: Option<&str>,
+    help: &str,
+    control: impl FnOnce(&mut Ui) -> R,
+) -> R {
     let id = ui.scope_id().with(("setting row", label));
     let (control_size, text_height): (Vec2, f32) =
         ui.data(|data| data.get_temp(id)).unwrap_or_default();
@@ -131,7 +143,12 @@ pub fn setting_row<R>(
             .layout(Layout::top_down(Align::Min)),
     );
     text.spacing_mut().item_spacing.y = 2.0;
-    text.add(Label::new(bold(label).color(colors(ui).strong)).wrap());
+    text.horizontal_wrapped(|ui| {
+        ui.add(Label::new(bold(label).color(colors(ui).strong)).wrap());
+        if let Some(tag) = tag {
+            badge(ui, tag, colors(ui).danger);
+        }
+    });
     if !help.is_empty() {
         let help = RichText::new(help).size(TEXT_SMALL).color(colors(ui).muted);
         text.add(Label::new(help).wrap());
@@ -217,6 +234,105 @@ pub fn toggle(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
     painter.circle_filled(knob, radius - 3.0, ON_FILL);
     focus_ring(ui, &response, radius as u8);
     response.on_hover_cursor(CursorIcon::PointingHand)
+}
+
+/// Text tabs with the open one underlined in the accent, over a line across the width.
+/// Returns whether the open tab changed.
+pub fn tabs<T: Copy + PartialEq>(ui: &mut Ui, value: &mut T, choices: &[(T, &str)]) -> bool {
+    let mut changed = false;
+    let row = ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = SPACE_L;
+        for (choice, label) in choices {
+            let on = *value == *choice;
+            let c = colors(ui);
+            let font = FontId::new(TEXT_BODY, bold_family());
+            let width = ui
+                .painter()
+                .layout_no_wrap((*label).to_owned(), font.clone(), c.strong)
+                .size()
+                .x;
+            let (rect, response) =
+                ui.allocate_exact_size(Vec2::new(width, CONTROL_HEIGHT), Sense::click());
+            if response.clicked() && !on {
+                *value = *choice;
+                changed = true;
+            }
+            let hover = ui.ctx().animate_bool_with_time(
+                response.id.with("hover"),
+                response.hovered(),
+                HOVER_SECONDS,
+            );
+            let color = if on {
+                c.strong
+            } else {
+                c.muted.lerp_to_gamma(c.strong, hover)
+            };
+            let painter = ui.painter();
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                *label,
+                font,
+                color,
+            );
+            if on {
+                let line = Stroke::new(2.0, accent(ui).text(c.dark));
+                painter.hline(rect.x_range(), rect.bottom() - 1.0, line);
+            }
+            focus_ring(ui, &response, RADIUS_ROW);
+            response.widget_info(|| WidgetInfo::selected(Role::Tab, true, on, *label));
+            response.on_hover_cursor(CursorIcon::PointingHand);
+        }
+    });
+    let y = row.response.rect.bottom();
+    ui.painter().hline(
+        ui.max_rect().x_range(),
+        y,
+        Stroke::new(1.0, colors(ui).border),
+    );
+    ui.add_space(SPACE_M);
+    changed
+}
+
+/// The height `unsaved_bar` takes, to leave room for it under a page.
+pub const UNSAVED_BAR: f32 = 52.0;
+
+/// "Careful, you have unsaved changes" with Reset and Save, floating at the bottom of
+/// what is in view. `nudge` (0 to 1) turns it red, for when someone tried to leave
+/// before saving. Returns whether Reset and Save were clicked.
+pub fn unsaved_bar(ui: &mut Ui, nudge: f32, can_save: bool) -> (bool, bool) {
+    let view = ui.clip_rect();
+    let x = ui.max_rect().x_range();
+    let rect = Rect::from_min_max(
+        egui::pos2(x.min, view.bottom() - UNSAVED_BAR - SPACE_S),
+        egui::pos2(x.max, view.bottom() - SPACE_S),
+    );
+    let mut bar = ui.new_child(
+        UiBuilder::new()
+            .max_rect(rect)
+            .layout(Layout::right_to_left(Align::Center)),
+    );
+    let c = colors(ui);
+    let fill = c.field.lerp_to_gamma(c.danger, nudge);
+    bar.painter().rect_filled(rect, RADIUS, fill);
+    bar.add_space(SPACE_M);
+    let save = bar
+        .add_enabled_ui(can_save, |ui| primary(ui, t!("common.save")))
+        .inner
+        .clicked();
+    let reset = secondary(&mut bar, t!("page.reset")).clicked();
+    bar.add_space(SPACE_S);
+    // Strong text on the plain bar, white once it has turned red.
+    let text = if nudge > 0.4 {
+        super::ON_FILL
+    } else {
+        c.strong
+    };
+    bar.with_layout(Layout::left_to_right(Align::Center), |ui| {
+        ui.add_space(SPACE_L);
+        ui.add(Label::new(bold(t!("page.unsaved")).color(text)).truncate());
+    });
+    (reset, save)
 }
 
 fn dismissed_id(id: &str) -> Id {

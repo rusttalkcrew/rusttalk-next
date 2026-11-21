@@ -346,6 +346,8 @@ pub enum Metadata {
     Avatar,
     EmojiName,
     EmojiImage,
+    /// A role's colour and whether it is listed separately; see the client's role display.
+    RoleDisplay,
 }
 
 impl Metadata {

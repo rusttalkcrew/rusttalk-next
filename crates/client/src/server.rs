@@ -3,7 +3,7 @@
 
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
-use eframe::egui::ColorImage;
+use eframe::egui::{Color32, ColorImage};
 
 use rusttalk_core::{
     client::{
@@ -232,22 +232,6 @@ pub struct Perms {
 
 pub const MENTION_EVERYONE: &str = "mention_everyone";
 
-/// The permissions a role can grant, as the API names them, with their labels.
-pub fn permissions() -> [(&'static str, &'static str); 10] {
-    [
-        ("invite", t!("perm.invite")),
-        ("kick", t!("perm.kick")),
-        ("ban", t!("perm.ban")),
-        ("manage_roles", t!("perm.manage_roles")),
-        ("view_audit_log", t!("perm.view_audit_log")),
-        ("delete_messages", t!("perm.delete_messages")),
-        ("manage_channels", t!("perm.manage_channels")),
-        ("manage_server", t!("perm.manage_server")),
-        (MENTION_EVERYONE, t!("perm.mention_everyone")),
-        ("manage_emoji", t!("perm.manage_emoji")),
-    ]
-}
-
 #[derive(Clone)]
 pub struct Role {
     pub id: String,
@@ -258,6 +242,42 @@ pub struct Role {
     pub permissions: Vec<String>,
     /// Made by people, not one of the four built-in roles.
     pub custom: bool,
+    pub color: Option<Color32>,
+    /// Its members are listed under its own heading in the member list.
+    pub separate: bool,
+}
+
+impl Directory {
+    /// The colour of someone's highest coloured role, for their name.
+    pub fn name_color(&self, roles: &[String]) -> Option<Color32> {
+        (self.roles.iter())
+            .filter(|role| roles.contains(&role.id))
+            .find_map(|role| role.color)
+    }
+
+    /// The highest role listed separately that someone has, if any.
+    pub fn heading_role(&self, roles: &[String]) -> Option<&Role> {
+        (self.roles.iter()).find(|role| role.separate && roles.contains(&role.id))
+    }
+}
+
+/// A role's colour and grouping as sealed for the server. Version 1 is
+/// `[1, flags, r, g, b]`, flag 1 for a colour and 2 for listed separately.
+pub fn role_display(color: Option<Color32>, separate: bool) -> Vec<u8> {
+    let [r, g, b, _] = color.unwrap_or_default().to_array();
+    let flags = u8::from(color.is_some()) | u8::from(separate) << 1;
+    vec![1, flags, r, g, b]
+}
+
+/// Read `role_display`; a newer version than this client knows shows no colour.
+pub fn parse_role_display(bytes: &[u8]) -> (Option<Color32>, bool) {
+    match bytes {
+        [1, flags, r, g, b, ..] => (
+            (flags & 1 != 0).then(|| Color32::from_rgb(*r, *g, *b)),
+            flags & 2 != 0,
+        ),
+        _ => (None, false),
+    }
 }
 
 /// Channels without a category go in a category without an ID or name.

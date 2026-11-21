@@ -7,7 +7,7 @@ use rusttalk_core::{
     auth::{decode, encode},
     keys::Metadata,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use sqlx::{FromRow, SqliteConnection, query, query_as, query_scalar};
 
 use crate::{
@@ -54,6 +54,7 @@ pub struct Role {
     rank: i64,
     permissions: i64,
     name_ct: Option<Vec<u8>>,
+    display_ct: Option<Vec<u8>>,
 }
 
 #[derive(Serialize)]
@@ -63,6 +64,7 @@ pub struct RoleView {
     rank: i64,
     permissions: Vec<Permission>,
     name_ct: Option<String>,
+    display_ct: Option<String>,
 }
 
 impl From<Role> for RoleView {
@@ -76,6 +78,7 @@ impl From<Role> for RoleView {
                 .filter(|flag| role.permissions & *flag as i64 != 0)
                 .collect(),
             name_ct: role.name_ct.map(|bytes| encode(&bytes)),
+            display_ct: role.display_ct.map(|bytes| encode(&bytes)),
         }
     }
 }
@@ -118,7 +121,7 @@ impl Authority {
 
 pub async fn for_person(db: &mut SqliteConnection, person: &[u8]) -> ApiResult<Vec<Role>> {
     Ok(query_as(
-        "SELECT id, kind, rank, permissions, name_ct FROM roles WHERE id IN (
+        "SELECT id, kind, rank, permissions, name_ct, display_ct FROM roles WHERE id IN (
                    SELECT role_id FROM member_roles WHERE person_id = ?
                    UNION ALL SELECT 'owner' FROM server_settings WHERE owner_person_id = ?
                  ) ORDER BY rank DESC, id",
@@ -149,7 +152,7 @@ pub async fn authority(db: &mut SqliteConnection, person: &[u8]) -> ApiResult<Au
 }
 
 pub async fn by_id(db: &mut SqliteConnection, id: &str) -> ApiResult<Role> {
-    query_as("SELECT id, kind, rank, permissions, name_ct FROM roles WHERE id = ?")
+    query_as("SELECT id, kind, rank, permissions, name_ct, display_ct FROM roles WHERE id = ?")
         .bind(id)
         .fetch_optional(db)
         .await?
@@ -168,7 +171,7 @@ pub async fn list(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<
         .fetch_one(&mut *tx)
         .await?;
     let roles = query_as::<_, Role>(
-        "SELECT id, kind, rank, permissions, name_ct FROM roles ORDER BY rank DESC, id",
+        "SELECT id, kind, rank, permissions, name_ct, display_ct FROM roles ORDER BY rank DESC, id",
     )
     .fetch_all(&mut *tx)
     .await?
@@ -266,15 +269,26 @@ pub async fn create(
                 rank,
                 permissions,
                 name_ct,
+                display_ct: None,
             }
             .into(),
         ),
     ))
 }
 
+/// Tells a field sent as `null` (`Some(None)`) from one left out (`None`).
+fn present<'de, D: Deserializer<'de>>(input: D) -> Result<Option<Option<String>>, D::Error> {
+    Option::deserialize(input).map(Some)
+}
+
 #[derive(Deserialize)]
 pub struct RoleName {
-    name_ct: Option<String>,
+    /// `null` goes back to the built-in name; left out keeps the current one.
+    #[serde(default, deserialize_with = "present")]
+    name_ct: Option<Option<String>>,
+    /// Colour and grouping; `null` clears them, left out keeps them.
+    #[serde(default, deserialize_with = "present")]
+    display_ct: Option<Option<String>>,
 }
 
 pub async fn rename(
@@ -291,10 +305,22 @@ pub async fn rename(
     if auth.rank != OWNER_RANK || role.rank != OWNER_RANK {
         auth.can_grant(role.rank, role.permissions)?;
     }
+    let RoleName {
+        name_ct,
+        display_ct,
+    } = payload(body)?;
     let epoch = keys::space_epoch(&mut tx, &app).await?;
-    let name = metadata::optional(Metadata::RoleName, epoch, payload(body)?.name_ct)?;
-    query("UPDATE roles SET name_ct = ? WHERE id = ?")
+    let name = match name_ct {
+        Some(name) => metadata::optional(Metadata::RoleName, epoch, name)?,
+        None => role.name_ct,
+    };
+    let display = match display_ct {
+        Some(display) => metadata::optional(Metadata::RoleDisplay, epoch, display)?,
+        None => role.display_ct,
+    };
+    query("UPDATE roles SET name_ct = ?, display_ct = ? WHERE id = ?")
         .bind(name)
+        .bind(display)
         .bind(&id)
         .execute(&mut *tx)
         .await?;
@@ -316,6 +342,8 @@ pub struct RoleEdit {
     permissions: Vec<Permission>,
     /// Omitted keeps the current name.
     name_ct: Option<String>,
+    /// Where it sorts; omitted keeps the current rank.
+    rank: Option<i64>,
 }
 
 pub async fn edit(
@@ -327,7 +355,11 @@ pub async fn edit(
     let RoleEdit {
         permissions,
         name_ct,
+        rank,
     } = payload(body)?;
+    if rank.is_some_and(|rank| !(1..OWNER_RANK).contains(&rank)) {
+        return Err(ApiError::bad_request("invalid_role_rank"));
+    }
     let permissions = permissions
         .into_iter()
         .fold(0, |mask, flag| mask | flag as i64);
@@ -338,7 +370,8 @@ pub async fn edit(
     // The same checks as deleting the role and making it again: the actor must outrank it,
     // hold what it grants now, and hold everything it will grant.
     auth.can_grant(role.rank, role.permissions)?;
-    auth.can_grant(role.rank, permissions)?;
+    let rank = rank.unwrap_or(role.rank);
+    auth.can_grant(rank, permissions)?;
     if role.kind != "custom" {
         return Err(ApiError::forbidden("built_in_role"));
     }
@@ -349,9 +382,10 @@ pub async fn edit(
         }
         None => role.name_ct,
     };
-    query("UPDATE roles SET permissions = ?, name_ct = ? WHERE id = ?")
+    query("UPDATE roles SET permissions = ?, name_ct = ?, rank = ? WHERE id = ?")
         .bind(permissions)
         .bind(name)
+        .bind(rank)
         .bind(&id)
         .execute(&mut *tx)
         .await?;
@@ -548,7 +582,7 @@ mod tests {
         Change,
         testing::{app, as_person, person},
     };
-    use rusttalk_core::{keys::Event, presence::Update};
+    use rusttalk_core::{auth::decode_bytes, keys::Event, presence::Update};
 
     #[tokio::test]
     async fn editing_a_role_follows_the_grant_rules() -> anyhow::Result<()> {
@@ -580,6 +614,7 @@ mod tests {
                 Ok(Json(RoleEdit {
                     permissions: permissions.to_vec(),
                     name_ct: None,
+                    rank: None,
                 })),
             )
         };
@@ -646,6 +681,98 @@ mod tests {
             events.try_recv(),
             Ok(Change::Update(Update::Event(Event::ChannelChanged)))
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn moving_a_role_stays_below_your_own() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let app = app(dir.path(), 2).await?;
+        // Person 2 manages roles at rank 50.
+        for (id, rank, permissions) in [("lead", 50, 8), ("low", 10, 0)] {
+            query("INSERT INTO roles (id, kind, rank, permissions) VALUES (?, 'custom', ?, ?)")
+                .bind(id)
+                .bind(rank)
+                .bind(permissions)
+                .execute(&app.db)
+                .await?;
+        }
+        query("INSERT INTO member_roles (person_id, role_id) VALUES (?, 'lead')")
+            .bind(person(2))
+            .execute(&app.db)
+            .await?;
+        let move_to = |rank: i64| {
+            edit(
+                State(app.clone()),
+                as_person(2),
+                Path("low".to_owned()),
+                Ok(Json(RoleEdit {
+                    permissions: Vec::new(),
+                    name_ct: None,
+                    rank: Some(rank),
+                })),
+            )
+        };
+        for (rank, code) in [
+            (50, "role_hierarchy"),
+            (60, "role_hierarchy"),
+            (0, "invalid_role_rank"),
+            (OWNER_RANK, "invalid_role_rank"),
+        ] {
+            assert_eq!(move_to(rank).await.unwrap_err().code, code, "rank {rank}");
+        }
+        assert_eq!(move_to(49).await.unwrap(), StatusCode::NO_CONTENT);
+        let rank: i64 = query_scalar("SELECT rank FROM roles WHERE id = 'low'")
+            .fetch_one(&app.db)
+            .await?;
+        assert_eq!(rank, 49);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_role_display_is_kept_until_sent_again() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let app = app(dir.path(), 1).await?;
+        let space = encode(&keys::space(&app).id);
+        query("INSERT INTO key_scopes (id, kind) VALUES (?, 'space') ON CONFLICT DO NOTHING")
+            .bind(&space)
+            .execute(&app.db)
+            .await?;
+        query("INSERT INTO key_epochs (scope_id, epoch, commitment) VALUES (?, 1, zeroblob(32))")
+            .bind(&space)
+            .execute(&app.db)
+            .await?;
+        // Opaque ciphertext: the server only checks its epoch and size.
+        let sealed = |fill: u8| encode(&[&1i64.to_be_bytes()[..], &[fill; 40]].concat());
+        let rename_as = |body: serde_json::Value| {
+            rename(
+                State(app.clone()),
+                as_person(1),
+                Path("moderator".to_owned()),
+                Ok(Json(serde_json::from_value(body).unwrap())),
+            )
+        };
+        let stored = || {
+            query_as::<_, (Option<Vec<u8>>, Option<Vec<u8>>)>(
+                "SELECT name_ct, display_ct FROM roles WHERE id = 'moderator'",
+            )
+            .fetch_one(&app.db)
+        };
+        rename_as(serde_json::json!({"display_ct": sealed(1)})).await?;
+        assert_eq!(stored().await?, (None, Some(decode_bytes(&sealed(1))?)));
+        // Older clients send only the name, which keeps the colour.
+        rename_as(serde_json::json!({"name_ct": sealed(2)})).await?;
+        assert_eq!(
+            stored().await?,
+            (
+                Some(decode_bytes(&sealed(2))?),
+                Some(decode_bytes(&sealed(1))?)
+            )
+        );
+        rename_as(serde_json::json!({"name_ct": null, "display_ct": null})).await?;
+        assert_eq!(stored().await?, (None, None));
+        let Json(listed) = list(State(app.clone()), as_person(1)).await?;
+        assert!(listed.roles.iter().all(|role| role.display_ct.is_none()));
         Ok(())
     }
 
