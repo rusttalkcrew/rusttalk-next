@@ -13,6 +13,7 @@ mod keystore;
 mod log_file;
 mod net;
 mod official;
+mod reorder;
 mod screen;
 mod server;
 mod share;

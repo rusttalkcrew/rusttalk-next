@@ -85,6 +85,8 @@ pub enum Command {
         name: String,
     },
     CreateCategory(String),
+    /// Save a new order: categories, each with its channels, as this person sees them.
+    Reorder(Vec<(Id, Vec<Id>)>),
     SetServerName(String),
     SetDisplayName(String),
     /// Set this person's picture (PNG, JPEG or GIF bytes).
@@ -952,6 +954,14 @@ async fn on_command(
         Command::CreateCategory(name) => {
             client.create_category(name.as_bytes()).await?;
             directory(ctx, url, client, state).await?;
+        }
+        Command::Reorder(order) => {
+            let saved = directory::save_order(client, &order).await;
+            if saved.is_err() {
+                // Back to the server's order before the error shows.
+                directory(ctx, url, client, state).await?;
+            }
+            saved?;
         }
         Command::SetServerName(name) => {
             client.set_server_name(name.as_bytes()).await?;
