@@ -25,7 +25,7 @@ flate2 = "1"
 futures-util = "0.3"
 hex = "0.4"
 # Crops and re-encodes picked profile pictures and server icons.
-image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png"] }
+image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 keyring = { version = "4.2", default-features = false, features = ["v1"] }
 livekit = "=0.11.0"
 # The frames DeepFilterNet takes.

@@ -12,13 +12,14 @@ use eframe::egui;
 use reqwest::StatusCode;
 use rusttalk_core::{
     client::{
-        Attachment, BlobRef, KeyClient, MessageBody, UploadRejected, decode_image, decode_thumbnail,
+        Attachment, BlobRef, KeyClient, MessageBody, UploadRejected, decode_frames,
+        decode_thumbnail,
     },
     messages::fit_file_name,
 };
 use url::Url;
 
-use super::{Ctx, Update, send_messages, to_msg};
+use super::{Ctx, Fetch, Update, directory::frame_image, send_messages, to_msg};
 use crate::server::Id;
 
 /// Upload the files, then send the message with them; `false` when an upload failed.
@@ -89,32 +90,47 @@ pub(super) async fn delete(
     Ok(())
 }
 
-/// Download and decode a picture: a thumbnail, or the full image (`true`).
-pub(super) async fn image(ctx: &Ctx, client: &KeyClient<'_>, file: BlobRef, full: bool) {
+/// Decoded memory one picture may use: in the viewer, and playing small in the chat.
+const FULL_BUDGET: usize = 64 * 1024 * 1024;
+const INLINE_BUDGET: usize = 24 * 1024 * 1024;
+
+/// Download and decode a picture as asked.
+pub(super) async fn image(ctx: &Ctx, client: &KeyClient<'_>, file: BlobRef, fetch: Fetch) {
     let id = file.id;
-    let image = async {
+    let frames = async {
         let bytes = client.download_file(&file, None).await?;
         // Received pictures are hostile: decode with limits, off the async workers.
         tokio::task::spawn_blocking(move || {
-            let image = if full {
-                decode_image(&bytes)
-            } else {
-                decode_thumbnail(&bytes)
-            }?
-            .into_rgba8();
-            let size = [image.width() as usize, image.height() as usize];
-            anyhow::Ok(egui::ColorImage::from_rgba_unmultiplied(
-                size,
-                image.as_raw(),
-            ))
+            Ok(match fetch {
+                Fetch::Thumbnail => vec![still(decode_thumbnail(&bytes)?)],
+                Fetch::Full => decode_frames(&bytes, None, FULL_BUDGET)?
+                    .into_iter()
+                    .map(frame_image)
+                    .collect(),
+                Fetch::Inline => {
+                    decode_frames(&bytes, Some(crate::files::THUMBNAIL as u32), INLINE_BUDGET)?
+                        .into_iter()
+                        .map(frame_image)
+                        .collect()
+                }
+            })
         })
         .await?
     };
-    let image = image.await.map_err(|error| {
+    let frames = frames.await.map_err(|error: anyhow::Error| {
         tracing::warn!(error = %format_args!("{error:#}"), "loading a picture failed");
         gone(&error)
     });
-    ctx.send(Update::Image(id, image));
+    ctx.send(Update::Image(id, fetch, frames));
+}
+
+fn still(image: image::DynamicImage) -> (egui::ColorImage, u32) {
+    let image = image.into_rgba8();
+    let size = [image.width() as usize, image.height() as usize];
+    (
+        egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw()),
+        0,
+    )
 }
 
 /// Download a file and save it here.

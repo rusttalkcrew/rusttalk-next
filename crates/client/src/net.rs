@@ -62,6 +62,17 @@ use voice::{
 
 const PAGE: u32 = 50;
 
+/// What to make of a downloaded picture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fetch {
+    /// The small PNG sent along with the file.
+    Thumbnail,
+    /// Every frame at full size, for the viewer.
+    Full,
+    /// Every frame shrunk to thumbnail size, to play in the chat.
+    Inline,
+}
+
 pub enum Command {
     /// Load the newest page and follow live messages.
     Open(Id),
@@ -72,8 +83,8 @@ pub enum Command {
     Delete(Id, Id, Id, Vec<Id>),
     /// Check that a deleted DM copy (channel, message) is really gone here.
     CheckGone(Id, Id),
-    /// Download and decode a picture: a thumbnail, or the full image (`true`).
-    Image(BlobRef, bool),
+    /// Download and decode a picture, as a thumbnail, the full image or a small looping copy.
+    Image(BlobRef, Fetch),
     /// Download a file and save it here.
     Save(BlobRef, PathBuf),
     /// Receive an offered file into this path.
@@ -273,8 +284,9 @@ pub enum Update {
     Uploading(Url, Id, Option<(String, f32)>),
     /// How far saving a stored file got (0 to 1), by blob ID.
     SaveProgress(Id, f32),
-    /// A picture by blob ID, or why not: `true` when it expired or was deleted.
-    Image(Id, Result<egui::ColorImage, bool>),
+    /// A picture's frames with their delays in ms, by blob ID, or why not: `true` when it
+    /// expired or was deleted.
+    Image(Id, Fetch, Result<Vec<(egui::ColorImage, u32)>, bool>),
     /// A file by blob ID was saved, or why not: `true` when it expired or was deleted.
     Saved(Id, Result<(), bool>),
     /// A file offered in the voice room, by someone else or by us.
@@ -675,7 +687,9 @@ async fn run(
                         ctx.send(Update::Unsent(url.clone(), draft));
                         ctx.send(Update::Failed(t!("admin.offline").into()));
                     }
-                    Some(Command::Image(file, _)) => ctx.send(Update::Image(file.id, Err(false))),
+                    Some(Command::Image(file, fetch)) => {
+                        ctx.send(Update::Image(file.id, fetch, Err(false)));
+                    }
                     Some(Command::Save(file, _)) => ctx.send(Update::Saved(file.id, Err(false))),
                     Some(Command::AcceptFile(id, _)) => {
                         let reason = t!("admin.offline").into();
@@ -1166,7 +1180,7 @@ async fn on_command(
         Command::Delete(channel, id, sender, blobs) => {
             files::delete(ctx, url, client, (channel, id, sender), blobs).await?;
         }
-        Command::Image(file, full) => files::image(ctx, client, file, full).await,
+        Command::Image(file, fetch) => files::image(ctx, client, file, fetch).await,
         Command::Save(file, path) => files::save(ctx, client, file, path).await,
         Command::SendLive(channel, path) => {
             voice::offer_chat_file(ctx, url, client, state, channel, path).await?;
