@@ -44,6 +44,9 @@ docker compose pull && docker compose up -d --wait
 Already running Caddy, nginx or Traefik on 443? Use
 [behind your own reverse proxy](docs/operations.md#behind-your-own-reverse-proxy).
 Owner invite, backups and upgrades: [Production](docs/operations.md#production).
+Optional automatic patch updates (off by default, no backup or rollback):
+[Automatic updates](docs/operations.md#automatic-updates). Running version:
+`curl https://<host>/v1/server-info`.
 
 ## Docs
 

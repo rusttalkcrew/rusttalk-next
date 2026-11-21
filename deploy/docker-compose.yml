@@ -13,6 +13,8 @@ services:
       args:
         SERVICE: api
     restart: unless-stopped
+    labels: &auto-update
+      com.centurylinklabs.watchtower.enable: "true"
     environment:
       LIVEKIT_API_KEY: rusttalk
       LIVEKIT_API_SECRET: "${LIVEKIT_API_SECRET:?set LIVEKIT_API_SECRET in deploy/.env}"
@@ -33,6 +35,7 @@ services:
       args:
         SERVICE: index
     restart: unless-stopped
+    labels: *auto-update
     environment:
       RUSTTALK_INDEX_TRUST_PROXY: "1"
     volumes:
@@ -120,6 +123,22 @@ services:
       retries: 3
       start_period: 60s
       start_interval: 2s
+
+  # Optional, off unless started with `--profile auto-update`. Pulls new images
+  # for the services labelled above (api, index) only, so RUSTTALK_VERSION should
+  # be <major>.<minor> (for example 0.1) to follow patch releases. It does not back
+  # up or roll back. See docs/operations.md#automatic-updates.
+  updater:
+    profiles: ["auto-update"]
+    image: ghcr.io/nicholas-fedor/watchtower:1.24.1
+    restart: unless-stopped
+    environment:
+      WATCHTOWER_LABEL_ENABLE: "true"
+      WATCHTOWER_CLEANUP: "true"
+      # Six fields (seconds first), server local time. Default: daily at 04:00.
+      WATCHTOWER_SCHEDULE: "${RUSTTALK_UPDATE_SCHEDULE:-0 0 4 * * *}"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
 
 volumes:
   api-data:
