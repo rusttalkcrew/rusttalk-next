@@ -4,7 +4,7 @@
 
 ## Why
 
-<!-- Link the issue: "Closes #123". Every PR needs an issue first. -->
+<!-- Link the issue: "Closes #123". Every PR needs an issue first, assigned to you. -->
 
 ## Screenshots
 

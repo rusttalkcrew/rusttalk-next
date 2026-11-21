@@ -9,6 +9,10 @@ rules keep it that way.
 1. **Open an issue first.** Describe the problem or idea in plain words, with
    a screenshot if it is about something you see. Wait for the maintainer
    (@vleeuwenmenno) to say yes before building anything.
+   **Every issue that is being worked on must have an assignee.** If an issue
+   is assigned to someone else, do not work on it. If nobody is assigned, ask
+   to be assigned (or assign yourself) before you start. This stops two
+   people from doing the same work.
 2. **Work on a branch**, never on `main`.
 3. **Open a pull request** that links the issue (`Closes #123`) and fills in
    the template: what changes, why, screenshots, how you tested it, and what
@@ -54,7 +58,8 @@ make e2e      # needed when the server, protocol or crypto changes
 
 ## What gets declined
 
-- Pull requests without an issue, or that do more than the issue asks.
+- Pull requests without an issue, without an assignee on that issue, or that
+  do more than the issue asks.
 - Redesigns, large refactors or new dependencies nobody asked for.
 - Tracking, analytics or new connections to outside services.
 - Code, images or sounds copied from other apps without a compatible license.

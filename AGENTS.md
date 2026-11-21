@@ -21,8 +21,8 @@ Run `git config user.name`, `git config user.email` and, if available,
    release.** Work on a branch and open a pull request. Every pull request
    needs a review from @vleeuwenmenno; GitHub enforces this, so do not try
    to get around it.
-2. **An issue comes first.** If no issue describes the change, help the person
-   write one and stop there. The maintainer decides whether it gets built.
+2. **An issue comes first, with an assignee** (see section 3). If no issue
+   describes the change, help the person write one and stop there. The maintainer decides whether it gets built.
 3. **One small change per pull request.** No drive-by refactors, renames,
    reformatting, dependency bumps or "while I was here" fixes.
 4. **Stop and ask the maintainer** (in the issue, not in code) before touching:
@@ -42,6 +42,23 @@ Run `git config user.name`, `git config user.email` and, if available,
    is unclear, ask in the issue.
 
 ## 3. Rules for everyone
+
+### Issues and assignees (mandatory, also for the maintainer)
+
+Two people must never build the same thing. Before you write any code:
+
+1. **Every fix or feature needs a GitHub issue.** No issue, no work. If none
+   exists, create one first (`gh issue create`).
+2. **Every issue you work on must have an assignee.** Check it first:
+   `gh issue view <number> --json assignees`.
+   - **Assigned to someone else:** stop. Do not work on it. Tell the person
+     you work for, and comment on the issue if you want to help.
+   - **Nobody assigned:** assign the person you work for before starting:
+     `gh issue edit <number> --add-assignee @me`.
+3. **Pull requests link their issue** with `Closes #<number>`. A pull request
+   whose issue has no assignee, or a different assignee, is not merged.
+4. **Stopping halfway?** Say so in the issue and remove the assignee, so
+   someone else can pick it up.
 
 ### Principles
 
