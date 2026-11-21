@@ -10,7 +10,7 @@ use crate::{
     admin::{self, Moderate},
     audio::Audio,
     call,
-    friends::{Act, Relation},
+    friends::{Act, Friends, Relation},
     net::{Admin, Command},
     server::{Id, Member, Server},
     ui,
@@ -46,13 +46,24 @@ pub struct Person<'a> {
 impl<'a> Person<'a> {
     /// `person` as seen from anywhere on `server`.
     pub fn of(home: &'a Home, server: &'a Server, person: Id) -> Self {
-        let listening = voice_channel(server, &person)
-            .is_some_and(|channel| home.voice.in_call(server, &channel));
+        Self::with(&home.friends, &home.voice, server, person)
+    }
+
+    /// `of` from the parts of `Home` it reads, for code that holds another part of
+    /// `Home` mutably, like the server settings window.
+    pub fn with(
+        friends: &'a Friends,
+        voice: &'a call::Voice,
+        server: &'a Server,
+        person: Id,
+    ) -> Self {
+        let listening =
+            voice_channel(server, &person).is_some_and(|channel| voice.in_call(server, &channel));
         Person {
             server,
             person,
-            relation: home.friends.relation(&person),
-            audio: listening.then_some(&home.voice.audio),
+            relation: friends.relation(&person),
+            audio: listening.then_some(&voice.audio),
             video: None,
         }
     }
@@ -205,7 +216,7 @@ impl<'a> Person<'a> {
     }
 }
 
-fn status_text(presence: Presence) -> &'static str {
+pub fn status_text(presence: Presence) -> &'static str {
     match presence {
         Presence::Online => t!("status.online"),
         Presence::Away => t!("status.away"),
