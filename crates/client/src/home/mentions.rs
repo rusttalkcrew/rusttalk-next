@@ -348,11 +348,11 @@ impl Choice<'_> {
         format!("{} ", self.alias)
     }
 
-    pub fn suggestion(&self, ui: &Ui) -> Suggestion {
+    pub fn suggestion(&self) -> Suggestion {
         let label = emoji::text(&self.label);
         let mut suggestion = Suggestion::new(self.insert()).content(label.clone());
         if let Some(member) = self.member {
-            let avatar = super::avatar_atom(ui, member, &self.label[1..]);
+            let avatar = super::avatar_atom(member, &self.label[1..]);
             suggestion = suggestion.content((avatar, label));
         }
         if let Some(hint) = self.hint {
