@@ -1,0 +1,43 @@
+name: macOS app
+
+# Builds the release RustTalk.app and DMG without publishing, when the packaging
+# changes, so a pull request proves it before a tag does. Run it by hand from the
+# Actions tab to get a test DMG from any branch.
+on:
+  pull_request:
+    paths:
+      - deploy/release/**
+      - .github/workflows/macos-app.yml
+      - .github/workflows/release.yml
+      - crates/client/src/update.rs
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-app-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dmg:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install && rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - run: deploy/release/macos.sh "$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "rusttalk-client") | .version')" dist
+      # The app must start: --version prints and exits before any window opens.
+      - run: |
+          hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/dmg" dist/*.dmg
+          "$RUNNER_TEMP/dmg/RustTalk.app/Contents/MacOS/rusttalk-client" --version
+          # The Intel half runs under Rosetta, when the runner has it.
+          if arch -x86_64 /usr/bin/true 2>/dev/null; then
+            arch -x86_64 "$RUNNER_TEMP/dmg/RustTalk.app/Contents/MacOS/rusttalk-client" --version
+          fi
+          hdiutil detach "$RUNNER_TEMP/dmg"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-universal
+          path: dist/*.dmg
+          if-no-files-found: error

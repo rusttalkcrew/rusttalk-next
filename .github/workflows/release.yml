@@ -1,7 +1,7 @@
 name: Release
 
 # Push a tag vX.Y.Z (make release) whose version matches Cargo.toml. This
-# builds every platform, pushes the server images to ghcr.io, signs
+# builds every platform (macOS unsigned, ad-hoc signed only), pushes the server images to ghcr.io, signs
 # latest.json and publishes the GitHub release.
 on:
   push:
@@ -99,8 +99,22 @@ jobs:
           path: dist/*.exe
           if-no-files-found: error
 
+  macos:
+    needs: version
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install && rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - run: deploy/release/macos.sh "${{ needs.version.outputs.version }}" dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-universal
+          path: dist/*.dmg
+          if-no-files-found: error
+
   publish:
-    needs: [version, linux, windows]
+    needs: [version, linux, windows, macos]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # The release key is an environment secret, available to tag builds only.

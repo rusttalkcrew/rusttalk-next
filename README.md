@@ -12,10 +12,24 @@ Status: early development. See [docs/work-order.md](docs/work-order.md) for prog
 [![Windows ARM64](https://img.shields.io/badge/Windows-ARM64-0078D4?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/rusttalkcrew/rusttalk-next/releases/latest/download/RustTalk-windows-aarch64.exe)
 [![Linux x64](https://img.shields.io/badge/Linux-x64-FCC624?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/rusttalkcrew/rusttalk-next/releases/latest/download/RustTalk-linux-x86_64.AppImage)
 [![Linux ARM64](https://img.shields.io/badge/Linux-ARM64-FCC624?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/rusttalkcrew/rusttalk-next/releases/latest/download/RustTalk-linux-aarch64.AppImage)
+[![macOS](https://img.shields.io/badge/macOS-Apple%20Silicon%20%26%20Intel-000000?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/rusttalkcrew/rusttalk-next/releases/latest/download/RustTalk-macos-universal.dmg)
 
 Windows installs per user without admin rights. On Linux, make the AppImage
-executable (`chmod +x RustTalk-*.AppImage`) and run it. Both update themselves.
-All releases: [GitHub releases](https://github.com/rusttalkcrew/rusttalk-next/releases).
+executable (`chmod +x RustTalk-*.AppImage`) and run it. On macOS (14.2 or
+later), open the DMG and drag RustTalk to Applications. All three update
+themselves. All releases: [GitHub releases](https://github.com/rusttalkcrew/rusttalk-next/releases).
+
+### Opening RustTalk on macOS
+
+RustTalk isn't signed by Apple yet, so the first time macOS says it can't
+check the app. Right-click RustTalk in Applications, choose **Open**, then
+**Open** again. On macOS 15 or later, open **System Settings → Privacy &
+Security** after that first try and click **Open Anyway**. Or run this once in
+Terminal:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/RustTalk.app
+```
 
 ## Quick start
 
