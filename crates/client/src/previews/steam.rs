@@ -4,7 +4,7 @@ use serde_json::Value;
 use url::Url;
 
 use super::{
-    Details, Field, Get, MAX_DESCRIPTION, MAX_FIELD, MAX_JSON, MAX_TITLE, Provider, plain,
+    Details, Field, Get, MAX_DESCRIPTION, MAX_FIELD, MAX_JSON, MAX_TITLE, Provider, plain, safe_url,
 };
 use crate::i18n::Lang;
 
@@ -117,9 +117,7 @@ pub fn parse(bytes: &[u8], id: &str) -> Option<Details> {
     let image = data
         .get("header_image")
         .and_then(Value::as_str)
-        .filter(|s| s.len() <= 1024)
-        .and_then(|s| Url::parse(s).ok())
-        .filter(|url| url.scheme() == "https" && url.host_str().is_some_and(image_host))
+        .and_then(|s| safe_url(s, image_host))
         .map(String::from);
     Some(Details {
         title,

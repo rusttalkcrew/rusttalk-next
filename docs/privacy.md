@@ -316,12 +316,16 @@ is deleted and never used; the normal noise suppression keeps working.
   picture from a Steam CDN host (`*.steamstatic.com` or
   `steamcdn-a.akamaihd.net`) named in the reply. Requests are HTTPS only,
   follow no redirects, and send a generic User-Agent, no cookies and no
-  Referer. They have a timeout and size caps, start at most one per second
-  with two at a time, and a failed site is retried after ten minutes. Steam
-  sees your IP address, timing and which games you look at; requests carry
-  no account, device or server identifiers. Previews are kept in memory and
-  in `previews/` in the app's data folder for up to a day (refreshed after an
-  hour, for prices), at most 200 of them.
+  Referer. They have a timeout and size caps (pictures are also capped in
+  size before decoding), start at most one per second with two at a time,
+  and after a failure the whole site waits ten minutes. A request still
+  queued is dropped when its link scrolls off screen or the site is turned
+  off, and one under way when it is turned off keeps nothing. Steam sees your
+  IP address, timing and which games you look at; requests carry no account,
+  device or server identifiers. Previews are kept in memory (the 50 most
+  recently shown) and in `previews/` in the app's data folder for up to a day
+  (refreshed after an hour, for prices), at most 200 of them. Signing out
+  stops all of it and deletes `previews/`.
 - **Pasted web pictures:** When the person pastes a picture copied from a web
   page and the browser put only a still copy of a moving picture (GIF or WebP)
   on the clipboard, the desktop client downloads the original over HTTPS from

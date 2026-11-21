@@ -1,9 +1,9 @@
 //! A card under a message that previews something the message links to, such as a
 //! server invite. It only shows what it is given: building one never contacts anything.
 
-use eframe::egui::{Align, Align2, FontId, Layout, Sense, Ui, Vec2};
+use eframe::egui::{Align, Align2, FontId, Layout, Sense, TextureHandle, Ui, Vec2};
 
-use super::{frame, paint_hovered};
+use super::paint_hovered;
 use crate::{server::Picture, ui};
 
 const WIDTH: f32 = 420.0;
@@ -13,8 +13,9 @@ pub enum Image<'a> {
     Picture(&'a Picture),
     /// A letter or symbol in a circle, when there is no picture.
     Glyph(String),
-    /// A banner across the top, such as a game's header picture.
-    Wide(&'a Picture),
+    /// A banner across the top, such as a game's header picture. Owned by its
+    /// preview, so it is freed with it.
+    Wide(&'a TextureHandle),
 }
 
 pub struct Button<'a> {
@@ -45,12 +46,12 @@ impl Embed<'_> {
                 || !self.fields.is_empty()
                 || self.buttons.len() > 1;
             ui::card(ui, |ui| {
-                if let Some(Image::Wide(picture)) = &self.image {
-                    let [w, h] = picture.frames[0].0.size;
+                if let Some(Image::Wide(texture)) = &self.image {
+                    let [w, h] = texture.size();
                     let width = ui.available_width();
                     let size = Vec2::new(width, width * h as f32 / w.max(1) as f32);
                     ui.add(
-                        eframe::egui::Image::new(&frame(ui, picture))
+                        eframe::egui::Image::new(*texture)
                             .fit_to_exact_size(size)
                             .corner_radius(ui::RADIUS),
                     );

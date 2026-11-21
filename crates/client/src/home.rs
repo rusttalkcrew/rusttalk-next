@@ -64,8 +64,6 @@ const RAIL_BUTTON: f32 = 48.0;
 const SERVER_HEADER: f32 = 44.0;
 const MESSAGE_AVATAR: f32 = 38.0;
 const STICKER_SIZE: f32 = 160.0;
-/// Link preview cards under one message, at most.
-const MAX_PREVIEWS: usize = 3;
 
 /// What the cards under messages need: joined servers for invites, and link previews.
 struct Embeds<'a> {
@@ -3939,13 +3937,9 @@ fn message(
                                         invite = Some(Pick::Invite(link.clone()));
                                     }
                                 }
-                                let mut links: Vec<&str> = Vec::new();
-                                for link in mention.doc.links() {
-                                    if links.len() < MAX_PREVIEWS && !links.contains(&link) {
-                                        links.push(link);
-                                        if let Some(pick) = link_preview(ui, embeds, link) {
-                                            invite = Some(pick);
-                                        }
+                                for (provider, key) in previews::supported(mention.doc.links()) {
+                                    if let Some(pick) = link_preview(ui, embeds, provider, &key) {
+                                        invite = Some(pick);
                                     }
                                 }
                             });
@@ -4130,9 +4124,12 @@ fn invite_card(ui: &mut Ui, servers: &[Server], link: &str) -> bool {
 
 /// A link's preview card, from a site the person allowed, or the question whether to
 /// allow it. Nothing is fetched before that yes, nor for messages off screen.
-fn link_preview(ui: &mut Ui, embeds: &Embeds, link: &str) -> Option<Pick> {
-    let url = url::Url::parse(link).ok()?;
-    let (provider, key) = previews::find(&url)?;
+fn link_preview(
+    ui: &mut Ui,
+    embeds: &Embeds,
+    provider: &'static dyn previews::Provider,
+    key: &str,
+) -> Option<Pick> {
     let site = provider.name();
     match embeds.allowed.get(provider.id()) {
         Some(false) => None,
@@ -4162,9 +4159,9 @@ fn link_preview(ui: &mut Ui, embeds: &Embeds, link: &str) -> Option<Pick> {
         Some(true) => {
             let on_screen = ui.clip_rect().contains(ui.next_widget_position());
             let preview = if on_screen {
-                embeds.previews.get(provider, &key)
+                embeds.previews.get(provider, key)
             } else {
-                embeds.previews.cached(provider, &key)
+                embeds.previews.cached(provider, key)
             }?;
             let details = &preview.details;
             let fields: Vec<_> = (details.fields.iter())
@@ -4172,7 +4169,7 @@ fn link_preview(ui: &mut Ui, embeds: &Embeds, link: &str) -> Option<Pick> {
                 .collect();
             let view = t!("previews.view_on", site = site);
             let clicked = embed::Embed {
-                image: preview.image.as_ref().map(embed::Image::Wide),
+                image: preview.texture(ui.ctx()).map(embed::Image::Wide),
                 kind: site,
                 title: &details.title,
                 description: (!details.description.is_empty()).then_some(&*details.description),
