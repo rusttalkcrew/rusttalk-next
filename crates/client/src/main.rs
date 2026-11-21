@@ -16,6 +16,7 @@ mod official;
 mod reorder;
 mod screen;
 mod server;
+mod settings;
 mod share;
 mod update;
 
