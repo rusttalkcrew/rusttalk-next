@@ -921,3 +921,15 @@ home.allow_dms_everyone = Allen
 home.allow_dms_everyone_help = Alle, mit denen du einen Server teilst, können dir schreiben.
 home.allow_dms_friends = Nur Freunden
 home.allow_dms_friends_help = Nachrichten von anderen landen ohne Benachrichtigung unter Nachrichtenanfragen. Deine App sortiert sie; Server wissen nicht, wer deine Freunde sind.
+
+sounds.section = Anruftöne
+sounds.enabled = Anruftöne abspielen
+sounds.volume = Lautstärke der Anruftöne
+sounds.you_joined = Du betrittst einen Sprachkanal
+sounds.you_left = Du verlässt einen Sprachkanal
+sounds.peer_joined = Jemand betritt deinen Sprachkanal
+sounds.peer_left = Jemand verlässt deinen Sprachkanal
+sounds.stream_started = Du startest einen Stream
+sounds.stream_stopped = Du beendest einen Stream
+sounds.viewer_started = Jemand beginnt, deinen Stream anzusehen
+sounds.viewer_stopped = Jemand hört auf, deinen Stream anzusehen

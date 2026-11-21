@@ -990,7 +990,12 @@ impl Home {
                     return;
                 }
                 match state {
-                    Some(state) => call.state = state,
+                    Some(state) => {
+                        if state == crate::server::CallState::Reconnecting {
+                            self.voice.sounds.reconnecting();
+                        }
+                        call.state = state;
+                    }
                     None => self.voice.end_call(),
                 }
             }
@@ -1045,7 +1050,29 @@ impl Home {
             Update::ControlEnded(sid, why) => {
                 self.toast = Some((call::remote::ended(self, &sid, why), now + 6.0));
             }
-            Update::Room(address, channel, peers) => {
+            Update::CallVideoStopped(address, channel, sid) => {
+                if self
+                    .voice
+                    .call
+                    .as_ref()
+                    .is_some_and(|call| call.server == address && call.channel == channel)
+                    && let Some(cue) = self.voice.sounds.stop_video(&sid)
+                {
+                    self.voice.audio.play_cue(cue);
+                }
+            }
+            Update::Room(address, channel, peers, sounds) => {
+                if let Some(snapshot) = sounds
+                    && self.voice.call.as_ref().is_some_and(|call| {
+                        call.server == address
+                            && call.channel == channel
+                            && call.state == crate::server::CallState::Connected
+                    })
+                {
+                    for cue in self.voice.sounds.update(snapshot) {
+                        self.voice.audio.play_cue(cue);
+                    }
+                }
                 if let Some(index) = self.index(&address) {
                     let rooms = &mut self.servers[index].voice;
                     if peers.is_empty() {
