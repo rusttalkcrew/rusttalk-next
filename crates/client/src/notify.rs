@@ -316,12 +316,17 @@ pub struct Activity {
 /// A chat to open: server address and channel.
 type Target = (Url, Id);
 
+fn read_key(server: &Url, channel: &Id) -> String {
+    format!("{server} {}", encode(channel))
+}
+
 /// `notify.json`.
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default)]
 struct Saved {
     prefs: Prefs,
-    /// The newest message time read, by channel ID.
+    /// The newest message time read, by server and channel (`read_key`), or by
+    /// channel ID alone as older versions saved it.
     read: BTreeMap<String, i64>,
     /// When this file was made: channels never opened count as read up to here, so
     /// old history doesn't light up every channel at once.
@@ -332,7 +337,9 @@ pub struct Notify {
     path: PathBuf,
     data: PathBuf,
     saved: Saved,
-    pub activity: HashMap<Id, Activity>,
+    /// By server and channel: another server can list a channel under the ID of a
+    /// DM here, and its messages must not mark the DM.
+    pub activity: HashMap<(Url, Id), Activity>,
     /// Notifications clicked, to open their channel.
     clicks: (Sender<Target>, Receiver<Target>),
     /// The system's notification service failed once; logged once.
@@ -383,23 +390,27 @@ impl Notify {
         }
     }
 
-    fn read_until(&self, channel: &Id) -> i64 {
-        (self.saved.read.get(&encode(channel)).copied()).unwrap_or(self.saved.since)
+    fn read_until(&self, server: &Url, channel: &Id) -> i64 {
+        (self.saved.read.get(&read_key(server, channel)))
+            .or_else(|| self.saved.read.get(&encode(channel)))
+            .copied()
+            .unwrap_or(self.saved.since)
     }
 
     /// Something new from someone else that wasn't read yet.
-    pub fn unread(&self, channel: &Id) -> bool {
-        (self.activity.get(channel)).is_some_and(|a| a.latest > self.read_until(channel))
+    pub fn unread(&self, server: &Url, channel: &Id) -> bool {
+        (self.activity.get(&(server.clone(), *channel)))
+            .is_some_and(|a| a.latest > self.read_until(server, channel))
     }
 
-    pub fn mentions(&self, channel: &Id) -> u32 {
-        self.activity.get(channel).map_or(0, |a| a.mentions)
+    pub fn mentions(&self, server: &Url, channel: &Id) -> u32 {
+        (self.activity.get(&(server.clone(), *channel))).map_or(0, |a| a.mentions)
     }
 
     /// Record a message from someone else, counting it as a mention when `mention`.
-    pub fn arrived(&mut self, channel: Id, at: i64, mention: bool) {
-        let read = self.read_until(&channel);
-        let activity = self.activity.entry(channel).or_default();
+    pub fn arrived(&mut self, server: &Url, channel: Id, at: i64, mention: bool) {
+        let read = self.read_until(server, &channel);
+        let activity = self.activity.entry((server.clone(), channel)).or_default();
         activity.latest = activity.latest.max(at);
         if mention && at > read {
             activity.mentions += 1;
@@ -407,14 +418,14 @@ impl Notify {
     }
 
     /// The channel is on screen: everything in it is read.
-    pub fn mark_read(&mut self, channel: &Id) {
-        let Some(activity) = self.activity.get_mut(channel) else {
+    pub fn mark_read(&mut self, server: &Url, channel: &Id) {
+        let Some(activity) = self.activity.get_mut(&(server.clone(), *channel)) else {
             return;
         };
         activity.mentions = 0;
         let latest = activity.latest;
-        if latest > self.read_until(channel) {
-            self.saved.read.insert(encode(channel), latest);
+        if latest > self.read_until(server, channel) {
+            self.saved.read.insert(read_key(server, channel), latest);
             self.save();
         }
     }
@@ -735,29 +746,44 @@ mod tests {
         let mut notify = Notify::open(dir.path(), NOW);
         let channel = [2; 32];
         // History from before this file existed counts as read.
-        notify.arrived(channel, NOW - 10, true);
-        assert!(!notify.unread(&channel));
-        assert_eq!(notify.mentions(&channel), 0);
+        notify.arrived(&url(), channel, NOW - 10, true);
+        assert!(!notify.unread(&url(), &channel));
+        assert_eq!(notify.mentions(&url(), &channel), 0);
 
-        notify.arrived(channel, NOW + 5, false);
-        notify.arrived(channel, NOW + 6, true);
-        notify.arrived(channel, NOW + 7, true);
-        assert!(notify.unread(&channel));
-        assert_eq!(notify.mentions(&channel), 2);
-        notify.mark_read(&channel);
-        assert!(!notify.unread(&channel));
-        assert_eq!(notify.mentions(&channel), 0);
+        notify.arrived(&url(), channel, NOW + 5, false);
+        notify.arrived(&url(), channel, NOW + 6, true);
+        notify.arrived(&url(), channel, NOW + 7, true);
+        assert!(notify.unread(&url(), &channel));
+        assert_eq!(notify.mentions(&url(), &channel), 2);
+        notify.mark_read(&url(), &channel);
+        assert!(!notify.unread(&url(), &channel));
+        assert_eq!(notify.mentions(&url(), &channel), 0);
         // A late page of older messages doesn't light it up again.
-        notify.arrived(channel, NOW + 6, true);
-        assert!(!notify.unread(&channel));
-        assert_eq!(notify.mentions(&channel), 0);
+        notify.arrived(&url(), channel, NOW + 6, true);
+        assert!(!notify.unread(&url(), &channel));
+        assert_eq!(notify.mentions(&url(), &channel), 0);
 
         // The read mark survives a restart.
         let mut again = Notify::open(dir.path(), NOW + 100);
-        again.arrived(channel, NOW + 7, false);
-        assert!(!again.unread(&channel));
-        again.arrived(channel, NOW + 8, false);
-        assert!(again.unread(&channel));
+        again.arrived(&url(), channel, NOW + 7, false);
+        assert!(!again.unread(&url(), &channel));
+        again.arrived(&url(), channel, NOW + 8, false);
+        assert!(again.unread(&url(), &channel));
+    }
+
+    #[test]
+    fn another_servers_channel_under_the_same_id_leaves_a_dm_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut notify = Notify::open(dir.path(), NOW);
+        let (dm, other): (Url, Url) = (url(), "https://203.0.113.9/".parse().unwrap());
+        let channel = [2; 32];
+        notify.arrived(&other, channel, NOW + 5, true);
+        assert!(notify.unread(&other, &channel) && !notify.unread(&dm, &channel));
+        assert_eq!(notify.mentions(&dm, &channel), 0);
+        // Reading it there doesn't read the DM either.
+        notify.arrived(&dm, channel, NOW + 6, false);
+        notify.mark_read(&other, &channel);
+        assert!(notify.unread(&dm, &channel));
     }
 
     #[test]
@@ -776,17 +802,17 @@ mod tests {
         );
         laptop.set_prefs(prefs.clone());
         let read = [3; 32];
-        laptop.arrived(read, NOW + 50, false);
-        laptop.mark_read(&read);
+        laptop.arrived(&url(), read, NOW + 50, false);
+        laptop.mark_read(&url(), &read);
         assert!(Notify::open(one.path(), NOW).prefs() == &prefs);
 
         // The desktop read further in one channel and less in another.
         let mut desktop = Notify::open(two.path(), NOW);
         let other = [4; 32];
-        desktop.arrived(other, NOW + 20, false);
-        desktop.mark_read(&other);
-        desktop.arrived(read, NOW + 10, false);
-        desktop.mark_read(&read);
+        desktop.arrived(&url(), other, NOW + 20, false);
+        desktop.mark_read(&url(), &other);
+        desktop.arrived(&url(), read, NOW + 10, false);
+        desktop.mark_read(&url(), &read);
         let synced = laptop.synced();
         assert_eq!(
             synced.keys().map(String::as_str).collect::<Vec<_>>(),
@@ -794,13 +820,13 @@ mod tests {
         );
         desktop.adopt(&synced);
         assert!(desktop.prefs() == &prefs);
-        desktop.arrived(read, NOW + 50, false);
+        desktop.arrived(&url(), read, NOW + 50, false);
         assert!(
-            !desktop.unread(&read),
+            !desktop.unread(&url(), &read),
             "the newer mark from the laptop wins"
         );
-        desktop.arrived(other, NOW + 20, false);
-        assert!(!desktop.unread(&other), "its own newer mark stays");
+        desktop.arrived(&url(), other, NOW + 20, false);
+        assert!(!desktop.unread(&url(), &other), "its own newer mark stays");
         // Adopted values are saved, and bad ones keep this device's.
         let mut bad = synced.clone();
         bad.insert(PREFS_KEY.into(), serde_json::json!("loud"));

@@ -360,7 +360,8 @@ pub struct Msg {
 pub enum Body {
     Text(String),
     /// A friend request or answer; shown as a card or a short line, not as text.
-    Friend(rusttalk_core::client::FriendSignal),
+    /// A friend message, with the sender's signed send time in milliseconds.
+    Friend(rusttalk_core::client::FriendSignal, u64),
     /// Could not be verified or decrypted (yet).
     Unreadable,
     /// A member or device change, with fingerprints for the details view.

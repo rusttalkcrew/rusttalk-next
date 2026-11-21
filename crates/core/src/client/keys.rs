@@ -20,9 +20,12 @@ use reqwest::{Method, RequestBuilder, Response, StatusCode};
 use serde_json::{Value, json};
 use tokio_tungstenite::tungstenite::Message;
 
-use super::{Server, chat::Opened};
+use super::{MessageBody, Server, chat::Opened};
+use crate::messages::KeyLink;
 
 type HistoricalDevice = ([u8; 32], [u8; 32], [u8; 32]);
+/// A verified epoch key, its envelope, the person who wrapped it, and its commitment.
+type HeldKey = (Key, String, PersonId, [u8; 32]);
 
 /// Wraps between refreshes of the still-missing set.
 const WRAP_BATCH: usize = 20;
@@ -36,15 +39,20 @@ pub struct KeyClient<'a> {
     events: tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,
-    /// Each verified key with its envelope and the person whose device wrapped it.
-    keys: HashMap<(Scope, i64), (Key, String, PersonId)>,
+    /// Each verified key with its envelope, the person whose device wrapped it, and
+    /// its epoch commitment.
+    keys: HashMap<(Scope, i64), HeldKey>,
     /// What this device knows about each DM channel, pinned once seen so the server
     /// can't relabel it. A DM key is only taken from, and wrapped to, those two people.
     pub(super) dms: HashMap<[u8; 32], DmPin>,
     /// The saved pins were lost: DMs not pinned yet are blocked, not trusted on first use.
     pins_lost: bool,
-    /// DMs this session already tried to re-key, so a refusal isn't retried in a loop.
-    rekeyed: HashSet<[u8; 32]>,
+    /// DM epochs this session already checked or re-keyed, so a refusal isn't
+    /// retried in a loop.
+    rekeyed: HashSet<([u8; 32], i64)>,
+    /// Key links opened in each pinned DM, sent by one of its two people: the epoch
+    /// each was sent in, and the link.
+    pub(super) links: HashMap<[u8; 32], Vec<(i64, KeyLink)>>,
     pub(super) devices: HashMap<String, DeviceCertificate>,
     pub(super) historical_devices: HashMap<HistoricalDevice, DeviceCertificate>,
     scopes: Vec<ScopeState>,
@@ -87,6 +95,7 @@ impl<'a> KeyClient<'a> {
             pins_lost: dms.is_none(),
             dms: dms.unwrap_or_default(),
             rekeyed: HashSet::new(),
+            links: HashMap::new(),
             devices: HashMap::new(),
             historical_devices: HashMap::new(),
             scopes: Vec::new(),
@@ -204,7 +213,7 @@ impl<'a> KeyClient<'a> {
                 if self
                     .keys
                     .get(&slot)
-                    .is_some_and(|(_, envelope, _)| *envelope == wrapped.envelope)
+                    .is_some_and(|(_, envelope, ..)| *envelope == wrapped.envelope)
                 {
                     continue;
                 }
@@ -228,7 +237,8 @@ impl<'a> KeyClient<'a> {
                 match opened {
                     Ok(key) => {
                         let person = *sender.person_id();
-                        self.keys.insert(slot, (key, wrapped.envelope, person));
+                        let entry = (key, wrapped.envelope, person, wrapped.commitment);
+                        self.keys.insert(slot, entry);
                     }
                     Err(error) => {
                         tracing::warn!(
@@ -255,13 +265,21 @@ impl<'a> KeyClient<'a> {
             self.scopes = state.scopes;
             refetch |= self.rekey_dms().await?;
 
-            for scope in &self.scopes {
-                if scope.rotate || (scope.epoch == 0 && self.is_owner().await?) {
-                    self.publish_epoch(
-                        scope.scope,
-                        scope.epoch.checked_add(1).context("epoch overflow")?,
-                    )
-                    .await?;
+            let states: Vec<_> = (self.scopes.iter())
+                .map(|state| (state.scope, state.epoch, state.rotate))
+                .collect();
+            for (scope, epoch, rotate) in states {
+                if rotate || (epoch == 0 && self.is_owner().await?) {
+                    let next = epoch.checked_add(1).context("epoch overflow")?;
+                    let key = keys::random_key()?;
+                    let commitment = self.publish_key(scope, next, &key).await?;
+                    // A DM epoch this device starts is new; the other person re-keys
+                    // from it if they can't tell.
+                    if let (Some(commitment), Some(DmPin::With { anchor, .. })) =
+                        (commitment, self.dms.get_mut(&scope.id))
+                    {
+                        *anchor = Some((next, commitment));
+                    }
                     refetch = true;
                 }
             }
@@ -357,18 +375,17 @@ impl<'a> KeyClient<'a> {
             .any(|role| role == "owner"))
     }
 
-    async fn publish_epoch(&self, scope: Scope, epoch: i64) -> Result<()> {
-        let key = keys::random_key()?;
-        let context =
-            EnvelopeContext::new(self.server.known_server().server_id, scope, epoch, &key);
-        let envelope = self.wrap_for_self(context, &key)?;
+    /// Start an epoch with this key. Its commitment, or `None` when another epoch or
+    /// an access change won the race (or the server refused it).
+    async fn publish_key(&self, scope: Scope, epoch: i64, key: &Key) -> Result<Option<[u8; 32]>> {
+        let context = EnvelopeContext::new(self.server.known_server().server_id, scope, epoch, key);
+        let envelope = self.wrap_for_self(context, key)?;
         let reply = self
             .request(Method::POST, "/v1/keys/epochs")
             .json(&json!({"scope": scope, "epoch": epoch, "commitment": encode(&context.commitment), "envelope": envelope}))
             .send()
             .await?;
-        key_state_raced(reply).await?;
-        Ok(())
+        Ok((!key_state_raced(reply).await?).then_some(context.commitment))
     }
 
     pub(super) fn wrap_for_self(&self, context: EnvelopeContext, key: &Key) -> Result<String> {
@@ -396,13 +413,18 @@ impl<'a> KeyClient<'a> {
             self.dms.insert(channel, DmPin::Blocked);
             return false;
         }
-        self.dms.insert(channel, DmPin::With { peer, from: None });
+        self.dms.insert(channel, DmPin::With { peer, anchor: None });
         let me = *self.identity.certificate.person_id();
         // Keys taken before this channel was known as a DM must pass the check too.
-        self.keys.retain(|(scope, _), (.., person)| {
+        self.keys.retain(|(scope, _), (_, _, person, _)| {
             scope.kind != Kind::Channel || scope.id != channel || dm_member(&me, &peer, person)
         });
         true
+    }
+
+    /// Whether this server's DM pins couldn't be read, so its DMs are paused.
+    pub fn dms_paused(&self) -> bool {
+        self.pins_lost
     }
 
     /// DM channels pinned so far.
@@ -411,31 +433,85 @@ impl<'a> KeyClient<'a> {
     }
 
     /// Whether this DM channel can take a message only the two people can read:
-    /// pinned to `peer`, re-keyed since, and its current key came from one of them.
+    /// pinned to `peer`, and its current epoch chains to a key this device knows is
+    /// new (see `trusted_epoch`), wrapped to it by one of the two.
     pub fn dm_private(&self, channel: &[u8; 32], peer: &PersonId) -> bool {
         let scope = Scope {
             kind: Kind::Channel,
             id: *channel,
         };
         let me = self.identity.certificate.person_id();
-        let Some(DmPin::With {
-            peer: bound,
-            from: Some(from),
-        }) = self.dms.get(channel)
-        else {
-            return false;
-        };
-        bound == peer
+        matches!(self.dms.get(channel), Some(DmPin::With { peer: bound, .. }) if bound == peer)
             && self.current_key(scope).is_ok_and(|(epoch, _)| {
-                epoch >= *from
+                self.trusted_epoch(scope) == Some(epoch)
                     && (self.keys.get(&(scope, epoch)))
-                        .is_some_and(|(.., person)| dm_member(me, peer, person))
+                        .is_some_and(|(_, _, person, _)| dm_member(me, peer, person))
             })
     }
 
+    /// The newest DM epoch this device can tell only the two people hold: its anchor
+    /// (an epoch it started itself after pinning, or reached before), then each epoch
+    /// a key link from one of the two names, sent in the epoch trusted so far.
+    fn trusted_epoch(&self, scope: Scope) -> Option<i64> {
+        let Some(DmPin::With {
+            anchor: Some(anchor),
+            ..
+        }) = self.dms.get(&scope.id)
+        else {
+            return None;
+        };
+        let commitment = |epoch| {
+            self.keys
+                .get(&(scope, epoch))
+                .map(|(.., commitment)| *commitment)
+        };
+        let links = self.links.get(&scope.id).map_or(&[][..], Vec::as_slice);
+        chain(*anchor, commitment, links)
+    }
+
+    /// Move a DM's anchor up to its newest trusted epoch, so it is saved.
+    fn advance_anchor(&mut self, scope: Scope) {
+        let Some(epoch) = self.trusted_epoch(scope) else {
+            return;
+        };
+        let commitment = self
+            .keys
+            .get(&(scope, epoch))
+            .map(|(.., commitment)| *commitment);
+        if let (Some(commitment), Some(DmPin::With { anchor, .. })) =
+            (commitment, self.dms.get_mut(&scope.id))
+        {
+            *anchor = Some((epoch, commitment));
+        }
+    }
+
+    /// Note a key link opened in a pinned DM, if one of its two people sent it.
+    pub(super) fn note_link(
+        &mut self,
+        channel: &[u8; 32],
+        epoch: i64,
+        person: &PersonId,
+        link: KeyLink,
+    ) {
+        let me = self.identity.certificate.person_id();
+        if let Some(DmPin::With { peer, .. }) = self.dms.get(channel)
+            && dm_member(me, peer, person)
+        {
+            let links = self.links.entry(*channel).or_default();
+            if !links.contains(&(epoch, link)) {
+                links.push((epoch, link));
+            }
+            self.advance_anchor(Scope {
+                kind: Kind::Channel,
+                id: *channel,
+            });
+        }
+    }
+
     /// Whether a key of this scope may come from or go to this person: anyone for
-    /// a channel or space, only the two people for a pinned DM.
-    fn dm_allows(&self, scope: Scope, person: &PersonId) -> bool {
+    /// a channel or space, only the two people for a pinned DM. Live files in a DM
+    /// follow the same rule.
+    pub(super) fn dm_allows(&self, scope: Scope, person: &PersonId) -> bool {
         dm_allows(
             &self.dms,
             self.identity.certificate.person_id(),
@@ -444,29 +520,79 @@ impl<'a> KeyClient<'a> {
         )
     }
 
-    /// Start a new epoch, wrapped only to the pair, on each DM pinned since its last
-    /// epoch: an earlier key may have reached others while the channel wasn't known
-    /// as a DM. Messages go out only from that epoch on. Returns whether one started.
+    /// For each pinned DM whose current epoch doesn't chain to a trusted one, look
+    /// for its key link in history, then re-key: announce a fresh key in a link in
+    /// the current epoch and start the next epoch with it, wrapped only to the pair.
+    /// An earlier key may have reached others while the channel wasn't known as a
+    /// DM. Returns whether key state changed.
     async fn rekey_dms(&mut self) -> Result<bool> {
-        let mut started = false;
+        let mut changed = false;
         let readable: Vec<_> = (self.scopes.iter())
-            .filter(|state| state.scope.kind == Kind::Channel)
+            .filter(|state| state.scope.kind == Kind::Channel && !state.rotate && state.epoch > 0)
             .map(|state| (state.scope, state.epoch))
             .collect();
         for (scope, epoch) in readable {
-            let Some(DmPin::With { from, .. }) = self.dms.get_mut(&scope.id) else {
-                continue;
-            };
-            if from.is_some() || !self.rekeyed.insert(scope.id) {
+            if !matches!(self.dms.get(&scope.id), Some(DmPin::With { .. })) {
                 continue;
             }
+            self.advance_anchor(scope);
+            if self.trusted_epoch(scope) == Some(epoch) || !self.rekeyed.insert((scope.id, epoch)) {
+                continue;
+            }
+            self.scan_links(scope, epoch).await;
+            if self.trusted_epoch(scope) == Some(epoch) {
+                continue;
+            }
+            // The link goes out sealed with this epoch's key; without it, wait for it.
+            let Some(current) = self.key(scope, epoch).cloned() else {
+                continue;
+            };
             let next = epoch.checked_add(1).context("epoch overflow")?;
-            *from = Some(next);
+            let key = keys::random_key()?;
+            let context =
+                EnvelopeContext::new(self.server.known_server().server_id, scope, next, &key);
+            let link = KeyLink {
+                epoch: next,
+                commitment: context.commitment,
+            };
+            let body = MessageBody {
+                key_link: Some(link),
+                ..MessageBody::default()
+            };
+            if let Err(error) = self
+                .post_at(&scope.id, *keys::random_key()?, epoch, &current, &body)
+                .await
+            {
+                tracing::warn!(error = %format_args!("{error:#}"), "announcing a DM key failed");
+                continue;
+            }
             // A server without DM re-keying refuses; this DM then stays unused there.
-            self.publish_epoch(scope, next).await?;
-            started = true;
+            if let Some(commitment) = self.publish_key(scope, next, &key).await?
+                && let Some(DmPin::With { anchor, .. }) = self.dms.get_mut(&scope.id)
+            {
+                *anchor = Some((next, commitment));
+            }
+            changed = true;
         }
-        Ok(started)
+        Ok(changed)
+    }
+
+    /// Open the DM's recent history from before `epoch`, which notes its key links.
+    // shortcut: four pages back; a link buried deeper means one more re-key.
+    async fn scan_links(&mut self, scope: Scope, epoch: i64) {
+        let mut before = None;
+        for _ in 0..4 {
+            let Ok(records) = self.message_page(&scope.id, before.as_ref(), 50).await else {
+                return;
+            };
+            for record in records.iter().filter(|record| record.epoch < epoch) {
+                let _ = self.open_message(&scope.id, record).await;
+            }
+            match records.last() {
+                Some(last) if records.len() == 50 => before = Some(last.id),
+                _ => return,
+            }
+        }
     }
 
     /// Pin the DMs the catalog lists. One pinned to someone else keeps its pin.
@@ -677,7 +803,8 @@ impl<'a> KeyClient<'a> {
             .await?
             .error_for_status()?;
         let me = *self.identity.certificate.person_id();
-        self.keys.insert((scope, 1), (key, envelope, me));
+        self.keys
+            .insert((scope, 1), (key, envelope, me, context.commitment));
         self.scopes.push(ScopeState {
             scope,
             epoch: 1,
@@ -729,16 +856,48 @@ impl<'a> KeyClient<'a> {
     }
 }
 
+/// Follow key links from a trusted anchor: each step is a link sent in the epoch
+/// trusted so far, naming a later epoch whose commitment matches. An anchor whose
+/// commitment differs from the key held for it is not trusted at all.
+fn chain(
+    anchor: (i64, [u8; 32]),
+    commitment: impl Fn(i64) -> Option<[u8; 32]>,
+    links: &[(i64, KeyLink)],
+) -> Option<i64> {
+    if commitment(anchor.0) != Some(anchor.1) {
+        return None;
+    }
+    let mut trusted = anchor.0;
+    loop {
+        let next = (links.iter())
+            .filter(|(within, link)| {
+                *within == trusted
+                    && link.epoch > trusted
+                    && commitment(link.epoch) == Some(link.commitment)
+            })
+            .map(|(_, link)| link.epoch)
+            .max();
+        match next {
+            Some(epoch) => trusted = epoch,
+            None => return Some(trusted),
+        }
+    }
+}
+
 fn dm_member(me: &PersonId, peer: &PersonId, person: &PersonId) -> bool {
     person == me || person == peer
 }
 
 /// What a device knows about a DM channel.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DmPin {
-    /// With this person. Epochs from `from` on were started after the pin, so only
-    /// the two people hold them. `None` until it is re-keyed.
-    With { peer: PersonId, from: Option<i64> },
+    /// With this person. `anchor` is the newest epoch this device knows only the
+    /// two people hold, with its commitment: one it started after pinning, or one
+    /// reached from there by key links. `None` until then.
+    With {
+        peer: PersonId,
+        anchor: Option<(i64, [u8; 32])>,
+    },
     /// Its person is unknown because the saved pins were lost: its keys go to nobody
     /// else and nothing is sent there.
     Blocked,
@@ -822,6 +981,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn only_epochs_linked_from_a_new_key_are_trusted() {
+        let link = |epoch, commitment| KeyLink { epoch, commitment };
+        // Epoch 3 is the key this device started after pinning; 4 and 5 were shared
+        // before the pin by someone else, 6 was announced in 3 by the other person.
+        let held = |epoch: i64| (3..=6).contains(&epoch).then_some([epoch as u8; 32]);
+        assert_eq!(chain((3, [3; 32]), held, &[]), Some(3));
+        let links = [
+            // A link sent in an epoch that isn't trusted proves nothing.
+            (4, link(5, [5; 32])),
+            // Nor does one whose commitment isn't that epoch's.
+            (3, link(5, [9; 32])),
+            (3, link(6, [6; 32])),
+        ];
+        assert_eq!(chain((3, [3; 32]), held, &links), Some(6));
+        // A higher epoch number alone is not enough, and a changed anchor key is nothing.
+        assert_eq!(chain((3, [3; 32]), held, &links[..2]), Some(3));
+        assert_eq!(chain((3, [7; 32]), held, &links), None);
+    }
+
+    #[test]
     fn a_dm_key_only_comes_from_and_goes_to_the_two_people() {
         let (me, peer, mallory) = ([1; 32], [2; 32], [3; 32]);
         let dm = Scope {
@@ -835,7 +1014,7 @@ mod tests {
         };
         let blocked = Scope { id: [7; 32], ..dm };
         let dms = HashMap::from([
-            (dm.id, DmPin::With { peer, from: None }),
+            (dm.id, DmPin::With { peer, anchor: None }),
             (blocked.id, DmPin::Blocked),
         ]);
         assert!(dm_allows(&dms, &me, dm, &me) && dm_allows(&dms, &me, dm, &peer));

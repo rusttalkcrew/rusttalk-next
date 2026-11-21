@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use crate::{
     auth::{decode_bytes, encode},
     identity::{DeviceCertificate, PersonId},
-    keys::{self, EnvelopeContext, Kind, Scope, wire_id},
+    keys::{self, EnvelopeContext, Key, Kind, Scope, wire_id},
     messages::{MAX_MESSAGE_BYTES, MessageContext, MessageError},
 };
 
@@ -134,6 +134,8 @@ impl KeyClient<'_> {
 
     /// Open or create a DM with a current member and reconcile its key envelopes.
     pub async fn create_dm(&mut self, peer: &PersonId) -> Result<Scope> {
+        // Without the saved pins every DM here is paused, a new one too.
+        ensure!(!self.dms_paused(), "DMs on this server are paused");
         let scope = Scope {
             kind: Kind::Channel,
             id: *keys::random_key()?,
@@ -146,7 +148,7 @@ impl KeyClient<'_> {
             scope.id,
             DmPin::With {
                 peer: *peer,
-                from: Some(1),
+                anchor: Some((1, context.commitment)),
             },
         );
         let request = self.request(Method::POST, "/v1/dms").json(&json!({
@@ -232,7 +234,32 @@ impl KeyClient<'_> {
             self.check_edit(channel, &id, cert.person_id(), &original)
                 .await?;
         }
+        // A pinned DM only takes messages on an epoch that is the pair's alone.
+        match self.dms.get(channel) {
+            Some(DmPin::With { peer, .. }) => {
+                ensure!(
+                    self.dm_private(channel, peer),
+                    "this DM's key may be held by someone else"
+                );
+            }
+            Some(DmPin::Blocked) => anyhow::bail!("DMs on this server are paused"),
+            None => {}
+        }
         let (epoch, key) = self.current_key(scope)?;
+        let key = key.clone();
+        self.post_at(channel, id, epoch, &key, body).await
+    }
+
+    /// Seal and post a message in a given epoch, with that epoch's key.
+    pub(super) async fn post_at(
+        &mut self,
+        channel: &[u8; 32],
+        id: [u8; 32],
+        epoch: i64,
+        key: &Key,
+        body: &MessageBody,
+    ) -> Result<MessageRecord> {
+        let cert = &self.identity.certificate;
         let context = MessageContext {
             server_id: self.server.known_server().server_id,
             channel_id: *channel,
@@ -262,6 +289,9 @@ impl KeyClient<'_> {
             .entry(*channel)
             .or_default()
             .insert(&record, body);
+        if let Some(link) = body.key_link {
+            self.note_link(channel, epoch, &context.person, link);
+        }
         Ok(record)
     }
 
@@ -272,20 +302,29 @@ impl KeyClient<'_> {
         channel: &[u8; 32],
         record: &MessageRecord,
     ) -> Result<MessageBody> {
-        if let Some(opened) = self.opened.get(channel)
-            && let Some(body) = opened.get(record)?
-        {
-            return Ok(body);
+        let cached = match self.opened.get(channel) {
+            Some(opened) => opened.get(record)?,
+            None => None,
+        };
+        let body = match cached {
+            Some(body) => body,
+            None => {
+                let body = self.decrypt_record(channel, record).await?;
+                if let Some(original) = body.edit_of {
+                    self.check_edit(channel, &record.id, &record.person, &original)
+                        .await?;
+                }
+                self.opened
+                    .entry(*channel)
+                    .or_default()
+                    .insert(record, &body);
+                body
+            }
+        };
+        // Also from the cache: the DM may have been pinned since it was first opened.
+        if let Some(link) = body.key_link {
+            self.note_link(channel, record.epoch, &record.person, link);
         }
-        let body = self.decrypt_record(channel, record).await?;
-        if let Some(original) = body.edit_of {
-            self.check_edit(channel, &record.id, &record.person, &original)
-                .await?;
-        }
-        self.opened
-            .entry(*channel)
-            .or_default()
-            .insert(record, &body);
         Ok(body)
     }
 

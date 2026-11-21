@@ -76,8 +76,10 @@ pub struct Home {
     /// Friends, requests and blocks; synced between this person's devices only.
     friends: Friends,
     friends_tab: friends::Tab,
-    /// This person's DM messages they deleted, on any device.
+    /// This person's DM messages they deleted, on any device. All of them stay in
+    /// `dm_deleted.json` here; the device sync copy holds the newest that fit.
     dm_deleted: dm::Tombstones,
+    dm_deleted_path: PathBuf,
     view: View,
     invite: String,
     join: Join,
@@ -236,7 +238,13 @@ impl Home {
             })
             .collect();
         let runtime = net.handle();
-        let dm_deleted = net.dm_deleted();
+        let dm_deleted_path = data_dir.join("dm_deleted.json");
+        let mut dm_deleted: dm::Tombstones =
+            crate::load_json(&dm_deleted_path).unwrap_or_else(|error| {
+                tracing::warn!(error = %format_args!("{error:#}"), "deleted DM messages unreadable");
+                dm::Tombstones::default()
+            });
+        dm_deleted.merge(&net.dm_deleted());
         let synced = device_sync::synced(&audio.settings());
         let layout = layout::Layout::new(&audio.settings());
         // Without servers yet, start by browsing the directory.
@@ -252,6 +260,7 @@ impl Home {
             friends,
             friends_tab: friends::Tab::default(),
             dm_deleted,
+            dm_deleted_path,
             invite: String::new(),
             join: Join::Idle(None),
             find: Find {
@@ -462,8 +471,7 @@ impl Home {
             self.toast = Some((t!("home.waiting_try_again").into(), now + 6.0));
         }
         if self.dm_deleted.add(id, msg.replicas.clone()) {
-            self.net
-                .sync(vec![Edit::DeletedDm(id, msg.replicas.clone())]);
+            self.record_delete(Edit::DeletedDm(id, msg.replicas.clone()));
         }
         if let Some(thread) = self.threads.get_mut(&peer) {
             thread.deleted(&me, &id);
@@ -476,6 +484,16 @@ impl Home {
                 chat.clear_draft();
             }
         }
+    }
+
+    /// Keep my deleted DM messages here, and send a change to my other devices.
+    fn record_delete(&mut self, edit: Edit) {
+        let data = self.dm_deleted_path.parent().expect("in the data folder");
+        let saved = rusttalk_core::client::save_json(data, &self.dm_deleted_path, &self.dm_deleted);
+        if let Err(error) = saved {
+            tracing::warn!(error = %format_args!("{error:#}"), "saving deleted DM messages failed");
+        }
+        self.net.sync(vec![edit]);
     }
 
     /// Publish the synced settings that changed since the last sync.
@@ -531,7 +549,7 @@ impl Home {
         let peer = self.dm_peer(index, &channel);
         let dm = peer.is_some();
         // Friend messages only mean something in a DM.
-        if !dm && matches!(msg.body, Body::Friend(_)) {
+        if !dm && matches!(msg.body, Body::Friend(..)) {
             return;
         }
         if let Some(peer) = peer {
@@ -541,7 +559,7 @@ impl Home {
             let relation = self.friends.relation(&peer);
             let quiet = match msg.body {
                 _ if relation == Relation::Blocked => true,
-                Body::Friend(signal) => {
+                Body::Friend(signal, _) => {
                     signal != FriendSignal::Request || relation != Relation::Incoming
                 }
                 _ => self.friends.is_request(&peer, self.friends_only()),
@@ -579,7 +597,7 @@ impl Home {
             };
             // Mentions read as names, like in the chat.
             let body = match &msg.body {
-                Body::Friend(_) => t!("notify.friend_request").into(),
+                Body::Friend(..) => t!("notify.friend_request").into(),
                 Body::Text(_) if msg.sticker.is_some() => t!("notify.sent_sticker").into(),
                 Body::Text(text) if !text.trim().is_empty() => {
                     emoji::plain(&message.plain(&server.dir)).into_owned()
@@ -590,7 +608,8 @@ impl Home {
             let target = (server.address.clone(), channel);
             self.notify.show(ctx, &title, &body, target);
         }
-        self.notify.arrived(channel, msg.at, mention);
+        let address = self.servers[index].address.clone();
+        self.notify.arrived(&address, channel, msg.at, mention);
     }
 
     /// Change a server's notification rule, or a channel's.
@@ -614,8 +633,8 @@ impl Home {
             });
         channels.fold((false, 0), |(unread, mentions), channel| {
             (
-                unread || self.notify.unread(&channel.id),
-                mentions + self.notify.mentions(&channel.id),
+                unread || self.notify.unread(&server.address, &channel.id),
+                mentions + self.notify.mentions(&server.address, &channel.id),
             )
         })
     }
@@ -625,7 +644,7 @@ impl Home {
         let (prefs, now) = (self.notify.prefs(), notify::unix_now());
         let friends_only = self.friends_only();
         let dms = (self.servers.iter()).flat_map(|server| {
-            (server.dir.dms.iter()).filter(move |dm| {
+            (server.dir.dms.iter().map(move |dm| (&server.address, dm))).filter(move |(_, dm)| {
                 !prefs
                     .effective(&server.address, &dm.channel, true, now)
                     .muted
@@ -633,10 +652,10 @@ impl Home {
                     && !self.friends.is_request(&dm.peer, friends_only)
             })
         });
-        dms.fold((false, 0), |(unread, mentions), dm| {
+        dms.fold((false, 0), |(unread, mentions), (server, dm)| {
             (
-                unread || self.notify.unread(&dm.channel),
-                mentions + self.notify.mentions(&dm.channel),
+                unread || self.notify.unread(server, &dm.channel),
+                mentions + self.notify.mentions(server, &dm.channel),
             )
         })
     }
@@ -838,13 +857,13 @@ impl Home {
                         deleted: &self.dm_deleted,
                     };
                     // I deleted it while this server was away: delete it here too.
-                    for id in thread.add(&server, channel, items, older, at_start, &pair) {
-                        let stale = Command::Delete(channel, id, me, Vec::new());
+                    for (id, files) in thread.add(&server, channel, items, older, at_start, &pair) {
+                        let stale = Command::Delete(channel, id, me, files);
                         self.servers[index].send(stale);
                         // Kept until that server confirms, also across restarts.
                         if self.dm_deleted.add(id, [server.clone()]) {
-                            self.net
-                                .sync(vec![Edit::DeletedDm(id, vec![server.clone()])]);
+                            let edit = Edit::DeletedDm(id, vec![server.clone()]);
+                            self.record_delete(edit);
                         }
                     }
                     return;
@@ -864,9 +883,9 @@ impl Home {
                     self.arrived(ctx, index, channel, msg);
                 }
             }
-            Update::Latest(found) => {
+            Update::Latest(address, found) => {
                 for (channel, at) in found {
-                    self.notify.arrived(channel, at, false);
+                    self.notify.arrived(&address, channel, at, false);
                 }
             }
             Update::Deleted(address, channel, id) => {
@@ -875,9 +894,9 @@ impl Home {
                 };
                 let me = *self.identity.certificate.person_id();
                 let dm = self.dm_peer(index, &channel);
-                // One of my deletes is done on that server.
-                if dm.is_some() && self.dm_deleted.gone(&id, &address) {
-                    self.net.sync(vec![Edit::DmCopyGone(id, address.clone())]);
+                // One of my deletes may be done there: check before counting it.
+                if dm.is_some() && self.dm_deleted.contains(&id) {
+                    self.servers[index].send(Command::CheckGone(channel, id));
                 }
                 let chat = match dm {
                     Some(peer) => self.threads.get_mut(&peer).map(|thread| {
@@ -904,6 +923,11 @@ impl Home {
                         chat.editing = None;
                         chat.clear_draft();
                     }
+                }
+            }
+            Update::CopyGone(address, id) => {
+                if self.dm_deleted.gone(&id, &address) {
+                    self.record_delete(Edit::DmCopyGone(id, address));
                 }
             }
             Update::PageFailed(address, channel, missing) => {
@@ -1083,7 +1107,20 @@ impl Home {
                         }
                     }
                 }
+                let before = self.dm_deleted.clone();
                 self.dm_deleted.merge(&synced_deletes);
+                if self.dm_deleted != before {
+                    // Saved here only; this came from the sync copy.
+                    let data = self.dm_deleted_path.parent().expect("in the data folder");
+                    let saved = rusttalk_core::client::save_json(
+                        data,
+                        &self.dm_deleted_path,
+                        &self.dm_deleted,
+                    );
+                    if let Err(error) = saved {
+                        tracing::warn!(error = %format_args!("{error:#}"), "saving deleted DM messages failed");
+                    }
+                }
                 let audio = &self.voice.audio;
                 let adopted = device_sync::adopt(&audio.settings(), &synced.settings);
                 self.synced = device_sync::synced(&adopted);
@@ -1179,8 +1216,9 @@ pub fn show(ui: &mut Ui, home: &mut Home, updates: &mut crate::update::Updater) 
         home.open_chat(&address, channel);
     }
     if focused {
-        for (_, channel) in home.viewing() {
-            home.notify.mark_read(&channel);
+        for (index, channel) in home.viewing() {
+            let address = home.servers[index].address.clone();
+            home.notify.mark_read(&address, &channel);
         }
     }
     home.track_activity(ui);
@@ -1517,10 +1555,10 @@ fn chat_marks(ui: &Ui, home: &Home, chats: &[(&url::Url, Id)], dm: bool, row: Re
     let (prefs, now) = (home.notify.prefs(), notify::unix_now());
     let chats =
         (chats.iter()).filter(|(server, channel)| !prefs.effective(server, channel, dm, now).muted);
-    let (unread, mentions) = chats.fold((false, 0), |(unread, mentions), (_, channel)| {
+    let (unread, mentions) = chats.fold((false, 0), |(unread, mentions), (server, channel)| {
         (
-            unread || home.notify.unread(channel),
-            mentions + home.notify.mentions(channel),
+            unread || home.notify.unread(server, channel),
+            mentions + home.notify.mentions(server, channel),
         )
     });
     if unread {
@@ -2867,12 +2905,12 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
         }
         let mut last: Option<&Msg> = None;
         for msg in &chat.messages {
-            if matches!(msg.body, Body::Friend(signal) if !friends::shown(signal)) {
+            if matches!(msg.body, Body::Friend(signal, _) if !friends::shown(signal)) {
                 continue;
             }
             let start = !last.is_some_and(|prev| {
                 prev.person == msg.person
-                    && !matches!(prev.body, Body::Notice { .. } | Body::Friend(_))
+                    && !matches!(prev.body, Body::Notice { .. } | Body::Friend(..))
                     && msg.at - prev.at < 300
                     && msg.reply_to.is_none()
             });
@@ -3411,7 +3449,7 @@ fn message(
         ui.add_space(4.0);
         return None;
     }
-    if let Body::Friend(signal) = msg.body {
+    if let Body::Friend(signal, _) = msg.body {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.weak("•");

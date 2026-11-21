@@ -44,8 +44,11 @@ async fn history(
 ) -> Result<Vec<(i64, [u8; 32], [u8; 32], String)>> {
     let mut items = Vec::new();
     for record in client.message_page(&dm.id, None, 100).await?.iter().rev() {
-        let text = client.open_message(&dm.id, record).await?.text;
-        items.push((record.at, record.person, record.id, text));
+        let body = client.open_message(&dm.id, record).await?;
+        // Key links are key work, not messages.
+        if body.key_link.is_none() {
+            items.push((record.at, record.person, record.id, body.text));
+        }
     }
     Ok(items)
 }
@@ -193,6 +196,8 @@ pub async fn friends(
 ) -> Result<()> {
     let signal = |friend| MessageBody {
         friend: Some(friend),
+        friend_sent: 0,
+        key_link: None,
         ..Default::default()
     };
     let request = *keys::random_key()?;

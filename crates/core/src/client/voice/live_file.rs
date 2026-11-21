@@ -26,7 +26,7 @@ use zeroize::Zeroizing;
 use crate::{
     auth::{KnownServer, decode, encode, live_file_identity, voice_identity},
     identity::random_bytes,
-    keys::{Event, random_key},
+    keys::{Event, Kind, Scope, random_key},
     messages::{
         LIVE_CHUNK_SIZE, LiveAttachment, LiveFileAcceptance, MAX_LIVE_FILE_SIZE, MessageBody,
         MessageRecord, fit_file_name,
@@ -401,11 +401,20 @@ impl LiveFiles {
             acceptance.recipient == encode(local.as_bytes()),
             "file acceptance has wrong recipient"
         );
-        let peer = client
+        let certificate = client
             .devices
             .get(device)
-            .context("file acceptance has unknown device")?
-            .signing_key();
+            .context("file acceptance has unknown device")?;
+        // In a DM only the other person may take the file.
+        let scope = Scope {
+            kind: Kind::Channel,
+            id: *channel_id,
+        };
+        ensure!(
+            client.dm_allows(scope, certificate.person_id()),
+            "file acceptance from outside the DM"
+        );
+        let peer = certificate.signing_key();
         acceptance
             .verify(&client.space().id, channel_id, peer)
             .context("invalid signed file acceptance")?;
@@ -563,6 +572,14 @@ async fn prepare_accept(
     ensure!(
         body.edit_of.is_none(),
         "live file offer must be an original message"
+    );
+    let scope = Scope {
+        kind: Kind::Channel,
+        id: *channel,
+    };
+    ensure!(
+        client.dm_allows(scope, &record.person),
+        "live file offer from outside the DM"
     );
     let sender = client
         .devices

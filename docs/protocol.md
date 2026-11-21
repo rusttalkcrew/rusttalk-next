@@ -362,20 +362,26 @@ servers, doesn't notify or mark the DM unread, and is replaced whole once a
 readable copy arrives. A DM shows records from its two people only.
 
 Before sending, the app pins each DM channel to the person the catalog first
-listed it with, in `dm_pins/<server ID>.json` on the device, with the first
-epoch started after the pin. A DM the app creates is pinned before its key is
-wrapped, so epoch 1 counts. Any other DM is re-keyed once pinned: the app
-starts the next epoch, which either person may do at any time, and wraps it
-only to the two people's devices. A channel the server later lists with
-someone else is skipped, with a warning. If the pin file can't be read, the
-app leaves it as it is and pauses that server's DMs, with a warning, instead
-of trusting the next catalog. A message, including a friend message, goes to
-a copy only when its current epoch started after the pin and its key came from
-a device of one of the two people (see
-[Crypto](crypto.md#direct-messages-on-several-servers)). Otherwise the app
-refuses with "Not sent over <server>: someone else could read this DM there."
-A server without DM re-keying refuses the new epoch, so its copies stay
-unused.
+listed it with, in `dm_pins/<server ID>.json` on the device, with the anchor:
+the newest epoch it knows only the two people hold, and its commitment. A DM
+the app creates is pinned before its key is wrapped, so epoch 1 is the anchor.
+Later epochs are trusted through key links: before starting a DM's next
+epoch, the app sends a key link message in the current epoch with the next
+epoch and its commitment (see [Crypto](crypto.md#direct-messages-on-several-servers)).
+Apps hide key links; they don't notify or mark anything unread. When the
+current epoch doesn't chain to the anchor, the app reads the DM's recent
+history for its link, and otherwise sends a link and starts the next epoch
+itself, which either person may do at any time, wrapped only to the two
+people's devices. A channel the server later lists with someone else is
+skipped, with a warning. If the pin file can't be read, the app leaves it as
+it is and pauses that server's DMs, also new ones, with a warning, instead of
+trusting the next catalog. A message, friend message or live-file offer goes
+to a copy only when its current epoch is trusted and its key came from a
+device of one of the two people. Otherwise the app refuses with "Not sent over
+<server>: someone else could read this DM there." If a send meets `409`
+because the other person just re-keyed, the app takes the new key and sends
+once more. A server without DM re-keying refuses the new epoch, so its copies
+stay unused.
 
 An edit goes to the servers holding the original. A `message_deleted` event
 removes only that server's copy, because a server can't show who deleted a
@@ -387,15 +393,21 @@ online server holding it, and keeps the delete in the synced setting
 `dm_deleted`: per message ID (base64url), the servers that may still hold a
 copy (`left`) and those whose copy is gone (`done`). Devices merge these as
 sets across every sync copy, so a delete can't be lost when two devices publish
-to different servers. A server's copy counts as gone on its delete event or a
-404. Their apps on every device hide that message and delete any readable
-copy that shows up later, also after a restart. Deletes still waiting for a
-server are kept (up to 2,000); of the rest, the newest 1,000. A copy of the
-other person's deleted message on a server that was offline shows again until
-that person's app deletes it there.
+to different servers. A server's copy counts as gone only once a fresh request
+for it returns 404, not on the server's delete event alone. Their apps on every
+device hide that message and delete any readable copy that shows up later,
+with its stored files, also after a restart. Each device keeps every delete
+that still waits for a server, and the newest 1,000 others, in
+`dm_deleted.json`; the sync copy holds the newest that fit in 64 KiB, resolved
+ones dropped first. A server can still claim a copy is gone and keep it; that
+copy is deleted again whenever it shows up, until its delete is among the
+oldest dropped. A copy of the other person's deleted message on a server that
+was offline shows again until that person's app deletes it there.
 
-After reconnecting, a DM counts as unread only when its newest record opens
-and comes from the pinned peer. Each copy keeps its own attachment
+After reconnecting, a DM counts as unread only when its newest record opens,
+comes from the pinned peer and isn't a key link. Unread marks and mention
+counts are kept per server and channel, so a channel on another server under
+the same ID can't change a DM's mark. Each copy keeps its own attachment
 references, and downloads switch to the next copy's when a server drops the
 shown one.
 
@@ -424,8 +436,8 @@ with, like a DM. The kinds are:
 
 Blocking someone sends Remove, Cancel or Decline as fits, so it looks like one
 of those, and then ignores their friend messages. Each list entry keeps the
-server time of the newest friend message handled from that person and the IDs
-of the last eight. A copy on another server, a reload, or an older message
+signed send time of the newest friend message handled from that person (from
+the message itself, not the server) and the IDs of the last eight. A copy on another server, a reload, or an older message
 loaded later (pages load newest first) changes nothing. Applying the same
 action twice changes nothing either. The app reads each DM's newest page when
 it connects, so requests sent while it was away show up; one older than that

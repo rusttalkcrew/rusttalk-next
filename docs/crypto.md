@@ -198,12 +198,14 @@ Format version 2 (the envelope's first byte) has this plaintext, in order.
 
 | Field | Encoding | Maximum bytes |
 | --- | --- | --- |
-| Flags | Bit 0 reply-to, bit 1 edit-of, bit 2 live offer, bit 3 sticker, bit 4 friend message. Other bits clear | 1 |
+| Flags | Bit 0 reply-to, bit 1 edit-of, bit 2 live offer, bit 3 sticker, bit 4 friend message, bit 5 key link. Other bits clear | 1 |
 | Text | Two-byte big-endian UTF-8 length, then text of at most 2,000 Unicode scalar values | 2 + 8,000 |
 | Reply ID | 32 bytes, present with bit 0 | 32 |
 | Original ID | 32 bytes, present with bit 1 | 32 |
 | Sticker ID | 32 bytes, present with bit 3 | 32 |
 | Friend kind | One byte, present with bit 4: request (1), accept (2), decline (3), cancel (4), remove (5) | 1 |
+| Friend send time | Eight-byte big-endian sender clock in milliseconds, present with bit 4 | 8 |
+| Key link | Present with bit 5: the next epoch (eight-byte big-endian, positive) and its 32-byte commitment | 40 |
 | Stored files | One-byte count 0–4, then that many [references](protocol.md#files) of at most 529 bytes | 1 + 2,116 |
 | Live offer | Present with bit 2, [offer fields](protocol.md#live-transfer) | 460 |
 
@@ -211,9 +213,10 @@ A sticker message has no stored files and no live offer; its text is the
 sticker's name, shown when the sticker is not available. Server emoji travel
 in the text as `<:name:id>` tokens (see [Protocol](protocol.md#server-emoji-and-stickers)).
 A friend message sets bit 4 alone, has empty text and no stored files, so its
-plaintext is exactly five bytes; readers reject anything else with bit 4 or an
-unknown kind (see [Protocol](protocol.md#friends)). Apps before this format
-show such a message as one they can't open.
+plaintext is exactly 13 bytes; readers reject anything else with bit 4 or an
+unknown kind (see [Protocol](protocol.md#friends)). A key link sets bit 5
+alone, with empty text and no stored files (44 bytes). Apps before this format
+show either as a message they can't open.
 Nothing may follow the last field. The largest plaintext is 10,644 bytes
 and the largest envelope is 10,751 bytes. Every length is checked against
 its field maximum before reading. Readers reject version 1 envelopes.
@@ -293,19 +296,46 @@ read: list a channel with that person as the DM, or ask honest apps to wrap
 the DM key to that person's device. The app pins each DM channel to the person
 it was first listed with and doesn't use it if the server relabels it. For a
 pinned DM it accepts an epoch key only from, and wraps it only to, a
-root-certified device of one of the two people. A key from before the pin may
-already be held by others, for example when the channel was an ordinary
-channel before, so the app re-keys a DM once it pins it: it starts the next
-epoch itself, with a fresh random key, and wraps it only to the pair. It sends
-only on epochs started after its pin whose key came from one of the two
-people. A DM it creates is pinned before the first key is wrapped. If the
-saved pins can't be read, the app blocks that server's DMs instead of pinning
-them again from the server's catalog.
+root-certified device of one of the two people.
+
+A key from before the pin may already be held by others, for example when the
+channel was an ordinary channel before. An epoch number doesn't show that a
+key is new: a dishonest server could hand out an older shared key under a
+higher number, wrapped by one of the two people who received it earlier. So
+the app trusts a DM epoch only through a chain of keys:
+
+- **Anchor.** The epoch of a key this device generated itself after pinning
+  the DM, with its commitment. A DM it creates is pinned before its first key
+  is wrapped, so that epoch 1 is the anchor. The anchor is saved with the pin
+  and moves up as the chain grows.
+- **Link.** Before people start a DM's next epoch, their app sends a key link
+  in the current epoch: the next epoch number and the new key's commitment,
+  inside the signed, encrypted message. The app trusts epoch N when a link
+  naming N, with N's actual commitment, was sent by one of the two people in
+  an epoch it already trusts. A commitment can only be made with the key, so
+  an older key under a new number doesn't match.
+- **Re-key.** When the current epoch doesn't chain to the anchor, the app looks
+  for the link in recent history (four pages). If there is none, it sends a
+  link and starts the next epoch itself, wrapped only to the pair.
+
+The app sends a message, friend message or live-file offer to a DM copy only
+when its current epoch is trusted this way and its key came from one of the
+two people. In a DM it takes a live-file acceptance only from a certified
+device of the other person and accepts an offer only from one of the two. If
+the saved pins can't be read, the app blocks that server's DMs, including new
+ones, instead of pinning them again from the server's catalog. Either person
+can start a DM epoch at any time, so either can disrupt delivery by re-keying
+over and over; that is accepted.
 
 This relies on both people's apps. An older app still wraps the key, also a
 re-keyed one, to any device the server names, so a dishonest server can still
 read along with a peer on an older app. This remains a high risk until both
-people update.
+people update. A server without DM re-keying refuses the new epoch, and its DM
+copies stay unused.
+
+Friend messages are ordered by their signed send time, not the server's. If
+someone's devices disagree on the time, a later friend message from the device
+whose clock is behind can be ignored.
 
 A record that fails to verify or decrypt never merges with a readable copy, so
 a server can't use one to change a message's time or servers, use up its

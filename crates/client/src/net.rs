@@ -70,6 +70,8 @@ pub enum Command {
     Send(Draft),
     /// Channel, message, and the IDs of its stored files to remove too.
     Delete(Id, Id, Id, Vec<Id>),
+    /// Check that a deleted DM copy (channel, message) is really gone here.
+    CheckGone(Id, Id),
     /// Download and decode a picture: a thumbnail, or the full image (`true`).
     Image(BlobRef, bool),
     /// Download a file and save it here.
@@ -158,7 +160,7 @@ pub struct Draft {
     /// A server sticker to send; `text` is its name.
     pub sticker: Option<Id>,
     /// A friend request or answer, sent with nothing else.
-    pub friend: Option<FriendSignal>,
+    pub friend: Option<(FriendSignal, u64)>,
 }
 
 pub struct LiveOffer {
@@ -228,12 +230,14 @@ pub enum Update {
         at_start: Option<bool>,
     },
     Deleted(Url, Id, Id),
+    /// A deleted DM copy is missing from this server: server and message.
+    CopyGone(Url, Id),
     /// Loading a page of a channel failed; `true` when its cursor is gone from the server.
     PageFailed(Url, Id, bool),
     /// A new message in any readable channel or DM, for unread marks and notifications.
     Arrived(Url, Id, Msg),
     /// The newest message time from someone else per channel, after (re)connecting.
-    Latest(Vec<(Id, i64)>),
+    Latest(Url, Vec<(Id, i64)>),
     /// This person left the server; remove it here too.
     Left(Url),
     /// A member came online, went away or offline.
@@ -643,7 +647,7 @@ async fn run(
                     None => return,
                     // The voice room outlives the API connection, so its shares can still stop.
                     // The status is sent again once connected, when it differs.
-                    Some(Command::SetStatus(_)) => {}
+                    Some(Command::SetStatus(_) | Command::CheckGone(..)) => {}
                     Some(command) if voice_only(&command) => {
                         if let Err(error) = voice_command(&ctx, &mut state, command).await {
                             tracing::warn!(error = %format_args!("{error:#}"), "voice request failed");
@@ -879,7 +883,7 @@ async fn resume(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, state: &mut St
         page(ctx, url, client, state, channel, None).await;
     }
     set_display_name(ctx, url, client, state).await;
-    latest(ctx, client, state).await;
+    latest(ctx, url, client, state).await;
     let voice: Vec<Id> = state
         .last
         .iter()
@@ -906,7 +910,7 @@ async fn resume(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, state: &mut St
 /// while away shows as unread.
 // shortcut: one request per channel on each (re)connect; the newest record may be an
 // edit, which then also counts as new.
-async fn latest(ctx: &Ctx, client: &mut KeyClient<'_>, state: &State) {
+async fn latest(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, state: &State) {
     let Some(dir) = &state.last else {
         return;
     };
@@ -926,7 +930,8 @@ async fn latest(ctx: &Ctx, client: &mut KeyClient<'_>, state: &State) {
                 };
                 if let Some(peer) = peer
                     && (record.person != peer
-                        || client.open_message(&channel, record).await.is_err())
+                        || !(client.open_message(&channel, record).await)
+                            .is_ok_and(|body| body.key_link.is_none()))
                 {
                     continue;
                 }
@@ -937,7 +942,7 @@ async fn latest(ctx: &Ctx, client: &mut KeyClient<'_>, state: &State) {
             }
         }
     }
-    ctx.send(Update::Latest(found));
+    ctx.send(Update::Latest(url.clone(), found));
 }
 
 /// Merge with this person's other devices and show the result.
@@ -969,7 +974,9 @@ async fn on_event(
             let (channel, id) = (decode(&channel)?, decode(&id)?);
             let record = client.message(&channel, &id).await?;
             if state.loaded.contains(&channel) {
-                let msg = open(client, state, &channel, &record).await;
+                let Some(msg) = open(client, state, &channel, &record).await else {
+                    return Ok(());
+                };
                 ctx.send(Update::Arrived(url.clone(), channel, msg.clone()));
                 send_messages(ctx, url, channel, vec![msg], false, None);
                 return Ok(());
@@ -980,6 +987,7 @@ async fn on_event(
                 tracing::warn!(error = %format_args!("{error:#}"), "message could not be opened");
             }
             let msg = match &body {
+                Ok(body) if body.key_link.is_some() => return Ok(()),
                 Ok(body) => to_msg(&record, body),
                 Err(_) => unreadable(&record),
             };
@@ -1031,7 +1039,7 @@ async fn on_event(
                     let Ok(record) = client.message(&channel, &id).await else {
                         continue;
                     };
-                    items.push(open(client, state, &channel, &record).await);
+                    items.extend(open(client, state, &channel, &record).await);
                 }
                 send_messages(ctx, url, channel, items, false, None);
             }
@@ -1100,14 +1108,31 @@ async fn on_command(
                 attachments: Vec::new(),
                 live: None,
                 sticker: draft.sticker,
-                friend: draft.friend,
+                friend: draft.friend.map(|(signal, _)| signal),
+                friend_sent: draft.friend.map_or(0, |(_, sent)| sent),
+                key_link: None,
             };
             let files = draft.files.clone();
-            let sent = files::send(ctx, url, client, (channel, draft.id), body, files).await;
+            let target = (channel, draft.id);
+            let mut sent = files::send(ctx, url, client, target, body.clone(), files.clone()).await;
+            // The other person re-keyed the DM just now: take the new key and send
+            // once more, whatever this was (text, sticker, file or friend message).
+            if draft.peer.is_some() && sent.as_ref().is_err_and(files::conflict) {
+                client.sync().await?;
+                sent = files::send(ctx, url, client, target, body, files).await;
+            }
             if !matches!(sent, Ok(true)) {
                 ctx.send(Update::Unsent(url.clone(), draft));
             }
             sent?;
+        }
+        Command::CheckGone(channel, id) => {
+            // The server's word that it deleted it isn't enough; it must be missing.
+            if let Err(error) = client.message(&channel, &id).await
+                && files::gone(&error)
+            {
+                ctx.send(Update::CopyGone(url.clone(), id));
+            }
         }
         Command::Delete(channel, id, sender, blobs) => {
             files::delete(ctx, url, client, (channel, id, sender), blobs).await?;
@@ -1285,11 +1310,13 @@ fn pins_path(data: &Path, server_id: &Id) -> PathBuf {
         .join(format!("{}.json", hex::encode(server_id)))
 }
 
-/// A pin as saved: the person, and the first epoch started after pinning.
+/// A pin as saved: the person, and the newest epoch known to be the pair's, with
+/// its commitment.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct SavedPin {
     peer: String,
-    from: Option<i64>,
+    #[serde(default)]
+    anchor: Option<(i64, String)>,
 }
 
 /// `None` when the file is there but can't be read: trusting the next catalog again
@@ -1305,8 +1332,11 @@ fn load_pins(data: &Path, server_id: &Id) -> Option<HashMap<Id, DmPin>> {
     (saved.iter())
         .map(|(channel, pin)| {
             let peer = decode(&pin.peer).ok()?;
-            let from = pin.from;
-            Some((decode(channel).ok()?, DmPin::With { peer, from }))
+            let anchor = match &pin.anchor {
+                Some((epoch, commitment)) => Some((*epoch, decode(commitment).ok()?)),
+                None => None,
+            };
+            Some((decode(channel).ok()?, DmPin::With { peer, anchor }))
         })
         .collect()
 }
@@ -1319,11 +1349,11 @@ fn save_pins(ctx: &Ctx, client: &KeyClient<'_>, state: &mut State) {
     let path = pins_path(&ctx.data, &state.server_id);
     let pins: HashMap<String, SavedPin> = (client.dms().iter())
         .filter_map(|(channel, pin)| match pin {
-            DmPin::With { peer, from } => Some((
+            DmPin::With { peer, anchor } => Some((
                 encode(channel),
                 SavedPin {
                     peer: encode(peer),
-                    from: *from,
+                    anchor: anchor.map(|(epoch, commitment)| (epoch, encode(&commitment))),
                 },
             )),
             DmPin::Blocked => None,
@@ -1363,7 +1393,7 @@ async fn page(
     let at_start = records.len() < PAGE as usize;
     let mut items = Vec::with_capacity(records.len());
     for record in records.iter().rev() {
-        items.push(open(client, state, &channel, record).await);
+        items.extend(open(client, state, &channel, record).await);
     }
     send_messages(ctx, url, channel, items, before.is_some(), Some(at_start));
 }
@@ -1373,21 +1403,23 @@ async fn open(
     state: &mut State,
     channel: &Id,
     record: &MessageRecord,
-) -> Msg {
+) -> Option<Msg> {
     match client.open_message(channel, record).await {
+        // Key work only (the client noted it); not a message to show.
+        Ok(body) if body.key_link.is_some() => None,
         Ok(body) => {
             if let Some(file) = &body.live {
                 let transfer = state.transfers.entry(file.id);
                 transfer.or_insert(Transfer::chat(*channel)).offer = Some(record.clone());
             }
-            to_msg(record, &body)
+            Some(to_msg(record, &body))
         }
         Err(error) => {
             if error.downcast_ref::<MessageError>() == Some(&MessageError::MissingKey) {
                 state.waiting.entry(*channel).or_default().insert(record.id);
             }
             tracing::warn!(error = %format_args!("{error:#}"), "message could not be opened");
-            unreadable(record)
+            Some(unreadable(record))
         }
     }
 }
@@ -1416,7 +1448,7 @@ fn to_msg(record: &MessageRecord, body: &MessageBody) -> Msg {
         reply_to: body.reply_to,
         edit_of: body.edit_of,
         body: match body.friend {
-            Some(signal) => Body::Friend(signal),
+            Some(signal) => Body::Friend(signal, body.friend_sent),
             None => Body::Text(body.text.clone()),
         },
         files: body.attachments.clone(),
@@ -1476,6 +1508,27 @@ fn now() -> i64 {
 #[cfg(test)]
 mod protocol_tests {
     use super::*;
+
+    #[test]
+    fn a_friend_message_keeps_its_signed_send_time() {
+        let record = MessageRecord {
+            id: [1; 32],
+            epoch: 1,
+            person: [2; 32],
+            sender_device: [3; 32],
+            at: 5,
+            size: 0,
+            envelope: String::new(),
+        };
+        let body = MessageBody {
+            friend: Some(FriendSignal::Request),
+            friend_sent: 9_000,
+            ..MessageBody::default()
+        };
+        // The server's time stays for the chat; friend state uses the signed one.
+        let msg = to_msg(&record, &body);
+        assert!(msg.body == Body::Friend(FriendSignal::Request, 9_000) && msg.at == 5);
+    }
 
     #[test]
     fn checks_server_protocol_against_supported_range() {

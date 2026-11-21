@@ -207,6 +207,11 @@ fn media_type(path: &Path) -> &'static str {
     }
 }
 
+/// The server answered 409, as for a message sent in an epoch that just ended.
+pub(super) fn conflict(error: &anyhow::Error) -> bool {
+    status(error) == Some(StatusCode::CONFLICT)
+}
+
 fn status(error: &anyhow::Error) -> Option<StatusCode> {
     error
         .downcast_ref::<UploadRejected>()
@@ -219,7 +224,7 @@ fn status(error: &anyhow::Error) -> Option<StatusCode> {
 }
 
 /// The server no longer has this file: it expired or was deleted.
-fn gone(error: &anyhow::Error) -> bool {
+pub(super) fn gone(error: &anyhow::Error) -> bool {
     status(error) == Some(StatusCode::NOT_FOUND)
 }
 

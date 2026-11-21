@@ -39,9 +39,9 @@ pub struct Pair<'a> {
 
 /// Resolved deletes kept for copies that show up on a server not known to hold one.
 const KEEP_RESOLVED: usize = 1_000;
-/// Unresolved deletes are never dropped below this; it keeps the sync copy in its size limit.
-// shortcut: past this many deletes still waiting for an offline server, the oldest go.
-const MAX_UNRESOLVED: usize = 2_000;
+/// The most the deletes take in the device sync copy, which holds 256 KiB in all.
+/// Every delete stays in this device's own copy (`dm_deleted.json`) regardless.
+pub const SYNC_BUDGET: usize = 64 * 1024;
 
 /// This person's deleted DM messages, oldest first, synced between their devices.
 /// Each merges as a set, so two devices deleting on different servers keep both.
@@ -125,8 +125,29 @@ impl Tombstones {
             extra -= usize::from(drop);
             !drop
         });
-        let extra = self.0.len().saturating_sub(KEEP_RESOLVED + MAX_UNRESOLVED);
-        self.0.drain(..extra);
+    }
+
+    /// The newest deletes that fit in `budget` bytes of JSON, for the device sync copy:
+    /// the oldest resolved ones go first, then the oldest unresolved ones. Each
+    /// device keeps all of its own unresolved ones in its local copy.
+    pub fn bounded(&self, budget: usize) -> Self {
+        let size =
+            |stone: &Tombstone| serde_json::to_vec(stone).map_or(usize::MAX, |json| json.len() + 1);
+        let mut used: usize = self.0.iter().map(size).sum::<usize>().saturating_add(2);
+        let mut keep = vec![true; self.0.len()];
+        for resolved in [true, false] {
+            for (at, stone) in self.0.iter().enumerate() {
+                if used <= budget {
+                    break;
+                }
+                if stone.left.is_empty() == resolved {
+                    keep[at] = false;
+                    used -= size(stone);
+                }
+            }
+        }
+        let stones = self.0.iter().zip(keep).filter(|(_, keep)| *keep);
+        Self(stones.map(|(stone, _)| stone.clone()).collect())
     }
 }
 
@@ -169,8 +190,9 @@ impl Thread {
             .collect()
     }
 
-    /// Add a page or live messages from one replica. Returns the IDs of my messages
-    /// I deleted that are still on this one, to delete there too.
+    /// Add a page or live messages from one replica. Returns my messages I deleted
+    /// that are still on this one, with that copy's stored files and thumbnails, to
+    /// delete there too.
     pub fn add(
         &mut self,
         server: &Url,
@@ -179,7 +201,7 @@ impl Thread {
         older: bool,
         at_start: Option<bool>,
         pair: &Pair,
-    ) -> Vec<Id> {
+    ) -> Vec<(Id, Vec<Id>)> {
         // A sent message can arrive before its replica is opened; opening still has to happen.
         if let Some(page) = self.pages.get_mut(&(server.clone(), channel))
             && let Some(at_start) = at_start
@@ -203,7 +225,11 @@ impl Thread {
             let deleted = msg.person == pair.me && pair.deleted.contains(&msg.id);
             // Only a copy that opened is mine for sure, so only that one is deleted.
             if deleted && msg.body != Body::Unreadable {
-                stale.push(msg.id);
+                let files = (msg.files.iter())
+                    .flat_map(|file| std::iter::once(&file.file).chain(&file.thumbnail))
+                    .map(|blob| blob.id)
+                    .collect();
+                stale.push((msg.id, files));
             }
             !deleted
         });
@@ -330,6 +356,15 @@ mod tests {
         Msg {
             body: Body::Unreadable,
             ..msg(id, person, at, "")
+        }
+    }
+
+    fn file(id: u8) -> Attachment {
+        Attachment {
+            file: BlobRef::for_tests([id; 32]),
+            name: "a.txt".into(),
+            media_type: "text/plain".into(),
+            thumbnail: None,
         }
     }
 
@@ -547,9 +582,14 @@ mod tests {
         // After a restart, B was away during the delete: its copy stays hidden and is
         // reported so it gets deleted there. A peer record under that ID is not mine.
         let mut restarted = Thread::default();
-        let items = vec![msg(1, 7, 10, "mine"), msg(1, 8, 12, "theirs")];
+        // B's copy has its own stored file, deleted with it.
+        let mine = Msg {
+            files: vec![file(5)],
+            ..msg(1, 7, 10, "mine")
+        };
+        let items = vec![mine, msg(1, 8, 12, "theirs")];
         let stale = restarted.add(&b, [2; 32], items, false, Some(true), &pair(&deleted));
-        assert_eq!(stale, [[1; 32]]);
+        assert_eq!(stale, [([1; 32], vec![[5; 32]])]);
         assert_eq!(texts(&restarted), ["theirs"]);
     }
 
@@ -592,14 +632,39 @@ mod tests {
     }
 
     #[test]
+    fn the_synced_copy_of_deletes_stays_within_its_budget() {
+        let servers: Vec<Url> = (1..=6).map(server).collect();
+        let mut deleted = Tombstones::default();
+        for n in 0..2_000u16 {
+            let mut id = [7; 32];
+            id[..2].copy_from_slice(&n.to_be_bytes());
+            deleted.add(id, servers.clone());
+            // The first half is resolved everywhere.
+            if n < 1_000 {
+                for at in &servers {
+                    deleted.gone(&id, at);
+                }
+            }
+        }
+        let synced = deleted.bounded(SYNC_BUDGET);
+        assert!(serde_json::to_vec(&synced).unwrap().len() <= SYNC_BUDGET);
+        // Resolved ones went first, and the local copy keeps every unresolved one.
+        assert!(synced.0.iter().all(|stone| !stone.left.is_empty()));
+        assert_eq!(
+            deleted
+                .0
+                .iter()
+                .filter(|stone| !stone.left.is_empty())
+                .count(),
+            1_000
+        );
+        // The newest unresolved ones are the ones synced.
+        assert_eq!(synced.0.last(), deleted.0.last());
+    }
+
+    #[test]
     fn files_follow_the_copy_that_is_shown() {
         let (a, b) = (server(1), server(2));
-        let file = |id: u8| Attachment {
-            file: BlobRef::for_tests([id; 32]),
-            name: "a.txt".into(),
-            media_type: "text/plain".into(),
-            thumbnail: None,
-        };
         let copy = |blob: u8| Msg {
             files: vec![file(blob)],
             ..msg(1, 8, 10, "hi")

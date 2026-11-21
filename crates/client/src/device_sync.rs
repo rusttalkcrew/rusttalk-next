@@ -20,7 +20,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use url::Url;
 
-use crate::{audio::Settings, dm::Tombstones};
+use crate::{
+    audio::Settings,
+    dm::{SYNC_BUDGET, Tombstones},
+};
 
 /// Voice and video preferences, dismissed official servers, the appearance and language, that follow the person to their other devices.
 /// The microphone, speakers and camera differ per computer and stay in `voice.json` only.
@@ -118,7 +121,7 @@ pub fn dm_deleted(settings: &BTreeMap<String, Value>) -> Tombstones {
 }
 
 fn set_dm_deleted(state: &mut State, deletes: &Tombstones) {
-    let value = serde_json::to_value(deletes).expect("deletes serialize");
+    let value = serde_json::to_value(deletes.bounded(SYNC_BUDGET)).expect("deletes serialize");
     state.settings.insert(DM_DELETED.into(), value);
 }
 
