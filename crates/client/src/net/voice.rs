@@ -15,7 +15,7 @@ use rusttalk_core::{
         Event, KeyClient, MessageRecord,
         voice::{
             ConnectionState, DataLiveFiles, LiveDownload, LiveFileEvent, NativeVideoSource,
-            RoomEvent, TrackSid, TrackSource, VoiceRoom, VoiceState,
+            RoomEvent, TrackSid, TrackSource, VoiceRoom, VoiceState, VoiceStatus,
         },
     },
     identity::fingerprint,
@@ -33,6 +33,8 @@ use crate::{
 pub(super) struct Live {
     room: VoiceRoom,
     pub(super) channel: Id,
+    /// The last acknowledged deafen state, so failures can be retried.
+    deafened: Option<bool>,
     /// Apps this device shares, each with its own track.
     shares: Vec<Share>,
     /// Decrypted names of subscribed remote app tracks.
@@ -86,6 +88,7 @@ pub(super) fn voice_only(command: &Command) -> bool {
     matches!(
         command,
         Command::LeaveVoice
+            | Command::SyncVoiceStatus
             | Command::StopApp(_)
             | Command::StopScreen
             | Command::ChangeScreen(_)
@@ -106,6 +109,10 @@ pub(super) async fn voice_command(
     }
     if let Command::CancelFile(id) = command {
         cancel_file(state, &id);
+        return Ok(None);
+    }
+    if let Command::SyncVoiceStatus = command {
+        sync_voice_status(ctx, state).await;
         return Ok(None);
     }
     let Some(live) = &mut state.voice else {
@@ -267,7 +274,24 @@ pub(super) async fn join_voice(
     } else {
         ctx.send(Update::Failed("You can listen here, but not talk.".into()));
     }
+    room.set_microphone_muted(ctx.audio.muted() || ctx.audio.deafened());
     Ok(room)
+}
+
+pub(super) async fn sync_voice_status(ctx: &Ctx, state: &mut State) {
+    let Some(live) = &mut state.voice else {
+        return;
+    };
+    let deafened = ctx.audio.deafened();
+    live.room
+        .set_microphone_muted(ctx.audio.muted() || deafened);
+    if live.deafened != Some(deafened) && live.room.connection_state() == ConnectionState::Connected
+    {
+        match live.room.set_deafened(deafened).await {
+            Ok(()) => live.deafened = Some(deafened),
+            Err(error) => tracing::warn!(%error, "sharing deafen state failed"),
+        }
+    }
 }
 
 pub(super) fn leave_voice(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &mut State) {
@@ -381,6 +405,7 @@ pub(super) fn send_room(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &St
             person,
             connecting: false,
             unknown: false,
+            status: VoiceStatus::default(),
             apps: Vec::new(),
             screens: Vec::new(),
             camera: None,
@@ -388,12 +413,24 @@ pub(super) fn send_room(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &St
         Some(live) => {
             let ids = identities(client, &state.server_id);
             let mut live_people: HashMap<Id, bool> = HashMap::new();
+            let mut statuses: HashMap<Id, VoiceStatus> = HashMap::new();
             let mut apps: HashMap<Id, Vec<(TrackSid, String)>> = HashMap::new();
             let mut screens: HashMap<Id, Vec<Screen>> = HashMap::new();
             let mut cameras: HashMap<Id, String> = HashMap::new();
             for (participant, voice) in live.room.participants() {
                 if let Some(person) = ids.get(participant.identity().as_str()) {
                     *live_people.entry(*person).or_default() |= voice == VoiceState::Connected;
+                    if voice == VoiceState::Connected {
+                        let status = VoiceStatus::from_participant(&participant);
+                        // A person gets a badge only when every connected device agrees.
+                        statuses
+                            .entry(*person)
+                            .and_modify(|current| {
+                                current.muted &= status.muted;
+                                current.deafened &= status.deafened;
+                            })
+                            .or_insert(status);
+                    }
                     apps.entry(*person).or_default().extend(
                         participant
                             .track_publications()
@@ -458,6 +495,7 @@ pub(super) fn send_room(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &St
                     person,
                     connecting: !ok,
                     unknown: false,
+                    status: statuses.remove(&person).unwrap_or_default(),
                     apps: apps.remove(&person).unwrap_or_default(),
                     screens: screens.remove(&person).unwrap_or_default(),
                     camera: cameras.remove(&person),
@@ -469,6 +507,7 @@ pub(super) fn send_room(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &St
         person: [0; 32],
         connecting: false,
         unknown: true,
+        status: VoiceStatus::default(),
         apps: Vec::new(),
         screens: Vec::new(),
         camera: None,
@@ -558,6 +597,9 @@ pub(super) fn on_voice(
         }
         RoomEvent::Reconnected => {
             tracing::info!("voice reconnected");
+            if let Some(live) = &mut state.voice {
+                live.deafened = None;
+            }
             ctx.send(Update::Call(
                 url.clone(),
                 channel,
@@ -572,6 +614,9 @@ pub(super) fn on_voice(
         | RoomEvent::ParticipantActive(_)
         | RoomEvent::TrackPublished { .. }
         | RoomEvent::TrackUnpublished { .. }
+        | RoomEvent::TrackMuted { .. }
+        | RoomEvent::TrackUnmuted { .. }
+        | RoomEvent::ParticipantAttributesChanged { .. }
         | RoomEvent::ParticipantDisconnected(_)
         | RoomEvent::ConnectionStateChanged(_) => {}
         _ => return,
@@ -856,6 +901,7 @@ pub(super) async fn start_call(
     state.voice = Some(Live {
         room,
         channel,
+        deafened: Some(false),
         shares: Vec::new(),
         apps: HashMap::new(),
         starting: None,
@@ -876,6 +922,7 @@ pub(super) async fn start_call(
         ctx.send(Update::NoVideo(url.clone(), channel));
     }
     send_room(ctx, url, client, state, channel);
+    sync_voice_status(ctx, state).await;
     Ok(())
 }
 

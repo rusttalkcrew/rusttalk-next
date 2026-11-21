@@ -20,7 +20,7 @@ use rusttalk_core::{
     auth::encode,
     client::{
         Event, KeyClient, Server,
-        voice::{RoomEvent, VoiceRoom, VoiceRoster},
+        voice::{ParticipantIdentity, RoomEvent, TrackSource, VoiceRoom, VoiceRoster, VoiceStatus},
     },
     identity::DeviceIdentity,
 };
@@ -40,6 +40,38 @@ async fn both_ways(a: &mut VoiceRoom, b: &mut VoiceRoom, a_hz: u32, b_hz: u32) -
         hear_tone(b, Some(&a_id), a_hz),
     )?;
     Ok(())
+}
+
+async fn wait_for_microphone(
+    room: &mut VoiceRoom,
+    who: &ParticipantIdentity,
+    muted: bool,
+) -> Result<()> {
+    timeout(LIMIT, async {
+        while let Some(event) = room.next_event().await {
+            let (participant, publication, event_muted) = match event {
+                RoomEvent::TrackMuted {
+                    participant,
+                    publication,
+                } => (participant, publication, true),
+                RoomEvent::TrackUnmuted {
+                    participant,
+                    publication,
+                } => (participant, publication, false),
+                _ => continue,
+            };
+            if participant.identity() == *who
+                && publication.source() == TrackSource::Microphone
+                && event_muted == muted
+            {
+                assert_eq!(publication.is_muted(), muted);
+                return Ok(());
+            }
+        }
+        anyhow::bail!("room closed while waiting for microphone state");
+    })
+    .await
+    .context("waiting for remote microphone state")?
 }
 
 pub async fn exercise(
@@ -139,6 +171,10 @@ pub async fn exercise(
         timeout(LIMIT, both_ways(&mut room_a, &mut room_b, A_HZ, B_HZ))
             .await
             .context("initial duplex")??;
+        for muted in [true, false] {
+            room_a.set_microphone_muted(muted);
+            wait_for_microphone(&mut room_b, &a_id, muted).await?;
+        }
         let people = timeout(LIMIT, async {
             loop {
                 let event = a
@@ -191,6 +227,35 @@ pub async fn exercise(
         Ok(())
     };
     tokio::try_join!(flow, refused)?;
+    let listener_id = listener.identity();
+    for deafened in [true, false] {
+        listener.set_deafened(deafened).await?;
+        timeout(LIMIT, async {
+            while let Some(event) = room_b.next_event().await {
+                if let RoomEvent::ParticipantAttributesChanged { participant, .. } = event
+                    && participant.identity() == listener_id
+                {
+                    let (remote, _) = room_b
+                        .participants()
+                        .into_iter()
+                        .find(|(peer, _)| peer.identity() == listener_id)
+                        .context("missing listener")?;
+                    assert_eq!(
+                        VoiceStatus::from_participant(&remote),
+                        VoiceStatus {
+                            muted: false,
+                            deafened
+                        }
+                    );
+                    return Ok(());
+                }
+            }
+            anyhow::bail!("room closed while waiting for deafen state");
+        })
+        .await
+        .context("waiting for remote deafen state")??;
+    }
+    println!("Voice microphone mute and listener deafen updates reached another participant");
     println!(
         "W08 encrypted voice both ways, voice_changed and room presence, subscribe-only audio, and automatic signal reconnect"
     );

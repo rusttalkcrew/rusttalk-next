@@ -114,6 +114,7 @@ publication epoch and name length. The chosen monitor or window name,
 its pixels, app names, camera pictures and audio are encrypted on the
 sender. Capture target IDs, enumerated sources and cameras, and Linux
 portal restore tokens stay on the sender's device.
+LiveKit can see microphone mute state and the deafen attribute for each device in a voice room.
 
 For live files, only the encrypted offer is retained as a chat message.
 The API sees its normal message metadata plus the live routing notice's

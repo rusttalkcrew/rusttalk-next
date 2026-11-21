@@ -222,6 +222,7 @@ pub async fn token(
             can_publish: Some(!sources.is_empty()),
             can_publish_data: Some(can_publish_data),
             can_subscribe: Some(true),
+            can_update_own_metadata: Some(true),
             can_publish_sources: sources
                 .into_iter()
                 .map(|source| source.as_str_name().to_ascii_lowercase())
@@ -629,6 +630,68 @@ pub async fn webhook(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn only_voice_tokens_allow_updating_own_metadata() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let db = crate::store::open(dir.path()).await?;
+        let api_key = "test-key";
+        let api_secret = "test-secret-with-at-least-32-characters";
+        let verifier = TokenVerifier::with_api_key(api_key, api_secret);
+        let app = App {
+            files: crate::files::Files::open(dir.path(), &db).await?.into(),
+            db,
+            key: Arc::new(ed25519_dalek::SigningKey::from_bytes(&[7; 32])),
+            changes: tokio::sync::broadcast::channel(128).0,
+            presence: Default::default(),
+            voice: Some(Arc::new(LiveKit {
+                api_key: api_key.into(),
+                api_secret: Zeroizing::new(api_secret.into()),
+                webhook: WebhookReceiver::new(TokenVerifier::with_api_key(api_key, api_secret)),
+                http: reqwest::Client::new(),
+                rosters: Mutex::default(),
+            })),
+            session_ttl: 3600,
+            listing_changed: tokio::sync::watch::channel(()).0,
+        };
+        let channel = encode(&[20; 32]);
+        let person = [1_u8; 32];
+        sqlx::query("INSERT INTO members (person_id, joined_at) VALUES (?, 0)")
+            .bind(person.as_slice())
+            .execute(&app.db)
+            .await?;
+        sqlx::query("UPDATE server_settings SET owner_person_id = ?")
+            .bind(person.as_slice())
+            .execute(&app.db)
+            .await?;
+        sqlx::query("INSERT INTO sessions (token_hash, person_id, device_id, ip, expires_at, session_id) VALUES (?, ?, ?, '192.0.2.1', ?, x'01')")
+            .bind(crate::store::hash(&[1; 32]).as_slice()).bind(person.as_slice()).bind([2; 32].as_slice())
+            .bind(i64::MAX).execute(&app.db).await?;
+        sqlx::query("INSERT INTO categories (id, position, name_ct) VALUES ('cat', 0, x'00')")
+            .execute(&app.db)
+            .await?;
+        sqlx::query("INSERT INTO channels (id, kind, category_id, position, name_ct) VALUES (?, 'voice', 'cat', 0, x'00')")
+            .bind(&channel).execute(&app.db).await?;
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            format!("Bearer {}", encode(&[1; 32])).parse()?,
+        );
+        headers.insert("x-forwarded-for", "192.0.2.1".parse()?);
+
+        let Json(voice) = token(State(app.clone()), headers.clone(), Path(channel.clone()))
+            .await
+            .unwrap();
+        let claims = verifier.verify(&voice.token)?;
+        assert!(claims.video.can_update_own_metadata());
+        let Json(data) = data_token(State(app), headers, Path((channel, encode(&[3; 16]))))
+            .await
+            .unwrap();
+        let claims = verifier.verify(&data.token)?;
+        assert!(!claims.video.can_update_own_metadata());
+        Ok(())
+    }
 
     #[test]
     fn voice_room_ids_can_start_with_the_data_prefix() {

@@ -9,8 +9,9 @@ use eframe::egui::{
     text::{LayoutJob, TextWrapping},
     vec2,
 };
+use rusttalk_core::client::voice::VoiceStatus;
 
-use super::{Voice, join, ring, stop_watching, stream_menu, upload, watch};
+use super::{Voice, join, ring, sound_badges, stop_watching, stream_menu, upload, watch};
 use crate::{
     home::{Home, face},
     server::{Id, Peer, Screen, Server},
@@ -676,13 +677,17 @@ fn name_tag(ui: &mut Ui, rect: Rect, entry: &Entry, audio: &crate::audio::Audio)
     let c = ui::colors(ui);
     let person = entry.peer.person;
     let is_person = matches!(entry.tile, Tile::Person(_));
-    let badge = match () {
-        _ if !is_person => None,
-        _ if entry.me && audio.deafened() => Some(("🎧", "Deafened")),
-        _ if entry.me && audio.muted() => Some(("🎤", "Muted")),
-        _ if !entry.me && audio.volume(&(person, None)).1 => Some(("🔊", "Muted by you")),
-        _ => None,
+    let status = match () {
+        _ if !is_person => VoiceStatus::default(),
+        _ if entry.me => VoiceStatus {
+            muted: audio.muted() && !audio.deafened(),
+            deafened: audio.deafened(),
+        },
+        _ => entry.peer.status,
     };
+    let local_mute = is_person && !entry.me && audio.volume(&(person, None)).1;
+    let badges = sound_badges(status).chain(local_mute.then_some(("🔊", "Muted by you")));
+    let badges_width = BADGE * badges.clone().count() as f32;
     let text = if entry.peer.connecting && is_person {
         format!("{} · Connecting…", entry.name)
     } else {
@@ -691,10 +696,11 @@ fn name_tag(ui: &mut Ui, rect: Rect, entry: &Entry, audio: &crate::audio::Audio)
     let pad = vec2(8.0, 3.0);
     // Beside the picture on a low tile without video, else at the bottom left.
     let beside = (is_person && entry.picture.is_none() && rect.height() < COMPACT)
-        .then(|| avatar_spot(rect).right() + GAP);
+        .then(|| avatar_spot(rect).right() + GAP)
+        .filter(|left| rect.right() - GAP - left - 2.0 * pad.x - badges_width >= ui::TEXT_SMALL);
     let left = beside.unwrap_or(rect.left() + GAP);
-    let room = rect.right() - GAP - left - 2.0 * pad.x - if badge.is_some() { BADGE } else { 0.0 };
-    if room < 16.0 {
+    let room = rect.right() - GAP - left - 2.0 * pad.x - badges_width;
+    if room < 0.0 {
         return;
     }
     let mut job =
@@ -703,7 +709,7 @@ fn name_tag(ui: &mut Ui, rect: Rect, entry: &Entry, audio: &crate::audio::Audio)
     let painter = ui.painter();
     let galley = painter.layout_job(job);
     let height = galley.size().y + 2.0 * pad.y;
-    let width = galley.size().x + 2.0 * pad.x + if badge.is_some() { BADGE } else { 0.0 };
+    let width = galley.size().x + 2.0 * pad.x + badges_width;
     let top = match beside {
         Some(_) => rect.center().y - height / 2.0,
         None => rect.bottom() - GAP - height,
@@ -712,9 +718,12 @@ fn name_tag(ui: &mut Ui, rect: Rect, entry: &Entry, audio: &crate::audio::Audio)
     painter.rect_filled(tag, ui::RADIUS_S, ui::OVERLAY_BUTTON);
     let text_at = tag.min + pad;
     painter.galley(text_at, galley, ui::OVERLAY_TEXT);
-    if let Some((glyph, tip)) = badge {
+    for (index, (glyph, tip)) in badges.enumerate() {
         let spot = Rect::from_center_size(
-            pos2(tag.right() - BADGE / 2.0 - 2.0, tag.center().y),
+            pos2(
+                tag.right() - badges_width + BADGE * (index as f32 + 0.5) - 2.0,
+                tag.center().y,
+            ),
             Vec2::splat(BADGE - 4.0),
         );
         painter.text(
@@ -730,7 +739,11 @@ fn name_tag(ui: &mut Ui, rect: Rect, entry: &Entry, audio: &crate::audio::Audio)
             Stroke::new(2.0, c.danger_text),
         );
         let response = ui
-            .interact(spot, UiId::unique(("tile badge", person)), Sense::hover())
+            .interact(
+                spot,
+                UiId::unique(("tile badge", person, tip)),
+                Sense::hover(),
+            )
             .on_hover_text(tip);
         response.widget_info(|| WidgetInfo::labeled(Role::Image, true, tip));
     }

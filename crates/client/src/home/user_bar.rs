@@ -5,7 +5,11 @@ use eframe::egui::{Align, Color32, Label, Layout, Ui, Vec2};
 use rusttalk_core::presence::{Presence, Status as Choice};
 
 use super::{Directory, Home, Tab, View, face, presence_color};
-use crate::ui::{self, ICON_BUTTON, Item, Look, Palette};
+use crate::{
+    call::call_server,
+    net::Command,
+    ui::{self, ICON_BUTTON, Item, Look, Palette},
+};
 
 const AVATAR_SIZE: f32 = 32.0;
 const BAR_HEIGHT: f32 = 40.0;
@@ -132,6 +136,11 @@ fn sound_buttons(ui: &mut Ui, home: &Home) {
         if muted {
             audio.set_deafened(false);
         }
+    }
+    if (ears.clicked() || mic.clicked())
+        && let Some(server) = call_server(home)
+    {
+        server.send(Command::SyncVoiceStatus);
     }
 }
 
