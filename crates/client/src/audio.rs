@@ -52,6 +52,20 @@ const FRAME: usize = 480;
 pub const SILENT_DB: f32 = -50.0;
 /// Voice activation stays open this long after the last loud frame.
 const HOLD_FRAMES: u32 = 40;
+/// Once open, the gate closes only this far below its threshold, so it doesn't chatter.
+const HYSTERESIS_DB: f32 = 4.0;
+/// Automatic sensitivity opens this far above the background noise.
+const AUTO_MARGIN_DB: f32 = 10.0;
+/// The automatic threshold stays inside this range, in dBFS.
+pub const AUTO_MIN_DB: f32 = -60.0;
+pub const AUTO_MAX_DB: f32 = -25.0;
+/// The noise floor is a low percentile of the last 5 s, in 100 ms blocks.
+const NOISE_BLOCK: u32 = 10;
+const NOISE_BLOCKS: usize = 50;
+const NOISE_PERCENTILE: f32 = 0.1;
+/// The floor follows quieter noise at once but rises at most this fast, in dB per block,
+/// so speech can't drag it up while a lasting louder noise still catches up in seconds.
+const NOISE_RISE_DB: f32 = 1.0;
 /// Playback starts once a track has this much queued, and drops what exceeds the cap.
 const PRIME: usize = 3 * FRAME;
 const CAP: usize = 20 * FRAME;
@@ -68,8 +82,12 @@ pub struct Settings {
     pub push_to_talk: bool,
     /// An `egui::Key` name.
     pub key: String,
-    /// Voice activation level in dBFS.
+    /// Voice activation level in dBFS, used while `auto_threshold` is off.
     pub threshold: f32,
+    /// Adjust the voice activation level to the background noise. On for new
+    /// settings; a saved file without it keeps its manual level.
+    #[serde(default)]
+    pub auto_threshold: bool,
     pub echo_cancellation: bool,
     pub noise_suppression: bool,
     pub auto_gain: bool,
@@ -127,6 +145,7 @@ impl Default for Settings {
             push_to_talk: false,
             key: "V".into(),
             threshold: -42.0,
+            auto_threshold: true,
             echo_cancellation: true,
             noise_suppression: true,
             auto_gain: true,
@@ -199,6 +218,8 @@ struct Shared {
     deafened: AtomicBool,
     /// Last processed microphone frame, in dBFS (f32 bits).
     level: AtomicU32,
+    /// The automatic voice activation level, in dBFS (f32 bits).
+    auto_threshold: AtomicU32,
     /// When this person last sent sound, in ms since `start`.
     talked: AtomicU64,
     /// Device latencies for the echo canceller, in ms.
@@ -292,6 +313,7 @@ impl Audio {
             muted: AtomicBool::new(false),
             deafened: AtomicBool::new(false),
             level: AtomicU32::new((-100f32).to_bits()),
+            auto_threshold: AtomicU32::new(NoiseFloor::default().threshold().to_bits()),
             talked: AtomicU64::new(0),
             input_delay: AtomicU32::new(10),
             output_delay: AtomicU32::new(20),
@@ -408,6 +430,11 @@ impl Audio {
         f32::from_bits(self.shared().level.load(Relaxed))
     }
 
+    /// The voice activation level automatic sensitivity picked last, in dBFS.
+    pub fn auto_threshold(&self) -> f32 {
+        f32::from_bits(self.shared().auto_threshold.load(Relaxed))
+    }
+
     /// This person is sending sound right now.
     pub fn talking(&self) -> bool {
         self.shared().now() < self.shared().talked.load(Relaxed) + SPEAKING_MS
@@ -497,6 +524,72 @@ pub fn calibrate(quiet: &[f32], speech: &[f32]) -> Option<f32> {
     let noise = percentile(quiet, 0.9)?;
     let voice = percentile(speech, 0.75)?;
     (voice - noise >= 10.0).then(|| noise + (voice - noise) / 3.0)
+}
+
+/// A slow estimate of the background noise from 10 ms frame levels.
+struct NoiseFloor {
+    /// Ring of 100 ms block averages.
+    blocks: [f32; NOISE_BLOCKS],
+    filled: usize,
+    next: usize,
+    sum: f32,
+    frames: u32,
+    floor: f32,
+}
+
+impl Default for NoiseFloor {
+    fn default() -> Self {
+        Self {
+            blocks: [0.0; NOISE_BLOCKS],
+            filled: 0,
+            next: 0,
+            sum: 0.0,
+            frames: 0,
+            // A quiet room after processing, so the first words after start aren't cut off.
+            floor: AUTO_MIN_DB - AUTO_MARGIN_DB,
+        }
+    }
+}
+
+impl NoiseFloor {
+    fn push(&mut self, db: f32) {
+        self.sum += db;
+        self.frames += 1;
+        if self.frames < NOISE_BLOCK {
+            return;
+        }
+        self.blocks[self.next] = self.sum / NOISE_BLOCK as f32;
+        self.next = (self.next + 1) % NOISE_BLOCKS;
+        self.filled = (self.filled + 1).min(NOISE_BLOCKS);
+        self.sum = 0.0;
+        self.frames = 0;
+        // Ten times a second over 50 values: trivial next to the audio processing.
+        let target = percentile(&self.blocks[..self.filled], NOISE_PERCENTILE).expect("filled");
+        self.floor = target.min(self.floor + NOISE_RISE_DB);
+    }
+
+    fn threshold(&self) -> f32 {
+        (self.floor + AUTO_MARGIN_DB).clamp(AUTO_MIN_DB, AUTO_MAX_DB)
+    }
+}
+
+/// Voice activation: opens above the threshold, closes once the level stayed below
+/// it minus the hysteresis for the hold time, so word endings aren't clipped.
+#[derive(Default)]
+struct Gate {
+    hold: u32,
+}
+
+impl Gate {
+    fn update(&mut self, db: f32, threshold: f32) -> bool {
+        let open = self.hold > 0;
+        self.hold = if db > threshold || (open && db > threshold - HYSTERESIS_DB) {
+            HOLD_FRAMES
+        } else {
+            self.hold.saturating_sub(1)
+        };
+        self.hold > 0
+    }
 }
 
 fn percentile(levels: &[f32], at: f32) -> Option<f32> {
@@ -882,7 +975,8 @@ fn process(shared: &Shared, frames: &Receiver<Mic>) {
     let mut pending = Vec::new();
     let mut near = Vec::new();
     let mut resampler = AudioResampler::default();
-    let mut hold = 0;
+    let mut gate = Gate::default();
+    let mut noise = NoiseFloor::default();
     // A stronger AI noise filter can go here later, after the WebRTC processing.
     let mut filter: Option<Filter> = None;
     while let Ok(message) = frames.recv() {
@@ -940,21 +1034,23 @@ fn process(shared: &Shared, frames: &Receiver<Mic>) {
             if let Some(levels) = lock(&shared.record).as_mut() {
                 levels.push(db);
             }
+            noise.push(db);
+            let auto = noise.threshold();
+            shared.auto_threshold.store(auto.to_bits(), Relaxed);
             let (push_to_talk, threshold) = {
                 let s = lock(&shared.settings);
-                (s.push_to_talk, s.threshold)
+                (
+                    s.push_to_talk,
+                    if s.auto_threshold { auto } else { s.threshold },
+                )
             };
-            hold = if db > threshold {
-                HOLD_FRAMES
-            } else {
-                hold.saturating_sub(1)
-            };
+            let voiced = gate.update(db, threshold);
             let open = !shared.muted.load(Relaxed)
                 && !shared.deafened.load(Relaxed)
                 && if push_to_talk {
                     shared.key_down.load(Relaxed)
                 } else {
-                    hold > 0
+                    voiced
                 };
             if open && db > SILENT_DB {
                 shared.talked.store(shared.now(), Relaxed);
@@ -988,6 +1084,86 @@ fn send(source: &NativeAudioSource, frame: &[i16]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Feeds `seconds` of 10 ms frames at `db` and returns how many opened the gate.
+    fn feed(noise: &mut NoiseFloor, gate: &mut Gate, db: f32, seconds: f32) -> usize {
+        (0..(seconds * 100.0) as usize)
+            .filter(|_| {
+                noise.push(db);
+                gate.update(db, noise.threshold())
+            })
+            .count()
+    }
+
+    #[test]
+    fn steady_noise_sets_the_threshold_above_it() {
+        let (mut noise, mut gate) = (NoiseFloor::default(), Gate::default());
+        feed(&mut noise, &mut gate, -50.0, 10.0);
+        assert!((noise.threshold() - (-50.0 + AUTO_MARGIN_DB)).abs() < 0.01);
+        assert_eq!(feed(&mut noise, &mut gate, -50.0, 5.0), 0);
+    }
+
+    #[test]
+    fn louder_noise_is_shut_out_within_seconds() {
+        let (mut noise, mut gate) = (NoiseFloor::default(), Gate::default());
+        feed(&mut noise, &mut gate, -55.0, 10.0);
+        // A fan turns on: it may open the gate briefly, then the floor catches up.
+        feed(&mut noise, &mut gate, -40.0, 8.0);
+        assert!((noise.threshold() - (-40.0 + AUTO_MARGIN_DB)).abs() < 0.01);
+        assert_eq!(feed(&mut noise, &mut gate, -40.0, 5.0), 0);
+        // And it turns off again: the floor drops back at once.
+        feed(&mut noise, &mut gate, -55.0, 5.0);
+        assert!((noise.threshold() - (-55.0 + AUTO_MARGIN_DB)).abs() < 0.01);
+    }
+
+    #[test]
+    fn speech_passes_without_raising_the_floor() {
+        let (mut noise, mut gate) = (NoiseFloor::default(), Gate::default());
+        feed(&mut noise, &mut gate, -55.0, 5.0);
+        for _ in 0..10 {
+            // Every frame of a word and the short pause after it go through.
+            assert_eq!(feed(&mut noise, &mut gate, -25.0, 1.5), 150);
+            assert_eq!(feed(&mut noise, &mut gate, -55.0, 0.3), 30);
+            feed(&mut noise, &mut gate, -55.0, 0.5);
+        }
+        assert!(noise.threshold() < -55.0 + AUTO_MARGIN_DB + 1.0);
+        // The gate closes in the silence after speaking.
+        assert!(!gate.update(-55.0, noise.threshold()));
+    }
+
+    #[test]
+    fn speech_after_long_silence_opens_at_once() {
+        let (mut noise, mut gate) = (NoiseFloor::default(), Gate::default());
+        feed(&mut noise, &mut gate, -100.0, 60.0);
+        assert_eq!(noise.threshold(), AUTO_MIN_DB);
+        noise.push(-35.0);
+        assert!(gate.update(-35.0, noise.threshold()));
+    }
+
+    #[test]
+    fn gate_holds_and_does_not_chatter() {
+        let mut gate = Gate::default();
+        // Just under the line doesn't open a closed gate.
+        assert!(!gate.update(-42.0, -40.0));
+        assert!(gate.update(-30.0, -40.0));
+        // Hovering just under the line keeps it open past the hold time.
+        for _ in 0..2 * HOLD_FRAMES {
+            assert!(gate.update(-42.0, -40.0));
+        }
+        // Well under it, the gate stays open for the hold time, then closes.
+        for _ in 0..HOLD_FRAMES - 1 {
+            assert!(gate.update(-60.0, -40.0));
+        }
+        assert!(!gate.update(-60.0, -40.0));
+    }
+
+    #[test]
+    fn saved_settings_keep_their_manual_level() {
+        assert!(Settings::default().auto_threshold);
+        let saved: Settings = serde_json::from_str(r#"{"threshold": -30.0}"#).unwrap();
+        assert!(!saved.auto_threshold);
+        assert_eq!(saved.threshold, -30.0);
+    }
 
     #[test]
     fn mix_applies_each_stream_volume() {

@@ -24,10 +24,11 @@ use crate::audio::Settings;
 
 /// Voice and video preferences, dismissed official servers and the appearance, that follow the person to their other devices.
 /// The microphone, speakers and camera differ per computer and stay in `voice.json` only.
-const SYNCED: [&str; 13] = [
+const SYNCED: [&str; 14] = [
     "push_to_talk",
     "key",
     "threshold",
+    "auto_threshold",
     "echo_cancellation",
     "noise_suppression",
     "auto_gain",
