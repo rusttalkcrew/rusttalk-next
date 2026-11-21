@@ -246,6 +246,32 @@ cached ID is rejected as a replay. To accept an edit it independently authentica
 original in the same channel and checks that it has the same person ID.
 The server supplies delivery timestamps and order.
 
+### Direct messages on several servers
+
+A DM has a copy on every server both people share. Each copy is an ordinary
+DM channel with its own channel key and epochs, created and wrapped as above.
+A message is sealed and signed separately for each copy under that server's
+current DM epoch, with the associated data above. Only the random message ID
+is shared, so readers can merge the copies by person and ID.
+
+The associated data keeps the server and channel IDs rather than binding a
+server-independent conversation ID. A server can then neither replay another
+server's copy nor accept it, because the API verifies the signature against its
+own server and channel. Each copy's key also follows that server's membership
+and rotations, so a revocation or removal on one server rotates only that copy
+and needs no key shared across servers. The wire format is unchanged and the
+API needs no new checks. Encrypting per server costs one seal per copy.
+
+A sender could post different bodies under one ID to different servers. This
+only affects the conversation partner, who could equally receive two separate
+messages. Readers show one readable copy. Merging by person and ID stops one
+participant's record from replacing the other's under a reused ID, and an edit
+applies only to the original with the same person. Ordering uses server
+timestamps, because the plaintext carries no send time; adding one would
+change the plaintext format that current apps parse. Readers use the earliest
+timestamp seen for a message across all copies. Server clocks can differ, so
+messages sent within that difference can appear out of order.
+
 An archived sender is a device that is no longer in the current directory,
 for example after revocation or removal of its person. Clients accept its
 root-signed certificate for any epoch of retained history. Removal and

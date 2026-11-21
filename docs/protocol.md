@@ -349,6 +349,20 @@ closes the pair's DM and deletes its history and envelopes. They can create a
 new DM if the former member rejoins. Copies already held by either person can
 remain on their devices.
 
+The app keeps one DM per person over every server both people share. Each
+server holds an ordinary DM channel, its copy. The app creates the copy on a
+shared server when it first sends there. It posts each message, with the same
+random message ID, to every shared server that is online. Copies are encrypted
+separately for each server (see [Crypto](crypto.md#direct-messages-on-several-servers)).
+Readers load every copy, merge records by person and message ID, and order
+them by the earliest server timestamp, keeping server order for equal times.
+An edit goes to the servers holding the original. A delete goes to every
+online server holding the message; the author's app deletes a copy that shows
+up later on a server that was offline. Older pages load from each copy
+separately. Without a shared server, the app keeps showing what it loaded and
+disables sending. The API is unchanged and still sees each copy as a separate
+DM, so older apps show one DM per server.
+
 ## Messages
 
 These routes require a bearer header and apply to text channels, voice channels and DMs.
