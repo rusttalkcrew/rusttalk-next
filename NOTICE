@@ -1,0 +1,16 @@
+RustTalk
+Copyright 2026 The RustTalk crew (https://github.com/rusttalkcrew)
+
+RustTalk was originally created by Menno van Leeuwen (@vleeuwenmenno) and the
+RustTalk crew. Source: https://github.com/rusttalkcrew/rusttalk-next
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+Anyone who redistributes RustTalk, or a work based on it, must keep this
+NOTICE file and the attribution above, as described in section 4(d) of the
+license.
+
+Third-party material bundled with RustTalk keeps its own license:
+- Inter font, SIL Open Font License 1.1 (crates/client/assets/fonts/Inter-LICENSE.txt)
+- Noto Sans CJK Japanese subset, SIL Open Font License 1.1 (crates/client/assets/fonts/NotoSansJP-LICENSE.txt)
+- Twemoji graphics by Twitter, Inc. and other contributors, CC BY 4.0 (crates/client/assets/emoji/TWEMOJI-LICENSE.txt)
+- Emojibase data, MIT (crates/client/assets/emoji/EMOJIBASE-LICENSE.txt)

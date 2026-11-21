@@ -11,6 +11,9 @@ mkdir -p "$appdir/usr/bin" "$out"
 cp "$target/rusttalk-client" "$target/rusttalk-pipewire" "$appdir/usr/bin/"
 ln -s usr/bin/rusttalk-client "$appdir/AppRun"
 cp deploy/release/rusttalk.desktop deploy/release/rusttalk.svg "$appdir/"
+# Apache-2.0 requires the license and NOTICE in every copy.
+mkdir -p "$appdir/usr/share/doc/rusttalk"
+cp LICENSE NOTICE "$appdir/usr/share/doc/rusttalk/"
 # A pinned local runtime: appimagetool would otherwise download one unverified.
 ARCH=$arch APPIMAGE_EXTRACT_AND_RUN=1 "$tool" --runtime-file "$runtime" "$appdir" \
   "$out/rusttalk-$version-linux-$arch.AppImage"
