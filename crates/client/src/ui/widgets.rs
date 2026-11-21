@@ -464,6 +464,55 @@ pub fn popup<R>(anchor: &Response, add: impl FnOnce(&mut Ui) -> R) -> Option<R> 
         .map(|inner| inner.inner)
 }
 
+/// A small card beside `anchor` that opens on a left click and closes on a click
+/// outside or Escape, like someone's profile card. It has its own id, so `anchor`
+/// can have a `context_menu` as well. With `at_click` it opens where `anchor` was
+/// clicked instead, so on a big tile it covers that tile rather than its neighbour.
+pub fn card_popup<R>(
+    ui: &Ui,
+    anchor: &Response,
+    label: &str,
+    at_click: bool,
+    add: impl FnOnce(&mut Ui) -> R,
+) -> Option<R> {
+    let id = anchor.id.with("card");
+    let spot = id.with("spot");
+    if at_click
+        && anchor.clicked()
+        && let Some(pos) = anchor.interact_pointer_pos()
+    {
+        ui.data_mut(|data| data.insert_temp(spot, pos));
+    }
+    let clicked_at = at_click
+        .then(|| ui.data(|data| data.get_temp::<Pos2>(spot)))
+        .flatten();
+    let c = colors(ui);
+    let frame = Frame::new()
+        .fill(c.raised)
+        .stroke(Stroke::new(1.0, c.border))
+        .corner_radius(RADIUS_WINDOW)
+        .inner_margin(Margin::same(SPACE_L as i8))
+        .shadow(ui.visuals().popup_shadow);
+    let mut popup = Popup::from_toggle_button_response(anchor);
+    if let Some(pos) = clicked_at {
+        popup = popup.anchor(pos);
+    }
+    popup
+        .id(id)
+        .kind(PopupKind::Popup)
+        .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
+        // Beside the row or tile; egui flips it when there is no room.
+        .align(RectAlign::RIGHT_START)
+        .gap(SPACE_S)
+        .frame(frame)
+        .accessible_name(label)
+        .show(|ui| {
+            ui.set_width(POPUP_WIDTH - 2.0 * SPACE_L);
+            add(ui)
+        })
+        .map(|inner| inner.inner)
+}
+
 /// A larger popup above the right end of `anchor`, open while `open` is set; a click
 /// outside it or Escape clears it. The frame has no padding, so a rail or a bar can
 /// run to its edges.

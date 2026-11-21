@@ -19,7 +19,10 @@ use crate::{
     audio::{self, Audio, Settings, StreamId},
     camera::{Camera, Change},
     denoise, files,
-    home::{Home, Tab, face},
+    home::{
+        Home, Tab, face,
+        person::{self, Person, Pick},
+    },
     mic_check::Verdict,
     net::{Admin, Command, Update},
     screen::{self, Kind, Options, Target, Video},
@@ -74,7 +77,7 @@ pub struct Voice {
     preview: Option<TextureHandle>,
     pub camera: Camera,
     /// People whose camera this device chose not to receive.
-    hidden: HashSet<Id>,
+    pub(crate) hidden: HashSet<Id>,
     /// Camera tracks this device receives, with their newest picture.
     cameras: HashMap<String, Option<TextureHandle>>,
     /// Camera tracks drawn this frame; only these stay subscribed.
@@ -236,7 +239,7 @@ impl Voice {
         self.preview = None;
     }
 
-    fn in_call(&self, server: &Server, channel: &Id) -> bool {
+    pub(crate) fn in_call(&self, server: &Server, channel: &Id) -> bool {
         self.call
             .as_ref()
             .is_some_and(|call| call.server == server.address && call.channel == *channel)
@@ -411,13 +414,11 @@ pub fn join_button(
     ui::icon_button(&mut at, "📞", t!("call.join_voice"), ui::Look::Ghost, size).clicked()
 }
 
-/// The people in a voice channel, under its name in the channel list.
-/// Each person's menu has their volume while in the call, and what a moderator may do;
-/// returns the moderation request picked.
-pub fn room_list(ui: &mut Ui, home: &Home, server: &Server, channel: &Id) -> Option<Admin> {
+/// The people in a voice channel, under its name in the channel list. A click on
+/// someone shows their profile card, a right click their menu; returns what was picked.
+pub fn room_list(ui: &mut Ui, home: &Home, server: &Server, channel: &Id) -> Option<(Id, Pick)> {
     let peers = server.voice.get(channel)?;
-    let perms = server.dir.perms;
-    let mut request = None;
+    let mut pick = None;
     // The speaking ring reaches 3 points past the picture: keep rows clear of each other.
     ui.spacing_mut().item_spacing.y = ui::SPACE_S;
     for peer in peers {
@@ -480,26 +481,16 @@ pub fn room_list(ui: &mut Ui, home: &Home, server: &Server, channel: &Id) -> Opt
                 });
             });
         });
-        let row = row.response.interact(Sense::click());
-        let other = peer.person != server.dir.me && !peer.unknown;
-        let listening = other && home.voice.in_call(server, channel);
-        let moderate = other && (perms.mute_members || perms.move_members);
-        if (listening || moderate)
-            && let Some(Some(picked)) = ui::context_menu(&row, |m| {
-                if listening {
-                    stream_menu(m, &home.voice.audio, &(peer.person, None));
-                }
-                if !moderate {
-                    return None;
-                }
-                if listening {
-                    m.separator();
-                }
-                moderation_menu(m, server, channel, peer.person)
-            })
+        let row =
+            (row.response.interact(Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand);
+        row.widget_info(|| WidgetInfo::labeled(Role::Button, true, &name));
+        if !peer.unknown
+            && let Some(picked) =
+                person::interact(ui, &row, &Person::of(home, server, peer.person), false)
         {
-            request = Some(picked);
+            pick = Some((peer.person, picked));
         }
+        let listening = peer.person != server.dir.me && home.voice.in_call(server, channel);
         for (sid, app) in &peer.apps {
             let stream = (peer.person, Some(sid.clone()));
             let row = ui.horizontal(|ui| {
@@ -515,12 +506,17 @@ pub fn room_list(ui: &mut Ui, home: &Home, server: &Server, channel: &Id) -> Opt
             }
         }
     }
-    request
+    pick
 }
 
 /// Mute for everyone, move and remove, as far as this moderator may. The server also
 /// checks that they rank above the person.
-fn moderation_menu(m: &mut ui::Menu, server: &Server, channel: &Id, person: Id) -> Option<Admin> {
+pub fn moderation_menu(
+    m: &mut ui::Menu,
+    server: &Server,
+    channel: &Id,
+    person: Id,
+) -> Option<Admin> {
     let perms = server.dir.perms;
     let mut request = None;
     if perms.mute_members {

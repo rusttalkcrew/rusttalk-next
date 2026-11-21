@@ -16,7 +16,11 @@ use super::{
     stream_menu, upload, watch,
 };
 use crate::{
-    home::{Home, face},
+    friends::Relation,
+    home::{
+        Home, face,
+        person::{self, Person, Pick},
+    },
     net::Command,
     server::{Id, Peer, Screen, Server},
     ui::{self, Look},
@@ -318,7 +322,8 @@ enum Act {
     Watch(Screen),
     StopWatching,
     HidePreview,
-    ShowVideo(Id, bool),
+    /// Picked on someone's card or in their menu.
+    Person(Id, Pick),
     RequestControl(String),
     ReleaseControl,
     /// Input for the screen we control.
@@ -538,6 +543,7 @@ pub fn stage(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
             _ => None,
         };
         let state = TileState {
+            relation: home.friends.relation(&entry.peer.person),
             joined,
             big: is_big,
             spotlight: big.is_some(),
@@ -594,7 +600,8 @@ pub fn stage(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
             join(home, index, channel);
         }
     }
-    apply(home, acts);
+    let now = ui.input(|input| input.time);
+    apply(home, index, now, acts);
 }
 
 /// A tile's place, eased towards `target` as a share of the stage, so the stage
@@ -620,6 +627,7 @@ fn animate(ctx: &egui::Context, tile: &Tile, target: Rect, stage: Rect) -> Rect 
 
 #[derive(Clone, Copy)]
 struct TileState {
+    relation: Relation,
     joined: bool,
     /// The focused or presented tile.
     big: bool,
@@ -721,7 +729,11 @@ fn tile(
             acts.push(Act::Watch(screen.clone()));
         }
     } else {
-        response.widget_info(|| WidgetInfo::labeled(Role::Group, true, &entry.name));
+        let role = match entry.tile {
+            Tile::Person(_) => Role::Button,
+            Tile::Screen(_) | Tile::Preview => Role::Group,
+        };
+        response.widget_info(|| WidgetInfo::labeled(role, true, &entry.name));
     }
     if response.double_clicked() && !controlling {
         acts.push(if state.focused {
@@ -730,18 +742,24 @@ fn tile(
             Act::Focus(entry.tile.clone())
         });
     }
-    let others = !entry.me && !entry.peer.unknown && state.joined;
-    if others && matches!(entry.tile, Tile::Person(_)) {
-        ui::context_menu(&response, |m| {
-            stream_menu(m, audio, &(person, None));
-            if entry.peer.camera.is_some() {
-                let show = entry.video;
-                let item = ui::Item::new("📷", t!("call.show_video")).checked(show);
-                if m.add(item).clicked() {
-                    acts.push(Act::ShowVideo(person, !show));
-                }
-            }
-        });
+    if matches!(entry.tile, Tile::Person(_)) && !entry.peer.unknown && !controlling {
+        let others = !entry.me && state.joined;
+        let target = Person {
+            server,
+            person,
+            relation: state.relation,
+            audio: others.then_some(audio),
+            video: (others && entry.peer.camera.is_some()).then_some(entry.video),
+        };
+        // In the strip a click focuses the tile, so only the menu is there.
+        let picked = if state.spotlight && !state.big {
+            ui::context_menu(&response, |m| target.menu(m)).flatten()
+        } else {
+            person::interact(ui, &response, &target, true)
+        };
+        if let Some(picked) = picked {
+            acts.push(Act::Person(person, picked));
+        }
     }
     if let Some(on) = state.remote {
         let sharer = entry.peer.name(server);
@@ -1003,7 +1021,7 @@ fn tools(
     }
 }
 
-fn apply(home: &mut Home, acts: Vec<Act>) {
+fn apply(home: &mut Home, index: usize, now: f64, acts: Vec<Act>) {
     for act in acts {
         let stage = &mut home.voice.stage;
         match act {
@@ -1029,12 +1047,7 @@ fn apply(home: &mut Home, acts: Vec<Act>) {
                 stop_watching(home);
             }
             Act::HidePreview => home.voice.stop_preview(),
-            Act::ShowVideo(person, true) => {
-                home.voice.hidden.remove(&person);
-            }
-            Act::ShowVideo(person, false) => {
-                home.voice.hidden.insert(person);
-            }
+            Act::Person(person, picked) => person::apply(home, index, person, picked, now),
             Act::RequestControl(sid) => send(home, Command::RequestControl(sid)),
             Act::ReleaseControl => send(home, Command::ReleaseControl),
             Act::Control(inputs) => send(home, Command::ControlInput(inputs)),

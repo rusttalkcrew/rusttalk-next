@@ -78,6 +78,7 @@ mod friends;
 pub mod layout;
 mod markdown;
 pub mod mentions;
+pub mod person;
 mod pokes;
 mod user_bar;
 #[cfg(test)]
@@ -90,7 +91,7 @@ pub struct Home {
     /// DMs by the other person, merged over every server they were on.
     threads: HashMap<Id, Thread>,
     /// Friends, requests and blocks; synced between this person's devices only.
-    friends: Friends,
+    pub(crate) friends: Friends,
     friends_tab: friends::Tab,
     /// Pokes received and sent; kept on this device only.
     pokes: crate::pokes::Pokes,
@@ -2012,7 +2013,7 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
     let mut pick = None;
     let mut add = None;
     let mut talk = None;
-    let mut moderation = None;
+    let mut person_pick = None;
     let mut configure = None;
     let mut moved = None;
     let mut channel_edit = None;
@@ -2096,8 +2097,8 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
                         if call::join_button(ui, home, server, &channel.id, &row, selected) {
                             talk = Some(channel.id);
                         }
-                        if let Some(request) = call::room_list(ui, home, server, &channel.id) {
-                            moderation = Some(request);
+                        if let Some(picked) = call::room_list(ui, home, server, &channel.id) {
+                            person_pick = Some(picked);
                         }
                     }
                     row
@@ -2164,8 +2165,9 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
     if let Some(channel) = talk {
         call::join(home, index, channel);
     }
-    if let Some(request) = moderation {
-        home.servers[index].send(Command::Admin(request));
+    if let Some((person, picked)) = person_pick {
+        let now = ui.input(|input| input.time);
+        person::apply(home, index, person, picked, now);
     }
     if let Some(category) = add {
         home.dialog = Some(new_channel(&home.servers[index], index, category));
@@ -2255,7 +2257,7 @@ fn category_name(voice: bool) -> &'static str {
 }
 
 pub fn avatar(ui: &mut Ui, person: &Id, name: &str, size: f32) -> Response {
-    let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
     paint_avatar(ui, rect, person, name);
     response
 }
@@ -2289,6 +2291,7 @@ fn avatar_atom(member: &Member, name: &str) -> egui::Atom<'static> {
 }
 
 /// A member's picture (or initials) and, with `dot`, their presence: green, yellow or grey.
+/// It only senses hover, so a click on it reaches the row or tile around it.
 pub fn face(
     ui: &mut Ui,
     dir: &Directory,
@@ -2312,7 +2315,7 @@ fn member_face(
 ) -> Response {
     let response = match member.and_then(|m| m.avatar.as_ref()) {
         Some(picture) => {
-            let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
+            let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
             paint_hovered(ui, rect, picture, size / 2.0);
             response
         }
@@ -2338,10 +2341,7 @@ fn member_list(ui: &mut Ui, home: &mut Home, index: usize) {
         ui.add_space(ui::SPACE_XS);
         ui::caption_label(ui, &t!("home.members_count", count = listed.len()));
     });
-    let perms = server.dir.perms;
-    let mut action = None;
-    let (mut befriend, mut poke) = (None, None);
-    let (mut manage, mut moderate) = (None, None);
+    let mut pick = None;
     // Roles shown separately get their own heading, highest first; everyone else after.
     let dir = &server.dir;
     let mut groups: Vec<(Option<&str>, Vec<&Member>)> = (dir.roles.iter())
@@ -2390,47 +2390,16 @@ fn member_list(ui: &mut Ui, home: &mut Home, index: usize) {
                     };
                     ui.add(Label::new(text).truncate());
                 });
-                ui::menu(&row, |m| {
-                    if !me && m.item("💬", t!("home.message")).clicked() {
-                        action = Some(Command::OpenDm(member.person));
-                    }
-                    let blocked = home.friends.relation(&member.person) == Relation::Blocked;
-                    if !me && !blocked && m.item("👉", t!("pokes.poke")).clicked() {
-                        poke = Some(member.person);
-                    }
-                    if m.item("ℹ", t!("common.details")).clicked() {
-                        home.dialog = Some(Dialog::Member(index, member.person));
-                    }
-                    if !me {
-                        let relation = home.friends.relation(&member.person);
-                        if let Some(act) = friends::menu_items(m, relation) {
-                            befriend = Some((member.person, act));
-                        }
-                    }
-                    if !me && home.voice.call.is_some() {
-                        m.separator();
-                        call::stream_menu(m, &home.voice.audio, &(member.person, None));
-                    }
-                    if !me && (perms.kick || perms.ban || perms.manage_roles) {
-                        m.separator();
-                        manage = Some(member.person);
-                        admin::member_menu(m, &mut moderate, perms);
-                    }
-                });
+                let target = person::Person::of(home, server, member.person);
+                if let Some(picked) = person::interact(ui, &row, &target, false) {
+                    pick = Some((member.person, picked));
+                }
             }
         }
     });
-    if let Some(command) = action {
-        home.servers[index].send(command);
-    }
-    if let Some(person) = poke {
-        home.dialog = Some(Dialog::Poke(person, String::new()));
-    }
-    if let Some((person, act)) = befriend {
-        home.befriend(person, act, ui.input(|input| input.time));
-    }
-    if let (Some(person), Some(choice)) = (manage, moderate) {
-        admin::moderate(home, index, person, choice);
+    if let Some((person, picked)) = pick {
+        let now = ui.input(|input| input.time);
+        person::apply(home, index, person, picked, now);
     }
 }
 
