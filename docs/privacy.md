@@ -161,10 +161,30 @@ media key and bound to both devices, so LiveKit can't read, forge or
 redirect them, and replayed input is dropped. Nothing about remote control is stored by the API, by
 LiveKit or on either device.
 
-On Linux, RustTalk shares monitor and window video through the ScreenCast
-portal. Remote control is unavailable because the RemoteDesktop portal can
-send clicks, scrolls and keystrokes outside the selected source. RustTalk
-requests only screen capture permission on Linux.
+On Linux, RustTalk shares video through the ScreenCast portal. Hyprland
+monitor shares can opt into control requests for that share, and the sharer
+must still approve each request in RustTalk. The portal grants screen
+capture permission only. Hyprland's Wayland virtual input protocols do not
+show a separate permission prompt. The approved viewer can use apps visible
+on the shared monitor. Window shares and other Linux compositors cannot
+grant control.
+
+RustTalk uses local Hyprland IPC to check monitor geometry, pointer position,
+the active window, keyboard-interactive layer surfaces, lock state,
+compositor keybinds, including mouse button and scroll binds, and the
+keyboard layout options Hyprland matches binds with. It matches those binds
+against the virtual keyboard's XKB state, assuming each bind needs exactly
+its modifiers, because Hyprland doesn't report binds set to ignore them;
+such binds are not detected. Hyprland doesn't report modifiers the sharer
+is holding on a physical keyboard, so a modifier held by the sharer can
+combine with remote input. Layer, bind and layout data stay
+on the sharer's device, and RustTalk
+does not collect what the sharer types. It pauses after observed local input
+and rechecks the scope and binds about every 100 ms while a remote key or
+button is held. If a check fails, RustTalk releases the held input and
+destroys the virtual devices. Changes between a check and input delivery
+can still route an event outside the shared area. Coincident local and
+virtual input can share one idle notification.
 
 For live files, only the encrypted offer is retained as a chat message.
 The API sees its normal message metadata plus the live routing notice's

@@ -6,7 +6,6 @@ use std::time::Instant;
 use rusttalk_core::{
     client::voice::ParticipantIdentity,
     control::{Answer, Input, Message, Nonce, Refusal, Step},
-    screen::REMOTE_CONTROL,
 };
 
 use super::{Command, Ctx, Update, voice::Live};
@@ -49,12 +48,21 @@ fn inject(live: &Live, inputs: &[Input]) {
     let Some((_, capture, _)) = &live.screen else {
         return;
     };
-    let remote = capture.remote();
     for input in inputs {
         // Per event and often harmless (the window is minimized), so not a warning.
-        if let Err(error) = remote.inject(input) {
+        if let Err(error) = capture.inject(input) {
             tracing::debug!(error = %format_args!("{error:#}"), "remote input not injected");
         }
+    }
+}
+
+fn end_input(live: &Live, releases: &[Input]) {
+    if cfg!(target_os = "linux") {
+        if let Some((_, capture, _)) = &live.screen {
+            capture.set_control_active(false);
+        }
+    } else {
+        inject(live, releases);
     }
 }
 
@@ -105,10 +113,15 @@ pub(super) async fn received(
     // We can't name an unknown device in the prompt, so it may not ask.
     let ours = live.screen.as_ref().map(|(sid, ..)| sid.to_string());
     let shared = ours.as_deref().filter(|_| person.is_some());
+    let supported = live
+        .screen
+        .as_ref()
+        .is_some_and(|(_, capture, _)| capture.supports_control())
+        && matches!(live.swap, crate::screen::Swap::Idle);
     let now = Instant::now();
     match live
         .host
-        .receive(from.as_str(), message, shared, REMOTE_CONTROL, now)
+        .receive(from.as_str(), message, shared, supported, now)
     {
         Step::Nothing => {}
         Step::Ask => {
@@ -125,7 +138,7 @@ pub(super) async fn received(
         Step::Inject(input) => inject(live, &[input]),
         Step::Ended(releases) => {
             tracing::info!("remote control request or session ended by the viewer");
-            inject(live, &releases);
+            end_input(live, &releases);
             show(ctx, live);
         }
     }
@@ -158,11 +171,16 @@ pub(super) async fn command(ctx: &Ctx, live: &mut Live, command: Command) {
         }
         Command::AnswerControl(request, allow) => {
             let asker = live.control.asked.map(|(person, _)| person);
+            let capture = live.screen.as_ref().map(|(_, capture, _)| capture);
+            let allow = allow && capture.is_some_and(|capture| capture.supports_control());
             if let Some((to, reply)) = live.host.answer(request, allow, Instant::now()) {
                 live.control.asked = None;
                 if matches!(reply, Message::Grant { .. }) {
                     tracing::info!("allowed remote control of our screen");
                     live.control.by = asker;
+                    if let Some(capture) = capture {
+                        capture.set_control_active(true);
+                    }
                 } else {
                     tracing::info!("denied remote control of our screen");
                 }
@@ -194,7 +212,7 @@ async fn release(live: &mut Live) {
 pub(super) async fn stop_hosting(ctx: &Ctx, live: &mut Live) {
     if let Some((to, message, releases)) = live.host.stop() {
         tracing::info!("took back remote control of our screen");
-        inject(live, &releases);
+        end_input(live, &releases);
         send(live, to, &message).await;
     }
     show(ctx, live);
@@ -202,7 +220,10 @@ pub(super) async fn stop_hosting(ctx: &Ctx, live: &mut Live) {
 
 /// Someone left the call: control by them, or of their screen, is over.
 pub(super) fn left(ctx: &Ctx, live: &mut Live, who: &str) {
-    let hosted = live.host.left(who).map(|releases| inject(live, &releases));
+    let hosted = live
+        .host
+        .left(who)
+        .map(|releases| end_input(live, &releases));
     if hosted.is_some() | live.guest.gone(Some(who), None) {
         tracing::info!("remote control ended: someone left the call");
         show(ctx, live);
@@ -220,7 +241,7 @@ pub(super) fn unpublished(ctx: &Ctx, live: &mut Live, screen: &str) {
 /// Leaving the call: let go of whatever a controller still holds on our side.
 pub(super) fn leave(live: &mut Live) {
     if let Some((.., releases)) = live.host.stop() {
-        inject(live, &releases);
+        end_input(live, &releases);
     }
 }
 

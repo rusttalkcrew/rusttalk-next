@@ -37,6 +37,12 @@ zeroize = "1"
 mime_guess = { version = "2.0.5", default-features = false, optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "1", features = ["event", "net", "time"], optional = true }
+wayland-client = { version = "0.31", optional = true }
+wayland-protocols = { version = "0.32", features = ["client", "staging"], optional = true }
+wayland-protocols-misc = { version = "0.3", features = ["client"], optional = true }
+wayland-protocols-wlr = { version = "0.3", features = ["client"], optional = true }
+xkbcommon = { version = "0.8", default-features = false, optional = true }
 nokhwa = { version = "0.10.11", default-features = false, features = ["input-v4l"], optional = true }
 
 [target.'cfg(windows)'.dependencies]
@@ -50,7 +56,7 @@ https-client = ["dep:reqwest", "dep:rustls"]
 client = ["dep:anyhow", "dep:image", "dep:futures-util", "https-client", "reqwest/json", "reqwest/stream", "dep:serde_json", "dep:tempfile", "dep:tokio", "dep:tokio-tungstenite", "dep:tracing"]
 livekit-tls = ["dep:async-trait", "dep:futures-util", "dep:livekit-net", "dep:livekit-protocol", "dep:prost", "dep:reqwest", "dep:rustls", "dep:tokio", "dep:tokio-tungstenite"]
 capture = ["dep:anyhow", "dep:serde_json", "dep:tracing", "dep:wasapi", "dep:windows"]
-voice = ["client", "livekit-tls", "dep:image", "dep:livekit", "dep:mime_guess", "dep:nokhwa", "dep:windows", "dep:windows-capture", "tokio/fs", "tokio/io-util", "tokio/process", "tokio/rt"]
+voice = ["dep:rustix", "dep:wayland-client", "dep:wayland-protocols", "dep:wayland-protocols-misc", "dep:wayland-protocols-wlr", "dep:xkbcommon", "client", "livekit-tls", "dep:image", "dep:livekit", "dep:mime_guess", "dep:nokhwa", "dep:windows", "dep:windows-capture", "tokio/fs", "tokio/io-util", "tokio/process", "tokio/rt"]
 
 [dev-dependencies]
 rcgen = { version = "0.14", default-features = false, features = ["ring"] }

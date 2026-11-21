@@ -51,7 +51,7 @@ pub(super) struct Live {
     /// The published screen with its capture and quality, which a change keeps.
     pub(super) screen: Option<(TrackSid, screen::Capture, screen::Options)>,
     /// Picking another source for the screen; the old one keeps sharing meanwhile.
-    swap: screen::Swap<tokio::task::JoinHandle<Result<screen::Capture>>>,
+    pub(super) swap: screen::Swap<tokio::task::JoinHandle<Result<screen::Capture>>>,
     /// The published camera; the UI owns its capture.
     camera: Option<TrackSid>,
     /// Screen and camera tracks this device receives; others are unsubscribed.
@@ -105,7 +105,7 @@ pub(super) fn voice_only(command: &Command) -> bool {
             | Command::SyncVoiceStatus
             | Command::StopApp(_)
             | Command::StopScreen
-            | Command::ChangeScreen(_)
+            | Command::ChangeScreen(..)
             | Command::Watch(..)
             | Command::StopCamera
             | Command::CancelFile(_)
@@ -157,10 +157,10 @@ pub(super) async fn voice_command(
             }
             changed
         }
-        Command::ChangeScreen(target) => {
+        Command::ChangeScreen(target, remote_control) => {
             // Control was granted for what is shared now, not what comes next.
             control::stop_hosting(ctx, live).await;
-            change_screen(ctx, live, target);
+            change_screen(ctx, live, target, remote_control);
             false
         }
         Command::Watch(sid, on) => {
@@ -804,6 +804,14 @@ pub(super) async fn stop_finished_shares(
         .into_iter()
         .partition(|share| share.capture.is_finished());
     live.shares = kept;
+    if live.host.controller().is_some()
+        && live
+            .screen
+            .as_ref()
+            .is_some_and(|(_, capture, _)| !capture.supports_control())
+    {
+        control::stop_hosting(ctx, live).await;
+    }
     if live
         .screen
         .as_ref()
@@ -1129,11 +1137,12 @@ pub(super) fn pick_screen(
 
 /// Pick another source for the screen we share. Its frames go into the published
 /// track's own source, so viewers keep watching with no reconnect.
-fn change_screen(ctx: &Ctx, live: &mut Live, target: screen::Target) {
+fn change_screen(ctx: &Ctx, live: &mut Live, target: screen::Target, remote_control: bool) {
     let Some((_, capture, options)) = &live.screen else {
         return;
     };
-    let (into, options) = (capture.source.clone(), *options);
+    let (into, mut options) = (capture.source.clone(), *options);
+    options.remote_control = remote_control;
     let picker =
         tokio::spawn(
             async move { screen::start_into(target, options, &mut None, Some(into)).await },
