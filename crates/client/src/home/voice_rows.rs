@@ -34,11 +34,12 @@ fn window() -> (Harness<'static, Option<Home>>, UnboundedReceiver<Command>) {
     let data = tempfile::tempdir().unwrap();
     let mut home = Home::new(identity, &harness.ctx, data.path().to_owned()).unwrap();
     let (commands, sent) = tokio::sync::mpsc::unbounded_channel();
-    let mut server = new_server(
-        "https://friends.example.org/".parse().unwrap(),
-        "Friends",
-        commands,
-    );
+    let known = rusttalk_core::auth::KnownServer {
+        address: "https://friends.example.org/".parse().unwrap(),
+        server_id: [2; 32],
+        tls_fingerprint: None,
+    };
+    let mut server = new_server(known, "Friends", commands);
     server.status = Status::Online;
     let channel = |id: u8, name: &str, voice| Channel {
         id: [id; 32],
