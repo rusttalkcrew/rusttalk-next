@@ -113,13 +113,15 @@ All endpoints below require `Authorization: Bearer <token>`.
 | DELETE `/v1/me/membership` | Empty | Any member except the owner. 204, leaves the server like a kick: sessions close, keys rotate, audit `left`. The owner gets `409 owner_cannot_leave` |
 | POST `/v1/me/revocations` | `{record}`, a W04 root-signed revocation for the caller's person | Any member. 204, affected device loses its token |
 | POST `/v1/invites` | `{uses, ttl_seconds, space_key_ct, name_ct?}` | `invite`. 201, `{id, code, expires_at}` |
-| DELETE `/v1/invites/{id}` | Empty | `invite`. 204 |
+| GET `/v1/invites` | Empty | `invite`. 200, active invites as `{id, created_by, remaining_uses, expires_at}`, soonest expiry first: the caller's own, or everyone's with `manage_server` |
+| DELETE `/v1/invites/{id}` | Empty | `invite` for the caller's own invite, also `manage_server` for anyone else's. 204 |
 | DELETE `/v1/members/{person}` | Empty | `kick`. 204 |
 | GET `/v1/bans` | Empty | `ban`. 200, active bans as `{person_id, banned_at, ban_ip}`, newest first |
 | PUT `/v1/bans/{person}` | `{ban_ip?}`, default false | `ban`. 204 |
 | DELETE `/v1/bans/{person}` | Empty | `ban`. 204 |
 | GET `/v1/roles` | Empty | Any member. 200, `{default_role_id, roles}` |
 | POST `/v1/roles` | `{id?, rank, permissions, name_ct?}` | `manage_roles`. 201, the created role |
+| PUT `/v1/roles/{id}` | `{permissions, name_ct?}` | `manage_roles`. 204, replaces a custom role's flags and, when given, its name |
 | PUT `/v1/roles/{id}/name` | `{name_ct?}` | `manage_roles`. 204 |
 | DELETE `/v1/roles/{id}` | Empty | `manage_roles`. 204 |
 | PUT `/v1/roles/default` | `{role_id}` | `manage_roles`. 204 |
@@ -144,6 +146,10 @@ role ID's UTF-8 bytes as the metadata object ID, including for built-ins.
 W05 role label blobs had no epoch or required encoding. The upgrade clears
 those labels and preserves the roles and assignments. The server allows
 up to 128 roles including built-ins.
+Editing a custom role requires outranking it and holding every flag it
+grants both before and after the change; built-in roles keep their flags.
+It writes the audit action `role_changed` and sends `channel_changed`, so
+clients reload roles and their own permissions.
 Deleting a custom role requires clearing its assignments and replacing it
 as the default first. Changing the default affects future joins.
 
@@ -153,7 +159,11 @@ actor to outrank that role and hold every permission it grants. The
 owner role comes from a singleton ownership record and can only move via
 the transfer endpoint. The prior owner keeps their assigned roles.
 
-Invite uses may be 1–1000, with lifetimes from 1 second to 30 days. The
+Invite uses may be 1–1000, with lifetimes from 1 second to 30 days.
+The server records who made each invite. Invites made before that have a
+null `created_by` and need `manage_server` to stop. The invite list never
+contains codes: the server stores only their hashes. The bootstrap owner
+invite is never listed. The
 bootstrap invite is single-use and expires after a day. For a regular
 invite, supply the encrypted space key and, if the server has a name,
 a separately encrypted copy of that name. Encrypt the copy using the

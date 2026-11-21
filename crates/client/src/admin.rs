@@ -1,4 +1,4 @@
-//! The server settings window (members, roles, bans, audit log, joining) and channel
+//! The server settings window (members, roles, invites, bans, audit log, joining) and channel
 //! settings. Shown only to people whose roles allow some of it; the server decides.
 
 use chrono::{DateTime, Local};
@@ -14,7 +14,7 @@ use rusttalk_core::{
 use crate::{
     files::Ask,
     home::{ChannelEdit, Home, face, frame, initials},
-    net::{Admin, AdminUpdate, AuditEntry, Ban, Command, PublicListing},
+    net::{Admin, AdminUpdate, AuditEntry, Ban, Command, Invite, PublicListing},
     server::{Id, PERMISSIONS, Perms, Server, Status},
     settings::{self as panel, Group, Page},
     ui::{self, Item, danger, error_text},
@@ -45,6 +45,7 @@ pub enum Tab {
     Overview,
     Members,
     Roles,
+    Invites,
     Bans,
     Audit,
     Joining,
@@ -75,6 +76,11 @@ pub struct Settings {
     new_role: String,
     new_permissions: Vec<&'static str>,
     renaming: Option<(String, String)>,
+    /// The custom role being edited: its ID, name and permissions.
+    editing: Option<(String, String, Vec<&'static str>)>,
+    invites: Vec<Invite>,
+    /// The invite waiting for "Revoke" to be confirmed.
+    revoking: Option<String>,
     /// The server name being typed in Overview; `None` until edited.
     server_name: Option<String>,
     /// The last result: text and whether it went wrong.
@@ -89,6 +95,7 @@ impl Settings {
                 self.audit = entries;
                 self.audit_shown = AUDIT_PAGE;
             }
+            AdminUpdate::Invites(invites) => self.invites = invites,
             AdminUpdate::Joining(open, cap) => self.joining = Some((open, cap)),
             AdminUpdate::Listing(on, saved) => {
                 self.listing = Some((on, saved.unwrap_or_default()));
@@ -96,6 +103,8 @@ impl Settings {
             AdminUpdate::Done(text) => {
                 self.member = None;
                 self.renaming = None;
+                self.editing = None;
+                self.revoking = None;
                 self.message = Some((text.into(), false));
             }
             AdminUpdate::Failed(text) => self.message = Some((text, true)),
@@ -112,8 +121,10 @@ pub fn open(home: &mut Home, index: usize, mut tab: Tab) {
             Tab::Overview
         } else if perms.audit {
             Tab::Audit
-        } else {
+        } else if perms.admin {
             Tab::Joining
+        } else {
+            Tab::Invites
         };
     }
     server.send(Command::Admin(Admin::Load {
@@ -121,6 +132,9 @@ pub fn open(home: &mut Home, index: usize, mut tab: Tab) {
         audit: perms.audit,
         bans: perms.ban,
     }));
+    if tab == Tab::Invites {
+        server.send(Command::Admin(Admin::Invites));
+    }
     home.server_settings = Some(Settings {
         server: index,
         tab,
@@ -134,6 +148,9 @@ pub fn open(home: &mut Home, index: usize, mut tab: Tab) {
         new_role: String::new(),
         new_permissions: Vec::new(),
         renaming: None,
+        editing: None,
+        invites: Vec::new(),
+        revoking: None,
         server_name: None,
         message: None,
     });
@@ -229,14 +246,14 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
     } else {
         let perms = server.dir.perms;
         let page = |id, icon, label, allowed: bool| allowed.then_some(Page { id, icon, label });
-        let group = |title, pages: [Option<Page<Tab>>; 3]| Group {
+        let group = |title, pages: Vec<Option<Page<Tab>>>| Group {
             title,
             pages: pages.into_iter().flatten().collect(),
         };
         let groups = [
             group(
                 "Server",
-                [
+                vec![
                     page(Tab::Overview, "🖼", "Overview", perms.manage_server),
                     page(Tab::Joining, "🚪", "Joining", perms.admin),
                     page(Tab::Listing, "🌐", "Public listing", perms.owner),
@@ -244,7 +261,7 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
             ),
             group(
                 "People",
-                [
+                vec![
                     page(
                         Tab::Members,
                         "👥",
@@ -252,12 +269,13 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
                         perms.kick || perms.ban || perms.manage_roles,
                     ),
                     page(Tab::Roles, "🏷", "Roles", perms.manage_roles),
+                    page(Tab::Invites, "✉", "Invites", perms.invite),
                     page(Tab::Bans, "🚫", "Bans", perms.ban),
                 ],
             ),
             group(
                 "Moderation",
-                [page(Tab::Audit, "📜", "Audit log", perms.audit), None, None],
+                vec![page(Tab::Audit, "📜", "Audit log", perms.audit)],
             ),
         ];
         let before = settings.tab;
@@ -283,6 +301,7 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
                     }
                     Tab::Members => members_tab(ui, server, settings),
                     Tab::Roles => roles_tab(ui, server, settings),
+                    Tab::Invites => invites_tab(ui, server, settings),
                     Tab::Bans => bans_tab(ui, server, settings),
                     Tab::Audit => audit_tab(ui, server, settings),
                     Tab::Joining => joining_tab(ui, settings),
@@ -305,6 +324,7 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
                     bans: true,
                 }),
                 Tab::Listing => Some(Admin::LoadListing),
+                Tab::Invites => Some(Admin::Invites),
                 _ => None,
             };
         } else {
@@ -312,6 +332,10 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
         }
         close
     };
+    // Confirmations over the settings window.
+    if let Some(asked) = role_editor(ctx, settings).or_else(|| revoke_dialog(ctx, settings)) {
+        request = Some(asked);
+    }
     if let Some(request) = request {
         settings.message = None;
         server.send(Command::Admin(request));
@@ -553,7 +577,6 @@ fn roles_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Option<Ad
         },
     );
     ui::page_section(ui, "Roles");
-    ui.weak("What a role can do is set when it's made. To change it, make a new role.");
     for role in &dir.roles {
         CollapsingHeader::new(&role.name)
             .id_salt(&role.id)
@@ -573,10 +596,29 @@ fn roles_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Option<Ad
                     }
                     _ => {
                         ui.horizontal(|ui| {
-                            if ui::secondary(ui, "Rename").clicked() {
-                                settings.renaming = Some((role.id.clone(), role.name.clone()));
+                            if !role.custom {
+                                if ui::secondary(ui, "Rename").clicked() {
+                                    settings.renaming = Some((role.id.clone(), role.name.clone()));
+                                }
+                                return;
                             }
-                            if role.custom && danger(ui, "Delete").clicked() {
+                            // Only roles below your own can be changed.
+                            let below = role.rank < dir.perms.rank;
+                            if ui
+                                .add_enabled_ui(below, |ui| ui::secondary(ui, "Edit"))
+                                .inner
+                                .clicked()
+                            {
+                                let permissions = PERMISSIONS
+                                    .into_iter()
+                                    .map(|(permission, _)| permission)
+                                    .filter(|p| role.permissions.iter().any(|r| r == p))
+                                    .collect();
+                                settings.editing =
+                                    Some((role.id.clone(), role.name.clone(), permissions));
+                                settings.message = None;
+                            }
+                            if danger(ui, "Delete").clicked() {
                                 request = Some(Admin::DeleteRole(role.id.clone()));
                             }
                         });
@@ -588,18 +630,7 @@ fn roles_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Option<Ad
     let label = ui.label("Role name");
     ui.add(ui::field(&mut settings.new_role).char_limit(100))
         .labelled_by(label.id);
-    ui.columns(2, |columns| {
-        for (at, (permission, label)) in PERMISSIONS.into_iter().enumerate() {
-            let ui = &mut columns[at % 2];
-            let mut on = settings.new_permissions.contains(&permission);
-            if ui::checkbox(ui, &mut on, label).changed() {
-                settings.new_permissions.retain(|p| *p != permission);
-                if on {
-                    settings.new_permissions.push(permission);
-                }
-            }
-        }
-    });
+    permission_boxes(ui, &mut settings.new_permissions);
     let name = settings.new_role.trim();
     if ui
         .add_enabled_ui(!name.is_empty(), |ui| ui::primary(ui, "Create role"))
@@ -611,6 +642,116 @@ fn roles_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Option<Ad
             permissions: std::mem::take(&mut settings.new_permissions),
         });
         settings.new_role.clear();
+    }
+    request
+}
+
+/// A checkbox per permission, in two columns.
+fn permission_boxes(ui: &mut Ui, chosen: &mut Vec<&'static str>) {
+    ui.columns(2, |columns| {
+        for (at, (permission, label)) in PERMISSIONS.into_iter().enumerate() {
+            let ui = &mut columns[at % 2];
+            let mut on = chosen.contains(&permission);
+            if ui::checkbox(ui, &mut on, label).changed() {
+                chosen.retain(|p| *p != permission);
+                if on {
+                    chosen.push(permission);
+                }
+            }
+        }
+    });
+}
+
+/// The dialog to change a custom role's name and permissions.
+fn role_editor(ctx: &egui::Context, settings: &mut Settings) -> Option<Admin> {
+    let (id, name, permissions) = settings.editing.as_mut()?;
+    let mut request = None;
+    let mut cancel = false;
+    let ((), dismissed) = ui::dialog(ctx, "edit-role", "Edit role", |ui| {
+        let label = ui.label(ui::bold("Role name"));
+        ui.add(
+            ui::field(name)
+                .char_limit(100)
+                .desired_width(ui.available_width()),
+        )
+        .labelled_by(label.id);
+        ui.add_space(ui::SPACE_S);
+        ui.label(ui::bold("Permissions"));
+        permission_boxes(ui, permissions);
+        if let Some((text, true)) = &settings.message {
+            error_text(ui, Some(text));
+        }
+        ui::footer(ui, |ui| {
+            let name = name.trim();
+            if ui
+                .add_enabled_ui(!name.is_empty(), |ui| ui::primary(ui, "Save"))
+                .inner
+                .clicked()
+            {
+                request = Some(Admin::EditRole {
+                    id: id.clone(),
+                    name: name.into(),
+                    permissions: permissions.clone(),
+                });
+            }
+            cancel = ui::secondary(ui, "Cancel").clicked();
+        });
+    });
+    if cancel || dismissed {
+        settings.editing = None;
+        settings.message = None;
+    }
+    request
+}
+
+/// Active invites with who made them, uses left and expiry, each with "Revoke".
+fn invites_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Option<Admin> {
+    ui::page_section(ui, "Active invites");
+    if settings.invites.is_empty() {
+        ui.weak("No invite links are active.");
+        return None;
+    }
+    for invite in &settings.invites {
+        let by = invite
+            .creator
+            .map_or_else(|| "Someone".into(), |person| server.member_name(&person));
+        let uses = match invite.uses {
+            1 => "1 use left".to_owned(),
+            n => format!("{n} uses left"),
+        };
+        let help = format!("{uses} · Expires {}", date(invite.expires_at));
+        ui.push_id(&invite.id, |ui| {
+            ui::setting_row(ui, &format!("Made by {by}"), &help, |ui| {
+                if danger(ui, "Revoke").clicked() {
+                    settings.revoking = Some(invite.id.clone());
+                    settings.message = None;
+                }
+            });
+        });
+    }
+    None
+}
+
+/// "Revoke" asks first: the link stops working for everyone it was sent to.
+fn revoke_dialog(ctx: &egui::Context, settings: &mut Settings) -> Option<Admin> {
+    let id = settings.revoking.clone()?;
+    let mut request = None;
+    let mut cancel = false;
+    let ((), dismissed) = ui::dialog(ctx, "revoke-invite", "Revoke this invite?", |ui| {
+        ui.label("The link stops working right away. People who already joined stay.");
+        if let Some((text, true)) = &settings.message {
+            error_text(ui, Some(text));
+        }
+        ui::footer(ui, |ui| {
+            if danger(ui, "Revoke").clicked() {
+                request = Some(Admin::RevokeInvite(id));
+            }
+            cancel = ui::secondary(ui, "Cancel").clicked();
+        });
+    });
+    if cancel || dismissed {
+        settings.revoking = None;
+        settings.message = None;
     }
     request
 }
@@ -701,6 +842,7 @@ fn sentence(server: &Server, entry: &AuditEntry) -> String {
         "joined" => format!("{actor} joined"),
         "role_created" => format!("{actor} made a role"),
         "role_renamed" => format!("{actor} renamed a role"),
+        "role_changed" => format!("{actor} edited a role"),
         "role_deleted" => format!("{actor} deleted a role"),
         "default_role_changed" => format!("{actor} changed the role for new members"),
         "channel_created" => format!("{actor} made a channel"),

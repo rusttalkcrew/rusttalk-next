@@ -211,7 +211,13 @@ pub struct Perms {
 impl Perms {
     /// May open the server settings window.
     pub fn settings(&self) -> bool {
-        self.admin || self.kick || self.ban || self.manage_roles || self.audit || self.manage_server
+        self.admin
+            || self.invite
+            || self.kick
+            || self.ban
+            || self.manage_roles
+            || self.audit
+            || self.manage_server
     }
 }
 

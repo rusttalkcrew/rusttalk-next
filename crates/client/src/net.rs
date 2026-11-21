@@ -48,7 +48,7 @@ mod files;
 mod find;
 mod voice;
 
-pub use admin::{Admin, AdminUpdate, AuditEntry, Ban, PublicListing};
+pub use admin::{Admin, AdminUpdate, AuditEntry, Ban, Invite, PublicListing};
 use directory::{directory, get};
 pub use files::{MAX_FILE, file_name};
 pub use find::{Listed, PAGE_SIZE};
