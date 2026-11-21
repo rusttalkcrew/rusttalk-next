@@ -97,6 +97,7 @@ impl Action {
 
 /// A command from `rusttalk --<id>`: the action and whether its key went down.
 /// `--push-to-talk-release` lets go of push-to-talk.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn command(text: &str) -> Option<(Action, bool)> {
     let (id, pressed) = match text.strip_suffix("-release") {
         Some(id) => (id, false),
@@ -310,7 +311,8 @@ pub enum Support {
     /// RustTalk binds the keys.
     Keys,
     Checking,
-    /// The desktop binds them and shows the keys it picked.
+    /// The desktop binds them and shows the keys it picked (Wayland only).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Portal {
         /// It can open its own shortcut settings.
         configurable: bool,
