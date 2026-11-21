@@ -84,6 +84,7 @@ mod pokes;
 pub(crate) mod user_bar;
 #[cfg(test)]
 mod voice_rows;
+mod welcome;
 
 pub struct Home {
     pub identity: Arc<DeviceIdentity>,
@@ -127,6 +128,12 @@ pub struct Home {
     /// My account: the default name being edited, and the bio as typed, unsaved.
     pub name_draft: Option<String>,
     pub bio_draft: Option<String>,
+    /// "What should people call you?" and the bio after it (`welcome`).
+    welcome: welcome::Step,
+    /// Made on this device just now: asks for a name at once.
+    pub new_account: bool,
+    /// A device sync has delivered the synced account data at least once.
+    synced_once: bool,
     /// The synced voice and video settings as last published or received.
     synced: BTreeMap<String, serde_json::Value>,
     /// Servers left in this session, so a sync that started before can't bring them back.
@@ -331,6 +338,9 @@ impl Home {
             crop: None,
             name_draft: None,
             bio_draft: None,
+            welcome: welcome::Step::Idle,
+            new_account: false,
+            synced_once: false,
             synced,
             left: HashSet::new(),
             status: None,
@@ -1344,6 +1354,7 @@ impl Home {
             Update::LinkCard(id, card) => self.files.link_card(id, card),
             Update::Saved(id, saved) => self.files.saved(id, saved),
             Update::Synced(synced) => {
+                self.synced_once = true;
                 for known in &synced.servers {
                     if self.index(&known.address).is_none() && !self.left.contains(&known.address) {
                         let commands = self.net.start(known.clone(), None, None);
@@ -1504,6 +1515,9 @@ pub fn show(
     ui::apply(ui.ctx(), settings.appearance());
     emoji::set_hover_only(ui.ctx(), settings.emoji_on_hover);
     crate::i18n::set(&settings.language);
+    if welcome::show(ui, home) {
+        return None;
+    }
     for (ask, paths) in home.files.answers() {
         if let Ask::Picture = ask {
             if let Some(path) = paths.into_iter().next() {

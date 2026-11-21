@@ -219,7 +219,13 @@ impl<'a> App<'a> {
                     Some(t!("app.words_mismatch").into())
                 };
                 match error {
-                    None => self.home(identity),
+                    None => {
+                        let mut screen = self.home(identity);
+                        if let Screen::Home(home) = &mut screen {
+                            home.new_account = true;
+                        }
+                        screen
+                    }
                     error => Screen::Confirm {
                         words,
                         identity,
