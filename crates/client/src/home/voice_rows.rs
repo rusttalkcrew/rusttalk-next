@@ -1,18 +1,21 @@
 //! Voice channel rows in the sidebar: a click opens the chat, the Join button or a
-//! double-click joins. Driven off-screen with egui_kittest.
+//! double-click joins, and people under it show their card on a click and their menu
+//! on a right click. Driven off-screen with egui_kittest.
 
-use eframe::egui::Vec2;
+use eframe::egui::{Vec2, accesskit::Role};
 use egui_kittest::{Harness, kittest::Queryable};
+use rusttalk_core::presence::Presence;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use super::{Home, View, channel_list, new_server};
 use crate::{
     net::Command,
-    server::{Category, Channel, Id, Status},
+    server::{Category, Channel, Id, Member, Peer, Status},
     ui,
 };
 
 const LOUNGE: Id = [2; 32];
+const ANN: Id = [7; 32];
 
 /// An online server with a text channel and a voice channel, shown in the sidebar.
 /// Also returns what the window sent to the server.
@@ -54,6 +57,26 @@ fn window() -> (Harness<'static, Option<Home>>, UnboundedReceiver<Command>) {
         name: String::new(),
         channels: vec![channel(1, "general", false), channel(2, "Lounge", true)],
     }];
+    server.dir.members = vec![Member {
+        person: ANN,
+        name: Some("Ann".into()),
+        devices: Vec::new(),
+        roles: Vec::new(),
+        avatar: None,
+        presence: Presence::Online,
+        hide_offline: false,
+        voice_muted: false,
+    }];
+    let ann = Peer {
+        person: ANN,
+        connecting: false,
+        unknown: false,
+        status: Default::default(),
+        apps: Vec::new(),
+        screens: Vec::new(),
+        camera: None,
+    };
+    server.voice.insert(LOUNGE, vec![ann]);
     home.servers.push(server);
     home.view = View::Server(0);
     *harness.state_mut() = Some(home);
@@ -106,4 +129,20 @@ fn double_clicking_a_voice_channel_joins() {
     harness.run_steps(10);
     assert!(home(&harness).voice.call.is_some());
     assert!(matches!(sent.try_recv(), Ok(Command::JoinVoice(id)) if id == LOUNGE));
+}
+
+#[test]
+fn clicking_someone_in_voice_shows_their_card_and_right_click_their_menu() {
+    let (mut harness, _sent) = window();
+    harness.get_by_role_and_label(Role::Button, "Ann").click();
+    harness.run_steps(4);
+    assert!(harness.query_by_label("Message").is_some());
+    assert!(harness.query_by_label("Details").is_none());
+
+    let (mut harness, _sent) = window();
+    harness
+        .get_by_role_and_label(Role::Button, "Ann")
+        .click_secondary();
+    harness.run_steps(4);
+    assert!(harness.query_by_label("Details").is_some());
 }
