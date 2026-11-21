@@ -49,6 +49,7 @@ impl Home {
                 sticker: None,
                 friend: None,
                 poke: true,
+                preview: None,
             }));
         }
         let at = notify::unix_now();

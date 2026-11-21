@@ -327,6 +327,23 @@ is deleted and never used; the normal noise suppression keeps working.
   signature, then requests your platform’s artifact if you choose to update.
   The host sees your IP address, requested files and timing. Requests carry no
   account, device or server identifiers. Redirects stay on HTTPS.
+- **Previews of links you send (on by default):** When a message you send
+  links to a website that no reader-side link preview below covers, your app
+  visits that link once while sending, to make a preview of at most one link
+  per message: it reads up to 512 KiB of the page for its Open Graph, Twitter
+  card or plain title and description, then downloads the picture it names.
+  The preview travels end-to-end encrypted with the message as a small file
+  with a thumbnail (see [Protocol](protocol.md#link-previews)), so readers and
+  the RustTalk server never contact the site. Requests go only to public
+  addresses: the client resolves the name itself and refuses private,
+  loopback, link-local, shared, multicast and reserved addresses, checks
+  every redirect again (at most three), uses no proxy, sends a generic
+  User-Agent and no cookies or Referer, and gives up after five seconds; the
+  message then goes without a preview. The site sees your IP address, timing
+  and the link. While the preview is made the composer shows "Adding
+  preview…" with a button to send without it. Turn it off in Settings →
+  Privacy → Link previews (**Create previews for links I send**); then no
+  request is made.
 - **Link previews (opt-in per site, per device):** Off until the person allows a
   site, either on the first card that asks ("Show Steam previews?") or in
   Settings → Privacy → Link previews, and off again there. Until then the

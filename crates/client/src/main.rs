@@ -18,6 +18,7 @@ mod files;
 mod friends;
 mod home;
 mod keystore;
+mod link_cards;
 mod log_file;
 mod mic_check;
 mod net;

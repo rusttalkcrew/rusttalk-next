@@ -60,6 +60,21 @@ impl KeyClient<'_> {
         bytes: &[u8],
         progress: Option<Progress>,
     ) -> Result<Attachment> {
+        self.upload_file_with(channel, name, media_type, bytes, bytes, progress)
+            .await
+    }
+
+    /// Like `upload_file`, with the thumbnail made from `picture` instead of the file,
+    /// as for a link preview whose file is text and whose thumbnail is the page's picture.
+    pub async fn upload_file_with(
+        &self,
+        channel: &[u8; 32],
+        name: &str,
+        media_type: &str,
+        bytes: &[u8],
+        picture: &[u8],
+        progress: Option<Progress>,
+    ) -> Result<Attachment> {
         let mut attachment = Attachment {
             file: blob_ref(bytes.len())?,
             name: name.into(),
@@ -67,7 +82,7 @@ impl KeyClient<'_> {
             thumbnail: None,
         };
         attachment.validate()?;
-        let thumbnail = make_thumbnail(bytes);
+        let thumbnail = make_thumbnail(picture);
         if let Some(png) = &thumbnail {
             attachment.thumbnail = Some(blob_ref(png.len())?);
         }

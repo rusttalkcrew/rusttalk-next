@@ -20,16 +20,20 @@ use rusttalk_core::{
 use url::Url;
 
 use super::{Ctx, Fetch, Update, directory::frame_image, send_messages, to_msg};
-use crate::server::Id;
+use crate::{
+    link_cards::{Card, FILE_NAME, MAX_CARD_BYTES, MEDIA_TYPE, Made},
+    server::Id,
+};
 
 /// Upload the files, then send the message with them; `false` when an upload failed.
+/// A link preview that fails to upload is left out, without failing the message.
 pub(super) async fn send(
     ctx: &Ctx,
     url: &Url,
     client: &mut KeyClient<'_>,
     (channel, id): (Id, Id),
     mut body: MessageBody,
-    files: Vec<PathBuf>,
+    (files, preview): (Vec<PathBuf>, Option<Arc<Made>>),
 ) -> Result<bool> {
     if let Some(first) = files.first() {
         let label = match files.len() {
@@ -54,6 +58,19 @@ pub(super) async fn send(
             discard(client, &body.attachments).await;
             ctx.send(Update::Failed(upload_problem(&error).into()));
             return Ok(false);
+        }
+    }
+    if let Some(made) = preview.filter(|_| body.attachments.len() < crate::files::MAX_FILES) {
+        let json = made.card.encode();
+        let picture = made.picture.as_deref().unwrap_or_default();
+        match client
+            .upload_file_with(&channel, FILE_NAME, MEDIA_TYPE, &json, picture, None)
+            .await
+        {
+            Ok(attachment) => body.attachments.push(attachment),
+            Err(error) => {
+                tracing::info!(error = %format_args!("{error:#}"), "uploading a link preview failed");
+            }
         }
     }
     let record = match client.post_message(&channel, id, &body).await {
@@ -88,6 +105,21 @@ pub(super) async fn delete(
         }
     }
     Ok(())
+}
+
+/// Download and read a link preview file, refusing anything too big to be one.
+pub(super) async fn link_card(ctx: &Ctx, client: &KeyClient<'_>, file: BlobRef) {
+    let id = file.id;
+    let card = async {
+        anyhow::ensure!(file.size <= MAX_CARD_BYTES, "link preview too big");
+        let bytes = client.download_file(&file, None).await?;
+        Card::decode(&bytes).context("unreadable link preview")
+    };
+    let card = card.await.map_err(|error| {
+        tracing::info!(error = %format_args!("{error:#}"), "loading a link preview failed");
+        gone(&error)
+    });
+    ctx.send(Update::LinkCard(id, card));
 }
 
 /// Decoded memory one picture may use: in the viewer, and playing small in the chat.

@@ -26,6 +26,7 @@ use url::Url;
 
 use crate::{
     home::frame_at,
+    link_cards,
     net::{Command, Fetch, MAX_FILE, file_name},
     server::{Chat, Id, Staged},
     ui::{self, ON_FILL, OVERLAY, OVERLAY_BUTTON, OVERLAY_TEXT},
@@ -73,6 +74,22 @@ pub struct Files {
     answers: Option<(mpsc::Sender<Answer>, mpsc::Receiver<Answer>)>,
     /// Files pasted into a composer, read from the clipboard on their own thread.
     pastes: (mpsc::Sender<Answer>, mpsc::Receiver<Answer>),
+    /// Link previews sent along with messages, by file blob ID.
+    cards: HashMap<Id, Card>,
+}
+
+/// A link preview file as loaded.
+enum Card {
+    Loading,
+    Ready(link_cards::Card),
+    /// Gone or unreadable: nothing is shown, as for a message without one.
+    Missing,
+}
+
+/// Whether a file is a link preview, which apps that know the type show as a card
+/// instead of a file (see `link_cards`).
+pub fn is_card(file: &Attachment) -> bool {
+    file.media_type == link_cards::MEDIA_TYPE && file.file.size <= link_cards::MAX_CARD_BYTES
 }
 
 /// A decoded picture: one texture, or an animation's textures and delays in ms.
@@ -173,6 +190,7 @@ impl Files {
             asking: false,
             answers: None,
             pastes: mpsc::channel(),
+            cards: HashMap::new(),
         }
     }
 
@@ -231,6 +249,12 @@ impl Files {
             }
         });
         inline.seen = now;
+    }
+
+    pub fn link_card(&mut self, id: Id, card: Result<link_cards::Card, bool>) {
+        if let Some(slot) = self.cards.get_mut(&id) {
+            *slot = card.map_or(Card::Missing, Card::Ready);
+        }
     }
 
     pub fn saved(&mut self, id: Id, saved: Result<(), bool>) {
@@ -846,6 +870,8 @@ pub fn attachments(
     commands: &UnboundedSender<Command>,
     list: &[Attachment],
 ) {
+    let (cards, list): (Vec<&Attachment>, Vec<&Attachment>) =
+        list.iter().partition(|file| is_card(file));
     for file in list {
         let play = plays_inline(&file.name, &file.media_type, file.file.size.into());
         // Files sent before thumbnails existed for GIFs have none; they still play.
@@ -938,6 +964,65 @@ pub fn attachments(
         if retry && let Some(thumb) = &file.thumbnail {
             files.images.remove(&thumb.id);
         }
+    }
+    // One preview per message, as senders make.
+    if let Some(card) = cards.first() {
+        link_card(ui, files, commands, card);
+    }
+}
+
+/// A link preview the sender's app made: loaded when on screen, then drawn as a card
+/// with the page's picture from its thumbnail.
+fn link_card(
+    ui: &mut Ui,
+    files: &mut Files,
+    commands: &UnboundedSender<Command>,
+    file: &Attachment,
+) {
+    let area = Rect::from_min_size(ui.cursor().min, Vec2::splat(THUMBNAIL));
+    if ui.is_rect_visible(area) {
+        files.cards.entry(file.file.id).or_insert_with(|| {
+            let _ = commands.send(Command::LinkCard(file.file.clone()));
+            Card::Loading
+        });
+    }
+    let Some(Card::Ready(card)) = files.cards.get(&file.file.id) else {
+        return;
+    };
+    let card = card.clone();
+    if let Some(thumb) = &file.thumbnail {
+        files.images.entry(thumb.id).or_insert_with(|| {
+            let _ = commands.send(Command::Image(thumb.clone(), Fetch::Thumbnail));
+            Picture::Loading
+        });
+    }
+    let picture = (file.thumbnail.as_ref()).and_then(|thumb| match files.images.get(&thumb.id) {
+        Some(Picture::Ready(anim)) => anim.frames.first(),
+        _ => None,
+    });
+    // The address's host always shows, so a card can't pass for another site.
+    let host = link_cards::web_url(&card.url)
+        .and_then(|url| url.host_str().map(str::to_owned))
+        .unwrap_or_default();
+    let kind = if card.site.is_empty() || card.site.eq_ignore_ascii_case(&host) {
+        host
+    } else {
+        format!("{} · {host}", card.site)
+    };
+    let clicked = crate::home::embed::Embed {
+        image: picture.map(crate::home::embed::Image::Wide),
+        kind: &kind,
+        title: &card.title,
+        description: (!card.description.is_empty()).then_some(card.description.as_str()),
+        fields: &[],
+        buttons: &[crate::home::embed::Button {
+            label: t!("previews.open_link"),
+            primary: false,
+        }],
+    }
+    .show(ui);
+    if clicked.is_some() {
+        ui.ctx().open_url(egui::OpenUrl::new_tab(card.url));
     }
 }
 
@@ -1123,6 +1208,24 @@ pub fn viewer(ctx: &egui::Context, files: &mut Files) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_small_files_of_the_preview_type_become_cards() {
+        let file = |media_type: &str, size| Attachment {
+            file: {
+                let mut blob = rusttalk_core::client::BlobRef::for_tests([1; 32]);
+                blob.size = size;
+                blob
+            },
+            name: link_cards::FILE_NAME.into(),
+            media_type: media_type.into(),
+            thumbnail: None,
+        };
+        assert!(is_card(&file(link_cards::MEDIA_TYPE, 300)));
+        // Older apps never test this and show the file; anything else stays a file here too.
+        assert!(!is_card(&file(link_cards::MEDIA_TYPE, 5000)));
+        assert!(!is_card(&file("application/json", 300)));
+    }
 
     #[test]
     fn staged_previews_follow_the_file_and_stop_when_unstaged() {

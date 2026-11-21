@@ -514,6 +514,33 @@ mod tests {
         }
     }
 
+    /// Link previews (#185) need nothing new in the format: apps that don't know the
+    /// media type read the message and show the preview as a small file.
+    #[test]
+    fn a_link_preview_file_is_an_ordinary_attachment() {
+        let file = BlobRef {
+            id: [1; 32],
+            key: Key::new([2; 32]),
+            size: 120,
+            chunk_size: 65536,
+        };
+        let body = MessageBody {
+            text: "https://news.example.org/story".into(),
+            attachments: vec![Attachment {
+                thumbnail: Some(BlobRef {
+                    id: [3; 32],
+                    ..file.clone()
+                }),
+                file,
+                name: "link-preview.json".into(),
+                media_type: "application/vnd.rusttalk.link-preview+json".into(),
+            }],
+            ..MessageBody::default()
+        };
+        let decoded = MessageBody::decode(&body.encode().unwrap()).unwrap();
+        assert!(decoded == body);
+    }
+
     #[test]
     fn key_links_round_trip_alone() {
         let body = MessageBody {

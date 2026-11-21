@@ -21,6 +21,9 @@ Chat Markdown and bundled syntax highlighting:
 - The bundled highlighting themes include Spacegray (Copyright (c) 2013 Gadzhi Kharkharov),
   InspiredGitHub (Copyright (c) 2015 Seth Lopez), and Solarized (Copyright (c) 2016 Koen Lageveen).
 
+Link previews of other websites:
+- html5ever, Copyright 2014-2017 The html5ever Project Developers.
+
 Wayland clipboard and file drops (vendored and patched in crates/smithay-clipboard):
 - smithay-clipboard, Copyright (c) 2018 Lucas Timmins & Victor Berger.
 
