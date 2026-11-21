@@ -19,6 +19,7 @@ use crate::{
     camera::{Camera, Change},
     denoise, files,
     home::{Home, Tab, face},
+    mic_check::Verdict,
     net::Command,
     screen::{self, Kind, Options, Target, Video},
     server::{Call, CallState, Id, Screen, Server, Stats},
@@ -79,7 +80,27 @@ pub struct Voice {
     pub stage: Stage,
     /// Remote control of our screen, or of one we watch.
     pub control: remote::Control,
+    /// A hint about the microphone, once per call, until answered.
+    pub mic_hint: Option<Verdict>,
+    highlight: Option<Highlight>,
 }
+
+/// A Voice & audio row a microphone hint points to.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Row {
+    AiNoise,
+    Gain,
+}
+
+/// Shows the row briefly after Settings opens from a hint.
+pub struct Highlight {
+    row: Row,
+    /// `ui.input` time of the first frame the row was drawn.
+    since: Option<f64>,
+}
+
+/// How long the row stays highlighted, fading out.
+const HIGHLIGHT_SECONDS: f64 = 3.0;
 
 /// A file sent live, shown in the call bar or, when `chat`, in a chat.
 pub struct LiveFile {
@@ -167,7 +188,14 @@ impl Voice {
             live_files: Vec::new(),
             stage: Stage::default(),
             control: remote::Control::default(),
+            mic_hint: None,
+            highlight: None,
         }
+    }
+
+    /// Open Voice & audio scrolled to `row`, which flashes.
+    pub fn show_row(&mut self, row: Row) {
+        self.highlight = Some(Highlight { row, since: None });
     }
 
     /// The call ended or was left: stop sending audio and forget its shares and video.
@@ -179,6 +207,8 @@ impl Voice {
         self.clear_screens();
         self.stage = Stage::default();
         self.control = remote::Control::default();
+        self.mic_hint = None;
+        let _ = self.audio.take_trouble();
     }
 
     /// Forget this call's video and files: our screen and camera, and what we watch.
@@ -251,6 +281,14 @@ pub fn frame(ctx: &egui::Context, home: &mut Home) {
     voice.audio.set_key_down(down);
     let testing = home.settings == Some(Tab::Voice);
     voice.audio.set_testing(testing);
+    if voice.call.is_some()
+        && let Some(verdict) = voice.audio.take_trouble()
+    {
+        voice.mic_hint = Some(verdict);
+    }
+    if !testing && voice.highlight.as_ref().is_some_and(|h| h.since.is_some()) {
+        voice.highlight = None;
+    }
     if testing || voice.call.is_some() {
         ctx.request_repaint_after(Duration::from_millis(100));
     }
@@ -904,9 +942,56 @@ pub fn settings_tab(ui: &mut Ui, voice: &mut Voice) {
         t!("call.noise"),
         t!("call.noise_help"),
     );
-    ai_noise(ui, &audio, &mut s);
-    ui::toggle_row(ui, &mut s.auto_gain, t!("call.gain"), t!("call.gain_help"));
+    highlighted(ui, &mut voice.highlight, Row::AiNoise, |ui| {
+        ai_noise(ui, &audio, &mut s)
+    });
+    highlighted(ui, &mut voice.highlight, Row::Gain, |ui| {
+        ui::toggle_row(ui, &mut s.auto_gain, t!("call.gain"), t!("call.gain_help"));
+    });
+    ui::toggle_row(
+        ui,
+        &mut s.mic_hint,
+        t!("call.mic_hint"),
+        t!("call.mic_hint_help"),
+    );
     audio.set_settings(s);
+}
+
+/// Draws `row`; if a hint pointed to it, scrolls it into view and tints it, fading out.
+fn highlighted(
+    ui: &mut Ui,
+    highlight: &mut Option<Highlight>,
+    row: Row,
+    add: impl FnOnce(&mut Ui),
+) {
+    let shape = ui.painter().add(egui::Shape::Noop);
+    let top = ui.cursor().top();
+    add(ui);
+    let Some(active) = highlight.as_mut().filter(|h| h.row == row) else {
+        return;
+    };
+    let rect = egui::Rect::from_x_y_ranges(ui.max_rect().x_range(), top..=ui.cursor().top());
+    let now = ui.input(|input| input.time);
+    let since = *active.since.get_or_insert(now);
+    let age = now - since;
+    // The first frames only measure the rows (sizes settle a frame later).
+    if age < 0.3 {
+        ui.scroll_to_rect(rect, Some(egui::Align::Center));
+    }
+    if age >= HIGHLIGHT_SECONDS {
+        *highlight = None;
+        return;
+    }
+    let fade = 1.0 - (age / HIGHLIGHT_SECONDS).powi(2) as f32;
+    ui.painter().set(
+        shape,
+        egui::Shape::rect_filled(
+            rect.expand(ui::SPACE_XS),
+            ui::RADIUS_ROW,
+            ui::accent(ui).base.gamma_multiply(0.25 * fade),
+        ),
+    );
+    ui.ctx().request_repaint();
 }
 
 /// The AI noise removal row: download its model first, then an on/off switch.
