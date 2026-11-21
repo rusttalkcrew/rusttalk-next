@@ -14,8 +14,10 @@ pub struct Palette {
     pub side: Color32,
     /// The chat and every page.
     pub main: Color32,
-    /// Text fields, the composer and cards on the main surface.
+    /// Text fields and cards on the main surface.
     pub field: Color32,
+    /// The message bar floating over the chat: a step away from `main`.
+    pub composer: Color32,
     /// Menus, popups and tooltips: a little lighter than the page.
     pub raised: Color32,
     /// A hovered row on a side surface or in a menu.
@@ -110,6 +112,7 @@ pub const MIDNIGHT: Palette = Palette {
     side: rgb(0x2b2d31),
     main: rgb(0x313338),
     field: rgb(0x1e1f22),
+    composer: rgb(0x383a40),
     raised: rgb(0x393b41),
     hover: rgb(0x43454c),
     hover_soft: rgb(0x2e3035),
@@ -137,6 +140,7 @@ pub const GRAPHITE: Palette = Palette {
     side: rgb(0x1d1d1d),
     main: rgb(0x242424),
     field: rgb(0x141414),
+    composer: rgb(0x2e2e2e),
     raised: rgb(0x2e2e2e),
     hover: rgb(0x393939),
     hover_soft: rgb(0x292929),
@@ -164,6 +168,7 @@ pub const DEEP_SEA: Palette = Palette {
     side: rgb(0x10202e),
     main: rgb(0x152737),
     field: rgb(0x0b1520),
+    composer: rgb(0x1c3245),
     raised: rgb(0x1c3245),
     hover: rgb(0x243d53),
     hover_soft: rgb(0x192d3f),
@@ -191,6 +196,7 @@ pub const DAYLIGHT: Palette = Palette {
     side: rgb(0xf2f3f5),
     main: Color32::WHITE,
     field: rgb(0xebedef),
+    composer: rgb(0xebedef),
     raised: Color32::WHITE,
     hover: rgb(0xe6e8eb),
     hover_soft: rgb(0xf5f6f7),
@@ -218,6 +224,7 @@ pub const PAPER: Palette = Palette {
     side: rgb(0xf2eee5),
     main: rgb(0xfbf9f4),
     field: rgb(0xece7dc),
+    composer: rgb(0xefe9dd),
     raised: rgb(0xfffdf8),
     hover: rgb(0xe8e2d6),
     hover_soft: rgb(0xf5f1e8),
@@ -245,6 +252,7 @@ pub const MIST: Palette = Palette {
     side: rgb(0xe9eef3),
     main: rgb(0xf6f8fb),
     field: rgb(0xe1e7ee),
+    composer: rgb(0xe6ebf1),
     raised: Color32::WHITE,
     hover: rgb(0xdde4ec),
     hover_soft: rgb(0xeef2f6),
@@ -446,7 +454,7 @@ mod tests {
     fn every_theme_meets_wcag_aa_for_text() {
         for p in DARK_THEMES.into_iter().chain(LIGHT_THEMES) {
             let surfaces = [
-                p.rail, p.side, p.main, p.field, p.raised, p.hover, p.selected,
+                p.rail, p.side, p.main, p.field, p.composer, p.raised, p.hover, p.selected,
             ];
             for surface in surfaces {
                 assert!(contrast(p.text, surface) >= 4.5, "{} text", p.id);

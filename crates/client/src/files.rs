@@ -7,7 +7,7 @@ use std::{
     f32::consts::FRAC_PI_2,
     fs, io,
     path::{Path, PathBuf},
-    sync::{Mutex, mpsc},
+    sync::{Arc, Mutex, mpsc},
     thread,
     time::Duration,
 };
@@ -503,11 +503,132 @@ pub fn size(bytes: u64) -> String {
     }
 }
 
-/// The staged files above the composer, each with a remove button.
+/// The side of a staged picture's tile in the composer.
+const PREVIEW: f32 = 112.0;
+/// Decoded memory a staged picture's tile and its preview may use.
+const PREVIEW_BUDGET: usize = 32 * MIB as usize;
+const OPEN_BUDGET: usize = 64 * MIB as usize;
+const OPEN_EDGE: u32 = 1600;
+
+/// Staged pictures by path and whether it is the large copy for the preview dialog.
+/// Decoded on their own thread; entries go when the file is no longer staged.
+#[derive(Clone, Default)]
+struct Previews(Arc<Mutex<HashMap<(PathBuf, bool), Preview>>>);
+
+enum Preview {
+    Loading,
+    Decoded(Vec<(egui::ColorImage, u32)>),
+    Ready(Anim),
+    Failed,
+}
+
+fn is_picture(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    [".png", ".jpg", ".jpeg", ".gif", ".webp"]
+        .iter()
+        .any(|end| name.ends_with(end))
+}
+
+/// Decode a staged picture to fit `edge`, with every frame of an animation.
+fn decode_staged(
+    path: &Path,
+    edge: u32,
+    budget: usize,
+) -> anyhow::Result<Vec<(egui::ColorImage, u32)>> {
+    let bytes = fs::read(path)?;
+    let frames = rusttalk_core::client::decode_frames(&bytes, Some(edge), budget)?;
+    Ok(frames.into_iter().map(crate::net::frame_image).collect())
+}
+
+impl Previews {
+    fn get(ctx: &egui::Context) -> Self {
+        ctx.data_mut(|data| {
+            data.get_temp_mut_or_default::<Self>(UiId::unique("staged-previews"))
+                .clone()
+        })
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<(PathBuf, bool), Preview>> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The picture's frames as textures once decoded; starts decoding on first ask.
+    fn with<R>(
+        &self,
+        ui: &mut Ui,
+        path: &Path,
+        large: bool,
+        show: impl FnOnce(&mut Ui, Option<&Anim>, bool) -> R,
+    ) -> R {
+        let key = (path.to_owned(), large);
+        let mut map = self.lock();
+        let entry = map.entry(key.clone()).or_insert_with(|| {
+            let (previews, ctx, path) = (self.clone(), ui.ctx().clone(), path.to_owned());
+            thread::spawn(move || {
+                let (edge, budget) = if large {
+                    (OPEN_EDGE, OPEN_BUDGET)
+                } else {
+                    (PREVIEW as u32 * 2, PREVIEW_BUDGET)
+                };
+                let decoded = decode_staged(&path, edge, budget);
+                let mut map = previews.lock();
+                // Unstaged meanwhile: nothing to show it in.
+                if let Some(slot) = map.get_mut(&(path, large)) {
+                    *slot = match decoded {
+                        Ok(frames) => Preview::Decoded(frames),
+                        Err(error) => {
+                            tracing::warn!(error = %format_args!("{error:#}"), "previewing a picture failed");
+                            Preview::Failed
+                        }
+                    };
+                    ctx.request_repaint();
+                }
+            });
+            Preview::Loading
+        });
+        if let Preview::Decoded(frames) = entry {
+            let delays = frames.iter().map(|(_, ms)| *ms).collect();
+            let frames = (std::mem::take(frames).into_iter())
+                .map(|(image, _)| {
+                    ui.ctx()
+                        .load_texture("staged", image, TextureOptions::LINEAR)
+                })
+                .collect();
+            *entry = Preview::Ready(Anim { frames, delays });
+        }
+        match entry {
+            Preview::Ready(anim) => show(ui, Some(anim), false),
+            Preview::Failed => show(ui, None, true),
+            _ => show(ui, None, false),
+        }
+    }
+}
+
+/// The staged files in the composer: pictures as tiles that play on hover and open
+/// large on click, other files as a chip with the name and size. Each has a remove button.
 pub fn staged(ui: &mut Ui, chat: &mut Chat) {
+    let previews = Previews::get(ui.ctx());
+    let open_id = UiId::unique("staged-open");
+    previews
+        .lock()
+        .retain(|(path, _), _| chat.staged.iter().any(|file| file.path == *path));
     let mut remove = None;
+    let mut open = None;
     ui.horizontal_wrapped(|ui| {
         for (at, file) in chat.staged.iter().enumerate() {
+            let tile = is_picture(&file.name)
+                && previews.with(ui, &file.path, false, |ui, anim, failed| {
+                    if failed {
+                        return false;
+                    }
+                    let (shown, removed) = picture_tile(ui, file, anim);
+                    open = open.or(shown.then_some(at));
+                    remove = remove.or(removed.then_some(at));
+                    true
+                });
+            if tile {
+                continue;
+            }
             Frame::new()
                 .fill(ui::colors(ui).field)
                 .corner_radius(ui::RADIUS)
@@ -521,9 +642,109 @@ pub fn staged(ui: &mut Ui, chat: &mut Chat) {
                 });
         }
     });
+    if let Some(at) = open {
+        ui.data_mut(|data| data.insert_temp(open_id, chat.staged[at].path.clone()));
+    }
+    let opened: Option<PathBuf> = ui.data(|data| data.get_temp(open_id));
+    if let Some(path) = opened {
+        let file = chat.staged.iter().find(|file| file.path == path);
+        let close = match file {
+            Some(file) => staged_dialog(ui, &previews, file),
+            None => true,
+        };
+        if close {
+            previews.lock().remove(&(path, true));
+            ui.data_mut(|data| data.remove::<PathBuf>(open_id));
+        }
+    }
     if let Some(at) = remove {
         discard(&chat.staged.remove(at).path);
     }
+}
+
+/// A staged picture's tile: cropped to a square, playing while hovered, with a ×.
+/// Returns whether it was clicked and whether × was.
+fn picture_tile(ui: &mut Ui, file: &Staged, anim: Option<&Anim>) -> (bool, bool) {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(PREVIEW), Sense::click());
+    let c = ui::colors(ui);
+    ui.painter().rect_filled(rect, ui::RADIUS, c.field);
+    match anim {
+        Some(anim) => {
+            let texture = anim.current(ui, response.hovered());
+            let size = texture.size_vec2();
+            // Cover the square: crop the longer side around the middle.
+            let cut = (Vec2::splat(size.min_elem()) / size).min(Vec2::splat(1.0));
+            let uv = Rect::from_center_size(egui::pos2(0.5, 0.5), cut);
+            Image::new(texture)
+                .uv(uv)
+                .corner_radius(ui::RADIUS)
+                .paint_at(ui, rect);
+            if anim.frames.len() > 1
+                && let Some(kind) = animated_kind(&file.name, "")
+            {
+                let corner = rect.left_bottom() + Vec2::new(6.0, -22.0);
+                let area = Rect::from_min_size(corner, Vec2::new(60.0, 18.0));
+                ui.scope_builder(UiBuilder::new().max_rect(area), |ui| {
+                    ui::badge(ui, kind, OVERLAY_BUTTON);
+                });
+            }
+        }
+        None => {
+            ui.put(rect, egui::Spinner::new());
+        }
+    }
+    ui::focus_ring(ui, &response, ui::RADIUS);
+    let label = format!("{} · {}", file.name, size(file.size));
+    response.widget_info(|| WidgetInfo::labeled(Role::Button, true, &label));
+    let shown = response
+        .on_hover_text(&label)
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .clicked();
+    let corner = Rect::from_min_size(rect.right_top() + Vec2::new(-26.0, 4.0), Vec2::splat(22.0));
+    let removed = ui
+        .scope_builder(UiBuilder::new().max_rect(corner), |ui| {
+            ui::icon_button(
+                ui,
+                "×",
+                t!("common.remove"),
+                ui::Look::On(OVERLAY_BUTTON),
+                Vec2::splat(22.0),
+            )
+        })
+        .inner
+        .clicked();
+    (shown, removed)
+}
+
+/// A staged picture large, before it is sent. True when it should close.
+fn staged_dialog(ui: &Ui, previews: &Previews, file: &Staged) -> bool {
+    let ((), close) = ui::dialog(ui.ctx(), "staged-preview", &file.name, |ui| {
+        let room = Vec2::new(ui::DIALOG_WIDTH, 420.0);
+        previews.with(ui, &file.path, true, |ui, anim, failed| match anim {
+            Some(anim) => {
+                let texture = anim.current(ui, true);
+                let size = texture.size_vec2();
+                let scale = (room.x / size.x).min(room.y / size.y).min(1.0);
+                ui.vertical_centered(|ui| {
+                    ui.add(
+                        Image::new(texture)
+                            .fit_to_exact_size(size * scale)
+                            .corner_radius(ui::RADIUS),
+                    );
+                });
+            }
+            None if failed => {
+                ui.label(t!("files.picture_failed"));
+            }
+            None => {
+                ui.allocate_ui(Vec2::new(room.x, 120.0), |ui| {
+                    ui.centered_and_justified(|ui| ui.spinner())
+                });
+            }
+        });
+        ui.label(ui::caption(size(file.size)));
+    });
+    close
 }
 
 /// "GIF" or "WebP" for a file that may animate, by its name or type; the contents

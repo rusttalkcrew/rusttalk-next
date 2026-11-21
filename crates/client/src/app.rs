@@ -196,6 +196,7 @@ fn forget_profile(data: &std::path::Path) {
         "notify.json",
         "pokes.json",
         crate::emoji::picker::RECENT_FILE,
+        crate::emoji::picker::FAVOURITES_FILE,
     ] {
         match std::fs::remove_file(data.join(name)) {
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => {

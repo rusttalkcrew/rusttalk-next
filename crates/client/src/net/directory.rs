@@ -604,7 +604,7 @@ async fn pictures(
 }
 
 /// A decoded frame as an image and how long it shows, in ms.
-pub(super) fn frame_image(frame: image::Frame) -> (ColorImage, u32) {
+pub(crate) fn frame_image(frame: image::Frame) -> (ColorImage, u32) {
     let (numer, denom) = frame.delay().numer_denom_ms();
     // Browsers also slow down GIF frames shorter than 20 ms.
     let ms = (numer / denom.max(1)).max(20);
