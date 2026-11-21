@@ -7,7 +7,7 @@ use eframe::egui::{
 };
 
 use rusttalk_core::{
-    auth::decode,
+    auth::{ServerUpdateOutcome, ServerUpdates, decode},
     index::{https_url, validate_details},
 };
 
@@ -79,6 +79,7 @@ pub struct Settings {
     joining: Option<(bool, u32)>,
     /// Whether the server is listed and the details, once loaded (owner).
     listing: Option<(bool, PublicListing)>,
+    updates: ServerUpdates,
     member: Option<(Id, MemberAction)>,
     new_role: String,
     new_permissions: Vec<&'static str>,
@@ -112,6 +113,7 @@ impl Settings {
             AdminUpdate::Listing(on, saved) => {
                 self.listing = Some((on, saved.unwrap_or_default()));
             }
+            AdminUpdate::ServerUpdates(updates) => self.updates = updates,
             AdminUpdate::Done(text) => {
                 self.member = None;
                 self.renaming = None;
@@ -147,6 +149,9 @@ pub fn open(home: &mut Home, index: usize, mut tab: Tab) {
         audit: perms.audit,
         bans: perms.ban,
     }));
+    if tab == Tab::Overview && perms.owner {
+        server.send(Command::Admin(Admin::LoadUpdates));
+    }
     if tab == Tab::Invites {
         server.send(Command::Admin(Admin::Invites));
     }
@@ -159,6 +164,7 @@ pub fn open(home: &mut Home, index: usize, mut tab: Tab) {
         audit_filter: None,
         joining: None,
         listing: None,
+        updates: ServerUpdates::default(),
         member: None,
         new_role: String::new(),
         new_permissions: Vec::new(),
@@ -361,6 +367,7 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
                     bans: true,
                 }),
                 Tab::Listing => Some(Admin::LoadListing),
+                Tab::Overview if perms.owner => Some(Admin::LoadUpdates),
                 Tab::Invites => Some(Admin::Invites),
                 _ => None,
             };
@@ -456,7 +463,31 @@ fn overview_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Overvi
             }
         });
     });
+    if server.dir.perms.owner {
+        update_notice(ui, &settings.updates);
+    }
     picked
+}
+
+fn update_notice(ui: &mut Ui, updates: &ServerUpdates) {
+    if updates.pending.is_none() && updates.last.is_none() {
+        return;
+    }
+    ui::page_section(ui, t!("admin.server_updates"));
+    if let Some(pending) = &updates.pending {
+        ui.label(t!("admin.update_waiting", version = pending.version));
+    }
+    if let Some(last) = &updates.last {
+        let date = date(last.at);
+        ui.label(match last.outcome {
+            ServerUpdateOutcome::Updated => {
+                t!("admin.update_applied", version = last.version, date = date)
+            }
+            ServerUpdateOutcome::Failed => {
+                t!("admin.update_failed", version = last.version, date = date)
+            }
+        });
+    }
 }
 
 /// The server's icon, or its initials on a rounded square.

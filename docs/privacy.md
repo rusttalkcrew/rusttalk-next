@@ -266,6 +266,14 @@ is deleted and never used; the normal noise suppression keeps working.
   opt-in, on startup and hourly while enabled. The owner's settings prefill
   the official directory, which the owner can change; the API itself has no
   default index URL.
+- **Server auto-updater (opt-in):** Fetches the signed release manifest and
+  detached signature from GitHub Releases over HTTPS. Docker pulls the
+  selected digests from GitHub Container Registry. These hosts see the IP
+  address, requested assets or images, and timing. The updater queries the
+  internal LiveKit RoomService for room activity without retaining room IDs,
+  and checks health and version over the internal network. It stores pending
+  and last release versions, timestamps and the last result locally for the
+  server owner, and keeps local backups of the server data volumes.
 - **Index:** No outbound network connections.
 - **Caddy:** Proxies requests to the API on 8080/TCP and to LiveKit on
   7880/TCP, using Docker's internal DNS. With the optional index enabled,

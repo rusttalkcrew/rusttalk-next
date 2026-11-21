@@ -87,6 +87,33 @@ pub struct ServerInfo {
     pub protocol: Option<u32>,
 }
 
+/// Operational update status visible to the server owner.
+#[derive(Default, Serialize, Deserialize)]
+pub struct ServerUpdates {
+    pub pending: Option<PendingServerUpdate>,
+    pub last: Option<ServerUpdateResult>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct PendingServerUpdate {
+    pub version: String,
+    pub since: i64,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ServerUpdateResult {
+    pub version: String,
+    pub at: i64,
+    pub outcome: ServerUpdateOutcome,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServerUpdateOutcome {
+    Updated,
+    Failed,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct OpenJoining {
     pub open_joining: bool,

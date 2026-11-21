@@ -3,7 +3,7 @@
 
 use reqwest::Method;
 use rusttalk_core::{
-    auth::{decode, encode},
+    auth::{ServerUpdates, decode, encode},
     client::KeyClient,
     keys::{Metadata, random_key},
 };
@@ -60,6 +60,7 @@ pub enum Admin {
     DeleteEmoji(Id),
     /// The owner's public listing setting.
     LoadListing,
+    LoadUpdates,
     /// List the server publicly with these details, or stop (`None`).
     SaveListing(Option<PublicListing>),
 }
@@ -107,6 +108,7 @@ pub enum AdminUpdate {
     Joining(bool, u32),
     /// Whether the server is listed, and the saved details.
     Listing(bool, Option<PublicListing>),
+    ServerUpdates(ServerUpdates),
     /// A change went through; the text says what happened.
     Done(&'static str),
     Failed(String),
@@ -141,6 +143,21 @@ pub(super) async fn run(
         Admin::LoadListing => {
             match get(client, "/v1/settings/public-listing").await {
                 Ok(value) => send(listing(&value)),
+                Err(error) => send(AdminUpdate::Failed(failed(&error))),
+            }
+            return;
+        }
+        Admin::LoadUpdates => {
+            match get(client, "/v1/settings/updates").await {
+                Ok(value) => match serde_json::from_value(value) {
+                    Ok(status) => send(AdminUpdate::ServerUpdates(status)),
+                    Err(_) => send(AdminUpdate::Failed(t!("admin.update_unavailable").into())),
+                },
+                Err(error)
+                    if error
+                        .downcast_ref::<reqwest::Error>()
+                        .and_then(reqwest::Error::status)
+                        == Some(reqwest::StatusCode::NOT_FOUND) => {}
                 Err(error) => send(AdminUpdate::Failed(failed(&error))),
             }
             return;

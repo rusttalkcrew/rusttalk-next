@@ -121,7 +121,7 @@ jobs:
         run: |
           echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           for service in api index; do
-            # <major>.<minor> lets Watchtower-style updaters follow patch releases only.
+            # Keep series tags available for manual initial installs.
             docker buildx imagetools create -t "$IMAGE-$service:$VERSION" -t "$IMAGE-$service:${VERSION%.*}" \
               -t "$IMAGE-$service:latest" \
               "$IMAGE-$service:$VERSION-amd64" "$IMAGE-$service:$VERSION-arm64"
