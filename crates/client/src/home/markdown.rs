@@ -6,12 +6,12 @@ use std::{
 };
 
 use egui::{
-    Color32, FontId, Label, Stroke, TextFormat, Ui,
+    FontId, Label, Stroke, TextFormat, Ui,
     cache::{ComputerMut, FrameCache},
     text::LayoutJob,
 };
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd, TextMergeWithOffset};
-use syntect::{easy::HighlightLines, highlighting::ThemeSet, parsing::SyntaxSet};
+mod highlight;
 
 use super::{frame, mentions::Message};
 use crate::{emoji, server::Directory, ui};
@@ -23,6 +23,7 @@ struct Style {
     underline: bool,
     strike: bool,
     heading: u8,
+    code: bool,
     link: Option<String>,
 }
 
@@ -41,7 +42,7 @@ enum Block {
 pub(super) struct Document {
     blocks: Vec<Block>,
     // Original byte offsets for shortcode and mention substitution in the composer.
-    prose: Vec<Range<usize>>,
+    code_ranges: Vec<Range<usize>>,
 }
 
 fn web_link(text: &str) -> Option<String> {
@@ -53,37 +54,61 @@ fn web_link(text: &str) -> Option<String> {
     .then(|| url.into())
 }
 
-// A server ID or emoji name can itself contain paired Markdown delimiters.
+// A URL, server ID, or emoji name can itself contain paired Markdown delimiters.
 // Mask those delimiters only in prose. Original byte offsets still identify the text.
 fn parser_source(source: &str) -> Cow<'_, str> {
-    if !source.contains('_') || !source.contains([':', '<']) {
+    if !source.contains(['_', '*']) || !source.contains([':', '<']) {
         return Cow::Borrowed(source);
     }
     static TOKEN: LazyLock<regex::Regex> = LazyLock::new(|| {
         regex::Regex::new(r"<@[&a-zA-Z0-9_-]+>|<:[a-zA-Z0-9_+-]+:[a-zA-Z0-9_-]+>|:[a-zA-Z0-9_+-]+:")
             .expect("chat token pattern")
     });
-    let mut candidates = TOKEN
+    let mut candidates: Vec<_> = TOKEN
         .find_iter(source)
         .filter(|m| m.as_str().contains('_'))
         .map(|m| m.range())
-        .peekable();
+        .collect();
+    let mut finder = linkify::LinkFinder::new();
+    finder.kinds(&[linkify::LinkKind::Url]);
+    candidates.extend(
+        finder
+            .links(source)
+            .filter(|link| link.as_str().contains(['*', '_']) && web_link(link.as_str()).is_some())
+            .map(|link| {
+                let mut end = link.end();
+                for mark in ["**", "__", "*", "_"] {
+                    if source[..link.start()].ends_with(mark)
+                        && source[link.start()..end].ends_with(mark)
+                    {
+                        end -= mark.len();
+                        break;
+                    }
+                }
+                link.start()..end
+            }),
+    );
+    candidates.sort_by_key(|r| r.start);
+    let mut candidates = candidates.into_iter().peekable();
     if candidates.peek().is_none() {
         return Cow::Borrowed(source);
     }
     let mut masked = Cow::Borrowed(source);
     let mut code = false;
+    let mut link = false;
     for (event, range) in Parser::new_ext(source, Options::ENABLE_STRIKETHROUGH).into_offset_iter()
     {
         match event {
             Event::Start(Tag::CodeBlock(_)) => code = true,
             Event::End(TagEnd::CodeBlock) => code = false,
-            Event::Text(_) if !code => {
+            Event::Start(Tag::Link { .. }) => link = true,
+            Event::End(TagEnd::Link) => link = false,
+            Event::Text(_) if !code && !link => {
                 while let Some(token) = candidates.next_if(|r| r.start < range.end) {
                     if token.start >= range.start {
                         masked
                             .to_mut()
-                            .replace_range(token.clone(), &source[token].replace('_', "x"));
+                            .replace_range(token.clone(), &source[token].replace(['_', '*'], "x"));
                     }
                 }
             }
@@ -125,6 +150,10 @@ impl Document {
             });
         for (event, range) in TextMergeWithOffset::new(events) {
             let literal = !matches!(event, Event::Text(_));
+            let inline_code = matches!(event, Event::Code(_));
+            if inline_code || matches!(event, Event::Start(Tag::CodeBlock(_))) {
+                doc.code_ranges.push(range.clone());
+            }
             match event {
                 Event::Start(tag) => {
                     styles.push(style.clone());
@@ -148,7 +177,10 @@ impl Document {
                                 _ => "• ".into(),
                             };
                             line.push(Span {
-                                text: prefix,
+                                text: format!(
+                                    "{}{prefix}",
+                                    "    ".repeat(lists.len().saturating_sub(1))
+                                ),
                                 style: style.clone(),
                                 literal: false,
                             });
@@ -178,9 +210,10 @@ impl Document {
                         TagEnd::List(_) => {
                             lists.pop();
                         }
-                        TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::Item => {
-                            flush(&mut line, &mut doc.blocks)
-                        }
+                        TagEnd::HtmlBlock
+                        | TagEnd::Paragraph
+                        | TagEnd::Heading(_)
+                        | TagEnd::Item => flush(&mut line, &mut doc.blocks),
                         _ => {}
                     }
                 }
@@ -195,9 +228,6 @@ impl Document {
                 | Event::Code(text)
                 | Event::Html(text)
                 | Event::InlineHtml(text) => {
-                    if !literal {
-                        doc.prose.push(range);
-                    }
                     if line.is_empty() && quote > 0 {
                         line.push(Span {
                             text: "┃ ".into(),
@@ -208,7 +238,10 @@ impl Document {
                     if literal || style.link.is_some() {
                         line.push(Span {
                             text: text.into_string(),
-                            style: style.clone(),
+                            style: Style {
+                                code: inline_code,
+                                ..style.clone()
+                            },
                             literal,
                         });
                     } else {
@@ -250,12 +283,12 @@ impl Document {
     ) -> String {
         let mut result = String::new();
         let mut start = 0;
-        for range in &self.prose {
-            result.push_str(&source[start..range.start]);
-            result.push_str(&replace(&source[range.clone()]));
+        for range in &self.code_ranges {
+            result.push_str(&replace(&source[start..range.start]));
+            result.push_str(&source[range.clone()]);
             start = range.end;
         }
-        result.push_str(&source[start..]);
+        result.push_str(&replace(&source[start..]));
         result
     }
 
@@ -279,39 +312,61 @@ impl Document {
             .join("\n")
     }
 
-    pub(super) fn show(&self, ui: &mut Ui, dir: &Directory, message: &Message, jumbo: bool) {
-        for block in &self.blocks {
+    pub(super) fn show(
+        &self,
+        ui: &mut Ui,
+        dir: &Directory,
+        message: &Message,
+        jumbo: bool,
+        edited: bool,
+    ) {
+        for (index, block) in self.blocks.iter().enumerate() {
+            let last = index + 1 == self.blocks.len();
             match block {
                 Block::Line(spans) if spans.is_empty() => {
                     ui.separator();
                 }
                 Block::Line(spans) => {
-                    show_line(ui, dir, message, spans, jumbo);
+                    show_line(ui, dir, message, spans, jumbo, edited && last);
                 }
                 Block::Code { language, text } => ui::card(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        if !language.is_empty() {
-                            ui.label(ui::caption(language));
-                        }
-                        if ui::secondary(ui, t!("home.copy_code")).clicked() {
-                            ui.ctx().copy_text(text.clone());
-                        }
-                    });
-                    let dark = ui.visuals().dark_mode;
-                    let job = ui.memory_mut(|m| {
-                        m.caches
-                            .cache::<FrameCache<LayoutJob, Highlighter>>()
-                            .get((language.as_str(), text.as_str(), dark))
-                            .clone()
-                    });
-                    ui.add(Label::new(job).wrap());
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            if ui::secondary(ui, t!("home.copy_code")).clicked() {
+                                ui.ctx().copy_text(text.clone());
+                            }
+                            ui.with_layout(
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    ui.label(ui::caption(language));
+                                },
+                            );
+                        },
+                    );
+                    highlight::show(ui, language, text);
                 }),
+            }
+            if edited && last && !matches!(block, Block::Line(s) if !s.is_empty()) {
+                edited_label(ui);
             }
         }
     }
 }
 
-fn show_line(ui: &mut Ui, dir: &Directory, message: &Message, spans: &[Span], jumbo: bool) {
+fn edited_label(ui: &mut Ui) {
+    ui.label(egui::RichText::new(t!("home.edited")).small().weak());
+}
+
+fn show_line(
+    ui: &mut Ui,
+    dir: &Directory,
+    message: &Message,
+    spans: &[Span],
+    jumbo: bool,
+    edited: bool,
+) {
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 0.;
         let mut job = LayoutJob::default();
@@ -320,7 +375,24 @@ fn show_line(ui: &mut Ui, dir: &Directory, message: &Message, spans: &[Span], ju
                 ui.add(Label::new(std::mem::take(job)).wrap());
             }
         };
-        for s in spans {
+        let mut spans = spans.iter().peekable();
+        while let Some(s) = spans.next() {
+            if let Some(url) = &s.style.link {
+                flush(ui, &mut job);
+                let mut label = message.resolve(dir, &s.text);
+                while let Some(next) = spans.next_if(|next| next.style.link.as_ref() == Some(url)) {
+                    label.push_str(&message.resolve(dir, &next.text));
+                }
+                if label != *url
+                    && let Ok(destination) = url::Url::parse(url)
+                    && let Some(host) = destination.host_str()
+                {
+                    label = format!("{label} ({host})");
+                }
+                ui.style_mut().url_in_tooltip = true;
+                ui.hyperlink_to(label, url);
+                continue;
+            }
             let size = match s.style.heading {
                 1 => ui::TEXT_HEADING,
                 2 => ui::TEXT_TITLE,
@@ -341,12 +413,11 @@ fn show_line(ui: &mut Ui, dir: &Directory, message: &Message, spans: &[Span], ju
                 format.underline = Stroke::new(1., color);
             }
             if s.literal {
-                format.font_id = FontId::monospace(ui::TEXT_MONO);
-                format.background = ui.visuals().extreme_bg_color;
+                if s.style.code {
+                    format.font_id = FontId::monospace(ui::TEXT_MONO);
+                    format.background = ui.visuals().extreme_bg_color;
+                }
                 job.append(&s.text, 0., format);
-            } else if let Some(url) = &s.style.link {
-                flush(ui, &mut job);
-                ui.hyperlink_to(message.resolve(dir, &s.text), url);
             } else {
                 for part in emoji::parts(&s.text) {
                     match part {
@@ -385,6 +456,10 @@ fn show_line(ui: &mut Ui, dir: &Directory, message: &Message, spans: &[Span], ju
             }
         }
         flush(ui, &mut job);
+        if edited {
+            ui.add_space(ui::SPACE_XS);
+            edited_label(ui);
+        }
     });
 }
 
@@ -402,53 +477,6 @@ pub(super) fn cached(ui: &Ui, text: &str) -> Arc<Document> {
             .get(text)
             .clone()
     })
-}
-
-#[derive(Default)]
-struct Highlighter;
-impl ComputerMut<(&str, &str, bool), LayoutJob> for Highlighter {
-    fn compute(&mut self, (language, text, dark): (&str, &str, bool)) -> LayoutJob {
-        static SYNTAX: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
-        static THEMES: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
-        let theme = &THEMES.themes[if dark {
-            "base16-ocean.dark"
-        } else {
-            "InspiredGitHub"
-        }];
-        let syntax = SYNTAX
-            .find_syntax_by_token(language)
-            .unwrap_or_else(|| SYNTAX.find_syntax_plain_text());
-        let mut highlighter = HighlightLines::new(syntax, theme);
-        let mut job = LayoutJob::default();
-        for line in text.split_inclusive('\n') {
-            let sections = highlighter
-                .highlight_line(line, &SYNTAX)
-                .unwrap_or_else(|_| {
-                    vec![(
-                        syntect::highlighting::Style {
-                            foreground: theme
-                                .settings
-                                .foreground
-                                .unwrap_or(syntect::highlighting::Color::BLACK),
-                            ..Default::default()
-                        },
-                        line,
-                    )]
-                });
-            for (style, part) in sections {
-                let c = style.foreground;
-                job.append(
-                    part,
-                    0.,
-                    TextFormat::simple(
-                        FontId::monospace(ui::TEXT_MONO),
-                        Color32::from_rgb(c.r, c.g, c.b),
-                    ),
-                );
-            }
-        }
-        job
-    }
 }
 
 #[cfg(test)]
@@ -492,6 +520,23 @@ mod tests {
     }
 
     #[test]
+    fn bare_urls_preserve_the_destination() {
+        for url in [
+            "https://store.steampowered.com/app/4915700/Ebbtide/",
+            "https://example.org/__dir__/*file*/v",
+        ] {
+            for source in [url.to_owned(), format!("**{url}**"), format!("<{url}>")] {
+                let doc = Document::parse(&source);
+                let [Block::Line(spans)] = doc.blocks.as_slice() else {
+                    panic!()
+                };
+                assert_eq!(spans.len(), 1, "{source}");
+                assert_eq!(spans[0].style.link.as_deref(), Some(url), "{source}");
+                assert_eq!(spans[0].text, url);
+            }
+        }
+    }
+    #[test]
     fn only_web_destinations_are_clickable_and_images_stay_local() {
         let doc = Document::parse(
             "[safe](https://example.org/path) https://example.org/bare [bad](file:///etc) ![alt](https://example.org/image)",
@@ -508,23 +553,5 @@ mod tests {
             ["https://example.org/path", "https://example.org/bare"]
         );
         assert!(doc.plain(str::to_owned).ends_with("bad alt"));
-    }
-
-    #[test]
-    fn rust_highlights_in_both_modes_and_unknown_code_survives() {
-        let code = "fn main() { println!(\"hello\"); }\n";
-        for dark in [false, true] {
-            let job = Highlighter.compute(("rust", code, dark));
-            assert_eq!(job.text, code);
-            assert!(
-                job.sections
-                    .windows(2)
-                    .any(|w| w[0].format.color != w[1].format.color)
-            );
-            assert_eq!(
-                Highlighter.compute(("unknown-language", code, dark)).text,
-                code
-            );
-        }
     }
 }

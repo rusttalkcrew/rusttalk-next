@@ -252,6 +252,22 @@ impl DraftMentions {
         (draft, aliases)
     }
 
+    // A backtick in a selected display name is part of the alias. Mask it while
+    // locating code, keeping the offsets in the original draft valid.
+    pub(super) fn parser_input<'a>(&self, text: &'a str) -> Cow<'a, str> {
+        let mut source = Cow::Borrowed(text);
+        if text.contains('`') {
+            for (range, _) in self.ranges(text) {
+                if text[range.clone()].contains('`') {
+                    source
+                        .to_mut()
+                        .replace_range(range.clone(), &text[range].replace('`', "x"));
+                }
+            }
+        }
+        source
+    }
+
     pub fn encode<'a>(&self, text: &'a str) -> Cow<'a, str> {
         if self.0.is_empty() {
             return Cow::Borrowed(text);
@@ -572,6 +588,26 @@ mod tests {
         assert!(message.plain(&dir).contains(&token));
     }
 
+    #[test]
+    fn selected_names_with_markdown_encode_only_outside_code() {
+        let token = person_token(ME);
+        for name in ["@*Star*", "@__init__", "@[", "@~~", "@Tick`", "@`ticks`"] {
+            let mut aliases = DraftMentions::default();
+            aliases.remember(name.to_owned(), token.clone());
+            let draft =
+                format!("**{name}** :wave: and ``{name} :wave:``\n\n```rust\n{name} :wave:\n```");
+            let doc = Document::parse(&aliases.parser_input(&draft));
+            let outgoing = doc.map_source(&draft, |raw| {
+                emoji::replace(&aliases.encode(raw), &[]).into_owned()
+            });
+            assert_eq!(
+                outgoing,
+                format!("**{token}** 👋 and ``{name} :wave:``\n\n```rust\n{name} :wave:\n```")
+            );
+            let msg = msg(ADA, outgoing);
+            assert!(names_me(&Message::new(&msg, &directory(), CHANNEL), &ME));
+        }
+    }
     #[test]
     fn permissions_gate_sending_and_receiving() {
         let mut dir = directory();

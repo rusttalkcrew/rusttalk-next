@@ -3583,7 +3583,8 @@ fn composer(
         field.request_focus();
         return (Some(command), attach);
     }
-    let converted = markdown::cached(ui, &chat.draft).map_source(&chat.draft, |s| {
+    let parser_input = chat.mentions.parser_input(&chat.draft);
+    let converted = markdown::cached(ui, &parser_input).map_source(&chat.draft, |s| {
         emoji::replace(&chat.mentions.encode(s), &dir.emoji).into_owned()
     });
     let count = converted.chars().count();
@@ -3760,10 +3761,13 @@ fn message(
                                 let jumbo = emoji::jumbo(text)
                                     && msg.files.is_empty()
                                     && msg.live.is_none();
-                                mention.doc.show(ui, dir, &mention, jumbo);
-                                if chat.edited.contains_key(&(msg.person, msg.id)) {
-                                    ui.label(RichText::new(t!("home.edited")).small().weak());
-                                }
+                                mention.doc.show(
+                                    ui,
+                                    dir,
+                                    &mention,
+                                    jumbo,
+                                    chat.edited.contains_key(&(msg.person, msg.id)),
+                                );
                             });
                         }
                         attachments(ui);

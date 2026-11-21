@@ -21,7 +21,7 @@ pub use menu::{
 };
 pub use page::*;
 pub use theme::{
-    ACCENTS, Accent, Appearance, DARK_THEMES, LIGHT_THEMES, Mode, Palette, ROLE_COLORS,
+    ACCENTS, Accent, Appearance, DARK_THEMES, LIGHT_THEMES, Mode, Palette, ROLE_COLORS, contrast,
 };
 pub use widgets::*;
 
