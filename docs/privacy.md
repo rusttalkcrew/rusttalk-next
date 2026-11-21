@@ -180,12 +180,15 @@ on the shared monitor. Window shares and other Linux compositors cannot
 grant control.
 
 RustTalk uses local Hyprland IPC to check monitor geometry, pointer position,
-keyboard focus and lock state. It uses Wayland idle notifications to pause
-after local input. RustTalk keeps these checks on the sharer's device and
-does not collect what the sharer types. Pointer or focus changes between the
-check and input delivery can still send input outside the shared area.
-Local and injected activity can also arrive together, and compositor
-shortcuts may affect other outputs.
+the active window, keyboard-interactive layer surfaces, lock state and
+compositor keybinds. It matches those binds against the virtual keyboard's
+XKB state. Layer and bind data stay on the sharer's device, and RustTalk
+does not collect what the sharer types. It pauses after observed local input
+and rechecks the scope and binds about every 100 ms while a remote key or
+button is held. If a check fails, RustTalk releases the held input and
+destroys the virtual devices. Changes between a check and input delivery
+can still route an event outside the shared area. Coincident local and
+virtual input can share one idle notification.
 
 On macOS, RustTalk captures displays and windows with ScreenCaptureKit,
 which needs the Screen & System Audio Recording permission. Listing sources

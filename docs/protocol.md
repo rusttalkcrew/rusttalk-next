@@ -743,20 +743,40 @@ the opt-in or a usable output identifier, and other Linux compositors answer
 `unsupported`. A source switch ends control and starts with a fresh opt-in.
 
 Before a click, scroll or key event, RustTalk checks the pointer is on the
-selected output through read-only Hyprland IPC. Keys also need a focused window
-on that output. A locked session, unavailable IPC or changed output geometry
-blocks input. Ctrl+Alt with Delete or a function key is blocked for the
-remote keyboard. RustTalk drops failed or stale events. On interruption and
-stop it releases only keys and buttons it actually injected and still holds.
-Observed local pointer or keyboard activity pauses input until the seat is
-idle for about 500 ms.
+selected output through Hyprland IPC. Keyboard input also requires a mapped,
+visible regular window on that output, as reported by `activewindow`.
+Because Hyprland can keep reporting that window while a layer surface owns
+keyboard focus, RustTalk checks mapped `layers` on all outputs. It drops keys
+when a layer with exclusive or on-demand keyboard interactivity is on
+another output or on any top or overlay layer. It uses the layer's IPC
+interactivity field where available, or corroborates the layer address using
+Hyprland's Lua layer query. Unknown interactivity in those positions blocks
+keys.
+
+RustTalk reads the configured `binds` and active `submap` at control start and
+again when verifying keys or held input. It checks XKB modifiers, keysyms and
+keycodes against the active and universal binds. RustTalk cross-checks the text
+bind list for triggers omitted from JSON. If the compositor omits the flag that says whether modifiers are required,
+RustTalk conservatively blocks that trigger in the relevant submap.
+Super, Logo and Mod4, including remapped keys, and Ctrl+Alt with Delete or a
+function key are blocked. RustTalk drops stale or failed events. Local
+pointer or keyboard activity pauses input until the seat is idle for about
+500 ms.
+
+About every 100 ms while a remote key or button remains held, RustTalk
+rechecks the lock state, monitor, pointer, keyboard focus and binds even
+without incoming events. A failed check releases held remote input and
+destroys the virtual devices. Cleanup clears the virtual modifier mask
+before sending key releases.
 
 There is a time-of-check/time-of-use race between the IPC snapshot and the
-compositor delivering an event. The pointer, focus or lock state can change
-in between. Hyprland reports local and virtual input through the same idle
-protocol, so local activity coincident with an injected event can also be
-coalesced into that event's notification. The pause reduces this race without
-eliminating it. Compositor shortcuts can still act beyond the shared output.
+compositor delivering an event. The pointer, focus, lock state or bind
+configuration can change in between. Hyprland reports local and virtual input
+through the same idle protocol, so coincident local activity can be
+coalesced into a virtual event's notification. The pause and periodic checks
+reduce exposure, and release events still follow compositor routing.
+Compositor actions outside the reported keyboard binds, including pointer
+binds, may affect other outputs.
 
 The API gets the active roster from LiveKit's internal RoomService,
 cached for one second per room, and maps device identities to current
