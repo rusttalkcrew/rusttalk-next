@@ -33,12 +33,17 @@ const DEV_SECRET: &str = "dev-only-livekit-secret-do-not-deploy";
 const DATA_PREFIX: &str = "file-";
 const ROSTER_TTL: Duration = Duration::from_secs(1);
 
+/// LiveKit identities active in a room.
+type Active = BTreeSet<String>;
+
 pub struct LiveKit {
     api_key: String,
     api_secret: Zeroizing<String>,
     webhook: WebhookReceiver,
     http: reqwest::Client,
-    rosters: Mutex<HashMap<String, (Instant, BTreeSet<String>)>>,
+    /// Active identities per room and when they were asked for; `None` marks a room
+    /// LiveKit reported a change in at that time, so older answers are not used again.
+    rosters: Mutex<HashMap<String, (Instant, Option<Active>)>>,
 }
 
 impl LiveKit {
@@ -136,11 +141,12 @@ impl LiveKit {
     }
 
     async fn active(&self, room: &str) -> ApiResult<BTreeSet<String>> {
-        if let Some((at, active)) = self.rosters.lock().expect("roster cache").get(room)
+        if let Some((at, Some(active))) = self.rosters.lock().expect("roster cache").get(room)
             && at.elapsed() < ROSTER_TTL
         {
             return Ok(active.clone());
         }
+        let asked = Instant::now();
         let active: BTreeSet<_> = self
             .list(room)
             .await?
@@ -148,11 +154,26 @@ impl LiveKit {
             .filter(|participant| participant.state == "ACTIVE")
             .map(|participant| participant.identity)
             .collect();
+        self.remember(room, asked, active.clone());
+        Ok(active)
+    }
+
+    /// Cache a roster LiveKit gave for a request sent at `asked`.
+    fn remember(&self, room: &str, asked: Instant, active: BTreeSet<String>) {
         let mut rosters = self.rosters.lock().expect("roster cache");
         // Expired rooms are dropped so closed rooms' participants are not kept in memory.
         rosters.retain(|_, (at, _)| at.elapsed() < ROSTER_TTL);
-        rosters.insert(room.into(), (Instant::now(), active.clone()));
-        Ok(active)
+        // An answer from before a reported change may still list who just left.
+        if rosters.get(room).is_none_or(|(at, _)| *at < asked) {
+            rosters.insert(room.into(), (asked, Some(active)));
+        }
+    }
+
+    /// Someone joined or left `room`: the refetch its notice triggers must not get the
+    /// cached roster from before, or a person who switched channels stays listed in both.
+    fn changed(&self, room: &str) {
+        let mut rosters = self.rosters.lock().expect("roster cache");
+        rosters.insert(room.into(), (Instant::now(), None));
     }
 
     async fn moderate(&self, room: &str, method: &str, body: serde_json::Value) {
@@ -616,7 +637,8 @@ pub async fn webhook(
         .get(AUTHORIZATION)
         .and_then(|header| header.to_str().ok())
         .ok_or_else(invalid)?;
-    let event = configured(&app)?
+    let livekit = configured(&app)?;
+    let event = livekit
         .webhook
         .receive(&body, token)
         .map_err(|_| invalid())?;
@@ -631,6 +653,7 @@ pub async fn webhook(
             enforce(&app, Some(channel.to_owned()));
         }
         if !data {
+            livekit.changed(&room.name);
             app.notify(Event::VoiceChanged { channel: room.name });
         }
     }
@@ -711,5 +734,37 @@ mod tests {
         assert_eq!(room_channel(&channel), Some((channel.as_str(), false)));
         assert_eq!(room_channel(&data_room), Some((channel.as_str(), true)));
         assert_eq!(room_channel(DATA_PREFIX), None);
+    }
+
+    #[test]
+    fn a_reported_join_or_leave_drops_older_rosters() {
+        let secret = "test-secret-with-at-least-32-characters";
+        let livekit = LiveKit {
+            api_key: "test-key".into(),
+            api_secret: Zeroizing::new(secret.into()),
+            webhook: WebhookReceiver::new(TokenVerifier::with_api_key("test-key", secret)),
+            http: reqwest::Client::new(),
+            rosters: Mutex::default(),
+        };
+        let cached = |livekit: &LiveKit| {
+            let rosters = livekit.rosters.lock().unwrap();
+            rosters.get("room").and_then(|(_, active)| active.clone())
+        };
+        let phil = BTreeSet::from(["phil".to_owned()]);
+        let before = Instant::now();
+        livekit.remember("room", before, phil.clone());
+        assert_eq!(cached(&livekit), Some(phil.clone()));
+        // Phil switched away: the notice's refetch must not see him from the cache,
+        // even when a request sent before the leave answers late.
+        livekit.changed("room");
+        assert_eq!(cached(&livekit), None);
+        livekit.remember("room", before, phil);
+        assert_eq!(cached(&livekit), None);
+        livekit.remember(
+            "room",
+            Instant::now() + Duration::from_millis(1),
+            BTreeSet::new(),
+        );
+        assert_eq!(cached(&livekit), Some(BTreeSet::new()));
     }
 }

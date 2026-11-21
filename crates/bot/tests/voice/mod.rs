@@ -387,6 +387,14 @@ pub async fn exercise(
         "W08 kick removed the speaking device from the room, rotation kept the listener hearing, and no room still listed the kicked speaker"
     );
 
+    let second = a.create_channel(&category, "voice", b"Second", b"").await?;
+    for (from, to) in [(&voice.id, &second.id), (&second.id, &voice.id)] {
+        room_a = switch(a, room_a, from, to).await?;
+    }
+    println!(
+        "#147 switching voice channels never listed the device in the channel it left once that was reported"
+    );
+
     senders.abort_all();
     while let Some(result) = senders.join_next().await {
         if let Ok(result) = result {
@@ -397,6 +405,51 @@ pub async fn exercise(
     let _ = room_b.leave().await;
     tokio::try_join!(room_a.leave(), listener.leave())?;
     roster(a, &voice.id, 0).await
+}
+
+/// Switch `a` from one voice channel to another the way the app does (leave in the
+/// background, join at once). The refetch on the leave notice must not list it in the
+/// channel it left, even though that roster was cached with it just before.
+async fn switch(
+    a: &mut KeyClient<'_>,
+    room: VoiceRoom,
+    from: &[u8; 32],
+    to: &[u8; 32],
+) -> Result<VoiceRoom> {
+    let me = *a.identity.certificate.person_id();
+    ensure!(a.voice_participants(from).await?.people.contains(&me));
+    // An older notice would let the check below run before the leave was reported.
+    while let Ok(event) = timeout(Duration::from_millis(200), a.next_event()).await {
+        event?.context("event stream closed")?;
+    }
+    let leaving = tokio::spawn(room.leave());
+    let room = a.join_voice(to).await?;
+    leaving.await??;
+    let left = encode(from);
+    timeout(LIMIT, async {
+        loop {
+            let event = a.next_event().await?.context("event stream closed")?;
+            if matches!(event, Event::VoiceChanged { channel } if channel == left) {
+                return Ok::<_, anyhow::Error>(());
+            }
+        }
+    })
+    .await
+    .context("waiting for the leave notice")??;
+    let roster = a.voice_participants(from).await?;
+    ensure!(
+        !roster.people.contains(&me),
+        "still listed in the channel it left"
+    );
+    timeout(LIMIT, async {
+        while !a.voice_participants(to).await?.people.contains(&me) {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .context("not listed in the new channel")??;
+    Ok(room)
 }
 
 async fn set_flags(a: &KeyClient<'_>, channel: &str, role: &str, flags: u8) -> Result<()> {

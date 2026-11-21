@@ -385,6 +385,7 @@ pub(super) fn leave_voice(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &
 pub(super) fn close(ctx: &Ctx, state: &mut State) -> Option<Id> {
     let mut live = state.voice.take()?;
     control::leave(&mut live);
+    left_room(state, &live.channel, ctx.identity.certificate.person_id());
     // The call's live files go with it.
     state.transfers.retain(|_, transfer| transfer.chat);
     for sid in &live.watched {
@@ -399,6 +400,16 @@ pub(super) fn close(ctx: &Ctx, state: &mut State) -> Option<Id> {
     // Closing waits for the media server; nothing here needs to wait for it.
     tokio::spawn(leave_room(live.room));
     Some(live.channel)
+}
+
+/// Drop ourselves from the server's last roster of a call we just left. That roster
+/// was fetched while we were in the call, and the server's next one only comes after
+/// the media server reports the leave: until then the sidebar would list us in both the
+/// old and the new channel. Our other devices still in it come back with that refetch.
+fn left_room(state: &mut State, channel: &Id, me: &Id) {
+    if let Some(roster) = state.rooms.get_mut(channel) {
+        roster.people.retain(|person| person != me);
+    }
 }
 
 pub(super) async fn leave_room(room: VoiceRoom) {
@@ -1325,4 +1336,28 @@ pub(super) fn live_file_accepted(
         ctx.send(Update::LiveReceiver(transfer, person, !acceptance.cancel));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use rusttalk_core::client::voice::VoiceRoster;
+
+    use super::*;
+
+    #[test]
+    fn leaving_drops_us_from_the_old_channel_until_the_server_says_otherwise() {
+        let (me, jakob, old, other) = ([1; 32], [2; 32], [10; 32], [11; 32]);
+        let mut state = State::default();
+        let roster = VoiceRoster {
+            people: vec![jakob, me],
+            unknown: 1,
+        };
+        state.rooms.insert(old, roster.clone());
+        state.rooms.insert(other, roster);
+        left_room(&mut state, &old, &me);
+        assert_eq!(state.rooms[&old].people, [jakob]);
+        assert_eq!(state.rooms[&old].unknown, 1);
+        // Only the channel we left changes.
+        assert_eq!(state.rooms[&other].people, [jakob, me]);
+    }
 }
