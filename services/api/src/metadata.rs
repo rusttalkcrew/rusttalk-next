@@ -248,9 +248,12 @@ pub struct Member {
     voice_muted: bool,
 }
 
+/// Person, display name, avatar hash, `hide_offline` and `voice_muted`.
+type MemberRow = (Vec<u8>, Ciphertext, Option<String>, bool, bool);
+
 pub async fn members(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Vec<Member>>> {
     let (mut tx, _) = authenticate_read(&app, &headers).await?;
-    let rows: Vec<(Vec<u8>, Ciphertext, Option<String>, bool, bool)> = query_as(
+    let rows: Vec<MemberRow> = query_as(
         "SELECT person_id, display_name_ct, avatar_hash, hide_offline, voice_muted FROM members
          ORDER BY person_id",
     )
