@@ -29,6 +29,9 @@ pub struct MessageBody {
     /// A DM key link instead of chat text, sent with nothing else: the next epoch
     /// and its commitment, announced in the epoch before it (see `KeyLink`).
     pub key_link: Option<KeyLink>,
+    /// A poke instead of chat text: the text is its short note (at most
+    /// `MAX_POKE_CHARS`), sent with nothing else.
+    pub poke: bool,
 }
 
 /// Sent by the person who starts a DM's next epoch, in the epoch before it, so the
@@ -68,6 +71,7 @@ const LIVE: u8 = 4;
 const STICKER: u8 = 8;
 const FRIEND: u8 = 16;
 const LINK: u8 = 32;
+const POKE: u8 = 64;
 
 impl MessageBody {
     /// Format version 2: flags, text, references, stored attachments, then the live offer.
@@ -85,7 +89,11 @@ impl MessageBody {
             | if self.live.is_some() { LIVE } else { 0 }
             | if self.sticker.is_some() { STICKER } else { 0 }
             | if self.friend.is_some() { FRIEND } else { 0 }
-            | if self.key_link.is_some() { LINK } else { 0 };
+            | if self.key_link.is_some() { LINK } else { 0 }
+            | if self.poke { POKE } else { 0 };
+        if self.poke && (flags != POKE || self.text.chars().count() > MAX_POKE_CHARS) {
+            return Err(MessageError::Encoding);
+        }
         for alone in [FRIEND, LINK] {
             if flags & alone != 0
                 && (flags != alone || !self.text.is_empty() || !self.attachments.is_empty())
@@ -125,7 +133,7 @@ impl MessageBody {
             return Err(MessageError::Encoding);
         }
         let ([flags, high, low], rest) = bytes.split_first_chunk().ok_or(MessageError::Encoding)?;
-        if flags & !(REPLY | EDIT | LIVE | STICKER | FRIEND | LINK) != 0 {
+        if flags & !(REPLY | EDIT | LIVE | STICKER | FRIEND | LINK | POKE) != 0 {
             return Err(MessageError::Encoding);
         }
         let length = u16::from_be_bytes([*high, *low]) as usize;
@@ -183,11 +191,16 @@ impl MessageBody {
         } else {
             None
         };
+        // A poke is its flag, a short note and zero files.
+        let poke = flags & POKE != 0;
+        if poke && *flags != POKE {
+            return Err(MessageError::Encoding);
+        }
         let (&count, mut tail) = tail.split_first().ok_or(MessageError::Encoding)?;
         // A sticker never has files or a live offer, so it stays within the plaintext limit.
         if count as usize > MAX_ATTACHMENTS
             || (sticker.is_some() && (count != 0 || flags & LIVE != 0))
-            || ((friend.is_some() || key_link.is_some()) && count != 0)
+            || ((friend.is_some() || key_link.is_some() || poke) && count != 0)
         {
             return Err(MessageError::Attachment);
         }
@@ -203,7 +216,8 @@ impl MessageBody {
             return Err(MessageError::Encoding);
         }
         let text = std::str::from_utf8(text).map_err(|_| MessageError::Encoding)?;
-        if text.chars().count() > MAX_TEXT_CHARS {
+        if text.chars().count() > MAX_TEXT_CHARS || (poke && text.chars().count() > MAX_POKE_CHARS)
+        {
             return Err(MessageError::TextLimit);
         }
         Ok(Self {
@@ -216,6 +230,7 @@ impl MessageBody {
             friend,
             friend_sent,
             key_link,
+            poke,
         })
     }
 }
@@ -316,6 +331,7 @@ mod tests {
             friend: None,
             friend_sent: 0,
             key_link: None,
+            poke: false,
         };
         let envelope = context.seal(&key, &sender, &body).unwrap();
         assert_eq!(
@@ -470,6 +486,7 @@ mod tests {
             friend: None,
             friend_sent: 0,
             key_link: None,
+            poke: false,
         };
         let encoded = body.encode().unwrap();
         assert_eq!(encoded.len(), MAX_PLAINTEXT - live::MAX_ATTACHMENT);
@@ -565,6 +582,43 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(with_text.encode().err(), Some(MessageError::Encoding));
+    }
+
+    #[test]
+    fn pokes_round_trip_alone_with_a_short_note() {
+        let body = MessageBody {
+            text: "é".repeat(MAX_POKE_CHARS),
+            poke: true,
+            ..Default::default()
+        };
+        let encoded = body.encode().unwrap();
+        assert!(MessageBody::decode(&encoded).unwrap() == body);
+        let empty = MessageBody {
+            poke: true,
+            ..Default::default()
+        };
+        assert_eq!(*empty.encode().unwrap(), [POKE, 0, 0, 0]);
+        let long = MessageBody {
+            text: "x".repeat(MAX_POKE_CHARS + 1),
+            ..empty.clone()
+        };
+        assert_eq!(long.encode().err(), Some(MessageError::Encoding));
+        let with_reply = MessageBody {
+            reply_to: Some([1; 32]),
+            ..empty.clone()
+        };
+        assert_eq!(with_reply.encode().err(), Some(MessageError::Encoding));
+        let long_text = [&[POKE, 0, 101][..], &[b'x'; 101], &[0]].concat();
+        for bad in [
+            long_text,
+            vec![POKE, 0, 0, 1],
+            vec![POKE, 0, 0],
+            vec![POKE, 0, 0, 0, 0],
+            [&[POKE | REPLY, 0, 0][..], &[1; 32], &[0]].concat(),
+            [&[POKE | FRIEND, 0, 0, 1][..], &[0; 8], &[0]].concat(),
+        ] {
+            assert!(MessageBody::decode(&bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]
@@ -665,6 +719,7 @@ mod tests {
             friend: None,
             friend_sent: 0,
             key_link: None,
+            poke: false,
         };
         let encoded = body.encode().unwrap();
         assert_eq!(encoded.len(), MAX_PLAINTEXT);

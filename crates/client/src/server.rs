@@ -362,6 +362,8 @@ pub enum Body {
     /// A friend request or answer; shown as a card or a short line, not as text.
     /// A friend message, with the sender's signed send time in milliseconds.
     Friend(rusttalk_core::client::FriendSignal, u64),
+    /// A poke and its note; listed under Pokes, not shown in the chat.
+    Poke(String),
     /// Could not be verified or decrypted (yet).
     Unreadable,
     /// A member or device change, with fingerprints for the details view.

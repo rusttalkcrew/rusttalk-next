@@ -11,8 +11,8 @@ use eframe::egui::{
 use super::{
     Accent, CARD_SECONDS, CARD_SLIDE, CONTROL_HEIGHT, DIALOG_PADDING, DIALOG_WIDTH, HOVER_GROW,
     HOVER_SECONDS, LARGE_CONTROL, ON_FILL, POPUP_WIDTH, PRESS_SHRINK, Palette, RADIUS, RADIUS_ROW,
-    RADIUS_S, RADIUS_WINDOW, SPACE_L, SPACE_S, STATE_SECONDS, TEXT_BODY, TEXT_CAPTION, TEXT_ICON,
-    TEXT_SMALL, accent, bold, bold_family, colors, heading,
+    RADIUS_S, RADIUS_WINDOW, SPACE_L, SPACE_M, SPACE_S, STATE_SECONDS, TEXT_BODY, TEXT_CAPTION,
+    TEXT_ICON, TEXT_SMALL, accent, bold, bold_family, colors, heading,
 };
 
 /// How an icon button looks when it is not just hovered.
@@ -665,6 +665,24 @@ pub fn dialog_frame(ctx: &Context) -> Frame {
         .corner_radius(RADIUS_WINDOW)
         .inner_margin(Margin::same(DIALOG_PADDING))
         .shadow(style.visuals.window_shadow)
+}
+
+/// A card floating at the top right of the window, above everything but dialogs,
+/// for a short-lived alert like a poke.
+pub fn toast<R>(ctx: &Context, id: &str, add: impl FnOnce(&mut Ui) -> R) -> R {
+    Area::new(Id::unique(("toast", id)))
+        .order(Order::Foreground)
+        .anchor(Align2::RIGHT_TOP, Vec2::new(-SPACE_L, SPACE_L))
+        .show(ctx, |ui| {
+            dialog_frame(ctx)
+                .inner_margin(Margin::same(SPACE_M as i8))
+                .show(ui, |ui| {
+                    ui.set_width(POPUP_WIDTH);
+                    add(ui)
+                })
+                .inner
+        })
+        .inner
 }
 
 /// The buttons at the bottom of a dialog, right-aligned: add the main one first.

@@ -71,6 +71,9 @@ the two people have one, and each message's size and time. A friend message
 is as large as a one-character text message.
 Blocking and "Friends only" work in the app: servers keep delivering those
 messages, and the app hides them or keeps them quiet.
+Pokes are encrypted DM messages as well, so servers don't learn that a
+message is a poke or what its note says; they see a DM message's size and
+time. The poke history stays on the device (`pokes.json`) and is not synced.
 The app stores on the device which person each DM channel is with, and the
 newest epoch it trusts there with its commitment (`dm_pins/`), and its own
 deleted DM messages (`dm_deleted.json`). Servers see each key link as one more
@@ -192,9 +195,10 @@ Service. Development profiles use separate entries. The client logs the
 person fingerprint locally. Creating an account shows the recovery words once
 in the app window. The client never stores or logs the words or the root
 signing key. "Sign out of this device" deletes the keystore entry and the
-profile's `sync.json`, `servers.json`, `saved.json`, `notify.json` and
-`emoji-recent.json`, so the next person on that profile starts without the
-servers, pins, saved file places, read marks, notification choices or recent emoji.
+profile's `sync.json`, `servers.json`, `saved.json`, `notify.json`,
+`pokes.json` and `emoji-recent.json`, so the next person on that profile starts
+without the servers, pins, saved file places, read marks, notification choices,
+pokes or recent emoji.
 Device settings (`voice.json`, `updates.json`) stay.
 
 Next to the settings, `servers.json` holds each server's address, server ID

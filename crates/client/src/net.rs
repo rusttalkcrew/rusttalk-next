@@ -161,6 +161,8 @@ pub struct Draft {
     pub sticker: Option<Id>,
     /// A friend request or answer, sent with nothing else.
     pub friend: Option<(FriendSignal, u64)>,
+    /// A poke: `text` is its note, sent with nothing else.
+    pub poke: bool,
 }
 
 pub struct LiveOffer {
@@ -953,7 +955,7 @@ async fn latest(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, state: &State)
                 if let Some(peer) = peer
                     && (record.person != peer
                         || !(client.open_message(&channel, record).await)
-                            .is_ok_and(|body| body.key_link.is_none()))
+                            .is_ok_and(|body| body.key_link.is_none() && !body.poke))
                 {
                     continue;
                 }
@@ -1134,6 +1136,7 @@ async fn on_command(
                 friend: draft.friend.map(|(signal, _)| signal),
                 friend_sent: draft.friend.map_or(0, |(_, sent)| sent),
                 key_link: None,
+                poke: draft.poke,
             };
             let files = draft.files.clone();
             let target = (channel, draft.id);
@@ -1501,6 +1504,7 @@ fn to_msg(record: &MessageRecord, body: &MessageBody) -> Msg {
         edit_of: body.edit_of,
         body: match body.friend {
             Some(signal) => Body::Friend(signal, body.friend_sent),
+            None if body.poke => Body::Poke(body.text.clone()),
             None => Body::Text(body.text.clone()),
         },
         files: body.attachments.clone(),

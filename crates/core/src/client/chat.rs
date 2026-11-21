@@ -14,7 +14,7 @@ use crate::{
 };
 
 use super::{KeyClient, keys::DmPin};
-pub use crate::messages::{MAX_TEXT_CHARS, MessageBody, MessageRecord};
+pub use crate::messages::{MAX_POKE_CHARS, MAX_TEXT_CHARS, MessageBody, MessageRecord};
 
 // shortcut: replay protection forgets the oldest IDs past this cap, same as server retention; persist with W14 sync.
 const OPENED_PER_CHANNEL: usize = 10_000;

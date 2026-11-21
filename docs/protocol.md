@@ -462,6 +462,30 @@ Blocked people's DMs are hidden and never notify. The servers still deliver
 these messages; refusing them there would mean telling the server who is a
 friend.
 
+### Pokes
+
+A poke is a short note that pops up for someone. It is a DM message with the
+poke flag (see [Crypto](crypto.md#messages)), sent like any DM message: one
+random ID, posted to every shared server that is online. So a poke reaches only
+people the sender shares a server with, and only through a DM copy that just the
+two people can read. The API has no poke routes.
+
+Apps keep pokes out of the DM's chat and list them on a Pokes page instead,
+received and sent, with the server they came over. A live poke from the other
+person shows an in-app pop-up and a desktop notification, following the DM's
+notification settings with that person: none when that DM is muted or set to
+nothing, and a poke counts as a mention for "Mentions only". Pokes don't mark
+the DM unread. The app reads each DM's newest page when it connects, so pokes
+sent while it was away show on the Pokes page, unread when under a day old,
+without a notification. Copies on other servers and reloads count once, by
+message ID.
+
+The receiving app drops pokes from blocked people and, with "Allow DMs from:
+Friends only", from people who aren't friends. It also takes at most three
+pokes from one person per minute of server time and drops the rest. The history
+(the newest 200) stays on the device in `pokes.json`; it is not synced.
+Apps before pokes show one as a message they can't open.
+
 ## Messages
 
 These routes require a bearer header and apply to text channels, voice channels and DMs.

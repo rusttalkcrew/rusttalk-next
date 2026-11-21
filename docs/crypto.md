@@ -214,7 +214,7 @@ Format version 2 (the envelope's first byte) has this plaintext, in order.
 
 | Field | Encoding | Maximum bytes |
 | --- | --- | --- |
-| Flags | Bit 0 reply-to, bit 1 edit-of, bit 2 live offer, bit 3 sticker, bit 4 friend message, bit 5 key link. Other bits clear | 1 |
+| Flags | Bit 0 reply-to, bit 1 edit-of, bit 2 live offer, bit 3 sticker, bit 4 friend message, bit 5 key link, bit 6 poke. Other bits clear | 1 |
 | Text | Two-byte big-endian UTF-8 length, then text of at most 2,000 Unicode scalar values | 2 + 8,000 |
 | Reply ID | 32 bytes, present with bit 0 | 32 |
 | Original ID | 32 bytes, present with bit 1 | 32 |
@@ -231,8 +231,10 @@ in the text as `<:name:id>` tokens (see [Protocol](protocol.md#server-emoji-and-
 A friend message sets bit 4 alone, has empty text and no stored files, so its
 plaintext is exactly 13 bytes; readers reject anything else with bit 4 or an
 unknown kind (see [Protocol](protocol.md#friends)). A key link sets bit 5
-alone, with empty text and no stored files (44 bytes). Apps before this format
-show either as a message they can't open.
+alone, with empty text and no stored files (44 bytes). A poke sets bit 6
+alone; its text is the poke's note, at most 100 Unicode scalar values and
+possibly empty, with no stored files (see [Protocol](protocol.md#pokes)).
+Apps before this format show any of these as a message they can't open.
 Nothing may follow the last field. The largest plaintext is 10,644 bytes
 and the largest envelope is 10,751 bytes. Every length is checked against
 its field maximum before reading. Readers reject version 1 envelopes.
