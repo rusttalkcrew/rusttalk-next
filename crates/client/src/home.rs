@@ -28,6 +28,7 @@ use crate::{
     app::{Action, submitted},
     audio::Audio,
     call::{self, LiveAction, LiveFile, LiveState, Voice},
+    crop::{Crop, Outcome, Target},
     device_sync::{self, Edit},
     files::{self, Ask, Files},
     net::{Admin, AdminUpdate, Admission, Command, Draft, Listed, Net, PAGE_SIZE, Preview, Update},
@@ -69,6 +70,8 @@ pub struct Home {
     pub confirm_sign_out: bool,
     pub error: Option<String>,
     pub server_settings: Option<admin::Settings>,
+    /// The crop step for a picked profile picture or server icon.
+    crop: Option<crate::crop::Crop>,
     /// The synced voice and video settings as last published or received.
     synced: BTreeMap<String, serde_json::Value>,
     /// Servers left in this session, so a sync that started before can't bring them back.
@@ -228,6 +231,7 @@ impl Home {
             confirm_sign_out: false,
             error: None,
             server_settings: None,
+            crop: None,
             synced,
             left: HashSet::new(),
             status: None,
@@ -735,12 +739,8 @@ pub fn show(ui: &mut Ui, home: &mut Home, updates: &mut crate::update::Updater) 
     for (ask, paths) in home.files.answers() {
         if let Ask::Picture = ask {
             if let Some(path) = paths.into_iter().next() {
-                match read_picture(&path) {
-                    Ok(bytes) => {
-                        for server in &home.servers {
-                            server.send(Command::SetAvatar(bytes.clone()));
-                        }
-                    }
+                match Crop::open(Target::Avatar, &path) {
+                    Ok(crop) => home.crop = Some(crop),
                     Err(problem) => home.error = Some(problem.into()),
                 }
             }
@@ -771,19 +771,17 @@ pub fn show(ui: &mut Ui, home: &mut Home, updates: &mut crate::update::Updater) 
                     home.files.save(&server.commands, &file, path);
                 }
             }
-            Ask::Icon(_) => {
+            Ask::Icon(address) => {
                 let Some(path) = paths.into_iter().next() else {
                     continue;
                 };
-                let problem = match read_picture(&path) {
-                    Ok(bytes) => {
-                        server.send(Command::Admin(Admin::SetIcon(bytes)));
-                        continue;
+                match Crop::open(Target::Icon(address), &path) {
+                    Ok(crop) => home.crop = Some(crop),
+                    Err(problem) => {
+                        if let Some(settings) = &mut home.server_settings {
+                            settings.apply(AdminUpdate::Failed(problem.into()));
+                        }
                     }
-                    Err(problem) => problem,
-                };
-                if let Some(settings) = &mut home.server_settings {
-                    settings.apply(AdminUpdate::Failed(problem.into()));
                 }
             }
             Ask::Offer(_) | Ask::Live(..) => {
@@ -920,7 +918,9 @@ pub fn show(ui: &mut Ui, home: &mut Home, updates: &mut crate::update::Updater) 
     files::viewer(ui.ctx(), &mut home.files);
     call::screen_dialog(ui.ctx(), home);
     call::frame(ui.ctx(), home);
-    crate::settings::show(ui.ctx(), home, updates)
+    let action = crate::settings::show(ui.ctx(), home, updates);
+    crop_dialog(ui.ctx(), home);
+    action
 }
 
 fn empty(ui: &mut Ui, title: &str, hint: &str) {
@@ -1020,19 +1020,35 @@ fn sidebar(ui: &mut Ui, home: &mut Home, update_available: bool) {
     }
 }
 
-/// Read a picture to use as a profile picture or server icon; the error is for people.
-fn read_picture(path: &std::path::Path) -> Result<Vec<u8>, &'static str> {
-    let bad = "Pick a PNG, JPG or GIF of at most 250 KB and 512 × 512 pixels.";
-    let bytes = std::fs::read(path).map_err(|error| {
-        tracing::warn!(%error, "reading a picture failed");
-        "Couldn't open that file."
-    })?;
-    // Checked here too, so the reason can be shown.
-    rusttalk_core::client::decode_profile_image(&bytes).map_err(|error| {
-        tracing::info!(error = %format_args!("{error:#}"), "picture refused");
-        bad
-    })?;
-    Ok(bytes)
+/// The crop step, over the settings that opened it; Save uploads, Cancel keeps the
+/// current picture.
+fn crop_dialog(ctx: &egui::Context, home: &mut Home) {
+    let Some(crop) = &mut home.crop else {
+        return;
+    };
+    let bytes = match crop.show(ctx) {
+        Outcome::Open => return,
+        Outcome::Cancel => None,
+        Outcome::Save(bytes) => Some(bytes),
+    };
+    let Some(crop) = home.crop.take() else {
+        return;
+    };
+    let Some(bytes) = bytes else {
+        return;
+    };
+    match crop.target {
+        Target::Avatar => {
+            for server in &home.servers {
+                server.send(Command::SetAvatar(bytes.clone()));
+            }
+        }
+        Target::Icon(address) => {
+            if let Some(index) = home.index(&address) {
+                home.servers[index].send(Command::Admin(Admin::SetIcon(bytes)));
+            }
+        }
+    }
 }
 
 /// The texture for a picture's current frame, so animated GIFs play.
