@@ -14,8 +14,8 @@ enum Unit {
 impl Unit {
     fn scale(self) -> i128 {
         match self {
-            Self::Mb => 1_000_000,
-            Self::Gb => 1_000_000_000,
+            Self::Mb => files::MIB.into(),
+            Self::Gb => files::GIB.into(),
             Self::Days => 86_400,
             Self::Stickers => 1,
         }
@@ -41,7 +41,12 @@ impl Unit {
     fn number(self, value: i64, exact_size: bool) -> String {
         let value = i128::from(value);
         let scale = self.scale();
-        let mut decimals = if exact_size { scale } else { 100 };
+        let mut decimals = if exact_size {
+            // Keep enough decimal places to recover the original byte count after switching units.
+            10_i128.pow(scale.ilog10() + 1)
+        } else {
+            100
+        };
         while value > 0 && value * decimals < scale {
             decimals *= 10;
         }
@@ -309,8 +314,8 @@ mod tests {
         let mut field = Field::new(16_777_216, Unit::Mb);
         assert_eq!(field.proposed(16_777_216, 33_554_432), Ok(16_777_216));
         field.text = "16,75".into();
-        assert_eq!(field.proposed(16_777_216, 33_554_432), Ok(16_750_000));
-        field.text = "33.554433".into();
+        assert_eq!(field.proposed(16_777_216, 33_554_432), Ok(17_563_648));
+        field.text = "32.000001".into();
         assert_eq!(
             field.proposed(16_777_216, 33_554_432),
             Err(Invalid::Ceiling)
@@ -324,5 +329,21 @@ mod tests {
         };
         assert_eq!(field.proposed(86_400, 172_800), Ok(129_600));
         assert_eq!(field.proposed(86_400, 129_599), Err(Invalid::Ceiling));
+    }
+
+    #[test]
+    fn binary_limits_and_attachment_sizes_share_units() {
+        assert_eq!(Unit::Mb.number(33_554_432, false), "32");
+        assert_eq!(Unit::Mb.number(524_288_000, false), "500");
+        assert_eq!(Unit::Gb.number(5_368_709_120, false), "5");
+        assert_eq!(files::size(1024), "1 KB");
+        assert_eq!(files::size(1_000_000), "977 KB");
+
+        let bytes = 16_777_219;
+        let field = Field {
+            text: Unit::Gb.number(bytes, true),
+            unit: Unit::Gb,
+        };
+        assert_eq!(field.proposed(16_777_216, bytes), Ok(bytes));
     }
 }

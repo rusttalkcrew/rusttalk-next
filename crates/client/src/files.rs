@@ -361,12 +361,15 @@ pub fn stage(chat: &mut Chat, paths: Vec<PathBuf>) -> Option<String> {
     problem
 }
 
+const KIB: u64 = 1024;
+pub(crate) const MIB: u64 = KIB * 1024;
+pub(crate) const GIB: u64 = MIB * 1024;
+
 pub fn size(bytes: u64) -> String {
-    let bytes = bytes as f64;
     match bytes {
-        b if b >= 1e9 => format!("{} GB", crate::i18n::number(b / 1e9, 1)),
-        b if b >= 1e6 => format!("{} MB", crate::i18n::number(b / 1e6, 1)),
-        b if b >= 1e3 => format!("{:.0} KB", b / 1e3),
+        b if b >= GIB => format!("{} GB", crate::i18n::number(b as f64 / GIB as f64, 1)),
+        b if b >= MIB => format!("{} MB", crate::i18n::number(b as f64 / MIB as f64, 1)),
+        b if b >= KIB => format!("{:.0} KB", b as f64 / KIB as f64),
         b => t!("files.bytes", count = b),
     }
 }
