@@ -921,7 +921,12 @@ fn open_screen_dialog(ctx: &egui::Context, voice: &mut Voice) {
 
 /// The t!("call.share_screen") dialog: what to share (Windows), quality, frame rate, cursor.
 pub fn screen_dialog(ctx: &egui::Context, home: &mut Home) {
+    // A moderator's mute also takes a stream's sound.
+    let muted = call_server(home).is_some_and(|server| server.voice_muted(&server.dir.me));
     let voice = &mut home.voice;
+    if muted {
+        voice.stream_audio.clear();
+    }
     let Some((options, picked)) = &mut voice.share_screen else {
         return;
     };
@@ -991,12 +996,14 @@ pub fn screen_dialog(ctx: &egui::Context, home: &mut Home) {
             ui.add_space(ui::SPACE_XS);
             let label = format!("🔊  {}", panel::sound_summary(&voice.stream_audio));
             let button = ui
-                .add_enabled_ui(voice.supported, |ui| ui::secondary(ui, &label))
+                .add_enabled_ui(voice.supported && !muted, |ui| ui::secondary(ui, &label))
                 .inner;
-            let button = if voice.supported {
-                button
-            } else {
+            let button = if !voice.supported {
                 button.on_disabled_hover_text(t!("call.needs_windows_11"))
+            } else if muted {
+                button.on_disabled_hover_text(t!("call.server_muted"))
+            } else {
+                button
             };
             if button.clicked() {
                 fill(ctx, &voice.apps, "apps", share::list);
