@@ -9,20 +9,20 @@ use std::{
 };
 
 use eframe::egui::{
-    self, Align, ColorImage, ComboBox, Event, Frame, Grid, Image, Key, Layout, Margin, RichText,
-    Role, Sense, Slider, Stroke, TextureHandle, TextureOptions, Ui, Vec2,
+    self, ColorImage, ComboBox, Event, Frame, Key, Margin, RichText, Role, Sense, Slider, Stroke,
+    TextureHandle, TextureOptions, Ui, Vec2,
 };
 
 use crate::{
     audio::{self, Audio, Settings, StreamId},
     camera::{Camera, Change},
     files,
-    home::{Home, Tab, face, pane_title, toast_line},
+    home::{Home, Tab, face},
     net::Command,
     screen::{self, Kind, Options, Target, Video},
     server::{Call, CallState, Id, Screen, Server, Stats},
     share::{self, App},
-    ui::{self, Look, section},
+    ui::{self, section},
 };
 
 /// Meter range in dBFS.
@@ -31,8 +31,6 @@ const CEILING: f32 = -10.0;
 const METER_WIDTH: f32 = 360.0;
 /// Device pickers in Settings.
 pub const PICKER_WIDTH: f32 = 260.0;
-/// Width of a person's tile while it shows their camera.
-const VIDEO_WIDTH: f32 = 240.0;
 /// The live transfer limit.
 pub const MAX_LIVE_FILE: u64 = rusttalk_core::messages::MAX_LIVE_FILE_SIZE;
 const DIRECT: &str = "Sent directly through the call. Nothing is stored.";
@@ -41,7 +39,9 @@ pub const DIRECT_CHAT: &str = "Sent directly to people online now. Nothing is st
 const OFFER_SECONDS: i64 = 10 * 60;
 
 mod panel;
+mod stage;
 pub use panel::{Link, call_bar};
+pub use stage::{Stage, full_view, stage};
 
 pub struct Voice {
     pub audio: Audio,
@@ -71,6 +71,8 @@ pub struct Voice {
     shown: HashSet<String>,
     /// Files sent through the call, newest last.
     pub live_files: Vec<LiveFile>,
+    /// Focus, minimized people and presentation mode, for this call only.
+    pub stage: Stage,
 }
 
 /// A file sent live, shown in the call bar or, when `chat`, in a chat.
@@ -119,14 +121,10 @@ pub enum Sharing {
     On,
 }
 
-/// The screen shown large in the room view.
+/// The screen this device receives; one at a time.
 pub struct Watching {
     pub sid: String,
-    /// Whose screen, for the title.
-    title: String,
     texture: Option<TextureHandle>,
-    /// Covers the whole window.
-    pub full: bool,
 }
 
 enum Calibration {
@@ -157,6 +155,7 @@ impl Voice {
             cameras: HashMap::new(),
             shown: HashSet::new(),
             live_files: Vec::new(),
+            stage: Stage::default(),
         }
     }
 
@@ -167,6 +166,7 @@ impl Voice {
         self.link = Link::default();
         self.shares.clear();
         self.clear_screens();
+        self.stage = Stage::default();
     }
 
     /// Forget this call's video and files: our screen and camera, and what we watch.
@@ -302,15 +302,13 @@ fn call_server(home: &Home) -> Option<&Server> {
     home.servers.iter().find(|s| s.address == call.server)
 }
 
-fn watch(home: &mut Home, screen: &Screen, title: String) {
+fn watch(home: &mut Home, screen: &Screen) {
     stop_watching(home);
     if let Some(server) = call_server(home) {
         server.send(Command::Watch(screen.sid.clone(), true));
         home.voice.watching = Some(Watching {
             sid: screen.sid.clone(),
-            title,
             texture: None,
-            full: false,
         });
     }
 }
@@ -723,273 +721,6 @@ pub fn screen_dialog(ctx: &egui::Context, home: &mut Home) {
 /// A red "LIVE" tag for someone sharing their screen.
 fn live_badge(ui: &mut Ui) {
     ui::badge(ui, "LIVE", ui::colors(ui).danger);
-}
-
-/// The watched screen: title, full window toggle, Stop watching, and the picture.
-pub fn screen_view(ui: &mut Ui, home: &mut Home) {
-    let voice = &mut home.voice;
-    let Some(watching) = &mut voice.watching else {
-        return;
-    };
-    // Upload only the newest converted frame.
-    if let Some(image) = voice.video.take(&watching.sid) {
-        upload(ui.ctx(), &mut watching.texture, "screen", image);
-    }
-    let mut stop = false;
-    ui.horizontal(|ui| {
-        ui.label(ui::bold(&watching.title));
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            stop = ui::secondary(ui, "Stop watching").clicked();
-            let label = if watching.full {
-                "Exit full window"
-            } else {
-                "Full window"
-            };
-            if ui::secondary(ui, label).clicked() {
-                watching.full ^= true;
-            }
-        });
-    });
-    if watching.full && ui.input(|input| input.key_pressed(Key::Escape)) {
-        watching.full = false;
-    }
-    let height = if watching.full {
-        ui.available_height()
-    } else {
-        ui.available_height() * 0.6
-    };
-    let area = Vec2::new(ui.available_width(), height.max(120.0));
-    match &watching.texture {
-        Some(texture) => {
-            let size = texture.size_vec2();
-            let scale = (area.x / size.x).min(area.y / size.y);
-            ui.vertical_centered(|ui| ui.add(Image::new((texture.id(), size * scale))));
-        }
-        None => {
-            ui.allocate_ui(area, |ui| {
-                ui.centered_and_justified(|ui| {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.weak("Waiting for the picture…");
-                    });
-                });
-            });
-        }
-    }
-    if stop {
-        stop_watching(home);
-    }
-}
-
-/// The main pane for a voice channel: everyone in it, with speaking rings.
-pub fn room(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
-    let server = &home.servers[index];
-    let title = server
-        .chat_title(&channel)
-        .map(|(name, _)| name)
-        .unwrap_or_default();
-    let joined = home.voice.in_call(server, &channel);
-    pane_title(
-        ui,
-        "room-title",
-        &format!("🔊 {title}"),
-        Some(&mut home.layout),
-    );
-    // Problems from the call bar and the room show here; the chat has its own line.
-    toast_line(ui, &mut home.toast);
-    ui.add_space(ui::SPACE_S);
-    let peers = server.voice.get(&channel).cloned().unwrap_or_default();
-    if joined && home.voice.watching.is_some() {
-        screen_view(ui, home);
-        ui.add_space(8.0);
-    }
-    let server = &home.servers[index];
-    let mut watch_now = None;
-    if peers.is_empty() {
-        ui.vertical_centered(|ui| {
-            ui.add_space(ui.available_height() * 0.3);
-            ui.weak(if joined {
-                "Connecting…"
-            } else {
-                "No one is here yet."
-            });
-        });
-    }
-    let mut hide = None;
-    ui.horizontal_wrapped(|ui| {
-        for peer in &peers {
-            let name = peer.name(server);
-            let me = peer.person == server.dir.me;
-            let picture = match &peer.camera {
-                _ if !joined => None,
-                Some(_) if me => home.voice.camera.self_view(ui, VIDEO_WIDTH),
-                Some(sid) if !home.voice.hidden.contains(&peer.person) => {
-                    home.voice.shown.insert(sid.clone());
-                    camera_picture(ui, &mut home.voice, sid)
-                }
-                _ => None,
-            };
-            let tile = Frame::new()
-                .fill(ui::colors(ui).side)
-                .corner_radius(ui::RADIUS)
-                .inner_margin(Margin::same(ui::SPACE_M as i8))
-                .show(ui, |ui| {
-                    ui.set_width(if picture.is_some() {
-                        VIDEO_WIDTH
-                    } else {
-                        150.0
-                    });
-                    ui.vertical_centered(|ui| {
-                        let video = picture.is_some();
-                        let face = match picture {
-                            Some(picture) => ui.add(picture),
-                            None => face(ui, &server.dir, &peer.person, &name, 64.0, false),
-                        };
-                        if home.voice.speaking(server, &peer.person) {
-                            if video {
-                                ui.painter().rect_stroke(
-                                    face.rect,
-                                    4.0,
-                                    Stroke::new(2.0, ui::colors(ui).success),
-                                    egui::StrokeKind::Outside,
-                                );
-                            } else {
-                                ring(ui, face.rect);
-                            }
-                        }
-                        ui.label(ui::bold(&name));
-                        if !peer.screens.is_empty() {
-                            live_badge(ui);
-                        }
-                        if peer.connecting {
-                            ui.weak("Connecting…");
-                        } else if me && home.voice.audio.deafened() {
-                            ui.weak("Deafened");
-                        } else if me && home.voice.audio.muted() {
-                            ui.weak("Muted");
-                        } else if !me && home.voice.audio.volume(&(peer.person, None)).1 {
-                            ui.weak("Muted by you");
-                        } else {
-                            ui.label(" ");
-                        }
-                    });
-                });
-            let tile = tile.response.interact(Sense::click());
-            // Click a live person's tile to watch their screen.
-            if let Some(screen) = peer.screens.first().filter(|_| !me && joined) {
-                let title = format!("{name}'s screen");
-                let label = format!("Watch {title}");
-                tile.widget_info(|| egui::WidgetInfo::labeled(Role::Button, true, &label));
-                if tile.clone().on_hover_text("Watch").clicked() {
-                    watch_now = Some((screen.clone(), title));
-                }
-            }
-            if !me && !peer.unknown && joined {
-                ui::context_menu(&tile, |m| {
-                    stream_menu(m, &home.voice.audio, &(peer.person, None));
-                    if peer.camera.is_some() {
-                        let show = !home.voice.hidden.contains(&peer.person);
-                        let item = ui::Item::new("📷", "Show video").checked(show);
-                        if m.add(item).clicked() {
-                            hide = Some((peer.person, show));
-                        }
-                    }
-                });
-            }
-        }
-    });
-    match hide {
-        Some((person, true)) => {
-            home.voice.hidden.insert(person);
-        }
-        Some((person, false)) => {
-            home.voice.hidden.remove(&person);
-        }
-        None => {}
-    }
-    if peers.iter().any(|peer| !peer.apps.is_empty()) || joined && !home.voice.shares.is_empty() {
-        ui.add_space(12.0);
-        section(ui, "Shared audio");
-        let mut stop = None;
-        Grid::new("shared audio")
-            .num_columns(3)
-            .spacing(Vec2::new(12.0, 6.0))
-            .show(ui, |ui| {
-                for peer in &peers {
-                    if peer.person == server.dir.me {
-                        continue;
-                    }
-                    let name = peer.name(server);
-                    for (sid, app) in &peer.apps {
-                        ui.label(format!("{name} · {app}"));
-                        stream_row(
-                            ui,
-                            &home.voice.audio,
-                            (peer.person, Some(sid.clone())),
-                            &format!("{name} · {app}"),
-                        );
-                        ui.end_row();
-                    }
-                }
-                if joined {
-                    for app in &home.voice.shares {
-                        ui.label(format!("You · {}", app.name));
-                        if ui::secondary(ui, "Stop sharing").clicked() {
-                            stop = Some(app.id.clone());
-                        }
-                        ui.label("");
-                        ui.end_row();
-                    }
-                }
-            });
-        if let Some(id) = stop {
-            home.voice.shares.retain(|shared| shared.id != id);
-            home.servers[index].send(Command::StopApp(id));
-        }
-    }
-    if let Some((screen, title)) = watch_now {
-        watch(home, &screen, title);
-    }
-    if !joined {
-        ui.add_space(12.0);
-        if ui::primary_large(ui, "Join voice").clicked() {
-            join(home, index, channel);
-        }
-    }
-}
-
-/// A watched camera's newest picture, once one arrived.
-fn camera_picture(ui: &Ui, voice: &mut Voice, sid: &str) -> Option<Image<'static>> {
-    let slot = voice.cameras.get_mut(sid)?;
-    if let Some(image) = voice.video.take(sid) {
-        upload(ui.ctx(), slot, sid, image);
-    }
-    let size = slot.as_ref()?.size_vec2();
-    let texture = slot.as_ref()?.id();
-    Some(Image::new((
-        texture,
-        Vec2::new(VIDEO_WIDTH, VIDEO_WIDTH * size.y / size.x),
-    )))
-}
-
-/// Volume slider and mute button for one stream, in a grid row.
-fn stream_row(ui: &mut Ui, audio: &Audio, stream: StreamId, name: &str) {
-    let (mut volume, muted) = audio.volume(&stream);
-    let slider = volume_slider(ui, &mut volume);
-    slider.widget_info(|| egui::WidgetInfo::labeled(Role::Slider, true, format!("{name} volume")));
-    let icon = if muted { "🔇" } else { "🔊" };
-    let label = if muted { "Unmute" } else { "Mute" };
-    let look = if muted { Look::Struck } else { Look::Plain };
-    let mute = ui::icon_button(
-        ui,
-        icon,
-        &format!("{label} {name}"),
-        look,
-        Vec2::splat(30.0),
-    );
-    if slider.changed() || mute.clicked() {
-        audio.set_volume(stream, volume, muted ^ mute.clicked());
-    }
 }
 
 /// Settings → Voice & audio.

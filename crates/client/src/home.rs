@@ -831,10 +831,10 @@ pub fn show(ui: &mut Ui, home: &mut Home, updates: &mut crate::update::Updater) 
         home.toast = None;
     }
     let colors = ui::colors(ui);
-    if home.voice.watching.as_ref().is_some_and(|w| w.full) {
+    if home.voice.stage.full.is_some() {
         CentralPanel::default()
             .frame(panel_frame(colors.main))
-            .show(ui, |ui| call::screen_view(ui, home));
+            .show(ui, |ui| call::full_view(ui, home));
         call::frame(ui.ctx(), home);
         return None;
     }
@@ -931,7 +931,7 @@ pub fn show(ui: &mut Ui, home: &mut Home, updates: &mut crate::update::Updater) 
             layout::MEMBERS_RANGE,
         );
     }
-    if !dragging {
+    if !dragging && !home.layout.split_dragging {
         home.layout.save(&home.voice.audio);
     }
     dialogs(ui.ctx(), home);
@@ -1963,17 +1963,33 @@ fn time(at: i64) -> String {
 /// A voice channel: the call on top and its chat below. Issue #63 replaces this
 /// fixed split with a draggable one and layout choices; only this function changes.
 fn voice_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
-    let height = (ui.available_height() * 0.45).max(180.0);
-    Panel::top("stage")
-        .resizable(false)
-        .exact_size(height)
-        .frame(Frame::new().inner_margin(Margin {
-            bottom: ui::SPACE_S as i8,
-            ..Margin::ZERO
-        }))
-        .show_separator_line(true)
-        .show(ui, |ui| call::room(ui, home, index, channel));
-    chat_pane(ui, home, index, channel);
+    let title = home.servers[index]
+        .chat_title(&channel)
+        .map(|(name, _)| name)
+        .unwrap_or_default();
+    pane_title(
+        ui,
+        "room-title",
+        &format!("🔊 {title}"),
+        Some(&mut home.layout),
+        true,
+    );
+    // Problems from the call and the voice panel show here; the chat has its own line.
+    toast_line(ui, &mut home.toast);
+    ui.add_space(ui::SPACE_S);
+    let area = ui.available_rect_before_wrap();
+    let (stage, divider, chat) = layout::split(area, &home.layout.split);
+    if let Some(rect) = stage {
+        let mut ui = ui.new_child(UiBuilder::new().max_rect(rect));
+        call::stage(&mut ui, home, index, channel);
+    }
+    if let Some(rect) = chat {
+        let mut ui = ui.new_child(UiBuilder::new().max_rect(rect));
+        chat_pane(&mut ui, home, index, channel);
+    }
+    home.layout.split_dragging = divider
+        .is_some_and(|divider| layout::split_divider(ui, divider, area, &mut home.layout.split));
+    ui.allocate_rect(area, Sense::hover());
 }
 
 fn chat_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
@@ -2020,7 +2036,7 @@ fn chat_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
         chat
     });
     if !in_voice {
-        pane_title(ui, "chat-title", &title, in_server.then_some(layout));
+        pane_title(ui, "chat-title", &title, in_server.then_some(layout), false);
     }
     let online = *status == Status::Online;
     let (hovered, dropped) = ui.input(|input| {
@@ -2199,6 +2215,7 @@ pub fn pane_title(
     id: &'static str,
     title: &str,
     members: Option<&mut layout::Layout>,
+    split: bool,
 ) {
     Panel::top(id)
         .frame(Frame::new().inner_margin(Margin {
@@ -2214,6 +2231,10 @@ pub fn pane_title(
                 if let Some(layout) = members {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         layout::members_button(ui, layout);
+                        if split {
+                            ui.add_space(ui::SPACE_S);
+                            layout::split_buttons(ui, &mut layout.split);
+                        }
                     });
                 }
             });
