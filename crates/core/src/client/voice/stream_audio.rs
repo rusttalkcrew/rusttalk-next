@@ -167,6 +167,9 @@ impl<G: Grants> Reconciler<G> {
         if !force && sent.as_ref() == Some(&wanted) {
             return Ok(());
         }
+        // The SDK stores the new permissions before it signals them: if this is cancelled
+        // or fails halfway, nobody knows what LiveKit has, so the next check must send.
+        *sent = None;
         self.grants.send(wanted.clone()).await?;
         *sent = Some(wanted);
         Ok(())
@@ -367,6 +370,9 @@ mod tests {
         desired: std::sync::Mutex<Permissions>,
         gate: tokio::sync::Semaphore,
         fail: std::sync::atomic::AtomicBool,
+        /// What the SDK holds: set before signalling, like `LocalParticipant` does.
+        stored: std::sync::Mutex<Permissions>,
+        tries: AtomicUsize,
         sent: std::sync::Mutex<Vec<Permissions>>,
     }
 
@@ -376,6 +382,8 @@ mod tests {
                 desired: std::sync::Mutex::new(desired),
                 gate: tokio::sync::Semaphore::new(0),
                 fail: Default::default(),
+                stored: Default::default(),
+                tries: Default::default(),
                 sent: Default::default(),
             }
         }
@@ -387,8 +395,10 @@ mod tests {
         }
 
         async fn send(&self, permissions: Permissions) -> Result<()> {
+            *self.stored.lock().unwrap() = permissions.clone();
             // Signalling blocked: nothing is enqueued until the gate opens.
             self.gate.acquire().await?.forget();
+            self.tries.fetch_add(1, Relaxed);
             anyhow::ensure!(!self.fail.load(Relaxed), "signalling failed");
             self.sent.lock().unwrap().push(permissions);
             Ok(())
@@ -478,6 +488,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_cancelled_restriction_is_undone() {
+        let reconciler = Reconciler::with_refresh(Fake::new(None), Duration::from_secs(3600));
+        reconciler.grants.gate.add_permits(1);
+        reconciler.apply(false).await.unwrap();
+        assert_eq!(*reconciler.sent.lock().await, Some(None));
+        // A stream sound publish starts restricting, and is cancelled while signalling
+        // is blocked, after the SDK already stored the restriction.
+        *reconciler.grants.desired.lock().unwrap() = restricted(false);
+        let cancelled =
+            tokio::time::timeout(Duration::from_millis(20), reconciler.apply(false)).await;
+        assert!(cancelled.is_err());
+        assert_eq!(*reconciler.grants.stored.lock().unwrap(), restricted(false));
+        // Back to no sound: the open permissions must be sent again, not skipped.
+        *reconciler.grants.desired.lock().unwrap() = None;
+        reconciler.grants.gate.add_permits(1);
+        reconciler.apply(false).await.unwrap();
+        assert_eq!(*reconciler.grants.stored.lock().unwrap(), None);
+        assert_eq!(*reconciler.grants.sent.lock().unwrap(), [None, None]);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn repair_happens_while_other_events_keep_coming() {
         let fake = Fake::new(restricted(false));
         fake.fail.store(true, Relaxed);
@@ -486,22 +517,30 @@ mod tests {
         let (events, receiver) = tokio::sync::mpsc::unbounded_channel();
         tokio::spawn(reconciler.clone().run(receiver));
         reconciler.wake();
-        tokio::time::sleep(Duration::from_millis(30)).await;
+        while reconciler.grants.tries.load(Relaxed) == 0 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            reconciler.grants.sent.lock().unwrap().is_empty(),
+            "the first try failed"
+        );
         reconciler.grants.fail.store(false, Relaxed);
-        // Speakers change every 10 ms, faster than the refresh period.
-        let noise = tokio::spawn(async move {
-            loop {
-                let busy = RoomEvent::ActiveSpeakersChanged {
-                    speakers: Vec::new(),
-                };
-                if events.send(busy).is_err() {
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
+        // Speakers change every 10 ms, faster than the 50 ms refresh, for 200 ms.
+        for step in 1..=20 {
+            let busy = RoomEvent::ActiveSpeakersChanged {
+                speakers: Vec::new(),
+            };
+            events.send(busy).unwrap();
+            tokio::time::advance(Duration::from_millis(10)).await;
+            tokio::task::yield_now().await;
+            if step == 5 {
+                // The first refresh, at 50 ms, repaired it despite the events.
+                assert_eq!(*reconciler.grants.sent.lock().unwrap(), [restricted(false)]);
             }
-        });
-        until(|| !reconciler.grants.sent.lock().unwrap().is_empty()).await;
-        noise.abort();
+        }
+        // While restricted, one resend per refresh: at 50, 100, 150 and 200 ms.
+        assert_eq!(reconciler.grants.tries.load(Relaxed), 5, "no bursts");
+        assert_eq!(reconciler.grants.sent.lock().unwrap().len(), 4);
     }
 
     #[tokio::test]
