@@ -5644,6 +5644,7 @@ dependencies = [
  "etcetera 0.11.0",
  "futures-util",
  "hex",
+ "image",
  "keyring",
  "libc",
  "livekit",
