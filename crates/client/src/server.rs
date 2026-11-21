@@ -147,6 +147,12 @@ pub enum Status {
 }
 
 impl Server {
+    /// Whether this server loaded and this device can read this person's name there;
+    /// until then the default-name logic leaves it alone.
+    pub fn profile_ready(&self) -> bool {
+        self.dir.me != [0; 32] && !self.dir.my_name_hidden
+    }
+
     pub fn name(&self) -> &str {
         self.dir.name.as_deref().unwrap_or(&self.label)
     }
@@ -210,6 +216,9 @@ pub struct Directory {
     pub hide_offline: Option<bool>,
     /// The server stores bios (older servers drop them).
     pub bios: bool,
+    /// This person has a name here this device can't read yet (no key for its
+    /// epoch), so it must not be taken for having no name.
+    pub my_name_hidden: bool,
     pub me: Id,
     pub perms: Perms,
     pub categories: Vec<Category>,

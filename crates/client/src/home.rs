@@ -590,7 +590,7 @@ impl Home {
     fn migrate_names(&self, settings: &mut crate::audio::Settings) {
         let names: Vec<_> = (self.servers.iter())
             .map(|server| {
-                let loaded = server.dir.me != [0; 32];
+                let loaded = server.profile_ready();
                 let name = server
                     .member(&server.dir.me)
                     .and_then(|m| m.name.as_deref());
@@ -627,11 +627,14 @@ impl Home {
     /// and send what it still has to hear.
     fn profile_loaded(&mut self, index: usize) {
         let mut settings = self.voice.audio.settings();
-        if settings.display_name.is_empty() && self.servers.iter().all(|s| s.dir.me != [0; 32]) {
+        if settings.display_name.is_empty() && self.servers.iter().all(Server::profile_ready) {
             self.migrate_names(&mut settings);
         }
         let server = &self.servers[index];
-        if let Some(mine) = server.member(&server.dir.me) {
+        if let Some(mine) = server
+            .member(&server.dir.me)
+            .filter(|_| server.profile_ready())
+        {
             let (name, bio) = settings.reported(
                 &server.address,
                 mine.name.as_deref(),
@@ -5027,6 +5030,52 @@ fn text_footer(ui: &mut Ui, confirm: &str, mut done: bool, close: &mut bool) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_name_this_device_cannot_read_is_never_overwritten() {
+        let ctx = egui::Context::default();
+        let (_, identity) = rusttalk_core::identity::DeviceIdentity::create("Desktop").unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let mut home = Home::new(identity, &ctx, data.path().to_owned()).unwrap();
+        let me = *home.identity.certificate.person_id();
+        let (commands, mut sent) = tokio::sync::mpsc::unbounded_channel();
+        let known = KnownServer {
+            address: "https://friends.example.org/".parse().unwrap(),
+            server_id: [2; 32],
+            tls_fingerprint: None,
+        };
+        let mut server = new_server(known, "Friends", commands);
+        server.status = Status::Online;
+        server.dir.me = me;
+        // Their custom name is there, but sealed under an epoch this device lacks.
+        server.dir.my_name_hidden = true;
+        server.dir.members = vec![Member {
+            person: me,
+            name: None,
+            devices: Vec::new(),
+            roles: Vec::new(),
+            avatar: None,
+            presence: Presence::Online,
+            hide_offline: false,
+            bio: None,
+            voice_muted: false,
+        }];
+        home.servers.push(server);
+        let mut settings = home.voice.audio.settings();
+        settings.display_name = "Ann".into();
+        home.voice.audio.set_settings(settings);
+        home.profile_loaded(0);
+        assert!(sent.try_recv().is_err(), "the unreadable name was replaced");
+        // Without a default, migration doesn't take the server for nameless either.
+        let mut settings = home.voice.audio.settings();
+        settings.display_name.clear();
+        home.migrate_names(&mut settings);
+        assert!(settings.display_name.is_empty() && settings.profile_pending.name.is_empty());
+        // Once readable and really nameless, it gets the default.
+        home.servers[0].dir.my_name_hidden = false;
+        home.profile_loaded(0);
+        assert!(matches!(sent.try_recv(), Ok(Command::SetDisplayName(name)) if name == "Ann"));
+    }
 
     #[test]
     fn join_page_takes_a_server_address() {

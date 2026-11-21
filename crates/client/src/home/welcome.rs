@@ -34,7 +34,11 @@ pub fn due(name_set: bool, new_account: bool, synced: bool, loaded: bool, joinin
 impl Home {
     fn welcome_due(&mut self) -> bool {
         let settings = self.voice.audio.settings();
-        let loaded = !self.servers.is_empty() && self.servers.iter().all(|s| s.dir.me != [0; 32]);
+        let loaded = !self.servers.is_empty()
+            && self
+                .servers
+                .iter()
+                .all(crate::server::Server::profile_ready);
         let joining = self.view == View::Join && matches!(self.join, Join::Idle(_));
         let synced = self.synced_once;
         if !due(

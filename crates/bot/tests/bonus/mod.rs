@@ -216,8 +216,6 @@ pub async fn icons(a: &KeyClient<'_>, b: &KeyClient<'_>) -> Result<()> {
     Ok(())
 }
 
-/// Server emoji: the Manage emoji permission, encrypted names and pictures, limits,
-/// rename, delete, audit entries and the change event.
 /// B sets the name and bio their client publishes to every server (#201); A, on the
 /// same server, decrypts both from the member directory, which holds only ciphertext.
 pub async fn profile(a: &KeyClient<'_>, b: &KeyClient<'_>) -> Result<()> {
@@ -243,6 +241,8 @@ pub async fn profile(a: &KeyClient<'_>, b: &KeyClient<'_>) -> Result<()> {
     Ok(())
 }
 
+/// Server emoji: the Manage emoji permission, encrypted names and pictures, limits,
+/// rename, delete, audit entries and the change event.
 pub async fn emoji(a: &mut KeyClient<'_>, b: &KeyClient<'_>) -> Result<()> {
     let mut png = Cursor::new(Vec::new());
     DynamicImage::new_rgba8(4, 4).write_to(&mut png, ImageFormat::Png)?;
