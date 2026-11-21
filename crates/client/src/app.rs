@@ -1,6 +1,5 @@
-use std::path::PathBuf;
+use std::{cell::Cell, path::PathBuf};
 
-use anyhow::Result;
 use eframe::egui::{
     self, CentralPanel, CollapsingHeader, Grid, Key, Response, ScrollArea, Ui, Vec2,
 };
@@ -16,14 +15,14 @@ use crate::{
 const DEVICE_NAME: &str = "Desktop";
 const CARD_WIDTH: f32 = 560.0;
 
-pub struct App {
-    /// `None` only when startup failed and the problem screen is showing.
-    keystore: Option<Keystore>,
+pub struct App<'a> {
+    keystore: Keystore,
     screen: Screen,
     ctx: egui::Context,
     /// The profile folder, for saved servers.
     data: PathBuf,
     updates: crate::update::Updater,
+    window_started: &'a Cell<bool>,
 }
 
 enum Screen {
@@ -55,29 +54,26 @@ pub enum Action {
     SignOut,
 }
 
-impl App {
+impl<'a> App<'a> {
     pub fn new(
         cc: &eframe::CreationContext,
-        opened: Result<(Keystore, Option<DeviceIdentity>)>,
+        keystore: Keystore,
+        identity: Option<DeviceIdentity>,
         data: PathBuf,
+        window_started: &'a Cell<bool>,
     ) -> Self {
         ui::install(&cc.egui_ctx);
         let updates = crate::update::Updater::new(&data, &cc.egui_ctx);
         let mut app = Self {
-            keystore: None,
+            keystore,
             screen: Screen::Welcome,
             ctx: cc.egui_ctx.clone(),
             data,
             updates,
+            window_started,
         };
-        match opened {
-            Ok((keystore, identity)) => {
-                app.keystore = Some(keystore);
-                if let Some(identity) = identity {
-                    app.screen = app.home(identity);
-                }
-            }
-            Err(error) => app.screen = Screen::Problem(format!("{error:#}")),
+        if let Some(identity) = identity {
+            app.screen = app.home(identity);
         }
         app
     }
@@ -93,9 +89,7 @@ impl App {
     }
 
     fn apply(&mut self, action: Action) {
-        let Some(keystore) = &self.keystore else {
-            return;
-        };
+        let keystore = &self.keystore;
         let screen = std::mem::replace(&mut self.screen, Screen::Welcome);
         self.screen = match (action, screen) {
             (Action::StartOver, _) => Screen::Welcome,
@@ -213,7 +207,14 @@ fn problem(what: &str, error: &IdentityError) -> Screen {
     Screen::Problem(format!("{what}: {error}"))
 }
 
-impl eframe::App for App {
+impl eframe::App for App<'_> {
+    fn logic(&mut self, _ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // eframe reports frame time after painting and showing the first frame.
+        if frame.info().cpu_usage.is_some() {
+            self.window_started.set(true);
+        }
+    }
+
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.updates.poll(ui.ctx());
         let action = match &mut self.screen {
