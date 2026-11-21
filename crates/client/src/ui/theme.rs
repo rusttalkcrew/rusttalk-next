@@ -83,6 +83,20 @@ const fn rgb(hex: u32) -> Color32 {
     Color32::from_rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
 }
 
+/// Colours people can give a role. They are the same in every theme, as people chose them.
+pub const ROLE_COLORS: [Color32; 10] = [
+    rgb(0x1abc9c),
+    rgb(0x2ecc71),
+    rgb(0x3498db),
+    rgb(0x9b59b6),
+    rgb(0xe91e63),
+    rgb(0xf1c40f),
+    rgb(0xe67e22),
+    rgb(0xe74c3c),
+    rgb(0x95a5a6),
+    rgb(0x607d8b),
+];
+
 const DARK_STATUS: (Color32, Color32, Color32, Color32) =
     (rgb(0x23a55a), rgb(0xf0b232), rgb(0xda373c), rgb(0xf6787c));
 const LIGHT_STATUS: (Color32, Color32, Color32, Color32) =

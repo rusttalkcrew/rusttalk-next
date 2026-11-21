@@ -121,8 +121,8 @@ All endpoints below require `Authorization: Bearer <token>`.
 | DELETE `/v1/bans/{person}` | Empty | `ban`. 204 |
 | GET `/v1/roles` | Empty | Any member. 200, `{default_role_id, roles}` |
 | POST `/v1/roles` | `{id?, rank, permissions, name_ct?}` | `manage_roles`. 201, the created role |
-| PUT `/v1/roles/{id}` | `{permissions, name_ct?}` | `manage_roles`. 204, replaces a custom role's flags and, when given, its name |
-| PUT `/v1/roles/{id}/name` | `{name_ct?}` | `manage_roles`. 204 |
+| PUT `/v1/roles/{id}` | `{permissions, name_ct?, rank?}` | `manage_roles`. 204, replaces a custom role's flags and, when given, its name and rank (1 to 999, below the caller's) |
+| PUT `/v1/roles/{id}/name` | `{name_ct?, display_ct?}` | `manage_roles`. 204. Each field left out is kept; `null` clears it. `display_ct` seals `[1, flags, r, g, b]` (flag 1 colour, 2 listed separately) as `RoleDisplay` metadata |
 | DELETE `/v1/roles/{id}` | Empty | `manage_roles`. 204 |
 | PUT `/v1/roles/default` | `{role_id}` | `manage_roles`. 204 |
 | PUT `/v1/members/{person}/roles` | `{role_ids}` | `manage_roles`. 204, replaces assigned roles |

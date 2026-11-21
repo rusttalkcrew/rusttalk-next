@@ -583,6 +583,8 @@ mod tests {
             rank: 0,
             permissions,
             custom: false,
+            color: None,
+            separate: false,
         };
         let dir = Directory {
             me,

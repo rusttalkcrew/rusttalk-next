@@ -2235,52 +2235,82 @@ fn member_list(ui: &mut Ui, home: &mut Home, index: usize) {
     let mut action = None;
     let (mut befriend, mut poke) = (None, None);
     let (mut manage, mut moderate) = (None, None);
+    // Roles shown separately get their own heading, highest first; everyone else after.
+    let dir = &server.dir;
+    let mut groups: Vec<(Option<&str>, Vec<&Member>)> = (dir.roles.iter())
+        .filter(|role| role.separate)
+        .map(|role| (Some(role.id.as_str()), Vec::new()))
+        .collect();
+    groups.push((None, Vec::new()));
+    for member in &dir.members {
+        let heading = dir.heading_role(&member.roles).map(|role| role.id.as_str());
+        if let Some((_, list)) = groups.iter_mut().find(|(id, _)| *id == heading) {
+            list.push(member);
+        }
+    }
+    let headings = groups.len() > 1;
     ScrollArea::vertical().show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 2.0;
-        for member in &server.dir.members {
-            let name = member.display_name();
-            let me = member.person == server.dir.me;
-            let label = if me {
-                t!("home.name_you", name = name)
-            } else {
-                name.clone()
-            };
-            let row = ui::row_button(ui, 40.0, &label, |ui| {
-                member_face(ui, Some(member), &member.person, &name, 30.0, true);
-                let text = if member.presence == Presence::Offline {
-                    emoji::text(&label).color(ui::colors(ui).muted)
+        for (id, list) in groups.iter().filter(|(_, list)| !list.is_empty()) {
+            if headings {
+                let caption = id
+                    .and_then(|id| dir.roles.iter().find(|role| role.id == id))
+                    .map_or_else(
+                        || t!("home.members_count", count = list.len()),
+                        |role| t!("home.role_count", name = role.name, count = list.len()),
+                    );
+                ui.horizontal(|ui| {
+                    ui.add_space(ui::SPACE_XS);
+                    ui::section(ui, &caption);
+                });
+            }
+            for member in list.iter().copied() {
+                let name = member.display_name();
+                let me = member.person == server.dir.me;
+                let label = if me {
+                    t!("home.name_you", name = name)
                 } else {
-                    emoji::text(&label)
+                    name.clone()
                 };
-                ui.add(Label::new(text).truncate());
-            });
-            ui::menu(&row, |m| {
-                if !me && m.item("💬", t!("home.message")).clicked() {
-                    action = Some(Command::OpenDm(member.person));
-                }
-                let blocked = home.friends.relation(&member.person) == Relation::Blocked;
-                if !me && !blocked && m.item("👉", t!("pokes.poke")).clicked() {
-                    poke = Some(member.person);
-                }
-                if m.item("ℹ", t!("common.details")).clicked() {
-                    home.dialog = Some(Dialog::Member(index, member.person));
-                }
-                if !me {
-                    let relation = home.friends.relation(&member.person);
-                    if let Some(act) = friends::menu_items(m, relation) {
-                        befriend = Some((member.person, act));
+                let row = ui::row_button(ui, 40.0, &label, |ui| {
+                    member_face(ui, Some(member), &member.person, &name, 30.0, true);
+                    let text = if member.presence == Presence::Offline {
+                        emoji::text(&label).color(ui::colors(ui).muted)
+                    } else if let Some(color) = dir.name_color(&member.roles) {
+                        emoji::text(&label).color(color)
+                    } else {
+                        emoji::text(&label)
+                    };
+                    ui.add(Label::new(text).truncate());
+                });
+                ui::menu(&row, |m| {
+                    if !me && m.item("💬", t!("home.message")).clicked() {
+                        action = Some(Command::OpenDm(member.person));
                     }
-                }
-                if !me && home.voice.call.is_some() {
-                    m.separator();
-                    call::stream_menu(m, &home.voice.audio, &(member.person, None));
-                }
-                if !me && (perms.kick || perms.ban || perms.manage_roles) {
-                    m.separator();
-                    manage = Some(member.person);
-                    admin::member_menu(m, &mut moderate, perms);
-                }
-            });
+                    let blocked = home.friends.relation(&member.person) == Relation::Blocked;
+                    if !me && !blocked && m.item("👉", t!("pokes.poke")).clicked() {
+                        poke = Some(member.person);
+                    }
+                    if m.item("ℹ", t!("common.details")).clicked() {
+                        home.dialog = Some(Dialog::Member(index, member.person));
+                    }
+                    if !me {
+                        let relation = home.friends.relation(&member.person);
+                        if let Some(act) = friends::menu_items(m, relation) {
+                            befriend = Some((member.person, act));
+                        }
+                    }
+                    if !me && home.voice.call.is_some() {
+                        m.separator();
+                        call::stream_menu(m, &home.voice.audio, &(member.person, None));
+                    }
+                    if !me && (perms.kick || perms.ban || perms.manage_roles) {
+                        m.separator();
+                        manage = Some(member.person);
+                        admin::member_menu(m, &mut moderate, perms);
+                    }
+                });
+            }
         }
     });
     if let Some(command) = action {

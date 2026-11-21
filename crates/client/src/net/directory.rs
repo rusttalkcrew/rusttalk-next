@@ -19,7 +19,7 @@ use url::Url;
 use super::{Ctx, State, Update, leave_voice, now};
 use crate::server::{
     Body, Category, Channel, CustomEmoji, Device, Directory, Dm, Id, Member, Msg, Perms, Picture,
-    Role, member_name,
+    Role, member_name, parse_role_display,
 };
 
 pub(super) async fn get(client: &KeyClient<'_>, path: &str) -> Result<Value> {
@@ -332,6 +332,12 @@ async fn build(
             _ => t!("role.new"),
         };
         let name = text(Metadata::RoleName, id.as_bytes(), role["name_ct"].as_str());
+        let (color, separate) = bytes(
+            Metadata::RoleDisplay,
+            id.as_bytes(),
+            role["display_ct"].as_str(),
+        )
+        .map_or((None, false), |display| parse_role_display(&display));
         role_list.push(Role {
             name_known: name.is_some() || (kind != "custom" && role["name_ct"].is_null()),
             name: name.unwrap_or_else(|| builtin.into()),
@@ -339,6 +345,8 @@ async fn build(
             rank,
             permissions,
             custom: kind == "custom",
+            color,
+            separate,
         });
     }
     // Highest rank first, as the server lists them.

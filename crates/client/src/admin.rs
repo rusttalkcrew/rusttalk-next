@@ -2,6 +2,8 @@
 
 mod file_limits;
 
+mod roles;
+
 use chrono::{DateTime, Local};
 use eframe::egui::{
     self, CollapsingHeader, ComboBox, DragValue, Grid, RichText, Ui, accesskit::Role,
@@ -16,7 +18,7 @@ use crate::{
     files::Ask,
     home::{ChannelEdit, Home, face, frame, initials},
     net::{Admin, AdminUpdate, AuditEntry, Ban, Command, Invite, PublicListing},
-    server::{Id, Perms, Server, Status, permissions},
+    server::{Id, Perms, Server, Status},
     settings::{self as panel, Group, Page},
     ui::{self, Item, danger, error_text},
 };
@@ -84,11 +86,7 @@ pub struct Settings {
     listing: Option<(bool, PublicListing)>,
     updates: ServerUpdates,
     member: Option<(Id, MemberAction)>,
-    new_role: String,
-    new_permissions: Vec<&'static str>,
-    renaming: Option<(String, String)>,
-    /// The custom role being edited: its ID, name and permissions.
-    editing: Option<(String, String, Vec<&'static str>)>,
+    roles: roles::RolesPage,
     invites: Vec<Invite>,
     /// The invite waiting for t!("admin.revoke") to be confirmed.
     revoking: Option<String>,
@@ -120,13 +118,15 @@ impl Settings {
             AdminUpdate::ServerUpdates(updates) => self.updates = updates,
             AdminUpdate::Done(text) => {
                 self.member = None;
-                self.renaming = None;
-                self.editing = None;
+                self.roles.done();
                 self.revoking = None;
                 self.emoji_renaming = None;
                 self.message = Some((text.into(), false));
             }
-            AdminUpdate::Failed(text) => self.message = Some((text, true)),
+            AdminUpdate::Failed(text) => {
+                self.roles.failed();
+                self.message = Some((text, true));
+            }
         }
     }
 }
@@ -176,10 +176,7 @@ pub fn open(home: &mut Home, index: usize, mut tab: Tab) {
         listing: None,
         updates: ServerUpdates::default(),
         member: None,
-        new_role: String::new(),
-        new_permissions: Vec::new(),
-        renaming: None,
-        editing: None,
+        roles: roles::RolesPage::default(),
         invites: Vec::new(),
         revoking: None,
         server_name: None,
@@ -253,6 +250,7 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
     let mut upload = None;
     let mut channel_edit = None;
     let mut rename = None;
+    let mut batch = Vec::new();
     let close = if let Tab::Channel(channel) = settings.tab {
         if !server.dir.perms.manage_channels {
             home.server_settings = None;
@@ -349,7 +347,10 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
                         None
                     }
                     Tab::Members => members_tab(ui, server, settings),
-                    Tab::Roles => roles_tab(ui, server, settings),
+                    Tab::Roles => {
+                        batch = roles::tab(ui, server, &mut settings.roles, &mut settings.message);
+                        None
+                    }
                     Tab::Invites => invites_tab(ui, server, settings),
                     Tab::Bans => bans_tab(ui, server, settings),
                     Tab::Audit => audit_tab(ui, server, settings),
@@ -399,11 +400,16 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
         close
     };
     // Confirmations over the settings window.
-    if let Some(asked) = role_editor(ctx, settings).or_else(|| revoke_dialog(ctx, settings)) {
+    if let Some(asked) = roles::delete_dialog(ctx, server, &mut settings.roles, &settings.message)
+        .or_else(|| revoke_dialog(ctx, settings))
+    {
         request = Some(asked);
     }
     if let Some(request) = request {
         settings.message = None;
+        server.send(Command::Admin(request));
+    }
+    for request in batch {
         server.send(Command::Admin(request));
     }
     if let Some(name) = rename {
@@ -791,170 +797,6 @@ fn members_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Option<
     }
     if pick.is_some() {
         settings.member = pick;
-        settings.message = None;
-    }
-    request
-}
-
-fn roles_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Option<Admin> {
-    let dir = &server.dir;
-    let mut request = None;
-    let default = dir
-        .roles
-        .iter()
-        .find(|role| role.id == dir.default_role)
-        .map_or("", |role| role.name.as_str());
-    ui::page_section(ui, t!("admin.new_members"));
-    ui::setting_row(
-        ui,
-        t!("admin.default_role"),
-        t!("admin.default_role_help"),
-        |ui| {
-            let combo = ComboBox::from_id_salt("default role")
-                .selected_text(default)
-                .show_ui(ui, |ui| {
-                    for role in dir.roles.iter().filter(|r| r.id != "owner") {
-                        if ui
-                            .selectable_label(role.id == dir.default_role, &role.name)
-                            .clicked()
-                            && role.id != dir.default_role
-                        {
-                            request = Some(Admin::DefaultRole(role.id.clone()));
-                        }
-                    }
-                });
-            combo.response.widget_info(|| {
-                egui::WidgetInfo::labeled(Role::ComboBox, true, t!("admin.default_role"))
-            });
-        },
-    );
-    ui::page_section(ui, t!("admin.roles"));
-    for role in &dir.roles {
-        CollapsingHeader::new(&role.name)
-            .id_salt(&role.id)
-            .show(ui, |ui| {
-                for (permission, label) in permissions() {
-                    let mut on = role.permissions.iter().any(|p| p == permission);
-                    ui.add_enabled(false, ui::Checkbox::new(&mut on, label));
-                }
-                match &mut settings.renaming {
-                    Some((id, name)) if *id == role.id => {
-                        ui.horizontal(|ui| {
-                            ui.add(ui::field(name).char_limit(100));
-                            if ui::primary(ui, t!("common.save")).clicked()
-                                && !name.trim().is_empty()
-                            {
-                                request = Some(Admin::RenameRole(id.clone(), name.trim().into()));
-                            }
-                        });
-                    }
-                    _ => {
-                        ui.horizontal(|ui| {
-                            if !role.custom {
-                                if ui::secondary(ui, t!("common.rename")).clicked() {
-                                    settings.renaming = Some((role.id.clone(), role.name.clone()));
-                                }
-                                return;
-                            }
-                            // Only roles below your own can be changed.
-                            let below = role.rank < dir.perms.rank;
-                            if ui
-                                .add_enabled_ui(below, |ui| ui::secondary(ui, t!("common.edit")))
-                                .inner
-                                .clicked()
-                            {
-                                let permissions = permissions()
-                                    .into_iter()
-                                    .map(|(permission, _)| permission)
-                                    .filter(|p| role.permissions.iter().any(|r| r == p))
-                                    .collect();
-                                settings.editing =
-                                    Some((role.id.clone(), role.name.clone(), permissions));
-                                settings.message = None;
-                            }
-                            if danger(ui, t!("common.delete")).clicked() {
-                                request = Some(Admin::DeleteRole(role.id.clone()));
-                            }
-                        });
-                    }
-                }
-            });
-    }
-    ui::page_section(ui, t!("admin.make_role"));
-    let label = ui.label(t!("admin.role_name"));
-    ui.add(ui::field(&mut settings.new_role).char_limit(100))
-        .labelled_by(label.id);
-    permission_boxes(ui, &mut settings.new_permissions);
-    let name = settings.new_role.trim();
-    if ui
-        .add_enabled_ui(!name.is_empty(), |ui| {
-            ui::primary(ui, t!("admin.create_role"))
-        })
-        .inner
-        .clicked()
-    {
-        request = Some(Admin::CreateRole {
-            name: name.into(),
-            permissions: std::mem::take(&mut settings.new_permissions),
-        });
-        settings.new_role.clear();
-    }
-    request
-}
-
-/// A checkbox per permission, in two columns.
-fn permission_boxes(ui: &mut Ui, chosen: &mut Vec<&'static str>) {
-    ui.columns(2, |columns| {
-        for (at, (permission, label)) in permissions().into_iter().enumerate() {
-            let ui = &mut columns[at % 2];
-            let mut on = chosen.contains(&permission);
-            if ui::checkbox(ui, &mut on, label).changed() {
-                chosen.retain(|p| *p != permission);
-                if on {
-                    chosen.push(permission);
-                }
-            }
-        }
-    });
-}
-
-/// The dialog to change a custom role's name and permissions.
-fn role_editor(ctx: &egui::Context, settings: &mut Settings) -> Option<Admin> {
-    let (id, name, permissions) = settings.editing.as_mut()?;
-    let mut request = None;
-    let mut cancel = false;
-    let ((), dismissed) = ui::dialog(ctx, "edit-role", t!("admin.edit_role"), |ui| {
-        let label = ui.label(ui::bold(t!("admin.role_name")));
-        ui.add(
-            ui::field(name)
-                .char_limit(100)
-                .desired_width(ui.available_width()),
-        )
-        .labelled_by(label.id);
-        ui.add_space(ui::SPACE_S);
-        ui.label(ui::bold(t!("admin.permissions")));
-        permission_boxes(ui, permissions);
-        if let Some((text, true)) = &settings.message {
-            error_text(ui, Some(text));
-        }
-        ui::footer(ui, |ui| {
-            let name = name.trim();
-            if ui
-                .add_enabled_ui(!name.is_empty(), |ui| ui::primary(ui, t!("common.save")))
-                .inner
-                .clicked()
-            {
-                request = Some(Admin::EditRole {
-                    id: id.clone(),
-                    name: name.into(),
-                    permissions: permissions.clone(),
-                });
-            }
-            cancel = ui::secondary(ui, t!("common.cancel")).clicked();
-        });
-    });
-    if cancel || dismissed {
-        settings.editing = None;
         settings.message = None;
     }
     request

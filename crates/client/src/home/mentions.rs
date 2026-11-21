@@ -460,6 +460,8 @@ mod tests {
             rank: 0,
             permissions,
             custom: false,
+            color: None,
+            separate: false,
         };
         Directory {
             me: ME,
