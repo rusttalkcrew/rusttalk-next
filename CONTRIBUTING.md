@@ -7,16 +7,19 @@ rules keep it that way.
 ## How a change gets in
 
 1. **Open an issue first.** Describe the problem or idea in plain words, with
-   a screenshot if it is about something you see. Wait for the maintainer
-   (@vleeuwenmenno) to say yes before building anything.
+   a screenshot if it is about something you see. You don't need to wait for
+   a yes before building it: the review of your pull request decides.
    **Every issue that is being worked on must have an assignee.** If an issue
    is assigned to someone else, do not work on it. If nobody is assigned, ask
    to be assigned (or assign yourself) before you start. This stops two
    people from doing the same work.
 2. **Work on a branch**, never on `main`.
 3. **Open a pull request** that links the issue (`Closes #123`) and fills in
-   the template: what changes, why, screenshots, how you tested it, and what
-   you are unsure about.
+   the template: what changes, why, screenshots, how you tested it, what
+   you are unsure about, and any **decisions for the maintainer** (for
+   example a new dependency, a change to encryption, the protocol, privacy
+   or the build). Listing them is enough; the maintainer confirms or changes
+   them during review.
 4. **Review.** Every pull request needs an approval from @vleeuwenmenno and
    green checks. Only the maintainer merges and makes releases.
 
@@ -49,7 +52,7 @@ make e2e      # needed when the server, protocol or crypto changes
 
 ## What gets accepted
 
-- Fixes and features that have an approved issue.
+- Fixes and features that have an issue with you as assignee.
 - Changes that keep everything users write end-to-end encrypted. The server
   must never see message text, names, files or other user content.
 - UI that uses the shared UI kit, short friendly labels, and text in all four

@@ -22,24 +22,34 @@ Run `git config user.name`, `git config user.email` and, if available,
    needs a review from @vleeuwenmenno; GitHub enforces this, so do not try
    to get around it.
 2. **An issue comes first, with an assignee** (see section 3). If no issue
-   describes the change, help the person write one and stop there. The maintainer decides whether it gets built.
+   describes the change, help the person write one, assign them, and then
+   build it. Nobody needs to wait for permission to start: the maintainer's
+   review of the pull request is the gate.
 3. **One small change per pull request.** No drive-by refactors, renames,
    reformatting, dependency bumps or "while I was here" fixes.
-4. **Stop and ask the maintainer** (in the issue, not in code) before touching:
+4. **List decisions for the maintainer instead of stopping.** If the change
+   touches any of these, keep going, but name each one under
+   "Decisions for the maintainer" in the pull request so it gets confirmed
+   in review:
    - cryptography, keys, sealing or anything in `docs/crypto.md`;
    - the protocol or server API (`services/`, `crates/core/src/client/`,
-     `docs/protocol.md`);
-   - privacy guarantees (`docs/privacy.md`);
+     `docs/protocol.md`), including anything that forces older apps to update;
+   - privacy guarantees (`docs/privacy.md`) or new outbound connections;
    - deployment, release or CI files (`deploy/`, `.github/`, `Makefile`);
-   - `LICENSE`, `NOTICE`, `AGENTS.md`, `CONTRIBUTING.md`;
-   - new dependencies.
+   - `LICENSE`, `NOTICE`, `PROMPT.md`, `AGENTS.md`, `CONTRIBUTING.md`;
+   - new dependencies (name, license, why);
+   - any choice the issue left open.
+   Pick the safest reasonable option, explain it in one line, and let the
+   maintainer change it in review. A listed decision never blocks opening
+   the pull request.
 5. **Explain in plain language.** The person you work with may not read code.
    Tell them what you changed, why, what you did not test, and what could go
    wrong. Write the pull request the same way, using the template.
 6. **Never claim something works that you did not run.** Paste the real result
    of `make lint` and `make test`. If something fails, say so.
 7. **Do not invent features.** Build exactly what the issue asks. If the issue
-   is unclear, ask in the issue.
+   is unclear, pick the simplest reading, build that, and list the question
+   under "Decisions for the maintainer".
 
 ## 3. Rules for everyone
 

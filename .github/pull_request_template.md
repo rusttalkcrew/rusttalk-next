@@ -17,6 +17,10 @@
 - [ ] `make e2e` passes (needed when the server, protocol or crypto changes)
 - [ ] Tried it in the app (`make client`), and describe what you did:
 
+## Decisions for the maintainer
+
+<!-- List anything the maintainer must confirm: crypto, protocol or server API (incl. forcing older apps to update), privacy or new outbound connections, deploy/CI, license files, new dependencies (name + license), or a choice the issue left open. One line each with what you picked. "None" if nothing. -->
+
 ## What was not tested or is unsure
 
 <!-- Be honest; this is where review starts. -->

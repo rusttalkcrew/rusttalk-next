@@ -3,7 +3,9 @@
 You are building RustTalk from scratch: a private, self-hosted voice, video and chat
 app for friends and small communities. Do not look at, copy or port any earlier
 RustTalk code. This brief is the only source of truth. When something here is
-unclear or contradicts itself, stop and ask; do not guess.
+unclear or contradicts itself, pick the safest reasonable reading, keep going,
+and list it under "Decisions for the maintainer" in the pull request; the
+maintainer confirms it in review.
 
 The goal is a small, boring, reliable codebase. Every agent working on it runs in
 ponytail mode: invoke `/ponytail` at the start of every session and task (use the
