@@ -1304,11 +1304,12 @@ pub(super) fn pick_screen(
         return Ok(());
     };
     live.stream_audio = audio;
+    let preview = ctx.video.preview.clone();
     // The system picker waits for the person; keep the server loop running meanwhile.
     live.starting = Some(tokio::spawn(async move {
         // shortcut: always opens a fresh picker; keep the portal's restore token
         // if people ask to skip it when sharing the same screen again.
-        let capture = screen::start(target, options, &mut None).await?;
+        let capture = screen::start(target, options, &mut None, preview).await?;
         Ok((capture, options))
     }));
     Ok(())
@@ -1321,10 +1322,10 @@ fn change_screen(ctx: &Ctx, live: &mut Live, target: screen::Target) {
         return;
     };
     let (into, options) = (capture.source.clone(), *options);
-    let picker =
-        tokio::spawn(
-            async move { screen::start_into(target, options, &mut None, Some(into)).await },
-        );
+    let preview = ctx.video.preview.clone();
+    let picker = tokio::spawn(async move {
+        screen::start_into(target, options, &mut None, Some(into), preview).await
+    });
     if let Err(picker) = live.swap.begin(picker) {
         picker.abort();
         ctx.send(Update::Sharing(true));

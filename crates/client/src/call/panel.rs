@@ -159,6 +159,8 @@ enum Stop {
     App(String),
     /// The screen share's sound changed to these.
     Sound(Vec<App>),
+    /// Show or hide the preview of our own screen.
+    Preview,
 }
 
 /// The voice panel, while in a voice room.
@@ -206,6 +208,14 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
     let mut share = Vec::new();
     let mut stop_screen = matches!(stopped, Some(Stop::Screen));
     let mut change_screen = matches!(stopped, Some(Stop::Change));
+    if matches!(stopped, Some(Stop::Preview)) {
+        let preview = &home.voice.video.preview;
+        if preview.is_on() {
+            home.voice.stop_preview();
+        } else {
+            preview.set(true);
+        }
+    }
     let mut voice_settings = false;
     Frame::new()
         .fill(c.field)
@@ -313,6 +323,7 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
     }
     if let (Some(server), true) = (server, stop_screen) {
         home.voice.sharing = Sharing::Off;
+        home.voice.stop_preview();
         server.send(Command::StopScreen);
     }
     if let Some(server) = server {
@@ -838,6 +849,14 @@ fn sharing_card(ui: &mut Ui, voice: &Voice) -> Option<Stop> {
                     }
                     if refresh {
                         fill(ui.ctx(), &voice.apps, "apps", share::list);
+                    }
+                    let look = if voice.video.preview.is_on() {
+                        Look::On(ui::accent(ui).base)
+                    } else {
+                        Look::Plain
+                    };
+                    if ui::icon_button(ui, "👁", t!("call.preview"), look, STOP_SIZE).clicked() {
+                        stop = Some(Stop::Preview);
                     }
                     let picking = voice.sharing == Sharing::Changing;
                     let change = ui.add_enabled_ui(!picking, |ui| {

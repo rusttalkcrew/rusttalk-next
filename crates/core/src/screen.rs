@@ -2,8 +2,8 @@
 
 use std::{
     sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering::Relaxed},
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering::Relaxed},
     },
     time::Duration,
 };
@@ -277,6 +277,63 @@ pub fn frame_to_rgba_into(frame: &dyn VideoBuffer, rgba: &mut [u8]) -> Result<()
     Ok(())
 }
 
+/// The preview's limits: small and slow enough to cost the share next to nothing.
+const PREVIEW_WIDTH: u32 = 960;
+const PREVIEW_PERIOD: Duration = Duration::from_millis(1000 / 15);
+
+/// The sharer's own view of their share: a small, low-rate copy of the captured
+/// frames, taken before encoding, so it needs no round trip through the server.
+/// While off, the capture only checks one flag per frame.
+#[derive(Clone, Default)]
+pub struct Preview(Arc<PreviewState>);
+
+#[derive(Default)]
+struct PreviewState {
+    on: AtomicBool,
+    /// The newest copy not yet shown, and when it was taken.
+    slot: Mutex<(Option<I420Buffer>, Option<std::time::Instant>)>,
+}
+
+impl Preview {
+    pub fn set(&self, on: bool) {
+        self.0.on.store(on, Relaxed);
+        if !on && let Ok(mut slot) = self.0.slot.lock() {
+            *slot = (None, None);
+        }
+    }
+
+    pub fn is_on(&self) -> bool {
+        self.0.on.load(Relaxed)
+    }
+
+    /// The newest copy since the last call. Never waits for the capture.
+    pub fn take(&self) -> Option<I420Buffer> {
+        self.0.slot.try_lock().ok()?.0.take()
+    }
+
+    /// Called by the capture after each frame went to the encoder. It never waits:
+    /// a frame is skipped while the window holds the slot, hasn't shown the last copy
+    /// yet, or the last copy is younger than the preview's frame period.
+    fn offer(&self, frame: &mut I420Buffer, now: std::time::Instant) {
+        if !self.is_on() {
+            return;
+        }
+        let Ok(mut slot) = self.0.slot.try_lock() else {
+            return;
+        };
+        if slot.0.is_some() || slot.1.is_some_and(|last| now < last + PREVIEW_PERIOD) {
+            return;
+        }
+        let (width, height) = (frame.width(), frame.height());
+        let scaled = width.min(PREVIEW_WIDTH);
+        let scaled = (scaled, (height * scaled / width).max(1));
+        *slot = (
+            Some(frame.scale(scaled.0 as i32, scaled.1 as i32)),
+            Some(now),
+        );
+    }
+}
+
 /// A screen source owns capture until dropped. Dropping it requests shutdown.
 pub struct ScreenCapture {
     pub name: String,
@@ -369,8 +426,9 @@ pub async fn start(
     source: ScreenSource,
     options: ScreenOptions,
     restore_token: &mut Option<String>,
+    preview: Preview,
 ) -> Result<ScreenCapture> {
-    start_into(source, options, restore_token, None).await
+    start_into(source, options, restore_token, None, preview).await
 }
 
 /// Like `start`, but feeds frames into the source of a track that is already published,
@@ -381,6 +439,7 @@ pub async fn start_into(
     options: ScreenOptions,
     restore_token: &mut Option<String>,
     into: Option<NativeVideoSource>,
+    preview: Preview,
 ) -> Result<ScreenCapture> {
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     {
@@ -454,6 +513,7 @@ pub async fn start_into(
                     Err(_) => (),
                 }
                 feeder.capture_frame(&frame);
+                preview.offer(&mut frame.buffer, std::time::Instant::now());
                 // Thin a faster capture to the chosen rate, on a steady schedule that lets
                 // a frame come a quarter period early (as the PipeWire helper does).
                 next = next.max(Instant::now() - period / 2) + period;
@@ -472,7 +532,7 @@ pub async fn start_into(
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
-        let _ = (source, options, restore_token, into);
+        let _ = (source, options, restore_token, into, preview);
         anyhow::bail!("screen capture is unavailable on this platform")
     }
 }
@@ -537,6 +597,46 @@ mod tests {
         let pixels = [0; 4].repeat(1920 * 1080);
         let same = bgra_to_i420(1920, 1080, &pixels, Some(1440)).unwrap();
         assert_eq!((same.width(), same.height()), (1920, 1080));
+    }
+
+    #[test]
+    fn preview_taps_a_small_copy_without_waiting() {
+        let preview = Preview::default();
+        let mut frame = bgra_to_i420(1920, 1080, &[0; 4].repeat(1920 * 1080), None).unwrap();
+        let start = std::time::Instant::now();
+        // Off: nothing is copied.
+        preview.offer(&mut frame, start);
+        assert!(preview.take().is_none());
+        preview.set(true);
+        preview.offer(&mut frame, start);
+        // A slow window: frames are dropped until it took the last copy...
+        let later = start + PREVIEW_PERIOD * 2;
+        preview.offer(&mut frame, later);
+        let copy = preview.take().unwrap();
+        assert_eq!((copy.width(), copy.height()), (960, 540));
+        assert!(preview.take().is_none());
+        // ...and taken more often than the preview's rate.
+        preview.offer(&mut frame, start + PREVIEW_PERIOD / 2);
+        assert!(preview.take().is_none());
+        preview.offer(&mut frame, later);
+        assert!(preview.take().is_some());
+        // The capture never waits for a window that holds the slot.
+        let held = preview.0.slot.lock().unwrap();
+        preview.offer(&mut frame, later + PREVIEW_PERIOD);
+        drop(held);
+        assert!(preview.take().is_none());
+        // Turning it off drops a copy not shown yet, and stops the copies.
+        preview.offer(&mut frame, later + PREVIEW_PERIOD);
+        preview.set(false);
+        assert!(preview.take().is_none());
+        preview.offer(&mut frame, later + PREVIEW_PERIOD * 2);
+        assert!(preview.take().is_none());
+        // Small screens are copied as they are.
+        let mut small = bgra_to_i420(640, 360, &[0; 4].repeat(640 * 360), None).unwrap();
+        preview.set(true);
+        preview.offer(&mut small, start);
+        let copy = preview.take().unwrap();
+        assert_eq!((copy.width(), copy.height()), (640, 360));
     }
 
     #[test]

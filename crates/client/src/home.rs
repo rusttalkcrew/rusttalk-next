@@ -1133,6 +1133,7 @@ impl Home {
                     self.voice.sharing = if on {
                         call::Sharing::On
                     } else {
+                        self.voice.stop_preview();
                         call::Sharing::Off
                     };
                 }

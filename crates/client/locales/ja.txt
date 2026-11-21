@@ -616,6 +616,9 @@ call.sound_in_stream = 配信中です。音声は「共有中」で選べます
 call.now_sharing = 共有中
 call.starting_screen = 画面共有を開始しています…
 call.your_screen = あなたの画面
+call.your_screen_preview = あなたの画面（プレビュー）
+call.preview = プレビュー
+call.hide_preview = プレビューを隠す
 call.stop_sharing_screen = 画面共有を停止
 call.stop_sharing_app = {app} の共有を停止
 
