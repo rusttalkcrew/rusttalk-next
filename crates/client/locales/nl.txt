@@ -684,6 +684,8 @@ call.stop_watching = Stoppen met kijken
 call.exit_full_screen = Volledig scherm sluiten
 
 # crates/client/src/call/remote.rs
+remote.share_opt_in = Bedieningsverzoeken toestaan
+remote.share_warning = Alleen voor schermen. Wie je toestemming geeft, kan apps op het gedeelde scherm bedienen. Alleen RustTalk vraagt om toestemming.
 remote.allow_help = Ze kunnen je muis en toetsenbord gebruiken in wat je deelt. Je kunt het altijd terugnemen.
 remote.they = Ze
 remote.no_answer = {name} reageerde niet.

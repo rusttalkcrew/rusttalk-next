@@ -721,7 +721,7 @@ granted `session`, and only when `seq` is higher than the last one seen on
 the same lane (moves, or everything else), which drops replays and stale
 moves. Control ends when the sharer stops it, the viewer withdraws or stops
 watching, either leaves, or the share stops or switches to another source.
-The sharer then releases every key and button the controller still held.
+The sharer then releases held remote keys and buttons.
 
 The viewer sends input only while the screen's tile (or its full screen
 view) has the keyboard focus; holding Escape for one second stops
@@ -734,13 +734,29 @@ are dropped; releases always go through. Windows never lets an app inject
 Ctrl+Alt+Del, and it keeps input from reaching apps running as
 administrator unless RustTalk does too.
 
-Linux sharers answer `unsupported` for both monitor and window shares. The
-[RemoteDesktop portal](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.RemoteDesktop.html)
-scopes absolute pointer motion to a ScreenCast stream. Clicks and scrolls
-are separate calls that target the compositor's current pointer location,
-which local input can change after the move. Keystrokes follow the
-compositor's keyboard focus, which RustTalk cannot verify against the
-shared source. RustTalk requires input to stay within the shared source.
+On Hyprland, the sharer can enable control requests for each monitor share.
+ScreenCast supplies the selected output's name, and RustTalk binds a Wayland
+virtual pointer to that output. It uses a Wayland virtual keyboard with the
+seat keymap and the active layout at the start of control. RustTalk's Allow
+prompt is the only permission gate for input. Window shares, shares without
+the opt-in or a usable output identifier, and other Linux compositors answer
+`unsupported`. A source switch ends control and starts with a fresh opt-in.
+
+Before a click, scroll or key event, RustTalk checks the pointer is on the
+selected output through read-only Hyprland IPC. Keys also need a focused window
+on that output. A locked session, unavailable IPC or changed output geometry
+blocks input. Ctrl+Alt with Delete or a function key is blocked for the
+remote keyboard. RustTalk drops failed or stale events. On interruption and
+stop it releases only keys and buttons it actually injected and still holds.
+Observed local pointer or keyboard activity pauses input until the seat is
+idle for about 500 ms.
+
+There is a time-of-check/time-of-use race between the IPC snapshot and the
+compositor delivering an event. The pointer, focus or lock state can change
+in between. Hyprland reports local and virtual input through the same idle
+protocol, so local activity coincident with an injected event can also be
+coalesced into that event's notification. The pause reduces this race without
+eliminating it. Compositor shortcuts can still act beyond the shared output.
 
 The API gets the active roster from LiveKit's internal RoomService,
 cached for one second per room, and maps device identities to current

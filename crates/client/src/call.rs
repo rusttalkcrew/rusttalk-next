@@ -866,6 +866,7 @@ fn screen_options(s: &Settings) -> Options {
             .find(|f| *f == s.screen_fps)
             .unwrap_or(default.fps),
         cursor: s.screen_cursor,
+        remote_control: false,
     }
 }
 
@@ -875,19 +876,18 @@ fn remember_screen_options(s: &mut Settings, options: Options) {
     s.screen_cursor = options.cursor;
 }
 
-/// Switch the screen being shared. Linux opens the system picker at once; Windows lists
-/// screens and windows first. Closing either keeps the current share.
+/// Switch the screen being shared. Closing the picker keeps the current share.
 fn change_screen(ctx: &egui::Context, voice: &mut Voice, server: &Server) {
     if voice.sharing != Sharing::On {
         return;
     }
-    if cfg!(target_os = "linux") {
+    if cfg!(target_os = "linux") && !rusttalk_core::screen::linux_remote_control() {
         let portal = screen::targets()
             .ok()
             .and_then(|found| found.into_iter().find(|t| t.kind == Kind::Portal));
         if let Some(portal) = portal {
             voice.sharing = Sharing::Changing;
-            server.send(Command::ChangeScreen(portal));
+            server.send(Command::ChangeScreen(portal, false));
         }
     } else {
         voice.changing_screen = true;
@@ -917,6 +917,15 @@ fn open_screen_dialog(ctx: &egui::Context, voice: &mut Voice) {
         voice.stream_audio = voice.shares.clone();
     }
     fill(ctx, &voice.targets, "screens", screen::targets);
+}
+
+fn linux_control_option(ui: &mut Ui, enabled: &mut bool) {
+    ui::toggle_row(
+        ui,
+        enabled,
+        t!("remote.share_opt_in"),
+        t!("remote.share_warning"),
+    );
 }
 
 /// The t!("call.share_screen") dialog: what to share (Windows), quality, frame rate, cursor.
@@ -1016,6 +1025,9 @@ pub fn screen_dialog(ctx: &egui::Context, home: &mut Home) {
                 fill(ctx, &voice.apps, "apps", share::list);
             }
         }
+        if rusttalk_core::screen::linux_remote_control() {
+            linux_control_option(ui, &mut options.remote_control);
+        }
         ui::footer(ui, |ui| {
             let label = if portal.is_some() {
                 t!("call.choose_share")
@@ -1039,7 +1051,7 @@ pub fn screen_dialog(ctx: &egui::Context, home: &mut Home) {
         let options = *options;
         if changing {
             if let Some(server) = call_server(home) {
-                server.send(Command::ChangeScreen(target));
+                server.send(Command::ChangeScreen(target, options.remote_control));
                 home.voice.sharing = Sharing::Changing;
             }
         } else {
@@ -1436,6 +1448,7 @@ mod tests {
                         max_height,
                         fps,
                         cursor,
+                        ..Options::default()
                     };
                     let mut settings = Settings::default();
                     remember_screen_options(&mut settings, options);

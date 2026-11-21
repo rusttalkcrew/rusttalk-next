@@ -6390,6 +6390,7 @@ dependencies = [
  "rand 0.10.4",
  "rcgen",
  "reqwest",
+ "rustix 1.1.6",
  "rustls",
  "serde",
  "serde_json",
@@ -6401,9 +6402,14 @@ dependencies = [
  "tracing",
  "url",
  "wasapi",
+ "wayland-client",
+ "wayland-protocols",
+ "wayland-protocols-misc",
+ "wayland-protocols-wlr",
  "windows",
  "windows-capture",
  "x25519-dalek 2.0.1",
+ "xkbcommon",
  "zeroize",
 ]
 
@@ -9307,6 +9313,16 @@ name = "xcursor"
 version = "0.3.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "163b33ed8786455e2fa5d72f554057ce3f3182425434f756cd39c99839d88e23"
+
+[[package]]
+name = "xkbcommon"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d66ca9352cbd4eecbbc40871d8a11b4ac8107cfc528a6e14d7c19c69d0e1ac9"
+dependencies = [
+ "libc",
+ "xkeysym",
+]
 
 [[package]]
 name = "xkbcommon-dl"

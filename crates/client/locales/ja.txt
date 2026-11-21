@@ -684,6 +684,8 @@ call.stop_watching = 視聴をやめる
 call.exit_full_screen = 全画面を終了
 
 # crates/client/src/call/remote.rs
+remote.share_opt_in = 操作リクエストを許可
+remote.share_warning = モニター共有のみ。許可した相手は共有画面上のアプリを操作できます。操作の許可を求めるのは RustTalk のみです。
 remote.allow_help = 共有している画面の中で、相手があなたのマウスとキーボードを使えるようになります。いつでも取り戻せます。
 remote.they = 相手
 remote.no_answer = {name} から応答がありませんでした。
