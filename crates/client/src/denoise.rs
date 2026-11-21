@@ -148,7 +148,9 @@ impl Denoiser {
 }
 
 type Samples = [i16; FRAME];
+// Three model hops (30 ms) plus Mix's one reserved hop (10 ms) = 40 ms total.
 const MODEL_DELAY: usize = 3;
+const DRY_DELAY: usize = (MODEL_DELAY + 1) * FRAME;
 const DEADLINE: Duration = Duration::from_millis(8);
 const QUEUE: usize = 16;
 
@@ -165,12 +167,13 @@ pub struct Worker {
     thread: std::thread::Thread,
     sequence: u64,
     misses: usize,
+    budget: Duration,
 }
 
 impl Worker {
     pub fn start(mut model: Denoiser) -> Result<Self> {
         let mut strength = 0;
-        Self::spawn(move |samples, db| {
+        Self::spawn(DEADLINE, move |samples, db| {
             if db != strength {
                 model.model.set_atten_lim(f32::from(db));
                 strength = db;
@@ -180,6 +183,7 @@ impl Worker {
     }
 
     fn spawn(
+        budget: Duration,
         mut infer: impl FnMut(&mut Samples, u8) -> Result<()> + Send + 'static,
     ) -> Result<Self> {
         let (input, mut jobs) = rtrb::RingBuffer::<Job>::new(QUEUE);
@@ -213,6 +217,7 @@ impl Worker {
             thread: worker.thread().clone(),
             sequence: 0,
             misses: 0,
+            budget,
         })
     }
 
@@ -225,7 +230,7 @@ impl Worker {
     pub fn process(&mut self, samples: &Samples, strength: u8) -> Option<Samples> {
         let sequence = self.sequence;
         self.sequence += 1;
-        let deadline = Instant::now() + DEADLINE;
+        let deadline = Instant::now() + self.budget;
         if self
             .input
             .push(Job {
@@ -262,63 +267,84 @@ impl Worker {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Default)]
-enum PathKind {
-    #[default]
-    Live,
-    Dry,
-    Clean,
-}
-
-/// Keep one processed hop in reserve: on a miss, its clean and time-aligned
-/// dry versions are both available for a full fade before the missing hop plays.
+/// Keep one processed hop in reserve so a missed deadline can fade to the dry
+/// version of the same audio. Slide the dry read position when entering or
+/// leaving AI mode; jumping it four hops would repeat or omit part of a word.
 pub struct Mix {
-    dry: [Samples; MODEL_DELAY + 1],
-    next: usize,
+    dry: [i16; DRY_DELAY + FRAME],
+    write: usize,
+    delay: usize,
     pending: Option<Samples>,
-    path: PathKind,
+    playing_clean: bool,
 }
 
 impl Default for Mix {
     fn default() -> Self {
         Self {
-            dry: [[0; FRAME]; MODEL_DELAY + 1],
-            next: 0,
+            dry: [0; DRY_DELAY + FRAME],
+            write: 0,
+            delay: 0,
             pending: None,
-            path: PathKind::Live,
+            playing_clean: false,
         }
     }
 }
 
 impl Mix {
+    fn dry_frame(&mut self, live: &Samples, delayed: bool) -> Samples {
+        let size = self.dry.len();
+        self.dry[self.write..self.write + FRAME].copy_from_slice(live);
+        // Change playback speed by 5% for 800 ms. At either end the dry path
+        // copies whole samples without interpolation or a permanent extra delay.
+        let next = if delayed {
+            (self.delay + FRAME / 20).min(DRY_DELAY)
+        } else {
+            self.delay.saturating_sub(FRAME / 20)
+        };
+        let read = self.write + size - self.delay;
+        let samples = if next == self.delay {
+            let start = read % size;
+            self.dry[start..start + FRAME]
+                .try_into()
+                .expect("hop aligned")
+        } else {
+            std::array::from_fn(|i| {
+                let offset = i as f32 + (self.delay as f32 - next as f32) * i as f32 / FRAME as f32;
+                let index = (read + offset as usize) % size;
+                let a = f32::from(self.dry[index]);
+                let b = f32::from(self.dry[(index + 1) % size]);
+                (a + offset.fract() * (b - a)).round() as i16
+            })
+        };
+        self.write = (self.write + FRAME) % size;
+        self.delay = next;
+        samples
+    }
+
     pub fn apply(&mut self, live: &mut Samples, clean: Option<Samples>, enabled: bool) {
-        let delayed = std::mem::replace(&mut self.dry[self.next], *live);
-        self.next = (self.next + 1) % self.dry.len();
+        let aligned = self.delay == DRY_DELAY;
+        // Fade clean to aligned dry first, then drain the delay on following hops.
+        let dry = self.dry_frame(live, enabled || self.playing_clean);
         let ready = clean.is_some();
         let previous = std::mem::replace(&mut self.pending, clean);
-        let target = if enabled && ready && previous.is_some() {
-            PathKind::Clean
-        } else if enabled && self.path != PathKind::Live {
-            PathKind::Dry
-        } else {
-            PathKind::Live
-        };
-        let signal = |path| match path {
-            PathKind::Clean => previous.as_ref().expect("previous clean frame"),
-            PathKind::Dry => &delayed,
-            PathKind::Live => &*live,
-        };
-        let from = signal(self.path);
-        let to = signal(target);
-        *live = if self.path == target {
-            *to
-        } else {
+        let play_clean = enabled && aligned && ready && previous.is_some();
+        *live = if self.playing_clean != play_clean {
+            let wet = previous.expect("reserved clean hop");
+            let (from, to) = if play_clean {
+                (&dry, &wet)
+            } else {
+                (&wet, &dry)
+            };
             std::array::from_fn(|i| {
                 let weight = i as f32 / (FRAME - 1) as f32;
                 (f32::from(from[i]) * (1.0 - weight) + f32::from(to[i]) * weight).round() as i16
             })
+        } else if play_clean {
+            previous.expect("reserved clean hop")
+        } else {
+            dry
         };
-        self.path = target;
+        self.playing_clean = play_clean;
     }
 }
 
@@ -330,7 +356,7 @@ mod tests {
 
     #[test]
     fn bursts_of_four_and_five_keep_processed_output() {
-        let mut worker = Worker::spawn(|samples, _| {
+        let mut worker = Worker::spawn(Duration::from_secs(1), |samples, _| {
             std::thread::sleep(Duration::from_micros(250));
             samples[0] += 1;
             Ok(())
@@ -352,7 +378,7 @@ mod tests {
 
     #[test]
     fn persistent_deadline_misses_request_a_fresh_worker() {
-        let mut worker = Worker::spawn(|_, _| {
+        let mut worker = Worker::spawn(DEADLINE, |_, _| {
             std::thread::sleep(DEADLINE * 4);
             Ok(())
         })
@@ -366,20 +392,45 @@ mod tests {
     #[test]
     fn missed_hops_fade_to_aligned_dry_and_back() {
         let mut mix = Mix::default();
+        for _ in 0..80 {
+            mix.apply(&mut [100; FRAME], None, true);
+        }
         for i in 0..12 {
             let mut samples = [100 + i; FRAME];
             let clean = (i >= 3 && i != 6 && i != 10).then_some([500 + i; FRAME]);
             mix.apply(&mut samples, clean, i < 10);
             let endpoints = match i {
-                4 => (104, 503), // live to clean
+                4 => (100, 503), // delayed dry to clean
                 6 => (505, 102), // clean to aligned dry
                 7 => (103, 103),
                 8 => (104, 507),
-                10 => (509, 110), // disabled mid-call
+                10 => (509, 106), // disabled mid-call
                 _ => continue,
             };
             assert_eq!((samples[0], samples[FRAME - 1]), endpoints);
         }
+    }
+
+    #[test]
+    fn switching_delay_keeps_the_dry_read_position_continuous() {
+        let mut mix = Mix::default();
+        let triangle = |i: usize| ((i % 20000) as i16 - 10000).abs();
+        let mut last = triangle(0);
+        for hop in 0..200 {
+            let mut samples = std::array::from_fn(|i| triangle(hop * FRAME + i));
+            mix.apply(&mut samples, None, (5..100).contains(&hop));
+            for sample in samples {
+                assert!(
+                    last.abs_diff(sample) <= 2,
+                    "dry read position jumped at hop {hop}"
+                );
+                last = sample;
+            }
+            if hop == 90 {
+                assert_eq!(last, triangle((hop + 1) * FRAME - 1 - DRY_DELAY));
+            }
+        }
+        assert_eq!(mix.delay, 0);
     }
 
     #[test]

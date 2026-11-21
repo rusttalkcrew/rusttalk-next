@@ -260,6 +260,8 @@ struct Shared {
     settings: Mutex<Settings>,
     /// Bumped when the processing toggles change, so the mic thread rebuilds its module.
     processing: AtomicU64,
+    /// Each call or AI switch gets a fresh recovery budget, even while capture is idle.
+    ai_session: AtomicU64,
     /// In a voice room: open both devices and feed the source.
     voice: AtomicBool,
     /// Settings are open: open the microphone for the meter.
@@ -368,6 +370,7 @@ impl Audio {
             file,
             settings: Mutex::new(settings),
             processing: AtomicU64::new(0),
+            ai_session: AtomicU64::new(0),
             voice: AtomicBool::new(false),
             testing: AtomicBool::new(false),
             key_down: AtomicBool::new(false),
@@ -442,6 +445,9 @@ impl Audio {
             return;
         }
         let toggles = |s: &Settings| (s.echo_cancellation, s.noise_suppression, s.ai_noise);
+        if current.ai_noise != settings.ai_noise {
+            self.shared().ai_session.fetch_add(1, Relaxed);
+        }
         if toggles(&current) != toggles(&settings) {
             self.shared().processing.fetch_add(1, Relaxed);
         }
@@ -457,6 +463,7 @@ impl Audio {
 
     /// Joined a voice room.
     pub fn start_voice(&self) {
+        self.shared().ai_session.fetch_add(1, Relaxed);
         self.shared().voice.store(true, Relaxed);
         self.refresh();
     }
@@ -756,7 +763,7 @@ impl NoiseFloor {
         let target = percentile(&self.blocks[..self.filled], NOISE_PERCENTILE).expect("filled");
         // Silent history also cannot lower sensitivity when the room sound resumes.
         if target >= AUTO_MIN_DB - AUTO_MARGIN_DB {
-            self.floor = target.clamp(self.floor - 0.2, self.floor + NOISE_RISE_DB);
+            self.floor = target.clamp(self.floor - 2.0, self.floor + NOISE_RISE_DB);
         }
     }
 
@@ -1211,6 +1218,17 @@ impl VoiceGain {
             self.learned +=
                 (target - self.learned) * if target < self.learned { 0.25 } else { 0.005 };
         }
+        self.ramp(frame);
+    }
+
+    fn reset(&mut self, frame: &mut [i16; FRAME]) {
+        self.learned = 1.0;
+        if self.applied != 1.0 {
+            self.ramp(frame);
+        }
+    }
+
+    fn ramp(&mut self, frame: &mut [i16; FRAME]) {
         let peak = frame
             .iter()
             .map(|x| x.unsigned_abs())
@@ -1229,29 +1247,58 @@ impl VoiceGain {
     }
 }
 
-/// Retry after five seconds of microphone audio delivered at capture speed.
-/// Checking across the whole interval tolerates bursty device callbacks.
+/// Probe after 5, 10, 20 and 40 seconds of steady capture. After four failed
+/// probes stay dry until a new call or an explicit change to the AI switch.
+#[derive(Default)]
 struct Recovery {
-    start: Instant,
+    attempts: u32,
+    since: Option<Instant>,
     frames: u32,
+    clean: u32,
+    paused: bool,
 }
 
 impl Recovery {
-    fn new(now: Instant) -> Self {
-        Self {
-            start: now,
-            frames: 0,
-        }
+    fn fail(&mut self, now: Instant) {
+        self.paused = true;
+        self.since = Some(now);
+        self.frames = 0;
+        self.clean = 0;
     }
 
     fn ready(&mut self, now: Instant) -> bool {
-        self.frames += 1;
-        if self.frames < 500 {
+        let Some(start) = self.since else {
+            return false;
+        };
+        if self.attempts >= 4 {
             return false;
         }
-        let elapsed = now.duration_since(self.start);
-        *self = Self::new(now);
-        (Duration::from_millis(4800)..=Duration::from_millis(5200)).contains(&elapsed)
+        let seconds = 5 << self.attempts;
+        self.frames += 1;
+        if self.frames < 100 * seconds {
+            return false;
+        }
+        self.frames = 0;
+        let millis = u128::from(seconds) * 1000;
+        if now.duration_since(start).as_millis().abs_diff(millis) > 200 {
+            self.since = Some(now);
+            return false;
+        }
+        self.since = None;
+        self.attempts += 1;
+        true
+    }
+
+    fn confirmed(&mut self, clean: bool) -> bool {
+        if !self.paused || self.since.is_some() {
+            return false;
+        }
+        self.clean = if clean { self.clean + 1 } else { 0 };
+        if self.clean < 200 {
+            return false;
+        }
+        self.paused = false;
+        true
     }
 }
 
@@ -1259,10 +1306,12 @@ impl Recovery {
 fn process(shared: &Shared, frames: &Receiver<Mic>) {
     let mut built = u64::MAX;
     let mut apm = None;
+    let mut apm_config = None;
+    let mut session = 0;
     let mut denoiser: Option<Worker> = None;
     let mut loading: Option<thread::JoinHandle<Result<denoise::Denoiser>>> = None;
     let mut ai_enabled = false;
-    let mut recovery: Option<Recovery> = None;
+    let mut recovery = Recovery::default();
     let mut mix = denoise::Mix::default();
     let mut gain = VoiceGain::default();
     let mut framer = Framer::default();
@@ -1271,23 +1320,35 @@ fn process(shared: &Shared, frames: &Receiver<Mic>) {
     let mut check = mic_check::Detector::default();
     while let Ok(message) = frames.recv() {
         let wanted = shared.processing.load(Relaxed);
-        if wanted != built {
+        let current_session = shared.ai_session.load(Relaxed);
+        if wanted != built || current_session != session {
+            if current_session != session {
+                session = current_session;
+                recovery = Recovery::default();
+                shared.ai_failed.store(false, Relaxed);
+            }
             let s = shared.settings();
             built = wanted;
             ai_enabled = s.ai_noise;
             if !ai_enabled {
                 denoiser = None;
-                recovery = None;
                 shared.ai_failed.store(false, Relaxed);
             } else if denoiser.is_none()
                 && loading.is_none()
-                && recovery.is_none()
+                && !recovery.paused
                 && *lock(&shared.model) == Model::Ready
             {
                 let file = shared.model_file.clone();
                 loading = Some(thread::spawn(move || denoise::load(&file)));
             }
-            apm = Some(build_apm(&s, denoiser.is_some()));
+            // Keep the echo canceller and classic suppression running unchanged while
+            // a replacement model proves it can meet deadlines.
+            let use_ai = denoiser.is_some() && !recovery.paused;
+            let config = (s.echo_cancellation, s.noise_suppression && !use_ai);
+            if apm_config != Some(config) {
+                apm = Some(build_apm(&s, use_ai));
+                apm_config = Some(config);
+            }
         }
         if loading.as_ref().is_some_and(|job| job.is_finished()) {
             match loading
@@ -1300,12 +1361,14 @@ fn process(shared: &Shared, frames: &Receiver<Mic>) {
                 Ok(model) => match Worker::start(model) {
                     Ok(worker) => {
                         denoiser = Some(worker);
-                        shared.ai_failed.store(false, Relaxed);
-                        apm = Some(build_apm(&shared.settings(), true));
+                        if !recovery.paused {
+                            shared.ai_failed.store(false, Relaxed);
+                            built = u64::MAX;
+                        }
                     }
                     Err(error) => {
                         tracing::warn!(%error, "starting AI noise removal worker failed");
-                        recovery = Some(Recovery::new(Instant::now()));
+                        recovery.fail(Instant::now());
                         shared.ai_failed.store(true, Relaxed);
                     }
                 },
@@ -1316,6 +1379,7 @@ fn process(shared: &Shared, frames: &Receiver<Mic>) {
                         tracing::warn!(%error, "removing unusable noise model failed");
                     }
                     *lock(&shared.model) = Model::Missing;
+                    recovery = Recovery::default();
                 }
             }
         }
@@ -1354,19 +1418,26 @@ fn process(shared: &Shared, frames: &Receiver<Mic>) {
             let clean = denoiser
                 .as_mut()
                 .and_then(|worker| worker.process(&frame, strength));
-            mix.apply(&mut frame, clean, ai_enabled);
+            let paused = recovery.paused;
+            // Probe silently; keep the dry path and its notice until two clean seconds.
+            let confirmed = recovery.confirmed(clean.is_some());
+            mix.apply(
+                &mut frame,
+                clean.filter(|_| !paused),
+                denoiser.is_some() || paused,
+            );
+            if confirmed {
+                shared.ai_failed.store(false, Relaxed);
+                built = u64::MAX;
+            }
             if denoiser.as_ref().is_some_and(Worker::overloaded) {
                 tracing::warn!("AI noise removal paused after missed audio deadlines");
                 denoiser = None;
-                recovery = Some(Recovery::new(Instant::now()));
+                recovery.fail(Instant::now());
                 shared.ai_failed.store(true, Relaxed);
-                *apm = build_apm(&shared.settings(), false);
+                built = u64::MAX;
             }
-            if recovery
-                .as_mut()
-                .is_some_and(|retry| retry.ready(Instant::now()))
-            {
-                recovery = None;
+            if recovery.ready(Instant::now()) {
                 let file = shared.model_file.clone();
                 loading = Some(thread::spawn(move || denoise::load(&file)));
             }
@@ -1409,7 +1480,7 @@ fn process(shared: &Shared, frames: &Receiver<Mic>) {
             if auto_gain {
                 gain.apply(&mut frame, db, threshold);
             } else {
-                gain = VoiceGain::default();
+                gain.reset(&mut frame);
             }
             if !open {
                 frame.fill(0);
@@ -1591,15 +1662,65 @@ mod tests {
     }
 
     #[test]
-    fn recovery_requires_sustained_capture_timing() {
-        let start = Instant::now();
-        let mut retry = Recovery::new(start);
-        for _ in 0..500 {
-            assert!(!retry.ready(start));
+    fn turning_off_gain_ramps_back_to_unity_in_one_hop() {
+        let mut gain = VoiceGain {
+            learned: 4.0,
+            applied: 4.0,
+        };
+        let mut frame = [1000; FRAME];
+        gain.reset(&mut frame);
+        assert!(frame[0] > 3900);
+        assert!(frame.windows(2).all(|w| w[0] >= w[1] && w[0] - w[1] <= 7));
+        assert_eq!(frame[FRAME - 1], 1000);
+    }
+
+    #[test]
+    fn recovery_backs_off_and_stops_after_four_probes() {
+        let mut now = Instant::now();
+        let mut retry = Recovery::default();
+        for seconds in [5, 10, 20, 40] {
+            retry.fail(now);
+            for i in 1..=seconds * 100 {
+                now += Duration::from_millis(10);
+                assert_eq!(retry.ready(now), i == seconds * 100);
+            }
+            assert!(retry.paused);
         }
-        for i in 1..=500 {
-            assert_eq!(retry.ready(start + Duration::from_millis(i * 10)), i == 500);
+        retry.fail(now);
+        for _ in 0..10000 {
+            now += Duration::from_millis(10);
+            assert!(!retry.ready(now));
         }
+        assert!(retry.paused);
+    }
+
+    #[test]
+    fn retry_needs_two_uninterrupted_clean_seconds() {
+        let mut retry = Recovery {
+            attempts: 1,
+            paused: true,
+            ..Default::default()
+        };
+        for _ in 0..199 {
+            assert!(!retry.confirmed(true));
+        }
+        assert!(!retry.confirmed(false));
+        for _ in 0..199 {
+            assert!(!retry.confirmed(true));
+        }
+        assert!(retry.paused);
+        assert!(retry.confirmed(true));
+        assert!(!retry.paused);
+        assert_eq!(retry.attempts, 1);
+    }
+
+    #[test]
+    fn vacuum_stops_and_quiet_speech_opens_within_two_seconds() {
+        let (mut noise, mut gate) = (NoiseFloor::default(), Gate::default());
+        feed(&mut noise, &mut gate, -35.0, 30.0);
+        assert_eq!(noise.threshold(), AUTO_MAX_DB);
+        feed(&mut noise, &mut gate, -68.0, 2.0);
+        assert!(gate.update(-50.0, noise.threshold()));
     }
 
     #[test]
