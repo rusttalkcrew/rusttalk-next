@@ -704,6 +704,19 @@ call.cancel_request = Cancel request
 call.stop_control = Stop control
 call.stop_watching = Stop watching
 call.exit_full_screen = Exit full screen
+call.show_fps = Show FPS
+call.stats_for_nerds = Stats for nerds
+call.stat_picture = Picture
+call.stat_bitrate = Bitrate
+call.stat_codec = Codec
+call.stat_decoder = Decoder
+call.stat_encoder = Encoder
+call.stat_loss = Packet loss
+call.stat_rtt = Round trip
+call.stat_decoded = Decoded
+call.stat_dropped = Dropped
+call.stat_encoded = Encoded
+call.stat_limited = Limited by
 
 # crates/client/src/call/remote.rs
 remote.share_opt_in = Allow control requests

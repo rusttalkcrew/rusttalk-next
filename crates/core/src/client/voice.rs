@@ -51,7 +51,7 @@ use crate::{
 use super::KeyClient;
 pub use live_file::{DataLiveFiles, LiveDownload, LiveFileEvent};
 pub use screen::{NativeVideoSource, NativeVideoStream, RemoteVideo, RemoteVideoTrack};
-pub use stats::{CallTraffic, TrackStats, Traffic, VideoFormat, VoiceStats};
+pub use stats::{CallTraffic, TrackStats, Traffic, VideoDetail, VideoFormat, VoiceStats};
 
 /// Derive a 32-byte media key for one server, channel and channel-key epoch.
 pub fn media_key(channel_key: &Key, server: &[u8; 32], channel: &[u8; 32], epoch: i64) -> Key {

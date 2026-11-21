@@ -44,6 +44,9 @@ pub struct Split {
     pub stage_hidden: bool,
     /// Only cameras and screens on the stage.
     pub video_only: bool,
+    /// The overlays on screen tiles (see `call::overlay`).
+    pub show_fps: bool,
+    pub nerd_stats: bool,
 }
 
 impl Split {
@@ -55,6 +58,8 @@ impl Split {
             // Never both hidden: the call wins.
             stage_hidden: settings.call_stage_hidden && !settings.call_chat_hidden,
             video_only: settings.call_video_only,
+            show_fps: settings.call_show_fps,
+            nerd_stats: settings.call_nerd_stats,
         }
     }
 }
@@ -175,6 +180,8 @@ impl Layout {
         settings.call_chat_hidden = now.split.chat_hidden;
         settings.call_stage_hidden = now.split.stage_hidden;
         settings.call_video_only = now.split.video_only;
+        settings.call_show_fps = now.split.show_fps;
+        settings.call_nerd_stats = now.split.nerd_stats;
         audio.set_settings(settings);
     }
 }
@@ -407,12 +414,14 @@ mod tests {
             call_split: 0.3,
             call_chat_hidden: true,
             call_video_only: true,
+            call_show_fps: true,
             ..Settings::default()
         };
         let saved = serde_json::to_string(&settings).unwrap();
         let loaded: Settings = serde_json::from_str(&saved).unwrap();
         let split = Layout::new(&loaded).split;
         assert!(split.side_by_side && split.chat_hidden && split.video_only);
+        assert!(split.show_fps && !split.nerd_stats);
         assert!(!split.stage_hidden);
         assert_eq!(split.ratio, 0.3);
     }

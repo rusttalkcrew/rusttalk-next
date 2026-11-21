@@ -1,7 +1,11 @@
 use std::{collections::HashMap, time::Instant};
 
 use anyhow::Result;
-use livekit::{Room, e2ee::EncryptionType, webrtc::stats::RtcStats};
+use livekit::{
+    Room,
+    e2ee::EncryptionType,
+    webrtc::stats::{QualityLimitationReason, RtcStats},
+};
 
 use super::{ParticipantIdentity, TrackSid, TrackSource};
 
@@ -24,6 +28,8 @@ pub struct TrackStats {
     pub bitrate_bps: Option<f64>,
     /// Video only: the picture received, or the biggest layer sent.
     pub video: Option<VideoFormat>,
+    /// Video only: what the "Stats for nerds" overlay adds.
+    pub detail: Option<VideoDetail>,
 }
 
 /// The size and frame rate a video track is running at.
@@ -32,6 +38,21 @@ pub struct VideoFormat {
     pub width: u32,
     pub height: u32,
     pub fps: f64,
+}
+
+/// Codec and frame counters of a video track, for the biggest layer of a sent one.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct VideoDetail {
+    /// For example "video/VP9".
+    pub codec: Option<String>,
+    /// The decoder (received) or encoder (sent) implementation.
+    pub implementation: Option<String>,
+    /// Frames decoded (received) or encoded (sent) since the track started.
+    pub frames: u32,
+    /// Received frames the decoder dropped; `None` for a sent track.
+    pub dropped: Option<u32>,
+    /// Sent video the encoder holds back: "cpu" or "bandwidth".
+    pub limited_by: Option<&'static str>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -169,6 +190,7 @@ impl VoiceStats {
             packets_received: None,
             bitrate_bps: None,
             video: None,
+            detail: None,
         };
         let bytes = measure(report, &mut track, counters);
         self.traffic.add(source, outbound, &track, bytes);
@@ -182,16 +204,30 @@ fn measure(report: &[RtcStats], track: &mut TrackStats, samples: &mut Samples) -
     let mut new_bytes = 0;
     let now = Instant::now();
     // Audio reports no frame size. Of several sent layers, show the biggest.
-    let video = |track: &mut TrackStats, width, height, fps| {
+    let video = |track: &mut TrackStats, width, height, fps, detail| {
         if width > track.video.map_or(0, |video| video.width) {
             track.video = Some(VideoFormat { width, height, fps });
+            track.detail = Some(detail);
         }
     };
     for stat in report {
         let (id, bytes) = match stat {
             RtcStats::InboundRtp(stat) if !track.outbound => {
                 let i = &stat.inbound;
-                video(track, i.frame_width, i.frame_height, i.frames_per_second);
+                let detail = VideoDetail {
+                    codec: codec(report, &stat.stream.codec_id),
+                    implementation: named(&i.decoder_implementation),
+                    frames: i.frames_decoded,
+                    dropped: Some(i.frames_dropped),
+                    limited_by: None,
+                };
+                video(
+                    track,
+                    i.frame_width,
+                    i.frame_height,
+                    i.frames_per_second,
+                    detail,
+                );
                 track.jitter_ms = max(track.jitter_ms, stat.received.jitter * 1000.0);
                 *track.packets_lost.get_or_insert(0) += stat.received.packets_lost;
                 *track.packets_received.get_or_insert(0) += stat.received.packets_received;
@@ -199,7 +235,24 @@ fn measure(report: &[RtcStats], track: &mut TrackStats, samples: &mut Samples) -
             }
             RtcStats::OutboundRtp(stat) if track.outbound => {
                 let o = &stat.outbound;
-                video(track, o.frame_width, o.frame_height, o.frames_per_second);
+                let detail = VideoDetail {
+                    codec: codec(report, &stat.stream.codec_id),
+                    implementation: named(&o.encoder_implementation),
+                    frames: o.frames_encoded,
+                    dropped: None,
+                    limited_by: match o.quality_limitation_reason {
+                        QualityLimitationReason::Cpu => Some("cpu"),
+                        QualityLimitationReason::Bandwidth => Some("bandwidth"),
+                        _ => None,
+                    },
+                };
+                video(
+                    track,
+                    o.frame_width,
+                    o.frame_height,
+                    o.frames_per_second,
+                    detail,
+                );
                 (&stat.rtc.id, stat.sent.bytes_sent)
             }
             RtcStats::RemoteInboundRtp(stat) if track.outbound => {
@@ -223,6 +276,18 @@ fn measure(report: &[RtcStats], track: &mut TrackStats, samples: &mut Samples) -
         }
     }
     new_bytes
+}
+
+fn named(text: &str) -> Option<String> {
+    (!text.is_empty()).then(|| text.to_owned())
+}
+
+/// The codec an RTP stream refers to, if the report carries it.
+fn codec(report: &[RtcStats], id: &str) -> Option<String> {
+    report.iter().find_map(|stat| match stat {
+        RtcStats::Codec(stat) if stat.rtc.id == id => named(&stat.codec.mime_type),
+        _ => None,
+    })
 }
 
 fn ping(report: &[RtcStats]) -> Option<f64> {
@@ -319,6 +384,41 @@ mod tests {
         assert_eq!(stats.traffic.total()[0].bytes, 10_000);
         assert_eq!(samples.len(), 2);
         assert_eq!(samples["h"].0, 9_000);
+    }
+
+    #[test]
+    fn received_video_reports_codec_and_decoder() {
+        let mut codec = livekit::webrtc::stats::CodecStats::default();
+        codec.rtc.id = "codec".into();
+        codec.codec.mime_type = "video/VP9".into();
+        let mut inbound = InboundRtpStats::default();
+        inbound.rtc.id = "rtp".into();
+        inbound.stream.codec_id = "codec".into();
+        inbound.inbound.decoder_implementation = "libvpx".into();
+        (inbound.inbound.frame_width, inbound.inbound.frame_height) = (1280, 720);
+        (
+            inbound.inbound.frames_decoded,
+            inbound.inbound.frames_dropped,
+        ) = (300, 4);
+        let report = [RtcStats::Codec(codec), RtcStats::InboundRtp(inbound)];
+        let mut stats = snapshot(CallTraffic::default());
+        record(
+            &mut stats,
+            TrackSource::Screenshare,
+            false,
+            &report,
+            &mut HashMap::new(),
+        );
+        assert_eq!(
+            stats.tracks[0].detail,
+            Some(VideoDetail {
+                codec: Some("video/VP9".into()),
+                implementation: Some("libvpx".into()),
+                frames: 300,
+                dropped: Some(4),
+                limited_by: None,
+            })
+        );
     }
 
     #[test]

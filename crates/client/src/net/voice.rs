@@ -1116,7 +1116,9 @@ pub(super) async fn voice_stats(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, st
                     } else {
                         *ids.get(t.participant.as_str())?
                     },
+                    sid: t.sid.to_string(),
                     mine: t.outbound,
+                    screen: live.screen.as_ref().is_some_and(|(sid, ..)| *sid == t.sid),
                     app: live
                         .apps
                         .get(&t.sid)
@@ -1128,6 +1130,10 @@ pub(super) async fn voice_stats(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, st
                         .cloned(),
                     kbps: t.bitrate_bps? / 1000.0,
                     video: t.video,
+                    detail: t.detail.clone(),
+                    jitter_ms: t.jitter_ms,
+                    lost: t.packets_lost,
+                    received: t.packets_received,
                 })
             })
             .collect(),

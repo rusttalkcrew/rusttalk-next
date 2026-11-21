@@ -701,6 +701,19 @@ call.cancel_request = 依頼をキャンセル
 call.stop_control = 操作を終了
 call.stop_watching = 視聴をやめる
 call.exit_full_screen = 全画面を終了
+call.show_fps = FPSを表示
+call.stats_for_nerds = 詳細統計
+call.stat_picture = 映像
+call.stat_bitrate = ビットレート
+call.stat_codec = コーデック
+call.stat_decoder = デコーダー
+call.stat_encoder = エンコーダー
+call.stat_loss = パケットロス
+call.stat_rtt = 往復時間
+call.stat_decoded = デコード済み
+call.stat_dropped = 破棄
+call.stat_encoded = エンコード済み
+call.stat_limited = 制限要因
 
 # crates/client/src/call/remote.rs
 remote.share_opt_in = 操作リクエストを許可
