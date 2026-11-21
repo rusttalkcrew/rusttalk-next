@@ -39,7 +39,7 @@ pub fn rows(tile: &Tile, focused: bool, picture: bool, watched: bool, sound: boo
     match tile {
         Tile::Screen(_) if watched => rows.push(Row::StopWatching),
         Tile::Preview => rows.push(Row::HidePreview),
-        Tile::Screen(_) | Tile::Person(_) => {}
+        Tile::Screen(_) | Tile::Person(_) | Tile::Terminal(_) => {}
     }
     if sound && watched {
         rows.push(Row::Volume);
@@ -63,7 +63,7 @@ impl Overlay {
             stats.tracks.iter().find(|track| match tile {
                 Tile::Screen(sid) => !track.mine && track.sid == *sid,
                 Tile::Preview => track.mine && track.screen,
-                Tile::Person(_) => false,
+                Tile::Person(_) | Tile::Terminal(_) => false,
             })
         });
         Self {

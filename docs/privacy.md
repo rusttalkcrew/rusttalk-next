@@ -171,6 +171,17 @@ media key and bound to both devices, so LiveKit can't read, forge or
 redirect them, and replayed input is dropped. Nothing about remote control is stored by the API, by
 LiveKit or on either device.
 
+For a shared terminal, LiveKit sees the `rusttalk.terminal` attribute
+(that a device shares a terminal, and when), which devices watch it, and the
+sizes and timing of the sealed data packets, which reveal roughly how much
+the terminal prints and when. The output, the terminal's size and what
+viewers ask for are encrypted and authenticated with keys derived from the
+room's media key, and each message is bound to its sender and recipient.
+Everyone watching sees everything the terminal shows, so the app warns the
+first time someone shares one. Nothing about a shared terminal is stored by
+the API or LiveKit; the output lives only in each device's memory while it
+is shown.
+
 On Linux, RustTalk shares video through the ScreenCast portal. Hyprland
 monitor shares can opt into control requests for that share, and the sharer
 must still approve each request in RustTalk. The portal grants screen

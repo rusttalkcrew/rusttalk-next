@@ -47,6 +47,7 @@ mod control;
 mod directory;
 mod files;
 mod find;
+mod terminal;
 mod voice;
 
 pub use admin::{Admin, AdminUpdate, AuditEntry, Ban, Invite, PublicListing};
@@ -159,6 +160,11 @@ pub enum Command {
     StopControl,
     /// Input for the screen we control.
     ControlInput(Vec<rusttalk_core::control::Input>),
+    /// Share our terminal in the call; its output is read from here.
+    ShareTerminal(crate::terminal::Shared),
+    StopTerminal,
+    /// Watch the terminal this device (LiveKit identity) shares, or stop watching.
+    WatchTerminal(Option<String>),
 }
 
 /// A message to send, and what goes back to the composer when sending fails.
@@ -299,6 +305,10 @@ pub enum Update {
     Control(ControlView),
     /// Asking for, or controlling, this screen (track ID) ended, and why.
     ControlEnded(String, Ended),
+    /// What to show of the terminal we watch.
+    Terminal(rusttalk_core::terminal::Feed),
+    /// Our terminal share couldn't start.
+    TerminalStopped,
     Stats(Url, Stats),
     /// A file upload in a channel started or went on (what to show, and how far), or ended.
     Uploading(Url, Id, Option<(String, f32)>),
@@ -1082,8 +1092,22 @@ async fn voice_next(
         Next::Event(Some(RoomEvent::DataReceived {
             payload,
             participant: Some(participant),
+            topic,
             ..
-        })) => voice::control_received(ctx, client, state, &participant, &payload).await,
+        })) => {
+            if topic.as_deref() == Some(rusttalk_core::client::voice::terminal::TOPIC) {
+                if let Some(live) = &mut state.voice {
+                    terminal::received(ctx, live, &participant.identity(), &payload).await;
+                }
+            } else {
+                voice::control_received(ctx, client, state, &participant, &payload).await;
+            }
+        }
+        Next::Flush => {
+            if let Some(live) = &mut state.voice {
+                terminal::flush(live).await;
+            }
+        }
         Next::Event(event) => {
             let lost = match &event {
                 Some(RoomEvent::ParticipantPermissionChanged {
@@ -1564,7 +1588,10 @@ async fn on_command(
         | Command::ReleaseControl
         | Command::AnswerControl(..)
         | Command::StopControl
-        | Command::ControlInput(_) => unreachable!("handled by voice_command"),
+        | Command::ControlInput(_)
+        | Command::ShareTerminal(_)
+        | Command::StopTerminal
+        | Command::WatchTerminal(_) => unreachable!("handled by voice_command"),
     }
     Ok(())
 }

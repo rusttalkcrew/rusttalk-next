@@ -1209,3 +1209,14 @@ hotkeys.join_first = Ga eerst naar een spraakkanaal.
 hotkeys.no_window = Geen venster om te delen. Klik eerst op het venster en probeer het dan opnieuw.
 hotkeys.unavailable = Globale sneltoetsen zijn op deze computer nu niet beschikbaar.
 hotkeys.no_screen_access = Sta schermopname toe voor RustTalk in Systeeminstellingen en open RustTalk daarna opnieuw.
+
+# crates/client/src/call/terminal.rs
+call.share_terminal = Terminal delen
+call.stop_terminal = Terminal niet meer delen
+call.share_cmd = Opdrachtprompt delen
+call.your_terminal = Jouw terminal
+call.someones_terminal = Terminal van {name}
+terminal.failed = De terminal kon niet starten.
+terminal.warn_title = Je terminal delen?
+terminal.warn_text = Iedereen die kijkt ziet alles erin, ook wachtwoorden of sleutels die in beeld komen. Alleen jij kunt erin typen.
+terminal.share = Delen

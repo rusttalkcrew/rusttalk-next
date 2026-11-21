@@ -24,6 +24,9 @@ Chat Markdown and bundled syntax highlighting:
 Link previews of other websites:
 - html5ever, Copyright 2014-2017 The html5ever Project Developers.
 
+Shared terminals:
+- portable-pty, Copyright (c) 2018 Wez Furlong.
+
 Wayland clipboard and file drops (vendored and patched in crates/smithay-clipboard):
 - smithay-clipboard, Copyright (c) 2018 Lucas Timmins & Victor Berger.
 

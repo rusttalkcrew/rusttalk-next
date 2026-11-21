@@ -15,7 +15,9 @@ use super::{
     Sharing, Voice, call_server, join, mixer,
     overlay::{self, Overlay, Row},
     remote::Control,
-    ring, sound_badges, stop_watching, upload, watch,
+    ring, sound_badges, stop_watching,
+    terminal::{self, Terminals},
+    upload, watch,
 };
 use crate::{
     friends::Relation,
@@ -47,13 +49,21 @@ const TOOL: Vec2 = Vec2::splat(28.0);
 /// The badge after a tile's name.
 const BADGE: f32 = 22.0;
 
-/// What a tile shows: a person (their camera or picture), a shared screen, or the
-/// preview of our own.
+/// What a tile shows: a person (their camera or picture), a shared screen, the
+/// preview of our own, or a person's shared terminal.
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub enum Tile {
     Person(Id),
     Screen(String),
     Preview,
+    Terminal(Id),
+}
+
+impl Tile {
+    /// Shared rather than a person: what presentation mode shows big.
+    fn shared(&self) -> bool {
+        matches!(self, Tile::Screen(_) | Tile::Preview | Tile::Terminal(_))
+    }
 }
 
 /// The stage's choices for this call only; they reset when it ends.
@@ -332,6 +342,9 @@ enum Act {
     ReleaseControl,
     /// Input for the screen we control.
     Control(Vec<Input>),
+    /// Watch the terminal this device shares.
+    WatchTerminal(String),
+    StopWatchingTerminal,
 }
 
 /// The tiles in this room: shared screens first, then people.
@@ -363,6 +376,28 @@ fn entries<'p>(
                 picture: preview_picture(ctx, voice),
                 video: true,
                 watched: false,
+                speaking: false,
+            });
+        }
+        let sharing = if me {
+            voice.terminals.local.is_some()
+        } else {
+            peer.terminal.is_some()
+        };
+        if joined && sharing {
+            let watched = !me && voice.terminals.watched() == peer.terminal.as_deref();
+            screens.push(Entry {
+                tile: Tile::Terminal(peer.person),
+                peer,
+                name: if me {
+                    t!("call.your_terminal").to_owned()
+                } else {
+                    t!("call.someones_terminal", name = name)
+                },
+                me,
+                picture: None,
+                video: true,
+                watched,
                 speaking: false,
             });
         }
@@ -413,9 +448,7 @@ pub fn stage(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
     stage
         .minimized
         .retain(|person| peers.iter().any(|p| p.person == *person));
-    let presentable = all
-        .iter()
-        .position(|e| matches!(e.tile, Tile::Screen(_) | Tile::Preview));
+    let presentable = all.iter().position(|e| e.tile.shared());
     if presentable.is_none() {
         stage.presenting = false;
     }
@@ -463,7 +496,7 @@ pub fn stage(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
         .iter()
         .filter(|e| match e.tile {
             Tile::Person(person) => !stage.minimized.contains(&person),
-            Tile::Screen(_) | Tile::Preview => true,
+            Tile::Screen(_) | Tile::Preview | Tile::Terminal(_) => true,
         })
         .filter(|e| !*video_only || e.video)
         .collect();
@@ -486,11 +519,7 @@ pub fn stage(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
     // The big tile: the presented screen, else the focused tile.
     let big = if stage.presenting {
         let watched = shown.iter().position(|e| e.watched);
-        watched.or_else(|| {
-            shown
-                .iter()
-                .position(|e| matches!(e.tile, Tile::Screen(_) | Tile::Preview))
-        })
+        watched.or_else(|| shown.iter().position(|e| e.tile.shared()))
     } else {
         (stage.focus.as_ref()).and_then(|focus| shown.iter().position(|e| e.tile == *focus))
     };
@@ -502,6 +531,16 @@ pub fn stage(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
         && let Some(screen) = entry.peer.screens.iter().find(|s| s.sid == *sid)
     {
         acts.push(Act::Watch(screen.clone()));
+    }
+    // So is a big terminal.
+    if let Some(entry) = big.map(|at| shown[at])
+        && let Tile::Terminal(_) = entry.tile
+        && !entry.watched
+        && !entry.me
+        && joined
+        && let Some(sharer) = &entry.peer.terminal
+    {
+        acts.push(Act::WatchTerminal(sharer.clone()));
     }
     if !stage.presenting && big.is_none() {
         stage.focus = None;
@@ -538,8 +577,9 @@ pub fn stage(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
     }
     let audio = home.voice.audio.clone();
     let split = home.layout.split;
-    let stats = home.voice.call.as_ref().map(|call| &call.stats);
-    let (stage, control) = (&home.voice.stage, &mut home.voice.control);
+    let voice = &mut home.voice;
+    let stats = voice.call.as_ref().map(|call| &call.stats);
+    let (stage, control, terms) = (&voice.stage, &mut voice.control, &mut voice.terminals);
     for (at, (entry, target)) in shown.iter().zip(&targets).enumerate() {
         let rect = animate(&ctx, &entry.tile, *target, rect);
         let is_big = big == Some(at);
@@ -557,8 +597,9 @@ pub fn stage(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
             remote,
         };
         let overlay = Overlay::new(&entry.tile, split.show_fps, split.nerd_stats, stats);
+        let tools = (&mut *control, &mut *terms);
         tile(
-            ui, rect, entry, state, server, &audio, control, &overlay, &mut acts,
+            ui, rect, entry, state, server, &audio, tools, &overlay, &mut acts,
         );
     }
     for (at, entry) in bubbles.iter().enumerate() {
@@ -657,7 +698,7 @@ fn tile(
     state: TileState,
     server: &Server,
     audio: &crate::audio::Audio,
-    control: &mut Control,
+    (control, terms): (&mut Control, &mut Terminals),
     overlay: &Overlay,
     acts: &mut Vec<Act>,
 ) {
@@ -675,7 +716,9 @@ fn tile(
                 ring(ui, picture.rect);
             }
         }
-        (None, Tile::Screen(_) | Tile::Preview) => {
+        // Drawn below, above the tile's own clicks: selecting text takes the pointer.
+        (None, Tile::Terminal(_)) if entry.me || entry.watched => {}
+        (None, Tile::Screen(_) | Tile::Preview | Tile::Terminal(_)) => {
             let text = if entry.watched || entry.tile == Tile::Preview {
                 t!("call.waiting_picture")
             } else if rect.height() > 90.0 {
@@ -709,9 +752,15 @@ fn tile(
     let response = ui.interact(rect, UiId::unique(("tile", &entry.tile)), Sense::click());
     let screen = match &entry.tile {
         Tile::Screen(sid) => entry.peer.screens.iter().find(|s| s.sid == *sid),
-        Tile::Person(_) | Tile::Preview => None,
+        Tile::Person(_) | Tile::Preview | Tile::Terminal(_) => None,
     };
     let watch_click = screen.filter(|_| !entry.watched && state.joined);
+    let terminal_click = match &entry.tile {
+        Tile::Terminal(_) if !entry.watched && !entry.me && state.joined => {
+            entry.peer.terminal.as_ref()
+        }
+        _ => None,
+    };
     let controlling = state.remote == Some(true);
     if controlling {
         // Clicks and keys here go to the shared screen, not to the stage.
@@ -738,10 +787,16 @@ fn tile(
         if response.clicked() {
             acts.push(Act::Watch(screen.clone()));
         }
+    } else if let Some(sharer) = terminal_click {
+        let label = t!("call.watch_name", name = entry.name);
+        response.widget_info(|| WidgetInfo::labeled(Role::Button, true, &label));
+        if response.clicked() {
+            acts.push(Act::WatchTerminal(sharer.clone()));
+        }
     } else {
         let role = match entry.tile {
             Tile::Person(_) => Role::Button,
-            Tile::Screen(_) | Tile::Preview => Role::Group,
+            Tile::Screen(_) | Tile::Preview | Tile::Terminal(_) => Role::Group,
         };
         response.widget_info(|| WidgetInfo::labeled(role, true, &entry.name));
     }
@@ -771,7 +826,8 @@ fn tile(
             acts.push(Act::Person(person, picked));
         }
     }
-    if !matches!(entry.tile, Tile::Person(_)) && !controlling {
+    // A terminal has no video to measure, and its own tile takes the pointer.
+    if matches!(entry.tile, Tile::Screen(_) | Tile::Preview) && !controlling {
         // The sharer's own menu sits inside, for someone else's screen.
         let sharer = (!entry.me && state.joined && !entry.peer.unknown).then_some(Person {
             server,
@@ -785,6 +841,21 @@ fn tile(
         });
         if let Some(Some(picked)) = menu {
             acts.push(Act::Person(person, picked));
+        }
+    }
+    if let Tile::Terminal(_) = entry.tile {
+        // In the strip a click focuses the tile instead.
+        let active = !state.spotlight || state.big;
+        if entry.me
+            && let Some(local) = &mut terms.local
+        {
+            terminal::ours(ui, rect, local, active, &entry.name);
+        } else if entry.watched {
+            let screen = terms
+                .watching
+                .as_mut()
+                .and_then(|(_, screen)| screen.as_mut());
+            terminal::theirs(ui, rect, screen, active, &entry.name);
         }
     }
     if let Some(on) = state.remote {
@@ -988,7 +1059,7 @@ fn name_tag(ui: &mut Ui, rect: Rect, entry: &Entry, audio: &crate::audio::Audio)
             .on_hover_text(tip);
         response.widget_info(|| WidgetInfo::labeled(Role::Image, true, tip));
     }
-    let live = is_person && !entry.peer.screens.is_empty();
+    let live = is_person && (!entry.peer.screens.is_empty() || entry.peer.terminal.is_some());
     if live && rect.height() > 2.0 * height + GAP {
         let galley = ui.painter().layout_no_wrap(
             t!("call.live_badge").into(),
@@ -1025,10 +1096,11 @@ fn tools(
     if rect.height() < TOOL.y + 2.0 * GAP || fits == 0 {
         return;
     }
+    let terminal = matches!(entry.tile, Tile::Terminal(_));
     // A person's voice and apps, or the sound of a screen.
-    let sound = is_person || !entry.peer.apps.is_empty();
+    let sound = is_person || (!terminal && !entry.peer.apps.is_empty());
     let volume = sound && !entry.me && !entry.peer.unknown && state.joined;
-    let full = entry.picture.is_some();
+    let full = entry.picture.is_some() || terminal && (entry.me || entry.watched);
     let preview = entry.tile == Tile::Preview;
     let stop = entry.watched || preview;
     // You need to see a screen to control it.
@@ -1104,6 +1176,8 @@ fn tools(
     }
     let (tip, act) = if preview {
         (t!("call.hide_preview"), Act::HidePreview)
+    } else if terminal {
+        (t!("call.stop_watching"), Act::StopWatchingTerminal)
     } else {
         (t!("call.stop_watching"), Act::StopWatching)
     };
@@ -1144,6 +1218,15 @@ fn apply(home: &mut Home, index: usize, now: f64, acts: Vec<Act>) {
             Act::RequestControl(sid) => send(home, Command::RequestControl(sid)),
             Act::ReleaseControl => send(home, Command::ReleaseControl),
             Act::Control(inputs) => send(home, Command::ControlInput(inputs)),
+            Act::WatchTerminal(sharer) => terminal::watch(home, &sharer),
+            Act::StopWatchingTerminal => {
+                // Like a screen: a big terminal would be watched again at once.
+                stage.presenting = false;
+                if matches!(stage.focus, Some(Tile::Terminal(_))) {
+                    stage.focus = None;
+                }
+                terminal::stop_watching(home);
+            }
         }
     }
 }
@@ -1182,6 +1265,17 @@ pub fn full_view(ui: &mut Ui, home: &mut Home) {
                 }
                 Tile::Preview => previewing(&home.voice)
                     .then(|| (t!("call.your_screen_preview").to_owned(), None, true)),
+                Tile::Terminal(person) => {
+                    let peer = peers.iter().find(|p| p.person == *person)?;
+                    if *person == me {
+                        (home.voice.terminals.local.is_some())
+                            .then(|| (t!("call.your_terminal").to_owned(), None, true))
+                    } else {
+                        let name = t!("call.someones_terminal", name = peer.name(server));
+                        let watched = home.voice.terminals.watched() == peer.terminal.as_deref();
+                        (peer.terminal.is_some() && watched).then_some((name, None, false))
+                    }
+                }
             }
         });
     let Some((name, peer, me)) = found else {
@@ -1189,6 +1283,32 @@ pub fn full_view(ui: &mut Ui, home: &mut Home) {
         home.voice.stage.full = None;
         return;
     };
+    if let Tile::Terminal(_) = tile {
+        // Escape belongs to our own shell.
+        let mut exit = !me && ui.input(|input| input.key_pressed(Key::Escape));
+        ui.horizontal(|ui| {
+            ui.label(ui::bold(&name));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                exit |= ui::secondary(ui, t!("call.exit_full_screen")).clicked();
+            });
+        });
+        ui.add_space(ui::SPACE_S);
+        let (rect, _) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
+        let terms = &mut home.voice.terminals;
+        if let (true, Some(local)) = (me, &mut terms.local) {
+            terminal::ours(ui, rect, local, true, &name);
+        } else {
+            let screen = terms
+                .watching
+                .as_mut()
+                .and_then(|(_, screen)| screen.as_mut());
+            terminal::theirs(ui, rect, screen, true, &name);
+        }
+        if exit {
+            home.voice.stage.full = None;
+        }
+        return;
+    }
     let split = home.layout.split;
     let stats = home.voice.call.as_ref().map(|call| &call.stats);
     let overlay = Overlay::new(&tile, split.show_fps, split.nerd_stats, stats);
@@ -1206,7 +1326,7 @@ pub fn full_view(ui: &mut Ui, home: &mut Home) {
     }
     let controlling = match &tile {
         Tile::Screen(sid) => voice.control.screen(sid) == Some(true),
-        Tile::Person(_) | Tile::Preview => false,
+        Tile::Person(_) | Tile::Preview | Tile::Terminal(_) => false,
     };
     // While controlling, Escape belongs to the shared screen.
     let mut exit = !controlling && ui.input(|input| input.key_pressed(Key::Escape));

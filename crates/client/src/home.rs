@@ -1205,6 +1205,8 @@ impl Home {
             }
             Update::CameraStopped => self.voice.camera.reset(),
             Update::Control(view) => self.voice.control.update(view, now),
+            Update::Terminal(feed) => self.voice.terminals.feed(feed),
+            Update::TerminalStopped => self.voice.terminals.local = None,
             Update::ControlEnded(sid, why) => {
                 self.toast = Some((call::remote::ended(self, &sid, why), now + 6.0));
             }
@@ -1640,6 +1642,7 @@ pub fn show(
     admin::window(ui.ctx(), home);
     files::viewer(ui.ctx(), &mut home.files);
     call::screen_dialog(ui.ctx(), home);
+    call::terminal::dialog(ui.ctx(), home);
     call::frame(ui.ctx(), home);
     let action = crate::settings::show(ui.ctx(), home, updates, keystore);
     updates.dialog(ui.ctx());

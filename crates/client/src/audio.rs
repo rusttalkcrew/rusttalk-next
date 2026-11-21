@@ -157,6 +157,8 @@ pub struct Settings {
     pub hotkeys: crate::hotkeys::Bindings,
     /// Volumes and mutes per person and shared app, and the masters; this device only.
     pub mix: crate::call::mixer::Mix,
+    /// The warning before sharing a terminal was accepted once. This device only.
+    pub terminal_warned: bool,
 }
 
 impl Settings {
@@ -225,6 +227,7 @@ impl Default for Settings {
             create_link_previews: None,
             hotkeys: Default::default(),
             mix: Default::default(),
+            terminal_warned: false,
         }
     }
 }

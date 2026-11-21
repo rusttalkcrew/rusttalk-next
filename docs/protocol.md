@@ -632,7 +632,8 @@ device_signing_public_key`, with each ID as 32 raw bytes. It carries
 no display name or metadata. It permits subscription. Data publication
 requires channel `write`. Clients consume byte streams only through the
 independently authenticated live file protocol, and data packets only
-on the remote control topic (see below), and drop other data events.
+on the remote control and terminal topics (see below), and drop other data
+events.
 Track publication requires
 the relevant flag from at least one assigned role. The `speak` grant
 allows `microphone` and `screen_share_audio`. The independent `video`
@@ -819,6 +820,53 @@ commits. A failure is logged with a reason and never undoes the change.
 Errors include `403 channel_read_denied`, `400 not_a_voice_channel`,
 `502 livekit_roster_unavailable` and
 `503 voice_unavailable`.
+
+### Terminal sharing
+
+A member of a call can share a terminal: a shell runs in a pseudo terminal
+on their device only (ConPTY on Windows), and viewers replay its output in
+their own terminal emulator at the sharer's size. Viewers never resize it.
+
+The sharer announces the share as the participant attribute
+`rusttalk.terminal`: `<epoch>.<base64url>`, the decimal channel-key epoch,
+a dot, then unpadded base64url of a 24-byte nonce and the
+XChaCha20-Poly1305 ciphertext and tag of the JSON `{"id": [16 bytes]}`. The
+key is HKDF-SHA256 from that epoch's room media key with info
+`rusttalk-terminal-share-v1`; the associated data is that literal, the
+epoch as a big-endian i64 and the sharer's LiveKit identity. An empty value
+ends the announcement. Receivers open it with any epoch key they hold.
+
+Messages are LiveKit data packets with topic `rusttalk.terminal`, always
+reliable and sent to one device, sealed exactly like remote control
+messages with HKDF info `rusttalk-terminal-v1` in place of
+`rusttalk-control-v1`, up to 15 KiB on the wire. Byte fields are base64
+strings. Every message carries the share's `id`; others are dropped.
+
+| Message (`t`) | From | Fields |
+| --- | --- | --- |
+| `watch` | Viewer | Send me the screen and the output from then on; also sent after a gap |
+| `unwatch` | Viewer | Stop sending |
+| `snapshot` | Sharer | `seq`, `cols`, `rows`, `data` (at most 8 KiB), `more` |
+| `data` | Sharer | `seq`, `data`: output bytes, at most 8 KiB |
+| `resize` | Sharer | `seq`, `cols`, `rows` |
+| `end` | Sharer | The share stopped |
+
+Sizes run from 2 to 500 columns and 1 to 200 rows. Output and resizes are
+numbered by one rising `seq`. A snapshot is the screen as of `seq`, as bytes
+that redraw it, with up to 500 lines of history, in a fresh terminal of
+that size; it is split over messages with the same `seq`, the last with
+`more` false, and a viewer assembles at most 2 MiB. While a full-screen
+program runs only its screen can be read, so the viewer gets the rest once
+it ends. A viewer plays output whose `seq` follows the last one it has,
+ignores older ones, and on a gap asks again with `watch`. Anyone in the
+call may watch; only watchers get output. The sharer gathers output every
+33 ms. More than 32 KiB in that time is dropped and every watcher gets a
+fresh screen instead; each watcher gets at most one screen every 500 ms.
+
+Stopping the share ends the shell and sends `end` to the watchers. Leaving
+the call does too. The terminal's own answers to programs (cursor position,
+device attributes) come from the sharer's emulator only, and neither side
+lets output read or write the clipboard.
 
 ## Live events
 

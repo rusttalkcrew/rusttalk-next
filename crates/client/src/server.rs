@@ -61,6 +61,8 @@ pub struct Peer {
     pub screens: Vec<Screen>,
     /// Their camera track, only known inside the room.
     pub camera: Option<String>,
+    /// The device (LiveKit identity) sharing a terminal, only known inside the room.
+    pub terminal: Option<String>,
 }
 
 #[derive(Clone, PartialEq)]
