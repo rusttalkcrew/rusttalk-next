@@ -117,12 +117,21 @@ pub struct Stats {
 #[derive(Clone)]
 pub struct TrackStats {
     pub person: Id,
+    /// The track, to find a tile's numbers.
+    pub sid: String,
     /// Sent by this device, rather than received.
     pub mine: bool,
+    /// Our own screen share.
+    pub screen: bool,
     /// The shared app, for an app track.
     pub app: Option<String>,
     pub kbps: f64,
     pub video: Option<rusttalk_core::client::voice::VideoFormat>,
+    pub detail: Option<rusttalk_core::client::voice::VideoDetail>,
+    pub jitter_ms: Option<f64>,
+    /// Packets lost and received since joining, to turn them into a rate.
+    pub lost: Option<i64>,
+    pub received: Option<u64>,
 }
 
 #[derive(Clone, PartialEq)]

@@ -43,6 +43,7 @@ pub const MAX_LIVE_FILE: u64 = rusttalk_core::messages::MAX_LIVE_FILE_SIZE;
 /// How long a live offer can be accepted.
 const OFFER_SECONDS: i64 = 10 * 60;
 
+mod overlay;
 mod panel;
 pub mod remote;
 mod stage;

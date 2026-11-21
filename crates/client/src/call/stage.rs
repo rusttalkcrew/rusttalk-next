@@ -12,8 +12,10 @@ use eframe::egui::{
 use rusttalk_core::client::voice::VoiceStatus;
 
 use super::{
-    Sharing, Voice, call_server, join, remote::Control, ring, sound_badges, stop_watching,
-    stream_menu, upload, watch,
+    Sharing, Voice, call_server, join,
+    overlay::{self, Overlay, Row},
+    remote::Control,
+    ring, sound_badges, stop_watching, stream_menu, upload, watch,
 };
 use crate::{
     friends::Relation,
@@ -322,6 +324,8 @@ enum Act {
     Watch(Screen),
     StopWatching,
     HidePreview,
+    ToggleFps,
+    ToggleNerdStats,
     /// Picked on someone's card or in their menu.
     Person(Id, Pick),
     RequestControl(String),
@@ -533,6 +537,8 @@ pub fn stage(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
         );
     }
     let audio = home.voice.audio.clone();
+    let split = home.layout.split;
+    let stats = home.voice.call.as_ref().map(|call| &call.stats);
     let (stage, control) = (&home.voice.stage, &mut home.voice.control);
     for (at, (entry, target)) in shown.iter().zip(&targets).enumerate() {
         let rect = animate(&ctx, &entry.tile, *target, rect);
@@ -550,7 +556,10 @@ pub fn stage(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
             focused,
             remote,
         };
-        tile(ui, rect, entry, state, server, &audio, control, &mut acts);
+        let overlay = Overlay::new(&entry.tile, split.show_fps, split.nerd_stats, stats);
+        tile(
+            ui, rect, entry, state, server, &audio, control, &overlay, &mut acts,
+        );
     }
     for (at, entry) in bubbles.iter().enumerate() {
         let spot = bubble(at, rect, GAP);
@@ -649,6 +658,7 @@ fn tile(
     server: &Server,
     audio: &crate::audio::Audio,
     control: &mut Control,
+    overlay: &Overlay,
     acts: &mut Vec<Act>,
 ) {
     let c = ui::colors(ui);
@@ -761,12 +771,103 @@ fn tile(
             acts.push(Act::Person(person, picked));
         }
     }
+    if !matches!(entry.tile, Tile::Person(_)) && !controlling {
+        // The sharer's own menu sits inside, for someone else's screen.
+        let sharer = (!entry.me && state.joined && !entry.peer.unknown).then_some(Person {
+            server,
+            person,
+            relation: state.relation,
+            audio: Some(audio),
+            video: None,
+        });
+        let menu = ui::context_menu(&response, |m| {
+            screen_menu(m, entry, state, audio, sharer.as_ref(), overlay, acts)
+        });
+        if let Some(Some(picked)) = menu {
+            acts.push(Act::Person(person, picked));
+        }
+    }
     if let Some(on) = state.remote {
         let sharer = entry.peer.name(server);
         remote_tag(ui, rect, entry, on, response.has_focus(), &sharer);
     }
+    overlay.paint(ui, rect);
     name_tag(ui, rect, entry, audio);
     tools(ui, rect, entry, state, audio, acts);
+}
+
+/// The right-click menu of a screen tile; the same actions as its hover buttons, its
+/// stream sound and the overlays. Returns what was picked in the sharer's submenu.
+fn screen_menu(
+    m: &mut ui::Menu,
+    entry: &Entry,
+    state: TileState,
+    audio: &crate::audio::Audio,
+    sharer: Option<&Person>,
+    overlay: &Overlay,
+    acts: &mut Vec<Act>,
+) -> Option<Pick> {
+    let mut picked = None;
+    if let Some(sharer) = sharer {
+        picked = m
+            .submenu("👤", &entry.peer.name(sharer.server), |m| sharer.menu(m))
+            .flatten();
+        m.separator();
+    }
+    let sound = state.joined && !entry.me && !entry.peer.apps.is_empty();
+    let rows = overlay::rows(
+        &entry.tile,
+        state.focused,
+        entry.picture.is_some(),
+        entry.watched,
+        sound,
+    );
+    let person = entry.peer.person;
+    for row in rows {
+        match row {
+            Row::Focus if m.item("🗖", t!("call.focus")).clicked() => {
+                acts.push(Act::Focus(entry.tile.clone()));
+            }
+            Row::Unfocus if m.item("🗗", t!("call.unfocus")).clicked() => acts.push(Act::Unfocus),
+            Row::FullScreen if m.item("⛶", t!("call.full_screen")).clicked() => {
+                acts.push(Act::Full(entry.tile.clone()));
+            }
+            Row::StopWatching if m.danger("⏹", t!("call.stop_watching")).clicked() => {
+                acts.push(Act::StopWatching);
+            }
+            Row::HidePreview if m.danger("⏹", t!("call.hide_preview")).clicked() => {
+                acts.push(Act::HidePreview);
+            }
+            Row::Volume => {
+                m.separator();
+                // The sharer's apps, whose sound arrives with the screen.
+                match entry.peer.apps.as_slice() {
+                    [(sid, _)] => stream_menu(m, audio, &(person, Some(sid.clone()))),
+                    apps => {
+                        for (sid, app) in apps {
+                            let stream = (person, Some(sid.clone()));
+                            m.submenu("🎵", app, |m| stream_menu(m, audio, &stream));
+                        }
+                    }
+                }
+            }
+            Row::ShowFps => {
+                m.separator();
+                let item = ui::Item::new("⏱", t!("call.show_fps")).checked(overlay.fps);
+                if m.add(item).clicked() {
+                    acts.push(Act::ToggleFps);
+                }
+            }
+            Row::NerdStats => {
+                let item = ui::Item::new("📊", t!("call.stats_for_nerds")).checked(overlay.nerd);
+                if m.add(item).clicked() {
+                    acts.push(Act::ToggleNerdStats);
+                }
+            }
+            _ => {}
+        }
+    }
+    picked
 }
 
 /// While asking for or having control of a screen: an outline, and what is going on.
@@ -1047,6 +1148,8 @@ fn apply(home: &mut Home, index: usize, now: f64, acts: Vec<Act>) {
                 stop_watching(home);
             }
             Act::HidePreview => home.voice.stop_preview(),
+            Act::ToggleFps => home.layout.split.show_fps ^= true,
+            Act::ToggleNerdStats => home.layout.split.nerd_stats ^= true,
             Act::Person(person, picked) => person::apply(home, index, person, picked, now),
             Act::RequestControl(sid) => send(home, Command::RequestControl(sid)),
             Act::ReleaseControl => send(home, Command::ReleaseControl),
@@ -1096,6 +1199,9 @@ pub fn full_view(ui: &mut Ui, home: &mut Home) {
         home.voice.stage.full = None;
         return;
     };
+    let split = home.layout.split;
+    let stats = home.voice.call.as_ref().map(|call| &call.stats);
+    let overlay = Overlay::new(&tile, split.show_fps, split.nerd_stats, stats);
     let voice = &mut home.voice;
     let picture = match (&tile, &peer) {
         (Tile::Person(_), Some(peer)) => person_picture(&ctx, voice, peer, me),
@@ -1137,6 +1243,7 @@ pub fn full_view(ui: &mut Ui, home: &mut Home) {
             // Whole, not cropped, now that it has the room.
             picture.cover = false;
             paint_picture(ui, rect, picture);
+            overlay.paint(ui, rect);
             if controlling {
                 let (inputs, stop) =
                     voice

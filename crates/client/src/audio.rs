@@ -137,6 +137,9 @@ pub struct Settings {
     pub call_chat_hidden: bool,
     pub call_stage_hidden: bool,
     pub call_video_only: bool,
+    /// The overlays on screen tiles, for all of them; this device only.
+    pub call_show_fps: bool,
+    pub call_nerd_stats: bool,
     /// The last "Share your screen" choices, kept on this device only: the height
     /// cap (`None` shares at the screen's own size), frame rate and cursor.
     pub screen_height: Option<u32>,
@@ -207,6 +210,8 @@ impl Default for Settings {
             call_chat_hidden: false,
             call_stage_hidden: false,
             call_video_only: false,
+            call_show_fps: false,
+            call_nerd_stats: false,
             screen_height: Some(1080),
             screen_fps: 30,
             screen_cursor: true,

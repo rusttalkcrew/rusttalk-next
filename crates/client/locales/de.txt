@@ -701,6 +701,21 @@ call.cancel_request = Anfrage abbrechen
 call.stop_control = Steuerung beenden
 call.stop_watching = Nicht mehr ansehen
 call.exit_full_screen = Vollbild beenden
+call.show_fps = FPS anzeigen
+call.stats_for_nerds = Statistiken für Nerds
+call.stat_picture = Bild
+call.stat_bitrate = Bitrate
+call.stat_codec = Codec
+call.stat_decoder = Decoder
+call.stat_encoder = Encoder
+call.stat_loss = Paketverlust
+call.stat_rtt = Laufzeit
+call.stat_decoded = Dekodiert
+call.stat_dropped = Verworfen
+call.stat_encoded = Kodiert
+call.stat_limited = Begrenzt durch
+call.limit_cpu = CPU
+call.limit_bandwidth = Bandbreite
 
 # crates/client/src/call/remote.rs
 remote.share_opt_in = Steuerungsanfragen erlauben

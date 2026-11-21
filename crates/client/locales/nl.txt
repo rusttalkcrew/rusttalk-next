@@ -701,6 +701,21 @@ call.cancel_request = Verzoek annuleren
 call.stop_control = Besturing stoppen
 call.stop_watching = Stoppen met kijken
 call.exit_full_screen = Volledig scherm sluiten
+call.show_fps = FPS tonen
+call.stats_for_nerds = Statistieken voor nerds
+call.stat_picture = Beeld
+call.stat_bitrate = Bitrate
+call.stat_codec = Codec
+call.stat_decoder = Decoder
+call.stat_encoder = Encoder
+call.stat_loss = Pakketverlies
+call.stat_rtt = Heen-en-terugtijd
+call.stat_decoded = Gedecodeerd
+call.stat_dropped = Overgeslagen
+call.stat_encoded = Gecodeerd
+call.stat_limited = Beperkt door
+call.limit_cpu = CPU
+call.limit_bandwidth = Bandbreedte
 
 # crates/client/src/call/remote.rs
 remote.share_opt_in = Bedieningsverzoeken toestaan
