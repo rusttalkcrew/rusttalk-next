@@ -6310,6 +6310,7 @@ dependencies = [
  "regex",
  "reqwest",
  "rfd",
+ "rtrb",
  "rusttalk-core",
  "semver",
  "serde",

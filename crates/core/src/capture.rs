@@ -99,25 +99,45 @@ pub fn capture_to_source(
     app: &App,
     source: crate::client::voice::NativeAudioSource,
 ) -> Result<Capture> {
-    use std::borrow::Cow;
-
     use futures_util::FutureExt;
-    use livekit::webrtc::audio_frame::AudioFrame;
 
     anyhow::ensure!(
         source.sample_rate() == SAMPLE_RATE && source.num_channels() == CHANNELS,
         "app capture requires a 48 kHz stereo source"
     );
     capture(app, move |samples| {
-        let frame = AudioFrame {
-            data: Cow::Borrowed(samples),
-            sample_rate: SAMPLE_RATE,
-            num_channels: CHANNELS,
-            samples_per_channel: SAMPLE_RATE / 100,
-        };
+        let frame = media_frame(samples);
         let sent = source.capture_frame(&frame).now_or_never();
         if let Err(error) = sent.expect("a source without a queue never waits") {
             tracing::warn!(%error, "sending app audio failed");
         }
     })
+}
+
+#[cfg(feature = "voice")]
+fn media_frame(samples: &[i16]) -> livekit::webrtc::audio_frame::AudioFrame<'_> {
+    livekit::webrtc::audio_frame::AudioFrame {
+        data: std::borrow::Cow::Borrowed(samples),
+        sample_rate: SAMPLE_RATE,
+        num_channels: CHANNELS,
+        samples_per_channel: SAMPLE_RATE / 100,
+    }
+}
+
+#[cfg(all(test, feature = "voice"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn app_audio_publishes_unprocessed_stereo() {
+        let options = audio_source().audio_options();
+        assert!(
+            !options.auto_gain_control && !options.echo_cancellation && !options.noise_suppression
+        );
+        let samples =
+            std::array::from_fn::<_, FRAME_SAMPLES, _>(|i| if i % 2 == 0 { 1 } else { -2 });
+        let frame = media_frame(&samples);
+        assert_eq!(frame.num_channels, 2);
+        assert_eq!(frame.data.as_ref(), samples);
+    }
 }
