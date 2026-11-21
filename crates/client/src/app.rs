@@ -8,7 +8,8 @@ use zeroize::Zeroizing;
 
 use crate::{
     home::Home,
-    keystore::Keystore,
+    key_storage::{self, NewPassword, Picked, Unlock},
+    keystore::{Keystore, Kind, Start},
     ui::{self, error_text, primary_large as primary, secondary_large as secondary},
 };
 
@@ -43,6 +44,18 @@ enum Screen {
         words: Zeroizing<String>,
         error: Option<String>,
     },
+    /// No keychain on the first start; `restore` goes on to the recovery words.
+    Storage {
+        password: Option<NewPassword>,
+        error: Option<String>,
+        restore: bool,
+    },
+    Unlock {
+        password: Zeroizing<String>,
+        error: Option<String>,
+        tries: u32,
+    },
+    KeychainGone,
     Home(Box<Home>),
 }
 
@@ -52,13 +65,16 @@ pub enum Action {
     StartOver,
     Continue,
     SignOut,
+    Choose(Picked),
+    Unlock,
+    UseWords,
 }
 
 impl<'a> App<'a> {
     pub fn new(
         cc: &eframe::CreationContext,
         keystore: Keystore,
-        identity: Option<DeviceIdentity>,
+        start: Start,
         data: PathBuf,
         window_started: &'a Cell<bool>,
     ) -> Self {
@@ -74,9 +90,21 @@ impl<'a> App<'a> {
             updates,
             window_started,
         };
-        if let Some(identity) = identity {
-            app.screen = app.home(identity);
-        }
+        app.screen = match start {
+            Start::Ready(Some(identity)) => app.home(*identity),
+            Start::Ready(None) => Screen::Welcome,
+            Start::Choose => Screen::Storage {
+                password: None,
+                error: None,
+                restore: false,
+            },
+            Start::Unlock => Screen::Unlock {
+                password: Zeroizing::default(),
+                error: None,
+                tries: 0,
+            },
+            Start::KeychainGone => Screen::KeychainGone,
+        };
         app
     }
 
@@ -91,7 +119,6 @@ impl<'a> App<'a> {
     }
 
     fn apply(&mut self, action: Action) {
-        let keystore = &self.keystore;
         let screen = std::mem::replace(&mut self.screen, Screen::Welcome);
         self.screen = match (action, screen) {
             (Action::StartOver, _) => Screen::Welcome,
@@ -126,7 +153,7 @@ impl<'a> App<'a> {
                 },
             ) => {
                 let error = if check.matches(&words, answers.each_ref().map(|a| a.as_str())) {
-                    save(keystore, &identity)
+                    save(&self.keystore, &identity)
                 } else {
                     Some(t!("app.words_mismatch").into())
                 };
@@ -143,7 +170,7 @@ impl<'a> App<'a> {
             }
             (Action::Continue, Screen::Restore { words, .. }) => {
                 let error = match DeviceIdentity::add_device(&words, DEVICE_NAME) {
-                    Ok(identity) => match save(keystore, &identity) {
+                    Ok(identity) => match save(&self.keystore, &identity) {
                         None => {
                             tracing::info!("added this device to an existing account");
                             self.screen = self.home(identity);
@@ -165,7 +192,51 @@ impl<'a> App<'a> {
                 };
                 Screen::Restore { words, error }
             }
-            (Action::SignOut, Screen::Home(mut home)) => match keystore.delete() {
+            (Action::UseWords, _) => Screen::Storage {
+                password: None,
+                error: None,
+                restore: true,
+            },
+            (
+                Action::Choose(picked),
+                Screen::Storage {
+                    password, restore, ..
+                },
+            ) => {
+                let (kind, typed) = match (picked, &password) {
+                    (Picked::Password, Some(typed)) => (Kind::Password, typed.password.as_str()),
+                    _ => (Kind::File, ""),
+                };
+                match self.keystore.choose(kind, typed) {
+                    Ok(()) if restore => Screen::Restore {
+                        words: Zeroizing::default(),
+                        error: None,
+                    },
+                    Ok(()) => Screen::Welcome,
+                    Err(error) => {
+                        tracing::error!(error = %format_args!("{error:#}"), "choosing key storage failed");
+                        Screen::Storage {
+                            password,
+                            error: Some(t!("keys.choose_failed").into()),
+                            restore,
+                        }
+                    }
+                }
+            }
+            (
+                Action::Unlock,
+                Screen::Unlock {
+                    password, tries, ..
+                },
+            ) => match self.keystore.unlock(&password) {
+                Ok(identity) => self.home(identity),
+                Err(error) => Screen::Unlock {
+                    password: Zeroizing::default(),
+                    error: Some(key_storage::unlock_error(&error)),
+                    tries: tries + 1,
+                },
+            },
+            (Action::SignOut, Screen::Home(mut home)) => match self.keystore.delete() {
                 Ok(()) => {
                     // Stop the network first, so nothing writes these files again.
                     home.stop_for_sign_out();
@@ -298,7 +369,29 @@ impl eframe::App for App<'_> {
                 ..
             } => card(ui, |ui| confirm(ui, check, answers, error.as_deref())),
             Screen::Restore { words, error } => card(ui, |ui| restore(ui, words, error.as_deref())),
-            Screen::Home(home) => crate::home::show(ui, home, &mut self.updates),
+            Screen::Storage {
+                password, error, ..
+            } => card(ui, |ui| {
+                key_storage::choose(ui, password, error).map(Action::Choose)
+            }),
+            Screen::Unlock {
+                password,
+                error,
+                tries,
+            } => card(ui, |ui| {
+                key_storage::unlock(ui, password, error.as_deref(), *tries).map(|unlock| {
+                    match unlock {
+                        Unlock::Try => Action::Unlock,
+                        Unlock::UseWords => Action::UseWords,
+                    }
+                })
+            }),
+            Screen::KeychainGone => card(ui, |ui| {
+                key_storage::keychain_gone(ui).then_some(Action::UseWords)
+            }),
+            Screen::Home(home) => {
+                crate::home::show(ui, home, &mut self.updates, &mut self.keystore)
+            }
         };
         if let Some(action) = action {
             self.apply(action);

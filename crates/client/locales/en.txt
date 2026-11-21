@@ -825,6 +825,37 @@ app.restore_text = Type your 24 recovery words in order, with a space between th
 app.recovery_words = Recovery words
 app.sign_in = Sign in
 
+# crates/client/src/key_storage.rs
+keys.section = Key storage
+keys.choose_title = Where should RustTalk keep your keys?
+keys.no_keychain = This device has no keychain (common in Steam Deck Game Mode). How should RustTalk keep your keys?
+keys.keychain = Keychain
+keys.keychain_help = Your system's keychain keeps your keys.
+keys.file = Protected file
+keys.file_help = Recommended. A file only you can open. Nothing to type.
+keys.password_file = File with password
+keys.password_file_help = Safest. You type your password at every start.
+keys.password = Password
+keys.repeat_password = Type it again
+keys.password_empty = Choose a password.
+keys.password_mismatch = The passwords don't match.
+keys.continue = Continue
+keys.choose_failed = Couldn't set up key storage. Try again.
+keys.unlock_title = Unlock RustTalk
+keys.unlock_text = Type your password to open your keys.
+keys.unlock = Unlock
+keys.wrong_password = Wrong password
+keys.unlock_failed = Couldn't open your keys. Check the log file.
+keys.forgot = Forgot your password? Sign in again with your recovery words.
+keys.use_words = Use recovery words
+keys.gone_title = Your keys are in the desktop keychain
+keys.gone_text = Open RustTalk once in Desktop Mode and switch Key storage to a file in Settings, or restore with your recovery words.
+keys.move = Move keys
+keys.change_password = Change password
+keys.moved = Done. Your keys are in their new place.
+keys.move_failed = Couldn't move your keys. They're still where they were.
+keys.no_keychain_here = This device has no keychain right now.
+
 # crates/client/src/net.rs
 net.dm_pins_unsaved = DMs on {server} are paused: this device couldn't save who they are with.
 net.dm_not_private = Not sent over {server}: someone else could read this DM there.

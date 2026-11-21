@@ -822,6 +822,37 @@ app.restore_text = Tippe deine 24 Wiederherstellungswörter der Reihe nach ein, 
 app.recovery_words = Wiederherstellungswörter
 app.sign_in = Anmelden
 
+# crates/client/src/key_storage.rs
+keys.section = Schlüsselspeicher
+keys.choose_title = Wo soll RustTalk deine Schlüssel aufbewahren?
+keys.no_keychain = Dieses Gerät hat keinen Schlüsselbund (üblich im Spielmodus des Steam Deck). Wie soll RustTalk deine Schlüssel aufbewahren?
+keys.keychain = Schlüsselbund
+keys.keychain_help = Der Schlüsselbund deines Systems bewahrt deine Schlüssel auf.
+keys.file = Geschützte Datei
+keys.file_help = Empfohlen. Eine Datei, die nur du öffnen kannst. Nichts einzugeben.
+keys.password_file = Datei mit Passwort
+keys.password_file_help = Am sichersten. Du gibst dein Passwort bei jedem Start ein.
+keys.password = Passwort
+keys.repeat_password = Noch einmal eingeben
+keys.password_empty = Wähle ein Passwort.
+keys.password_mismatch = Die Passwörter stimmen nicht überein.
+keys.continue = Weiter
+keys.choose_failed = Schlüsselspeicher konnte nicht eingerichtet werden. Versuche es erneut.
+keys.unlock_title = RustTalk entsperren
+keys.unlock_text = Gib dein Passwort ein, um deine Schlüssel zu öffnen.
+keys.unlock = Entsperren
+keys.wrong_password = Falsches Passwort
+keys.unlock_failed = Deine Schlüssel konnten nicht geöffnet werden. Sieh in die Logdatei.
+keys.forgot = Passwort vergessen? Melde dich mit deinen Wiederherstellungswörtern neu an.
+keys.use_words = Wiederherstellungswörter verwenden
+keys.gone_title = Deine Schlüssel sind im Desktop-Schlüsselbund
+keys.gone_text = Öffne RustTalk einmal im Desktop-Modus und stelle den Schlüsselspeicher in den Einstellungen auf eine Datei um, oder stelle mit deinen Wiederherstellungswörtern wieder her.
+keys.move = Schlüssel verschieben
+keys.change_password = Passwort ändern
+keys.moved = Fertig. Deine Schlüssel sind an ihrem neuen Ort.
+keys.move_failed = Deine Schlüssel konnten nicht verschoben werden. Sie sind noch am alten Ort.
+keys.no_keychain_here = Dieses Gerät hat gerade keinen Schlüsselbund.
+
 # crates/client/src/net.rs
 net.dm_pins_unsaved = DMs auf {server} sind pausiert: Dieses Gerät konnte nicht speichern, mit wem sie sind.
 net.dm_not_private = Nicht über {server} gesendet: Dort könnte jemand anderes diese DM lesen.

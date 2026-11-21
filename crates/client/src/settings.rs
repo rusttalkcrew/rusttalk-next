@@ -379,6 +379,7 @@ pub fn show(
     ctx: &egui::Context,
     home: &mut Home,
     updates: &mut crate::update::Updater,
+    keystore: &mut crate::keystore::Keystore,
 ) -> Option<Action> {
     let mut tab = home.settings?;
     let page = |id, icon, label| Page { id, icon, label };
@@ -442,7 +443,7 @@ pub fn show(
                 }
                 Tab::Notifications => notifications_page(ui, home),
                 Tab::Shortcuts => crate::hotkeys::settings_page(ui, home),
-                Tab::Privacy => privacy_tab(ui, home),
+                Tab::Privacy => privacy_tab(ui, home, keystore),
                 Tab::Devices => devices_page(ui, home),
                 Tab::Updates => updates.settings(ui),
                 Tab::About => {

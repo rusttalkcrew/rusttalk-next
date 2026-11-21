@@ -822,6 +822,37 @@ app.restore_text = Typ je 24 herstelwoorden op volgorde, met een spatie ertussen
 app.recovery_words = Herstelwoorden
 app.sign_in = Aanmelden
 
+# crates/client/src/key_storage.rs
+keys.section = Sleutelopslag
+keys.choose_title = Waar moet RustTalk je sleutels bewaren?
+keys.no_keychain = Dit apparaat heeft geen sleutelbos (vaak zo in de Game Mode van de Steam Deck). Hoe moet RustTalk je sleutels bewaren?
+keys.keychain = Sleutelbos
+keys.keychain_help = De sleutelbos van je systeem bewaart je sleutels.
+keys.file = Beveiligd bestand
+keys.file_help = Aanbevolen. Een bestand dat alleen jij kunt openen. Niets te typen.
+keys.password_file = Bestand met wachtwoord
+keys.password_file_help = Het veiligst. Je typt je wachtwoord bij elke start.
+keys.password = Wachtwoord
+keys.repeat_password = Typ het nog een keer
+keys.password_empty = Kies een wachtwoord.
+keys.password_mismatch = De wachtwoorden komen niet overeen.
+keys.continue = Doorgaan
+keys.choose_failed = Kon de sleutelopslag niet instellen. Probeer het opnieuw.
+keys.unlock_title = RustTalk ontgrendelen
+keys.unlock_text = Typ je wachtwoord om je sleutels te openen.
+keys.unlock = Ontgrendelen
+keys.wrong_password = Verkeerd wachtwoord
+keys.unlock_failed = Kon je sleutels niet openen. Kijk in het logbestand.
+keys.forgot = Wachtwoord vergeten? Meld je opnieuw aan met je herstelwoorden.
+keys.use_words = Herstelwoorden gebruiken
+keys.gone_title = Je sleutels staan in de sleutelbos van de desktop
+keys.gone_text = Open RustTalk één keer in Desktop Mode en zet Sleutelopslag in Instellingen op een bestand, of herstel met je herstelwoorden.
+keys.move = Sleutels verplaatsen
+keys.change_password = Wachtwoord wijzigen
+keys.moved = Klaar. Je sleutels staan op hun nieuwe plek.
+keys.move_failed = Kon je sleutels niet verplaatsen. Ze staan nog op de oude plek.
+keys.no_keychain_here = Dit apparaat heeft nu geen sleutelbos.
+
 # crates/client/src/net.rs
 net.dm_pins_unsaved = DM's op {server} zijn gepauzeerd: dit apparaat kon niet opslaan met wie ze zijn.
 net.dm_not_private = Niet via {server} verstuurd: iemand anders kan dit DM daar lezen.

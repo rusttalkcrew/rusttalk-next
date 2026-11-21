@@ -211,6 +211,12 @@ impl Field<'_> {
         self
     }
 
+    /// Show dots instead of the typed text.
+    pub fn password(mut self) -> Self {
+        self.edit = self.edit.password(true);
+        self
+    }
+
     pub fn char_limit(mut self, limit: usize) -> Self {
         self.edit = self.edit.char_limit(limit);
         self

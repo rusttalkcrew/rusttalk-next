@@ -55,6 +55,31 @@ the 32-byte Ed25519 secret, 32-byte X25519 secret, 32-byte sync key, 32-byte
 person ID and the certificate bytes in that order. On load the client verifies
 the signature and checks both device secrets against the certificate.
 
+Where these bytes live is the profile's key storage, recorded as
+`{"storage":"keychain"|"file"|"password"}` in `keystore.json`:
+
+- **Keychain** (the default when one is reachable): the OS keystore entry above.
+- **Protected file:** `identity.key` in the profile folder, `RTKEYP01` followed
+  by the same bytes. It is written to a temporary file (mode 0600 on Unix),
+  flushed, and renamed over the old one. On Windows the per-user AppData folder
+  already admits only the current user.
+- **File with password:** `identity.key` holds `RTKEYE01 || m_cost || t_cost ||
+  p_cost || salt || nonce || ciphertext`. The costs are big-endian u32 values
+  (64 MiB, 3 passes, 1 lane when written today) and the salt is 16 random
+  bytes. Argon2id over the password with that salt and those costs gives a
+  32-byte XChaCha20-Poly1305 key; the 24-byte nonce is fresh per write and the
+  36-byte header is the associated data, so changed costs fail like a wrong
+  password. The password and derived key are only held in memory.
+
+Each file says its own format, so a switch between the two file kinds that is
+cut short still loads. Without a reachable keychain and without a choice, the
+client asks which file kind to use. If the keychain was chosen (or an older
+profile already has servers) but is unreachable, the client creates no new
+identity and points to Desktop Mode or the recovery words. Switching storage in
+Settings writes the new copy, reads it back, records the choice and only then
+removes the old copy. A forgotten password is recovered by adding the device
+again with the recovery words.
+
 The recovery words and root signing key are never stored. Adding or revoking
 a device requires the recovery words again. The client records the person
 fingerprint in the startup log.

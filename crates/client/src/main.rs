@@ -18,6 +18,7 @@ mod files;
 mod friends;
 mod home;
 mod hotkeys;
+mod key_storage;
 mod keystore;
 mod link_cards;
 mod log_file;
@@ -180,13 +181,16 @@ fn run(
     }
 
     files::clear_opened();
-    let (keystore, identity) = keystore::Keystore::open(&config, &service)?;
-    match &identity {
-        Some(identity) => tracing::info!(
+    let (keystore, start) = keystore::Keystore::open(&config, &service)?;
+    match &start {
+        keystore::Start::Ready(Some(identity)) => tracing::info!(
             fingerprint = %fingerprint(identity.certificate.person_id()),
             "RustTalk client started"
         ),
-        None => tracing::info!("RustTalk client started without an account"),
+        keystore::Start::Ready(None) => {
+            tracing::info!("RustTalk client started without an account")
+        }
+        _ => tracing::info!("RustTalk client started, waiting for the key storage"),
     }
 
     // Test runs set an `agent.` app id so the compositor can route the window.
@@ -213,7 +217,7 @@ fn run(
             Ok(Box::new(app::App::new(
                 cc,
                 keystore,
-                identity,
+                start,
                 config,
                 window_started,
             )))
