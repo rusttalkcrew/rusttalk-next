@@ -69,9 +69,27 @@ pub async fn exercise(
         .send()
         .await?
         .error_for_status()?;
-    let _ = room_b.leave().await;
-    room_b = rejoin(b, room_a, voice, &b_source).await?;
-    println!("Server mute silenced B in LiveKit, held across a rejoin, and lifting it restored B");
+    // Lifting it gives the microphone back in the room B is in, with no rejoin and without
+    // B's API connection: LiveKit's own permission change is enough, as the app relies on.
+    timeout(LIMIT, async {
+        while !room_b.can_publish() {
+            room_b.next_event().await.context("room closed")?;
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .context("lifting the mute did not give B the microphone back")??;
+    ensure!(
+        !room_b.has_microphone(),
+        "LiveKit kept the muted microphone"
+    );
+    room_b.publish_audio(b_source.clone()).await?;
+    timeout(LIMIT, both_ways(room_a, &mut room_b, A_HZ, B_HZ))
+        .await
+        .context("duplex after the mute was lifted")??;
+    println!(
+        "Server mute silenced B in LiveKit and held across a rejoin; lifting it gave the microphone back in place"
+    );
 
     // Removing disconnects B with LiveKit's removal reason.
     let participant = format!("/v1/voice/{channel}/participants/{b_person}");

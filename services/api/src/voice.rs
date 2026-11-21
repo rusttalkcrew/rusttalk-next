@@ -38,6 +38,12 @@ const ROSTER_TTL: Duration = Duration::from_secs(1);
 /// LiveKit identities active in a room.
 type Active = BTreeSet<String>;
 
+#[derive(PartialEq)]
+enum Outcome {
+    Applied,
+    AlreadyAbsent,
+}
+
 pub struct LiveKit {
     api_key: String,
     api_secret: Zeroizing<String>,
@@ -46,6 +52,7 @@ pub struct LiveKit {
     /// Active identities per room and when they were asked for; `None` marks a room
     /// LiveKit reported a change in at that time, so older answers are not used again.
     rosters: Mutex<HashMap<String, (Instant, Option<Active>)>>,
+    enforcing: tokio::sync::Mutex<()>,
 }
 
 impl LiveKit {
@@ -74,6 +81,7 @@ impl LiveKit {
                 .timeout(Duration::from_secs(3))
                 .build()?,
             rosters: Mutex::default(),
+            enforcing: Default::default(),
         }))
     }
 
@@ -183,14 +191,14 @@ impl LiveKit {
         room: &str,
         method: &str,
         body: serde_json::Value,
-    ) -> ApiResult<()> {
+    ) -> ApiResult<Outcome> {
         match self.room_service(method, room, body).await? {
             response if response.status().is_success() => {
                 tracing::info!(method, "changed voice room");
-                Ok(())
+                Ok(Outcome::Applied)
             }
             // The participant left, or the room closed, on its own in the meantime.
-            response if response.status() == StatusCode::NOT_FOUND => Ok(()),
+            response if response.status() == StatusCode::NOT_FOUND => Ok(Outcome::AlreadyAbsent),
             _ => Err(ApiError::new(StatusCode::BAD_GATEWAY, "livekit_rejected")),
         }
     }
@@ -457,8 +465,66 @@ fn room_channel(room: &str) -> Option<(&str, bool)> {
     Some((channel, true))
 }
 
+enum Action {
+    Keep,
+    Remove,
+    Update(ParticipantPermission),
+}
+
+/// What a participant may do now, from the database as it is at this moment.
+async fn decide(
+    app: &App,
+    channel: &str,
+    data: bool,
+    participant: &Participant,
+) -> ApiResult<Action> {
+    let mut db = app.db.acquire().await?;
+    let device = if data {
+        (participant.identity.split_once('.')).map_or("", |(device, _)| device)
+    } else {
+        &participant.identity
+    };
+    let readers = reader_identities(app, &mut db, channel).await?;
+    let Some(person) = readers.get(device) else {
+        return Ok(Action::Remove);
+    };
+    if data {
+        // Readers stay to receive; a sender that lost write leaves.
+        let kind: Option<String> = query_scalar("SELECT kind FROM channels WHERE id = ?")
+            .bind(channel)
+            .fetch_optional(&mut *db)
+            .await?;
+        let lost = participant.permission.can_publish_data
+            && !messages::can_write(&mut db, channel, person, kind.as_deref().unwrap_or(""))
+                .await?;
+        return Ok(if lost { Action::Remove } else { Action::Keep });
+    }
+    // Grants follow the current flags both ways, so lifting a mute gives the microphone back.
+    let mut permission = participant.permission.clone();
+    permission.can_publish_data =
+        channels::has_flag(&mut db, channel, person, channels::WRITE).await?;
+    let mut allowed: Vec<i32> = (publish_sources(&mut db, channel, person).await?.into_iter())
+        .map(|source| source as i32)
+        .collect();
+    allowed.sort_unstable();
+    permission.can_publish = !allowed.is_empty();
+    permission.can_publish_sources = allowed;
+    let mut granted = participant.permission.can_publish_sources.clone();
+    granted.sort_unstable();
+    let same = granted == permission.can_publish_sources
+        && participant.permission.can_publish == permission.can_publish
+        && participant.permission.can_publish_data == permission.can_publish_data;
+    Ok(if same {
+        Action::Keep
+    } else {
+        Action::Update(permission)
+    })
+}
+
 /// Returns whether every room was checked and every change went through.
 async fn enforce_rooms(app: &App, livekit: &LiveKit, room: Option<String>) -> ApiResult<bool> {
+    // One run at a time: a decision made before a later change must not land after it.
+    let _turn = livekit.enforcing.lock().await;
     let mut complete = true;
     let rooms = match room {
         Some(channel) => vec![format!("{DATA_PREFIX}{channel}"), channel],
@@ -476,85 +542,21 @@ async fn enforce_rooms(app: &App, livekit: &LiveKit, room: Option<String>) -> Ap
                 continue;
             }
         };
-        if participants.is_empty() {
-            continue;
-        }
-        // Decide first so no pooled connection is held across LiveKit calls.
-        let (mut remove, mut restrict) = (Vec::new(), Vec::new());
-        {
-            let mut db = app.db.acquire().await?;
-            let readers = reader_identities(app, &mut db, channel).await?;
-            let kind: Option<String> = query_scalar("SELECT kind FROM channels WHERE id = ?")
-                .bind(channel)
-                .fetch_optional(&mut *db)
-                .await?;
-            for participant in participants {
-                let device = if data {
-                    participant
-                        .identity
-                        .split_once('.')
-                        .map_or("", |(device, _)| device)
-                } else {
-                    &participant.identity
-                };
-                let Some(person) = readers.get(device) else {
-                    remove.push(participant.identity);
-                    continue;
-                };
-                if data {
-                    // Readers stay to receive; a sender that lost write leaves.
-                    if participant.permission.can_publish_data
-                        && !messages::can_write(
-                            &mut db,
-                            channel,
-                            person,
-                            kind.as_deref().unwrap_or(""),
-                        )
-                        .await?
-                    {
-                        remove.push(participant.identity);
-                    }
+        for participant in participants {
+            // Decided right before each change, without holding a connection across it.
+            let body = match decide(app, channel, data, &participant).await? {
+                Action::Keep => continue,
+                Action::Remove => {
+                    let body = json!({ "room": room, "identity": participant.identity });
+                    complete &= livekit.moderate(&room, "RemoveParticipant", body).await;
                     continue;
                 }
-                let mut permission = participant.permission;
-                let revoke_data = permission.can_publish_data
-                    && !channels::has_flag(&mut db, channel, person, channels::WRITE).await?;
-                let mut changed = revoke_data;
-                if revoke_data {
-                    permission.can_publish_data = false;
-                }
-                if permission.can_publish {
-                    let allowed = publish_sources(&mut db, channel, person).await?;
-                    let granted = &mut permission.can_publish_sources;
-                    let before = granted.len();
-                    if before == 0 {
-                        // LiveKit represents unrestricted grants with an empty source list.
-                        granted.extend(allowed.iter().map(|source| *source as i32));
-                    } else {
-                        granted.retain(|source| {
-                            allowed.iter().any(|allowed| *allowed as i32 == *source)
-                        });
-                    }
-                    if before == 0 || granted.len() != before {
-                        permission.can_publish = !granted.is_empty();
-                        changed = true;
-                    }
-                }
-                if changed {
-                    restrict.push((participant.identity, permission));
-                }
-            }
-        }
-        for identity in remove {
-            let body = json!({ "room": room, "identity": identity });
-            complete &= livekit.moderate(&room, "RemoveParticipant", body).await;
-        }
-        for (identity, permission) in restrict {
-            let body = json!({
-                "room": room,
-                "identity": identity,
-                "permission": permission,
-            });
+                Action::Update(permission) => json!({
+                    "room": room,
+                    "identity": participant.identity,
+                    "permission": permission,
+                }),
+            };
             complete &= livekit.moderate(&room, "UpdateParticipant", body).await;
         }
     }
@@ -712,6 +714,7 @@ mod tests {
                 webhook: WebhookReceiver::new(TokenVerifier::with_api_key(api_key, api_secret)),
                 http: reqwest::Client::new(),
                 rosters: Mutex::default(),
+                enforcing: Default::default(),
             })),
             session_ttl: 3600,
             listing_changed: tokio::sync::watch::channel(()).0,
@@ -772,6 +775,7 @@ mod tests {
             webhook: WebhookReceiver::new(TokenVerifier::with_api_key("test-key", secret)),
             http: reqwest::Client::new(),
             rosters: Mutex::default(),
+            enforcing: Default::default(),
         };
         let cached = |livekit: &LiveKit| {
             let rosters = livekit.rosters.lock().unwrap();

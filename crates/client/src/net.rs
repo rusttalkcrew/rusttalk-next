@@ -274,8 +274,8 @@ pub enum Update {
     Admin(Url, AdminUpdate),
     /// The call in a voice channel changed state; `None` when it ended.
     Call(Url, Id, Option<CallState>),
-    /// This device joined the call without permission to talk.
-    Listening(Url, Id),
+    /// Whether this device may talk in the call, as LiveKit currently grants it.
+    CanTalk(Url, Id, bool),
     /// A moderator moved this person's call from one voice channel to another.
     VoiceMoved(Url, Id, Id),
     /// This device may not share its screen or camera in the call.
@@ -1086,7 +1086,11 @@ async fn voice_next(
             };
             on_voice(ctx, url, client, state, event).await;
             if let Some(unpublished) = lost {
+                let permission = unpublished.is_none();
                 stop_lost_video(ctx, url, client, state, unpublished).await;
+                if permission {
+                    voice::sync_microphone(ctx, url, state).await;
+                }
             }
         }
         Next::Capture(capture) => match client {

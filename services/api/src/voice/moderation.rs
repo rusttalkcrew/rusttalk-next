@@ -3,7 +3,7 @@
 //! A mute is server-wide and kept on the member, so it holds across channels and rejoins
 //! until a moderator lifts it; leaving the server drops it with the member row. LiveKit
 //! enforces it: tokens and `enforce` leave out the microphone and app audio sources while it
-//! lasts.
+//! lasts, and `enforce` gives them back when it is lifted.
 
 use std::collections::BTreeSet;
 
@@ -20,13 +20,13 @@ use serde::Deserialize;
 use serde_json::json;
 use sqlx::{SqliteConnection, query, query_scalar};
 
-use super::{configured, enforce, require_voice_read};
+use super::{Outcome, configured, enforce, require_voice_read};
 use crate::{
     ApiError, ApiResult, App,
     auth::authenticate,
     keys, payload,
     roles::{self, Permission},
-    store::audit,
+    store::{self, audit},
 };
 
 pub async fn muted(db: &mut SqliteConnection, person: &[u8]) -> ApiResult<bool> {
@@ -99,14 +99,12 @@ async fn set_muted(
     }
     tx.commit().await?;
     if before != on {
-        // Member lists show the mute. When it is lifted, the person's client rejoins its
-        // call for a token with the microphone again.
+        // Member lists show the mute.
         keys::changed(app, &person, None);
     }
-    // Muting again applies the mute in LiveKit again, should an earlier attempt have failed.
-    if on {
-        enforce(app, None);
-    }
+    // LiveKit takes or gives back the sources now, also for devices already in a room.
+    // Setting it again reapplies it, should an earlier attempt have failed.
+    enforce(app, None);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -227,7 +225,7 @@ async fn take_out(
             .try_moderate(&channel, "RemoveParticipant", body)
             .await
         {
-            Ok(()) => removed = true,
+            Ok(outcome) => removed |= outcome == Outcome::Applied,
             Err(error) => {
                 tracing::warn!(reason = error.code, "could not remove a voice participant");
                 failure = Some(error);
@@ -235,21 +233,25 @@ async fn take_out(
         }
     }
     if removed {
-        let (mut tx, actor) = authenticate(app, headers).await?;
+        // The acting session may have ended during the LiveKit calls; the action happened.
         let (action, target) = match &to {
             Some(to) => ("voice_moved", to),
             None => ("voice_removed", &channel),
         };
+        let mut tx = store::write(&app.db).await?;
         audit(
             &mut tx,
             &actor.person,
             action,
             Some(&person),
             Some(target),
-            actor.at,
+            store::now()?,
         )
         .await?;
         tx.commit().await?;
+    } else if failure.is_none() {
+        // Every device left on its own in the meantime.
+        return Err(ApiError::not_found("not_in_voice"));
     }
     failure.map_or(Ok(StatusCode::NO_CONTENT), Err)
 }
@@ -423,6 +425,64 @@ mod tests {
         );
         crate::members::kick(State(app.clone()), as_person(1), Path(encode(&person(3)))).await?;
         assert_eq!(check(None).await.unwrap_err().code, "member_not_found");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn enforcement_takes_and_gives_back_the_muted_sources() -> anyhow::Result<()> {
+        use super::super::{Action, Participant, decide};
+        let dir = tempfile::tempdir()?;
+        let app = server(dir.path()).await?;
+        query(
+            "INSERT INTO member_devices (device_id, person_id, certificate) VALUES (?, ?, x'00')",
+        )
+        .bind([33; 32].as_slice())
+        .bind(person(3))
+        .execute(&app.db)
+        .await?;
+        let all = [
+            TrackSource::Microphone,
+            TrackSource::ScreenShareAudio,
+            TrackSource::Camera,
+            TrackSource::ScreenShare,
+        ];
+        let mut participant = Participant {
+            identity: voice_identity(app.key.verifying_key().as_bytes(), &[33; 32]),
+            state: "ACTIVE".into(),
+            permission: Default::default(),
+        };
+        participant.permission.can_publish = true;
+        participant.permission.can_publish_data = true;
+        participant.permission.can_publish_sources = all.iter().map(|s| *s as i32).collect();
+        let sources = |action: Action| match action {
+            Action::Update(permission) => Some(permission.can_publish_sources),
+            _ => None,
+        };
+        assert!(matches!(
+            decide(&app, &channel(1), false, &participant).await?,
+            Action::Keep
+        ));
+
+        query("UPDATE members SET voice_muted = 1 WHERE person_id = ?")
+            .bind(person(3))
+            .execute(&app.db)
+            .await?;
+        let muted = sources(decide(&app, &channel(1), false, &participant).await?).unwrap();
+        let mut expected = vec![TrackSource::Camera as i32, TrackSource::ScreenShare as i32];
+        expected.sort_unstable();
+        assert_eq!(muted, expected);
+
+        // A lift gives them back to a device still in the room, without a rejoin.
+        participant.permission.can_publish_sources = muted;
+        query("UPDATE members SET voice_muted = 0 WHERE person_id = ?")
+            .bind(person(3))
+            .execute(&app.db)
+            .await?;
+        let mut restored = sources(decide(&app, &channel(1), false, &participant).await?).unwrap();
+        restored.sort_unstable();
+        let mut expected: Vec<_> = all.iter().map(|s| *s as i32).collect();
+        expected.sort_unstable();
+        assert_eq!(restored, expected);
         Ok(())
     }
 }

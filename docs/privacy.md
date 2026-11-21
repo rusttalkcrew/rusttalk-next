@@ -131,7 +131,7 @@ The API can see who is in which voice room by matching opaque LiveKit
 device identities to current channel readers. Readers see unmatched
 devices only as a count. After a kick, ban, revocation or permission
 change the API asks LiveKit to remove devices that lost access and to
-revoke any audio, video or data publication rights they lost. It keeps the active
+revoke any audio, video or data publication rights they lost (and to give back rights they regained, such as after a voice mute is lifted). It keeps the active
 voice roster in memory for one second per room and drops expired rooms on the
 next roster lookup. It keeps no voice roster or
 LiveKit join tokens in SQLite. LiveKit sees opaque room and device IDs,

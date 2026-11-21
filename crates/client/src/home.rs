@@ -862,21 +862,15 @@ impl Home {
                     let muted = (dir.members.iter()).any(|m| m.person == me && m.voice_muted);
                     let changed = server.voice_muted(&me) != muted;
                     server.dir = *dir;
+                    // The microphone itself comes back from LiveKit when the mute is lifted.
                     if changed
-                        && let Some(call) = &mut self.voice.call
-                        && call.server == address
+                        && muted
+                        && (self.voice.call.as_ref()).is_some_and(|call| call.server == address)
                     {
-                        if muted {
-                            self.toast = Some((t!("call.server_muted").into(), now + 6.0));
-                            // LiveKit drops shared app audio too; stop capturing it.
-                            for app in self.voice.shares.drain(..) {
-                                server.send(Command::StopApp(app.id));
-                            }
-                        } else {
-                            // The call's grant left the microphone out; a new join brings it back.
-                            call.state = crate::server::CallState::Connecting;
-                            call.can_talk = true;
-                            server.send(Command::JoinVoice(call.channel));
+                        self.toast = Some((t!("call.server_muted").into(), now + 6.0));
+                        // LiveKit drops shared app audio too; stop capturing it.
+                        for app in self.voice.shares.drain(..) {
+                            server.send(Command::StopApp(app.id));
                         }
                     }
                     self.load_dms(index);
@@ -1061,12 +1055,12 @@ impl Home {
                     None => self.voice.end_call(),
                 }
             }
-            Update::Listening(address, channel) => {
+            Update::CanTalk(address, channel, can_talk) => {
                 if let Some(call) = &mut self.voice.call
                     && call.server == address
                     && call.channel == channel
                 {
-                    call.can_talk = false;
+                    call.can_talk = can_talk;
                 }
             }
             Update::VoiceMoved(address, from, to) => {

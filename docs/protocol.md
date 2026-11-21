@@ -591,20 +591,34 @@ channels and rejoins until lifted. Leaving or being removed from the server
 deletes it with the membership. While muted, tokens and access enforcement
 leave out the `microphone` and `screen_share_audio` sources, so LiveKit refuses
 and drops those publications: the person is fully silent, as shared audio could
-otherwise carry the microphone. The API applies mutes at startup, retries
-enforcement with backoff while LiveKit fails, and muting again reapplies it
-without a second audit entry. Clients rejoin the call when the mute is lifted
-to get a token with those sources again.
+otherwise carry the microphone. Enforcement sets each device's grants to what
+its current flags and mute allow, in both directions, so lifting a mute gives
+the sources back to devices still in the room without a rejoin. Runs are
+serialised and decide each device from the database right before changing it,
+so an older decision cannot land after a newer change. The API enforces on
+startup, on every LiveKit join notice (whatever the token allowed), after each
+mute change, and retries with backoff while LiveKit fails; muting again
+reapplies it without a second audit entry. Clients follow LiveKit's own
+permission change: they publish the microphone again when it is allowed, even
+if their API connection missed the lift.
 
 Removing and moving fail with `404 not_in_voice` when none of the person's
 devices is in the room, and a move with `403 voice_move_denied` when the person
 may not read the target channel. Permission, rank, membership and channel
 access are checked again after the LiveKit roster lookup. The audit entry is
-written only after LiveKit removed at least one device; if removing any device
-fails, the request returns `502 livekit_rejected` (or `livekit_unreachable`).
+written, for the acting member even if their session ended meanwhile, only after
+LiveKit confirmed removing at least one device; a device that had already left
+does not count, and if all had, the request returns `404 not_in_voice`. If
+removing any device fails, the request returns `502 livekit_rejected` (or
+`livekit_unreachable`).
 A removal is not a kick: they may rejoin. Clients act on `voice_moved` only
 for their own call in `from`, or just after LiveKit removed them from it, and
-only when `to` is a voice channel they can read. The audit actions are
+only when `to` is a voice channel they can read. A malicious server could still
+remove a device and send a made-up move within that window. This is an accepted
+risk: the server already controls membership and can disconnect anyone, a move
+only goes to a channel the person may read, media stays end-to-end encrypted to
+holders of that channel's key, and the client says "Moved to <channel> by a
+moderator". The audit actions are
 `voice_muted` and `voice_unmuted`, and `voice_removed` and `voice_moved` with
 the source or target channel as `target_id`.
 

@@ -469,6 +469,12 @@ impl VoiceRoom {
             .await
     }
 
+    /// Whether this device publishes a microphone.
+    pub fn has_microphone(&self) -> bool {
+        (self.room.local_participant().track_publications().values())
+            .any(|publication| publication.source() == TrackSource::Microphone)
+    }
+
     /// Set the published microphone's mute state, leaving shared audio alone.
     pub fn set_microphone_muted(&self, muted: bool) {
         for publication in self
