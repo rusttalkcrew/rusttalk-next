@@ -18,6 +18,8 @@ pub struct TrackStats {
     pub outbound: bool,
     pub jitter_ms: Option<f64>,
     pub packets_lost: Option<i64>,
+    /// Received packets, inbound tracks only; cumulative like the loss.
+    pub packets_received: Option<u64>,
     pub bitrate_bps: Option<f64>,
 }
 
@@ -42,7 +44,7 @@ impl Sampler {
         for (sid, publication) in local.track_publications() {
             if let Some(track) = publication.track() {
                 let report = track.get_stats().await?;
-                let (jitter_ms, packets_lost, bitrate_bps) =
+                let (jitter_ms, packets_lost, _, bitrate_bps) =
                     measure(&report, true, &self.previous, &mut samples);
                 snapshot.tracks.push(TrackStats {
                     participant: local.identity(),
@@ -50,6 +52,7 @@ impl Sampler {
                     outbound: true,
                     jitter_ms,
                     packets_lost,
+                    packets_received: None,
                     bitrate_bps,
                 });
             }
@@ -60,7 +63,7 @@ impl Sampler {
                     && let Some(track) = publication.track()
                 {
                     let report = track.get_stats().await?;
-                    let (jitter_ms, packets_lost, bitrate_bps) =
+                    let (jitter_ms, packets_lost, packets_received, bitrate_bps) =
                         measure(&report, false, &self.previous, &mut samples);
                     snapshot.tracks.push(TrackStats {
                         participant: participant.identity(),
@@ -68,6 +71,7 @@ impl Sampler {
                         outbound: false,
                         jitter_ms,
                         packets_lost,
+                        packets_received,
                         bitrate_bps,
                     });
                 }
@@ -78,21 +82,23 @@ impl Sampler {
     }
 }
 
-/// Jitter (worst layer), packets lost and bitrate (summed over simulcast layers) of one track.
+/// Jitter (worst layer), packets lost, packets received (inbound) and bitrate
+/// (summed over simulcast layers) of one track.
 fn measure(
     report: &[RtcStats],
     outbound: bool,
     previous: &Samples,
     samples: &mut Samples,
-) -> (Option<f64>, Option<i64>, Option<f64>) {
+) -> (Option<f64>, Option<i64>, Option<u64>, Option<f64>) {
     let max = |a: Option<f64>, b: f64| Some(a.map_or(b, |a| a.max(b)));
-    let (mut jitter, mut lost, mut bitrate) = (None, None, None);
+    let (mut jitter, mut lost, mut received, mut bitrate) = (None, None, None, None);
     let now = Instant::now();
     for stat in report {
         let (id, bytes) = match stat {
             RtcStats::InboundRtp(stat) if !outbound => {
                 jitter = max(jitter, stat.received.jitter * 1000.0);
                 lost = Some(lost.unwrap_or(0) + stat.received.packets_lost);
+                received = Some(received.unwrap_or(0) + stat.received.packets_received);
                 (&stat.rtc.id, stat.inbound.bytes_received)
             }
             RtcStats::OutboundRtp(stat) if outbound => (&stat.rtc.id, stat.sent.bytes_sent),
@@ -113,7 +119,7 @@ fn measure(
         }
         samples.insert(id.clone(), (bytes, now));
     }
-    (jitter, lost, bitrate)
+    (jitter, lost, received, bitrate)
 }
 
 fn ping(report: &[RtcStats]) -> Option<f64> {
@@ -160,7 +166,7 @@ mod tests {
         let previous = HashMap::from([("q".into(), (0, at)), ("h".into(), (0, at))]);
         let report = [layer("q", 1_000), layer("h", 9_000), loss(2), loss(3)];
         let mut samples = HashMap::new();
-        let (_, lost, bitrate) = measure(&report, true, &previous, &mut samples);
+        let (_, lost, _, bitrate) = measure(&report, true, &previous, &mut samples);
         assert_eq!(lost, Some(5));
         let bitrate = bitrate.unwrap();
         assert!((75_000.0..=80_000.0).contains(&bitrate), "{bitrate}");
@@ -171,7 +177,8 @@ mod tests {
     #[test]
     fn first_sample_has_no_bitrate() {
         let mut samples = HashMap::new();
-        let (_, lost, bitrate) = measure(&[layer("q", 1_000)], true, &HashMap::new(), &mut samples);
+        let (_, lost, _, bitrate) =
+            measure(&[layer("q", 1_000)], true, &HashMap::new(), &mut samples);
         assert_eq!((lost, bitrate), (None, None));
         assert_eq!(samples.len(), 1);
     }

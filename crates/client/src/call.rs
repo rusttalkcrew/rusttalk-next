@@ -10,14 +10,14 @@ use std::{
 
 use eframe::egui::{
     self, Align, Button, Color32, ColorImage, ComboBox, Event, Frame, Grid, Image, Key, Layout,
-    Margin, Modal, Popup, PopupCloseBehavior, RichText, Role, Sense, Slider, Stroke, TextureHandle,
-    TextureOptions, Ui, Vec2, Window,
+    Margin, Modal, Popup, RichText, Role, Sense, Slider, Stroke, TextureHandle, TextureOptions, Ui,
+    Vec2,
 };
 
 use crate::{
     audio::{self, Audio, Settings, StreamId},
     camera::{Camera, Change},
-    files::{self, Ask},
+    files,
     home::{Home, Tab, face, palette, section, toast_line},
     net::Command,
     screen::{self, Kind, Options, Target, Video},
@@ -27,7 +27,6 @@ use crate::{
 };
 
 const GREEN: Color32 = Color32::from_rgb(0x23, 0xa5, 0x5a);
-const AMBER: Color32 = Color32::from_rgb(0xf0, 0xb2, 0x32);
 const RED: Color32 = Color32::from_rgb(0xda, 0x37, 0x3c);
 /// Meter range in dBFS.
 const FLOOR: f32 = -70.0;
@@ -42,10 +41,14 @@ pub const DIRECT_CHAT: &str = "Sent directly to people online now. Nothing is st
 /// How long a live offer can be accepted.
 const OFFER_SECONDS: i64 = 10 * 60;
 
+mod panel;
+pub use panel::{Link, call_bar};
+
 pub struct Voice {
     pub audio: Audio,
     pub call: Option<Call>,
-    pub show_stats: bool,
+    /// Ping history and packet loss for the connection popup.
+    pub link: Link,
     /// Apps this device shares in the call.
     pub shares: Vec<App>,
     /// Apps playing sound when the picker opened, filled by a listing thread.
@@ -140,7 +143,7 @@ impl Voice {
         Self {
             audio,
             call: None,
-            show_stats: false,
+            link: Link::default(),
             shares: Vec::new(),
             apps: Arc::new(Mutex::new(Listing::Loading)),
             supported: share::supported(),
@@ -163,7 +166,7 @@ impl Voice {
     pub fn end_call(&mut self) {
         self.call = None;
         self.audio.set_voice(false);
-        self.show_stats = false;
+        self.link = Link::default();
         self.shares.clear();
         self.clear_screens();
     }
@@ -399,167 +402,9 @@ fn volume_slider(ui: &mut Ui, volume: &mut f32) -> egui::Response {
     )
 }
 
-/// The bar at the bottom of the channel list while in a voice room.
-pub fn call_bar(ui: &mut Ui, home: &mut Home) {
-    let Some(call) = &home.voice.call else {
-        return;
-    };
-    let server = home.servers.iter().find(|s| s.address == call.server);
-    let place = server
-        .and_then(|server| {
-            let (name, _) = server.chat_title(&call.channel)?;
-            Some(format!("{name} / {}", server.name()))
-        })
-        .unwrap_or_default();
-    let (text, color) = match call.state {
-        CallState::Connecting => ("Connecting…", AMBER),
-        CallState::Connected => ("Voice connected", GREEN),
-        CallState::Reconnecting => ("Reconnecting…", AMBER),
-    };
-    let audio = home.voice.audio.clone();
-    let connected = call.state == CallState::Connected;
-    let can_talk = call.can_talk;
-    let can_share_video = call.can_share_video;
-    let can_send_files = call.can_send_files;
-    let mut live = None;
-    let mut leave_now = false;
-    let mut share = None;
-    let mut stop = None;
-    let mut stop_screen = false;
-    Frame::new()
-        .fill(ui.visuals().extreme_bg_color)
-        .corner_radius(6)
-        .inner_margin(Margin::same(8))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.label(RichText::new(text).strong().color(color));
-            ui.label(RichText::new(place).small().weak());
-            let off = RED.gamma_multiply(0.6);
-            let selected = ui.visuals().selection.bg_fill;
-            ui.horizontal(|ui| {
-                let deafened = audio.deafened();
-                let muted = audio.muted() || deafened;
-                let mic = if muted { "🔇" } else { "🎤" };
-                if toggle(
-                    ui,
-                    mic,
-                    if muted { "Unmute" } else { "Mute" },
-                    muted.then_some(off),
-                )
-                .clicked()
-                {
-                    audio.set_muted(!muted);
-                    if muted {
-                        audio.set_deafened(false);
-                    }
-                }
-                let ears = if deafened { "Undeafen" } else { "Deafen" };
-                if toggle(ui, "🎧", ears, deafened.then_some(off)).clicked() {
-                    audio.set_deafened(!deafened);
-                }
-                if toggle(
-                    ui,
-                    "📶",
-                    "Connection",
-                    home.voice.show_stats.then_some(selected),
-                )
-                .clicked()
-                {
-                    home.voice.show_stats ^= true;
-                }
-                if toggle(ui, "⚙", "Voice settings", None).clicked() {
-                    home.settings = Some(Tab::Voice);
-                }
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let hang = ui
-                        .add(Button::new(RichText::new("📞").color(Color32::WHITE)).fill(RED))
-                        .on_hover_text("Leave");
-                    hang.widget_info(|| egui::WidgetInfo::labeled(Role::Button, true, "Leave"));
-                    leave_now = hang.clicked();
-                });
-            });
-            share_picker(
-                ui,
-                &mut home.voice,
-                connected,
-                can_talk,
-                &mut share,
-                &mut stop,
-            );
-            camera_button(ui, &mut home.voice.camera, connected, can_share_video);
-            if screen::SUPPORTED {
-                stop_screen = screen_button(ui, &mut home.voice, connected, can_share_video);
-            }
-            live = live_files(
-                ui,
-                &home.voice.live_files,
-                server,
-                connected,
-                can_send_files,
-            );
-        });
-    let server = home
-        .voice
-        .call
-        .as_ref()
-        .and_then(|call| home.servers.iter().find(|s| s.address == call.server));
-    if let (Some(server), Some((app, on))) = (server, share) {
-        if on {
-            home.voice.shares.push(app.clone());
-            server.send(Command::ShareApp(app));
-        } else {
-            home.voice.shares.retain(|shared| shared.id != app.id);
-            server.send(Command::StopApp(app.id.clone()));
-        }
-    }
-    if let (Some(server), Some(id)) = (server, stop) {
-        home.voice.shares.retain(|shared| shared.id != id);
-        server.send(Command::StopApp(id));
-    }
-    if let (Some(server), true) = (server, stop_screen) {
-        home.voice.sharing = Sharing::Off;
-        server.send(Command::StopScreen);
-    }
-    if let Some(server) = server {
-        let address = server.address.clone();
-        match live {
-            Some(LiveAction::Send) => home.files.ask(ui.ctx(), Ask::Offer(address)),
-            Some(LiveAction::Save(id, name)) => {
-                home.files.ask(ui.ctx(), Ask::Accept(address, id, name))
-            }
-            Some(LiveAction::Remove(id, stop)) => {
-                if stop {
-                    server.send(Command::CancelFile(id));
-                }
-                home.voice.live_files.retain(|file| file.id != id);
-            }
-            None => {}
-        }
-    }
-    if leave_now {
-        leave(home);
-    }
-}
-
-/// "Send file", then each file offered in the call with what can be done with it.
-fn live_files(
-    ui: &mut Ui,
-    list: &[LiveFile],
-    server: Option<&Server>,
-    connected: bool,
-    allowed: bool,
-) -> Option<LiveAction> {
+/// Each file offered in the call with what can be done with it.
+fn live_files(ui: &mut Ui, list: &[LiveFile], server: Option<&Server>) -> Option<LiveAction> {
     let mut action = None;
-    let button = Button::new("📎  Send file").min_size(Vec2::new(ui.available_width(), 28.0));
-    let button = ui.add_enabled(connected && allowed, button);
-    let button = if allowed {
-        button.on_hover_text(DIRECT)
-    } else {
-        button.on_disabled_hover_text("You can't send files here")
-    };
-    if button.clicked() {
-        action = Some(LiveAction::Send);
-    }
     let name = |person: &Id| server.map_or_else(String::new, |s| s.member_name(person));
     for file in list.iter().filter(|file| !file.chat) {
         let size = files::size(file.size);
@@ -704,66 +549,6 @@ pub fn chat_live(
             });
         });
     action
-}
-
-/// Turns the camera on or off in the call.
-fn camera_button(ui: &mut Ui, camera: &mut Camera, connected: bool, allowed: bool) {
-    let text = if camera.on {
-        "📷  Turn off camera"
-    } else {
-        "📷  Turn on camera"
-    };
-    let mut button = Button::new(text).min_size(Vec2::new(ui.available_width(), 28.0));
-    if camera.on {
-        button = button.fill(ui.visuals().selection.bg_fill);
-    }
-    let button = ui.add_enabled(connected && allowed, button);
-    let button = if allowed {
-        button
-    } else {
-        button.on_disabled_hover_text("You can't share video here")
-    };
-    if button.clicked() {
-        camera.on ^= true;
-    }
-}
-
-/// "Share screen", or while sharing a chip with Stop. True when Stop was clicked.
-fn screen_button(ui: &mut Ui, voice: &mut Voice, connected: bool, allowed: bool) -> bool {
-    let text = match voice.sharing {
-        Sharing::Off => {
-            let button =
-                Button::new("🖥  Share screen").min_size(Vec2::new(ui.available_width(), 28.0));
-            let button = if allowed {
-                ui.add_enabled(connected, button)
-            } else {
-                ui.add_enabled(false, button)
-                    .on_disabled_hover_text("You can't share your screen here")
-            };
-            if button.clicked() {
-                voice.share_screen = Some((Options::default(), None));
-                list_targets(ui.ctx(), voice);
-            }
-            return false;
-        }
-        Sharing::Starting => "Starting your screen…",
-        Sharing::On => "You're sharing your screen",
-    };
-    let mut stop = false;
-    Frame::new()
-        .fill(GREEN.gamma_multiply(0.25))
-        .corner_radius(4)
-        .inner_margin(Margin::symmetric(6, 4))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(text).small());
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    stop = ui.small_button("Stop").clicked();
-                });
-            });
-        });
-    stop
 }
 
 fn list_targets(ctx: &egui::Context, voice: &Voice) {
@@ -962,76 +747,6 @@ pub fn screen_view(ui: &mut Ui, home: &mut Home) {
     if stop {
         stop_watching(home);
     }
-}
-
-/// "Share app audio", its app picker, and a chip with a stop button per shared app.
-fn share_picker(
-    ui: &mut Ui,
-    voice: &mut Voice,
-    connected: bool,
-    can_talk: bool,
-    share: &mut Option<(App, bool)>,
-    stop: &mut Option<String>,
-) {
-    let button = Button::new("🎵  Share app audio").min_size(Vec2::new(ui.available_width(), 28.0));
-    let button = if !voice.supported {
-        ui.add_enabled(false, button)
-            .on_disabled_hover_text("Needs Windows 11")
-    } else if !can_talk {
-        ui.add_enabled(false, button)
-            .on_disabled_hover_text("You can't talk here")
-    } else {
-        ui.add_enabled(connected, button)
-    };
-    if button.clicked() {
-        // Listing starts a helper process on Linux; keep it off the UI thread.
-        fill(ui.ctx(), &voice.apps, "apps", share::list);
-    }
-    Popup::menu(&button)
-        .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
-        .show(|ui| {
-            ui.set_min_width(200.0);
-            ui.label(RichText::new("Pick apps to share").strong());
-            match &*audio::lock(&voice.apps) {
-                Listing::Loading => {
-                    ui.spinner();
-                }
-                Listing::Failed => {
-                    ui.weak("Couldn't look for apps. Try again.");
-                }
-                Listing::Found(apps) if apps.is_empty() => {
-                    ui.weak("No apps are playing sound.");
-                }
-                Listing::Found(apps) => {
-                    for app in apps {
-                        let was = voice.shares.iter().any(|shared| shared.id == app.id);
-                        let mut on = was;
-                        ui.checkbox(&mut on, &app.name);
-                        if on != was {
-                            *share = Some((app.clone(), on));
-                        }
-                    }
-                }
-            }
-        });
-    if voice.shares.is_empty() {
-        return;
-    }
-    ui.horizontal_wrapped(|ui| {
-        for app in &voice.shares {
-            let chip = ui
-                .add(Button::new(
-                    RichText::new(format!("🎵 {}  ×", app.name)).small(),
-                ))
-                .on_hover_text("Stop sharing");
-            chip.widget_info(|| {
-                egui::WidgetInfo::labeled(Role::Button, true, format!("Stop sharing {}", app.name))
-            });
-            if chip.clicked() {
-                *stop = Some(app.id.clone());
-            }
-        }
-    });
 }
 
 /// An icon button; `on` fills it, with `fill` or the selection color.
@@ -1242,62 +957,6 @@ fn stream_row(ui: &mut Ui, audio: &Audio, stream: StreamId, name: &str) {
     if slider.changed() || mute.clicked() {
         audio.set_volume(stream, volume, muted ^ mute.clicked());
     }
-}
-
-/// The connection panel, opened from the call bar.
-pub fn stats_window(ctx: &egui::Context, home: &mut Home) {
-    let Some(call) = &home.voice.call else {
-        return;
-    };
-    let mut open = home.voice.show_stats;
-    let server = home.servers.iter().find(|s| s.address == call.server);
-    Window::new("Connection")
-        .open(&mut open)
-        .resizable(false)
-        .collapsible(false)
-        .default_width(240.0)
-        // Above the call bar, beside the server rail.
-        .pivot(egui::Align2::LEFT_BOTTOM)
-        .default_pos(ctx.content_rect().left_bottom() + Vec2::new(84.0, -150.0))
-        .show(ctx, |ui| {
-            let stats = &call.stats;
-            let ms = |value: Option<f64>| value.map_or("—".into(), |v| format!("{v:.0} ms"));
-            let count = |value: Option<i64>| value.map_or("—".into(), |v| v.to_string());
-            Grid::new("connection").num_columns(2).show(ui, |ui| {
-                ui.label("Ping");
-                ui.label(ms(stats.ping_ms));
-                ui.end_row();
-                ui.label("Jitter");
-                ui.label(ms(stats.jitter_ms));
-                ui.end_row();
-                ui.label("Lost packets in");
-                ui.label(count(stats.lost_in));
-                ui.end_row();
-                ui.label("Lost packets out");
-                ui.label(count(stats.lost_out));
-                ui.end_row();
-            });
-            section(ui, "Bitrate");
-            if stats.tracks.is_empty() {
-                ui.weak("No audio yet.");
-            }
-            Grid::new("bitrates").num_columns(2).show(ui, |ui| {
-                for track in &stats.tracks {
-                    let name = match (track.mine, server) {
-                        (true, _) => "You".to_owned(),
-                        (false, Some(server)) => server.member_name(&track.person),
-                        (false, None) => String::new(),
-                    };
-                    match &track.app {
-                        Some(app) => ui.label(format!("{name} · {app}")),
-                        None => ui.label(name),
-                    };
-                    ui.label(format!("{:.0} kbps", track.kbps));
-                    ui.end_row();
-                }
-            });
-        });
-    home.voice.show_stats &= open;
 }
 
 /// Settings → Voice & audio.

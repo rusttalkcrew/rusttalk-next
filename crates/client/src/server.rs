@@ -95,6 +95,8 @@ pub struct Stats {
     /// Packets lost since joining.
     pub lost_in: Option<i64>,
     pub lost_out: Option<i64>,
+    /// Packets received since joining, to turn `lost_in` into a rate.
+    pub received_in: Option<u64>,
     pub tracks: Vec<TrackStats>,
 }
 
