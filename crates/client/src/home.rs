@@ -1337,19 +1337,31 @@ pub fn show(ui: &mut Ui, home: &mut Home, updates: &mut crate::update::Updater) 
         call::frame(ui.ctx(), home);
         return None;
     }
-    Panel::left("servers")
+    home.layout
+        .set_window_width(ui.available_width() - RAIL_WIDTH);
+    // One column for rail and channel list, so the bottom panel spans both like Discord.
+    let channels = Panel::left("sidebar")
         .resizable(false)
-        .exact_size(RAIL_WIDTH)
-        .frame(panel_frame(colors.rail))
-        .show(ui, |ui| server_rail(ui, home));
-    home.layout.set_window_width(ui.available_width());
-    let channels = Panel::left("channels")
-        .resizable(false)
-        .exact_size(home.layout.channels)
-        .frame(panel_frame(colors.side))
-        .show(ui, |ui| sidebar(ui, home, updates))
-        .response
-        .rect;
+        .exact_size(RAIL_WIDTH + home.layout.channels)
+        .frame(Frame::new())
+        .show(ui, |ui| {
+            Panel::bottom("you")
+                .frame(panel_frame(colors.side))
+                .show(ui, |ui| bottom_panel(ui, home, updates));
+            Panel::left("servers")
+                .resizable(false)
+                .exact_size(RAIL_WIDTH)
+                .frame(panel_frame(colors.rail))
+                .show(ui, |ui| server_rail(ui, home));
+            Panel::left("channels")
+                .resizable(false)
+                .exact_size(home.layout.channels)
+                .frame(panel_frame(colors.side))
+                .show(ui, |ui| sidebar(ui, home))
+                .response
+                .rect
+        })
+        .inner;
     let mut members = None;
     if let View::Server(index) = home.view
         && home.servers[index].status != Status::Connecting
@@ -1578,18 +1590,17 @@ fn chat_marks(ui: &Ui, home: &Home, chats: &[(&url::Url, Id)], dm: bool, row: Re
     }
 }
 
-fn sidebar(ui: &mut Ui, home: &mut Home, updates: &mut crate::update::Updater) {
-    Panel::bottom("you")
-        .frame(Frame::new().inner_margin(Margin::symmetric(0, 6)))
-        .show(ui, |ui| {
-            if updates.available() {
-                Frame::new()
-                    .inner_margin(Margin::symmetric(0, ui::SPACE_XS as i8))
-                    .show(ui, |ui| updates.button(ui));
-            }
-            call::call_bar(ui, home);
-            user_bar::show(ui, home, updates.available());
-        });
+fn bottom_panel(ui: &mut Ui, home: &mut Home, updates: &mut crate::update::Updater) {
+    if updates.available() {
+        Frame::new()
+            .inner_margin(Margin::symmetric(0, ui::SPACE_XS as i8))
+            .show(ui, |ui| updates.button(ui));
+    }
+    call::call_bar(ui, home);
+    user_bar::show(ui, home, updates.available());
+}
+
+fn sidebar(ui: &mut Ui, home: &mut Home) {
     match home.view {
         View::Server(index) => channel_list(ui, home, index),
         _ => dm_list(ui, home),
