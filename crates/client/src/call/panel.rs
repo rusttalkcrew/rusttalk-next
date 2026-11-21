@@ -1,0 +1,587 @@
+//! The voice panel at the bottom of the channel list: a header with connection
+//! quality and hang-up, one row of share buttons, the "now sharing" card above it
+//! and the connection popup.
+
+use std::collections::VecDeque;
+
+use eframe::egui::{
+    self, Align, Button, Color32, CursorIcon, Frame, Grid, Label, Layout, Margin, Response,
+    RichText, Role, Sense, Ui, Vec2, WidgetInfo,
+};
+
+use super::{
+    Listing, LiveAction, Sharing, Voice, audio, fill, leave, list_targets, live_files, screen,
+};
+use crate::{
+    files::Ask,
+    home::{Home, Tab},
+    net::Command,
+    server::{CallState, Server, Stats},
+    share::{self, App},
+    widgets::{
+        self, AMBER, BUTTON_HEIGHT, GAP, GREEN, GREY, HOVER_SECONDS, LIVE, Look, RADIUS, RED,
+    },
+};
+
+/// Ping samples kept for the chart: five minutes at one every two seconds.
+pub const HISTORY: usize = 150;
+/// Up to these, the connection counts as good, then as fair.
+const GOOD_PING_MS: f64 = 150.0;
+const FAIR_PING_MS: f64 = 300.0;
+const GOOD_LOSS_PERCENT: f64 = 2.0;
+const FAIR_LOSS_PERCENT: f64 = 8.0;
+const SIGNAL_SIZE: Vec2 = Vec2::splat(BUTTON_HEIGHT);
+const CHART_HEIGHT: f32 = 56.0;
+const STOP_SIZE: Vec2 = Vec2::splat(24.0);
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Quality {
+    Unknown,
+    Poor,
+    Fair,
+    Good,
+}
+
+/// Quality from the round trip time and the share of incoming packets lost.
+pub fn quality(ping_ms: Option<f64>, loss_percent: Option<f64>) -> Quality {
+    let Some(ping) = ping_ms else {
+        return Quality::Unknown;
+    };
+    let loss = loss_percent.unwrap_or(0.0);
+    if ping <= GOOD_PING_MS && loss < GOOD_LOSS_PERCENT {
+        Quality::Good
+    } else if ping <= FAIR_PING_MS && loss < FAIR_LOSS_PERCENT {
+        Quality::Fair
+    } else {
+        Quality::Poor
+    }
+}
+
+impl Quality {
+    fn color(self) -> Color32 {
+        match self {
+            Quality::Unknown => GREY,
+            Quality::Poor => RED,
+            Quality::Fair => AMBER,
+            Quality::Good => GREEN,
+        }
+    }
+
+    /// Signal bars lit, of four.
+    fn bars(self) -> usize {
+        match self {
+            Quality::Unknown => 0,
+            Quality::Poor => 1,
+            Quality::Fair => 3,
+            Quality::Good => 4,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Quality::Unknown => "Measuring…",
+            Quality::Poor => "Poor",
+            Quality::Fair => "Okay",
+            Quality::Good => "Good",
+        }
+    }
+}
+
+/// The call's ping history and recent packet loss, from the stats every two seconds.
+#[derive(Default)]
+pub struct Link {
+    pings: VecDeque<f64>,
+    /// The previous cumulative lost and received counts.
+    last: Option<(i64, u64)>,
+    /// Incoming packets lost between the last two samples, in percent.
+    loss: Option<f64>,
+}
+
+impl Link {
+    pub fn push(&mut self, stats: &Stats) {
+        if let Some(ping) = stats.ping_ms {
+            if self.pings.len() == HISTORY {
+                self.pings.pop_front();
+            }
+            self.pings.push_back(ping);
+        }
+        let (Some(lost), Some(received)) = (stats.lost_in, stats.received_in) else {
+            self.last = None;
+            self.loss = None;
+            return;
+        };
+        if let Some((was_lost, was_received)) = self.last {
+            // Counters drop when someone leaves; then just start again from here.
+            let lost_now = lost - was_lost;
+            let received_now = received as i64 - was_received as i64;
+            if lost_now >= 0 && received_now >= 0 && lost_now + received_now > 0 {
+                self.loss = Some(100.0 * lost_now as f64 / (lost_now + received_now) as f64);
+            }
+        }
+        self.last = Some((lost, received));
+    }
+
+    pub fn average(&self) -> Option<f64> {
+        let count = self.pings.len();
+        (count > 0).then(|| self.pings.iter().sum::<f64>() / count as f64)
+    }
+}
+
+fn camera_tip(on: bool) -> &'static str {
+    if on {
+        "Turn off camera"
+    } else {
+        "Turn on camera"
+    }
+}
+
+fn screen_tip(sharing: Sharing) -> &'static str {
+    match sharing {
+        Sharing::Off => "Share your screen",
+        Sharing::Starting | Sharing::On => "Stop sharing",
+    }
+}
+
+/// What the "now sharing" card stops.
+enum Stop {
+    Screen,
+    App(String),
+}
+
+/// The voice panel, while in a voice room.
+pub fn call_bar(ui: &mut Ui, home: &mut Home) {
+    let Some(call) = &home.voice.call else {
+        return;
+    };
+    let server = home.servers.iter().find(|s| s.address == call.server);
+    let place = server
+        .and_then(|server| {
+            let (name, _) = server.chat_title(&call.channel)?;
+            Some(format!("{name} / {}", server.name()))
+        })
+        .unwrap_or_default();
+    let (text, color) = match call.state {
+        CallState::Connecting => ("Connecting…", AMBER),
+        CallState::Connected => ("Voice connected", GREEN),
+        CallState::Reconnecting => ("Reconnecting…", AMBER),
+    };
+    let connected = call.state == CallState::Connected;
+    let can_talk = call.can_talk;
+    let can_share_video = call.can_share_video;
+    let can_send_files = call.can_send_files;
+    let stats = call.stats.clone();
+    let quality = if connected {
+        quality(stats.ping_ms, home.voice.link.loss)
+    } else {
+        Quality::Unknown
+    };
+    let stopped = sharing_card(ui, &home.voice);
+    let mut live = None;
+    let mut leave_now = false;
+    let mut share = None;
+    let mut stop_screen = matches!(stopped, Some(Stop::Screen));
+    let mut voice_settings = false;
+    Frame::new()
+        .fill(ui.visuals().extreme_bg_color)
+        .corner_radius(RADIUS)
+        .inner_margin(Margin::same(8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            widgets::right_row(ui, BUTTON_HEIGHT, |ui| {
+                let hang = widgets::icon_button(ui, "📞", "Leave call", Look::Danger, SIGNAL_SIZE);
+                leave_now = hang.clicked();
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    let signal = signal_button(ui, quality);
+                    widgets::popup(&signal, |ui| {
+                        voice_settings = connection(ui, &stats, &home.voice.link, quality, server);
+                    });
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        ui.add(Label::new(RichText::new(text).strong().color(color)).truncate());
+                        ui.add(Label::new(RichText::new(&place).small().weak()).truncate());
+                    });
+                });
+            });
+            ui.add_space(6.0);
+            let count = if screen::SUPPORTED { 4.0 } else { 3.0 };
+            let width = (ui.available_width() - GAP * (count - 1.0)) / count;
+            let size = Vec2::new(width, BUTTON_HEIGHT);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = GAP;
+                let voice = &mut home.voice;
+                let camera = &mut voice.camera;
+                let look = if camera.on {
+                    Look::On(LIVE)
+                } else {
+                    Look::Plain
+                };
+                let button = ui
+                    .add_enabled_ui(connected && can_share_video, |ui| {
+                        widgets::icon_button(ui, "📷", camera_tip(camera.on), look, size)
+                    })
+                    .inner;
+                if !can_share_video {
+                    button.on_disabled_hover_text("You can't share video here");
+                } else if button.clicked() {
+                    camera.on ^= true;
+                }
+                if screen::SUPPORTED {
+                    let look = if voice.sharing == Sharing::Off {
+                        Look::Plain
+                    } else {
+                        Look::On(LIVE)
+                    };
+                    let button = ui
+                        .add_enabled_ui(connected && can_share_video, |ui| {
+                            widgets::icon_button(ui, "🖥", screen_tip(voice.sharing), look, size)
+                        })
+                        .inner;
+                    if !can_share_video {
+                        button.on_disabled_hover_text("You can't share your screen here");
+                    } else if button.clicked() {
+                        if voice.sharing == Sharing::Off {
+                            voice.share_screen = Some((Default::default(), None));
+                            list_targets(ui.ctx(), voice);
+                        } else {
+                            stop_screen = true;
+                        }
+                    }
+                }
+                share = app_button(ui, voice, connected && can_talk, can_talk, size);
+                let button = ui
+                    .add_enabled_ui(connected && can_send_files, |ui| {
+                        widgets::icon_button(ui, "📎", "Send a file", Look::Plain, size)
+                    })
+                    .inner;
+                if !can_send_files {
+                    button.on_disabled_hover_text("You can't send files here");
+                } else if button.clicked() {
+                    live = Some(LiveAction::Send);
+                }
+            });
+            if let Some(action) = live_files(ui, &home.voice.live_files, server) {
+                live = Some(action);
+            }
+        });
+    let server = home
+        .voice
+        .call
+        .as_ref()
+        .and_then(|call| home.servers.iter().find(|s| s.address == call.server));
+    if let (Some(server), Some((app, on))) = (server, share) {
+        if on {
+            home.voice.shares.push(app.clone());
+            server.send(Command::ShareApp(app));
+        } else {
+            home.voice.shares.retain(|shared| shared.id != app.id);
+            server.send(Command::StopApp(app.id.clone()));
+        }
+    }
+    if let (Some(server), Some(Stop::App(id))) = (server, stopped) {
+        home.voice.shares.retain(|shared| shared.id != id);
+        server.send(Command::StopApp(id));
+    }
+    if let (Some(server), true) = (server, stop_screen) {
+        home.voice.sharing = Sharing::Off;
+        server.send(Command::StopScreen);
+    }
+    if let Some(server) = server {
+        let address = server.address.clone();
+        match live {
+            Some(LiveAction::Send) => home.files.ask(ui.ctx(), Ask::Offer(address)),
+            Some(LiveAction::Save(id, name)) => {
+                home.files.ask(ui.ctx(), Ask::Accept(address, id, name))
+            }
+            Some(LiveAction::Remove(id, stop)) => {
+                if stop {
+                    server.send(Command::CancelFile(id));
+                }
+                home.voice.live_files.retain(|file| file.id != id);
+            }
+            None => {}
+        }
+    }
+    if voice_settings {
+        home.settings = Some(Tab::Voice);
+    }
+    if leave_now {
+        leave(home);
+    }
+}
+
+/// Four signal bars in the quality's colour; opens the connection popup.
+fn signal_button(ui: &mut Ui, quality: Quality) -> Response {
+    let (rect, response) = ui.allocate_exact_size(SIGNAL_SIZE, Sense::click());
+    let hover = ui.ctx().animate_bool_with_time(
+        response.id.with("hover"),
+        response.hovered(),
+        HOVER_SECONDS,
+    );
+    let visuals = ui.visuals();
+    let fill = Color32::TRANSPARENT.lerp_to_gamma(visuals.widgets.hovered.weak_bg_fill, hover);
+    let painter = ui.painter();
+    painter.rect_filled(rect, RADIUS, fill);
+    let (bar, gap, tall) = (3.0, 2.0, 14.0);
+    let left = rect.center().x - (4.0 * bar + 3.0 * gap) / 2.0;
+    let bottom = rect.center().y + tall / 2.0;
+    for at in 0..4 {
+        let height = tall * (at + 1) as f32 / 4.0;
+        let x = left + at as f32 * (bar + gap);
+        let color = if at < quality.bars() {
+            quality.color()
+        } else {
+            GREY.gamma_multiply(0.45)
+        };
+        let bar =
+            egui::Rect::from_min_max(egui::pos2(x, bottom - height), egui::pos2(x + bar, bottom));
+        painter.rect_filled(bar, 1, color);
+    }
+    response.widget_info(|| WidgetInfo::labeled(Role::Button, true, "Connection info"));
+    response
+        .on_hover_text(format!("Connection info · {}", quality.label()))
+        .on_hover_cursor(CursorIcon::PointingHand)
+}
+
+/// The connection popup: ping now and on average, loss, a ping chart, the details
+/// and encryption. True when "Voice settings" was clicked.
+fn connection(
+    ui: &mut Ui,
+    stats: &Stats,
+    link: &Link,
+    quality: Quality,
+    server: Option<&Server>,
+) -> bool {
+    let ms = |value: Option<f64>| value.map_or("—".into(), |v| format!("{v:.0} ms"));
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Connection").strong());
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.label(RichText::new(quality.label()).color(quality.color()));
+            widgets::dot(ui, quality.color());
+        });
+    });
+    Grid::new("connection").num_columns(2).show(ui, |ui| {
+        ui.label("Ping");
+        ui.label(ms(stats.ping_ms));
+        ui.end_row();
+        ui.label("Average");
+        ui.label(ms(link.average()));
+        ui.end_row();
+        ui.label("Packet loss");
+        ui.label(link.loss.map_or("—".into(), |v| format!("{v:.1} %")));
+        ui.end_row();
+    });
+    ui.add_space(4.0);
+    let pings: Vec<f64> = link.pings.iter().copied().collect();
+    let size = Vec2::new(ui.available_width(), CHART_HEIGHT);
+    widgets::line_chart(ui, &pings, HISTORY, size, quality.color());
+    ui.horizontal(|ui| {
+        ui.small(RichText::new("5 min ago").weak());
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.small(RichText::new("now").weak());
+        });
+    });
+    egui::CollapsingHeader::new("Details")
+        .id_salt("connection details")
+        .show(ui, |ui| details(ui, stats, server));
+    ui.separator();
+    ui.label("🔒  End-to-end encrypted")
+        .on_hover_text("Only people in the call can hear and see it, not the server.");
+    ui.add(Button::new("⚙  Voice settings").frame_when_inactive(false))
+        .clicked()
+}
+
+/// Jitter, lost packets and bitrates: what the connection window used to show.
+fn details(ui: &mut Ui, stats: &Stats, server: Option<&Server>) {
+    let ms = |value: Option<f64>| value.map_or("—".into(), |v| format!("{v:.0} ms"));
+    let count = |value: Option<i64>| value.map_or("—".into(), |v| v.to_string());
+    Grid::new("connection details")
+        .num_columns(2)
+        .show(ui, |ui| {
+            ui.label("Jitter");
+            ui.label(ms(stats.jitter_ms));
+            ui.end_row();
+            ui.label("Lost packets in");
+            ui.label(count(stats.lost_in));
+            ui.end_row();
+            ui.label("Lost packets out");
+            ui.label(count(stats.lost_out));
+            ui.end_row();
+            for track in &stats.tracks {
+                let name = match (track.mine, server) {
+                    (true, _) => "You".to_owned(),
+                    (false, Some(server)) => server.member_name(&track.person),
+                    (false, None) => String::new(),
+                };
+                match &track.app {
+                    Some(app) => ui.label(format!("{name} · {app}")),
+                    None => ui.label(name),
+                };
+                ui.label(format!("{:.0} kbps", track.kbps));
+                ui.end_row();
+            }
+        });
+}
+
+/// The app audio button and its picker. Returns an app turned on or off.
+fn app_button(
+    ui: &mut Ui,
+    voice: &mut Voice,
+    enabled: bool,
+    can_talk: bool,
+    size: Vec2,
+) -> Option<(App, bool)> {
+    let look = if voice.shares.is_empty() {
+        Look::Plain
+    } else {
+        Look::On(LIVE)
+    };
+    let usable = voice.supported && enabled;
+    let button = ui
+        .add_enabled_ui(usable, |ui| {
+            widgets::icon_button(ui, "🎵", "Share app audio", look, size)
+        })
+        .inner;
+    let button = if !voice.supported {
+        button.on_disabled_hover_text("Needs Windows 11")
+    } else if !can_talk {
+        button.on_disabled_hover_text("You can't talk here")
+    } else {
+        button
+    };
+    if button.clicked() {
+        // Listing starts a helper process on Linux; keep it off the UI thread.
+        fill(ui.ctx(), &voice.apps, "apps", share::list);
+    }
+    let mut share = None;
+    widgets::popup(&button, |ui| {
+        ui.label(RichText::new("Pick apps to share").strong());
+        match &*audio::lock(&voice.apps) {
+            Listing::Loading => {
+                ui.spinner();
+            }
+            Listing::Failed => {
+                ui.weak("Couldn't look for apps. Try again.");
+            }
+            Listing::Found(apps) if apps.is_empty() => {
+                ui.weak("No apps are playing sound.");
+            }
+            Listing::Found(apps) => {
+                for app in apps {
+                    let was = voice.shares.iter().any(|shared| shared.id == app.id);
+                    let mut on = was;
+                    ui.checkbox(&mut on, &app.name);
+                    if on != was {
+                        share = Some((app.clone(), on));
+                    }
+                }
+            }
+        }
+    });
+    share
+}
+
+/// "Now sharing" above the panel while this device shares its screen or app audio,
+/// each with a stop button.
+fn sharing_card(ui: &mut Ui, voice: &Voice) -> Option<Stop> {
+    let shown = voice.sharing != Sharing::Off || !voice.shares.is_empty();
+    let mut stop = None;
+    widgets::card(ui, "now sharing", shown, |ui| {
+        ui.label(RichText::new("Now sharing").small().weak());
+        let screen = match voice.sharing {
+            Sharing::Off => None,
+            Sharing::Starting => Some("Starting your screen…".to_owned()),
+            Sharing::On => Some("Your screen".to_owned()),
+        };
+        let rows = screen
+            .map(|text| {
+                (
+                    "🖥",
+                    text,
+                    "Stop sharing your screen".to_owned(),
+                    Stop::Screen,
+                )
+            })
+            .into_iter()
+            .chain(voice.shares.iter().map(|app| {
+                let tip = format!("Stop sharing {}", app.name);
+                ("🎵", app.name.clone(), tip, Stop::App(app.id.clone()))
+            }));
+        for (icon, text, tip, which) in rows {
+            widgets::right_row(ui, STOP_SIZE.y, |ui| {
+                if widgets::icon_button(ui, "⏹", &tip, Look::Plain, STOP_SIZE).clicked() {
+                    stop = Some(which);
+                }
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    widgets::dot(ui, LIVE);
+                    ui.add(Label::new(format!("{icon}  {text}")).truncate());
+                });
+            });
+        }
+    });
+    ui.add_space(4.0);
+    stop
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stats(ping: Option<f64>, lost: Option<i64>, received: Option<u64>) -> Stats {
+        Stats {
+            ping_ms: ping,
+            lost_in: lost,
+            received_in: received,
+            ..Stats::default()
+        }
+    }
+
+    #[test]
+    fn quality_from_ping_and_loss() {
+        assert_eq!(quality(None, Some(0.0)), Quality::Unknown);
+        assert_eq!(quality(Some(40.0), None), Quality::Good);
+        assert_eq!(quality(Some(40.0), Some(1.9)), Quality::Good);
+        assert_eq!(quality(Some(40.0), Some(2.0)), Quality::Fair);
+        assert_eq!(quality(Some(200.0), Some(0.0)), Quality::Fair);
+        assert_eq!(quality(Some(350.0), Some(0.0)), Quality::Poor);
+        assert_eq!(quality(Some(40.0), Some(10.0)), Quality::Poor);
+    }
+
+    #[test]
+    fn ping_history_keeps_five_minutes() {
+        let mut link = Link::default();
+        assert_eq!(link.average(), None);
+        for ping in 0..HISTORY + 10 {
+            link.push(&stats(Some(ping as f64), None, None));
+        }
+        link.push(&stats(None, None, None));
+        assert_eq!(link.pings.len(), HISTORY);
+        assert_eq!(link.pings.front(), Some(&10.0));
+        assert_eq!(link.pings.back(), Some(&(HISTORY as f64 + 9.0)));
+        assert_eq!(link.average(), Some(10.0 + (HISTORY as f64 - 1.0) / 2.0));
+    }
+
+    #[test]
+    fn loss_is_measured_between_samples() {
+        let mut link = Link::default();
+        link.push(&stats(None, Some(10), Some(1_000)));
+        assert_eq!(link.loss, None);
+        link.push(&stats(None, Some(15), Some(1_095)));
+        assert_eq!(link.loss, Some(5.0));
+        // Someone left: counters dropped, keep the last value and start again.
+        link.push(&stats(None, Some(2), Some(300)));
+        assert_eq!(link.loss, Some(5.0));
+        link.push(&stats(None, Some(2), Some(400)));
+        assert_eq!(link.loss, Some(0.0));
+        link.push(&stats(None, None, None));
+        assert_eq!(link.loss, None);
+    }
+
+    #[test]
+    fn tooltips_follow_the_state() {
+        assert_eq!(camera_tip(false), "Turn on camera");
+        assert_eq!(camera_tip(true), "Turn off camera");
+        assert_eq!(screen_tip(Sharing::Off), "Share your screen");
+        assert_eq!(screen_tip(Sharing::Starting), "Stop sharing");
+        assert_eq!(screen_tip(Sharing::On), "Stop sharing");
+    }
+}

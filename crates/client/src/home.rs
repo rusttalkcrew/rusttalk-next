@@ -47,6 +47,8 @@ const ONLINE: Color32 = Color32::from_rgb(0x23, 0xa5, 0x5a);
 const AWAY: Color32 = Color32::from_rgb(0xf0, 0xb2, 0x32);
 const OFFLINE: Color32 = Color32::from_rgb(0x80, 0x84, 0x8e);
 
+mod user_bar;
+
 pub struct Home {
     pub identity: Arc<DeviceIdentity>,
     net: Net,
@@ -563,6 +565,7 @@ impl Home {
                 if let Some(call) = &mut self.voice.call
                     && call.server == address
                 {
+                    self.voice.link.push(&stats);
                     call.stats = stats;
                 }
             }
@@ -842,7 +845,6 @@ pub fn show(ui: &mut Ui, home: &mut Home, updates: &mut crate::update::Updater) 
     dialogs(ui.ctx(), home);
     admin::window(ui.ctx(), home);
     files::viewer(ui.ctx(), &mut home.files);
-    call::stats_window(ui.ctx(), home);
     call::screen_dialog(ui.ctx(), home);
     call::frame(ui.ctx(), home);
     crate::settings::show(ui.ctx(), home, updates)
@@ -927,69 +929,11 @@ fn sidebar(ui: &mut Ui, home: &mut Home, update_available: bool) {
         .frame(Frame::new().inner_margin(Margin::symmetric(0, 6)))
         .show(ui, |ui| {
             call::call_bar(ui, home);
-            status_menu(ui, home);
-            let settings = if update_available {
-                "⚙  Settings · Update available"
-            } else {
-                "⚙  Settings"
-            };
-            if ui.button(settings).clicked() {
-                home.settings = Some(if update_available {
-                    Tab::Updates
-                } else {
-                    Tab::Profile
-                });
-            }
+            user_bar::show(ui, home, update_available);
         });
     match home.view {
         View::Server(index) => channel_list(ui, home, index),
         _ => dm_list(ui, home),
-    }
-}
-
-/// Your status, and a menu to pick another.
-fn status_menu(ui: &mut Ui, home: &mut Home) {
-    let current = home.status.unwrap_or(Choice::Online);
-    let (color, label) = status_look(current);
-    let button = ui
-        .horizontal(|ui| {
-            dot(ui, color);
-            ui.add(Button::new(format!("{label}  ⏷")).frame_when_inactive(false))
-        })
-        .inner;
-    button.widget_info(|| WidgetInfo::labeled(Role::Button, true, "Status"));
-    let mut picked = None;
-    Popup::menu(&button).show(|ui| {
-        for choice in [Choice::Online, Choice::Away, Choice::Invisible] {
-            let (color, label) = status_look(choice);
-            ui.horizontal(|ui| {
-                dot(ui, color);
-                if ui
-                    .add(Button::selectable(choice == current, label))
-                    .clicked()
-                {
-                    picked = Some(choice);
-                }
-            });
-        }
-        ui.weak("Invisible: you look offline but can use everything.");
-    });
-    if let Some(choice) = picked {
-        home.auto_away = false;
-        home.set_status(choice);
-    }
-}
-
-fn dot(ui: &mut Ui, color: Color32) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
-    ui.painter().circle_filled(rect.center(), 5.0, color);
-}
-
-fn status_look(choice: Choice) -> (Color32, &'static str) {
-    match choice {
-        Choice::Online => (ONLINE, "Online"),
-        Choice::Away => (AWAY, "Away"),
-        Choice::Invisible => (OFFLINE, "Invisible"),
     }
 }
 

@@ -19,6 +19,7 @@ mod server;
 mod settings;
 mod share;
 mod update;
+mod widgets;
 
 use std::{
     env, fs,

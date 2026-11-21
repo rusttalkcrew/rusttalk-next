@@ -669,6 +669,10 @@ pub(super) async fn voice_stats(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, st
         jitter_ms: received.iter().filter_map(|t| t.jitter_ms).reduce(f64::max),
         lost_in: lost(&received),
         lost_out: lost(&sent),
+        received_in: received
+            .iter()
+            .filter_map(|t| t.packets_received)
+            .reduce(|a, b| a + b),
         tracks: snapshot
             .tracks
             .iter()
