@@ -600,7 +600,8 @@ change. Pending checks coalesce: a person whose mute changed, then a full pass,
 then single rooms, each queued at most once, so a burst of joins in one room
 cannot hold up a mute elsewhere. The API enforces on
 startup, on every LiveKit join notice (whatever the token allowed), after each
-mute change, and retries with backoff while LiveKit fails; muting again
+mute change. A check that fails is retried after 5 seconds while other checks
+go on, and a worker that stops unexpectedly is restarted with a full pass; muting again
 reapplies it without a second audit entry. Clients follow LiveKit's own
 permission change: they publish the microphone again when it is allowed, even
 if their API connection missed the lift.

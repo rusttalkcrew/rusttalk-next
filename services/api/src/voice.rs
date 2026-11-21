@@ -55,9 +55,8 @@ pub struct LiveKit {
     /// Active identities per room and when they were asked for; `None` marks a room
     /// LiveKit reported a change in at that time, so older answers are not used again.
     rosters: Mutex<HashMap<String, (Instant, Option<Active>)>>,
-    /// Access checks waiting for the enforcement worker, and its wake-up.
-    pending: Mutex<enforcer::Pending>,
-    wake: tokio::sync::Notify,
+    /// Access checks waiting for the enforcement worker.
+    queue: enforcer::Queue,
 }
 
 impl LiveKit {
@@ -86,8 +85,7 @@ impl LiveKit {
                 .timeout(Duration::from_secs(3))
                 .build()?,
             rosters: Mutex::default(),
-            pending: Mutex::default(),
-            wake: Default::default(),
+            queue: Default::default(),
         }))
     }
 
@@ -656,8 +654,7 @@ mod tests {
                 webhook: WebhookReceiver::new(TokenVerifier::with_api_key(api_key, api_secret)),
                 http: reqwest::Client::new(),
                 rosters: Mutex::default(),
-                pending: Mutex::default(),
-                wake: Default::default(),
+                queue: Default::default(),
             })),
             session_ttl: 3600,
             listing_changed: tokio::sync::watch::channel(()).0,
@@ -718,8 +715,7 @@ mod tests {
             webhook: WebhookReceiver::new(TokenVerifier::with_api_key("test-key", secret)),
             http: reqwest::Client::new(),
             rosters: Mutex::default(),
-            pending: Mutex::default(),
-            wake: Default::default(),
+            queue: Default::default(),
         };
         let cached = |livekit: &LiveKit| {
             let rosters = livekit.rosters.lock().unwrap();
