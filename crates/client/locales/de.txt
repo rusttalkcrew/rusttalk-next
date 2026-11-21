@@ -183,6 +183,7 @@ home.edited = (bearbeitet)
 home.message_unreadable = Diese Nachricht konnte nicht geöffnet werden.
 common.reply = Antworten
 common.edit = Bearbeiten
+home.copy_code = Code kopieren
 home.copy_text = Text kopieren
 common.delete = Löschen
 home.sticker = Sticker {code}

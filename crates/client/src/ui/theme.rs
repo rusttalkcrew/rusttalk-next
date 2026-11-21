@@ -420,27 +420,27 @@ impl Appearance {
     }
 }
 
+/// WCAG relative luminance.
+fn luminance(color: Color32) -> f64 {
+    let channel = |c: u8| {
+        let c = f64::from(c) / 255.0;
+        if c <= 0.03928 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * channel(color.r()) + 0.7152 * channel(color.g()) + 0.0722 * channel(color.b())
+}
+
+pub fn contrast(a: Color32, b: Color32) -> f64 {
+    let (a, b) = (luminance(a), luminance(b));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// WCAG relative luminance.
-    fn luminance(color: Color32) -> f64 {
-        let channel = |c: u8| {
-            let c = f64::from(c) / 255.0;
-            if c <= 0.03928 {
-                c / 12.92
-            } else {
-                ((c + 0.055) / 1.055).powf(2.4)
-            }
-        };
-        0.2126 * channel(color.r()) + 0.7152 * channel(color.g()) + 0.0722 * channel(color.b())
-    }
-
-    pub fn contrast(a: Color32, b: Color32) -> f64 {
-        let (a, b) = (luminance(a), luminance(b));
-        (a.max(b) + 0.05) / (a.min(b) + 0.05)
-    }
 
     #[test]
     fn every_theme_meets_wcag_aa_for_text() {
