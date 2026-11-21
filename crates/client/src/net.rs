@@ -843,7 +843,11 @@ async fn serve(
             () = rekey_due => {
                 match client.sync().await {
                     Ok(()) => save_pins(ctx, url, client, state),
-                    Err(error) => tracing::warn!(error = %format_args!("{error:#}"), "DM key recovery failed"),
+                    Err(error) => {
+                        tracing::warn!(error = %format_args!("{error:#}"), "DM key recovery failed");
+                        // Wait before the next try, so a fast failure can't spin.
+                        client.rekey_failed();
+                    }
                 }
             }
             () = tokio::time::sleep(refresh) => {

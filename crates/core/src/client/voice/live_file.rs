@@ -26,7 +26,7 @@ use zeroize::Zeroizing;
 use crate::{
     auth::{KnownServer, decode, encode, live_file_identity, voice_identity},
     identity::random_bytes,
-    keys::{Event, Kind, Scope, random_key},
+    keys::{Event, random_key},
     messages::{
         LIVE_CHUNK_SIZE, LiveAttachment, LiveFileAcceptance, MAX_LIVE_FILE_SIZE, MessageBody,
         MessageRecord, fit_file_name,
@@ -405,11 +405,6 @@ impl LiveFiles {
             .devices
             .get(device)
             .context("file acceptance has unknown device")?;
-        // In a DM only the pinned other person may take the file.
-        ensure!(
-            client.dm_peer_is(channel_id, certificate.person_id()),
-            "file acceptance from someone other than the DM's other person"
-        );
         let peer = certificate.signing_key();
         acceptance
             .verify(&client.space().id, channel_id, peer)
@@ -420,6 +415,8 @@ impl LiveFiles {
         let Some(offer) = self.offers.get_mut(&transfer) else {
             return Ok(());
         };
+        // A verified cancellation of a transfer already running for that device and
+        // nonce always goes through, also while DMs here are paused.
         if acceptance.cancel {
             if let Some((accepted_nonce, task)) = offer.recipients.get(peer.as_bytes())
                 && *accepted_nonce == nonce
@@ -428,6 +425,11 @@ impl LiveFiles {
             }
             return Ok(());
         }
+        // A new transfer in a DM: only the pinned other person, and not while paused.
+        ensure!(
+            client.dm_peer_is(channel_id, certificate.person_id()),
+            "file acceptance from someone other than the DM's other person"
+        );
         ensure!(
             offer.created.elapsed() < OFFER_LIFETIME,
             "live file offer expired"
@@ -569,13 +571,10 @@ async fn prepare_accept(
         body.edit_of.is_none(),
         "live file offer must be an original message"
     );
-    let scope = Scope {
-        kind: Kind::Channel,
-        id: *channel,
-    };
+    // In a DM only from one of the two, and not while this server's DMs are paused.
     ensure!(
-        client.dm_allows(scope, &record.person),
-        "live file offer from outside the DM"
+        client.may_accept_offer(channel, &record.person),
+        "live file offer from outside the DM, or DMs here are paused"
     );
     let sender = client
         .devices

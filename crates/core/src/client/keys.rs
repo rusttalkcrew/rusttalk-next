@@ -51,6 +51,8 @@ pub struct KeyClient<'a> {
     /// DM epochs not yet trusted that this session tried to recover: attempts and
     /// when to try again, so a refusal isn't retried in a loop but a delay is.
     rekeyed: HashMap<([u8; 32], i64), (u32, std::time::Instant)>,
+    /// Timer-driven syncs that failed in a row, to back off their retries too.
+    rekey_failures: u32,
     /// Key links opened in each pinned DM, sent by one of its two people: the epoch
     /// each was sent in, and the link.
     pub(super) links: HashMap<[u8; 32], Vec<(i64, KeyLink)>>,
@@ -96,6 +98,7 @@ impl<'a> KeyClient<'a> {
             pins_lost: dms.is_none(),
             dms: dms.unwrap_or_default(),
             rekeyed: HashMap::new(),
+            rekey_failures: 0,
             links: HashMap::new(),
             devices: HashMap::new(),
             historical_devices: HashMap::new(),
@@ -599,6 +602,13 @@ impl<'a> KeyClient<'a> {
         dm_peer_is(&self.dms, self.pins_lost, channel, person)
     }
 
+    /// Whether this device may accept a live file `offerer` offered in this channel.
+    #[cfg(feature = "voice")]
+    pub(super) fn may_accept_offer(&self, channel: &[u8; 32], offerer: &PersonId) -> bool {
+        let me = self.identity.certificate.person_id();
+        may_accept_offer(&self.dms, self.pins_lost, me, channel, offerer)
+    }
+
     /// Whether a key of this scope may come from or go to this person: anyone for
     /// a channel or space, only the two people for a pinned DM. Live files in a DM
     /// follow the same rule.
@@ -618,6 +628,7 @@ impl<'a> KeyClient<'a> {
     /// DM. Returns whether key state changed.
     async fn rekey_dms(&mut self) -> Result<bool> {
         let mut changed = false;
+        self.rekey_failures = 0;
         let readable: Vec<_> = (self.scopes.iter())
             .filter(|state| state.scope.kind == Kind::Channel && !state.rotate && state.epoch > 0)
             .map(|state| (state.scope, state.epoch))
@@ -694,6 +705,17 @@ impl<'a> KeyClient<'a> {
     /// so the connection can sync then even without an event.
     pub fn next_rekey(&self) -> Option<std::time::Instant> {
         self.rekeyed.values().map(|(_, next)| *next).min()
+    }
+
+    /// A timer-driven sync failed before it could move the due attempts on: push
+    /// them back, waiting longer after each failure in a row, so it can't spin.
+    pub fn rekey_failed(&mut self) {
+        self.rekey_failures += 1;
+        delay_due(
+            &mut self.rekeyed,
+            std::time::Instant::now(),
+            self.rekey_failures,
+        );
     }
 
     /// Something is waiting to go out: try untrusted DM epochs on the next sync.
@@ -1066,6 +1088,18 @@ fn recovery(have_current: bool, tries: u32) -> Recovery {
     }
 }
 
+/// Move every attempt due before the failure backoff to the end of it.
+fn delay_due(
+    rekeyed: &mut HashMap<([u8; 32], i64), (u32, std::time::Instant)>,
+    now: std::time::Instant,
+    failures: u32,
+) {
+    let until = now + backoff(failures);
+    for (_, next) in rekeyed.values_mut() {
+        *next = (*next).max(until);
+    }
+}
+
 /// The wait before the next recovery attempt: 15 s, doubling up to 16 min.
 fn backoff(tries: u32) -> Duration {
     Duration::from_secs(15 << tries.saturating_sub(1).min(6))
@@ -1073,6 +1107,23 @@ fn backoff(tries: u32) -> Duration {
 
 /// Whether this person may take a live file in this channel: in a DM, only the
 /// pinned other person, and nobody while this server's DMs are paused.
+/// Whether this device may accept a live file offered here by `offerer`: in a DM,
+/// only from one of the two people, and not while this server's DMs are paused.
+#[cfg(any(feature = "voice", test))]
+fn may_accept_offer(
+    dms: &HashMap<[u8; 32], DmPin>,
+    paused: bool,
+    me: &PersonId,
+    channel: &[u8; 32],
+    offerer: &PersonId,
+) -> bool {
+    let scope = Scope {
+        kind: Kind::Channel,
+        id: *channel,
+    };
+    dm_allows(dms, me, scope, offerer) && !(paused && dms.contains_key(channel))
+}
+
 #[cfg(any(feature = "voice", test))]
 fn dm_peer_is(
     dms: &HashMap<[u8; 32], DmPin>,
@@ -1176,6 +1227,34 @@ mod tests {
         // without a link rather than never.
         assert_eq!(recovery(false, 1), Recovery::Wait);
         assert_eq!(recovery(false, 2), Recovery::Fresh);
+    }
+
+    #[test]
+    fn failed_timer_syncs_wait_longer_each_time() {
+        let now = std::time::Instant::now();
+        let slot = ([9; 32], 3);
+        let mut rekeyed = HashMap::from([(slot, (1, now))]);
+        // A deadline already passed and the sync fails at once, twice in a row.
+        delay_due(&mut rekeyed, now, 1);
+        assert_eq!(rekeyed[&slot].1, now + Duration::from_secs(15));
+        delay_due(&mut rekeyed, now, 2);
+        assert_eq!(rekeyed[&slot].1, now + Duration::from_secs(30));
+        // A later deadline stays as it is.
+        let later = now + Duration::from_secs(600);
+        rekeyed.insert(slot, (4, later));
+        delay_due(&mut rekeyed, now, 1);
+        assert_eq!(rekeyed[&slot].1, later);
+    }
+
+    #[test]
+    fn a_paused_device_accepts_no_dm_offer() {
+        let (me, peer, other) = ([1; 32], [2; 32], [3; 32]);
+        let dms = HashMap::from([([9; 32], DmPin::With { peer, anchor: None })]);
+        assert!(may_accept_offer(&dms, false, &me, &[9; 32], &peer));
+        assert!(!may_accept_offer(&dms, false, &me, &[9; 32], &other));
+        assert!(!may_accept_offer(&dms, true, &me, &[9; 32], &peer));
+        // An ordinary channel's offers are unaffected.
+        assert!(may_accept_offer(&dms, true, &me, &[8; 32], &other));
     }
 
     #[test]
