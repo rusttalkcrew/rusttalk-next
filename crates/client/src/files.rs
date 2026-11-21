@@ -297,7 +297,7 @@ impl Files {
                     .into_iter()
                     .collect(),
                 (None, None) if pictures => rfd::FileDialog::new()
-                    .add_filter(t!("files.pictures"), &["png", "jpg", "jpeg", "gif"])
+                    .add_filter(t!("files.pictures"), &["png", "jpg", "jpeg", "gif", "webp"])
                     .pick_file()
                     .into_iter()
                     .collect(),

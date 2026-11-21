@@ -1578,11 +1578,11 @@ fn server_rail(ui: &mut Ui, home: &mut Home) {
             let selected = home.view == View::Server(index);
             let button = match &server.dir.icon {
                 Some(icon) => {
-                    let image = egui::Image::new(&frame(ui, icon))
-                        .fit_to_exact_size(Vec2::splat(RAIL_BUTTON))
-                        .corner_radius(if selected { 16 } else { 24 })
-                        .sense(Sense::click());
-                    let button = ui.add(image).on_hover_text(server.name());
+                    let (rect, button) =
+                        ui.allocate_exact_size(Vec2::splat(RAIL_BUTTON), Sense::click());
+                    let radius = if selected { 16.0 } else { 24.0 };
+                    paint_hovered(ui, rect, icon, radius);
+                    let button = button.on_hover_text(server.name());
                     let name = server.name().to_owned();
                     button.widget_info(|| WidgetInfo::labeled(Role::Button, true, &name));
                     button
@@ -1723,8 +1723,22 @@ pub fn frame_at(delays: impl Iterator<Item = u32> + Clone, now: u64) -> Option<(
 }
 
 /// The texture for a picture's current frame, so animated GIFs play.
-// shortcut: textures stay in egui's memory until restart; evict them if people change pictures often.
 pub fn frame(ui: &Ui, picture: &Picture) -> TextureHandle {
+    frame_when(ui, picture, true)
+}
+
+/// Paint a profile picture or server icon in `rect`: its first frame, and it plays
+/// only while the pointer is over it, so lists of them cost nothing at rest.
+pub fn paint_hovered(ui: &Ui, rect: Rect, picture: &Picture, radius: f32) {
+    let play = ui.rect_contains_pointer(rect);
+    egui::Image::new(&frame_when(ui, picture, play))
+        .corner_radius(radius)
+        .paint_at(ui, rect);
+}
+
+/// `frame`, with `play` false for the first frame only (and no repaints).
+// shortcut: textures stay in egui's memory until restart; evict them if people change pictures often.
+fn frame_when(ui: &Ui, picture: &Picture, play: bool) -> TextureHandle {
     let id = UiId::unique(("picture", picture.key));
     let textures = ui.data(|data| data.get_temp::<Arc<Vec<TextureHandle>>>(id));
     let textures = textures.unwrap_or_else(|| {
@@ -1739,7 +1753,7 @@ pub fn frame(ui: &Ui, picture: &Picture) -> TextureHandle {
         ui.data_mut(|data| data.insert_temp(id, made.clone()));
         made
     });
-    if textures.len() > 1 {
+    if play && textures.len() > 1 {
         let now = (ui.input(|input| input.time) * 1000.0) as u64;
         let delays = picture.frames.iter().map(|(_, ms)| *ms);
         if let Some((at, left)) = frame_at(delays, now) {
@@ -2179,13 +2193,13 @@ fn paint_avatar(ui: &Ui, rect: Rect, person: &Id, name: &str) {
     );
 }
 
-fn avatar_atom(ui: &Ui, member: &Member, name: &str) -> egui::Atom<'static> {
+fn avatar_atom(member: &Member, name: &str) -> egui::Atom<'static> {
     let size = ui::SPACE_XL;
     if let Some(picture) = &member.avatar {
-        let texture = frame(ui, picture);
-        return egui::Image::new((texture.id(), Vec2::splat(size)))
-            .corner_radius(size / 2.0)
-            .into();
+        let picture = picture.clone();
+        return egui::Atom::paint(Vec2::splat(size), move |ui, args| {
+            paint_hovered(ui, args.rect, &picture, size / 2.0);
+        });
     }
     let person = member.person;
     let name = name.to_owned();
@@ -2217,12 +2231,11 @@ fn member_face(
     dot: bool,
 ) -> Response {
     let response = match member.and_then(|m| m.avatar.as_ref()) {
-        Some(picture) => ui.add(
-            egui::Image::new(&frame(ui, picture))
-                .fit_to_exact_size(Vec2::splat(size))
-                .corner_radius(size / 2.0)
-                .sense(Sense::click()),
-        ),
+        Some(picture) => {
+            let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
+            paint_hovered(ui, rect, picture, size / 2.0);
+            response
+        }
         None => avatar(ui, person, name, size),
     };
     if dot {
@@ -3468,7 +3481,7 @@ fn composer(
                                     && !emoji::shortcode_char(c)
                                     && !c.is_alphanumeric()
                             },
-                            |ui, query| {
+                            |_, query| {
                                 if query.word.starts_with('@') {
                                     choices = mentions::choices(
                                         query,
@@ -3477,7 +3490,7 @@ fn composer(
                                         wide,
                                         &chat.mentions,
                                     );
-                                    choices.iter().map(|choice| choice.suggestion(ui)).collect()
+                                    choices.iter().map(|choice| choice.suggestion()).collect()
                                 } else {
                                     picker::suggestions(query, &dir.emoji)
                                 }

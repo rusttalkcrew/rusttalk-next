@@ -262,6 +262,12 @@ short hash of each icon and avatar ciphertext instead of the ciphertext, so
 clients fetch a picture only when its hash is new. Icon and avatar ciphertext
 blobs allow 256 KiB each. The two metadata PUT routes that accept images
 allow 356 KiB JSON bodies to account for base64url and accompanying fields.
+Avatars and icons are PNG, JPEG or animated GIF on the wire, so older clients show
+them (an animated one plays) and no field or limit changes. The desktop picker also
+takes WebP and animated WebP: it crops every frame and sends a still as PNG, an
+animation as a looping GIF of at most 256×256 and 100 frames, with frames dropped
+(keeping the total time) and then the size reduced until it fits the 256 KiB limit.
+Clients show the first frame and play the animation only while it is hovered.
 Invite preview permits 32 lookups per IPv4 address or IPv6 /64 and
 256 server-wide in 60 seconds. Invalid codes that pass base64url parsing also count.
 

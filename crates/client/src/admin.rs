@@ -522,11 +522,8 @@ fn update_notice(ui: &mut Ui, updates: &ServerUpdates) {
 fn server_icon(ui: &mut Ui, server: &Server, size: f32) {
     match &server.dir.icon {
         Some(icon) => {
-            ui.add(
-                egui::Image::new(&frame(ui, icon))
-                    .fit_to_exact_size(egui::Vec2::splat(size))
-                    .corner_radius(size / 4.0),
-            );
+            let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(size), egui::Sense::hover());
+            crate::home::paint_hovered(ui, rect, icon, size / 4.0);
         }
         None => {
             let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(size), egui::Sense::hover());

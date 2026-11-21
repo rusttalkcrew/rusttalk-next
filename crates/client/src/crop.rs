@@ -9,10 +9,14 @@ use eframe::egui::{
     StrokeKind, TextureHandle, TextureOptions, Ui, Vec2, pos2,
 };
 use image::{
-    DynamicImage, ImageFormat, ImageReader, Limits, RgbaImage, codecs::jpeg::JpegEncoder,
+    Delay, DynamicImage, Frame, ImageFormat, ImageReader, Limits, RgbaImage,
+    codecs::{
+        gif::{GifEncoder, Repeat},
+        jpeg::JpegEncoder,
+    },
     imageops::FilterType,
 };
-use rusttalk_core::{client::decode_profile_image, keys::IMAGE_PLAINTEXT};
+use rusttalk_core::{client::decode_frames, keys::IMAGE_PLAINTEXT};
 
 use crate::ui;
 
@@ -28,6 +32,18 @@ const MAX_ZOOM: f32 = 8.0;
 /// JPEG qualities tried in turn when the PNG is too large.
 const QUALITIES: [u8; 6] = [90, 82, 74, 66, 58, 50];
 const VIEW: f32 = 300.0;
+
+/// Animations are saved at most this large (a still picture keeps `EDGE`): every frame
+/// counts, and the file has to fit the same size limit.
+const ANIMATED_EDGE: u32 = 256;
+/// Receivers play at most this many frames.
+const MAX_FRAMES: usize = 100;
+/// An animation's frames are scaled to this on opening: there are many of them.
+const ANIMATION_WORKING_EDGE: u32 = 512;
+/// Decoded frames of an opened animation together stay within this many bytes.
+const ANIMATION_BUDGET: usize = 256 * 1024 * 1024;
+/// Animations stop shrinking (fewer frames, then smaller) at this many frames.
+const MIN_FRAMES: usize = 12;
 
 /// Server emoji and stickers are saved at most this large: plenty for how they show.
 const EMOJI_EDGE: u32 = 128;
@@ -123,11 +139,9 @@ pub struct Crop {
     image: RgbaImage,
     square: Square,
     texture: Option<TextureHandle>,
-    /// An animated GIF that already fits, which can be kept as it is.
-    animated: Option<Vec<u8>>,
-    /// An animated GIF that doesn't fit: cropping it keeps only the first frame.
-    stills: bool,
-    keep_animation: bool,
+    /// Every frame of an animated GIF or WebP (empty for a still picture), scaled to
+    /// the same size as `image`, the first one. The crop applies to all of them.
+    frames: Vec<Frame>,
     error: Option<&'static str>,
 }
 
@@ -145,20 +159,17 @@ impl Crop {
             tracing::warn!(%error, "reading a picture failed");
             t!("crop.open_failed")
         })?;
-        let (image, animated_gif) = decode(&bytes).map_err(|error| {
+        let (image, frames) = decode(&bytes).map_err(|error| {
             tracing::info!(error = %format_args!("{error:#}"), "picture refused");
             t!("crop.not_picture")
         })?;
-        let fits = animated_gif && decode_profile_image(&bytes).is_ok();
         let square = Square::new(image.width(), image.height());
         Ok(Self {
             target,
             image,
             square,
             texture: None,
-            animated: fits.then_some(bytes),
-            stills: animated_gif && !fits,
-            keep_animation: fits,
+            frames,
             error: None,
         })
     }
@@ -174,13 +185,7 @@ impl Crop {
         };
         let mut outcome = Outcome::Open;
         let ((), dismissed) = ui::dialog(ctx, "crop", title, |ui| {
-            let still = !self.keep_animation;
-            ui.add_enabled_ui(still, |ui| self.editor(ui));
-            if self.animated.is_some() {
-                ui::checkbox(ui, &mut self.keep_animation, t!("crop.keep_gif"));
-            } else if self.stills {
-                ui.label(ui::caption(t!("crop.gif_still")));
-            }
+            self.editor(ui);
             ui::error_text(ui, self.error);
             ui::footer(ui, |ui| {
                 if ui::primary(ui, t!("common.save")).clicked() {
@@ -215,20 +220,18 @@ impl Crop {
             response.widget_info(|| {
                 egui::WidgetInfo::labeled(Role::Image, ui.is_enabled(), t!("crop.drag"))
             });
-            if ui.is_enabled() {
-                if response.dragged() {
-                    self.square.pan(response.drag_delta(), VIEW);
+            if response.dragged() {
+                self.square.pan(response.drag_delta(), VIEW);
+            }
+            if response.hovered() {
+                let scroll = ui.input(|input| input.smooth_scroll_delta.y);
+                if scroll != 0.0 {
+                    self.square
+                        .zoom_to(self.square.zoom * (scroll / 200.0).exp());
                 }
-                if response.hovered() {
-                    let scroll = ui.input(|input| input.smooth_scroll_delta.y);
-                    if scroll != 0.0 {
-                        self.square
-                            .zoom_to(self.square.zoom * (scroll / 200.0).exp());
-                    }
-                }
-                if response.hovered() || response.dragged() {
-                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
-                }
+            }
+            if response.hovered() || response.dragged() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
             }
             let c = ui::colors(ui);
             let painter = ui.painter_at(rect);
@@ -279,12 +282,18 @@ impl Crop {
         });
     }
 
-    /// The bytes to upload: the GIF as it is, or the crop scaled and re-encoded.
+    /// The bytes to upload: the crop scaled and re-encoded, as a GIF when animated.
     fn save(&self) -> Result<Vec<u8>> {
-        if let (true, Some(bytes)) = (self.keep_animation, &self.animated) {
-            return Ok(bytes.clone());
-        }
         let (x, y, side) = self.square.pixels();
+        if !self.frames.is_empty() {
+            let edge = match self.target {
+                Target::Emoji { sticker, .. } => {
+                    ANIMATED_EDGE.min(if sticker { STICKER_EDGE } else { EMOJI_EDGE })
+                }
+                _ => ANIMATED_EDGE,
+            };
+            return encode_animated(&self.frames, (x, y, side), edge);
+        }
         let crop = image::imageops::crop_imm(&self.image, x, y, side, side).to_image();
         // Server emoji and stickers are PNG or GIF only, so they never fall back to JPEG.
         match self.target {
@@ -296,17 +305,26 @@ impl Crop {
     }
 }
 
-/// Decode a PNG, JPEG or GIF (its first frame) and scale it down to the working
-/// size. Also says whether it is a GIF with more than one frame.
-fn decode(bytes: &[u8]) -> Result<(RgbaImage, bool)> {
+/// Decode a PNG, JPEG, GIF or WebP and scale it down to the working size. An animated
+/// GIF or WebP also gives all its frames (scaled the same way), else none.
+fn decode(bytes: &[u8]) -> Result<(RgbaImage, Vec<Frame>)> {
     let format = image::guess_format(bytes)?;
     ensure!(
         matches!(
             format,
-            ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::Gif
+            ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::Gif | ImageFormat::WebP
         ),
         "unsupported image format {format:?}"
     );
+    if matches!(format, ImageFormat::Gif | ImageFormat::WebP) {
+        // A picture that is not animated, or too big to play, still works as a still.
+        if let Ok(frames) = decode_frames(bytes, Some(ANIMATION_WORKING_EDGE), ANIMATION_BUDGET) {
+            let first = frames[0].buffer().dimensions();
+            if frames.len() > 1 && frames.iter().all(|f| f.buffer().dimensions() == first) {
+                return Ok((frames[0].buffer().clone(), frames));
+            }
+        }
+    }
     let mut reader = ImageReader::with_format(Cursor::new(bytes), format);
     let mut limits = Limits::default();
     limits.max_image_width = Some(OPEN_EDGE);
@@ -315,21 +333,66 @@ fn decode(bytes: &[u8]) -> Result<(RgbaImage, bool)> {
     reader.limits(limits);
     let image = reader.decode()?;
     ensure!(image.width() > 0 && image.height() > 0, "empty image");
-    let animated = format == ImageFormat::Gif && gif_frames(bytes) > 1;
     let image = if image.width().max(image.height()) > WORKING_EDGE {
         image.resize(WORKING_EDGE, WORKING_EDGE, FilterType::Triangle)
     } else {
         image
     };
-    Ok((image.into_rgba8(), animated))
+    Ok((image.into_rgba8(), Vec::new()))
 }
 
-/// Frames in a GIF, counting no further than two.
-fn gif_frames(bytes: &[u8]) -> usize {
-    use image::AnimationDecoder;
-    image::codecs::gif::GifDecoder::new(Cursor::new(bytes))
-        .map(|decoder| decoder.into_frames().take(2).count())
-        .unwrap_or(0)
+/// Crop the same square out of every frame, scale it to at most `edge` and encode a
+/// looping GIF that fits the size limit (also what older clients can show). Too big
+/// means fewer frames (the time stays the same), then smaller frames.
+fn encode_animated(frames: &[Frame], (x, y, side): (u32, u32, u32), edge: u32) -> Result<Vec<u8>> {
+    let mut images: Vec<(RgbaImage, u32)> = frames
+        .iter()
+        .map(|frame| {
+            let mut image = image::imageops::crop_imm(frame.buffer(), x, y, side, side).to_image();
+            if side > edge {
+                image = image::imageops::resize(&image, edge, edge, FilterType::Lanczos3);
+            }
+            let (numer, denom) = frame.delay().numer_denom_ms();
+            (image, numer / denom.max(1))
+        })
+        .collect();
+    loop {
+        if images.len() > MAX_FRAMES {
+            images = halve(images);
+            continue;
+        }
+        let mut bytes = Vec::new();
+        let mut encoder = GifEncoder::new_with_speed(&mut bytes, 10);
+        encoder.set_repeat(Repeat::Infinite)?;
+        encoder.encode_frames(images.iter().map(|(image, ms)| {
+            Frame::from_parts(image.clone(), 0, 0, Delay::from_numer_denom_ms(*ms, 1))
+        }))?;
+        drop(encoder);
+        if bytes.len() <= IMAGE_PLAINTEXT {
+            return Ok(bytes);
+        }
+        if images.len() > MIN_FRAMES {
+            images = halve(images);
+            continue;
+        }
+        let width = images[0].0.width();
+        ensure!(width > 16, "picture does not compress");
+        let small = width * 3 / 4;
+        for (image, _) in &mut images {
+            *image = image::imageops::resize(image, small, small, FilterType::Lanczos3);
+        }
+    }
+}
+
+/// Every other frame, each one showing as long as it and the one dropped after it.
+fn halve(images: Vec<(RgbaImage, u32)>) -> Vec<(RgbaImage, u32)> {
+    let mut out = Vec::with_capacity(images.len() / 2 + 1);
+    let mut images = images.into_iter();
+    while let Some((image, ms)) = images.next() {
+        let more = images.next().map_or(0, |(_, ms)| ms);
+        out.push((image, ms + more));
+    }
+    out
 }
 
 /// Scale a square to at most `edge` pixels and encode it to fit the size limit:
@@ -368,6 +431,7 @@ fn encode(mut image: RgbaImage, edge: u32, jpeg: bool) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusttalk_core::client::decode_profile_image;
 
     #[test]
     fn zoom_and_pan_stay_inside_the_picture() {
@@ -444,9 +508,72 @@ mod tests {
         assert!(decode(b"not a picture").is_err());
         let mut png = Cursor::new(Vec::new());
         DynamicImage::new_rgba8(3000, 1000).write_to(&mut png, ImageFormat::Png)?;
-        let (image, animated) = decode(png.get_ref())?;
+        let (image, frames) = decode(png.get_ref())?;
         assert_eq!(image.dimensions(), (WORKING_EDGE, 683));
-        assert!(!animated);
+        assert!(frames.is_empty());
+        Ok(())
+    }
+
+    fn gif(width: u32, height: u32, count: usize) -> Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        let mut encoder = GifEncoder::new(&mut bytes);
+        encoder.encode_frames((0..count).map(|index| {
+            // The left half is red, the right half changes per frame.
+            let image = RgbaImage::from_fn(width, height, |x, _| {
+                if x < width / 2 {
+                    image::Rgba([255, 0, 0, 255])
+                } else {
+                    image::Rgba([0, (index * 20 % 256) as u8, 255, 255])
+                }
+            });
+            Frame::from_parts(image, 0, 0, Delay::from_numer_denom_ms(40, 1))
+        }))?;
+        drop(encoder);
+        Ok(bytes)
+    }
+
+    #[test]
+    fn animations_crop_every_frame() -> Result<()> {
+        let (image, frames) = decode(&gif(600, 300, 6)?)?;
+        assert_eq!(image.dimensions(), (512, 256));
+        assert_eq!(frames.len(), 6);
+        // The right-hand 256x256 square: only the changing half is left of it.
+        let bytes = encode_animated(&frames, (256, 0, 256), ANIMATED_EDGE)?;
+        let out = decode_profile_image(&bytes)?;
+        assert_eq!(out.len(), 6);
+        for frame in &out {
+            assert_eq!(frame.buffer().dimensions(), (256, 256));
+            assert_eq!(frame.buffer().get_pixel(5, 5).0[0], 0);
+        }
+        let first = out[0].buffer().get_pixel(5, 5).0;
+        let last = out[5].buffer().get_pixel(5, 5).0;
+        assert_ne!(first, last);
+        Ok(())
+    }
+
+    #[test]
+    fn long_animations_keep_their_duration_within_the_limits() -> Result<()> {
+        let (_, frames) = decode(&gif(64, 64, 150)?)?;
+        let bytes = encode_animated(&frames, (0, 0, 64), ANIMATED_EDGE)?;
+        assert!(bytes.len() <= IMAGE_PLAINTEXT);
+        let out = decode_profile_image(&bytes)?;
+        assert!(out.len() <= MAX_FRAMES);
+        let ms: u32 = out
+            .iter()
+            .map(|f| f.delay().numer_denom_ms().0 / f.delay().numer_denom_ms().1)
+            .sum();
+        assert!((5900..=6100).contains(&ms), "{ms}");
+        Ok(())
+    }
+
+    #[test]
+    fn webp_pictures_open() -> Result<()> {
+        let mut webp = Cursor::new(Vec::new());
+        RgbaImage::from_pixel(40, 30, image::Rgba([1, 2, 3, 255]))
+            .write_to(&mut webp, ImageFormat::WebP)?;
+        let (image, frames) = decode(webp.get_ref())?;
+        assert_eq!(image.dimensions(), (40, 30));
+        assert!(frames.is_empty());
         Ok(())
     }
 }
