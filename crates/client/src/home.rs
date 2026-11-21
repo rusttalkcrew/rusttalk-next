@@ -28,7 +28,6 @@ use crate::{
     app::{Action, error_text, primary, secondary, submitted},
     audio::Audio,
     call::{self, LiveAction, LiveFile, LiveState, Voice},
-    camera,
     device_sync::{self, Edit},
     files::{self, Ask, Files},
     net::{Admin, AdminUpdate, Admission, Command, Draft, Listed, Net, PAGE_SIZE, Preview, Update},
@@ -142,6 +141,8 @@ pub enum Tab {
     Video,
     Privacy,
     Devices,
+    Updates,
+    About,
 }
 
 impl Home {
@@ -259,7 +260,7 @@ impl Home {
     }
 
     /// Publish the synced settings that changed since the last sync.
-    fn publish_settings(&mut self) {
+    pub fn publish_settings(&mut self) {
         let current = device_sync::synced(&self.voice.audio.settings());
         let edits: Vec<_> = current
             .iter()
@@ -651,7 +652,7 @@ fn initials(name: &str) -> String {
 pub struct Palette {
     rail: Color32,
     pub side: Color32,
-    main: Color32,
+    pub main: Color32,
     hover: Color32,
     input: Color32,
 }
@@ -844,7 +845,7 @@ pub fn show(ui: &mut Ui, home: &mut Home, updates: &mut crate::update::Updater) 
     call::stats_window(ui.ctx(), home);
     call::screen_dialog(ui.ctx(), home);
     call::frame(ui.ctx(), home);
-    settings(ui.ctx(), home, updates)
+    crate::settings::show(ui.ctx(), home, updates)
 }
 
 fn empty(ui: &mut Ui, title: &str, hint: &str) {
@@ -933,7 +934,11 @@ fn sidebar(ui: &mut Ui, home: &mut Home, update_available: bool) {
                 "⚙  Settings"
             };
             if ui.button(settings).clicked() {
-                home.settings = Some(Tab::Profile);
+                home.settings = Some(if update_available {
+                    Tab::Updates
+                } else {
+                    Tab::Profile
+                });
             }
         });
     match home.view {
@@ -1554,7 +1559,7 @@ fn official_servers(ui: &mut Ui, home: &mut Home) {
     }
 }
 
-fn privacy_tab(ui: &mut Ui, home: &mut Home) {
+pub fn privacy_tab(ui: &mut Ui, home: &mut Home) {
     let audio = home.voice.audio.clone();
     let mut settings = audio.settings();
     section(ui, "Server directory");
@@ -2498,105 +2503,6 @@ fn text_dialog(ui: &mut Ui, text: &mut String, confirm: &str, close: &mut bool) 
         *close |= ui.button("Cancel").clicked();
     });
     done && !text.trim().is_empty()
-}
-
-fn settings(
-    ctx: &egui::Context,
-    home: &mut Home,
-    updates: &mut crate::update::Updater,
-) -> Option<Action> {
-    let mut tab = home.settings?;
-    let mut close = false;
-    let modal = Modal::new(UiId::unique("settings")).show(ctx, |ui| {
-        ui.set_width(440.0);
-        ui.heading("Settings");
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut tab, Tab::Profile, "Profile");
-            ui.selectable_value(&mut tab, Tab::Voice, "Voice");
-            ui.selectable_value(&mut tab, Tab::Video, "Video");
-            ui.selectable_value(&mut tab, Tab::Privacy, "Privacy");
-            ui.selectable_value(&mut tab, Tab::Devices, "Devices");
-        });
-        ui.separator();
-        match tab {
-            Tab::Profile => {
-                ui.horizontal(|ui| {
-                    let me = home.identity.certificate.person_id();
-                    // The picture is the same everywhere; show it from any server that has it.
-                    let none = Directory::default();
-                    let dir = (home.servers.iter())
-                        .find(|s| s.member(me).is_some_and(|m| m.avatar.is_some()))
-                        .map_or(&none, |s| &s.dir);
-                    face(ui, dir, me, "?", 56.0, false);
-                    ui.vertical(|ui| {
-                        ui.label("Your picture, on all your servers.");
-                        let change = ui
-                            .add_enabled(!home.servers.is_empty(), Button::new("Change picture"))
-                            .on_hover_text("PNG, JPG or GIF. GIFs play.");
-                        if change.clicked() {
-                            home.error = None;
-                            home.files.ask(ui.ctx(), Ask::Picture);
-                        }
-                    });
-                });
-                ui.add_space(6.0);
-                ui.label("You pick your name on each server. Change it from the server's menu.");
-                CollapsingHeader::new("Details").show(ui, |ui| {
-                    ui.label("Your ID");
-                    ui.monospace(fingerprint(home.identity.certificate.person_id()));
-                    ui.weak("Friends can compare this to make sure it's really you.");
-                });
-                ui.separator();
-                updates.settings(ui);
-            }
-            Tab::Voice => call::settings_tab(ui, &mut home.voice),
-            Tab::Video => {
-                let audio = home.voice.audio.clone();
-                let mut s = audio.settings();
-                camera::settings_tab(ui, &mut home.voice.camera, &mut s);
-                audio.set_settings(s);
-            }
-            Tab::Privacy => privacy_tab(ui, home),
-            Tab::Devices => {
-                ui.label(format!("This device: {}", home.identity.certificate.name()));
-            }
-        }
-        error_text(ui, home.error.as_deref());
-        ui.separator();
-        ui.horizontal(|ui| {
-            if ui.button("Sign out of this device").clicked() {
-                home.confirm_sign_out = true;
-            }
-            close = ui.button("Close").clicked();
-        });
-    });
-    home.settings = Some(tab);
-    if close || (modal.should_close() && !home.confirm_sign_out) {
-        home.settings = None;
-        home.error = None;
-        home.publish_settings();
-    }
-
-    if !home.confirm_sign_out {
-        return None;
-    }
-    let mut action = None;
-    let mut cancel = false;
-    let modal = Modal::new(UiId::unique("sign-out")).show(ctx, |ui| {
-        ui.set_width(380.0);
-        ui.heading("Sign out of this device?");
-        ui.label("This removes your account from this computer. To sign in again, you need your 24 recovery words.");
-        ui.horizontal(|ui| {
-            if ui.button("Sign out").clicked() {
-                action = Some(Action::SignOut);
-            }
-            cancel = ui.button("Cancel").clicked();
-        });
-    });
-    if cancel || modal.should_close() {
-        home.confirm_sign_out = false;
-    }
-    action
 }
 
 #[cfg(test)]

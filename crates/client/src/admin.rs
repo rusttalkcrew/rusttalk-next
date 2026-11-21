@@ -18,6 +18,7 @@ use crate::{
     home::{Home, face, frame, section},
     net::{Admin, AdminUpdate, AuditEntry, Ban, Command, PublicListing},
     server::{Id, PERMISSIONS, Perms, Server},
+    settings::{self as panel, Group, Page},
 };
 
 /// Audit log entries shown per "Show older".
@@ -191,75 +192,97 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
         home.server_settings = None;
         return;
     };
-    let mut close = false;
     let mut request = None;
     let mut icon = false;
-    let modal = Modal::new(UiId::unique("server-settings")).show(ctx, |ui| {
-        ui.set_width(560.0);
-        let perms = server.dir.perms;
-        if let Tab::Channel(channel) = settings.tab {
+    let close = if let Tab::Channel(channel) = settings.tab {
+        let mut close = false;
+        let modal = Modal::new(UiId::unique("server-settings")).show(ctx, |ui| {
+            ui.set_width(560.0);
             request = channel_tab(ui, server, channel);
-        } else {
-            ui.heading(format!("{} settings", server.name()));
-            ui.horizontal(|ui| {
-                let tabs = [
-                    (Tab::Overview, "Overview", perms.manage_server),
-                    (
+            message(ui, settings);
+            ui.separator();
+            close = ui.button("Close").clicked();
+        });
+        close || modal.should_close()
+    } else {
+        let perms = server.dir.perms;
+        let page = |id, icon, label, allowed: bool| allowed.then_some(Page { id, icon, label });
+        let group = |title, pages: [Option<Page<Tab>>; 3]| Group {
+            title,
+            pages: pages.into_iter().flatten().collect(),
+        };
+        let groups = [
+            group(
+                "Server",
+                [
+                    page(Tab::Overview, "🖼", "Overview", perms.manage_server),
+                    page(Tab::Joining, "🚪", "Joining", perms.admin),
+                    page(Tab::Listing, "🌐", "Public listing", perms.owner),
+                ],
+            ),
+            group(
+                "People",
+                [
+                    page(
                         Tab::Members,
+                        "👥",
                         "Members",
                         perms.kick || perms.ban || perms.manage_roles,
                     ),
-                    (Tab::Roles, "Roles", perms.manage_roles),
-                    (Tab::Bans, "Bans", perms.ban),
-                    (Tab::Audit, "Audit log", perms.audit),
-                    (Tab::Joining, "Joining", perms.admin),
-                    (Tab::Listing, "Public listing", perms.owner),
-                ];
-                for (tab, label, allowed) in tabs {
-                    if allowed && ui.selectable_value(&mut settings.tab, tab, label).clicked() {
-                        settings.message = None;
-                        // Show what changed since the window opened.
-                        request = match tab {
-                            Tab::Audit => {
-                                Some(Admin::Audit(settings.audit_filter.map(str::to_owned)))
-                            }
-                            Tab::Bans => Some(Admin::Load {
-                                joining: false,
-                                audit: false,
-                                bans: true,
-                            }),
-                            Tab::Listing => Some(Admin::LoadListing),
-                            _ => None,
-                        };
+                    page(Tab::Roles, "🏷", "Roles", perms.manage_roles),
+                    page(Tab::Bans, "🚫", "Bans", perms.ban),
+                ],
+            ),
+            group(
+                "Moderation",
+                [page(Tab::Audit, "📜", "Audit log", perms.audit), None, None],
+            ),
+        ];
+        let before = settings.tab;
+        let mut tab = before;
+        let (changed, close) = panel::window(
+            ctx,
+            "server-settings",
+            server.name(),
+            &groups,
+            &mut tab,
+            |ui| {
+                let changed = match before {
+                    Tab::Overview => {
+                        icon = overview_tab(ui, server);
+                        None
                     }
-                }
-            });
-            ui.separator();
-            let changed = match settings.tab {
-                Tab::Overview => {
-                    icon = overview_tab(ui, server);
-                    None
-                }
-                Tab::Members => members_tab(ui, server, settings),
-                Tab::Roles => roles_tab(ui, server, settings),
-                Tab::Bans => bans_tab(ui, server, settings),
-                Tab::Audit => audit_tab(ui, server, settings),
-                Tab::Joining => joining_tab(ui, settings),
-                Tab::Listing => listing_tab(ui, server, settings),
-                Tab::Channel(_) => None,
+                    Tab::Members => members_tab(ui, server, settings),
+                    Tab::Roles => roles_tab(ui, server, settings),
+                    Tab::Bans => bans_tab(ui, server, settings),
+                    Tab::Audit => audit_tab(ui, server, settings),
+                    Tab::Joining => joining_tab(ui, settings),
+                    Tab::Listing => listing_tab(ui, server, settings),
+                    Tab::Channel(_) => None,
+                };
+                message(ui, settings);
+                changed
+            },
+        );
+        if tab != before {
+            settings.tab = tab;
+            settings.message = None;
+            // Show what changed since the window opened.
+            request = match settings.tab {
+                Tab::Audit => Some(Admin::Audit(settings.audit_filter.map(str::to_owned))),
+                Tab::Bans => Some(Admin::Load {
+                    joining: false,
+                    audit: false,
+                    bans: true,
+                }),
+                Tab::Listing => Some(Admin::LoadListing),
+                _ => None,
             };
-            request = request.take().or(changed);
+        } else {
+            request = changed;
         }
-        if let Some((text, error)) = &settings.message {
-            if *error {
-                error_text(ui, Some(text));
-            } else {
-                ui.label(RichText::new(text).color(ui.visuals().selection.stroke.color));
-            }
-        }
-        ui.separator();
-        close = ui.button("Close").clicked();
-    });
+        close
+    };
     if let Some(request) = request {
         settings.message = None;
         server.send(Command::Admin(request));
@@ -268,8 +291,19 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
         settings.message = None;
         home.files.ask(ctx, Ask::Icon(server.address.clone()));
     }
-    if close || modal.should_close() {
+    if close {
         home.server_settings = None;
+    }
+}
+
+/// The last result, in red when it went wrong.
+fn message(ui: &mut Ui, settings: &Settings) {
+    if let Some((text, error)) = &settings.message {
+        if *error {
+            error_text(ui, Some(text));
+        } else {
+            ui.label(RichText::new(text).color(ui.visuals().selection.stroke.color));
+        }
     }
 }
 

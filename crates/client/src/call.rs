@@ -22,6 +22,7 @@ use crate::{
     net::Command,
     screen::{self, Kind, Options, Target, Video},
     server::{Call, CallState, Id, Screen, Server, Stats},
+    settings,
     share::{self, App},
 };
 
@@ -1299,21 +1300,31 @@ pub fn stats_window(ctx: &egui::Context, home: &mut Home) {
     home.voice.show_stats &= open;
 }
 
-/// Settings → Voice.
+/// Settings → Voice & audio.
 pub fn settings_tab(ui: &mut Ui, voice: &mut Voice) {
     let audio = voice.audio.clone();
     let mut s = audio.settings();
     let (inputs, outputs) = audio.devices();
+    section(ui, "Devices");
     device_picker(ui, "Microphone", &mut s.input, &inputs);
     device_picker(ui, "Speakers", &mut s.output, &outputs);
     if let Some(problem) = audio.problem() {
         ui.colored_label(ui.visuals().error_fg_color, problem);
     }
-    ui.add_space(6.0);
-    ui.horizontal(|ui| {
-        ui.selectable_value(&mut s.push_to_talk, false, "Voice activity");
-        ui.selectable_value(&mut s.push_to_talk, true, "Push to talk");
+    section(ui, "Input mode");
+    ui.horizontal_wrapped(|ui| {
+        let cards = [
+            (false, "🔊", "Voice activity", "Talk when you speak"),
+            (true, "⌨", "Push to talk", "Hold a key to talk"),
+        ];
+        for (push_to_talk, icon, title, help) in cards {
+            let selected = s.push_to_talk == push_to_talk;
+            if settings::choice_card(ui, selected, icon, title, help).clicked() {
+                s.push_to_talk = push_to_talk;
+            }
+        }
     });
+    ui.add_space(4.0);
     meter(ui, &audio, &s);
     if s.push_to_talk {
         key_picker(ui, voice, &mut s);
@@ -1325,7 +1336,7 @@ pub fn settings_tab(ui: &mut Ui, voice: &mut Voice) {
         ui.weak("Your mic turns on when the level passes the line. Drag to change it.");
         calibrate(ui, voice, &mut s);
     }
-    ui.add_space(6.0);
+    section(ui, "Voice processing");
     ui.checkbox(&mut s.echo_cancellation, "Echo cancellation");
     ui.checkbox(&mut s.noise_suppression, "Noise suppression");
     ui.checkbox(&mut s.auto_gain, "Automatic gain");

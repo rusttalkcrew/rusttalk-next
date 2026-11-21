@@ -15,6 +15,7 @@ mod net;
 mod official;
 mod screen;
 mod server;
+mod settings;
 mod share;
 mod update;
 
