@@ -124,6 +124,12 @@ pub enum Event {
     VoiceChanged {
         channel: String,
     },
+    /// A moderator moved `person` from one voice channel to another. Sent only to that person.
+    VoiceMoved {
+        person: String,
+        from: String,
+        to: String,
+    },
     DmCreated {
         channel: String,
     },

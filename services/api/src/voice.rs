@@ -29,6 +29,8 @@ use zeroize::Zeroizing;
 
 use crate::{ApiError, ApiResult, App, auth::authenticate_read, channels, messages, payload};
 
+pub mod moderation;
+
 const DEV_SECRET: &str = "dev-only-livekit-secret-do-not-deploy";
 const DATA_PREFIX: &str = "file-";
 const ROSTER_TTL: Duration = Duration::from_secs(1);
@@ -310,7 +312,11 @@ async fn publish_sources(
 ) -> ApiResult<Vec<TrackSource>> {
     let mut sources = Vec::new();
     if channels::has_flag(db, channel, person, channels::SPEAK).await? {
-        sources.extend([TrackSource::Microphone, TrackSource::ScreenShareAudio]);
+        // A moderator's mute takes the microphone only, as shared app audio is separate.
+        if !moderation::muted(db, person).await? {
+            sources.push(TrackSource::Microphone);
+        }
+        sources.push(TrackSource::ScreenShareAudio);
     }
     if channels::has_flag(db, channel, person, channels::VIDEO).await? {
         sources.extend([TrackSource::Camera, TrackSource::ScreenShare]);

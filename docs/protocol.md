@@ -117,6 +117,8 @@ All endpoints below require `Authorization: Bearer <token>`.
 | GET `/v1/invites` | Empty | `invite`. 200, active invites as `{id, created_by, remaining_uses, expires_at}`, soonest expiry first: the caller's own, or everyone's with `manage_server` |
 | DELETE `/v1/invites/{id}` | Empty | `invite` for the caller's own invite, also `manage_server` for anyone else's. 204 |
 | DELETE `/v1/members/{person}` | Empty | `kick`. 204 |
+| PUT `/v1/members/{person}/voice-mute` | Empty | `mute_members`. 204, mutes them in every voice channel until lifted |
+| DELETE `/v1/members/{person}/voice-mute` | Empty | `mute_members`. 204, lifts the mute |
 | GET `/v1/bans` | Empty | `ban`. 200, active bans as `{person_id, banned_at, ban_ip}`, newest first |
 | PUT `/v1/bans/{person}` | `{ban_ip?}`, default false | `ban`. 204 |
 | DELETE `/v1/bans/{person}` | Empty | `ban`. 204 |
@@ -142,9 +144,9 @@ file ciphertext, including expired files that cleanup has yet to remove.
 
 A role has `{id, kind, rank, permissions, name_ct}`. A member's permissions
 are the union of their role flags, and their highest rank is used for
-hierarchy. Owner (1000) and Admin (100) have all ten flags. Moderator (50)
-has `kick`, `ban`, and `delete_messages`. Member (0) has no flags and starts
-as the default. The other flags are `invite`, `manage_roles`,
+hierarchy. Owner (1000) and Admin (100) have all twelve flags. Moderator (50)
+has `kick`, `ban`, `delete_messages`, `mute_members` and `move_members`. Member (0) has no
+flags and starts as the default. The other flags are `invite`, `manage_roles`,
 `view_audit_log`, `manage_channels`, `manage_server`, `mention_everyone`, and
 `manage_emoji`. Built-in role IDs match their kinds. Custom roles have opaque IDs and ranks
 from 1 to 999, strictly below their creator. They can only receive flags that the creator
@@ -162,7 +164,7 @@ clients reload roles and their own permissions.
 Deleting a custom role requires clearing its assignments and replacing it
 as the default first. Changing the default affects future joins.
 
-Kick, ban, and role assignment require the actor to outrank the target
+Kick, ban, role assignment and voice moderation require the actor to outrank the target
 strictly. Granting a role or choosing it as the default also requires the
 actor to outrank that role and hold every permission it grants. The
 owner role comes from a singleton ownership record and can only move via
@@ -235,7 +237,7 @@ in a state response indicating that the first epoch is still pending.
 | GET `/v1/space` | Empty | Any member. 200, `{name_ct, description_ct, icon_hash}` |
 | GET `/v1/space/icon` | Empty | Any member. 200, `{icon_ct}`, or `404 icon_not_found` |
 | PUT `/v1/space` | `{name_ct?, description_ct?, icon_ct?}` | `manage_server`. 204 |
-| GET `/v1/members` | Empty | Any member. 200, `[{person_id, display_name_ct, avatar_hash, role_ids, presence, hide_offline}]`. Clients keep members with `hide_offline` out of the member list while their presence is `offline`, but still use their name and picture elsewhere |
+| GET `/v1/members` | Empty | Any member. 200, `[{person_id, display_name_ct, avatar_hash, role_ids, presence, hide_offline, voice_muted?}]`. Clients keep members with `hide_offline` out of the member list while their presence is `offline`, but still use their name and picture elsewhere. `voice_muted` is present and true while a moderator mutes them |
 | GET `/v1/members/{person}/avatar` | Empty | Any member. 200, `{avatar_ct}`, or `404 avatar_not_found` |
 | PUT `/v1/me/profile` | `{display_name_ct?, avatar_ct?}` | Updates the authenticated member's own profile. 204 |
 | POST `/v1/invite-preview` | `{code}` | No bearer. 200, `{space_key_ct, name_ct}`. Missing, expired, spent or unpreviewable invite returns 404 |
@@ -581,6 +583,20 @@ to voice channels only.
 | --- | --- | --- |
 | POST `/v1/voice/{channel}/token` | Empty | 200, `{token, audio_kbps}`. LiveKit JWT valid for ten minutes for this room, and the channel's Opus bitrate in kbps |
 | GET `/v1/voice/{channel}/participants` | Empty | 200, `{people, unknown}`: sorted unique person IDs and a count of unmatched devices |
+| DELETE `/v1/voice/{channel}/participants/{person}` | Empty | `move_members`. 204, disconnects their devices from the room |
+| POST `/v1/voice/{channel}/participants/{person}/move` | `{to}` | `move_members` and `read` on `to`. 204, sends them `voice_moved`, then disconnects their devices from the room |
+
+A voice mute is server-wide and stored on the member, so it holds across
+channels and rejoins until lifted. Leaving or being removed from the server
+deletes it with the membership. While muted, tokens and access enforcement
+leave out the `microphone` source, so LiveKit refuses and drops that
+publication; shared app audio is unaffected. Clients rejoin the call when the
+mute is lifted to get a token with the microphone again. Removing and moving
+fail with `404 not_in_voice` when none of the person's devices is in the
+room, and a move with `403 voice_move_denied` when the person may not read
+the target channel. A removal is not a kick: they may rejoin. The audit
+actions are `voice_muted` and `voice_unmuted`, and `voice_removed` and
+`voice_moved` with the source or target channel as `target_id`.
 
 The room name is the encoded channel ID. The token's identity is
 base64url of SHA-256 over `"rusttalk-voice-device-v1" || server_id ||
@@ -731,6 +747,7 @@ session validity before pushing updates.
 | `presence_changed` | `person_id`, `status`. Sent to members when visible presence changes |
 | `channel_changed` | None. Refresh the catalog, server metadata and server emoji |
 | `voice_changed` | `channel`. Fetch current voice participants. Sent to current channel readers on signed LiveKit join, leave and room-end notices |
+| `voice_moved` | `person`, `from`, `to`. A moderator moved this person's call; join `to`. Sent only to that person |
 | `dm_created` | `channel`. Refresh the catalog and reconcile keys |
 | `message_created` | `channel`, `id`. Fetch the ciphertext record |
 | `message_deleted` | `channel`, `id`. Remove the record and hide edits that reference it |

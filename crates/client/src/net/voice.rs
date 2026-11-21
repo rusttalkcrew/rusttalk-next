@@ -7,7 +7,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use livekit::prelude::RemoteTrack;
+use livekit::{DisconnectReason, prelude::RemoteTrack};
 use rusttalk_core::{
     auth::{decode, encode, voice_identity},
     camera::CameraOptions,
@@ -896,7 +896,15 @@ pub(super) async fn on_voice(
         }
         RoomEvent::Disconnected { reason } => {
             tracing::info!(?reason, "voice disconnected");
-            end(state, t!("voice.disconnected"));
+            // A move to another channel follows as its own notice and replaces this text.
+            end(
+                state,
+                if reason == DisconnectReason::ParticipantRemoved {
+                    t!("voice.removed")
+                } else {
+                    t!("voice.disconnected")
+                },
+            );
         }
         RoomEvent::ParticipantDisconnected(participant) => {
             if let Some(live) = &mut state.voice {

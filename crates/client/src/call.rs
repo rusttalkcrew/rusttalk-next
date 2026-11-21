@@ -21,7 +21,7 @@ use crate::{
     denoise, files,
     home::{Home, Tab, face},
     mic_check::Verdict,
-    net::{Command, Update},
+    net::{Admin, Command, Update},
     screen::{self, Kind, Options, Target, Video},
     server::{Call, CallState, Id, Screen, Server, Stats, Status},
     share::{self, App},
@@ -412,10 +412,12 @@ pub fn join_button(
 }
 
 /// The people in a voice channel, under its name in the channel list.
-pub fn room_list(ui: &mut Ui, home: &Home, server: &Server, channel: &Id) {
-    let Some(peers) = server.voice.get(channel) else {
-        return;
-    };
+/// Each person's menu has their volume while in the call, and what a moderator may do;
+/// returns the moderation request picked.
+pub fn room_list(ui: &mut Ui, home: &Home, server: &Server, channel: &Id) -> Option<Admin> {
+    let peers = server.voice.get(channel)?;
+    let perms = server.dir.perms;
+    let mut request = None;
     // The speaking ring reaches 3 points past the picture: keep rows clear of each other.
     ui.spacing_mut().item_spacing.y = ui::SPACE_S;
     for peer in peers {
@@ -446,9 +448,18 @@ pub fn room_list(ui: &mut Ui, home: &Home, server: &Server, channel: &Id) {
             // it, fill what is left and the name shortens to keep clear of them.
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.add_space(ui::SPACE_S);
-                let marks: Vec<_> = sound_badges(status).collect();
+                // A moderator's mute replaces the person's own mute mark.
+                let server_muted = server.voice_muted(&peer.person);
+                let own = VoiceStatus {
+                    muted: status.muted && !server_muted,
+                    ..status
+                };
+                let marks: Vec<_> = sound_badges(own).collect();
                 for (glyph, tip) in marks.into_iter().rev() {
                     sound_mark(ui, glyph, tip);
+                }
+                if server_muted {
+                    server_mute_mark(ui);
                 }
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                     let mut measure = ui.new_child(UiBuilder::new().sizing_pass().invisible());
@@ -461,19 +472,33 @@ pub fn room_list(ui: &mut Ui, home: &Home, server: &Server, channel: &Id) {
                     };
                     ui.scope(|ui| {
                         ui.set_max_width((ui.available_width() - reserved).max(0.0));
-                        ui.add(Label::new(RichText::new(&name).size(ui::TEXT_SMALL)).truncate());
+                        // Not selectable, so a right-click on the name opens the row's menu.
+                        let label = Label::new(RichText::new(&name).size(ui::TEXT_SMALL));
+                        ui.add(label.truncate().selectable(false));
                     });
                     after_name(ui);
                 });
             });
         });
         let row = row.response.interact(Sense::click());
-        let listening =
-            peer.person != server.dir.me && !peer.unknown && home.voice.in_call(server, channel);
-        if listening {
-            ui::context_menu(&row, |m| {
-                stream_menu(m, &home.voice.audio, &(peer.person, None))
-            });
+        let other = peer.person != server.dir.me && !peer.unknown;
+        let listening = other && home.voice.in_call(server, channel);
+        let moderate = other && (perms.mute_members || perms.move_members);
+        if (listening || moderate)
+            && let Some(Some(picked)) = ui::context_menu(&row, |m| {
+                if listening {
+                    stream_menu(m, &home.voice.audio, &(peer.person, None));
+                }
+                if !moderate {
+                    return None;
+                }
+                if listening {
+                    m.separator();
+                }
+                moderation_menu(m, server, channel, peer.person)
+            })
+        {
+            request = Some(picked);
         }
         for (sid, app) in &peer.apps {
             let stream = (peer.person, Some(sid.clone()));
@@ -490,6 +515,52 @@ pub fn room_list(ui: &mut Ui, home: &Home, server: &Server, channel: &Id) {
             }
         }
     }
+    request
+}
+
+/// Mute for everyone, move and remove, as far as this moderator may. The server also
+/// checks that they rank above the person.
+fn moderation_menu(m: &mut ui::Menu, server: &Server, channel: &Id, person: Id) -> Option<Admin> {
+    let perms = server.dir.perms;
+    let mut request = None;
+    if perms.mute_members {
+        let muted = server.voice_muted(&person);
+        let (icon, label) = if muted {
+            ("🎤", t!("call.unmute_everyone"))
+        } else {
+            ("🔇", t!("call.mute_everyone"))
+        };
+        if m.item(icon, label).clicked() {
+            request = Some(Admin::VoiceMute(person, !muted));
+        }
+    }
+    if perms.move_members {
+        let others: Vec<_> = (server.dir.categories.iter())
+            .flat_map(|category| &category.channels)
+            .filter(|other| other.voice && other.id != *channel)
+            .collect();
+        if !others.is_empty() {
+            m.submenu("↪", t!("call.move_to"), |m| {
+                for other in others {
+                    if m.item("🔊", &other.name).clicked() {
+                        request = Some(Admin::VoiceMove {
+                            person,
+                            from: *channel,
+                            to: Some(other.id),
+                        });
+                    }
+                }
+            });
+        }
+        if m.danger("🚪", t!("call.remove_from_channel")).clicked() {
+            request = Some(Admin::VoiceMove {
+                person,
+                from: *channel,
+                to: None,
+            });
+        }
+    }
+    request
 }
 
 fn sound_badges(status: VoiceStatus) -> impl Iterator<Item = (&'static str, &'static str)> + Clone {
@@ -501,16 +572,33 @@ fn sound_badges(status: VoiceStatus) -> impl Iterator<Item = (&'static str, &'st
     .flatten()
 }
 
-fn status_name(ui: &mut Ui, name: &str, status: VoiceStatus) {
+/// A name with its sound badges. A moderator's mute replaces the person's own mute badge.
+fn status_name(ui: &mut Ui, name: &str, mut status: VoiceStatus, server_muted: bool) {
+    status.muted &= !server_muted;
     let badges = sound_badges(status);
-    let reserved = badges.clone().count() as f32 * (ui::TEXT_BODY + ui.spacing().item_spacing.x);
+    let count = badges.clone().count() + usize::from(server_muted);
+    let reserved = count as f32 * (ui::TEXT_BODY + ui.spacing().item_spacing.x);
     ui.scope(|ui| {
         ui.set_max_width((ui.available_width() - reserved).max(0.0));
-        ui.add(Label::new(RichText::new(name).size(ui::TEXT_SMALL)).truncate());
+        // Not selectable, so a right-click on the name opens the row's menu.
+        let label = Label::new(RichText::new(name).size(ui::TEXT_SMALL));
+        ui.add(label.truncate().selectable(false));
     });
+    if server_muted {
+        server_mute_mark(ui);
+    }
     for (glyph, tip) in badges {
         sound_mark(ui, glyph, tip);
     }
+}
+
+/// A moderator's mute: a red muted speaker, unlike the struck mic of a person's own mute.
+fn server_mute_mark(ui: &mut Ui) {
+    let tip = t!("call.server_muted");
+    let glyph = RichText::new("🔇").size(ui::TEXT_SMALL);
+    ui.label(glyph.color(ui::colors(ui).danger_text))
+        .on_hover_text(tip)
+        .widget_info(|| WidgetInfo::labeled(Role::Image, true, tip));
 }
 
 /// A struck-through microphone or headphones.

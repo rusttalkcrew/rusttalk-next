@@ -519,7 +519,8 @@ fn connection_contents(
     {
         egui::CollapsingHeader::new(t!("call.people_in_call")).show(ui, |ui| {
             for peer in peers.iter().filter(|peer| peer.person != server.dir.me) {
-                ui.horizontal(|ui| status_name(ui, &peer.name(server), peer.status));
+                let muted = server.voice_muted(&peer.person);
+                ui.horizontal(|ui| status_name(ui, &peer.name(server), peer.status, muted));
             }
         });
     }

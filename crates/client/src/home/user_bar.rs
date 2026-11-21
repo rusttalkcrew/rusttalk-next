@@ -139,7 +139,15 @@ fn sound_buttons(ui: &mut Ui, home: &Home) {
     if ears.clicked() {
         audio.set_deafened(!deafened);
     }
-    let mic = ui::icon_button(ui, "🎤", mute_tip(muted), look(muted), BUTTON_SIZE);
+    // A moderator's mute holds until they lift it; the person can't unmute themselves.
+    let server_muted = call_server(home).is_some_and(|server| server.voice_muted(&server.dir.me));
+    let mic = ui
+        .add_enabled_ui(!server_muted, |ui| {
+            let off = muted || server_muted;
+            ui::icon_button(ui, "🎤", mute_tip(off), look(off), BUTTON_SIZE)
+        })
+        .inner
+        .on_disabled_hover_text(t!("call.server_muted"));
     if mic.clicked() {
         audio.set_muted(!muted);
         if muted {

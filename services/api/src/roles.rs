@@ -32,9 +32,12 @@ pub enum Permission {
     ManageServer = 128,
     MentionEveryone = 256,
     ManageEmoji = 512,
+    MuteMembers = 1024,
+    /// Remove people from a voice channel or move them to another.
+    MoveMembers = 2048,
 }
 
-const PERMISSIONS: [Permission; 10] = [
+const PERMISSIONS: [Permission; 12] = [
     Permission::Invite,
     Permission::Kick,
     Permission::Ban,
@@ -45,6 +48,8 @@ const PERMISSIONS: [Permission; 10] = [
     Permission::ManageServer,
     Permission::MentionEveryone,
     Permission::ManageEmoji,
+    Permission::MuteMembers,
+    Permission::MoveMembers,
 ];
 
 #[derive(FromRow)]

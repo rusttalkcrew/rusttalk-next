@@ -22,6 +22,14 @@ pub enum Admin {
         bans: bool,
     },
     Kick(Id),
+    /// Mute (`true`) or unmute someone in every voice channel.
+    VoiceMute(Id, bool),
+    /// Disconnect someone from a voice channel, or (`Some`) move them to another.
+    VoiceMove {
+        person: Id,
+        from: Id,
+        to: Option<Id>,
+    },
     /// Ban a person, and (`true`) the networks they use.
     Ban(Id, bool),
     Unban(Id),
@@ -203,6 +211,28 @@ pub(super) async fn run(
         )
         .await
         .map(|()| t!("admin.done_kicked")),
+        Admin::VoiceMute(person, on) => {
+            let method = if on { Method::PUT } else { Method::DELETE };
+            let path = format!("/v1/members/{}/voice-mute", encode(&person));
+            call(client, method, &path, None)
+                .await
+                .map(|()| t!("admin.done_voice"))
+        }
+        Admin::VoiceMove { person, from, to } => {
+            let path = format!(
+                "/v1/voice/{}/participants/{}",
+                encode(&from),
+                encode(&person)
+            );
+            match to {
+                None => call(client, Method::DELETE, &path, None).await,
+                Some(to) => {
+                    let body = json!({"to": encode(&to)});
+                    call(client, Method::POST, &format!("{path}/move"), Some(body)).await
+                }
+            }
+            .map(|()| t!("admin.done_voice"))
+        }
         Admin::Ban(person, network) => {
             let path = format!("/v1/bans/{}", encode(&person));
             call(client, Method::PUT, &path, Some(json!({"ban_ip": network})))
@@ -652,6 +682,8 @@ fn problem(code: &str) -> &'static str {
             t!("admin.no_active_ip")
         }
         "member_not_found" => t!("admin.member_not_found"),
+        "not_in_voice" => t!("admin.not_in_voice"),
+        "voice_move_denied" => t!("admin.voice_move_denied"),
         "ban_not_found" => t!("admin.ban_not_found"),
         "invite_not_found" => t!("admin.invite_not_found"),
         "invalid_member_cap" => t!("admin.invalid_member_cap"),

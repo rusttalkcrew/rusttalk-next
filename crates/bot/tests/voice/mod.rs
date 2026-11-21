@@ -1,5 +1,6 @@
 mod camera;
 mod live_file;
+mod moderation;
 mod screen;
 
 use std::{
@@ -341,27 +342,29 @@ pub async fn exercise(
     // Taking `speak` from B's role must make LiveKit stop forwarding B's audio.
     let b_id = room_b.identity();
     set_flags(a, &channel, "admin", 11).await?;
-    // Only a full second without B's tone ends the wait; a closed room or stream keeps
-    // waiting until LIMIT fails the test.
-    timeout(LIMIT, async {
-        while timeout(
-            Duration::from_secs(1),
-            hear_tone(&mut room_a, Some(&b_id), 780),
-        )
+    falls_silent(&mut room_a, &b_id, 780)
         .await
-        .is_ok()
-        {}
-    })
-    .await
-    .context("B was still audible after losing speak")?;
+        .context("B was still audible after losing speak")?;
     set_flags(a, &channel, "admin", 15).await?;
     let _ = room_b.leave().await;
     room_b = b.join_voice(&voice.id).await?;
-    room_b.publish_audio(b_source).await?;
+    room_b.publish_audio(b_source.clone()).await?;
     timeout(LIMIT, both_ways(&mut room_a, &mut room_b, A_HZ, 780))
         .await
         .context("duplex after speak returned")??;
     println!("W08 removing speak stopped the speaker's audio, and rejoining restored it");
+
+    let mut room_b = moderation::exercise(
+        a,
+        &mut b,
+        &c,
+        &mut room_a,
+        room_b,
+        b_source,
+        &category,
+        voice,
+    )
+    .await?;
 
     // Kick speaker B while its tone keeps playing.
     b_pitch.store(1100, Ordering::Relaxed);
@@ -468,6 +471,19 @@ async fn switch(
     .await
     .context("not listed in the new channel")??;
     Ok(room)
+}
+
+/// Wait until `who`'s tone stops reaching `room`. Only a full second without it ends the
+/// wait; a closed room or stream keeps waiting until LIMIT fails.
+async fn falls_silent(room: &mut VoiceRoom, who: &ParticipantIdentity, hz: u32) -> Result<()> {
+    timeout(LIMIT, async {
+        while timeout(Duration::from_secs(1), hear_tone(room, Some(who), hz))
+            .await
+            .is_ok()
+        {}
+    })
+    .await?;
+    Ok(())
 }
 
 async fn set_flags(a: &KeyClient<'_>, channel: &str, role: &str, flags: u8) -> Result<()> {

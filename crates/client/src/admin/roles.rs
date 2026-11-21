@@ -235,6 +235,18 @@ fn groups() -> [(&'static str, Vec<Permission>); 4] {
                     t!("perm.view_audit_log_help"),
                     false,
                 ),
+                (
+                    "mute_members",
+                    t!("perm.mute_members"),
+                    t!("perm.mute_members_help"),
+                    false,
+                ),
+                (
+                    "move_members",
+                    t!("perm.move_members"),
+                    t!("perm.move_members_help"),
+                    false,
+                ),
             ],
         ),
         (

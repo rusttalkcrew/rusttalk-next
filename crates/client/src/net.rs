@@ -276,6 +276,8 @@ pub enum Update {
     Call(Url, Id, Option<CallState>),
     /// This device joined the call without permission to talk.
     Listening(Url, Id),
+    /// A moderator moved this person's call from one voice channel to another.
+    VoiceMoved(Url, Id, Id),
     /// This device may not share its screen or camera in the call.
     NoVideo(Url, Id),
     /// Everyone in one voice channel.
@@ -1273,6 +1275,14 @@ async fn on_event(
         }
         Event::VoiceChanged { channel } => {
             room_changed(ctx, url, client, state, decode(&channel)?).await?;
+        }
+        // The server only sends our own moves; the UI switches the call it shows.
+        Event::VoiceMoved { from, to, .. } => {
+            ctx.send(Update::VoiceMoved(
+                url.clone(),
+                decode(&from)?,
+                decode(&to)?,
+            ));
         }
         Event::LiveFileAccepted { .. } => voice::live_file_accepted(ctx, client, state, &event)?,
         Event::RotateNeeded { .. } => {}

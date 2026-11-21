@@ -34,7 +34,7 @@ use tokio::sync::mpsc;
 use zeroize::Zeroizing;
 
 pub use livekit::{
-    ConnectionState, RoomEvent,
+    ConnectionState, DisconnectReason, RoomEvent,
     prelude::{
         LocalTrackPublication, ParticipantIdentity, RemoteAudioTrack, RemoteParticipant, TrackSid,
         TrackSource,

@@ -9,8 +9,8 @@ tables in SQLite (WAL). IDs and digests are binary unless indicated. The `_ct` s
 
 | Table | Columns |
 | --- | --- |
-| `members` | `person_id` (root public key), `joined_at` (Unix seconds), nullable `display_name_ct`, nullable `avatar_ct`, `presence_status` (current choice: online, away or invisible), `hide_offline` (whether to leave them out of member lists while offline) |
-| `roles` | `id` (text), `kind` (built-in kind or custom), `rank`, `permissions` (ten-bit mask), nullable `name_ct` and `display_ct` (opaque ciphertext: the name, and the colour and member-list grouping) |
+| `members` | `person_id` (root public key), `joined_at` (Unix seconds), nullable `display_name_ct`, nullable `avatar_ct`, `presence_status` (current choice: online, away or invisible), `hide_offline` (whether to leave them out of member lists while offline), `voice_muted` (a moderator's server-wide voice mute) |
+| `roles` | `id` (text), `kind` (built-in kind or custom), `rank`, `permissions` (twelve-bit mask), nullable `name_ct` and `display_ct` (opaque ciphertext: the name, and the colour and member-list grouping) |
 | `server_settings` | Singleton `id`, nullable `owner_person_id`, `default_role_id`, nullable `name_ct`, nullable `description_ct`, nullable `icon_ct`, `open_joining` (public flag), `member_cap` (open admission limit), nullable `index_listing_ct` (encrypted public-listing configuration), nullable `max_file_bytes`, `member_storage_bytes`, `server_storage_bytes`, `retention_secs`, `max_stickers` (server limits) |
 | `member_roles` | `person_id`, `role_id` |
 | `invites` | `id` (opaque text), `code_hash` (SHA-256), `is_owner`, `remaining_uses`, `expires_at`, nullable `space_key_ct` and `name_ct` for preview, nullable `created_by` (person ID of the member who made it) |
@@ -148,6 +148,9 @@ its pixels, app names, camera pictures and audio are encrypted on the
 sender. Capture target IDs, enumerated sources and cameras, and Linux
 portal restore tokens stay on the sender's device.
 LiveKit can see microphone mute state and the deafen attribute for each device in a voice room.
+A moderator's voice mute is stored on the member and shown to every member. Removing or
+moving someone from a voice room is logged by opaque channel ID; the move notice with
+both channel IDs goes only to the moved person.
 
 Clients use the `rusttalk.video-watches` participant attribute for local
 watch/unwatch sounds. It contains the IDs of video tracks that device is

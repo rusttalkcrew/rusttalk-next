@@ -931,6 +931,10 @@ fn sentence(server: &Server, entry: &AuditEntry) -> String {
         "member_banned" => t!("audit.member_banned", actor = actor, target = target),
         "member_unbanned" => t!("audit.member_unbanned", actor = actor, target = target),
         "member_kicked" => t!("audit.member_kicked", actor = actor, target = target),
+        "voice_muted" => t!("audit.voice_muted", actor = actor, target = target),
+        "voice_unmuted" => t!("audit.voice_unmuted", actor = actor, target = target),
+        "voice_removed" => t!("audit.voice_removed", actor = actor, target = target),
+        "voice_moved" => t!("audit.voice_moved", actor = actor, target = target),
         "left" => t!("audit.left", actor = actor),
         "member_roles_changed" => t!("audit.member_roles_changed", actor = actor, target = target),
         "ownership_transferred" => t!(

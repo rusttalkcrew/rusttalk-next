@@ -333,6 +333,8 @@ async fn build(
                     "view_audit_log" => perms.audit = true,
                     "manage_server" => perms.manage_server = true,
                     "manage_emoji" => perms.manage_emoji = true,
+                    "mute_members" => perms.mute_members = true,
+                    "move_members" => perms.move_members = true,
                     _ => {}
                 }
             }
@@ -471,6 +473,7 @@ async fn build(
             avatar: picture(&person, row["avatar_hash"].as_str()),
             presence: serde_json::from_value(row["presence"].clone()).unwrap_or_default(),
             hide_offline: row["hide_offline"].as_bool().unwrap_or_default(),
+            voice_muted: row["voice_muted"].as_bool().unwrap_or_default(),
         });
     }
     list.sort_by_cached_key(|member| {
@@ -774,6 +777,7 @@ mod tests {
             avatar: None,
             presence: Default::default(),
             hide_offline: false,
+            voice_muted: false,
         }
     }
 
