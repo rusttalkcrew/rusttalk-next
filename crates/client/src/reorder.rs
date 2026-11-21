@@ -13,6 +13,13 @@ use crate::{
     ui::{self, Item as MenuItem, SLIDE_SECONDS},
 };
 
+const SCROLL_EDGE: f32 = 40.0;
+const SCROLL_SPEED: f32 = 600.0;
+
+fn scroll_speed(distance: f32) -> f32 {
+    (1.0 - distance / SCROLL_EDGE).clamp(0.0, 1.0) * SCROLL_SPEED
+}
+
 /// A row in the channel list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Item {
@@ -148,7 +155,10 @@ pub fn target(
     rects: &HashMap<Item, Rect>,
     dragged: Item,
     top: f32,
+    scroll_delta: f32,
 ) -> Option<Target> {
+    // Compare the floating row with the last frame's layout in the same coordinates.
+    let top = top + scroll_delta;
     // What moves as one: each row when dragging a channel, a whole category otherwise.
     let mut units: Vec<Vec<Item>> = Vec::new();
     for category in categories {
@@ -276,6 +286,7 @@ struct State {
     drag: Option<Drag>,
     /// Each row's place in the last frame, height including spacing.
     rects: HashMap<Item, Rect>,
+    origin_y: f32,
     landing: Option<Landing>,
     /// The order just changed: rows are already in their new places.
     snap: bool,
@@ -301,14 +312,22 @@ impl List {
             state.drag = None;
         }
         let pointer = ui.ctx().pointer_interact_pos();
+        let origin_y = ui.cursor().min.y;
         let target = state
             .drag
             .as_ref()
             .zip(pointer)
             .and_then(|(drag, pointer)| {
-                target(categories, &state.rects, drag.item, pointer.y - drag.grab.y)
+                target(
+                    categories,
+                    &state.rects,
+                    drag.item,
+                    pointer.y - drag.grab.y,
+                    state.origin_y - origin_y,
+                )
             });
         state.rects.clear();
+        state.origin_y = origin_y;
         Self {
             id,
             allowed,
@@ -376,7 +395,7 @@ impl List {
     }
 
     /// Finish the frame; returns a drop that should be applied with `place`.
-    pub fn end(mut self, ui: &Ui, categories: &[Category]) -> Option<(Item, Slot)> {
+    pub fn end(mut self, ui: &Ui, categories: &[Category], viewport: Rect) -> Option<(Item, Slot)> {
         let pointer = ui.ctx().pointer_interact_pos();
         let mut dropped = None;
         if let Some(drag) = self.state.drag.take() {
@@ -425,6 +444,21 @@ impl List {
                 width: handle.rect.width(),
                 label: label(categories, *item),
             });
+        }
+        if self.state.drag.is_some()
+            && let Some(pointer) = pointer.filter(|&pointer| self.clip.contains(pointer))
+        {
+            let speed = scroll_speed(self.clip.bottom() - pointer.y)
+                - scroll_speed(pointer.y - self.clip.top());
+            let dt = ui.input(|input| input.stable_dt.min(0.1));
+            let offset = viewport.top();
+            let content_height = ui.min_size().y + ui.spacing().scroll.content_margin.sum().y;
+            let max_offset = (content_height - viewport.height()).max(0.0);
+            let next = (offset + speed * dt).clamp(0.0, max_offset);
+            if speed != 0.0 && (next - offset).abs() > 0.001 {
+                // ScrollArea applies this after layout and repaints for the new offset.
+                ui.scroll_with_delta(vec2(0.0, offset - next));
+            }
         }
         ui.data_mut(|data| data.insert_temp(self.id, self.state));
         dropped
@@ -500,9 +534,33 @@ mod tests {
 
     fn drop(dragged: Item, top: f32) -> (Vec<(u8, Vec<u8>)>, bool, Target) {
         let (mut categories, rects) = sample();
-        let target = target(&categories, &rects, dragged, top).unwrap();
+        let target = target(&categories, &rects, dragged, top, 0.0).unwrap();
         let changed = place(&mut categories, dragged, target.slot);
         (ids(&categories), changed, target)
+    }
+
+    #[test]
+    fn edge_scroll_speed_increases_toward_the_edge() {
+        assert_eq!(scroll_speed(50.0), 0.0);
+        assert_eq!(scroll_speed(40.0), 0.0);
+        assert_eq!(scroll_speed(20.0), 300.0);
+        assert_eq!(scroll_speed(0.0), 600.0);
+    }
+
+    #[test]
+    fn scrolling_updates_the_drop_slot_and_slide_offsets() {
+        let (categories, rects) = sample();
+        let channel = Item::Channel([11; 32]);
+        let before = target(&categories, &rects, channel, 25.0, 0.0).unwrap();
+        let after = target(&categories, &rects, channel, 25.0, 20.0).unwrap();
+        assert_eq!(before.slot, Slot::Channel(0, 0));
+        assert_eq!(after.slot, Slot::Channel(0, 1));
+        assert_eq!(after.offsets[&Item::Channel([12; 32])], -20.0);
+
+        let category = Item::Category([2; 32]);
+        let after = target(&categories, &rects, category, 40.0, -20.0).unwrap();
+        assert_eq!(after.slot, Slot::Category(0));
+        assert_eq!(after.offsets[&Item::Channel([12; 32])], 40.0);
     }
 
     #[test]
