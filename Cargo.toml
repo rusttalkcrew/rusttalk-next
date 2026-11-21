@@ -6,3 +6,11 @@ members = ["crates/*", "services/*"]
 version = "0.1.5"
 edition = "2024"
 license = "Apache-2.0"
+
+# The desktop client runs in dev builds too. Keep the model's hot loops optimized.
+[profile.dev.package.deep-filter-rt]
+opt-level = 3
+[profile.dev.package.tract-core]
+opt-level = 3
+[profile.dev.package.tract-linalg]
+opt-level = 3

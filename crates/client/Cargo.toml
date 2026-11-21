@@ -15,6 +15,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 cpal = { version = "0.18", features = ["pulseaudio"] }
 # DeepFilterNet3 noise removal (tract, pure Rust); its weights are downloaded on request.
 deep-filter-rt = "0.2"
+rtrb = "0.3"
 ed25519-dalek = { version = "2.2", default-features = false, features = ["fast"] }
 eframe = "0.37"
 # Bundled emoji glyphs, so icons and chat emoji render without system fonts.

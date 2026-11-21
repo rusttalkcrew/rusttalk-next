@@ -147,11 +147,124 @@ impl Denoiser {
     }
 }
 
+/// Two hops of scheduling slack plus the pinned model's three hops of signal delay.
+/// The dry path carries the same timestamp even if inference misses its deadline.
+const SLACK: usize = 2;
+const DELAY: usize = SLACK + 3;
+type Samples = [i16; FRAME];
+
+pub struct Worker {
+    input: Option<rtrb::Producer<(u64, u8, Samples)>>,
+    output: rtrb::Consumer<(u64, Samples)>,
+    thread: std::thread::Thread,
+    dry: [Samples; DELAY],
+    sequence: u64,
+    misses: usize,
+}
+
+impl Worker {
+    pub fn start(mut model: Denoiser) -> Result<Self> {
+        let (input, mut jobs) = rtrb::RingBuffer::new(SLACK + 1);
+        let (mut results, output) = rtrb::RingBuffer::new(SLACK + 1);
+        let worker = std::thread::Builder::new()
+            .name("ai-denoise".into())
+            .spawn(move || {
+                let mut strength = 0;
+                loop {
+                    let Ok((seq, db, mut samples)): Result<(_, _, Samples), _> = jobs.pop() else {
+                        if jobs.is_abandoned() {
+                            break;
+                        }
+                        std::thread::park_timeout(Duration::from_millis(50));
+                        continue;
+                    };
+                    if db != strength {
+                        model.model.set_atten_lim(f32::from(db));
+                        strength = db;
+                    }
+                    if let Err(error) = model.process(&mut samples) {
+                        tracing::warn!(%error, "noise inference failed");
+                        break;
+                    }
+                    if results.push((seq, samples)).is_err() {
+                        break;
+                    }
+                }
+            })?;
+        Ok(Self {
+            input: Some(input),
+            output,
+            thread: worker.thread().clone(),
+            dry: [[0; FRAME]; DELAY],
+            sequence: 0,
+            misses: 0,
+        })
+    }
+
+    pub fn bypassed(&self) -> bool {
+        self.input.is_none()
+    }
+
+    pub fn process(&mut self, samples: &mut Samples, strength: u8) {
+        let seq = self.sequence;
+        self.sequence += 1;
+        let original = *samples;
+        std::mem::swap(samples, &mut self.dry[(seq % DELAY as u64) as usize]);
+        let Some(input) = self.input.as_mut() else {
+            return;
+        };
+        let due = seq.checked_sub(SLACK as u64);
+        while let Ok(&(index, _)) = self.output.peek() {
+            if Some(index) >= due {
+                break;
+            }
+            let _ = self.output.pop();
+        }
+        if let Some(due) = due {
+            if self.output.peek().is_ok_and(|(index, _)| *index == due) {
+                *samples = self.output.pop().unwrap().1;
+                self.misses = 0;
+            } else {
+                self.misses += 1;
+            }
+        }
+        // A dropped input breaks the model's contiguous history. Stay dry until re-enabled.
+        if self.misses >= 3
+            || input.is_abandoned()
+            || input.push((seq, strength.clamp(6, 48), original)).is_err()
+        {
+            self.input = None;
+            tracing::warn!("AI noise removal bypassed after missed audio deadline");
+        }
+        self.thread.unpark();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Instant;
 
     use super::*;
+
+    #[test]
+    fn stalled_inference_keeps_dry_frames_in_order_at_fixed_delay() {
+        let (input, _stalled) = rtrb::RingBuffer::new(SLACK + 1);
+        let (_producer, output) = rtrb::RingBuffer::new(SLACK + 1);
+        let mut worker = Worker {
+            input: Some(input),
+            output,
+            thread: std::thread::current(),
+            dry: [[0; FRAME]; DELAY],
+            sequence: 0,
+            misses: 0,
+        };
+        for i in 0..20i16 {
+            let mut frame = [i + 1; FRAME];
+            worker.process(&mut frame, 24);
+            assert_eq!(frame, [(i + 1 - DELAY as i16).max(0); FRAME]);
+        }
+        assert!(worker.bypassed());
+    }
 
     #[test]
     fn only_the_pinned_model_passes() {
@@ -206,7 +319,9 @@ mod tests {
         let frames = 300;
         let (mut noise_in, mut noise_out, mut tone_in, mut tone_out) = (0.0, 0.0, 0.0, 0.0);
         let mut slowest = Duration::ZERO;
-        let start = Instant::now();
+        denoiser.model.set_atten_lim(24.0);
+        let mut elapsed = Duration::ZERO;
+        let mut missed = 0;
         for i in 0..frames {
             let speaking = i % 100 < 50;
             let tone: Vec<f32> = (0..FRAME)
@@ -226,7 +341,10 @@ mod tests {
             let before = energy(&frame);
             let took = Instant::now();
             denoiser.process(&mut frame).unwrap();
-            slowest = slowest.max(took.elapsed());
+            let took = took.elapsed();
+            elapsed += took;
+            slowest = slowest.max(took);
+            missed += usize::from(took > Duration::from_millis(10));
             // Noise-only frames after the model settled and its 30 ms delay passed.
             if !speaking && i % 100 > 55 && i > 100 {
                 noise_in += before;
@@ -240,11 +358,11 @@ mod tests {
                 tone_out += energy(&frame);
             }
         }
-        let per_frame = start.elapsed() / frames as u32;
+        let per_frame = elapsed / frames as u32;
         let reduced = 10.0 * (noise_in / noise_out.max(1.0)).log10();
         let kept = 10.0 * (tone_out / tone_in).log10();
         eprintln!(
-            "noise {reduced:.1} dB down, tone {kept:+.1} dB, {per_frame:?} per 10 ms frame, slowest {slowest:?}"
+            "noise {reduced:.1} dB down, tone {kept:+.1} dB, {per_frame:?} per 10 ms frame, slowest {slowest:?}, {missed}/{frames} over deadline"
         );
         assert!(reduced > 10.0, "noise only {reduced:.1} dB down");
         assert!(kept > -6.0, "tone {kept:.1} dB down");

@@ -1,7 +1,7 @@
 //! Voice audio on its own threads, so device work never blocks the UI.
 //!
 //! Microphone: cpal capture → 48 kHz mono → WebRTC audio processing (echo
-//! cancellation, noise suppression, auto gain) → optional AI noise removal →
+//! cancellation and high-pass) → classic or AI noise removal → pre-gain level and VAD → bounded gain →
 //! push-to-talk or voice gate → the `NativeAudioSource` that voice publishes.
 //! Speakers: each remote track is read as 48 kHz mono, scaled per stream (a
 //! person's voice or one app they share), mixed and played through cpal; the mix
@@ -45,7 +45,7 @@ use serde::{Deserialize, Serialize};
 use tokio::runtime::Runtime;
 
 use crate::{
-    denoise::{self, Denoiser},
+    denoise::{self, Worker},
     mic_check::{self, Verdict},
     server::Id,
     sounds::{self, Cue},
@@ -63,13 +63,13 @@ const HYSTERESIS_DB: f32 = 4.0;
 /// Automatic sensitivity opens this far above the background noise.
 const AUTO_MARGIN_DB: f32 = 10.0;
 /// The automatic threshold stays inside this range, in dBFS.
-pub const AUTO_MIN_DB: f32 = -60.0;
+pub const AUTO_MIN_DB: f32 = -45.0;
 pub const AUTO_MAX_DB: f32 = -25.0;
 /// The noise floor is a low percentile of the last 5 s, in 100 ms blocks.
 const NOISE_BLOCK: u32 = 10;
 const NOISE_BLOCKS: usize = 50;
 const NOISE_PERCENTILE: f32 = 0.1;
-/// The floor follows quieter noise at once but rises at most this fast, in dB per block,
+/// The floor rises at most this fast, in dB per block,
 /// so speech can't drag it up while a lasting louder noise still catches up in seconds.
 const NOISE_RISE_DB: f32 = 1.0;
 /// Playback starts once a track has this much queued, and drops what exceeds the cap.
@@ -101,6 +101,7 @@ pub struct Settings {
     /// AI noise removal in place of the normal noise suppression, once its model is
     /// downloaded. Not synced: the download is per device.
     pub ai_noise: bool,
+    pub noise_strength: u8,
     /// Suggest fixes during a call when the microphone is noisy or too loud;
     /// "Don't ask again" turns it off. This device only.
     pub mic_hint: bool,
@@ -178,6 +179,7 @@ impl Default for Settings {
             noise_suppression: true,
             auto_gain: true,
             ai_noise: false,
+            noise_strength: 24,
             mic_hint: true,
             camera: None,
             camera_height: 720,
@@ -439,14 +441,7 @@ impl Audio {
         if *current == settings {
             return;
         }
-        let toggles = |s: &Settings| {
-            (
-                s.echo_cancellation,
-                s.noise_suppression,
-                s.auto_gain,
-                s.ai_noise,
-            )
-        };
+        let toggles = |s: &Settings| (s.echo_cancellation, s.noise_suppression, s.ai_noise);
         if toggles(&current) != toggles(&settings) {
             self.shared().processing.fetch_add(1, Relaxed);
         }
@@ -746,14 +741,22 @@ impl NoiseFloor {
         if self.frames < NOISE_BLOCK {
             return;
         }
-        self.blocks[self.next] = self.sum / NOISE_BLOCK as f32;
-        self.next = (self.next + 1) % NOISE_BLOCKS;
-        self.filled = (self.filled + 1).min(NOISE_BLOCKS);
+        let block = self.sum / NOISE_BLOCK as f32;
         self.sum = 0.0;
         self.frames = 0;
+        self.blocks[self.next] = block;
+        self.next = (self.next + 1) % NOISE_BLOCKS;
+        self.filled = (self.filled + 1).min(NOISE_BLOCKS);
+        // Keep quiet gaps in the percentile so speech alone cannot become the noise floor.
+        // Hold the learned sensitivity when the mic is too quiet to measure room tone.
+        if block < AUTO_MIN_DB - AUTO_MARGIN_DB {
+            return;
+        }
         // Ten times a second over 50 values: trivial next to the audio processing.
         let target = percentile(&self.blocks[..self.filled], NOISE_PERCENTILE).expect("filled");
-        self.floor = target.min(self.floor + NOISE_RISE_DB);
+        self.floor = target
+            .max(AUTO_MIN_DB - AUTO_MARGIN_DB)
+            .clamp(self.floor - 0.2, self.floor + NOISE_RISE_DB);
     }
 
     fn floor(&self) -> f32 {
@@ -1186,11 +1189,42 @@ fn mix_tracks(mixer: &mut Mixer, deafened: bool) -> [i16; FRAME] {
     sum.map(|s| s.clamp(-32768.0, 32767.0) as i16)
 }
 
+struct VoiceGain(f32);
+
+impl Default for VoiceGain {
+    fn default() -> Self {
+        Self(1.0)
+    }
+}
+
+impl VoiceGain {
+    fn apply(&mut self, frame: &mut [i16; FRAME], db: f32, threshold: f32) {
+        if db <= threshold {
+            return;
+        }
+        // Move toward -18 dBFS slowly for quiet speech, quickly for loud speech.
+        let target = 10f32.powf((-18.0 - db) / 20.0).clamp(0.25, 4.0);
+        self.0 += (target - self.0) * if target < self.0 { 0.25 } else { 0.005 };
+        let peak = frame
+            .iter()
+            .map(|x| x.unsigned_abs())
+            .max()
+            .unwrap_or(1)
+            .max(1);
+        let limited = self.0.min(32767.0 / f32::from(peak));
+        for x in frame {
+            *x = (f32::from(*x) * limited) as i16;
+        }
+    }
+}
+
 /// The microphone thread: resample, process, gate, and hand frames to the source.
 fn process(shared: &Shared, frames: &Receiver<Mic>) {
     let mut built = u64::MAX;
     let mut apm = None;
-    let mut denoiser = None;
+    let mut denoiser: Option<Worker> = None;
+    let mut loading: Option<thread::JoinHandle<Result<denoise::Denoiser>>> = None;
+    let mut gain = VoiceGain::default();
     let mut framer = Framer::default();
     let mut gate = Gate::default();
     let mut noise = NoiseFloor::default();
@@ -1200,13 +1234,49 @@ fn process(shared: &Shared, frames: &Receiver<Mic>) {
         if wanted != built {
             let s = shared.settings();
             built = wanted;
-            denoiser = if s.ai_noise {
-                denoiser.take().or_else(|| load_denoiser(shared))
-            } else {
+            if !s.ai_noise {
+                denoiser = None;
+                loading = None;
                 shared.ai_failed.store(false, Relaxed);
-                None
-            };
-            apm = Some(build_apm(&s, denoiser.is_some()));
+            } else if denoiser.is_none()
+                && loading.is_none()
+                && *lock(&shared.model) == Model::Ready
+            {
+                let file = shared.model_file.clone();
+                loading = Some(thread::spawn(move || denoise::load(&file)));
+            }
+            apm = Some(build_apm(
+                &s,
+                denoiser.as_ref().is_some_and(|w| !w.bypassed()),
+            ));
+        }
+        if loading.as_ref().is_some_and(|job| job.is_finished()) {
+            match loading
+                .take()
+                .unwrap()
+                .join()
+                .unwrap_or_else(|_| Err(anyhow!("noise worker panicked")))
+            {
+                Ok(model) => match Worker::start(model) {
+                    Ok(worker) => {
+                        denoiser = Some(worker);
+                        shared.ai_failed.store(false, Relaxed);
+                        apm = Some(build_apm(&shared.settings(), true));
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "starting AI noise removal worker failed");
+                        shared.ai_failed.store(true, Relaxed);
+                    }
+                },
+                Err(error) => {
+                    tracing::warn!(%error, "loading AI noise removal failed");
+                    shared.ai_failed.store(true, Relaxed);
+                    if let Err(error) = fs::remove_file(&shared.model_file) {
+                        tracing::warn!(%error, "removing unusable noise model failed");
+                    }
+                    *lock(&shared.model) = Model::Missing;
+                }
+            }
         }
         let apm = apm.as_mut().expect("built above");
         match message {
@@ -1230,14 +1300,13 @@ fn process(shared: &Shared, frames: &Receiver<Mic>) {
             }
             // After the echo canceller, which needs the untouched signal and leaves only
             // what the model should judge; the model replaces WebRTC's noise suppression.
-            if let Some(model) = &mut denoiser
-                && let Err(error) = model.process(&mut frame)
-            {
-                tracing::warn!(error = %format_args!("{error:#}"), "AI noise removal failed");
-                shared.ai_failed.store(true, Relaxed);
-                denoiser = None;
-                // The normal noise suppression takes over from the next frame.
-                *apm = build_apm(&shared.settings(), false);
+            if let Some(worker) = &mut denoiser {
+                let active = !worker.bypassed();
+                worker.process(&mut frame, lock(&shared.settings).noise_strength);
+                if active && worker.bypassed() {
+                    shared.ai_failed.store(true, Relaxed);
+                    *apm = build_apm(&shared.settings(), false);
+                }
             }
             let db = level_db(&frame);
             shared.level.store(db.to_bits(), Relaxed);
@@ -1247,12 +1316,13 @@ fn process(shared: &Shared, frames: &Receiver<Mic>) {
             noise.push(db);
             let auto = noise.threshold();
             shared.auto_threshold.store(auto.to_bits(), Relaxed);
-            let (push_to_talk, threshold, watch) = {
+            let (push_to_talk, threshold, watch, auto_gain) = {
                 let s = lock(&shared.settings);
                 (
                     s.push_to_talk,
                     if s.auto_threshold { auto } else { s.threshold },
                     s.mic_hint && !s.ai_noise,
+                    s.auto_gain,
                 )
             };
             if !shared.voice.load(Relaxed) {
@@ -1261,7 +1331,7 @@ fn process(shared: &Shared, frames: &Receiver<Mic>) {
             } else if watch {
                 let muted = shared.muted.load(Relaxed) || shared.deafened.load(Relaxed);
                 let frame = mic_check::Frame {
-                    floor: noise.floor(),
+                    floor: noise.floor().min(db),
                     clipped,
                     muted,
                 };
@@ -1281,6 +1351,11 @@ fn process(shared: &Shared, frames: &Receiver<Mic>) {
             if open && db > SILENT_DB {
                 shared.talked.store(shared.now(), Relaxed);
             }
+            if auto_gain {
+                gain.apply(&mut frame, db, threshold);
+            } else {
+                gain = VoiceGain::default();
+            }
             if !open {
                 frame.fill(0);
             }
@@ -1295,36 +1370,10 @@ fn build_apm(s: &Settings, ai_noise: bool) -> AudioProcessingModule {
     // Two noise filters in a row only add artifacts; the model is the stronger one.
     AudioProcessingModule::new(
         s.echo_cancellation,
-        s.auto_gain,
+        false,
         true,
         s.noise_suppression && !ai_noise,
     )
-}
-
-/// The downloaded model, or `None` with the failure noted for the settings page.
-fn load_denoiser(shared: &Shared) -> Option<Denoiser> {
-    if *lock(&shared.model) != Model::Ready {
-        // Waiting for the download.
-        return None;
-    }
-    let started = Instant::now();
-    match denoise::load(&shared.model_file) {
-        Ok(model) => {
-            tracing::info!(ms = started.elapsed().as_millis(), "AI noise removal on");
-            shared.ai_failed.store(false, Relaxed);
-            Some(model)
-        }
-        Err(error) => {
-            tracing::warn!(error = %format_args!("{error:#}"), "loading AI noise removal failed");
-            shared.ai_failed.store(true, Relaxed);
-            // Damaged or replaced on disk: offer the download again.
-            if let Err(error) = fs::remove_file(&shared.model_file) {
-                tracing::warn!(%error, "removing the noise model failed");
-            }
-            *lock(&shared.model) = Model::Missing;
-            None
-        }
-    }
 }
 
 /// Cuts captured audio, in whatever block sizes the device delivers, into 10 ms
@@ -1343,12 +1392,12 @@ impl Framer {
         let step = rate as usize / 100;
         self.pending.extend_from_slice(samples);
         while self.pending.len() >= step {
-            let chunk: Vec<_> = self.pending.drain(..step).collect();
+            let chunk = &self.pending[..step];
             if rate == RATE {
                 self.near.extend(chunk);
             } else {
                 self.near.extend(self.resampler.remix_and_resample(
-                    &chunk,
+                    chunk,
                     step as u32,
                     1,
                     rate,
@@ -1356,11 +1405,12 @@ impl Framer {
                     RATE,
                 ));
             }
+            self.pending.drain(..step);
         }
     }
 
-    fn next(&mut self) -> Option<Vec<i16>> {
-        (self.near.len() >= FRAME).then(|| self.near.drain(..FRAME).collect())
+    fn next(&mut self) -> Option<[i16; FRAME]> {
+        (self.near.len() >= FRAME).then(|| std::array::from_fn(|_| self.near.pop_front().unwrap()))
     }
 }
 
@@ -1432,8 +1482,8 @@ mod tests {
         feed(&mut noise, &mut gate, -40.0, 8.0);
         assert!((noise.threshold() - (-40.0 + AUTO_MARGIN_DB)).abs() < 0.01);
         assert_eq!(feed(&mut noise, &mut gate, -40.0, 5.0), 0);
-        // And it turns off again: the floor drops back at once.
-        feed(&mut noise, &mut gate, -55.0, 5.0);
+        // And it turns off again: the floor returns gradually.
+        feed(&mut noise, &mut gate, -55.0, 15.0);
         assert!((noise.threshold() - (-55.0 + AUTO_MARGIN_DB)).abs() < 0.01);
     }
 
@@ -1459,6 +1509,55 @@ mod tests {
         assert_eq!(noise.threshold(), AUTO_MIN_DB);
         noise.push(-35.0);
         assert!(gate.update(-35.0, noise.threshold()));
+    }
+
+    #[test]
+    fn fan_after_two_minutes_of_silence_stays_out() {
+        let mut apm = build_apm(&Settings::default(), false);
+        let (mut noise, mut gate) = (NoiseFloor::default(), Gate::default());
+        let mut gain = VoiceGain::default();
+        let mut initial = 0.0;
+        let mut speech = 0;
+        for i in 0..13200 {
+            let mut frame = std::array::from_fn(|j| {
+                let phase = (i * FRAME + j) as f32 / RATE as f32 * std::f32::consts::TAU;
+                let fan = if (1000..13000).contains(&i) {
+                    0.0
+                } else {
+                    150.0
+                };
+                (fan * (phase * 100.0).sin()
+                    + if (700..780).contains(&i) {
+                        2400.0 * (phase * 220.0).sin()
+                    } else {
+                        0.0
+                    }) as i16
+            });
+            apm.process_stream(&mut frame, RATE as i32, 1).unwrap();
+            let db = level_db(&frame);
+            noise.push(db);
+            let voiced = gate.update(db, noise.threshold());
+            let previous = gain.0;
+            gain.apply(&mut frame, db, noise.threshold());
+            assert!(gain.0 <= 4.0);
+            if (700..780).contains(&i) && voiced {
+                speech += 1;
+            }
+            if i == 999 {
+                initial = noise.threshold();
+            }
+            if i == 12999 {
+                assert_eq!(initial, noise.threshold());
+            }
+            if i >= 13000 {
+                assert!(!voiced);
+                assert_eq!(previous, gain.0);
+            }
+        }
+        assert!(speech >= 75);
+        eprintln!(
+            "threshold {initial:.1} dBFS before and after silence, 0/200 returning fan frames opened, {speech}/80 speech frames opened"
+        );
     }
 
     #[test]
