@@ -1077,7 +1077,10 @@ fn ai_noise(ui: &mut Ui, audio: &Audio, s: &mut Settings) {
             ui::toggle_row(ui, &mut s.ai_noise, label, t!("call.ai_noise_help"));
             if s.ai_noise {
                 ui::setting_row(ui, t!("call.strength"), t!("call.strength_help"), |ui| {
-                    let slider = ui.add(Slider::new(&mut s.noise_strength, 6..=48).suffix(" dB"));
+                    ui.label(t!("call.strength_light"));
+                    let slider =
+                        ui.add(Slider::new(&mut s.noise_strength, 6..=48).show_value(false));
+                    ui.label(t!("call.strength_strong"));
                     slider.widget_info(|| {
                         egui::WidgetInfo::labeled(Role::Slider, true, t!("call.strength"))
                     });

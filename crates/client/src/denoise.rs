@@ -7,7 +7,7 @@ use std::{
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, ensure};
@@ -147,96 +147,178 @@ impl Denoiser {
     }
 }
 
-/// Two hops of scheduling slack plus the pinned model's three hops of signal delay.
-/// The dry path carries the same timestamp even if inference misses its deadline.
-const SLACK: usize = 2;
-const DELAY: usize = SLACK + 3;
 type Samples = [i16; FRAME];
+const MODEL_DELAY: usize = 3;
+const DEADLINE: Duration = Duration::from_millis(8);
+const QUEUE: usize = 16;
+
+struct Job {
+    sequence: u64,
+    deadline: Instant,
+    strength: u8,
+    samples: Samples,
+}
 
 pub struct Worker {
-    input: Option<rtrb::Producer<(u64, u8, Samples)>>,
-    output: rtrb::Consumer<(u64, Samples)>,
+    input: rtrb::Producer<Job>,
+    output: rtrb::Consumer<(u64, Option<Samples>)>,
     thread: std::thread::Thread,
-    dry: [Samples; DELAY],
     sequence: u64,
     misses: usize,
 }
 
 impl Worker {
     pub fn start(mut model: Denoiser) -> Result<Self> {
-        let (input, mut jobs) = rtrb::RingBuffer::new(SLACK + 1);
-        let (mut results, output) = rtrb::RingBuffer::new(SLACK + 1);
+        let mut strength = 0;
+        Self::spawn(move |samples, db| {
+            if db != strength {
+                model.model.set_atten_lim(f32::from(db));
+                strength = db;
+            }
+            model.process(samples)
+        })
+    }
+
+    fn spawn(
+        mut infer: impl FnMut(&mut Samples, u8) -> Result<()> + Send + 'static,
+    ) -> Result<Self> {
+        let (input, mut jobs) = rtrb::RingBuffer::<Job>::new(QUEUE);
+        let (mut results, output) = rtrb::RingBuffer::new(QUEUE);
+        let mic = std::thread::current();
         let worker = std::thread::Builder::new()
             .name("ai-denoise".into())
             .spawn(move || {
-                let mut strength = 0;
                 loop {
-                    let Ok((seq, db, mut samples)): Result<(_, _, Samples), _> = jobs.pop() else {
+                    let Ok(mut job) = jobs.pop() else {
                         if jobs.is_abandoned() {
                             break;
                         }
                         std::thread::park_timeout(Duration::from_millis(50));
                         continue;
                     };
-                    if db != strength {
-                        model.model.set_atten_lim(f32::from(db));
-                        strength = db;
-                    }
-                    if let Err(error) = model.process(&mut samples) {
+                    if let Err(error) = infer(&mut job.samples, job.strength) {
                         tracing::warn!(%error, "noise inference failed");
                         break;
                     }
-                    if results.push((seq, samples)).is_err() {
+                    let clean = (Instant::now() <= job.deadline).then_some(job.samples);
+                    if results.push((job.sequence, clean)).is_err() {
                         break;
                     }
+                    mic.unpark();
                 }
             })?;
         Ok(Self {
-            input: Some(input),
+            input,
             output,
             thread: worker.thread().clone(),
-            dry: [[0; FRAME]; DELAY],
             sequence: 0,
             misses: 0,
         })
     }
 
-    pub fn bypassed(&self) -> bool {
-        self.input.is_none()
+    pub fn overloaded(&self) -> bool {
+        self.misses >= 3 || self.input.is_abandoned()
     }
 
-    pub fn process(&mut self, samples: &mut Samples, strength: u8) {
-        let seq = self.sequence;
+    /// Called on the mic processing thread. Jobs in the same device callback each
+    /// get their own wall-clock budget, even when their samples arrive in a burst.
+    pub fn process(&mut self, samples: &Samples, strength: u8) -> Option<Samples> {
+        let sequence = self.sequence;
         self.sequence += 1;
-        let original = *samples;
-        std::mem::swap(samples, &mut self.dry[(seq % DELAY as u64) as usize]);
-        let Some(input) = self.input.as_mut() else {
-            return;
-        };
-        let due = seq.checked_sub(SLACK as u64);
-        while let Ok(&(index, _)) = self.output.peek() {
-            if Some(index) >= due {
-                break;
-            }
-            let _ = self.output.pop();
-        }
-        if let Some(due) = due {
-            if self.output.peek().is_ok_and(|(index, _)| *index == due) {
-                *samples = self.output.pop().unwrap().1;
-                self.misses = 0;
-            } else {
-                self.misses += 1;
-            }
-        }
-        // A dropped input breaks the model's contiguous history. Stay dry until re-enabled.
-        if self.misses >= 3
-            || input.is_abandoned()
-            || input.push((seq, strength.clamp(6, 48), original)).is_err()
+        let deadline = Instant::now() + DEADLINE;
+        if self
+            .input
+            .push(Job {
+                sequence,
+                deadline,
+                strength: strength.clamp(6, 48),
+                samples: *samples,
+            })
+            .is_err()
         {
-            self.input = None;
-            tracing::warn!("AI noise removal bypassed after missed audio deadline");
+            self.misses = 3;
+            return None;
         }
         self.thread.unpark();
+        let clean = loop {
+            if let Ok((seq, clean)) = self.output.pop() {
+                if seq == sequence {
+                    break clean;
+                }
+                continue;
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() || self.input.is_abandoned() {
+                break None;
+            }
+            std::thread::park_timeout(left);
+        };
+        if clean.is_some() {
+            self.misses = 0;
+        } else {
+            self.misses += 1;
+        }
+        clean.filter(|_| sequence >= MODEL_DELAY as u64)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Default)]
+enum PathKind {
+    #[default]
+    Live,
+    Dry,
+    Clean,
+}
+
+/// Keep one processed hop in reserve: on a miss, its clean and time-aligned
+/// dry versions are both available for a full fade before the missing hop plays.
+pub struct Mix {
+    dry: [Samples; MODEL_DELAY + 1],
+    next: usize,
+    pending: Option<Samples>,
+    path: PathKind,
+}
+
+impl Default for Mix {
+    fn default() -> Self {
+        Self {
+            dry: [[0; FRAME]; MODEL_DELAY + 1],
+            next: 0,
+            pending: None,
+            path: PathKind::Live,
+        }
+    }
+}
+
+impl Mix {
+    pub fn apply(&mut self, live: &mut Samples, clean: Option<Samples>, enabled: bool) {
+        let delayed = std::mem::replace(&mut self.dry[self.next], *live);
+        self.next = (self.next + 1) % self.dry.len();
+        let ready = clean.is_some();
+        let previous = std::mem::replace(&mut self.pending, clean);
+        let target = if enabled && ready && previous.is_some() {
+            PathKind::Clean
+        } else if enabled && self.path != PathKind::Live {
+            PathKind::Dry
+        } else {
+            PathKind::Live
+        };
+        let signal = |path| match path {
+            PathKind::Clean => previous.as_ref().expect("previous clean frame"),
+            PathKind::Dry => &delayed,
+            PathKind::Live => &*live,
+        };
+        let from = signal(self.path);
+        let to = signal(target);
+        *live = if self.path == target {
+            *to
+        } else {
+            std::array::from_fn(|i| {
+                let weight = i as f32 / (FRAME - 1) as f32;
+                (f32::from(from[i]) * (1.0 - weight) + f32::from(to[i]) * weight).round() as i16
+            })
+        };
+        self.path = target;
     }
 }
 
@@ -247,23 +329,57 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stalled_inference_keeps_dry_frames_in_order_at_fixed_delay() {
-        let (input, _stalled) = rtrb::RingBuffer::new(SLACK + 1);
-        let (_producer, output) = rtrb::RingBuffer::new(SLACK + 1);
-        let mut worker = Worker {
-            input: Some(input),
-            output,
-            thread: std::thread::current(),
-            dry: [[0; FRAME]; DELAY],
-            sequence: 0,
-            misses: 0,
-        };
-        for i in 0..20i16 {
-            let mut frame = [i + 1; FRAME];
-            worker.process(&mut frame, 24);
-            assert_eq!(frame, [(i + 1 - DELAY as i16).max(0); FRAME]);
+    fn bursts_of_four_and_five_keep_processed_output() {
+        let mut worker = Worker::spawn(|samples, _| {
+            std::thread::sleep(Duration::from_micros(250));
+            samples[0] += 1;
+            Ok(())
+        })
+        .unwrap();
+        let mut seq = 0;
+        for burst in [4, 5, 4, 5] {
+            for _ in 0..burst {
+                let result = worker.process(&[seq; FRAME], 24);
+                if seq >= MODEL_DELAY as i16 {
+                    assert_eq!(result.unwrap()[0], seq + 1);
+                }
+                assert!(!worker.overloaded());
+                seq += 1;
+            }
+            std::thread::sleep(Duration::from_millis(40));
         }
-        assert!(worker.bypassed());
+    }
+
+    #[test]
+    fn persistent_deadline_misses_request_a_fresh_worker() {
+        let mut worker = Worker::spawn(|_, _| {
+            std::thread::sleep(DEADLINE * 4);
+            Ok(())
+        })
+        .unwrap();
+        for misses in 1..=3 {
+            assert!(worker.process(&[1; FRAME], 24).is_none());
+            assert_eq!(worker.overloaded(), misses == 3);
+        }
+    }
+
+    #[test]
+    fn missed_hops_fade_to_aligned_dry_and_back() {
+        let mut mix = Mix::default();
+        for i in 0..12 {
+            let mut samples = [100 + i; FRAME];
+            let clean = (i >= 3 && i != 6 && i != 10).then_some([500 + i; FRAME]);
+            mix.apply(&mut samples, clean, i < 10);
+            let endpoints = match i {
+                4 => (104, 503), // live to clean
+                6 => (505, 102), // clean to aligned dry
+                7 => (103, 103),
+                8 => (104, 507),
+                10 => (509, 110), // disabled mid-call
+                _ => continue,
+            };
+            assert_eq!((samples[0], samples[FRAME - 1]), endpoints);
+        }
     }
 
     #[test]

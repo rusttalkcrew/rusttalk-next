@@ -266,12 +266,6 @@ Outbound connections), and the client checks its size and pinned SHA-256
 before saving it and again every time it loads it. A file that fails the check
 is deleted and never used; the normal noise suppression keeps working.
 
-Echo cancellation uses the playback reference before noise reduction adds any
-delay. The mic uses either the classic suppressor or AI removal. Voice activation
-measures this signal before automatic gain can amplify background noise. Gain
-adjusts on frames above the activation threshold and boosts by at most 12 dB.
-Shared app audio travels directly from stereo capture to its own source.
-
 ## Outbound connections
 
 - **Bot:** Only the configured RustTalk stack. Membership, key events, encrypted
