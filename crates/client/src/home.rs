@@ -2050,7 +2050,7 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
                             configure = Some(channel.id);
                         }
                         if can_manage {
-                            if m.item("✏", t!("home.rename_channel")).clicked() {
+                            if m.item("✏", t!("home.edit_channel")).clicked() {
                                 channel_edit = Some((channel.id, ChannelEdit::Rename));
                             }
                             if can_move {
@@ -3967,7 +3967,7 @@ fn dialog_title(home: &Home, dialog: &Dialog) -> String {
         Dialog::MyName(..) => t!("home.your_name_dialog").into(),
         Dialog::Category(..) => t!("home.create_category").into(),
         Dialog::Channel { .. } => t!("home.create_channel").into(),
-        Dialog::RenameChannel { .. } => t!("home.rename_channel").into(),
+        Dialog::RenameChannel { .. } => t!("home.edit_channel").into(),
         Dialog::RenameCategory(..) => t!("home.rename_category").into(),
         Dialog::DeleteItem(_, reorder::Item::Channel(_), _) => {
             t!("home.delete_channel_title").into()

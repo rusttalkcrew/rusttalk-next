@@ -264,7 +264,7 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
             if server.status == Status::Online && server.channel(&channel).is_some() {
                 ui.separator();
                 ui.horizontal(|ui| {
-                    if ui::secondary(ui, t!("home.rename_channel")).clicked() {
+                    if ui::secondary(ui, t!("home.edit_channel")).clicked() {
                         channel_edit = Some((settings.server, channel, ChannelEdit::Rename));
                     }
                     if ui::danger(ui, t!("home.delete_channel")).clicked() {
