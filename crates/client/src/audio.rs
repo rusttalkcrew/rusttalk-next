@@ -548,13 +548,17 @@ impl Audio {
         self.shared().deafened.load(Relaxed)
     }
 
+    /// Plays the matching chime once per change, even when deafening.
     pub fn set_deafened(&self, on: bool) {
-        self.shared().deafened.store(on, Relaxed);
+        if self.shared().deafened.swap(on, Relaxed) == on {
+            return;
+        }
         if on {
             let mut mixer = lock(&self.shared().mixer);
             mixer.cues.clear();
             mixer.cue_until = None;
         }
+        self.play_cue(if on { Cue::Deafened } else { Cue::Undeafened });
     }
 
     /// Queue a chime in the speaker mixer only. Echo cancellation gets the same
@@ -562,8 +566,9 @@ impl Audio {
     pub fn play_cue(&self, cue: Cue) {
         let settings = lock(&self.shared().settings);
         let prefs = &settings.call_sounds;
-        if !prefs.enabled || prefs.volume <= 0.0 || self.deafened() || prefs.disabled.contains(&cue)
-        {
+        // Deafened people only hear the chimes about deafening itself.
+        let silenced = self.deafened() && !matches!(cue, Cue::Deafened | Cue::Undeafened);
+        if !prefs.enabled || prefs.volume <= 0.0 || silenced || prefs.disabled.contains(&cue) {
             return;
         }
         let mut mixer = lock(&self.shared().mixer);
@@ -1097,9 +1102,9 @@ fn play<T: SizedSample + FromSample<i16>>(
                 }
                 let _ = mic.try_send(Mic::Far(chunk));
             }
-            let deafened = shared.deafened.load(Relaxed);
+            // Deafening is applied in the mixer, so its own chime still reaches the speakers.
             for (frame, sample) in data.chunks_mut(channels).zip(ready.drain(..frames)) {
-                frame.fill(T::from_sample(if deafened { 0 } else { sample }));
+                frame.fill(T::from_sample(sample));
             }
         },
         error,
@@ -1126,7 +1131,7 @@ fn mix_tracks(mixer: &mut Mixer, deafened: bool) -> [i16; FRAME] {
         cue_until,
         ..
     } = mixer;
-    if deafened || cue_until.is_some_and(|until| until <= Instant::now()) {
+    if cue_until.is_some_and(|until| until <= Instant::now()) {
         cues.clear();
     }
     for (slot, sample) in sum.iter_mut().zip(cues.drain(..cues.len().min(FRAME))) {
@@ -1473,7 +1478,7 @@ mod tests {
     }
 
     #[test]
-    fn mixer_consumes_cues_and_drops_them_on_deafen() {
+    fn mixer_consumes_cues_and_still_plays_them_while_deafened() {
         let samples: VecDeque<_> = Cue::YouJoined.samples(RATE, 0.5).collect();
         let mut mixer = Mixer {
             cues: samples.clone(),
@@ -1485,8 +1490,13 @@ mod tests {
                 .any(|&sample| sample != 0)
         );
         assert_eq!(mixer.cues.len(), samples.len() - FRAME);
-        assert_eq!(mix_tracks(&mut mixer, true), [0; FRAME]);
-        assert!(mixer.cues.is_empty());
+        // Deafening silences voices, not the chime that confirms it.
+        assert!(
+            mix_tracks(&mut mixer, true)
+                .iter()
+                .any(|&sample| sample != 0)
+        );
+        assert_eq!(mixer.cues.len(), samples.len() - 2 * FRAME);
     }
 
     #[test]
