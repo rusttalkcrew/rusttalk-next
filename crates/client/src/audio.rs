@@ -540,8 +540,12 @@ impl Audio {
         self.shared().muted.load(Relaxed)
     }
 
+    /// Plays the matching chime once per change. Not while deafened: deafening already
+    /// mutes, and its own chime covers that.
     pub fn set_muted(&self, on: bool) {
-        self.shared().muted.store(on, Relaxed);
+        if self.shared().muted.swap(on, Relaxed) != on && !self.deafened() {
+            self.play_cue(if on { Cue::Muted } else { Cue::Unmuted });
+        }
     }
 
     pub fn deafened(&self) -> bool {
