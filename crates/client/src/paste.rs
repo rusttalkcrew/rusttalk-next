@@ -19,7 +19,8 @@ use crate::net::MAX_FILE;
 
 /// Formats worth taking, best first: copied files, pictures that may move, a web
 /// page's moving picture (browsers offer only a still copy of it as a picture),
-/// then still pictures. Windows names are mapped to these in `windows::name`.
+/// then still pictures. Windows names are mapped to these in `windows::name`, macOS
+/// pasteboard types in `macos::NAMES`.
 const RANKED: [&str; 7] = [
     "text/uri-list",
     "x-special/gnome-copied-files",
@@ -343,6 +344,81 @@ mod linux {
             let atom = self.0.getter.get_atom(format).ok()?;
             self.load(atom)
         }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn system() -> Option<Clip> {
+    read(&mut macos::Pasteboard::general()).or_else(macos::tiff)
+}
+
+#[cfg(target_os = "macos")]
+mod macos {
+    use objc2::rc::Retained;
+    use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSPasteboard};
+    use objc2_foundation::{NSDictionary, NSString};
+
+    use super::{Clip, Source};
+
+    /// The pasteboard types worth taking, by the names in `RANKED`.
+    const NAMES: [(&str, &str); 6] = [
+        ("public.file-url", "text/uri-list"),
+        ("com.compuserve.gif", "image/gif"),
+        ("org.webmproject.webp", "image/webp"),
+        ("public.html", "text/html"),
+        ("public.png", "image/png"),
+        ("public.jpeg", "image/jpeg"),
+    ];
+
+    pub struct Pasteboard(Retained<NSPasteboard>);
+
+    impl Pasteboard {
+        pub fn general() -> Self {
+            Self(NSPasteboard::generalPasteboard())
+        }
+    }
+
+    impl Source for Pasteboard {
+        fn formats(&mut self) -> Vec<String> {
+            let Some(types) = self.0.types() else {
+                return Vec::new();
+            };
+            (types.iter())
+                .filter_map(|offered| {
+                    let offered = offered.to_string();
+                    NAMES.iter().find(|(id, _)| *id == offered)
+                })
+                .map(|(_, name)| (*name).to_owned())
+                .collect()
+        }
+
+        fn get(&mut self, format: &str) -> Option<Vec<u8>> {
+            let (id, _) = NAMES.iter().find(|(_, name)| *name == format)?;
+            let id = NSString::from_str(id);
+            if format == "text/uri-list" {
+                // One pasteboard item per copied file, each with its file address.
+                let list: Vec<String> = (self.0.pasteboardItems()?.iter())
+                    .filter_map(|item| item.stringForType(&id))
+                    .map(|url| url.to_string())
+                    .collect();
+                return Some(list.join("\r\n").into_bytes());
+            }
+            Some(self.0.dataForType(&id)?.to_vec())
+        }
+    }
+
+    /// A picture offered only as TIFF, as many Mac apps copy them, as PNG.
+    pub fn tiff() -> Option<Clip> {
+        let tiff =
+            NSPasteboard::generalPasteboard().dataForType(&NSString::from_str("public.tiff"))?;
+        let image = NSBitmapImageRep::imageRepWithData(&tiff)?;
+        let png = unsafe {
+            image.representationUsingType_properties(
+                NSBitmapImageFileType::PNG,
+                &NSDictionary::new(),
+            )
+        }?;
+        Some(Clip::Picture(png.to_vec(), "png"))
     }
 }
 

@@ -593,6 +593,7 @@ call.lost_in = Verloren pakketten in
 call.lost_out = Verloren pakketten uit
 call.share_app_audio = App-audio delen
 call.needs_windows_11 = Vereist Windows 11
+call.not_on_mac_yet = Nog niet beschikbaar op macOS
 call.no_talk_here = Je kunt hier niet praten
 call.looking_for_apps = Apps zoeken…
 call.apps_failed = Kon niet naar apps zoeken.

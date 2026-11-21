@@ -614,7 +614,11 @@ fn app_button(
         })
         .inner;
     let button = if !voice.supported {
-        button.on_disabled_hover_text(t!("call.needs_windows_11"))
+        button.on_disabled_hover_text(if cfg!(target_os = "macos") {
+            t!("call.not_on_mac_yet")
+        } else {
+            t!("call.needs_windows_11")
+        })
     } else if !can_talk {
         button.on_disabled_hover_text(t!("call.no_talk_here"))
     } else {

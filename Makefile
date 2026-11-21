@@ -8,6 +8,11 @@ E2E_FEATURES ?= --features media
 ifeq ($(shell uname -s),Linux)
 PIPEWIRE_HELPER := -p rusttalk-pipewire
 endif
+# macOS's own openssl is LibreSSL, which can't make Ed25519 keys; the updater tests need
+# Homebrew's OpenSSL 3.
+ifeq ($(shell uname -s),Darwin)
+OPENSSL_PATH := $(shell brew --prefix openssl@3 2>/dev/null)/bin:
+endif
 
 ##@ Help
 
@@ -19,7 +24,11 @@ help: ## Show this help
 
 ##@ Dev
 
+ifeq ($(shell uname -s),Darwin)
+dev: export NODE_IP ?= $(shell ipconfig getifaddr "$$(route -n get 1.1.1.1 2>/dev/null | awk '/interface:/ { print $$2 }')" 2>/dev/null)
+else
 dev: export NODE_IP ?= $(shell ip -4 route get 1.1.1.1 2>/dev/null | awk '{ for (i = 1; i < NF; i++) if ($$i == "src") { print $$(i + 1); exit } }')
+endif
 dev: export RUSTTALK_DEV_HTTPS_PORT ?= 8443
 dev: ## Start the Docker stack and rebuild the API on changes
 	@test -n "$$NODE_IP" || { printf '\033[1;31mSet NODE_IP to the host LAN IPv4 address.\033[0m\n' >&2; exit 1; }
@@ -92,7 +101,7 @@ fmt: ## Format all code
 test: ## Run unit and integration tests
 	@printf '\033[1;34m==> tests\033[0m\n'
 	cargo test $(CARGO_SCOPE) --locked
-	python3 -m unittest discover -s deploy/updater
+	PATH="$(OPENSSL_PATH)$$PATH" python3 -m unittest discover -s deploy/updater
 
 e2e: ## Run the two-stack membership, keys, chat, stored files, voice, app audio, screen, camera, live file, device sync and index scenarios
 	@printf '\033[1;34m==> Two-stack membership, keys, chat, stored files, voice, app audio, screen, camera, live file, device sync and index\033[0m\n'

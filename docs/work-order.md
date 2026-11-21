@@ -73,3 +73,18 @@ content on the server, not even temporarily.
 - [x] **W17 Updates and packaging.** Signed releases, verified client updates,
   installer, AppImage, images. Gate: a client updates itself from a local release.
 - [x] **W18 First release.** `make soak` passes; `/ponytail-audit` findings fixed.
+
+**10. macOS** (macOS 14.2 or later, universal binary, parity with Windows)
+- [x] **W19 macOS build.** Client and core build, lint and test on macOS; camera
+  through AVFoundation; Finder reveal; `make dev` and `make test` on macOS; CI job.
+  Gate: `make lint test` green on macOS in CI.
+- [x] **W20 macOS screen sharing.** ScreenCaptureKit monitors and windows. Gate: e2e
+  screen track from macOS.
+- [ ] **W21 macOS app audio.** Core Audio process taps. Gate: two app tracks with
+  independent volume from macOS.
+- [ ] **W22 macOS remote control.** Posted input confined to the shared monitor or
+  window, Ctrl and Cmd swapped between macOS and other systems, Accessibility
+  permission. Gate: control a macOS share from Windows and back.
+- [ ] **W23 macOS release.** Universal `.app` in a DMG signed with a stable
+  self-signed identity, usage descriptions, verified in-app updates. Gate: a macOS
+  client updates itself from a local release and keeps its permissions.

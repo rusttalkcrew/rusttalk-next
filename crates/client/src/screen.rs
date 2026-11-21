@@ -66,7 +66,7 @@ impl<H> Swap<H> {
     }
 }
 
-pub const SUPPORTED: bool = cfg!(any(target_os = "linux", windows));
+pub const SUPPORTED: bool = cfg!(any(target_os = "linux", target_os = "macos", windows));
 
 /// Watched screens, converted to RGBA off the UI thread. Only the newest frame is kept.
 #[derive(Clone)]

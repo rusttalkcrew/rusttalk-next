@@ -54,8 +54,8 @@ helper next to the app and bot. Ship it as a sibling binary in Linux packages.
 
 Run `make client` in the repository root to build and start the desktop
 app. It uses the platform config directory and the OS keystore (Windows
-Credential Manager or an unlocked Linux Secret Service session). The window
-follows the system light or dark theme.
+Credential Manager, the macOS login keychain or an unlocked Linux Secret
+Service session). The window follows the system light or dark theme.
 
 On first start the app offers two paths:
 
@@ -266,9 +266,20 @@ session. A disconnected RDP session can enumerate sources without
 delivering frames. Use an interactive scheduled task for an SSH-driven
 smoke test and remove it afterwards.
 
+On macOS, ScreenCaptureKit lists every display and the titled normal windows
+of other apps in the current Space; windows in other Spaces or of hidden apps
+deliver no frames, so they are left out. The first listing asks for Screen &
+System Audio Recording access, and macOS applies a grant only after RustTalk
+restarts. Displays capture at their full pixel size and windows at their
+size when sharing starts; a resized window is scaled into that size.
+
 ### Camera
 
-Cameras use `nokhwa`: V4L2 on Linux, Media Foundation on Windows. MJPEG
+Cameras use `nokhwa`: V4L2 on Linux, Media Foundation on Windows,
+AVFoundation on macOS. On macOS the first listing asks for camera access
+and waits for the answer; a refusal fails with a pointer to System Settings.
+Its macOS mode list is broken, so `camera.rs` reads modes through
+`nokhwa-bindings-macos` and offers only the top rate of each range. MJPEG
 frames decode in pure Rust (`image`), other formats through nokhwa, then
 convert to I420. Bot A can publish `--share-camera synthetic` (the screen
 pattern) or `--share-camera device` (the first camera at 720p30), and bot B
@@ -340,6 +351,23 @@ every merge; CI does not run it. Local `make lint test` covers the whole
 workspace. `rust-toolchain.toml` pins the Rust version, so a new Rust release
 does not invalidate the CI caches; update it together with the image in
 `services/api/Dockerfile`.
+
+## macOS
+
+The client and core build and test on macOS 14.2 or later with the Xcode
+command line tools. `make dev` reads the LAN address from the default
+route's interface. `make test` puts Homebrew's `openssl@3` first on `PATH`
+for the updater tests, because the system LibreSSL can't make Ed25519 keys
+(`brew install openssl@3`). The client and bot build scripts link with
+`-ObjC`: WebRTC adds Objective-C category methods that the linker otherwise
+drops, and joining a voice channel then aborts with an unrecognized selector.
+Cargo doesn't pass on the flag that `webrtc-sys` prints.
+
+Microphone, speakers, camera, screen and window sharing, chat and files
+work. App audio and remote control are off and say so, and in-app updates
+are unavailable, until their macOS backends land (`docs/work-order.md`, section 10). Started
+from a terminal, the client's microphone and camera prompts name the
+terminal app, which then holds the permission.
 
 ## Local release testing
 

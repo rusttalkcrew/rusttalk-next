@@ -6,6 +6,9 @@ use serde::Deserialize;
 #[cfg(target_os = "linux")]
 #[path = "capture/linux.rs"]
 mod platform;
+#[cfg(target_os = "macos")]
+#[path = "capture/macos.rs"]
+mod platform;
 #[cfg(windows)]
 #[path = "capture/windows.rs"]
 mod platform;
@@ -21,16 +24,17 @@ pub struct App {
     pub name: String,
 }
 
-/// Windows builds before 20348 cannot capture single apps.
+/// This system can't capture single apps: Windows builds before 20348, and macOS
+/// until its backend lands.
 #[derive(Debug, thiserror::Error)]
-#[error("application audio capture needs Windows build 20348 or later")]
+#[error("application audio capture is unavailable on this system")]
 pub struct Unsupported;
 
-/// Fails with `Unsupported` on Windows builds that cannot capture single apps.
+/// Fails with `Unsupported` where single apps can't be captured.
 pub fn supported() -> Result<()> {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     return platform::supported();
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     Ok(())
 }
 
@@ -66,6 +70,7 @@ pub fn capture(app: &App, sink: impl FnMut(&[i16]) + Send + 'static) -> Result<C
     platform::capture(app, sink)
 }
 
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn deliver(bytes: &[u8; FRAME_SAMPLES * 2], sink: &mut impl FnMut(&[i16])) {
     let mut frame = [0; FRAME_SAMPLES];
     for (sample, bytes) in frame.iter_mut().zip(bytes.as_chunks::<2>().0) {
