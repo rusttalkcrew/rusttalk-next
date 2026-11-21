@@ -59,6 +59,8 @@ pub struct Voice {
     pub sharing: Sharing,
     /// The dialog's choices: options and the picked entry of `targets`.
     share_screen: Option<(Options, Option<usize>)>,
+    /// The dialog switches the screen being shared, keeping its quality, rather than starting one.
+    changing_screen: bool,
     /// Screens and windows to pick from (Windows), filled by a listing thread.
     targets: Arc<Mutex<Listing<Target>>>,
     pub watching: Option<Watching>,
@@ -118,6 +120,8 @@ pub enum Sharing {
     Off,
     /// Waiting for the system picker or the first frame.
     Starting,
+    /// Picking another screen; the current one keeps sharing meanwhile.
+    Changing,
     On,
 }
 
@@ -148,6 +152,7 @@ impl Voice {
             video,
             sharing: Sharing::Off,
             share_screen: None,
+            changing_screen: false,
             targets: Arc::new(Mutex::new(Listing::Loading)),
             watching: None,
             camera: Camera::new(runtime),
@@ -174,6 +179,7 @@ impl Voice {
         self.live_files.retain(|file| file.chat);
         self.sharing = Sharing::Off;
         self.share_screen = None;
+        self.changing_screen = false;
         self.watching = None;
         self.camera.reset();
         self.cameras.clear();
@@ -622,6 +628,26 @@ fn remember_screen_options(s: &mut Settings, options: Options) {
     s.screen_cursor = options.cursor;
 }
 
+/// Switch the screen being shared. Linux opens the system picker at once; Windows lists
+/// screens and windows first. Closing either keeps the current share.
+fn change_screen(ctx: &egui::Context, voice: &mut Voice, server: &Server) {
+    if voice.sharing != Sharing::On {
+        return;
+    }
+    if cfg!(target_os = "linux") {
+        let portal = screen::targets()
+            .ok()
+            .and_then(|found| found.into_iter().find(|t| t.kind == Kind::Portal));
+        if let Some(portal) = portal {
+            voice.sharing = Sharing::Changing;
+            server.send(Command::ChangeScreen(portal));
+        }
+    } else {
+        voice.changing_screen = true;
+        open_screen_dialog(ctx, voice);
+    }
+}
+
 /// Open "Share your screen" with the last choices and look for what to share.
 fn open_screen_dialog(ctx: &egui::Context, voice: &mut Voice) {
     voice.share_screen = Some((screen_options(&voice.audio.settings()), None));
@@ -636,7 +662,13 @@ pub fn screen_dialog(ctx: &egui::Context, home: &mut Home) {
     };
     let mut close = false;
     let mut share = None;
-    let ((), dismissed) = ui::dialog(ctx, "share screen", "Share your screen", |ui| {
+    let changing = voice.changing_screen;
+    let title = if changing {
+        "Change what you share"
+    } else {
+        "Share your screen"
+    };
+    let ((), dismissed) = ui::dialog(ctx, "share screen", title, |ui| {
         let targets = audio::lock(&voice.targets);
         // Linux lists one entry that opens the system's own picker.
         let portal = match &*targets {
@@ -672,22 +704,27 @@ pub fn screen_dialog(ctx: &egui::Context, home: &mut Home) {
                 portal
             }
         };
-        section(ui, "Quality");
-        ui.add_space(ui::SPACE_XS);
-        ui::segmented(ui, &mut options.max_height, &SCREEN_QUALITIES);
-        section(ui, "Frame rate");
-        ui.add_space(ui::SPACE_XS);
-        ui::segmented(ui, &mut options.fps, &SCREEN_RATES);
-        ui.add_space(ui::SPACE_S);
-        ui::toggle_row(
-            ui,
-            &mut options.cursor,
-            "Show my cursor",
-            "Others see your mouse pointer",
-        );
+        // A change keeps the quality, frame rate and cursor the share started with.
+        if !changing {
+            section(ui, "Quality");
+            ui.add_space(ui::SPACE_XS);
+            ui::segmented(ui, &mut options.max_height, &SCREEN_QUALITIES);
+            section(ui, "Frame rate");
+            ui.add_space(ui::SPACE_XS);
+            ui::segmented(ui, &mut options.fps, &SCREEN_RATES);
+            ui.add_space(ui::SPACE_S);
+            ui::toggle_row(
+                ui,
+                &mut options.cursor,
+                "Show my cursor",
+                "Others see your mouse pointer",
+            );
+        }
         ui::footer(ui, |ui| {
             let label = if portal.is_some() {
                 "Choose what to share"
+            } else if changing {
+                "Switch"
             } else {
                 "Share"
             };
@@ -704,17 +741,25 @@ pub fn screen_dialog(ctx: &egui::Context, home: &mut Home) {
     });
     if let Some(target) = share {
         let options = *options;
-        let mut settings = home.voice.audio.settings();
-        remember_screen_options(&mut settings, options);
-        home.voice.audio.set_settings(settings);
-        if let Some(server) = call_server(home) {
-            server.send(Command::ShareScreen(target, options));
-            home.voice.sharing = Sharing::Starting;
+        if changing {
+            if let Some(server) = call_server(home) {
+                server.send(Command::ChangeScreen(target));
+                home.voice.sharing = Sharing::Changing;
+            }
+        } else {
+            let mut settings = home.voice.audio.settings();
+            remember_screen_options(&mut settings, options);
+            home.voice.audio.set_settings(settings);
+            if let Some(server) = call_server(home) {
+                server.send(Command::ShareScreen(target, options));
+                home.voice.sharing = Sharing::Starting;
+            }
         }
         close = true;
     }
     if close || dismissed {
         home.voice.share_screen = None;
+        home.voice.changing_screen = false;
     }
 }
 

@@ -39,7 +39,10 @@ pub(super) struct Live {
     apps: HashMap<TrackSid, String>,
     /// A capture waiting for the person to pick (Linux) or for its first frame.
     starting: Option<tokio::task::JoinHandle<Result<(screen::Capture, screen::Options)>>>,
-    screen: Option<(TrackSid, screen::Capture)>,
+    /// The published screen with its capture and quality, which a change keeps.
+    screen: Option<(TrackSid, screen::Capture, screen::Options)>,
+    /// Picking another source for the screen; the old one keeps sharing meanwhile.
+    swap: screen::Swap<tokio::task::JoinHandle<Result<screen::Capture>>>,
     /// The published camera; the UI owns its capture.
     camera: Option<TrackSid>,
     /// Screen and camera tracks this device receives; others are unsubscribed.
@@ -85,6 +88,7 @@ pub(super) fn voice_only(command: &Command) -> bool {
         Command::LeaveVoice
             | Command::StopApp(_)
             | Command::StopScreen
+            | Command::ChangeScreen(_)
             | Command::Watch(..)
             | Command::StopCamera
             | Command::CancelFile(_)
@@ -120,6 +124,10 @@ pub(super) async fn voice_command(
             true
         }
         Command::StopScreen => stop_screen(live).await,
+        Command::ChangeScreen(target) => {
+            change_screen(ctx, live, target);
+            false
+        }
         Command::Watch(sid, on) => {
             watch(ctx, live, sid, on)?;
             false
@@ -138,7 +146,10 @@ pub(super) async fn stop_screen(live: &mut Live) -> bool {
     if let Some(starting) = live.starting.take() {
         starting.abort();
     }
-    let Some((sid, _capture)) = live.screen.take() else {
+    if let Some(picker) = live.swap.abort() {
+        picker.abort();
+    }
+    let Some((sid, ..)) = live.screen.take() else {
         return false;
     };
     tracing::info!("stopped sharing screen");
@@ -218,7 +229,7 @@ pub(super) async fn share_screen(
             .room
             .publish_screen(&capture.name, options, capture.source.clone())
             .await
-            .map(|publication| (publication.sid(), capture)),
+            .map(|publication| (publication.sid(), capture, options)),
         Err(error) => Err(error),
     };
     match published {
@@ -277,6 +288,9 @@ pub(super) fn close(ctx: &Ctx, state: &mut State) -> Option<Id> {
     if let Some(starting) = &live.starting {
         starting.abort();
     }
+    if let screen::Swap::Picking(picker) = &live.swap {
+        picker.abort();
+    }
     // Closing waits for the media server; nothing here needs to wait for it.
     tokio::spawn(leave_room(live.room));
     Some(live.channel)
@@ -304,6 +318,8 @@ pub(super) enum Next {
     Event(Option<RoomEvent>),
     /// A screen capture finished starting; clear `starting` before polling again.
     Capture(Result<(screen::Capture, screen::Options)>),
+    /// The picker for another screen source finished.
+    Swap(Result<screen::Capture>),
 }
 
 pub(super) async fn next_voice(voice: &mut Option<Live>) -> Next {
@@ -316,9 +332,16 @@ pub(super) async fn next_voice(voice: &mut Option<Live>) -> Next {
             None => std::future::pending().await,
         }
     };
+    let swapping = async {
+        match &mut live.swap {
+            screen::Swap::Picking(picker) => picker.await,
+            screen::Swap::Idle => std::future::pending().await,
+        }
+    };
     tokio::select! {
         event = live.room.next_event() => Next::Event(event),
         capture = starting => Next::Capture(capture.map_err(anyhow::Error::from).and_then(|c| c)),
+        capture = swapping => Next::Swap(capture.map_err(anyhow::Error::from).and_then(|c| c)),
     }
 }
 
@@ -411,7 +434,7 @@ pub(super) fn send_room(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &St
             if let Some(sid) = &live.camera {
                 cameras.insert(me, sid.to_string());
             }
-            if let Some((sid, _)) = &live.screen {
+            if let Some((sid, ..)) = &live.screen {
                 screens.insert(
                     me,
                     vec![Screen {
@@ -580,7 +603,7 @@ pub(super) async fn stop_lost_video(
     if live
         .screen
         .as_ref()
-        .is_some_and(|(sid, _)| gone(sid, screen))
+        .is_some_and(|(sid, ..)| gone(sid, screen))
         || !screen && live.starting.is_some()
     {
         changed |= stop_screen(live).await;
@@ -612,7 +635,7 @@ pub(super) async fn stop_finished_shares(
     if live
         .screen
         .as_ref()
-        .is_some_and(|(_, capture)| capture.is_finished())
+        .is_some_and(|(_, capture, _)| capture.is_finished())
     {
         tracing::info!("screen capture ended");
         stop_screen(live).await;
@@ -648,7 +671,7 @@ pub(super) async fn voice_stats(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, st
     let screens: HashMap<TrackSid, String> = live
         .screen
         .iter()
-        .map(|(sid, _)| (sid.clone(), "Screen".into()))
+        .map(|(sid, ..)| (sid.clone(), "Screen".into()))
         .chain(live.camera.iter().map(|sid| (sid.clone(), "Camera".into())))
         .chain(
             live.room
@@ -837,6 +860,7 @@ pub(super) async fn start_call(
         apps: HashMap::new(),
         starting: None,
         screen: None,
+        swap: screen::Swap::Idle,
         camera: None,
         watched: HashSet::new(),
     });
@@ -912,6 +936,47 @@ pub(super) fn pick_screen(
         Ok((capture, options))
     }));
     Ok(())
+}
+
+/// Pick another source for the screen we share. Its frames go into the published
+/// track's own source, so viewers keep watching with no reconnect.
+fn change_screen(ctx: &Ctx, live: &mut Live, target: screen::Target) {
+    let Some((_, capture, options)) = &live.screen else {
+        return;
+    };
+    let (into, options) = (capture.source.clone(), *options);
+    let picker =
+        tokio::spawn(
+            async move { screen::start_into(target, options, &mut None, Some(into)).await },
+        );
+    if let Err(picker) = live.swap.begin(picker) {
+        picker.abort();
+        ctx.send(Update::Sharing(true));
+    }
+}
+
+/// The picker for another source finished: switch to it, or keep the old share.
+pub(super) fn screen_changed(ctx: &Ctx, state: &mut State, result: Result<screen::Capture>) {
+    let Some(live) = &mut state.voice else {
+        return;
+    };
+    match live.swap.finish(result) {
+        screen::Outcome::Swapped(new) => {
+            if let Some((_, capture, _)) = &mut live.screen {
+                tracing::info!("changed the shared screen");
+                // Dropping the old capture stops it; the new one already feeds the track.
+                *capture = new;
+            }
+        }
+        screen::Outcome::Cancelled => tracing::info!("screen change cancelled"),
+        screen::Outcome::Failed(error) => {
+            tracing::warn!(error = %format_args!("{error:#}"), "changing the shared screen failed");
+            ctx.send(Update::Failed("Couldn't switch what you share.".into()));
+        }
+    }
+    if live.screen.is_some() {
+        ctx.send(Update::Sharing(true));
+    }
 }
 
 /// Publish a running camera, replacing an earlier one.
