@@ -1,6 +1,6 @@
 //! Mentions are resolved from verified, decrypted text and the current directory.
 
-use std::{borrow::Cow, ops::Range};
+use std::{borrow::Cow, ops::Range, sync::Arc};
 
 use eframe::egui::{self, CompletionQuery, Suggestion, Ui, text::LayoutJob};
 use rusttalk_core::auth::{decode, encode};
@@ -10,6 +10,8 @@ use crate::{
     server::{Body, Directory, Id, MENTION_EVERYONE, Member, Msg},
     ui,
 };
+
+use super::markdown::{self, Document};
 
 const BROADCASTS: [&str; 2] = ["@everyone", "@here"];
 
@@ -109,77 +111,70 @@ pub fn can_mention_everyone(dir: &Directory, channel: Id, person: Id) -> bool {
             })
 }
 
-pub fn allowed_to_send(text: &str, wide: bool) -> bool {
-    tokens(text).all(|(_, mention)| mention.allowed(wide))
+pub(super) fn allowed_to_send(doc: &Document, wide: bool) -> bool {
+    wide || doc
+        .prose()
+        .flat_map(tokens)
+        .all(|(_, mention)| mention.allowed(false))
 }
 
-/// A verified message with its sender's current permission in this channel.
-pub struct Message<'a> {
-    text: &'a str,
+pub struct Message {
+    pub(super) doc: Arc<Document>,
     wide: bool,
 }
 
-impl<'a> Message<'a> {
-    pub fn new(msg: &'a Msg, dir: &Directory, channel: Id) -> Self {
-        let text = match &msg.body {
-            Body::Text(text) => text,
-            _ => "",
-        };
-        Self {
-            text,
-            wide: tokens(text).any(|(_, mention)| !mention.allowed(false))
-                && can_mention_everyone(dir, channel, msg.person),
-        }
+impl Message {
+    pub fn new(msg: &Msg, dir: &Directory, channel: Id) -> Self {
+        Self::from_msg(msg, dir, channel, |s| Arc::new(Document::parse(s)))
     }
 
-    fn parts(&self, dir: &Directory) -> Vec<(Cow<'a, str>, bool)> {
+    pub(super) fn cached(ui: &Ui, msg: &Msg, dir: &Directory, channel: Id) -> Self {
+        Self::from_msg(msg, dir, channel, |s| markdown::cached(ui, s))
+    }
+
+    fn from_msg(
+        msg: &Msg,
+        dir: &Directory,
+        channel: Id,
+        parse: impl FnOnce(&str) -> Arc<Document>,
+    ) -> Self {
+        let doc = parse(match &msg.body {
+            Body::Text(s) => s,
+            _ => "",
+        });
+        let wide = !allowed_to_send(&doc, false) && can_mention_everyone(dir, channel, msg.person);
+        Self { doc, wide }
+    }
+
+    pub(super) fn parts<'a>(&self, dir: &Directory, text: &'a str) -> Vec<(Cow<'a, str>, bool)> {
         let mut parts = Vec::new();
         let mut start = 0;
-        for (range, mention) in tokens(self.text) {
+        for (range, mention) in tokens(text) {
             if start < range.start {
-                parts.push((Cow::Borrowed(&self.text[start..range.start]), false));
+                parts.push((Cow::Borrowed(&text[start..range.start]), false));
             }
             parts.push((Cow::Owned(mention.label(dir)), mention.allowed(self.wide)));
             start = range.end;
         }
-        parts.push((Cow::Borrowed(&self.text[start..]), false));
+        parts.push((Cow::Borrowed(&text[start..]), false));
         parts
     }
 
+    pub(super) fn resolve(&self, dir: &Directory, text: &str) -> String {
+        self.parts(dir, text)
+            .into_iter()
+            .map(|(s, _)| emoji::plain(&s).into_owned())
+            .collect()
+    }
+
     pub fn plain(&self, dir: &Directory) -> String {
-        self.parts(dir).into_iter().map(|(text, _)| text).collect()
-    }
-
-    /// The layout of one run of this message's text, for messages that also hold server emoji.
-    pub fn layout_text(&self, ui: &Ui, dir: &Directory, text: &str) -> Option<LayoutJob> {
-        Message {
-            text,
-            wide: self.wide,
-        }
-        .layout(ui, dir)
-    }
-
-    pub fn layout(&self, ui: &Ui, dir: &Directory) -> Option<LayoutJob> {
-        tokens(self.text).next()?;
-        let mut job = LayoutJob::default();
-        let plain =
-            egui::text::TextFormat::simple(emoji::font(ui::TEXT_BODY), ui.visuals().text_color());
-        let chip = ui::mention_format(ui);
-        for (text, marked) in self.parts(dir) {
-            // Keep multiword names together when a chip wraps.
-            if marked {
-                job.append(&text.replace(' ', "\u{a0}"), 0.0, chip.clone());
-            } else {
-                job.append(&text, 0.0, plain.clone());
-            }
-        }
-        Some(job)
+        self.doc.plain(|s| self.resolve(dir, s))
     }
 }
 
 /// Shared with notifications so they apply the same rule as the chat highlight.
-pub fn mentions_me(message: &Message<'_>, me: &Id, my_roles: &[String]) -> bool {
-    tokens(message.text).any(|(_, mention)| {
+pub fn mentions_me(message: &Message, me: &Id, my_roles: &[String]) -> bool {
+    message.doc.prose().flat_map(tokens).any(|(_, mention)| {
         mention.allowed(message.wide)
             && match mention {
                 Mention::Person(person) => person == *me,
@@ -190,8 +185,12 @@ pub fn mentions_me(message: &Message<'_>, me: &Id, my_roles: &[String]) -> bool 
 }
 
 /// Whether this person is named directly; muting @everyone never silences that.
-pub fn names_me(message: &Message<'_>, me: &Id) -> bool {
-    tokens(message.text).any(|(_, mention)| mention == Mention::Person(*me))
+pub fn names_me(message: &Message, me: &Id) -> bool {
+    message
+        .doc
+        .prose()
+        .flat_map(tokens)
+        .any(|(_, mention)| mention == Mention::Person(*me))
 }
 
 /// The visible names chosen in one draft. Keep each alias bound to its ID for
@@ -228,25 +227,28 @@ impl DraftMentions {
     }
 
     pub fn open(dir: &Directory, text: &str) -> (String, Self) {
-        let mut draft = String::new();
         let mut aliases = Self::default();
-        let mut start = 0;
-        for (range, mention) in tokens(text) {
-            let token = &text[range.clone()];
-            draft.push_str(&text[start..range.start]);
-            if !matches!(mention, Mention::Broadcast(_))
-                && starts_at(text, range.start)
-                && ends_at(text, range.end)
-            {
-                let alias = aliases.alias(&alias_label(&mention.label(dir)), token, &[text]);
-                draft.push_str(&alias);
-                aliases.remember(alias, token.into());
-            } else {
-                draft.push_str(token);
+        let draft = Document::parse(text).map_source(text, |prose| {
+            let mut draft = String::new();
+            let mut start = 0;
+            for (range, mention) in tokens(prose) {
+                let token = &prose[range.clone()];
+                draft.push_str(&prose[start..range.start]);
+                if !matches!(mention, Mention::Broadcast(_))
+                    && starts_at(prose, range.start)
+                    && ends_at(prose, range.end)
+                {
+                    let alias = aliases.alias(&alias_label(&mention.label(dir)), token, &[text]);
+                    draft.push_str(&alias);
+                    aliases.remember(alias, token.into());
+                } else {
+                    draft.push_str(token);
+                }
+                start = range.end;
             }
-            start = range.end;
-        }
-        draft.push_str(&text[start..]);
+            draft.push_str(&prose[start..]);
+            draft
+        });
         (draft, aliases)
     }
 
@@ -542,9 +544,9 @@ mod tests {
             "Hi @Ada Byron, @Friday Games, @unknown, @unknown!"
         );
         let chips: Vec<_> = message
-            .parts(&dir)
+            .parts(&dir, &message.doc.prose().collect::<String>())
             .into_iter()
-            .filter_map(|(label, marked)| marked.then_some(label))
+            .filter_map(|(label, marked)| marked.then(|| label.into_owned()))
             .collect();
         assert_eq!(
             chips,
@@ -553,11 +555,32 @@ mod tests {
     }
 
     #[test]
+    fn bold_mentions_ping_but_examples_in_code_do_not() {
+        let dir = directory();
+        let token = person_token(ME);
+        let incoming = msg(ADA, format!("**{token}**"));
+        let message = Message::new(&incoming, &dir, CHANNEL);
+        assert!(names_me(&message, &ME));
+        assert_eq!(message.plain(&dir), "@Jamie");
+        let example = msg(
+            ADA,
+            format!("`{token}`\n\n```\n@everyone :wave: {token}\n```"),
+        );
+        let message = Message::new(&example, &dir, CHANNEL);
+        assert!(!mentions_me(&message, &ME, &[]));
+        assert!(allowed_to_send(&message.doc, false));
+        assert!(message.plain(&dir).contains(&token));
+    }
+
+    #[test]
     fn permissions_gate_sending_and_receiving() {
         let mut dir = directory();
         let direct = person_token(ME);
         let can_send = |sender, channel, text| {
-            allowed_to_send(text, can_mention_everyone(&dir, channel, sender))
+            allowed_to_send(
+                &Document::parse(text),
+                can_mention_everyone(&dir, channel, sender),
+            )
         };
         for text in ["<@&member>", "@everyone", "@here"] {
             assert!(can_send(ADA, CHANNEL, text));
@@ -566,7 +589,12 @@ mod tests {
             assert!(!can_send([9; 32], CHANNEL, text));
             let incoming = msg(BOB, text);
             let message = Message::new(&incoming, &dir, CHANNEL);
-            assert!(message.parts(&dir).iter().all(|(_, marked)| !marked));
+            assert!(
+                message
+                    .parts(&dir, &message.doc.prose().collect::<String>())
+                    .iter()
+                    .all(|(_, marked)| !marked)
+            );
             assert!(!mentions_me(&message, &ME, &["member".into()]));
         }
         assert!(can_send(BOB, CHANNEL, &direct));

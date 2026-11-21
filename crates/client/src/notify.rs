@@ -165,7 +165,7 @@ pub enum Mention {
 }
 
 /// How a message mentions this person, by the same rules as the chat highlight (#66).
-pub fn mention(message: &Message<'_>, me: &Id, my_roles: &[String]) -> Mention {
+pub fn mention(message: &Message, me: &Id, my_roles: &[String]) -> Mention {
     if mentions::names_me(message, me) {
         Mention::Me
     } else if mentions::mentions_me(message, me, my_roles) {

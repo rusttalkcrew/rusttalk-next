@@ -64,6 +64,7 @@ const TOOLBAR_BUTTON: Vec2 = Vec2::new(30.0, 26.0);
 
 mod friends;
 pub mod layout;
+mod markdown;
 pub mod mentions;
 mod pokes;
 mod user_bar;
@@ -631,9 +632,7 @@ impl Home {
             let body = match &msg.body {
                 Body::Friend(..) => t!("notify.friend_request").into(),
                 Body::Text(_) if msg.sticker.is_some() => t!("notify.sent_sticker").into(),
-                Body::Text(text) if !text.trim().is_empty() => {
-                    emoji::plain(&message.plain(&server.dir)).into_owned()
-                }
+                Body::Text(text) if !text.trim().is_empty() => message.plain(&server.dir),
                 _ if !msg.files.is_empty() || msg.live.is_some() => t!("notify.sent_file").into(),
                 _ => t!("notify.new_message").into(),
             };
@@ -3537,7 +3536,10 @@ fn composer(
             Body::Text(text)
                 if msg.person == dir.me && msg.live.is_none() && msg.sticker.is_none() =>
             {
-                Some((msg.id, emoji::plain(text).into_owned()))
+                Some((
+                    msg.id,
+                    markdown::cached(ui, text).map_source(text, |s| emoji::plain(s).into_owned()),
+                ))
             }
             _ => None,
         });
@@ -3581,8 +3583,9 @@ fn composer(
         field.request_focus();
         return (Some(command), attach);
     }
-    let encoded = chat.mentions.encode(&chat.draft);
-    let converted = emoji::replace(&encoded, &dir.emoji);
+    let converted = markdown::cached(ui, &chat.draft).map_source(&chat.draft, |s| {
+        emoji::replace(&chat.mentions.encode(s), &dir.emoji).into_owned()
+    });
     let count = converted.chars().count();
     if count >= COUNT_FROM {
         let color = if count > MAX_TEXT_CHARS {
@@ -3595,7 +3598,7 @@ fn composer(
         });
     }
     let text = converted.trim();
-    let allowed = mentions::allowed_to_send(text, wide);
+    let allowed = mentions::allowed_to_send(&markdown::cached(ui, text), wide);
     error_text(ui, (!allowed).then_some(t!("home.no_wide_mentions")));
     // Edits change only the text; staged files wait for the next message.
     let editing = chat.editing.is_some();
@@ -3692,7 +3695,7 @@ fn message(
         ui.add_space(4.0);
         return None;
     }
-    let mention = mentions::Message::new(msg, dir, channel);
+    let mention = mentions::Message::cached(ui, msg, dir, channel);
     let my_roles = dir
         .members
         .iter()
@@ -3726,9 +3729,10 @@ fn message(
                             )
                         }
                         Some(quoted) if matches!(quoted.body, Body::Text(_)) => {
-                            let text = mentions::Message::new(quoted, dir, channel).plain(dir);
+                            let text =
+                                mentions::Message::cached(ui, quoted, dir, channel).plain(dir);
                             let person = quoted.person;
-                            let snippet: String = emoji::plain(&text).chars().take(80).collect();
+                            let snippet: String = text.chars().take(80).collect();
                             let snippet = if snippet.is_empty() {
                                 t!("home.a_file").into()
                             } else {
@@ -3752,11 +3756,11 @@ fn message(
                     }
                     Body::Text(text) => {
                         if !text.is_empty() {
-                            ui.horizontal_wrapped(|ui| {
+                            ui.vertical(|ui| {
                                 let jumbo = emoji::jumbo(text)
                                     && msg.files.is_empty()
                                     && msg.live.is_none();
-                                message_text(ui, dir, &mention, text, jumbo);
+                                mention.doc.show(ui, dir, &mention, jumbo);
                                 if chat.edited.contains_key(&(msg.person, msg.id)) {
                                     ui.label(RichText::new(t!("home.edited")).small().weak());
                                 }
@@ -3778,8 +3782,13 @@ fn message(
     let rect = row.response.rect;
     let mine = msg.person == me;
     let text = match &msg.body {
-        Body::Text(text) => Some(emoji::plain(text).into_owned()),
+        Body::Text(text) => Some(text.as_str()),
         _ => None,
+    };
+    let edit_text = |text: &str| {
+        mention
+            .doc
+            .map_source(text, |s| emoji::plain(s).into_owned())
     };
     let can_reply = text.is_some();
     let can_edit = mine && text.is_some() && msg.sticker.is_none();
@@ -3798,12 +3807,10 @@ fn message(
             && let Some(text) = &text
             && m.item("✏", t!("common.edit")).clicked()
         {
-            pick = Some(Pick::Edit(msg.id, text.clone()));
+            pick = Some(Pick::Edit(msg.id, edit_text(text)));
         }
         if can_reply && m.item("📋", t!("home.copy_text")).clicked() {
-            m.ui()
-                .ctx()
-                .copy_text(emoji::plain(&mention.plain(dir)).into_owned());
+            m.ui().ctx().copy_text(mention.plain(dir));
         }
         if can_delete {
             m.separator();
@@ -3870,7 +3877,7 @@ fn message(
         && let Some(text) = &text
         && ui::icon_button(&mut ui, "✏", t!("common.edit"), Look::Ghost, TOOLBAR_BUTTON).clicked()
     {
-        pick = Some(Pick::Edit(msg.id, text.clone()));
+        pick = Some(Pick::Edit(msg.id, edit_text(text)));
     }
     if can_delete
         && ui::icon_button(
@@ -3885,55 +3892,6 @@ fn message(
         pick = Some(Pick::Delete(msg.id));
     }
     pick
-}
-
-/// Message text with mentions as chips and server emoji drawn as pictures, or as
-/// `:name:` when not available.
-fn message_text(
-    ui: &mut Ui,
-    dir: &Directory,
-    mention: &mentions::Message<'_>,
-    text: &str,
-    jumbo: bool,
-) {
-    let parts = emoji::parts(text);
-    let size = if jumbo { 36.0 } else { ui::TEXT_BODY };
-    let label = |ui: &Ui, text: &str| match mention.layout_text(ui, dir, text) {
-        Some(job) => Label::new(job).wrap(),
-        None => {
-            let body = emoji::text(text);
-            Label::new(if jumbo { body.size(size) } else { body }).wrap()
-        }
-    };
-    if let [emoji::Part::Text(text)] = parts.as_slice() {
-        ui.add(label(ui, text));
-        return;
-    }
-    ui.spacing_mut().item_spacing.x = 0.0;
-    for part in parts {
-        match part {
-            emoji::Part::Text(text) => {
-                ui.add(label(ui, text));
-            }
-            emoji::Part::Custom { name, id, .. } => {
-                let code = format!(":{name}:");
-                match dir.emoji_by_id(&id).and_then(|e| e.picture.as_ref()) {
-                    Some(picture) => {
-                        let side = if jumbo { 48.0 } else { size + 6.0 };
-                        ui.add(
-                            egui::Image::new(&frame(ui, picture))
-                                .fit_to_exact_size(Vec2::splat(side))
-                                .alt_text(&code),
-                        )
-                        .on_hover_text(code);
-                    }
-                    None => {
-                        ui.add(label(ui, &code));
-                    }
-                }
-            }
-        }
-    }
 }
 
 /// A sticker message: the picture, large, or its name when not available.
