@@ -15,7 +15,7 @@ use std::{
     pin::pin,
     sync::{
         Arc, Mutex, MutexGuard,
-        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed},
+        atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering::Relaxed},
         mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender},
     },
     task::{Context, Poll, Waker},
@@ -46,6 +46,7 @@ use tokio::runtime::Runtime;
 
 use crate::{
     denoise::{self, Denoiser},
+    mic_check::{self, Verdict},
     server::Id,
     sounds::{self, Cue},
 };
@@ -100,6 +101,9 @@ pub struct Settings {
     /// AI noise removal in place of the normal noise suppression, once its model is
     /// downloaded. Not synced: the download is per device.
     pub ai_noise: bool,
+    /// Suggest fixes during a call when the microphone is noisy or too loud;
+    /// "Don't ask again" turns it off. This device only.
+    pub mic_hint: bool,
     /// Camera name; `None` uses the first camera.
     pub camera: Option<String>,
     pub camera_height: u32,
@@ -172,6 +176,7 @@ impl Default for Settings {
             noise_suppression: true,
             auto_gain: true,
             ai_noise: false,
+            mic_hint: true,
             camera: None,
             camera_height: 720,
             camera_fps: 30,
@@ -262,6 +267,8 @@ struct Shared {
     level: AtomicU32,
     /// The automatic voice activation level, in dBFS (f32 bits).
     auto_threshold: AtomicU32,
+    /// The microphone problem noticed in this call, until the UI takes it (`trouble`).
+    trouble: AtomicU8,
     /// When this person last sent sound, in ms since `start`.
     talked: AtomicU64,
     /// Device latencies for the echo canceller, in ms.
@@ -363,6 +370,7 @@ impl Audio {
             deafened: AtomicBool::new(false),
             level: AtomicU32::new((-100f32).to_bits()),
             auto_threshold: AtomicU32::new(NoiseFloor::default().threshold().to_bits()),
+            trouble: AtomicU8::new(0),
             talked: AtomicU64::new(0),
             input_delay: AtomicU32::new(10),
             output_delay: AtomicU32::new(20),
@@ -580,6 +588,15 @@ impl Audio {
         f32::from_bits(self.shared().auto_threshold.load(Relaxed))
     }
 
+    /// The microphone problem noticed in this call, once; `None` until there is one.
+    pub fn take_trouble(&self) -> Option<Verdict> {
+        match self.shared().trouble.swap(0, Relaxed) {
+            1 => Some(Verdict::Noisy),
+            2 => Some(Verdict::Loud),
+            _ => None,
+        }
+    }
+
     /// This person is sending sound right now.
     pub fn talking(&self) -> bool {
         self.shared().now() < self.shared().talked.load(Relaxed) + SPEAKING_MS
@@ -711,6 +728,10 @@ impl NoiseFloor {
         // Ten times a second over 50 values: trivial next to the audio processing.
         let target = percentile(&self.blocks[..self.filled], NOISE_PERCENTILE).expect("filled");
         self.floor = target.min(self.floor + NOISE_RISE_DB);
+    }
+
+    fn floor(&self) -> f32 {
+        self.floor
     }
 
     fn threshold(&self) -> f32 {
@@ -1147,6 +1168,7 @@ fn process(shared: &Shared, frames: &Receiver<Mic>) {
     let mut framer = Framer::default();
     let mut gate = Gate::default();
     let mut noise = NoiseFloor::default();
+    let mut check = mic_check::Detector::default();
     while let Ok(message) = frames.recv() {
         let wanted = shared.processing.load(Relaxed);
         if wanted != built {
@@ -1171,6 +1193,10 @@ fn process(shared: &Shared, frames: &Receiver<Mic>) {
             Mic::Near { samples, len, rate } => framer.push(&samples[..len], rate),
         }
         while let Some(mut frame) = framer.next() {
+            // Before the gain: clipping happens at the device, and the gain would hide it.
+            let clipped = frame
+                .iter()
+                .any(|s| s.unsigned_abs() >= mic_check::CLIP_LEVEL);
             let delay = shared.input_delay.load(Relaxed) + shared.output_delay.load(Relaxed);
             let _ = apm.set_stream_delay_ms(delay as i32);
             if let Err(error) = apm.process_stream(&mut frame, RATE as i32, 1) {
@@ -1195,13 +1221,29 @@ fn process(shared: &Shared, frames: &Receiver<Mic>) {
             noise.push(db);
             let auto = noise.threshold();
             shared.auto_threshold.store(auto.to_bits(), Relaxed);
-            let (push_to_talk, threshold) = {
+            let (push_to_talk, threshold, watch) = {
                 let s = lock(&shared.settings);
                 (
                     s.push_to_talk,
                     if s.auto_threshold { auto } else { s.threshold },
+                    s.mic_hint && !s.ai_noise,
                 )
             };
+            if !shared.voice.load(Relaxed) {
+                // Out of a call: the next one is judged afresh.
+                check = mic_check::Detector::default();
+            } else if watch {
+                let muted = shared.muted.load(Relaxed) || shared.deafened.load(Relaxed);
+                let frame = mic_check::Frame {
+                    floor: noise.floor(),
+                    clipped,
+                    muted,
+                };
+                if let Some(verdict) = check.push(frame) {
+                    let code = if verdict == Verdict::Noisy { 1 } else { 2 };
+                    shared.trouble.store(code, Relaxed);
+                }
+            }
             let voiced = gate.update(db, threshold);
             let open = !shared.muted.load(Relaxed)
                 && !shared.deafened.load(Relaxed)

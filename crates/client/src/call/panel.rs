@@ -11,12 +11,13 @@ use eframe::egui::{
 use rusttalk_core::client::voice::{CallTraffic, TrackSource, Traffic};
 
 use super::{
-    Listing, LiveAction, Sharing, Voice, audio, change_screen as change_screen_now, fill, leave,
-    live_files, open_screen_dialog, screen, status_name,
+    Listing, LiveAction, Row, Sharing, Voice, audio, change_screen as change_screen_now, fill,
+    leave, live_files, open_screen_dialog, screen, status_name,
 };
 use crate::{
     files::Ask,
     home::{Home, Tab},
+    mic_check::Verdict,
     net::Command,
     server::{CallState, Id, Server, Stats},
     share::{self, App},
@@ -160,6 +161,10 @@ enum Stop {
 
 /// The voice panel, while in a voice room.
 pub fn call_bar(ui: &mut Ui, home: &mut Home) {
+    if home.voice.call.is_none() {
+        return;
+    }
+    mic_hint_card(ui, home);
     let Some(call) = &home.voice.call else {
         return;
     };
@@ -322,6 +327,75 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
     if leave_now {
         leave(home);
     }
+}
+
+/// A gentle hint above the panel when the microphone is noisy or too loud. Never while
+/// muted; it waits, and answering it (or leaving the call) is final for this call.
+fn mic_hint_card(ui: &mut Ui, home: &mut Home) {
+    let audio = home.voice.audio.clone();
+    let mut settings = audio.settings();
+    let verdict = home
+        .voice
+        .mic_hint
+        .filter(|_| !audio.muted() && !settings.ai_noise);
+    let Some(last) = verdict else { return };
+    let mut answer = None;
+    ui::fade_card(ui, "mic hint", true, |ui| {
+        let text = match last {
+            Verdict::Noisy => t!("call.mic_noisy"),
+            Verdict::Loud => t!("call.mic_loud"),
+        };
+        ui.add(Label::new(text).wrap());
+        ui.add_space(SPACE_XS);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = SPACE_XS;
+            if last == Verdict::Noisy && ui::primary(ui, t!("call.mic_turn_on")).clicked() {
+                answer = Some(Hint::TurnOn);
+            }
+            if ui::secondary(ui, t!("call.mic_settings")).clicked() {
+                answer = Some(Hint::Settings);
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = SPACE_XS;
+            if ui::secondary(ui, t!("call.mic_not_now")).clicked() {
+                answer = Some(Hint::NotNow);
+            }
+            if ui.link(t!("call.mic_dont_ask")).clicked() {
+                answer = Some(Hint::Never);
+            }
+        });
+    });
+    ui.add_space(4.0);
+    let Some(answer) = answer else { return };
+    home.voice.mic_hint = None;
+    match answer {
+        Hint::TurnOn => {
+            // Like the Download button in Settings: it starts as soon as the model is ready.
+            settings.ai_noise = true;
+            audio.download_model();
+            audio.set_settings(settings);
+        }
+        Hint::Settings => {
+            home.voice.show_row(match last {
+                Verdict::Noisy => Row::AiNoise,
+                Verdict::Loud => Row::Gain,
+            });
+            home.settings = Some(Tab::Voice);
+        }
+        Hint::NotNow => {}
+        Hint::Never => {
+            settings.mic_hint = false;
+            audio.set_settings(settings);
+        }
+    }
+}
+
+enum Hint {
+    TurnOn,
+    Settings,
+    NotNow,
+    Never,
 }
 
 /// Four signal bars in the quality's colour; opens the connection popup.

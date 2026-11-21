@@ -19,6 +19,7 @@ mod friends;
 mod home;
 mod keystore;
 mod log_file;
+mod mic_check;
 mod net;
 mod notify;
 mod official;
