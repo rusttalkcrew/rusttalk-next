@@ -10,9 +10,8 @@ use url::Url;
 use crate::net::Listed;
 
 /// The official server directory, used when the person sets no other.
-/// Temporary host: this becomes `https://index.rusttalk.com/` in a later release, once its DNS
-/// exists. It has a public certificate, so no pin.
-pub const DIRECTORY: &str = "https://rusttalk-index.mvl.sh/";
+/// It has a public certificate, so no pin.
+pub const DIRECTORY: &str = "https://index.rusttalk.com/";
 
 /// Name, address and server ID (base64url). Each ID is that server's `rusttalk-api server-id`;
 /// Join checks it like an invite would. Their certificates are public, so no pin.

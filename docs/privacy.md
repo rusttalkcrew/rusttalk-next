@@ -302,8 +302,7 @@ is deleted and never used; the normal noise suppression keeps working.
   connections. Voice uses the same pinned signaling path and advertised
   WebRTC ports as the bot. The client contacts the server directory only
   when the person searches in Find servers: the address set in Settings →
-  Privacy, or else the official directory (`rusttalk-index.mvl.sh`, to move
-  to `index.rusttalk.com`) with normal certificate trust. The join page lists the
+  Privacy, or else the official directory (`index.rusttalk.com`) with normal certificate trust. The join page lists the
   official servers (`es`, `de` and `jp.public.rusttalk.com`) from a list
   built into the client; it contacts one only when the person picks Join. An
   invite link or server address typed on the join page is contacted only when
