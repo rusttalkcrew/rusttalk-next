@@ -7,7 +7,7 @@ publish = false
 
 [dependencies]
 anyhow = "1"
-axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio", "ws"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "matched-path", "query", "tokio", "ws"] }
 ed25519-dalek = { version = "2.2", default-features = false, features = ["fast", "zeroize"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 livekit-api = { version = "=0.10.2", default-features = false, features = ["webhooks"] }

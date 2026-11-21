@@ -17,7 +17,7 @@ use sqlx::{FromRow, SqliteConnection, query, query_as, query_scalar};
 
 use crate::{
     ApiError, ApiResult, App,
-    auth::{Actor, authenticate},
+    auth::{Actor, authenticate, authenticate_read},
     channels, keys, payload,
     roles::{self, Permission},
     store::audit,
@@ -288,7 +288,7 @@ pub async fn list(
     if !(1..=PAGE_LIMIT).contains(&limit) {
         return Err(ApiError::bad_request("invalid_query"));
     }
-    let (mut tx, actor) = authenticate(&app, &headers).await?;
+    let (mut tx, actor) = authenticate_read(&app, &headers).await?;
     chat_kind(&mut tx, &actor, &channel).await?;
     let through = match page.before {
         Some(id) => sequence(&mut tx, &channel, &id).await? - 1,
@@ -304,7 +304,7 @@ pub async fn get(
     headers: HeaderMap,
     Path((channel, id)): Path<(String, String)>,
 ) -> ApiResult<Json<MessageRecord>> {
-    let (mut tx, actor) = authenticate(&app, &headers).await?;
+    let (mut tx, actor) = authenticate_read(&app, &headers).await?;
     chat_kind(&mut tx, &actor, &channel).await?;
     let through = sequence(&mut tx, &channel, &id).await?;
     let record = records(&mut tx, &channel, through, 1)
@@ -322,7 +322,7 @@ pub async fn device(
 ) -> ApiResult<Json<String>> {
     let device = decode::<32>(&device)?;
     let person = decode::<32>(&person)?;
-    let (mut tx, actor) = authenticate(&app, &headers).await?;
+    let (mut tx, actor) = authenticate_read(&app, &headers).await?;
     chat_kind(&mut tx, &actor, &channel).await?;
     let certificate: Vec<u8> = query_scalar(
         "SELECT s.certificate FROM message_senders s

@@ -30,7 +30,7 @@ use tracing::Instrument;
 
 use crate::{
     ApiError, ApiResult, App,
-    auth::authenticate,
+    auth::{authenticate, authenticate_read},
     file_settings, messages,
     roles::{self, Permission},
     store,
@@ -323,7 +323,7 @@ pub async fn download(
     RoutePath(id): RoutePath<String>,
 ) -> ApiResult<Response> {
     decode::<32>(&id)?;
-    let (mut tx, actor) = authenticate(&app, &headers).await.map_err(|error| {
+    let (mut tx, actor) = authenticate_read(&app, &headers).await.map_err(|error| {
         if error.status == StatusCode::UNAUTHORIZED {
             missing()
         } else {

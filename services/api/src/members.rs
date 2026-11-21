@@ -12,7 +12,10 @@ use sqlx::{FromRow, SqliteConnection, query, query_as, query_scalar};
 
 use crate::{
     ApiError, ApiResult, App,
-    auth::{PublicLimit, authenticate, check_public_limit, client_ip, create_invite, limit_key},
+    auth::{
+        PublicLimit, authenticate, authenticate_read, check_public_limit, client_ip, create_invite,
+        limit_key,
+    },
     keys, metadata, payload,
     roles::{self, Permission},
     store::{audit, hash, log_closed, now, write},
@@ -34,7 +37,7 @@ pub async fn open_joining(
     State(app): State<App>,
     headers: HeaderMap,
 ) -> ApiResult<Json<OpenJoining>> {
-    let (mut tx, actor) = authenticate(&app, &headers).await?;
+    let (mut tx, actor) = authenticate_read(&app, &headers).await?;
     roles::require_admin(&mut tx, &actor.person).await?;
     let (open_joining, member_cap) =
         query_as("SELECT open_joining, member_cap FROM server_settings WHERE id = 1")
@@ -100,7 +103,7 @@ pub struct Me {
 }
 
 pub async fn me(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Me>> {
-    let (mut tx, actor) = authenticate(&app, &headers).await?;
+    let (mut tx, actor) = authenticate_read(&app, &headers).await?;
     let joined_at = query_scalar("SELECT joined_at FROM members WHERE person_id = ?")
         .bind(actor.person.as_slice())
         .fetch_one(&mut *tx)
@@ -254,7 +257,7 @@ pub async fn invites(
     State(app): State<App>,
     headers: HeaderMap,
 ) -> ApiResult<Json<Vec<ActiveInvite>>> {
-    let (mut tx, actor) = authenticate(&app, &headers).await?;
+    let (mut tx, actor) = authenticate_read(&app, &headers).await?;
     let auth = roles::authority(&mut tx, &actor.person).await?;
     auth.require(Permission::Invite)?;
     let everyone = auth.require(Permission::ManageServer).is_ok();
@@ -517,7 +520,7 @@ pub struct Ban {
 }
 
 pub async fn bans(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Vec<Ban>>> {
-    let (mut tx, actor) = authenticate(&app, &headers).await?;
+    let (mut tx, actor) = authenticate_read(&app, &headers).await?;
     roles::authority(&mut tx, &actor.person)
         .await?
         .require(Permission::Ban)?;
@@ -582,7 +585,7 @@ pub async fn audit_log(
     if after < 0 || !(1..=100).contains(&limit) {
         return Err(ApiError::bad_request("invalid_query"));
     }
-    let (mut tx, actor) = authenticate(&app, &headers).await?;
+    let (mut tx, actor) = authenticate_read(&app, &headers).await?;
     roles::authority(&mut tx, &actor.person)
         .await?
         .require(Permission::ViewAuditLog)?;

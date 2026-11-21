@@ -17,7 +17,7 @@ use sqlx::{SqlitePool, query, query_as, query_scalar};
 
 use crate::{
     ApiError, ApiResult, App,
-    auth::authenticate,
+    auth::{authenticate, authenticate_read},
     keys, payload,
     roles::{self, Permission},
 };
@@ -89,7 +89,7 @@ pub struct Space {
 }
 
 pub async fn space(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Space>> {
-    let (mut tx, _) = authenticate(&app, &headers).await?;
+    let (mut tx, _) = authenticate_read(&app, &headers).await?;
     let (name, description, icon_hash): (Ciphertext, Ciphertext, Option<String>) =
         query_as("SELECT name_ct, description_ct, icon_hash FROM server_settings WHERE id = 1")
             .fetch_one(&mut *tx)
@@ -103,7 +103,7 @@ pub async fn space(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json
 }
 
 pub async fn icon(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Value>> {
-    let (mut tx, _) = authenticate(&app, &headers).await?;
+    let (mut tx, _) = authenticate_read(&app, &headers).await?;
     let icon: Ciphertext = query_scalar("SELECT icon_ct FROM server_settings WHERE id = 1")
         .fetch_one(&mut *tx)
         .await?;
@@ -118,7 +118,7 @@ pub async fn avatar(
     Path(person): Path<String>,
 ) -> ApiResult<Json<Value>> {
     let person = decode_bytes(&person)?;
-    let (mut tx, _) = authenticate(&app, &headers).await?;
+    let (mut tx, _) = authenticate_read(&app, &headers).await?;
     let avatar: Option<Ciphertext> =
         query_scalar("SELECT avatar_ct FROM members WHERE person_id = ?")
             .bind(person)
@@ -244,7 +244,7 @@ pub struct Member {
 }
 
 pub async fn members(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Vec<Member>>> {
-    let (mut tx, _) = authenticate(&app, &headers).await?;
+    let (mut tx, _) = authenticate_read(&app, &headers).await?;
     let rows: Vec<(Vec<u8>, Ciphertext, Option<String>)> =
         query_as("SELECT person_id, display_name_ct, avatar_hash FROM members ORDER BY person_id")
             .fetch_all(&mut *tx)

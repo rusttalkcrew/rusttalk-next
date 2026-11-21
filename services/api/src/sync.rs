@@ -8,10 +8,14 @@ use futures_util::TryStreamExt;
 use rusttalk_core::sync::{MAX_BODY, split_blob};
 use sqlx::{query, query_as, query_scalar};
 
-use crate::{ApiError, ApiResult, App, auth::authenticate, files};
+use crate::{
+    ApiError, ApiResult, App,
+    auth::{authenticate, authenticate_read},
+    files,
+};
 
 pub async fn get(State(app): State<App>, headers: HeaderMap) -> ApiResult<Response> {
-    let (mut tx, actor) = authenticate(&app, &headers).await?;
+    let (mut tx, actor) = authenticate_read(&app, &headers).await?;
     let row: Option<(i64, Vec<u8>)> =
         query_as("SELECT version, ciphertext FROM device_sync WHERE person_id = ?")
             .bind(actor.person.as_slice())
