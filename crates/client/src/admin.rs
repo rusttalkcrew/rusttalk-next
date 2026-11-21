@@ -2,6 +2,8 @@
 
 mod file_limits;
 
+mod members;
+
 mod roles;
 
 use chrono::{DateTime, Local};
@@ -16,7 +18,10 @@ use rusttalk_core::{
 
 use crate::{
     files::Ask,
-    home::{ChannelEdit, Home, face, frame, initials},
+    home::{
+        ChannelEdit, Home, frame, initials,
+        person::{self, Person, Pick},
+    },
     net::{Admin, AdminUpdate, AuditEntry, Ban, Command, Invite, PublicListing},
     server::{Id, Perms, Server, Status},
     settings::{self as panel, Group, Page},
@@ -86,6 +91,9 @@ pub struct Settings {
     listing: Option<(bool, PublicListing)>,
     updates: ServerUpdates,
     member: Option<(Id, MemberAction)>,
+    /// The kick, ban or roles question was already on screen last frame.
+    member_shown: bool,
+    members: members::View,
     roles: roles::RolesPage,
     invites: Vec<Invite>,
     /// The invite waiting for t!("admin.revoke") to be confirmed.
@@ -176,6 +184,8 @@ pub fn open(home: &mut Home, index: usize, mut tab: Tab) {
         listing: None,
         updates: ServerUpdates::default(),
         member: None,
+        member_shown: false,
+        members: members::View::default(),
         roles: roles::RolesPage::default(),
         invites: Vec::new(),
         revoking: None,
@@ -245,6 +255,10 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
         home.server_settings = None;
         return;
     };
+    let index = settings.server;
+    // `Person` reads these two parts of `home` while `settings` borrows another.
+    let (friends, voice) = (&home.friends, &home.voice);
+    let mut person_pick = None;
     let mut request = None;
     let mut icon = false;
     let mut upload = None;
@@ -346,7 +360,12 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
                         rename = picked.rename;
                         None
                     }
-                    Tab::Members => members_tab(ui, server, settings),
+                    Tab::Members => {
+                        let target = |person| Person::with(friends, voice, server, person);
+                        let (request, picked) = members_tab(ui, server, settings, target);
+                        person_pick = picked;
+                        request
+                    }
                     Tab::Roles => {
                         batch = roles::tab(ui, server, &mut settings.roles, &mut settings.message);
                         None
@@ -431,6 +450,17 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
     }
     if let Some((index, id, edit)) = channel_edit {
         home.edit_channel(index, id, edit);
+    }
+    if let Some((person, pick)) = person_pick {
+        // Their card, a poke or a chat belongs on top of the page, not under it.
+        if !matches!(
+            pick,
+            Pick::Moderate(_) | Pick::Voice(_) | Pick::Befriend(_) | Pick::ShowVideo(_)
+        ) {
+            home.server_settings = None;
+        }
+        let now = ctx.input(|input| input.time);
+        person::apply(home, index, person, pick, now);
     }
 }
 
@@ -696,25 +726,19 @@ fn emoji_tab(
     (upload, request)
 }
 
-fn role_names(server: &Server, roles: &[String]) -> String {
-    let mut names: Vec<_> = server
-        .dir
-        .roles
-        .iter()
-        .filter(|role| roles.contains(&role.id))
-        .map(|role| role.name.as_str())
-        .collect();
-    if names.is_empty() {
-        names.push(t!("admin.no_role"));
-    }
-    names.join(", ")
-}
-
-fn members_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Option<Admin> {
+fn members_tab<'a>(
+    ui: &mut Ui,
+    server: &Server,
+    settings: &mut Settings,
+    target: impl Fn(Id) -> Person<'a>,
+) -> (Option<Admin>, Option<(Id, Pick)>) {
     let perms = server.dir.perms;
     let mut request = None;
-    ui::page_section(ui, t!("admin.members"));
     if let Some((person, action)) = &mut settings.member {
+        // The page may be scrolled far down a long list: bring the question into view.
+        if !settings.member_shown {
+            ui.scroll_to_cursor(Some(egui::Align::TOP));
+        }
         let name = server.member_name(person);
         let person = *person;
         let mut cancel = false;
@@ -771,32 +795,9 @@ fn members_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Option<
             settings.member = None;
         }
     }
-    ui.weak(t!("admin.members_help"));
-    let mut pick = None;
-    for member in &server.dir.members {
-        let name = server.member_name(&member.person);
-        let row = ui::row_button(ui, 44.0, &name, |ui| {
-            face(ui, &server.dir, &member.person, &name, 30.0, false);
-            ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing.y = 0.0;
-                ui.label(ui::bold(&name));
-                ui.label(ui::caption(role_names(server, &member.roles)));
-            });
-        });
-        if member.person == server.dir.me {
-            continue;
-        }
-        let mut choice = None;
-        ui::context_menu(&row, |m| member_menu(m, &mut choice, perms));
-        if let Some(choice) = choice {
-            pick = Some((member.person, action(server, &member.person, choice)));
-        }
-    }
-    if pick.is_some() {
-        settings.member = pick;
-        settings.message = None;
-    }
-    request
+    settings.member_shown = settings.member.is_some();
+    let pick = members::show(ui, &server.dir, &mut settings.members, target);
+    (request, pick)
 }
 
 /// Active invites with who made them, uses left and expiry, each with t!("admin.revoke").
