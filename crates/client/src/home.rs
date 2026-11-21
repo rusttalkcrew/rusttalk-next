@@ -33,7 +33,7 @@ use crate::{
     dm::{self, Thread},
     emoji::{
         self,
-        picker::{self, Picked, Picker},
+        picker::{self, Picked, Picker, Tab as PickerTab},
     },
     files::{self, Ask, Files},
     friends::{Act, Friends, Relation},
@@ -52,6 +52,8 @@ use crate::{
 const FIELD_WIDTH: f32 = 280.0;
 /// Show the character count once a message gets this long.
 const COUNT_FROM: usize = 1_800;
+/// The buttons in the message bar.
+const COMPOSER_BUTTON: f32 = 36.0;
 const DAY: u32 = 24 * 60 * 60;
 /// Seconds without any input before "Online" turns into "Away" by itself.
 const AWAY_AFTER: f64 = 10.0 * 60.0;
@@ -3029,7 +3031,14 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
         files.paste(ui.ctx(), ask);
     }
     let attach = Panel::bottom("composer")
-        .frame(Frame::new().inner_margin(Margin::symmetric(0, 8)))
+        // It floats over the chat: no line above, room around it.
+        .frame(Frame::new().inner_margin(Margin {
+            left: 8,
+            right: 8,
+            top: 4,
+            bottom: 8,
+        }))
+        .show_separator_line(false)
         .show(ui, |ui| {
             // The call above already shows problems in a voice channel.
             if !in_voice {
@@ -3039,7 +3048,12 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
                 ui.weak(t!("home.dm_read_only", name = name));
                 return None;
             }
-            let (command, attach) = composer(ui, chat, dir, online, key, &title, emoji_picker);
+            let hint = if dm {
+                format!("@{name}")
+            } else {
+                format!("#{name}")
+            };
+            let (command, attach) = composer(ui, chat, dir, online, key, &hint, emoji_picker);
             match (at, command) {
                 (At::Dm(peer), Some(Command::Send(draft))) => {
                     send_dm(servers, &targets, chat, toast, now, (me, peer), draft);
@@ -3386,7 +3400,7 @@ fn composer(
     dir: &Directory,
     online: bool,
     channel: Id,
-    title: &str,
+    hint: &str,
     emoji_picker: &mut Picker,
 ) -> (Option<Command>, Option<bool>) {
     let mut cancel = false;
@@ -3413,116 +3427,96 @@ fn composer(
             );
         });
     }
-    files::staged(ui, chat);
-    let input = ui::colors(ui).field;
     let wide = mentions::can_mention_everyone(dir, channel, dir.me);
+    let editor = composer_id(channel);
+    // From the draft as this frame starts; Enter checks the converted text below.
+    let ready =
+        !chat.draft.trim().is_empty() || (chat.editing.is_none() && !chat.staged.is_empty());
     let mut attach = None;
-    let mut sticker = None;
-    let field = ui
-        .horizontal_top(|ui| {
-            let plus = ui
-                .add_enabled_ui(online && chat.editing.is_none(), |ui| {
-                    ui::icon_button(
-                        ui,
-                        "➕",
-                        t!("home.attach_files"),
-                        Look::Plain,
-                        Vec2::splat(36.0),
-                    )
-                })
-                .inner;
-            ui::menu_wide(&plus, |m| {
-                let upload =
-                    Item::new("📎", t!("home.upload_file")).hint(t!("home.upload_file_help"));
-                if m.add(upload).clicked() {
-                    attach = Some(false);
-                }
-                let live = Item::new("📡", t!("home.send_live")).hint(t!("home.send_live_help"));
-                if m.add(live).on_hover_text(t!("call.direct_chat")).clicked() {
-                    attach = Some(true);
-                }
-            });
-            let emoji_button = ui
-                .add_enabled_ui(online, |ui| {
-                    ui::icon_button(
-                        ui,
-                        "😀",
-                        t!("home.emoji_picker"),
-                        Look::Plain,
-                        Vec2::splat(36.0),
-                    )
-                })
-                .inner;
-            let picked = emoji_picker.show(&emoji_button, composer_id(channel), &dir.emoji);
-            ScrollArea::vertical()
-                .id_salt("composer-scroll")
-                .max_height(180.0)
-                .show(ui, |ui| {
-                    ui.add_enabled_ui(online, |ui| {
-                        let mut layouter = |ui: &Ui, text: &dyn egui::TextBuffer, width| {
-                            let job = chat.mentions.layout(ui, text.as_str(), width, wide);
-                            ui.fonts_mut(|fonts| fonts.layout_job(job))
+    let mut send = false;
+    let mut tabs = Vec::new();
+    let button = Vec2::splat(COMPOSER_BUTTON);
+    let bar = Frame::new()
+        .fill(ui::colors(ui).composer)
+        .corner_radius(ui::RADIUS_WINDOW)
+        .inner_margin(Margin::same(ui::SPACE_XS as i8 + 2))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            if !chat.staged.is_empty() {
+                ui.add_space(ui::SPACE_XS);
+                ui.horizontal(|ui| {
+                    ui.add_space(ui::SPACE_XS);
+                    files::staged(ui, chat);
+                });
+                ui.add_space(ui::SPACE_XS);
+            }
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                let plus = ui
+                    .add_enabled_ui(online && chat.editing.is_none(), |ui| {
+                        ui::icon_button(ui, "➕", t!("home.attach_files"), Look::Ghost, button)
+                    })
+                    .inner;
+                ui::menu_wide(&plus, |m| {
+                    let upload =
+                        Item::new("📎", t!("home.upload_file")).hint(t!("home.upload_file_help"));
+                    if m.add(upload).clicked() {
+                        attach = Some(false);
+                    }
+                    let live =
+                        Item::new("📡", t!("home.send_live")).hint(t!("home.send_live_help"));
+                    if m.add(live).on_hover_text(t!("call.direct_chat")).clicked() {
+                        attach = Some(true);
+                    }
+                });
+                // Room for the buttons right of the box: emoji, sticker and send.
+                let right = 3.0 * (COMPOSER_BUTTON + 2.0);
+                let size = Vec2::new(ui.available_width() - right, 0.0);
+                let field = ui
+                    .allocate_ui_with_layout(size, Layout::top_down(Align::Min), |ui| {
+                        composer_field(ui, chat, dir, online, channel, hint, wide, emoji_picker)
+                    })
+                    .inner;
+                ui.add_enabled_ui(online, |ui| {
+                    for (glyph, tip, tab) in [
+                        ("☺", t!("home.emoji_picker"), PickerTab::Emoji),
+                        ("🏷", t!("home.sticker_picker"), PickerTab::Stickers),
+                    ] {
+                        let look = if emoji_picker.is_open(tab) {
+                            Look::Plain
+                        } else {
+                            Look::Ghost
                         };
-                        let edit = TextEdit::multiline(&mut chat.draft)
-                            .layouter(&mut layouter)
-                            .background_color(input)
-                            .margin(Margin::symmetric(12, 9))
-                            .hint_text(if online {
-                                t!("home.message_hint", channel = title)
-                            } else {
-                                t!("home.waiting_for_server").into()
-                            })
-                            .font(emoji::font(ui::TEXT_BODY))
-                            .desired_rows(1)
-                            .desired_width(f32::INFINITY)
-                            .return_key(KeyboardShortcut::new(Modifiers::SHIFT, Key::Enter));
-                        let mut choices = Vec::new();
-                        let completion = ui::completion(
-                            ui,
-                            composer_id(channel),
-                            edit,
-                            |c| {
-                                c != ':'
-                                    && c != '@'
-                                    && !emoji::shortcode_char(c)
-                                    && !c.is_alphanumeric()
-                            },
-                            |_, query| {
-                                if query.word.starts_with('@') {
-                                    choices = mentions::choices(
-                                        query,
-                                        dir,
-                                        channel,
-                                        wide,
-                                        &chat.mentions,
-                                    );
-                                    choices.iter().map(|choice| choice.suggestion()).collect()
-                                } else {
-                                    picker::suggestions(query, &dir.emoji)
-                                }
-                            },
-                        );
-                        let field = completion.text_edit.response.response;
-                        if let Some(accepted) = completion.accepted
-                            && !chat.mentions.accepted(&accepted.insert, choices)
-                        {
-                            emoji_picker.remember(&accepted.insert);
-                        }
-                        match picked {
-                            Some(Picked::Text(sequence)) => {
-                                emoji_picker.insert(&field, &mut chat.draft, &sequence);
-                            }
-                            Some(Picked::Sticker(id, name)) => sticker = Some((id, name)),
-                            None => {}
-                        }
-                        field
+                        tabs.push((ui::icon_button(ui, glyph, tip, look, button), tab));
+                    }
+                });
+                // Dimmed until there is something to send.
+                let look = if ready {
+                    Look::On(ui::accent(ui).base)
+                } else {
+                    Look::Ghost
+                };
+                send = ui
+                    .add_enabled_ui(online && ready, |ui| {
+                        ui::icon_button(ui, "▶", t!("home.send"), look, button)
                     })
                     .inner
-                })
-                .inner
-        })
-        .inner;
-    ui::field_focus(ui, &field);
+                    .clicked();
+                field
+            })
+            .inner
+        });
+    let field = bar.inner;
+    let (was_open, picked) = emoji_picker.show(ui, bar.response.rect, dir);
+    for (response, tab) in &tabs {
+        emoji_picker.button(response, *tab, editor, was_open);
+    }
+    let mut sticker = None;
+    match picked {
+        Some(Picked::Text(sequence)) => emoji_picker.insert(&field, &mut chat.draft, &sequence),
+        Some(Picked::Sticker(id, name)) => sticker = Some((id, name)),
+        None => {}
+    }
     let (enter, escape, up) = ui.input(|input| {
         (
             input.key_pressed(Key::Enter) && !input.modifiers.shift,
@@ -3600,7 +3594,7 @@ fn composer(
     // Edits change only the text; staged files wait for the next message.
     let editing = chat.editing.is_some();
     let nothing = text.is_empty() && (editing || chat.staged.is_empty());
-    if !(focused && enter) || nothing || count > MAX_TEXT_CHARS {
+    if !((focused && enter) || send) || nothing || count > MAX_TEXT_CHARS {
         return (None, attach);
     }
     if !allowed {
@@ -3636,6 +3630,66 @@ fn composer(
     chat.clear_draft();
     field.request_focus();
     (Some(command), attach)
+}
+
+/// The composer's text box, with mentions and `:shortcode:` completion.
+#[allow(clippy::too_many_arguments)]
+fn composer_field(
+    ui: &mut Ui,
+    chat: &mut Chat,
+    dir: &Directory,
+    online: bool,
+    channel: Id,
+    hint: &str,
+    wide: bool,
+    emoji_picker: &mut Picker,
+) -> Response {
+    ScrollArea::vertical()
+        .id_salt("composer-scroll")
+        .max_height(180.0)
+        .show(ui, |ui| {
+            ui.add_enabled_ui(online, |ui| {
+                let mut layouter = |ui: &Ui, text: &dyn egui::TextBuffer, width| {
+                    let job = chat.mentions.layout(ui, text.as_str(), width, wide);
+                    ui.fonts_mut(|fonts| fonts.layout_job(job))
+                };
+                let edit = TextEdit::multiline(&mut chat.draft)
+                    .layouter(&mut layouter)
+                    .frame(Frame::NONE.inner_margin(Margin::symmetric(6, 9)))
+                    .hint_text(if online {
+                        t!("home.message_hint", channel = hint)
+                    } else {
+                        t!("home.waiting_for_server").into()
+                    })
+                    .font(emoji::font(ui::TEXT_BODY))
+                    .desired_rows(1)
+                    .desired_width(f32::INFINITY)
+                    .return_key(KeyboardShortcut::new(Modifiers::SHIFT, Key::Enter));
+                let mut choices = Vec::new();
+                let completion = ui::completion(
+                    ui,
+                    composer_id(channel),
+                    edit,
+                    |c| c != ':' && c != '@' && !emoji::shortcode_char(c) && !c.is_alphanumeric(),
+                    |_, query| {
+                        if query.word.starts_with('@') {
+                            choices = mentions::choices(query, dir, channel, wide, &chat.mentions);
+                            choices.iter().map(|choice| choice.suggestion()).collect()
+                        } else {
+                            picker::suggestions(query, &dir.emoji)
+                        }
+                    },
+                );
+                if let Some(accepted) = completion.accepted
+                    && !chat.mentions.accepted(&accepted.insert, choices)
+                {
+                    emoji_picker.remember(&accepted.insert);
+                }
+                completion.text_edit.response.response
+            })
+            .inner
+        })
+        .inner
 }
 
 fn message(

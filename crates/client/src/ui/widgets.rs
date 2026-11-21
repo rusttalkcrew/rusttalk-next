@@ -3,9 +3,9 @@
 
 use eframe::egui::{
     self, Align, Align2, Area, Button, Color32, Context, CornerRadius, CursorIcon, FontId, Frame,
-    Id, Layout, Margin, Modal, Order, Popup, PopupCloseBehavior, Pos2, Rect, RectAlign, Response,
-    RichText, Sense, Shape, Stroke, StrokeKind, TextBuffer, TextEdit, Ui, UiBuilder, Vec2, Widget,
-    WidgetInfo, WidgetText, accesskit::Role,
+    Id, Layout, Margin, Modal, Order, Popup, PopupCloseBehavior, PopupKind, Pos2, Rect, RectAlign,
+    Response, RichText, Sense, Shape, Stroke, StrokeKind, TextBuffer, TextEdit, Ui, UiBuilder,
+    Vec2, Widget, WidgetInfo, WidgetText, accesskit::Role,
 };
 
 use super::{
@@ -461,6 +461,33 @@ pub fn popup<R>(anchor: &Response, add: impl FnOnce(&mut Ui) -> R) -> Option<R> 
             ui.set_width(POPUP_WIDTH);
             add(ui)
         })
+        .map(|inner| inner.inner)
+}
+
+/// A larger popup above the right end of `anchor`, open while `open` is set; a click
+/// outside it or Escape clears it. The frame has no padding, so a rail or a bar can
+/// run to its edges.
+pub fn panel_popup<R>(
+    ui: &Ui,
+    id: Id,
+    anchor: Rect,
+    open: &mut bool,
+    add: impl FnOnce(&mut Ui) -> R,
+) -> Option<R> {
+    let c = colors(ui);
+    let frame = Frame::new()
+        .fill(c.raised)
+        .stroke(Stroke::new(1.0, c.border))
+        .corner_radius(RADIUS_WINDOW)
+        .shadow(ui.visuals().popup_shadow);
+    Popup::new(id, ui.ctx().clone(), anchor, ui.layer_id())
+        .kind(PopupKind::Popup)
+        .open_bool(open)
+        .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
+        .align(RectAlign::TOP_END)
+        .gap(SPACE_S)
+        .frame(frame)
+        .show(add)
         .map(|inner| inner.inner)
 }
 

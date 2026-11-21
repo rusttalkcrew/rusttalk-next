@@ -201,9 +201,9 @@ person fingerprint locally. Creating an account shows the recovery words once
 in the app window. The client never stores or logs the words or the root
 signing key. "Sign out of this device" deletes the keystore entry and the
 profile's `sync.json`, `servers.json`, `saved.json`, `notify.json`,
-`pokes.json` and `emoji-recent.json`, so the next person on that profile starts
-without the servers, pins, saved file places, read marks, notification choices,
-pokes or recent emoji.
+`pokes.json`, `emoji-recent.json` and `emoji-favourites.json`, so the next
+person on that profile starts without the servers, pins, saved file places,
+read marks, notification choices, pokes, recent or favourite emoji.
 Device settings (`voice.json`, `updates.json`) stay.
 
 Next to the settings, `servers.json` holds each server's address, server ID
@@ -241,7 +241,8 @@ sent like a picked file; removing it from the message deletes it, and otherwise
 it goes with the other folders. The client reads the clipboard only when the
 person pastes into the composer.
 `emoji-recent.json` holds up to 32 emoji selected through the picker or
-autocomplete. It stays on this device.
+autocomplete, and `emoji-favourites.json` up to 64 emoji marked as favourites
+in the picker. Both stay on this device.
 `updates.json` holds the chosen release directory URL and the automatic
 check preference (on by default in release builds) on this device.
 `deepfilternet3.tar.gz` is the AI noise removal model, present only after the

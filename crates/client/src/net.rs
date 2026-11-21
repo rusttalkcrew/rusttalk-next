@@ -51,6 +51,7 @@ mod voice;
 
 pub use admin::{Admin, AdminUpdate, AuditEntry, Ban, Invite, PublicListing};
 pub use control::{ControlView, Ended};
+pub(crate) use directory::frame_image;
 use directory::{directory, get};
 pub use files::{MAX_FILE, file_name};
 pub use find::{Listed, PAGE_SIZE};
