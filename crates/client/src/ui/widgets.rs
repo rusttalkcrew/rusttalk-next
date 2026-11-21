@@ -861,11 +861,11 @@ pub fn small_close(ui: &mut Ui, tip: &str) -> Response {
 
 /// Text styling for an inline mention in chat.
 pub fn mention_format(ui: &Ui) -> egui::text::TextFormat {
-    let accent = accent(ui);
+    let (color, background) = accent(ui).mention_colors(colors(ui));
     egui::text::TextFormat {
         font_id: FontId::new(TEXT_BODY, crate::emoji::family(true)),
-        color: accent.text(ui.visuals().dark_mode),
-        background: colors(ui).main.lerp_to_gamma(accent.base, 0.13),
+        color,
+        background,
         ..Default::default()
     }
 }
