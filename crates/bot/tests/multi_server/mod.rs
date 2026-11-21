@@ -1,8 +1,6 @@
 use std::{env, path::Path};
 
-#[cfg(feature = "media")]
-use anyhow::Context;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use reqwest::{Method, StatusCode};
 use rustls_pki_types::{CertificateDer, pem::PemObject};
 use rusttalk_core::{
@@ -15,9 +13,12 @@ use serde_json::{Value, json};
 
 use super::{chat, compose, invite, receive_key, rejected, session};
 
+mod dm;
+
 const SETTINGS: &str = "/v1/settings/open-joining";
 
 pub async fn exercise(
+    first_project: &str,
     project: &str,
     server_a: &Server,
     owner_a: &mut KeyClient<'_>,
@@ -127,6 +128,17 @@ pub async fn exercise(
     )
     .await?;
     println!("W15 same bot identity exchanged encrypted chat on both servers");
+    let dms = dm::replicas(
+        project,
+        &server_b,
+        (&mut *owner_a, &mut owner_b),
+        (&mut peer_a, &mut peer_b),
+    )
+    .await
+    .context("W70 DM over two servers")?;
+    // Server B's API restarted, which closed the event streams there.
+    owner_b = KeyClient::connect(&server_b, owner_a.identity, &owner_token).await?;
+    peer_b = KeyClient::connect(&server_b, &peer, &peer_b_token).await?;
 
     #[cfg(feature = "media")]
     {
@@ -238,6 +250,14 @@ pub async fn exercise(
     assert!(first[0]["id"].as_i64() < second[0]["id"].as_i64());
     assert_eq!(second[0]["actor_person_id"], peer_id);
     println!("W15 bans had timestamps, and filtered audit paging advanced the cursor");
+    dm::after_leaving(
+        [first_project, project],
+        (&mut *owner_a, &mut owner_b),
+        &mut peer_a,
+        dms,
+    )
+    .await
+    .context("W70 DM after leaving server B")?;
     Ok(())
 }
 

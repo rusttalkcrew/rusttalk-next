@@ -630,6 +630,7 @@ async fn docker_membership() -> Result<()> {
     docker_keys(&project, &owner_bot, &mut owner_keys, &mut secrets).await?;
     if let Ok(second_project) = env::var("RUSTTALK_E2E_SECOND_PROJECT") {
         multi_server::exercise(
+            &project,
             &second_project,
             &owner_bot,
             &mut owner_keys,
