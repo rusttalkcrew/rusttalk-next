@@ -93,6 +93,13 @@ pub struct Settings {
     pub channels_width: f32,
     pub members_width: f32,
     pub members_hidden: bool,
+    /// The voice channel view: chat beside the call instead of under it, the call's
+    /// share of the space, which side is hidden and "Show only video"; this device only.
+    pub call_side_by_side: bool,
+    pub call_split: f32,
+    pub call_chat_hidden: bool,
+    pub call_stage_hidden: bool,
+    pub call_video_only: bool,
     /// The last "Share your screen" choices, kept on this device only: the height
     /// cap (`None` shares at the screen's own size), frame rate and cursor.
     pub screen_height: Option<u32>,
@@ -143,6 +150,11 @@ impl Default for Settings {
             channels_width: crate::home::layout::CHANNELS_WIDTH,
             members_width: crate::home::layout::MEMBERS_WIDTH,
             members_hidden: false,
+            call_side_by_side: false,
+            call_split: crate::home::layout::SPLIT,
+            call_chat_hidden: false,
+            call_stage_hidden: false,
+            call_video_only: false,
             screen_height: Some(1080),
             screen_fps: 30,
             screen_cursor: true,

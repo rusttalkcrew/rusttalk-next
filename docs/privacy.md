@@ -155,8 +155,9 @@ settings, and local edits not yet uploaded. `voice.json` holds the
 chosen audio devices, voice options, the chosen camera's name,
 resolution and frame rate, and the server directory address and
 certificate pin used by "Find servers" (`index_url`, `index_fingerprint`),
-and the server IDs of official servers dismissed from the join page
-(`dismissed_official`). Of these, only the voice options (push to talk
+the server IDs of official servers dismissed from the join page
+(`dismissed_official`), and the window layout (sidebar widths, the member
+list, and how a voice channel splits its call and chat). Of these, only the voice options (push to talk
 and its key, activation level, echo cancellation, noise suppression, auto
 gain), the camera resolution and frame rate, and the dismissed official
 servers sync to the person's other devices; the chosen microphone, speakers and camera stay on this device. Decrypted names, messages and pictures stay in

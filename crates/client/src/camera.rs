@@ -179,6 +179,16 @@ impl Camera {
 
     /// The mirrored self view, if the camera is running.
     pub fn self_view(&mut self, ui: &Ui, width: f32) -> Option<Image<'static>> {
+        let texture = self.self_texture(ui.ctx())?;
+        let size = texture.size_vec2();
+        Some(
+            Image::new((texture.id(), Vec2::new(width, width * size.y / size.x)))
+                .uv(Rect::from_min_max(pos2(1.0, 0.0), pos2(0.0, 1.0))),
+        )
+    }
+
+    /// The newest self view picture, not yet mirrored, if the camera is running.
+    pub fn self_texture(&mut self, ctx: &egui::Context) -> Option<&TextureHandle> {
         let fresh = match self.ready()?.as_ref()? {
             Ok(capture) => capture.take_preview(),
             Err(_) => return None,
@@ -187,14 +197,9 @@ impl Camera {
             let size = [frame.width() as usize, frame.height() as usize];
             // Opaque pixels: premultiplied and straight alpha are the same bytes.
             let image = ColorImage::from_rgba_premultiplied(size, frame.as_raw());
-            upload(ui.ctx(), &mut self.texture, "self view", image);
+            upload(ctx, &mut self.texture, "self view", image);
         }
-        let texture = self.texture.as_ref()?;
-        let size = texture.size_vec2();
-        Some(
-            Image::new((texture.id(), Vec2::new(width, width * size.y / size.x)))
-                .uv(Rect::from_min_max(pos2(1.0, 0.0), pos2(0.0, 1.0))),
-        )
+        self.texture.as_ref()
     }
 }
 
