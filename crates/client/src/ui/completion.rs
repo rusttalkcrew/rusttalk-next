@@ -22,7 +22,7 @@ pub fn completion(
     id: Id,
     edit: TextEdit<'_>,
     word_boundary: impl Fn(char) -> bool,
-    suggestions: impl FnOnce(&CompletionQuery<'_>) -> Vec<Suggestion>,
+    suggestions: impl FnOnce(&Ui, &CompletionQuery<'_>) -> Vec<Suggestion>,
 ) -> CompletionOutput {
     let mut state: Selection = ui.data(|data| data.get_temp(id)).unwrap_or_default();
     let popup_id = id.with("completion-popup");
@@ -105,11 +105,14 @@ pub fn completion(
         && !state.dismissed
         && output.cursor_range.is_some_and(|cursor| cursor.is_empty())
     {
-        suggestions(&CompletionQuery {
-            text: buffer.as_str(),
-            word,
-            word_range: range.clone(),
-        })
+        suggestions(
+            ui,
+            &CompletionQuery {
+                text: buffer.as_str(),
+                word,
+                word_range: range.clone(),
+            },
+        )
     } else {
         Vec::new()
     };
@@ -125,7 +128,11 @@ pub fn completion(
             .align(RectAlign::TOP_START)
             .width(width)
             .layout(Layout::top_down_justified(Align::Min))
-            .accessible_name("Emoji suggestions")
+            .accessible_name(if word.starts_with('@') {
+                "Mention suggestions"
+            } else {
+                "Emoji suggestions"
+            })
             .show(|ui| {
                 ui.set_width(width);
                 ui.spacing_mut().item_spacing.y = SPACE_XS;

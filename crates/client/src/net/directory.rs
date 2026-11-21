@@ -297,6 +297,7 @@ async fn build(
         };
         let name = text(Metadata::RoleName, id.as_bytes(), role["name_ct"].as_str());
         role_list.push(Role {
+            name_known: name.is_some() || (kind != "custom" && role["name_ct"].is_null()),
             name: name.unwrap_or_else(|| builtin.into()),
             id,
             rank,

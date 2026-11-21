@@ -61,6 +61,7 @@ const MESSAGE_AVATAR: f32 = 38.0;
 const TOOLBAR_BUTTON: Vec2 = Vec2::new(30.0, 26.0);
 
 pub mod layout;
+pub mod mentions;
 mod user_bar;
 
 pub struct Home {
@@ -524,7 +525,7 @@ impl Home {
                     }
                     if chat.editing == Some(id) {
                         chat.editing = None;
-                        chat.draft.clear();
+                        chat.clear_draft();
                     }
                 }
             }
@@ -692,10 +693,11 @@ impl Home {
                 let Some(index) = self.index(&address) else {
                     return;
                 };
-                let chat = self.servers[index].chats.entry(draft.channel).or_default();
+                let server = &mut self.servers[index];
+                let chat = server.chats.entry(draft.channel).or_default();
                 // Only when nothing new was typed or picked meanwhile.
                 if chat.draft.is_empty() && chat.staged.is_empty() {
-                    chat.draft = draft.text;
+                    chat.open_draft(&server.dir, &draft.text);
                     chat.reply_to = draft.reply_to;
                     chat.editing = draft.edit_of;
                     files::stage(chat, draft.files);
@@ -1488,6 +1490,12 @@ fn category_name(voice: bool) -> &'static str {
 
 pub fn avatar(ui: &mut Ui, person: &Id, name: &str, size: f32) -> Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
+    paint_avatar(ui, rect, person, name);
+    response
+}
+
+fn paint_avatar(ui: &Ui, rect: Rect, person: &Id, name: &str) {
+    let size = rect.width();
     let color: Color32 = Hsva::new(f32::from(person[0]) / 255.0, 0.45, 0.6, 1.0).into();
     ui.painter().circle_filled(rect.center(), size / 2.0, color);
     ui.painter().text(
@@ -1497,7 +1505,21 @@ pub fn avatar(ui: &mut Ui, person: &Id, name: &str, size: f32) -> Response {
         FontId::new(size * 0.38, ui::bold_family()),
         ui::ON_FILL,
     );
-    response
+}
+
+fn avatar_atom(ui: &Ui, member: &Member, name: &str) -> egui::Atom<'static> {
+    let size = ui::SPACE_XL;
+    if let Some(picture) = &member.avatar {
+        let texture = frame(ui, picture);
+        return egui::Image::new((texture.id(), Vec2::splat(size)))
+            .corner_radius(size / 2.0)
+            .into();
+    }
+    let person = member.person;
+    let name = name.to_owned();
+    egui::Atom::paint(Vec2::splat(size), move |ui, args| {
+        paint_avatar(ui, args.rect, &person, &name);
+    })
 }
 
 /// A member's picture (or initials) and, with `dot`, their presence: green, yellow or grey.
@@ -2096,7 +2118,6 @@ fn chat_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
             ui::colors(ui).strong,
         );
     }
-    let can_moderate = dir.perms.delete_messages && !dm;
     let mut area = ScrollArea::vertical()
         .id_salt(("chat", index, channel))
         .stick_to_bottom(true)
@@ -2123,7 +2144,7 @@ fn chat_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
                     && msg.at - prev.at < 300
                     && msg.reply_to.is_none()
             });
-            let shown = message(ui, chat, msg, start, dir, can_moderate, |ui| {
+            let shown = message(ui, chat, msg, start, dir, channel, |ui| {
                 files::attachments(ui, files, address, commands, &msg.files);
                 // The server isn't borrowed whole here, so look the offer up by its parts.
                 if msg.live.is_some() {
@@ -2206,14 +2227,14 @@ fn chat_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
         Some(Pick::Reply(id)) => {
             chat.reply_to = Some(id);
             if chat.editing.take().is_some() {
-                chat.draft.clear();
+                chat.clear_draft();
             }
             ui.memory_mut(|memory| memory.request_focus(composer_id(channel)));
         }
         Some(Pick::Edit(id, text)) => {
             chat.editing = Some(id);
             chat.reply_to = None;
-            chat.draft = text;
+            chat.open_draft(dir, &text);
             ui.memory_mut(|memory| memory.request_focus(composer_id(channel)));
         }
         Some(Pick::Delete(id)) => *dialog = Some(Dialog::Delete(index, channel, id)),
@@ -2318,6 +2339,7 @@ fn composer(
     }
     files::staged(ui, chat);
     let input = ui::colors(ui).field;
+    let wide = mentions::can_mention_everyone(dir, channel, dir.me);
     let mut attach = None;
     let field = ui
         .horizontal_top(|ui| {
@@ -2348,7 +2370,12 @@ fn composer(
                 .max_height(180.0)
                 .show(ui, |ui| {
                     ui.add_enabled_ui(online, |ui| {
+                        let mut layouter = |ui: &Ui, text: &dyn egui::TextBuffer, width| {
+                            let job = chat.mentions.layout(ui, text.as_str(), width, wide);
+                            ui.fonts_mut(|fonts| fonts.layout_job(job))
+                        };
                         let edit = TextEdit::multiline(&mut chat.draft)
+                            .layouter(&mut layouter)
                             .background_color(input)
                             .margin(Margin::symmetric(12, 9))
                             .hint_text(if online {
@@ -2360,15 +2387,36 @@ fn composer(
                             .desired_rows(1)
                             .desired_width(f32::INFINITY)
                             .return_key(KeyboardShortcut::new(Modifiers::SHIFT, Key::Enter));
+                        let mut choices = Vec::new();
                         let completion = ui::completion(
                             ui,
                             composer_id(channel),
                             edit,
-                            |c| c != ':' && !emoji::shortcode_char(c),
-                            picker::suggestions,
+                            |c| {
+                                c != ':'
+                                    && c != '@'
+                                    && !emoji::shortcode_char(c)
+                                    && !c.is_alphanumeric()
+                            },
+                            |ui, query| {
+                                if query.word.starts_with('@') {
+                                    choices = mentions::choices(
+                                        query,
+                                        dir,
+                                        channel,
+                                        wide,
+                                        &chat.mentions,
+                                    );
+                                    choices.iter().map(|choice| choice.suggestion(ui)).collect()
+                                } else {
+                                    picker::suggestions(query)
+                                }
+                            },
                         );
                         let field = completion.text_edit.response.response;
-                        if let Some(accepted) = completion.accepted {
+                        if let Some(accepted) = completion.accepted
+                            && !chat.mentions.accepted(&accepted.insert, choices)
+                        {
                             emoji_picker.remember(&accepted.insert);
                         }
                         if let Some(sequence) = picked {
@@ -2401,8 +2449,8 @@ fn composer(
         if let Some((id, text)) = last {
             chat.editing = Some(id);
             chat.reply_to = None;
-            let end = text.chars().count();
-            chat.draft = text;
+            chat.open_draft(dir, &text);
+            let end = chat.draft.chars().count();
             if let Some(mut state) = TextEdit::load_state(ui.ctx(), field.id) {
                 let cursor = egui::text::CCursorRange::one(egui::text::CCursor::new(end));
                 state.cursor.set_char_range(Some(cursor));
@@ -2413,10 +2461,11 @@ fn composer(
     if cancel || (focused && escape) {
         chat.reply_to = None;
         if chat.editing.take().is_some() {
-            chat.draft.clear();
+            chat.clear_draft();
         }
     }
-    let converted = emoji::replace(&chat.draft);
+    let encoded = chat.mentions.encode(&chat.draft);
+    let converted = emoji::replace(&encoded);
     let count = converted.chars().count();
     if count >= COUNT_FROM {
         let color = if count > MAX_TEXT_CHARS {
@@ -2429,10 +2478,19 @@ fn composer(
         });
     }
     let text = converted.trim();
+    let allowed = mentions::allowed_to_send(text, wide);
+    error_text(
+        ui,
+        (!allowed).then_some("You can’t mention roles, @everyone or @here in this chat."),
+    );
     // Edits change only the text; staged files wait for the next message.
     let editing = chat.editing.is_some();
     let nothing = text.is_empty() && (editing || chat.staged.is_empty());
     if !(focused && enter) || nothing || count > MAX_TEXT_CHARS {
+        return (None, attach);
+    }
+    if !allowed {
+        field.request_focus();
         return (None, attach);
     }
     let files = if editing {
@@ -2447,7 +2505,7 @@ fn composer(
         edit_of: chat.editing.take(),
         files,
     });
-    chat.draft.clear();
+    chat.clear_draft();
     field.request_focus();
     (Some(command), attach)
 }
@@ -2458,7 +2516,7 @@ fn message(
     msg: &Msg,
     start: bool,
     dir: &Directory,
-    can_moderate: bool,
+    channel: Id,
     attachments: impl FnOnce(&mut Ui),
 ) -> Option<Pick> {
     let names = |person: &Id| member_name(dir, person);
@@ -2490,6 +2548,13 @@ fn message(
         ui.add_space(4.0);
         return None;
     }
+    let mention = mentions::Message::new(msg, dir, channel);
+    let my_roles = dir
+        .members
+        .iter()
+        .find(|member| member.person == me)
+        .map_or(&[][..], |member| member.roles.as_slice());
+    let pinged = mentions::mentions_me(&mention, &me, my_roles);
     let background = ui.painter().add(Shape::Noop);
     let name = names(&msg.person);
     if start {
@@ -2502,15 +2567,17 @@ fn message(
             if start {
                 face(ui, dir, &msg.person, &name, MESSAGE_AVATAR, false);
             } else {
-                ui.add_space(MESSAGE_AVATAR);
+                ui.add_space(MESSAGE_AVATAR + ui.spacing().item_spacing.x);
             }
             ui.add_space(4.0);
             ui.vertical(|ui| {
                 ui.set_width(ui.available_width());
                 if let Some(reply) = msg.reply_to {
                     let quoted = chat.messages.iter().find(|m| m.id == reply);
-                    let line = match quoted.map(|m| (&m.body, m.person)) {
-                        Some((Body::Text(text), person)) => {
+                    let line = match quoted {
+                        Some(quoted) if matches!(quoted.body, Body::Text(_)) => {
+                            let text = mentions::Message::new(quoted, dir, channel).plain(dir);
+                            let person = quoted.person;
                             let snippet: String = text.chars().take(80).collect();
                             let snippet = if snippet.is_empty() {
                                 "a file".into()
@@ -2538,7 +2605,11 @@ fn message(
                                 {
                                     body = body.size(36.0);
                                 }
-                                ui.add(Label::new(body).wrap());
+                                if let Some(job) = mention.layout(ui, dir) {
+                                    ui.add(Label::new(job).wrap());
+                                } else {
+                                    ui.add(Label::new(body).wrap());
+                                }
                                 if chat.edited.contains_key(&msg.id) {
                                     ui.label(RichText::new("(edited)").small().weak());
                                 }
@@ -2565,7 +2636,8 @@ fn message(
     };
     let can_reply = text.is_some();
     let can_edit = mine && text.is_some();
-    let can_delete = mine || can_moderate;
+    let can_delete =
+        mine || (dir.perms.delete_messages && !dir.dms.iter().any(|dm| dm.channel == channel));
     let mut pick = None;
     ui::context_menu(&row.response, |m| {
         if can_reply && m.item("↩", "Reply").clicked() {
@@ -2577,10 +2649,8 @@ fn message(
         {
             pick = Some(Pick::Edit(msg.id, text.clone()));
         }
-        if let Some(text) = &text
-            && m.item("📋", "Copy text").clicked()
-        {
-            m.ui().ctx().copy_text(text.clone());
+        if can_reply && m.item("📋", "Copy text").clicked() {
+            m.ui().ctx().copy_text(mention.plain(dir));
         }
         if can_delete {
             m.separator();
@@ -2589,13 +2659,18 @@ fn message(
             }
         }
     });
-    if !ui.rect_contains_pointer(rect) {
+    let hovered = ui.rect_contains_pointer(rect);
+    if pinged {
+        ui::mention_highlight(ui, background, rect.expand(2.0), hovered);
+    } else if hovered {
+        ui.painter().set(
+            background,
+            Shape::rect_filled(rect.expand(2.0), ui::RADIUS_S, ui::colors(ui).hover_soft),
+        );
+    }
+    if !hovered {
         return pick;
     }
-    ui.painter().set(
-        background,
-        Shape::rect_filled(rect.expand(2.0), ui::RADIUS_S, ui::colors(ui).hover_soft),
-    );
     // A small floating toolbar on the top right of the row.
     let buttons = [can_reply, can_edit, can_delete]
         .into_iter()

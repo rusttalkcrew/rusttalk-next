@@ -222,8 +222,10 @@ impl Perms {
     }
 }
 
+pub const MENTION_EVERYONE: &str = "mention_everyone";
+
 /// The permissions a role can grant, as the API names them, with their labels.
-pub const PERMISSIONS: [(&str, &str); 8] = [
+pub const PERMISSIONS: [(&str, &str); 9] = [
     ("invite", "Invite people"),
     ("kick", "Kick"),
     ("ban", "Ban"),
@@ -232,12 +234,14 @@ pub const PERMISSIONS: [(&str, &str); 8] = [
     ("delete_messages", "Delete messages"),
     ("manage_channels", "Manage channels"),
     ("manage_server", "Manage server"),
+    (MENTION_EVERYONE, "Mention everyone"),
 ];
 
 #[derive(Clone)]
 pub struct Role {
     pub id: String,
     pub name: String,
+    pub name_known: bool,
     pub rank: i64,
     /// API permission names, see `PERMISSIONS`.
     pub permissions: Vec<String>,
@@ -345,6 +349,7 @@ pub struct Chat {
     pub loading: bool,
     pub at_start: bool,
     pub draft: String,
+    pub mentions: crate::home::mentions::DraftMentions,
     pub reply_to: Option<Id>,
     pub editing: Option<Id>,
     /// Files picked or dropped, sent with the next message.
@@ -359,6 +364,15 @@ pub struct Chat {
 }
 
 impl Chat {
+    pub fn open_draft(&mut self, dir: &Directory, text: &str) {
+        (self.draft, self.mentions) = crate::home::mentions::DraftMentions::open(dir, text);
+    }
+
+    pub fn clear_draft(&mut self) {
+        self.draft.clear();
+        self.mentions = Default::default();
+    }
+
     /// Add records from a page or a live event, applying edits to their originals.
     pub fn merge(&mut self, items: Vec<Msg>, older: bool) {
         let (edits, plain): (Vec<_>, Vec<_>) =

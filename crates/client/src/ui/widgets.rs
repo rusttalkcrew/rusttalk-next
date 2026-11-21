@@ -858,3 +858,32 @@ pub fn drag_preview(ctx: &Context, id: Id, at: Pos2, width: f32, label: &str) {
 pub fn small_close(ui: &mut Ui, tip: &str) -> Response {
     icon_button(ui, "×", tip, Look::Ghost, Vec2::splat(22.0))
 }
+
+/// Text styling for an inline mention in chat.
+pub fn mention_format(ui: &Ui) -> egui::text::TextFormat {
+    let accent = accent(ui);
+    egui::text::TextFormat {
+        font_id: FontId::new(TEXT_BODY, crate::emoji::family(true)),
+        color: accent.text(ui.visuals().dark_mode),
+        background: colors(ui).main.lerp_to_gamma(accent.base, 0.13),
+        ..Default::default()
+    }
+}
+
+/// Tint a message addressed to the reader and mark its left edge.
+pub fn mention_highlight(ui: &Ui, background: egui::layers::ShapeIdx, rect: Rect, hovered: bool) {
+    let accent = accent(ui);
+    let palette = colors(ui);
+    let surface = if hovered {
+        palette.hover_soft
+    } else {
+        palette.main
+    };
+    ui.painter().set(
+        background,
+        Shape::rect_filled(rect, RADIUS_S, surface.lerp_to_gamma(accent.base, 0.09)),
+    );
+    let accent_bar = Rect::from_min_size(rect.min, Vec2::new(2.0, rect.height()));
+    ui.painter()
+        .rect_filled(accent_bar, RADIUS_S, accent.text(ui.visuals().dark_mode));
+}
