@@ -22,9 +22,9 @@ use url::Url;
 
 use crate::audio::Settings;
 
-/// Voice and video preferences that follow the person to their other devices.
+/// Voice and video preferences, and dismissed official servers, that follow the person to their other devices.
 /// The microphone, speakers and camera differ per computer and stay in `voice.json` only.
-const SYNCED: [&str; 8] = [
+const SYNCED: [&str; 9] = [
     "push_to_talk",
     "key",
     "threshold",
@@ -33,6 +33,7 @@ const SYNCED: [&str; 8] = [
     "auto_gain",
     "camera_height",
     "camera_fps",
+    "dismissed_official",
 ];
 
 pub struct DeviceSync {

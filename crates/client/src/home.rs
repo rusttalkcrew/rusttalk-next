@@ -32,6 +32,7 @@ use crate::{
     device_sync::{self, Edit},
     files::{self, Ask, Files},
     net::{Admin, AdminUpdate, Admission, Command, Draft, Listed, Net, PAGE_SIZE, Preview, Update},
+    official,
     screen::Video,
     server::{Body, Chat, Directory, Id, Member, Msg, Picture, Server, Status, member_name},
 };
@@ -313,6 +314,10 @@ impl Home {
                             name: String::new(),
                         };
                         self.view = View::Join;
+                    }
+                    // An official server, picked on the join page.
+                    Err(error) if matches!(self.join, Join::Checking) => {
+                        self.join = Join::Idle(Some(error));
                     }
                     Err(error) => self.find.error = Some(error),
                 }
@@ -1413,10 +1418,11 @@ fn join(ui: &mut Ui, home: &mut Home) {
                         }
                     }
                 }
+                official_servers(ui, home);
             }
             Join::Checking => {
                 ui.spinner();
-                ui.label("Checking the invite…");
+                ui.label("Checking the server…");
             }
             Join::Joining(_) => {
                 ui.spinner();
@@ -1495,6 +1501,59 @@ fn join(ui: &mut Ui, home: &mut Home) {
     });
 }
 
+/// The official servers not joined or dismissed yet, each with Join and Dismiss.
+fn official_servers(ui: &mut Ui, home: &mut Home) {
+    let audio = home.voice.audio.clone();
+    let mut settings = audio.settings();
+    let joined: Vec<_> = home.servers.iter().map(|server| &server.address).collect();
+    let shown = official::shown(&joined, &settings.dismissed_official);
+    let mut pick = None;
+    let mut changed = false;
+    if !shown.is_empty() {
+        ui.add_space(24.0);
+        ui.label(RichText::new("Official servers").strong());
+    }
+    for listed in shown {
+        Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(&listed.name);
+                    ui.weak(host(&listed.server.address));
+                });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let dismiss = ui.button("Dismiss");
+                    dismiss.widget_info(|| {
+                        WidgetInfo::labeled(Role::Button, true, format!("Dismiss {}", listed.name))
+                    });
+                    let join = primary_small(ui, "Join");
+                    join.widget_info(|| {
+                        WidgetInfo::labeled(Role::Button, true, format!("Join {}", listed.name))
+                    });
+                    if dismiss.clicked() {
+                        settings.dismissed_official.push(official::id(&listed));
+                        changed = true;
+                    } else if join.clicked() {
+                        pick = Some(listed.clone());
+                    }
+                });
+            });
+        });
+    }
+    if !settings.dismissed_official.is_empty() && ui.link("Show official servers again").clicked() {
+        settings.dismissed_official.clear();
+        changed = true;
+    }
+    if changed {
+        audio.set_settings(settings);
+        home.publish_settings();
+    }
+    if let Some(listed) = pick {
+        home.join = Join::Checking;
+        home.net.check_listed(listed);
+    }
+}
+
 fn privacy_tab(ui: &mut Ui, home: &mut Home) {
     let audio = home.voice.audio.clone();
     let mut settings = audio.settings();
@@ -1504,10 +1563,11 @@ fn privacy_tab(ui: &mut Ui, home: &mut Home) {
     let label = ui.label("Directory address");
     ui.add(
         TextEdit::singleline(&mut settings.index_url)
-            .hint_text("https://…")
+            .hint_text(official::DIRECTORY)
             .desired_width(f32::INFINITY),
     )
     .labelled_by(label.id);
+    ui.weak("Leave it empty to use the official directory.");
     CollapsingHeader::new("Details").show(ui, |ui| {
         let label = ui.label("Certificate fingerprint, only for a directory without a domain");
         ui.add(TextEdit::singleline(&mut settings.index_fingerprint).desired_width(f32::INFINITY))
@@ -1521,10 +1581,16 @@ fn privacy_tab(ui: &mut Ui, home: &mut Home) {
     audio.set_settings(settings);
 }
 
-/// The configured directory and its optional certificate pin.
+/// The configured directory and its optional certificate pin, or the official one.
 fn directory(settings: &crate::audio::Settings) -> Result<(url::Url, Option<Fingerprint>), String> {
-    let url =
-        https_url(settings.index_url.trim()).ok_or("Use an address that starts with https://.")?;
+    let url = settings.index_url.trim();
+    if url.is_empty() {
+        return Ok((
+            https_url(official::DIRECTORY).expect("official directory"),
+            None,
+        ));
+    }
+    let url = https_url(url).ok_or("Use an address that starts with https://.")?;
     let pin = settings.index_fingerprint.trim();
     let pin = (!pin.is_empty())
         .then(|| decode(pin).map_err(|_| "That certificate fingerprint isn't right."))
@@ -1538,14 +1604,6 @@ fn find(ui: &mut Ui, home: &mut Home) {
         ui.set_max_width(640.0);
         ui.heading("Find servers");
         let settings = home.voice.audio.settings();
-        if settings.index_url.trim().is_empty() {
-            ui.label("Add a server directory in your settings first.");
-            ui.weak("RustTalk only contacts it while you're on this page.");
-            if primary(ui, "Open privacy settings").clicked() {
-                home.settings = Some(Tab::Privacy);
-            }
-            return;
-        }
         let find = &mut home.find;
         let mut page = None;
         ui.horizontal(|ui| {
@@ -2539,4 +2597,23 @@ fn settings(
         home.confirm_sign_out = false;
     }
     action
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn directory_defaults_to_official() {
+        let mut settings = crate::audio::Settings::default();
+        let (url, pin) = directory(&settings).unwrap();
+        assert_eq!(url.as_str(), official::DIRECTORY);
+        assert!(pin.is_none());
+
+        settings.index_url = "https://index.example/".into();
+        assert_eq!(
+            directory(&settings).unwrap().0.as_str(),
+            "https://index.example/"
+        );
+    }
 }
