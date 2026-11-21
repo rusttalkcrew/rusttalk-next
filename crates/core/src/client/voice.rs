@@ -170,6 +170,7 @@ impl KeyClient<'_> {
         let url = signaling_url(server)?;
         let name_keys = self.name_keys(channel, track_name::APP_AUDIO);
         let screen_names = self.name_keys(channel, track_name::SCREEN);
+        let stream_names = self.name_keys(channel, track_name::STREAM_AUDIO);
         let control_keys = self.name_keys(channel, control::LABEL);
         let watch_keys = self.name_keys(channel, watch::LABEL);
         let key = media_key(key, &server.server_id, channel, epoch);
@@ -195,7 +196,7 @@ impl KeyClient<'_> {
             .context("connect to pinned LiveKit room")?;
         for participant in room.remote_participants().into_values() {
             for publication in participant.track_publications().into_values() {
-                subscribe_audio(&publication);
+                subscribe_audio(&publication, &stream_names);
             }
         }
         Ok(VoiceRoom {
@@ -208,6 +209,7 @@ impl KeyClient<'_> {
             provider,
             name_keys,
             screen_names,
+            stream_names,
             control_keys,
             watch_keys,
             stats: stats::Sampler::default(),
@@ -275,6 +277,7 @@ pub struct VoiceRoom {
     provider: KeyProvider,
     name_keys: HashMap<i64, Key>,
     screen_names: HashMap<i64, Key>,
+    stream_names: HashMap<i64, Key>,
     /// Seal remote control messages; only the current epoch's is used.
     control_keys: HashMap<i64, Key>,
     watch_keys: HashMap<i64, Key>,
@@ -282,13 +285,21 @@ pub struct VoiceRoom {
     files: live_file::LiveFiles,
 }
 
-fn subscribe_audio(publication: &RemoteTrackPublication) {
+/// Receive voices and shared apps. A screen share's sound comes with its video instead.
+fn subscribe_audio(publication: &RemoteTrackPublication, stream_names: &HashMap<i64, Key>) {
     if publication.kind() == TrackKind::Audio
         && publication.encryption_type() == EncryptionType::Gcm
         && !publication.is_desired()
+        && !is_stream_audio(publication, stream_names)
     {
         publication.set_subscribed(true);
     }
+}
+
+fn is_stream_audio(publication: &RemoteTrackPublication, stream_names: &HashMap<i64, Key>) -> bool {
+    publication.source() == TrackSource::ScreenshareAudio
+        && track_name::decrypt(stream_names, track_name::STREAM_AUDIO, &publication.name())
+            .is_some()
 }
 
 impl VoiceRoom {
@@ -324,6 +335,7 @@ impl VoiceRoom {
         let (epoch, key) = keys.current_key(scope(&self.channel))?;
         self.name_keys = keys.name_keys(&self.channel, track_name::APP_AUDIO);
         self.screen_names = keys.name_keys(&self.channel, track_name::SCREEN);
+        self.stream_names = keys.name_keys(&self.channel, track_name::STREAM_AUDIO);
         self.control_keys = keys.name_keys(&self.channel, control::LABEL);
         self.watch_keys = keys.name_keys(&self.channel, watch::LABEL);
         if epoch <= self.epoch {
@@ -384,7 +396,20 @@ impl VoiceRoom {
                     tracing::warn!("refused unencrypted voice track");
                     continue;
                 }
-                RoomEvent::TrackPublished { publication, .. } => subscribe_audio(publication),
+                RoomEvent::TrackPublished {
+                    publication,
+                    participant,
+                } => {
+                    subscribe_audio(publication, &self.stream_names);
+                    // Sound added to a screen share someone already watches.
+                    let watched = participant
+                        .track_publications()
+                        .into_values()
+                        .any(|p| p.source() == TrackSource::Screenshare && p.is_desired());
+                    if watched && is_stream_audio(publication, &self.stream_names) {
+                        publication.set_subscribed(true);
+                    }
+                }
                 RoomEvent::LocalTrackPublished { .. } | RoomEvent::LocalTrackRepublished { .. } => {
                     self.switch_senders();
                 }
@@ -494,13 +519,33 @@ impl VoiceRoom {
             .await
     }
 
-    /// The display name for a subscribed app track, if this is app audio.
+    /// Publish one app (or all system audio) as part of our screen share: only people
+    /// watching the share receive it. Feed PCM after this succeeds.
+    pub async fn publish_stream_audio(
+        &self,
+        name: &str,
+        source: NativeAudioSource,
+    ) -> Result<LocalTrackPublication> {
+        let key = self
+            .stream_names
+            .get(&self.epoch)
+            .context("missing current media key")?;
+        let name = track_name::encrypt(key, track_name::STREAM_AUDIO, self.epoch, name)?;
+        self.publish_audio_track(&name, source, TrackSource::ScreenshareAudio)
+            .await
+    }
+
+    /// The display name for a subscribed app track, if this is app or stream audio.
     pub fn app_audio_name(&self, track: &RemoteAudioTrack) -> Option<String> {
         if track.source() != TrackSource::ScreenshareAudio {
             return None;
         }
+        let name = track.name();
         Some(
-            track_name::decrypt(&self.name_keys, track_name::APP_AUDIO, &track.name())
+            track_name::decrypt(&self.name_keys, track_name::APP_AUDIO, &name)
+                .or_else(|| {
+                    track_name::decrypt(&self.stream_names, track_name::STREAM_AUDIO, &name)
+                })
                 .unwrap_or_else(|| {
                     tracing::warn!("could not decrypt shared audio track name");
                     "Shared audio".into()

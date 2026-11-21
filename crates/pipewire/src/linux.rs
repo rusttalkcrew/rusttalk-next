@@ -36,13 +36,15 @@ struct App {
 }
 
 const STARTUP: Duration = Duration::from_secs(3);
-static PARENT: OnceLock<u32> = OnceLock::new();
+pub(crate) static PARENT: OnceLock<u32> = OnceLock::new();
+/// 10 ms of 48 kHz stereo s16, what RustTalk reads at a time.
+pub(crate) const FRAME_BYTES: usize = 480 * 2 * 2;
 
 pub fn run() -> Result<()> {
     PARENT.get_or_init(parent_id);
     let arg = std::env::args()
         .nth(1)
-        .context("expected list, screen or a stream ID")?;
+        .context("expected list, screen, system or a stream ID")?;
     if arg == "screen" {
         return crate::screen::run();
     }
@@ -56,13 +58,28 @@ pub fn run() -> Result<()> {
         serde_json::to_writer(io::stdout().lock(), &list_apps(&loop_, &core)?)?;
         return Ok(());
     }
+    if arg == "system" {
+        return crate::system::run(&loop_, &core);
+    }
     let (_, serial) = arg.split_once(':').context("invalid PipeWire stream ID")?;
     let serial: u64 = serial.parse().context("invalid PipeWire object serial")?;
     ensure!(
         list_apps(&loop_, &core)?.iter().any(|app| app.id == arg),
         "the selected playback stream is no longer running"
     );
-    capture(&loop_, &core, serial)
+    let stream = StreamBox::new(
+        &core,
+        "RustTalk app audio",
+        properties! {
+            *pw::keys::MEDIA_TYPE => "Audio",
+            *pw::keys::MEDIA_CATEGORY => "Capture",
+            *pw::keys::TARGET_OBJECT => serial.to_string(),
+            "node.dont-fallback" => "true",
+            "node.dont-move" => "true",
+            "node.dont-reconnect" => "true",
+        },
+    )?;
+    capture(&loop_, &core, &stream, true, |_| Ok(()))
 }
 
 fn list_apps(loop_: &MainLoop, core: &CoreRc) -> Result<Vec<App>> {
@@ -194,20 +211,16 @@ pub(crate) fn iterate(loop_: &MainLoop) -> Result<()> {
     Ok(())
 }
 
-fn capture(loop_: &MainLoop, core: &Core, serial: u64) -> Result<()> {
-    let stream = StreamBox::new(
-        core,
-        "RustTalk app audio",
-        properties! {
-            *pw::keys::MEDIA_TYPE => "Audio",
-            *pw::keys::MEDIA_CATEGORY => "Capture",
-            *pw::keys::TARGET_OBJECT => serial.to_string(),
-            "node.dont-fallback" => "true",
-            "node.dont-move" => "true",
-            "node.dont-reconnect" => "true",
-        },
-    )?;
-
+/// Write a capture stream's PCM to stdout until it ends. `targeted` streams are linked by
+/// the session manager and start once audio flows; others are linked by `tick`, which
+/// runs on every loop turn, and start once connected.
+pub(crate) fn capture(
+    loop_: &MainLoop,
+    core: &Core,
+    stream: &StreamBox,
+    targeted: bool,
+    mut tick: impl FnMut(&StreamBox) -> Result<()>,
+) -> Result<()> {
     let output_error = Rc::new(Cell::new(false));
     let io_error = output_error.clone();
     let _listener = stream
@@ -255,6 +268,13 @@ fn capture(loop_: &MainLoop, core: &Core, serial: u64) -> Result<()> {
     format.set_format(AudioFormat::S16LE);
     format.set_rate(48_000);
     format.set_channels(2);
+    // Named channels give our input ports FL and FR, which "All system audio" links to.
+    let mut position = [0; pw::spa::sys::SPA_AUDIO_MAX_CHANNELS as usize];
+    position[..2].copy_from_slice(&[
+        pw::spa::sys::SPA_AUDIO_CHANNEL_FL,
+        pw::spa::sys::SPA_AUDIO_CHANNEL_FR,
+    ]);
+    format.set_position(position);
     let (param, _) = PodSerializer::serialize(
         Cursor::new(Vec::new()),
         &Value::Object(Object {
@@ -264,17 +284,18 @@ fn capture(loop_: &MainLoop, core: &Core, serial: u64) -> Result<()> {
         }),
     )?;
     let mut params = [Pod::from_bytes(param.get_ref()).expect("serialized PCM format")];
-    stream.connect(
-        Direction::Input,
-        None,
-        StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS,
-        &mut params,
-    )?;
+    let flags = if targeted {
+        StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS
+    } else {
+        StreamFlags::MAP_BUFFERS
+    };
+    stream.connect(Direction::Input, None, flags, &mut params)?;
     let deadline = Instant::now() + STARTUP;
     let mut started = false;
     while !failed.get() && !output_error.get() {
         match stream.state() {
             StreamState::Streaming => started = true,
+            StreamState::Paused if !targeted => started = true,
             StreamState::Unconnected if started => return Ok(()),
             StreamState::Error(_) => {
                 bail!("PipeWire could not capture the selected playback stream")
@@ -283,6 +304,9 @@ fn capture(loop_: &MainLoop, core: &Core, serial: u64) -> Result<()> {
         }
         if !started && Instant::now() >= deadline {
             bail!("timed out connecting to the selected playback stream");
+        }
+        if started {
+            tick(stream)?;
         }
         iterate(loop_)?;
     }

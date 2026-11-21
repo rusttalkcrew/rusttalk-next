@@ -31,14 +31,19 @@ pub fn list_apps() -> Result<Vec<App>> {
 }
 
 pub fn capture(app: &App, mut sink: impl FnMut(&[i16]) + Send + 'static) -> Result<Capture> {
-    let (cookie, serial) = app
-        .id
-        .split_once(':')
-        .context("invalid PipeWire stream ID")?;
-    let cookie: u32 = cookie.parse().context("invalid PipeWire daemon cookie")?;
-    let serial: u64 = serial.parse().context("invalid PipeWire object serial")?;
+    let arg = if app.id == super::SYSTEM {
+        super::SYSTEM.to_owned()
+    } else {
+        let (cookie, serial) = app
+            .id
+            .split_once(':')
+            .context("invalid PipeWire stream ID")?;
+        let cookie: u32 = cookie.parse().context("invalid PipeWire daemon cookie")?;
+        let serial: u64 = serial.parse().context("invalid PipeWire object serial")?;
+        format!("{cookie}:{serial}")
+    };
     let mut child = Command::new(pipewire_helper()?)
-        .arg(format!("{cookie}:{serial}"))
+        .arg(arg)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

@@ -36,6 +36,11 @@ pub(super) async fn exercise(
         .publish_screen(screen::NAME, screen::options(), source.clone())
         .await?
         .sid();
+    // The share's sound: only people watching the share may receive it.
+    let sound = a
+        .publish_stream_audio(STREAM_SOUND, rusttalk_core::capture::audio_source())
+        .await?
+        .sid();
     let result = async {
         let found =
             tokio::time::timeout(LIMIT, screen::find(&mut listener, TrackSource::Screenshare))
@@ -45,16 +50,21 @@ pub(super) async fn exercise(
         tokio::time::timeout(LIMIT, screen::hear(b, TrackSource::Screenshare))
             .await
             .context("screen pattern with current key")??;
+        tokio::time::timeout(LIMIT, stream_sound(b, true))
+            .await
+            .context("stream sound arriving with the watched share")??;
         if let Ok(error) = tokio::time::timeout(Duration::from_millis(400), async {
             while let Some(event) = listener.next_event().await {
-                if matches!(
-                    event,
-                    RoomEvent::TrackSubscribed {
-                        track: RemoteTrack::Video(_),
-                        ..
+                if let RoomEvent::TrackSubscribed { track, .. } = event {
+                    match track {
+                        RemoteTrack::Video(_) => return "an idle viewer received video",
+                        RemoteTrack::Audio(audio)
+                            if audio.source() == TrackSource::ScreenshareAudio =>
+                        {
+                            return "an idle viewer received the stream's sound";
+                        }
+                        RemoteTrack::Audio(_) => {}
                     }
-                ) {
-                    return "an idle viewer received video";
                 }
             }
             "idle viewer disconnected"
@@ -69,20 +79,48 @@ pub(super) async fn exercise(
                 .iter()
                 .all(|video| video.track.is_none())
         );
+        ensure!(
+            !(listener.remote_audio_tracks().iter())
+                .any(|(_, _, track)| track.source() == TrackSource::ScreenshareAudio),
+            "an idle viewer holds the stream's sound"
+        );
         listener.leave().await?;
         wrong_key(server, c, channel_id, a, &sid).await?;
         b.set_subscribed(&sid, false)?;
+        tokio::time::timeout(LIMIT, stream_sound(b, false))
+            .await
+            .context("stream sound leaving with the share")??;
         println!(
             "W10 encrypted 320x180 synthetic screen, decrypted name and color bars, no video without subscription or with the wrong key"
         );
+        println!("Stream sound received only while watching the share");
         Ok::<_, anyhow::Error>(())
     };
     tokio::select! {
         result = result => result?,
         result = screen::send(source) => result?,
     }
+    a.unpublish_audio(&sound).await?;
     a.unpublish_video(&sid).await?;
     c.join_voice(channel_id).await
+}
+
+const STREAM_SOUND: &str = "All system audio";
+
+/// Wait until `room` holds (or no longer holds) the share's decrypted sound track.
+async fn stream_sound(room: &mut VoiceRoom, held: bool) -> Result<()> {
+    loop {
+        let found = (room.remote_audio_tracks().iter()).any(|(_, _, track)| {
+            room.app_audio_name(track).as_deref() == Some(STREAM_SOUND)
+                && track.name() != STREAM_SOUND
+        });
+        if found == held {
+            return Ok(());
+        }
+        room.next_event()
+            .await
+            .context("room closed waiting for the stream's sound")?;
+    }
 }
 
 async fn wrong_key(

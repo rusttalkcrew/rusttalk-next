@@ -53,6 +53,8 @@ pub struct Voice {
     pub link: Link,
     /// Apps this device shares in the call.
     pub shares: Vec<App>,
+    /// The sound the screen share carries (or will): apps, all system audio, or none.
+    pub stream_audio: Vec<App>,
     /// Apps playing sound when the picker opened, filled by a listing thread.
     apps: Arc<Mutex<Listing<App>>>,
     supported: bool,
@@ -171,6 +173,7 @@ impl Voice {
             sounds: sounds::Detector::default(),
             link: Link::default(),
             shares: Vec::new(),
+            stream_audio: Vec::new(),
             apps: Arc::new(Mutex::new(Listing::Loading)),
             supported: share::supported(),
             calibration: None,
@@ -772,6 +775,10 @@ fn change_screen(ctx: &egui::Context, voice: &mut Voice, server: &Server) {
 /// Open t!("call.share_screen") with the last choices and look for what to share.
 fn open_screen_dialog(ctx: &egui::Context, voice: &mut Voice) {
     voice.share_screen = Some((screen_options(&voice.audio.settings()), None));
+    if !voice.changing_screen {
+        // Apps shared now become the stream's sound, since going live stops them.
+        voice.stream_audio = voice.shares.clone();
+    }
     fill(ctx, &voice.targets, "screens", screen::targets);
 }
 
@@ -843,6 +850,27 @@ pub fn screen_dialog(ctx: &egui::Context, home: &mut Home) {
                 t!("call.show_cursor"),
                 t!("call.show_cursor_help"),
             );
+            section(ui, t!("call.stream_sound"));
+            ui.add_space(ui::SPACE_XS);
+            let label = format!("🔊  {}", panel::sound_summary(&voice.stream_audio));
+            let button = ui
+                .add_enabled_ui(voice.supported, |ui| ui::secondary(ui, &label))
+                .inner;
+            let button = if voice.supported {
+                button
+            } else {
+                button.on_disabled_hover_text(t!("call.needs_windows_11"))
+            };
+            if button.clicked() {
+                fill(ctx, &voice.apps, "apps", share::list);
+            }
+            let (picked, refresh) = panel::sound_menu(&button, &voice.apps, &voice.stream_audio);
+            if let Some(picked) = picked {
+                voice.stream_audio = picked;
+            }
+            if refresh {
+                fill(ctx, &voice.apps, "apps", share::list);
+            }
         }
         ui::footer(ui, |ui| {
             let label = if portal.is_some() {
@@ -875,7 +903,8 @@ pub fn screen_dialog(ctx: &egui::Context, home: &mut Home) {
             remember_screen_options(&mut settings, options);
             home.voice.audio.set_settings(settings);
             if let Some(server) = call_server(home) {
-                server.send(Command::ShareScreen(target, options));
+                let audio = home.voice.stream_audio.clone();
+                server.send(Command::ShareScreen(target, options, audio));
                 home.voice.sharing = Sharing::Starting;
             }
         }

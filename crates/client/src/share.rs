@@ -21,6 +21,18 @@ pub fn list() -> Result<Vec<App>> {
     Ok(apps)
 }
 
+/// "All system audio": everything this computer plays except RustTalk itself.
+pub fn system() -> App {
+    App {
+        id: capture::SYSTEM.into(),
+        name: t!("call.all_system_audio").into(),
+    }
+}
+
+pub fn is_system(app: &App) -> bool {
+    app.id == capture::SYSTEM
+}
+
 /// Start capturing an app into a new source for its track. Blocks until audio flows.
 pub fn capture(app: &App) -> Result<(Capture, NativeAudioSource)> {
     let source = capture::audio_source();

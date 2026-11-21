@@ -44,6 +44,8 @@ pub(super) struct Live {
     deafened: Option<bool>,
     /// Apps this device shares, each with its own track.
     shares: Vec<Share>,
+    /// The sound the screen share should carry; started once the screen is live.
+    stream_audio: Vec<App>,
     /// Decrypted names of subscribed remote app tracks.
     apps: HashMap<TrackSid, String>,
     /// Audio tracks from devices not known when they arrived, with their identity, to
@@ -99,6 +101,8 @@ pub(super) struct Share {
     sid: TrackSid,
     /// Stops capturing when dropped.
     capture: Capture,
+    /// Part of the screen share: only its viewers hear it, and it stops with the share.
+    stream: bool,
 }
 
 /// Commands that only need the voice room, which outlives the API connection.
@@ -109,6 +113,7 @@ pub(super) fn voice_only(command: &Command) -> bool {
             | Command::SyncVoiceStatus
             | Command::StopApp(_)
             | Command::StopScreen
+            | Command::StreamAudio(_)
             | Command::ChangeScreen(_)
             | Command::Watch(..)
             | Command::StopCamera
@@ -143,7 +148,9 @@ pub(super) async fn voice_command(
     }
     let changed = match command {
         Command::StopApp(id) => {
-            let Some(at) = live.shares.iter().position(|share| share.app.id == id) else {
+            let Some(at) =
+                (live.shares.iter()).position(|share| !share.stream && share.app.id == id)
+            else {
                 return Ok(None);
             };
             let share = live.shares.remove(at);
@@ -161,6 +168,7 @@ pub(super) async fn voice_command(
             }
             changed
         }
+        Command::StreamAudio(apps) => set_stream_audio(ctx, live, apps).await,
         Command::ChangeScreen(target) => {
             // Control was granted for what is shared now, not what comes next.
             control::stop_hosting(ctx, live).await;
@@ -195,6 +203,12 @@ pub(super) async fn stop_screen(ctx: &Ctx, live: &mut Live) -> bool {
     if let Some(picker) = live.swap.abort() {
         picker.abort();
     }
+    live.stream_audio.clear();
+    let (sound, kept) = std::mem::take(&mut live.shares)
+        .into_iter()
+        .partition(|share| share.stream);
+    live.shares = kept;
+    unpublish_shares(live, sound).await;
     let Some((sid, ..)) = live.screen.take() else {
         return false;
     };
@@ -203,6 +217,69 @@ pub(super) async fn stop_screen(ctx: &Ctx, live: &mut Live) -> bool {
         tracing::warn!(error = %format_args!("{error:#}"), "stopping screen failed");
     }
     true
+}
+
+async fn unpublish_shares(live: &Live, shares: Vec<Share>) {
+    for share in shares {
+        tracing::info!(stream = share.stream, "stopped sharing app audio");
+        if let Err(error) = live.room.unpublish_audio(&share.sid).await {
+            tracing::warn!(error = %format_args!("{error:#}"), "stopping app audio failed");
+        }
+    }
+}
+
+/// Make the screen share carry `apps`' sound: stop the others and start the new ones.
+/// Before the screen is live this only notes them. True if a track changed.
+async fn set_stream_audio(ctx: &Ctx, live: &mut Live, apps: Vec<App>) -> bool {
+    live.stream_audio = apps;
+    if live.screen.is_none() {
+        return false;
+    }
+    let wanted = |id: &str| live.stream_audio.iter().any(|app| app.id == id);
+    let (gone, kept): (Vec<_>, _) = std::mem::take(&mut live.shares)
+        .into_iter()
+        .partition(|share| share.stream && !wanted(&share.app.id));
+    live.shares = kept;
+    let mut changed = !gone.is_empty();
+    unpublish_shares(live, gone).await;
+    for app in live.stream_audio.clone() {
+        if live.shares.iter().any(|s| s.stream && s.app.id == app.id) {
+            continue;
+        }
+        match start_share(&live.room, app.clone(), true).await {
+            Ok(share) => {
+                tracing::info!("sharing app audio in the stream");
+                live.shares.push(share);
+                changed = true;
+            }
+            Err(error) => {
+                tracing::warn!(error = %format_args!("{error:#}"), "sharing app audio failed");
+                live.stream_audio.retain(|wanted| wanted.id != app.id);
+                ctx.send(Update::AppStopped(app.id));
+                ctx.send(Update::Failed(t!("voice.app_failed", app = app.name)));
+            }
+        }
+    }
+    changed
+}
+
+/// Capture an app (or all system audio) and publish it as its own track.
+async fn start_share(room: &VoiceRoom, app: App, stream: bool) -> Result<Share> {
+    let target = app.clone();
+    // shortcut: starting waits for the app's first audio (up to seconds) and holds
+    // this server's loop meanwhile; move it to its own task if that gets noticed.
+    let (capture, source) = tokio::task::spawn_blocking(move || share::capture(&target)).await??;
+    let publication = if stream {
+        room.publish_stream_audio(&app.name, source).await?
+    } else {
+        room.publish_app_audio(&app.name, source).await?
+    };
+    Ok(Share {
+        app,
+        sid: publication.sid(),
+        capture,
+        stream,
+    })
 }
 
 /// Stop offering our file, or stop receiving one; dropping a download removes its partial file.
@@ -305,6 +382,18 @@ pub(super) async fn share_screen(
             tracing::info!("sharing screen");
             live.screen = Some(screen);
             ctx.send(Update::Sharing(true));
+            // Live, sound is part of the stream: apps shared on their own stop (the
+            // window offered them for the stream instead).
+            let (apps, sound): (Vec<_>, _) = std::mem::take(&mut live.shares)
+                .into_iter()
+                .partition(|share| !share.stream);
+            live.shares = sound;
+            for share in &apps {
+                ctx.send(Update::AppStopped(share.app.id.clone()));
+            }
+            unpublish_shares(live, apps).await;
+            let wanted = live.stream_audio.clone();
+            set_stream_audio(ctx, live, wanted).await;
             let channel = live.channel;
             send_room(ctx, url, client, state, channel);
         }
@@ -913,6 +1002,7 @@ pub(super) async fn stop_finished_shares(
     }
     for share in &ended {
         tracing::info!("app audio capture ended");
+        live.stream_audio.retain(|app| app.id != share.app.id);
         if let Err(error) = live.room.unpublish_audio(&share.sid).await {
             tracing::warn!(error = %format_args!("{error:#}"), "stopping app audio failed");
         }
@@ -1138,6 +1228,7 @@ pub(super) async fn start_call(
         channel,
         deafened: Some(false),
         shares: Vec::new(),
+        stream_audio: Vec::new(),
         apps: HashMap::new(),
         nameless: HashMap::new(),
         starting: None,
@@ -1174,23 +1265,15 @@ pub(super) async fn share_app(
     state: &mut State,
     app: App,
 ) -> Result<()> {
-    let Some(live) = &mut state.voice else {
+    // While live, sound goes with the stream instead (see `set_stream_audio`).
+    let Some(live) = state.voice.as_mut().filter(|live| live.screen.is_none()) else {
         ctx.send(Update::AppStopped(app.id));
         return Ok(());
     };
-    let started = async {
-        let target = app.clone();
-        // shortcut: starting waits for the app's first audio (up to seconds) and holds
-        // this server's loop meanwhile; move it to its own task if that gets noticed.
-        let (capture, source) =
-            tokio::task::spawn_blocking(move || share::capture(&target)).await??;
-        let sid = live.room.publish_app_audio(&app.name, source).await?.sid();
-        anyhow::Ok((capture, sid))
-    };
-    match started.await {
-        Ok((capture, sid)) => {
+    match start_share(&live.room, app.clone(), false).await {
+        Ok(share) => {
             tracing::info!("sharing app audio");
-            live.shares.push(Share { app, sid, capture });
+            live.shares.push(share);
             let channel = live.channel;
             send_room(ctx, url, client, state, channel);
         }
@@ -1210,11 +1293,13 @@ pub(super) fn pick_screen(
     state: &mut State,
     target: screen::Target,
     options: screen::Options,
+    audio: Vec<App>,
 ) -> Result<()> {
     let Some(live) = state.voice.as_mut().filter(|live| live.screen.is_none()) else {
         ctx.send(Update::Sharing(false));
         return Ok(());
     };
+    live.stream_audio = audio;
     // The system picker waits for the person; keep the server loop running meanwhile.
     live.starting = Some(tokio::spawn(async move {
         // shortcut: always opens a fresh picker; keep the portal's restore token

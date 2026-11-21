@@ -1113,7 +1113,10 @@ impl Home {
                     }
                 }
             }
-            Update::AppStopped(id) => self.voice.shares.retain(|app| app.id != id),
+            Update::AppStopped(id) => {
+                self.voice.shares.retain(|app| app.id != id);
+                self.voice.stream_audio.retain(|app| app.id != id);
+            }
             Update::Sharing(on) => {
                 // A late result after Stop or leaving doesn't turn the chip back on.
                 if self.voice.sharing != call::Sharing::Off || !on {
