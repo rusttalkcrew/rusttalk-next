@@ -155,6 +155,7 @@ common.show_more = Show more
 home.members.one = {count} member
 home.members.other = {count} members
 home.drop_to_send = Drop to send in {channel}
+home.drop_hint = Added to your message, up to {max} files
 home.chat_start = This is the start of {channel}
 home.replying_to = Replying to {name}
 home.cancel_reply = Cancel reply
