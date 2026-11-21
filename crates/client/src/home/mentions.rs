@@ -470,6 +470,7 @@ mod tests {
             devices: vec![],
             avatar: None,
             presence: Default::default(),
+            hide_offline: false,
         };
         let role = |id: &str, name: &str, permissions| Role {
             id: id.into(),

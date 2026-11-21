@@ -470,6 +470,7 @@ async fn build(
             roles: strings(&row["role_ids"]),
             avatar: picture(&person, row["avatar_hash"].as_str()),
             presence: serde_json::from_value(row["presence"].clone()).unwrap_or_default(),
+            hide_offline: row["hide_offline"].as_bool().unwrap_or_default(),
         });
     }
     list.sort_by_cached_key(|member| {
@@ -498,6 +499,7 @@ async fn build(
         name: text(Metadata::ServerName, &server_id, space["name_ct"].as_str()),
         icon: picture(&server_id, space["icon_hash"].as_str()),
         status: serde_json::from_value(me["status"].clone()).ok(),
+        hide_offline: me["hide_offline"].as_bool(),
         me: *client.identity.certificate.person_id(),
         perms,
         categories,
@@ -771,6 +773,7 @@ mod tests {
             roles: Vec::new(),
             avatar: None,
             presence: Default::default(),
+            hide_offline: false,
         }
     }
 

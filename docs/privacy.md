@@ -9,7 +9,7 @@ tables in SQLite (WAL). IDs and digests are binary unless indicated. The `_ct` s
 
 | Table | Columns |
 | --- | --- |
-| `members` | `person_id` (root public key), `joined_at` (Unix seconds), nullable `display_name_ct`, nullable `avatar_ct`, `presence_status` (current choice: online, away or invisible) |
+| `members` | `person_id` (root public key), `joined_at` (Unix seconds), nullable `display_name_ct`, nullable `avatar_ct`, `presence_status` (current choice: online, away or invisible), `hide_offline` (whether to leave them out of member lists while offline) |
 | `roles` | `id` (text), `kind` (built-in kind or custom), `rank`, `permissions` (ten-bit mask), nullable `name_ct` and `display_ct` (opaque ciphertext: the name, and the colour and member-list grouping) |
 | `server_settings` | Singleton `id`, nullable `owner_person_id`, `default_role_id`, nullable `name_ct`, nullable `description_ct`, nullable `icon_ct`, `open_joining` (public flag), `member_cap` (open admission limit), nullable `index_listing_ct` (encrypted public-listing configuration), nullable `max_file_bytes`, `member_storage_bytes`, `server_storage_bytes`, `retention_secs`, `max_stickers` (server limits) |
 | `member_roles` | `person_id`, `role_id` |
@@ -104,6 +104,13 @@ is kept, and it is returned only to that member. Members see only the person
 ID and visible status (online, away or offline). There is no last-seen
 timestamp or presence event history. The existing session and connection-close logging
 still applies.
+A member can choose to be left out of member lists while they appear offline
+(disconnected or invisible). The server stores this one boolean with the member
+row and returns it with the member directory, so clients can still show the
+member's name and picture on their messages, mentions and DMs; clients leave
+the member out of the member list while their visible status is offline. The
+admin member management view still lists them. This only hides the member in
+other people's apps; it is not an access-control or anonymity guarantee.
 
 Public listing is off by default. The owner explicitly supplies the name
 and description they want to make public. The API encrypts this separate

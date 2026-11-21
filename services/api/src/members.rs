@@ -100,14 +100,16 @@ pub struct Me {
     role_ids: Vec<String>,
     /// This member's own presence choice; never shown to others.
     status: rusttalk_core::presence::Status,
+    hide_offline: bool,
 }
 
 pub async fn me(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Me>> {
     let (mut tx, actor) = authenticate_read(&app, &headers).await?;
-    let joined_at = query_scalar("SELECT joined_at FROM members WHERE person_id = ?")
-        .bind(actor.person.as_slice())
-        .fetch_one(&mut *tx)
-        .await?;
+    let (joined_at, hide_offline) =
+        query_as("SELECT joined_at, hide_offline FROM members WHERE person_id = ?")
+            .bind(actor.person.as_slice())
+            .fetch_one(&mut *tx)
+            .await?;
     let role_ids = roles::for_person(&mut tx, &actor.person)
         .await?
         .into_iter()
@@ -121,6 +123,7 @@ pub async fn me(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Me
         joined_at,
         role_ids,
         status,
+        hide_offline,
     }))
 }
 

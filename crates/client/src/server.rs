@@ -1,7 +1,11 @@
 //! What the UI shows for each server. The network task in net.rs decrypts the
 //! server's metadata and messages and sends these; the UI only reads and merges them.
 
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    path::PathBuf,
+    sync::Arc,
+};
 
 use eframe::egui::{Color32, ColorImage};
 
@@ -13,6 +17,7 @@ use rusttalk_core::{
     identity::fingerprint,
     presence::{Presence, Status as Choice},
 };
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 use url::Url;
 
@@ -182,6 +187,8 @@ pub struct Directory {
     pub icon: Option<Picture>,
     /// This person's presence choice here.
     pub status: Option<Choice>,
+    /// Whether this person hides from member lists here while offline.
+    pub hide_offline: Option<bool>,
     pub me: Id,
     pub perms: Perms,
     pub categories: Vec<Category>,
@@ -309,9 +316,16 @@ pub struct Member {
     pub roles: Vec<String>,
     pub avatar: Option<Picture>,
     pub presence: Presence,
+    /// They asked to be left out of member lists while offline.
+    pub hide_offline: bool,
 }
 
 impl Member {
+    /// Whether the member list shows them; hidden people still have names elsewhere.
+    pub fn listed(&self) -> bool {
+        !(self.hide_offline && self.presence == Presence::Offline)
+    }
+
     /// Their chosen name, or a placeholder from their fingerprint.
     pub fn display_name(&self) -> String {
         (self.name.clone()).unwrap_or_else(|| {
@@ -320,6 +334,55 @@ impl Member {
                 id = &fingerprint(&self.person)[..4]
             )
         })
+    }
+}
+
+/// "Hide me when I'm offline": each server stores the flag, and this device keeps
+/// its last known value plus the servers it still has to tell about a change made
+/// here. Saved, so a restart doesn't let a stale server undo that change.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HideOffline {
+    /// What the switch shows: the last value chosen here or reported by a server.
+    pub on: bool,
+    /// Servers that haven't confirmed a value from this device yet, with that value.
+    pub pending: BTreeMap<String, bool>,
+}
+
+impl HideOffline {
+    /// The person changed it here: every server has to be told.
+    pub fn choose<'a>(&mut self, on: bool, servers: impl Iterator<Item = &'a Url>) {
+        self.on = on;
+        self.pending = servers.map(|server| (server.to_string(), on)).collect();
+    }
+
+    /// This person joined a server, which starts with hiding off: tell it the
+    /// value still being sent elsewhere, or else the one shown.
+    pub fn joined(&mut self, server: &Url) {
+        let on = self.pending.values().next().copied().unwrap_or(self.on);
+        self.pending.insert(server.to_string(), on);
+    }
+
+    /// A server this person is no longer in has nothing left to be told.
+    pub fn left(&mut self, server: &Url) {
+        self.pending.remove(server.as_str());
+    }
+
+    /// A server reported its stored flag; returns what to send it, if anything.
+    /// Without a value pending for that server, its value is the newest one (made
+    /// on another device) and is taken over, so two devices never write back and forth.
+    pub fn reported(&mut self, server: &Url, theirs: bool) -> Option<bool> {
+        match self.pending.get(server.as_str()) {
+            None => {
+                self.on = theirs;
+                None
+            }
+            Some(&on) if on == theirs => {
+                self.pending.remove(server.as_str());
+                None
+            }
+            Some(&on) => Some(on),
+        }
     }
 }
 
@@ -567,6 +630,87 @@ fn add_replicas(replicas: &mut Vec<Url>, more: Vec<Url>) {
 
 #[cfg(test)]
 mod tests {
+    use super::HideOffline;
+
+    /// A server that stores the flag, like the API.
+    fn server(n: u8) -> url::Url {
+        format!("https://server{n}.test/").parse().unwrap()
+    }
+
+    #[test]
+    fn two_devices_converge_without_writing_back_and_forth() {
+        let a = server(1);
+        let (mut first, mut second) = (HideOffline::default(), HideOffline::default());
+        first.choose(true, [&a].into_iter());
+        let mut stored = first.on;
+        // The write tells everyone to reload; both devices read the server again.
+        let mut writes = 0;
+        for _ in 0..3 {
+            for device in [&mut first, &mut second] {
+                if let Some(on) = device.reported(&a, stored) {
+                    stored = on;
+                    writes += 1;
+                }
+            }
+        }
+        assert_eq!(writes, 0);
+        assert!(stored && first.on && second.on);
+        assert!(first.pending.is_empty());
+    }
+
+    #[test]
+    fn a_change_made_offline_survives_a_restart_and_a_stale_server() {
+        let (a, b) = (server(1), server(2));
+        let mut device = HideOffline::default();
+        device.choose(true, [&a, &b].into_iter());
+        // A took it; B was offline.
+        assert_eq!(device.reported(&a, true), None);
+        let saved = serde_json::to_string(&device).unwrap();
+        let mut restarted: HideOffline = serde_json::from_str(&saved).unwrap();
+        // B answers first after the restart, with its old value: it gets told again.
+        assert_eq!(restarted.reported(&b, false), Some(true));
+        assert!(restarted.on);
+        assert_eq!(restarted.reported(&a, true), None);
+        assert_eq!(restarted.reported(&b, true), None);
+        assert!(restarted.pending.is_empty());
+    }
+
+    #[test]
+    fn a_new_server_gets_the_value_still_being_sent_elsewhere() {
+        let (a, b, c) = (server(1), server(2), server(3));
+        let mut device = HideOffline::default();
+        device.choose(true, [&a, &b].into_iter());
+        assert_eq!(device.reported(&a, true), None);
+        // B is still offline when C is joined; C starts with hiding off.
+        device.joined(&c);
+        assert_eq!(device.reported(&c, false), Some(true));
+        assert!(device.on);
+        assert_eq!(device.reported(&b, false), Some(true));
+        assert_eq!(device.reported(&c, true), None);
+        // Leaving B drops what it still had to be told.
+        device.left(&b);
+        assert!(device.pending.is_empty());
+    }
+
+    #[test]
+    fn hidden_members_leave_the_list_only_while_offline() {
+        use rusttalk_core::presence::Presence;
+        let member = |hide_offline, presence| super::Member {
+            person: [0; 32],
+            name: None,
+            devices: Vec::new(),
+            roles: Vec::new(),
+            avatar: None,
+            presence,
+            hide_offline,
+        };
+        assert!(member(false, Presence::Offline).listed());
+        assert!(member(true, Presence::Online).listed());
+        assert!(member(true, Presence::Away).listed());
+        // Invisible people look offline, so they are left out too.
+        assert!(!member(true, Presence::Offline).listed());
+    }
+
     use super::*;
 
     fn msg(id: u8, at: i64, text: &str, edit_of: Option<u8>) -> Msg {

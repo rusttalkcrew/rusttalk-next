@@ -213,6 +213,30 @@ pub async fn set(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(Deserialize)]
+pub struct HideOffline {
+    hide_offline: bool,
+}
+
+/// Leave this member out of other people's member lists while they appear offline.
+pub async fn set_hide_offline(
+    State(app): State<App>,
+    headers: HeaderMap,
+    body: Result<Json<HideOffline>, JsonRejection>,
+) -> ApiResult<StatusCode> {
+    let HideOffline { hide_offline } = payload(body)?;
+    let (mut tx, actor) = authenticate(&app, &headers).await?;
+    query("UPDATE members SET hide_offline = ? WHERE person_id = ?")
+        .bind(hide_offline)
+        .bind(actor.person.as_slice())
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    // Others refetch the directory, which carries the flag.
+    crate::keys::changed(&app, &actor.person, None);
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// Apply a choice to a connected member, including one within the reconnect grace,
 /// so the reconnected sockets keep the new choice.
 fn apply(app: &App, person_id: &str, status: Status) {

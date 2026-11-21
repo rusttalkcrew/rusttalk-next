@@ -265,6 +265,7 @@ async fn serve(app: App) -> io::Result<()> {
         .route("/v1/auth/refresh", post(auth::refresh))
         .route("/v1/me", get(members::me))
         .route("/v1/me/status", put(presence::set))
+        .route("/v1/me/hide-offline", put(presence::set_hide_offline))
         .route("/v1/me/membership", delete(members::leave))
         .route("/v1/space", get(metadata::space))
         .route("/v1/space/icon", get(metadata::icon))

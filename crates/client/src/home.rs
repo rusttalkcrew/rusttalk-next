@@ -346,6 +346,9 @@ impl Home {
         self.dialog = None;
         self.server_settings = None;
         let server = self.servers.remove(index);
+        let mut settings = self.voice.audio.settings();
+        settings.hide_offline.left(&server.address);
+        self.voice.audio.set_settings(settings);
         for thread in self.threads.values_mut() {
             thread.forget(&server.address);
         }
@@ -845,6 +848,13 @@ impl Home {
                             server.send(Command::SetStatus(mine));
                         }
                         _ => {}
+                    }
+                    if let Some(theirs) = dir.hide_offline {
+                        let mut settings = self.voice.audio.settings();
+                        if let Some(on) = settings.hide_offline.reported(&address, theirs) {
+                            server.send(Command::SetHideOffline(on));
+                        }
+                        self.voice.audio.set_settings(settings);
                     }
                     server.dir = *dir;
                     self.load_dms(index);
@@ -2256,13 +2266,14 @@ fn member_face(
 
 fn member_list(ui: &mut Ui, home: &mut Home, index: usize) {
     let server = &home.servers[index];
+    // You always see yourself, also while invisible.
+    let listed: Vec<&Member> = (server.dir.members.iter())
+        .filter(|m| m.listed() || m.person == server.dir.me)
+        .collect();
     ui.add_space(6.0);
     ui.horizontal(|ui| {
         ui.add_space(ui::SPACE_XS);
-        ui::caption_label(
-            ui,
-            &t!("home.members_count", count = server.dir.members.len()),
-        );
+        ui::caption_label(ui, &t!("home.members_count", count = listed.len()));
     });
     let perms = server.dir.perms;
     let mut action = None;
@@ -2275,7 +2286,7 @@ fn member_list(ui: &mut Ui, home: &mut Home, index: usize) {
         .map(|role| (Some(role.id.as_str()), Vec::new()))
         .collect();
     groups.push((None, Vec::new()));
-    for member in &dir.members {
+    for member in listed {
         let heading = dir.heading_role(&member.roles).map(|role| role.id.as_str());
         if let Some((_, list)) = groups.iter_mut().find(|(id, _)| *id == heading) {
             list.push(member);
@@ -2517,6 +2528,11 @@ fn join(ui: &mut Ui, home: &mut Home) {
                     let label = preview.name.as_deref().unwrap_or(t!("home.new_server"));
                     home.servers
                         .push(new_server(address.clone(), label, commands));
+                    if !member {
+                        let mut settings = home.voice.audio.settings();
+                        settings.hide_offline.joined(&address);
+                        home.voice.audio.set_settings(settings);
+                    }
                     home.left.remove(&address);
                     home.join = Join::Joining(address);
                 } else if ui::secondary_large(ui, t!("common.cancel")).clicked() {
@@ -2615,6 +2631,23 @@ pub fn privacy_tab(ui: &mut Ui, home: &mut Home) {
     if changed {
         audio.set_settings(settings.clone());
         home.publish_settings();
+    }
+    ui::page_section(ui, t!("home.member_lists"));
+    let mut hide = settings.hide_offline.on;
+    let toggle = ui.add_enabled_ui(!home.servers.is_empty(), |ui| {
+        ui::toggle_row(
+            ui,
+            &mut hide,
+            t!("home.hide_offline"),
+            t!("home.hide_offline_help"),
+        )
+    });
+    if toggle.inner.changed() {
+        let servers = home.servers.iter().map(|server| &server.address);
+        settings.hide_offline.choose(hide, servers);
+        for server in &home.servers {
+            server.send(Command::SetHideOffline(hide));
+        }
     }
     ui::page_section(ui, t!("home.server_directory"));
     ui::banner(ui, "privacy-directory", t!("home.directory_help"));
@@ -2984,6 +3017,7 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
                 roles: Vec::new(),
                 avatar: None,
                 presence: Presence::Offline,
+                hide_offline: false,
             })
             .collect(),
         ..Directory::default()
