@@ -39,15 +39,29 @@ use wayland_protocols_wlr::virtual_pointer::v1::client::{
 };
 use xkbcommon::xkb;
 
+#[path = "hyprland_keys.rs"]
+mod keys;
 #[path = "hyprland_scope.rs"]
 mod scope;
 
 use crate::control::{Button, Input};
-use scope::Monitor;
+use scope::{Monitor, Scope, Verified};
 
 const IO_TIMEOUT: Duration = Duration::from_millis(100);
 const LOCAL_PAUSE: Duration = Duration::from_millis(500);
-const SNAPSHOT: &str = "[[BATCH]]j/monitors;j/locked;j/cursorpos;j/activewindow";
+const HELD_CHECK: Duration = Duration::from_millis(100);
+const POINTER_SNAPSHOT: &str = "[[BATCH]]j/monitors;j/locked;j/cursorpos";
+const BIND_SNAPSHOT: &str = "[[BATCH]]j/submap;j/binds";
+// j/layers omits interactivity on releases that expose it through Lua's layer objects.
+// This fixed read-only query joins by layer address and accepts no interpolated input.
+const KEY_SNAPSHOT: &str = concat!(
+    "[[BATCH]]j/monitors;j/locked;j/cursorpos;j/activewindow;j/layers;j/submap;j/binds;",
+    r#"repl return (function() local out = {} for _, layer in ipairs(hl.get_layers()) do "#,
+    r#"local mode = layer.keyboard_interactivity or layer.interactivity "#,
+    r#"if layer.mapped and type(mode) == "number" then "#,
+    r#"table.insert(out, string.format('"%s":%d', layer.address, mode)) end end "#,
+    r#"return "{" .. table.concat(out, ",") .. "}" end)()"#,
+);
 
 fn event_time() -> u32 {
     let now = clock_gettime(ClockId::Monotonic);
@@ -408,6 +422,7 @@ struct Devices {
     pointer: pointer::ZwlrVirtualPointerV1,
     keyboard: keyboard::ZwpVirtualKeyboardV1,
     xkb: xkb::State,
+    focus: Option<String>,
     keys: BTreeSet<u32>,
     buttons: BTreeSet<Button>,
 }
@@ -473,6 +488,7 @@ impl Devices {
             pointer,
             keyboard,
             xkb,
+            focus: None,
             keys: BTreeSet::new(),
             buttons: BTreeSet::new(),
         })
@@ -521,9 +537,6 @@ impl Devices {
                 let Some(code) = scope::evdev(key) else {
                     return;
                 };
-                if down && scope::blocked_combo(code, &self.keys) {
-                    return;
-                }
                 let changed = if down {
                     self.keys.insert(code)
                 } else {
@@ -569,24 +582,59 @@ impl Devices {
         );
     }
 
-    fn release(&mut self, time: u32) -> bool {
-        let held = !self.keys.is_empty() || !self.buttons.is_empty();
-        for key in std::mem::take(&mut self.keys) {
-            self.key(time, key, false);
-        }
-        for button in std::mem::take(&mut self.buttons) {
-            self.button(time, button, false);
-        }
-        held
+    fn held(&self) -> bool {
+        !self.keys.is_empty() || !self.buttons.is_empty()
+    }
+
+    fn valid(&self, verified: &Verified) -> bool {
+        self.focus
+            .as_ref()
+            .is_none_or(|focus| verified.focus.as_ref() == Some(focus))
+            && verified
+                .binds
+                .as_ref()
+                .is_some_and(|binds| binds.allows(&self.xkb, &self.keys, None))
     }
 }
 
 impl Drop for Devices {
     fn drop(&mut self) {
-        self.release(event_time());
+        let time = event_time();
+        // Clear the virtual modifier mask before cleanup so releases carry no remote chord.
+        if !self.keys.is_empty() {
+            self.keyboard.modifiers(
+                0,
+                0,
+                0,
+                self.xkb.serialize_layout(xkb::STATE_LAYOUT_EFFECTIVE),
+            );
+        }
+        for &key in &self.keys {
+            self.keyboard.key(time, key, 0);
+        }
+        for &button in &self.buttons {
+            self.button(time, button, false);
+        }
         self.keyboard.destroy();
         self.pointer.destroy();
     }
+}
+
+fn revalidate_held<T>(
+    devices: &mut Option<T>,
+    now: Instant,
+    next: &mut Instant,
+    held: impl FnOnce(&T) -> bool,
+    valid: impl FnOnce(&T) -> bool,
+) -> bool {
+    if now < *next || !devices.as_ref().is_some_and(held) {
+        return false;
+    }
+    *next = now + HELD_CHECK;
+    if devices.as_ref().is_some_and(valid) {
+        return false;
+    }
+    devices.take().is_some()
 }
 
 fn run(
@@ -617,6 +665,29 @@ fn run_input(
     let mut session = 0;
     let mut devices: Option<Devices> = None;
     let mut activity = wayland.state.activity;
+    let mut next_held_check = Instant::now();
+    let verify = |scope| {
+        let command = match scope {
+            Scope::Keyboard => KEY_SNAPSHOT,
+            _ => POINTER_SNAPSHOT,
+        };
+        match query(socket, server, command) {
+            Ok(snapshot) => {
+                let mut verified = scope::verify(&snapshot, monitor, scope)?;
+                if let Some(binds) = &mut verified.binds
+                    && binds.needs_display_keys()
+                {
+                    let text = query(socket, server, "binds").ok()?;
+                    binds.fill_display_keys(&text)?;
+                }
+                Some(verified)
+            }
+            Err(error) => {
+                tracing::debug!(%error, "Hyprland input check failed");
+                None
+            }
+        }
+    };
     let observe =
         |wayland: &mut Wayland, activity: &mut u64, paused: &mut Option<Instant>, own: u64| {
             wayland.sync()?;
@@ -647,51 +718,67 @@ fn run_input(
             }
             session = current;
             paused = Some(Instant::now());
+            if session % 2 == 1 {
+                let binds = query(socket, server, BIND_SNAPSHOT).ok().and_then(|reply| {
+                    keys::Binds::parse(&mut serde_json::Deserializer::from_str(&reply))
+                });
+                if binds.is_none() {
+                    tracing::debug!("Hyprland binds unavailable when control started");
+                }
+            }
         }
         if session % 2 == 0 {
             continue;
         }
-        let time = event_time();
         observe(wayland, &mut activity, &mut paused, 0)?;
         if wayland.state.idle_for_pause && paused.is_some_and(|at| at.elapsed() >= LOCAL_PAUSE) {
             paused = None;
         }
         if overflow.swap(false, SeqCst) || paused.is_some() {
-            if let Some(devices) = &mut devices
-                && devices.release(time)
-            {
+            if devices.as_ref().is_some_and(Devices::held) {
+                drop(devices.take());
                 observe(wayland, &mut activity, &mut paused, 1)?;
             }
             continue;
         }
+        if revalidate_held(
+            &mut devices,
+            Instant::now(),
+            &mut next_held_check,
+            Devices::held,
+            |devices| verify(Scope::Keyboard).is_some_and(|verified| devices.valid(&verified)),
+        ) {
+            tracing::debug!("Hyprland held input lost verified scope");
+            observe(wayland, &mut activity, &mut paused, 1)?;
+            continue;
+        }
+
         let Some(event) = event.filter(|event| event.session == session) else {
             continue;
         };
-        let verified = |input| match query(socket, server, SNAPSHOT) {
-            Ok(snapshot) => scope::allows(&snapshot, monitor, input),
-            Err(error) => {
-                tracing::debug!(%error, "Hyprland input check failed");
-                false
-            }
-        };
-        if event.received.elapsed() >= IO_TIMEOUT || !verified(&event.input) {
-            if let Some(devices) = &mut devices
-                && devices.release(time)
-            {
+        let time = event_time();
+        let scope = || Scope::from(&event.input);
+        let verified = (event.received.elapsed() < IO_TIMEOUT)
+            .then(|| verify(scope()))
+            .flatten();
+        let Some(mut verified) = verified else {
+            if devices.take().is_some() {
                 observe(wayland, &mut activity, &mut paused, 1)?;
             }
             continue;
-        }
+        };
         if devices.is_none() {
             if generation.load(SeqCst) != session {
                 continue;
             }
             devices = Some(Devices::open(wayland, socket, server)?);
             observe(wayland, &mut activity, &mut paused, 1)?;
-            // Device creation may have changed focus or consumed enough time to stale the event.
-            if !verified(&event.input) {
+            let Some(fresh) = verify(scope()) else {
+                drop(devices.take());
+                observe(wayland, &mut activity, &mut paused, 1)?;
                 continue;
-            }
+            };
+            verified = fresh;
         }
         observe(wayland, &mut activity, &mut paused, 0)?;
         if !wayland.state.idle
@@ -702,31 +789,116 @@ fn run_input(
             if matches!(
                 event.input,
                 Input::Key { down: false, .. } | Input::Button { down: false, .. }
-            ) && let Some(devices) = &mut devices
-                && devices.release(time)
+            ) && devices.take().is_some()
             {
                 observe(wayland, &mut activity, &mut paused, 1)?;
             }
             continue;
         }
-        let devices = devices.as_mut().expect("virtual input devices initialized");
+        let active = devices.as_mut().expect("virtual input devices initialized");
+        if let Input::Key { ref key, down } = event.input {
+            if !active.valid(&verified) {
+                drop(devices.take());
+                observe(wayland, &mut activity, &mut paused, 1)?;
+                continue;
+            }
+            let Some(code) = scope::evdev(key) else {
+                continue;
+            };
+            if (down && scope::blocked_combo(code, &active.keys))
+                || !verified.binds.as_ref().is_some_and(|binds| {
+                    binds.allows(&active.xkb, &active.keys, Some((code, down)))
+                })
+            {
+                if !down && active.keys.contains(&code) {
+                    drop(devices.take());
+                    observe(wayland, &mut activity, &mut paused, 1)?;
+                }
+                continue;
+            }
+            active.focus = verified.focus;
+        }
         if let Input::Button {
             down: true, x, y, ..
         } = event.input
         {
-            devices.motion(time, x, y);
+            active.motion(time, x, y);
             observe(wayland, &mut activity, &mut paused, 1)?;
-            let scoped = verified(&event.input);
+            let scoped = verify(scope()).is_some();
             observe(wayland, &mut activity, &mut paused, 0)?;
             if !scoped
                 || paused.is_some()
                 || generation.load(SeqCst) != session
                 || event.received.elapsed() >= IO_TIMEOUT
             {
+                drop(devices.take());
+                observe(wayland, &mut activity, &mut paused, 1)?;
                 continue;
             }
         }
-        devices.input(&event.input, time);
+        let was_held = active.held();
+        active.input(&event.input, time);
+        if !was_held && active.held() {
+            next_held_check = Instant::now() + HELD_CHECK;
+        }
+        if active.keys.is_empty() {
+            active.focus = None;
+        }
         observe(wayland, &mut activity, &mut paused, 1)?;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn idle_held_key_is_released_when_scope_changes() {
+        struct Pressed<'a>(&'a Cell<bool>);
+        impl Drop for Pressed<'_> {
+            fn drop(&mut self) {
+                self.0.set(false);
+            }
+        }
+
+        let monitors = include_str!("fixtures/monitors.json");
+        let target = Monitor::find(monitors, "HDMI-A-1").unwrap();
+        let snapshot = |locked| {
+            [
+                monitors,
+                locked,
+                include_str!("fixtures/cursorpos.json"),
+                include_str!("fixtures/activewindow.json"),
+                include_str!("fixtures/layers.json"),
+                r#""default""#,
+                include_str!("fixtures/binds.json"),
+            ]
+            .join("\n")
+        };
+        let check = |locked, _: &Pressed<'_>| {
+            scope::verify(&snapshot(locked), &target, Scope::Keyboard).is_some()
+        };
+        let down = Cell::new(true);
+        let mut device = Some(Pressed(&down));
+        let start = Instant::now();
+        let mut next = start;
+        assert!(!revalidate_held(
+            &mut device,
+            start,
+            &mut next,
+            |_| true,
+            |device| check(include_str!("fixtures/locked.json"), device)
+        ));
+        assert!(down.get());
+        assert!(revalidate_held(
+            &mut device,
+            start + HELD_CHECK,
+            &mut next,
+            |_| true,
+            |device| check(r#"{"locked":true}"#, device)
+        ));
+        assert!(!down.get());
+        assert!(device.is_none());
     }
 }

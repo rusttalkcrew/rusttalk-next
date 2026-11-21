@@ -1,10 +1,14 @@
 //! Interprets read-only Hyprland IPC snapshots independently of Wayland.
 
+use std::collections::BTreeMap;
+
 use serde::Deserialize;
+
+use super::keys::Binds;
 
 use crate::control::{Input, scan_code};
 
-#[derive(Deserialize, PartialEq)]
+#[derive(Clone, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct Monitor {
     id: i64,
@@ -22,26 +26,21 @@ pub(super) struct Monitor {
 
 impl Monitor {
     pub(super) fn find(monitors: &str, name: &str) -> anyhow::Result<Self> {
-        Self::from_list(serde_json::from_str(monitors)?, name)
+        let monitors: Vec<Self> = serde_json::from_str(monitors)?;
+        Self::select(&monitors, name)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("shared output is missing, overlapping or unavailable"))
     }
 
-    fn from_list(monitors: Vec<Self>, name: &str) -> anyhow::Result<Self> {
-        let mut matching = monitors.iter().enumerate().filter(|(_, m)| m.name == name);
-        let index = matching.next().and_then(|(index, monitor)| {
-            let available = monitor.usable()
+    fn select<'a>(monitors: &'a [Self], name: &str) -> Option<&'a Self> {
+        let mut matching = monitors.iter().filter(|m| m.name == name);
+        matching.next().filter(|monitor| {
+            monitor.usable()
                 && matching.next().is_none()
                 && !monitors
                     .iter()
-                    .any(|other| other.name != name && other.usable() && monitor.overlaps(other));
-            available.then_some(index)
-        });
-        let index = index.ok_or_else(|| {
-            anyhow::anyhow!("shared output is missing, overlapping or unavailable")
-        })?;
-        Ok(monitors
-            .into_iter()
-            .nth(index)
-            .expect("index into these monitors"))
+                    .any(|other| other.name != name && other.usable() && monitor.overlaps(other))
+        })
     }
 
     fn usable(&self) -> bool {
@@ -88,6 +87,7 @@ struct Cursor {
 
 #[derive(Deserialize)]
 struct Focus {
+    address: String,
     monitor: i64,
     mapped: bool,
     hidden: bool,
@@ -98,28 +98,122 @@ struct Lock {
     locked: bool,
 }
 
+#[derive(Deserialize)]
+struct Layer {
+    address: String,
+    #[serde(default, alias = "interactivity")]
+    keyboard_interactivity: Option<u8>,
+}
+
+struct OutputLayers {
+    levels: [Vec<Layer>; 4],
+}
+
+impl<'de> Deserialize<'de> for OutputLayers {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Levels {
+            #[serde(rename = "0")]
+            background: Vec<Layer>,
+            #[serde(rename = "1")]
+            bottom: Vec<Layer>,
+            #[serde(rename = "2")]
+            top: Vec<Layer>,
+            #[serde(rename = "3")]
+            overlay: Vec<Layer>,
+        }
+        #[derive(Deserialize)]
+        struct Reply {
+            levels: Levels,
+        }
+        let levels = Reply::deserialize(deserializer)?.levels;
+        Ok(Self {
+            levels: [levels.background, levels.bottom, levels.top, levels.overlay],
+        })
+    }
+}
+
+pub(super) enum Scope {
+    Move,
+    Pointer,
+    Keyboard,
+}
+
+pub(super) struct Verified {
+    pub focus: Option<String>,
+    pub binds: Option<Binds>,
+}
+
 /// A missing or changed output, malformed snapshot or locked desktop blocks input.
-pub(super) fn allows(snapshot: &str, target: &Monitor, input: &Input) -> bool {
-    // The four batch results are distinct JSON values with arbitrary whitespace.
+pub(super) fn verify(snapshot: &str, target: &Monitor, scope: Scope) -> Option<Verified> {
+    // The batch results are distinct JSON values with arbitrary whitespace.
     let mut fields = serde_json::Deserializer::from_str(snapshot);
-    let monitor = Vec::<Monitor>::deserialize(&mut fields)
-        .ok()
-        .and_then(|list| Monitor::from_list(list, &target.name).ok());
-    let lock = Lock::deserialize(&mut fields);
-    if monitor.as_ref() != Some(target) || !matches!(lock, Ok(Lock { locked: false })) {
-        return false;
+    let monitors = Vec::<Monitor>::deserialize(&mut fields).ok()?;
+    let monitor = Monitor::select(&monitors, &target.name)?;
+    if monitor != target || Lock::deserialize(&mut fields).ok()?.locked {
+        return None;
     }
-    if matches!(input, Input::Move { .. }) {
-        return true;
+    let mut verified = Verified {
+        focus: None,
+        binds: None,
+    };
+    if matches!(scope, Scope::Move) {
+        return Some(verified);
     }
-    if !Cursor::deserialize(&mut fields).is_ok_and(|cursor| target.contains(cursor)) {
-        return false;
+    if !target.contains(Cursor::deserialize(&mut fields).ok()?) {
+        return None;
     }
-    if matches!(input, Input::Key { .. }) {
-        return Focus::deserialize(&mut fields)
-            .is_ok_and(|focus| focus.mapped && !focus.hidden && focus.monitor == target.id);
+    if !matches!(scope, Scope::Keyboard) {
+        return Some(verified);
     }
-    true
+    let focus = Focus::deserialize(&mut fields).ok()?;
+    if !focus.mapped
+        || focus.hidden
+        || focus.monitor != target.id
+        || focus
+            .address
+            .strip_prefix("0x")
+            .and_then(|address| u64::from_str_radix(address, 16).ok())
+            .is_none_or(|address| address == 0)
+    {
+        return None;
+    }
+
+    // activewindow can stay set while a layer surface owns keyboard focus.
+    let outputs = BTreeMap::<String, OutputLayers>::deserialize(&mut fields).ok()?;
+    let binds = Binds::parse(&mut fields)?;
+    let modes = BTreeMap::<String, u8>::deserialize(&mut fields).unwrap_or_default();
+    if monitors
+        .iter()
+        .any(|monitor| !outputs.contains_key(&monitor.name))
+        || outputs.into_iter().any(|(name, output)| {
+            output.levels.iter().enumerate().any(|(level, layers)| {
+                (name != target.name || level >= 2)
+                    && layers.iter().any(|layer| {
+                        layer
+                            .keyboard_interactivity
+                            .or_else(|| modes.get(&layer.address).copied())
+                            != Some(0)
+                    })
+            })
+        })
+    {
+        return None;
+    }
+    verified.focus = Some(focus.address);
+    verified.binds = Some(binds);
+    Some(verified)
+}
+
+impl From<&Input> for Scope {
+    fn from(input: &Input) -> Self {
+        match input {
+            Input::Move { .. } => Self::Move,
+            Input::Key { .. } => Self::Keyboard,
+            _ => Self::Pointer,
+        }
+    }
 }
 
 /// Set 1 and evdev match for these ordinary keys. Extended keys use evdev codes.
@@ -159,6 +253,8 @@ mod tests {
     const CURSOR: &str = include_str!("fixtures/cursorpos.json");
     const FOCUS: &str = include_str!("fixtures/activewindow.json");
     const LOCK: &str = include_str!("fixtures/locked.json");
+    const LAYERS: &str = include_str!("fixtures/layers.json");
+    const BINDS: &str = include_str!("fixtures/binds.json");
 
     #[test]
     fn only_targeted_events_pass() {
@@ -176,8 +272,9 @@ mod tests {
         };
         let moved = Input::Move { x: 0.5, y: 0.5 };
         let check = |monitors: &str, lock: &str, cursor: &str, focus: &str, input: &Input| {
-            let snapshot = [monitors, lock, cursor, focus].join("\n\n\n");
-            allows(&snapshot, &monitor, input)
+            let snapshot =
+                [monitors, lock, cursor, focus, LAYERS, r#""default""#, BINDS].join("\n\n\n");
+            verify(&snapshot, &monitor, input.into()).is_some()
         };
         for event in [&click, &scroll, &key, &moved] {
             assert!(check(MONITORS, LOCK, CURSOR, FOCUS, event));
@@ -204,6 +301,35 @@ mod tests {
             &FOCUS.replace("\"monitor\": 1", "\"monitor\": 2"),
             &key
         ));
+    }
+
+    #[test]
+    fn regular_window_focus_does_not_override_interactive_layers() {
+        let monitor = Monitor::find(MONITORS, "HDMI-A-1").unwrap();
+        let check = |layers: &str, modes: &str| {
+            let snapshot = [
+                MONITORS,
+                LOCK,
+                CURSOR,
+                FOCUS,
+                layers,
+                r#""default""#,
+                BINDS,
+                modes,
+            ]
+            .join("\n");
+            verify(&snapshot, &monitor, Scope::Keyboard).is_some()
+        };
+        for (output, level) in [("DP-1", "0"), ("HDMI-A-1", "2"), ("HDMI-A-1", "3")] {
+            let mut layers: serde_json::Value = serde_json::from_str(LAYERS).unwrap();
+            layers[output]["levels"][level] = serde_json::json!([{"address":"0xa123"}]);
+            let layers = layers.to_string();
+            assert!(!check(&layers, "unavailable"));
+            assert!(!check(&layers, r#"{"0xa123":1}"#));
+            assert!(!check(&layers, r#"{"0xa123":2}"#));
+            assert!(check(&layers, r#"{"0xa123":0}"#));
+        }
+        assert!(!check("{}", "{}"));
     }
 
     #[test]

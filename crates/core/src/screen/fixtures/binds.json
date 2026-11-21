@@ -1,0 +1,5 @@
+[
+  {"modmask": 5, "key": "E", "keycode": 0, "submap": "", "submap_universal": "0", "catch_all": false, "ignore_mods": false, "dispatcher": "exit"},
+  {"modmask": 5, "key": "", "keycode": 27, "submap": "resize", "submap_universal": "0", "catch_all": false, "ignore_mods": false},
+  {"modmask": 8, "key": "b", "keycode": 0, "submap": "", "submap_universal": "1", "catch_all": false}
+]
