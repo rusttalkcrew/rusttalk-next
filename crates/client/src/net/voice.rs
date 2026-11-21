@@ -832,8 +832,8 @@ pub(super) async fn on_voice(
                     live.nameless.insert(sid.to_string(), identity);
                 }
                 if let Some(name) = live.room.app_audio_name(&track) {
+                    app = Some(name.clone());
                     live.apps.insert(sid.clone(), name);
-                    app = Some(sid.clone());
                 }
             }
             ctx.audio.add_track(

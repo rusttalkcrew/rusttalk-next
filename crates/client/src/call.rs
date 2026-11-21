@@ -16,7 +16,7 @@ use eframe::egui::{
 use rusttalk_core::client::voice::VoiceStatus;
 
 use crate::{
-    audio::{self, Audio, Settings, StreamId},
+    audio::{self, Audio, Settings},
     camera::{Camera, Change},
     denoise, files,
     home::{
@@ -43,6 +43,7 @@ pub const MAX_LIVE_FILE: u64 = rusttalk_core::messages::MAX_LIVE_FILE_SIZE;
 /// How long a live offer can be accepted.
 const OFFER_SECONDS: i64 = 10 * 60;
 
+pub mod mixer;
 mod overlay;
 mod panel;
 pub mod remote;
@@ -493,18 +494,22 @@ pub fn room_list(ui: &mut Ui, home: &Home, server: &Server, channel: &Id) -> Opt
             pick = Some((peer.person, picked));
         }
         let listening = peer.person != server.dir.me && home.voice.in_call(server, channel);
-        for (sid, app) in &peer.apps {
-            let stream = (peer.person, Some(sid.clone()));
+        for shared in &peer.apps {
+            let app = &shared.1;
+            let stream = (peer.person, Some(app.clone()));
             let row = ui.horizontal(|ui| {
                 ui.add_space(52.0);
                 ui.label(RichText::new(format!("🎵 {app}")).size(ui::TEXT_SMALL));
-                if listening && home.voice.audio.volume(&stream).1 {
+                if listening && home.voice.audio.stream_muted(&stream) {
                     ui.label(ui::caption(t!("call.muted")));
                 }
             });
             if listening {
                 let row = row.response.interact(Sense::click());
-                ui::context_menu(&row, |m| stream_menu(m, &home.voice.audio, &stream));
+                let apps = std::slice::from_ref(shared);
+                ui::context_menu(&row, |m| {
+                    mixer::show(m, &home.voice.audio, peer.person, false, apps);
+                });
             }
         }
     }
@@ -616,37 +621,6 @@ fn ring(ui: &Ui, rect: egui::Rect) {
         rect.width() / 2.0 + 2.0,
         Stroke::new(2.0, ui::colors(ui).success),
     );
-}
-
-/// Volume and mute for a person's voice or one app they share, in its menu.
-pub fn stream_menu(m: &mut ui::Menu, audio: &Audio, stream: &StreamId) {
-    let (mut volume, mut muted) = audio.volume(stream);
-    let before = (volume, muted);
-    m.caption(t!("call.volume"));
-    m.ui().horizontal(|ui| {
-        ui.add_space(ui::SPACE_S);
-        ui.spacing_mut().slider_width = ui.available_width() - 64.0;
-        volume_slider(ui, &mut volume);
-    });
-    if m.add(ui::Item::new("🔇", t!("call.mute")).checked(muted))
-        .clicked()
-    {
-        muted = !muted;
-    }
-    if (volume, muted) != before {
-        audio.set_volume(stream.clone(), volume, muted);
-    }
-}
-
-fn volume_slider(ui: &mut Ui, volume: &mut f32) -> egui::Response {
-    ui.add(
-        Slider::new(volume, 0.0..=2.0)
-            .custom_formatter(|value, _| format!("{:.0}%", value * 100.0))
-            .custom_parser(|text| {
-                let percent: f64 = text.trim().trim_end_matches('%').parse().ok()?;
-                Some(percent / 100.0)
-            }),
-    )
 }
 
 /// Each file offered in the call with what can be done with it.
@@ -1086,6 +1060,7 @@ pub fn settings_tab(ui: &mut Ui, voice: &mut Voice) {
     if let Some(problem) = audio.problem() {
         ui::error_text(ui, Some(&problem));
     }
+    mixer::masters(ui, &mut s);
     ui::page_section(ui, t!("call.input_mode"));
     ui.horizontal_wrapped(|ui| {
         let cards = [

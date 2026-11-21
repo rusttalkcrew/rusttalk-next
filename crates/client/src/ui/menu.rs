@@ -28,6 +28,8 @@ const CHECK_BOX: f32 = 16.0;
 /// The inside of a menu; add items to it.
 pub struct Menu<'u> {
     ui: &'u mut Ui,
+    /// Set by `keep_open`.
+    controls: bool,
 }
 
 enum Leading<'a> {
@@ -108,7 +110,18 @@ impl Menu<'_> {
     /// Add a row; returns its response, clicked when picked.
     pub fn add(&mut self, item: Item) -> Response {
         let ui = &mut *self.ui;
-        ui.add_enabled_ui(item.enabled, |ui| row(ui, &item)).inner
+        let response = ui.add_enabled_ui(item.enabled, |ui| row(ui, &item)).inner;
+        // Also when `keep_open` lets other clicks through.
+        if response.clicked() {
+            ui.close();
+        }
+        response
+    }
+
+    /// Stay open while the controls added through `ui`, like sliders and mute
+    /// buttons, are clicked; items still close the menu.
+    pub fn keep_open(&mut self) {
+        self.controls = true;
     }
 
     pub fn item(&mut self, icon: &str, label: &str) -> Response {
@@ -135,7 +148,10 @@ impl Menu<'_> {
         SubMenu::new()
             .show(self.ui, &response, |ui| {
                 ui.set_width(content_width(MENU_WIDTH));
-                add(&mut Menu { ui })
+                add(&mut Menu {
+                    ui,
+                    controls: false,
+                })
             })
             .map(|inner| inner.inner)
     }
@@ -339,12 +355,27 @@ fn one_line(ui: &Ui, text: &str, font: FontId, color: Color32, width: f32) -> Ar
 }
 
 fn show<R>(popup: Popup, width: f32, add: impl FnOnce(&mut Menu) -> R) -> Option<R> {
+    // What the menu held last frame: a click lands after it was shown.
+    let keep = popup.get_id().with("keep open");
+    let ctx = popup.ctx().clone();
+    let popup = if ctx.data(|data| data.get_temp(keep)).unwrap_or(false) {
+        popup.close_behavior(PopupCloseBehavior::CloseOnClickOutside)
+    } else {
+        popup
+    };
     popup
         .width(width)
         .show(|ui| {
             ui.set_width(content_width(width));
             ui.spacing_mut().item_spacing.y = 2.0;
-            add(&mut Menu { ui })
+            let mut menu = Menu {
+                ui,
+                controls: false,
+            };
+            let inner = add(&mut menu);
+            let controls = menu.controls;
+            ctx.data_mut(|data| data.insert_temp(keep, controls));
+            inner
         })
         .map(|inner| inner.inner)
 }

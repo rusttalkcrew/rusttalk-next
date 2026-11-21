@@ -30,15 +30,12 @@ use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
 };
 use futures_util::StreamExt;
-use livekit::{
-    prelude::TrackSid,
-    webrtc::{
-        audio_frame::AudioFrame,
-        audio_source::{AudioSourceOptions, native::NativeAudioSource},
-        audio_stream::native::NativeAudioStream,
-        native::{apm::AudioProcessingModule, audio_resampler::AudioResampler},
-        prelude::RtcAudioTrack,
-    },
+use livekit::webrtc::{
+    audio_frame::AudioFrame,
+    audio_source::{AudioSourceOptions, native::NativeAudioSource},
+    audio_stream::native::NativeAudioStream,
+    native::{apm::AudioProcessingModule, audio_resampler::AudioResampler},
+    prelude::RtcAudioTrack,
 };
 use rusttalk_core::client::save_json;
 use serde::{Deserialize, Serialize};
@@ -158,6 +155,8 @@ pub struct Settings {
     pub create_link_previews: Option<bool>,
     /// Global shortcuts (see `hotkeys`). This device only: keyboards and desktops differ.
     pub hotkeys: crate::hotkeys::Bindings,
+    /// Volumes and mutes per person and shared app, and the masters; this device only.
+    pub mix: crate::call::mixer::Mix,
 }
 
 impl Settings {
@@ -225,6 +224,7 @@ impl Default for Settings {
             link_previews: Default::default(),
             create_link_previews: None,
             hotkeys: Default::default(),
+            mix: Default::default(),
         }
     }
 }
@@ -318,8 +318,8 @@ struct Shared {
     start: Instant,
 }
 
-/// A person's voice (`None`) or one app they share, by its track.
-pub type StreamId = (Id, Option<TrackSid>);
+/// A person's voice (`None`) or one app they share, by its name.
+pub type StreamId = (Id, Option<String>);
 
 #[derive(Default)]
 struct Mixer {
@@ -327,13 +327,13 @@ struct Mixer {
     serial: u64,
     cues: VecDeque<i16>,
     cue_until: Option<Instant>,
-    /// Per-stream volume (1.0 is normal) and mute.
-    volumes: HashMap<StreamId, (f32, bool)>,
 }
 
 struct Track {
     serial: u64,
     stream: StreamId,
+    /// Its stream's volume from the mix; 0 when muted.
+    gain: f32,
     queue: VecDeque<i16>,
     primed: bool,
     loud: u64,
@@ -484,6 +484,11 @@ impl Audio {
             let mut mixer = lock(&self.shared().mixer);
             mixer.cues.clear();
             mixer.cue_until = None;
+        }
+        if current.mix != settings.mix {
+            for track in lock(&self.shared().mixer).tracks.values_mut() {
+                track.gain = settings.mix.gain(&track.stream);
+            }
         }
         *current = settings;
         drop(current);
@@ -658,15 +663,19 @@ impl Audio {
             .any(|track| track.stream == (*person, None) && now < track.loud + SPEAKING_MS)
     }
 
-    pub fn volume(&self, stream: &StreamId) -> (f32, bool) {
-        let mixer = lock(&self.shared().mixer);
-        mixer.volumes.get(stream).copied().unwrap_or((1.0, false))
+    /// Muted on this device, in the mixer.
+    pub fn stream_muted(&self, stream: &StreamId) -> bool {
+        lock(&self.shared().settings).mix.level(stream).muted
     }
 
-    pub fn set_volume(&self, stream: StreamId, volume: f32, muted: bool) {
-        lock(&self.shared().mixer)
-            .volumes
-            .insert(stream, (volume, muted));
+    pub fn mix(&self) -> crate::call::mixer::Mix {
+        lock(&self.shared().settings).mix.clone()
+    }
+
+    pub fn set_mix(&self, mix: crate::call::mixer::Mix) {
+        let mut settings = self.settings();
+        settings.mix = mix;
+        self.set_settings(settings);
     }
 
     /// Start or stop keeping frame levels for calibration; stopping returns them.
@@ -677,6 +686,8 @@ impl Audio {
     /// Play a remote audio track until it ends or is removed.
     pub fn add_track(&self, sid: String, stream: StreamId, track: RtcAudioTrack) {
         let serial = {
+            // Settings before the mixer, as everywhere, so a new mix can't slip between.
+            let settings = lock(&self.shared().settings);
             let mut mixer = lock(&self.shared().mixer);
             mixer.serial += 1;
             let serial = mixer.serial;
@@ -685,6 +696,7 @@ impl Audio {
                 sid.clone(),
                 Track {
                     serial,
+                    gain: settings.mix.gain(&stream),
                     stream,
                     queue: VecDeque::with_capacity(CAP + FRAME),
                     primed: false,
@@ -730,14 +742,16 @@ impl Audio {
     /// Whose a playing track is, once known: a device that joined while it couldn't be
     /// named plays as nobody until then, out of reach of their volume and mute.
     pub fn set_person(&self, sid: &str, person: Id) {
-        lock(&self.shared().mixer).set_person(sid, person);
+        let settings = lock(&self.shared().settings);
+        lock(&self.shared().mixer).set_person(sid, person, &settings.mix);
     }
 }
 
 impl Mixer {
-    fn set_person(&mut self, sid: &str, person: Id) {
+    fn set_person(&mut self, sid: &str, person: Id, mix: &crate::call::mixer::Mix) {
         if let Some(track) = self.tracks.get_mut(sid) {
             track.stream.0 = person;
+            track.gain = mix.gain(&track.stream);
         }
     }
 }
@@ -1193,7 +1207,6 @@ fn mix_tracks(mixer: &mut Mixer, deafened: bool) -> [i16; FRAME] {
     let mut sum = [0f32; FRAME];
     let Mixer {
         tracks,
-        volumes,
         cues,
         cue_until,
         ..
@@ -1205,8 +1218,7 @@ fn mix_tracks(mixer: &mut Mixer, deafened: bool) -> [i16; FRAME] {
         *slot = f32::from(sample);
     }
     for track in tracks.values_mut() {
-        let (volume, muted) = volumes.get(&track.stream).copied().unwrap_or((1.0, false));
-        let gain = if deafened || muted { 0.0 } else { volume };
+        let gain = if deafened { 0.0 } else { track.gain };
         track.primed |= track.queue.len() >= PRIME;
         if !track.primed {
             continue;
@@ -1600,21 +1612,29 @@ mod tests {
         let mut mixer = Mixer::default();
         let track = |stream| Track {
             serial: 1,
+            gain: 1.0,
             stream,
             queue: VecDeque::new(),
             primed: false,
             loud: 0,
         };
-        let app: TrackSid = "TR_app".to_owned().try_into().unwrap();
+        let app = "Spotify".to_owned();
         mixer.tracks.insert("voice".into(), track(([0; 32], None)));
         mixer
             .tracks
             .insert("app".into(), track(([0; 32], Some(app.clone()))));
-        mixer.set_person("voice", [7; 32]);
-        mixer.set_person("app", [7; 32]);
-        mixer.set_person("gone", [7; 32]);
+        // Once known, the track plays at that person's volume.
+        let mut mix = crate::call::mixer::Mix::default();
+        let mut ann = mix.person(&[7; 32]);
+        ann.voice.muted = true;
+        mix.set_person(&[7; 32], ann);
+        mixer.set_person("voice", [7; 32], &mix);
+        mixer.set_person("app", [7; 32], &mix);
+        mixer.set_person("gone", [7; 32], &mix);
         assert_eq!(mixer.tracks["voice"].stream, ([7; 32], None));
         assert_eq!(mixer.tracks["app"].stream, ([7; 32], Some(app)));
+        assert_eq!(mixer.tracks["voice"].gain, 0.0);
+        assert_eq!(mixer.tracks["app"].gain, 1.0);
     }
 
     /// Feeds `seconds` of 10 ms frames at `db` and returns how many opened the gate.
@@ -1897,10 +1917,13 @@ mod tests {
         let loud: StreamId = ([1; 32], None);
         let quiet: StreamId = ([2; 32], None);
         let mut mixer = Mixer::default();
-        mixer.volumes.insert(loud.clone(), (1.0, false));
-        mixer.volumes.insert(quiet.clone(), (0.25, false));
-        let track = |stream, sample| Track {
+        let mut mix = crate::call::mixer::Mix::default();
+        let mut person = mix.person(&quiet.0);
+        person.voice.volume = 0.25;
+        mix.set_person(&quiet.0, person);
+        let track = |stream: StreamId, sample| Track {
             serial: 0,
+            gain: mix.gain(&stream),
             stream,
             queue: VecDeque::from(vec![sample; PRIME]),
             primed: false,
