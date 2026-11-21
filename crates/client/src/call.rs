@@ -485,7 +485,8 @@ pub fn room_list(ui: &mut Ui, home: &Home, server: &Server, channel: &Id) -> Opt
             (row.response.interact(Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand);
         row.widget_info(|| WidgetInfo::labeled(Role::Button, true, &name));
         if !peer.unknown
-            && let Some(picked) = person::interact(ui, &row, &Person::of(home, server, peer.person))
+            && let Some(picked) =
+                person::interact(ui, &row, &Person::of(home, server, peer.person), false)
         {
             pick = Some((peer.person, picked));
         }

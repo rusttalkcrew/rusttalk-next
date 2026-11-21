@@ -755,7 +755,7 @@ fn tile(
         let picked = if state.spotlight && !state.big {
             ui::context_menu(&response, |m| target.menu(m)).flatten()
         } else {
-            person::interact(ui, &response, &target)
+            person::interact(ui, &response, &target, true)
         };
         if let Some(picked) = picked {
             acts.push(Act::Person(person, picked));

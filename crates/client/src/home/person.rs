@@ -16,6 +16,9 @@ use crate::{
     ui,
 };
 
+/// The owner's role rank on the server; nobody outranks it.
+const OWNER_RANK: i64 = 1000;
+
 /// What was picked on someone's card or in their menu.
 pub enum Pick {
     Message,
@@ -90,7 +93,7 @@ impl<'a> Person<'a> {
                 }
             }
         }
-        if !other || !known {
+        if !other || !self.outranked() {
             return pick;
         }
         let perms = self.server.dir.perms;
@@ -108,6 +111,24 @@ impl<'a> Person<'a> {
             pick = pick.or(choice.map(Pick::Moderate));
         }
         pick
+    }
+
+    /// Whether you may moderate them, as the server decides it (`Authority::outrank`):
+    /// their highest role ranks strictly below yours and below the owner's, which
+    /// nobody outranks. The admin role counts by its rank only.
+    fn outranked(&self) -> bool {
+        let Some(member) = self.member() else {
+            return false;
+        };
+        let dir = &self.server.dir;
+        let rank = (dir.roles.iter())
+            .filter(|role| member.roles.contains(&role.id))
+            .map(|role| role.rank)
+            .max()
+            .unwrap_or(-1);
+        !member.roles.iter().any(|role| role == "owner")
+            && rank < OWNER_RANK
+            && rank < dir.perms.rank
     }
 
     fn talk_items(&self, m: &mut ui::Menu) -> Option<Pick> {
@@ -199,10 +220,11 @@ fn voice_channel(server: &Server, person: &Id) -> Option<Id> {
         .map(|(channel, _)| *channel)
 }
 
-/// The card on a left click on `response` and the menu on a right click.
-pub fn interact(ui: &Ui, response: &Response, person: &Person) -> Option<Pick> {
+/// The card on a left click on `response` (opening where it was clicked with
+/// `at_click`, for big tiles) and the menu on a right click.
+pub fn interact(ui: &Ui, response: &Response, person: &Person, at_click: bool) -> Option<Pick> {
     let name = person.server.member_name(&person.person);
-    let card = ui::card_popup(ui, response, &name, |ui| person.card(ui)).flatten();
+    let card = ui::card_popup(ui, response, &name, at_click, |ui| person.card(ui)).flatten();
     let menu = ui::context_menu(response, |m| person.menu(m)).flatten();
     card.or(menu)
 }
@@ -233,7 +255,7 @@ mod tests {
     use rusttalk_core::client::voice::VoiceStatus;
 
     use super::*;
-    use crate::server::{Peer, Perms, Status};
+    use crate::server::{Peer, Perms, Role, Status};
 
     const ME: Id = [1; 32];
     const ANN: Id = [7; 32];
@@ -246,6 +268,7 @@ mod tests {
         in_voice: bool,
         /// You are in that call too.
         in_call: bool,
+        ann_roles: &'static [&'static str],
     }
 
     fn member(person: Id, name: &str) -> Member {
@@ -303,7 +326,20 @@ mod tests {
         server.status = Status::Online;
         server.dir.me = ME;
         server.dir.perms = case.perms;
-        server.dir.members = vec![member(ME, "Me"), member(ANN, "Ann")];
+        let role = |id: &str, rank| Role {
+            id: id.into(),
+            name: id.into(),
+            name_known: true,
+            rank,
+            permissions: Vec::new(),
+            custom: false,
+            color: None,
+            separate: false,
+        };
+        server.dir.roles = vec![role("owner", 1000), role("admin", 900), role("mod", 500)];
+        let mut ann = member(ANN, "Ann");
+        ann.roles = case.ann_roles.iter().map(|id| id.to_string()).collect();
+        server.dir.members = vec![member(ME, "Me"), ann];
         if case.in_voice {
             let peer = Peer {
                 person: ANN,
@@ -360,6 +396,7 @@ mod tests {
             person: ME,
             in_voice: false,
             in_call: false,
+            ann_roles: &[],
         });
         assert!(shown(&harness, t!("common.details")));
         assert!(shown(&harness, t!("settings.edit_profile")));
@@ -376,6 +413,7 @@ mod tests {
             person: ANN,
             in_voice: true,
             in_call: false,
+            ann_roles: &[],
         });
         for label in [
             t!("home.message"),
@@ -398,6 +436,7 @@ mod tests {
             person: ANN,
             in_voice: true,
             in_call: false,
+            ann_roles: &[],
         });
         assert_eq!(moderation_shown(&in_voice), [true; 5]);
         assert!(shown(&in_voice, t!("home.message")));
@@ -409,6 +448,7 @@ mod tests {
             person: ANN,
             in_voice: false,
             in_call: false,
+            ann_roles: &[],
         });
         assert_eq!(
             moderation_shown(&elsewhere),
@@ -423,9 +463,49 @@ mod tests {
             person: ANN,
             in_voice: true,
             in_call: true,
+            ann_roles: &[],
         });
         assert!(shown(&harness, t!("call.mute")));
         assert!(shown(&harness, t!("home.message")));
         assert_eq!(moderation_shown(&harness), [false; 5]);
+    }
+
+    /// Moderation shown against Ann with `roles`, by someone of `rank`.
+    fn moderation_against(rank: i64, roles: &'static [&'static str]) -> Vec<bool> {
+        let harness = menu(Case {
+            perms: Perms {
+                rank,
+                ..moderator()
+            },
+            person: ANN,
+            in_voice: true,
+            in_call: false,
+            ann_roles: roles,
+        });
+        moderation_shown(&harness)
+    }
+
+    #[test]
+    fn moderation_needs_a_strictly_higher_rank_and_never_reaches_the_owner() {
+        // Lower: an admin over a moderator, the owner over an admin.
+        assert_eq!(moderation_against(900, &["mod"]), [true; 5]);
+        assert_eq!(moderation_against(1000, &["admin", "mod"]), [true; 5]);
+        // Equal and higher.
+        assert_eq!(moderation_against(500, &["mod"]), [false; 5]);
+        assert_eq!(moderation_against(500, &["admin"]), [false; 5]);
+        // The owner, even for another owner rank.
+        assert_eq!(moderation_against(1000, &["owner"]), [false; 5]);
+        // Message and Poke stay for everyone.
+        let harness = menu(Case {
+            perms: Perms {
+                rank: 500,
+                ..moderator()
+            },
+            person: ANN,
+            in_voice: true,
+            in_call: false,
+            ann_roles: &["owner"],
+        });
+        assert!(harness.query_by_label(t!("home.message")).is_some());
     }
 }

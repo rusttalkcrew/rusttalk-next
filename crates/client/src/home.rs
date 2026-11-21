@@ -2391,7 +2391,7 @@ fn member_list(ui: &mut Ui, home: &mut Home, index: usize) {
                     ui.add(Label::new(text).truncate());
                 });
                 let target = person::Person::of(home, server, member.person);
-                if let Some(picked) = person::interact(ui, &row, &target) {
+                if let Some(picked) = person::interact(ui, &row, &target, false) {
                     pick = Some((member.person, picked));
                 }
             }
