@@ -761,7 +761,8 @@ Hyprland resolves keysym binds with a keymap built from the global
 options, which can differ from the seat keymap the virtual keyboard uses.
 RustTalk reads those options with `getoption`, builds the same keymap and
 blocks a key whose keysym under either keymap, or whose keycode, matches a
-bind. Keys are blocked if the options can't be read or compiled, or if
+bind. Like Hyprland, a key that resolves to a modifier keysym such as
+`Control_L` counts its own modifier bit when matching. Keys are blocked if the options can't be read or compiled, or if
 `input:kb_file` is set. Buttons match `mouse:272`-style triggers and scrolls
 match `mouse_up`, `mouse_down`, `mouse_left` and `mouse_right` in either
 direction, with the virtual keyboard's modifiers, including release, click
@@ -793,8 +794,13 @@ through the same idle protocol, so coincident local activity can be
 coalesced into a virtual event's notification. The pause and periodic checks
 reduce exposure, and release events still follow compositor routing.
 Compositor actions outside the reported binds may affect other outputs.
-Hyprland combines modifiers from all keyboards, so a physical modifier held
-without new local activity is not seen by these checks.
+Hyprland combines modifiers from all keyboards when matching binds, but its
+IPC reports only Caps Lock and Num Lock, not the modifiers held right now.
+RustTalk matches binds with the virtual keyboard's modifiers only. If the
+sharer holds a physical modifier such as Super for more than about 500 ms
+without other local input, a viewer's click, scroll or key can trigger the
+sharer's bind for that modifier, for example `SUPER + mouse:272` moving a
+window. This needs the sharer to hold the modifier themselves.
 
 The API gets the active roster from LiveKit's internal RoomService,
 cached for one second per room, and maps device identities to current
