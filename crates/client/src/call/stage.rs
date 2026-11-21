@@ -59,6 +59,17 @@ pub struct Stage {
     pub full: Option<Tile>,
 }
 
+impl Stage {
+    /// Stopping a screen also drops its big tile: a big screen is received on its
+    /// own (see `stage`), so keeping it big would start watching again at once.
+    fn stop_watching(&mut self) {
+        self.presenting = false;
+        if matches!(self.focus, Some(Tile::Screen(_))) {
+            self.focus = None;
+        }
+    }
+}
+
 /// Tiles of `count` in a grid as large as fits `area`, rows centred.
 pub fn grid(count: usize, area: Rect, gap: f32) -> Vec<Rect> {
     if count == 0 {
@@ -969,7 +980,7 @@ fn apply(home: &mut Home, acts: Vec<Act>) {
             Act::Full(tile) => stage.full = Some(tile),
             Act::Watch(screen) => watch(home, &screen),
             Act::StopWatching => {
-                stage.presenting = false;
+                stage.stop_watching();
                 stop_watching(home);
             }
             Act::ShowVideo(person, true) => {
@@ -1121,6 +1132,21 @@ mod tests {
                 .iter()
                 .all(|b| !a.shrink(0.01).intersects(b.shrink(0.01)))
         })
+    }
+
+    #[test]
+    fn stopping_a_screen_leaves_no_big_screen_to_receive() {
+        let mut stage = Stage {
+            focus: Some(Tile::Screen("s".into())),
+            ..Stage::default()
+        };
+        stage.stop_watching();
+        assert_eq!(stage.focus, None);
+        // A focused person stays focused.
+        stage.focus = Some(Tile::Person([0; 32]));
+        stage.presenting = true;
+        stage.stop_watching();
+        assert!(stage.focus.is_some() && !stage.presenting);
     }
 
     #[test]
