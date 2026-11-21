@@ -259,7 +259,7 @@ pub async fn data_token(
     Ok(Json(Token { token }))
 }
 
-/// Data rooms exist only for text channels and DMs. Readers may receive; only
+/// Every chat (text, voice or DM) has a data room. Readers may receive; only
 /// writers may send. Returns whether this person may publish data.
 async fn require_chat_read(
     db: &mut SqliteConnection,
@@ -268,9 +268,6 @@ async fn require_chat_read(
 ) -> ApiResult<bool> {
     decode::<32>(channel)?;
     let kind = messages::readable_kind(db, channel, person).await?;
-    if !matches!(kind.as_str(), "text" | "dm") {
-        return Err(ApiError::bad_request("not_a_chat_channel"));
-    }
     messages::can_write(db, channel, person, &kind).await
 }
 

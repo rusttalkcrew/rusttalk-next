@@ -18,7 +18,9 @@ const EDIT: &str = "W07 Turquoise Edited Message";
 const FORGED_EDIT: &str = "W07 Garnet Impostor Edit";
 const DELETE: &str = "W07 Pearl Author Deleted Message";
 const MOD_DELETE: &str = "W07 Amber Moderator Deleted Message";
-pub(super) const TEXTS: [&str; 8] = [
+const VOICE_A: &str = "W61 Jade Voice Chat from A";
+const VOICE_B: &str = "W61 Onyx Voice Chat from B";
+pub(super) const TEXTS: [&str; 10] = [
     TEXT_A,
     TEXT_B,
     DM_A,
@@ -27,6 +29,8 @@ pub(super) const TEXTS: [&str; 8] = [
     FORGED_EDIT,
     DELETE,
     MOD_DELETE,
+    VOICE_A,
+    VOICE_B,
 ];
 
 fn body(text: &str) -> MessageBody {
@@ -299,6 +303,24 @@ pub(super) async fn scenario(
         "missing moderator delete audit"
     );
     println!("W07 verified two-way text and DMs, paging, edits, replays and audited moderation");
+
+    // A voice channel has the same chat as a text channel, under its own channel key.
+    let category = a.create_category(b"W61 Voice chat").await?;
+    let voice = a
+        .create_channel(&category, "voice", b"W61 Lounge", b"")
+        .await?;
+    a.sync().await?;
+    receive_key(b, voice, 1).await?;
+    exchange(a, b, voice, [VOICE_A, VOICE_B]).await?;
+    // Later key checks expect only the first text channel, so remove this one.
+    a.request(
+        Method::DELETE,
+        &format!("/v1/channels/{}", encode(&voice.id)),
+    )
+    .send()
+    .await?
+    .error_for_status()?;
+    println!("W61 verified two-way chat, replies and paging in a voice channel");
     Ok((dm, b_message))
 }
 

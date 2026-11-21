@@ -163,7 +163,7 @@ errors may have an empty body. The API logs a request ID, status and reason.
 
 | Status | Codes |
 | --- | --- |
-| 400 | `invalid_json`, `invalid_encoding`, `invalid_query`, `invalid_forwarded_ip`, `invalid_revocation`, `invalid_invite_limits`, `invalid_role_rank`, `invalid_role_count`, `role_id_required`, `already_owner`, `unexpected_invite`, `invite_name_required`, `invalid_member_cap`, `invalid_certificate`, `invalid_metadata`, `invalid_envelope`, `invalid_channel_flags`, `invalid_order`, `invalid_dm_peer`, `not_a_chat_channel`, `not_a_voice_channel`, `invalid_message`, `invalid_file_body`, `invalid_file_acceptance`, `invalid_event_query`, `invalid_sync_blob`, `invalid_listing`, `invalid_listing_settings`, `invalid_index_url`, `invalid_index_tls_fingerprint` |
+| 400 | `invalid_json`, `invalid_encoding`, `invalid_query`, `invalid_forwarded_ip`, `invalid_revocation`, `invalid_invite_limits`, `invalid_role_rank`, `invalid_role_count`, `role_id_required`, `already_owner`, `unexpected_invite`, `invite_name_required`, `invalid_member_cap`, `invalid_certificate`, `invalid_metadata`, `invalid_envelope`, `invalid_channel_flags`, `invalid_order`, `invalid_dm_peer`, `not_a_voice_channel`, `invalid_message`, `invalid_file_body`, `invalid_file_acceptance`, `invalid_event_query`, `invalid_sync_blob`, `invalid_listing`, `invalid_listing_settings`, `invalid_index_url`, `invalid_index_tls_fingerprint` |
 | 401 | `invalid_challenge`, `invalid_certificate`, `invalid_device_signature`, `invalid_session`, `token_expired`, `invalid_livekit_webhook` |
 | 403 | `invite_required`, `invalid_invite`, `person_banned`, `ip_banned`, `device_revoked`, `device_certificate_required`, `permission_denied`, `role_hierarchy`, `cannot_grant_permission`, `built_in_role`, `owner_required`, `open_joining_disabled`, `scope_read_denied`, `recipient_read_denied`, `channel_read_denied`, `channel_write_denied`, `live_file_peer_not_in_room` |
 | 404 | `invite_not_found`, `member_not_found`, `ban_not_found`, `role_not_found`, `category_not_found`, `channel_not_found`, `message_not_found`, `message_device_not_found`, `file_not_found`, `avatar_not_found`, `icon_not_found` |
@@ -289,6 +289,9 @@ remain on their devices.
 ## Messages
 
 These routes require a bearer header and apply to text channels, voice channels and DMs.
+A voice channel's chat follows the same read and write flags, limits and events
+as a text channel. Its messages use the channel key epoch that call media keys
+also derive from; joining or leaving the call does not change the epoch.
 IDs are random 32-byte client-generated values. A page is newest first by
 insertion order. Pass the last record ID as `before` for the next page. If
 that cursor was pruned or deleted, the API returns `404 message_not_found`
@@ -512,8 +515,8 @@ receiver never derives a save path from it.
 The receiver chooses a destination and explicitly accepts an offer from a
 currently verified device. For a transfer outside a call, each participant
 uses `POST /v1/channels/{channel}/live-file/token/{nonce}` with a bearer token
-and an empty body. The route requires a text channel or DM the caller can read,
-otherwise `400 not_a_chat_channel` or `403 channel_read_denied`, and returns
+and an empty body. The route requires a text channel, voice channel or DM the
+caller can read, otherwise `403 channel_read_denied`, and returns
 `{token}`. DM participants can read and write their DM. The token allows
 joining for 60 seconds and is scoped to the `file-{channel}` LiveKit room.
 It allows subscribing, and publishing data only with write access, so a

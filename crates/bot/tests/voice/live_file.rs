@@ -212,13 +212,8 @@ pub(super) async fn data_only(
     )
     .await?;
 
-    // A voice channel has no data room, so voice permissions never reach one.
-    super::rejected(
-        data_token(voice).send().await?,
-        reqwest::StatusCode::BAD_REQUEST,
-        "not_a_chat_channel",
-    )
-    .await?;
+    // A voice channel's chat has its own data room, apart from the call.
+    data_token(voice).send().await?.error_for_status()?;
 
     // A reader without write may join to receive but never to send.
     super::set_flags(a, &encode(&text.id), "member", 1).await?;
