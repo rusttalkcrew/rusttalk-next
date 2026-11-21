@@ -30,9 +30,10 @@ pub enum Permission {
     DeleteMessages = 32,
     ManageChannels = 64,
     ManageServer = 128,
+    MentionEveryone = 256,
 }
 
-const PERMISSIONS: [Permission; 8] = [
+const PERMISSIONS: [Permission; 9] = [
     Permission::Invite,
     Permission::Kick,
     Permission::Ban,
@@ -41,6 +42,7 @@ const PERMISSIONS: [Permission; 8] = [
     Permission::DeleteMessages,
     Permission::ManageChannels,
     Permission::ManageServer,
+    Permission::MentionEveryone,
 ];
 
 #[derive(FromRow)]
@@ -584,6 +586,12 @@ mod tests {
             (3, "low", &[Permission::Invite][..], "permission_denied"),
             // Granting a permission you don't have.
             (2, "low", &[Permission::Ban], "cannot_grant_permission"),
+            (
+                2,
+                "low",
+                &[Permission::MentionEveryone],
+                "cannot_grant_permission",
+            ),
             // Taking away a permission you don't have.
             (2, "kickers", &[], "cannot_grant_permission"),
             // A role at or above your own.
@@ -600,14 +608,32 @@ mod tests {
 
         let saved = edit_as(2, "low", &[Permission::Invite, Permission::ManageRoles]).await;
         assert_eq!(saved.unwrap(), StatusCode::NO_CONTENT);
-        let saved = edit_as(1, "kickers", &[Permission::ManageServer]).await;
+        let saved = edit_as(
+            1,
+            "kickers",
+            &[Permission::ManageServer, Permission::MentionEveryone],
+        )
+        .await;
         assert_eq!(saved.unwrap(), StatusCode::NO_CONTENT);
         let stored: Vec<(String, i64)> = query_as(
             "SELECT id, permissions FROM roles WHERE id IN ('low', 'kickers') ORDER BY id",
         )
         .fetch_all(&app.db)
         .await?;
-        assert_eq!(stored, [("kickers".into(), 128), ("low".into(), 9)]);
+        assert_eq!(stored, [("kickers".into(), 128 | 256), ("low".into(), 9)]);
+        let Json(listed) = list(State(app.clone()), as_person(3)).await?;
+        for role in listed.roles {
+            let flags = serde_json::to_value(role.permissions)?;
+            let can_mention = flags
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|flag| flag == "mention_everyone");
+            assert_eq!(
+                can_mention,
+                matches!(role.id.as_str(), "owner" | "admin" | "kickers")
+            );
+        }
         let audited: i64 = query_scalar(
             "SELECT COUNT(*) FROM audit_log WHERE action = 'role_changed' AND target_id = 'low'",
         )

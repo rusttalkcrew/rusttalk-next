@@ -10,7 +10,7 @@ tables in SQLite (WAL). IDs and digests are binary unless indicated. The `_ct` s
 | Table | Columns |
 | --- | --- |
 | `members` | `person_id` (root public key), `joined_at` (Unix seconds), nullable `display_name_ct`, nullable `avatar_ct`, `presence_status` (current choice: online, away or invisible) |
-| `roles` | `id` (text), `kind` (built-in kind or custom), `rank`, `permissions` (eight-bit mask), nullable `name_ct` (opaque ciphertext) |
+| `roles` | `id` (text), `kind` (built-in kind or custom), `rank`, `permissions` (nine-bit mask), nullable `name_ct` (opaque ciphertext) |
 | `server_settings` | Singleton `id`, nullable `owner_person_id`, `default_role_id`, nullable `name_ct`, nullable `description_ct`, nullable `icon_ct`, `open_joining` (public flag), `member_cap` (open admission limit), nullable `index_listing_ct` (encrypted public-listing configuration) |
 | `member_roles` | `person_id`, `role_id` |
 | `invites` | `id` (opaque text), `code_hash` (SHA-256), `is_owner`, `remaining_uses`, `expires_at`, nullable `space_key_ct` and `name_ct` for preview, nullable `created_by` (person ID of the member who made it) |

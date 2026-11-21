@@ -133,12 +133,12 @@ All endpoints below require `Authorization: Bearer <token>`.
 
 A role has `{id, kind, rank, permissions, name_ct}`. A member's permissions
 are the union of their role flags, and their highest rank is used for
-hierarchy. Owner (1000) and Admin (100) have all eight flags. Moderator (50)
+hierarchy. Owner (1000) and Admin (100) have all nine flags. Moderator (50)
 has `kick`, `ban`, and `delete_messages`. Member (0) has no flags and starts
 as the default. The other flags are `invite`, `manage_roles`,
-`view_audit_log`, `manage_channels`, and `manage_server`. Built-in role IDs
-match their kinds. Custom roles have opaque IDs and ranks from 1 to 999,
-strictly below their creator. They can only receive flags that the creator
+`view_audit_log`, `manage_channels`, `manage_server`, and `mention_everyone`.
+Built-in role IDs match their kinds. Custom roles have opaque IDs and ranks
+from 1 to 999, strictly below their creator. They can only receive flags that the creator
 has. `name_ct` is null or a metadata ciphertext of at most 512 bytes
 after decoding. Supply a client-generated 16-byte ID when setting an
 initial name. The server can assign the ID for an unnamed role. Use the
@@ -351,6 +351,21 @@ duplicate retained ID returns `409 message_exists`, and malformed framing or
 signature returns `400 invalid_message`. IDs stay reserved after a delete or retention drop, and reusing one also returns
 `409 message_exists`. Access failures use
 `403 channel_read_denied` or `403 channel_write_denied`.
+
+Mentions are part of the encrypted text. `<@person_id>` uses a person's
+base64url ID, `<@&role_id>` uses the role ID, and `@everyone` and `@here`
+target every recipient in a server channel. Clients resolve display names
+and role names locally. In a DM only person mentions are active.
+
+Role-wide and channel-wide mentions require the **Mention everyone**
+permission, granted to Owner and Admin by default. The sending client
+refuses such a message without the permission. Receiving clients check
+the authenticated sender's current roles before highlighting or notifying
+for those mentions, and leave them as ordinary text if the sender or
+their permissions are unknown. The API stores and authorizes the role
+flag but cannot inspect ciphertext or enforce the mention rule. A modified
+client can send the tokens without permission. Changes to role assignments
+or permissions can change how clients display retained messages.
 
 The API keeps the newest 10,000 records per channel. Explicit deletes remove
 the ciphertext and add a `message_deleted` audit entry with actor, message ID

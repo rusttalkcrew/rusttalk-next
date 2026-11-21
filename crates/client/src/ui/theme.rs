@@ -59,6 +59,11 @@ impl Accent {
     pub fn text(&self, dark: bool) -> Color32 {
         if dark { self.tint } else { self.base }
     }
+
+    pub fn mention_colors(&self, palette: &Palette) -> (Color32, Color32) {
+        let text = if palette.dark { self.tint } else { self.strong };
+        (text, palette.main.lerp_to_gamma(self.base, 0.13))
+    }
 }
 
 const fn rgb(hex: u32) -> Color32 {
@@ -437,6 +442,13 @@ mod tests {
                 accent.id
             );
             for p in DARK_THEMES.into_iter().chain(LIGHT_THEMES) {
+                let (text, background) = accent.mention_colors(p);
+                assert!(
+                    contrast(text, background) >= 4.5,
+                    "{} mention on {}",
+                    accent.id,
+                    p.id
+                );
                 for surface in [p.side, p.main, p.raised] {
                     let text = accent.text(p.dark);
                     assert!(contrast(text, surface) >= 4.5, "{} on {}", accent.id, p.id);
