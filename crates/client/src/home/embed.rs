@@ -47,7 +47,9 @@ impl Embed<'_> {
             // A big card, or one with a choice, puts its buttons under everything else.
             let stacked = matches!(self.image, Some(Image::Wide(_)))
                 || !self.fields.is_empty()
-                || self.buttons.len() > 1;
+                || self.buttons.len() > 1
+                // Wrapped text has no room left beside it for a button.
+                || self.description.is_some_and(|d| d.chars().count() > 60);
             ui::card(ui, |ui| {
                 if let Some(Image::Wide(texture)) = &self.image {
                     let [w, h] = texture.size();
