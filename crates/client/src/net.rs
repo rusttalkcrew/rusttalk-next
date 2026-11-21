@@ -44,6 +44,7 @@ use crate::{
 };
 
 mod admin;
+mod backfill;
 mod control;
 mod directory;
 mod files;
@@ -79,6 +80,7 @@ pub enum Fetch {
 pub enum Command {
     /// Load the newest page and follow live messages.
     Open(Id),
+    Backfill(backfill::Request),
     /// Load the page before a message: channel, oldest loaded message.
     Older(Id, Id),
     Send(Draft),
@@ -850,7 +852,8 @@ fn refuse(ctx: &Ctx, url: &Url, command: Command) {
         Command::SetStatus(_)
         | Command::SetHideOffline(_)
         | Command::SetBio(_)
-        | Command::CheckGone(..) => {}
+        | Command::CheckGone(..)
+        | Command::Backfill(_) => {}
         Command::ShareApp(app) => {
             ctx.send(Update::AppStopped(app.id));
             ctx.send(Update::Failed(t!("admin.offline").into()));
@@ -1405,7 +1408,7 @@ async fn on_command(
                 ctx.send(Update::Failed(t!("net.dm_not_private", server = server)));
                 return Ok(());
             }
-            let body = MessageBody {
+            let mut body = MessageBody {
                 text: draft.text.clone(),
                 // Edits carry their revision there; current apps ignore it on edits.
                 reply_to: match draft.edit_of {
@@ -1426,6 +1429,11 @@ async fn on_command(
                 poke: draft.poke,
                 poll: draft.poll.as_deref().cloned(),
             };
+            if draft.peer.is_some()
+                && let Some(dir) = &state.last
+            {
+                crate::emoji::for_replica(&mut body.text, &mut body.sticker, &dir.emoji);
+            }
             let files = (draft.files.clone(), draft.preview.clone());
             let target = (channel, draft.id);
             let mut sent = files::send(ctx, url, client, target, body.clone(), files.clone()).await;
@@ -1580,6 +1588,7 @@ async fn on_command(
             tracing::info!(server = %fingerprint(&state.server_id), "left server");
             ctx.send(Update::Left(url.clone()));
         }
+        Command::Backfill(request) => request.run(ctx, url, client, state).await,
         Command::OpenDm(peer) => {
             let channel = dm_channel(ctx, url, client, state, peer).await?;
             ctx.send(Update::DmReady(url.clone(), channel));

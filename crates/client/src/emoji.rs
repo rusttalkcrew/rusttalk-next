@@ -214,6 +214,30 @@ fn replace_codes<'a>(text: &'a str, custom: &[CustomEmoji]) -> Cow<'a, str> {
     Cow::Owned(result)
 }
 
+/// Resolve named artwork in the destination server's catalog.
+pub fn for_replica(text: &mut String, sticker: &mut Option<Id>, custom: &[CustomEmoji]) {
+    if sticker.is_some() {
+        *sticker = custom
+            .iter()
+            .find(|e| e.sticker && e.name.eq_ignore_ascii_case(text))
+            .map(|e| e.id);
+        if sticker.is_none() {
+            *text = format!(":{text}:");
+        }
+    } else if text.contains("<:") {
+        *text = parts(text)
+            .into_iter()
+            .map(|part| match part {
+                Part::Text(s) => s.to_owned(),
+                Part::Custom { name, .. } => custom
+                    .iter()
+                    .find(|e| !e.sticker && e.name.eq_ignore_ascii_case(name))
+                    .map_or_else(|| format!(":{name}:"), |e| token(&e.name, &e.id)),
+            })
+            .collect();
+    }
+}
+
 /// How a server emoji travels inside encrypted message text.
 pub fn token(name: &str, id: &Id) -> String {
     format!("<:{name}:{}>", encode(id))

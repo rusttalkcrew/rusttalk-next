@@ -354,6 +354,11 @@ and rotations, so a revocation or removal on one server rotates only that copy
 and needs no key shared across servers. The wire format is unchanged and the
 API needs no new checks. Encrypting per server costs one seal per copy.
 
+Backfill verifies the author’s source record and checks that its epoch key
+commits to the pinned pair before copying it. An older ordinary channel
+relabeled as a DM cannot supply history for a different conversation.
+The destination also needs its own trusted current DM epoch.
+
 A sender could post different bodies under one ID to different servers. This
 only affects the conversation partner, who could equally receive two separate
 messages. Readers show one readable copy. Merging by person and ID stops one

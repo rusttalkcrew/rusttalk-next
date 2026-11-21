@@ -238,6 +238,16 @@ impl KeyClient<'_> {
         id: [u8; 32],
         body: &MessageBody,
     ) -> Result<MessageRecord> {
+        self.post_message_dated(channel, id, body, None).await
+    }
+
+    pub(super) async fn post_message_dated(
+        &mut self,
+        channel: &[u8; 32],
+        id: [u8; 32],
+        body: &MessageBody,
+        backfill_at: Option<i64>,
+    ) -> Result<MessageRecord> {
         let scope = Scope {
             kind: Kind::Channel,
             id: *channel,
@@ -260,7 +270,8 @@ impl KeyClient<'_> {
         }
         let (epoch, key) = self.current_key(scope)?;
         let key = key.clone();
-        self.post_at(channel, id, epoch, &key, body).await
+        self.post_at(channel, id, epoch, &key, body, backfill_at)
+            .await
     }
 
     /// Seal and post a message in a given epoch, with that epoch's key.
@@ -271,6 +282,7 @@ impl KeyClient<'_> {
         epoch: i64,
         key: &Key,
         body: &MessageBody,
+        backfill_at: Option<i64>,
     ) -> Result<MessageRecord> {
         let cert = &self.identity.certificate;
         let context = MessageContext {
@@ -291,7 +303,7 @@ impl KeyClient<'_> {
         )?);
         let record: MessageRecord = self
             .request(Method::POST, &message_path(channel))
-            .json(&json!({ "id": encode(&id), "epoch": epoch, "envelope": envelope }))
+            .json(&json!({ "id": encode(&id), "epoch": epoch, "envelope": envelope, "backfill_at": backfill_at }))
             .send()
             .await?
             .error_for_status()?

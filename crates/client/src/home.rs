@@ -94,6 +94,8 @@ pub struct Home {
     pub servers: Vec<Server>,
     /// DMs by the other person, merged over every server they were on.
     threads: HashMap<Id, Thread>,
+    backfill: Option<tokio::task::JoinHandle<()>>,
+    next_backfill: f64,
     /// Friends, requests and blocks; synced between this person's devices only.
     pub(crate) friends: Friends,
     friends_tab: friends::Tab,
@@ -312,6 +314,8 @@ impl Home {
             view: if browse { View::Find } else { View::Server(0) },
             servers,
             threads: HashMap::new(),
+            backfill: None,
+            next_backfill: 2.0,
             friends,
             friends_tab: friends::Tab::default(),
             pokes: crate::pokes::Pokes::open(data_dir.join("pokes.json")),
@@ -1512,6 +1516,11 @@ pub fn show(
     while let Ok(update) = home.net.updates.try_recv() {
         home.apply(ui.ctx(), update, now);
     }
+    if now >= home.next_backfill && home.backfill.as_ref().is_none_or(|job| job.is_finished()) {
+        home.backfill = Some(home.net.backfill(&home.servers, &home.dm_deleted));
+        home.next_backfill = now + 60.0;
+    }
+    ui.ctx().request_repaint_after(Duration::from_secs(60));
     home.send_queued(ui.ctx(), now);
     while let Some((address, channel)) = home.notify.clicked() {
         home.open_chat(&address, channel);
@@ -3527,27 +3536,46 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
                     && msg.at - prev.at < 300
                     && msg.reply_to.is_none()
             });
-            let shown = message(ui, chat, msg, start, dir, &embeds, key, |ui| {
-                if let Some(server) = holder(msg) {
-                    // A link preview must be about one of the message's own links.
-                    let links: Vec<String> = match &msg.body {
-                        Body::Text(text) => markdown::cached(ui, text)
-                            .links()
-                            .map(String::from)
-                            .collect(),
-                        _ => Vec::new(),
-                    };
-                    let server = (&server.address, &server.commands);
-                    files::attachments(ui, files, server, &msg.files, &links);
-                }
-                // The server isn't borrowed whole here, so look the offer up by its parts.
-                if msg.live.is_some() {
-                    let action = call::chat_live(ui, &voice.live_files, dir, msg);
-                    live = action
-                        .map(|action| (action, msg.replicas.first().cloned()))
-                        .or(live.take());
-                }
-            });
+            // The displayed copy carries this server's emoji and sticker IDs.
+            let (message_dir, message_channel) = match (at, holder(msg)) {
+                (At::Dm(peer), Some(server)) => server
+                    .dir
+                    .dms
+                    .iter()
+                    .find(|dm| dm.peer == peer)
+                    .map_or((dir, key), |dm| (&server.dir, dm.channel)),
+                _ => (dir, key),
+            };
+            let shown = message(
+                ui,
+                chat,
+                msg,
+                start,
+                message_dir,
+                &embeds,
+                message_channel,
+                |ui| {
+                    if let Some(server) = holder(msg) {
+                        // A link preview must be about one of the message's own links.
+                        let links: Vec<String> = match &msg.body {
+                            Body::Text(text) => markdown::cached(ui, text)
+                                .links()
+                                .map(String::from)
+                                .collect(),
+                            _ => Vec::new(),
+                        };
+                        let server = (&server.address, &server.commands);
+                        files::attachments(ui, files, server, &msg.files, &links);
+                    }
+                    // The server isn't borrowed whole here, so look the offer up by its parts.
+                    if msg.live.is_some() {
+                        let action = call::chat_live(ui, &voice.live_files, dir, msg);
+                        live = action
+                            .map(|action| (action, msg.replicas.first().cloned()))
+                            .or(live.take());
+                    }
+                },
+            );
             if let Some(chosen) = shown {
                 pick = Some(chosen);
             }

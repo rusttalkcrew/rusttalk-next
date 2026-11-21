@@ -33,6 +33,7 @@ pub struct NewMessage {
     id: String,
     epoch: i64,
     envelope: String,
+    backfill_at: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -134,12 +135,22 @@ pub async fn create(
         id,
         epoch,
         envelope,
+        backfill_at,
     } = payload(body)?;
     let channel_id = decode(&channel)?;
     let message_id = decode(&id)?;
     let envelope_bytes = decode_bytes(&envelope)?;
     let (mut tx, actor) = authenticate(&app, &headers).await?;
     require_write(&mut tx, &actor, &channel).await?;
+    let at = match backfill_at {
+        Some(at) if chat_kind(&mut tx, &actor, &channel).await? == "dm" => at.clamp(0, actor.at),
+        Some(_) => return Err(ApiError::bad_request("invalid_backfill")),
+        None => actor.at,
+    };
+    // Historical inserts must not evict live history from a full replica.
+    if backfill_at.is_some() && history_full(&mut tx, &channel).await? {
+        return Err(keys::conflict("history_full"));
+    }
     let scope = Scope {
         kind: Kind::Channel,
         id: channel_id,
@@ -195,7 +206,7 @@ pub async fn create(
     .bind(epoch)
     .bind(&actor.device)
     .bind(actor.person.as_slice())
-    .bind(actor.at)
+    .bind(at)
     .bind(size as i64)
     .bind(envelope_bytes)
     .execute(&mut *tx)
@@ -216,7 +227,7 @@ pub async fn create(
             epoch,
             person: actor.person,
             sender_device: device,
-            at: actor.at,
+            at,
             size,
             envelope,
         }),
@@ -233,6 +244,16 @@ async fn reserve(db: &mut SqliteConnection, id: &str) -> ApiResult<()> {
         return Err(keys::conflict("message_exists"));
     }
     Ok(())
+}
+
+async fn history_full(db: &mut SqliteConnection, channel: &str) -> ApiResult<bool> {
+    Ok(
+        query_scalar("SELECT EXISTS(SELECT 1 FROM messages WHERE channel_id = ? LIMIT 1 OFFSET ?)")
+            .bind(channel)
+            .bind(RETAIN - 1)
+            .fetch_one(db)
+            .await?,
+    )
 }
 
 async fn prune(db: &mut SqliteConnection, channel: &str) -> ApiResult<Vec<String>> {
@@ -432,6 +453,8 @@ mod tests {
         .bind(limit)
         .execute(&mut *tx)
         .await?;
+        assert!(history_full(&mut tx, "a").await?);
+        assert!(!history_full(&mut tx, "b").await?);
         assert_eq!(prune(&mut tx, "a").await?, ["1"]);
         let counts: Vec<(String, i64)> = query_as(
             "SELECT channel_id, COUNT(*) FROM messages GROUP BY channel_id ORDER BY channel_id",

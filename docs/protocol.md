@@ -392,6 +392,21 @@ placeholder for its own server. It doesn't change a readable copy's time or
 servers, doesn't notify or mark the DM unread, and is replaced whole once a
 readable copy arrives. A DM shows records from its two people only.
 
+While online, the author’s app periodically compares the newest 256 records of
+each shared DM copy in pages of 32. One scan runs at a time, with at least
+250 ms between network commands. It opens its own missing records, oldest
+first, and posts them under the original IDs to the pinned destination DM,
+creating the channel there if needed. The optional DM-only POST field
+`backfill_at` preserves the source timestamp, capped at the destination’s
+current time. Pagination and retention still use local insertion order. A full DM refuses
+a historical insert with `409 history_full` so live history is preserved.
+After interruption the next scan uses the IDs already stored as its checkpoint.
+Deleted or pruned IDs remain reserved. Epoch links and live transfers stay
+local to their channel. Available stored attachments are uploaded under fresh
+keys and IDs. Custom emoji and stickers use the destination’s matching name
+or fall back to text. If a stored file is unavailable the record waits for a
+readable source copy.
+
 Before sending, the app pins each DM channel to the person the catalog first
 listed it with, in `dm_pins/<server ID>.json` on the device, with the anchor:
 the newest epoch it knows only the two people hold, and its commitment. A DM
@@ -451,7 +466,7 @@ Older pages load from each copy separately, and the view asks each copy on
 its own, so a slow server doesn't hold up the others. A page that fails stops
 only that copy's paging until its server reconnects; when its cursor is gone
 (404), that copy loads from its newest page again. Without a shared server, the app keeps
-showing what it loaded and disables sending. The API is unchanged and still
+showing what it loaded and disables sending. The API still
 sees each copy as a separate DM, so older apps show one DM per server.
 
 ### Friends

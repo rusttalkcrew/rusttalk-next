@@ -1,5 +1,6 @@
 //! Pinned RustTalk connections, in-memory keys, and encrypted chat.
 
+pub mod backfill;
 mod chat;
 mod files;
 mod keys;
