@@ -437,6 +437,8 @@ fn install_dmg(dmg: &Path, target: &Target, version: &Version, cache: &Path) -> 
     let bundle = &target.path;
     let (_lock, key) = lock_bundle(cache, bundle)?;
     let parent = bundle.parent().context("locate the app folder")?;
+    clean_stale(parent, ".rusttalk-update");
+    clean_stale(cache, "download");
     let stage = tempfile::Builder::new()
         .prefix(".rusttalk-update")
         .tempdir_in(parent)
@@ -472,12 +474,46 @@ fn install_dmg(dmg: &Path, target: &Target, version: &Version, cache: &Path) -> 
         "RustTalk was updated in another window; restart it first"
     );
     // After the exchange the old bundle sits in the stage, which is removed on return.
-    if swap(&new, bundle).is_err() {
-        let old = parent.join(format!(".RustTalk-old-{key}.app"));
-        replace_bundle(&new, bundle, &old, |from, to| fs::rename(from, to))?;
+    match swap(&new, bundle) {
+        Ok(()) => Ok(()),
+        // The volume can't exchange in one step.
+        Err(error) if matches!(error.raw_os_error(), Some(libc::ENOTSUP | libc::EINVAL)) => {
+            let old = parent.join(format!(".RustTalk-old-{key}.app"));
+            replace_bundle(&new, bundle, &old, |from, to| fs::rename(from, to))
+        }
+        Err(error) => Err(anyhow::Error::new(error).context("put the new RustTalk.app in place")),
     }
-    Ok(())
 }
+
+/// Removes what an install that was cut short (a crash, a forced quit) left in
+/// `dir`: entries named `prefix*` older than an hour, so a running download or
+/// install is never touched. A disk image still mounted in one is closed first.
+#[cfg(target_os = "macos")]
+fn clean_stale(dir: &Path, prefix: &str) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let stale = entry.file_name().to_string_lossy().starts_with(prefix)
+            && entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .is_ok_and(|time| time.elapsed().is_ok_and(|age| age > STALE));
+        if stale {
+            let mount = entry.path().join("mount");
+            if mount.is_dir() {
+                let _ = run(Command::new("/usr/bin/hdiutil")
+                    .args(["detach", "-force", "-quiet"])
+                    .arg(&mount));
+            }
+            let _ = fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+/// Longer than any download or install takes (the HTTP timeout is five minutes).
+#[cfg(target_os = "macos")]
+const STALE: Duration = Duration::from_secs(60 * 60);
 
 /// Takes the install lock for `bundle`, so two windows can't install into it at
 /// once. Returns the held lock and the bundle's short key.
@@ -574,7 +610,16 @@ fn replace_bundle(
     old: &Path,
     rename: impl Fn(&Path, &Path) -> std::io::Result<()>,
 ) -> Result<()> {
-    rename(bundle, old).context("move the old RustTalk.app aside")?;
+    rename(bundle, old).map_err(|error| {
+        if matches!(error.raw_os_error(), Some(libc::ENOTEMPTY | libc::EEXIST)) {
+            anyhow!(
+                "remove the leftover copy at {} and try again",
+                old.display()
+            )
+        } else {
+            anyhow::Error::new(error).context("move the old RustTalk.app aside")
+        }
+    })?;
     if let Err(error) = rename(new, bundle) {
         return match rename(old, bundle) {
             Ok(()) => Err(anyhow::Error::new(error).context("put the new RustTalk.app in place")),
@@ -1412,6 +1457,46 @@ mod tests {
         swap(&new, &bundle).unwrap();
         assert_eq!(version_of(&bundle), "0.2.0");
         assert_eq!(version_of(&new), "0.1.0");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_leftover_copy_is_named_and_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = dir.path().join("RustTalk.app");
+        let (new, old) = (dir.path().join("new.app"), dir.path().join("old.app"));
+        fake_bundle(&bundle, BUNDLE_ID, "0.1.0");
+        fake_bundle(&new, BUNDLE_ID, "0.2.0");
+        fake_bundle(&old, BUNDLE_ID, "0.0.9");
+        let error =
+            replace_bundle(&new, &bundle, &old, |from, to| fs::rename(from, to)).unwrap_err();
+        assert!(error.to_string().contains("leftover"));
+        assert!(error.to_string().contains(&old.display().to_string()));
+        assert_eq!(version_of(&bundle), "0.1.0");
+        assert!(old.exists() && new.exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn only_stale_leftovers_are_cleaned() {
+        let dir = tempfile::tempdir().unwrap();
+        let make = |name: &str, age: Duration| {
+            let path = dir.path().join(name);
+            fs::create_dir(&path).unwrap();
+            fs::write(path.join("file"), b"x").unwrap();
+            let modified = std::time::SystemTime::now() - age;
+            fs::File::open(&path)
+                .unwrap()
+                .set_modified(modified)
+                .unwrap();
+            path
+        };
+        let old_stage = make(".rusttalk-update1", STALE * 2);
+        let running = make(".rusttalk-update2", Duration::ZERO);
+        let other = make("Other.app", STALE * 2);
+        clean_stale(dir.path(), ".rusttalk-update");
+        assert!(!old_stage.exists());
+        assert!(running.exists() && other.exists());
     }
 
     #[cfg(target_os = "macos")]
