@@ -21,6 +21,9 @@ Chat Markdown and bundled syntax highlighting:
 - The bundled highlighting themes include Spacegray (Copyright (c) 2013 Gadzhi Kharkharov),
   InspiredGitHub (Copyright (c) 2015 Seth Lopez), and Solarized (Copyright (c) 2016 Koen Lageveen).
 
+Wayland clipboard and file drops (vendored and patched in crates/smithay-clipboard):
+- smithay-clipboard, Copyright (c) 2018 Lucas Timmins & Victor Berger.
+
 The MIT license applies to the above and to the bundled Rust syntax definition:
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
