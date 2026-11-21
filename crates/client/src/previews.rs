@@ -719,9 +719,25 @@ fn wanted(shared: &Shared, job: &Job) -> bool {
         && lock(&shared.seen)
             .get(&job.cache)
             .is_some_and(|at| at.elapsed() < SEEN)
-        && lock(&shared.backoff)
-            .get(job.provider.id())
-            .is_none_or(|until| Instant::now() >= *until)
+}
+
+/// The site is waiting after a failure.
+fn backed_off(shared: &Shared, job: &Job) -> bool {
+    lock(&shared.backoff)
+        .get(job.provider.id())
+        .is_some_and(|until| Instant::now() < *until)
+}
+
+/// Not now, because the site is waiting: try again later, not on the next frame.
+fn pause(shared: &Shared, job: &Job) {
+    let mut slots = lock(&shared.slots);
+    match slots.get_mut(&job.cache).map(|slot| &mut slot.entry) {
+        Some(entry @ Entry::Loading) => *entry = Entry::Failed(Instant::now()),
+        Some(Entry::Ready { refresh, .. }) if *refresh == u64::MAX => {
+            *refresh = now() + RETRY.as_secs();
+        }
+        _ => {}
+    }
 }
 
 /// Load one preview: from disk, else (or when old) from the site.
@@ -742,6 +758,9 @@ fn run(shared: &Shared, get: &Get, job: &Job) {
             return;
         }
     }
+    if backed_off(shared, job) {
+        return pause(shared, job);
+    }
     if !wanted(shared, job) {
         return abandon(shared, job);
     }
@@ -753,6 +772,9 @@ fn run(shared: &Shared, get: &Get, job: &Job) {
     };
     thread::sleep(start.saturating_duration_since(Instant::now()));
     // Scrolled away or turned off while waiting.
+    if backed_off(shared, job) {
+        return pause(shared, job);
+    }
     if !wanted(shared, job) {
         return abandon(shared, job);
     }
@@ -789,14 +811,21 @@ fn run(shared: &Shared, get: &Get, job: &Job) {
 }
 
 /// Not fetched after all: ask again when the link is next on screen.
+/// It wakes the window: a link still on screen (missed frames can make it look gone)
+/// is asked for again on that frame instead of waiting for something else to redraw.
 fn abandon(shared: &Shared, job: &Job) {
     let mut slots = lock(&shared.slots);
-    match slots.get_mut(&job.cache).map(|slot| &mut slot.entry) {
-        Some(Entry::Loading) => {
-            slots.remove(&job.cache);
+    let changed = match slots.get_mut(&job.cache).map(|slot| &mut slot.entry) {
+        Some(Entry::Loading) => slots.remove(&job.cache).is_some(),
+        Some(Entry::Ready { refresh, .. }) if *refresh == u64::MAX => {
+            *refresh = now();
+            true
         }
-        Some(Entry::Ready { refresh, .. }) if *refresh == u64::MAX => *refresh = now(),
-        _ => {}
+        _ => false,
+    };
+    drop(slots);
+    if changed {
+        shared.ctx.request_repaint();
     }
 }
 
@@ -1018,6 +1047,61 @@ mod tests {
                 .map(|s| &s.entry),
             Some(Entry::Ready { .. })
         )
+    }
+
+    #[test]
+    fn a_finished_preview_wakes_the_window() {
+        let data = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let wakes = Arc::new(AtomicUsize::new(0));
+        ctx.set_request_repaint_callback({
+            let wakes = wakes.clone();
+            move |_| {
+                wakes.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        let previews = Previews::new(&ctx, data.path());
+        let site = fake(true);
+        previews.allow(site.id(), true);
+        let shown = job(&previews, site, "1", true);
+        let before = wakes.load(Ordering::SeqCst);
+        run(&previews.shared, &Get::new().unwrap(), &shown);
+        assert!(ready(&previews, &shown));
+        assert!(
+            wakes.load(Ordering::SeqCst) > before,
+            "no repaint asked for"
+        );
+    }
+
+    #[test]
+    fn a_dropped_request_wakes_the_window_but_a_paused_site_does_not() {
+        let data = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let wakes = Arc::new(AtomicUsize::new(0));
+        ctx.set_request_repaint_callback({
+            let wakes = wakes.clone();
+            move |_| {
+                wakes.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        let previews = Previews::new(&ctx, data.path());
+        let get = Get::new().unwrap();
+        let site = fake(true);
+        previews.allow(site.id(), true);
+        let unseen = job(&previews, site, "1", false);
+        assert!(previews.claim(&unseen.cache).1);
+        let before = wakes.load(Ordering::SeqCst);
+        run(&previews.shared, &get, &unseen);
+        assert!(
+            wakes.load(Ordering::SeqCst) > before,
+            "asked again on the next frame"
+        );
+        lock(&previews.shared.backoff).insert(site.id(), Instant::now() + RETRY);
+        let paused = job(&previews, site, "2", true);
+        assert!(previews.claim(&paused.cache).1);
+        run(&previews.shared, &get, &paused);
+        assert!(!previews.claim(&paused.cache).1, "not again on every frame");
+        assert_eq!(site.calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
