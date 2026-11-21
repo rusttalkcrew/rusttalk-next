@@ -3,12 +3,13 @@ use std::{collections::HashMap, time::Instant};
 use anyhow::Result;
 use livekit::{Room, e2ee::EncryptionType, webrtc::stats::RtcStats};
 
-use super::{ParticipantIdentity, TrackSid};
+use super::{ParticipantIdentity, TrackSid, TrackSource};
 
 /// A WebRTC snapshot. RTT and jitter are milliseconds.
 pub struct VoiceStats {
     pub ping_ms: Option<f64>,
     pub tracks: Vec<TrackStats>,
+    pub traffic: CallTraffic,
 }
 
 /// One published or subscribed media track. Loss counters are cumulative.
@@ -23,12 +24,66 @@ pub struct TrackStats {
     pub bitrate_bps: Option<f64>,
 }
 
+#[derive(Clone, Copy, Default)]
+pub struct Traffic {
+    pub bytes: u64,
+    pub bps: f64,
+}
+
+/// Locally measured RTP traffic, with bytes accumulated for the life of the room.
+#[derive(Clone, Copy, Default)]
+pub struct CallTraffic {
+    sources: [[Traffic; 2]; 5],
+}
+
+impl CallTraffic {
+    /// Upload and download, in that order.
+    pub fn total(&self) -> [Traffic; 2] {
+        let mut total = [Traffic::default(); 2];
+        for pair in self.sources {
+            for (total, source) in total.iter_mut().zip(pair) {
+                total.bytes += source.bytes;
+                total.bps += source.bps;
+            }
+        }
+        total
+    }
+
+    /// Upload and download for one publication source.
+    pub fn for_source(&self, source: TrackSource) -> [Traffic; 2] {
+        self.sources[Self::index(source)]
+    }
+
+    fn index(source: TrackSource) -> usize {
+        match source {
+            TrackSource::Microphone => 0,
+            TrackSource::Camera => 1,
+            TrackSource::Screenshare => 2,
+            TrackSource::ScreenshareAudio => 3,
+            TrackSource::Unknown => 4,
+        }
+    }
+
+    fn add(&mut self, source: TrackSource, outbound: bool, track: &TrackStats, bytes: u64) {
+        let traffic = &mut self.sources[Self::index(source)][usize::from(!outbound)];
+        traffic.bytes += bytes;
+        traffic.bps += track.bitrate_bps.unwrap_or_default();
+    }
+
+    fn clear_rates(&mut self) {
+        for traffic in self.sources.iter_mut().flatten() {
+            traffic.bps = 0.0;
+        }
+    }
+}
+
 /// Byte counters by WebRTC stat id, one per simulcast layer.
 type Samples = HashMap<String, (u64, Instant)>;
 
 #[derive(Default)]
 pub(super) struct Sampler {
-    previous: Samples,
+    previous: HashMap<TrackSid, Samples>,
+    traffic: CallTraffic,
 }
 
 impl Sampler {
@@ -38,88 +93,113 @@ impl Sampler {
         let mut snapshot = VoiceStats {
             ping_ms,
             tracks: Vec::new(),
+            traffic: self.traffic,
         };
+        snapshot.traffic.clear_rates();
         let local = room.local_participant();
         let mut samples = HashMap::new();
         for (sid, publication) in local.track_publications() {
+            let mut counters = self.previous.get(&sid).cloned().unwrap_or_default();
             if let Some(track) = publication.track() {
                 let report = track.get_stats().await?;
-                let (jitter_ms, packets_lost, _, bitrate_bps) =
-                    measure(&report, true, &self.previous, &mut samples);
-                snapshot.tracks.push(TrackStats {
-                    participant: local.identity(),
-                    sid,
-                    outbound: true,
-                    jitter_ms,
-                    packets_lost,
-                    packets_received: None,
-                    bitrate_bps,
-                });
+                snapshot.record(
+                    local.identity(),
+                    &sid,
+                    publication.source(),
+                    true,
+                    &report,
+                    &mut counters,
+                );
             }
+            samples.insert(sid, counters);
         }
         for participant in room.remote_participants().into_values() {
             for (sid, publication) in participant.track_publications() {
-                if publication.encryption_type() == EncryptionType::Gcm
-                    && let Some(track) = publication.track()
-                {
-                    let report = track.get_stats().await?;
-                    let (jitter_ms, packets_lost, packets_received, bitrate_bps) =
-                        measure(&report, false, &self.previous, &mut samples);
-                    snapshot.tracks.push(TrackStats {
-                        participant: participant.identity(),
-                        sid,
-                        outbound: false,
-                        jitter_ms,
-                        packets_lost,
-                        packets_received,
-                        bitrate_bps,
-                    });
+                if publication.encryption_type() != EncryptionType::Gcm {
+                    continue;
                 }
+                // A publication can remain while its subscription is paused or switched.
+                let mut counters = self.previous.get(&sid).cloned().unwrap_or_default();
+                if let Some(track) = publication.track() {
+                    let report = track.get_stats().await?;
+                    snapshot.record(
+                        participant.identity(),
+                        &sid,
+                        publication.source(),
+                        false,
+                        &report,
+                        &mut counters,
+                    );
+                }
+                samples.insert(sid, counters);
             }
         }
         self.previous = samples;
+        self.traffic = snapshot.traffic;
         Ok(snapshot)
     }
 }
 
-/// Jitter (worst layer), packets lost, packets received (inbound) and bitrate
-/// (summed over simulcast layers) of one track.
-fn measure(
-    report: &[RtcStats],
-    outbound: bool,
-    previous: &Samples,
-    samples: &mut Samples,
-) -> (Option<f64>, Option<i64>, Option<u64>, Option<f64>) {
+impl VoiceStats {
+    fn record(
+        &mut self,
+        participant: ParticipantIdentity,
+        sid: &TrackSid,
+        source: TrackSource,
+        outbound: bool,
+        report: &[RtcStats],
+        counters: &mut Samples,
+    ) {
+        let mut track = TrackStats {
+            participant,
+            sid: sid.clone(),
+            outbound,
+            jitter_ms: None,
+            packets_lost: None,
+            packets_received: None,
+            bitrate_bps: None,
+        };
+        let bytes = measure(report, &mut track, counters);
+        self.traffic.add(source, outbound, &track, bytes);
+        self.tracks.push(track);
+    }
+}
+
+/// Update one track and return the newly observed bytes across its layers.
+fn measure(report: &[RtcStats], track: &mut TrackStats, samples: &mut Samples) -> u64 {
     let max = |a: Option<f64>, b: f64| Some(a.map_or(b, |a| a.max(b)));
-    let (mut jitter, mut lost, mut received, mut bitrate) = (None, None, None, None);
+    let mut new_bytes = 0;
     let now = Instant::now();
     for stat in report {
         let (id, bytes) = match stat {
-            RtcStats::InboundRtp(stat) if !outbound => {
-                jitter = max(jitter, stat.received.jitter * 1000.0);
-                lost = Some(lost.unwrap_or(0) + stat.received.packets_lost);
-                received = Some(received.unwrap_or(0) + stat.received.packets_received);
+            RtcStats::InboundRtp(stat) if !track.outbound => {
+                track.jitter_ms = max(track.jitter_ms, stat.received.jitter * 1000.0);
+                *track.packets_lost.get_or_insert(0) += stat.received.packets_lost;
+                *track.packets_received.get_or_insert(0) += stat.received.packets_received;
                 (&stat.rtc.id, stat.inbound.bytes_received)
             }
-            RtcStats::OutboundRtp(stat) if outbound => (&stat.rtc.id, stat.sent.bytes_sent),
-            RtcStats::RemoteInboundRtp(stat) if outbound => {
-                jitter = max(jitter, stat.received.jitter * 1000.0);
-                lost = Some(lost.unwrap_or(0) + stat.received.packets_lost);
+            RtcStats::OutboundRtp(stat) if track.outbound => (&stat.rtc.id, stat.sent.bytes_sent),
+            RtcStats::RemoteInboundRtp(stat) if track.outbound => {
+                track.jitter_ms = max(track.jitter_ms, stat.received.jitter * 1000.0);
+                *track.packets_lost.get_or_insert(0) += stat.received.packets_lost;
                 continue;
             }
             _ => continue,
         };
-        if let Some((previous_bytes, at)) = previous.get(id)
-            && let Some(delta) = bytes.checked_sub(*previous_bytes)
+        if let Some((previous_bytes, at)) = samples.insert(id.clone(), (bytes, now))
+            && let Some(delta) = bytes.checked_sub(previous_bytes)
         {
-            let elapsed = now.duration_since(*at).as_secs_f64();
+            new_bytes += delta;
+            let elapsed = now.duration_since(at).as_secs_f64();
             if elapsed > 0.0 {
-                bitrate = Some(bitrate.unwrap_or(0.0) + 8.0 * delta as f64 / elapsed);
+                *track.bitrate_bps.get_or_insert(0.0) += 8.0 * delta as f64 / elapsed;
             }
+        } else {
+            // A new stream or reset starts a fresh byte count with no rate baseline.
+            new_bytes += bytes;
         }
-        samples.insert(id.clone(), (bytes, now));
     }
-    (jitter, lost, received, bitrate)
+    new_bytes
 }
 
 fn ping(report: &[RtcStats]) -> Option<f64> {
@@ -143,7 +223,7 @@ fn ping(report: &[RtcStats]) -> Option<f64> {
 mod tests {
     use std::time::Duration;
 
-    use livekit::webrtc::stats::{OutboundRtpStats, RemoteInboundRtpStats};
+    use livekit::webrtc::stats::{InboundRtpStats, OutboundRtpStats, RemoteInboundRtpStats};
 
     use super::*;
 
@@ -160,26 +240,107 @@ mod tests {
         RtcStats::RemoteInboundRtp(stat)
     }
 
+    fn record(
+        snapshot: &mut VoiceStats,
+        source: TrackSource,
+        outbound: bool,
+        report: &[RtcStats],
+        samples: &mut Samples,
+    ) {
+        snapshot.record(
+            ParticipantIdentity("device".into()),
+            &TrackSid::try_from("TR_test".to_owned()).unwrap(),
+            source,
+            outbound,
+            report,
+            samples,
+        );
+    }
+
+    fn snapshot(traffic: CallTraffic) -> VoiceStats {
+        let mut snapshot = VoiceStats {
+            ping_ms: None,
+            tracks: Vec::new(),
+            traffic,
+        };
+        snapshot.traffic.clear_rates();
+        snapshot
+    }
+
     #[test]
     fn simulcast_layers_add_up() {
         let at = Instant::now() - Duration::from_secs(1);
-        let previous = HashMap::from([("q".into(), (0, at)), ("h".into(), (0, at))]);
+        let mut samples = HashMap::from([("q".into(), (0, at)), ("h".into(), (0, at))]);
         let report = [layer("q", 1_000), layer("h", 9_000), loss(2), loss(3)];
-        let mut samples = HashMap::new();
-        let (_, lost, _, bitrate) = measure(&report, true, &previous, &mut samples);
-        assert_eq!(lost, Some(5));
-        let bitrate = bitrate.unwrap();
+        let mut stats = snapshot(CallTraffic::default());
+        record(&mut stats, TrackSource::Camera, true, &report, &mut samples);
+        assert_eq!(stats.tracks[0].packets_lost, Some(5));
+        let bitrate = stats.tracks[0].bitrate_bps.unwrap();
         assert!((75_000.0..=80_000.0).contains(&bitrate), "{bitrate}");
+        assert_eq!(stats.traffic.total()[0].bps, bitrate);
+        assert_eq!(stats.traffic.total()[0].bytes, 10_000);
         assert_eq!(samples.len(), 2);
         assert_eq!(samples["h"].0, 9_000);
     }
 
     #[test]
-    fn first_sample_has_no_bitrate() {
-        let mut samples = HashMap::new();
-        let (_, lost, _, bitrate) =
-            measure(&[layer("q", 1_000)], true, &HashMap::new(), &mut samples);
-        assert_eq!((lost, bitrate), (None, None));
-        assert_eq!(samples.len(), 1);
+    fn traffic_accumulates_across_restarts_and_inactive_samples() {
+        let mut camera = HashMap::new();
+        let mut app_audio = HashMap::new();
+        let mut traffic = CallTraffic::default();
+        for (camera_bytes, expected) in [
+            (Some(100), 100),
+            (Some(120), 120),
+            (None, 120),
+            (Some(120), 120),
+            (Some(30), 150),
+            (Some(50), 170),
+            (None, 170),
+        ] {
+            let mut stats = snapshot(traffic);
+            if let Some(bytes) = camera_bytes {
+                record(
+                    &mut stats,
+                    TrackSource::Camera,
+                    true,
+                    &[layer("rtp", bytes)],
+                    &mut camera,
+                );
+                if [100, 30].contains(&bytes) {
+                    assert_eq!(stats.tracks[0].bitrate_bps, None);
+                }
+            }
+            let mut inbound = InboundRtpStats::default();
+            inbound.rtc.id = "rtp".into();
+            inbound.inbound.bytes_received = 200;
+            record(
+                &mut stats,
+                TrackSource::ScreenshareAudio,
+                false,
+                &[RtcStats::InboundRtp(inbound)],
+                &mut app_audio,
+            );
+            traffic = stats.traffic;
+            assert_eq!(traffic.total().map(|value| value.bytes), [expected, 200]);
+            assert_eq!(
+                traffic
+                    .for_source(TrackSource::Camera)
+                    .map(|value| value.bytes),
+                [expected, 0]
+            );
+            assert_eq!(
+                traffic
+                    .for_source(TrackSource::ScreenshareAudio)
+                    .map(|value| value.bytes),
+                [0, 200]
+            );
+            if camera_bytes.is_none() {
+                assert_eq!(traffic.total()[0].bps, 0.0);
+            }
+        }
+        assert_eq!(
+            Sampler::default().traffic.total().map(|value| value.bytes),
+            [0, 0]
+        );
     }
 }

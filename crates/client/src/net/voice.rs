@@ -666,6 +666,7 @@ pub(super) async fn voice_stats(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, st
     };
     let stats = Stats {
         ping_ms: snapshot.ping_ms,
+        traffic: snapshot.traffic,
         jitter_ms: received.iter().filter_map(|t| t.jitter_ms).reduce(f64::max),
         lost_in: lost(&received),
         lost_out: lost(&sent),

@@ -8,6 +8,7 @@ use eframe::egui::{
     self, Align, Color32, CursorIcon, Frame, Grid, Label, Layout, Margin, Response, RichText, Role,
     Sense, Ui, Vec2, WidgetInfo,
 };
+use rusttalk_core::client::voice::{CallTraffic, TrackSource, Traffic};
 
 use super::{
     Listing, LiveAction, Sharing, Voice, audio, fill, leave, live_files, open_screen_dialog, screen,
@@ -21,7 +22,7 @@ use crate::{
     ui::{self, HOVER_SECONDS, ICON_BUTTON, Look, Palette, RADIUS, SPACE_XS},
 };
 
-/// Ping samples kept for the chart: five minutes at one every two seconds.
+/// Samples kept for the charts: five minutes at one every two seconds.
 pub const HISTORY: usize = 150;
 /// Up to these, the connection counts as good, then as fair.
 const GOOD_PING_MS: f64 = 150.0;
@@ -30,6 +31,7 @@ const GOOD_LOSS_PERCENT: f64 = 2.0;
 const FAIR_LOSS_PERCENT: f64 = 8.0;
 const SIGNAL_SIZE: Vec2 = Vec2::splat(ICON_BUTTON);
 const CHART_HEIGHT: f32 = 56.0;
+const TRAFFIC_CHART_HEIGHT: f32 = 40.0;
 const STOP_SIZE: Vec2 = Vec2::splat(24.0);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -85,10 +87,11 @@ impl Quality {
     }
 }
 
-/// The call's ping history and recent packet loss, from the stats every two seconds.
+/// The call's recent ping, traffic and packet loss, sampled every two seconds.
 #[derive(Default)]
 pub struct Link {
     pings: VecDeque<f64>,
+    traffic_kbps: VecDeque<f64>,
     /// The previous cumulative lost and received counts.
     last: Option<(i64, u64)>,
     /// Incoming packets lost between the last two samples, in percent.
@@ -97,6 +100,12 @@ pub struct Link {
 
 impl Link {
     pub fn push(&mut self, stats: &Stats) {
+        if self.traffic_kbps.len() == HISTORY {
+            self.traffic_kbps.pop_front();
+        }
+        let [upload, download] = stats.traffic.total();
+        self.traffic_kbps
+            .push_back((upload.bps + download.bps) / 1000.0);
         if let Some(ping) = stats.ping_ms {
             if self.pings.len() == HISTORY {
                 self.pings.pop_front();
@@ -329,9 +338,23 @@ fn signal_button(ui: &mut Ui, quality: Quality) -> Response {
         .on_hover_cursor(CursorIcon::PointingHand)
 }
 
-/// The connection popup: ping now and on average, loss, a ping chart, the details
-/// and encryption. True when "Voice settings" was clicked.
+/// The connection popup. True when "Voice settings" was clicked.
 fn connection(
+    ui: &mut Ui,
+    stats: &Stats,
+    link: &Link,
+    quality: Quality,
+    server: Option<&Server>,
+) -> bool {
+    ui.set_max_height(ui.ctx().content_rect().height() - 2.0 * ui::SPACE_L);
+    egui::ScrollArea::vertical()
+        .show(ui, |ui| {
+            connection_contents(ui, stats, link, quality, server)
+        })
+        .inner
+}
+
+fn connection_contents(
     ui: &mut Ui,
     stats: &Stats,
     link: &Link,
@@ -368,6 +391,8 @@ fn connection(
             ui.label(ui::caption("now"));
         });
     });
+    ui.separator();
+    traffic(ui, &stats.traffic, link);
     egui::CollapsingHeader::new("Details")
         .id_salt("connection details")
         .show(ui, |ui| details(ui, stats, server));
@@ -375,6 +400,46 @@ fn connection(
     ui.label("🔒  End-to-end encrypted")
         .on_hover_text("Only people in the call can hear and see it, not the server.");
     ui::secondary(ui, "⚙  Voice settings").clicked()
+}
+
+fn traffic(ui: &mut Ui, traffic: &CallTraffic, link: &Link) {
+    let c = ui::colors(ui);
+    Grid::new("call traffic")
+        .num_columns(3)
+        .min_row_height(ui::TEXT_BODY)
+        .spacing(Vec2::new(ui::SPACE_S, SPACE_XS))
+        .show(ui, |ui| {
+            ui.label(ui::bold("Traffic").size(ui::TEXT_CAPTION));
+            ui.label(ui::caption("Upload"));
+            ui.label(ui::caption("Download"));
+            ui.end_row();
+            let mut row = |label: &str, pair: [Traffic; 2]| {
+                ui.label(ui::caption(label).color(c.text));
+                for value in pair {
+                    let rate = if value.bps >= 1_000_000.0 {
+                        format!("{:.1} Mbps", value.bps / 1_000_000.0)
+                    } else {
+                        format!("{:.0} kbps", value.bps / 1000.0)
+                    };
+                    let mb = value.bytes as f64 / 1_000_000.0;
+                    ui.label(ui::caption(format!("{rate} · {mb:.2} MB")).color(c.text));
+                }
+                ui.end_row();
+            };
+            row("Total", traffic.total());
+            for (label, source) in [
+                ("Voice", TrackSource::Microphone),
+                ("Camera", TrackSource::Camera),
+                ("Screen", TrackSource::Screenshare),
+                ("App audio", TrackSource::ScreenshareAudio),
+            ] {
+                row(label, traffic.for_source(source));
+            }
+        });
+    ui.label(ui::caption("Upload + download · last 5 min"));
+    let rates: Vec<_> = link.traffic_kbps.iter().copied().collect();
+    let size = Vec2::new(ui.available_width(), TRAFFIC_CHART_HEIGHT);
+    ui::line_chart(ui, &rates, HISTORY, size, ui::accent(ui).text(c.dark));
 }
 
 /// Jitter, lost packets and bitrates: what the connection window used to show.

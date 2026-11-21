@@ -6,7 +6,10 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use eframe::egui::ColorImage;
 
 use rusttalk_core::{
-    client::{Attachment, voice::TrackSid},
+    client::{
+        Attachment,
+        voice::{CallTraffic, TrackSid},
+    },
     identity::fingerprint,
     presence::{Presence, Status as Choice},
 };
@@ -98,6 +101,7 @@ pub struct Stats {
     /// Packets received since joining, to turn `lost_in` into a rate.
     pub received_in: Option<u64>,
     pub tracks: Vec<TrackStats>,
+    pub traffic: CallTraffic,
 }
 
 #[derive(Clone)]
