@@ -338,8 +338,9 @@ image override. Enable it only if you accept that access.
 
 Stop and remove `updater` with the commands above. To keep the installed
 digests, keep the override in `COMPOSE_FILE`. To manage versions manually,
-remove the override entry and set `RUSTTALK_VERSION` to an exact release
-before the next `docker compose up`.
+remove the override entry and move `auto-update/images.yml` out of the
+deployment directory. Set `RUSTTALK_VERSION` to an exact release before the
+next `docker compose up`.
 
 Backups are UTC-timestamped `rusttalk-*.tar.gz` archives in the project's
 `update-backups` volume. The updater keeps the last `RUSTTALK_UPDATE_KEEP`
@@ -361,8 +362,8 @@ on restore, an unpacked copy of the data.
    ```sh
    docker compose --profile auto-update run --rm --no-deps updater restore ARCHIVE
    ```
-3. Remove the updater container, drop the image override from `COMPOSE_FILE`
-   and set the exact version printed by the restore command. Start the stack with
+3. Remove the updater container and follow the manual version steps above.
+   Set the exact version printed by the restore command. Start the stack with
    `docker compose up -d --wait` (include `--profile index` if you ran the
    index). Check `/v1/server-info` and keep the updater off while verifying the
    restored data.
