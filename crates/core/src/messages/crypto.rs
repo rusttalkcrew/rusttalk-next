@@ -301,6 +301,47 @@ mod tests {
     }
 
     #[test]
+    fn dm_copies_share_an_id_but_stay_bound_to_their_server() {
+        // A DM posts one ID to each shared server, sealed under that server's DM key.
+        let (_, sender) = DeviceIdentity::create("sender").unwrap();
+        let body = MessageBody {
+            text: "hi".into(),
+            ..Default::default()
+        };
+        let replica = |server: u8, channel: u8| MessageContext {
+            server_id: [server; 32],
+            channel_id: [channel; 32],
+            epoch: 1,
+            id: [7; 32],
+            sender_device: sender.certificate.signing_key().to_bytes(),
+            person: *sender.certificate.person_id(),
+        };
+        let (first, second) = (replica(1, 2), replica(3, 4));
+        let (first_key, second_key) = (Key::new([5; 32]), Key::new([6; 32]));
+        let first_copy = first.seal(&first_key, &sender, &body).unwrap();
+        let second_copy = second.seal(&second_key, &sender, &body).unwrap();
+        assert!(
+            first
+                .open(&first_key, &sender.certificate, &first_copy)
+                .unwrap()
+                == body
+        );
+        assert!(
+            second
+                .open(&second_key, &sender.certificate, &second_copy)
+                .unwrap()
+                == body
+        );
+        // One server can't replay another server's copy, even under the same key.
+        for key in [&first_key, &second_key] {
+            assert_eq!(
+                second.open(key, &sender.certificate, &first_copy).err(),
+                Some(MessageError::Signature)
+            );
+        }
+    }
+
+    #[test]
     fn attachment_references_are_bounded() {
         let file = BlobRef {
             id: [1; 32],

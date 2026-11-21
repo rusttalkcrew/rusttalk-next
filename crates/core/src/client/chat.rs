@@ -198,11 +198,21 @@ impl KeyClient<'_> {
         channel: &[u8; 32],
         body: &MessageBody,
     ) -> Result<MessageRecord> {
+        self.post_message(channel, *keys::random_key()?, body).await
+    }
+
+    /// Like `send_message`, with a chosen random ID: a DM posts the same ID to every
+    /// server both people share, so readers can merge the copies.
+    pub async fn post_message(
+        &mut self,
+        channel: &[u8; 32],
+        id: [u8; 32],
+        body: &MessageBody,
+    ) -> Result<MessageRecord> {
         let scope = Scope {
             kind: Kind::Channel,
             id: *channel,
         };
-        let id = *keys::random_key()?;
         let cert = &self.identity.certificate;
         if let Some(original) = body.edit_of {
             self.check_edit(channel, &id, cert.person_id(), &original)
