@@ -13,7 +13,11 @@ use eframe::egui::{
 };
 use rusttalk_core::client::save_json;
 
-use super::{PICKER, SHORTCODES, matching, shortcode_char, sprite, text};
+use super::{
+    PICKER, SHORTCODES,
+    gif::{self, Gif, Gifs},
+    matching, shortcode_char, sprite, text,
+};
 use crate::{
     server::{CustomEmoji, Directory, Id},
     ui,
@@ -32,12 +36,15 @@ const HEADER: f32 = 28.0;
 const RAIL: f32 = 44.0;
 const BODY: f32 = 300.0;
 const PADDING: f32 = 12.0;
+const GIF_COLUMNS: usize = 3;
+const GIF_HEIGHT: f32 = 96.0;
 /// The rail, the grid and room for its scroll bar.
 const WIDTH: f32 = RAIL + COLUMNS as f32 * CELL + 2.0 * PADDING + 4.0;
 
 /// The picker's tabs, each opened by its own composer button.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
+    Gifs,
     Stickers,
     Emoji,
 }
@@ -45,6 +52,7 @@ pub enum Tab {
 impl Tab {
     pub fn label(self) -> &'static str {
         match self {
+            Tab::Gifs => t!("picker.gifs"),
             Tab::Stickers => t!("picker.stickers"),
             Tab::Emoji => t!("picker.emoji"),
         }
@@ -141,6 +149,7 @@ enum Hover {
 pub enum Picked {
     Text(String),
     Sticker(Id, String),
+    Gif(Gif),
 }
 
 pub struct Picker {
@@ -159,6 +168,9 @@ pub struct Picker {
     focus_search: bool,
     pressed_cursor: Option<CCursorRange>,
     insert_at: Option<CCursorRange>,
+    pub gifs: Gifs,
+    /// The GIF under the pointer, by title, for the bottom bar.
+    gif_hover: Option<String>,
 }
 
 fn load(path: &Path) -> Vec<String> {
@@ -189,6 +201,8 @@ impl Picker {
             focus_search: false,
             pressed_cursor: None,
             insert_at: None,
+            gifs: Gifs::default(),
+            gif_hover: None,
         }
     }
 
@@ -250,6 +264,7 @@ impl Picker {
         self.tab = tab;
         self.query.clear();
         self.hover = None;
+        self.gif_hover = None;
         self.focus_search = true;
     }
 
@@ -280,13 +295,14 @@ impl Picker {
             })
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    for tab in [Tab::Stickers, Tab::Emoji] {
+                    for tab in [Tab::Gifs, Tab::Stickers, Tab::Emoji] {
                         if ui::choice_button(ui, self.tab == tab, tab.label(), Vec2::ZERO).clicked()
                             && self.tab != tab
                         {
                             self.tab = tab;
                             self.query.clear();
                             self.hover = None;
+                            self.gif_hover = None;
                             self.focus_search = true;
                         }
                     }
@@ -295,6 +311,8 @@ impl Picker {
                     let tone = self.tab == Tab::Emoji;
                     let width = ui.available_width() - if tone { CELL + ui::SPACE_S } else { 0.0 };
                     let hint = match self.tab {
+                        // KLIPY asks for its name in the search box.
+                        Tab::Gifs => t!("picker.search_gifs"),
                         Tab::Stickers => t!("picker.search_stickers"),
                         Tab::Emoji => t!("picker.search"),
                     };
@@ -308,6 +326,7 @@ impl Picker {
                     }
                     if search.changed() {
                         self.hover = None;
+                        self.gif_hover = None;
                     }
                     if tone {
                         self.tone_button(ui);
@@ -333,6 +352,7 @@ impl Picker {
                     match self.tab {
                         Tab::Emoji => self.emoji(ui, dir),
                         Tab::Stickers => self.stickers(ui, custom),
+                        Tab::Gifs => self.gif_tab(ui),
                     }
                 },
             )
@@ -594,14 +614,139 @@ impl Picker {
                 }
                 ui.label(ui::bold(format!(":{}:", emoji.name)));
             }
+            _ if self.tab == Tab::Gifs => {
+                match &self.gif_hover {
+                    Some(title) => ui.label(ui::bold(title)),
+                    None => ui.label(ui::caption(t!("picker.powered_by", service = gif::SERVICE))),
+                };
+            }
             _ => {
                 let tip = match self.tab {
-                    Tab::Emoji => t!("picker.favourite_tip"),
+                    Tab::Gifs | Tab::Emoji => t!("picker.favourite_tip"),
                     Tab::Stickers => t!("picker.sticker_tip"),
                 };
                 ui.label(ui::caption(tip));
             }
         }
+    }
+
+    /// The GIF tab: the opt-in screen until search is on, then trending or results.
+    fn gif_tab(&mut self, ui: &mut Ui) -> Option<Picked> {
+        let mut picked = None;
+        ui.vertical(|ui| {
+            ui.set_width(WIDTH);
+            let message = |ui: &mut Ui, text: &str| {
+                ui.add_space(PADDING * 2.0);
+                ui.vertical_centered(|ui| ui.label(text));
+            };
+            if gif::KEY.is_none() {
+                message(ui, t!("picker.gifs_unavailable"));
+                return;
+            }
+            if !self.gifs.enabled {
+                ui.add_space(PADDING * 3.0);
+                ui.vertical_centered(|ui| {
+                    ui.set_max_width(WIDTH - 4.0 * PADDING);
+                    ui.label(ui::title(t!("picker.gifs_off")));
+                    ui.add_space(ui::SPACE_XS);
+                    ui.label(t!("picker.gifs_off_help", service = gif::SERVICE));
+                    ui.add_space(ui::SPACE_M);
+                    ui.spacing_mut().button_padding = Vec2::new(ui::SPACE_M, 6.0);
+                    if ui::primary(ui, t!("picker.gifs_turn_on")).clicked() {
+                        self.gifs.turn_on = true;
+                        self.gifs.enabled = true;
+                    }
+                    ui.add_space(ui::SPACE_S);
+                    ui.label(ui::caption(t!("picker.gifs_settings")));
+                });
+                return;
+            }
+            if self.gifs.problem {
+                ui::error_text(ui, Some(t!("picker.gif_failed")));
+            }
+            let query = self.query.clone();
+            let gifs = match self.gifs.results(ui, &query) {
+                gif::Shown::Ready(gifs) => gifs.to_vec(),
+                gif::Shown::Failed => {
+                    message(ui, t!("picker.gifs_failed"));
+                    return;
+                }
+                gif::Shown::Loading => {
+                    ui.add_space(PADDING * 2.0);
+                    ui.vertical_centered(|ui| ui.spinner());
+                    return;
+                }
+            };
+            if gifs.is_empty() {
+                message(ui, t!("picker.none_found"));
+                return;
+            }
+            let cell = Vec2::new(
+                (WIDTH - 2.0 * PADDING - 8.0) / GIF_COLUMNS as f32,
+                GIF_HEIGHT,
+            );
+            ui.add_space(ui::SPACE_XS);
+            ScrollArea::vertical()
+                .id_salt(("picker-gifs", query.trim().is_empty()))
+                .auto_shrink(false)
+                .show_rows(ui, cell.y, gifs.len().div_ceil(GIF_COLUMNS), |ui, rows| {
+                    for row in rows {
+                        ui.horizontal(|ui| {
+                            ui.add_space(PADDING);
+                            for gif in gifs.iter().skip(row * GIF_COLUMNS).take(GIF_COLUMNS) {
+                                let response = self.gif_tile(ui, gif, cell);
+                                if response.hovered() {
+                                    self.gif_hover = Some(gif.title.clone());
+                                }
+                                if response.clicked() {
+                                    picked = Some(Picked::Gif(gif.clone()));
+                                }
+                            }
+                        });
+                    }
+                });
+        });
+        picked
+    }
+
+    /// A result: its preview playing, cropped to fill the cell.
+    fn gif_tile(&mut self, ui: &mut Ui, gif: &Gif, cell: Vec2) -> Response {
+        let (rect, response) = ui.allocate_exact_size(cell, Sense::click());
+        let inner = rect.shrink(2.0);
+        let c = ui::colors(ui);
+        ui.painter().rect_filled(inner, ui::RADIUS, c.field);
+        if ui.is_rect_visible(rect) {
+            match self.gifs.preview(ui, &gif.preview) {
+                Some(texture) => {
+                    let size = texture.size_vec2();
+                    let scale = (inner.size() / size).max_elem();
+                    let uv = Rect::from_center_size(
+                        egui::pos2(0.5, 0.5),
+                        (inner.size() / (size * scale)).min(Vec2::splat(1.0)),
+                    );
+                    egui::Image::new(&texture)
+                        .uv(uv)
+                        .corner_radius(ui::RADIUS)
+                        .paint_at(ui, inner);
+                }
+                None => {
+                    ui.put(inner, egui::Spinner::new());
+                }
+            }
+        }
+        if response.hovered() {
+            let stroke = egui::Stroke::new(2.0, ui::accent(ui).text(c.dark));
+            ui.painter()
+                .rect_stroke(inner, ui::RADIUS, stroke, egui::StrokeKind::Inside);
+        }
+        ui::focus_ring(ui, &response, ui::RADIUS);
+        let label = if gif.title.is_empty() {
+            t!("picker.gifs")
+        } else {
+            &gif.title
+        };
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
+        response.on_hover_cursor(egui::CursorIcon::PointingHand)
     }
 
     pub fn insert(&mut self, field: &Response, draft: &mut String, sequence: &str) {

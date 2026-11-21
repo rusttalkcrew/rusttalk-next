@@ -294,6 +294,21 @@ is deleted and never used; the normal noise suppression keeps working.
   the address the page gave, as the browser already did. That site sees the IP
   address and timing. The request carries no account, device or server
   identifiers.
+- **GIF search (opt-in):** Off until the person selects **Turn on** in the
+  picker's GIFs tab or turns on **Settings → Privacy → Search GIFs in the
+  picker** (`gif_search` in `voice.json`, this device only). While it is off the
+  client sends no request to the service. While it is on and the GIFs tab is
+  open, the desktop client asks `api.klipy.com` for trending GIFs or the typed
+  search words (at most once a second, after typing pauses) and downloads the
+  previews it shows from `static.klipy.com`, over HTTPS straight from this device,
+  not through any RustTalk server. Requests carry the KLIPY app key built into
+  that version of RustTalk, but no account, device, server or customer ID, no
+  language, no Referer, and the same generic User-Agent for everyone. KLIPY sees
+  the IP address, the search words, which previews were loaded, which GIF was
+  picked, and timing. A picked GIF is downloaded once by the sender, into a
+  `rusttalk-<random>` temporary folder removed like pasted pictures, and sent as a
+  normal end-to-end encrypted file, so the people who receive it never contact
+  KLIPY. Builds made without a KLIPY key (`RUSTTALK_KLIPY_KEY`) never contact it.
 - **AI noise removal model (opt-in):** Only when the person selects
   **Download** in Settings → Voice & audio, the desktop client fetches
   `models/DeepFilterNet3_onnx.tar.gz` of `Rikorose/DeepFilterNet` at commit

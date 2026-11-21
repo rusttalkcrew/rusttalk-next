@@ -2617,6 +2617,13 @@ pub fn privacy_tab(ui: &mut Ui, home: &mut Home) {
         audio.set_settings(settings.clone());
         home.publish_settings();
     }
+    ui::page_section(ui, t!("home.gif_search"));
+    ui::toggle_row(
+        ui,
+        &mut settings.gif_search,
+        t!("home.gif_search_toggle"),
+        &t!("home.gif_search_help", service = crate::emoji::gif::SERVICE),
+    );
     ui::page_section(ui, t!("home.server_directory"));
     ui::banner(ui, "privacy-directory", t!("home.directory_help"));
     ui::setting_row(
@@ -3029,6 +3036,13 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
             At::Dm(peer) => Ask::AttachDm(peer),
         };
         files.paste(ui.ctx(), ask);
+    }
+    // GIF search follows the setting; its opt-in button turns the setting on.
+    emoji_picker.gifs.enabled = voice.audio.settings().gif_search;
+    if std::mem::take(&mut emoji_picker.gifs.turn_on) {
+        let mut settings = voice.audio.settings();
+        settings.gif_search = true;
+        voice.audio.set_settings(settings);
     }
     let attach = Panel::bottom("composer")
         // It floats over the chat: no line above, room around it.
@@ -3469,8 +3483,8 @@ fn composer(
                         attach = Some(true);
                     }
                 });
-                // Room for the buttons right of the box: emoji, sticker and send.
-                let right = 3.0 * (COMPOSER_BUTTON + 2.0);
+                // Room for the buttons right of the box: GIF, emoji, sticker and send.
+                let right = 4.0 * (COMPOSER_BUTTON + 2.0);
                 let size = Vec2::new(ui.available_width() - right, 0.0);
                 let field = ui
                     .allocate_ui_with_layout(size, Layout::top_down(Align::Min), |ui| {
@@ -3479,6 +3493,7 @@ fn composer(
                     .inner;
                 ui.add_enabled_ui(online, |ui| {
                     for (glyph, tip, tab) in [
+                        ("GIF", t!("home.gif_picker"), PickerTab::Gifs),
                         ("☺", t!("home.emoji_picker"), PickerTab::Emoji),
                         ("🏷", t!("home.sticker_picker"), PickerTab::Stickers),
                     ] {
@@ -3515,8 +3530,11 @@ fn composer(
     match picked {
         Some(Picked::Text(sequence)) => emoji_picker.insert(&field, &mut chat.draft, &sequence),
         Some(Picked::Sticker(id, name)) => sticker = Some((id, name)),
+        Some(Picked::Gif(gif)) => emoji_picker.gifs.send(ui.ctx(), channel, &gif),
         None => {}
     }
+    // A picked GIF, downloaded: it goes out as an encrypted file of its own.
+    let gif = emoji_picker.gifs.take_ready(ui.ctx(), channel);
     let (enter, escape, up) = ui.input(|input| {
         (
             input.key_pressed(Key::Enter) && !input.modifiers.shift,
@@ -3553,8 +3571,8 @@ fn composer(
             chat.clear_draft();
         }
     }
-    // A sticker goes out on its own, leaving the draft as it is.
-    if let Some((id, name)) = sticker {
+    // A sticker or GIF goes out on its own, leaving the draft as it is.
+    if sticker.is_some() || gif.is_some() {
         let Ok(message) = rusttalk_core::keys::random_key() else {
             tracing::warn!("no randomness for a message ID");
             return (None, attach);
@@ -3563,12 +3581,15 @@ fn composer(
             id: *message,
             channel,
             peer: None,
-            text: name,
+            text: sticker
+                .as_ref()
+                .map(|(_, name)| name.clone())
+                .unwrap_or_default(),
             reply_to: chat.reply_to.take(),
             edit_of: None,
             revision: 0,
-            files: Vec::new(),
-            sticker: Some(id),
+            files: gif.into_iter().collect(),
+            sticker: sticker.map(|(id, _)| id),
             friend: None,
             poke: false,
         });

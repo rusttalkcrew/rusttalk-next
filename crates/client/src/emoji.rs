@@ -11,6 +11,7 @@ use unicode_segmentation::UnicodeSegmentation as _;
 
 use crate::server::{CustomEmoji, Id};
 
+pub mod gif;
 pub mod picker;
 
 const PNGS: &[u8] = include_bytes!("../assets/emoji/sprites.bin");

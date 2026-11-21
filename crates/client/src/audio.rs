@@ -125,6 +125,8 @@ pub struct Settings {
     /// Allow DMs from friends only: others land under "Message requests" without
     /// notifications. Enforced here, since servers don't know who is a friend.
     pub friends_only: bool,
+    /// GIF search in the picker, off until the person turns it on; this device only.
+    pub gif_search: bool,
     /// Sidebar widths and the member list toggle; this device only, never synced.
     pub channels_width: f32,
     pub members_width: f32,
@@ -189,6 +191,7 @@ impl Default for Settings {
             accent: "rust".into(),
             language: "system".into(),
             friends_only: false,
+            gif_search: false,
             channels_width: crate::home::layout::CHANNELS_WIDTH,
             members_width: crate::home::layout::MEMBERS_WIDTH,
             members_hidden: false,
