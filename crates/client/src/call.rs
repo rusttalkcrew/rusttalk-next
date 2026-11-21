@@ -1023,10 +1023,29 @@ pub fn settings_tab(ui: &mut Ui, voice: &mut Voice) {
     } else {
         // As wide as the meter, so the handle sits on the line.
         ui.spacing_mut().slider_width = METER_WIDTH;
-        let slider = ui.add(Slider::new(&mut s.threshold, FLOOR..=CEILING).show_value(false));
-        slider.widget_info(|| egui::WidgetInfo::labeled(Role::Slider, true, "Sensitivity"));
-        ui.weak("Your mic turns on when the level passes the line. Drag to change it.");
-        calibrate(ui, voice, &mut s);
+        if s.auto_threshold {
+            // Shows the live automatic level; turning automatic off keeps the person's own.
+            let mut live = audio.auto_threshold();
+            let slider = ui.add_enabled(
+                false,
+                Slider::new(&mut live, FLOOR..=CEILING).show_value(false),
+            );
+            slider.widget_info(|| egui::WidgetInfo::labeled(Role::Slider, false, "Sensitivity"));
+            ui.weak("Your mic turns on when the level passes the line.");
+        } else {
+            let slider = ui.add(Slider::new(&mut s.threshold, FLOOR..=CEILING).show_value(false));
+            slider.widget_info(|| egui::WidgetInfo::labeled(Role::Slider, true, "Sensitivity"));
+            ui.weak("Your mic turns on when the level passes the line. Drag to change it.");
+        }
+        ui::toggle_row(
+            ui,
+            &mut s.auto_threshold,
+            "Adjust automatically",
+            "Follows the noise around you, like a fan or an open window.",
+        );
+        if !s.auto_threshold {
+            calibrate(ui, voice, &mut s);
+        }
     }
     ui::page_section(ui, "Voice processing");
     ui::toggle_row(
@@ -1088,10 +1107,15 @@ fn meter(ui: &mut Ui, audio: &Audio, s: &Settings) {
     let painter = ui.painter();
     let c = ui::colors(ui);
     painter.rect_filled(rect, ui::RADIUS_S, c.field);
+    let threshold = if s.auto_threshold {
+        audio.auto_threshold()
+    } else {
+        s.threshold
+    };
     let open = if s.push_to_talk {
         audio.talking()
     } else {
-        level > s.threshold
+        level > threshold
     };
     let mut filled = rect;
     filled.set_width(rect.width() * fraction(level));
@@ -1101,7 +1125,7 @@ fn meter(ui: &mut Ui, audio: &Audio, s: &Settings) {
         if open { c.success } else { c.offline },
     );
     if !s.push_to_talk {
-        let x = rect.left() + rect.width() * fraction(s.threshold);
+        let x = rect.left() + rect.width() * fraction(threshold);
         painter.vline(x, rect.y_range(), Stroke::new(2.0, c.strong));
     }
     response.widget_info(|| egui::WidgetInfo::labeled(Role::Meter, true, "Mic level"));
