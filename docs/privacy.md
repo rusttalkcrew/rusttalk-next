@@ -116,6 +116,15 @@ sender. Capture target IDs, enumerated sources and cameras, and Linux
 portal restore tokens stay on the sender's device.
 LiveKit can see microphone mute state and the deafen attribute for each device in a voice room.
 
+For remote control of a shared screen, LiveKit sees that two devices in a
+room exchange data packets on the `rusttalk.control` topic, their sizes,
+whether each is reliable or lossy, and their timing, which reveals roughly
+when someone moves the pointer or types. Requests, answers and every input
+event are encrypted and authenticated with a key derived from the room's
+media key and bound to both devices, so LiveKit can't read, forge or
+redirect them, and replayed input is dropped. Nothing about remote control is stored by the API, by
+LiveKit or on either device.
+
 For live files, only the encrypted offer is retained as a chat message.
 The API sees its normal message metadata plus the live routing notice's
 opaque transfer ID, offering and accepting device IDs, nonce, signature,

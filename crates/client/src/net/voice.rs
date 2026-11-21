@@ -15,14 +15,20 @@ use rusttalk_core::{
         Event, KeyClient, MessageRecord,
         voice::{
             ConnectionState, DataLiveFiles, LiveDownload, LiveFileEvent, NativeVideoSource,
-            RoomEvent, TrackSid, TrackSource, VoiceRoom, VoiceState, VoiceStatus,
+            RemoteParticipant, RoomEvent, TrackSid, TrackSource, VoiceRoom, VoiceState,
+            VoiceStatus,
         },
     },
+    control::{Guest, Host},
     identity::fingerprint,
 };
 use url::Url;
 
-use super::{Command, Ctx, LiveOffer, State, Update, send_messages, to_msg};
+use super::{
+    Command, Ctx, LiveOffer, State, Update,
+    control::{self, ControlView},
+    send_messages, to_msg,
+};
 use crate::{
     screen,
     server::{CallState, Id, Peer, Screen, Stats, TrackStats},
@@ -31,7 +37,7 @@ use crate::{
 
 /// The voice room this device is in, on this server.
 pub(super) struct Live {
-    room: VoiceRoom,
+    pub(super) room: VoiceRoom,
     pub(super) channel: Id,
     /// The last acknowledged deafen state, so failures can be retried.
     deafened: Option<bool>,
@@ -42,13 +48,19 @@ pub(super) struct Live {
     /// A capture waiting for the person to pick (Linux) or for its first frame.
     starting: Option<tokio::task::JoinHandle<Result<(screen::Capture, screen::Options)>>>,
     /// The published screen with its capture and quality, which a change keeps.
-    screen: Option<(TrackSid, screen::Capture, screen::Options)>,
+    pub(super) screen: Option<(TrackSid, screen::Capture, screen::Options)>,
     /// Picking another source for the screen; the old one keeps sharing meanwhile.
     swap: screen::Swap<tokio::task::JoinHandle<Result<screen::Capture>>>,
     /// The published camera; the UI owns its capture.
     camera: Option<TrackSid>,
     /// Screen and camera tracks this device receives; others are unsubscribed.
     watched: HashSet<String>,
+    /// Who asks for, or has, control of our screen.
+    pub(super) host: Host,
+    /// The screen we ask for, or have, control of.
+    pub(super) guest: Guest,
+    /// What the window last heard about both.
+    pub(super) control: ControlView,
 }
 
 /// A live file in the voice room or a chat, kept in `State::transfers` by transfer ID.
@@ -95,7 +107,7 @@ pub(super) fn voice_only(command: &Command) -> bool {
             | Command::Watch(..)
             | Command::StopCamera
             | Command::CancelFile(_)
-    )
+    ) || control::is_control(command)
 }
 
 /// Run a `voice_only` command. Returns the call's channel when its roster changed.
@@ -118,6 +130,10 @@ pub(super) async fn voice_command(
     let Some(live) = &mut state.voice else {
         return Ok(None);
     };
+    if control::is_control(&command) {
+        control::command(ctx, live, command).await;
+        return Ok(None);
+    }
     let changed = match command {
         Command::StopApp(id) => {
             let Some(at) = live.shares.iter().position(|share| share.app.id == id) else {
@@ -130,8 +146,10 @@ pub(super) async fn voice_command(
             }
             true
         }
-        Command::StopScreen => stop_screen(live).await,
+        Command::StopScreen => stop_screen(ctx, live).await,
         Command::ChangeScreen(target) => {
+            // Control was granted for what is shared now, not what comes next.
+            control::stop_hosting(ctx, live).await;
             change_screen(ctx, live, target);
             false
         }
@@ -149,7 +167,9 @@ pub(super) async fn voice_command(
 }
 
 /// Stop the screen share, closing a system picker that is still open. True if a share stopped.
-pub(super) async fn stop_screen(live: &mut Live) -> bool {
+pub(super) async fn stop_screen(ctx: &Ctx, live: &mut Live) -> bool {
+    // Remote control ends with the share; release keys while it can still inject.
+    control::stop_hosting(ctx, live).await;
     if let Some(starting) = live.starting.take() {
         starting.abort();
     }
@@ -303,7 +323,8 @@ pub(super) fn leave_voice(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &
 /// Leave a call: stop showing its videos, close a system picker that is still open,
 /// and close the room. Returns the call's channel.
 pub(super) fn close(ctx: &Ctx, state: &mut State) -> Option<Id> {
-    let live = state.voice.take()?;
+    let mut live = state.voice.take()?;
+    control::leave(&mut live);
     // The call's live files go with it.
     state.transfers.retain(|_, transfer| transfer.chat);
     for sid in &live.watched {
@@ -366,6 +387,23 @@ pub(super) async fn next_voice(voice: &mut Option<Live>) -> Next {
         event = live.room.next_event() => Next::Event(event),
         capture = starting => Next::Capture(capture.map_err(anyhow::Error::from).and_then(|c| c)),
         capture = swapping => Next::Swap(capture.map_err(anyhow::Error::from).and_then(|c| c)),
+    }
+}
+
+/// A sealed remote control message from someone in the call.
+pub(super) async fn control_received(
+    ctx: &Ctx,
+    client: &KeyClient<'_>,
+    state: &mut State,
+    from: &RemoteParticipant,
+    wire: &[u8],
+) {
+    let from = from.identity();
+    let person = identities(client, &state.server_id)
+        .get(from.as_str())
+        .copied();
+    if let Some(live) = &mut state.voice {
+        control::received(ctx, live, &from, person, wire).await;
     }
 }
 
@@ -610,14 +648,22 @@ pub(super) fn on_voice(
             tracing::info!(?reason, "voice disconnected");
             end(state, "Voice disconnected.");
         }
+        RoomEvent::ParticipantDisconnected(participant) => {
+            if let Some(live) = &mut state.voice {
+                control::left(ctx, live, participant.identity().as_str());
+            }
+        }
+        RoomEvent::TrackUnpublished { publication, .. } => {
+            if let Some(live) = &mut state.voice {
+                control::unpublished(ctx, live, publication.sid().as_str());
+            }
+        }
         RoomEvent::ParticipantConnected(_)
         | RoomEvent::ParticipantActive(_)
         | RoomEvent::TrackPublished { .. }
-        | RoomEvent::TrackUnpublished { .. }
         | RoomEvent::TrackMuted { .. }
         | RoomEvent::TrackUnmuted { .. }
         | RoomEvent::ParticipantAttributesChanged { .. }
-        | RoomEvent::ParticipantDisconnected(_)
         | RoomEvent::ConnectionStateChanged(_) => {}
         _ => return,
     }
@@ -651,7 +697,7 @@ pub(super) async fn stop_lost_video(
         .is_some_and(|(sid, ..)| gone(sid, screen))
         || !screen && live.starting.is_some()
     {
-        changed |= stop_screen(live).await;
+        changed |= stop_screen(ctx, live).await;
         ctx.send(Update::Sharing(false));
     }
     let channel = live.channel;
@@ -683,7 +729,7 @@ pub(super) async fn stop_finished_shares(
         .is_some_and(|(_, capture, _)| capture.is_finished())
     {
         tracing::info!("screen capture ended");
-        stop_screen(live).await;
+        stop_screen(ctx, live).await;
         ctx.send(Update::Sharing(false));
     } else if ended.is_empty() {
         return;
@@ -909,6 +955,9 @@ pub(super) async fn start_call(
         swap: screen::Swap::Idle,
         camera: None,
         watched: HashSet::new(),
+        host: Host::default(),
+        guest: Guest::default(),
+        control: ControlView::default(),
     });
     ctx.send(Update::Call(
         url.clone(),

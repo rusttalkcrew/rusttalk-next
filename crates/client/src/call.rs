@@ -40,6 +40,7 @@ pub const DIRECT_CHAT: &str = "Sent directly to people online now. Nothing is st
 const OFFER_SECONDS: i64 = 10 * 60;
 
 mod panel;
+pub mod remote;
 mod stage;
 pub use panel::{Link, call_bar};
 pub use stage::{Stage, full_view, stage};
@@ -76,6 +77,8 @@ pub struct Voice {
     pub live_files: Vec<LiveFile>,
     /// Focus, minimized people and presentation mode, for this call only.
     pub stage: Stage,
+    /// Remote control of our screen, or of one we watch.
+    pub control: remote::Control,
 }
 
 /// A file sent live, shown in the call bar or, when `chat`, in a chat.
@@ -162,6 +165,7 @@ impl Voice {
             shown: HashSet::new(),
             live_files: Vec::new(),
             stage: Stage::default(),
+            control: remote::Control::default(),
         }
     }
 
@@ -173,6 +177,7 @@ impl Voice {
         self.shares.clear();
         self.clear_screens();
         self.stage = Stage::default();
+        self.control = remote::Control::default();
     }
 
     /// Forget this call's video and files: our screen and camera, and what we watch.
@@ -248,6 +253,7 @@ pub fn frame(ctx: &egui::Context, home: &mut Home) {
     if testing || voice.call.is_some() {
         ctx.request_repaint_after(Duration::from_millis(100));
     }
+    remote::frame(home, ctx.input(|input| input.time));
     // Stop watching a screen once it is no longer shared.
     if let Some(watching) = &home.voice.watching {
         let shared = call_server(home)

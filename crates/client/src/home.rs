@@ -745,6 +745,10 @@ impl Home {
                 }
             }
             Update::CameraStopped => self.voice.camera.reset(),
+            Update::Control(view) => self.voice.control.update(view, now),
+            Update::ControlEnded(sid, why) => {
+                self.toast = Some((call::remote::ended(self, &sid, why), now + 6.0));
+            }
             Update::Room(address, channel, peers) => {
                 if let Some(index) = self.index(&address) {
                     let rooms = &mut self.servers[index].voice;
@@ -979,6 +983,8 @@ pub fn show(ui: &mut Ui, home: &mut Home, updates: &mut crate::update::Updater) 
         home.toast = None;
     }
     let colors = ui::colors(ui);
+    // Above everything, full screen too: who controls this screen, and the prompt.
+    call::remote::sharer(ui, home);
     if home.voice.stage.full.is_some() {
         CentralPanel::default()
             .frame(panel_frame(colors.main))

@@ -43,12 +43,14 @@ use crate::{
 };
 
 mod admin;
+mod control;
 mod directory;
 mod files;
 mod find;
 mod voice;
 
 pub use admin::{Admin, AdminUpdate, AuditEntry, Ban, Invite, PublicListing};
+pub use control::{ControlView, Ended};
 use directory::{directory, get};
 pub use files::{MAX_FILE, file_name};
 pub use find::{Listed, PAGE_SIZE};
@@ -127,6 +129,16 @@ pub enum Command {
     /// Publish a running camera, replacing an earlier one.
     ShareCamera(NativeVideoSource, CameraOptions),
     StopCamera,
+    /// Ask to control a shared screen, by track.
+    RequestControl(String),
+    /// Stop asking for, or controlling, a shared screen.
+    ReleaseControl,
+    /// Allow (`true`) or deny this request to control our screen.
+    AnswerControl(rusttalk_core::control::Nonce, bool),
+    /// Take control of our screen back.
+    StopControl,
+    /// Input for the screen we control.
+    ControlInput(Vec<rusttalk_core::control::Input>),
 }
 
 /// A message to send, and what goes back to the composer when sending fails.
@@ -233,6 +245,10 @@ pub enum Update {
     Sharing(bool),
     /// This device's camera stopped publishing or never started.
     CameraStopped,
+    /// Remote control in the call changed.
+    Control(ControlView),
+    /// Asking for, or controlling, this screen (track ID) ended, and why.
+    ControlEnded(String, Ended),
     Stats(Url, Stats),
     /// A file upload in a channel started or went on (what to show, and how far), or ended.
     Uploading(Url, Id, Option<(String, f32)>),
@@ -804,6 +820,11 @@ async fn serve(
                 }
             }
             next = next_voice(&mut state.voice) => match next {
+                Next::Event(Some(RoomEvent::DataReceived {
+                    payload,
+                    participant: Some(participant),
+                    ..
+                })) => voice::control_received(ctx, client, state, &participant, &payload).await,
                 Next::Event(event) => {
                     let lost = match &event {
                         Some(RoomEvent::ParticipantPermissionChanged {
@@ -1185,7 +1206,12 @@ async fn on_command(
         | Command::ChangeScreen(_)
         | Command::Watch(..)
         | Command::StopCamera
-        | Command::CancelFile(_) => unreachable!("handled by voice_command"),
+        | Command::CancelFile(_)
+        | Command::RequestControl(_)
+        | Command::ReleaseControl
+        | Command::AnswerControl(..)
+        | Command::StopControl
+        | Command::ControlInput(_) => unreachable!("handled by voice_command"),
     }
     Ok(())
 }
