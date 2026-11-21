@@ -754,14 +754,29 @@ Hyprland's Lua layer query. Unknown interactivity in those positions blocks
 keys.
 
 RustTalk reads the configured `binds` and active `submap` at control start and
-again when verifying keys or held input. It checks XKB modifiers, keysyms and
-keycodes against the active and universal binds. RustTalk cross-checks the text
-bind list for triggers omitted from JSON. If the compositor omits the flag that says whether modifiers are required,
-RustTalk conservatively blocks that trigger in the relevant submap.
-Super, Logo and Mod4, including remapped keys, and Ctrl+Alt with Delete or a
-function key are blocked. RustTalk drops stale or failed events. Local
-pointer or keyboard activity pauses input until the seat is idle for about
-500 ms.
+again when verifying clicks, scrolls, keys or held input. It checks XKB
+modifiers, keysyms and keycodes against the active and universal binds.
+Hyprland resolves keysym binds with a keymap built from the global
+`input:kb_rules`, `kb_model`, `kb_layout`, `kb_variant` and `kb_options`
+options, which can differ from the seat keymap the virtual keyboard uses.
+RustTalk reads those options with `getoption`, builds the same keymap and
+blocks a key whose keysym under either keymap, or whose keycode, matches a
+bind. Keys are blocked if the options can't be read or compiled, or if
+`input:kb_file` is set. Buttons match `mouse:272`-style triggers and scrolls
+match `mouse_up`, `mouse_down`, `mouse_left` and `mouse_right` in either
+direction, with the virtual keyboard's modifiers, including release, click
+and drag binds and `bindm`. Catch-all binds in the active submap block
+pointer input too. A new modifier is checked against held buttons, and held
+buttons are rechecked with held keys. RustTalk cross-checks the text bind
+list for triggers omitted from JSON. If the compositor omits the flag that
+says whether modifiers are required, RustTalk conservatively blocks that
+trigger, key or pointer, in the relevant submap. Super, Logo and Mod4,
+including remapped keys, and Ctrl+Alt with Delete or a function key are
+blocked. VT switch keysyms (`XF86Switch_VT_1` to `XF86Switch_VT_12`),
+`Terminate_Server` and the other server-private `XF86` keysyms that the
+compositor can act on before binds are blocked with any modifiers. RustTalk
+drops stale or failed events. Local pointer or keyboard activity pauses
+input until the seat is idle for about 500 ms.
 
 About every 100 ms while a remote key or button remains held, RustTalk
 rechecks the lock state, monitor, pointer, keyboard focus and binds even
@@ -775,8 +790,9 @@ configuration can change in between. Hyprland reports local and virtual input
 through the same idle protocol, so coincident local activity can be
 coalesced into a virtual event's notification. The pause and periodic checks
 reduce exposure, and release events still follow compositor routing.
-Compositor actions outside the reported keyboard binds, including pointer
-binds, may affect other outputs.
+Compositor actions outside the reported binds may affect other outputs.
+Hyprland combines modifiers from all keyboards, so a physical modifier held
+without new local activity is not seen by these checks.
 
 The API gets the active roster from LiveKit's internal RoomService,
 cached for one second per room, and maps device identities to current
