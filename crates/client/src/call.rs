@@ -743,7 +743,12 @@ pub fn room(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
         .map(|(name, _)| name)
         .unwrap_or_default();
     let joined = home.voice.in_call(server, &channel);
-    pane_title(ui, "room-title", &format!("🔊 {title}"));
+    pane_title(
+        ui,
+        "room-title",
+        &format!("🔊 {title}"),
+        Some(&mut home.layout),
+    );
     // Problems from the call bar and the room show here; the chat has its own line.
     toast_line(ui, &mut home.toast);
     ui.add_space(ui::SPACE_S);
