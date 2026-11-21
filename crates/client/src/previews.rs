@@ -46,6 +46,8 @@ const WORKERS: usize = 2;
 const GAP: Duration = Duration::from_secs(1);
 /// A link counts as on screen until it hasn't been drawn for this long.
 const SEEN: Duration = Duration::from_secs(1);
+/// While a preview loads, the screen is redrawn at least this often, renewing `SEEN`.
+const REPAINT: Duration = Duration::from_millis(500);
 /// Prices change; anything older is fetched again when shown, while the old copy stays up.
 const FRESH: u64 = 60 * 60;
 /// Previews are dropped after a day, in memory and on disk.
@@ -284,14 +286,16 @@ struct Job {
     cache: String,
     lang: Lang,
     country: Option<String>,
+    /// The site's consent generation when queued; results from an older one are dropped.
+    generation: u64,
 }
 
 struct Shared {
     slots: Mutex<HashMap<String, Slot>>,
     queue: Mutex<VecDeque<Job>>,
     wake: Condvar,
-    /// Sites allowed right now.
-    allowed: Mutex<Vec<&'static str>>,
+    /// Per site: allowed right now, and a generation bumped each time that changes.
+    consent: Mutex<HashMap<&'static str, (bool, u64)>>,
     /// Links drawn on screen lately, by cache key.
     seen: Mutex<HashMap<String, Instant>>,
     /// Per site: no request before this.
@@ -344,7 +348,7 @@ impl Previews {
                 slots: Mutex::default(),
                 queue: Mutex::default(),
                 wake: Condvar::new(),
-                allowed: Mutex::default(),
+                consent: Mutex::default(),
                 seen: Mutex::default(),
                 backoff: Mutex::default(),
                 next: Mutex::new(Instant::now()),
@@ -381,9 +385,42 @@ impl Previews {
         seen.insert(cache.clone(), Instant::now());
         drop(seen);
         self.allow(provider.id(), true);
+        let generation = lock(&self.shared.consent)
+            .get(provider.id())
+            .map_or(0, |(_, generation)| *generation);
+        let (shown, start) = self.claim(&cache);
+        if start {
+            self.send(Job {
+                provider,
+                key: key.to_owned(),
+                cache: cache.clone(),
+                lang: crate::i18n::current(),
+                country: country(),
+                generation,
+            });
+        }
+        // Keep drawing while it loads, so the link stays counted as on screen even
+        // when nothing else repaints.
+        if matches!(
+            lock(&self.shared.slots).get(&cache).map(|slot| &slot.entry),
+            Some(
+                Entry::Loading
+                    | Entry::Ready {
+                        refresh: u64::MAX,
+                        ..
+                    }
+            )
+        ) {
+            self.shared.ctx.request_repaint_after(REPAINT);
+        }
+        shown
+    }
+
+    /// What is shown for `cache` now, and whether to start loading it.
+    fn claim(&self, cache: &str) -> (Option<Arc<Preview>>, bool) {
         let mut slots = lock(&self.shared.slots);
         let now = now();
-        let (shown, start) = match slots.get_mut(&cache) {
+        let (shown, start) = match slots.get_mut(cache) {
             Some(slot) => {
                 slot.used = Instant::now();
                 match &mut slot.entry {
@@ -405,30 +442,22 @@ impl Previews {
             None => (None, true),
         };
         if start && shown.is_none() {
-            insert(&mut slots, cache.clone(), Entry::Loading);
+            insert(&mut slots, cache.to_owned(), Entry::Loading);
         }
-        drop(slots);
-        if start {
-            self.send(Job {
-                provider,
-                key: key.to_owned(),
-                cache,
-                lang: crate::i18n::current(),
-                country: country(),
-            });
-        }
-        shown
+        (shown, start)
     }
 
-    /// Record that a site was allowed or turned off; turning it off drops its queued work.
+    /// Record that a site was allowed or turned off.
     pub fn allow(&self, id: &'static str, on: bool) {
-        let mut allowed = lock(&self.shared.allowed);
-        allowed.retain(|known| *known != id);
         if on {
-            allowed.push(id);
+            let mut consent = lock(&self.shared.consent);
+            let (allowed, generation) = consent.entry(id).or_default();
+            if !*allowed {
+                *allowed = true;
+                *generation += 1;
+            }
         } else {
-            drop(allowed);
-            lock(&self.shared.queue).retain(|job| job.provider.id() != id);
+            revoke(&self.shared, id);
         }
     }
 
@@ -467,9 +496,34 @@ fn stop(shared: &Shared) {
     {
         let _write = lock(&shared.write);
         shared.stopped.store(true, Ordering::SeqCst);
+        for (allowed, generation) in lock(&shared.consent).values_mut() {
+            *allowed = false;
+            *generation += 1;
+        }
     }
     lock(&shared.queue).clear();
     shared.wake.notify_all();
+}
+
+/// Turn a site off: under the write lock, so no result of its older requests is
+/// kept after this, and its queued work is dropped and asked for again later.
+fn revoke(shared: &Shared, id: &'static str) {
+    {
+        let _write = lock(&shared.write);
+        let mut consent = lock(&shared.consent);
+        let (allowed, generation) = consent.entry(id).or_default();
+        *allowed = false;
+        *generation += 1;
+    }
+    let dropped: VecDeque<Job> = {
+        let mut queue = lock(&shared.queue);
+        let (dropped, kept) = queue.drain(..).partition(|job| job.provider.id() == id);
+        *queue = kept;
+        dropped
+    };
+    for job in &dropped {
+        abandon(shared, job);
+    }
 }
 
 /// Add an entry, dropping the least recently shown beyond `MAX_MEMORY`.
@@ -529,8 +583,10 @@ fn work(shared: &Shared, get: Option<&Get>) {
     }
 }
 
+/// Not signed out, and the site still allowed since the job was queued.
 fn allowed(shared: &Shared, job: &Job) -> bool {
-    !shared.stopped.load(Ordering::SeqCst) && lock(&shared.allowed).contains(&job.provider.id())
+    !shared.stopped.load(Ordering::SeqCst)
+        && lock(&shared.consent).get(job.provider.id()) == Some(&(true, job.generation))
 }
 
 /// Allowed, on screen, and the site isn't waiting after a failure.
@@ -572,7 +628,7 @@ fn run(shared: &Shared, get: &Get, job: &Job) {
     if !wanted(shared, job) {
         return abandon(shared, job);
     }
-    let fetched = fetch(get, job);
+    let fetched = fetch(get, job, || allowed(shared, job));
     if fetched.is_none() {
         lock(&shared.backoff).insert(job.provider.id(), Instant::now() + RETRY);
     }
@@ -580,23 +636,26 @@ fn run(shared: &Shared, get: &Get, job: &Job) {
     if !allowed(shared, job) {
         return abandon(shared, job);
     }
-    match (fetched, saved) {
+    let committed = match (fetched, saved) {
         (Some((details, image, bytes)), _) => {
-            save(shared, &file, &details, bytes.as_deref());
             let at = now();
-            publish(
-                shared,
-                job,
-                Arc::new(Preview::new(details, image)),
-                at + FRESH,
-                at + KEEP,
-            );
+            save(shared, job, &file, &details, bytes.as_deref())
+                && publish(
+                    shared,
+                    job,
+                    Arc::new(Preview::new(details, image)),
+                    at + FRESH,
+                    at + KEEP,
+                )
         }
         // A failed refresh keeps the old copy, without an error.
         (None, Some((preview, at))) => {
             publish(shared, job, preview, now() + RETRY.as_secs(), at + KEEP)
         }
         (None, None) => set(shared, job, Entry::Failed(Instant::now())),
+    };
+    if !committed {
+        abandon(shared, job);
     }
 }
 
@@ -612,7 +671,7 @@ fn abandon(shared: &Shared, job: &Job) {
     }
 }
 
-fn publish(shared: &Shared, job: &Job, preview: Arc<Preview>, refresh: u64, kept: u64) {
+fn publish(shared: &Shared, job: &Job, preview: Arc<Preview>, refresh: u64, kept: u64) -> bool {
     set(
         shared,
         job,
@@ -621,26 +680,33 @@ fn publish(shared: &Shared, job: &Job, preview: Arc<Preview>, refresh: u64, kept
             refresh,
             kept,
         },
-    );
+    )
 }
 
-fn set(shared: &Shared, job: &Job, entry: Entry) {
+/// Keep `entry`, unless signed out or the site was turned off since the job was queued.
+fn set(shared: &Shared, job: &Job, entry: Entry) -> bool {
     let _write = lock(&shared.write);
-    if shared.stopped.load(Ordering::SeqCst) {
-        return;
+    if !allowed(shared, job) {
+        return false;
     }
     insert(&mut lock(&shared.slots), job.cache.clone(), entry);
     shared.ctx.request_repaint();
+    true
 }
 
 type Fetched = (Details, Option<ColorImage>, Option<Vec<u8>>);
 
 /// The details, and the picture decoded and as downloaded.
-fn fetch(get: &Get, job: &Job) -> Option<Fetched> {
+/// `go` is checked before every request, so none starts after sign-out or turning off.
+fn fetch(get: &Get, job: &Job, go: impl Fn() -> bool) -> Option<Fetched> {
+    if !go() {
+        return None;
+    }
     let details = job
         .provider
         .fetch(get, &job.key, job.lang, job.country.as_deref())?;
     let bytes = (details.image.as_deref())
+        .filter(|_| go())
         .and_then(|u| safe_url(u, |host| job.provider.image_host(host)))
         .and_then(|url| get.get(&url, MAX_IMAGE, |host| job.provider.image_host(host)));
     let image = bytes.as_deref().and_then(picture);
@@ -684,11 +750,12 @@ fn load(file: &Path) -> Option<(Arc<Preview>, u64)> {
     Some((Arc::new(Preview::new(saved.details, image)), saved.at))
 }
 
-fn save(shared: &Shared, file: &Path, details: &Details, image: Option<&[u8]>) {
+/// Write a fetched preview, unless the job lost its consent; `false` then.
+fn save(shared: &Shared, job: &Job, file: &Path, details: &Details, image: Option<&[u8]>) -> bool {
     {
         let _write = lock(&shared.write);
-        if shared.stopped.load(Ordering::SeqCst) {
-            return;
+        if !allowed(shared, job) {
+            return false;
         }
         let saved = Saved {
             at: now(),
@@ -708,6 +775,7 @@ fn save(shared: &Shared, file: &Path, details: &Details, image: Option<&[u8]>) {
         }
     }
     prune(shared);
+    true
 }
 
 /// Drop expired previews, and the oldest beyond `MAX_SAVED`.
@@ -745,6 +813,9 @@ mod tests {
     /// A site that never touches the network: it counts calls and answers as set.
     struct Fake {
         calls: AtomicUsize,
+        /// Picture requests begun: each checks the host first, which is refused,
+        /// so none reaches the network.
+        pictures: AtomicUsize,
         answer: bool,
         during: Mutex<Option<Box<dyn Fn() + Send>>>,
     }
@@ -769,10 +840,11 @@ mod tests {
                 description: String::new(),
                 fields: Vec::new(),
                 url: "https://example.org/".into(),
-                image: None,
+                image: Some("https://picture.invalid/header.png".into()),
             })
         }
         fn image_host(&self, _: &str) -> bool {
+            self.pictures.fetch_add(1, Ordering::SeqCst);
             false
         }
     }
@@ -780,6 +852,7 @@ mod tests {
     fn fake(answer: bool) -> &'static Fake {
         Box::leak(Box::new(Fake {
             calls: AtomicUsize::new(0),
+            pictures: AtomicUsize::new(0),
             answer,
             during: Mutex::new(None),
         }))
@@ -797,12 +870,16 @@ mod tests {
         if on_screen {
             lock(&previews.shared.seen).insert(cache.clone(), Instant::now());
         }
+        let generation = lock(&previews.shared.consent)
+            .get(provider.id())
+            .map_or(0, |(_, generation)| *generation);
         Job {
             provider,
             key: key.into(),
             cache,
             lang: Lang::En,
             country: None,
+            generation,
         }
     }
 
@@ -836,14 +913,80 @@ mod tests {
         let site = fake(true);
         previews.allow(site.id(), true);
         let shared = previews.shared.clone();
-        *lock(&site.during) = Some(Box::new(move || {
-            lock(&shared.allowed).clear();
-        }));
+        *lock(&site.during) = Some(Box::new(move || revoke(&shared, "fake")));
         let job = job(&previews, site, "1", true);
         run(&previews.shared, &get, &job);
         assert_eq!(site.calls.load(Ordering::SeqCst), 1);
         assert!(!ready(&previews, &job));
         assert!(!data.path().join(DIR).exists());
+    }
+
+    #[test]
+    fn no_picture_request_after_turning_off_mid_request() {
+        let (previews, _data, get) = setup();
+        let site = fake(true);
+        previews.allow(site.id(), true);
+        run(&previews.shared, &get, &job(&previews, site, "1", true));
+        assert_eq!(
+            site.pictures.load(Ordering::SeqCst),
+            1,
+            "the picture is asked for"
+        );
+        let shared = previews.shared.clone();
+        *lock(&site.during) = Some(Box::new(move || revoke(&shared, "fake")));
+        *lock(&previews.shared.next) = Instant::now();
+        run(&previews.shared, &get, &job(&previews, site, "2", true));
+        assert_eq!(site.pictures.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn off_and_on_again_mid_request_still_keeps_nothing() {
+        let (previews, data, get) = setup();
+        let site = fake(true);
+        previews.allow(site.id(), true);
+        let shared = previews.shared.clone();
+        *lock(&site.during) = Some(Box::new(move || {
+            revoke(&shared, "fake");
+            lock(&shared.consent).insert("fake", (true, 3));
+        }));
+        let job = job(&previews, site, "1", true);
+        run(&previews.shared, &get, &job);
+        assert_eq!(site.calls.load(Ordering::SeqCst), 1);
+        assert!(!ready(&previews, &job), "an older generation's result");
+        assert!(!data.path().join(DIR).exists());
+    }
+
+    #[test]
+    fn turning_off_resets_queued_work_so_on_again_restarts_it() {
+        let (previews, _data, get) = setup();
+        let site = fake(true);
+        previews.allow(site.id(), true);
+        let loading = job(&previews, site, "1", true);
+        let refreshing = job(&previews, site, "2", true);
+        assert!(previews.claim(&loading.cache).1);
+        let preview = Arc::new(Preview::new(
+            site.fetch(&get, "2", Lang::En, None).unwrap(),
+            None,
+        ));
+        insert(
+            &mut lock(&previews.shared.slots),
+            refreshing.cache.clone(),
+            Entry::Ready {
+                preview,
+                refresh: u64::MAX,
+                kept: u64::MAX,
+            },
+        );
+        lock(&previews.shared.queue).extend([loading, refreshing]);
+        previews.allow(site.id(), false);
+        assert!(lock(&previews.shared.queue).is_empty());
+        previews.allow(site.id(), true);
+        for key in ["1", "2"] {
+            assert!(
+                previews.claim(&cache_key(site, key)).1,
+                "{key} starts again"
+            );
+        }
     }
 
     #[test]
