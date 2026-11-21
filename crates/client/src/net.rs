@@ -113,6 +113,7 @@ pub enum Command {
     Admin(Admin),
     JoinVoice(Id),
     LeaveVoice,
+    SyncVoiceStatus,
     ShareApp(App),
     /// Stop sharing an app, by its ID.
     StopApp(String),
@@ -819,6 +820,7 @@ async fn serve(
                 Next::Swap(capture) => screen_changed(ctx, state, capture),
             },
             _ = stats.tick(), if state.voice.is_some() => {
+                voice::sync_voice_status(ctx, state).await;
                 stop_finished_shares(ctx, url, client, state).await;
                 voice_stats(ctx, url, client, state).await;
             }
@@ -1132,6 +1134,7 @@ async fn on_command(
             voice::share_camera(ctx, url, client, state, source, options).await?;
         }
         Command::LeaveVoice
+        | Command::SyncVoiceStatus
         | Command::StopApp(_)
         | Command::StopScreen
         | Command::ChangeScreen(_)

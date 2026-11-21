@@ -45,6 +45,7 @@ pub struct Peer {
     pub connecting: bool,
     /// A device the server couldn't match to a member; `person` is all zeros.
     pub unknown: bool,
+    pub status: rusttalk_core::client::voice::VoiceStatus,
     /// Track and name of each app they share, only known inside the room.
     pub apps: Vec<(TrackSid, String)>,
     /// Screens they share, only known inside the room.

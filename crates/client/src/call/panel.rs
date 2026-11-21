@@ -12,13 +12,13 @@ use rusttalk_core::client::voice::{CallTraffic, TrackSource, Traffic};
 
 use super::{
     Listing, LiveAction, Sharing, Voice, audio, change_screen as change_screen_now, fill, leave,
-    live_files, open_screen_dialog, screen,
+    live_files, open_screen_dialog, screen, status_name,
 };
 use crate::{
     files::Ask,
     home::{Home, Tab},
     net::Command,
-    server::{CallState, Server, Stats},
+    server::{CallState, Id, Server, Stats},
     share::{self, App},
     ui::{self, HOVER_SECONDS, ICON_BUTTON, Look, Palette, RADIUS, SPACE_XS},
 };
@@ -180,6 +180,7 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
     let can_talk = call.can_talk;
     let can_share_video = call.can_share_video;
     let stats = call.stats.clone();
+    let channel = call.channel;
     let quality = if connected {
         quality(stats.ping_ms, home.voice.link.loss)
     } else {
@@ -204,7 +205,8 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                     let signal = signal_button(ui, quality);
                     ui::popup(&signal, |ui| {
-                        voice_settings = connection(ui, &stats, &home.voice.link, quality, server);
+                        voice_settings =
+                            connection(ui, &stats, &home.voice.link, quality, server, &channel);
                     });
                     ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing.y = 0.0;
@@ -362,11 +364,12 @@ fn connection(
     link: &Link,
     quality: Quality,
     server: Option<&Server>,
+    channel: &Id,
 ) -> bool {
     ui.set_max_height(ui.ctx().content_rect().height() - 2.0 * ui::SPACE_L);
     egui::ScrollArea::vertical()
         .show(ui, |ui| {
-            connection_contents(ui, stats, link, quality, server)
+            connection_contents(ui, stats, link, quality, server, channel)
         })
         .inner
 }
@@ -377,6 +380,7 @@ fn connection_contents(
     link: &Link,
     quality: Quality,
     server: Option<&Server>,
+    channel: &Id,
 ) -> bool {
     let ms = |value: Option<f64>| value.map_or("—".into(), |v| format!("{v:.0} ms"));
     let color = quality.color(ui::colors(ui));
@@ -409,6 +413,16 @@ fn connection_contents(
         });
     });
     ui.separator();
+    if let Some(server) = server
+        && let Some(peers) = server.voice.get(channel)
+        && peers.iter().any(|peer| peer.person != server.dir.me)
+    {
+        egui::CollapsingHeader::new("People in call").show(ui, |ui| {
+            for peer in peers.iter().filter(|peer| peer.person != server.dir.me) {
+                ui.horizontal(|ui| status_name(ui, &peer.name(server), peer.status));
+            }
+        });
+    }
     traffic(ui, &stats.traffic, link);
     egui::CollapsingHeader::new("Details")
         .id_salt("connection details")

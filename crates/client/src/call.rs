@@ -9,9 +9,10 @@ use std::{
 };
 
 use eframe::egui::{
-    self, ColorImage, ComboBox, Event, Frame, Key, Margin, RichText, Role, Sense, Slider, Stroke,
-    TextureHandle, TextureOptions, Ui, Vec2,
+    self, ColorImage, ComboBox, Event, Frame, Key, Label, Margin, RichText, Role, Sense, Slider,
+    Stroke, TextureHandle, TextureOptions, Ui, Vec2, WidgetInfo,
 };
+use rusttalk_core::client::voice::VoiceStatus;
 
 use crate::{
     audio::{self, Audio, Settings, StreamId},
@@ -303,7 +304,7 @@ pub fn frame(ctx: &egui::Context, home: &mut Home) {
     }
 }
 
-fn call_server(home: &Home) -> Option<&Server> {
+pub(crate) fn call_server(home: &Home) -> Option<&Server> {
     let call = home.voice.call.as_ref()?;
     home.servers.iter().find(|s| s.address == call.server)
 }
@@ -340,7 +341,15 @@ pub fn room_list(ui: &mut Ui, home: &Home, server: &Server, channel: &Id) {
             if home.voice.speaking(server, &peer.person) {
                 ring(ui, face.rect);
             }
-            ui.label(RichText::new(&name).size(ui::TEXT_SMALL));
+            let status = if peer.person == server.dir.me && home.voice.in_call(server, channel) {
+                VoiceStatus {
+                    muted: home.voice.audio.muted(),
+                    deafened: home.voice.audio.deafened(),
+                }
+            } else {
+                peer.status
+            };
+            status_name(ui, &name, status);
             if peer.connecting {
                 ui.label(ui::caption("Connecting…"));
             }
@@ -370,6 +379,33 @@ pub fn room_list(ui: &mut Ui, home: &Home, server: &Server, channel: &Id) {
                 ui::context_menu(&row, |m| stream_menu(m, &home.voice.audio, &stream));
             }
         }
+    }
+}
+
+fn sound_badges(status: VoiceStatus) -> impl Iterator<Item = (&'static str, &'static str)> + Clone {
+    [
+        status.muted.then_some(("🎤", "Muted")),
+        status.deafened.then_some(("🎧", "Deafened")),
+    ]
+    .into_iter()
+    .flatten()
+}
+
+fn status_name(ui: &mut Ui, name: &str, status: VoiceStatus) {
+    let badges = sound_badges(status);
+    let reserved = badges.clone().count() as f32 * (ui::TEXT_BODY + ui.spacing().item_spacing.x);
+    ui.scope(|ui| {
+        ui.set_max_width((ui.available_width() - reserved).max(0.0));
+        ui.add(Label::new(RichText::new(name).size(ui::TEXT_SMALL)).truncate());
+    });
+    for (glyph, tip) in badges {
+        let response = ui.label(ui::caption(glyph)).on_hover_text(tip);
+        let half = Vec2::splat(ui::SPACE_XS);
+        ui.painter().line_segment(
+            [response.rect.center() - half, response.rect.center() + half],
+            Stroke::new(2.0, ui::colors(ui).danger_text),
+        );
+        response.widget_info(|| WidgetInfo::labeled(Role::Image, true, tip));
     }
 }
 

@@ -73,6 +73,42 @@ pub enum VoiceState {
     Disconnected,
 }
 
+const DEAFENED: &str = "deafened";
+
+/// Untrusted participant status for display in the joined room.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct VoiceStatus {
+    pub muted: bool,
+    pub deafened: bool,
+}
+
+impl VoiceStatus {
+    pub fn from_participant(participant: &RemoteParticipant) -> Self {
+        Self::from_signals(
+            participant
+                .track_publications()
+                .into_values()
+                .map(|track| (track.source(), track.is_muted())),
+            participant.attributes().get(DEAFENED).map(String::as_str),
+        )
+    }
+
+    fn from_signals(
+        tracks: impl IntoIterator<Item = (TrackSource, bool)>,
+        deafened: Option<&str>,
+    ) -> Self {
+        let mut microphones = tracks
+            .into_iter()
+            .filter(|&(source, _)| source == TrackSource::Microphone);
+        Self {
+            muted: microphones
+                .next()
+                .is_some_and(|(_, muted)| muted && microphones.all(|(_, muted)| muted)),
+            deafened: deafened == Some("1"),
+        }
+    }
+}
+
 /// People in a voice room, plus devices the server could not match to a current reader.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct VoiceRoster {
@@ -386,6 +422,38 @@ impl VoiceRoom {
             .await
     }
 
+    /// Set the published microphone's mute state, leaving shared audio alone.
+    pub fn set_microphone_muted(&self, muted: bool) {
+        for publication in self
+            .room
+            .local_participant()
+            .track_publications()
+            .into_values()
+        {
+            if publication.source() == TrackSource::Microphone
+                && let Some(track) = publication.track()
+            {
+                if muted {
+                    track.mute();
+                } else {
+                    track.unmute();
+                }
+            }
+        }
+    }
+
+    /// Advertise whether this device has deafened itself.
+    pub async fn set_deafened(&self, deafened: bool) -> Result<()> {
+        self.room
+            .local_participant()
+            .set_attributes(HashMap::from([(
+                DEAFENED.into(),
+                if deafened { "1" } else { "" }.into(),
+            )]))
+            .await?;
+        Ok(())
+    }
+
     /// Publish one app as a separate encrypted audio track. Feed PCM after this succeeds.
     pub async fn publish_app_audio(
         &self,
@@ -470,6 +538,36 @@ impl VoiceRoom {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn badges_follow_microphone_mute_and_exact_deafen_attribute() {
+        use TrackSource::{Microphone, ScreenshareAudio};
+        let status = |tracks: &[(TrackSource, bool)], deafened| {
+            VoiceStatus::from_signals(tracks.iter().copied(), deafened)
+        };
+        assert_eq!(
+            status(&[(Microphone, true), (ScreenshareAudio, false)], Some("1")),
+            VoiceStatus {
+                muted: true,
+                deafened: true
+            },
+        );
+        assert_eq!(
+            status(&[(Microphone, false), (Microphone, true)], Some("")),
+            VoiceStatus::default(),
+        );
+        assert_eq!(
+            status(&[(ScreenshareAudio, true)], Some("true")),
+            VoiceStatus::default(),
+        );
+        assert_eq!(
+            status(&[], Some("1")),
+            VoiceStatus {
+                muted: false,
+                deafened: true
+            },
+        );
+    }
 
     #[test]
     fn media_key_binds_server_channel_and_epoch() {
