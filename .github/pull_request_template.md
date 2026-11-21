@@ -1,6 +1,6 @@
 ## What changes
 
-<!-- In plain words: what does this change for people using RustTalk? -->
+<!-- In plain words, a few bullets: what does this change for people using RustTalk? Keep the whole description short (under ~200 words). -->
 
 ## Why
 
@@ -8,7 +8,7 @@
 
 ## Screenshots
 
-<!-- For anything visible: before and after, in a dark and a light theme. -->
+<!-- Required for anything visible: before and after, in a dark and a light theme. Drag images here. -->
 
 ## How it was tested
 

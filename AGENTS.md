@@ -97,6 +97,16 @@ Two people must never build the same thing. Before you write any code:
 
 - Title: what it does, in plain words. Body: follow
   `.github/pull_request_template.md`, with `Closes #<issue>`.
+- **Keep the description short.** A few bullet points: what changes for
+  people using RustTalk, why, how it was tested, and what is unsure. Aim for
+  under 200 words. No walls of text, no copy of the diff, no list of every
+  file touched. The reviewer reads the code; the description says what to
+  look at.
+- **Add screenshots whenever the change is visible** (before and after, dark
+  and light theme). Drag the images into the pull request description on
+  GitHub. An AI agent that cannot upload images saves them and gives the
+  person their full paths, so they can attach them. No screenshot for a
+  visible change? Say why.
 - Commits end with a `Co-Authored-By:` line naming the AI model that helped.
 - Keep the branch up to date with `main` by rebasing, and resolve conflicts
   so that everyone's changes survive.
