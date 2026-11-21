@@ -85,7 +85,7 @@ impl Server {
             .timeout(Duration::from_secs(10))
     }
 
-    /// Read public admission information through the verified server connection.
+    /// Read public admission and version information through the verified server connection.
     pub async fn info(&self) -> Result<ServerInfo> {
         Ok(self
             .request(reqwest::Method::GET, "/v1/server-info")

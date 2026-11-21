@@ -31,7 +31,10 @@ use crate::{
     crop::{Crop, Outcome, Target},
     device_sync::{self, Edit},
     files::{self, Ask, Files},
-    net::{Admin, AdminUpdate, Admission, Command, Draft, Listed, Net, PAGE_SIZE, Preview, Update},
+    net::{
+        Admin, AdminUpdate, Admission, Command, Compatibility, Draft, Listed, Net, PAGE_SIZE,
+        Preview, Update,
+    },
     official, reorder,
     screen::Video,
     server::{Body, Chat, Directory, Id, Member, Msg, Picture, Server, Status, member_name},
@@ -126,6 +129,7 @@ impl Find {
 
 enum Join {
     Idle(Option<String>),
+    UpdateRequired,
     Checking,
     Preview { preview: Box<Preview>, name: String },
     Joining(url::Url),
@@ -401,7 +405,12 @@ impl Home {
                         self.view = View::Server(index);
                     }
                     (Status::Stopped(error), true) => {
-                        self.join = Join::Idle(Some(error.clone()));
+                        self.join = if self.servers[index].compatibility == Compatibility::AppTooOld
+                        {
+                            Join::UpdateRequired
+                        } else {
+                            Join::Idle(Some(error.clone()))
+                        };
                         self.remove_server(index);
                         self.view = View::Join;
                         return;
@@ -419,6 +428,7 @@ impl Home {
                 }
                 let server = &mut self.servers[index];
                 if status == Status::Online {
+                    server.order_unavailable = false;
                     // Opens that failed while offline.
                     for (channel, chat) in &server.chats {
                         if chat.loading && chat.messages.is_empty() {
@@ -427,6 +437,16 @@ impl Home {
                     }
                 }
                 server.status = status;
+            }
+            Update::Compatibility(address, compatibility) => {
+                if let Some(index) = self.index(&address) {
+                    self.servers[index].compatibility = compatibility;
+                }
+            }
+            Update::ChannelOrderUnavailable(address) => {
+                if let Some(index) = self.index(&address) {
+                    self.servers[index].order_unavailable = true;
+                }
             }
             Update::Directory(address, dir) => {
                 if let Some(index) = self.index(&address) {
@@ -834,6 +854,7 @@ pub fn show(ui: &mut Ui, home: &mut Home, updates: &mut crate::update::Updater) 
     let mut members = None;
     if let View::Server(index) = home.view
         && home.servers[index].status != Status::Connecting
+        && home.servers[index].compatibility != Compatibility::AppTooOld
     {
         // Toggled from the channel header; the panel only slides.
         let mut shown = home.layout.members_shown();
@@ -858,27 +879,36 @@ pub fn show(ui: &mut Ui, home: &mut Home, updates: &mut crate::update::Updater) 
                 "Direct messages",
                 "Pick a person in a server's member list to start a chat.",
             ),
-            View::Direct(Some((index, channel))) => chat_pane(ui, home, index, channel),
-            View::Server(index) => match home.servers[index].open {
-                Some(channel) if home.servers[index].is_voice(&channel) => {
-                    voice_pane(ui, home, index, channel)
+            View::Direct(Some((index, channel))) => {
+                if show_compatibility(ui, home, index) {
+                    chat_pane(ui, home, index, channel);
                 }
-                Some(channel) => chat_pane(ui, home, index, channel),
-                None => {
-                    let server = &home.servers[index];
-                    let hint = match &server.status {
-                        Status::Stopped(reason) => reason.clone(),
-                        Status::Connecting => "Connecting…".into(),
-                        _ if server.dir.categories.is_empty()
-                            && server.dir.perms.manage_channels =>
-                        {
-                            "No channels yet. Create one from the server menu.".into()
-                        }
-                        _ => "Pick a channel on the left.".into(),
-                    };
-                    empty(ui, server.name(), &hint);
+            }
+            View::Server(index) => {
+                if !show_compatibility(ui, home, index) {
+                    return;
                 }
-            },
+                match home.servers[index].open {
+                    Some(channel) if home.servers[index].is_voice(&channel) => {
+                        voice_pane(ui, home, index, channel)
+                    }
+                    Some(channel) => chat_pane(ui, home, index, channel),
+                    None => {
+                        let server = &home.servers[index];
+                        let hint = match &server.status {
+                            Status::Stopped(reason) => reason.clone(),
+                            Status::Connecting => "Connecting…".into(),
+                            _ if server.dir.categories.is_empty()
+                                && server.dir.perms.manage_channels =>
+                            {
+                                "No channels yet. Create one from the server menu.".into()
+                            }
+                            _ => "Pick a channel on the left.".into(),
+                        };
+                        empty(ui, server.name(), &hint);
+                    }
+                }
+            }
         });
     // Resize handles go last so they sit above the panels on both sides of each edge.
     let mut dragging = layout::resize_edge(
@@ -912,6 +942,28 @@ pub fn show(ui: &mut Ui, home: &mut Home, updates: &mut crate::update::Updater) 
     let action = crate::settings::show(ui.ctx(), home, updates);
     crop_dialog(ui.ctx(), home);
     action
+}
+
+fn show_compatibility(ui: &mut Ui, home: &mut Home, index: usize) -> bool {
+    let compatibility = home.servers[index].compatibility;
+    if compatibility_banner(ui, compatibility) {
+        home.settings = Some(Tab::Updates);
+    }
+    compatibility != Compatibility::AppTooOld
+}
+
+fn compatibility_banner(ui: &mut Ui, compatibility: Compatibility) -> bool {
+    let text = match compatibility {
+        Compatibility::Supported => return false,
+        Compatibility::ServerTooOld => {
+            "This server runs an older RustTalk. Some things may not work until its owner updates it."
+        }
+        Compatibility::AppTooOld => "This server needs a newer RustTalk. Update the app.",
+    };
+    ui::card(ui, |ui| {
+        ui.add(Label::new(text).wrap());
+        compatibility == Compatibility::AppTooOld && ui::primary(ui, "Open updates").clicked()
+    })
 }
 
 fn empty(ui: &mut Ui, title: &str, hint: &str) {
@@ -1183,7 +1235,9 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
             ui.weak("Offline. Trying again…");
         }
         Status::Stopped(reason) => {
-            error_text(ui, Some(reason));
+            if server.compatibility != Compatibility::AppTooOld {
+                error_text(ui, Some(reason));
+            }
             if ui::secondary(ui, "Remove server").clicked() {
                 home.leave_server(index);
                 return;
@@ -1207,7 +1261,7 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
     let mut category_dialog = None;
     let categories = &server.dir.categories;
     let can_manage = perms.manage_channels && online;
-    let can_move = can_manage && reorder::order(categories).is_some();
+    let can_move = can_manage && !server.order_unavailable && reorder::order(categories).is_some();
     let area = ScrollArea::vertical().animated(false);
     area.show_viewport(ui, |ui, viewport| {
         ui.spacing_mut().item_spacing.y = 2.0;
@@ -1573,6 +1627,14 @@ fn join(ui: &mut Ui, home: &mut Home) {
                 ui.spinner();
                 ui.label("Checking the server…");
             }
+            Join::UpdateRequired => {
+                if compatibility_banner(ui, Compatibility::AppTooOld) {
+                    home.settings = Some(Tab::Updates);
+                }
+                if ui::secondary_large(ui, "Back").clicked() {
+                    home.join = Join::Idle(None);
+                }
+            }
             Join::Joining(_) => {
                 ui.spinner();
                 ui.label("Joining…");
@@ -1865,6 +1927,8 @@ fn new_server(
         address,
         label: label.into(),
         status: Status::Connecting,
+        compatibility: Compatibility::default(),
+        order_unavailable: false,
         dir: Directory::default(),
         chats: HashMap::new(),
         open: None,

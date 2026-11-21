@@ -4,7 +4,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
 };
 use rusttalk_core::{
-    auth::{OpenJoining, ServerInfo, decode, encode},
+    auth::{OpenJoining, PROTOCOL_VERSION, ServerInfo, decode, encode},
     keys::{INVITE_BYTES, Metadata},
 };
 use serde::{Deserialize, Serialize};
@@ -23,7 +23,11 @@ pub async fn server_info(State(app): State<App>) -> ApiResult<Json<ServerInfo>> 
     let open_joining = query_scalar("SELECT open_joining FROM server_settings WHERE id = 1")
         .fetch_one(&app.db)
         .await?;
-    Ok(Json(ServerInfo { open_joining }))
+    Ok(Json(ServerInfo {
+        open_joining,
+        version: Some(env!("CARGO_PKG_VERSION").into()),
+        protocol: Some(PROTOCOL_VERSION),
+    }))
 }
 
 pub async fn open_joining(
@@ -559,4 +563,50 @@ pub async fn audit_log(
             })
             .collect(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{body::to_bytes, response::IntoResponse};
+
+    #[tokio::test]
+    async fn server_info_reports_version_protocol_and_admission() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::store::open(dir.path()).await.unwrap();
+        let app = App {
+            files: crate::files::Files::open(dir.path(), &db)
+                .await
+                .unwrap()
+                .into(),
+            db,
+            key: ed25519_dalek::SigningKey::from_bytes(&[7; 32]).into(),
+            changes: tokio::sync::broadcast::channel(128).0,
+            presence: Default::default(),
+            voice: None,
+            session_ttl: crate::auth::SESSION_TTL,
+            listing_changed: tokio::sync::watch::channel(()).0,
+        };
+        for open_joining in [false, true] {
+            query("UPDATE server_settings SET open_joining = ?")
+                .bind(open_joining)
+                .execute(&app.db)
+                .await
+                .unwrap();
+            let response = server_info(State(app.clone()))
+                .await
+                .unwrap()
+                .into_response();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = to_bytes(response.into_body(), 4096).await.unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+                serde_json::json!({
+                    "open_joining": open_joining,
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "protocol": PROTOCOL_VERSION
+                })
+            );
+        }
+    }
 }

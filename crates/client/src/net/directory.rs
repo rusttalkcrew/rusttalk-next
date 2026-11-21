@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use anyhow::{Context, Result};
 use eframe::egui::ColorImage;
 use futures_util::future::join_all;
-use reqwest::Method;
+use reqwest::{Method, StatusCode};
 use rusttalk_core::{
     auth::{decode, encode},
     client::{Catalog, Channel as WireChannel, KeyClient, decode_profile_image},
@@ -32,8 +32,9 @@ pub(super) async fn get(client: &KeyClient<'_>, path: &str) -> Result<Value> {
         .await?)
 }
 
-/// Save a channel order. Everything this person can't see keeps its place.
-pub(super) async fn save_order(client: &KeyClient<'_>, shown: &[(Id, Vec<Id>)]) -> Result<()> {
+/// Save a channel order, or return false if the server lacks the endpoint.
+/// Everything this person can't see keeps its place.
+pub(super) async fn save_order(client: &KeyClient<'_>, shown: &[(Id, Vec<Id>)]) -> Result<bool> {
     let id = |value: &Value| -> Result<Id> { Ok(decode(value.as_str().context("missing ID")?)?) };
     let categories = get(client, "/v1/categories").await?;
     let categories: Vec<Id> = (categories.as_array().into_iter().flatten())
@@ -50,13 +51,24 @@ pub(super) async fn save_order(client: &KeyClient<'_>, shown: &[(Id, Vec<Id>)]) 
             serde_json::json!({"id": encode(category), "channels": list})
         })
         .collect();
-    client
+    let reply = client
         .request(Method::PUT, "/v1/channels/order")
         .json(&serde_json::json!({ "categories": body }))
         .send()
-        .await?
-        .error_for_status()?;
-    Ok(())
+        .await?;
+    match reply.status() {
+        StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED => return Ok(false),
+        StatusCode::BAD_REQUEST => {
+            // Older servers treat "order" as a channel ID and reject its encoding.
+            let error = reply.json::<Value>().await?;
+            if error["error"] == "invalid_encoding" {
+                return Ok(false);
+            }
+            anyhow::bail!("channel order rejected");
+        }
+        _ => reply.error_for_status()?,
+    };
+    Ok(true)
 }
 
 pub(super) async fn rename_channel(

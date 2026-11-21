@@ -78,9 +78,13 @@ pub struct SignIn {
     pub invite: Option<String>,
 }
 
+pub const PROTOCOL_VERSION: u32 = 1;
+
 #[derive(Serialize, Deserialize)]
 pub struct ServerInfo {
     pub open_joining: bool,
+    pub version: Option<String>,
+    pub protocol: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize)]

@@ -13,7 +13,7 @@ use rusttalk_core::{
 use tokio::sync::mpsc::UnboundedSender;
 use url::Url;
 
-use crate::net::Command;
+use crate::net::{Command, Compatibility};
 
 pub type Id = [u8; 32];
 
@@ -22,6 +22,8 @@ pub struct Server {
     /// The name from the invite, or the host, until the space key arrives.
     pub label: String,
     pub status: Status,
+    pub compatibility: Compatibility,
+    pub order_unavailable: bool,
     pub dir: Directory,
     pub chats: HashMap<Id, Chat>,
     /// The channel shown when this server is picked.

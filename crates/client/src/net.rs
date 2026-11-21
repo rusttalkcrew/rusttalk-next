@@ -15,7 +15,8 @@ use livekit::prelude::Participant;
 use reqwest::{Method, StatusCode};
 use rusttalk_core::{
     auth::{
-        Fingerprint, InviteCode, InviteLink, KnownServer, ProtocolError, Session, decode, encode,
+        Fingerprint, InviteCode, InviteLink, KnownServer, PROTOCOL_VERSION, ProtocolError, Session,
+        decode, encode,
     },
     camera::CameraOptions,
     client::{
@@ -163,6 +164,25 @@ pub enum Admission {
     Open,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Compatibility {
+    ServerTooOld,
+    #[default]
+    Supported,
+    AppTooOld,
+}
+
+impl Compatibility {
+    fn for_protocol(protocol: Option<u32>) -> Self {
+        const MIN_SUPPORTED_PROTOCOL: u32 = 1;
+        match protocol.unwrap_or(1) {
+            n if n < MIN_SUPPORTED_PROTOCOL => Self::ServerTooOld,
+            n if n > PROTOCOL_VERSION => Self::AppTooOld,
+            _ => Self::Supported,
+        }
+    }
+}
+
 pub enum Update {
     Preview(Result<Box<Preview>, String>),
     /// A page of directory results, by page number.
@@ -170,6 +190,8 @@ pub enum Update {
     /// A server picked from the directory, checked; errors show in the directory.
     Listed(Result<Box<Preview>, String>),
     Status(Url, Status),
+    Compatibility(Url, Compatibility),
+    ChannelOrderUnavailable(Url),
     Directory(Url, Box<Directory>),
     Messages {
         server: Url,
@@ -459,6 +481,7 @@ struct State {
     /// Records that waited for a channel key, retried after key work.
     waiting: HashMap<Id, HashSet<Id>>,
     last: Option<Directory>,
+    order_unavailable: bool,
     /// Whether `last` was built with the space key.
     named: bool,
     display_name: Option<String>,
@@ -518,6 +541,7 @@ async fn run(
                 match KeyClient::connect(api, &ctx.identity, &session).await {
                     Ok(mut client) => {
                         delay = 1;
+                        state.order_unavailable = false;
                         tracing::info!(server = %fingerprint(&server.server_id), "connected to server");
                         ctx.send(Update::Status(url.clone(), Status::Online));
                         let end = serve(&ctx, &url, &mut client, &mut state, &mut commands).await;
@@ -637,6 +661,30 @@ async fn session<'a>(
         *api = Some(verified);
     }
     let api = api.as_ref().expect("set above");
+    let protocol = match api.info().await {
+        Ok(info) => Some(info.protocol),
+        Err(error) if pin_changed(&error) => return Err(stop_or_retry(error)),
+        Err(error)
+            if error
+                .downcast_ref::<reqwest::Error>()
+                .and_then(reqwest::Error::status)
+                == Some(StatusCode::NOT_FOUND) =>
+        {
+            Some(None)
+        }
+        Err(error) => {
+            tracing::warn!(error = %format_args!("{error:#}"), "reading server version failed");
+            None
+        }
+    };
+    if let Some(protocol) = protocol {
+        let compatibility = Compatibility::for_protocol(protocol);
+        ctx.send(Update::Compatibility(server.address.clone(), compatibility));
+        if compatibility == Compatibility::AppTooOld {
+            tracing::warn!(?protocol, "server requires a newer protocol");
+            return Err(Failure::Stop("This server needs a newer RustTalk.".into()));
+        }
+    }
     let reply = match admission {
         Some(Admission::Open) => api.join_open(&ctx.identity).await,
         Some(Admission::Invite(code)) => api.sign_in(&ctx.identity, Some(code)).await,
@@ -992,12 +1040,27 @@ async fn on_command(
             directory(ctx, url, client, state).await?;
         }
         Command::Reorder(order) => {
-            let saved = directory::save_order(client, &order).await;
-            if saved.is_err() {
-                // Back to the server's order before the error shows.
-                directory(ctx, url, client, state).await?;
+            if !state.order_unavailable {
+                match directory::save_order(client, &order).await {
+                    Ok(true) => return Ok(()),
+                    Ok(false) => {
+                        tracing::info!("server does not support channel ordering");
+                        state.order_unavailable = true;
+                        ctx.send(Update::ChannelOrderUnavailable(url.clone()));
+                        ctx.send(Update::Failed(
+                            "Update the server to move channels and categories.".into(),
+                        ));
+                    }
+                    Err(error) => {
+                        // Back to the server's order before the error shows.
+                        directory(ctx, url, client, state).await?;
+                        return Err(error);
+                    }
+                }
             }
-            saved?;
+            if let Some(dir) = &state.last {
+                ctx.send(Update::Directory(url.clone(), Box::new(dir.clone())));
+            }
         }
         Command::SetServerName(name) => {
             client.set_server_name(name.as_bytes()).await?;
@@ -1192,4 +1255,32 @@ fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs() as i64)
+}
+
+#[cfg(test)]
+mod protocol_tests {
+    use super::*;
+
+    #[test]
+    fn checks_server_protocol_against_supported_range() {
+        let old_info: rusttalk_core::auth::ServerInfo =
+            serde_json::from_str(r#"{"open_joining":true}"#).unwrap();
+        assert_eq!(old_info.version, None);
+        assert_eq!(
+            Compatibility::for_protocol(old_info.protocol),
+            Compatibility::Supported
+        );
+        assert_eq!(
+            Compatibility::for_protocol(Some(1)),
+            Compatibility::Supported
+        );
+        assert_eq!(
+            Compatibility::for_protocol(Some(0)),
+            Compatibility::ServerTooOld
+        );
+        assert_eq!(
+            Compatibility::for_protocol(Some(PROTOCOL_VERSION + 1)),
+            Compatibility::AppTooOld
+        );
+    }
 }
