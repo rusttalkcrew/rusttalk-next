@@ -152,6 +152,16 @@ pub fn secondary(ui: &mut Ui, text: &str) -> Response {
     button(ui, text, Kind::Secondary, NORMAL, TEXT_BODY)
 }
 
+/// A toggle in a compact picker.
+pub fn choice_button<'a>(
+    ui: &mut Ui,
+    selected: bool,
+    label: impl egui::IntoAtoms<'a>,
+    size: Vec2,
+) -> Response {
+    ui.add(Button::selectable(selected, label).min_size(size))
+}
+
 /// Something that can't be undone, like Delete, Kick or Leave.
 pub fn danger(ui: &mut Ui, text: &str) -> Response {
     button(ui, text, Kind::Danger, NORMAL, TEXT_BODY)
@@ -567,11 +577,7 @@ pub fn nav_row(
         FontId::proportional(TEXT_ICON),
         if selected { c.strong } else { c.muted },
     );
-    let label_font = if selected {
-        FontId::new(TEXT_BODY, bold_family())
-    } else {
-        FontId::proportional(TEXT_BODY)
-    };
+    let label_font = FontId::new(TEXT_BODY, crate::emoji::family(selected));
     let galley = painter.layout(
         label.to_owned(),
         label_font,

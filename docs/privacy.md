@@ -144,8 +144,9 @@ Service. Development profiles use separate entries. The client logs the
 person fingerprint locally. Creating an account shows the recovery words once
 in the app window. The client never stores or logs the words or the root
 signing key. "Sign out of this device" deletes the keystore entry and the
-profile's `sync.json`, `servers.json` and `saved.json`, so the next person
-on that profile starts without the servers, pins or saved file places.
+profile's `sync.json`, `servers.json`, `saved.json` and `emoji-recent.json`,
+so the next person on that profile starts without the servers, pins, saved
+file places or recent emoji.
 Device settings (`voice.json`, `updates.json`) stay.
 
 Next to the settings, `servers.json` holds each server's address, server ID
@@ -170,6 +171,8 @@ so "Show in folder" and "Open" work later; it never leaves this device.
 writes it to a `rusttalk-<id>` folder in the system temporary directory and
 hands it to the system's default app; the client deletes these folders when it
 starts and when the person signs out.
+`emoji-recent.json` holds up to 32 emoji selected through the picker or
+autocomplete. It stays on this device.
 `updates.json` holds the chosen release directory URL and the automatic
 check preference on this device.
 

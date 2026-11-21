@@ -30,6 +30,10 @@ use crate::{
     call::{self, LiveAction, LiveFile, LiveState, Voice},
     crop::{Crop, Outcome, Target},
     device_sync::{self, Edit},
+    emoji::{
+        self,
+        picker::{self, Picker},
+    },
     files::{self, Ask, Files},
     net::{
         Admin, AdminUpdate, Admission, Command, Compatibility, Draft, Listed, Net, PAGE_SIZE,
@@ -72,6 +76,7 @@ pub struct Home {
     pub settings: Option<Tab>,
     pub voice: Voice,
     pub files: Files,
+    emoji_picker: Picker,
     pub confirm_sign_out: bool,
     pub error: Option<String>,
     pub server_settings: Option<admin::Settings>,
@@ -234,6 +239,7 @@ impl Home {
             settings: None,
             voice: Voice::new(audio, video, runtime),
             files: Files::new(&data_dir),
+            emoji_picker: Picker::new(&data_dir),
             confirm_sign_out: false,
             error: None,
             server_settings: None,
@@ -1194,7 +1200,7 @@ fn server_header(ui: &mut Ui, name: &str) -> Response {
     let text = c.text.lerp_to_gamma(c.strong, hover);
     let galley = painter.layout(
         name.to_owned(),
-        FontId::new(ui::TEXT_TITLE - 1.0, ui::bold_family()),
+        FontId::new(ui::TEXT_TITLE - 1.0, emoji::family(true)),
         c.strong,
         (rect.width() - 44.0).max(0.0),
     );
@@ -1551,9 +1557,9 @@ fn member_list(ui: &mut Ui, home: &mut Home, index: usize) {
             let row = ui::row_button(ui, 40.0, &label, |ui| {
                 member_face(ui, Some(member), &member.person, &name, 30.0, true);
                 let text = if member.presence == Presence::Offline {
-                    RichText::new(&label).color(ui::colors(ui).muted)
+                    emoji::text(&label).color(ui::colors(ui).muted)
                 } else {
-                    RichText::new(&label)
+                    emoji::text(&label)
                 };
                 ui.add(Label::new(text).truncate());
             });
@@ -2015,6 +2021,7 @@ fn chat_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
         toast,
         dialog,
         files,
+        emoji_picker,
         voice,
         layout,
         ..
@@ -2058,7 +2065,7 @@ fn chat_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
             if !in_voice {
                 toast_line(ui, toast);
             }
-            let (command, attach) = composer(ui, chat, dir, online, channel, &title);
+            let (command, attach) = composer(ui, chat, dir, online, channel, &title, emoji_picker);
             if let Some(command) = command {
                 let _ = commands.send(command);
             }
@@ -2273,6 +2280,7 @@ fn composer(
     online: bool,
     channel: Id,
     title: &str,
+    emoji_picker: &mut Picker,
 ) -> (Option<Command>, Option<bool>) {
     let mut cancel = false;
     if let Some(reply) = chat.reply_to {
@@ -2282,7 +2290,7 @@ fn composer(
             .find(|msg| msg.id == reply)
             .map_or_else(|| "a message".into(), |msg| member_name(dir, &msg.person));
         ui.horizontal(|ui| {
-            ui.weak(format!("Replying to {author}"));
+            ui.label(emoji::text(format!("Replying to {author}")).weak());
             cancel = ui::small_close(ui, "Cancel reply").clicked();
         });
     }
@@ -2323,25 +2331,46 @@ fn composer(
                     attach = Some(true);
                 }
             });
+            let emoji_button = ui
+                .add_enabled_ui(online, |ui| {
+                    ui::icon_button(ui, "😀", "Emoji picker", Look::Plain, Vec2::splat(36.0))
+                })
+                .inner;
+            let picked = emoji_picker.show(&emoji_button, composer_id(channel));
             ScrollArea::vertical()
                 .id_salt("composer-scroll")
                 .max_height(180.0)
                 .show(ui, |ui| {
-                    ui.add_enabled(
-                        online,
-                        TextEdit::multiline(&mut chat.draft)
+                    ui.add_enabled_ui(online, |ui| {
+                        let edit = TextEdit::multiline(&mut chat.draft)
                             .background_color(input)
                             .margin(Margin::symmetric(12, 9))
-                            .id(composer_id(channel))
                             .hint_text(if online {
                                 format!("Message {title}")
                             } else {
                                 "Waiting for the server…".into()
                             })
+                            .font(emoji::font(ui::TEXT_BODY))
                             .desired_rows(1)
                             .desired_width(f32::INFINITY)
-                            .return_key(KeyboardShortcut::new(Modifiers::SHIFT, Key::Enter)),
-                    )
+                            .return_key(KeyboardShortcut::new(Modifiers::SHIFT, Key::Enter));
+                        let completion = ui::completion(
+                            ui,
+                            composer_id(channel),
+                            edit,
+                            |c| c != ':' && !emoji::shortcode_char(c),
+                            picker::suggestions,
+                        );
+                        let field = completion.text_edit.response.response;
+                        if let Some(accepted) = completion.accepted {
+                            emoji_picker.remember(&accepted.insert);
+                        }
+                        if let Some(sequence) = picked {
+                            emoji_picker.insert(&field, &mut chat.draft, &sequence);
+                        }
+                        field
+                    })
+                    .inner
                 })
                 .inner
         })
@@ -2381,7 +2410,8 @@ fn composer(
             chat.draft.clear();
         }
     }
-    let count = chat.draft.chars().count();
+    let converted = emoji::replace(&chat.draft);
+    let count = converted.chars().count();
     if count >= COUNT_FROM {
         let color = if count > MAX_TEXT_CHARS {
             ui::colors(ui).danger_text
@@ -2392,7 +2422,7 @@ fn composer(
             ui.colored_label(color, format!("{count} / {MAX_TEXT_CHARS}"));
         });
     }
-    let text = chat.draft.trim();
+    let text = converted.trim();
     // Edits change only the text; staged files wait for the next message.
     let editing = chat.editing.is_some();
     let nothing = text.is_empty() && (editing || chat.staged.is_empty());
@@ -2443,7 +2473,7 @@ fn message(
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.weak("•");
-            ui.label(RichText::new(format!("{name} {action}")).weak().italics());
+            ui.label(emoji::text(format!("{name} {action}")).weak().italics());
             ui.weak(time(msg.at));
             ui.add(
                 Label::new(RichText::new("Details").small().underline().weak())
@@ -2485,7 +2515,7 @@ fn message(
                         }
                         _ => "↪ Earlier message".into(),
                     };
-                    ui.label(ui::caption(line));
+                    ui.label(emoji::text(line).size(ui::TEXT_CAPTION).weak());
                 }
                 if start {
                     ui.horizontal(|ui| {
@@ -2497,7 +2527,12 @@ fn message(
                     Body::Text(text) => {
                         if !text.is_empty() {
                             ui.horizontal_wrapped(|ui| {
-                                ui.add(Label::new(text.as_str()).wrap());
+                                let mut body = emoji::text(text);
+                                if emoji::jumbo(text) && msg.files.is_empty() && msg.live.is_none()
+                                {
+                                    body = body.size(36.0);
+                                }
+                                ui.add(Label::new(body).wrap());
                                 if chat.edited.contains_key(&msg.id) {
                                     ui.label(RichText::new("(edited)").small().weak());
                                 }

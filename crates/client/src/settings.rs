@@ -407,6 +407,13 @@ pub fn show(
                     ui::page_section(ui, &format!("RustTalk {}", env!("CARGO_PKG_VERSION")));
                     ui.label("Free and open source, under the MIT license.");
                     ui.hyperlink_to("Source code on GitHub", REPOSITORY);
+                    ui.add_space(SPACE_S);
+                    ui.label("Twemoji graphics by Twitter, Inc. and other contributors.");
+                    ui.hyperlink_to("Twemoji source", "https://github.com/jdecked/twemoji");
+                    ui.hyperlink_to(
+                        "CC BY 4.0 license",
+                        "https://creativecommons.org/licenses/by/4.0/",
+                    );
                 }
             }
             error_text(ui, home.error.as_deref());

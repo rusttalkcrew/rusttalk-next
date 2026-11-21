@@ -8,6 +8,7 @@ mod call;
 mod camera;
 mod crop;
 mod device_sync;
+mod emoji;
 mod files;
 mod home;
 mod keystore;
