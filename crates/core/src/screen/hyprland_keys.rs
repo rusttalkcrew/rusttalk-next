@@ -1,5 +1,7 @@
 //! Match Hyprland's bind data against the virtual keyboard's XKB state.
 
+use std::collections::BTreeSet;
+
 use serde::Deserialize;
 use xkbcommon::xkb;
 
@@ -114,6 +116,19 @@ fn modmasks(state: &xkb::State) -> [u8; 2] {
         mods(xkb::STATE_MODS_EFFECTIVE),
         mods(xkb::STATE_MODS_DEPRESSED | xkb::STATE_MODS_LATCHED),
     ]
+}
+
+/// The modifier bit Hyprland gives a trigger key that is itself a modifier.
+fn trigger_mod(sym: xkb::Keysym) -> u8 {
+    match sym.raw() {
+        0xffe1 | 0xffe2 => 1,  // Shift_L, Shift_R
+        0xffe5 => 2,           // Caps_Lock
+        0xffe3 | 0xffe4 => 4,  // Control_L, Control_R
+        0xffe9 | 0xffea => 8,  // Alt_L, Alt_R
+        0xff7f => 16,          // Num_Lock
+        0xffeb | 0xffec => 64, // Super_L, Super_R
+        _ => 0,
+    }
 }
 
 /// Keysyms the compositor acts on before binds: VT switches and the server-private range.
@@ -274,9 +289,16 @@ impl Binds {
             && syms
                 .iter()
                 .any(|sym| matches!(sym.raw(), 0xffff | 0xffbe..=0xffc9));
+        // Hyprland adds a modifier trigger's own bit before matching, e.g. a key resolved
+        // to Control_L matches CTRL binds.
+        // Each candidate keysym may be the resolved one, so each adds only its own bit.
+        let triggers: BTreeSet<u8> = syms.iter().map(|sym| trigger_mod(*sym)).collect();
         logo || system
-            || self.matches_key(code, &syms, effective)
-            || self.matches_key(code, &syms, depressed)
+            || [effective, depressed].into_iter().any(|mods| {
+                triggers
+                    .iter()
+                    .any(|bit| self.matches_key(code, &syms, mods | bit))
+            })
     }
 
     /// Checks a pointer trigger and held buttons against binds under the current modifiers.
@@ -290,7 +312,7 @@ impl Binds {
     pub(super) fn allows(
         &self,
         state: &xkb::State,
-        held: &std::collections::BTreeSet<u32>,
+        held: &BTreeSet<u32>,
         buttons: &[String],
         event: Option<(u32, bool)>,
     ) -> bool {
@@ -327,7 +349,6 @@ impl Binds {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeSet;
 
     fn keymap(options: Option<&str>) -> xkb::Keymap {
         names("us", "", options)
@@ -499,6 +520,23 @@ mod tests {
         // Dvorak's own `r` key stays blocked as well.
         assert!(!binds.allows(&state, &BTreeSet::new(), &[], Some((24, true))));
         assert!(binds.allows(&state, &BTreeSet::new(), &[], Some((30, true))));
+    }
+
+    #[test]
+    fn a_key_resolved_to_a_modifier_adds_its_own_bit() {
+        // Global ctrl:nocaps makes Caps Lock resolve to Control_L in Hyprland, which then
+        // matches CTRL binds on Control_L although the device sends a plain Caps Lock.
+        let device = keymap(None);
+        let mut binds = Binds::new(
+            "default".into(),
+            serde_json::from_str(&bind(4, "Control_L")).unwrap(),
+        )
+        .unwrap();
+        binds.resolve_with(&device);
+        let state = xkb::State::new(&device);
+        assert!(binds.allows(&state, &BTreeSet::new(), &[], Some((58, true))));
+        binds.resolve_with(&keymap(Some("ctrl:nocaps")));
+        assert!(!binds.allows(&state, &BTreeSet::new(), &[], Some((58, true))));
     }
 
     #[test]

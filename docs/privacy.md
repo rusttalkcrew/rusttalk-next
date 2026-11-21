@@ -175,7 +175,9 @@ compositor keybinds, including mouse button and scroll binds, and the
 keyboard layout options Hyprland matches binds with. It matches those binds
 against the virtual keyboard's XKB state, assuming each bind needs exactly
 its modifiers, because Hyprland doesn't report binds set to ignore them;
-such binds are not detected. Layer, bind and layout data stay
+such binds are not detected. Hyprland doesn't report modifiers the sharer
+is holding on a physical keyboard, so a modifier held by the sharer can
+combine with remote input. Layer, bind and layout data stay
 on the sharer's device, and RustTalk
 does not collect what the sharer types. It pauses after observed local input
 and rechecks the scope and binds about every 100 ms while a remote key or
