@@ -273,6 +273,10 @@ impl eframe::App for App<'_> {
         if frame.info().cpu_usage.is_some() {
             self.window_started.set(true);
         }
+        // Here, not in `ui`: a hidden window gets no `ui` pass on Wayland.
+        if let Screen::Home(home) = &mut self.screen {
+            crate::hotkeys::frame(home);
+        }
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {

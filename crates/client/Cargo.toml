@@ -56,12 +56,16 @@ syntect = { version = "5.3", default-features = false, features = ["default-synt
 linkify = "0.10"
 regex = "1"
 html5ever = "0.40.1"
+# System-wide shortcuts on Windows, macOS and X11; Wayland goes through the desktop portal.
+global-hotkey = "0.10"
 
 [target.'cfg(windows)'.build-dependencies]
 # Compiles rusttalk.rc so Windows shows the app icon on the executable.
 embed-resource = "3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
+# Global shortcuts on Wayland, through the desktop's portal.
+ashpd = { version = "=0.14.0", default-features = false, features = ["global_shortcuts", "tokio"] }
 # statvfs, to match the AppImage mount against the AppImage file before an update.
 libc = "0.2"
 # Wayland file drops: our window's surface, and egui's clipboard patched to take

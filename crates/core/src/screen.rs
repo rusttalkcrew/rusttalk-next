@@ -106,6 +106,16 @@ pub fn list_sources() -> Result<Vec<ScreenSource>> {
     anyhow::bail!("screen capture is unavailable on this platform")
 }
 
+/// The window the person is using, never RustTalk's own, for the "share the window
+/// I'm using" shortcut. Linux can't see other apps' windows: it gives the entry that
+/// opens the desktop's picker.
+pub fn focused_window() -> Result<Option<ScreenSource>> {
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    return platform::focused_window();
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    anyhow::bail!("screen capture is unavailable on this platform")
+}
+
 /// The person closed the system screen picker without choosing.
 #[derive(Debug, thiserror::Error)]
 #[error("screen picker cancelled")]

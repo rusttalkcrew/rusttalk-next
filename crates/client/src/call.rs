@@ -287,13 +287,14 @@ pub fn leave(home: &mut Home) {
 
 /// Once per frame: push-to-talk, the settings meter, and repaints for live indicators.
 pub fn frame(ctx: &egui::Context, home: &mut Home) {
+    let recording = home.hotkeys.recording();
     let voice = &mut home.voice;
     let settings = voice.audio.settings();
     let key = Key::from_name(&settings.key);
-    // shortcut: push-to-talk works only while RustTalk has focus; add a global hotkey
-    // (per OS) if people ask to talk while another app is in front.
+    // While another app is in front, the global shortcut (see `hotkeys`) talks instead.
     let down = settings.push_to_talk
         && !voice.picking_key
+        && !recording
         && !ctx.egui_wants_keyboard_input()
         && key.is_some_and(|key| ctx.input(|input| input.key_down(key)));
     voice.audio.set_key_down(down);
@@ -849,7 +850,7 @@ fn screen_rates() -> [(u32, &'static str, &'static str); 3] {
 }
 
 /// The last choices from Settings, or the defaults for values this version no longer offers.
-fn screen_options(s: &Settings) -> Options {
+pub(crate) fn screen_options(s: &Settings) -> Options {
     let default = Options::default();
     let height = screen_qualities().into_iter().map(|q| q.0);
     let fps = screen_rates().into_iter().map(|r| r.0);

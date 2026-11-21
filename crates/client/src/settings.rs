@@ -397,6 +397,7 @@ pub fn show(
                 page(Tab::Appearance, "🎨", t!("settings.appearance")),
                 page(Tab::Voice, "🎤", t!("settings.voice")),
                 page(Tab::Video, "🎥", t!("settings.video")),
+                page(Tab::Shortcuts, "⌨", t!("settings.shortcuts")),
                 page(Tab::Notifications, "🔔", t!("settings.notifications")),
                 page(
                     Tab::Updates,
@@ -440,6 +441,7 @@ pub fn show(
                     audio.set_settings(s);
                 }
                 Tab::Notifications => notifications_page(ui, home),
+                Tab::Shortcuts => crate::hotkeys::settings_page(ui, home),
                 Tab::Privacy => privacy_tab(ui, home),
                 Tab::Devices => devices_page(ui, home),
                 Tab::Updates => updates.settings(ui),

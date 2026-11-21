@@ -20,6 +20,10 @@ pub fn list_sources() -> Result<Vec<ScreenSource>> {
     }])
 }
 
+pub fn focused_window() -> Result<Option<ScreenSource>> {
+    Ok(list_sources()?.into_iter().next())
+}
+
 #[derive(Deserialize)]
 struct Selection {
     #[serde(default)]
