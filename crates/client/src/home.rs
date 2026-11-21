@@ -16,7 +16,7 @@ use eframe::egui::{
     TextureOptions, Ui, UiBuilder, Vec2, WidgetInfo, ecolor::Hsva,
 };
 use rusttalk_core::{
-    auth::{Fingerprint, InviteLink, decode},
+    auth::{Fingerprint, InviteLink, KnownServer, decode},
     client::{FriendSignal, MAX_TEXT_CHARS, voice::LiveFileEvent},
     identity::{DeviceIdentity, fingerprint},
     index::https_url,
@@ -250,11 +250,8 @@ impl Home {
             .joined()
             .into_iter()
             .map(|known| {
-                new_server(
-                    known.address.clone(),
-                    t!("home.new_server"),
-                    net.start(known, None, None),
-                )
+                let commands = net.start(known.clone(), None, None);
+                new_server(known, t!("home.new_server"), commands)
             })
             .collect();
         let runtime = net.handle();
@@ -1158,7 +1155,7 @@ impl Home {
                     if self.index(&known.address).is_none() && !self.left.contains(&known.address) {
                         let commands = self.net.start(known.clone(), None, None);
                         self.servers.push(new_server(
-                            known.address.clone(),
+                            known.clone(),
                             t!("home.new_server"),
                             commands,
                         ));
@@ -2530,7 +2527,7 @@ fn join(ui: &mut Ui, home: &mut Home) {
                     );
                     let label = preview.name.as_deref().unwrap_or(t!("home.new_server"));
                     home.servers
-                        .push(new_server(address.clone(), label, commands));
+                        .push(new_server(preview.server.clone(), label, commands));
                     if !member {
                         let mut settings = home.voice.audio.settings();
                         settings.hide_offline.joined(&address);
@@ -2808,12 +2805,13 @@ fn find(ui: &mut Ui, home: &mut Home) {
 }
 
 fn new_server(
-    address: url::Url,
+    known: KnownServer,
     label: &str,
     commands: tokio::sync::mpsc::UnboundedSender<Command>,
 ) -> Server {
     Server {
-        address,
+        address: known.address.clone(),
+        known,
         label: label.into(),
         status: Status::Connecting,
         compatibility: Compatibility::default(),
@@ -3295,10 +3293,7 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
         }
         Some(Pick::Invite(text)) => {
             if let Ok(link) = InviteLink::parse(&text) {
-                match servers
-                    .iter()
-                    .position(|s| s.address == link.server.address)
-                {
+                match servers.iter().position(|s| s.known == link.server) {
                     Some(index) => *view = View::Server(index),
                     None => {
                         *view = View::Join;
@@ -4037,7 +4032,9 @@ fn invite_card(ui: &mut Ui, servers: &[Server], link: &str) -> bool {
         Some(port) => format!("{}:{port}", host(address)),
         None => host(address),
     };
-    let known = servers.iter().find(|server| &server.address == address);
+    // Same address but other pins: maybe a rebuilt server, maybe not the one you
+    // joined. Joining checks it, so it gets the normal Join card.
+    let known = servers.iter().find(|server| server.known == invite.server);
     let (image, title, description, button) = match known {
         Some(server) => (
             match &server.dir.icon {
