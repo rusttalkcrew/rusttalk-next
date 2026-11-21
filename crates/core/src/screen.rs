@@ -2,10 +2,10 @@
 
 use std::{
     sync::{
-        Arc, Mutex,
+        Arc, Condvar, Mutex, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering::Relaxed},
     },
-    time::Duration,
+    time::{Duration, Instant as StdInstant},
 };
 
 use anyhow::{Context, Result, ensure};
@@ -281,24 +281,56 @@ pub fn frame_to_rgba_into(frame: &dyn VideoBuffer, rgba: &mut [u8]) -> Result<()
 const PREVIEW_WIDTH: u32 = 960;
 const PREVIEW_PERIOD: Duration = Duration::from_millis(1000 / 15);
 
+/// A frame as sent to the encoder, shared so the preview can read it without the
+/// capture task copying it.
+struct Shared(Arc<I420Buffer>);
+
+impl AsRef<dyn VideoBuffer> for Shared {
+    fn as_ref(&self) -> &(dyn VideoBuffer + 'static) {
+        &*self.0
+    }
+}
+
 /// The sharer's own view of their share: a small, low-rate copy of the captured
 /// frames, taken before encoding, so it needs no round trip through the server.
-/// While off, the capture only checks one flag per frame.
+/// The capture only hands frames over; a worker thread shrinks them. While off, the
+/// capture checks one flag per frame.
 #[derive(Clone, Default)]
 pub struct Preview(Arc<PreviewState>);
 
 #[derive(Default)]
 struct PreviewState {
     on: AtomicBool,
-    /// The newest copy not yet shown, and when it was taken.
-    slot: Mutex<(Option<I420Buffer>, Option<std::time::Instant>)>,
+    started: AtomicBool,
+    /// A frame for the worker to shrink, and when the capture last handed one over.
+    raw: Mutex<(Option<Arc<I420Buffer>>, Option<StdInstant>)>,
+    wake: Condvar,
+    /// The newest small copy, until the window takes it.
+    small: Mutex<Option<I420Buffer>>,
+    /// `small` holds a copy: the capture skips frames until the window took it.
+    waiting: AtomicBool,
 }
 
 impl Preview {
     pub fn set(&self, on: bool) {
         self.0.on.store(on, Relaxed);
-        if !on && let Ok(mut slot) = self.0.slot.lock() {
-            *slot = (None, None);
+        if on && !self.0.started.swap(true, Relaxed) {
+            let state = Arc::downgrade(&self.0);
+            let spawned = std::thread::Builder::new()
+                .name("screen-preview".into())
+                .spawn(move || shrink_frames(state));
+            if let Err(error) = spawned {
+                tracing::warn!(%error, "could not start the screen preview");
+            }
+        }
+        if !on {
+            if let Ok(mut raw) = self.0.raw.lock() {
+                *raw = (None, None);
+            }
+            if let Ok(mut small) = self.0.small.lock() {
+                *small = None;
+            }
+            self.0.waiting.store(false, Relaxed);
         }
     }
 
@@ -306,32 +338,77 @@ impl Preview {
         self.0.on.load(Relaxed)
     }
 
-    /// The newest copy since the last call. Never waits for the capture.
+    /// The newest copy since the last call. Never waits for the worker.
     pub fn take(&self) -> Option<I420Buffer> {
-        self.0.slot.try_lock().ok()?.0.take()
+        let frame = self.0.small.try_lock().ok()?.take();
+        if frame.is_some() {
+            self.0.waiting.store(false, Relaxed);
+        }
+        frame
     }
 
-    /// Called by the capture after each frame went to the encoder. It never waits:
-    /// a frame is skipped while the window holds the slot, hasn't shown the last copy
-    /// yet, or the last copy is younger than the preview's frame period.
-    fn offer(&self, frame: &mut I420Buffer, now: std::time::Instant) {
-        if !self.is_on() {
+    /// Called by the capture after each frame went to the encoder. It never waits
+    /// and never copies pixels: a frame is skipped while the window hasn't taken the
+    /// last copy, the worker is busy or holds the slot, or the last hand-over is
+    /// younger than the preview's frame period.
+    fn offer(&self, frame: &Arc<I420Buffer>, now: StdInstant) {
+        if !self.is_on() || self.0.waiting.load(Relaxed) {
             return;
         }
-        let Ok(mut slot) = self.0.slot.try_lock() else {
+        let Ok(mut raw) = self.0.raw.try_lock() else {
             return;
         };
-        if slot.0.is_some() || slot.1.is_some_and(|last| now < last + PREVIEW_PERIOD) {
+        if raw.0.is_some() || raw.1.is_some_and(|last| now < last + PREVIEW_PERIOD) {
             return;
         }
-        let (width, height) = (frame.width(), frame.height());
-        let scaled = width.min(PREVIEW_WIDTH);
-        let scaled = (scaled, (height * scaled / width).max(1));
-        *slot = (
-            Some(frame.scale(scaled.0 as i32, scaled.1 as i32)),
-            Some(now),
-        );
+        *raw = (Some(frame.clone()), Some(now));
+        drop(raw);
+        self.0.wake.notify_one();
     }
+}
+
+/// The preview's worker: shrinks what the capture hands over. Ends once every
+/// `Preview` handle is gone.
+fn shrink_frames(state: Weak<PreviewState>) {
+    loop {
+        let Some(state) = state.upgrade() else {
+            return;
+        };
+        let frame = {
+            let Ok(raw) = state.raw.lock() else {
+                return;
+            };
+            let idle = |raw: &mut (Option<Arc<I420Buffer>>, Option<StdInstant>)| raw.0.is_none();
+            let Ok((mut raw, _)) = state
+                .wake
+                .wait_timeout_while(raw, Duration::from_secs(1), idle)
+            else {
+                return;
+            };
+            raw.0.take()
+        };
+        let Some(frame) = frame else {
+            continue;
+        };
+        // libwebrtc only scales a buffer it may write to: copy it, unless the capture
+        // already moved on to a newer one.
+        let mut frame =
+            Arc::try_unwrap(frame).unwrap_or_else(|frame| (&*frame as &dyn VideoBuffer).to_i420());
+        let small = shrink(&mut frame);
+        if state.on.load(Relaxed)
+            && let Ok(mut slot) = state.small.lock()
+        {
+            *slot = Some(small);
+            state.waiting.store(true, Relaxed);
+        }
+    }
+}
+
+/// At most `PREVIEW_WIDTH` wide, keeping its shape.
+fn shrink(frame: &mut I420Buffer) -> I420Buffer {
+    let (width, height) = (frame.width(), frame.height());
+    let scaled = width.min(PREVIEW_WIDTH);
+    frame.scale(scaled as i32, (height * scaled / width).max(1) as i32)
 }
 
 /// A screen source owns capture until dropped. Dropping it requests shutdown.
@@ -479,7 +556,7 @@ pub async fn start_into(
             )
         });
         // Seed the source before publication. Reuse converted pixels for static content.
-        let mut frame = VideoFrame::new(VideoRotation::VideoRotation0, first);
+        let mut frame = VideoFrame::new(VideoRotation::VideoRotation0, Shared(Arc::new(first)));
         source.capture_frame(&frame);
         let feeder = source.clone();
         let sizes = size.clone();
@@ -501,7 +578,7 @@ pub async fn start_into(
                         if let Some(next) = pending.as_ref() {
                             sizes.store(pack(next), Relaxed);
                             match convert(next) {
-                                Ok(next) => frame.buffer = next,
+                                Ok(next) => frame.buffer = Shared(Arc::new(next)),
                                 Err(error) => {
                                     tracing::warn!(%error, "could not convert captured screen frame");
                                     break;
@@ -513,7 +590,7 @@ pub async fn start_into(
                     Err(_) => (),
                 }
                 feeder.capture_frame(&frame);
-                preview.offer(&mut frame.buffer, std::time::Instant::now());
+                preview.offer(&frame.buffer.0, StdInstant::now());
                 // Thin a faster capture to the chosen rate, on a steady schedule that lets
                 // a frame come a quarter period early (as the PipeWire helper does).
                 next = next.max(Instant::now() - period / 2) + period;
@@ -599,44 +676,87 @@ mod tests {
         assert_eq!((same.width(), same.height()), (1920, 1080));
     }
 
+    fn i420(width: u32, height: u32) -> Arc<I420Buffer> {
+        let pixels = [0; 4].repeat((width * height) as usize);
+        Arc::new(bgra_to_i420(width, height, &pixels, None).unwrap())
+    }
+
+    /// The worker's next copy, waiting for it at most a few seconds.
+    fn next_copy(preview: &Preview) -> Option<I420Buffer> {
+        for _ in 0..500 {
+            if let Some(copy) = preview.take() {
+                return Some(copy);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        None
+    }
+
+    fn handed_over(preview: &Preview) -> Option<StdInstant> {
+        preview.0.raw.lock().unwrap().1
+    }
+
     #[test]
     fn preview_taps_a_small_copy_without_waiting() {
         let preview = Preview::default();
-        let mut frame = bgra_to_i420(1920, 1080, &[0; 4].repeat(1920 * 1080), None).unwrap();
-        let start = std::time::Instant::now();
-        // Off: nothing is copied.
-        preview.offer(&mut frame, start);
-        assert!(preview.take().is_none());
+        let frame = i420(1920, 1080);
+        let start = StdInstant::now();
+        // Off: nothing is handed over.
+        preview.offer(&frame, start);
+        assert_eq!(handed_over(&preview), None);
         preview.set(true);
-        preview.offer(&mut frame, start);
-        // A slow window: frames are dropped until it took the last copy...
-        let later = start + PREVIEW_PERIOD * 2;
-        preview.offer(&mut frame, later);
-        let copy = preview.take().unwrap();
+        preview.offer(&frame, start);
+        let copy = next_copy(&preview).unwrap();
         assert_eq!((copy.width(), copy.height()), (960, 540));
-        assert!(preview.take().is_none());
-        // ...and taken more often than the preview's rate.
-        preview.offer(&mut frame, start + PREVIEW_PERIOD / 2);
-        assert!(preview.take().is_none());
-        preview.offer(&mut frame, later);
+        // Offered more often than the preview's rate: skipped.
+        preview.offer(&frame, start + PREVIEW_PERIOD / 2);
+        assert_eq!(handed_over(&preview), Some(start));
+        // A slow window: frames are skipped until it took the last copy.
+        let later = start + PREVIEW_PERIOD;
+        preview.offer(&frame, later);
+        while !preview.0.waiting.load(Relaxed) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        preview.offer(&frame, later + PREVIEW_PERIOD * 2);
+        assert_eq!(handed_over(&preview), Some(later));
         assert!(preview.take().is_some());
-        // The capture never waits for a window that holds the slot.
-        let held = preview.0.slot.lock().unwrap();
-        preview.offer(&mut frame, later + PREVIEW_PERIOD);
+        // The capture never waits for a worker that holds the slot.
+        let held = preview.0.raw.lock().unwrap();
+        preview.offer(&frame, later + PREVIEW_PERIOD * 3);
         drop(held);
-        assert!(preview.take().is_none());
-        // Turning it off drops a copy not shown yet, and stops the copies.
-        preview.offer(&mut frame, later + PREVIEW_PERIOD);
+        assert_eq!(handed_over(&preview), Some(later));
+        // Turning it off drops what wasn't shown yet and stops the hand-overs.
         preview.set(false);
         assert!(preview.take().is_none());
-        preview.offer(&mut frame, later + PREVIEW_PERIOD * 2);
-        assert!(preview.take().is_none());
+        preview.offer(&frame, later + PREVIEW_PERIOD * 4);
+        assert_eq!(handed_over(&preview), None);
         // Small screens are copied as they are.
-        let mut small = bgra_to_i420(640, 360, &[0; 4].repeat(640 * 360), None).unwrap();
         preview.set(true);
-        preview.offer(&mut small, start);
-        let copy = preview.take().unwrap();
+        preview.offer(&i420(640, 360), start);
+        let copy = next_copy(&preview).unwrap();
         assert_eq!((copy.width(), copy.height()), (640, 360));
+    }
+
+    #[test]
+    fn preview_costs_the_capture_little_at_4k() {
+        let preview = Preview::default();
+        preview.set(true);
+        let mut now = StdInstant::now();
+        let mut took = Duration::ZERO;
+        let rounds = 30;
+        for _ in 0..rounds {
+            // A fresh frame each time, as the capture sends.
+            let frame = i420(3840, 2160);
+            let offered = Instant::now();
+            preview.offer(&frame, now);
+            took += offered.elapsed();
+            drop(frame);
+            assert!(next_copy(&preview).is_some());
+            now += PREVIEW_PERIOD;
+        }
+        let each = took / rounds;
+        println!("capture-side cost per 4K frame handed to the preview: {each:?}");
+        assert!(each < Duration::from_millis(1), "{each:?}");
     }
 
     #[test]

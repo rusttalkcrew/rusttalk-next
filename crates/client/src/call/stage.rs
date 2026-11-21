@@ -404,7 +404,9 @@ pub fn stage(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
     stage
         .minimized
         .retain(|person| peers.iter().any(|p| p.person == *person));
-    let presentable = all.iter().position(|e| matches!(e.tile, Tile::Screen(_)));
+    let presentable = all
+        .iter()
+        .position(|e| matches!(e.tile, Tile::Screen(_) | Tile::Preview));
     if presentable.is_none() {
         stage.presenting = false;
     }
@@ -475,7 +477,11 @@ pub fn stage(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
     // The big tile: the presented screen, else the focused tile.
     let big = if stage.presenting {
         let watched = shown.iter().position(|e| e.watched);
-        watched.or_else(|| shown.iter().position(|e| matches!(e.tile, Tile::Screen(_))))
+        watched.or_else(|| {
+            shown
+                .iter()
+                .position(|e| matches!(e.tile, Tile::Screen(_) | Tile::Preview))
+        })
     } else {
         (stage.focus.as_ref()).and_then(|focus| shown.iter().position(|e| e.tile == *focus))
     };

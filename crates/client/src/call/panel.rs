@@ -819,61 +819,73 @@ fn sharing_card(ui: &mut Ui, voice: &Voice) -> Option<Stop> {
                 ("🎵", app.name.clone(), tip, Stop::App(app.id.clone()))
             }));
         for (icon, text, tip, which) in rows {
+            // The screen's other buttons get a row of their own, so its name stays
+            // readable in a narrow panel.
+            let tools = matches!(which, Stop::Screen) && voice.sharing != Sharing::Starting;
             ui::right_row(ui, STOP_SIZE.y, |ui| {
-                let screen_row = matches!(which, Stop::Screen);
                 if ui::icon_button(ui, "⏹", &tip, Look::Plain, STOP_SIZE).clicked() {
                     stop = Some(which);
-                }
-                if screen_row && voice.sharing != Sharing::Starting {
-                    let (glyph, look) = if voice.stream_audio.is_empty() {
-                        ("🔇", Look::Plain)
-                    } else {
-                        ("🔊", Look::On(ui::colors(ui).success))
-                    };
-                    let tip = format!(
-                        "{}: {}",
-                        t!("call.stream_sound"),
-                        sound_summary(&voice.stream_audio)
-                    );
-                    let sound = ui
-                        .add_enabled_ui(voice.supported, |ui| {
-                            ui::icon_button(ui, glyph, &tip, look, STOP_SIZE)
-                        })
-                        .inner;
-                    if sound.clicked() {
-                        fill(ui.ctx(), &voice.apps, "apps", share::list);
-                    }
-                    let (picked, refresh) = sound_menu(&sound, &voice.apps, &voice.stream_audio);
-                    if let Some(picked) = picked {
-                        stop = Some(Stop::Sound(picked));
-                    }
-                    if refresh {
-                        fill(ui.ctx(), &voice.apps, "apps", share::list);
-                    }
-                    let look = if voice.video.preview.is_on() {
-                        Look::On(ui::accent(ui).base)
-                    } else {
-                        Look::Plain
-                    };
-                    if ui::icon_button(ui, "👁", t!("call.preview"), look, STOP_SIZE).clicked() {
-                        stop = Some(Stop::Preview);
-                    }
-                    let picking = voice.sharing == Sharing::Changing;
-                    let change = ui.add_enabled_ui(!picking, |ui| {
-                        ui::icon_button(ui, "🔄", t!("call.change_share"), Look::Plain, STOP_SIZE)
-                    });
-                    if change.inner.clicked() {
-                        stop = Some(Stop::Change);
-                    }
                 }
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                     ui::dot(ui, ui::colors(ui).success);
                     ui.add(Label::new(format!("{icon}  {text}")).truncate());
                 });
             });
+            if tools {
+                ui::right_row(ui, STOP_SIZE.y, |ui| {
+                    stop = screen_tools(ui, voice).or(stop.take());
+                });
+            }
         }
     });
     ui.add_space(4.0);
+    stop
+}
+
+/// The screen share's buttons on the "now sharing" card: its sound, the preview and
+/// changing what is shared, laid out right to left.
+fn screen_tools(ui: &mut Ui, voice: &Voice) -> Option<Stop> {
+    let mut stop = None;
+    let (glyph, look) = if voice.stream_audio.is_empty() {
+        ("🔇", Look::Plain)
+    } else {
+        ("🔊", Look::On(ui::colors(ui).success))
+    };
+    let tip = format!(
+        "{}: {}",
+        t!("call.stream_sound"),
+        sound_summary(&voice.stream_audio)
+    );
+    let sound = ui
+        .add_enabled_ui(voice.supported, |ui| {
+            ui::icon_button(ui, glyph, &tip, look, STOP_SIZE)
+        })
+        .inner;
+    if sound.clicked() {
+        fill(ui.ctx(), &voice.apps, "apps", share::list);
+    }
+    let (picked, refresh) = sound_menu(&sound, &voice.apps, &voice.stream_audio);
+    if let Some(picked) = picked {
+        stop = Some(Stop::Sound(picked));
+    }
+    if refresh {
+        fill(ui.ctx(), &voice.apps, "apps", share::list);
+    }
+    let look = if voice.video.preview.is_on() {
+        Look::On(ui::accent(ui).base)
+    } else {
+        Look::Plain
+    };
+    if ui::icon_button(ui, "👁", t!("call.preview"), look, STOP_SIZE).clicked() {
+        stop = Some(Stop::Preview);
+    }
+    let picking = voice.sharing == Sharing::Changing;
+    let change = ui.add_enabled_ui(!picking, |ui| {
+        ui::icon_button(ui, "🔄", t!("call.change_share"), Look::Plain, STOP_SIZE)
+    });
+    if change.inner.clicked() {
+        stop = Some(Stop::Change);
+    }
     stop
 }
 
