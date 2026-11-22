@@ -251,7 +251,7 @@ pub async fn exercise(
     receive_key(&mut sibling_client, text_b, 1).await?;
     let device = sibling.certificate.signing_key().to_bytes();
     #[cfg(feature = "media")]
-    let (mut listening, speaking) = {
+    let (mut listening, speaking, voice_scope) = {
         use rusttalk_core::client::voice::RoomEvent;
         let voice = owner_b
             .create_channel(&category_b, "voice", b"Revocation check", b"")
@@ -273,7 +273,7 @@ pub async fn exercise(
             }
             anyhow::bail!("room closed before B2 subscribed")
         }).await?;
-        (listening, speaking)
+        (listening, speaking, voice)
     };
     let revoked =
         rusttalk_core::identity::revoke_device(&peer_words, peer.certificate.person_id(), device)?;
@@ -284,23 +284,11 @@ pub async fn exercise(
         .await?
         .error_for_status()?;
     owner_a.sync().await?;
-    #[cfg(feature = "media")]
-    {
-        use rusttalk_core::client::voice::RoomEvent;
-        super::wait::within("B2 microphone unsubscription on the stale server", async {
-            while let Some(event) = listening.next_event().await {
-                if matches!(event, RoomEvent::TrackUnsubscribed { participant, .. } if participant.identity() == speaking.identity()) {
-                    return Ok(());
-                }
-            }
-            anyhow::bail!("room closed before B2 unsubscribed")
-        }).await?;
-        assert!(listening.remote_audio_tracks().is_empty());
-        tokio::try_join!(listening.leave(), speaking.leave())?;
-        println!(
-            "W109 B2 microphone unsubscribed during a call after another server delivered its revocation"
-        );
-    }
+    // A default reader keeps the ordinary epoch usable after the profile learns a removal.
+    let before = owner_b.current_key(text_b)?.0;
+    owner_b.sync().await?;
+    assert_eq!(owner_b.current_key(text_b)?.0, before);
+    owner_b.enable_protected_epochs_for_test()?;
     let post = sibling_client
         .send_message(
             &text_b.id,
@@ -318,6 +306,73 @@ pub async fn exercise(
             .context("accepted revoked sender")?
             .to_string(),
         "device revoked"
+    );
+    #[cfg(feature = "media")]
+    {
+        use rusttalk_core::client::voice::RoomEvent;
+        super::wait::within("B2 microphone unsubscription on the stale server", async {
+            while let Some(event) = listening.next_event().await {
+                if matches!(event, RoomEvent::TrackUnsubscribed { participant, .. } if participant.identity() == speaking.identity()) {
+                    return Ok(());
+                }
+            }
+            anyhow::bail!("room closed before B2 unsubscribed")
+        }).await?;
+        assert!(listening.remote_audio_tracks().is_empty());
+        owner_b.sync().await?;
+        assert!(listening.sync_key(&owner_b)?);
+        assert!(listening.epoch() > speaking.epoch());
+        assert!(
+            owner_b.current_key(voice_scope)?.1
+                != sibling_client.key(voice_scope, speaking.epoch()).unwrap()
+        );
+        tokio::try_join!(listening.leave(), speaking.leave())?;
+        println!(
+            "W109 B2 microphone unsubscribed during a call after another server delivered its revocation"
+        );
+    }
+    // B still serves ciphertext to B2 and has never asked for rotation. A reader
+    // that learned the proof on A must initiate it here, including the voice scope.
+    let old_key = sibling_client.current_key(text_b)?.1.clone();
+    owner_b.sync().await?;
+    let (epoch, fresh) = owner_b.current_key(text_b)?;
+    assert!(epoch > 1 && fresh != &old_key);
+    let after = owner_b
+        .send_message(
+            &text_b.id,
+            &rusttalk_core::client::MessageBody {
+                text: "after device rotation".into(),
+                ..Default::default()
+            },
+        )
+        .await?;
+    let copy = sibling_client.message(&text_b.id, &after.id).await?;
+    let context = rusttalk_core::messages::MessageContext {
+        server_id: known.server_id,
+        channel_id: text_b.id,
+        epoch: copy.epoch,
+        id: copy.id,
+        sender_device: copy.sender_device,
+        person: copy.person,
+    };
+    let bytes = rusttalk_core::auth::decode_bytes(&copy.envelope)?;
+    assert_eq!(copy.epoch, epoch);
+    assert!(matches!(
+        context.open(&old_key, &owner_b.identity.certificate, &bytes),
+        Err(rusttalk_core::messages::MessageError::Authentication)
+    ));
+    peer_b.sync().await?;
+    assert_eq!(
+        peer_b.open_message(&text_b.id, &copy).await?.text,
+        "after device rotation"
+    );
+    sibling_client.sync().await?;
+    assert!(sibling_client.key(text_b, epoch).is_none());
+    owner_b.sync().await?;
+    assert_eq!(
+        owner_b.current_key(text_b)?.0,
+        epoch,
+        "replay must not rotate twice"
     );
     let new_scope = owner_b
         .create_channel(&category_b, "text", b"After revocation", b"")

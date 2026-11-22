@@ -704,6 +704,8 @@ async fn run(
         voice: None,
         ..State::default()
     };
+    let records = rusttalk_core::client::revocations::Revocations::in_profile(&ctx.data);
+    let mut removals = records.changes();
     let mut delay = 1;
     // Verified once, then reused: each verification spends one of the server's rate-limited challenges.
     let mut api = None;
@@ -760,6 +762,7 @@ async fn run(
                             &mut state,
                             &mut commands,
                             &mut queued,
+                            &mut removals,
                         )
                         .await;
                         state.identities = voice::identities(&client, &state.server_id);
@@ -1031,6 +1034,7 @@ async fn serve(
     state: &mut State,
     commands: &mut UnboundedReceiver<Command>,
     queued: &mut VecDeque<Command>,
+    removals: &mut tokio::sync::watch::Receiver<()>,
 ) -> End {
     if let Err(error) = resume(ctx, url, client, state).await {
         tracing::warn!(error = %format_args!("{error:#}"), "loading server state failed");
@@ -1054,6 +1058,15 @@ async fn serve(
             }
         };
         tokio::select! {
+            _ = removals.changed() => {
+                if let Err(error) = client.sync().await {
+                    tracing::warn!(%error, "could not rotate after device removal");
+                    sync_voice_key(ctx, client, state);
+                    continue;
+                }
+                sync_voice_key(ctx, client, state);
+                save_pins(ctx, url, client, state);
+            }
             event = client.next_update() => match event {
                 Ok(Some(Pushed::Presence(PresenceEvent::PresenceChanged { person_id, status }))) => {
                     match decode(&person_id) {
@@ -1065,10 +1078,11 @@ async fn serve(
                     if let Err(error) = on_event(ctx, url, client, state, event).await {
                         tracing::warn!(error = %format_args!("{error:#}"), "handling a server event failed");
                     }
-                    sync_voice_key(client, state);
+                    sync_voice_key(ctx, client, state);
                 }
                 Ok(None) => return End::Closed(client.close_reason.clone()),
                 Err(error) => {
+                    sync_voice_key(ctx, client, state);
                     tracing::warn!(error = %format_args!("{error:#}"), "event stream failed");
                     return End::Error;
                 }
@@ -1081,7 +1095,7 @@ async fn serve(
             }
             () = rekey_due => {
                 match client.sync().await {
-                    Ok(()) => save_pins(ctx, url, client, state),
+                    Ok(()) => { sync_voice_key(ctx, client, state); save_pins(ctx, url, client, state); },
                     Err(error) => {
                         tracing::warn!(error = %format_args!("{error:#}"), "DM key recovery failed");
                         // Wait before the next try, so a fast failure can't spin.
@@ -1123,6 +1137,7 @@ async fn run_command(
     if let Err(error) = on_command(ctx, url, client, state, command).await {
         tracing::warn!(error = %format_args!("{error:#}"), "server request failed");
         let text = match error.downcast_ref::<MessageError>() {
+            Some(MessageError::ServerUpdateRequired) => t!("net.rotation_update"),
             Some(MessageError::TextLimit) => t!("net.text_limit"),
             _ => t!("admin.failed"),
         };
@@ -1239,7 +1254,7 @@ async fn resume(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, state: &mut St
             tracing::warn!(error = %format_args!("{error:#}"), "loading voice presence failed");
         }
     }
-    sync_voice_key(client, state);
+    sync_voice_key(ctx, client, state);
     Ok(())
 }
 

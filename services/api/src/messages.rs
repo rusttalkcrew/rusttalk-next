@@ -466,7 +466,7 @@ mod tests {
             .bind(&dm)
             .execute(&app.db)
             .await?;
-        query("INSERT INTO key_epochs VALUES (?, 1, zeroblob(32))")
+        query("INSERT INTO key_epochs (scope_id, epoch, commitment) VALUES (?, 1, zeroblob(32))")
             .bind(&dm)
             .execute(&app.db)
             .await?;
@@ -508,7 +508,7 @@ mod tests {
                  VALUES ('a', 'text', 'category', 0, X'00'), ('b', 'text', 'category', 0, X'00');
              INSERT INTO key_scopes (id, kind, channel_id)
                  SELECT id, 'channel', id FROM channels;
-             INSERT INTO key_epochs SELECT id, 1, zeroblob(32) FROM key_scopes;
+             INSERT INTO key_epochs (scope_id, epoch, commitment) SELECT id, 1, zeroblob(32) FROM key_scopes;
              INSERT INTO message_senders VALUES (X'01', X'02', X'03');",
         )
         .execute(&mut *tx)

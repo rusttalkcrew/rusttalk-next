@@ -649,21 +649,34 @@ async fn docker_membership() -> Result<()> {
     index::exercise(&project, &owner_bot, &owner).await?;
 
     let mut owner_keys = KeyClient::connect(&owner_bot, &owner_id, &owner).await?;
-    docker_keys(&project, &owner_bot, &mut owner_keys, &mut secrets).await?;
+    // Keep the large scenario futures off the test thread's stack during LiveKit joins.
+    Box::pin(docker_keys(
+        &project,
+        &owner_bot,
+        &mut owner_keys,
+        &mut secrets,
+    ))
+    .await?;
     if let Ok(second_project) = env::var("RUSTTALK_E2E_SECOND_PROJECT") {
-        multi_server::exercise(
+        Box::pin(multi_server::exercise(
             &project,
             &second_project,
             &owner_bot,
             &mut owner_keys,
             &owner_pins,
             &mut secrets,
-        )
+        ))
         .await
         .context("W15 second server")?;
     }
     #[cfg(feature = "media")]
-    voice::exercise(&project, &owner_bot, &mut owner_keys, &mut secrets).await?;
+    Box::pin(voice::exercise(
+        &project,
+        &owner_bot,
+        &mut owner_keys,
+        &mut secrets,
+    ))
+    .await?;
 
     let (_, link) = invite(&mut owner_keys, &mut secrets).await?;
     let first_invite = link.code;

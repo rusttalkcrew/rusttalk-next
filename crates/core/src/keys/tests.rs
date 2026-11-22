@@ -197,3 +197,34 @@ fn image_plaintext_limit_matches_ciphertext_limit() {
             .is_err()
     );
 }
+
+#[test]
+fn dropping_an_exclusion_or_changing_the_dm_pair_invalidates_the_commitment() {
+    let key = random_key().unwrap();
+    let scope = Scope {
+        kind: Kind::Channel,
+        id: [3; 32],
+    };
+    let excluded = Excluded::from([
+        exclusion_id(&[9; 32], &[4; 32]),
+        exclusion_id(&[9; 32], &[5; 32]),
+    ]);
+    let plain = EnvelopeContext::new([1; 32], scope, 2, &key);
+    let dm = EnvelopeContext::new_dm([1; 32], scope, 2, &key, [[6; 32], [7; 32]]);
+    let bound = dm.excluding(&excluded);
+    assert_eq!(
+        plain.excluding(&Default::default()).commitment,
+        plain.commitment
+    );
+    assert_ne!(bound.commitment, plain.excluding(&excluded).commitment);
+    assert_ne!(
+        bound.commitment,
+        dm.excluding(&Excluded::from([exclusion_id(&[9; 32], &[4; 32])]))
+            .commitment
+    );
+    let (words, sender) = DeviceIdentity::create("sender").unwrap();
+    let receiver = DeviceIdentity::add_device(&words, "receiver").unwrap();
+    let wrap = bound.wrap(&key, &receiver.certificate, &sender).unwrap();
+    assert!(dm.open(&receiver, &sender.certificate, &wrap).is_err());
+    assert!(bound.open(&receiver, &sender.certificate, &wrap).unwrap() == key);
+}

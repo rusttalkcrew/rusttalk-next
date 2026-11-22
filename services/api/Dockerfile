@@ -4,12 +4,13 @@ COPY Cargo.* ./
 COPY crates/ crates/
 COPY services/ services/
 ARG SERVICE=api
+ARG FEATURES=""
 # The cache is shared across checkouts. Force Cargo to recheck workspace sources
 # with older mtimes than artifacts left by another checkout.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,id=rusttalk-services-target,target=/src/target,sharing=locked \
     find crates services -type f -exec touch {} + && \
-    cargo build --release --locked -p "rusttalk-${SERVICE}" && \
+    cargo build --release --locked --features "$FEATURES" -p "rusttalk-${SERVICE}" && \
     install "target/release/rusttalk-${SERVICE}" "/usr/local/bin/rusttalk-${SERVICE}"
 
 FROM debian:trixie-slim AS runtime

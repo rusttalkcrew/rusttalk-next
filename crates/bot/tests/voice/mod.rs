@@ -370,6 +370,8 @@ pub async fn exercise(
     )
     .await?;
 
+    // A prior removal may already have rotated this channel.
+    let after_kick = a.current_key(voice)?.0 + 1;
     // Kick speaker B while its tone keeps playing.
     b_pitch.store(1100, Ordering::Relaxed);
     a.request(
@@ -390,10 +392,10 @@ pub async fn exercise(
     .await
     .context("LiveKit did not remove the kicked speaker")??;
     a.sync().await?;
-    receive_key(a, voice, 2).await?;
-    receive_key(&mut c, voice, 2).await?;
+    receive_key(a, voice, after_kick).await?;
+    receive_key(&mut c, voice, after_kick).await?;
     assert!(room_a.sync_key(a)? && listener.sync_key(&c)?);
-    assert_eq!((room_a.epoch(), listener.epoch()), (2, 2));
+    assert_eq!((room_a.epoch(), listener.epoch()), (after_kick, after_kick));
     // A new tone separates post-rotation media from the jitter buffer's concealed audio.
     a_pitch.store(880, Ordering::Relaxed);
     timeout(hang_guard(), hear_tone(&mut listener, Some(&a_id), 880))

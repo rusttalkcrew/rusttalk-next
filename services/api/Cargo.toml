@@ -5,6 +5,9 @@ license.workspace = true
 edition.workspace = true
 publish = false
 
+[features]
+rotation-test = []
+
 [dependencies]
 anyhow = "1"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "matched-path", "query", "tokio", "ws"] }

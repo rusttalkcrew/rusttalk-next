@@ -101,6 +101,8 @@ pub enum MessageError {
     TextLimit,
     #[error("message randomness unavailable")]
     Randomness,
+    #[error("server update required for device removal rotation")]
+    ServerUpdateRequired,
     #[error("missing message epoch key")]
     MissingKey,
     #[error("message ID was already received")]

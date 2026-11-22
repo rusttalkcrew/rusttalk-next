@@ -12,7 +12,7 @@ use eframe::egui;
 use reqwest::StatusCode;
 use rusttalk_core::{
     client::{
-        Attachment, BlobRef, KeyClient, MessageBody, UploadRejected, decode_frames,
+        Attachment, BlobRef, KeyClient, MessageBody, MessageError, UploadRejected, decode_frames,
         decode_thumbnail,
     },
     messages::fit_file_name,
@@ -431,6 +431,9 @@ pub(super) fn gone(error: &anyhow::Error) -> bool {
 }
 
 fn upload_problem(error: &anyhow::Error) -> &'static str {
+    if error.downcast_ref::<MessageError>() == Some(&MessageError::ServerUpdateRequired) {
+        return t!("net.rotation_update");
+    }
     let code = error
         .downcast_ref::<UploadRejected>()
         .map(|r| r.code.as_str());

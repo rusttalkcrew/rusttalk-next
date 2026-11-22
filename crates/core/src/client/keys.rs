@@ -1,3 +1,5 @@
+mod rotation;
+
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     time::Duration,
@@ -7,7 +9,7 @@ use crate::{
     auth::{InviteLink, Session, decode, decode_bytes, encode},
     identity::{DeviceCertificate, DeviceIdentity, PersonId, fingerprint},
     keys::{
-        self, EnvelopeContext, Event, Key, KeyState, Kind, MemberDevice, Metadata, Scope,
+        self, EnvelopeContext, Event, Excluded, Key, KeyState, Kind, MemberDevice, Metadata, Scope,
         ScopeState,
     },
     pinned_tls,
@@ -26,10 +28,20 @@ use crate::messages::KeyLink;
 type HistoricalDevice = ([u8; 32], [u8; 32], [u8; 32]);
 /// A verified epoch key, its envelope, the person who wrapped it, its commitment,
 /// and whether that commitment names the pinned pair (a DM key made for them).
-type HeldKey = (Key, String, PersonId, [u8; 32], bool);
+struct HeldKey {
+    key: Key,
+    envelope: String,
+    sender: PersonId,
+    commitment: [u8; 32],
+    excluded: Excluded,
+    pair_bound: bool,
+}
 
 /// Wraps between refreshes of the still-missing set.
 const WRAP_BATCH: usize = 20;
+
+// Requires protocol 3 admission to exclude clients that reject protected commitments.
+const CREATE_PROTECTED_EPOCHS: bool = false;
 
 /// An authenticated client with a live event stream and an in-memory epoch key store.
 pub struct KeyClient<'a> {
@@ -37,6 +49,11 @@ pub struct KeyClient<'a> {
     /// The authenticated device identity.
     pub identity: &'a DeviceIdentity,
     pub(super) revocations: &'a super::revocations::Revocations,
+    changes: tokio::sync::watch::Receiver<()>,
+    checked_removals: bool,
+    create_protected_epochs: bool,
+    update_required: HashSet<Scope>,
+    rotation_retry: Option<std::time::Instant>,
     own_revocations_changed: bool,
     session: Session,
     events: tokio_tungstenite::WebSocketStream<
@@ -60,6 +77,9 @@ pub struct KeyClient<'a> {
     pub(super) links: HashMap<[u8; 32], Vec<(i64, KeyLink)>>,
     pub(super) devices: HashMap<String, DeviceCertificate>,
     pub(super) historical_devices: HashMap<HistoricalDevice, DeviceCertificate>,
+    rotations: rotation::Rotations,
+    rotation_save_pending: bool,
+    former_devices: HashSet<(PersonId, [u8; 32])>,
     scopes: Vec<ScopeState>,
     pub(super) opened: HashMap<[u8; 32], Opened>,
     /// Received events not yet returned, and whether key state must sync before returning them.
@@ -91,13 +111,20 @@ impl<'a> KeyClient<'a> {
         let events = pinned_tls::events_socket(server.known_server(), &session.token)
             .await
             .map_err(anyhow::Error::from_boxed)?;
+        let revocations = server
+            .revocations
+            .as_ref()
+            .context("key sync needs a connected profile")?;
+        let create_protected_epochs = CREATE_PROTECTED_EPOCHS && server.protocol >= 3;
         let mut client = Self {
             server,
             identity,
-            revocations: server
-                .revocations
-                .as_ref()
-                .context("key sync needs a connected profile")?,
+            revocations,
+            changes: revocations.changes(),
+            checked_removals: false,
+            create_protected_epochs,
+            update_required: Default::default(),
+            rotation_retry: None,
             own_revocations_changed: false,
             session: session.clone(),
             events,
@@ -109,6 +136,15 @@ impl<'a> KeyClient<'a> {
             links: HashMap::new(),
             devices: HashMap::new(),
             historical_devices: HashMap::new(),
+            rotations: if create_protected_epochs {
+                rotation::Rotations::load(
+                    &revocations.rotation_file(&server.known_server().server_id),
+                )?
+            } else {
+                Default::default()
+            },
+            rotation_save_pending: false,
+            former_devices: Default::default(),
             scopes: Vec::new(),
             opened: HashMap::new(),
             queued: VecDeque::new(),
@@ -118,6 +154,14 @@ impl<'a> KeyClient<'a> {
         };
         client.sync().await?;
         Ok(client)
+    }
+
+    #[cfg(feature = "rotation-test")]
+    pub fn enable_protected_epochs_for_test(&mut self) -> Result<()> {
+        self.rotations =
+            rotation::Rotations::load(&self.revocations.rotation_file(&self.space().id))?;
+        self.create_protected_epochs = true;
+        Ok(())
     }
 
     /// Return the expiry time of the active bearer token as Unix seconds.
@@ -153,7 +197,7 @@ impl<'a> KeyClient<'a> {
 
     /// Borrow a verified key for any known epoch of a readable scope.
     pub fn key(&self, scope: Scope, epoch: i64) -> Option<&Key> {
-        self.keys.get(&(scope, epoch)).map(|(key, ..)| key)
+        self.keys.get(&(scope, epoch)).map(|held| &held.key)
     }
 
     /// Every verified epoch key held for a scope.
@@ -162,7 +206,7 @@ impl<'a> KeyClient<'a> {
         self.keys
             .iter()
             .filter(move |((held, _), _)| *held == scope)
-            .map(|((_, epoch), (key, ..))| (*epoch, key))
+            .map(|((_, epoch), held)| (*epoch, &held.key))
     }
 
     /// Seal metadata with the current space key and return base64url ciphertext.
@@ -198,21 +242,68 @@ impl<'a> KeyClient<'a> {
 
     /// The latest verified key once the scope is ready for use.
     pub fn current_key(&self, scope: Scope) -> Result<(i64, &Key)> {
+        ensure!(
+            !self.create_protected_epochs
+                || (self.checked_removals && !self.changes.has_changed()?),
+            "checking device removals"
+        );
+        ensure!(
+            !self.update_required.contains(&scope),
+            crate::messages::MessageError::ServerUpdateRequired
+        );
         let current = self
             .scopes
             .iter()
             .find(|state| state.scope == scope && !state.rotate)
             .context("scope key unavailable or rotation pending")?;
-        let key = self
-            .key(current.scope, current.epoch)
+        let held = self
+            .keys
+            .get(&(scope, current.epoch))
             .context("missing current scope key")?;
-        Ok((current.epoch, key))
+        ensure!(
+            current.excluded.is_subset(&held.excluded)
+                && self.rotations.covered(scope, &held.excluded),
+            "waiting for device removal rotation"
+        );
+        Ok((current.epoch, &held.key))
     }
 
     /// Reconcile the current directory, missing envelopes and rotations. SQLite decides races.
     pub async fn sync(&mut self) -> Result<()> {
+        let mut waited = false;
+        let mut attempted = HashSet::new();
         loop {
             let state = self.key_state().await?;
+            self.checked_removals = false;
+            self.changes.borrow_and_update();
+            let sibling =
+                self.create_protected_epochs && self.find_rotations(&state.scopes).await?;
+            self.checked_removals = true;
+            let missing: HashSet<_> = state
+                .scopes
+                .iter()
+                .filter(|s| {
+                    !self.rotations.covered(s.scope, &s.excluded)
+                        || self
+                            .keys
+                            .get(&(s.scope, s.epoch))
+                            .is_some_and(|held| !self.rotations.covered(s.scope, &held.excluded))
+                })
+                .map(|s| s.scope)
+                .collect();
+            if !missing.is_empty() && state.supports_exclusions && !waited {
+                // Siblings get a head start. Every eligible online reader can take over.
+                waited = true;
+                let [a, b, ..] = *keys::random_key()?;
+                let jitter = u64::from(u16::from_le_bytes([a, b])) % 1000;
+                tokio::time::sleep(Duration::from_millis(if sibling {
+                    jitter / 4
+                } else {
+                    250 + jitter
+                }))
+                .await;
+                continue;
+            }
 
             let mut refetch = false;
             let mut learned = false;
@@ -221,11 +312,18 @@ impl<'a> KeyClient<'a> {
                     // A directory change can overtake the key-state request.
                     continue;
                 };
+                if wrapped.excluded.contains(&keys::certificate_id(sender))
+                    || wrapped
+                        .excluded
+                        .contains(&keys::certificate_id(&self.identity.certificate))
+                {
+                    continue;
+                }
                 let slot = (wrapped.need.scope, wrapped.need.epoch);
                 if self
                     .keys
                     .get(&slot)
-                    .is_some_and(|(_, envelope, ..)| *envelope == wrapped.envelope)
+                    .is_some_and(|held| held.envelope == wrapped.envelope)
                 {
                     continue;
                 }
@@ -248,7 +346,7 @@ impl<'a> KeyClient<'a> {
                     .map_err(|_| keys::KeyError::Encoding)
                     .and_then(|bytes| context.open(self.identity, &sender, &bytes))
                     .map(|key| {
-                        let bound = self.pair_bound(&context, &key);
+                        let bound = self.pair_bound(&context, &key, &wrapped.excluded);
                         (key, bound)
                     });
                 // A DM commitment needs its pair: learn the DMs once, then try again.
@@ -259,13 +357,20 @@ impl<'a> KeyClient<'a> {
                     learned = true;
                     let key = key.clone();
                     self.learn_dms().await?;
-                    let bound = self.pair_bound(&context, &key);
+                    let bound = self.pair_bound(&context, &key, &wrapped.excluded);
                     opened = Ok((key, bound));
                 }
                 match opened {
                     Ok((key, Some(bound))) => {
                         let person = *sender.person_id();
-                        let entry = (key, wrapped.envelope, person, wrapped.commitment, bound);
+                        let entry = HeldKey {
+                            key,
+                            envelope: wrapped.envelope,
+                            sender: person,
+                            commitment: wrapped.commitment,
+                            excluded: wrapped.excluded,
+                            pair_bound: bound,
+                        };
                         self.keys.insert(slot, entry);
                     }
                     Ok((_, None)) if matches!(self.dms.get(&slot.0.id), Some(DmPin::Blocked)) => {
@@ -306,13 +411,35 @@ impl<'a> KeyClient<'a> {
                 })
             });
             self.scopes = state.scopes;
+            self.update_required = if state.supports_exclusions {
+                Default::default()
+            } else {
+                missing.clone()
+            };
+            for current in &mut self.scopes {
+                current.rotate |= missing.contains(&current.scope);
+            }
             refetch |= self.rekey_dms().await?;
 
             let states: Vec<_> = (self.scopes.iter())
                 .map(|state| (state.scope, state.epoch, state.rotate))
                 .collect();
+            let mut retry = false;
             for (scope, epoch, rotate) in states {
                 if rotate || (epoch == 0 && self.is_owner().await?) {
+                    if self.create_protected_epochs
+                        && scope.kind == Kind::Channel
+                        && matches!(self.dms.get(&scope.id), Some(DmPin::Blocked))
+                    {
+                        continue;
+                    }
+                    if self.update_required.contains(&scope) || !self.may_create_epoch(scope) {
+                        continue;
+                    }
+                    if !attempted.insert(scope) {
+                        retry = true;
+                        continue;
+                    }
                     let next = epoch.checked_add(1).context("epoch overflow")?;
                     let key = keys::random_key()?;
                     let commitment = self.publish_key(scope, next, &key).await?;
@@ -327,13 +454,19 @@ impl<'a> KeyClient<'a> {
                 }
             }
 
+            self.rotation_retry = retry.then(|| std::time::Instant::now() + backoff(1));
             let mut pending = state.pending;
             if pending.iter().any(|need| need.scope.kind == Kind::Channel) {
                 // Learn which channels are DMs before wrapping any channel key.
                 self.learn_dms().await?;
             }
             pending.retain(|need| {
-                self.key(need.scope, need.epoch).is_some() && self.device(&need.device).is_some()
+                self.keys
+                    .get(&(need.scope, need.epoch))
+                    .zip(self.device(&need.device))
+                    .is_some_and(|(held, device)| {
+                        !held.excluded.contains(&keys::certificate_id(device))
+                    })
             });
             if !pending.is_empty() {
                 // Every online member sees the same need; a random pause lets one wrap and the rest skip.
@@ -356,7 +489,16 @@ impl<'a> KeyClient<'a> {
                         continue;
                     };
                     let me = self.identity.certificate.person_id();
-                    if !may_wrap(&self.dms, me, need.scope, device.person_id(), held.4) {
+                    if held.excluded.contains(&keys::certificate_id(device)) {
+                        continue;
+                    }
+                    if !may_wrap(
+                        &self.dms,
+                        me,
+                        need.scope,
+                        device.person_id(),
+                        held.pair_bound,
+                    ) {
                         tracing::warn!(
                             person = %fingerprint(device.person_id()),
                             device = %fingerprint(device.signing_key().as_bytes()),
@@ -364,13 +506,13 @@ impl<'a> KeyClient<'a> {
                         );
                         continue;
                     }
-                    let key = &held.0;
+                    let key = &held.key;
                     // The epoch's own commitment, which the API checks; a DM's names its pair.
                     let context = EnvelopeContext {
                         server_id: self.server.known_server().server_id,
                         scope: need.scope,
                         epoch: need.epoch,
-                        commitment: held.3,
+                        commitment: held.commitment,
                     };
                     let envelope = context.wrap(key, device, self.identity)?;
                     tracing::info!(
@@ -389,7 +531,7 @@ impl<'a> KeyClient<'a> {
                     pending.retain(|need| fresh.contains(need));
                 }
             }
-            if !refetch {
+            if !refetch && !self.changes.has_changed()? {
                 return Ok(());
             }
         }
@@ -407,6 +549,24 @@ impl<'a> KeyClient<'a> {
             state.revocations.len() <= super::revocations::MAX_PER_REPLY,
             "oversized key-state revocation list"
         );
+        for excluded in state
+            .scopes
+            .iter()
+            .map(|s| &s.excluded)
+            .chain(state.envelopes.iter().map(|e| &e.excluded))
+        {
+            ensure!(
+                excluded.len() <= super::revocations::MAX_PER_REPLY
+                    && excluded
+                        .iter()
+                        .all(
+                            |d| d.split_once('.').is_some_and(|(owner, key)| [owner, key]
+                                .iter()
+                                .all(|s| s.len() == 43 && decode::<32>(s).is_ok()))
+                        ),
+                "invalid epoch exclusions"
+            );
+        }
         self.sync_devices().await?;
         let me = self.identity.certificate.person_id();
         let mut people: HashSet<_> = self
@@ -471,14 +631,39 @@ impl<'a> KeyClient<'a> {
             .any(|role| role == "owner"))
     }
 
+    fn may_create_epoch(&self, scope: Scope) -> bool {
+        self.create_protected_epochs
+            || !self.scopes.iter().any(|s| {
+                s.scope == scope
+                    && (!s.excluded.is_empty()
+                        || self
+                            .keys
+                            .get(&(scope, s.epoch))
+                            .is_some_and(|held| !held.excluded.is_empty()))
+            })
+    }
+
     /// Start an epoch with this key. Its commitment, or `None` when another epoch or
     /// an access change won the race (or the server refused it).
     async fn publish_key(&self, scope: Scope, epoch: i64, key: &Key) -> Result<Option<[u8; 32]>> {
-        let context = self.epoch_context(scope, epoch, key);
+        let (excluded, revocations) = self.rotation_proposal(scope);
+        if self
+            .scopes
+            .iter()
+            .any(|s| s.scope == scope && !s.excluded.is_subset(&excluded))
+        {
+            tracing::warn!("waiting for authenticated prior epoch exclusions");
+            return Ok(None);
+        }
+        let context = self.epoch_context(scope, epoch, key).excluding(&excluded);
+        ensure!(
+            !excluded.contains(&keys::certificate_id(&self.identity.certificate)),
+            "device excluded from epoch"
+        );
         let envelope = self.wrap_for_self(context, key)?;
         let reply = self
             .request(Method::POST, "/v1/keys/epochs")
-            .json(&json!({"scope": scope, "epoch": epoch, "commitment": encode(&context.commitment), "envelope": envelope}))
+            .json(&json!({"scope": scope, "epoch": epoch, "commitment": encode(&context.commitment), "envelope": envelope, "excluded": excluded, "revocations": revocations}))
             .send()
             .await?;
         Ok((!key_state_raced(reply).await?).then_some(context.commitment))
@@ -500,17 +685,35 @@ impl<'a> KeyClient<'a> {
     /// the pinned pair, `Some(false)` for a plain one (an ordinary channel's, or a DM
     /// epoch from before pair binding), `None` for neither, as for a DM key made
     /// for another pair or for a DM not pinned yet.
-    fn pair_bound(&self, context: &EnvelopeContext, key: &Key) -> Option<bool> {
-        if let Some(DmPin::With { peer, .. }) = self.dms.get(&context.scope.id)
-            && context.scope.kind == Kind::Channel
-            && context.commits_dm(
+    fn pair_bound(
+        &self,
+        context: &EnvelopeContext,
+        key: &Key,
+        excluded: &Excluded,
+    ) -> Option<bool> {
+        let server = context.server_id;
+        let scope = context.scope;
+        let epoch = context.epoch;
+        if let Some(DmPin::With { peer, .. }) = self.dms.get(&scope.id)
+            && scope.kind == Kind::Channel
+            && EnvelopeContext::new_dm(
+                server,
+                scope,
+                epoch,
                 key,
                 keys::dm_pair(*self.identity.certificate.person_id(), *peer),
             )
+            .excluding(excluded)
+            .commitment
+                == context.commitment
         {
             return Some(true);
         }
-        context.commits(key).then_some(false)
+        (EnvelopeContext::new(server, scope, epoch, key)
+            .excluding(excluded)
+            .commitment
+            == context.commitment)
+            .then_some(false)
     }
 
     pub(super) fn wrap_for_self(&self, context: EnvelopeContext, key: &Key) -> Result<String> {
@@ -551,19 +754,24 @@ impl<'a> KeyClient<'a> {
         self.dms.insert(channel, DmPin::With { peer, anchor: None });
         let me = *self.identity.certificate.person_id();
         // Keys taken before this channel was known as a DM must pass the checks too.
-        self.keys.retain(|(scope, _), (_, _, person, ..)| {
-            scope.kind != Kind::Channel || scope.id != channel || dm_member(&me, &peer, person)
+        self.keys.retain(|(scope, _), held| {
+            scope.kind != Kind::Channel
+                || scope.id != channel
+                || dm_member(&me, &peer, &held.sender)
         });
         let server_id = self.server.known_server().server_id;
-        for ((scope, epoch), (key, _, _, commitment, bound)) in &mut self.keys {
+        for ((scope, epoch), held) in &mut self.keys {
             if scope.kind == Kind::Channel && scope.id == channel {
-                let context = EnvelopeContext {
+                held.pair_bound = EnvelopeContext::new_dm(
                     server_id,
-                    scope: *scope,
-                    epoch: *epoch,
-                    commitment: *commitment,
-                };
-                *bound = context.commits_dm(key, keys::dm_pair(me, peer));
+                    *scope,
+                    *epoch,
+                    &held.key,
+                    keys::dm_pair(me, peer),
+                )
+                .excluding(&held.excluded)
+                .commitment
+                    == held.commitment;
             }
         }
         true
@@ -598,7 +806,7 @@ impl<'a> KeyClient<'a> {
             && self.current_key(scope).is_ok_and(|(epoch, _)| {
                 self.trusted_epoch(scope) == Some(epoch)
                     && (self.keys.get(&(scope, epoch)))
-                        .is_some_and(|(_, _, person, ..)| dm_member(me, peer, person))
+                        .is_some_and(|held| dm_member(me, peer, &held.sender))
             })
     }
 
@@ -609,7 +817,7 @@ impl<'a> KeyClient<'a> {
             kind: Kind::Channel,
             id: channel,
         };
-        self.keys.get(&(scope, epoch)).map(|(.., bound)| *bound)
+        self.keys.get(&(scope, epoch)).map(|held| held.pair_bound)
     }
 
     /// The newest DM epoch this device can tell only the two people hold: its anchor
@@ -626,8 +834,8 @@ impl<'a> KeyClient<'a> {
         // Only keys made for this pair count; a plain DM epoch from before is not one.
         let commitment = |epoch| {
             (self.keys.get(&(scope, epoch)))
-                .filter(|(.., bound)| *bound)
-                .map(|(_, _, _, commitment, _)| *commitment)
+                .filter(|held| held.pair_bound)
+                .map(|held| held.commitment)
         };
         let links = self.links.get(&scope.id).map_or(&[][..], Vec::as_slice);
         chain(*anchor, commitment, links)
@@ -638,10 +846,7 @@ impl<'a> KeyClient<'a> {
         let Some(epoch) = self.trusted_epoch(scope) else {
             return;
         };
-        let commitment = self
-            .keys
-            .get(&(scope, epoch))
-            .map(|(_, _, _, commitment, _)| *commitment);
+        let commitment = self.keys.get(&(scope, epoch)).map(|held| held.commitment);
         if let (Some(commitment), Some(DmPin::With { anchor, .. })) =
             (commitment, self.dms.get_mut(&scope.id))
         {
@@ -742,6 +947,9 @@ impl<'a> KeyClient<'a> {
                 self.rekeyed.remove(&slot);
                 continue;
             }
+            if !self.may_create_epoch(scope) {
+                continue;
+            }
             let current = self.key(scope, epoch).cloned();
             let linked = match recovery(current.is_some(), tries) {
                 Recovery::Wait => continue,
@@ -750,7 +958,9 @@ impl<'a> KeyClient<'a> {
             };
             let next = epoch.checked_add(1).context("epoch overflow")?;
             let key = keys::random_key()?;
-            let context = self.epoch_context(scope, next, &key);
+            let context = self
+                .epoch_context(scope, next, &key)
+                .excluding(&self.rotation_proposal(scope).0);
             if linked && let Some(current) = current {
                 let link = KeyLink {
                     epoch: next,
@@ -781,16 +991,23 @@ impl<'a> KeyClient<'a> {
         Ok(changed)
     }
 
-    /// The earliest time a DM epoch that isn't trusted yet should be tried again,
+    /// The earliest retry for an untrusted DM epoch or a lost rotation race,
     /// so the connection can sync then even without an event.
     pub fn next_rekey(&self) -> Option<std::time::Instant> {
-        self.rekeyed.values().map(|(_, next)| *next).min()
+        self.rekeyed
+            .values()
+            .map(|(_, next)| *next)
+            .chain(self.rotation_retry)
+            .min()
     }
 
     /// A timer-driven sync failed before it could move the due attempts on: push
     /// them back, waiting longer after each failure in a row, so it can't spin.
     pub fn rekey_failed(&mut self) {
         self.rekey_failures += 1;
+        if let Some(next) = &mut self.rotation_retry {
+            *next = std::time::Instant::now() + backoff(self.rekey_failures);
+        }
         delay_due(
             &mut self.rekeyed,
             std::time::Instant::now(),
@@ -863,6 +1080,16 @@ impl<'a> KeyClient<'a> {
         }
         for (id, certificate) in &self.devices {
             if !devices.contains_key(id) {
+                if self.create_protected_epochs {
+                    if self.former_devices.len() < super::revocations::MAX_PER_REPLY {
+                        self.former_devices.insert((
+                            *certificate.person_id(),
+                            certificate.signing_key().to_bytes(),
+                        ));
+                    } else {
+                        tracing::warn!("former device limit reached");
+                    }
+                }
                 tracing::info!(
                     person = %fingerprint(certificate.person_id()),
                     device = %fingerprint(certificate.signing_key().as_bytes()),
@@ -1058,13 +1285,27 @@ impl<'a> KeyClient<'a> {
             .await?
             .error_for_status()?;
         let me = *self.identity.certificate.person_id();
-        self.keys
-            .insert((scope, 1), (key, envelope, me, context.commitment, false));
+        self.keys.insert(
+            (scope, 1),
+            HeldKey {
+                key,
+                envelope,
+                sender: me,
+                commitment: context.commitment,
+                excluded: Default::default(),
+                pair_bound: false,
+            },
+        );
         self.scopes.push(ScopeState {
             scope,
             epoch: 1,
             rotate: false,
+            excluded: Default::default(),
         });
+        if !self.rotations.covered(self.space(), &Excluded::new()) {
+            // Classify the new channel with its actual permissions before it can send.
+            self.sync().await?;
+        }
         Ok(scope)
     }
 

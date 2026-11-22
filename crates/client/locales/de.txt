@@ -959,6 +959,7 @@ net.needs_invite = Dieser Server braucht jetzt eine Einladung. Frag jemanden dan
 net.full = Dieser Server ist voll. Frag dort jemanden nach einer Einladung.
 net.join_limit = Zu viele Leute sind diesem Server kürzlich beigetreten. Versuche es in einer Stunde noch einmal.
 net.device_limit = Dein Konto hat auf diesem Server schon 10 Geräte. Entferne zuerst eins.
+net.rotation_update = Dieser Server braucht ein Update, bevor du hier Nachrichten senden kannst.
 net.sign_in_failed = Anmeldung bei diesem Server fehlgeschlagen.
 net.text_limit = Nachrichten dürfen bis zu 2.000 Zeichen lang sein.
 net.a_server = einen Server

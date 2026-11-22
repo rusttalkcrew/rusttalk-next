@@ -326,6 +326,7 @@ pub async fn after_leaving(
         [true, false]
     );
     let page = peer_a.message_page(&dms[0].id, None, 1).await?;
+    receive_key(peer_a, dms[0], page[0].epoch).await?;
     ensure!(
         peer_a.open_message(&dms[0].id, &page[0]).await?.text == LEFT,
         "server A did not carry the DM after the peer left server B"
