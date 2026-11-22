@@ -41,6 +41,7 @@ mod ui;
 mod update;
 #[cfg(target_os = "linux")]
 mod wayland_drops;
+mod whats_new;
 
 use std::{
     cell::Cell,

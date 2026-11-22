@@ -414,6 +414,7 @@ fn forget_profile(data: &std::path::Path, settings: crate::audio::Settings) {
         screen_height: settings.screen_height,
         screen_fps: settings.screen_fps,
         screen_cursor: settings.screen_cursor,
+        whats_new_seen: settings.whats_new_seen,
         ..Default::default()
     };
     let path = data.join("voice.json");

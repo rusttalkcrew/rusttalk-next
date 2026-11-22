@@ -159,6 +159,9 @@ pub struct Settings {
     pub mix: crate::call::mixer::Mix,
     /// The warning before sharing a terminal was accepted once. This device only.
     pub terminal_warned: bool,
+    /// The app version whose "What's new" was shown last, so it opens once per update.
+    /// This device only.
+    pub whats_new_seen: String,
     /// The name used on every server without a name of its own, and the profile bio
     /// (see `profile`). Synced, like the overrides.
     pub display_name: String,
@@ -236,6 +239,7 @@ impl Default for Settings {
             hotkeys: Default::default(),
             mix: Default::default(),
             terminal_warned: false,
+            whats_new_seen: String::new(),
             display_name: String::new(),
             bio: String::new(),
             name_overrides: Vec::new(),

@@ -266,6 +266,7 @@ pub enum Tab {
     Shortcuts,
     Updates,
     About,
+    WhatsNew,
 }
 
 impl Home {
@@ -277,7 +278,16 @@ impl Home {
     pub fn new(identity: DeviceIdentity, ctx: &egui::Context, data: PathBuf) -> Result<Self> {
         let identity = Arc::new(identity);
         let data_dir = data.clone();
+        let fresh = !data.join("voice.json").exists();
         let audio = Audio::new(&data)?;
+        // After an update, open "What's new" once; a first start has nothing new yet.
+        let version = env!("CARGO_PKG_VERSION");
+        let mut saved = audio.settings();
+        let announce = crate::whats_new::announce(&saved.whats_new_seen, version, fresh);
+        if saved.whats_new_seen != version {
+            saved.whats_new_seen = version.into();
+            audio.set_settings(saved);
+        }
         let video = Video::new(ctx.clone());
         let net = Net::new(
             ctx.clone(),
@@ -330,7 +340,7 @@ impl Home {
             },
             dialog: None,
             toast: None,
-            settings: None,
+            settings: announce.then_some(Tab::WhatsNew),
             hotkeys: crate::hotkeys::Hotkeys::new(ctx, audio.clone()),
             voice: Voice::new(audio, video, runtime),
             files: Files::new(&data_dir),

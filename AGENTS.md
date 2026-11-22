@@ -117,6 +117,12 @@ Two people must never build the same thing. Before you write any code:
   GitHub. An AI agent that cannot upload images saves them and gives the
   person their full paths, so they can attach them. No screenshot for a
   visible change? Say why.
+- **Changelog.** Every user-visible change adds one short line under
+  `## Unreleased` in `CHANGELOG.md`, in the same pull request (plain words, what
+  changes for people, no PR numbers). The release step moves Unreleased under the
+  new version with its date, and the website roadmap's Shipped timeline
+  (`rusttalkcrew/website`, `roadmap.html`) is updated from `CHANGELOG.md` at every
+  release. The app shows the same file as "What's new", so keep its format.
 - Commits end with a `Co-Authored-By:` line naming the AI model that helped.
 - Keep the branch up to date with `main` by rebasing, and resolve conflicts
   so that everyone's changes survive.

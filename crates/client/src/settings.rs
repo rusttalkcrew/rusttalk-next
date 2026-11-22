@@ -417,10 +417,14 @@ pub fn show(
         },
         Group {
             title: t!("settings.group_info"),
-            pages: vec![page(Tab::About, "ℹ", t!("settings.about"))],
+            pages: vec![
+                page(Tab::WhatsNew, "✨", t!("settings.whats_new")),
+                page(Tab::About, "ℹ", t!("settings.about")),
+            ],
         },
     ];
     let before = tab;
+    let mut open_news = false;
     let ((), close) = window(
         ctx,
         "settings",
@@ -450,8 +454,13 @@ pub fn show(
                 Tab::Privacy => privacy_tab(ui, home, keystore),
                 Tab::Devices => devices_page(ui, home),
                 Tab::Updates => updates.settings(ui),
+                Tab::WhatsNew => crate::whats_new::page(ui),
                 Tab::About => {
                     ui::page_section(ui, &format!("RustTalk {}", env!("CARGO_PKG_VERSION")));
+                    if ui::secondary(ui, t!("settings.whats_new")).clicked() {
+                        open_news = true;
+                    }
+                    ui.add_space(SPACE_S);
                     ui.label(t!("settings.about_license"));
                     ui.hyperlink_to(t!("settings.about_source"), REPOSITORY);
                     ui.add_space(SPACE_S);
@@ -469,7 +478,7 @@ pub fn show(
             error_text(ui, home.error.as_deref());
         },
     );
-    home.settings = Some(tab);
+    home.settings = Some(if open_news { Tab::WhatsNew } else { tab });
     if close && !home.confirm_sign_out {
         home.settings = None;
         home.error = None;
