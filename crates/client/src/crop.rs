@@ -59,6 +59,8 @@ pub enum Target {
         address: url::Url,
         name: String,
         sticker: bool,
+        /// The pack it goes to; the server's first when `None`.
+        pack: Option<crate::server::Id>,
     },
 }
 
@@ -291,20 +293,57 @@ impl Crop {
         let crop = image::imageops::crop_imm(&self.image, x, y, side, side).to_image();
         // Server emoji and stickers are PNG or GIF only, so they never fall back to JPEG.
         match self.target {
-            Target::Emoji { sticker, .. } => {
-                encode(crop, if sticker { STICKER_EDGE } else { EMOJI_EDGE }, false)
-            }
+            Target::Emoji { sticker, .. } => encode(crop, still_edge(sticker), false),
             _ => encode(crop, EDGE, true),
         }
     }
 }
 
+/// A picture file made into an emoji or sticker without asking: the centred square, as
+/// the crop dialog starts out, scaled and re-encoded the same way (animation kept).
+pub fn fit(bytes: &[u8], sticker: bool) -> Result<Vec<u8>> {
+    let (image, frames) = decode(bytes)?;
+    let (x, y, side) = Square::new(image.width(), image.height()).pixels();
+    if !frames.is_empty() {
+        return encode_animated(&frames, (x, y, side), emoji_animated_edge(sticker));
+    }
+    let crop = image::imageops::crop_imm(&image, x, y, side, side).to_image();
+    encode(crop, still_edge(sticker), false)
+}
+
+/// A small preview of a picture file for lists (its first frame), and its longer side.
+pub fn preview(bytes: &[u8]) -> Option<(ColorImage, u32)> {
+    let (image, _) = decode(bytes).ok()?;
+    let side = image.width().max(image.height());
+    let small = DynamicImage::ImageRgba8(image)
+        .thumbnail(64, 64)
+        .into_rgba8();
+    let size = [small.width() as usize, small.height() as usize];
+    Some((
+        ColorImage::from_rgba_unmultiplied(size, small.as_raw()),
+        side,
+    ))
+}
+
+/// The largest side of a still emoji or sticker.
+fn still_edge(sticker: bool) -> u32 {
+    if sticker { STICKER_EDGE } else { EMOJI_EDGE }
+}
+
+fn emoji_animated_edge(sticker: bool) -> u32 {
+    ANIMATED_EDGE.min(still_edge(sticker))
+}
+
+/// The largest side a received emoji or sticker file may have: what apps save, so a
+/// bigger one did not come from an app.
+pub const fn received_edge(sticker: bool) -> u32 {
+    if sticker { STICKER_EDGE } else { EMOJI_EDGE }
+}
+
 /// The largest side an animation for `target` is saved at.
 fn animated_edge(target: &Target) -> u32 {
     match target {
-        Target::Emoji { sticker, .. } => {
-            ANIMATED_EDGE.min(if *sticker { STICKER_EDGE } else { EMOJI_EDGE })
-        }
+        Target::Emoji { sticker, .. } => emoji_animated_edge(*sticker),
         _ => ANIMATED_EDGE,
     }
 }
@@ -575,6 +614,7 @@ mod tests {
             address: "https://example.com".parse().unwrap(),
             name: "party".into(),
             sticker,
+            pack: None,
         }
     }
 

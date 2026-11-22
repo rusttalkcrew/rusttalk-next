@@ -56,8 +56,8 @@ impl Tab {
 enum Section {
     Favourites,
     Recent,
-    /// This server's emoji.
-    Server,
+    /// One pack of server emoji, by its place among the packs shown.
+    Pack(usize),
     Unicode(u8),
     /// Search results, without a header.
     Found,
@@ -70,7 +70,7 @@ impl Section {
         match self {
             Section::Favourites => t!("picker.favourites"),
             Section::Recent => t!("picker.recent"),
-            Section::Server => t!("picker.server"),
+            Section::Pack(_) => "",
             Section::Unicode(0) => t!("picker.smileys"),
             Section::Unicode(1) => t!("picker.people"),
             Section::Unicode(3) => t!("picker.animals"),
@@ -88,7 +88,7 @@ impl Section {
         match self {
             Section::Favourites => "★",
             Section::Recent => "🕘",
-            Section::Server => "🏠",
+            Section::Pack(_) => "🏠",
             Section::Unicode(0) => "☺",
             Section::Unicode(1) => "👋",
             Section::Unicode(3) => "🐻",
@@ -122,12 +122,97 @@ fn tones() -> [(&'static str, &'static str); 6] {
 enum Item<'a> {
     /// Sequence and name.
     Unicode(&'a str, &'a str),
+    /// This server's emoji, typed into the text by name.
     Custom(&'a CustomEmoji),
+    /// Another server's: sent as a small file along with the message.
+    Foreign(&'a CustomEmoji),
 }
 
 struct Group<'a> {
     section: Section,
+    /// For pack sections; the others are named by their section.
+    title: Option<String>,
     items: Vec<Item<'a>>,
+}
+
+impl Group<'_> {
+    fn title(&self) -> &str {
+        self.title
+            .as_deref()
+            .unwrap_or_else(|| self.section.title())
+    }
+}
+
+/// The emoji and stickers of one pack, for what is shown now.
+struct PackItems<'a> {
+    title: String,
+    foreign: bool,
+    items: Vec<&'a CustomEmoji>,
+}
+
+/// The server emoji the picker offers: this server's, which go into the text by ID, and
+/// other servers', which go along as files. In a DM nothing is this server's.
+pub struct Scope<'a> {
+    pub local: Option<&'a Directory>,
+    pub others: Vec<(&'a str, &'a Directory)>,
+}
+
+impl<'a> Scope<'a> {
+    /// The packs with emoji (or `sticker`s) whose names contain `query`, this server's
+    /// first, then each other server's.
+    fn packs(&self, sticker: bool, query: &str) -> Vec<PackItems<'a>> {
+        let sources = (self.local.map(|dir| (None, dir)).into_iter())
+            .chain(self.others.iter().map(|(name, dir)| (Some(*name), *dir)));
+        let mut out = Vec::new();
+        for (server, dir) in sources {
+            // A server that has no packs yet keeps everything in one.
+            let none = [crate::server::EmojiPack {
+                id: [0; 32],
+                name: None,
+            }];
+            let packs = if dir.packs.is_empty() {
+                &none[..]
+            } else {
+                &dir.packs[..]
+            };
+            for pack in packs {
+                let items: Vec<_> = (dir.emoji.iter())
+                    .filter(|e| e.pack == pack.id && e.sticker == sticker && e.name.contains(query))
+                    .collect();
+                if items.is_empty() {
+                    continue;
+                }
+                let title = match server {
+                    None => pack.title(),
+                    Some(name) if packs.len() <= 1 => name.to_owned(),
+                    Some(name) => format!("{name} · {}", pack.title()),
+                };
+                out.push(PackItems {
+                    title,
+                    foreign: server.is_some(),
+                    items,
+                });
+            }
+        }
+        out
+    }
+
+    /// Every emoji and sticker offered, to look a hovered one up by ID.
+    fn all(&self) -> impl Iterator<Item = &'a CustomEmoji> + '_ {
+        (self.local.into_iter())
+            .chain(self.others.iter().map(|(_, dir)| *dir))
+            .flat_map(|dir| dir.emoji.iter())
+    }
+}
+
+/// What picking a server emoji or sticker means: text or a sticker of this server, or a
+/// picture of another server to send as a file.
+fn pick_custom(emoji: &CustomEmoji, foreign: bool) -> Picked {
+    match (foreign, emoji.sticker) {
+        (true, _) => Picked::Foreign(emoji.clone()),
+        (false, true) => Picked::Sticker(emoji.id, emoji.name.clone()),
+        (false, false) => Picked::Text(format!(":{}:", emoji.name)),
+    }
 }
 
 /// What the pointer was last over, for the bar at the bottom.
@@ -141,6 +226,8 @@ enum Hover {
 pub enum Picked {
     Text(String),
     Sticker(Id, String),
+    /// An emoji or sticker of another server.
+    Foreign(CustomEmoji),
 }
 
 pub struct Picker {
@@ -255,12 +342,12 @@ impl Picker {
 
     /// The panel above `anchor` while open. Returns whether it was open before this
     /// frame, for `button`, and what was picked.
-    pub fn show(&mut self, ui: &Ui, anchor: Rect, dir: &Directory) -> (bool, Option<Picked>) {
+    pub fn show(&mut self, ui: &Ui, anchor: Rect, scope: &Scope) -> (bool, Option<Picked>) {
         let was_open = self.open;
         let mut open = self.open;
         let picked = ui::panel_popup(ui, egui::Id::unique("picker"), anchor, &mut open, |ui| {
             ui.set_width(WIDTH);
-            self.panel(ui, dir)
+            self.panel(ui, scope)
         })
         .flatten();
         self.open = open && picked.is_none();
@@ -270,8 +357,7 @@ impl Picker {
         (was_open, picked)
     }
 
-    fn panel(&mut self, ui: &mut Ui, dir: &Directory) -> Option<Picked> {
-        let custom = &dir.emoji;
+    fn panel(&mut self, ui: &mut Ui, scope: &Scope) -> Option<Picked> {
         ui.spacing_mut().item_spacing = Vec2::splat(ui::SPACE_S);
         egui::Frame::new()
             .inner_margin(Margin {
@@ -331,14 +417,14 @@ impl Picker {
                     // Tiles are exactly a cell; the emoji fills it without padding.
                     ui.spacing_mut().button_padding = Vec2::ZERO;
                     match self.tab {
-                        Tab::Emoji => self.emoji(ui, dir),
-                        Tab::Stickers => self.stickers(ui, custom),
+                        Tab::Emoji => self.emoji(ui, scope),
+                        Tab::Stickers => self.stickers(ui, scope),
                     }
                 },
             )
             .inner;
         line(ui, ui.cursor().top());
-        self.bar(ui, custom);
+        self.bar(ui, scope);
         picked
     }
 
@@ -356,18 +442,17 @@ impl Picker {
         }
     }
 
-    fn emoji(&mut self, ui: &mut Ui, dir: &Directory) -> Option<Picked> {
-        let custom = &dir.emoji;
+    fn emoji(&mut self, ui: &mut Ui, scope: &Scope) -> Option<Picked> {
         let saved = Saved {
             favourites: self.favourites.clone(),
             recent: self.recent.clone(),
             query: self.query.trim().trim_matches(':').to_lowercase(),
             tone: self.tone,
         };
-        let groups = saved.groups(custom);
+        let groups = saved.groups(scope);
         let searching = !self.query.trim().is_empty();
         if !searching {
-            self.rail(ui, &groups, dir);
+            self.rail(ui, &groups);
         }
         if groups.iter().all(|group| group.items.is_empty()) {
             ui.add_space(PADDING);
@@ -412,7 +497,7 @@ impl Picker {
                     ui.painter().text(
                         rect.left_center(),
                         Align2::LEFT_CENTER,
-                        format!("{}  {}", group.section.icon(), group.section.title()),
+                        format!("{}  {}", group.section.icon(), group.title()),
                         FontId::new(ui::TEXT_SMALL, ui::bold_family()),
                         ui::colors(ui).muted,
                     );
@@ -437,10 +522,10 @@ impl Picker {
                                     Hover::Unicode(sequence.to_owned()),
                                     Picked::Text(sequence.to_owned()),
                                 ),
-                                Item::Custom(emoji) => (
+                                Item::Custom(emoji) | Item::Foreign(emoji) => (
                                     picture_tile(ui, emoji, CELL),
                                     Hover::Custom(emoji.id),
-                                    Picked::Text(format!(":{}:", emoji.name)),
+                                    pick_custom(emoji, matches!(*item, Item::Foreign(_))),
                                 ),
                             };
                             if response.hovered() {
@@ -478,7 +563,7 @@ impl Picker {
     }
 
     /// The sections down the left, each scrolling the grid to its header.
-    fn rail(&mut self, ui: &mut Ui, groups: &[Group], dir: &Directory) {
+    fn rail(&mut self, ui: &mut Ui, groups: &[Group]) {
         let (rect, _) = ui.allocate_exact_size(Vec2::new(RAIL, BODY), Sense::hover());
         ui.painter()
             .rect_filled(rect, egui::CornerRadius::ZERO, ui::colors(ui).side);
@@ -496,21 +581,20 @@ impl Picker {
                     let section = group.section;
                     let on = self.current == Some(section);
                     let look = if on { ui::Look::Plain } else { ui::Look::Ghost };
-                    // The server's icon stands for its emoji, else its first emoji.
-                    let first = || {
-                        (dir.emoji.iter().find(|emoji| !emoji.sticker))
-                            .and_then(|emoji| emoji.picture.as_ref())
+                    // A pack's first emoji stands for it on the rail.
+                    let picture = match (section, group.items.first()) {
+                        (Section::Pack(_), Some(Item::Custom(e) | Item::Foreign(e))) => {
+                            e.picture.as_ref()
+                        }
+                        _ => None,
                     };
-                    let picture = (section == Section::Server)
-                        .then(|| dir.icon.as_ref().or_else(first))
-                        .flatten();
                     let icon = if picture.is_some() {
                         ""
                     } else {
                         section.icon()
                     };
                     let size = Vec2::splat(ui::ICON_BUTTON);
-                    let response = ui::icon_button(ui, icon, section.title(), look, size);
+                    let response = ui::icon_button(ui, icon, group.title(), look, size);
                     if let Some(picture) = picture {
                         let inner =
                             Rect::from_center_size(response.rect.center(), Vec2::splat(22.0));
@@ -523,17 +607,14 @@ impl Picker {
             });
     }
 
-    fn stickers(&mut self, ui: &mut Ui, custom: &[CustomEmoji]) -> Option<Picked> {
+    fn stickers(&mut self, ui: &mut Ui, scope: &Scope) -> Option<Picked> {
         let query = self.query.trim().trim_matches(':').to_lowercase();
-        let all: Vec<_> = custom.iter().filter(|e| e.sticker).collect();
-        let items: Vec<_> = (all.iter())
-            .filter(|e| e.name.to_lowercase().contains(&query))
-            .collect();
+        let packs = scope.packs(true, &query);
         ui.add_space(PADDING);
-        if items.is_empty() {
+        if packs.is_empty() {
             ui.vertical(|ui| {
                 ui.add_space(PADDING);
-                ui.label(if all.is_empty() {
+                ui.label(if scope.packs(true, "").is_empty() {
                     t!("picker.no_stickers")
                 } else {
                     t!("settings.nothing_found")
@@ -541,47 +622,84 @@ impl Picker {
             });
             return None;
         }
+        let mut tops = Vec::with_capacity(packs.len());
+        let mut total = 0.0;
+        for pack in &packs {
+            tops.push(total);
+            total += HEADER + pack.items.len().div_ceil(STICKER_COLUMNS) as f32 * STICKER_CELL;
+        }
         let mut picked = None;
         ui.vertical(|ui| {
             ui.add_space(ui::SPACE_XS);
             ScrollArea::vertical()
                 .id_salt("picker-stickers")
                 .auto_shrink(false)
-                .show_rows(
-                    ui,
-                    STICKER_CELL,
-                    items.len().div_ceil(STICKER_COLUMNS),
-                    |ui, rows| {
-                        for row in rows {
-                            ui.horizontal(|ui| {
+                .show_viewport(ui, |ui, viewport| {
+                    let origin = ui.max_rect().min;
+                    ui.set_width(STICKER_COLUMNS as f32 * STICKER_CELL);
+                    ui.set_height(total);
+                    for (pack, top) in packs.iter().zip(&tops) {
+                        let rows = pack.items.len().div_ceil(STICKER_COLUMNS);
+                        let height = HEADER + rows as f32 * STICKER_CELL;
+                        if top + height < viewport.min.y || *top > viewport.max.y {
+                            continue;
+                        }
+                        let rect = Rect::from_min_size(
+                            origin + Vec2::new(4.0, *top),
+                            Vec2::new(STICKER_COLUMNS as f32 * STICKER_CELL, HEADER),
+                        );
+                        ui.painter().text(
+                            rect.left_center(),
+                            Align2::LEFT_CENTER,
+                            &pack.title,
+                            FontId::new(ui::TEXT_SMALL, ui::bold_family()),
+                            ui::colors(ui).muted,
+                        );
+                        let first = ((viewport.min.y - top - HEADER) / STICKER_CELL)
+                            .floor()
+                            .max(0.0) as usize;
+                        let last = (((viewport.max.y - top - HEADER) / STICKER_CELL)
+                            .ceil()
+                            .max(0.0) as usize)
+                            .min(rows);
+                        for row in first..last {
+                            let rect = Rect::from_min_size(
+                                origin + Vec2::new(0.0, top + HEADER + row as f32 * STICKER_CELL),
+                                Vec2::new(STICKER_COLUMNS as f32 * STICKER_CELL, STICKER_CELL),
+                            );
+                            let builder = UiBuilder::new()
+                                .max_rect(rect)
+                                .id_salt(("sticker-row", top.to_bits(), row))
+                                .layout(Layout::left_to_right(Align::Center));
+                            ui.scope_builder(builder, |ui| {
                                 ui.spacing_mut().item_spacing.x = 0.0;
-                                let row = items.iter().skip(row * STICKER_COLUMNS);
-                                for item in row.take(STICKER_COLUMNS) {
+                                let cells = pack.items.iter().skip(row * STICKER_COLUMNS);
+                                for item in cells.take(STICKER_COLUMNS) {
                                     let response = picture_tile(ui, item, STICKER_CELL);
                                     if response.hovered() {
                                         self.hover = Some(Hover::Custom(item.id));
                                     }
                                     if response.clicked() {
-                                        picked = Some(Picked::Sticker(item.id, item.name.clone()));
+                                        picked = Some(pick_custom(item, pack.foreign));
                                     }
                                 }
                             });
                         }
-                    },
-                );
+                    }
+                });
         });
         picked
     }
 
     /// The hovered emoji large with its `:shortcode:`, or a tip.
-    fn bar(&self, ui: &mut Ui, custom: &[CustomEmoji]) {
+    fn bar(&self, ui: &mut Ui, scope: &Scope) {
         let (rect, _) = ui.allocate_exact_size(Vec2::new(WIDTH, 48.0), Sense::hover());
         let mut ui = ui.new_child(
             UiBuilder::new()
                 .max_rect(rect.shrink2(Vec2::new(PADDING, 6.0)))
                 .layout(Layout::left_to_right(Align::Center)),
         );
-        let custom_emoji = |id: &Id| custom.iter().find(|emoji| emoji.id == *id);
+        let custom_emoji = |id: &Id| scope.all().find(|emoji| emoji.id == *id);
         match &self.hover {
             Some(Hover::Unicode(sequence)) => {
                 ui.label(text(sequence.as_str()).size(26.0));
@@ -630,19 +748,26 @@ struct Saved {
 
 impl Saved {
     /// The grid's sections, or one of search results.
-    fn groups<'a>(&'a self, custom: &'a [CustomEmoji]) -> Vec<Group<'a>> {
+    fn groups<'a>(&'a self, scope: &Scope<'a>) -> Vec<Group<'a>> {
         let query = &self.query;
-        let server = |query: &str| -> Vec<Item<'a>> {
-            (custom.iter())
-                .filter(|e| !e.sticker && e.name.to_lowercase().contains(query))
-                .map(Item::Custom)
+        let packs = scope.packs(false, query);
+        let item = |pack: &PackItems<'a>| -> Vec<Item<'a>> {
+            (pack.items.iter())
+                .map(|e| {
+                    if pack.foreign {
+                        Item::Foreign(e)
+                    } else {
+                        Item::Custom(e)
+                    }
+                })
                 .collect()
         };
         if !query.is_empty() {
-            let mut items = server(query);
+            let mut items: Vec<Item<'a>> = packs.iter().flat_map(item).collect();
             items.extend(self.found(query));
             return vec![Group {
                 section: Section::Found,
+                title: None,
                 items,
             }];
         }
@@ -654,17 +779,22 @@ impl Saved {
         let mut groups = vec![
             Group {
                 section: Section::Favourites,
+                title: None,
                 items: saved(&self.favourites),
             },
             Group {
                 section: Section::Recent,
+                title: None,
                 items: saved(&self.recent),
             },
-            Group {
-                section: Section::Server,
-                items: server(""),
-            },
         ];
+        for (at, pack) in packs.iter().enumerate() {
+            groups.push(Group {
+                section: Section::Pack(at),
+                title: Some(pack.title.clone()),
+                items: item(pack),
+            });
+        }
         for group in UNICODE {
             let items = (PICKER.iter())
                 .filter(|entry| entry.group == group)
@@ -672,6 +802,7 @@ impl Saved {
                 .collect();
             groups.push(Group {
                 section: Section::Unicode(group),
+                title: None,
                 items,
             });
         }
@@ -830,6 +961,102 @@ mod tests {
         assert_eq!(Picker::new(dir.path()).favourites, ["🇳🇱"]);
     }
 
+    fn nothing() -> Scope<'static> {
+        Scope {
+            local: None,
+            others: Vec::new(),
+        }
+    }
+
+    fn server(packs: &[(u8, &str)], emoji: &[(&str, bool, u8)]) -> Directory {
+        Directory {
+            packs: (packs.iter())
+                .map(|(id, name)| crate::server::EmojiPack {
+                    id: [*id; 32],
+                    name: (!name.is_empty()).then(|| (*name).to_owned()),
+                })
+                .collect(),
+            emoji: (emoji.iter())
+                .map(|(name, sticker, pack)| CustomEmoji {
+                    id: [name.len() as u8 + *pack; 32],
+                    name: (*name).into(),
+                    sticker: *sticker,
+                    pack: [*pack; 32],
+                    picture: None,
+                })
+                .collect(),
+            ..Directory::default()
+        }
+    }
+
+    #[test]
+    fn each_pack_is_a_section_and_other_servers_are_marked() {
+        let here = server(
+            &[(0, ""), (1, "Cats")],
+            &[("party", false, 0), ("meow", false, 1), ("hug", true, 1)],
+        );
+        let there = server(&[(0, "")], &[("wave", false, 0), ("bow", true, 0)]);
+        let scope = Scope {
+            local: Some(&here),
+            others: vec![("Friends", &there)],
+        };
+        let titles = |sticker| -> Vec<(String, bool, usize)> {
+            (scope.packs(sticker, "").into_iter())
+                .map(|p| (p.title, p.foreign, p.items.len()))
+                .collect()
+        };
+        // The unnamed pack is the Default one; a server with one pack is shown by its name.
+        assert_eq!(
+            titles(false),
+            [
+                (t!("picker.default_pack").to_owned(), false, 1),
+                ("Cats".to_owned(), false, 1),
+                ("Friends".to_owned(), true, 1),
+            ]
+        );
+        assert_eq!(
+            titles(true),
+            [
+                ("Cats".to_owned(), false, 1),
+                ("Friends".to_owned(), true, 1)
+            ]
+        );
+        // The grid has a section per pack between recent and the Unicode ones.
+        let saved = Saved {
+            favourites: Vec::new(),
+            recent: Vec::new(),
+            query: String::new(),
+            tone: 0,
+        };
+        let sections: Vec<_> = saved.groups(&scope).iter().map(|g| g.section).collect();
+        assert_eq!(
+            sections[..4],
+            [
+                Section::Pack(0),
+                Section::Pack(1),
+                Section::Pack(2),
+                Section::Unicode(0)
+            ]
+        );
+        // Search looks through every pack and every server.
+        assert_eq!(scope.packs(false, "w").len(), 2);
+        // Picking one of another server is a file; of this server it is text or a sticker.
+        let wave = &there.emoji[0];
+        assert!(matches!(pick_custom(wave, true), Picked::Foreign(_)));
+        assert!(matches!(pick_custom(wave, false), Picked::Text(t) if t == ":wave:"));
+        assert!(matches!(
+            pick_custom(&here.emoji[2], false),
+            Picked::Sticker(..)
+        ));
+        // A server without packs (older) keeps everything in one.
+        let old = server(&[], &[("old", false, 0)]);
+        let scope = Scope {
+            local: Some(&old),
+            others: Vec::new(),
+        };
+        assert_eq!(scope.packs(false, "").len(), 1);
+    }
+
     #[test]
     fn sections_skip_empty_ones_and_search_has_one() {
         let dir = tempfile::tempdir().unwrap();
@@ -842,7 +1069,7 @@ mod tests {
         };
         let sections = |picker: &Picker| -> Vec<Section> {
             saved(picker)
-                .groups(&[])
+                .groups(&nothing())
                 .iter()
                 .map(|g| g.section)
                 .collect()
@@ -856,7 +1083,7 @@ mod tests {
         );
         picker.query = "thumbs".into();
         let saved = saved(&picker);
-        let groups = saved.groups(&[]);
+        let groups = saved.groups(&nothing());
         assert_eq!(groups.len(), 1);
         assert!(
             groups[0]

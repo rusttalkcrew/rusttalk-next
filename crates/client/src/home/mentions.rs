@@ -121,6 +121,8 @@ pub(super) fn allowed_to_send(doc: &Document, wide: bool) -> bool {
 pub struct Message {
     pub(super) doc: Arc<Document>,
     wide: bool,
+    /// Emoji of other servers the message carries as files: name and file blob ID.
+    inline: Vec<(String, Id)>,
 }
 
 impl Message {
@@ -143,7 +145,23 @@ impl Message {
             _ => "",
         });
         let wide = !allowed_to_send(&doc, false) && can_mention_everyone(dir, channel, msg.person);
-        Self { doc, wide }
+        let inline = (msg.files.iter())
+            .filter_map(|file| match crate::sticker_files::of(file) {
+                Some((crate::sticker_files::Kind::Emoji, name)) => Some((name, file.file.id)),
+                _ => None,
+            })
+            .collect();
+        Self { doc, wide, inline }
+    }
+
+    /// The picture of a `:name:` emoji from another server that this message carries.
+    pub(super) fn inline_picture(
+        &self,
+        ctx: &eframe::egui::Context,
+        name: &str,
+    ) -> Option<crate::server::Picture> {
+        let (_, blob) = (self.inline.iter()).find(|(n, _)| n.eq_ignore_ascii_case(name))?;
+        crate::sticker_files::picture(ctx, blob)
     }
 
     pub(super) fn parts<'a>(&self, dir: &Directory, text: &'a str) -> Vec<(Cow<'a, str>, bool)> {

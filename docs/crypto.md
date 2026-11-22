@@ -234,9 +234,9 @@ object_id || epoch (8 bytes, big endian)
 The object type values are server name (1), description (2), icon (3),
 channel name (4), topic (5), category name (6), role name (7), display
 name (8), avatar (9), server emoji or sticker name (10), server emoji
-or sticker picture (11), role display (12) and profile bio (13). Server objects use the raw server ID. Channels
+or sticker picture (11), role display (12), profile bio (13) and emoji pack name (14). Server objects use the raw server ID. Channels
 and categories use their raw 32-byte IDs. Members (display name, avatar and bio) use the raw person ID.
-Server emoji and stickers use their raw 32-byte IDs.
+Server emoji, stickers and emoji packs use their raw 32-byte IDs.
 Role names use the role ID's UTF-8 bytes. New metadata uses the newest
 space epoch held by the client, and the API accepts writes only when
 that epoch is current and the scope is ready. A removed member who

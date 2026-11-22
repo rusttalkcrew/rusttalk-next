@@ -52,7 +52,7 @@ mod find;
 pub mod terminal;
 mod voice;
 
-pub use admin::{Admin, AdminUpdate, AuditEntry, Ban, Invite, PublicListing};
+pub use admin::{Admin, AdminUpdate, AuditEntry, Ban, ImportItem, Invite, PublicListing};
 pub use control::{ControlView, Ended};
 pub(crate) use directory::frame_image;
 use directory::{directory, get};
@@ -77,6 +77,8 @@ pub enum Fetch {
     Inline,
 }
 
+// A draft is big and rare next to the other commands, which are small.
+#[allow(clippy::large_enum_variant)]
 pub enum Command {
     /// Load the newest page and follow live messages.
     Open(Id),
@@ -92,6 +94,8 @@ pub enum Command {
     Image(BlobRef, Fetch),
     /// Download and read a link preview file.
     LinkCard(BlobRef),
+    /// Download, check and decode another server's emoji or sticker file.
+    StickerFile(BlobRef, crate::sticker_files::Kind),
     /// Download a file and save it here.
     Save(BlobRef, PathBuf),
     /// Receive an offered file into this path.
@@ -209,6 +213,8 @@ pub struct Draft {
     pub poll: Option<Box<PollPart>>,
     /// A link preview made while sending, uploaded as a hidden file (see `link_cards`).
     pub preview: Option<std::sync::Arc<crate::link_cards::Made>>,
+    /// Emoji and stickers of other servers, uploaded as small files (see `sticker_files`).
+    pub inline: Vec<crate::sticker_files::Inline>,
 }
 
 pub struct LiveOffer {
@@ -339,6 +345,8 @@ pub enum Update {
     Image(Id, Fetch, Result<Vec<(egui::ColorImage, u32)>, bool>),
     /// A link preview file by blob ID, or why not: `true` when it expired or was deleted.
     LinkCard(Id, Result<crate::link_cards::Card, bool>),
+    /// An emoji or sticker file by blob ID, or why not: `true` when it expired or was deleted.
+    StickerFile(Id, Result<Picture, bool>),
     /// A file by blob ID was saved, or why not: `true` when it expired or was deleted.
     Saved(Id, Result<(), bool>),
     /// A file offered in the voice room, by someone else or by us.
@@ -1452,9 +1460,23 @@ async fn on_command(
             if draft.peer.is_some()
                 && let Some(dir) = &state.last
             {
-                crate::emoji::for_replica(&mut body.text, &mut body.sticker, &dir.emoji);
+                // Emoji of other servers carry their pictures as files and keep their tokens.
+                let kept: Vec<&str> = (draft.inline.iter())
+                    .filter(|picture| picture.kind == crate::sticker_files::Kind::Emoji)
+                    .map(|picture| picture.name.as_str())
+                    .collect();
+                crate::emoji::for_replica_keeping(
+                    &mut body.text,
+                    &mut body.sticker,
+                    &dir.emoji,
+                    &kept,
+                );
             }
-            let files = (draft.files.clone(), draft.preview.clone());
+            let files = (
+                draft.files.clone(),
+                draft.preview.clone(),
+                draft.inline.clone(),
+            );
             let target = (channel, draft.id);
             let mut sent = files::send(ctx, url, client, target, body.clone(), files.clone()).await;
             // The other person re-keyed the DM just now: take the new key and send
@@ -1484,6 +1506,7 @@ async fn on_command(
         }
         Command::Image(file, fetch) => files::image(ctx, client, file, fetch).await,
         Command::LinkCard(file) => files::link_card(ctx, client, file).await,
+        Command::StickerFile(file, kind) => files::sticker_file(ctx, client, file, kind).await,
         Command::Save(file, path) => files::save(ctx, client, file, path).await,
         Command::SendLive(channel, path) => {
             voice::offer_chat_file(ctx, url, client, state, channel, path).await?;

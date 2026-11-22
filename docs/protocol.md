@@ -211,9 +211,9 @@ errors may have an empty body. The API logs a request ID, status and reason.
 | 400 | `invalid_json`, `invalid_encoding`, `invalid_query`, `invalid_forwarded_ip`, `invalid_revocation`, `invalid_invite_limits`, `invalid_role_rank`, `invalid_role_count`, `role_id_required`, `already_owner`, `unexpected_invite`, `invite_name_required`, `invalid_member_cap`, `invalid_certificate`, `invalid_metadata`, `invalid_envelope`, `invalid_channel_flags`, `invalid_audio_kbps`, `invalid_order`, `invalid_dm_peer`, `not_a_voice_channel`, `invalid_message`, `invalid_file_body`, `invalid_file_acceptance`, `invalid_event_query`, `invalid_sync_blob`, `invalid_listing`, `invalid_listing_settings`, `invalid_index_url`, `invalid_index_tls_fingerprint` |
 | 401 | `invalid_challenge`, `invalid_certificate`, `invalid_device_signature`, `invalid_session`, `token_expired`, `invalid_livekit_webhook` |
 | 403 | `invite_required`, `invalid_invite`, `person_banned`, `ip_banned`, `device_revoked`, `device_certificate_required`, `permission_denied`, `role_hierarchy`, `cannot_grant_permission`, `built_in_role`, `owner_required`, `open_joining_disabled`, `scope_read_denied`, `recipient_read_denied`, `channel_read_denied`, `channel_write_denied`, `live_file_peer_not_in_room` |
-| 404 | `invite_not_found`, `member_not_found`, `ban_not_found`, `role_not_found`, `category_not_found`, `channel_not_found`, `message_not_found`, `message_device_not_found`, `file_not_found`, `avatar_not_found`, `icon_not_found`, `emoji_not_found` |
+| 404 | `invite_not_found`, `member_not_found`, `ban_not_found`, `role_not_found`, `category_not_found`, `channel_not_found`, `message_not_found`, `message_device_not_found`, `file_not_found`, `avatar_not_found`, `icon_not_found`, `emoji_not_found`, `pack_not_found` |
 | 408 | `file_upload_timeout` |
-| 409 | `owner_cannot_leave`, `already_banned`, `no_active_ip`, `role_exists`, `role_in_use`, `role_limit`, `member_cap_reached`, `device_limit`, `device_certificate_changed`, `revocation_limit`, `epoch_changed`, `space_key_unavailable`, `metadata_epoch_changed`, `category_exists`, `category_in_use`, `channel_exists`, `order_changed`, `message_exists`, `file_exists`, `emoji_exists`, `emoji_limit`, `sticker_limit` |
+| 409 | `owner_cannot_leave`, `already_banned`, `no_active_ip`, `role_exists`, `role_in_use`, `role_limit`, `member_cap_reached`, `device_limit`, `device_certificate_changed`, `revocation_limit`, `epoch_changed`, `space_key_unavailable`, `metadata_epoch_changed`, `category_exists`, `category_in_use`, `channel_exists`, `order_changed`, `message_exists`, `file_exists`, `emoji_exists`, `emoji_limit`, `sticker_limit`, `pack_exists`, `pack_limit`, `last_pack` |
 | 413 | `body_too_large` when generated after reading the body, `file_too_large`, `file_member_quota`, `file_server_quota`, `emoji_too_large` |
 | 415 | `expected_json` |
 | 429 | `challenge_limit`, `invite_preview_limit`, `open_join_limit` |
@@ -291,9 +291,14 @@ Invite preview permits 32 lookups per IPv4 address or IPv6 /64 and
 
 | Method and path | Body | Permission and success |
 | --- | --- | --- |
-| GET `/v1/emoji` | Empty | Any member. 200, `{max_emoji, max_stickers, max_bytes, items: [{id, kind, owner, size, image_hash, name_ct}]}`, oldest first |
+| GET `/v1/emoji` | Empty | Any member. 200, `{max_emoji, max_stickers, max_bytes, max_packs, packs: [{id, name_ct}], items: [{id, kind, owner, size, image_hash, name_ct, pack_id}]}`; packs in display order, items oldest first |
 | GET `/v1/emoji/{id}/image` | Empty | Any member. 200, `{image_ct}`, or `404 emoji_not_found` |
-| POST `/v1/emoji` | `{id, kind, name_ct, image_ct}` | `manage_emoji`. 201 |
+| POST `/v1/emoji` | `{id, kind, name_ct, image_ct, pack_id?}` | `manage_emoji`. 201. `pack_id` defaults to the first pack |
+| PUT `/v1/emoji/{id}/pack` | `{pack_id}` | `manage_emoji`. 204 |
+| POST `/v1/emoji/packs` | `{id, name_ct}` | `manage_emoji`. 201, added last |
+| PUT `/v1/emoji/packs/{id}/name` | `{name_ct}` | `manage_emoji`. 204 |
+| PUT `/v1/emoji/packs/order` | `{ids}` | `manage_emoji`. 204. Lists every pack once |
+| DELETE `/v1/emoji/packs/{id}` | Empty | `manage_emoji`. 204. Deletes the pack's emoji and stickers too |
 | PUT `/v1/emoji/{id}/name` | `{name_ct}` | `manage_emoji`. 204 |
 | DELETE `/v1/emoji/{id}` | Empty | `manage_emoji`. 204 |
 
@@ -313,10 +318,35 @@ files beside the database. Changes record `emoji_added`, `emoji_renamed` and
 `emoji_deleted` audit entries with the emoji ID as `target_id`, and send
 `channel_changed`.
 
+Every emoji and sticker is in one pack. The migration creates the Default pack
+(the ID of 32 zero bytes) with an empty name, since the server cannot encrypt
+one; apps show their own "Default" until it is renamed. Pack names are space
+metadata (type 14) with the same epoch rules as emoji names. The server allows
+`RUSTTALK_EMOJI_PACKS_MAX` packs (default 20) and returns `409 pack_limit`
+past it, `409 pack_exists` for a reused ID, `404 pack_not_found` for an unknown
+pack, `409 order_changed` when an order lists other packs than exist,
+`400 invalid_order` for a repeated ID, and `409 last_pack` when deleting the
+only pack. Pack changes record `emoji_pack_changed` audit entries and send
+`channel_changed`.
+
 Messages carry a server emoji as the token `<:name:id>` inside the encrypted
 text, with the base64url ID. Clients show the picture when this server has
 that ID and `:name:` otherwise. A sticker is its own message, see
 [the plaintext format](crypto.md#messages).
+
+An emoji or sticker of another server (or in a DM) cannot be read from the
+server that holds it, so the sender's app attaches the picture to the message
+as a small stored file on the server the message goes to, without a thumbnail.
+The file's media type is `application/vnd.rusttalk.sticker` or
+`application/vnd.rusttalk.emoji` and its name is `name.gif`, `name.png` or
+`name.jpg` with a valid emoji name. A sticker message has the text `:name:` and
+the file; an emoji message keeps its `<:name:id>` tokens and carries one file
+per emoji, matched to the token by name. The file counts toward that server's
+file storage like any file. Receivers accept it only when the type, a name
+that fits, a size of at most 262,144 bytes minus the encryption framing, no
+thumbnail, a PNG, JPEG or GIF of at most 100 frames and 32 MiB decoded, and at
+most 128 pixels on a side (emoji) or 320 (stickers) all hold; anything else
+stays an ordinary file. Apps that do not know the types show a small file.
 
 ## Channels and categories
 

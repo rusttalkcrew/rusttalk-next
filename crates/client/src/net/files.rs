@@ -19,10 +19,13 @@ use rusttalk_core::{
 };
 use url::Url;
 
+use sha2::Digest as _;
+
 use super::{Ctx, Fetch, Update, directory::frame_image, send_messages, to_msg};
 use crate::{
     link_cards::{Card, FILE_NAME, MAX_CARD_BYTES, MEDIA_TYPE, Made},
     server::Id,
+    sticker_files::{Inline, Kind},
 };
 use rusttalk_core::client::prepare_file;
 use std::time::Instant;
@@ -35,7 +38,7 @@ pub(super) async fn send(
     client: &mut KeyClient<'_>,
     (channel, id): (Id, Id),
     mut body: MessageBody,
-    (files, preview): (Vec<PathBuf>, Option<Arc<Made>>),
+    (files, preview, inline): (Vec<PathBuf>, Option<Arc<Made>>, Vec<Inline>),
 ) -> Result<bool> {
     if let Some(first) = files.first() {
         let label = match files.len() {
@@ -70,6 +73,22 @@ pub(super) async fn send(
             Preview::Left(prepared) => leftover.extend(prepared),
         }
     }
+    // Emoji and stickers from other servers go along as small files of their own type.
+    for picture in inline
+        .iter()
+        .take(crate::files::MAX_FILES.saturating_sub(body.attachments.len()))
+    {
+        match upload_inline(client, &channel, picture).await {
+            Ok(attachment) => body.attachments.push(attachment),
+            Err(error) => {
+                tracing::warn!(error = %format_args!("{error:#}"), "uploading an emoji file failed");
+                discard(client, &body.attachments).await;
+                at_most(CLEANUP, discard(client, &leftover)).await;
+                ctx.send(Update::Failed(upload_problem(&error).into()));
+                return Ok(false);
+            }
+        }
+    }
     let record = match client.post_message(&channel, id, &body).await {
         Ok(record) => record,
         Err(error) => {
@@ -81,6 +100,24 @@ pub(super) async fn send(
     send_messages(ctx, url, channel, vec![to_msg(&record, &body)], false, None);
     at_most(CLEANUP, discard(client, &leftover)).await;
     Ok(true)
+}
+
+/// Upload another server's emoji or sticker as a small file (no thumbnail) on this one.
+async fn upload_inline(
+    client: &KeyClient<'_>,
+    channel: &Id,
+    picture: &Inline,
+) -> Result<Attachment> {
+    let (attachment, _) = prepare_file(
+        &picture.file_name(),
+        picture.kind.media_type(),
+        &picture.bytes,
+        &[],
+    )?;
+    client
+        .upload_prepared(channel, &attachment, &picture.bytes, None, None)
+        .await?;
+    Ok(attachment)
 }
 
 /// How long removing a preview that didn't make it may hold up this server's loop.
@@ -210,6 +247,33 @@ pub(super) async fn link_card(ctx: &Ctx, client: &KeyClient<'_>, file: BlobRef) 
         gone(&error)
     });
     ctx.send(Update::LinkCard(id, card));
+}
+
+/// Download another server's emoji or sticker file, refuse anything an app could not have
+/// made, and decode it.
+pub(super) async fn sticker_file(ctx: &Ctx, client: &KeyClient<'_>, file: BlobRef, kind: Kind) {
+    let id = file.id;
+    let picture = async {
+        anyhow::ensure!(
+            file.size as usize <= rusttalk_core::keys::IMAGE_PLAINTEXT,
+            "emoji file too big"
+        );
+        let bytes = client.download_file(&file, None).await?;
+        tokio::task::spawn_blocking(move || {
+            let frames = crate::sticker_files::decode(&bytes, kind)?;
+            Ok(crate::server::Picture {
+                key: sha2::Sha256::digest(&bytes).into(),
+                frames: Arc::new(frames.into_iter().map(frame_image).collect()),
+                bytes: Arc::new(bytes),
+            })
+        })
+        .await?
+    };
+    let picture = picture.await.map_err(|error: anyhow::Error| {
+        tracing::info!(error = %format_args!("{error:#}"), "loading an emoji file failed");
+        gone(&error)
+    });
+    ctx.send(Update::StickerFile(id, picture));
 }
 
 /// Decoded memory one picture may use: in the viewer, and playing small in the chat.

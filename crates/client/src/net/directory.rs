@@ -1,6 +1,6 @@
 //! The server's names, channels, members and permissions, decrypted for the UI.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use anyhow::{Context, Result};
 use eframe::egui::ColorImage;
@@ -20,8 +20,8 @@ use rusttalk_core::client::voice::DEFAULT_AUDIO_KBPS;
 
 use super::{Ctx, State, Update, leave_voice, now};
 use crate::server::{
-    Body, Category, Channel, CustomEmoji, Device, Directory, Dm, Id, Member, Msg, Perms, Picture,
-    Role, member_name, parse_role_display,
+    Body, Category, Channel, CustomEmoji, Device, Directory, Dm, EmojiPack, Id, Member, Msg, Perms,
+    Picture, Role, member_name, parse_role_display,
 };
 
 pub(super) async fn get(client: &KeyClient<'_>, path: &str) -> Result<Value> {
@@ -503,7 +503,20 @@ async fn build(
             id,
             name,
             sticker: row["kind"] == "sticker",
+            pack: row["pack_id"]
+                .as_str()
+                .and_then(|pack| decode(pack).ok())
+                .unwrap_or_default(),
             picture: picture(&id, row["image_hash"].as_str()),
+        });
+    }
+    let mut packs = Vec::new();
+    for row in emoji["packs"].as_array().into_iter().flatten() {
+        let id: Id = decode(row["id"].as_str().context("pack without ID")?)?;
+        // The Default pack has no name until someone renames it.
+        packs.push(EmojiPack {
+            id,
+            name: text(Metadata::EmojiPackName, &id, row["name_ct"].as_str()),
         });
     }
     let limit = |key: &str| emoji[key].as_u64().unwrap_or_default() as usize;
@@ -524,6 +537,8 @@ async fn build(
         default_role: roles["default_role_id"].as_str().unwrap_or_default().into(),
         emoji: emoji_items,
         emoji_max: (limit("max_emoji"), limit("max_stickers")),
+        packs,
+        packs_max: limit("max_packs"),
     })
 }
 
@@ -649,6 +664,7 @@ fn picture(bytes: &[u8]) -> Option<Picture> {
     Some(Picture {
         key,
         frames: frames.into(),
+        bytes: Arc::new(bytes.to_vec()),
     })
 }
 

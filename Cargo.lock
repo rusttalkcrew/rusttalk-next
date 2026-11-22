@@ -6579,6 +6579,7 @@ dependencies = [
  "x11-clipboard",
  "x11rb",
  "zeroize",
+ "zip",
 ]
 
 [[package]]

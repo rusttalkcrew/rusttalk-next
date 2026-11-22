@@ -14,6 +14,7 @@ Third-party material bundled with RustTalk keeps its own license:
 - Noto Sans CJK Japanese subset, SIL Open Font License 1.1 (crates/client/assets/fonts/NotoSansJP-LICENSE.txt)
 - Twemoji graphics by Twitter, Inc. and other contributors, CC BY 4.0 (crates/client/assets/emoji/TWEMOJI-LICENSE.txt)
 - Emojibase data, MIT (crates/client/assets/emoji/EMOJIBASE-LICENSE.txt)
+- zip crate (reads emoji pack archives), MIT
 
 Chat Markdown and bundled syntax highlighting:
 - pulldown-cmark, Copyright 2015 Google Inc. All rights reserved.

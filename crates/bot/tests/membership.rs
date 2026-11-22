@@ -893,12 +893,7 @@ async fn docker_membership() -> Result<()> {
         .await?;
     rejected(reply, StatusCode::FORBIDDEN, "owner_required").await?;
 
-    let reply = member_bot
-        .request(Method::GET, "/v1/audit")
-        .bearer_auth(&sibling_token.token)
-        .send()
-        .await?;
-    let audit: Vec<Value> = reply.error_for_status()?.json().await?;
+    // A page holds the oldest 100 entries, so ask for each action on its own.
     for action in [
         "member_kicked",
         "member_banned",
@@ -907,6 +902,12 @@ async fn docker_membership() -> Result<()> {
         "member_roles_changed",
         "ownership_transferred",
     ] {
+        let reply = member_bot
+            .request(Method::GET, &format!("/v1/audit?action={action}"))
+            .bearer_auth(&sibling_token.token)
+            .send()
+            .await?;
+        let audit: Vec<Value> = reply.error_for_status()?.json().await?;
         assert!(
             audit.iter().any(|event| event["action"] == action),
             "missing audit action {action}"
