@@ -535,6 +535,16 @@ impl<'a> KeyClient<'a> {
             })
     }
 
+    /// Historical plaintext may leave this server only if its own epoch key was
+    /// committed to the pinned pair. A later DM pin cannot relabel ordinary chat.
+    pub(super) fn dm_history_epoch(&self, channel: [u8; 32], epoch: i64) -> Option<bool> {
+        let scope = Scope {
+            kind: Kind::Channel,
+            id: channel,
+        };
+        self.keys.get(&(scope, epoch)).map(|(.., bound)| *bound)
+    }
+
     /// The newest DM epoch this device can tell only the two people hold: its anchor
     /// (an epoch it started itself after pinning, or reached before), then each epoch
     /// a key link from one of the two names, sent in the epoch trusted so far.
@@ -684,7 +694,10 @@ impl<'a> KeyClient<'a> {
                     ..MessageBody::default()
                 };
                 let id = *keys::random_key()?;
-                if let Err(error) = self.post_at(&scope.id, id, epoch, &current, &body).await {
+                if let Err(error) = self
+                    .post_at(&scope.id, id, epoch, &current, &body, None)
+                    .await
+                {
                     tracing::warn!(error = %format_args!("{error:#}"), "announcing a DM key failed");
                     continue;
                 }

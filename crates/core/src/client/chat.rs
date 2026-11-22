@@ -238,6 +238,16 @@ impl KeyClient<'_> {
         id: [u8; 32],
         body: &MessageBody,
     ) -> Result<MessageRecord> {
+        self.post_message_dated(channel, id, body, None).await
+    }
+
+    pub(super) async fn post_message_dated(
+        &mut self,
+        channel: &[u8; 32],
+        id: [u8; 32],
+        body: &MessageBody,
+        backfill_at: Option<i64>,
+    ) -> Result<MessageRecord> {
         let scope = Scope {
             kind: Kind::Channel,
             id: *channel,
@@ -260,7 +270,8 @@ impl KeyClient<'_> {
         }
         let (epoch, key) = self.current_key(scope)?;
         let key = key.clone();
-        self.post_at(channel, id, epoch, &key, body).await
+        self.post_at(channel, id, epoch, &key, body, backfill_at)
+            .await
     }
 
     /// Seal and post a message in a given epoch, with that epoch's key.
@@ -271,6 +282,7 @@ impl KeyClient<'_> {
         epoch: i64,
         key: &Key,
         body: &MessageBody,
+        backfill_at: Option<i64>,
     ) -> Result<MessageRecord> {
         let cert = &self.identity.certificate;
         let context = MessageContext {
@@ -289,14 +301,23 @@ impl KeyClient<'_> {
             self.identity,
             &mut body,
         )?);
-        let record: MessageRecord = self
+        let response = self
             .request(Method::POST, &message_path(channel))
-            .json(&json!({ "id": encode(&id), "epoch": epoch, "envelope": envelope }))
+            .json(&json!({ "id": encode(&id), "epoch": epoch, "envelope": envelope, "backfill_at": backfill_at }))
             .send()
-            .await?
-            .error_for_status()?
-            .json()
             .await?;
+        if let Err(error) = response.error_for_status_ref() {
+            let status = response.status();
+            if backfill_at.is_some() {
+                let body = response.json::<serde_json::Value>().await.ok();
+                let code = body.as_ref().and_then(|v| v["error"].as_str());
+                if let Some(refusal) = super::backfill::Refusal::from_response(status, code) {
+                    return Err(refusal.into());
+                }
+            }
+            return Err(error.into());
+        }
+        let record: MessageRecord = response.json().await?;
         ensure!(
             record.id == id
                 && record.epoch == epoch
@@ -499,6 +520,7 @@ mod tests {
 
     fn record(id: u8, envelope: &str) -> MessageRecord {
         MessageRecord {
+            backfilled: false,
             id: [id; 32],
             epoch: 1,
             person: [2; 32],

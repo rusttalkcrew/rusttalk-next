@@ -163,6 +163,8 @@ impl MessageContext {
 /// Signed ciphertext and its server-provided routing and paging fields.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct MessageRecord {
+    #[serde(default)]
+    pub backfilled: bool,
     #[serde(with = "wire_id")]
     pub id: [u8; 32],
     pub epoch: i64,

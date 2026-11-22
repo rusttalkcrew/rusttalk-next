@@ -44,6 +44,7 @@ use crate::{
 };
 
 mod admin;
+mod backfill;
 mod control;
 mod directory;
 mod files;
@@ -79,6 +80,7 @@ pub enum Fetch {
 pub enum Command {
     /// Load the newest page and follow live messages.
     Open(Id),
+    Backfill(backfill::Request),
     /// Load the page before a message: channel, oldest loaded message.
     Older(Id, Id),
     Send(Draft),
@@ -253,6 +255,7 @@ impl Compatibility {
 }
 
 pub enum Update {
+    RetryDmBackfill,
     Preview(Result<Box<Preview>, String>),
     /// A page of directory results, by page number.
     Found(u32, Result<Vec<Listed>, String>),
@@ -341,6 +344,7 @@ pub enum Update {
 }
 
 pub struct Net {
+    completed_dm_copies: Arc<tokio::sync::Mutex<backfill::Completed>>,
     runtime: Option<Runtime>,
     ctx: Ctx,
     pub updates: mpsc::Receiver<Update>,
@@ -383,6 +387,7 @@ impl Net {
         let sync = Arc::new(DeviceSync::open(&data)?);
         Ok(Self {
             runtime: Some(runtime),
+            completed_dm_copies: Default::default(),
             ctx: Ctx {
                 updates,
                 egui,
@@ -612,6 +617,7 @@ fn pin_changed(error: &anyhow::Error) -> bool {
 
 #[derive(Default)]
 struct State {
+    dm_backfill: bool,
     /// Channels the UI has opened, which get live messages.
     loaded: HashSet<Id>,
     /// Records that waited for a channel key, retried after key work.
@@ -683,7 +689,8 @@ async fn run(
         let connecting = {
             let (ctx, server, api, admission) = (&ctx, &server, &mut api, &mut admission);
             async move {
-                let (api, session) = session(ctx, server, api, admission.as_ref()).await?;
+                let (api, session, dm_backfill) =
+                    session(ctx, server, api, admission.as_ref()).await?;
                 if admission.take().is_some() {
                     tracing::info!(server = %fingerprint(&server.server_id), "joined server");
                     let joined = vec![Edit::Join(api.known_server().clone())];
@@ -694,7 +701,7 @@ async fn run(
                 let pins = load_pins(&ctx.data, &server.server_id);
                 let client =
                     KeyClient::connect_with_dms(api, &ctx.identity, &session, pins.clone()).await;
-                Ok::<_, Failure>((client, pins))
+                Ok::<_, Failure>((client, pins, dm_backfill))
             }
         };
         let Some(connected) = offline(
@@ -710,7 +717,8 @@ async fn run(
             return;
         };
         match connected {
-            Ok((connected, pins)) => {
+            Ok((connected, pins, dm_backfill)) => {
+                state.dm_backfill = dm_backfill;
                 state.pins_lost = pins.is_none();
                 state.pins_saved = pins.unwrap_or_default();
                 match connected {
@@ -850,7 +858,8 @@ fn refuse(ctx: &Ctx, url: &Url, command: Command) {
         Command::SetStatus(_)
         | Command::SetHideOffline(_)
         | Command::SetBio(_)
-        | Command::CheckGone(..) => {}
+        | Command::CheckGone(..)
+        | Command::Backfill(_) => {}
         Command::ShareApp(app) => {
             ctx.send(Update::AppStopped(app.id));
             ctx.send(Update::Failed(t!("admin.offline").into()));
@@ -893,7 +902,7 @@ async fn session<'a>(
     server: &KnownServer,
     api: &'a mut Option<Api>,
     admission: Option<&Admission>,
-) -> Result<(&'a Api, Session), Failure> {
+) -> Result<(&'a Api, Session, bool), Failure> {
     let stop_or_retry = |error: anyhow::Error| {
         if pin_changed(&error) {
             tracing::error!(error = %format_args!("{error:#}"), "server pins differ");
@@ -915,8 +924,12 @@ async fn session<'a>(
         *api = Some(verified);
     }
     let api = api.as_mut().expect("set above");
+    let mut dm_backfill = false;
     let protocol = match api.info().await {
-        Ok(info) => Some(info.protocol),
+        Ok(info) => {
+            dm_backfill = info.dm_backfill;
+            Some(info.protocol)
+        }
         Err(error) if pin_changed(&error) => return Err(stop_or_retry(error)),
         Err(error)
             if error
@@ -953,7 +966,7 @@ async fn session<'a>(
             .map_err(|error| stop_or_retry(error.without_url().into()))?;
         // Refresh only at sign-in. Missing server info keeps this session on v2 envelopes.
         api.protocol = protocol.flatten().unwrap_or(1);
-        return Ok((api, session));
+        return Ok((api, session, dm_backfill));
     }
     let code = reply
         .json::<Value>()
@@ -1226,7 +1239,8 @@ async fn latest(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, state: &State)
                     continue;
                 };
                 if let Some(peer) = peer
-                    && (record.person != peer
+                    && (record.backfilled
+                        || record.person != peer
                         || !(client.open_message(&channel, record).await)
                             .is_ok_and(|body| body.key_link.is_none() && !body.poke))
                 {
@@ -1405,7 +1419,7 @@ async fn on_command(
                 ctx.send(Update::Failed(t!("net.dm_not_private", server = server)));
                 return Ok(());
             }
-            let body = MessageBody {
+            let mut body = MessageBody {
                 text: draft.text.clone(),
                 // Edits carry their revision there; current apps ignore it on edits.
                 reply_to: match draft.edit_of {
@@ -1426,6 +1440,11 @@ async fn on_command(
                 poke: draft.poke,
                 poll: draft.poll.as_deref().cloned(),
             };
+            if draft.peer.is_some()
+                && let Some(dir) = &state.last
+            {
+                crate::emoji::for_replica(&mut body.text, &mut body.sticker, &dir.emoji);
+            }
             let files = (draft.files.clone(), draft.preview.clone());
             let target = (channel, draft.id);
             let mut sent = files::send(ctx, url, client, target, body.clone(), files.clone()).await;
@@ -1580,6 +1599,7 @@ async fn on_command(
             tracing::info!(server = %fingerprint(&state.server_id), "left server");
             ctx.send(Update::Left(url.clone()));
         }
+        Command::Backfill(request) => request.run(ctx, url, client, state).await,
         Command::OpenDm(peer) => {
             let channel = dm_channel(ctx, url, client, state, peer).await?;
             ctx.send(Update::DmReady(url.clone(), channel));
@@ -1792,6 +1812,7 @@ async fn open(
 
 fn unreadable(record: &MessageRecord) -> Msg {
     Msg {
+        backfilled: record.backfilled,
         id: record.id,
         person: record.person,
         at: record.at,
@@ -1809,6 +1830,7 @@ fn unreadable(record: &MessageRecord) -> Msg {
 
 fn to_msg(record: &MessageRecord, body: &MessageBody) -> Msg {
     Msg {
+        backfilled: record.backfilled,
         id: record.id,
         person: record.person,
         at: record.at,
@@ -1902,6 +1924,7 @@ mod protocol_tests {
     #[test]
     fn a_friend_message_keeps_its_signed_send_time() {
         let record = MessageRecord {
+            backfilled: false,
             id: [1; 32],
             epoch: 1,
             person: [2; 32],

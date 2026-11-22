@@ -214,6 +214,35 @@ fn replace_codes<'a>(text: &'a str, custom: &[CustomEmoji]) -> Cow<'a, str> {
     Cow::Owned(result)
 }
 
+/// Resolve named artwork in the destination server's catalog.
+pub fn for_replica(text: &mut String, sticker: &mut Option<Id>, custom: &[CustomEmoji]) {
+    if sticker.is_some() {
+        let mut matches = custom
+            .iter()
+            .filter(|e| e.sticker && e.name.eq_ignore_ascii_case(text));
+        if !matches.clone().any(|e| Some(e.id) == *sticker) {
+            *sticker = matches
+                .next()
+                .map(|e| e.id)
+                .filter(|_| matches.next().is_none());
+        }
+        if sticker.is_none() {
+            *text = format!(":{text}:");
+        }
+    } else if text.contains("<:") {
+        *text = parts(text)
+            .into_iter()
+            .map(|part| match part {
+                Part::Text(s) => s.to_owned(),
+                Part::Custom { name, .. } => custom
+                    .iter()
+                    .find(|e| !e.sticker && e.name.eq_ignore_ascii_case(name))
+                    .map_or_else(|| format!(":{name}:"), |e| token(&e.name, &e.id)),
+            })
+            .collect();
+    }
+}
+
 /// How a server emoji travels inside encrypted message text.
 pub fn token(name: &str, id: &Id) -> String {
     format!("<:{name}:{}>", encode(id))
@@ -317,6 +346,29 @@ pub static PICKER: LazyLock<Vec<Entry>> = LazyLock::new(|| {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replica_stickers_keep_exact_ids_and_only_remap_unambiguous_names() {
+        let sticker = |id| CustomEmoji {
+            id: [id; 32],
+            name: "Wave".into(),
+            sticker: true,
+            picture: None,
+        };
+        let catalog = [sticker(1), sticker(2)];
+        for (id, entries, expected) in [
+            (2, &catalog[..], Some([2; 32])),
+            (3, &catalog[..1], Some([1; 32])),
+            (3, &catalog[..], None),
+            (3, &catalog[..0], None),
+        ] {
+            let mut id = Some([id; 32]);
+            let mut text = String::from("wave");
+            for_replica(&mut text, &mut id, entries);
+            assert_eq!(id, expected);
+            assert_eq!(text, if expected.is_some() { "wave" } else { ":wave:" });
+        }
+    }
 
     #[test]
     fn shortcode_lookup_and_replacement() {

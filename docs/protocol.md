@@ -34,7 +34,7 @@ tries to connect. Above it the app directs people to Settings → Updates.
 | Method and path | Request | Success |
 | --- | --- | --- |
 | GET `/v1/health` | Empty | 200, `ok` |
-| GET `/v1/server-info` | Empty | 200, `{open_joining, version, protocol}` |
+| GET `/v1/server-info` | Empty | 200, `{open_joining, version, protocol, dm_backfill}` |
 | GET `/v1/auth/challenge` | Empty | 200, `{challenge, server_id, signature}` |
 | POST `/v1/auth/sign-in` | `{person_id, certificate, challenge, signature, invite?}` | 200, `{token, expires_at}` |
 | POST `/v1/auth/join` | `{person_id, certificate, challenge, signature}` | 200, `{token, expires_at}` |
@@ -386,11 +386,31 @@ shared server when it first sends there. It posts each message, with the same
 random message ID, to every shared server that is online. Copies are encrypted
 separately for each server (see [Crypto](crypto.md#direct-messages-on-several-servers)).
 Readers load every copy, merge records by person and message ID, and order
-them by the earliest server timestamp, keeping server order for equal times.
+them by the earliest ordinary receipt time (or earliest restored time if all copies are historical), keeping server order for equal times.
 Only copies that open count: a record that fails to verify or decrypt stays a
 placeholder for its own server. It doesn't change a readable copy's time or
 servers, doesn't notify or mark the DM unread, and is replaced whole once a
 readable copy arrives. A DM shows records from its two people only.
+
+On connection, reconnection, membership or DM changes, and hourly while online, the author’s app compares the newest 256 records of
+each shared DM copy in pages of 32. One scan runs at a time, with at least
+250 ms between network commands. It opens its own missing records, oldest
+first, and posts them under the original IDs to the pinned destination DM,
+creating the channel there if needed. The optional DM-only POST field
+`backfill_at` preserves the source timestamp, capped at the destination’s
+current time. Servers advertise support with `dm_backfill: true` in server info.
+Historical copies have `backfilled: true` in POST, page and lookup responses and
+get a new local sequence number. Pagination and retention still use local
+insertion order. A full DM refuses
+a historical insert with `409 history_full` so live history is preserved.
+After interruption the next scan uses the IDs already stored as its checkpoint.
+Deleted or pruned IDs remain reserved. Epoch links and live transfers stay
+local to their channel. The background scan skips records with attachments
+to keep file transfers off the connection loop. Successful and permanently
+refused IDs are remembered per route for the session. A full destination page
+window limits repair to records newer than its oldest entry. Custom emoji and
+stickers use the destination catalog. Ambiguous sticker names fall back to text
+unless the selected sticker ID is present.
 
 Before sending, the app pins each DM channel to the person the catalog first
 listed it with, in `dm_pins/<server ID>.json` on the device, with the anchor:
@@ -451,7 +471,7 @@ Older pages load from each copy separately, and the view asks each copy on
 its own, so a slow server doesn't hold up the others. A page that fails stops
 only that copy's paging until its server reconnects; when its cursor is gone
 (404), that copy loads from its newest page again. Without a shared server, the app keeps
-showing what it loaded and disables sending. The API is unchanged and still
+showing what it loaded and disables sending. The API still
 sees each copy as a separate DM, so older apps show one DM per server.
 
 ### Friends

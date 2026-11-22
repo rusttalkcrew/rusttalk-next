@@ -344,6 +344,7 @@ mod tests {
 
     fn msg(id: u8, person: u8, at: i64, text: &str) -> Msg {
         Msg {
+            backfilled: false,
             id: [id; 32],
             person: [person; 32],
             at,

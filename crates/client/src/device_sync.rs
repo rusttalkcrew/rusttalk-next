@@ -170,6 +170,10 @@ impl DeviceSync {
         dm_deleted(&self.saved.blocking_lock().snapshot.state.settings)
     }
 
+    pub async fn current_dm_deletes(&self) -> Tombstones {
+        dm_deleted(&self.saved.lock().await.snapshot.state.settings)
+    }
+
     pub fn set_peer(&self, address: &Url, peer: Option<(Api, Session)>) {
         let mut peers = self.peers.lock().unwrap_or_else(PoisonError::into_inner);
         match peer {

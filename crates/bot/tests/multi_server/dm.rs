@@ -152,6 +152,51 @@ pub async fn replicas(
         post((&mut *peer.0, &mut *peer.1), dms, BACK).await?,
         [true; 2]
     );
+    let source = owner.0.message_page(&dm_a.id, None, 100).await?;
+    let target = owner.1.message_page(&dm_b.id, None, 100).await?;
+    let inventory = |records: &[rusttalk_core::client::MessageRecord]| {
+        records
+            .iter()
+            .map(|m| (m.id, m.person, m.at))
+            .collect::<Vec<_>>()
+    };
+    let down = source
+        .iter()
+        .find(|record| record.id == page[0].id)
+        .context("missing source record")?;
+    let missing = rusttalk_core::client::backfill::missing_dm_ids(
+        &inventory(&source),
+        &inventory(&target),
+        owner_person,
+    );
+    assert!(missing.contains(&down.id));
+    for id in missing {
+        if let Some(item) = owner.0.read_dm_copy(&dm_a.id, peer_person, id).await? {
+            owner.1.restore_dm_copy(&dm_b.id, item).await?;
+        }
+    }
+    // A retry after losing the acknowledgement must keep the same single copy.
+    let item = owner
+        .0
+        .read_dm_copy(&dm_a.id, peer_person, down.id)
+        .await?
+        .context("missing backfill body")?;
+    let conflict = owner.1.restore_dm_copy(&dm_b.id, item).await.unwrap_err();
+    assert_eq!(
+        conflict.downcast_ref::<rusttalk_core::client::backfill::Refusal>(),
+        Some(&rusttalk_core::client::backfill::Refusal::Record)
+    );
+    assert!(
+        !owner
+            .1
+            .needs_dm_copy(&dm_b.id, peer_person, down.id)
+            .await?
+    );
+    let restored = peer.1.message(&dm_b.id, &down.id).await?;
+    assert!(restored.backfilled && !down.backfilled);
+    assert_eq!(restored.at, down.at);
+    assert_ne!(restored.envelope, down.envelope);
+    assert_eq!(peer.1.open_message(&dm_b.id, &restored).await?.text, DOWN);
     let expected = [BOTH, REPLY, DOWN, BACK];
     let owner_view = merged((&mut *owner.0, &mut *owner.1), dms).await?;
     let peer_view = merged((&mut *peer.0, &mut *peer.1), dms).await?;
@@ -161,7 +206,7 @@ pub async fn replicas(
     assert!(
         on_b.iter()
             .map(|item| item.3.as_str())
-            .eq([BOTH, REPLY, BACK])
+            .eq([BOTH, REPLY, BACK, DOWN])
     );
 
     // Server B can't take server A's copy: it is bound to server A and its channel.

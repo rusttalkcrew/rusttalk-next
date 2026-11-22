@@ -446,6 +446,7 @@ pub struct Dm {
 
 #[derive(Clone)]
 pub struct Msg {
+    pub backfilled: bool,
     pub id: Id,
     pub person: Id,
     pub at: i64,
@@ -621,7 +622,10 @@ impl Chat {
                     if old.reply_to == msg.reply_to && old.quoted_author.is_none() {
                         old.quoted_author = msg.quoted_author;
                     }
-                    old.at = old.at.min(msg.at);
+                    if (msg.backfilled, msg.at) < (old.backfilled, old.at) {
+                        old.at = msg.at;
+                        old.backfilled = msg.backfilled;
+                    }
                     for server in &msg.replicas {
                         if !old.replicas.contains(server) {
                             old.copy_files.push((server.clone(), msg.files.clone()));
@@ -839,6 +843,7 @@ mod tests {
 
     fn msg(id: u8, at: i64, text: &str, edit_of: Option<u8>) -> Msg {
         Msg {
+            backfilled: false,
             id: [id; 32],
             person: [9; 32],
             at,
@@ -862,6 +867,23 @@ mod tests {
                 _ => "?",
             })
             .collect()
+    }
+
+    #[test]
+    fn normal_copy_sets_time_in_either_arrival_order() {
+        let normal = msg(1, 100, "hello", None);
+        let restored = Msg {
+            backfilled: true,
+            at: 5,
+            ..normal.clone()
+        };
+        for pair in [[normal.clone(), restored.clone()], [restored, normal]] {
+            let mut chat = Chat::default();
+            chat.merge(pair.into(), false);
+            assert_eq!(chat.messages.len(), 1);
+            assert_eq!(chat.messages[0].at, 100);
+            assert!(!chat.messages[0].backfilled);
+        }
     }
 
     #[test]

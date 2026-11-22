@@ -94,6 +94,8 @@ pub struct Home {
     pub servers: Vec<Server>,
     /// DMs by the other person, merged over every server they were on.
     threads: HashMap<Id, Thread>,
+    backfill: Option<tokio::task::JoinHandle<()>>,
+    next_backfill: f64,
     /// Friends, requests and blocks; synced between this person's devices only.
     pub(crate) friends: Friends,
     friends_tab: friends::Tab,
@@ -312,6 +314,8 @@ impl Home {
             view: if browse { View::Find } else { View::Server(0) },
             servers,
             threads: HashMap::new(),
+            backfill: None,
+            next_backfill: 2.0,
             friends,
             friends_tab: friends::Tab::default(),
             pokes: crate::pokes::Pokes::open(data_dir.join("pokes.json")),
@@ -685,6 +689,9 @@ impl Home {
 
     /// A new message: mark it unread, count a mention and notify, as the person chose.
     fn arrived(&mut self, ctx: &egui::Context, index: usize, channel: Id, msg: Msg) {
+        if msg.backfilled {
+            return;
+        }
         let me = *self.identity.certificate.person_id();
         if msg.person == me
             || msg.edit_of.is_some()
@@ -973,6 +980,7 @@ impl Home {
                 }
                 let server = &mut self.servers[index];
                 if status == Status::Online {
+                    self.next_backfill = now;
                     server.order_unavailable = false;
                     // Opens that failed while offline.
                     for (channel, chat) in &server.chats {
@@ -1001,6 +1009,11 @@ impl Home {
             }
             Update::Directory(address, dir) => {
                 if let Some(index) = self.index(&address) {
+                    let peers: HashSet<_> = self
+                        .servers
+                        .iter()
+                        .flat_map(|s| s.dir.dms.iter().map(|dm| dm.peer))
+                        .collect();
                     let server = &mut self.servers[index];
                     for member in &dir.members {
                         if let Some(name) = &member.name {
@@ -1031,6 +1044,24 @@ impl Home {
                     let me = dir.me;
                     let muted = (dir.members.iter()).any(|m| m.person == me && m.voice_muted);
                     let changed = server.voice_muted(&me) != muted;
+                    let dm_members = |dir: &Directory| {
+                        dir.members
+                            .iter()
+                            .map(|m| m.person)
+                            .filter(|id| peers.contains(id))
+                            .collect::<HashSet<_>>()
+                    };
+                    if dm_members(&server.dir) != dm_members(&dir)
+                        || server
+                            .dir
+                            .dms
+                            .iter()
+                            .map(|dm| (dm.peer, dm.channel))
+                            .collect::<HashSet<_>>()
+                            != dir.dms.iter().map(|dm| (dm.peer, dm.channel)).collect()
+                    {
+                        self.next_backfill = now;
+                    }
                     server.dir = *dir;
                     self.profile_loaded(index);
                     let server = &mut self.servers[index];
@@ -1170,6 +1201,10 @@ impl Home {
                 if self.dm_deleted.gone(&id, &copy) {
                     self.record_delete(Edit::DmCopyGone(id, copy));
                 }
+            }
+            Update::RetryDmBackfill => {
+                self.next_backfill = self.next_backfill.min(now + 30.0);
+                ctx.request_repaint_after(Duration::from_secs(30));
             }
             Update::PageFailed(address, channel, missing) => {
                 if let Some(index) = self.index(&address)
@@ -1512,6 +1547,11 @@ pub fn show(
     while let Ok(update) = home.net.updates.try_recv() {
         home.apply(ui.ctx(), update, now);
     }
+    if now >= home.next_backfill && home.backfill.as_ref().is_none_or(|job| job.is_finished()) {
+        home.backfill = Some(home.net.backfill(&home.servers, &home.dm_deleted));
+        home.next_backfill = now + 3600.0;
+    }
+    ui.ctx().request_repaint_after(Duration::from_secs(60));
     home.send_queued(ui.ctx(), now);
     while let Some((address, channel)) = home.notify.clicked() {
         home.open_chat(&address, channel);
@@ -3523,31 +3563,51 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
             }
             let start = !last.is_some_and(|prev| {
                 prev.person == msg.person
+                    && prev.backfilled == msg.backfilled
                     && !matches!(prev.body, Body::Notice { .. } | Body::Friend(..))
                     && msg.at - prev.at < 300
                     && msg.reply_to.is_none()
             });
-            let shown = message(ui, chat, msg, start, dir, &embeds, key, |ui| {
-                if let Some(server) = holder(msg) {
-                    // A link preview must be about one of the message's own links.
-                    let links: Vec<String> = match &msg.body {
-                        Body::Text(text) => markdown::cached(ui, text)
-                            .links()
-                            .map(String::from)
-                            .collect(),
-                        _ => Vec::new(),
-                    };
-                    let server = (&server.address, &server.commands);
-                    files::attachments(ui, files, server, &msg.files, &links);
-                }
-                // The server isn't borrowed whole here, so look the offer up by its parts.
-                if msg.live.is_some() {
-                    let action = call::chat_live(ui, &voice.live_files, dir, msg);
-                    live = action
-                        .map(|action| (action, msg.replicas.first().cloned()))
-                        .or(live.take());
-                }
-            });
+            // The displayed copy carries this server's emoji and sticker IDs.
+            let (message_dir, message_channel) = match (at, holder(msg)) {
+                (At::Dm(peer), Some(server)) => server
+                    .dir
+                    .dms
+                    .iter()
+                    .find(|dm| dm.peer == peer)
+                    .map_or((dir, key), |dm| (&server.dir, dm.channel)),
+                _ => (dir, key),
+            };
+            let shown = message(
+                ui,
+                chat,
+                msg,
+                start,
+                message_dir,
+                &embeds,
+                message_channel,
+                |ui| {
+                    if let Some(server) = holder(msg) {
+                        // A link preview must be about one of the message's own links.
+                        let links: Vec<String> = match &msg.body {
+                            Body::Text(text) => markdown::cached(ui, text)
+                                .links()
+                                .map(String::from)
+                                .collect(),
+                            _ => Vec::new(),
+                        };
+                        let server = (&server.address, &server.commands);
+                        files::attachments(ui, files, server, &msg.files, &links);
+                    }
+                    // The server isn't borrowed whole here, so look the offer up by its parts.
+                    if msg.live.is_some() {
+                        let action = call::chat_live(ui, &voice.live_files, dir, msg);
+                        live = action
+                            .map(|action| (action, msg.replicas.first().cloned()))
+                            .or(live.take());
+                    }
+                },
+            );
             if let Some(chosen) = shown {
                 pick = Some(chosen);
             }
@@ -4240,6 +4300,13 @@ fn composer_field(
         .inner
 }
 
+fn message_time(ui: &mut Ui, msg: &Msg) {
+    ui.label(ui::caption(time(msg.at)));
+    if msg.backfilled {
+        ui.label(ui::caption(t!("home.restored")));
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn message(
     ui: &mut Ui,
@@ -4291,7 +4358,7 @@ fn message(
             ui.weak("•");
             let line = friends::line(signal, &names(&msg.person));
             ui.label(emoji::text(line).weak().italics());
-            ui.weak(time(msg.at));
+            message_time(ui, msg);
         });
         ui.add_space(4.0);
         return None;
@@ -4351,10 +4418,12 @@ fn message(
                     };
                     ui.label(emoji::text(line).size(ui::TEXT_CAPTION).weak());
                 }
-                if start {
+                if start || msg.backfilled {
                     ui.horizontal(|ui| {
-                        ui.label(ui::bold(&name));
-                        ui.label(ui::caption(time(msg.at)));
+                        if start {
+                            ui.label(ui::bold(&name));
+                        }
+                        message_time(ui, msg);
                     });
                 }
                 match &msg.body {

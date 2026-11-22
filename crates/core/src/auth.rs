@@ -82,6 +82,8 @@ pub const PROTOCOL_VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize)]
 pub struct ServerInfo {
+    #[serde(default)]
+    pub dm_backfill: bool,
     pub open_joining: bool,
     pub version: Option<String>,
     pub protocol: Option<u32>,

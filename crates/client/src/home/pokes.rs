@@ -77,6 +77,9 @@ impl Home {
         msg: &Msg,
         live: bool,
     ) {
+        if live && msg.backfilled {
+            return;
+        }
         let crate::server::Body::Poke(text) = &msg.body else {
             return;
         };
@@ -99,7 +102,7 @@ impl Home {
             text: text.clone(),
             at: msg.at,
             server: server.name().to_owned(),
-            read: false,
+            read: msg.backfilled,
         };
         let now = notify::unix_now();
         if !self.pokes.add(poke, live, now) || !live || !incoming {
