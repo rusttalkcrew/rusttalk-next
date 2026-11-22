@@ -25,6 +25,8 @@ use zeroize::Zeroizing;
 
 const KEY_FILE: &str = "identity.key";
 const STATE_FILE: &str = "keystore.json";
+/// Phones: older key files set aside instead of overwritten (see `write_copy`).
+const REPLACED: &str = "identity.key.replaced-";
 /// Profiles from before `keystore.json` kept their keys in the keychain; these files
 /// show such a profile has an account.
 const ACCOUNT_FILES: [&str; 2] = ["servers.json", "sync.json"];
@@ -109,8 +111,6 @@ pub enum Chosen {
     New,
     /// Keys that had no password, now locked with the new one.
     Opened(Box<DeviceIdentity>),
-    /// The key file already has a password: unlock it.
-    Unlock,
 }
 
 /// The password didn't open the key file (or the file was changed).
@@ -538,19 +538,6 @@ impl Keystore {
             self.sealer = sealer;
             return load(&secret).map(|identity| Chosen::Opened(Box::new(identity)));
         }
-        // A sealed key file already here (an earlier attempt locked it but couldn't
-        // record that) is this profile's keys: open it, never start a new account.
-        if self.password_only
-            && self
-                .read_key_file()?
-                .is_some_and(|file| file.starts_with(SEALED))
-        {
-            self.record(|state| {
-                state.storage = Some(Kind::Password);
-                state.keys_saved = true;
-            })?;
-            return Ok(Chosen::Unlock);
-        }
         self.record(|state| {
             state.storage = Some(kind);
             state.keys_saved = false;
@@ -610,14 +597,6 @@ impl Keystore {
 
     pub fn save(&mut self, identity: &DeviceIdentity) -> Result<()> {
         let kind = self.state.storage.context("no key storage chosen")?;
-        // Phones: a new account never replaces a key file this profile still holds.
-        ensure!(
-            !self.password_only
-                || self.state.keys_saved
-                || self.state.cleanup.contains(&Place::File)
-                || self.read_key_file()?.is_none(),
-            "a key file is already here; unlock it instead"
-        );
         self.write_copy(kind, self.sealer.as_ref(), &encode(identity))?;
         self.record(|state| {
             state.keys_saved = true;
@@ -637,6 +616,15 @@ impl Keystore {
         }
         self.remove_temp_files();
         remove(&self.dir.join(KEY_FILE))?;
+        // Signing out means no keys stay behind, set-aside ones included.
+        for entry in fs::read_dir(&self.dir)
+            .context("list profile folder")?
+            .flatten()
+        {
+            if entry.file_name().to_string_lossy().starts_with(REPLACED) {
+                remove(&entry.path())?;
+            }
+        }
         self.sync()?;
         cleanup.retain(|place| *place != Place::File);
         self.record(|state| {
@@ -847,6 +835,10 @@ impl Keystore {
                 "this device keeps keys only in a file with a password"
             )));
         }
+        if self.password_only && kind != Kind::Keychain {
+            self.set_aside_other_keys(sealer, secret)
+                .map_err(WriteError::Before)?;
+        }
         let file = self.dir.join(KEY_FILE);
         let written = match kind {
             Kind::Keychain => return self.keychain.set(secret).map_err(WriteError::Before),
@@ -857,6 +849,41 @@ impl Keystore {
         };
         written.map_err(WriteError::Before)?;
         self.sync().map_err(WriteError::After)
+    }
+
+    /// Phones: a key file holding other keys than `secret` (another account, or one
+    /// whose password isn't known here, as when recovery words replace a locked
+    /// profile) is renamed to `identity.key.replaced-<unix time>`, never overwritten:
+    /// a spare file is better than a lost identity. The same keys are written again.
+    fn set_aside_other_keys(&self, sealer: Option<&Sealer>, secret: &[u8]) -> Result<()> {
+        let Some(file) = self.read_key_file()? else {
+            return Ok(());
+        };
+        let on_disk = match plain(&file) {
+            Ok(keys) => Some(Zeroizing::new(keys.to_vec())),
+            Err(_) => [self.sealer.as_ref(), sealer]
+                .into_iter()
+                .flatten()
+                .find_map(|sealer| sealer.decrypt(file.strip_prefix(&sealer.header)?).ok()),
+        };
+        if on_disk.is_some_and(|keys| same_keys(&keys, secret)) {
+            return Ok(());
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_secs());
+        let aside = (0..)
+            .map(|n| match n {
+                0 => format!("{REPLACED}{now}"),
+                n => format!("{REPLACED}{now}-{n}"),
+            })
+            .map(|name| self.dir.join(name))
+            .find(|path| !path.exists())
+            .expect("a free name");
+        fs::rename(self.dir.join(KEY_FILE), &aside).context("set the old key file aside")?;
+        self.sync()?;
+        tracing::warn!(file = %aside.display(), "kept a key file with other keys");
+        Ok(())
     }
 
     fn read(&self, kind: Kind, sealer: Option<&Sealer>) -> Result<Option<Zeroizing<Vec<u8>>>> {
@@ -893,6 +920,14 @@ impl Keystore {
             .and_then(|dir| dir.sync_all())
             .context("flush profile folder")?;
         Ok(())
+    }
+}
+
+/// Whether two encoded identities hold the same device key (by public key).
+fn same_keys(a: &[u8], b: &[u8]) -> bool {
+    match (load(a), load(b)) {
+        (Ok(a), Ok(b)) => a.signing_key.verifying_key() == b.signing_key.verifying_key(),
+        _ => false,
     }
 }
 
@@ -1201,23 +1236,102 @@ mod tests {
         let (mut store, start) = open_phone(dir.path());
         assert!(matches!(start, Start::Unlock));
         assert!(same(&unlock(&mut store, "hunter2").unwrap(), &me));
+    }
+
+    fn set_aside(dir: &Path) -> Vec<PathBuf> {
+        fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.to_string_lossy().contains(REPLACED))
+            .collect()
+    }
+
+    #[test]
+    fn recovery_words_replace_a_locked_phone_profile_without_losing_its_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, _) = open_phone(dir.path());
+        let key = sealer(&store, "forgotten");
+        store.choose(Kind::Password, key).unwrap();
+        let old = identity();
+        store.save(&old).unwrap();
         drop(store);
 
-        // Had the keys been lost from memory, the sealed file is unlocked, not
-        // replaced by a new account.
-        let (mut store, _) = open_phone(dir.path());
-        store.state.storage = None;
-        store.state.keys_saved = false;
-        let key = sealer(&store, "other");
+        // Wrong passwords, then "Use recovery words" with a new password.
+        let (mut store, start) = open_phone(dir.path());
+        assert!(matches!(start, Start::Unlock));
+        assert!(unlock(&mut store, "guess").is_err());
+        let key = sealer(&store, "hunter2");
         assert!(matches!(
             store.choose(Kind::Password, key).unwrap(),
-            Chosen::Unlock
+            Chosen::New
         ));
-        store.state.keys_saved = false;
-        assert!(store.save(&identity()).is_err());
+        let recovered = identity();
+        store.save(&recovered).unwrap();
         drop(store);
+
+        let (mut store, start) = open_phone(dir.path());
+        assert!(matches!(start, Start::Unlock));
+        assert!(same(&unlock(&mut store, "hunter2").unwrap(), &recovered));
+        drop(store);
+        // The locked keys were set aside, not overwritten.
+        let aside = set_aside(dir.path());
+        assert_eq!(aside.len(), 1);
+        fs::rename(&aside[0], dir.path().join(KEY_FILE)).unwrap();
         let (mut store, _) = open_phone(dir.path());
-        assert!(same(&unlock(&mut store, "hunter2").unwrap(), &me));
+        assert!(same(&unlock(&mut store, "forgotten").unwrap(), &old));
+    }
+
+    #[test]
+    fn a_cut_short_phone_save_keeps_every_identity() {
+        for after_rename in [false, true] {
+            for retry_same in [true, false] {
+                let dir = tempfile::tempdir().unwrap();
+                let (mut store, _) = open_phone(dir.path());
+                let key = sealer(&store, "hunter2");
+                store.choose(Kind::Password, key).unwrap();
+                // The key file is written, then keystore.json fails before or after
+                // its rename (the folder sync).
+                store.fail_state.set(Some((Kind::Password, after_rename)));
+                let first = identity();
+                assert!(store.save(&first).is_err());
+                let next = if retry_same {
+                    load(&encode(&first)).unwrap()
+                } else {
+                    identity()
+                };
+                store.save(&next).unwrap();
+                drop(store);
+
+                let (mut store, start) = open_phone(dir.path());
+                assert!(matches!(start, Start::Unlock));
+                assert!(same(&unlock(&mut store, "hunter2").unwrap(), &next));
+                drop(store);
+                let aside = set_aside(dir.path());
+                if retry_same {
+                    assert!(aside.is_empty(), "the same keys are written again");
+                } else {
+                    assert_eq!(aside.len(), 1);
+                    fs::rename(&aside[0], dir.path().join(KEY_FILE)).unwrap();
+                    let (mut store, _) = open_phone(dir.path());
+                    assert!(same(&unlock(&mut store, "hunter2").unwrap(), &first));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn signing_out_a_phone_removes_set_aside_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, _) = open_phone(dir.path());
+        let key = sealer(&store, "hunter2");
+        store.choose(Kind::Password, key).unwrap();
+        store.save(&identity()).unwrap();
+        store.save(&identity()).unwrap();
+        assert_eq!(set_aside(dir.path()).len(), 1);
+        store.delete().unwrap();
+        assert!(set_aside(dir.path()).is_empty());
+        assert!(!dir.path().join(KEY_FILE).exists());
     }
 
     #[test]

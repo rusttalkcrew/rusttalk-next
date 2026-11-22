@@ -136,15 +136,6 @@ impl<'a> App<'a> {
                 key_storage::forget(&self.ctx);
                 self.home(*identity)
             }
-            Ok(Chosen::Unlock) => {
-                key_storage::forget(&self.ctx);
-                Screen::Unlock {
-                    password: key_storage::secret_input(),
-                    error: None,
-                    tries: 0,
-                    busy: None,
-                }
-            }
             Ok(Chosen::New) => {
                 key_storage::forget(&self.ctx);
                 if restore {
