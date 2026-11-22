@@ -219,13 +219,15 @@ pub fn editor(ui: &mut Ui, editor: &mut Editor, attached: bool) -> Option<Action
                 ],
             );
             ui.add_space(ui::SPACE_M);
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if attached {
-                    if ui::secondary(ui, t!("forum.remove_poll")).clicked() {
-                        action = Some(Action::Cancel);
-                    }
-                    return;
+            // In a post form the form's own buttons send it; a right-to-left layout
+            // there would take all the height left in the form.
+            if attached {
+                if ui::secondary(ui, t!("forum.remove_poll")).clicked() {
+                    action = Some(Action::Cancel);
                 }
+                return;
+            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let valid = editor.valid();
                 if ui
                     .add_enabled_ui(valid, |ui| ui::primary(ui, t!("polls.post")))

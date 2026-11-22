@@ -343,7 +343,7 @@ fn new_post(
                 ui::Look::Plain,
                 egui::Vec2::splat(ui::CONTROL_HEIGHT),
             );
-            ui::menu(&plus, |m| {
+            ui::menu_wide(&plus, |m| {
                 let item = ui::Item::new("📊", t!("forum.add_poll"))
                     .hint(t!("forum.add_poll_help"))
                     .enabled(new.poll.is_none());
@@ -457,13 +457,7 @@ pub(super) fn view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat
             });
         });
     });
-    let dir = &home.servers[index].dir;
-    let sent = (can_post && new.open)
-        .then(|| {
-            ui.add_space(ui::SPACE_S);
-            new_post(ui, &mut new, dir, channel, online)
-        })
-        .flatten();
+    let mut sent = None;
     ui.add_space(ui::SPACE_S);
 
     // A dropped file goes with the reply being written.
@@ -515,6 +509,11 @@ pub(super) fn view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat
         .auto_shrink(false)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
+            // The form scrolls with the posts, so its buttons stay reachable.
+            if can_post && new.open {
+                sent = new_post(ui, &mut new, dir, channel, online);
+                ui.add_space(ui::SPACE_S);
+            }
             if posts.is_empty() {
                 if chat.loading {
                     ui.vertical_centered(|ui| ui.spinner());

@@ -29,7 +29,7 @@ const MARKS: [(&str, Tip, Mark); 9] = [
     ("H", || t!("forum.heading"), Mark::Line("## ")),
     ("•", || t!("forum.list"), Mark::Line("- ")),
     ("1.", || t!("forum.numbered"), Mark::Line("1. ")),
-    ("❝", || t!("forum.quote"), Mark::Line("> ")),
+    ("“", || t!("forum.quote"), Mark::Line("> ")),
 ];
 
 fn byte(text: &str, char_at: usize) -> usize {
