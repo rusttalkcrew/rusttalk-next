@@ -16,35 +16,43 @@ messages and reading them again after a restart.
 
 - **Typing** (`src/android.rs`). The keyboard doesn't send keys to
   GameActivity: it edits a text buffer that GameTextInput keeps, and winit 0.30
-  drops the events that say it changed. The buffer stands for a stretch of the
-  focused field: it starts empty at the field's cursor (or for its selection),
-  and each change to it (text, selection, composed word) becomes the same change
-  at the same place in the field, through the field's cursor and egui text and
-  delete events. Moving the cursor in the field starts the buffer over there.
-  Reading and resetting the buffer happen on the Java thread, where the keyboard
-  edits it, through GameTextInput's C API; a reset is numbered, and the field
-  ignores the buffer until the Java thread has done the latest one, so text from
-  one field never lands in the next. A composed word shows as plain text (egui
-  can't mark a range from outside). While a field is focused the app paints
-  every 40 ms to read the buffer, since nothing else wakes it. Checked: letters,
-  backspace, Enter, autocorrect, typing in the middle of a field, and moving from
-  the password to the confirm field. Gboard on the emulator sends no composing
-  region for English, so Japanese input is covered by unit tests only.
-- **Enter**: winit drops the keyboard's action key, so every field asks for an
-  Enter key, which types a lone newline; that becomes Enter. Newlines that come
-  with other text (a paste) stay text, so pasting doesn't send a message.
+  drops the events that say it changed. The buffer holds the focused field's
+  text for up to 100 characters each side of the cursor (dots for passwords and
+  recovery words), so the keyboard can delete and correct what is already
+  there; each change to it (text, selection, composed word) becomes the same
+  change at the same place in the field, through the field's cursor and egui
+  text and delete events. Moving the cursor in the field starts the buffer over
+  there. Reading and setting the buffer happen on the Java thread, where the
+  keyboard edits it, through GameTextInput's C API. A start-over is numbered and
+  counts only once the Java thread reads back exactly what was set; until then
+  the field ignores the buffer, and the start-over is sent again every 300 ms.
+  A composed word shows as plain text (egui can't mark a range from outside).
+  While a field is focused the app paints every 40 ms to read the buffer, since
+  nothing else wakes it.
+- **Enter**: winit drops the keyboard's action key, so `MainActivity` (the only
+  Java in the app) counts presses of it and the app turns each into Enter. The
+  key shows Done. Newlines are text, also a lone one from Enter on a hardware
+  keyboard or a paste, so nothing is sent by accident.
+- **Long text**: GameTextInput copies at most 64 KiB but reports the full
+  length, and android-activity's reader for winit trusts that length. A Java
+  `LengthFilter` keeps the keyboard's buffer under 21,845 UTF-16 units, which
+  always fits, and the app's own reader takes only the copied bytes.
 - **Keyboard type**: password fields and recovery words (`ui::Field::private`)
   get no suggestions and ask the keyboard not to learn
-  (`IME_FLAG_NO_PERSONALIZED_LEARNING`).
-- **Typed secrets**: winit, egui-winit and android-activity log unhandled input
-  events, typed text included, so the log file takes only their errors.
-  GameTextInput's Java code logs typed text to logcat at debug level; R8 strips
-  those calls (`deploy/android/proguard-rules.pro`), which needs a build that
-  isn't debuggable. Rust copies of the buffer are wiped when dropped
-  (`Zeroizing`), and leaving a secret field overwrites GameTextInput's native
-  buffer (which never shrinks) before emptying it. Java strings (the keyboard's
-  own copy, `Editable`) can't be wiped; the garbage collector frees them when it
-  wants, and the keyboard app keeps whatever it keeps.
+  (`IME_FLAG_NO_PERSONALIZED_LEARNING`). When a field stops wanting text the app
+  hides the keyboard itself: winit's hide doesn't work once Android counts the
+  keyboard as opened on purpose.
+- **Typed secrets**: on Android, winit's "Unknown android_activity input event"
+  warning, which prints the keyboard's text, is dropped before it is formatted;
+  other warnings stay. GameTextInput's Java code logs typed text to logcat at
+  debug level; R8 strips those calls (`deploy/android/proguard-rules.pro`),
+  which needs a build that isn't debuggable. Rust copies are wiped: the buffer
+  and the bridge's copy (`Zeroizing`, dropped as soon as focus moves), and the
+  text events egui got, at the end of each frame. Leaving a secret field
+  overwrites GameTextInput's native buffer (which never shrinks) before
+  emptying it. Some copies can't be wiped: android-activity's copy of the text
+  for winit's (dropped) event, egui's undo history inside a field, Java strings
+  (the keyboard's `Editable`), and whatever the keyboard app keeps.
 - **Safe area**: system bars, display cutout and the keyboard come from
   GameActivity's window insets, read on the Java thread when the window
   changes size, when the keyboard opens or closes (for a moment while it
@@ -54,9 +62,12 @@ messages and reading them again after a restart.
   field (egui and winit already did that).
 - **Recovery words** show in two columns on phones.
 - **Destroy**: the app runs eframe on its own winit loop and ends it once
-  android-activity has handled `onDestroy`, waits up to 3 seconds for messages
-  still being sent, then ends the process (see Android lifecycle). Drafts in the
-  message box are lost, as on a desktop quit: no platform saves them yet.
+  android-activity has handled `onDestroy`, waits up to 4 seconds for messages
+  still being sent (a new activity's window waits too, and Android reports it as
+  not responding after 5), then ends the process (see Android lifecycle). If
+  messages were still on their way, the next start says so in the chat; the
+  note (`unsent`) holds no message text. Drafts in the message box are lost, as
+  on a desktop quit: no platform saves them yet.
 - **Test build**: `deploy/android/build.sh` makes a release APK signed with the
   local debug key (`rusttalk-<version>-android-arm64-test.apk`): not
   debuggable, so a USB cable no longer opens the app's files, and R8 can strip
@@ -159,8 +170,8 @@ cargo-ndk automates), builds the client library as a `cdylib` with
   add Android libraries (AARs).
 - **Gradle** is needed anyway: GameActivity ships as an AAR, and later phases
   need Java or Kotlin glue (notifications, Android Keystore, the file picker,
-  `libwebrtc.jar`). The shell has no Java code yet: the manifest starts
-  `com.google.androidgamesdk.GameActivity` directly.
+  `libwebrtc.jar`). Its only Java so far is `MainActivity`, a GameActivity that
+  counts the keyboard's action key.
 
 cargo-ndk can replace the few lines of environment in `build.sh` when more
 ABIs (32-bit ARM, x86_64) are added.

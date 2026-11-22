@@ -1169,6 +1169,7 @@ startup.message = RustTalk を起動できませんでした。\n\n{error}\n\n{l
 
 # Direct messages (#100)
 home.waiting_try_again = サーバーを待っています。少ししてからもう一度お試しください。
+home.unsent_after_close = メッセージが送信されなかった可能性があります。
 home.dm_read_only = {name} と共通のサーバーがなくなりました。メッセージは読めますが、新しく送ることはできません。
 home.no_shared_server = 共通のサーバーなし
 

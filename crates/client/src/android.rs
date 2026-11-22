@@ -3,20 +3,37 @@
 //!
 //! The on-screen keyboard doesn't send keys: it edits a text buffer that
 //! GameActivity's GameTextInput keeps, and winit drops the events that say it
-//! changed. The buffer stands for a stretch of the focused egui field: it starts
-//! empty at the field's cursor (or for its selection), and each change the keyboard
-//! makes to it becomes the same change, at the same place, in the field. Moving the
-//! cursor in the field starts the buffer over there.
+//! changed. The buffer holds a stretch of the focused egui field around its cursor
+//! (dots for secrets), so the keyboard can delete and correct what is there; each
+//! change the keyboard makes to it becomes the same change, at the same place, in
+//! the field. Moving the cursor in the field starts the buffer over there.
 
 #[cfg(target_os = "android")]
 pub use activity::*;
+
+use std::fmt::{self, Write as _};
 
 use eframe::egui::{
     Context, Event, Id, Key, Modifiers,
     text::{CCursor, CCursorRange},
     text_edit::TextEditState,
 };
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
+
+/// GameTextInput's native text buffer (`DEFAULT_MAX_STRING_SIZE`), which never
+/// shrinks. It copies at most this minus the closing NUL, but keeps reporting the
+/// full length of a longer text.
+const NATIVE_BUFFER: usize = 1 << 16;
+/// The keyboard's buffer is capped in UTF-16 units (Java's `LengthFilter`) so its
+/// modified UTF-8 (at most 3 bytes a unit) always fits the native buffer.
+const MAX_TYPED: i32 = ((NATIVE_BUFFER - 1) / 3) as i32;
+/// Characters of the field on each side of the cursor that the buffer holds.
+const CONTEXT: usize = 100;
+
+/// How many bytes of a reported text length GameTextInput really copied.
+fn copied(length: i32) -> usize {
+    usize::try_from(length).unwrap_or(0).min(NATIVE_BUFFER - 1)
+}
 
 /// The keyboard's buffer: its text, and the selection in characters (sorted).
 #[derive(Clone, Default, PartialEq)]
@@ -50,6 +67,50 @@ impl Buffer {
             selection: (a.min(b), a.max(b)),
         }
     }
+
+    /// To Java's modified UTF-8 ending in NUL, with the selection in UTF-16 units.
+    pub fn to_java(&self) -> (Zeroizing<Vec<u8>>, (i32, i32)) {
+        // At most 6 bytes a character, so the vector never moves either.
+        let mut bytes = Zeroizing::new(Vec::with_capacity(self.text.len() * 2 + 1));
+        let (mut units, mut selection) = (0, (0, 0));
+        let mut count = 0;
+        for (index, c) in self.text.chars().enumerate() {
+            if index == self.selection.0 {
+                selection.0 = units;
+            }
+            if index == self.selection.1 {
+                selection.1 = units;
+            }
+            let mut pair = [0; 2];
+            for &unit in c.encode_utf16(&mut pair).iter() {
+                push_modified_utf8(&mut bytes, unit);
+            }
+            units += c.len_utf16();
+            count = index + 1;
+        }
+        if self.selection.0 >= count {
+            selection.0 = units;
+        }
+        if self.selection.1 >= count {
+            selection.1 = units;
+        }
+        bytes.push(0);
+        let as_i32 = |n: usize| i32::try_from(n).unwrap_or(i32::MAX);
+        (bytes, (as_i32(selection.0), as_i32(selection.1)))
+    }
+}
+
+fn push_modified_utf8(bytes: &mut Vec<u8>, unit: u16) {
+    // Java writes NUL as two bytes and each surrogate on its own.
+    match unit {
+        0x01..=0x7f => bytes.push(unit as u8),
+        0x00 | 0x80..=0x7ff => bytes.extend([0xc0 | (unit >> 6) as u8, 0x80 | (unit & 0x3f) as u8]),
+        _ => bytes.extend([
+            0xe0 | (unit >> 12) as u8,
+            0x80 | ((unit >> 6) & 0x3f) as u8,
+            0x80 | (unit & 0x3f) as u8,
+        ]),
+    }
 }
 
 /// Modified UTF-8 to UTF-16 units; a broken sequence becomes U+FFFD.
@@ -80,13 +141,37 @@ fn utf16_units(bytes: &[u8]) -> Vec<u16> {
     units
 }
 
+/// The field's text around its cursor, which the buffer starts with.
+#[derive(Clone, Default, PartialEq)]
+pub struct Seed {
+    pub text: Zeroizing<String>,
+    /// Where `text` starts in the field, in characters.
+    pub start: usize,
+}
+
+impl Seed {
+    /// `CONTEXT` characters each side of `cursor`; dots instead of a secret, which
+    /// the keyboard needs only to know there is something to delete.
+    pub fn around(text: &str, cursor: (usize, usize), secret: bool) -> Self {
+        let len = text.chars().count();
+        let (from, to) = (cursor.0.min(len), cursor.1.min(len));
+        let start = from.saturating_sub(CONTEXT);
+        let end = (to + CONTEXT).min(len);
+        let mut seed = Zeroizing::new(String::with_capacity((end - start) * 4));
+        for c in text.chars().skip(start).take(end - start) {
+            seed.push(if secret { '•' } else { c });
+        }
+        Self { text: seed, start }
+    }
+}
+
 /// Turns changes of the keyboard's buffer into the same changes of the focused field.
 #[derive(Default)]
 pub struct Bridge {
     /// The buffer as last applied.
     last: Buffer,
     /// Where the buffer starts in the field, and how many of the field's characters
-    /// it stands for: at first the selection, which its first change replaces.
+    /// it stands for (with an empty buffer: the selection its first change replaces).
     anchor: usize,
     region: usize,
     /// The field's cursor after the last change.
@@ -103,14 +188,31 @@ pub struct Change {
 }
 
 impl Bridge {
-    /// The buffer is empty again and stands for the field's selection.
-    pub fn start(&mut self, cursor: (usize, usize)) {
-        *self = Self {
-            anchor: cursor.0,
-            region: cursor.1 - cursor.0,
-            expected: Some(cursor),
-            ..Self::default()
+    /// Start the buffer over with `seed`, if it holds the cursor; empty otherwise.
+    pub fn start(&mut self, cursor: (usize, usize), seed: Seed) {
+        let len = seed.text.chars().count();
+        *self = match seed.start <= cursor.0 && cursor.1 <= seed.start + len {
+            true => Self {
+                last: Buffer {
+                    selection: (cursor.0 - seed.start, cursor.1 - seed.start),
+                    text: seed.text,
+                },
+                anchor: seed.start,
+                region: len,
+                expected: Some(cursor),
+            },
+            false => Self {
+                anchor: cursor.0,
+                region: cursor.1 - cursor.0,
+                expected: Some(cursor),
+                ..Self::default()
+            },
         };
+    }
+
+    /// What the keyboard's buffer should hold now.
+    pub fn buffer(&self) -> &Buffer {
+        &self.last
     }
 
     pub fn update(
@@ -156,24 +258,11 @@ impl Bridge {
             .max(start);
         let added = new_len - prefix - suffix;
         let inserted: String = new.chars().skip(prefix).take(added).collect();
-        if inserted == "\n" && start == end {
-            // The Enter key types a lone newline (winit drops the keyboard's action
-            // key); a pasted newline comes with other text and stays text.
-            for pressed in [true, false] {
-                events.push(Event::Key {
-                    key: Key::Enter,
-                    physical_key: None,
-                    pressed,
-                    repeat: false,
-                    modifiers: Modifiers::NONE,
-                });
-            }
-            return Change {
-                restart: true,
-                ..Change::default()
-            };
-        }
-        if !inserted.is_empty() {
+        if inserted.contains('\n') {
+            // Newlines are text (egui drops a lone one as `Text`); only the
+            // keyboard's action key is Enter.
+            events.push(Event::Paste(inserted));
+        } else if !inserted.is_empty() {
             events.push(Event::Text(inserted));
         } else if start < end {
             events.push(Event::Key {
@@ -196,11 +285,24 @@ impl Bridge {
     }
 }
 
+/// Wipe typed text from events egui is done with.
+pub fn wipe_text(events: &mut [Event]) {
+    for event in events {
+        if let Event::Text(text) | Event::Paste(text) = event {
+            text.zeroize();
+        }
+    }
+}
+
 /// The field's cursor or selection, in characters (sorted).
 pub fn cursor(ctx: &Context, field: Id) -> Option<(usize, usize)> {
     let range = TextEditState::load(ctx, field)?.cursor.char_range()?;
+    Some(sorted(range))
+}
+
+fn sorted(range: CCursorRange) -> (usize, usize) {
     let [a, b] = range.sorted_cursors();
-    Some((a.index.0, b.index.0))
+    (a.index.0, b.index.0)
 }
 
 pub fn set_cursor(ctx: &Context, field: Id, (a, b): (usize, usize)) {
@@ -211,10 +313,65 @@ pub fn set_cursor(ctx: &Context, field: Id, (a, b): (usize, usize)) {
     }
 }
 
+/// Drops winit's "Unknown android_activity input event {event:?}", which holds the
+/// keyboard's text, before it is formatted or written. Other warnings stay.
+pub struct NoTypedText;
+
+const TYPED_TEXT_EVENT: &str = "Unknown android_activity input event";
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for NoTypedText {
+    fn event_enabled(
+        &self,
+        event: &tracing::Event<'_>,
+        _: tracing_subscriber::layer::Context<'_, S>,
+    ) -> bool {
+        if !event
+            .metadata()
+            .target()
+            .starts_with("winit::platform_impl::android")
+        {
+            return true;
+        }
+        let mut start = MessageStart::default();
+        event.record(&mut start);
+        start.0 != TYPED_TEXT_EVENT
+    }
+}
+
+/// The first words of an event's message; formatting stops there, so the rest
+/// (here: the typed text) is never written out, not even in memory.
+#[derive(Default)]
+struct MessageStart(String);
+
+impl tracing::field::Visit for MessageStart {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn fmt::Debug) {
+        if field.name() == "message" {
+            let _ = write!(self, "{value:?}");
+        }
+    }
+}
+
+impl fmt::Write for MessageStart {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        let mut end = s
+            .len()
+            .min(TYPED_TEXT_EVENT.len().saturating_sub(self.0.len()));
+        while !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        self.0.push_str(&s[..end]);
+        match end == s.len() {
+            true => Ok(()),
+            false => Err(fmt::Error),
+        }
+    }
+}
+
 #[cfg(target_os = "android")]
 mod activity {
     use std::{
         ffi::{c_char, c_void},
+        path::PathBuf,
         slice,
         sync::{
             LazyLock, Mutex, MutexGuard, OnceLock,
@@ -226,7 +383,7 @@ mod activity {
     use anyhow::{Context as _, Result};
     use eframe::{
         UserEvent,
-        egui::{self, IMEPurpose, Id, SafeAreaInsets, epaint::MarginF32},
+        egui::{self, IMEPurpose, Id, SafeAreaInsets, epaint::MarginF32, text::CCursorRange},
     };
     use jni::{JValue, JavaVM, jni_sig, jni_str, objects::JObject};
     use winit::{
@@ -237,19 +394,40 @@ mod activity {
             EventLoopBuilderExtAndroid as _,
             activity::{
                 AndroidApp,
-                input::{ImeOptions, InputType, TextInputAction},
+                input::{ImeOptions, InputType},
             },
         },
         window::WindowId,
     };
 
-    use super::{Bridge, Buffer, cursor, set_cursor};
+    use super::{
+        Bridge, Buffer, MAX_TYPED, NATIVE_BUFFER, Seed, copied, cursor, set_cursor, sorted,
+        wipe_text,
+    };
+
+    /// The keyboard's action key (Done): Enter for egui.
+    fn enter(events: &mut Vec<egui::Event>) {
+        for pressed in [true, false] {
+            events.push(egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            });
+        }
+    }
 
     /// One activity per process: `android_main` ends the process after it.
     static APP: OnceLock<AndroidApp> = OnceLock::new();
+    /// The settings folder, kept for when the activity is gone.
+    static DATA: OnceLock<PathBuf> = OnceLock::new();
     static KEYBOARD: LazyLock<Mutex<Keyboard>> = LazyLock::new(Mutex::default);
-    /// The buffer as last read on the Java thread, after start-over number `.0`.
-    static READ: Mutex<Option<(u64, Buffer)>> = Mutex::new(None);
+    /// The buffer as last read on the Java thread.
+    static READ: Mutex<Option<Read>> = Mutex::new(None);
+    /// The focused field, its cursor and its text around it, from the last frame.
+    type Shared = (Id, (usize, usize), Seed);
+    static FIELD: Mutex<Option<Shared>> = Mutex::new(None);
     /// System bars, display cutout and keyboard, in pixels: left, top, right, bottom.
     static INSETS: Mutex<[i32; 4]> = Mutex::new([0; 4]);
     /// The window or the keyboard changed: follow the insets for a moment.
@@ -257,6 +435,9 @@ mod activity {
     /// `WindowInsetsCompat.Type`: status bars 1, navigation bars 2, caption bar 4,
     /// keyboard 8, display cutout 128.
     const COVERED: i32 = 1 | 2 | 4 | 8 | 128;
+    /// `EditorInfo.IME_ACTION_DONE`, in `imeOptions`: the keyboard shows Done, which
+    /// is Enter.
+    const ACTION_DONE: i32 = 6;
     /// How long insets are read every frame after a change (the keyboard slides).
     const INSETS_SETTLE: Duration = Duration::from_millis(600);
     /// While the keyboard is up it can be closed with Back, which tells the app nothing.
@@ -264,10 +445,19 @@ mod activity {
     /// How often a frame reads the keyboard's buffer while a field is focused:
     /// nothing tells the app that it changed.
     const TYPING_POLL: Duration = Duration::from_millis(40);
-    /// How long a destroyed activity waits for messages still being sent.
-    const SEND_GRACE: Duration = Duration::from_secs(3);
-    /// GameTextInput's text buffer (`DEFAULT_MAX_STRING_SIZE`), which never shrinks.
-    const NATIVE_BUFFER: usize = 1 << 16;
+    /// A start-over the Java thread hasn't confirmed by then is sent again.
+    const RESTART_RETRY: Duration = Duration::from_millis(300);
+    /// How long a destroyed activity waits for messages still being sent. A new
+    /// activity's window waits too, and Android calls it not responding after 5 s.
+    const SEND_GRACE: Duration = Duration::from_secs(4);
+
+    /// The buffer and the count of action key presses, read together.
+    #[derive(Clone)]
+    struct Read {
+        generation: u64,
+        buffer: Buffer,
+        actions: i32,
+    }
 
     #[derive(Clone, Copy, PartialEq)]
     enum Kind {
@@ -280,10 +470,16 @@ mod activity {
     struct Keyboard {
         bridge: Bridge,
         focused: Option<Id>,
-        /// Start-overs asked for; the bridge waits until the Java thread did the latest.
+        /// Start the buffer over (with the field's text) once the field has a cursor.
+        start: bool,
+        /// Start-overs sent; the field waits until the Java thread confirmed the
+        /// latest (`confirmed` false, sent at `sent`).
         generation: u64,
-        waiting: bool,
-        /// A secret field had focus since the last start-over: wipe the buffer.
+        confirmed: bool,
+        sent: Instant,
+        /// Action key presses already turned into Enter.
+        actions: i32,
+        /// A secret field had focus since the buffer was last wiped.
         secret: bool,
         kind: Option<Kind>,
         ime: bool,
@@ -298,8 +494,11 @@ mod activity {
             Self {
                 bridge: Bridge::default(),
                 focused: None,
+                start: false,
                 generation: 0,
-                waiting: false,
+                confirmed: true,
+                sent: Instant::now(),
+                actions: 0,
                 secret: false,
                 kind: None,
                 ime: false,
@@ -311,20 +510,39 @@ mod activity {
     }
 
     impl Keyboard {
-        fn restart(&mut self, app: &AndroidApp, ctx: &egui::Context) {
-            self.generation += 1;
-            self.waiting = true;
-            let (generation, wipe) = (self.generation, std::mem::take(&mut self.secret));
-            on_java_thread(app, ctx, generation, move |input| {
-                if wipe {
-                    // Overwrite all the secret ever used, then empty it.
+        /// Focus moved: forget the last field's text at once, and wipe the buffer
+        /// if it held a secret.
+        fn forget(&mut self, app: &AndroidApp) {
+            self.bridge = Bridge::default();
+            *lock(&READ) = None;
+            *lock(&FIELD) = None;
+            self.start = true;
+            self.confirmed = true;
+            if std::mem::take(&mut self.secret) {
+                on_java_thread(app, |input, _| {
+                    // Overwrite all the secret could have used, then empty it.
                     let mut filler = vec![b'x'; NATIVE_BUFFER - 1];
                     filler.push(0);
-                    // SAFETY: `input` is live on this thread; the text ends in NUL.
-                    unsafe { set_state(input, &filler) };
-                }
-                // SAFETY: as above.
-                unsafe { set_state(input, b"\0") };
+                    // SAFETY: `input` is live on this thread; the texts end in NUL.
+                    unsafe { set_state(input, &filler, (0, 0)) };
+                    unsafe { set_state(input, b"\0", (0, 0)) };
+                });
+            }
+        }
+
+        /// Put the bridge's buffer into the keyboard's, as start-over `generation`.
+        fn send(&mut self, app: &AndroidApp, ctx: &egui::Context, again: bool) {
+            if !again {
+                self.generation += 1;
+            }
+            self.confirmed = false;
+            self.sent = Instant::now();
+            let (text, selection) = self.bridge.buffer().to_java();
+            let (generation, ctx) = (self.generation, ctx.clone());
+            on_java_thread(app, move |input, actions| {
+                // SAFETY: `input` is live on this thread; the text ends in NUL.
+                unsafe { set_state(input, &text, selection) };
+                read_back(input, generation, actions, &ctx);
             });
         }
     }
@@ -338,6 +556,11 @@ mod activity {
     pub fn run(options: eframe::NativeOptions, creator: eframe::AppCreator<'_>) -> Result<()> {
         let app = options.android_app.clone().context("no Android activity")?;
         let _ = APP.set(app.clone());
+        if let Some(data) = app.internal_data_path() {
+            let _ = DATA.set(data);
+        }
+        // The length cap, before any field takes focus.
+        configure_keyboard(&app, Kind::Normal);
         let event_loop = EventLoop::<UserEvent>::with_user_event()
             .with_android_app(app.clone())
             .build()?;
@@ -384,8 +607,13 @@ mod activity {
             // Every loop pass ends here, also the one that handled `onDestroy`.
             if destroyed(&self.app) {
                 tracing::info!("Android activity destroyed");
-                // The process ends next; the app's tasks don't get to finish.
-                crate::net::wait_for_sends(SEND_GRACE);
+                // The process ends next; the app's tasks don't get to finish. What
+                // is still on its way gets a notice at the next start.
+                if crate::net::wait_for_sends(SEND_GRACE) > 0
+                    && let Some(data) = DATA.get()
+                {
+                    crate::net::note_unsent(data);
+                }
                 event_loop.exit();
             }
         }
@@ -452,17 +680,16 @@ mod activity {
         fn GameTextInput_setState(input: *mut c_void, state: *const State);
     }
 
-    /// Set the buffer; `text` is modified UTF-8 ending in NUL (ASCII here).
+    /// Set the buffer; `text` is modified UTF-8 ending in NUL.
     ///
     /// SAFETY: `input` is GameTextInput, used on the Java thread.
-    unsafe fn set_state(input: *mut c_void, text: &[u8]) {
-        let length = i32::try_from(text.len() - 1).unwrap_or(0);
+    unsafe fn set_state(input: *mut c_void, text: &[u8], selection: (i32, i32)) {
         let state = State {
             text: text.as_ptr().cast(),
-            length,
+            length: i32::try_from(text.len() - 1).unwrap_or(0),
             selection: Span {
-                start: length,
-                end: length,
+                start: selection.0,
+                end: selection.1,
             },
             composing: Span { start: -1, end: -1 },
         };
@@ -475,8 +702,9 @@ mod activity {
             // SAFETY: `context` is `out` below; the state is valid during this call.
             let (out, state) = unsafe { (&mut *context.cast::<Option<Buffer>>(), state.as_ref()) };
             let Some(state) = state else { return };
-            let length = usize::try_from(state.length).unwrap_or(0);
-            // The text is null before the first state is set.
+            // Only what GameTextInput really copied; the text is null before the
+            // first state is set.
+            let length = copied(state.length);
             let bytes = match state.text.is_null() || length == 0 {
                 true => &[][..],
                 false => unsafe { slice::from_raw_parts(state.text.cast::<u8>(), length) },
@@ -489,17 +717,32 @@ mod activity {
         out
     }
 
-    /// Run `f` with GameTextInput on the Java thread, where the keyboard edits it,
-    /// then read the buffer back as after start-over `generation`.
-    fn on_java_thread(
-        app: &AndroidApp,
-        ctx: &egui::Context,
-        generation: u64,
-        f: impl FnOnce(*mut c_void) + Send + 'static,
-    ) {
-        let (main, ctx) = (app.clone(), ctx.clone());
+    /// Read the buffer for the frame that sent start-over `generation`.
+    fn read_back(input: *mut c_void, generation: u64, actions: i32, ctx: &egui::Context) {
+        // SAFETY: called on the Java thread with a live `input`.
+        let Some(buffer) = (unsafe { read_state(input) }) else {
+            return;
+        };
+        let mut read = lock(&READ);
+        let changed = read.as_ref().is_none_or(|old| {
+            old.generation != generation || old.actions != actions || old.buffer != buffer
+        });
+        if changed {
+            *read = Some(Read {
+                generation,
+                buffer,
+                actions,
+            });
+            ctx.request_repaint();
+        }
+    }
+
+    /// Run `f` with GameTextInput and the action key count on the Java thread,
+    /// where the keyboard edits the buffer.
+    fn on_java_thread(app: &AndroidApp, f: impl FnOnce(*mut c_void, i32) + Send + 'static) {
+        let main = app.clone();
         app.run_on_java_main_thread(Box::new(move || {
-            let handle = java(&main, |env, activity| {
+            let found = java(&main, |env, activity| {
                 // This activity's GameActivity, unless a newer one took over.
                 // (`getGameActivityNativeHandle` returns 0 for the current one.)
                 let class = env.get_object_class(activity)?;
@@ -511,30 +754,101 @@ mod activity {
                     )?
                     .l()?;
                 if !env.is_same_object(&owner, activity)? {
-                    return Ok(0);
+                    return Ok((0, 0));
                 }
-                env.get_static_field(&class, jni_str!("nativeHandle"), jni_sig!("J"))?
-                    .j()
+                let handle = env
+                    .get_static_field(&class, jni_str!("nativeHandle"), jni_sig!("J"))?
+                    .j()?;
+                // MainActivity counts the action key, which winit drops.
+                let actions = env
+                    .get_static_field(&class, jni_str!("editorActions"), jni_sig!("I"))?
+                    .i()?;
+                Ok((handle, actions))
             });
-            let handle = match handle {
-                Ok(0) => return,
-                Ok(handle) => handle,
+            let (handle, actions) = match found {
+                Ok((0, _)) => return,
+                Ok(found) => found,
                 Err(error) => return tracing::warn!(%error, "find the keyboard's text"),
             };
             // SAFETY: the live GameActivity; it is only freed on this thread.
             let input = unsafe { GameActivity_getTextInput(handle as *const c_void) };
-            if input.is_null() {
-                return;
+            if !input.is_null() {
+                f(input, actions);
             }
-            f(input);
-            // SAFETY: as above.
-            let Some(buffer) = (unsafe { read_state(input) }) else {
-                return;
-            };
-            let mut read = lock(&READ);
-            if read.as_ref() != Some(&(generation, buffer.clone())) {
-                *read = Some((generation, buffer));
-                ctx.request_repaint();
+        }));
+    }
+
+    /// The keyboard type for the field, and the length cap; on the Java thread,
+    /// because setting the type clears the cap.
+    fn configure_keyboard(app: &AndroidApp, kind: Kind) {
+        // Multi-line keeps newlines in pasted text; Done is the action key (Enter).
+        let mut input = InputType::TYPE_CLASS_TEXT | InputType::TYPE_TEXT_FLAG_MULTI_LINE;
+        let mut options = ImeOptions::IMG_FLAG_NO_EXTRACT_UI | ImeOptions::IME_FLAG_NO_FULLSCREEN;
+        if kind != Kind::Normal {
+            // No suggestions, and the keyboard must not learn it.
+            input |= match kind {
+                Kind::Password => InputType::TYPE_TEXT_VARIATION_PASSWORD,
+                _ => InputType::TYPE_TEXT_VARIATION_VISIBLE_PASSWORD,
+            } | InputType::TYPE_TEXT_FLAG_NO_SUGGESTIONS;
+            options |= ImeOptions::IME_FLAG_NO_PERSONALIZED_LEARNING;
+        }
+        let (input, options) = (input.bits() as i32, options.bits() as i32 | ACTION_DONE);
+        let main = app.clone();
+        app.run_on_java_main_thread(Box::new(move || {
+            let done = java(&main, |env, activity| {
+                env.call_method(
+                    activity,
+                    jni_str!("setImeEditorInfoFields"),
+                    jni_sig!("(III)V"),
+                    &[
+                        JValue::Int(input),
+                        JValue::Int(ACTION_DONE),
+                        JValue::Int(options),
+                    ],
+                )?;
+                let view = env
+                    .get_field(
+                        activity,
+                        jni_str!("mSurfaceView"),
+                        jni_sig!(
+                            "Lcom/google/androidgamesdk/GameActivity$InputEnabledSurfaceView;"
+                        ),
+                    )?
+                    .l()?;
+                let connection = env
+                    .get_field(
+                        &view,
+                        jni_str!("mInputConnection"),
+                        jni_sig!("Lcom/google/androidgamesdk/gametextinput/InputConnection;"),
+                    )?
+                    .l()?;
+                let editable = env
+                    .call_method(
+                        &connection,
+                        jni_str!("getEditable"),
+                        jni_sig!("()Landroid/text/Editable;"),
+                        &[],
+                    )?
+                    .l()?;
+                // GameTextInput copies at most 64 KiB but reports the full length,
+                // which winit's reader trusts: keep the text short enough to fit.
+                let filter = env.new_object(
+                    jni_str!("android/text/InputFilter$LengthFilter"),
+                    jni_sig!("(I)V"),
+                    &[JValue::Int(MAX_TYPED)],
+                )?;
+                let filters =
+                    env.new_object_array(1, jni_str!("android/text/InputFilter"), &filter)?;
+                env.call_method(
+                    &editable,
+                    jni_str!("setFilters"),
+                    jni_sig!("([Landroid/text/InputFilter;)V"),
+                    &[JValue::Object(&filters)],
+                )?;
+                Ok(())
+            });
+            if let Err(error) = done {
+                tracing::warn!(%error, "set up the keyboard");
             }
         }));
     }
@@ -579,6 +893,16 @@ mod activity {
         }));
     }
 
+    /// The focused field's text around its cursor, for the keyboard (see
+    /// `ui::share_with_keyboard`). Password fields lay out dots already.
+    pub fn share_field(ctx: &egui::Context, field: Id, text: &str, cursor: Option<CCursorRange>) {
+        let Some(cursor) = cursor.map(sorted) else {
+            return;
+        };
+        let seed = Seed::around(text, cursor, crate::ui::is_private(ctx, field));
+        *lock(&FIELD) = Some((field, cursor, seed));
+    }
+
     /// Before the frame: typed text, and the space the system leaves for the app.
     pub fn input(ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         let Some(app) = APP.get() else { return };
@@ -602,7 +926,7 @@ mod activity {
         let focused = ctx.memory(|memory| memory.focused());
         if focused != keyboard.focused {
             keyboard.focused = focused;
-            keyboard.restart(app, ctx);
+            keyboard.forget(app);
         }
         let Some(field) = focused.filter(|_| ctx.egui_wants_keyboard_input()) else {
             return;
@@ -610,27 +934,54 @@ mod activity {
         let Some(cursor) = cursor(ctx, field) else {
             return;
         };
-        let read = lock(&READ).clone();
-        if let Some((_, buffer)) = read.filter(|(generation, _)| *generation == keyboard.generation)
-        {
-            if keyboard.waiting {
-                // The buffer is empty now, and only the keyboard changes it from here.
-                keyboard.waiting = false;
-                keyboard.bridge.start(cursor);
+        if keyboard.start {
+            let seed = (lock(&FIELD).as_ref())
+                .filter(|(id, at, _)| *id == field && *at == cursor)
+                .map(|(_, _, seed)| seed.clone())
+                .unwrap_or_default();
+            keyboard.bridge.start(cursor, seed);
+            keyboard.start = false;
+            keyboard.send(app, ctx, false);
+            return;
+        }
+        let read = lock(&READ)
+            .clone()
+            .filter(|read| read.generation == keyboard.generation);
+        if !keyboard.confirmed {
+            // Only the exact buffer that was sent confirms the start-over.
+            match read {
+                Some(read) if read.buffer == *keyboard.bridge.buffer() => {
+                    keyboard.confirmed = true;
+                    keyboard.actions = read.actions;
+                }
+                _ => {
+                    if keyboard.sent.elapsed() >= RESTART_RETRY {
+                        keyboard.send(app, ctx, true);
+                    }
+                    return;
+                }
             }
+        } else if let Some(read) = read {
             let change = keyboard
                 .bridge
-                .update(cursor, &buffer, &mut raw_input.events);
+                .update(cursor, &read.buffer, &mut raw_input.events);
             if let Some(range) = change.cursor {
                 set_cursor(ctx, field, range);
             }
             if change.restart {
-                return keyboard.restart(app, ctx);
+                keyboard.bridge = Bridge::default();
+                keyboard.start = true;
+                return;
+            }
+            if read.actions != keyboard.actions {
+                keyboard.actions = read.actions;
+                enter(&mut raw_input.events);
             }
         }
-        if !keyboard.waiting {
-            on_java_thread(app, ctx, keyboard.generation, |_| {});
-        }
+        let (generation, ctx) = (keyboard.generation, ctx.clone());
+        on_java_thread(app, move |input, actions| {
+            read_back(input, generation, actions, &ctx)
+        });
     }
 
     /// Draw the app in the part of the screen the system bars, notch and keyboard
@@ -660,14 +1011,24 @@ mod activity {
         }
     }
 
-    /// At the end of the frame: tell the keyboard what the focused field is for.
+    /// At the end of the frame: wipe the typed text egui got, and tell the keyboard
+    /// what the focused field is for.
     fn frame_end(ctx: &egui::Context) {
+        ctx.input_mut(|input| {
+            wipe_text(&mut input.events);
+            wipe_text(&mut input.raw.events);
+        });
         let Some(app) = APP.get() else { return };
         let mut keyboard = lock(&KEYBOARD);
         let ime = ctx.output(|output| output.ime);
         if ime.is_some() != keyboard.ime {
             keyboard.ime = ime.is_some();
             INSETS_STALE.store(true, Ordering::Relaxed);
+            if ime.is_none() {
+                // winit hides only a keyboard shown implicitly, and Android counts
+                // some of ours as shown on purpose.
+                app.hide_soft_input(false);
+            }
         }
         if Instant::now() < keyboard.insets_until {
             ctx.request_repaint_after(TYPING_POLL);
@@ -683,25 +1044,10 @@ mod activity {
             _ => Kind::Normal,
         };
         keyboard.secret |= kind != Kind::Normal;
-        if keyboard.kind == Some(kind) {
-            return;
+        if keyboard.kind != Some(kind) {
+            keyboard.kind = Some(kind);
+            configure_keyboard(app, kind);
         }
-        keyboard.kind = Some(kind);
-        // Multi-line: without it GameActivity drops the newline Enter types.
-        let mut input = InputType::TYPE_CLASS_TEXT | InputType::TYPE_TEXT_FLAG_MULTI_LINE;
-        // The keyboard needs no action key: Enter arrives as a newline.
-        let mut options = ImeOptions::IME_FLAG_NO_ENTER_ACTION
-            | ImeOptions::IMG_FLAG_NO_EXTRACT_UI
-            | ImeOptions::IME_FLAG_NO_FULLSCREEN;
-        if kind != Kind::Normal {
-            // No suggestions, and the keyboard must not learn it.
-            input |= match kind {
-                Kind::Password => InputType::TYPE_TEXT_VARIATION_PASSWORD,
-                _ => InputType::TYPE_TEXT_VARIATION_VISIBLE_PASSWORD,
-            } | InputType::TYPE_TEXT_FLAG_NO_SUGGESTIONS;
-            options |= ImeOptions::IME_FLAG_NO_PERSONALIZED_LEARNING;
-        }
-        app.set_ime_editor_info(input, TextInputAction::None, options);
     }
 }
 
@@ -709,6 +1055,7 @@ mod activity {
 mod tests {
     use super::*;
     use eframe::egui::{RawInput, TextEdit};
+    use tracing_subscriber::layer::SubscriberExt as _;
 
     const FIELD: &str = "field";
 
@@ -721,6 +1068,7 @@ mod tests {
     }
 
     impl Field {
+        /// The buffer starts with the field's text around the cursor, as on a phone.
         fn new(text: &str, multiline: bool, cursor: (usize, usize)) -> Self {
             let mut field = Self {
                 ctx: Context::default(),
@@ -734,7 +1082,8 @@ mod tests {
             field.frame(Vec::new());
             set_cursor(&field.ctx, Id::unique(FIELD), cursor);
             field.frame(Vec::new());
-            field.bridge.start(field.cursor());
+            let seed = Seed::around(&field.text, field.cursor(), false);
+            field.bridge.start(field.cursor(), seed);
             field
         }
 
@@ -784,12 +1133,25 @@ mod tests {
     }
 
     #[test]
+    fn the_buffer_starts_with_the_text_around_the_cursor() {
+        let mut field = Field::new("hello world", false, (3, 3));
+        assert_eq!(&*field.bridge.buffer().text, "hello world");
+        assert_eq!(field.bridge.buffer().selection, (3, 3));
+        // Backspace right after tapping into the word. Which "l" went is
+        // ambiguous; the keyboard's cursor follows next frame.
+        field.keyboard("helo world", (2, 2));
+        assert_eq!(field.text, "helo world");
+        field.keyboard("helo world", (2, 2));
+        assert_eq!(field.cursor(), (2, 2));
+    }
+
+    #[test]
     fn composing_in_the_middle_keeps_the_text_after_it() {
         // "a|b": Japanese input composes にほん between them, then converts it.
         let mut field = Field::new("ab", false, (1, 1));
-        field.keyboard("に", (1, 1));
-        field.keyboard("にほん", (3, 3));
-        field.keyboard("日本", (2, 2));
+        field.keyboard("aにb", (2, 2));
+        field.keyboard("aにほんb", (4, 4));
+        field.keyboard("a日本b", (3, 3));
         assert_eq!(field.text, "a日本b");
         assert_eq!(field.cursor(), (3, 3));
     }
@@ -797,8 +1159,8 @@ mod tests {
     #[test]
     fn an_emoji_before_the_change_counts_as_one_character() {
         let mut field = Field::new("😀ab", false, (2, 2));
-        field.keyboard("x", (1, 1));
-        field.keyboard("xy", (2, 2));
+        field.keyboard("😀axb", (3, 3));
+        field.keyboard("😀axyb", (4, 4));
         assert_eq!(field.text, "😀axyb");
         assert_eq!(field.cursor(), (4, 4));
     }
@@ -806,9 +1168,17 @@ mod tests {
     #[test]
     fn typing_replaces_the_selection() {
         let mut field = Field::new("hello world", false, (6, 11));
-        field.keyboard("there", (5, 5));
+        field.keyboard("hello there", (11, 11));
         assert_eq!(field.text, "hello there");
         assert_eq!(field.cursor(), (11, 11));
+    }
+
+    #[test]
+    fn an_empty_buffer_stands_for_the_selection() {
+        let mut field = Field::new("hello world", false, (6, 11));
+        field.bridge.start(field.cursor(), Seed::default());
+        field.keyboard("there", (5, 5));
+        assert_eq!(field.text, "hello there");
     }
 
     #[test]
@@ -822,57 +1192,56 @@ mod tests {
     #[test]
     fn deleting_across_the_composed_word() {
         let mut field = Field::new("xy", false, (1, 1));
-        field.keyboard("abc", (3, 3));
+        field.keyboard("xabcy", (4, 4));
         // The keyboard selects "bc" (its composed part) and deletes it.
-        field.keyboard("abc", (1, 3));
+        field.keyboard("xabcy", (2, 4));
         assert_eq!(field.cursor(), (2, 4));
-        field.keyboard("a", (1, 1));
+        field.keyboard("xay", (2, 2));
         assert_eq!(field.text, "xay");
         assert_eq!(field.cursor(), (2, 2));
     }
 
     #[test]
-    fn the_keyboard_moving_its_cursor_moves_the_fields() {
-        let mut field = Field::new("[]", false, (1, 1));
-        field.keyboard("abc", (3, 3));
-        field.keyboard("abc", (1, 1));
-        field.keyboard("aXbc", (2, 2));
-        assert_eq!(field.text, "[aXbc]");
-        assert_eq!(field.cursor(), (3, 3));
-    }
-
-    #[test]
-    fn enter_presses_enter_but_pasted_newlines_stay_text() {
+    fn newlines_stay_text_even_alone() {
         let mut field = Field::new("", true, (0, 0));
         field.keyboard("a\nb", (3, 3));
-        assert_eq!(field.text, "a\nb");
+        field.keyboard("a\nb\n", (4, 4));
+        assert_eq!(field.text, "a\nb\n");
         let mut events = Vec::new();
         let buffer = Buffer {
-            text: Zeroizing::new("a\nb\n".to_owned()),
-            selection: (4, 4),
+            text: Zeroizing::new("a\nb\n\n".to_owned()),
+            selection: (5, 5),
         };
-        let change = field.bridge.update(field.cursor(), &buffer, &mut events);
-        assert!(change.restart);
-        assert!(matches!(
-            events[..],
-            [
-                Event::Key {
-                    key: Key::Enter,
-                    pressed: true,
-                    ..
-                },
-                Event::Key { pressed: false, .. }
-            ]
-        ));
+        field.bridge.update(field.cursor(), &buffer, &mut events);
+        assert!(matches!(&events[..], [Event::Paste(text)] if text == "\n"));
     }
 
     #[test]
     fn moving_the_cursor_in_the_field_starts_over() {
         let mut field = Field::new("abc", false, (3, 3));
-        field.keyboard("d", (1, 1));
+        field.keyboard("abcd", (4, 4));
         set_cursor(&field.ctx, Id::unique(FIELD), (0, 0));
-        assert!(field.keyboard("de", (2, 2)).restart);
+        assert!(field.keyboard("abcde", (5, 5)).restart);
         assert_eq!(field.text, "abcd");
+    }
+
+    #[test]
+    fn a_paste_over_64_kib() {
+        let long = "y".repeat(70_000);
+        // Whatever the length says, only what GameTextInput copied is read.
+        assert_eq!(
+            copied(i32::try_from(long.len()).unwrap()),
+            NATIVE_BUFFER - 1
+        );
+        assert_eq!(copied(-1), 0);
+        let buffer = Buffer::from_java(&long.as_bytes()[..copied(70_000)], (-1, -1));
+        assert_eq!(buffer.text.len(), NATIVE_BUFFER - 1);
+        // The keyboard keeps less than that, and the field takes all of it.
+        assert!(MAX_TYPED as usize * 3 < NATIVE_BUFFER);
+        let paste = "z".repeat(MAX_TYPED as usize);
+        let mut field = Field::new("", true, (0, 0));
+        field.keyboard(&paste, (paste.len(), paste.len()));
+        assert_eq!(field.text, paste);
     }
 
     #[test]
@@ -883,7 +1252,64 @@ mod tests {
         let buffer = Buffer::from_java(&bytes, (4, 2));
         assert_eq!(&*buffer.text, "a\0😀b");
         assert_eq!(buffer.selection, (2, 3));
+        let (back, selection) = buffer.to_java();
+        assert_eq!(&back[..], &[&bytes[..], &[0]].concat()[..]);
+        assert_eq!(selection, (2, 4));
         assert_eq!(Buffer::from_java(b"ab", (-1, -1)).selection, (2, 2));
         assert_eq!(&*Buffer::from_java(&[0xff, b'a'], (0, 0)).text, "\u{fffd}a");
+    }
+
+    #[test]
+    fn secrets_go_to_the_keyboard_as_dots() {
+        let seed = Seed::around("hunter2", (7, 7), true);
+        assert_eq!(&*seed.text, "•••••••");
+        let seed = Seed::around(&"a".repeat(300), (150, 150), false);
+        assert_eq!((seed.start, seed.text.len()), (50, 200));
+    }
+
+    #[test]
+    fn typed_text_is_wiped_from_events() {
+        let mut events = vec![Event::Text("secret".into()), Event::Paste("words".into())];
+        wipe_text(&mut events);
+        assert!(
+            matches!(&events[..], [Event::Text(a), Event::Paste(b)] if a.is_empty() && b.is_empty())
+        );
+    }
+
+    #[test]
+    fn winits_input_event_dump_is_dropped_and_other_warnings_stay() {
+        #[derive(Clone, Default)]
+        struct Seen(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Seen {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                let mut message = MessageAll::default();
+                event.record(&mut message);
+                self.0.lock().unwrap().push(message.0);
+            }
+        }
+        #[derive(Default)]
+        struct MessageAll(String);
+        impl tracing::field::Visit for MessageAll {
+            fn record_debug(&mut self, _: &tracing::field::Field, value: &dyn fmt::Debug) {
+                let _ = write!(self.0, "{value:?}");
+            }
+        }
+        let seen = Seen::default();
+        let subscriber = tracing_subscriber::registry()
+            .with(NoTypedText)
+            .with(seen.clone());
+        tracing::subscriber::with_default(subscriber, || {
+            let event = "TextEvent(TextInputState { text: \"hunter2\" })";
+            tracing::warn!(target: "winit::platform_impl::android", "Unknown android_activity input event {event}");
+            tracing::warn!(target: "winit::platform_impl::android", "Failed to get input events iterator: x");
+            tracing::warn!(target: "egui_winit", "Unknown android_activity input event y");
+        });
+        let seen = seen.0.lock().unwrap();
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        assert!(seen.iter().all(|line| !line.contains("hunter2")));
     }
 }

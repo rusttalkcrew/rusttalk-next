@@ -361,7 +361,12 @@ impl Home {
                 ..Find::default()
             },
             dialog: None,
-            toast: None,
+            // A phone had to end while messages were still on their way.
+            toast: crate::net::take_unsent(&data_dir).then(|| {
+                // Shown in a chat, so long enough to open one.
+                let until = ctx.input(|input| input.time) + 60.0;
+                (t!("home.unsent_after_close").to_owned(), until)
+            }),
             settings: announce.then_some(Tab::WhatsNew),
             hotkeys: crate::hotkeys::Hotkeys::new(ctx, audio.clone()),
             voice: Voice::new(audio, video, runtime),
@@ -3821,6 +3826,7 @@ fn page_view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat: &mut
                     keep.extend(card.cloned());
                 }
                 let draft = Draft {
+                    queued: Default::default(),
                     id: *id,
                     channel,
                     peer: None,
@@ -4368,6 +4374,7 @@ fn poll_draft(channel: Id, text: String, part: PollPart) -> Option<Draft> {
         return None;
     };
     Some(Draft {
+        queued: Default::default(),
         id: *id,
         channel,
         peer: None,
@@ -4821,6 +4828,7 @@ fn composer(
             return (None, attach);
         };
         let command = Command::Send(Draft {
+            queued: Default::default(),
             id: *message,
             channel,
             peer: None,
@@ -4889,6 +4897,7 @@ fn composer(
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_millis() as u64);
     let command = Command::Send(Draft {
+        queued: Default::default(),
         id: *id,
         channel,
         peer: None,
@@ -4973,6 +4982,7 @@ fn composer_field(
                         }
                     },
                 );
+                ui::share_with_keyboard(&completion.text_edit);
                 if let Some(accepted) = completion.accepted
                     && !chat.mentions.accepted(&accepted.insert, choices)
                 {

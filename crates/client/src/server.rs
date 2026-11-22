@@ -173,15 +173,10 @@ impl Server {
         self.dir.members.iter().find(|m| m.person == *person)
     }
 
-    pub fn send(&self, command: Command) {
-        let message = matches!(command, Command::Send(_));
-        if message {
-            crate::net::message_queued(true);
-        }
+    pub fn send(&self, mut command: Command) {
+        crate::net::Queued::count(&mut command);
         // The task only ends after the UI drops this sender or the server stopped for good.
-        if self.commands.send(command).is_err() && message {
-            crate::net::message_queued(false);
-        }
+        let _ = self.commands.send(command);
     }
 
     pub fn channel(&self, id: &Id) -> Option<&Channel> {

@@ -85,29 +85,62 @@ pub enum Fetch {
 /// phone can wait for them before its process ends (`wait_for_sends`).
 static SENDING: AtomicUsize = AtomicUsize::new(0);
 
-/// `Server::send` counts a message; `Sent` uncounts it when the network is done.
-pub fn message_queued(queued: bool) {
-    match queued {
-        true => SENDING.fetch_add(1, Ordering::Relaxed),
-        false => SENDING.fetch_sub(1, Ordering::Relaxed),
-    };
-}
+/// Counts a message from `Server::send` until the network is done with it, or
+/// until it is dropped unsent anywhere. Copies of a draft don't count.
+#[derive(Default)]
+pub struct Queued(bool);
 
-struct Sent;
-
-impl Drop for Sent {
-    fn drop(&mut self) {
-        message_queued(false);
+impl Queued {
+    /// Count a message being handed to the network.
+    pub fn count(command: &mut Command) {
+        if let Command::Send(draft) = command {
+            SENDING.fetch_add(1, Ordering::Relaxed);
+            draft.queued = Self(true);
+        }
     }
 }
 
-/// Wait, at most `limit`, until no message is on its way.
+impl Clone for Queued {
+    fn clone(&self) -> Self {
+        Self(false)
+    }
+}
+
+impl Drop for Queued {
+    fn drop(&mut self) {
+        if self.0 {
+            SENDING.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Wait, at most `limit`, until no message is on its way; how many still are.
 #[cfg(target_os = "android")]
-pub fn wait_for_sends(limit: Duration) {
+pub fn wait_for_sends(limit: Duration) -> usize {
     let end = std::time::Instant::now() + limit;
-    while SENDING.load(Ordering::Relaxed) > 0 && std::time::Instant::now() < end {
+    loop {
+        let left = SENDING.load(Ordering::Relaxed);
+        if left == 0 || std::time::Instant::now() >= end {
+            return left;
+        }
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// A file saying that messages were still on their way when the app had to end.
+/// It holds no message text: nothing a person wrote is kept on the device.
+const UNSENT: &str = "unsent";
+
+#[cfg(target_os = "android")]
+pub fn note_unsent(data: &Path) {
+    if let Err(error) = std::fs::write(data.join(UNSENT), b"") {
+        tracing::warn!(%error, "note unsent messages");
+    }
+}
+
+/// Whether the last run ended with messages still on their way (and forget it).
+pub fn take_unsent(data: &Path) -> bool {
+    std::fs::remove_file(data.join(UNSENT)).is_ok()
 }
 
 // A draft is big and rare next to the other commands, which are small.
@@ -257,6 +290,8 @@ pub struct Draft {
     pub preview: Option<std::sync::Arc<crate::link_cards::Made>>,
     /// Emoji and stickers of other servers, uploaded as small files (see `sticker_files`).
     pub inline: Vec<crate::sticker_files::Inline>,
+    /// Set by `Server::send`.
+    pub queued: Queued,
 }
 
 pub struct LiveOffer {
@@ -952,8 +987,8 @@ fn refuse(ctx: &Ctx, url: &Url, command: Command) {
                 AdminUpdate::Failed(t!("admin.offline").into()),
             ));
         }
-        Command::Send(draft) => {
-            let _sent = Sent;
+        Command::Send(mut draft) => {
+            let _sent = std::mem::take(&mut draft.queued);
             ctx.send(Update::Unsent(url.clone(), draft));
             ctx.send(Update::Failed(t!("admin.offline").into()));
         }
@@ -1512,8 +1547,8 @@ async fn on_command(
         Command::Older(channel, before) => {
             page(ctx, url, client, state, channel, Some(before)).await;
         }
-        Command::Send(draft) => {
-            let _sent = Sent;
+        Command::Send(mut draft) => {
+            let _sent = std::mem::take(&mut draft.queued);
             let channel = match draft.peer {
                 Some(peer) => dm_channel(ctx, url, client, state, peer).await,
                 None => Ok(draft.channel),

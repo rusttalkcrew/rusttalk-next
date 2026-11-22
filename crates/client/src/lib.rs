@@ -267,14 +267,9 @@ fn start_logging(path: PathBuf) -> Result<()> {
         .with(
             Targets::new()
                 .with_default(Level::WARN)
-                .with_target("rusttalk_", Level::INFO)
-                // These print unhandled input events, typed text included (winit's
-                // "Unknown android_activity input event", egui-winit's IME warnings),
-                // and the log file must never hold passwords or recovery words.
-                .with_target("winit", Level::ERROR)
-                .with_target("egui_winit", Level::ERROR)
-                .with_target("android_activity", Level::ERROR),
+                .with_target("rusttalk_", Level::INFO),
         )
+        .with(no_typed_text())
         .with(
             tracing_subscriber::fmt::layer()
                 .with_ansi(false)
@@ -285,6 +280,18 @@ fn start_logging(path: PathBuf) -> Result<()> {
         .context("start logging")?;
     STARTED.store(true, std::sync::atomic::Ordering::Relaxed);
     Ok(())
+}
+
+/// Android: winit logs every input event it doesn't handle with its contents, and
+/// that includes the keyboard's text (passwords, recovery words).
+#[cfg(target_os = "android")]
+fn no_typed_text() -> android::NoTypedText {
+    android::NoTypedText
+}
+
+#[cfg(not(target_os = "android"))]
+fn no_typed_text() -> tracing_subscriber::layer::Identity {
+    tracing_subscriber::layer::Identity::new()
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]

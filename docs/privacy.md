@@ -276,7 +276,9 @@ and preview consent. Hardware, local sound and window preferences in
 the device.
 
 Next to the settings, `servers.json` holds each server's address, server ID
-and TLS fingerprint. `sync.json` holds the last merged device sync snapshot
+and TLS fingerprint. On Android, an empty `unsent` file means the app had to
+end while messages were still being sent; the next start shows a note and
+deletes it. `sync.json` holds the last merged device sync snapshot
 with its version: joined servers with their pins, servers left, synced
 settings, friends (with pending requests, blocks and each person's last seen
 name), and local edits not yet uploaded. `voice.json` holds the

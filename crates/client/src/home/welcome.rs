@@ -116,15 +116,28 @@ pub fn show(ui: &mut Ui, home: &mut Home) -> bool {
             }
             ui.label(ui::caption(format!("{}/{BIO_CHARS}", bio.chars().count())));
             ui.add_space(12.0);
-            // Wrapped: two large buttons don't fit side by side on a phone.
-            ui.horizontal_wrapped(|ui| {
-                if primary_large(ui, t!("common.save")).clicked() {
-                    next = Some(Some(clean_bio(bio)));
+            // Two large buttons don't fit side by side on a phone: one row each.
+            let (save, skip) = match crate::ui::is_phone(ui.ctx()) {
+                true => (
+                    ui.horizontal(|ui| primary_large(ui, t!("common.save")))
+                        .inner,
+                    ui.horizontal(|ui| secondary_large(ui, t!("welcome.skip")))
+                        .inner,
+                ),
+                false => {
+                    ui.horizontal(|ui| {
+                        let save = primary_large(ui, t!("common.save"));
+                        (save, secondary_large(ui, t!("welcome.skip")))
+                    })
+                    .inner
                 }
-                if secondary_large(ui, t!("welcome.skip")).clicked() {
-                    next = Some(None);
-                }
-            });
+            };
+            if save.clicked() {
+                next = Some(Some(clean_bio(bio)));
+            }
+            if skip.clicked() {
+                next = Some(None);
+            }
         }
     });
     match (std::mem::take(&mut home.welcome), next) {

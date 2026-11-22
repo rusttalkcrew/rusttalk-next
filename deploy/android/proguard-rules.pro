@@ -4,7 +4,8 @@
     public static int d(...);
     public static int v(...);
 }
-# GameActivity and GameTextInput are reached from native code by name.
+# GameActivity, GameTextInput and MainActivity are reached from native code by name.
 -keep class com.google.androidgamesdk.** { *; }
+-keep class io.github.rusttalkcrew.rusttalk.** { *; }
 # Only the logging goes; names stay readable in crash reports.
 -dontobfuscate

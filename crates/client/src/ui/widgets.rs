@@ -247,7 +247,9 @@ impl Field<'_> {
 
 impl Widget for Field<'_> {
     fn ui(self, ui: &mut Ui) -> Response {
-        let response = ui.add(self.edit);
+        let output = self.edit.show(ui);
+        share_with_keyboard(&output);
+        let response = output.response.response;
         if self.private {
             // For this frame only: another screen's field can get the same id.
             let pass = ui.ctx().cumulative_pass_nr();
@@ -257,6 +259,23 @@ impl Widget for Field<'_> {
         field_focus(ui, &response);
         response
     }
+}
+
+/// Phones: the on-screen keyboard works on the text around the cursor (to delete
+/// and correct it), so the focused field shares it (`android::share_field`).
+pub fn share_with_keyboard(output: &egui::text_edit::TextEditOutput) {
+    #[cfg(target_os = "android")]
+    if output.response.response.has_focus() {
+        let response = &output.response.response;
+        crate::android::share_field(
+            &response.ctx,
+            response.id,
+            output.galley.text(),
+            output.cursor_range,
+        );
+    }
+    #[cfg(not(target_os = "android"))]
+    let _ = output;
 }
 
 fn private_id(field: egui::Id) -> egui::Id {
