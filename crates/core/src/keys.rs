@@ -157,6 +157,10 @@ pub enum Event {
     MessageCreated {
         channel: String,
         id: String,
+        /// A page's document changed, and `id` names no message. Apps from before that look
+        /// the message up and find none; an event type of its own would end their connection.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        page: bool,
     },
     MessageDeleted {
         channel: String,

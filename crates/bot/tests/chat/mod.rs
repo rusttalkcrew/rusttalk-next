@@ -3,9 +3,10 @@ use anyhow::{Context, Result, ensure};
 use reqwest::{Method, StatusCode};
 use rusttalk_core::{
     auth::encode,
-    client::{Event, KeyClient, MessageBody, MessageError},
+    client::{Event, KeyClient, MAX_TEXT_CHARS, MessageBody, MessageError},
     keys::{self, KeyState, Scope},
     messages::{Ballot, MessageContext, Poll, PollPart, tally},
+    pages::{Align, Banner, Block, Layout, Picture, Placed, Row, Tile},
     presence::Update,
 };
 use serde_json::{Value, json};
@@ -75,9 +76,9 @@ pub(super) async fn wait_event(
             Ok(status.is_success() != deleted)
         },
         |update| match update {
-            Update::Event(Event::MessageCreated { channel: c, id: m }) => {
-                !deleted && *c == channel && *m == id
-            }
+            Update::Event(Event::MessageCreated {
+                channel: c, id: m, ..
+            }) => !deleted && *c == channel && *m == id,
             Update::Event(Event::MessageDeleted { channel: c, id: m }) => {
                 deleted && *c == channel && *m == id
             }
@@ -417,7 +418,7 @@ async fn poll(
     Ok(())
 }
 
-/// #210: a page channel is a text channel only staff may write to; everyone reads it.
+/// #210, #259: a page channel has one document that only staff may replace; readers read it.
 async fn page(
     a: &mut KeyClient<'_>,
     b: &mut KeyClient<'_>,
@@ -434,102 +435,148 @@ async fn page(
         listed.is_some_and(|channel| channel.kind == "page"),
         "page not listed as a page"
     );
+    ensure!(c.page(&page.id).await?.is_none(), "a new page is not empty");
     // C is a plain member: read only. B is a moderator: may change the page.
-    let Err(refused) = c.send_message(&page.id, &body(PAGE)).await else {
+    let long = format!("{PAGE}\n").repeat(1_000);
+    ensure!(long.chars().count() > MAX_TEXT_CHARS, "page fits a message");
+    let Err(refused) = c.save_page(&page.id, 0, 1, &Layout::text(&long)).await else {
         anyhow::bail!("a member changed a page");
     };
     ensure!(
         format!("{refused:#}").contains("403"),
         "unexpected refusal: {refused:#}"
     );
-    let saved = b.send_message(&page.id, &body(PAGE)).await?;
-    wait_event(c, page, &saved.id, false).await?;
-    let [newest] = c
-        .message_page(&page.id, None, 1)
+    b.save_page(&page.id, 0, 1, &Layout::text(&long))
         .await?
-        .try_into()
-        .ok()
-        .context("no page")?;
-    ensure!(c.open_message(&page.id, &newest).await?.text == PAGE);
-    // #226: a page's picture is an encrypted file. A uploads it, B saves the page again
-    // with the same reference, and C still opens it from the newest version.
-    let picture = b"not really a png, just page picture bytes";
-    let mut first = body(PAGE);
-    first.attachments = vec![
-        a.upload_file(&page.id, "map.png", "image/png", picture, None)
-            .await?,
-    ];
-    let first = a.send_message(&page.id, &first).await?;
-    let mut again = body("Updated rules");
-    // B reads the page's picture reference, as the app does before saving.
-    again.attachments = b
-        .open_message(&page.id, &b.message(&page.id, &first.id).await?)
-        .await?
-        .attachments;
-    let saved = b.send_message(&page.id, &again).await?;
-    wait_event(c, page, &saved.id, false).await?;
-    let newest_picture = async |c: &mut KeyClient<'_>| -> Result<Vec<u8>> {
-        let [newest] = c
-            .message_page(&page.id, None, 1)
-            .await?
-            .try_into()
-            .ok()
-            .context("no page")?;
-        let opened = c.open_message(&page.id, &newest).await?;
-        let kept = opened
-            .attachments
-            .first()
-            .context("page lost its picture")?;
-        c.download_file(&kept.file, None).await
+        .context("first save refused")?;
+    super::wait::until(
+        c,
+        "page event",
+        async |client| Ok(client.page(&page.id).await?.is_some()),
+        |update| {
+            matches!(
+                update,
+                Update::Event(Event::MessageCreated { page: true, .. })
+            )
+        },
+    )
+    .await?;
+    let stored = c.page(&page.id).await?.context("no page")?;
+    ensure!(c.open_page(&page.id, &stored).await? == Layout::text(&long));
+
+    // #274: a title and tiles of their own widths, one of a kind no app here knows.
+    let placed = |width, tile| Placed { width, tile };
+    let tiles = Layout {
+        title: PAGE.into(),
+        banner: None,
+        rows: vec![
+            Row {
+                tiles: vec![
+                    placed(5, Tile::markdown(PAGE)),
+                    placed(4, Tile::markdown(format!("## {PAGE}"))),
+                    placed(
+                        3,
+                        Tile::Unknown {
+                            kind: 9,
+                            data: PAGE.as_bytes().to_vec(),
+                        },
+                    ),
+                ],
+            },
+            Row {
+                tiles: vec![placed(7, Tile::markdown(PAGE))],
+            },
+        ],
     };
-    ensure!(newest_picture(c).await? == picture);
-    // B, a moderator, deletes their version and asks to remove its files the way an
-    // older app does: the picture is A's, so it stays for the version before.
-    b.delete_message(&page.id, &saved.id).await?;
-    let file = again.attachments.first().context("no picture")?;
+
+    // A started from the empty page, so their save must not replace B's.
     ensure!(
-        b.delete_message_file(&file.file.id, &saved.person)
-            .await
-            .is_err(),
-        "a moderator removed another member's page picture"
+        a.save_page(&page.id, 0, 1, &tiles).await?.is_none(),
+        "a save replaced a page it never saw"
     );
-    wait_event(c, page, &saved.id, true).await?;
-    ensure!(newest_picture(c).await? == picture);
-    // #269: a picture the newest page version keeps outlives file expiry (12 s in e2e)
-    // and expires once a newer version drops it. Only editors may save a version.
-    let mut kept = body("Pinned rules");
-    kept.attachments = vec![
-        a.upload_file(&page.id, "kept.png", "image/png", picture, None)
-            .await?,
-    ];
-    let file = kept.attachments[0].file.clone();
-    let id = *keys::random_key()?;
+    a.save_page(&page.id, 1, 2, &tiles)
+        .await?
+        .context("second save refused")?;
+    let Err(refused) = b.send_message(&page.id, &body(PAGE)).await else {
+        anyhow::bail!("a page took a message");
+    };
     ensure!(
-        c.post_page(&page.id, id, &kept).await.is_err(),
-        "a member saved a page version"
+        format!("{refused:#}").contains("409"),
+        "unexpected refusal: {refused:#}"
     );
-    let pinned = a.post_page(&page.id, id, &kept).await?;
-    wait_event(c, page, &pinned.id, false).await?;
-    tokio::time::sleep(std::time::Duration::from_secs(18)).await;
-    ensure!(
-        c.download_file(&file, None).await? == picture,
-        "the page lost its kept picture"
-    );
-    let dropped = a
-        .post_page(
-            &page.id,
-            *keys::random_key()?,
-            &body("Rules without pictures"),
-        )
+
+    // #285: a banner and a picture in the text outlive file expiry (12 s in e2e) while
+    // the page uses them, and expire once a save drops them.
+    let bytes = b"not really a png, just page picture bytes";
+    let banner = a
+        .upload_file(&page.id, "banner.png", "image/png", bytes, None)
         .await?;
-    wait_event(c, page, &dropped.id, false).await?;
+    let inline = a
+        .upload_file(&page.id, "raid.png", "image/png", bytes, None)
+        .await?;
+    let mut illustrated = tiles.clone();
+    illustrated.banner = Some(Banner {
+        file: banner.clone(),
+        height: 250,
+        focus: [128, 40],
+    });
+    illustrated.rows[1].tiles[0].tile = Tile::Blocks(vec![
+        Block::Markdown(PAGE.into()),
+        Block::Picture(Picture {
+            file: inline.clone(),
+            width: 60,
+            align: Align::Right,
+        }),
+    ]);
+    ensure!(
+        c.save_page(&page.id, 2, 3, &illustrated).await.is_err(),
+        "a member kept files"
+    );
+    a.save_page(&page.id, 2, 3, &illustrated)
+        .await?
+        .context("picture save refused")?;
+    tokio::time::sleep(std::time::Duration::from_secs(18)).await;
+    let stored = c.page(&page.id).await?.context("no page with pictures")?;
+    ensure!(c.open_page(&page.id, &stored).await? == illustrated);
+    for file in [&banner, &inline] {
+        ensure!(
+            c.download_file(&file.file, None).await? == bytes,
+            "the page lost a kept picture"
+        );
+    }
+    a.save_page(&page.id, 3, 4, &tiles)
+        .await?
+        .context("save without pictures refused")?;
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        while c.download_file(&file, None).await.is_ok() {
+        while c.download_file(&banner.file, None).await.is_ok() {
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         }
     })
     .await
     .context("a dropped page picture did not expire")?;
+
+    // Taking C's access away rotates the key. The page from before still opens.
+    a.request(
+        Method::PUT,
+        &format!("/v1/channels/{}/permissions/member", encode(&page.id)),
+    )
+    .json(&json!({"flags": 0}))
+    .send()
+    .await?
+    .error_for_status()?;
+    receive_key(a, page, 2).await?;
+    receive_key(b, page, 2).await?;
+    let stored = b.page(&page.id).await?.context("no page after rotation")?;
+    ensure!(stored.epoch == 1 && stored.version == 4);
+    ensure!(b.open_page(&page.id, &stored).await? == tiles);
+    let Err(refused) = c.page(&page.id).await.map(|_| ()) else {
+        anyhow::bail!("a page was fetched without read");
+    };
+    ensure!(
+        format!("{refused:#}").contains("403"),
+        "unexpected refusal: {refused:#}"
+    );
+
     // Later key checks expect only the first text channel, so remove this one.
     a.request(
         Method::DELETE,
@@ -539,7 +586,7 @@ async fn page(
     .await?
     .error_for_status()?;
     println!(
-        "#210/#226/#269 verified a page channel: members read it and its pictures, only moderators and up change it, kept pictures outlive file expiry"
+        "#259/#274 verified page documents: long pages, tiles, pictures outliving expiry, rights, conflicts, rotation"
     );
     Ok(())
 }

@@ -34,7 +34,7 @@ tries to connect. Above it the app directs people to Settings → Updates.
 | Method and path | Request | Success |
 | --- | --- | --- |
 | GET `/v1/health` | Empty | 200, `ok` |
-| GET `/v1/server-info` | Empty | 200, `{open_joining, version, protocol, dm_backfill}` |
+| GET `/v1/server-info` | Empty | 200, `{open_joining, version, protocol, dm_backfill, pages}` |
 | GET `/v1/auth/challenge` | Empty | 200, `{challenge, server_id, signature}` |
 | POST `/v1/auth/sign-in` | `{protocol, person_id, certificate, challenge, signature, invite?}` | 200, `{token, expires_at}` |
 | POST `/v1/auth/join` | `{protocol, person_id, certificate, challenge, signature}` | 200, `{token, expires_at}` |
@@ -208,12 +208,12 @@ errors may have an empty body. The API logs a request ID, status and reason.
 
 | Status | Codes |
 | --- | --- |
-| 400 | `invalid_json`, `invalid_encoding`, `invalid_query`, `invalid_forwarded_ip`, `invalid_revocation`, `invalid_invite_limits`, `invalid_role_rank`, `invalid_role_count`, `role_id_required`, `already_owner`, `unexpected_invite`, `invite_name_required`, `invalid_member_cap`, `invalid_certificate`, `invalid_metadata`, `invalid_envelope`, `invalid_channel_flags`, `invalid_audio_kbps`, `invalid_order`, `invalid_dm_peer`, `not_a_voice_channel`, `invalid_message`, `invalid_keep`, `invalid_file_body`, `invalid_file_acceptance`, `invalid_event_query`, `invalid_sync_blob`, `invalid_listing`, `invalid_listing_settings`, `invalid_index_url`, `invalid_index_tls_fingerprint` |
+| 400 | `invalid_json`, `invalid_encoding`, `invalid_query`, `invalid_forwarded_ip`, `invalid_revocation`, `invalid_invite_limits`, `invalid_role_rank`, `invalid_role_count`, `role_id_required`, `already_owner`, `unexpected_invite`, `invite_name_required`, `invalid_member_cap`, `invalid_certificate`, `invalid_metadata`, `invalid_envelope`, `invalid_channel_flags`, `invalid_audio_kbps`, `invalid_order`, `invalid_dm_peer`, `not_a_voice_channel`, `invalid_message`, `invalid_keep`, `invalid_page`, `invalid_page_version`, `invalid_file_body`, `invalid_file_acceptance`, `invalid_event_query`, `invalid_sync_blob`, `invalid_listing`, `invalid_listing_settings`, `invalid_index_url`, `invalid_index_tls_fingerprint` |
 | 401 | `invalid_challenge`, `invalid_certificate`, `invalid_device_signature`, `invalid_session`, `token_expired`, `invalid_livekit_webhook` |
 | 403 | `invite_required`, `invalid_invite`, `person_banned`, `ip_banned`, `device_revoked`, `device_certificate_required`, `permission_denied`, `role_hierarchy`, `cannot_grant_permission`, `built_in_role`, `owner_required`, `open_joining_disabled`, `scope_read_denied`, `recipient_read_denied`, `channel_read_denied`, `channel_write_denied`, `live_file_peer_not_in_room` |
-| 404 | `invite_not_found`, `member_not_found`, `ban_not_found`, `role_not_found`, `category_not_found`, `channel_not_found`, `message_not_found`, `message_device_not_found`, `file_not_found`, `avatar_not_found`, `icon_not_found`, `emoji_not_found`, `pack_not_found` |
+| 404 | `invite_not_found`, `member_not_found`, `ban_not_found`, `role_not_found`, `category_not_found`, `channel_not_found`, `message_not_found`, `message_device_not_found`, `file_not_found`, `avatar_not_found`, `icon_not_found`, `emoji_not_found`, `pack_not_found`, `page_not_found` |
 | 408 | `file_upload_timeout` |
-| 409 | `owner_cannot_leave`, `already_banned`, `no_active_ip`, `role_exists`, `role_in_use`, `role_limit`, `member_cap_reached`, `device_limit`, `device_certificate_changed`, `revocation_limit`, `epoch_changed`, `space_key_unavailable`, `metadata_epoch_changed`, `category_exists`, `category_in_use`, `channel_exists`, `order_changed`, `message_exists`, `file_exists`, `file_shared`, `shared_limit`, `emoji_exists`, `emoji_limit`, `sticker_limit`, `pack_exists`, `pack_limit`, `last_pack` |
+| 409 | `owner_cannot_leave`, `already_banned`, `no_active_ip`, `role_exists`, `role_in_use`, `role_limit`, `member_cap_reached`, `device_limit`, `device_certificate_changed`, `revocation_limit`, `epoch_changed`, `page_changed`, `page_channel`, `space_key_unavailable`, `metadata_epoch_changed`, `category_exists`, `category_in_use`, `channel_exists`, `order_changed`, `message_exists`, `file_exists`, `file_shared`, `shared_limit`, `emoji_exists`, `emoji_limit`, `sticker_limit`, `pack_exists`, `pack_limit`, `last_pack` |
 | 413 | `body_too_large` when generated after reading the body, `file_too_large`, `file_member_quota`, `file_server_quota`, `emoji_too_large` |
 | 415 | `expected_json` |
 | 429 | `challenge_limit`, `invite_preview_limit`, `open_join_limit` |
@@ -369,31 +369,10 @@ stays an ordinary file. Apps that do not know the types show a small file.
 ## Channels and categories
 
 All routes require a bearer header. Channel kind is `text`, `voice`, `page`, or `dm`.
-A `page` channel works exactly like a text channel on the server (same messages,
-keys and flags); clients show only its newest message, as one Markdown page, and
-saving a change posts the whole page as a new message. A new page channel gives
+A `page` channel has the keys and flags of a text channel and one
+[document](#page-documents) instead of a chat. A new page channel gives
 read and write (3) to Owner, Admin and Moderator and read (1) to Member, so only
-people with write can change the page. Older clients show it as a text channel. The page's pictures are
-that message's stored files (at most four, like any message). Saving a change
-sends the references of the pictures it keeps again in the new message, so their
-blobs are not uploaded twice. A version saved with the same link also keeps its
-link preview. The message post of a page version adds `keep`, the IDs of every
-stored file it references (files and thumbnails, at most 8, no repeats). The API
-keeps only those that are unexpired files stored in that page channel and leaves
-the others out, so a page whose picture is gone still saves; `keep` on any other
-channel, a malformed ID, a repeat or more than 8 IDs is `400 invalid_keep`. An
-editor can thus keep any 8 live files of the page channel; they still count toward
-their uploader's quota. Files the page's newest version keeps never expire. When a newer version (or deleting the
-newest) leaves a file out, it expires with the server's file retention from its
-upload time again, like any other file. A version saved without `keep`, as older
-clients do, keeps nothing. When the editor who saved a version leaves, is kicked
-or banned, or revokes the device that saved it, that version no longer keeps
-files. Older servers ignore `keep`, and the pictures expire as before.
-Several versions can thus reference one blob: when deleting a page version, the
-client skips the files another loaded version still references. Older clients,
-which show a page as a text channel, do not; a moderator's delete still cannot
-remove another member's file (see Files). Link previews on a page work exactly as
-in chat.
+people with write can change the page.
 Channel and category IDs are client-generated random 32-byte values.
 `position` is an integer used for ordering with ID as the tiebreaker.
 Text and voice channels each have one category. Channel kind is fixed at creation.
@@ -644,7 +623,7 @@ and the client can restart from the newest page.
 | Method and path | Body or query | Permission and success |
 | --- | --- | --- |
 | GET `/v1/channels/{channel}/messages?before={id}&limit={n}` | Optional cursor and limit, 1–100, default 50 | `read`. 200, array of message records |
-| POST `/v1/channels/{channel}/messages` | `{id, epoch, envelope}`, and a page version's optional `keep` (file IDs) | `write`. 201, the stored message record |
+| POST `/v1/channels/{channel}/messages` | `{id, epoch, envelope}` | `write`. 201, the stored message record |
 | GET `/v1/channels/{channel}/messages/{id}` | Empty | `read`. 200, one message record |
 | DELETE `/v1/channels/{channel}/messages/{id}` | Empty | The author or a reader with `delete_messages`. 204 |
 | GET `/v1/channels/{channel}/message-devices/{device}/{person}` | Empty | `read`. 200, the public device certificate as a base64url JSON string, when the device authored a retained message here |
@@ -705,6 +684,51 @@ delete removes the original, clients suppress edits that still reference that
 ID. Deletes apply per stored record, because the API cannot see which records
 are edits. When a client deletes a message, including a moderator delete, it
 also deletes every edit of it that it has opened or sent.
+
+## Page documents
+
+A page channel's content is one signed ciphertext, replaced by each save
+(see [Crypto](crypto.md#page-documents)). Only the newest version is kept.
+Servers that have these routes send `pages: true` in server info. Apps don't
+fall back to messages on servers without them.
+
+| Method and path | Body | Permission and success |
+| --- | --- | --- |
+| GET `/v1/channels/{channel}/page` | Empty | `read`. 200, the page record, or 204 before the first save |
+| PUT `/v1/channels/{channel}/page` | `{base, version, epoch, envelope, keep?}` | `write`. 200, the stored page record |
+
+A page record has `{version, epoch, person, sender_device, at, envelope}`.
+`base` is the stored version the save replaces, or 0 when there is none. If
+another is stored, the API returns `409 page_changed` and changes nothing.
+`version` is above `base` by at most 10,000 (`400 invalid_page_version`
+otherwise): normally one, or more to get past a version the app saw before the
+server was restored from a backup. The envelope is at most 65,536 bytes and the
+PUT limit is 89,366 bytes of JSON. As for messages, the API checks the
+signature against the authenticated person and device (`400 invalid_page`) and
+requires the current epoch (`409 epoch_changed`). Other channels return
+`404 page_not_found`. The editor's certificate is served by
+`message-devices` while their document is stored.
+
+`keep` lists every stored file the page uses (pictures, banner and thumbnails,
+at most 32, no repeats; `400 invalid_keep` otherwise). The API keeps only
+those that are unexpired files stored in that page channel and leaves the
+others out, so a page whose picture is gone still saves. An editor can thus
+keep any 32 live files of the channel; they still count toward their
+uploader's quota. Kept files never expire. A file the next save leaves out
+expires with the server's retention from its upload time, like any other.
+When the editor who saved the page last leaves, is kicked or banned, or revokes
+the device that saved it, the page no longer keeps files. A page from before
+documents keeps what its newest message listed until the channel's first
+document is saved.
+
+A save sends `message_created` to readers with `page: true` and an `id` that
+names no message. It is not an event type of its own, because apps from before
+documents end their connection on one they don't know. Those apps look up the
+ID, find nothing and carry on.
+
+Page channels refuse new messages with `409 page_channel`, so an older app's
+save fails visibly. Messages stored there before documents stay readable over
+the message routes and are not converted: apps with documents don't show them.
 
 ## Voice
 
@@ -1120,7 +1144,7 @@ session validity before pushing updates.
 | `voice_changed` | `channel`. Fetch current voice participants. Sent to current channel readers on signed LiveKit join, leave and room-end notices |
 | `voice_moved` | `devices`, `from`, `to`. A moderator moved these devices' call; join `to`. Sent only to those devices |
 | `dm_created` | `channel`. Refresh the catalog and reconcile keys |
-| `message_created` | `channel`, `id`. Fetch the ciphertext record |
+| `message_created` | `channel`, `id`, optional `page`. Fetch the ciphertext record, or with `page: true` the [page document](#page-documents) |
 | `message_deleted` | `channel`, `id`. Remove the record and hide edits that reference it |
 | `live_file_accepted` | `channel`, accepting `device`, signed `acceptance` object, optional `data` (true for data-room acceptances). Sent only to the offering device while it has channel read access |
 | `resync` | None. The socket fell behind. Fetch current state, including keys, catalog, member presence and devices, and visible message history |

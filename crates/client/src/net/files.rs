@@ -32,16 +32,14 @@ use std::time::Instant;
 
 /// Upload the files, then send the message with them; `false` when an upload failed.
 /// A link preview that fails to upload is left out, without failing the message.
-/// Files already in `body` are kept ones (see `Draft::keep`): never removed here.
 pub(super) async fn send(
     ctx: &Ctx,
     url: &Url,
     client: &mut KeyClient<'_>,
-    (channel, id, page): (Id, Id, bool),
+    (channel, id): (Id, Id),
     mut body: MessageBody,
     (files, preview, inline): (Vec<PathBuf>, Option<Arc<Made>>, Vec<Inline>),
 ) -> Result<bool> {
-    let kept = body.attachments.len();
     if let Some(first) = files.first() {
         let label = match files.len() {
             1 => file_name(first),
@@ -62,7 +60,7 @@ pub(super) async fn send(
         ctx.send(Update::Uploading(url.clone(), channel, None));
         if let Err(error) = uploaded {
             tracing::warn!(error = %format_args!("{error:#}"), "uploading a file failed");
-            discard(client, &body.attachments[kept..]).await;
+            discard(client, &body.attachments).await;
             ctx.send(Update::Failed(upload_problem(&error).into()));
             return Ok(false);
         }
@@ -84,21 +82,17 @@ pub(super) async fn send(
             Ok(attachment) => body.attachments.push(attachment),
             Err(error) => {
                 tracing::warn!(error = %format_args!("{error:#}"), "uploading an emoji file failed");
-                discard(client, &body.attachments[kept..]).await;
+                discard(client, &body.attachments).await;
                 at_most(CLEANUP, discard(client, &leftover)).await;
                 ctx.send(Update::Failed(upload_problem(&error).into()));
                 return Ok(false);
             }
         }
     }
-    let posted = match page {
-        true => client.post_page(&channel, id, &body).await,
-        false => client.post_message(&channel, id, &body).await,
-    };
-    let record = match posted {
+    let record = match client.post_message(&channel, id, &body).await {
         Ok(record) => record,
         Err(error) => {
-            discard(client, &body.attachments[kept..]).await;
+            discard(client, &body.attachments).await;
             at_most(CLEANUP, discard(client, &leftover)).await;
             return Err(error);
         }
@@ -106,6 +100,55 @@ pub(super) async fn send(
     send_messages(ctx, url, channel, vec![to_msg(&record, &body)], false, None);
     at_most(CLEANUP, discard(client, &leftover)).await;
     Ok(true)
+}
+
+/// What stands in for a picked picture until it is uploaded: a random ID, and room for
+/// a thumbnail, so the page's size comes out right. It opens nothing.
+pub(crate) fn stand_in(path: &Path) -> Option<Attachment> {
+    let name = fit_file_name(&file_name(path));
+    let (mut file, _) = prepare_file(&name, media_type(path), &[], &[]).ok()?;
+    let (thumbnail, _) = prepare_file(&name, media_type(path), &[], &[]).ok()?;
+    file.thumbnail = Some(thumbnail.file);
+    Some(file)
+}
+
+/// Upload the pictures of a page being saved, in order; `None` when one failed, and
+/// then none of them stay.
+pub(super) async fn upload_pictures(
+    ctx: &Ctx,
+    url: &Url,
+    client: &KeyClient<'_>,
+    channel: Id,
+    paths: Vec<PathBuf>,
+) -> Option<Vec<Attachment>> {
+    let mut sent = Vec::new();
+    let Some(first) = paths.first() else {
+        return Some(sent);
+    };
+    let label = match paths.len() {
+        1 => file_name(first),
+        count => t!("files.count", count = count),
+    };
+    let count = paths.len() as f32;
+    let shown = {
+        let (ctx, url) = (ctx.clone(), url.clone());
+        move |done: f32| {
+            let what = Some((label.clone(), done / count));
+            ctx.send(Update::Uploading(url.clone(), channel, what));
+        }
+    };
+    shown(0.0);
+    let uploaded = upload(client, &channel, paths, &mut sent, shown).await;
+    ctx.send(Update::Uploading(url.clone(), channel, None));
+    match uploaded {
+        Ok(()) => Some(sent),
+        Err(error) => {
+            tracing::warn!(error = %format_args!("{error:#}"), "uploading a page picture failed");
+            discard(client, &sent).await;
+            ctx.send(Update::Failed(upload_problem(&error).into()));
+            None
+        }
+    }
 }
 
 /// Upload another server's emoji or sticker as a small file (no thumbnail) on this one.
@@ -285,6 +328,9 @@ pub(super) async fn sticker_file(ctx: &Ctx, client: &KeyClient<'_>, file: BlobRe
 /// Decoded memory one picture may use: in the viewer, and playing small in the chat.
 const FULL_BUDGET: usize = 64 * 1024 * 1024;
 const INLINE_BUDGET: usize = 24 * 1024 * 1024;
+/// A page's picture: sharp at the page's widest.
+const WIDE_EDGE: u32 = 1600;
+const WIDE_BUDGET: usize = 32 * 1024 * 1024;
 
 /// Download and decode a picture as asked.
 pub(super) async fn image(ctx: &Ctx, client: &KeyClient<'_>, file: BlobRef, fetch: Fetch) {
@@ -305,6 +351,15 @@ pub(super) async fn image(ctx: &Ctx, client: &KeyClient<'_>, file: BlobRef, fetc
                         .map(frame_image)
                         .collect()
                 }
+                // A long animation is too much at that size, so it plays small.
+                Fetch::Wide => decode_frames(&bytes, Some(WIDE_EDGE), WIDE_BUDGET)
+                    .or_else(|_| {
+                        let small = crate::files::THUMBNAIL as u32;
+                        decode_frames(&bytes, Some(small), INLINE_BUDGET)
+                    })?
+                    .into_iter()
+                    .map(frame_image)
+                    .collect(),
             })
         })
         .await?
@@ -459,7 +514,7 @@ pub(super) async fn unshare(
 }
 
 /// Remove uploaded files that will not be sent after all.
-async fn discard(client: &KeyClient<'_>, files: &[Attachment]) {
+pub(super) async fn discard(client: &KeyClient<'_>, files: &[Attachment]) {
     for file in files {
         for blob in std::iter::once(&file.file).chain(&file.thumbnail) {
             if let Err(error) = client.delete_file(&blob.id).await {

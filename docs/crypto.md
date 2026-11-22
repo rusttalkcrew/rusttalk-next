@@ -519,6 +519,61 @@ that has seen the owner's signed revocation also rejects those records when
 a dishonest API backdates them or supplies the genuine archived certificate.
 Membership removal alone provides no such signed proof.
 
+## Page documents
+
+A page channel's document is a format byte (1 or 2), a random 24-byte nonce,
+the XChaCha20-Poly1305 ciphertext with its tag under the channel epoch key,
+and a 64-byte Ed25519 device signature. It is at most 65,536 bytes, so the
+plaintext is at most 65,431. The associated data is
+
+```text
+"rusttalk-page-v1" || server_id (32 bytes) || channel_id (32 bytes) || epoch (8 bytes, big endian) || version (8 bytes, big endian) || device (32 bytes) || person (32 bytes)
+```
+
+The signature covers the associated data, then the envelope without the
+signature. The domain differs from the message domain, so a page and a message
+can't pass as each other. Readers check the editor's root-signed certificate,
+current or archived, refuse removed devices as for messages, and then decrypt.
+A page last saved by a device removed later therefore stops opening until
+someone who can write replaces it.
+
+Format 1's plaintext is UTF-8 Markdown, the whole page in one full-width tile.
+Apps read it but always write format 2, also for text alone, so the format byte
+does not tell the server which pages have tiles. Format 2's plaintext holds
+a title and rows of tiles, in reading order:
+
+| Field | Encoding | Limit |
+| --- | --- | --- |
+| Title | Two-byte big-endian length, then that many bytes of UTF-8 | One line of at most 100 Unicode scalar values |
+| Rows | One-byte count, then that many rows | |
+| Row | One-byte tile count, then that many tiles | 1–3 tiles, together at most 12 wide |
+| Tile | One-byte width in twelfths of the page, one-byte kind, two-byte big-endian length, then that many bytes | Width 3–12, 64 tiles per page |
+
+Kind 1 is UTF-8 Markdown. Kind 2 mixes text and pictures: a one-byte count
+(1–33), then that many blocks. Block 1 is text, a two-byte big-endian length
+and UTF-8 Markdown. Block 2 is a picture: one byte of width in percent of the
+tile (10–100), one of alignment (0 left, 1 center, 2 right) and a stored-file
+reference as in [messages](protocol.md#files). An optional banner follows the
+rows: byte 1, a two-byte big-endian height in thousandths of the page's width
+(80–600), two bytes for the part that shows (horizontal, vertical, 0–255) and
+such a reference. A page has at most 16 pictures with the banner, each
+`image/png`, `image/jpeg`, `image/gif` or `image/webp`. The references, and
+with them the files' names and keys, are only inside the ciphertext.
+
+Apps keep other kinds byte for byte when saving and
+show that the app needs an update. Readers reject any other format, a count
+or width out of range, invalid UTF-8 and trailing bytes. The server sees the format
+byte, which is the same for every page saved now, and the size, not the title, rows,
+tiles or kinds.
+
+Each device saves the newest version it opened per channel, with a SHA-256 of
+that envelope (`page_versions/<server ID>.json`). It doesn't show a lower
+version, another envelope under the same version, or no document where it has
+seen one. Only documents that verified and decrypted move that mark. A device
+that never saw the newer version can't detect the replay, and a server can
+withhold newer versions. If the saved marks can't be read, the app logs it and
+starts fresh.
+
 ## Server-stored file encryption
 
 The sender generates a fresh random 32-byte key and independent random 32-byte

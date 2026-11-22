@@ -17,6 +17,9 @@ mod highlight;
 use super::{emoji_image, mentions::Message};
 use crate::{emoji, server::Directory, ui};
 
+/// List levels that still indent. Deeper ones would cost memory by the square of a page.
+const MAX_INDENT: usize = 32;
+
 #[derive(Clone, Default)]
 struct Style {
     bold: bool,
@@ -25,7 +28,7 @@ struct Style {
     strike: bool,
     heading: u8,
     code: bool,
-    link: Option<String>,
+    link: Option<Arc<str>>,
     // A RustTalk invite with a card: shown shortened, copied in full.
     invite: bool,
 }
@@ -168,7 +171,9 @@ impl Document {
                         Tag::Strong => style.bold = true,
                         Tag::Emphasis => style.italic = true,
                         Tag::Strikethrough => style.strike = true,
-                        Tag::Link { dest_url, .. } => style.link = web_link(&dest_url),
+                        Tag::Link { dest_url, .. } => {
+                            style.link = web_link(&dest_url).map(Arc::from)
+                        }
                         Tag::BlockQuote(_) => quote += 1,
                         Tag::List(start) => lists.push(start),
                         Tag::Item => {
@@ -184,7 +189,7 @@ impl Document {
                             line.push(Span {
                                 text: format!(
                                     "{}{prefix}",
-                                    "    ".repeat(lists.len().saturating_sub(1))
+                                    "    ".repeat(lists.len().saturating_sub(1).min(MAX_INDENT))
                                 ),
                                 style: style.clone(),
                                 literal: false,
@@ -253,7 +258,7 @@ impl Document {
                         for piece in finder.spans(&text) {
                             let mut style = style.clone();
                             if piece.kind().is_some() {
-                                style.link = web_link(piece.as_str());
+                                style.link = web_link(piece.as_str()).map(Arc::from);
                                 let link = piece.as_str();
                                 style.invite =
                                     style.link.is_none() && InviteLink::parse(link).is_ok();
@@ -422,14 +427,14 @@ fn show_line(
                 while let Some(next) = spans.next_if(|next| next.style.link.as_ref() == Some(url)) {
                     label.push_str(&message.resolve(dir, &next.text));
                 }
-                if label != *url
+                if *label != **url
                     && let Ok(destination) = url::Url::parse(url)
                     && let Some(host) = destination.host_str()
                 {
                     label = format!("{label} ({host})");
                 }
                 ui.style_mut().url_in_tooltip = true;
-                ui.hyperlink_to(label, url);
+                ui.hyperlink_to(label, &**url);
                 continue;
             }
             let size = match s.style.heading {
@@ -580,6 +585,21 @@ pub(super) fn cached(ui: &Ui, text: &str) -> Arc<Document> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deep_lists_stop_indenting_so_a_whole_page_stays_small() {
+        let source = format!("{}x", "- ".repeat(4_000));
+        let doc = Document::parse(&source);
+        let widest = (doc.blocks.iter())
+            .filter_map(|block| match block {
+                Block::Line(spans) => spans.first(),
+                Block::Code { .. } => None,
+            })
+            .map(|span| span.text.len())
+            .max()
+            .unwrap();
+        assert!(widest <= MAX_INDENT * 4 + "• ".len() + 1, "{widest}");
+    }
 
     #[test]
     fn previews_keep_visible_text_and_leave_code_literal() {

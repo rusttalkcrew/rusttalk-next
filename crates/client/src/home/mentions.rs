@@ -154,6 +154,15 @@ impl Message {
         Self { doc, wide, inline }
     }
 
+    /// Text by a person that carries no files, like a page's tile.
+    pub(super) fn of_text(doc: Arc<Document>, dir: &Directory, channel: Id, person: Id) -> Self {
+        Self {
+            wide: !allowed_to_send(&doc, false) && can_mention_everyone(dir, channel, person),
+            doc,
+            inline: Vec::new(),
+        }
+    }
+
     /// The picture of a `:name:` emoji from another server that this message carries.
     pub(super) fn inline_picture(
         &self,

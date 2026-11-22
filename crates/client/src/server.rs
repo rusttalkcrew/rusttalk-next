@@ -229,6 +229,8 @@ pub struct Directory {
     pub hide_offline: Option<bool>,
     /// The server stores bios (older servers drop them).
     pub bios: bool,
+    /// The server keeps page documents (older servers had pages as messages).
+    pub pages: bool,
     /// This person has a name here this device can't read yet (no key for its
     /// epoch), so it must not be taken for having no name.
     pub my_name_hidden: bool,
@@ -396,7 +398,7 @@ pub struct Channel {
     pub name: String,
     pub topic: String,
     pub voice: bool,
-    /// Shows its newest message as one Markdown page instead of a chat.
+    /// Shows its document as one Markdown page instead of a chat.
     pub page: bool,
     /// Opus bitrate of a voice channel, in kbps.
     pub audio_kbps: u32,
@@ -556,6 +558,35 @@ pub enum Body {
     },
 }
 
+/// A page channel's document as last loaded.
+#[derive(Clone, Default)]
+pub struct Page {
+    /// The server's version, which a save replaces; 0 before the first.
+    pub version: i64,
+    /// Who saved it when, with all of its text (for notifications) or `Body::Unreadable`.
+    pub msg: Option<Msg>,
+    pub layout: rusttalk_core::pages::Layout,
+    /// Older than this device has seen, so it isn't shown.
+    pub outdated: bool,
+}
+
+impl Page {
+    /// Whether there is nothing here this device can't open.
+    pub fn readable(&self) -> bool {
+        !self.outdated && !(self.msg.as_ref()).is_some_and(|msg| msg.body == Body::Unreadable)
+    }
+}
+
+/// A page channel on screen.
+#[derive(Default)]
+pub struct PageState {
+    /// `None` until it loaded.
+    pub page: Option<Page>,
+    pub failed: bool,
+    pub editor: Option<crate::home::page::editor::Editor>,
+    pub saving: bool,
+}
+
 pub struct Staged {
     pub path: PathBuf,
     pub name: String,
@@ -598,6 +629,7 @@ pub struct Chat {
     polls: HashMap<Id, PollEvents>,
     /// The poll being written in place of the composer.
     pub poll_editor: Option<crate::home::polls::Editor>,
+    pub page: PageState,
     pub loading: bool,
     pub at_start: bool,
     pub draft: String,

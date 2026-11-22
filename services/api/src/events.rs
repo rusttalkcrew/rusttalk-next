@@ -326,6 +326,7 @@ mod tests {
         let message = Event::MessageCreated {
             channel: "c".into(),
             id: "m".into(),
+            page: false,
         };
         assert!(queue(&mut notices, Change::Update(Update::Event(message))) == Recheck::None);
         let member = Event::MemberChanged {

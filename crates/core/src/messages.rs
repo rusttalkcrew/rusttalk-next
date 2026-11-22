@@ -100,6 +100,8 @@ pub enum MessageError {
     Authentication,
     #[error("invalid attachment reference")]
     Attachment,
+    #[error("page exceeds 64 KiB")]
+    PageLimit,
     #[error("message text exceeds 2,000 characters")]
     TextLimit,
     #[error("message randomness unavailable")]

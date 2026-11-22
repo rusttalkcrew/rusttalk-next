@@ -11,6 +11,10 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Pages can be much longer and warn when two people edit at once. Existing pages start empty: keep a copy before updating
+- Pages have a title and tiles you can drag, resize and format right on the page
+- Pages take a banner and up to 16 pictures between the paragraphs. Link preview cards on pages are gone for now
+
 ## v0.1.11 - 2026-11-22
 
 - Your microphone works again when a moderator unmutes you, without rejoining the call

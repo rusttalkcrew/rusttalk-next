@@ -23,7 +23,7 @@ use crate::{
 enum ChannelKind {
     Text,
     Voice,
-    /// A text channel shown as one Markdown page: its newest message.
+    /// A text channel shown as one page: its document (see `pages`).
     Page,
 }
 

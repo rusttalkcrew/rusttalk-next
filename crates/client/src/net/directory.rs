@@ -213,6 +213,7 @@ pub(super) async fn directory(
         }
         kept
     });
+    dir.pages = state.pages;
     super::save_pins(ctx, url, client, state);
     state.pictures = pictures;
     if let Some(before) = &state.last {
@@ -529,6 +530,7 @@ async fn build(
         hide_offline: me["hide_offline"].as_bool(),
         my_name_hidden,
         bios: (members.as_array().into_iter().flatten()).any(|row| row.get("bio_ct").is_some()),
+        pages: false,
         me: *client.identity.certificate.person_id(),
         perms,
         categories,

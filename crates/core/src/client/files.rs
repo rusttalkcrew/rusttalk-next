@@ -211,7 +211,8 @@ const PICTURE_FORMATS: &[ImageFormat] = &[
     ImageFormat::Gif,
     ImageFormat::WebP,
 ];
-const PICTURE_EDGE: u32 = 4096;
+/// A picture wider or taller than this isn't decoded.
+pub const PICTURE_EDGE: u32 = 4096;
 const PICTURE_ALLOC: u64 = 64 * 1024 * 1024;
 /// Frames of one animation, however small they are.
 const MAX_ANIMATION_FRAMES: usize = 400;

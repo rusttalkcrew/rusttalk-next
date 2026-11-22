@@ -99,7 +99,7 @@ impl Attachment {
         Ok(())
     }
 
-    pub(super) fn encode(&self, out: &mut Vec<u8>) -> Result<()> {
+    pub(crate) fn encode(&self, out: &mut Vec<u8>) -> Result<()> {
         self.validate()?;
         self.file.encode(out);
         out.push(self.name.len() as u8);
@@ -113,7 +113,7 @@ impl Attachment {
         Ok(())
     }
 
-    pub(super) fn decode(input: &mut &[u8]) -> Result<Self> {
+    pub(crate) fn decode(input: &mut &[u8]) -> Result<Self> {
         fn string(input: &mut &[u8], max: usize) -> Result<String> {
             let (&len, rest) = input.split_first().ok_or(MessageError::Attachment)?;
             if len as usize > max {

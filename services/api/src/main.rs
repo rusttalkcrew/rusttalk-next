@@ -11,6 +11,7 @@ mod members;
 mod messages;
 mod metadata;
 mod page_files;
+mod pages;
 mod presence;
 mod roles;
 mod store;
@@ -409,6 +410,11 @@ async fn serve(app: App) -> io::Result<()> {
                     get(messages::list).post(messages::create),
                 )
                 .layer(RequestBodyLimitLayer::new(messages::BODY_LIMIT)),
+        )
+        .merge(
+            Router::new()
+                .route("/v1/channels/{id}/page", get(pages::get).put(pages::put))
+                .layer(RequestBodyLimitLayer::new(rusttalk_core::pages::BODY_LIMIT)),
         )
         .with_state(app)
         .layer(middleware::from_fn(finish_changes))

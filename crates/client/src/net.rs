@@ -49,6 +49,7 @@ mod control;
 mod directory;
 mod files;
 mod find;
+mod pages;
 pub mod terminal;
 mod voice;
 
@@ -56,6 +57,7 @@ pub use admin::{Admin, AdminUpdate, AuditEntry, Ban, ImportItem, Invite, PublicL
 pub use control::{ControlView, Ended};
 pub(crate) use directory::frame_image;
 use directory::{directory, get};
+pub(crate) use files::stand_in;
 pub use files::{MAX_FILE, file_name};
 pub use find::{Listed, PAGE_SIZE};
 use voice::{
@@ -75,6 +77,8 @@ pub enum Fetch {
     Full,
     /// Every frame shrunk to thumbnail size, to play in the chat.
     Inline,
+    /// Shrunk to a page's width, for its banner and pictures.
+    Wide,
 }
 
 // A draft is big and rare next to the other commands, which are small.
@@ -86,6 +90,14 @@ pub enum Command {
     /// Load the page before a message: channel, oldest loaded message.
     Older(Id, Id),
     Send(Draft),
+    /// Replace version `base` of a page channel's document.
+    SavePage {
+        channel: Id,
+        base: i64,
+        layout: rusttalk_core::pages::Layout,
+        /// Pictures to upload first, by the ID that stands in for each in `layout`.
+        uploads: Vec<(Id, PathBuf)>,
+    },
     /// Channel, message, and the IDs of its stored files to remove too.
     Delete(Id, Id, Id, Vec<Id>),
     /// Check that a deleted DM copy (channel, message) is really gone here.
@@ -208,9 +220,6 @@ pub struct Draft {
     pub revision: u64,
     /// Uploaded first, then sent with the message.
     pub files: Vec<PathBuf>,
-    /// Files already stored in this channel, sent again with the message: a page
-    /// keeps its pictures when it is saved as a new message.
-    pub keep: Vec<rusttalk_core::client::Attachment>,
     /// A server sticker to send; `text` is its name.
     pub sticker: Option<Id>,
     /// A friend request or answer, sent with nothing else.
@@ -302,6 +311,10 @@ pub enum Update {
     CopyGone(Url, Id, Id),
     /// Loading a page of a channel failed; `true` when its cursor is gone from the server.
     PageFailed(Url, Id, bool),
+    /// A page channel's document, or `None` when loading it failed.
+    Page(Url, Id, Option<Box<crate::server::Page>>),
+    /// Whether saving a page worked.
+    PageSaved(Url, Id, bool),
     /// A new message in any readable channel or DM, for unread marks and notifications.
     Arrived(Url, Id, Msg),
     /// The newest message time from someone else per channel, after (re)connecting.
@@ -656,6 +669,11 @@ fn pin_changed(error: &anyhow::Error) -> bool {
 #[derive(Default)]
 struct State {
     dm_backfill: bool,
+    /// The server keeps page documents.
+    pages: bool,
+    pages_seen: pages::Seen,
+    /// Pages that wait for their channel key.
+    waiting_pages: HashSet<Id>,
     /// Channels the UI has opened, which get live messages.
     loaded: HashSet<Id>,
     /// Records that waited for a channel key, retried after key work.
@@ -714,6 +732,7 @@ async fn run(
         server_id: server.server_id,
         rooms: HashMap::new(),
         voice: None,
+        pages_seen: pages::load_seen(&ctx.data, &server.server_id),
         ..State::default()
     };
     let records = rusttalk_core::client::revocations::Revocations::in_profile(&ctx.data);
@@ -729,7 +748,7 @@ async fn run(
         let connecting = {
             let (ctx, server, api, admission) = (&ctx, &server, &mut api, &mut admission);
             async move {
-                let (api, session, dm_backfill) =
+                let (api, session, dm_backfill, pages) =
                     session(ctx, server, api, admission.as_ref()).await?;
                 if admission.take().is_some() {
                     tracing::info!(server = %fingerprint(&server.server_id), "joined server");
@@ -741,7 +760,7 @@ async fn run(
                 let pins = load_pins(&ctx.data, &server.server_id);
                 let client =
                     KeyClient::connect_with_dms(api, &ctx.identity, &session, pins.clone()).await;
-                Ok::<_, Failure>((client, pins, dm_backfill))
+                Ok::<_, Failure>((client, pins, dm_backfill, pages))
             }
         };
         let Some(connected) = offline(
@@ -757,8 +776,9 @@ async fn run(
             return;
         };
         match connected {
-            Ok((connected, pins, dm_backfill)) => {
+            Ok((connected, pins, dm_backfill, pages)) => {
                 state.dm_backfill = dm_backfill;
+                state.pages = pages;
                 state.pins_lost = pins.is_none();
                 state.pins_saved = pins.unwrap_or_default();
                 match connected {
@@ -923,6 +943,10 @@ fn refuse(ctx: &Ctx, url: &Url, command: Command) {
             ctx.send(Update::Unsent(url.clone(), draft));
             ctx.send(Update::Failed(t!("admin.offline").into()));
         }
+        Command::SavePage { channel, .. } => {
+            ctx.send(Update::PageSaved(url.clone(), channel, false));
+            ctx.send(Update::Failed(t!("admin.offline").into()));
+        }
         Command::Image(file, fetch) => ctx.send(Update::Image(file.id, fetch, Err(false))),
         Command::Save(file, _) => ctx.send(Update::Saved(file.id, Err(false))),
         Command::SharedFiles(channel) => {
@@ -947,7 +971,7 @@ async fn session<'a>(
     server: &KnownServer,
     api: &'a mut Option<Api>,
     admission: Option<&Admission>,
-) -> Result<(&'a Api, Session, bool), Failure> {
+) -> Result<(&'a Api, Session, bool, bool), Failure> {
     let stop_or_retry = |error: anyhow::Error| {
         if pin_changed(&error) {
             tracing::error!(error = %format_args!("{error:#}"), "server pins differ");
@@ -970,9 +994,11 @@ async fn session<'a>(
     }
     let api = api.as_mut().expect("set above");
     let mut dm_backfill = false;
+    let mut pages = false;
     let protocol = match api.info().await {
         Ok(info) => {
             dm_backfill = info.dm_backfill;
+            pages = info.pages;
             Some(info.protocol)
         }
         Err(error) if pin_changed(&error) => return Err(stop_or_retry(error)),
@@ -1011,7 +1037,7 @@ async fn session<'a>(
             .map_err(|error| stop_or_retry(error.without_url().into()))?;
         // Refresh only at sign-in. Missing server info keeps this session on v2 envelopes.
         api.protocol = protocol.flatten().unwrap_or(1);
-        return Ok((api, session, dm_backfill));
+        return Ok((api, session, dm_backfill, pages));
     }
     let code = reply
         .json::<Value>()
@@ -1280,7 +1306,7 @@ async fn resume(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, state: &mut St
     tokio::spawn(async move { sync(&sync_ctx, Vec::new()).await });
     directory(ctx, url, client, state).await?;
     for channel in state.loaded.clone() {
-        page(ctx, url, client, state, channel, None).await;
+        open_channel(ctx, url, client, state, channel).await;
     }
     set_display_name(ctx, url, client, state).await;
     latest(ctx, url, client, state).await;
@@ -1318,6 +1344,19 @@ async fn latest(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, state: &State)
     let me = *client.identity.certificate.person_id();
     let mut found = Vec::new();
     for (channel, peer) in channels {
+        if peer.is_none() && pages::is_page(state, &channel) {
+            // A page is as new as its document; an older server's pages aren't shown.
+            if state.pages {
+                match client.page(&channel).await {
+                    Ok(Some(record)) if record.person != me => found.push((channel, record.at)),
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(error = %format_args!("{error:#}"), "loading a page's time failed");
+                    }
+                }
+            }
+            continue;
+        }
         match client.message_page(&channel, None, 1).await {
             Ok(records) => {
                 let Some(record) = records.first().filter(|record| record.person != me) else {
@@ -1369,7 +1408,12 @@ async fn on_event(
         sync(ctx, Vec::new()).await;
     }
     match event {
-        Event::MessageCreated { channel, id } => {
+        Event::MessageCreated {
+            channel,
+            page: true,
+            ..
+        } => pages::changed(ctx, url, client, state, decode(&channel)?).await?,
+        Event::MessageCreated { channel, id, .. } => {
             let (channel, id) = (decode(&channel)?, decode(&id)?);
             let record = client.message(&channel, &id).await?;
             if state.loaded.contains(&channel) {
@@ -1442,6 +1486,9 @@ async fn on_event(
                 }
                 send_messages(ctx, url, channel, items, false, None);
             }
+            for channel in std::mem::take(&mut state.waiting_pages) {
+                pages::show(ctx, url, client, state, channel).await;
+            }
             set_display_name(ctx, url, client, state).await;
         }
         Event::VoiceChanged { channel } => {
@@ -1473,8 +1520,14 @@ async fn on_command(
     match command {
         Command::Open(channel) => {
             state.loaded.insert(channel);
-            page(ctx, url, client, state, channel, None).await;
+            open_channel(ctx, url, client, state, channel).await;
         }
+        Command::SavePage {
+            channel,
+            base,
+            layout,
+            uploads,
+        } => pages::save(ctx, url, client, state, (channel, base, layout, uploads)).await,
         Command::Older(channel, before) => {
             page(ctx, url, client, state, channel, Some(before)).await;
         }
@@ -1519,7 +1572,7 @@ async fn on_command(
                     .filter(|_| draft.edit_of.is_none())
                     .map(|(person, _)| person),
                 edit_of: draft.edit_of,
-                attachments: draft.keep.clone(),
+                attachments: Vec::new(),
                 live: None,
                 sticker: draft.sticker,
                 friend: draft.friend.map(|(signal, _)| signal),
@@ -1548,12 +1601,7 @@ async fn on_command(
                 draft.preview.clone(),
                 draft.inline.clone(),
             );
-            // A page version names its stored files, so the server keeps them (see `post_page`).
-            let page = (state.last.iter())
-                .flat_map(|dir| &dir.categories)
-                .flat_map(|category| &category.channels)
-                .any(|known| known.id == channel && known.page);
-            let target = (channel, draft.id, page);
+            let target = (channel, draft.id);
             let mut sent = files::send(ctx, url, client, target, body.clone(), files.clone()).await;
             // The other person re-keyed the DM just now: take the new key and send
             // once more, whatever this was (text, sticker, file or friend message).
@@ -1868,6 +1916,21 @@ fn save_pins(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, state: &mut State
             let server = url.host_str().unwrap_or(t!("net.a_server"));
             ctx.send(Update::Failed(t!("net.dm_pins_unsaved", server = server)));
         }
+    }
+}
+
+/// Load what a channel shows: its document for a page channel, else its newest messages.
+async fn open_channel(
+    ctx: &Ctx,
+    url: &Url,
+    client: &mut KeyClient<'_>,
+    state: &mut State,
+    channel: Id,
+) {
+    if pages::is_page(state, &channel) {
+        pages::show(ctx, url, client, state, channel).await;
+    } else {
+        page(ctx, url, client, state, channel, None).await;
     }
 }
 

@@ -18,7 +18,7 @@ use sqlx::{FromRow, SqliteConnection, query, query_as, query_scalar};
 use crate::{
     ApiError, ApiResult, App,
     auth::{Actor, authenticate, authenticate_read},
-    channels, keys, page_files, payload,
+    channels, keys, page_files, pages, payload,
     roles::{self, Permission},
     store::audit,
 };
@@ -35,9 +35,6 @@ pub struct NewMessage {
     epoch: i64,
     envelope: String,
     backfill_at: Option<i64>,
-    /// A page version's stored files, kept while it is the newest (see `page_files`).
-    #[serde(default)]
-    keep: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -142,18 +139,16 @@ pub async fn create(
         epoch,
         envelope,
         backfill_at,
-        keep,
     } = payload(body)?;
     decode::<32>(&channel)?;
     let message_id = decode(&id)?;
     let envelope_bytes = decode_bytes(&envelope)?;
     let (mut tx, actor) = authenticate(&app, &headers).await?;
     require_write(&mut tx, &actor, &channel).await?;
-    let page = page_files::is_page(&mut tx, &channel).await?;
-    let keep = match keep.is_empty() {
-        true => keep,
-        false => page_files::check(&mut tx, &channel, page, keep, actor.at).await?,
-    };
+    if pages::is_page(&mut tx, &channel).await? {
+        // A page is a document; an older app saving one as a message must see it fail.
+        return Err(keys::conflict("page_channel"));
+    }
     let at = match backfill_at {
         Some(at) if chat_kind(&mut tx, &actor, &channel).await? == "dm" => {
             historical_time(at, actor.at)
@@ -193,10 +188,6 @@ pub async fn create(
     .execute(&mut *tx)
     .await?;
     let dropped = prune(&mut tx, &channel).await?;
-    if page {
-        page_files::record(&mut tx, &channel, &id, &keep).await?;
-        page_files::refresh(&app, &mut tx, &channel).await?;
-    }
     tx.commit().await?;
     for id in dropped {
         app.notify(Event::MessageDeleted {
@@ -204,7 +195,11 @@ pub async fn create(
             id,
         });
     }
-    app.notify(Event::MessageCreated { channel, id });
+    app.notify(Event::MessageCreated {
+        channel,
+        id,
+        page: false,
+    });
     Ok((
         StatusCode::CREATED,
         Json(MessageRecord {
@@ -259,12 +254,18 @@ pub(crate) async fn verify_signed(
         .verify_as(purpose, &verification_key, envelope_bytes)
         .map_err(|_| ApiError::bad_request("invalid_message"))?;
 
+    remember_sender(tx, actor).await?;
+    Ok(device)
+}
+
+/// Archive the sender's certificate, so what they wrote still verifies after they left.
+pub async fn remember_sender(db: &mut SqliteConnection, actor: &Actor) -> ApiResult<()> {
     let certificate: Vec<u8> = query_scalar(
         "SELECT certificate FROM member_devices WHERE device_id = ? AND person_id = ?",
     )
     .bind(&actor.device)
     .bind(actor.person.as_slice())
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut *db)
     .await?
     .ok_or(ApiError::forbidden("device_certificate_required"))?;
     query(
@@ -274,9 +275,9 @@ pub(crate) async fn verify_signed(
     .bind(&actor.device)
     .bind(actor.person.as_slice())
     .bind(certificate)
-    .execute(&mut *tx)
+    .execute(db)
     .await?;
-    Ok(device)
+    Ok(())
 }
 
 async fn reserve(db: &mut SqliteConnection, id: &str) -> ApiResult<()> {
@@ -396,16 +397,17 @@ pub async fn device(
     chat_kind(&mut tx, &actor, &channel).await?;
     let certificate: Vec<u8> = query_scalar(
         "SELECT s.certificate FROM message_senders s
-         WHERE s.device_id = ? AND s.person_id = ?
-           AND (EXISTS (SELECT 1 FROM messages m WHERE m.channel_id = ?
+         WHERE s.device_id = ?1 AND s.person_id = ?2
+           AND (EXISTS (SELECT 1 FROM messages m WHERE m.channel_id = ?3
              AND m.sender_device = s.device_id AND m.sender_person = s.person_id)
              OR EXISTS (SELECT 1 FROM shared_files h JOIN files f ON f.id = h.id
-               WHERE f.channel_id = ?
-               AND h.sender_device = s.device_id AND h.sender_person = s.person_id))",
+               WHERE f.channel_id = ?3
+               AND h.sender_device = s.device_id AND h.sender_person = s.person_id)
+             OR EXISTS (SELECT 1 FROM page_documents p WHERE p.channel_id = ?3
+               AND p.sender_device = s.device_id AND p.sender_person = s.person_id))",
     )
     .bind(device.as_slice())
     .bind(person.as_slice())
-    .bind(&channel)
     .bind(&channel)
     .fetch_optional(&mut *tx)
     .await?
@@ -455,7 +457,7 @@ pub async fn delete(
             .execute(&mut *tx)
             .await?;
     }
-    if page_files::is_page(&mut tx, &channel).await? {
+    if pages::is_page(&mut tx, &channel).await? {
         page_files::refresh(&app, &mut tx, &channel).await?;
     }
     tx.commit().await?;
@@ -471,7 +473,8 @@ mod tests {
 
     #[test]
     fn body_limit_holds_the_largest_message() {
-        let keep = vec![format!("\"{}\"", "A".repeat(43)); page_files::MAX_KEPT].join(",");
+        // App 0.1.10 lists a page's files here. It must fit, so that app sees the refusal.
+        let keep = vec![format!("\"{}\"", "A".repeat(43)); 8].join(",");
         let json = format!(
             r#"{{"id":"{}","epoch":{},"envelope":"{}","backfill_at":null,"keep":[{keep}]}}"#,
             "A".repeat(43),
@@ -524,20 +527,16 @@ mod tests {
              INSERT INTO messages (id, channel_id, epoch, sender_device, sender_person, at, size, envelope)
              SELECT CAST(i AS TEXT), ?, 1, X'01', X'02', 0, 111, zeroblob(111) FROM n")
              .bind(RETAIN).bind(&dm).execute(&app.db).await?;
-        // Only a page version keeps files, and only from people who may write there.
-        let kept = vec![encode(&[5; 32])];
-        for (by, channel, backfill_at, keep, code) in [
-            (1, &text, Some(1), vec![], "invalid_backfill"),
-            (1, &dm, Some(1), vec![], "history_full"),
-            (1, &text, None, kept.clone(), "invalid_keep"),
-            (2, &text, None, kept, "channel_read_denied"),
+        for (by, channel, backfill_at, code) in [
+            (1, &text, Some(1), "invalid_backfill"),
+            (1, &dm, Some(1), "history_full"),
+            (2, &text, None, "channel_read_denied"),
         ] {
             let post = NewMessage {
                 id: encode(&[9; 32]),
                 epoch: 1,
                 envelope: encode(&[]),
                 backfill_at,
-                keep,
             };
             let result = create(
                 State(app.clone()),

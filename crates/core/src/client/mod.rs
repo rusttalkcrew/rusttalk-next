@@ -5,6 +5,7 @@ mod chat;
 mod files;
 mod keys;
 mod metadata;
+mod pages;
 pub mod revocations;
 mod server;
 pub mod sync;
@@ -20,8 +21,8 @@ pub use chat::{
     RoleFlags, SharedFile,
 };
 pub use files::{
-    Progress, UploadRejected, decode_frames, decode_frames_until, decode_image, decode_thumbnail,
-    prepare_file,
+    PICTURE_EDGE, Progress, UploadRejected, decode_frames, decode_frames_until, decode_image,
+    decode_thumbnail, prepare_file,
 };
 pub use keys::{DmPin, KeyClient, invite_name};
 pub use metadata::decode_profile_image;

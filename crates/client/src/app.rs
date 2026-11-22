@@ -391,6 +391,10 @@ fn forget_profile(data: &std::path::Path, settings: crate::audio::Settings) {
     }
     remove("revocations", fs::remove_dir_all(data.join("revocations")));
     remove("dm_pins", fs::remove_dir_all(data.join("dm_pins")));
+    remove(
+        "page_versions",
+        fs::remove_dir_all(data.join("page_versions")),
+    );
     crate::previews::forget(data);
 
     // Only carry hardware and window preferences into the next account.
@@ -673,6 +677,7 @@ mod tests {
         }
         for file in [
             "dm_pins/server.json",
+            "page_versions/server.json",
             "previews/card.json",
             "previews/card.img",
         ] {
@@ -689,7 +694,10 @@ mod tests {
         };
         rusttalk_core::client::save_json(dir, &dir.join("voice.json"), &voice).unwrap();
         forget_profile(dir, voice);
-        for file in account.into_iter().chain(["dm_pins", "previews"]) {
+        for file in account
+            .into_iter()
+            .chain(["dm_pins", "page_versions", "previews"])
+        {
             assert!(!dir.join(file).exists(), "{file} survived sign-out");
         }
         for file in device {

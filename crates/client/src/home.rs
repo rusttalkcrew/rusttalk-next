@@ -17,7 +17,7 @@ use eframe::egui::{
 };
 use rusttalk_core::{
     auth::{Fingerprint, InviteLink, KnownServer, decode},
-    client::{Attachment, FriendSignal, MAX_TEXT_CHARS, voice::LiveFileEvent},
+    client::{FriendSignal, MAX_TEXT_CHARS, voice::LiveFileEvent},
     identity::{DeviceIdentity, fingerprint},
     index::https_url,
     messages::PollPart,
@@ -88,6 +88,7 @@ mod friends;
 pub mod layout;
 mod markdown;
 pub mod mentions;
+pub(crate) mod page;
 pub mod person;
 mod pokes;
 pub mod polls;
@@ -1190,6 +1191,25 @@ impl Home {
                     chat.at_start |= at_start;
                 }
             }
+            Update::Page(address, channel, page) => {
+                if let Some(index) = self.index(&address) {
+                    let state = &mut self.servers[index].chats.entry(channel).or_default().page;
+                    state.failed = page.is_none();
+                    // A failed reload keeps what is shown.
+                    if page.is_some() {
+                        state.page = page.map(|page| *page);
+                    }
+                }
+            }
+            Update::PageSaved(address, channel, saved) => {
+                if let Some(index) = self.index(&address) {
+                    let chat = self.servers[index].chats.entry(channel).or_default();
+                    chat.page.saving = false;
+                    if saved && let Some(editor) = chat.page.editor.take() {
+                        editor.close();
+                    }
+                }
+            }
             Update::Arrived(address, channel, msg) => {
                 if let Some(index) = self.index(&address) {
                     self.arrived(ctx, index, channel, msg);
@@ -1664,9 +1684,15 @@ pub fn show(
         };
         let server = &mut home.servers[index];
         match ask {
-            Ask::Attach(_, channel) | Ask::PagePictures(_, channel) => {
+            Ask::Attach(_, channel) => {
                 let chat = server.chats.entry(channel).or_default();
                 if let Some(problem) = files::stage(chat, paths) {
+                    home.toast = Some((problem, now + 6.0));
+                }
+            }
+            Ask::PagePictures(_, channel) => {
+                let chat = server.chats.entry(channel).or_default();
+                if let Some(problem) = page::picked(ui.ctx(), channel, &mut chat.page, paths) {
                     home.toast = Some((problem, now + 6.0));
                 }
             }
@@ -3317,13 +3343,9 @@ fn queue_preview(
     to: &To,
     draft: Draft,
 ) -> Option<Draft> {
-    // A page saved again keeps its preview while its link stays the same.
-    let link = (draft.edit_of.is_none()
-        && draft.sticker.is_none()
-        && draft.poll.is_none()
-        && !draft.keep.iter().any(files::is_card))
-    .then(|| link_cards::candidate(markdown::cached(ui, &draft.text).links()))
-    .flatten();
+    let link = (draft.edit_of.is_none() && draft.sticker.is_none() && draft.poll.is_none())
+        .then(|| link_cards::candidate(markdown::cached(ui, &draft.text).links()))
+        .flatten();
     // Asked the first time (and each time until Always or Never).
     let preview = match (link, voice.audio.settings().create_link_previews) {
         (Some(url), Some(true)) => Some(Making::Job(link_cards::Job::start(url, ui.ctx()))),
@@ -3414,7 +3436,7 @@ fn chat_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
     {
         // Reopening the files loads them again, with what others added meanwhile.
         chat.shared_asked = false;
-        page_view(ui, home, index, channel, &mut chat);
+        page::view(ui, home, index, channel, &mut chat);
     } else {
         chat.shared_asked = false;
         chat_view(ui, home, At::Channel(index, channel), &mut chat);
@@ -3538,246 +3560,6 @@ fn files_view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat: &mu
     if let Some(shared) = remove {
         home.dialog = Some(Dialog::Unshare(index, channel, Box::new(shared)));
     }
-}
-
-/// A page channel: its newest message, shown as one Markdown page with its pictures
-/// and link previews. Saving an edit posts the whole page again as a new message, so
-/// it stays end-to-end encrypted; its pictures go along by reference.
-fn page_view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat: &mut Chat) {
-    let in_server = matches!(home.view, View::Server(_));
-    let server = &home.servers[index];
-    let title = server
-        .channel(&channel)
-        .map_or_else(String::new, |c| format!("{} {}", channel_icon(c), c.name));
-    let can_edit = server.can_write(&channel);
-    let online = server.status == Status::Online;
-    pane_title(
-        ui,
-        "chat-title",
-        &title,
-        in_server.then_some(&mut home.layout),
-        false,
-        Some(channel),
-    );
-    toast_line(ui, &mut home.toast);
-    let Home {
-        servers,
-        files,
-        voice,
-        previews,
-        sending,
-        toast,
-        ..
-    } = home;
-    let server = &servers[index];
-    let dir = &server.dir;
-    let to = To::Channel(server.address.clone());
-    let now = ui.input(|input| input.time);
-    // Member and device notices are not part of the page.
-    // A copy, so the editor below can change the chat's staged pictures.
-    let page = (chat.messages.iter().rev())
-        .find(|msg| matches!(msg.body, Body::Text(_) | Body::Unreadable) && msg.sticker.is_none())
-        .cloned();
-    let page = page.as_ref();
-    let editing_id = UiId::unique(("page-editing", channel));
-    let mut editing = can_edit && ui.data(|d| d.get_temp(editing_id)).unwrap_or(false);
-    // Pictures the editor took off; the rest stay with the page when it is saved.
-    let removed_id = UiId::unique(("page-removed", channel));
-    let mut removed: Vec<Id> = ui.data(|d| d.get_temp(removed_id)).unwrap_or_default();
-    // Pictures only: the sender-made link preview is kept on save only if its link is.
-    let kept: Vec<Attachment> = page
-        .map(|msg| msg.files.as_slice())
-        .unwrap_or_default()
-        .iter()
-        .filter(|file| !files::is_card(file) && !removed.contains(&file.file.id))
-        .cloned()
-        .collect();
-    let room = files::MAX_FILES.saturating_sub(kept.len());
-    if chat.staged.len() > room {
-        for file in chat.staged.drain(room..) {
-            files::discard(&file.path);
-        }
-        *toast = Some((t!("files.too_many", max = files::MAX_FILES), now + 6.0));
-    }
-    let mut save = false;
-    let mut cancel = false;
-    ui.add_space(ui::SPACE_S);
-    if can_edit {
-        ui.horizontal(|ui| {
-            if editing {
-                let ready = online
-                    && !(chat.draft.trim().is_empty() && kept.is_empty() && chat.staged.is_empty());
-                save = ui
-                    .add_enabled_ui(ready, |ui| ui::primary(ui, t!("common.save")))
-                    .inner
-                    .clicked();
-                if ui::secondary(ui, t!("common.cancel")).clicked() {
-                    cancel = true;
-                    editing = false;
-                }
-                let add = format!("🖼 {}", t!("home.page_add_pictures"));
-                if ui
-                    .add_enabled_ui(online && chat.staged.len() < room, |ui| {
-                        ui::secondary(ui, add.as_str())
-                    })
-                    .inner
-                    .clicked()
-                {
-                    files.ask(ui.ctx(), Ask::PagePictures(server.address.clone(), channel));
-                }
-                let count = chat.draft.chars().count();
-                ui.weak(format!("{count} / {MAX_TEXT_CHARS}"));
-            } else if ui::secondary(ui, format!("✏ {}", t!("home.edit_page")).as_str()).clicked()
-            {
-                // A draft kept from a failed save wins over the page as it is.
-                if chat.draft.is_empty() && chat.staged.is_empty() {
-                    removed.clear();
-                    if let Some(Msg {
-                        body: Body::Text(text),
-                        ..
-                    }) = page
-                    {
-                        chat.draft = text.clone();
-                    }
-                }
-                editing = true;
-            }
-        });
-        ui.add_space(ui::SPACE_S);
-    }
-    if let Some(out) = (sending.iter_mut()).find(|o| o.to == to && o.preview.is_some()) {
-        preview_status(ui, voice, out);
-    }
-    let settings = voice.audio.settings();
-    let embeds = Embeds {
-        servers,
-        previews,
-        allowed: &settings.link_previews,
-    };
-    let holder = (&server.address, &server.commands);
-    let mut pick = None;
-    ScrollArea::vertical()
-        .id_salt(("page", channel))
-        .auto_shrink(false)
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            if editing {
-                ui.add(
-                    ui::text_area(&mut chat.draft)
-                        .char_limit(MAX_TEXT_CHARS)
-                        .desired_rows(20)
-                        .desired_width(f32::INFINITY),
-                );
-                ui.add_space(ui::SPACE_S);
-                ui.horizontal_wrapped(|ui| {
-                    for file in &kept {
-                        ui.vertical(|ui| {
-                            files::attachments(ui, files, holder, std::slice::from_ref(file), &[]);
-                            if ui::small_close(ui, t!("common.remove")).clicked() {
-                                removed.push(file.file.id);
-                            }
-                        });
-                    }
-                });
-                files::staged(ui, chat);
-                return;
-            }
-            match page {
-                Some(
-                    msg @ Msg {
-                        body: Body::Text(text),
-                        ..
-                    },
-                ) => {
-                    let mention = mentions::Message::cached(ui, msg, dir, channel);
-                    mention.doc.show(ui, dir, &mention, false, false);
-                    // A sender-made preview must be about one of the page's own links.
-                    let links: Vec<String> = markdown::cached(ui, text)
-                        .links()
-                        .map(String::from)
-                        .collect();
-                    files::attachments(ui, files, holder, &msg.files, &links);
-                    for (provider, key) in previews::supported(mention.doc.links()) {
-                        if let Some(chosen) = link_preview(ui, &embeds, provider, &key) {
-                            pick = Some(chosen);
-                        }
-                    }
-                    ui.add_space(ui::SPACE_S);
-                    let edited = t!(
-                        "home.page_updated",
-                        name = server.member_name(&msg.person),
-                        time = time(msg.at)
-                    );
-                    ui.label(ui::caption(&edited));
-                }
-                Some(_) => {
-                    ui.weak(t!("home.page_unreadable"));
-                }
-                None if chat.loading => {
-                    ui.vertical_centered(|ui| ui.spinner());
-                }
-                None if can_edit => empty(ui, &title, t!("home.page_empty_editor")),
-                None => empty(ui, &title, t!("home.page_empty")),
-            }
-        });
-    if let Some(Pick::Previews(id, allow)) = pick {
-        let mut settings = voice.audio.settings();
-        settings.link_previews.insert(id.into(), allow);
-        voice.audio.set_settings(settings);
-        previews.allow(id, allow);
-    }
-    if cancel {
-        // Else the next Edit reopens the cancelled text, not the current page.
-        chat.clear_draft();
-        for file in chat.staged.drain(..) {
-            files::discard(&file.path);
-        }
-        removed.clear();
-    }
-    if save {
-        match rusttalk_core::keys::random_key() {
-            Ok(id) => {
-                // Keep leading indentation: a page may start with a code block.
-                let text = chat.draft.trim_end().to_owned();
-                let mut keep = kept;
-                // The link didn't change: keep its preview rather than visit the site again.
-                let link = link_cards::candidate(markdown::cached(ui, &text).links());
-                let card = (page.into_iter().flat_map(|msg| &msg.files)).find(|file| {
-                    files::is_card(file) && link.is_some() && files.card_url(&file.file.id) == link
-                });
-                if keep.len() + chat.staged.len() < files::MAX_FILES {
-                    keep.extend(card.cloned());
-                }
-                let draft = Draft {
-                    id: *id,
-                    channel,
-                    peer: None,
-                    text,
-                    reply_to: None,
-                    edit_of: None,
-                    revision: 0,
-                    files: chat.staged.drain(..).map(|file| file.path).collect(),
-                    keep,
-                    sticker: None,
-                    friend: None,
-                    poke: false,
-                    preview: None,
-                    inline: Vec::new(),
-                    poll: None,
-                };
-                if let Some(draft) = queue_preview(ui, voice, sending, &to, draft) {
-                    server.send(Command::Send(draft));
-                }
-                chat.clear_draft();
-                editing = false;
-            }
-            Err(_) => tracing::warn!("no randomness for a page ID"),
-        }
-    }
-    ui.data_mut(|d| {
-        d.insert_temp(editing_id, editing);
-        d.insert_temp(removed_id, removed);
-    });
 }
 
 fn dm_pane(ui: &mut Ui, home: &mut Home, peer: Id) {
@@ -4304,7 +4086,6 @@ fn poll_draft(channel: Id, text: String, part: PollPart) -> Option<Draft> {
         edit_of: None,
         revision: 0,
         files: Vec::new(),
-        keep: Vec::new(),
         sticker: None,
         friend: None,
         poke: false,
@@ -4755,7 +4536,6 @@ fn composer(
             edit_of: None,
             revision: 0,
             files: Vec::new(),
-            keep: Vec::new(),
             sticker: id,
             friend: None,
             poke: false,
@@ -4823,7 +4603,6 @@ fn composer(
         edit_of,
         revision: edit_of.map_or(0, |original| chat.next_revision(dir.me, original, now_ms)),
         files,
-        keep: Vec::new(),
         sticker: None,
         friend: None,
         poke: false,
@@ -6109,6 +5888,7 @@ mod tests {
 
     #[test]
     fn deleting_a_page_version_keeps_pictures_another_version_shows() {
+        use rusttalk_core::client::Attachment;
         let picture = |id: u8| Attachment {
             file: rusttalk_core::client::BlobRef::for_tests([id; 32]),
             name: "map.png".into(),

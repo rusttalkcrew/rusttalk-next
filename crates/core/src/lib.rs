@@ -13,6 +13,7 @@ pub mod identity;
 pub mod index;
 pub mod keys;
 pub mod messages;
+pub mod pages;
 #[cfg(any(feature = "https-client", feature = "livekit-tls"))]
 pub mod pinned_tls;
 #[cfg(all(target_os = "linux", any(feature = "capture", feature = "voice")))]

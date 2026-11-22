@@ -86,6 +86,9 @@ pub const PROTOCOL_VERSION: u32 = 3;
 pub struct ServerInfo {
     #[serde(default)]
     pub dm_backfill: bool,
+    /// Page channels keep documents instead of messages.
+    #[serde(default)]
+    pub pages: bool,
     pub open_joining: bool,
     pub version: Option<String>,
     pub protocol: Option<u32>,

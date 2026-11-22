@@ -33,9 +33,11 @@ tables in SQLite (WAL). IDs and digests are binary unless indicated. The `_ct` s
 | `key_envelope_rejections` | `scope_id`, `epoch`, `recipient_device`, `sender_person` |
 | `message_senders` | `device_id`, `person_id`, `certificate` (archived public certificate for signature verification) |
 | `messages` | `sequence` (insertion order), `id` and `channel_id` (text), `epoch`, `sender_device`, `sender_person`, `at` (Unix seconds), `size` (binary envelope length), `envelope` (public framing, nonce, ciphertext with tag, and signature) |
+| `page_documents` | `channel_id` (text), `version`, `epoch`, `sender_device` and `sender_person` (the last editor), `at` (Unix seconds), `size`, `envelope` (format byte, nonce, ciphertext with tag, and signature). Only the newest version is kept |
 | `message_ids` | `id` (opaque text, including deleted message IDs to prevent reuse) |
 | `files` | `id` and `channel_id` (opaque text), `uploader` (person public key), `size` (ciphertext bytes), `created_at`, `expires_at` (Unix seconds) |
-| `page_files` | `message_id`, `file_id` and `channel_id` (opaque text): the stored files a page version uses |
+| `page_files` | `message_id`, `file_id` and `channel_id` (opaque text): the stored files a page from before documents uses |
+| `page_document_files` | `channel_id` and `file_id` (opaque text): the stored files a page's document uses |
 | `shared_files` | `id` (a stored file's opaque ID), `epoch`, `sender_device` and `sender_person` (public keys), `at` (Unix seconds), `envelope` (signed channel-key ciphertext holding the file's reference) |
 | `emoji` | `id` (opaque text), `kind` (emoji or sticker), `owner` (person public key), `size` (picture ciphertext bytes), `image_hash` (short hash of the picture ciphertext), `name_ct`, `created_at` (Unix seconds) |
 | `device_sync` | `person_id`, `version`, `ciphertext` (nonce and encrypted payload with tag), `size` (ciphertext bytes), `at` (Unix seconds) |
@@ -80,6 +82,12 @@ Polls, votes and ending a poll are encrypted messages too: servers see a
 message's size and time, not the question, the answers or who picked what.
 A vote is a small message posted soon after a poll, and its size grows with
 the number of answers picked.
+Pages are encrypted documents. Their pictures are encrypted files, and the
+server knows which stored files a page uses, so it can keep them. It doesn't
+know which is the banner or where they go. Servers see that a page changed, who saved it
+when, its version and its size, not what it says or how
+it is laid out. The app stores on the device
+the newest version and envelope digest it opened of each page (`page_versions/`).
 The app stores on the device which person each DM channel is with, and the
 newest epoch it trusts there with its commitment (`dm_pins/`), and its own
 deleted DM messages (`dm_deleted.json`). Servers see each key link as one more
@@ -269,7 +277,7 @@ app window. The client never stores or logs the words or the root signing key.
 "Sign out of this device" deletes the keychain entry, `identity.key`, leftover
 temporary key files and the profile's `sync.json`, `servers.json`,
 `saved.json`, `notify.json`, `pokes.json`, `dm_deleted.json`, `dm_pins/`,
-recent and favourite emoji, cached link previews and both local logs. This
+`page_versions/`, recent and favourite emoji, cached link previews and both local logs. This
 clears the previous person's fingerprint, DM history markers, server records
 and preview consent. Hardware, local sound and window preferences in
 `voice.json`, the downloaded noise removal model and updater settings stay on
@@ -373,8 +381,8 @@ is deleted and never used; the normal noise suppression keeps working.
   The host sees your IP address, requested files and timing. Requests carry no
   account, device or server identifiers. Redirects stay on HTTPS.
 - **Previews of links you send (asked first):** Off until you agree. When a
-  message you send (or a page you save) links to a website that no reader-side
-  link preview below covers, the app asks "Create a preview? Your app will visit <host> to
+  message you send links to a website that no reader-side
+  link preview below covers, the composer asks "Create a preview? Your app will visit <host> to
   make it." with **Always**, **Not now** (send without, ask again next time)
   and **Never**; Settings → Privacy → Link previews (**Create previews for
   links I send**) changes the choice. Until you pick Always nothing is
@@ -399,7 +407,7 @@ is deleted and never used; the normal noise suppression keeps working.
   site, either on the first card that asks ("Show Steam previews?") or in
   Settings → Privacy → Link previews, and off again there. Until then the
   link stays a plain link and nothing is requested. Once allowed, the app
-  showing a message (or a page) fetches the preview itself, only for messages on screen;
+  showing a message fetches the preview itself, only for messages on screen;
   the sender and the RustTalk server are not involved. Each site has its own
   question and toggle, and is asked only for its own kind of link:
   - **Steam**, `store.steampowered.com/app/<id>`: requests

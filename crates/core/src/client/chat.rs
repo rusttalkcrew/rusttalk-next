@@ -251,18 +251,6 @@ impl KeyClient<'_> {
             .await
     }
 
-    /// Post a new version of a page channel. It names the stored files it uses, so the
-    /// server keeps them while this is the page's newest version.
-    pub async fn post_page(
-        &mut self,
-        channel: &[u8; 32],
-        id: [u8; 32],
-        body: &MessageBody,
-    ) -> Result<MessageRecord> {
-        self.post_message_dated(channel, id, body, Posting::Page)
-            .await
-    }
-
     pub(super) async fn post_message_dated(
         &mut self,
         channel: &[u8; 32],
@@ -325,10 +313,7 @@ impl KeyClient<'_> {
             Posting::Backfill(at) => Some(at),
             _ => None,
         };
-        let mut post = json!({ "id": encode(&id), "epoch": epoch, "envelope": envelope, "backfill_at": backfill_at });
-        if posting == Posting::Page {
-            post["keep"] = kept_files(&body).into();
-        }
+        let post = json!({ "id": encode(&id), "epoch": epoch, "envelope": envelope, "backfill_at": backfill_at });
         let response = self
             .request(Method::POST, &message_path(channel))
             .json(&post)
@@ -509,7 +494,9 @@ impl KeyClient<'_> {
         );
         let bytes = decode_bytes(&record.envelope)?;
         ensure!(bytes.len() == record.size, MessageError::Encoding);
-        let sender = self.message_sender(channel, record).await?;
+        let sender = self
+            .certified_sender(channel, &record.person, &record.sender_device)
+            .await?;
         let scope = Scope {
             kind: Kind::Channel,
             id: *channel,
@@ -530,25 +517,26 @@ impl KeyClient<'_> {
         Ok(context.open_as(purpose, key, &sender, &bytes)?)
     }
 
-    async fn message_sender(
+    pub(super) async fn certified_sender(
         &mut self,
         channel: &[u8; 32],
-        record: &MessageRecord,
+        person: &PersonId,
+        device: &[u8; 32],
     ) -> Result<DeviceCertificate> {
-        if let Some(sender) = self.devices.get(&encode(&record.sender_device))
-            && sender.person_id() == &record.person
+        if let Some(sender) = self.devices.get(&encode(device))
+            && sender.person_id() == person
         {
             return Ok(sender.clone());
         }
-        let slot = (*channel, record.sender_device, record.person);
+        let slot = (*channel, *device, *person);
         if let Some(sender) = self.historical_devices.get(&slot) {
             return Ok(sender.clone());
         }
         let path = format!(
             "/v1/channels/{}/message-devices/{}/{}",
             encode(channel),
-            encode(&record.sender_device),
-            encode(&record.person)
+            encode(device),
+            encode(person)
         );
         let certificate: String = self
             .request(Method::GET, &path)
@@ -557,9 +545,9 @@ impl KeyClient<'_> {
             .error_for_status()?
             .json()
             .await?;
-        let sender = DeviceCertificate::verify_public(record.person, &decode_bytes(&certificate)?)?;
+        let sender = DeviceCertificate::verify_public(*person, &decode_bytes(&certificate)?)?;
         ensure!(
-            sender.signing_key().as_bytes() == &record.sender_device,
+            sender.signing_key().as_bytes() == device,
             MessageError::Signature
         );
         self.historical_devices.insert(slot, sender.clone());
@@ -608,18 +596,6 @@ pub(super) enum Posting {
     Plain,
     /// A DM copy restored at its original time (Unix seconds).
     Backfill(i64),
-    /// A page version, which lists the stored files it uses.
-    Page,
-}
-
-/// Every stored file a message uses: its files and their thumbnails.
-fn kept_files(body: &MessageBody) -> Vec<String> {
-    (body.attachments.iter())
-        .flat_map(|file| std::iter::once(&file.file).chain(&file.thumbnail))
-        .map(|blob| encode(&blob.id))
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect()
 }
 
 fn shared_body(file: Attachment) -> MessageBody {

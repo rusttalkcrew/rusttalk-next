@@ -40,6 +40,8 @@ pub(crate) const THUMBNAIL: f32 = 320.0;
 const INLINE_MAX: u64 = 8 * MIB;
 /// Animations playing in the chat at once; the ones scrolled away drop first.
 const MAX_INLINE: usize = 8;
+/// Page pictures kept at full width at once: what one page can hold, and a few more.
+const MAX_WIDE: usize = 24;
 /// An animation unseen this long (seconds) may be dropped when others need the room.
 const INLINE_IDLE: f64 = 1.0;
 /// Pictures kept before the cache is emptied; shown ones load again on demand.
@@ -62,6 +64,8 @@ pub struct Files {
     images: HashMap<Id, Picture>,
     /// Small looping copies of animated files shown in the chat, by file blob ID.
     inline: HashMap<Id, Inline>,
+    /// Page pictures at a page's width, by file blob ID.
+    wide: HashMap<Id, Inline>,
     /// Downloads to disk, by blob ID.
     saves: HashMap<Id, Saving>,
     /// Where stored files were saved on this device, by blob ID. Kept in `saved.json`
@@ -144,6 +148,14 @@ enum Saving {
     Failed,
 }
 
+/// What there is to show of a page's picture.
+pub enum Shown {
+    Ready(TextureHandle),
+    Loading,
+    Gone,
+    Failed,
+}
+
 /// The picture open in the viewer.
 struct Viewer {
     address: Url,
@@ -197,6 +209,7 @@ impl Files {
         Self {
             images: HashMap::new(),
             inline: HashMap::new(),
+            wide: HashMap::new(),
             saves: HashMap::new(),
             paths,
             data: data.to_owned(),
@@ -226,6 +239,7 @@ impl Files {
     ) {
         let slot = match fetch {
             Fetch::Inline => self.inline.get_mut(&id).map(|inline| &mut inline.picture),
+            Fetch::Wide => self.wide.get_mut(&id).map(|wide| &mut wide.picture),
             Fetch::Thumbnail | Fetch::Full => self.images.get_mut(&id),
         };
         let Some(slot) = slot else {
@@ -243,6 +257,71 @@ impl Files {
             Err(true) => Picture::Gone,
             Err(false) => Picture::Failed,
         };
+    }
+
+    /// A page's stored picture. Its thumbnail shows until the wide copy is there.
+    pub fn page_picture(
+        &mut self,
+        ui: &Ui,
+        commands: &UnboundedSender<Command>,
+        file: &Attachment,
+    ) -> Shown {
+        let now = ui.input(|input| input.time);
+        let id = file.file.id;
+        if self.wide.len() >= MAX_WIDE && !self.wide.contains_key(&id) {
+            self.wide.retain(|_, wide| {
+                matches!(wide.picture, Picture::Loading) || now - wide.seen < INLINE_IDLE
+            });
+        }
+        let wide = self.wide.entry(id).or_insert_with(|| {
+            let _ = commands.send(Command::Image(file.file.clone(), Fetch::Wide));
+            Inline {
+                picture: Picture::Loading,
+                seen: now,
+            }
+        });
+        wide.seen = now;
+        match &wide.picture {
+            Picture::Ready(anim) => return Shown::Ready(anim.current(ui, true).clone()),
+            Picture::Gone => return Shown::Gone,
+            Picture::Failed => return Shown::Failed,
+            Picture::Loading => {}
+        }
+        let Some(thumb) = &file.thumbnail else {
+            return Shown::Loading;
+        };
+        let open = self.viewer.as_ref().map(|viewer| viewer.file.file.id);
+        bound_pictures(&mut self.images, open);
+        let small = self.images.entry(thumb.id).or_insert_with(|| {
+            let _ = commands.send(Command::Image(thumb.clone(), Fetch::Thumbnail));
+            Picture::Loading
+        });
+        match small {
+            Picture::Ready(anim) => Shown::Ready(anim.current(ui, false).clone()),
+            _ => Shown::Loading,
+        }
+    }
+
+    /// A picture picked into a page that isn't saved yet.
+    pub fn local_picture(&self, ui: &mut Ui, path: &Path) -> Shown {
+        Previews::get(ui.ctx()).with(ui, path, true, |ui, anim, failed| match anim {
+            Some(anim) => Shown::Ready(anim.current(ui, true).clone()),
+            None if failed => Shown::Failed,
+            None => Shown::Loading,
+        })
+    }
+
+    /// Open a stored picture in the viewer.
+    pub fn view(&mut self, address: &Url, commands: &UnboundedSender<Command>, file: &Attachment) {
+        self.images.insert(file.file.id, Picture::Loading);
+        let _ = commands.send(Command::Image(file.file.clone(), Fetch::Full));
+        self.viewer = Some(Viewer {
+            address: address.clone(),
+            file: file.clone(),
+            commands: commands.clone(),
+            zoom: 1.0,
+            turns: 0,
+        });
     }
 
     /// Start loading the playing copy of an animated file once it is on screen, after
@@ -284,14 +363,6 @@ impl Files {
         self.sticker_bytes += bytes;
         for old in evict(&mut self.stickers, &mut self.sticker_bytes, STICKER_BUDGET) {
             sticker_files::forget(ctx, &old);
-        }
-    }
-
-    /// The address of a loaded link preview file.
-    pub fn card_url(&self, id: &Id) -> Option<Url> {
-        match self.cards.get(id)? {
-            Card::Ready(card) => link_cards::web_url(&card.url),
-            _ => None,
         }
     }
 
@@ -630,7 +701,17 @@ impl Drop for Preview {
     }
 }
 
-fn is_picture(name: &str) -> bool {
+/// Whether a picture's header says everyone's app can decode it.
+pub(crate) fn decodes(path: &Path) -> bool {
+    let edge = rusttalk_core::client::PICTURE_EDGE;
+    image::ImageReader::open(path)
+        .and_then(|reader| reader.with_guessed_format())
+        .ok()
+        .and_then(|reader| reader.into_dimensions().ok())
+        .is_some_and(|(width, height)| width <= edge && height <= edge)
+}
+
+pub(crate) fn is_picture(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
     [".png", ".jpg", ".jpeg", ".gif", ".webp"]
         .iter()
@@ -1401,6 +1482,20 @@ pub fn viewer(ctx: &egui::Context, files: &mut Files) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_pictures_every_app_decodes_go_on_a_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let edge = rusttalk_core::client::PICTURE_EDGE;
+        for (width, fine) in [(edge, true), (edge + 1, false)] {
+            let path = dir.path().join(format!("{width}.png"));
+            image::RgbaImage::new(width, 2).save(&path).unwrap();
+            assert_eq!(decodes(&path), fine, "{width} px");
+        }
+        let broken = dir.path().join("broken.jpg");
+        fs::write(&broken, b"not a picture").unwrap();
+        assert!(!decodes(&broken));
+    }
 
     #[test]
     fn pictures_and_link_previews_stay_bounded() {

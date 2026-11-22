@@ -16,7 +16,7 @@ use crate::{
 const SCROLL_EDGE: f32 = 40.0;
 const SCROLL_SPEED: f32 = 600.0;
 
-fn scroll_speed(distance: f32) -> f32 {
+pub(crate) fn scroll_speed(distance: f32) -> f32 {
     (1.0 - distance / SCROLL_EDGE).clamp(0.0, 1.0) * SCROLL_SPEED
 }
 

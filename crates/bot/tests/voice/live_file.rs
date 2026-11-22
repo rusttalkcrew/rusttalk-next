@@ -99,6 +99,7 @@ pub(super) async fn exercise(
             if let Event::MessageCreated {
                 channel: id,
                 id: message,
+                ..
             } = event
                 && id == channel
                 && message == encode(&record.id)

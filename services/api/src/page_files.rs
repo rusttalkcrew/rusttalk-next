@@ -1,44 +1,33 @@
-//! Page pictures that stay while a page uses them. Message bodies are sealed, so the
-//! editor who saves a page version lists the stored files it keeps; files the newest
-//! version keeps never expire, and the others expire like any file again.
+//! Page pictures that stay while a page uses them. Documents are sealed, so the editor
+//! who saves one lists the stored files it keeps; those never expire while it is the
+//! page, and the others expire like any file again. A page from before documents keeps
+//! what its newest message listed until the channel has a document.
 
 use std::collections::HashSet;
 
-use rusttalk_core::auth::decode;
+use rusttalk_core::{auth::decode, pages::MAX_KEPT};
 use sqlx::{SqliteConnection, query, query_scalar};
 
 use crate::{ApiError, ApiResult, App, file_settings};
 
-/// Four pictures, each with its thumbnail.
-pub const MAX_KEPT: usize = 8;
+/// The files any page keeps.
+pub(crate) const KEPT: &str = "SELECT file_id FROM page_document_files
+     UNION ALL
+     SELECT p.file_id FROM page_files p JOIN messages m ON m.id = p.message_id
+     WHERE m.sequence = (SELECT MAX(sequence) FROM messages WHERE channel_id = p.channel_id)
+       AND NOT EXISTS (SELECT 1 FROM page_documents d WHERE d.channel_id = p.channel_id)";
 
-/// The files kept by the newest version of any page.
-pub(crate) const KEPT: &str =
-    "SELECT p.file_id FROM page_files p JOIN messages m ON m.id = p.message_id
-     WHERE m.sequence = (SELECT MAX(sequence) FROM messages WHERE channel_id = p.channel_id)";
-
-/// Whether a channel is a page (a text channel shown as its newest message).
-pub(crate) async fn is_page(db: &mut SqliteConnection, channel: &str) -> ApiResult<bool> {
-    Ok(
-        query_scalar("SELECT EXISTS (SELECT 1 FROM channels WHERE id = ? AND page)")
-            .bind(channel)
-            .fetch_one(db)
-            .await?,
-    )
-}
-
-/// Check a page version's kept files (at most `MAX_KEPT` distinct IDs; any channel but a
-/// page takes none) and return those that are unexpired files stored in this page channel.
+/// Check a page save's kept files (at most `MAX_KEPT` distinct IDs) and return those that
+/// are unexpired files stored in this page channel.
 /// Others are left out rather than refused: a page whose picture expired must still save.
 pub(crate) async fn check(
     db: &mut SqliteConnection,
     channel: &str,
-    page: bool,
     keep: Vec<String>,
     at: i64,
 ) -> ApiResult<Vec<String>> {
     let distinct: HashSet<&String> = keep.iter().collect();
-    if !page || keep.len() > MAX_KEPT || distinct.len() != keep.len() {
+    if keep.len() > MAX_KEPT || distinct.len() != keep.len() {
         return Err(ApiError::bad_request("invalid_keep"));
     }
     for id in &keep {
@@ -61,25 +50,27 @@ pub(crate) async fn check(
     Ok(live)
 }
 
-/// Remember the files a new page version keeps (already checked).
+/// Replace what the channel's document keeps (already checked).
 pub(crate) async fn record(
     db: &mut SqliteConnection,
     channel: &str,
-    message: &str,
     keep: &[String],
 ) -> ApiResult<()> {
+    query("DELETE FROM page_document_files WHERE channel_id = ?")
+        .bind(channel)
+        .execute(&mut *db)
+        .await?;
     for id in keep {
-        query("INSERT INTO page_files (message_id, file_id, channel_id) VALUES (?, ?, ?)")
-            .bind(message)
-            .bind(id)
+        query("INSERT INTO page_document_files (channel_id, file_id) VALUES (?, ?)")
             .bind(channel)
+            .bind(id)
             .execute(&mut *db)
             .await?;
     }
     Ok(())
 }
 
-/// After a page channel's newest version changed: keep the files it lists, and give
+/// After what a page channel keeps changed: keep the files it lists, and give
 /// files no longer listed their normal expiry from upload again. Shared files stay kept.
 pub(crate) async fn refresh(app: &App, db: &mut SqliteConnection, channel: &str) -> ApiResult<()> {
     let retention = file_settings::effective(&mut *db, app.files.ceilings)
@@ -94,41 +85,37 @@ pub(crate) async fn refresh(app: &App, db: &mut SqliteConnection, channel: &str)
     .bind(channel)
     .execute(&mut *db)
     .await?;
-    const NEWEST: &str = "SELECT p.file_id FROM page_files p JOIN messages m ON m.id = p.message_id
-         WHERE m.sequence = (SELECT MAX(sequence) FROM messages WHERE channel_id = ?)";
     query(&format!(
         "UPDATE files SET expires_at = created_at + ?
          WHERE channel_id = ? AND expires_at = ? AND id NOT IN (SELECT id FROM shared_files)
-             AND id NOT IN ({NEWEST})"
+             AND id NOT IN ({KEPT})"
     ))
     .bind(retention)
     .bind(channel)
     .bind(i64::MAX)
-    .bind(channel)
     .execute(&mut *db)
     .await?;
     // An already expired file stays expired.
     query(&format!(
-        "UPDATE files SET expires_at = ? WHERE channel_id = ? AND expires_at > ? AND id IN ({NEWEST})"
+        "UPDATE files SET expires_at = ? WHERE channel_id = ? AND expires_at > ? AND id IN ({KEPT})"
     ))
     .bind(i64::MAX)
     .bind(channel)
     .bind(now)
-    .bind(channel)
     .execute(&mut *db)
     .await?;
     Ok(())
 }
 
-/// Stop keeping the files a person's page versions (only those from `device`, when given)
-/// keep: they left, were removed, or that device was revoked.
+/// Stop keeping the files of the pages a person saved last (only those from `device`,
+/// when given): they left, were removed, or that device was revoked.
 pub(crate) async fn release_from(
     app: &App,
     db: &mut SqliteConnection,
     person: &[u8],
     device: Option<&[u8]>,
 ) -> ApiResult<()> {
-    let channels: Vec<String> = query_scalar(
+    let mut channels: Vec<String> = query_scalar(
         "DELETE FROM page_files WHERE message_id IN (SELECT id FROM messages
              WHERE sender_person = ? AND (? IS NULL OR sender_device = ?))
          RETURNING channel_id",
@@ -138,6 +125,17 @@ pub(crate) async fn release_from(
     .bind(device)
     .fetch_all(&mut *db)
     .await?;
+    let documents: Vec<String> = query_scalar(
+        "DELETE FROM page_document_files WHERE channel_id IN (SELECT channel_id FROM page_documents
+             WHERE sender_person = ? AND (? IS NULL OR sender_device = ?))
+         RETURNING channel_id",
+    )
+    .bind(person)
+    .bind(device)
+    .bind(device)
+    .fetch_all(&mut *db)
+    .await?;
+    channels.extend(documents);
     let channels: HashSet<String> = channels.into_iter().collect();
     for channel in &channels {
         refresh(app, db, channel).await?;
@@ -169,10 +167,107 @@ mod tests {
         .bind(person(1))
         .execute(&mut *tx)
         .await?;
-        let keep: Vec<String> = keep.iter().map(|id| id.to_string()).collect();
-        record(&mut tx, "p", version, &keep).await?;
+        for id in keep {
+            query("INSERT INTO page_files (message_id, file_id, channel_id) VALUES (?, ?, 'p')")
+                .bind(version)
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+        }
         refresh(app, &mut tx, "p").await?;
         tx.commit().await?;
+        Ok(())
+    }
+
+    async fn document(app: &App, version: i64, keep: &[&str]) -> Result<()> {
+        let mut tx = crate::store::write(&app.db).await?;
+        query(
+            "INSERT INTO page_documents (channel_id, version, epoch, sender_device, sender_person, at, size, envelope)
+             VALUES ('p', ?, 1, X'01', ?, 0, 105, zeroblob(105))
+             ON CONFLICT (channel_id) DO UPDATE SET version = excluded.version",
+        )
+        .bind(version)
+        .bind(person(1))
+        .execute(&mut *tx)
+        .await?;
+        let keep: Vec<String> = keep.iter().map(|id| id.to_string()).collect();
+        record(&mut tx, "p", &keep).await?;
+        refresh(app, &mut tx, "p").await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_document_takes_over_from_the_message_based_page() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let app = app(dir.path(), 1).await?;
+        sqlx::raw_sql(
+            "INSERT INTO categories VALUES ('category', 0, X'00');
+             INSERT INTO channels (id, kind, category_id, position, name_ct)
+                 VALUES ('p', 'text', 'category', 0, X'00');
+             UPDATE channels SET page = TRUE WHERE id = 'p';
+             INSERT INTO key_scopes (id, kind, channel_id) SELECT id, 'channel', id FROM channels;
+             INSERT INTO key_epochs (scope_id, epoch, commitment) SELECT id, 1, zeroblob(32) FROM key_scopes;",
+        )
+        .execute(&app.db)
+        .await?;
+        query("INSERT INTO message_senders VALUES (X'01', ?, X'03')")
+            .bind(person(1))
+            .execute(&app.db)
+            .await?;
+        let (old, banner, next) = (encode(&[1; 32]), encode(&[2; 32]), encode(&[3; 32]));
+        for id in [&old, &banner] {
+            query(
+                "INSERT INTO files (id, channel_id, uploader, size, created_at, expires_at)
+                 VALUES (?, 'p', ?, 16, 100, 4000000000)",
+            )
+            .bind(id)
+            .bind(person(1))
+            .execute(&app.db)
+            .await?;
+        }
+        save(&app, "v1", &[&old]).await?;
+        assert_eq!(
+            expiry(&app, &old).await?,
+            Some(i64::MAX),
+            "kept until there is a document"
+        );
+
+        document(&app, 1, &[&banner]).await?;
+        assert_eq!(expiry(&app, &banner).await?, Some(i64::MAX));
+        assert_ne!(expiry(&app, &old).await?, Some(i64::MAX));
+        crate::files::expire_batch(&app).await?;
+        assert_eq!(
+            expiry(&app, &banner).await?,
+            Some(i64::MAX),
+            "the sweep passes over it"
+        );
+
+        document(&app, 2, &[]).await?;
+        assert_ne!(expiry(&app, &banner).await?, Some(i64::MAX));
+
+        // A fresh upload: what was dropped has expired and stays so.
+        query(
+            "INSERT INTO files (id, channel_id, uploader, size, created_at, expires_at)
+             VALUES (?, 'p', ?, 16, 100, 4000000000)",
+        )
+        .bind(&next)
+        .bind(person(1))
+        .execute(&app.db)
+        .await?;
+        document(&app, 3, &[&next]).await?;
+        let mut tx = crate::store::write(&app.db).await?;
+        release_from(&app, &mut tx, &person(1), Some(&[2])).await?;
+        tx.commit().await?;
+        assert_eq!(
+            expiry(&app, &next).await?,
+            Some(i64::MAX),
+            "another device changes nothing"
+        );
+        let mut tx = crate::store::write(&app.db).await?;
+        release_from(&app, &mut tx, &person(1), None).await?;
+        tx.commit().await?;
+        assert_ne!(expiry(&app, &next).await?, Some(i64::MAX));
         Ok(())
     }
 
@@ -216,19 +311,18 @@ mod tests {
             .await?;
         }
         let mut db = app.db.acquire().await?;
-        let mut checked = async |page: bool, keep: &[&String]| {
+        let mut checked = async |keep: &[&String]| {
             let keep: Vec<String> = keep.iter().map(|id| id.to_string()).collect();
-            check(&mut db, "p", page, keep, 500)
+            check(&mut db, "p", keep, 500)
                 .await
                 .map(|live| live.len())
                 .map_err(|e| e.code)
         };
-        assert_eq!(checked(false, &[one]).await, Err("invalid_keep"));
-        assert_eq!(checked(true, &[one, one]).await, Err("invalid_keep"));
-        assert_eq!(checked(true, &[one; 9]).await, Err("invalid_keep"));
-        assert_eq!(checked(true, &[one, two]).await, Ok(2));
+        assert_eq!(checked(&[one, one]).await, Err("invalid_keep"));
+        assert_eq!(checked(&[one; MAX_KEPT + 1]).await, Err("invalid_keep"));
+        assert_eq!(checked(&[one, two]).await, Ok(2));
         // A gone picture or another channel's file is left out; the save still goes through.
-        assert_eq!(checked(true, &[one, expired, other]).await, Ok(1));
+        assert_eq!(checked(&[one, expired, other]).await, Ok(1));
         drop(db);
 
         save(&app, "v1", &[one, two]).await?;
