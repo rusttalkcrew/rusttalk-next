@@ -59,16 +59,20 @@ fn default_check_minutes() -> u64 {
     CHECK_MINUTES[0]
 }
 
-/// Release builds point at their own release directory.
+/// The official release directory, so every build starts with a working address.
+const OFFICIAL_URL: &str =
+    "https://github.com/rusttalkcrew/rusttalk-next/releases/latest/download/";
+
+/// Release builds point at their own release directory (forks set their own).
 fn default_url() -> String {
     option_env!("RUSTTALK_DEFAULT_UPDATE_URL")
-        .unwrap_or_default()
+        .unwrap_or(OFFICIAL_URL)
         .to_owned()
 }
 
-/// Release builds check by default; a saved choice always wins over this.
+/// Checking is on by default; a saved choice always wins over this.
 fn default_automatic() -> bool {
-    !default_url().is_empty()
+    true
 }
 
 /// The release page for `version`, when the update directory is a GitHub release
@@ -97,7 +101,14 @@ impl Settings {
     }
 
     fn load(path: &Path) -> Result<Self> {
-        crate::load_json(path)
+        let mut settings: Self = crate::load_json(path)?;
+        // Older builds saved an empty address with checks off before there was a
+        // default: that was never a choice, so start from the defaults.
+        if settings.url.trim().is_empty() {
+            settings.url = default_url();
+            settings.automatic = default_automatic();
+        }
+        Ok(settings)
     }
 
     fn save(&self, path: &Path) -> Result<()> {
@@ -1516,6 +1527,16 @@ mod tests {
         assert!(!saved.automatic);
         let unset: Settings = serde_json::from_str(r#"{"url":"u"}"#).unwrap();
         assert_eq!(unset.automatic, default_automatic());
+    }
+
+    #[test]
+    fn empty_saved_address_gets_the_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("updates.json");
+        std::fs::write(&path, r#"{"automatic":false,"url":""}"#).unwrap();
+        let loaded = Settings::load(&path).unwrap();
+        assert_eq!(loaded.url, default_url());
+        assert!(loaded.automatic);
     }
 
     #[test]

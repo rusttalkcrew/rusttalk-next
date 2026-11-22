@@ -363,9 +363,10 @@ is deleted and never used; the normal noise suppression keeps working.
   as Join. On Linux it accesses Secret
   Service, and opens file dialogs through xdg-desktop-portal, over the local
   session bus.
-- **Update host:** Release builds contact the HTTPS directory configured in
+- **Update host:** The app contacts the HTTPS directory configured in
   Settings (by default the GitHub release directory of the RustTalk
-  repository, `github.com`) at startup, every six hours and when you select
+  repository, `github.com`) at startup, on the chosen schedule (every 15
+  minutes by default) and when you select
   **Check now**. Turn the automatic checks off in **Settings → Updates**
   (**Check automatically**). It requests the release manifest and its detached
   signature, then requests your platform’s artifact if you choose to update.
