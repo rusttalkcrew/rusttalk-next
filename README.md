@@ -24,6 +24,16 @@
 > yet. Use it with friends, and don't rely on it where a mistake would really
 > hurt.
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/app-dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="docs/images/app-light.png">
+    <img src="docs/images/app-dark.png" alt="RustTalk with a server open: channels and a voice channel with three people on the left, a chat with code, a poll and a reply in the middle, and the member list by role on the right." width="900">
+  </picture>
+  <br>
+  <sub>Demo content. RustTalk still changes, so the app may look a bit different.</sub>
+</p>
+
 ## Why RustTalk?
 
 - **Your server, your rules.** Run your own server with one Docker Compose
