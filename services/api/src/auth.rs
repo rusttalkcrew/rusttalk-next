@@ -100,6 +100,13 @@ async fn sign_in_device(
     request: SignIn,
     open_join: bool,
 ) -> ApiResult<Json<Session>> {
+    // Protocol 2 clients cannot read protected epochs.
+    if request.protocol < 3 {
+        return Err(ApiError::new(
+            StatusCode::UPGRADE_REQUIRED,
+            "client_update_required",
+        ));
+    }
     let ip = client_ip(headers)?;
     let challenge = decode(&request.challenge)?;
     // Commit consumption even if subsequent checks reject the sign-in.

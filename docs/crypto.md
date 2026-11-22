@@ -62,7 +62,7 @@ key wraps, envelope senders, live-file acceptance and message verification
 (including cached or archived certificates). Unseen older messages from that
 device also fail verification: the delivery time cannot prove a signature
 predates revocation. Previously displayed plaintext and previously shared keys
-cannot be recalled. Client-started protected epochs are disabled during rollout. When enabled, a client that knows about a removal requires a fresh epoch for the
+cannot be recalled. On protocol 3 or later, a client that knows about a removal requires a fresh epoch for the
 person's readable scopes, including DMs and voice channels. A sibling waits
 0–249 ms and other readers wait 250–1,249 ms, then fetch again. An online
 reader proposes a random key if the current epoch still lacks the exclusion.
@@ -221,7 +221,7 @@ Recipients verify it with the opened key and the advertised exclusions.
 Even a reader unaware of the original removal refuses to wrap this key to
 a listed device. Earlier epochs keep their original commitments and keys.
 
-With creation enabled, clients use their verified removals and the visible channel permissions
+On protocol 3 or later, clients use their verified removals and the visible channel permissions
 or pinned DM pair to determine which exclusions they require for sending.
 The profile records each verified removal and its affected scopes per server,
 so withholding a member or changing a role after restart cannot undo the

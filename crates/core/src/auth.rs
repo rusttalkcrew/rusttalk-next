@@ -71,6 +71,8 @@ pub struct Challenge {
 
 #[derive(Serialize, Deserialize)]
 pub struct SignIn {
+    #[serde(default)]
+    pub protocol: u32,
     pub person_id: String,
     pub certificate: String,
     pub challenge: String,
@@ -78,7 +80,7 @@ pub struct SignIn {
     pub invite: Option<String>,
 }
 
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 #[derive(Serialize, Deserialize)]
 pub struct ServerInfo {
@@ -174,6 +176,7 @@ impl SignIn {
         invite: Option<&InviteCode>,
     ) -> Result<Self, IdentityError> {
         Ok(Self {
+            protocol: PROTOCOL_VERSION,
             person_id: encode(identity.certificate.person_id()),
             certificate: encode(identity.certificate.public_bytes()?),
             challenge: encode(challenge),

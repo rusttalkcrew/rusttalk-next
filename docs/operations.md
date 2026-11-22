@@ -64,6 +64,7 @@ To upgrade, set `RUSTTALK_VERSION` to the new version in
 `docker compose up -d --wait`.
 The volumes, server key and TLS pin carry over. To roll back, set the previous
 version again. Back up first, because a newer API may migrate the database.
+After migration 0029, the v0.1.9 server image cannot start against the upgraded database. Restore the pre-upgrade backup to roll back to v0.1.9.
 
 ## Behind your own reverse proxy
 

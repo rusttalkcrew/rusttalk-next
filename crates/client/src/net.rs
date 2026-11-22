@@ -1015,6 +1015,13 @@ async fn session<'a>(
         "open_joining_disabled" => Failure::Stop(t!("net.needs_invite").into()),
         "member_cap_reached" => Failure::Stop(t!("net.full").into()),
         "open_join_limit" => Failure::Stop(t!("net.join_limit").into()),
+        "client_update_required" => {
+            ctx.send(Update::Compatibility(
+                server.address.clone(),
+                Compatibility::AppTooOld,
+            ));
+            Failure::Stop(t!("net.needs_newer").into())
+        }
         "device_revoked" => Failure::Stop(t!("net.device_revoked").into()),
         "device_limit" => Failure::Stop(t!("net.device_limit").into()),
         _ if status.is_server_error()

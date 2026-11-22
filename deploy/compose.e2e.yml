@@ -5,9 +5,6 @@
 # the current user so they can write to them.
 services:
   api:
-    build:
-      args:
-        FEATURES: rotation-test
     user: "${RUSTTALK_DEV_USER}"
     volumes: !override
       - ${RUSTTALK_E2E_DB}/${COMPOSE_PROJECT_NAME}-api:/data

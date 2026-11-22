@@ -625,6 +625,26 @@ async fn docker_membership() -> Result<()> {
     )
     .await?;
     let (_, owner_id) = DeviceIdentity::create("Bot A")?;
+    assert_eq!(owner_bot.protocol, 3);
+    let mut legacy = serde_json::to_value(rusttalk_core::auth::SignIn::signed(
+        &owner_id,
+        &[0; 32],
+        &known.server_id,
+        None,
+    )?)?;
+    legacy.as_object_mut().unwrap().remove("protocol");
+    for path in ["/v1/auth/sign-in", "/v1/auth/join"] {
+        rejected(
+            owner_bot
+                .request(Method::POST, path)
+                .json(&legacy)
+                .send()
+                .await?,
+            StatusCode::UPGRADE_REQUIRED,
+            "client_update_required",
+        )
+        .await?;
+    }
     let old_code = cli("owner-invite")?;
     let owner_code = cli("owner-invite")?;
     let mut secrets = vec![old_code.clone(), owner_code.clone()];
