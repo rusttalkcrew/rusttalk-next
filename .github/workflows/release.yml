@@ -135,9 +135,7 @@ jobs:
         run: |
           echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           for service in api index; do
-            # Keep series tags available for manual initial installs.
-            docker buildx imagetools create -t "$IMAGE-$service:$VERSION" -t "$IMAGE-$service:${VERSION%.*}" \
-              -t "$IMAGE-$service:latest" \
+            docker buildx imagetools create -t "$IMAGE-$service:$VERSION" \
               "$IMAGE-$service:$VERSION-amd64" "$IMAGE-$service:$VERSION-arm64"
           done
           api=$(docker buildx imagetools inspect "$IMAGE-api:$VERSION" --format '{{.Manifest.Digest}}')
@@ -159,3 +157,12 @@ jobs:
             cp "$file" "dist/RustTalk-${file#dist/rusttalk-$VERSION-}"
           done
           gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes --title "RustTalk $VERSION"
+      # Watchtower follows :latest, so servers move only once the release (and the app
+      # update it carries) exists. A protocol bump would otherwise lock everyone out.
+      - name: Move latest image tags
+        run: |
+          for service in api index; do
+            # Keep series tags available for manual initial installs.
+            docker buildx imagetools create -t "$IMAGE-$service:${VERSION%.*}" -t "$IMAGE-$service:latest" \
+              "$IMAGE-$service:$VERSION"
+          done
