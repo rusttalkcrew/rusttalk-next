@@ -528,11 +528,15 @@ pub(crate) async fn unshare_from(
     .fetch_all(&mut *db)
     .await?;
     for id in &ids {
-        query("UPDATE files SET expires_at = created_at + ? WHERE id = ?")
-            .bind(retention)
-            .bind(id)
-            .execute(&mut *db)
-            .await?;
+        // A page's newest version may keep the same file; it stays then.
+        query(&format!(
+            "UPDATE files SET expires_at = created_at + ? WHERE id = ? AND id NOT IN ({})",
+            crate::page_files::KEPT
+        ))
+        .bind(retention)
+        .bind(id)
+        .execute(&mut *db)
+        .await?;
     }
     if !ids.is_empty() {
         tracing::info!(count = ids.len(), "shared files returned to normal expiry");
@@ -603,19 +607,20 @@ pub async fn expire(app: App) {
     }
 }
 
-async fn expire_batch(app: &App) -> ApiResult<()> {
+pub(crate) async fn expire_batch(app: &App) -> ApiResult<()> {
     let mut tx = store::write(&app.db).await?;
     let limits = file_settings::effective(&mut tx, app.files.ceilings).await?;
     let now = store::now()?;
     // Shorter retention also applies to files uploaded before the setting changed.
-    // Shared files stay until removed or their channel is deleted.
+    // Kept files (shared ones and a page's pictures) never expire; they stay until
+    // removed, no longer kept, or their channel is deleted.
     let rows: Vec<(String, i64)> = query_as(
-        "SELECT id, size FROM files WHERE expires_at <= ?
-             OR (created_at <= ? AND id NOT IN (SELECT id FROM shared_files))
+        "SELECT id, size FROM files WHERE expires_at <= ? OR (created_at <= ? AND expires_at < ?)
          ORDER BY expires_at LIMIT 64",
     )
     .bind(now)
     .bind(now - limits.retention_secs)
+    .bind(i64::MAX)
     .fetch_all(&mut *tx)
     .await?;
     let mut removed = Vec::new();

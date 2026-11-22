@@ -1527,7 +1527,12 @@ async fn on_command(
                 draft.preview.clone(),
                 draft.inline.clone(),
             );
-            let target = (channel, draft.id);
+            // A page version names its stored files, so the server keeps them (see `post_page`).
+            let page = (state.last.iter())
+                .flat_map(|dir| &dir.categories)
+                .flat_map(|category| &category.channels)
+                .any(|known| known.id == channel && known.page);
+            let target = (channel, draft.id, page);
             let mut sent = files::send(ctx, url, client, target, body.clone(), files.clone()).await;
             // The other person re-keyed the DM just now: take the new key and send
             // once more, whatever this was (text, sticker, file or friend message).

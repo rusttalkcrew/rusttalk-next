@@ -11,6 +11,7 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Pictures on a page no longer disappear after a while; they stay while the page uses them.
 - Pages can show pictures, and links on a page get the same preview cards as in chat.
 - Link preview text no longer runs underneath the Open link button.
 - Removing a device changes chat and call keys on updated servers. Older apps must update to connect.

@@ -247,7 +247,20 @@ impl KeyClient<'_> {
         id: [u8; 32],
         body: &MessageBody,
     ) -> Result<MessageRecord> {
-        self.post_message_dated(channel, id, body, None).await
+        self.post_message_dated(channel, id, body, Posting::Plain)
+            .await
+    }
+
+    /// Post a new version of a page channel. It names the stored files it uses, so the
+    /// server keeps them while this is the page's newest version.
+    pub async fn post_page(
+        &mut self,
+        channel: &[u8; 32],
+        id: [u8; 32],
+        body: &MessageBody,
+    ) -> Result<MessageRecord> {
+        self.post_message_dated(channel, id, body, Posting::Page)
+            .await
     }
 
     pub(super) async fn post_message_dated(
@@ -255,7 +268,7 @@ impl KeyClient<'_> {
         channel: &[u8; 32],
         id: [u8; 32],
         body: &MessageBody,
-        backfill_at: Option<i64>,
+        posting: Posting,
     ) -> Result<MessageRecord> {
         let scope = Scope {
             kind: Kind::Channel,
@@ -278,8 +291,7 @@ impl KeyClient<'_> {
             );
         }
         let key = key.clone();
-        self.post_at(channel, id, epoch, &key, body, backfill_at)
-            .await
+        self.post_at(channel, id, epoch, &key, body, posting).await
     }
 
     /// Seal and post a message in a given epoch, with that epoch's key.
@@ -290,7 +302,7 @@ impl KeyClient<'_> {
         epoch: i64,
         key: &Key,
         body: &MessageBody,
-        backfill_at: Option<i64>,
+        posting: Posting,
     ) -> Result<MessageRecord> {
         let cert = &self.identity.certificate;
         let context = MessageContext {
@@ -309,9 +321,17 @@ impl KeyClient<'_> {
             self.identity,
             &mut body,
         )?);
+        let backfill_at = match posting {
+            Posting::Backfill(at) => Some(at),
+            _ => None,
+        };
+        let mut post = json!({ "id": encode(&id), "epoch": epoch, "envelope": envelope, "backfill_at": backfill_at });
+        if posting == Posting::Page {
+            post["keep"] = kept_files(&body).into();
+        }
         let response = self
             .request(Method::POST, &message_path(channel))
-            .json(&json!({ "id": encode(&id), "epoch": epoch, "envelope": envelope, "backfill_at": backfill_at }))
+            .json(&post)
             .send()
             .await?;
         if let Err(error) = response.error_for_status_ref() {
@@ -580,6 +600,26 @@ fn seal_for_protocol(
     } else {
         context.seal(key, sender, body)
     }
+}
+
+/// How a post differs from a plain message.
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum Posting {
+    Plain,
+    /// A DM copy restored at its original time (Unix seconds).
+    Backfill(i64),
+    /// A page version, which lists the stored files it uses.
+    Page,
+}
+
+/// Every stored file a message uses: its files and their thumbnails.
+fn kept_files(body: &MessageBody) -> Vec<String> {
+    (body.attachments.iter())
+        .flat_map(|file| std::iter::once(&file.file).chain(&file.thumbnail))
+        .map(|blob| encode(&blob.id))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 fn shared_body(file: Attachment) -> MessageBody {

@@ -18,13 +18,14 @@ use sqlx::{FromRow, SqliteConnection, query, query_as, query_scalar};
 use crate::{
     ApiError, ApiResult, App,
     auth::{Actor, authenticate, authenticate_read},
-    channels, keys, payload,
+    channels, keys, page_files, payload,
     roles::{self, Permission},
     store::audit,
 };
 
-/// JSON for the largest envelope (unpadded base64url) plus 512 bytes for the ID, epoch and keys.
-pub const BODY_LIMIT: usize = (MAX_MESSAGE_BYTES * 4).div_ceil(3) + 512;
+/// JSON for the largest envelope (unpadded base64url) plus 512 bytes for the ID, epoch and keys,
+/// and 512 for a page's kept files.
+pub const BODY_LIMIT: usize = (MAX_MESSAGE_BYTES * 4).div_ceil(3) + 1024;
 const RETAIN: i64 = 10_000;
 const PAGE_LIMIT: i64 = 100;
 
@@ -34,6 +35,9 @@ pub struct NewMessage {
     epoch: i64,
     envelope: String,
     backfill_at: Option<i64>,
+    /// A page version's stored files, kept while it is the newest (see `page_files`).
+    #[serde(default)]
+    keep: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -138,12 +142,18 @@ pub async fn create(
         epoch,
         envelope,
         backfill_at,
+        keep,
     } = payload(body)?;
     decode::<32>(&channel)?;
     let message_id = decode(&id)?;
     let envelope_bytes = decode_bytes(&envelope)?;
     let (mut tx, actor) = authenticate(&app, &headers).await?;
     require_write(&mut tx, &actor, &channel).await?;
+    let page = page_files::is_page(&mut tx, &channel).await?;
+    let keep = match keep.is_empty() {
+        true => keep,
+        false => page_files::check(&mut tx, &channel, page, keep, actor.at).await?,
+    };
     let at = match backfill_at {
         Some(at) if chat_kind(&mut tx, &actor, &channel).await? == "dm" => {
             historical_time(at, actor.at)
@@ -183,6 +193,10 @@ pub async fn create(
     .execute(&mut *tx)
     .await?;
     let dropped = prune(&mut tx, &channel).await?;
+    if page {
+        page_files::record(&mut tx, &channel, &id, &keep).await?;
+        page_files::refresh(&app, &mut tx, &channel).await?;
+    }
     tx.commit().await?;
     for id in dropped {
         app.notify(Event::MessageDeleted {
@@ -441,12 +455,15 @@ pub async fn delete(
             .execute(&mut *tx)
             .await?;
     }
+    if page_files::is_page(&mut tx, &channel).await? {
+        page_files::refresh(&app, &mut tx, &channel).await?;
+    }
     tx.commit().await?;
     app.notify(Event::MessageDeleted { channel, id });
     Ok(StatusCode::NO_CONTENT)
 }
 
-const _: () = assert!(BODY_LIMIT == 14_848);
+const _: () = assert!(BODY_LIMIT == 15_360);
 
 #[cfg(test)]
 mod tests {
@@ -454,14 +471,15 @@ mod tests {
 
     #[test]
     fn body_limit_holds_the_largest_message() {
+        let keep = vec![format!("\"{}\"", "A".repeat(43)); page_files::MAX_KEPT].join(",");
         let json = format!(
-            r#"{{"id":"{}","epoch":{},"envelope":"{}"}}"#,
+            r#"{{"id":"{}","epoch":{},"envelope":"{}","backfill_at":null,"keep":[{keep}]}}"#,
             "A".repeat(43),
             i64::MAX,
             "A".repeat((MAX_MESSAGE_BYTES * 4).div_ceil(3)),
         );
         assert!(json.len() <= BODY_LIMIT);
-        assert!(BODY_LIMIT - json.len() < 512);
+        assert!(BODY_LIMIT - json.len() < 1024);
         assert!(serde_json::from_str::<NewMessage>(&json).is_ok());
     }
 
@@ -506,21 +524,29 @@ mod tests {
              INSERT INTO messages (id, channel_id, epoch, sender_device, sender_person, at, size, envelope)
              SELECT CAST(i AS TEXT), ?, 1, X'01', X'02', 0, 111, zeroblob(111) FROM n")
              .bind(RETAIN).bind(&dm).execute(&app.db).await?;
-        for (channel, code) in [(text, "invalid_backfill"), (dm, "history_full")] {
+        // Only a page version keeps files, and only from people who may write there.
+        let kept = vec![encode(&[5; 32])];
+        for (by, channel, backfill_at, keep, code) in [
+            (1, &text, Some(1), vec![], "invalid_backfill"),
+            (1, &dm, Some(1), vec![], "history_full"),
+            (1, &text, None, kept.clone(), "invalid_keep"),
+            (2, &text, None, kept, "channel_read_denied"),
+        ] {
             let post = NewMessage {
                 id: encode(&[9; 32]),
                 epoch: 1,
                 envelope: encode(&[]),
-                backfill_at: Some(1),
+                backfill_at,
+                keep,
             };
             let result = create(
                 State(app.clone()),
-                as_person(1),
-                Path(channel),
+                as_person(by),
+                Path(channel.clone()),
                 Ok(Json(post)),
             )
             .await;
-            assert_eq!(result.err().expect("must reject backfill").code, code);
+            assert_eq!(result.err().expect("must reject the post").code, code);
         }
         Ok(())
     }

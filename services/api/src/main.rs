@@ -10,6 +10,7 @@ mod keys;
 mod members;
 mod messages;
 mod metadata;
+mod page_files;
 mod presence;
 mod roles;
 mod store;
