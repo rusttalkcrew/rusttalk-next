@@ -1182,6 +1182,9 @@ async fn voice_next(
             }
         },
         Next::Swap(capture) => screen_changed(ctx, state, capture),
+        Next::App(app, stream, started) => {
+            voice::app_started(ctx, url, client, state, app, stream, started).await;
+        }
     }
 }
 
@@ -1649,7 +1652,7 @@ async fn on_command(
                 send_room(ctx, url, client, state, channel);
             }
         }
-        Command::ShareApp(app) => voice::share_app(ctx, url, client, state, app).await?,
+        Command::ShareApp(app) => voice::share_app(ctx, state, app),
         Command::ShareScreen(target, options, audio) => {
             voice::pick_screen(ctx, state, target, options, audio)?;
         }

@@ -166,11 +166,9 @@ pub fn capture(app: &App, sink: impl FnMut(&[i16]) + Send + 'static) -> Result<C
             tracing::warn!(%error, "WASAPI app capture ended");
             let _ = ready.try_send(Err(error));
         }
+        Ok(())
     });
-    let capture = Capture {
-        stop: Some(Box::new(move || stop.store(true, Relaxed))),
-        worker,
-    };
+    let capture = Capture::new(move || stop.store(true, Relaxed), worker);
     startup
         .recv_timeout(Duration::from_secs(5))
         .context("starting WASAPI app capture")??;

@@ -5,6 +5,20 @@ use rusttalk_core::{capture, client::voice::NativeAudioSource};
 
 pub use capture::{App, Capture};
 
+/// macOS: System Audio Recording is off for RustTalk.
+pub fn blocked(error: &anyhow::Error) -> bool {
+    error.is::<capture::NoAccess>()
+}
+
+/// The text for a share that failed: macOS says when access is off.
+pub fn failed(error: &anyhow::Error, app: &App) -> String {
+    if blocked(error) {
+        t!("voice.app_audio_blocked").into()
+    } else {
+        t!("voice.app_failed", app = app.name)
+    }
+}
+
 /// False on Windows builds that can't capture single apps (Windows 10).
 pub fn supported() -> bool {
     capture::supported().is_ok()

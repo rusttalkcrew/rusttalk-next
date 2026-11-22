@@ -14,9 +14,9 @@ use rusttalk_core::{
     client::{
         Event, KeyClient, MessageRecord,
         voice::{
-            ConnectionState, DataLiveFiles, LiveDownload, LiveFileEvent, NativeVideoSource,
-            RemoteParticipant, RoomEvent, TrackSid, TrackSource, VoiceRoom, VoiceState,
-            VoiceStatus,
+            ConnectionState, DataLiveFiles, LiveDownload, LiveFileEvent, NativeAudioSource,
+            NativeVideoSource, RemoteParticipant, RoomEvent, TrackSid, TrackSource, VoiceRoom,
+            VoiceState, VoiceStatus,
         },
     },
     control::{Guest, Host},
@@ -46,6 +46,8 @@ pub(super) struct Live {
     deafened: Option<bool>,
     /// Apps this device shares, each with its own track.
     shares: Vec<Share>,
+    /// App captures still starting; `app_started` publishes them.
+    pending: Vec<Pending>,
     /// The sound the screen share should carry; started once the screen is live.
     stream_audio: Vec<App>,
     /// Decrypted names of subscribed remote app tracks.
@@ -100,6 +102,13 @@ impl Transfer {
             ..Self::default()
         }
     }
+}
+
+/// An app capture starting off the voice loop: macOS can wait on its permission prompt.
+struct Pending {
+    app: App,
+    stream: bool,
+    task: tokio::task::JoinHandle<Result<(Capture, NativeAudioSource)>>,
 }
 
 pub(super) struct Share {
@@ -159,6 +168,8 @@ pub(super) async fn voice_command(
     }
     let changed = match command {
         Command::StopApp(id) => {
+            live.pending
+                .retain(|start| start.stream || start.app.id != id);
             let Some(at) =
                 (live.shares.iter()).position(|share| !share.stream && share.app.id == id)
             else {
@@ -251,35 +262,89 @@ async fn set_stream_audio(ctx: &Ctx, live: &mut Live, apps: Vec<App>) -> bool {
         .into_iter()
         .partition(|share| share.stream && !wanted(&share.app.id));
     live.shares = kept;
-    let mut changed = !gone.is_empty();
+    live.pending
+        .retain(|start| !start.stream || wanted(&start.app.id));
+    let changed = !gone.is_empty();
     unpublish_shares(live, gone).await;
     for app in live.stream_audio.clone() {
-        if live.shares.iter().any(|s| s.stream && s.app.id == app.id) {
+        let started = |id: &str| id == app.id;
+        if live.shares.iter().any(|s| s.stream && started(&s.app.id))
+            || live.pending.iter().any(|s| s.stream && started(&s.app.id))
+        {
             continue;
         }
-        match start_share(&live.room, app.clone(), true).await {
-            Ok(share) => {
-                tracing::info!("sharing app audio in the stream");
-                live.shares.push(share);
-                changed = true;
-            }
-            Err(error) => {
-                tracing::warn!(error = %format_args!("{error:#}"), "sharing app audio failed");
-                live.stream_audio.retain(|wanted| wanted.id != app.id);
-                ctx.send(Update::Failed(t!("voice.app_failed", app = app.name)));
-            }
-        }
+        start_share(live, app, true);
     }
     ctx.send(Update::StreamAudio(live.stream_audio.clone()));
     changed
 }
 
-/// Capture an app (or all system audio) and publish it as its own track.
-async fn start_share(room: &VoiceRoom, app: App, stream: bool) -> Result<Share> {
+/// Start capturing an app (or all system audio) without holding up the call; starting
+/// waits for its first audio, or for the macOS permission prompt.
+fn start_share(live: &mut Live, app: App, stream: bool) {
     let target = app.clone();
-    // shortcut: starting waits for the app's first audio (up to seconds) and holds
-    // this server's loop meanwhile; move it to its own task if that gets noticed.
-    let (capture, source) = tokio::task::spawn_blocking(move || share::capture(&target)).await??;
+    let task = tokio::task::spawn_blocking(move || share::capture(&target));
+    live.pending.push(Pending { app, stream, task });
+}
+
+/// An app capture finished starting: publish it as its own track if still wanted.
+pub(super) async fn app_started(
+    ctx: &Ctx,
+    url: &Url,
+    client: Option<&KeyClient<'_>>,
+    state: &mut State,
+    app: App,
+    stream: bool,
+    started: Result<(Capture, NativeAudioSource)>,
+) {
+    let Some(live) = &mut state.voice else {
+        return;
+    };
+    // Live, sound goes with the stream; stream sound only while the screen is live.
+    let wanted = match stream {
+        true => live.screen.is_some() && live.stream_audio.iter().any(|w| w.id == app.id),
+        false => live.screen.is_none(),
+    };
+    if !wanted {
+        if !stream {
+            ctx.send(Update::AppStopped(app.id));
+        }
+        return;
+    }
+    let published = match started {
+        Ok((capture, source)) => {
+            publish_share(&live.room, app.clone(), stream, capture, source).await
+        }
+        Err(error) => Err(error),
+    };
+    match published {
+        Ok(share) => {
+            tracing::info!(stream, "sharing app audio");
+            live.shares.push(share);
+            let channel = live.channel;
+            roster(ctx, url, client, state, channel);
+        }
+        Err(error) => {
+            tracing::warn!(error = %format_args!("{error:#}"), "sharing app audio failed");
+            ctx.send(Update::Failed(share::failed(&error, &app)));
+            if stream {
+                live.stream_audio.retain(|wanted| wanted.id != app.id);
+                ctx.send(Update::StreamAudio(live.stream_audio.clone()));
+            } else {
+                ctx.send(Update::AppStopped(app.id));
+            }
+        }
+    }
+}
+
+/// Publish a started app capture as its own track.
+async fn publish_share(
+    room: &VoiceRoom,
+    app: App,
+    stream: bool,
+    capture: Capture,
+    source: NativeAudioSource,
+) -> Result<Share> {
     let publication = if stream {
         room.publish_stream_audio(&app.name, source).await?
     } else {
@@ -536,6 +601,8 @@ pub(super) enum Next {
     Capture(Result<(screen::Capture, screen::Options)>),
     /// The picker for another screen source finished.
     Swap(Result<screen::Capture>),
+    /// An app capture finished starting; it's no longer in `pending`.
+    App(App, bool, Result<(Capture, NativeAudioSource)>),
     /// Time to send our terminal's output.
     Flush,
 }
@@ -556,6 +623,16 @@ pub(super) async fn next_voice(voice: &mut Option<Live>) -> Next {
             screen::Swap::Idle => std::future::pending().await,
         }
     };
+    let app = async {
+        if live.pending.is_empty() {
+            return std::future::pending().await;
+        }
+        let tasks = live.pending.iter_mut().map(|start| &mut start.task);
+        let (started, at, _) = futures_util::future::select_all(tasks).await;
+        let start = live.pending.remove(at);
+        let started = started.map_err(anyhow::Error::from).and_then(|s| s);
+        Next::App(start.app, start.stream, started)
+    };
     let flush = async {
         match live.terminal.as_mut() {
             Some(hosting) => hosting.tick.tick().await,
@@ -567,6 +644,7 @@ pub(super) async fn next_voice(voice: &mut Option<Live>) -> Next {
         _ = flush => Next::Flush,
         capture = starting => Next::Capture(capture.map_err(anyhow::Error::from).and_then(|c| c)),
         capture = swapping => Next::Swap(capture.map_err(anyhow::Error::from).and_then(|c| c)),
+        next = app => next,
     }
 }
 
@@ -1075,7 +1153,7 @@ pub(super) async fn stop_finished_shares(
     let Some(live) = &mut state.voice else {
         return;
     };
-    let (ended, kept): (Vec<Share>, _) = std::mem::take(&mut live.shares)
+    let (mut ended, kept): (Vec<Share>, _) = std::mem::take(&mut live.shares)
         .into_iter()
         .partition(|share| share.capture.is_finished());
     live.shares = kept;
@@ -1098,8 +1176,12 @@ pub(super) async fn stop_finished_shares(
     } else if ended.is_empty() {
         return;
     }
-    for share in &ended {
+    for share in &mut ended {
         tracing::info!("app audio capture ended");
+        // macOS: access turned out to be off once audio flowed (it delivers silence).
+        if let Some(error) = share.capture.error().filter(share::blocked) {
+            ctx.send(Update::Failed(share::failed(&error, &share.app)));
+        }
         if let Err(error) = live.room.unpublish_audio(&share.sid).await {
             tracing::warn!(error = %format_args!("{error:#}"), "stopping app audio failed");
         }
@@ -1336,6 +1418,7 @@ pub(super) async fn start_call(
         channel,
         deafened: Some(false),
         shares: Vec::new(),
+        pending: Vec::new(),
         stream_audio: Vec::new(),
         apps: HashMap::new(),
         nameless: HashMap::new(),
@@ -1367,34 +1450,16 @@ pub(super) async fn start_call(
     Ok(())
 }
 
-/// Publish an app's audio as its own track.
-pub(super) async fn share_app(
-    ctx: &Ctx,
-    url: &Url,
-    client: &KeyClient<'_>,
-    state: &mut State,
-    app: App,
-) -> Result<()> {
+/// Publish an app's audio as its own track once its capture starts.
+pub(super) fn share_app(ctx: &Ctx, state: &mut State, app: App) {
     // While live, sound goes with the stream instead (see `set_stream_audio`).
     let Some(live) = state.voice.as_mut().filter(|live| live.screen.is_none()) else {
         ctx.send(Update::AppStopped(app.id));
-        return Ok(());
+        return;
     };
-    match start_share(&live.room, app.clone(), false).await {
-        Ok(share) => {
-            tracing::info!("sharing app audio");
-            live.shares.push(share);
-            let channel = live.channel;
-            send_room(ctx, url, client, state, channel);
-        }
-        Err(error) => {
-            tracing::warn!(error = %format_args!("{error:#}"), "sharing app audio failed");
-            let text = t!("voice.app_failed", app = app.name);
-            ctx.send(Update::AppStopped(app.id));
-            ctx.send(Update::Failed(text));
-        }
+    if !live.pending.iter().any(|s| !s.stream && s.app.id == app.id) {
+        start_share(live, app, false);
     }
-    Ok(())
 }
 
 /// Start a screen capture; `share_screen` publishes it once it started.

@@ -12,6 +12,9 @@ mod platform;
 #[cfg(windows)]
 #[path = "capture/windows.rs"]
 mod platform;
+#[cfg(any(target_os = "macos", test))]
+#[path = "capture/tap.rs"]
+mod tap;
 
 pub const SAMPLE_RATE: u32 = 48_000;
 pub const CHANNELS: u32 = 2;
@@ -27,17 +30,24 @@ pub struct App {
     pub name: String,
 }
 
-/// This system can't capture single apps: Windows builds before 20348, and macOS
-/// until its backend lands.
+/// This system can't capture single apps: Windows builds before 20348.
 #[derive(Debug, thiserror::Error)]
 #[error("application audio capture is unavailable on this system")]
 pub struct Unsupported;
 
+/// macOS: System Audio Recording is off for RustTalk.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "system audio recording is off for RustTalk; allow it in System Settings, Privacy & \
+     Security, Screen & System Audio Recording"
+)]
+pub struct NoAccess;
+
 /// Fails with `Unsupported` where single apps can't be captured.
 pub fn supported() -> Result<()> {
-    #[cfg(any(windows, target_os = "macos"))]
+    #[cfg(windows)]
     return platform::supported();
-    #[cfg(not(any(windows, target_os = "macos")))]
+    #[cfg(not(windows))]
     Ok(())
 }
 
@@ -49,13 +59,37 @@ pub fn list_apps() -> Result<Vec<App>> {
 /// Owns the capture. Dropping it requests shutdown without blocking the UI.
 pub struct Capture {
     stop: Option<Box<dyn FnOnce() + Send + Sync>>,
-    worker: std::thread::JoinHandle<()>,
+    /// Taken by `error` once finished.
+    worker: Option<std::thread::JoinHandle<Result<()>>>,
 }
 
 impl Capture {
+    fn new(
+        stop: impl FnOnce() + Send + Sync + 'static,
+        worker: std::thread::JoinHandle<Result<()>>,
+    ) -> Self {
+        Self {
+            stop: Some(Box::new(stop)),
+            worker: Some(worker),
+        }
+    }
+
     /// True if the target disappeared or the backend stopped.
     pub fn is_finished(&self) -> bool {
-        self.worker.is_finished()
+        self.worker
+            .as_ref()
+            .is_none_or(|worker| worker.is_finished())
+    }
+
+    /// Why a finished capture stopped after it started, such as `NoAccess`.
+    pub fn error(&mut self) -> Option<anyhow::Error> {
+        if !self.is_finished() {
+            return None;
+        }
+        match self.worker.take()?.join() {
+            Ok(result) => result.err(),
+            Err(_) => Some(anyhow::anyhow!("app audio capture panicked")),
+        }
     }
 }
 

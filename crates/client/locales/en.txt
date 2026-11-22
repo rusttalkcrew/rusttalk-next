@@ -731,7 +731,6 @@ call.lost_in = Lost packets in
 call.lost_out = Lost packets out
 call.share_app_audio = Share app audio
 call.needs_windows_11 = Needs Windows 11
-call.not_on_mac_yet = Not available on macOS yet
 call.no_talk_here = You can't talk here
 call.looking_for_apps = Looking for apps…
 call.apps_failed = Couldn't look for apps.
@@ -1112,6 +1111,7 @@ voice.disconnected = Voice disconnected.
 voice.removed = You were removed from the voice channel.
 voice.moved = Moved to {channel} by a moderator.
 voice.app_failed = Couldn't share {app}. Is it still playing?
+voice.app_audio_blocked = Allow system audio recording for RustTalk in System Settings.
 voice.switch_failed = Couldn't switch what you share.
 voice.camera_failed = Couldn't turn on your camera.
 

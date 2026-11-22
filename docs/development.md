@@ -368,9 +368,13 @@ for the updater tests, because the system LibreSSL can't make Ed25519 keys
 drops, and joining a voice channel then aborts with an unrecognized selector.
 Cargo doesn't pass on the flag that `webrtc-sys` prints.
 
-Microphone, speakers, camera, screen and window sharing, chat and files
-work. App audio and remote control are off and say so, until their macOS
-backends land (`docs/work-order.md`, section 10). Started from a terminal,
+Microphone, speakers, camera, screen and window sharing, app audio, chat and
+files work. Remote control is off and says so, until its macOS backend lands
+(`docs/work-order.md`, section 10). App audio uses Core Audio process taps;
+the first share asks for System Audio Recording access. Refused, macOS delivers
+silence; after three silent seconds while the app plays, the share ends with a
+pointer to System Settings. "All system audio" can include system sounds such as
+notification alerts. Started from a terminal,
 the client's microphone and camera prompts name the terminal app, which then
 holds the permission.
 

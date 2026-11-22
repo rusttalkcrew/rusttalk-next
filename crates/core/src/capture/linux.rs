@@ -80,14 +80,15 @@ pub fn capture(app: &App, mut sink: impl FnMut(&[i16]) + Send + 'static) -> Resu
         if !reason.trim().is_empty() {
             tracing::warn!(reason = reason.trim(), "PipeWire capture helper stopped");
         }
+        Ok(())
     });
-    let capture = Capture {
-        stop: Some(Box::new(move || {
+    let capture = Capture::new(
+        move || {
             stopped.store(true, Relaxed);
             let _ = child.lock().expect("capture child").kill();
-        })),
+        },
         worker,
-    };
+    );
     startup
         .recv_timeout(Duration::from_secs(7))
         .context("timed out starting PipeWire app capture")?
