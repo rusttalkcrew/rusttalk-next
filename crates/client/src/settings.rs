@@ -14,6 +14,7 @@ use crate::{
     files::Ask,
     home::{Home, Tab, face, privacy_tab},
     i18n::{LANGS, Lang},
+    net::Command,
     server::Directory,
     ui::{
         self, CONTROL_HEIGHT, DARK_THEMES, LIGHT_THEMES, Mode, RADIUS_WINDOW, SPACE_S, TEXT_BODY,
@@ -472,6 +473,8 @@ pub fn show(
     if close && !home.confirm_sign_out {
         home.settings = None;
         home.error = None;
+        home.name_draft = None;
+        home.bio_draft = None;
         home.publish_settings();
     }
 
@@ -495,16 +498,18 @@ pub fn show(
     action
 }
 
-/// A server that knows this person's picture, and the name they use on their first
-/// server. The picture is the same everywhere; names are per server.
+/// A server that knows this person's picture, and their default name (before there
+/// is one, the name on their first server).
 fn me(home: &Home) -> (&Directory, String) {
     static NONE: std::sync::LazyLock<Directory> = std::sync::LazyLock::new(Directory::default);
     let me = home.identity.certificate.person_id();
     let dir = (home.servers.iter())
         .find(|s| s.member(me).is_some_and(|m| m.avatar.is_some()))
         .map_or(&*NONE, |s| &s.dir);
-    let name = (home.servers.iter())
-        .find_map(|s| s.member(me).and_then(|m| m.name.clone()))
+    let default = home.voice.audio.settings().display_name;
+    let name = (!default.is_empty())
+        .then_some(default)
+        .or_else(|| (home.servers.iter()).find_map(|s| s.member(me).and_then(|m| m.name.clone())))
         .unwrap_or_else(|| t!("common.you").into());
     (dir, name)
 }
@@ -536,12 +541,113 @@ fn account_page(ui: &mut Ui, home: &mut Home) {
             );
         });
     });
-    ui::setting_row(ui, t!("settings.name"), t!("settings.name_help"), |_| {});
+    name_row(ui, home);
+    bio_editor(ui, home);
     ui::page_section(ui, t!("settings.your_id"));
     ui.weak(t!("settings.your_id_help"));
     ui::card(ui, |ui| {
         ui.monospace(fingerprint(home.identity.certificate.person_id()));
     });
+}
+
+/// The default name: shown with an edit button, or a field while editing.
+fn name_row(ui: &mut Ui, home: &mut Home) {
+    let saved = home.voice.audio.settings().display_name;
+    let mut save = None;
+    ui::setting_row(
+        ui,
+        t!("settings.name"),
+        t!("settings.name_help"),
+        |ui| match &mut home.name_draft {
+            None => {
+                if !saved.is_empty() {
+                    ui.label(ui::bold(&saved));
+                }
+                if ui::secondary(ui, t!("settings.edit_name")).clicked() {
+                    home.name_draft = Some(saved.clone());
+                }
+            }
+            Some(draft) => {
+                let field = ui.add(
+                    ui::field(draft)
+                        .char_limit(crate::profile::NAME_CHARS)
+                        .desired_width(180.0),
+                );
+                let entered = field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                if ui::primary(ui, t!("common.save")).clicked() || entered {
+                    save = Some(draft.trim().to_owned());
+                }
+                if ui::secondary(ui, t!("common.cancel")).clicked() {
+                    home.name_draft = None;
+                }
+            }
+        },
+    );
+    if let Some(name) = save.filter(|name| !name.is_empty()) {
+        home.name_draft = None;
+        home.change_profile(|settings, servers| {
+            let told = settings.set_default_name(&name, servers.iter());
+            (told.into_iter())
+                .map(|server| (server, Command::SetDisplayName(name.clone())))
+                .collect()
+        });
+    }
+}
+
+/// The bio: a few lines with a live count, saved to every server.
+fn bio_editor(ui: &mut Ui, home: &mut Home) {
+    use crate::profile::{BIO_CHARS, BIO_LINES, clean_bio, fit_bio};
+    let saved = home.voice.audio.settings().bio;
+    let draft = home.bio_draft.get_or_insert_with(|| saved.clone());
+    ui::setting_row(ui, t!("settings.bio"), t!("settings.bio_help"), |_| {});
+    let label = t!("settings.bio");
+    let response = ui.add(
+        ui::text_area(draft)
+            .hint_text(t!("settings.bio_hint"))
+            .desired_rows(3)
+            .desired_width(f32::INFINITY),
+    );
+    response.widget_info(|| egui::WidgetInfo::labeled(Role::MultilineTextInput, true, label));
+    let fitted = fit_bio(draft);
+    if fitted != *draft {
+        *draft = fitted;
+    }
+    let changed = clean_bio(draft) != saved;
+    let (count, lines) = (draft.chars().count(), draft.split('\n').count());
+    let (mut save, mut cancel) = (false, false);
+    ui.horizontal(|ui| {
+        ui.label(ui::caption(format!("{count}/{BIO_CHARS}")))
+            .on_hover_text(t!(
+                "settings.bio_limits",
+                lines = BIO_LINES,
+                chars = BIO_CHARS
+            ));
+        if lines >= BIO_LINES {
+            ui.label(ui::caption(t!(
+                "settings.bio_lines_full",
+                lines = BIO_LINES
+            )));
+        }
+        if changed {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                save = ui::primary(ui, t!("common.save")).clicked();
+                cancel = ui::secondary(ui, t!("common.cancel")).clicked();
+            });
+        }
+    });
+    if cancel {
+        home.bio_draft = None;
+    }
+    if save {
+        let bio = clean_bio(home.bio_draft.as_deref().unwrap_or_default());
+        home.bio_draft = Some(bio.clone());
+        home.change_profile(|settings, servers| {
+            settings.set_bio(&bio, servers.iter());
+            (servers.into_iter())
+                .map(|server| (server, Command::SetBio(bio.clone())))
+                .collect()
+        });
+    }
 }
 
 /// Settings → Notifications: the switches for every server. Servers and channels

@@ -156,8 +156,8 @@ impl<'a> Person<'a> {
         pick
     }
 
-    /// The profile card: picture, name, status, roles, and Message and Poke (or Edit
-    /// profile on your own).
+    /// The profile card: picture, name, status, roles, bio, and Message and Poke (or
+    /// Edit profile on your own).
     pub fn card(&self, ui: &mut Ui) -> Option<Pick> {
         let dir = &self.server.dir;
         let member = self.member();
@@ -193,6 +193,14 @@ impl<'a> Person<'a> {
                     });
                 }
             });
+        }
+        if let Some(bio) = member
+            .and_then(|m| m.bio.as_deref())
+            .filter(|b| !b.is_empty())
+        {
+            ui.add_space(ui::SPACE_S);
+            ui::caption_label(ui, t!("person.about"));
+            super::markdown::bio(ui, dir, bio);
         }
         ui.add_space(ui::SPACE_M);
         let mut pick = None;
@@ -294,6 +302,7 @@ mod tests {
             avatar: None,
             presence: Presence::Online,
             hide_offline: false,
+            bio: None,
             voice_muted: false,
         }
     }

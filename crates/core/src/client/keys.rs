@@ -923,6 +923,22 @@ impl<'a> KeyClient<'a> {
         Ok(())
     }
 
+    /// Encrypt and replace this member's bio; an empty bio clears it.
+    pub async fn set_bio(&self, bio: &str) -> Result<()> {
+        let bio_ct = if bio.is_empty() {
+            None
+        } else {
+            let me = self.identity.certificate.person_id();
+            Some(self.encrypt_metadata(Metadata::Bio, me, bio.as_bytes())?)
+        };
+        self.request(Method::PUT, "/v1/me/profile")
+            .json(&json!({"bio_ct": bio_ct}))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
     /// Create a category with an encrypted name.
     pub async fn create_category(&self, name: &[u8]) -> Result<[u8; 32]> {
         let id = *keys::random_key()?;

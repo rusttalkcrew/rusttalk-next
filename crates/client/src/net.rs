@@ -118,6 +118,8 @@ pub enum Command {
     Reorder(Vec<(Id, Vec<Id>)>),
     SetServerName(String),
     SetDisplayName(String),
+    /// Set this person's bio here; empty clears it.
+    SetBio(String),
     /// Set this person's picture (PNG, JPEG or GIF bytes).
     SetAvatar(Vec<u8>),
     /// Online, away or invisible.
@@ -844,7 +846,11 @@ fn cancel_queued(queued: &mut VecDeque<Command>, command: &Command) {
 fn refuse(ctx: &Ctx, url: &Url, command: Command) {
     match command {
         // The status and hiding are sent again once connected, when they differ.
-        Command::SetStatus(_) | Command::SetHideOffline(_) | Command::CheckGone(..) => {}
+        // So is a pending bio.
+        Command::SetStatus(_)
+        | Command::SetHideOffline(_)
+        | Command::SetBio(_)
+        | Command::CheckGone(..) => {}
         Command::ShareApp(app) => {
             ctx.send(Update::AppStopped(app.id));
             ctx.send(Update::Failed(t!("admin.offline").into()));
@@ -1541,6 +1547,16 @@ async fn on_command(
             state.display_name = Some(name);
             set_display_name(ctx, url, client, state).await;
         }
+        // Without the space key yet, the bio waits: it stays pending and is sent on a later load.
+        Command::SetBio(bio) if client.has_space_key() => {
+            if let Err(error) = client.set_bio(&bio).await {
+                tracing::warn!(error = %format_args!("{error:#}"), "setting bio failed");
+                ctx.send(Update::Failed(t!("net.bio_failed").into()));
+                return Ok(());
+            }
+            directory(ctx, url, client, state).await?;
+        }
+        Command::SetBio(_) => {}
         Command::SetAvatar(bytes) => {
             if let Err(error) = client.set_avatar(&bytes).await {
                 tracing::warn!(error = %format_args!("{error:#}"), "setting picture failed");

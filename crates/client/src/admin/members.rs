@@ -371,6 +371,7 @@ mod tests {
             avatar: None,
             presence: Presence::Offline,
             hide_offline: false,
+            bio: None,
             voice_muted: false,
         }
     }

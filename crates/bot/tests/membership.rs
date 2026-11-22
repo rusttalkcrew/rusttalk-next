@@ -257,6 +257,7 @@ async fn docker_keys(
     receive_key(&mut b, channel, 1).await?;
     receive_key(&mut b, space, 1).await?;
     bonus::icons(a, &b).await?;
+    bonus::profile(a, &b).await?;
     bonus::emoji(a, &b).await?;
     assert_eq!(
         Metadata::ChannelTopic.open(&space.id, HISTORY_ID, b.key(channel, 1).unwrap(), &history)?,

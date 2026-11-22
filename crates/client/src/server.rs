@@ -148,6 +148,12 @@ pub enum Status {
 }
 
 impl Server {
+    /// Whether this server loaded and this device can read this person's name there;
+    /// until then the default-name logic leaves it alone.
+    pub fn profile_ready(&self) -> bool {
+        self.dir.me != [0; 32] && !self.dir.my_name_hidden
+    }
+
     pub fn name(&self) -> &str {
         self.dir.name.as_deref().unwrap_or(&self.label)
     }
@@ -209,6 +215,11 @@ pub struct Directory {
     pub status: Option<Choice>,
     /// Whether this person hides from member lists here while offline.
     pub hide_offline: Option<bool>,
+    /// The server stores bios (older servers drop them).
+    pub bios: bool,
+    /// This person has a name here this device can't read yet (no key for its
+    /// epoch), so it must not be taken for having no name.
+    pub my_name_hidden: bool,
     pub me: Id,
     pub perms: Perms,
     pub categories: Vec<Category>,
@@ -341,6 +352,8 @@ pub struct Member {
     pub presence: Presence,
     /// They asked to be left out of member lists while offline.
     pub hide_offline: bool,
+    /// Their profile bio as they typed it, `:shortcodes:` included.
+    pub bio: Option<String>,
     /// A moderator muted them in every voice channel.
     pub voice_muted: bool,
 }
@@ -812,6 +825,7 @@ mod tests {
             avatar: None,
             presence,
             hide_offline,
+            bio: None,
             voice_muted: false,
         };
         assert!(member(false, Presence::Offline).listed());

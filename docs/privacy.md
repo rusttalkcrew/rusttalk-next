@@ -9,7 +9,7 @@ tables in SQLite (WAL). IDs and digests are binary unless indicated. The `_ct` s
 
 | Table | Columns |
 | --- | --- |
-| `members` | `person_id` (root public key), `joined_at` (Unix seconds), nullable `display_name_ct`, nullable `avatar_ct`, `presence_status` (current choice: online, away or invisible), `hide_offline` (whether to leave them out of member lists while offline), `voice_muted` (a moderator's server-wide voice mute) |
+| `members` | `person_id` (root public key), `joined_at` (Unix seconds), nullable `display_name_ct`, nullable `avatar_ct`, nullable `bio_ct` (the profile bio), `presence_status` (current choice: online, away or invisible), `hide_offline` (whether to leave them out of member lists while offline), `voice_muted` (a moderator's server-wide voice mute) |
 | `roles` | `id` (text), `kind` (built-in kind or custom), `rank`, `permissions` (twelve-bit mask), nullable `name_ct` and `display_ct` (opaque ciphertext: the name, and the colour and member-list grouping) |
 | `server_settings` | Singleton `id`, nullable `owner_person_id`, `default_role_id`, nullable `name_ct`, nullable `description_ct`, nullable `icon_ct`, `open_joining` (public flag), `member_cap` (open admission limit), nullable `index_listing_ct` (encrypted public-listing configuration), nullable `max_file_bytes`, `member_storage_bytes`, `server_storage_bytes`, `retention_secs`, `max_stickers` (server limits) |
 | `member_roles` | `person_id`, `role_id` |
@@ -51,7 +51,7 @@ prune them.
 The API persists public device certificates. The human-readable device
 name and commitment salt stay on the device. Raw invite codes, link keys,
 session tokens, space and channel keys, and readable names, descriptions,
-topics, icons, avatars and server emoji names and pictures are absent from API storage and logs. Audit
+topics, icons, avatars, bios and server emoji names and pictures are absent from API storage and logs. Audit
 records carry IDs and fixed actions. The server knows DM participant IDs,
 sender and routing IDs, ciphertext sizes, timestamps and access changes.
 Text, replies, attachment references and edit targets are inside message
@@ -275,7 +275,13 @@ the server IDs of official servers dismissed from the join page
 list, and how a voice channel splits its call and chat). Of these, only the voice options (push to talk
 and its key, activation level, echo cancellation, noise suppression, auto
 gain), the camera resolution and frame rate, the dismissed official
-servers and "Allow DMs from" (`friends_only`) sync to the person's other devices; the chosen microphone, speakers and camera stay on this device.
+servers, "Allow DMs from" (`friends_only`), the default display name, the
+bio and the servers with a name of their own sync to the person's other
+devices; the chosen microphone, speakers and camera stay on this device.
+`voice.json` also lists the servers this device still has to send a name or
+bio change to. The default name and the bio are sealed for each server like
+other member names, so only members of servers the person is in see them;
+friends see them on the servers they share.
 `notify.json` holds the notification choices (desktop notifications, sound,
 "only when not focused", and per server address and channel ID the level,
 @everyone suppression and mute end time) and, per channel ID, the time of the

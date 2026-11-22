@@ -452,8 +452,18 @@ async fn build(
     }
 
     let mut list = Vec::new();
+    let my_id = *client.identity.certificate.person_id();
+    let mut my_name_hidden = false;
     for row in members.as_array().into_iter().flatten() {
         let person: Id = decode(row["person_id"].as_str().context("member without ID")?)?;
+        let name = text(
+            Metadata::DisplayName,
+            &person,
+            row["display_name_ct"].as_str(),
+        );
+        if person == my_id && name.is_none() && row["display_name_ct"].is_string() {
+            my_name_hidden = true;
+        }
         let devices = client
             .devices()
             .filter(|device| device.person_id() == &person)
@@ -464,16 +474,13 @@ async fn build(
             .collect();
         list.push(Member {
             person,
-            name: text(
-                Metadata::DisplayName,
-                &person,
-                row["display_name_ct"].as_str(),
-            ),
+            name,
             devices,
             roles: strings(&row["role_ids"]),
             avatar: picture(&person, row["avatar_hash"].as_str()),
             presence: serde_json::from_value(row["presence"].clone()).unwrap_or_default(),
             hide_offline: row["hide_offline"].as_bool().unwrap_or_default(),
+            bio: received_bio(text(Metadata::Bio, &person, row["bio_ct"].as_str())),
             voice_muted: row["voice_muted"].as_bool().unwrap_or_default(),
         });
     }
@@ -504,6 +511,8 @@ async fn build(
         icon: picture(&server_id, space["icon_hash"].as_str()),
         status: serde_json::from_value(me["status"].clone()).ok(),
         hide_offline: me["hide_offline"].as_bool(),
+        my_name_hidden,
+        bios: (members.as_array().into_iter().flatten()).any(|row| row.get("bio_ct").is_some()),
         me: *client.identity.certificate.person_id(),
         perms,
         categories,
@@ -514,6 +523,11 @@ async fn build(
         emoji: emoji_items,
         emoji_max: (limit("max_emoji"), limit("max_stickers")),
     })
+}
+
+/// A bio as decrypted, capped like the editor caps it, so nobody can send a huge card.
+fn received_bio(bio: Option<String>) -> Option<String> {
+    bio.map(|bio| crate::profile::fit_bio(&bio))
 }
 
 /// The cache key of a member's avatar or the server icon: its owner and ciphertext hash.
@@ -778,8 +792,18 @@ mod tests {
             avatar: None,
             presence: Default::default(),
             hide_offline: false,
+            bio: None,
             voice_muted: false,
         }
+    }
+
+    #[test]
+    fn a_received_bio_is_capped_like_a_typed_one() {
+        let hostile = format!("{}{}", "x\n".repeat(1000), "y".repeat(5000));
+        let bio = super::received_bio(Some(hostile)).unwrap();
+        assert_eq!(bio.lines().count(), crate::profile::BIO_LINES);
+        assert!(bio.chars().count() <= crate::profile::BIO_CHARS);
+        assert_eq!(super::received_bio(None), None);
     }
 
     #[test]

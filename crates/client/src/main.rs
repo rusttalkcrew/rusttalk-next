@@ -29,6 +29,7 @@ mod official;
 mod paste;
 mod pokes;
 mod previews;
+mod profile;
 mod reorder;
 mod screen;
 mod server;

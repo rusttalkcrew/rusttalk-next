@@ -238,9 +238,9 @@ in a state response indicating that the first epoch is still pending.
 | GET `/v1/space` | Empty | Any member. 200, `{name_ct, description_ct, icon_hash}` |
 | GET `/v1/space/icon` | Empty | Any member. 200, `{icon_ct}`, or `404 icon_not_found` |
 | PUT `/v1/space` | `{name_ct?, description_ct?, icon_ct?}` | `manage_server`. 204 |
-| GET `/v1/members` | Empty | Any member. 200, `[{person_id, display_name_ct, avatar_hash, role_ids, presence, hide_offline, voice_muted?}]`. Clients keep members with `hide_offline` out of the member list while their presence is `offline`, but still use their name and picture elsewhere. `voice_muted` is present and true while a moderator mutes them |
+| GET `/v1/members` | Empty | Any member. 200, `[{person_id, display_name_ct, avatar_hash, bio_ct, role_ids, presence, hide_offline, voice_muted?}]`. `bio_ct` is always present (null without a bio), so clients know the server stores bios. Clients keep members with `hide_offline` out of the member list while their presence is `offline`, but still use their name and picture elsewhere. `voice_muted` is present and true while a moderator mutes them |
 | GET `/v1/members/{person}/avatar` | Empty | Any member. 200, `{avatar_ct}`, or `404 avatar_not_found` |
-| PUT `/v1/me/profile` | `{display_name_ct?, avatar_ct?}` | Updates the authenticated member's own profile. 204 |
+| PUT `/v1/me/profile` | `{display_name_ct?, avatar_ct?, bio_ct?}` | Updates the authenticated member's own profile. 204 |
 | POST `/v1/invite-preview` | `{code}` | No bearer. 200, `{space_key_ct, name_ct}`. Missing, expired, spent or unpreviewable invite returns 404 |
 
 Scope state entries have `{scope, epoch, rotate}`. Pending entries have
@@ -260,8 +260,20 @@ values and explicit null clears a field. Metadata writes require the current
 space epoch.
 During space rotation, the API returns `409 space_key_unavailable`.
 A ciphertext from a different epoch returns `409 metadata_epoch_changed`.
-Server names, descriptions, channel names and topics, category names and
-display names allow 1024 plaintext bytes each. The directory routes return a
+Server names, descriptions, channel names and topics, category names,
+display names and bios allow 1024 plaintext bytes each. The desktop app caps a
+bio at 8 lines and 190 characters, which always fit.
+
+The desktop app keeps one default display name and one bio for the person,
+synced between their devices in the encrypted device sync blob together with
+the servers where they picked a name of their own. It publishes the default
+name, sealed for each server, to every server without its own name, and the
+bio to every server. A device remembers which servers still have to receive a
+change made on it and sends it when such a server next loads its member list,
+so servers that were offline catch up. For people from before default names,
+the name used on most servers becomes the default once every server has
+loaded (or when they first change a name), and servers with a different name
+keep it as their own. The directory routes return a
 short hash of each icon and avatar ciphertext instead of the ciphertext, so
 clients fetch a picture only when its hash is new. Icon and avatar ciphertext
 blobs allow 256 KiB each. The two metadata PUT routes that accept images
