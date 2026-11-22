@@ -15,6 +15,7 @@
 - [ ] `make lint` passes
 - [ ] `make test` passes
 - [ ] `make e2e` passes (needed when the server, protocol or crypto changes)
+- [ ] Added a line under `## Unreleased` in `CHANGELOG.md` (or this change is not visible to people)
 - [ ] Tried it in the app (`make client`), and describe what you did:
 
 ## Decisions for the maintainer
