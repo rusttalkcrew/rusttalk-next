@@ -566,6 +566,9 @@ pub fn stage(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
     if shown.is_empty() {
         let text = if *video_only && !all.is_empty() {
             t!("call.no_video")
+        } else if !bubbles.is_empty() {
+            // Everyone left is minimized: not a connection problem.
+            t!("call.all_minimized")
         } else if joined {
             t!("common.connecting")
         } else {

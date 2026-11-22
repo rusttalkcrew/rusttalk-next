@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Minimizing everyone on the call stage no longer shows "Connecting…"
+
 ## v0.1.10 - 2026-11-22
 
 - Update required: older apps must update (protocol version 3)

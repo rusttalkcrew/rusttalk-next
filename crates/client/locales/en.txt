@@ -767,6 +767,7 @@ call.presentation_help = Shows a shared screen big
 call.show_everyone = Show everyone
 call.show_only_video = Show only video
 call.no_video = No one has video on.
+call.all_minimized = Everyone is minimized. Click a picture below to bring them back.
 call.nobody_here = No one is here yet.
 call.show_name = Show {name}
 call.join_voice = Join voice
