@@ -2478,23 +2478,20 @@ fn new_channel(server: &Server, index: usize, category: Option<Id>) -> Dialog {
 
 /// A category that already holds this kind of channel, else an empty one;
 /// `None` makes a new category named after the kind.
+/// Pages go with the text channels; only voice has a category of its own.
 fn default_category(server: &Server, kind: ChannelKind) -> Option<Id> {
+    let voice = kind == ChannelKind::Voice;
     let categories = || server.dir.categories.iter().filter(|c| c.id.is_some());
     categories()
-        .find(|c| {
-            c.channels
-                .iter()
-                .any(|channel| ChannelKind::of(channel) == kind)
-        })
+        .find(|c| c.channels.iter().any(|channel| channel.voice == voice))
         .or_else(|| categories().find(|c| c.channels.is_empty()))
         .and_then(|c| c.id)
 }
 
 fn category_name(kind: ChannelKind) -> &'static str {
     match kind {
-        ChannelKind::Text => t!("home.text_channels"),
         ChannelKind::Voice => t!("home.voice_channels"),
-        ChannelKind::Page => t!("home.page_channels"),
+        ChannelKind::Text | ChannelKind::Page => t!("home.text_channels"),
     }
 }
 
