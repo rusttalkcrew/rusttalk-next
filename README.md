@@ -158,8 +158,8 @@ RustTalk moves fast, so this list is a snapshot. The live plan is in
 
 **🚧 Still open or being built**
 - Phones: Android and iOS build from the same code but are
-  [experimental](docs/mobile.md); typing on Android doesn't work yet
-  ([#282](https://github.com/rusttalkcrew/rusttalk-next/issues/282))
+  [experimental](docs/mobile.md) test builds; on Android you can sign up, join and chat,
+  but much is still missing ([#282](https://github.com/rusttalkcrew/rusttalk-next/issues/282))
 - Signed installers: macOS ([#233](https://github.com/rusttalkcrew/rusttalk-next/issues/233))
   and Windows still show a warning on first start
 - Pages with tiles and a banner, stored as their own encrypted document
