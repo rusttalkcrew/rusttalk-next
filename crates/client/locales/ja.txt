@@ -1298,6 +1298,7 @@ hotkeys.no_screen_access = システム設定で RustTalk の画面収録を許�
 call.share_terminal = ターミナルを共有
 call.stop_terminal = ターミナルの共有を停止
 call.share_cmd = コマンドプロンプトを共有
+call.more = その他
 call.your_terminal = あなたのターミナル
 call.someones_terminal = {name} のターミナル
 terminal.failed = ターミナルを起動できませんでした。

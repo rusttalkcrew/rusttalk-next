@@ -1298,6 +1298,7 @@ hotkeys.no_screen_access = Sta schermopname toe voor RustTalk in Systeeminstelli
 call.share_terminal = Terminal delen
 call.stop_terminal = Terminal niet meer delen
 call.share_cmd = Opdrachtprompt delen
+call.more = Meer
 call.your_terminal = Jouw terminal
 call.someones_terminal = Terminal van {name}
 terminal.failed = De terminal kon niet starten.
