@@ -38,7 +38,28 @@ fn read(path: &Path) -> Result<SavedScopes> {
         file.metadata()?.len() <= 16 * 1024 * 1024,
         "oversized saved rotation list"
     );
-    Ok(serde_json::from_reader(file.take(16 * 1024 * 1024))?)
+    let entries: BTreeMap<String, serde_json::Value> =
+        serde_json::from_reader(file.take(16 * 1024 * 1024))?;
+    let mut valid = SavedScopes::new();
+    for (device, value) in entries {
+        let parsed = (|| -> Result<Saved> {
+            let saved: Saved = serde_json::from_value(value)?;
+            let owner = decode(&saved.proof.0)?;
+            let signed = super::super::revocations::verify(&owner, &saved.proof.1)?;
+            ensure!(
+                device == keys::exclusion_id(&owner, signed.device_signing_key()),
+                "invalid saved rotation device"
+            );
+            Ok(saved)
+        })();
+        match parsed {
+            Ok(saved) => {
+                valid.insert(device, saved);
+            }
+            Err(_) => tracing::warn!("skipping invalid saved rotation entry"),
+        }
+    }
+    Ok(valid)
 }
 
 fn lock_store(dir: &Path) -> Result<fs::File> {
@@ -57,8 +78,8 @@ impl Rotations {
             return Ok(Self::default());
         }
         let _lock = lock_store(path.parent().context("missing rotation directory")?)?;
-        match read(path).and_then(Self::from_saved) {
-            Ok(rotations) => Ok(rotations),
+        match read(path) {
+            Ok(entries) => Ok(Self::from_saved(entries)),
             Err(error)
                 if error.is::<io::Error>()
                     || error
@@ -77,15 +98,9 @@ impl Rotations {
         }
     }
 
-    fn from_saved(entries: SavedScopes) -> Result<Self> {
+    fn from_saved(entries: SavedScopes) -> Self {
         let mut result = Self::default();
         for (device, saved) in entries {
-            let owner = decode(&saved.proof.0)?;
-            let signed = super::super::revocations::verify(&owner, &saved.proof.1)?;
-            ensure!(
-                device == keys::exclusion_id(&owner, signed.device_signing_key()),
-                "invalid saved rotation device"
-            );
             let proof = Arc::new(saved.proof);
             for scope in saved.scopes {
                 result
@@ -95,7 +110,7 @@ impl Rotations {
                     .insert(device.clone(), Arc::clone(&proof));
             }
         }
-        Ok(result)
+        result
     }
 
     fn persist(&self, path: &Path) -> Result<()> {
@@ -347,8 +362,14 @@ mod tests {
             Arc::new((encode(owner), encode(&signed.to_bytes()))),
         );
         rotations.persist(&path).unwrap();
+        let mut entries: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        entries["wrong-device"] = entries[&device].clone();
+        entries["bad-format"] = serde_json::json!(17);
+        fs::write(&path, serde_json::to_vec(&entries).unwrap()).unwrap();
         let restarted = Rotations::load(&path).unwrap();
         let (excluded, proofs) = restarted.proposal(scope, &Excluded::new());
+        assert_eq!(excluded, Excluded::from([device]));
         assert_eq!(proofs.len(), 1);
         assert!(restarted.covered(scope, &excluded));
         assert!(restarted.proposal(scope, &excluded).1.is_empty());

@@ -27,7 +27,6 @@ tracing-subscriber = { version = "0.3", optional = true }
 tempfile = { version = "3", optional = true }
 
 [dev-dependencies]
-rusttalk-core = { path = "../core", features = ["rotation-test"] }
 ed25519-dalek = { version = "2.2", default-features = false, features = ["fast", "zeroize"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 image = { version = "0.25", default-features = false, features = ["png"] }

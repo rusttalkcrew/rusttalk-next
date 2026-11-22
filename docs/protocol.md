@@ -8,8 +8,8 @@ base64url. Times are Unix seconds. Auth and membership responses carry
 ## Release compatibility
 
 The public `GET /v1/server-info` response reports the server's release
-`version` and integer API `protocol`. The app supports protocols 1 and 2.
-Protocol 2 adds message format v3.
+`version` and integer API `protocol`. The app supports protocols 1 through 3.
+Protocol 2 adds message format v3. Protocol 3 enables protected key epochs.
 If the endpoint returns 404 or the protocol field is missing, the app assumes
 protocol 1. The app reads this information over the verified connection.
 Protocol metadata never changes TLS or server pin checks, device authentication,
@@ -36,8 +36,8 @@ tries to connect. Above it the app directs people to Settings → Updates.
 | GET `/v1/health` | Empty | 200, `ok` |
 | GET `/v1/server-info` | Empty | 200, `{open_joining, version, protocol, dm_backfill}` |
 | GET `/v1/auth/challenge` | Empty | 200, `{challenge, server_id, signature}` |
-| POST `/v1/auth/sign-in` | `{person_id, certificate, challenge, signature, invite?}` | 200, `{token, expires_at}` |
-| POST `/v1/auth/join` | `{person_id, certificate, challenge, signature}` | 200, `{token, expires_at}` |
+| POST `/v1/auth/sign-in` | `{protocol, person_id, certificate, challenge, signature, invite?}` | 200, `{token, expires_at}` |
+| POST `/v1/auth/join` | `{protocol, person_id, certificate, challenge, signature}` | 200, `{token, expires_at}` |
 | POST `/v1/auth/refresh` | Bearer token, empty body | 200, `{token, expires_at}` |
 
 The server signs the 32 raw bytes of the challenge followed by the ASCII
@@ -251,12 +251,15 @@ key. The API checks that the device was registered to that owner on this server
 and that the owner currently reads the scope. Dropping previous exclusions returns
 HTTP 422 `epoch_exclusions_required`. Each set and proof list is limited to 4,096
 entries, with at most 64 devices per owner in a scope. The signed envelope
-commitment authenticates the set (see docs/crypto.md). Version 0.1.9 clients read protected epochs, and shipping servers reject
-growth of the exclusion set with HTTP 409 `epoch_exclusions_disabled`. Before
-enabling creation, servers must bump the protocol to 3 and enforce a minimum
-client version that excludes 0.1.8. Clients must require server protocol 3 or
-later to create protected epochs. Otherwise 0.1.8 rejects their envelopes and
-repeatedly tries to re-key the same DM.
+commitment authenticates the set (see docs/crypto.md). Protocol 3 clients create
+protected epochs only on servers advertising protocol 3 or later. On older
+servers they continue using ordinary epochs.
+
+Protocol 3 servers require a client declaring protocol 3 or later at sign-in
+or open join. Missing or lower values return HTTP 426 `client_update_required`.
+Upgrading the server expires existing sessions once to enforce the same minimum
+on reconnect and refresh. Released 0.1.8 and 0.1.9 apps see protocol 3 in server-info
+and prompt for an update before signing in.
 
 Scope state entries have `{scope, epoch, rotate, excluded?}`. Pending entries have
 `{scope, epoch, device}`. Envelope entries add `sender`, `commitment`, `envelope` and optional `excluded`
@@ -631,7 +634,7 @@ A message record has `{id, epoch, person, sender_device, at, size, envelope}`.
 `envelope` carries a one-byte version, 24-byte nonce, two-byte big-endian
 ciphertext length, ciphertext including its authentication tag, and 64-byte
 device signature. Protocol 2 accepts versions `2` and `3`. New apps send v3 on
-protocol 2 servers for all messages, and v2 on protocol 1 servers. Older apps
+protocol 2 and later servers for all messages, and v2 on protocol 1 servers. Older apps
 reject v3 envelopes as unreadable and prompt for an update on protocol 2
 servers. The envelope is at most 10,752 bytes
 (see [the plaintext format](crypto.md#messages)). The POST limit is

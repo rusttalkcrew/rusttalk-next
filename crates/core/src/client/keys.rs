@@ -40,9 +40,6 @@ struct HeldKey {
 /// Wraps between refreshes of the still-missing set.
 const WRAP_BATCH: usize = 20;
 
-// Requires protocol 3 admission to exclude clients that reject protected commitments.
-const CREATE_PROTECTED_EPOCHS: bool = false;
-
 /// An authenticated client with a live event stream and an in-memory epoch key store.
 pub struct KeyClient<'a> {
     pub(super) server: &'a Server,
@@ -115,7 +112,7 @@ impl<'a> KeyClient<'a> {
             .revocations
             .as_ref()
             .context("key sync needs a connected profile")?;
-        let create_protected_epochs = CREATE_PROTECTED_EPOCHS && server.protocol >= 3;
+        let create_protected_epochs = server.protocol >= 3;
         let mut client = Self {
             server,
             identity,
@@ -154,14 +151,6 @@ impl<'a> KeyClient<'a> {
         };
         client.sync().await?;
         Ok(client)
-    }
-
-    #[cfg(feature = "rotation-test")]
-    pub fn enable_protected_epochs_for_test(&mut self) -> Result<()> {
-        self.rotations =
-            rotation::Rotations::load(&self.revocations.rotation_file(&self.space().id))?;
-        self.create_protected_epochs = true;
-        Ok(())
     }
 
     /// Return the expiry time of the active bearer token as Unix seconds.
