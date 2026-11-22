@@ -257,17 +257,16 @@ impl KeyClient<'_> {
             self.check_edit(channel, &id, cert.person_id(), &original)
                 .await?;
         }
+        if matches!(self.dms.get(channel), Some(DmPin::Blocked)) {
+            anyhow::bail!("DMs on this server are paused");
+        }
         let (epoch, key) = self.current_key(scope)?;
         // A pinned DM only takes messages on an epoch that is the pair's alone.
-        match self.dms.get(channel) {
-            Some(DmPin::With { peer, .. }) => {
-                ensure!(
-                    self.dm_private(channel, peer),
-                    "this DM's key may be held by someone else"
-                );
-            }
-            Some(DmPin::Blocked) => anyhow::bail!("DMs on this server are paused"),
-            None => {}
+        if let Some(DmPin::With { peer, .. }) = self.dms.get(channel) {
+            ensure!(
+                self.dm_private(channel, peer),
+                "this DM's key may be held by someone else"
+            );
         }
         let key = key.clone();
         self.post_at(channel, id, epoch, &key, body, backfill_at)

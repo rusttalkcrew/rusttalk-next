@@ -40,7 +40,7 @@ struct HeldKey {
 /// Wraps between refreshes of the still-missing set.
 const WRAP_BATCH: usize = 20;
 
-// Enable only after older clients can read protected commitments.
+// Requires protocol 3 admission to exclude clients that reject protected commitments.
 const CREATE_PROTECTED_EPOCHS: bool = false;
 
 /// An authenticated client with a live event stream and an in-memory epoch key store.
@@ -115,13 +115,14 @@ impl<'a> KeyClient<'a> {
             .revocations
             .as_ref()
             .context("key sync needs a connected profile")?;
+        let create_protected_epochs = CREATE_PROTECTED_EPOCHS && server.protocol >= 3;
         let mut client = Self {
             server,
             identity,
             revocations,
             changes: revocations.changes(),
             checked_removals: false,
-            create_protected_epochs: CREATE_PROTECTED_EPOCHS,
+            create_protected_epochs,
             update_required: Default::default(),
             rotation_retry: None,
             own_revocations_changed: false,
@@ -135,7 +136,7 @@ impl<'a> KeyClient<'a> {
             links: HashMap::new(),
             devices: HashMap::new(),
             historical_devices: HashMap::new(),
-            rotations: if CREATE_PROTECTED_EPOCHS {
+            rotations: if create_protected_epochs {
                 rotation::Rotations::load(
                     &revocations.rotation_file(&server.known_server().server_id),
                 )?
@@ -426,7 +427,8 @@ impl<'a> KeyClient<'a> {
             let mut retry = false;
             for (scope, epoch, rotate) in states {
                 if rotate || (epoch == 0 && self.is_owner().await?) {
-                    if scope.kind == Kind::Channel
+                    if self.create_protected_epochs
+                        && scope.kind == Kind::Channel
                         && matches!(self.dms.get(&scope.id), Some(DmPin::Blocked))
                     {
                         continue;

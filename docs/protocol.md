@@ -251,8 +251,12 @@ key. The API checks that the device was registered to that owner on this server
 and that the owner currently reads the scope. Dropping previous exclusions returns
 HTTP 422 `epoch_exclusions_required`. Each set and proof list is limited to 4,096
 entries, with at most 64 devices per owner in a scope. The signed envelope
-commitment authenticates the set (see docs/crypto.md). Protocol version 2
-clients ship with protected epoch creation disabled during rollout.
+commitment authenticates the set (see docs/crypto.md). Version 0.1.9 clients read protected epochs, and shipping servers reject
+growth of the exclusion set with HTTP 409 `epoch_exclusions_disabled`. Before
+enabling creation, servers must bump the protocol to 3 and enforce a minimum
+client version that excludes 0.1.8. Clients must require server protocol 3 or
+later to create protected epochs. Otherwise 0.1.8 rejects their envelopes and
+repeatedly tries to re-key the same DM.
 
 Scope state entries have `{scope, epoch, rotate, excluded?}`. Pending entries have
 `{scope, epoch, device}`. Envelope entries add `sender`, `commitment`, `envelope` and optional `excluded`

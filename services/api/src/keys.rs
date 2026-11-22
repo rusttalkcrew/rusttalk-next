@@ -388,6 +388,8 @@ struct Rotation {
     revocations: Vec<(String, String)>,
 }
 
+const ACCEPT_NEW_EXCLUSIONS: bool = cfg!(feature = "rotation-test");
+
 /// Only a root-signed removal for a reader can authorize an unscheduled epoch.
 /// Existing exclusions survive later rotations, including permission changes.
 async fn check_rotation(
@@ -395,6 +397,7 @@ async fn check_rotation(
     scope: Scope,
     current: i64,
     rotation: &Rotation,
+    accept_new: bool,
 ) -> ApiResult<bool> {
     let id = encode(&scope.id);
     let previous: Option<String> =
@@ -405,7 +408,10 @@ async fn check_rotation(
             .await?;
     let mut expected = exclusions(previous.as_deref().unwrap_or("[]"))?;
     let before = expected.len();
-    if rotation.excluded.len() > 4096 || rotation.revocations.len() > 4096 {
+    if rotation.excluded.len() > 4096 {
+        return Err(conflict("revocation_limit"));
+    }
+    if rotation.revocations.len() > 4096 {
         return Err(ApiError::bad_request("invalid_revocation"));
     }
     if !expected.is_subset(&rotation.excluded) {
@@ -416,6 +422,9 @@ async fn check_rotation(
     }
     if rotation.excluded == expected {
         return Ok(false);
+    }
+    if !accept_new {
+        return Err(conflict("epoch_exclusions_disabled"));
     }
     if rotation.revocations.len() != rotation.excluded.len().saturating_sub(before) {
         return Err(conflict("epoch_changed"));
@@ -500,7 +509,7 @@ async fn start_epoch(
     {
         return Err(ApiError::forbidden("device_revoked"));
     }
-    let removing = check_rotation(db, scope, current, rotation).await?;
+    let removing = check_rotation(db, scope, current, rotation, ACCEPT_NEW_EXCLUSIONS).await?;
     if !may_start_epoch(current, epoch, rotate || removing, dm) {
         return Err(conflict("epoch_changed"));
     }
@@ -770,14 +779,25 @@ mod tests {
             )],
         };
         assert_eq!(
-            check_rotation(&mut tx, scope, 0, &request)
+            check_rotation(&mut tx, scope, 0, &request, true)
                 .await
                 .unwrap_err()
                 .code,
             "unknown_removed_device"
         );
         register_device(&mut tx, &device.certificate).await.unwrap();
-        assert!(check_rotation(&mut tx, scope, 0, &request).await.unwrap());
+        assert_eq!(
+            check_rotation(&mut tx, scope, 0, &request, false)
+                .await
+                .unwrap_err()
+                .code,
+            "epoch_exclusions_disabled"
+        );
+        assert!(
+            check_rotation(&mut tx, scope, 0, &request, true)
+                .await
+                .unwrap()
+        );
         query("INSERT INTO revocations (person_id,device_id,record) VALUES (?,?,?)")
             .bind(device.certificate.person_id().as_slice())
             .bind(signing.as_slice())
@@ -790,20 +810,36 @@ mod tests {
             .execute(&mut *tx)
             .await
             .unwrap();
-        assert!(check_rotation(&mut tx, scope, 0, &request).await.unwrap());
+        assert!(
+            check_rotation(&mut tx, scope, 0, &request, true)
+                .await
+                .unwrap()
+        );
         query("INSERT INTO key_epochs (scope_id,epoch,commitment,excluded) VALUES (?,1,zeroblob(32),?)").bind(encode(&scope.id)).bind(serde_json::to_string(&request.excluded).unwrap()).execute(&mut *tx).await.unwrap();
-        assert!(!check_rotation(&mut tx, scope, 1, &request).await.unwrap());
+        assert!(
+            !check_rotation(&mut tx, scope, 1, &request, false)
+                .await
+                .unwrap()
+        );
         assert_eq!(
-            check_rotation(&mut tx, scope, 1, &Rotation::default())
+            check_rotation(&mut tx, scope, 1, &Rotation::default(), false)
                 .await
                 .unwrap_err()
                 .status,
             StatusCode::UNPROCESSABLE_ENTITY
         );
         request.revocations[0].1 = proof(&other, stranger.certificate.person_id());
-        assert!(check_rotation(&mut tx, scope, 0, &request).await.is_err());
+        assert!(
+            check_rotation(&mut tx, scope, 0, &request, true)
+                .await
+                .is_err()
+        );
         request.revocations[0].0 = encode(stranger.certificate.person_id());
-        assert!(check_rotation(&mut tx, scope, 0, &request).await.is_err());
+        assert!(
+            check_rotation(&mut tx, scope, 0, &request, true)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

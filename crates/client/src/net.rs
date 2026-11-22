@@ -1062,7 +1062,7 @@ async fn serve(
                 if let Err(error) = client.sync().await {
                     tracing::warn!(%error, "could not rotate after device removal");
                     sync_voice_key(ctx, client, state);
-                    return End::Error;
+                    continue;
                 }
                 sync_voice_key(ctx, client, state);
                 save_pins(ctx, url, client, state);

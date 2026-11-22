@@ -41,10 +41,45 @@ fn read(path: &Path) -> Result<SavedScopes> {
     Ok(serde_json::from_reader(file.take(16 * 1024 * 1024))?)
 }
 
+fn lock_store(dir: &Path) -> Result<fs::File> {
+    let lock = fs::File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join("store.lock"))?;
+    lock.lock()?;
+    Ok(lock)
+}
+
 impl Rotations {
     pub(super) fn load(path: &Path) -> Result<Self> {
+        if !path.try_exists()? {
+            return Ok(Self::default());
+        }
+        let _lock = lock_store(path.parent().context("missing rotation directory")?)?;
+        match read(path).and_then(Self::from_saved) {
+            Ok(rotations) => Ok(rotations),
+            Err(error)
+                if error.is::<io::Error>()
+                    || error
+                        .downcast_ref::<serde_json::Error>()
+                        .is_some_and(|e| e.is_io()) =>
+            {
+                Err(error)
+            }
+            Err(_) => {
+                fs::rename(path, path.with_extension("corrupt"))?;
+                tracing::warn!(
+                    "moved invalid rotation file aside; rebuilding from verified removals"
+                );
+                Ok(Self::default())
+            }
+        }
+    }
+
+    fn from_saved(entries: SavedScopes) -> Result<Self> {
         let mut result = Self::default();
-        for (device, saved) in read(path)? {
+        for (device, saved) in entries {
             let owner = decode(&saved.proof.0)?;
             let signed = super::super::revocations::verify(&owner, &saved.proof.1)?;
             ensure!(
@@ -66,12 +101,7 @@ impl Rotations {
     fn persist(&self, path: &Path) -> Result<()> {
         let dir = path.parent().context("missing rotation directory")?;
         fs::create_dir_all(dir)?;
-        let lock = fs::File::options()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(dir.join("store.lock"))?;
-        lock.lock()?;
+        let _lock = lock_store(dir)?;
         let mut saved = read(path)?;
         let mut links = saved.values().map(|s| s.scopes.len()).sum::<usize>();
         let mut capped = false;
@@ -329,7 +359,17 @@ mod tests {
             &Excluded::from([keys::exclusion_id(&[7; 32], &target)])
         ));
         std::fs::write(&path, b"invalid").unwrap();
-        assert!(Rotations::load(&path).is_err());
+        assert!(Rotations::load(&path).unwrap().0.is_empty());
+        assert_eq!(
+            fs::read(path.with_extension("corrupt")).unwrap(),
+            b"invalid"
+        );
+        rotations.persist(&path).unwrap();
+        assert!(
+            !Rotations::load(&path)
+                .unwrap()
+                .covered(scope, &Excluded::new())
+        );
     }
 
     #[test]
