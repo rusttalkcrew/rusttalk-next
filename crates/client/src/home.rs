@@ -3334,6 +3334,7 @@ fn page_view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat: &mut
     let editing_id = UiId::unique(("page-editing", channel));
     let mut editing = can_edit && ui.data(|d| d.get_temp(editing_id)).unwrap_or(false);
     let mut save = false;
+    let mut cancel = false;
     ui.add_space(ui::SPACE_S);
     if can_edit {
         ui.horizontal(|ui| {
@@ -3344,8 +3345,7 @@ fn page_view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat: &mut
                     .inner
                     .clicked();
                 if ui::secondary(ui, t!("common.cancel")).clicked() {
-                    // Else the next Edit reopens the cancelled text, not the current page.
-                    chat.clear_draft();
+                    cancel = true;
                     editing = false;
                 }
                 let count = chat.draft.chars().count();
@@ -3407,6 +3407,10 @@ fn page_view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat: &mut
                 None => empty(ui, &title, t!("home.page_empty")),
             }
         });
+    if cancel {
+        // Else the next Edit reopens the cancelled text, not the current page.
+        chat.clear_draft();
+    }
     if save {
         match rusttalk_core::keys::random_key() {
             Ok(id) => {
