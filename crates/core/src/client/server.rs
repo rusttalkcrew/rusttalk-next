@@ -33,6 +33,21 @@ pub struct Server {
 }
 
 impl Server {
+    #[cfg(test)]
+    pub(super) fn for_test(protocol: u32, profile: &Path) -> Self {
+        Self {
+            protocol,
+            revocations: Some(super::revocations::Revocations::in_profile(profile)),
+            known_revocations: Default::default(),
+            http: Client::new(),
+            server: KnownServer {
+                address: "https://localhost/".parse().unwrap(),
+                server_id: [1; 32],
+                tls_fingerprint: None,
+            },
+        }
+    }
+
     /// Verify the origin against saved and supplied pins, then persist the verified pins.
     pub async fn connect(
         address: Url,

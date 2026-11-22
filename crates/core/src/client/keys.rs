@@ -25,6 +25,9 @@ use tokio_tungstenite::tungstenite::Message;
 use super::{MessageBody, Server, chat::Opened};
 use crate::messages::KeyLink;
 
+type EventStream =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
 type HistoricalDevice = ([u8; 32], [u8; 32], [u8; 32]);
 /// A verified epoch key, its envelope, the person who wrapped it, its commitment,
 /// and whether that commitment names the pinned pair (a DM key made for them).
@@ -53,9 +56,7 @@ pub struct KeyClient<'a> {
     rotation_retry: Option<std::time::Instant>,
     own_revocations_changed: bool,
     session: Session,
-    events: tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+    events: EventStream,
     /// Each verified key with its envelope, the person whose device wrapped it, and
     /// its epoch commitment.
     keys: HashMap<(Scope, i64), HeldKey>,
@@ -108,12 +109,24 @@ impl<'a> KeyClient<'a> {
         let events = pinned_tls::events_socket(server.known_server(), &session.token)
             .await
             .map_err(anyhow::Error::from_boxed)?;
+        let mut client = Self::from_stream(server, identity, session, dms, events)?;
+        client.sync().await?;
+        Ok(client)
+    }
+
+    fn from_stream(
+        server: &'a Server,
+        identity: &'a DeviceIdentity,
+        session: &Session,
+        dms: Option<HashMap<[u8; 32], DmPin>>,
+        events: EventStream,
+    ) -> Result<Self> {
         let revocations = server
             .revocations
             .as_ref()
             .context("key sync needs a connected profile")?;
         let create_protected_epochs = server.protocol >= 3;
-        let mut client = Self {
+        Ok(Self {
             server,
             identity,
             revocations,
@@ -148,9 +161,7 @@ impl<'a> KeyClient<'a> {
             stale: false,
             closed: false,
             close_reason: None,
-        };
-        client.sync().await?;
-        Ok(client)
+        })
     }
 
     /// Return the expiry time of the active bearer token as Unix seconds.
@@ -1551,6 +1562,65 @@ pub async fn invite_name(server: &Server, link: &InviteLink) -> Result<Option<Ve
 mod tests {
     use super::*;
     use crate::identity::DeviceIdentity;
+
+    #[tokio::test]
+    async fn protocol_two_keeps_the_current_key_after_learning_a_removal() -> Result<()> {
+        let profile = tempfile::tempdir()?;
+        let server = Server::for_test(2, profile.path());
+        let (words, identity) = DeviceIdentity::create("reader")?;
+        let sibling = DeviceIdentity::add_device(&words, "removed")?;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let socket = tokio::net::TcpStream::connect(listener.local_addr()?).await?;
+        let events = EventStream::from_raw_socket(
+            tokio_tungstenite::MaybeTlsStream::Plain(socket),
+            tokio_tungstenite::tungstenite::protocol::Role::Client,
+            None,
+        )
+        .await;
+        let session = Session {
+            token: String::new(),
+            expires_at: 0,
+        };
+        let mut client = KeyClient::from_stream(&server, &identity, &session, None, events)?;
+        let scope = client.space();
+        let key = keys::random_key()?;
+        let epoch = 7;
+        let context = EnvelopeContext::new(server.known_server().server_id, scope, epoch, &key);
+        client.keys.insert(
+            (scope, epoch),
+            HeldKey {
+                key: key.clone(),
+                envelope: encode(&context.wrap(&key, &identity.certificate, &identity)?),
+                sender: *identity.certificate.person_id(),
+                commitment: context.commitment,
+                excluded: Excluded::new(),
+                pair_bound: false,
+            },
+        );
+        client.scopes.push(ScopeState {
+            scope,
+            epoch,
+            rotate: false,
+            excluded: Excluded::new(),
+        });
+        client.checked_removals = true;
+        assert_eq!(client.current_key(scope)?, (epoch, &key));
+
+        let owner = identity.certificate.person_id();
+        let removal = crate::identity::revoke_device(
+            &words,
+            owner,
+            sibling.certificate.signing_key().to_bytes(),
+        )?;
+        assert!(
+            client
+                .revocations
+                .observe(owner, &encode(&removal.to_bytes()))?
+        );
+        assert!(client.changes.has_changed()?);
+        assert_eq!(client.current_key(scope)?, (epoch, &key));
+        Ok(())
+    }
 
     #[test]
     fn recovery_waits_once_for_a_missing_key_then_starts_fresh() {
