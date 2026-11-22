@@ -29,10 +29,34 @@ const NATIVE_BUFFER: usize = 1 << 16;
 const MAX_TYPED: i32 = ((NATIVE_BUFFER - 1) / 3) as i32;
 /// Characters of the field on each side of the cursor that the buffer holds.
 const CONTEXT: usize = 100;
+/// The most characters a buffer starts with (at most 2 UTF-16 units each), well
+/// under `MAX_TYPED`; a longer selection starts with an empty buffer instead.
+const MAX_SEED: usize = 1000;
 
 /// How many bytes of a reported text length GameTextInput really copied.
 fn copied(length: i32) -> usize {
     usize::try_from(length).unwrap_or(0).min(NATIVE_BUFFER - 1)
+}
+
+/// Modified UTF-8 cut to whole characters: a copy cut short can end inside a
+/// sequence, or between the two halves of a surrogate pair.
+fn whole_chars(bytes: &[u8]) -> &[u8] {
+    let mut end = bytes.len();
+    if let Some(lead) = (0..end).rev().find(|&i| bytes[i] & 0xc0 != 0x80) {
+        let len = match bytes[lead] {
+            0xc0..=0xdf => 2,
+            0xe0..=0xef => 3,
+            _ => 1,
+        };
+        if end - lead < len {
+            end = lead;
+        }
+    }
+    // A high surrogate (U+D800..U+DBFF) waits for its low half.
+    if end >= 3 && bytes[end - 3] == 0xed && (0xa0..=0xaf).contains(&bytes[end - 2]) {
+        end -= 3;
+    }
+    &bytes[..end]
 }
 
 /// The keyboard's buffer: its text, and the selection in characters (sorted).
@@ -150,19 +174,103 @@ pub struct Seed {
 }
 
 impl Seed {
-    /// `CONTEXT` characters each side of `cursor`; dots instead of a secret, which
-    /// the keyboard needs only to know there is something to delete.
-    pub fn around(text: &str, cursor: (usize, usize), secret: bool) -> Self {
+    /// Up to `CONTEXT` characters each side of `cursor`, at most `MAX_SEED` in
+    /// all; empty for a longer selection. Never for a secret field.
+    pub fn around(text: &str, cursor: (usize, usize)) -> Self {
         let len = text.chars().count();
         let (from, to) = (cursor.0.min(len), cursor.1.min(len));
-        let start = from.saturating_sub(CONTEXT);
-        let end = (to + CONTEXT).min(len);
+        let Some(room) = MAX_SEED.checked_sub(to - from) else {
+            return Self::default();
+        };
+        let context = CONTEXT.min(room / 2);
+        let start = from.saturating_sub(context);
+        let end = (to + context).min(len);
         let mut seed = Zeroizing::new(String::with_capacity((end - start) * 4));
-        for c in text.chars().skip(start).take(end - start) {
-            seed.push(if secret { '•' } else { c });
-        }
+        seed.extend(text.chars().skip(start).take(end - start));
         Self { text: seed, start }
     }
+}
+
+/// What the focused field shares with the keyboard (see `share_field`).
+#[derive(Clone)]
+struct SharedField {
+    field: Id,
+    cursor: (usize, usize),
+    /// Characters in the field.
+    len: usize,
+    secret: bool,
+    /// Empty for a secret.
+    seed: Seed,
+}
+
+fn shared_id() -> Id {
+    Id::unique("keyboard field")
+}
+
+/// The focused field shares its cursor and length, and unless it is `secret` its
+/// text around the cursor (`ui::share_with_keyboard`). Being secret is known before
+/// any text is looked at, so a secret never reaches the keyboard.
+pub fn share_field(
+    ctx: &Context,
+    field: Id,
+    text: &str,
+    cursor: Option<CCursorRange>,
+    secret: bool,
+) {
+    let Some(cursor) = cursor.map(sorted) else {
+        return;
+    };
+    let seed = match secret {
+        true => Seed::default(),
+        false => Seed::around(text, cursor),
+    };
+    let len = text.chars().count();
+    let shared = SharedField {
+        field,
+        cursor,
+        len,
+        secret,
+        seed,
+    };
+    ctx.data_mut(|data| data.insert_temp(shared_id(), shared));
+}
+
+/// Whether `field` shared itself.
+#[cfg(target_os = "android")]
+pub fn has_shared(ctx: &Context, field: Id) -> bool {
+    ctx.data(|data| data.get_temp::<SharedField>(shared_id()))
+        .is_some_and(|shared| shared.field == field)
+}
+
+/// Forget what the last field shared, unless it is `keep` (the newly focused one).
+#[cfg(target_os = "android")]
+pub fn forget_shared(ctx: &Context, keep: Option<Id>) {
+    if !keep.is_some_and(|field| has_shared(ctx, field)) {
+        ctx.data_mut(|data| data.remove::<SharedField>(shared_id()));
+    }
+}
+
+/// Start the buffer over for `field`, and where the field's cursor goes. A
+/// normal field's buffer starts with its text around the cursor; a secret field's
+/// starts empty, and on focus with the cursor at the end, as Android password
+/// fields do (Backspace deletes from the end).
+pub fn start(
+    ctx: &Context,
+    bridge: &mut Bridge,
+    field: Id,
+    cursor: (usize, usize),
+    on_focus: bool,
+) -> (usize, usize) {
+    let shared = ctx
+        .data(|data| data.get_temp::<SharedField>(shared_id()))
+        .filter(|shared| shared.field == field);
+    let (cursor, seed) = match shared {
+        Some(shared) if shared.secret && on_focus => ((shared.len, shared.len), Seed::default()),
+        Some(shared) if !shared.secret && shared.cursor == cursor => (cursor, shared.seed),
+        _ => (cursor, Seed::default()),
+    };
+    bridge.start(cursor, seed);
+    cursor
 }
 
 /// Turns changes of the keyboard's buffer into the same changes of the focused field.
@@ -401,8 +509,8 @@ mod activity {
     };
 
     use super::{
-        Bridge, Buffer, MAX_TYPED, NATIVE_BUFFER, Seed, copied, cursor, set_cursor, sorted,
-        wipe_text,
+        Bridge, Buffer, MAX_TYPED, NATIVE_BUFFER, copied, cursor, forget_shared, has_shared,
+        set_cursor, start, whole_chars, wipe_text,
     };
 
     /// The keyboard's action key (Done): Enter for egui.
@@ -425,9 +533,9 @@ mod activity {
     static KEYBOARD: LazyLock<Mutex<Keyboard>> = LazyLock::new(Mutex::default);
     /// The buffer as last read on the Java thread.
     static READ: Mutex<Option<Read>> = Mutex::new(None);
-    /// The focused field, its cursor and its text around it, from the last frame.
-    type Shared = (Id, (usize, usize), Seed);
-    static FIELD: Mutex<Option<Shared>> = Mutex::new(None);
+    /// The action key count when focus last moved, for start-over number `.0`
+    /// of focus: later presses belong to the newly focused field.
+    static FOCUS_ACTIONS: Mutex<Option<(u64, i32)>> = Mutex::new(None);
     /// System bars, display cutout and keyboard, in pixels: left, top, right, bottom.
     static INSETS: Mutex<[i32; 4]> = Mutex::new([0; 4]);
     /// The window or the keyboard changed: follow the insets for a moment.
@@ -447,6 +555,9 @@ mod activity {
     const TYPING_POLL: Duration = Duration::from_millis(40);
     /// A start-over the Java thread hasn't confirmed by then is sent again.
     const RESTART_RETRY: Duration = Duration::from_millis(300);
+    /// Frames a newly focused field gets to share its text before the buffer
+    /// starts empty.
+    const SHARE_WAIT: u8 = 3;
     /// How long a destroyed activity waits for messages still being sent. A new
     /// activity's window waits too, and Android calls it not responding after 5 s.
     const SEND_GRACE: Duration = Duration::from_secs(4);
@@ -470,15 +581,20 @@ mod activity {
     struct Keyboard {
         bridge: Bridge,
         focused: Option<Id>,
-        /// Start the buffer over (with the field's text) once the field has a cursor.
+        /// Start the buffer over (with the field's text) once the field has a cursor;
+        /// `on_focus` for the first start after focus moved.
         start: bool,
+        on_focus: bool,
+        waited: u8,
         /// Start-overs sent; the field waits until the Java thread confirmed the
         /// latest (`confirmed` false, sent at `sent`).
         generation: u64,
         confirmed: bool,
         sent: Instant,
-        /// Action key presses already turned into Enter.
-        actions: i32,
+        /// Focus moves so far, and the action key presses turned into Enter for the
+        /// focused field (unknown until the Java thread said how many there were).
+        focus_moves: u64,
+        actions: Option<i32>,
         /// A secret field had focus since the buffer was last wiped.
         secret: bool,
         kind: Option<Kind>,
@@ -495,10 +611,13 @@ mod activity {
                 bridge: Bridge::default(),
                 focused: None,
                 start: false,
+                on_focus: false,
+                waited: 0,
                 generation: 0,
                 confirmed: true,
                 sent: Instant::now(),
-                actions: 0,
+                focus_moves: 0,
+                actions: None,
                 secret: false,
                 kind: None,
                 ime: false,
@@ -510,24 +629,31 @@ mod activity {
     }
 
     impl Keyboard {
-        /// Focus moved: forget the last field's text at once, and wipe the buffer
-        /// if it held a secret.
-        fn forget(&mut self, app: &AndroidApp) {
+        /// Focus moved: forget the last field's text at once (keeping what the new
+        /// field shared), wipe the buffer if it held a secret, and count the
+        /// action key presses from here on for the new field.
+        fn forget(&mut self, app: &AndroidApp, ctx: &egui::Context, focused: Option<Id>) {
             self.bridge = Bridge::default();
             *lock(&READ) = None;
-            *lock(&FIELD) = None;
+            forget_shared(ctx, focused);
             self.start = true;
+            self.on_focus = true;
+            self.waited = 0;
             self.confirmed = true;
-            if std::mem::take(&mut self.secret) {
-                on_java_thread(app, |input, _| {
+            self.focus_moves += 1;
+            self.actions = None;
+            let (wipe, moves) = (std::mem::take(&mut self.secret), self.focus_moves);
+            on_java_thread(app, move |input, actions| {
+                if wipe {
                     // Overwrite all the secret could have used, then empty it.
                     let mut filler = vec![b'x'; NATIVE_BUFFER - 1];
                     filler.push(0);
                     // SAFETY: `input` is live on this thread; the texts end in NUL.
                     unsafe { set_state(input, &filler, (0, 0)) };
                     unsafe { set_state(input, b"\0", (0, 0)) };
-                });
-            }
+                }
+                *lock(&FOCUS_ACTIONS) = Some((moves, actions));
+            });
         }
 
         /// Put the bridge's buffer into the keyboard's, as start-over `generation`.
@@ -707,7 +833,9 @@ mod activity {
             let length = copied(state.length);
             let bytes = match state.text.is_null() || length == 0 {
                 true => &[][..],
-                false => unsafe { slice::from_raw_parts(state.text.cast::<u8>(), length) },
+                false => {
+                    whole_chars(unsafe { slice::from_raw_parts(state.text.cast::<u8>(), length) })
+                }
             };
             let selection = (state.selection.start, state.selection.end);
             *out = Some(Buffer::from_java(bytes, selection));
@@ -893,16 +1021,6 @@ mod activity {
         }));
     }
 
-    /// The focused field's text around its cursor, for the keyboard (see
-    /// `ui::share_with_keyboard`). Password fields lay out dots already.
-    pub fn share_field(ctx: &egui::Context, field: Id, text: &str, cursor: Option<CCursorRange>) {
-        let Some(cursor) = cursor.map(sorted) else {
-            return;
-        };
-        let seed = Seed::around(text, cursor, crate::ui::is_private(ctx, field));
-        *lock(&FIELD) = Some((field, cursor, seed));
-    }
-
     /// Before the frame: typed text, and the space the system leaves for the app.
     pub fn input(ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         let Some(app) = APP.get() else { return };
@@ -926,7 +1044,7 @@ mod activity {
         let focused = ctx.memory(|memory| memory.focused());
         if focused != keyboard.focused {
             keyboard.focused = focused;
-            keyboard.forget(app);
+            keyboard.forget(app, ctx, focused);
         }
         let Some(field) = focused.filter(|_| ctx.egui_wants_keyboard_input()) else {
             return;
@@ -935,14 +1053,26 @@ mod activity {
             return;
         };
         if keyboard.start {
-            let seed = (lock(&FIELD).as_ref())
-                .filter(|(id, at, _)| *id == field && *at == cursor)
-                .map(|(_, _, seed)| seed.clone())
-                .unwrap_or_default();
-            keyboard.bridge.start(cursor, seed);
+            // A field shares itself from its first frame with focus.
+            if !has_shared(ctx, field) && keyboard.waited < SHARE_WAIT {
+                keyboard.waited += 1;
+                return;
+            }
+            let on_focus = keyboard.on_focus;
+            let at = start(ctx, &mut keyboard.bridge, field, cursor, on_focus);
+            if at != cursor {
+                set_cursor(ctx, field, at);
+            }
             keyboard.start = false;
+            keyboard.on_focus = false;
             keyboard.send(app, ctx, false);
             return;
+        }
+        if keyboard.actions.is_none()
+            && let Some((moves, actions)) = *lock(&FOCUS_ACTIONS)
+            && moves == keyboard.focus_moves
+        {
+            keyboard.actions = Some(actions);
         }
         let read = lock(&READ)
             .clone()
@@ -952,7 +1082,6 @@ mod activity {
             match read {
                 Some(read) if read.buffer == *keyboard.bridge.buffer() => {
                     keyboard.confirmed = true;
-                    keyboard.actions = read.actions;
                 }
                 _ => {
                     if keyboard.sent.elapsed() >= RESTART_RETRY {
@@ -973,9 +1102,14 @@ mod activity {
                 keyboard.start = true;
                 return;
             }
-            if read.actions != keyboard.actions {
-                keyboard.actions = read.actions;
-                enter(&mut raw_input.events);
+            // Each press once, for the field focused when it came.
+            if let Some(seen) = keyboard.actions
+                && read.actions > seen
+            {
+                for _ in seen..read.actions {
+                    enter(&mut raw_input.events);
+                }
+                keyboard.actions = Some(read.actions);
             }
         }
         let (generation, ctx) = (keyboard.generation, ctx.clone());
@@ -1082,7 +1216,7 @@ mod tests {
             field.frame(Vec::new());
             set_cursor(&field.ctx, Id::unique(FIELD), cursor);
             field.frame(Vec::new());
-            let seed = Seed::around(&field.text, field.cursor(), false);
+            let seed = Seed::around(&field.text, field.cursor());
             field.bridge.start(field.cursor(), seed);
             field
         }
@@ -1260,11 +1394,47 @@ mod tests {
     }
 
     #[test]
-    fn secrets_go_to_the_keyboard_as_dots() {
-        let seed = Seed::around("hunter2", (7, 7), true);
-        assert_eq!(&*seed.text, "•••••••");
-        let seed = Seed::around(&"a".repeat(300), (150, 150), false);
+    fn seeds_stay_small() {
+        let seed = Seed::around(&"a".repeat(300), (150, 150));
         assert_eq!((seed.start, seed.text.len()), (50, 200));
+        // A long selection gets less context, and one past the cap none at all.
+        let text = "b".repeat(5000);
+        let seed = Seed::around(&text, (1000, 1990));
+        assert_eq!((seed.start, seed.text.chars().count()), (995, 1000));
+        assert!(Seed::around(&text, (0, 4000)) == Seed::default());
+    }
+
+    #[test]
+    fn a_long_selection_is_replaced_from_an_empty_buffer() {
+        let text = "c".repeat(30_000);
+        let mut field = Field::new(&text, true, (0, 30_000));
+        assert!(field.bridge.buffer().text.is_empty());
+        let (bytes, _) = field.bridge.buffer().to_java();
+        assert_eq!(&bytes[..], b"\0");
+        field.keyboard("short", (5, 5));
+        assert_eq!(field.text, "short");
+    }
+
+    #[test]
+    fn a_cut_copy_ends_on_a_whole_character() {
+        // 2-byte characters cut after an odd number of bytes.
+        let two = "é".repeat(40_000);
+        let cut = whole_chars(&two.as_bytes()[..copied(80_000)]);
+        assert_eq!(cut.len(), NATIVE_BUFFER - 2);
+        // Emoji are two 3-byte surrogates in modified UTF-8; 65535 = 6 * 10922 + 3
+        // ends on a high surrogate, which goes.
+        let emoji = Buffer {
+            text: Zeroizing::new("😀".repeat(12_000)),
+            selection: (0, 0),
+        }
+        .to_java()
+        .0;
+        let cut = whole_chars(&emoji[..copied(72_000)]);
+        assert_eq!(cut.len(), 65_532);
+        let buffer = Buffer::from_java(cut, (0, 0));
+        assert!(!buffer.text.contains('\u{fffd}'));
+        assert_eq!(buffer.text.chars().count(), 10_922);
+        assert_eq!(whole_chars(b"ab"), b"ab");
     }
 
     #[test]

@@ -180,6 +180,7 @@ pub fn secondary_large(ui: &mut Ui, text: &str) -> Response {
 pub struct Field<'t> {
     edit: TextEdit<'t>,
     private: bool,
+    password: bool,
 }
 
 /// A one-line text field.
@@ -187,6 +188,7 @@ pub fn field(text: &mut dyn TextBuffer) -> Field<'_> {
     Field {
         edit: TextEdit::singleline(text).margin(Margin::symmetric(10, 7)),
         private: false,
+        password: false,
     }
 }
 
@@ -195,6 +197,7 @@ pub fn text_area(text: &mut dyn TextBuffer) -> Field<'_> {
     Field {
         edit: TextEdit::multiline(text).margin(Margin::symmetric(10, 7)),
         private: false,
+        password: false,
     }
 }
 
@@ -229,6 +232,7 @@ impl Field<'_> {
 
     /// Show dots instead of the typed text.
     pub fn password(mut self) -> Self {
+        self.password = true;
         self.edit = self.edit.password(true);
         self
     }
@@ -248,7 +252,7 @@ impl Field<'_> {
 impl Widget for Field<'_> {
     fn ui(self, ui: &mut Ui) -> Response {
         let output = self.edit.show(ui);
-        share_with_keyboard(&output);
+        share_with_keyboard(&output, self.private || self.password);
         let response = output.response.response;
         if self.private {
             // For this frame only: another screen's field can get the same id.
@@ -262,9 +266,10 @@ impl Widget for Field<'_> {
 }
 
 /// Phones: the on-screen keyboard works on the text around the cursor (to delete
-/// and correct it), so the focused field shares it (`android::share_field`).
-pub fn share_with_keyboard(output: &egui::text_edit::TextEditOutput) {
-    #[cfg(target_os = "android")]
+/// and correct it), so the focused field shares it (`android::share_field`); a
+/// `secret` field shares only its cursor and length.
+pub fn share_with_keyboard(output: &egui::text_edit::TextEditOutput, secret: bool) {
+    #[cfg(any(target_os = "android", test))]
     if output.response.response.has_focus() {
         let response = &output.response.response;
         crate::android::share_field(
@@ -272,10 +277,11 @@ pub fn share_with_keyboard(output: &egui::text_edit::TextEditOutput) {
             response.id,
             output.galley.text(),
             output.cursor_range,
+            secret,
         );
     }
-    #[cfg(not(target_os = "android"))]
-    let _ = output;
+    #[cfg(not(any(target_os = "android", test)))]
+    let _ = (output, secret);
 }
 
 fn private_id(field: egui::Id) -> egui::Id {

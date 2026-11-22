@@ -121,6 +121,9 @@ pub struct Home {
     find: Find,
     dialog: Option<Dialog>,
     pub toast: Option<(String, f64)>,
+    /// Android: the note that messages were left unsent, until its notice showed.
+    #[cfg(target_os = "android")]
+    unsent: Option<PathBuf>,
     pub settings: Option<Tab>,
     pub voice: Voice,
     pub hotkeys: crate::hotkeys::Hotkeys,
@@ -300,6 +303,8 @@ impl Home {
     pub fn new(identity: DeviceIdentity, ctx: &egui::Context, data: PathBuf) -> Result<Self> {
         let identity = Arc::new(identity);
         let data_dir = data.clone();
+        #[cfg(target_os = "android")]
+        let unsent = crate::net::unsent_note(&data_dir);
         let fresh = !data.join("voice.json").exists();
         let audio = Audio::new(&data)?;
         // After an update, open "What's new" once; a first start has nothing new yet.
@@ -361,12 +366,16 @@ impl Home {
                 ..Find::default()
             },
             dialog: None,
-            // A phone had to end while messages were still on their way.
-            toast: crate::net::take_unsent(&data_dir).then(|| {
-                // Shown in a chat, so long enough to open one.
-                let until = ctx.input(|input| input.time) + 60.0;
-                (t!("home.unsent_after_close").to_owned(), until)
-            }),
+            // A phone had to end while messages were still on their way: say so
+            // until it shows in a chat.
+            #[cfg(target_os = "android")]
+            toast: unsent
+                .is_some()
+                .then(|| (t!("home.unsent_after_close").to_owned(), f64::INFINITY)),
+            #[cfg(not(target_os = "android"))]
+            toast: None,
+            #[cfg(target_os = "android")]
+            unsent,
             settings: announce.then_some(Tab::WhatsNew),
             hotkeys: crate::hotkeys::Hotkeys::new(ctx, audio.clone()),
             voice: Voice::new(audio, video, runtime),
@@ -1767,6 +1776,15 @@ pub fn show(
                     server.send(Command::AcceptFile(id, path));
                 }
             }
+        }
+    }
+    #[cfg(target_os = "android")]
+    if home.unsent.is_some() && toast_shown(ui.ctx()) {
+        if let Some(note) = home.unsent.take() {
+            let _ = std::fs::remove_file(note);
+        }
+        if let Some((_, until)) = &mut home.toast {
+            *until = now + 10.0;
         }
     }
     if home.toast.as_ref().is_some_and(|(_, until)| *until < now) {
@@ -4589,9 +4607,22 @@ fn composer_id(channel: Id) -> UiId {
     UiId::unique(("composer", channel))
 }
 
+fn toast_shown_id() -> UiId {
+    UiId::unique("toast shown")
+}
+
+/// Whether a toast was drawn since the last time this was asked.
+#[cfg(target_os = "android")]
+fn toast_shown(ctx: &egui::Context) -> bool {
+    ctx.data_mut(|data| data.remove_temp::<bool>(toast_shown_id()))
+        .unwrap_or(false)
+}
+
 /// The latest problem, in red, with a close button.
 pub fn toast_line(ui: &mut Ui, toast: &mut Option<(String, f64)>) {
     if let Some((text, _)) = toast.as_ref() {
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(toast_shown_id(), true));
         let mut close = false;
         ui.horizontal(|ui| {
             ui.colored_label(ui::colors(ui).danger_text, text.as_str());
@@ -4982,7 +5013,7 @@ fn composer_field(
                         }
                     },
                 );
-                ui::share_with_keyboard(&completion.text_edit);
+                ui::share_with_keyboard(&completion.text_edit, false);
                 if let Some(accepted) = completion.accepted
                     && !chat.mentions.accepted(&accepted.insert, choices)
                 {

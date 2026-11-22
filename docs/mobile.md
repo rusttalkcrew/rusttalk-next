@@ -16,10 +16,14 @@ messages and reading them again after a restart.
 
 - **Typing** (`src/android.rs`). The keyboard doesn't send keys to
   GameActivity: it edits a text buffer that GameTextInput keeps, and winit 0.30
-  drops the events that say it changed. The buffer holds the focused field's
-  text for up to 100 characters each side of the cursor (dots for passwords and
-  recovery words), so the keyboard can delete and correct what is already
-  there; each change to it (text, selection, composed word) becomes the same
+  drops the events that say it changed. For a normal field the buffer starts
+  with its text for up to 100 characters each side of the cursor (at most 1,000
+  in all; a longer selection starts empty and is replaced), also right after the
+  field takes focus, so the keyboard can delete and correct what is already
+  there. Password and recovery-word fields never give the keyboard their text:
+  the field says it is secret before anything is shared, its buffer starts
+  empty, and on focus the cursor goes to the end, as in Android password fields
+  (Backspace deletes from there). Each change to the buffer (text, selection, composed word) becomes the same
   change at the same place in the field, through the field's cursor and egui
   text and delete events. Moving the cursor in the field starts the buffer over
   there. Reading and setting the buffer happen on the Java thread, where the
@@ -30,13 +34,15 @@ messages and reading them again after a restart.
   While a field is focused the app paints every 40 ms to read the buffer, since
   nothing else wakes it.
 - **Enter**: winit drops the keyboard's action key, so `MainActivity` (the only
-  Java in the app) counts presses of it and the app turns each into Enter. The
-  key shows Done. Newlines are text, also a lone one from Enter on a hardware
+  Java in the app) counts presses of Done (not Next or Search) and the app turns
+  each into one Enter for the field that had focus when it came. The key shows
+  Done. Newlines are text, also a lone one from Enter on a hardware
   keyboard or a paste, so nothing is sent by accident.
 - **Long text**: GameTextInput copies at most 64 KiB but reports the full
   length, and android-activity's reader for winit trusts that length. A Java
   `LengthFilter` keeps the keyboard's buffer under 21,845 UTF-16 units, which
-  always fits, and the app's own reader takes only the copied bytes.
+  always fits, and the app's own reader takes only the copied bytes, cut to
+  whole characters.
 - **Keyboard type**: password fields and recovery words (`ui::Field::private`)
   get no suggestions and ask the keyboard not to learn
   (`IME_FLAG_NO_PERSONALIZED_LEARNING`). When a field stops wanting text the app
@@ -65,8 +71,8 @@ messages and reading them again after a restart.
   android-activity has handled `onDestroy`, waits up to 4 seconds for messages
   still being sent (a new activity's window waits too, and Android reports it as
   not responding after 5), then ends the process (see Android lifecycle). If
-  messages were still on their way, the next start says so in the chat; the
-  note (`unsent`) holds no message text. Drafts in the message box are lost, as
+  messages were still on their way, it leaves a note (`unsent`, no message
+  text); the next start says so in a chat and deletes the note once that showed. Drafts in the message box are lost, as
   on a desktop quit: no platform saves them yet.
 - **Test build**: `deploy/android/build.sh` makes a release APK signed with the
   local debug key (`rusttalk-<version>-android-arm64-test.apk`): not

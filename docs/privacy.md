@@ -277,8 +277,8 @@ the device.
 
 Next to the settings, `servers.json` holds each server's address, server ID
 and TLS fingerprint. On Android, an empty `unsent` file means the app had to
-end while messages were still being sent; the next start shows a note and
-deletes it. `sync.json` holds the last merged device sync snapshot
+end while messages were still being sent; the app deletes it once it has told
+the person, in a chat. Desktops never write or read it. `sync.json` holds the last merged device sync snapshot
 with its version: joined servers with their pins, servers left, synced
 settings, friends (with pending requests, blocks and each person's last seen
 name), and local edits not yet uploaded. `voice.json` holds the

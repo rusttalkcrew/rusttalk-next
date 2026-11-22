@@ -127,8 +127,9 @@ pub fn wait_for_sends(limit: Duration) -> usize {
     }
 }
 
-/// A file saying that messages were still on their way when the app had to end.
-/// It holds no message text: nothing a person wrote is kept on the device.
+/// Android: a file saying that messages were still on their way when the app had
+/// to end. It holds no message text: nothing a person wrote is kept on the device.
+#[cfg(target_os = "android")]
 const UNSENT: &str = "unsent";
 
 #[cfg(target_os = "android")]
@@ -138,9 +139,10 @@ pub fn note_unsent(data: &Path) {
     }
 }
 
-/// Whether the last run ended with messages still on their way (and forget it).
-pub fn take_unsent(data: &Path) -> bool {
-    std::fs::remove_file(data.join(UNSENT)).is_ok()
+/// The note, if the last run left one; deleted once its notice was shown.
+#[cfg(target_os = "android")]
+pub fn unsent_note(data: &Path) -> Option<PathBuf> {
+    Some(data.join(UNSENT)).filter(|note| note.exists())
 }
 
 // A draft is big and rare next to the other commands, which are small.

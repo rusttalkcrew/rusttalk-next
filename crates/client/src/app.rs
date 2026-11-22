@@ -667,6 +667,43 @@ mod tests {
     use std::fs;
 
     #[test]
+    fn recovery_words_never_reach_the_keyboard() {
+        use crate::android::{Bridge, cursor, set_cursor, start};
+        let ctx = egui::Context::default();
+        let mut words = Zeroizing::new("apple banana cherry".to_owned());
+        let frame = |words: &mut Zeroizing<String>| {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                restore(ui, words, None);
+            });
+            output.textures_delta.clear();
+        };
+        // The screen focuses its field, which then shares itself with the keyboard.
+        frame(&mut words);
+        frame(&mut words);
+        let field = ctx
+            .memory(|memory| memory.focused())
+            .expect("focused field");
+        // What would go to GameTextInput_setState.
+        let sent = |bridge: &Bridge| bridge.buffer().to_java().0;
+        let mut bridge = Bridge::default();
+        let at = start(&ctx, &mut bridge, field, cursor(&ctx, field).unwrap(), true);
+        assert_eq!(at, (19, 19), "typing starts at the end");
+        assert_eq!(&sent(&bridge)[..], b"\0");
+        // Moving the cursor into the words starts over, still without them.
+        set_cursor(&ctx, field, (6, 6));
+        frame(&mut words);
+        let at = start(
+            &ctx,
+            &mut bridge,
+            field,
+            cursor(&ctx, field).unwrap(),
+            false,
+        );
+        assert_eq!(at, (6, 6));
+        assert_eq!(&sent(&bridge)[..], b"\0");
+    }
+
+    #[test]
     fn sign_out_removes_account_data_and_preserves_device_setup() {
         let profile = tempfile::tempdir().unwrap();
         let dir = profile.path();
