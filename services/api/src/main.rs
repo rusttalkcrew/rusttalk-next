@@ -53,7 +53,7 @@ use tower_http::{
     request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
 };
 use tracing::{Instrument, Level};
-use tracing_subscriber::{filter::Targets, prelude::*};
+use tracing_subscriber::{filter::Targets, fmt::writer::BoxMakeWriter, prelude::*};
 
 #[derive(Clone)]
 struct App {
@@ -186,13 +186,23 @@ async fn main() -> ExitCode {
                 .with_default(Level::WARN)
                 .with_target("rusttalk_", Level::INFO),
         )
-        .with(tracing_subscriber::fmt::layer().json())
+        .with(tracing_subscriber::fmt::layer().json().with_writer(log_writer()))
         .init();
     if let Err(error) = run().await {
         tracing::error!(error = %format_args!("{error:#}"), "API command failed");
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
+}
+
+/// Server logs go to stdout. A CLI command prints its value there, so its logs (such as
+/// sqlx's slow-statement warning while the server holds the writer) go to stderr instead.
+fn log_writer() -> BoxMakeWriter {
+    if env::args_os().nth(1).is_some() {
+        BoxMakeWriter::new(io::stderr)
+    } else {
+        BoxMakeWriter::new(io::stdout)
+    }
 }
 
 async fn run() -> Result<()> {
