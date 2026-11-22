@@ -319,6 +319,37 @@ only in the invite fragment. After rotation an invite can still preview
 its original snapshot. Once the invitee joins, it obtains readable
 epochs through the normal envelope flow.
 
+## Server events
+
+An event is a format byte (1), a random 24-byte nonce, the XChaCha20-Poly1305
+ciphertext with its tag under the space epoch key, and a 64-byte Ed25519
+device signature. It is at most 3,246 bytes. The associated data is
+
+```text
+"rusttalk-event-v1" || server_id (32 bytes) || event_id (32 bytes) ||
+epoch (8 bytes, big endian) || remove_at (8 bytes, big endian) ||
+author_device (32 bytes) || author (32 bytes)
+```
+
+The signature covers the associated data, then the envelope without the
+signature. The domain differs from messages and metadata, so none can pass
+as another. The plaintext is the start and end (8 bytes each, Unix seconds,
+big endian), the place, the title's length (2 bytes, big endian), the title (1 to 80
+characters) and the description (up to 500 characters), both UTF-8. The place is
+one byte: 0 for none; 1 followed by a 2-byte big-endian length and up to 200
+characters of UTF-8 for a place in real life; or 2 followed by a 32-byte
+channel ID. Apps show a channel only by the name they can already see.
+
+`remove_at` must be the end plus two hours. The server needs it in the clear
+to delete events, so it learns the end but not the start. Readers verify the
+author's root-signed certificate sent with the record, refuse devices they
+know were removed, verify the signature, decrypt and then check `remove_at`
+against the signed end. An event that fails any check shows as unreadable
+and can't be approved from that app. Approval itself is not signed: like
+roles, the server decides it, so a malicious server can show a suggestion as
+approved, hide events or replay a deleted one. It can't change one or make
+one up in someone's name.
+
 ## Messages
 
 Formats 2 and 3 (the envelope's first byte) have this plaintext, in order.

@@ -45,6 +45,7 @@ use crate::{
 
 mod admin;
 mod backfill;
+mod calendar;
 mod control;
 mod directory;
 mod files;
@@ -53,6 +54,7 @@ pub mod terminal;
 mod voice;
 
 pub use admin::{Admin, AdminUpdate, AuditEntry, Ban, ImportItem, Invite, PublicListing};
+pub use calendar::Change;
 pub use control::{ControlView, Ended};
 pub(crate) use directory::frame_image;
 use directory::{directory, get};
@@ -146,6 +148,8 @@ pub enum Command {
     /// Make an invite link: uses and lifetime in seconds.
     Invite(u32, u32),
     Admin(Admin),
+    /// Suggest, add, approve or delete an event.
+    Calendar(Change),
     JoinVoice(Id),
     LeaveVoice,
     SyncVoiceStatus,
@@ -289,6 +293,8 @@ pub enum Update {
     Compatibility(Url, Compatibility),
     ChannelOrderUnavailable(Url),
     Directory(Url, Box<Directory>),
+    /// How a change to the events went.
+    Calendar(Url, Result<(), String>),
     Messages {
         server: Url,
         channel: Id,
@@ -919,6 +925,10 @@ fn refuse(ctx: &Ctx, url: &Url, command: Command) {
                 AdminUpdate::Failed(t!("admin.offline").into()),
             ));
         }
+        Command::Calendar(_) => ctx.send(Update::Calendar(
+            url.clone(),
+            Err(t!("admin.offline").into()),
+        )),
         Command::Send(draft) => {
             ctx.send(Update::Unsent(url.clone(), draft));
             ctx.send(Update::Failed(t!("admin.offline").into()));
@@ -1721,6 +1731,7 @@ async fn on_command(
             ctx.send(Update::Invite(url.clone(), id, link.to_string()));
         }
         Command::Admin(request) => admin::run(ctx, url, client, state, request).await,
+        Command::Calendar(change) => calendar::change(ctx, url, client, change).await,
         Command::JoinVoice(channel) => voice::start_call(ctx, url, client, state, channel).await?,
         command if voice_only(&command) => {
             if let Some(channel) = voice_command(ctx, url, state, command).await? {

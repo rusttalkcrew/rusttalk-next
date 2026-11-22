@@ -213,6 +213,7 @@ pub(super) async fn directory(
         }
         kept
     });
+    dir.calendar = super::calendar::load(client).await?;
     super::save_pins(ctx, url, client, state);
     state.pictures = pictures;
     if let Some(before) = &state.last {
@@ -337,6 +338,9 @@ async fn build(
                     "manage_emoji" => perms.manage_emoji = true,
                     "mute_members" => perms.mute_members = true,
                     "move_members" => perms.move_members = true,
+                    "suggest_events" => perms.suggest_events = true,
+                    "create_events" => perms.create_events = true,
+                    "manage_events" => perms.manage_events = true,
                     _ => {}
                 }
             }
@@ -540,6 +544,7 @@ async fn build(
         emoji_max: (limit("max_emoji"), limit("max_stickers")),
         packs,
         packs_max: limit("max_packs"),
+        calendar: None,
     })
 }
 

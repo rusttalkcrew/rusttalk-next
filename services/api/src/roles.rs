@@ -35,9 +35,15 @@ pub enum Permission {
     MuteMembers = 1024,
     /// Remove people from a voice channel or move them to another.
     MoveMembers = 2048,
+    /// Suggest events, which show once someone approves them.
+    SuggestEvents = 4096,
+    /// Add events without approval.
+    CreateEvents = 8192,
+    /// Approve, decline and cancel anyone's events.
+    ManageEvents = 16384,
 }
 
-const PERMISSIONS: [Permission; 12] = [
+const PERMISSIONS: [Permission; 15] = [
     Permission::Invite,
     Permission::Kick,
     Permission::Ban,
@@ -50,6 +56,9 @@ const PERMISSIONS: [Permission; 12] = [
     Permission::ManageEmoji,
     Permission::MuteMembers,
     Permission::MoveMembers,
+    Permission::SuggestEvents,
+    Permission::CreateEvents,
+    Permission::ManageEvents,
 ];
 
 #[derive(FromRow)]
@@ -94,8 +103,12 @@ pub struct Authority {
 }
 
 impl Authority {
+    pub fn has(&self, flag: Permission) -> bool {
+        self.permissions & flag as i64 != 0
+    }
+
     pub fn require(&self, flag: Permission) -> ApiResult<()> {
-        if self.permissions & flag as i64 == 0 {
+        if !self.has(flag) {
             return Err(ApiError::forbidden("permission_denied"));
         }
         Ok(())

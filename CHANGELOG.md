@@ -12,6 +12,7 @@ Unreleased under the new version and date.
 ## Unreleased
 
 - Experimental Android test build (APK) and unsigned iOS build (IPA); typing on Android does not work yet
+- Servers can turn on Events: a calendar above the channels to suggest, approve and add events, in real life or in a channel
 
 ## v0.1.11 - 2026-11-22
 

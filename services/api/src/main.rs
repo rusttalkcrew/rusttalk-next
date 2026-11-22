@@ -1,4 +1,5 @@
 mod auth;
+mod calendar;
 mod channels;
 mod dms;
 mod emoji;
@@ -259,7 +260,7 @@ async fn run() -> Result<()> {
 }
 
 async fn serve(app: App) -> io::Result<()> {
-    let expiry = tokio::spawn(store::expire_records(app.db.clone()));
+    let expiry = tokio::spawn(store::expire_records(app.clone()));
     // Apply mutes and access changes that a restart or LiveKit outage left unapplied.
     voice::start_enforcer(&app);
     let publisher = tokio::spawn(index::refresh(app.clone(), app.listing_changed.subscribe()));
@@ -295,6 +296,9 @@ async fn serve(app: App) -> io::Result<()> {
         .route("/v1/member-devices", get(keys::devices))
         .route("/v1/invite-preview", post(members::preview))
         .route("/v1/catalog", get(channels::catalog))
+        .route("/v1/calendar/{id}", delete(calendar::remove))
+        .route("/v1/calendar/{id}/approve", post(calendar::approve))
+        .route("/v1/settings/calendar", put(calendar::set_enabled))
         .route("/v1/voice/{id}/token", post(voice::token))
         .route("/v1/voice/{id}/participants", get(voice::participants))
         .route(
@@ -378,6 +382,13 @@ async fn serve(app: App) -> io::Result<()> {
                     get(index::get).put(index::update),
                 )
                 .layer(RequestBodyLimitLayer::new(rusttalk_core::index::BODY_LIMIT)),
+        )
+        .merge(
+            Router::new()
+                .route("/v1/calendar", get(calendar::list).post(calendar::create))
+                .layer(RequestBodyLimitLayer::new(
+                    rusttalk_core::calendar::BODY_LIMIT,
+                )),
         )
         .merge(
             Router::new()

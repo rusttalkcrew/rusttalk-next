@@ -84,6 +84,7 @@ struct Embeds<'a> {
 const TOOLBAR_BUTTON: Vec2 = Vec2::new(30.0, 26.0);
 
 pub(crate) mod embed;
+pub(crate) mod events;
 mod friends;
 pub mod layout;
 mod markdown;
@@ -1150,6 +1151,11 @@ impl Home {
                     self.load_dms(index);
                 }
             }
+            Update::Calendar(address, result) => {
+                if let Some(index) = self.index(&address) {
+                    self.servers[index].events.changed(result);
+                }
+            }
             Update::Left(address) => {
                 if let Some(index) = self.index(&address) {
                     self.leave_server(index);
@@ -1874,6 +1880,11 @@ pub fn show(
                             voice_pane(ui, home, index, channel)
                         }
                         Some(channel) => chat_pane(ui, home, index, channel),
+                        None if home.servers[index].events_open
+                            && events::enabled(&home.servers[index]) =>
+                        {
+                            events::pane(ui, home, index)
+                        }
                         None => {
                             let server = &home.servers[index];
                             let hint = match &server.status {
@@ -2414,6 +2425,11 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
     let categories = &server.dir.categories;
     let can_manage = perms.manage_channels && online;
     let can_move = can_manage && !server.order_unavailable && reorder::order(categories).is_some();
+    let mut show_events = false;
+    if events::enabled(server) {
+        let selected = server.open.is_none() && server.events_open;
+        show_events = events::nav_row(ui, server, selected);
+    }
     let area = ScrollArea::vertical().animated(false);
     area.show_viewport(ui, |ui, viewport| {
         ui.spacing_mut().item_spacing.y = 2.0;
@@ -2542,6 +2558,12 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
     }
     if category_dialog.is_some() {
         home.dialog = category_dialog;
+    }
+    if show_events {
+        let server = &mut home.servers[index];
+        server.open = None;
+        server.events_open = true;
+        home.layout.list = false;
     }
     if let Some(channel) = pick {
         home.servers[index].open = Some(channel);
@@ -3276,6 +3298,8 @@ pub(crate) fn new_server(
         dir: Directory::default(),
         chats: HashMap::new(),
         open: None,
+        events_open: false,
+        events: events::View::default(),
         voice: HashMap::new(),
         names: HashMap::new(),
         commands,

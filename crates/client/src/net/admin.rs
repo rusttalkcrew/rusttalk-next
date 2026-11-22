@@ -67,6 +67,8 @@ pub enum Admin {
     RevokeInvite(String),
     /// Replace the server icon (PNG, JPEG or GIF bytes).
     SetIcon(Vec<u8>),
+    /// Events on or off.
+    Events(bool),
     /// Add a server emoji or (`sticker`) a sticker from PNG or GIF bytes.
     AddEmoji {
         name: String,
@@ -349,6 +351,12 @@ pub(super) async fn run(
             )
             .await
             .map(|()| t!("admin.done_listing"))
+        }
+        Admin::Events(on) => {
+            let body = json!({ "enabled": on });
+            call(client, Method::PUT, "/v1/settings/calendar", Some(body))
+                .await
+                .map(|()| t!("admin.done_events"))
         }
         Admin::SetIcon(bytes) => match client.set_server_icon(&bytes).await {
             Ok(()) => Ok(t!("admin.done_icon")),

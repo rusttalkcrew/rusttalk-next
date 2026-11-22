@@ -185,12 +185,12 @@ pub fn log_closed(sessions: Vec<i64>, at: i64, reason: &'static str) {
     }
 }
 
-pub async fn expire_records(pool: SqlitePool) {
+pub async fn expire_records(app: crate::App) {
     let mut interval = tokio::time::interval(Duration::from_secs(30));
     loop {
         interval.tick().await;
         let result = async {
-            let mut tx = write(&pool).await?;
+            let mut tx = write(&app.db).await?;
             let at = now()?;
             let sessions =
                 query_scalar("DELETE FROM sessions WHERE expires_at <= ? RETURNING expires_at")
@@ -208,6 +208,9 @@ pub async fn expire_records(pool: SqlitePool) {
         .await;
         if let Err(error) = result {
             tracing::error!(reason = error.code, "record expiry failed");
+        }
+        if let Err(error) = crate::calendar::expire(&app).await {
+            tracing::error!(reason = error.code, "event expiry failed");
         }
     }
 }
