@@ -794,6 +794,50 @@ mod activity {
         app.internal_data_path().is_none()
     }
 
+    #[unsafe(no_mangle)]
+    extern "system" fn Java_io_github_rusttalkcrew_rusttalk_MainActivity_initializeVoice(
+        env: livekit_jni::JNIEnv,
+        _: livekit_jni::objects::JClass,
+        context: livekit_jni::objects::JObject,
+    ) -> livekit_jni::sys::jboolean {
+        env.get_java_vm()
+            .is_ok_and(|vm| livekit::webrtc::android::initialize_android_context(&vm, &context))
+            .into()
+    }
+
+    pub fn voice_permission(request: bool) -> i32 {
+        let Some(app) = APP.get() else { return -2 };
+        java(app, |env, activity| {
+            env.call_method(
+                activity,
+                jni_str!("voicePermission"),
+                jni_sig!("(Z)I"),
+                &[JValue::Bool(request)],
+            )?
+            .i()
+        })
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "checking microphone permission failed");
+            -2
+        })
+    }
+
+    pub fn communication_mode(on: bool) {
+        if let Some(app) = APP.get()
+            && let Err(error) = java(app, |env, activity| {
+                env.call_method(
+                    activity,
+                    jni_str!("communicationMode"),
+                    jni_sig!("(Z)V"),
+                    &[JValue::Bool(on)],
+                )?
+                .v()
+            })
+        {
+            tracing::warn!(%error, "setting call audio mode failed");
+        }
+    }
+
     fn java<T>(
         app: &AndroidApp,
         f: impl FnOnce(&mut jni::Env, &JObject) -> jni::errors::Result<T>,

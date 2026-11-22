@@ -1124,6 +1124,8 @@ find.server_unreachable = Dieser Server ist gerade nicht erreichbar. Versuche es
 
 # crates/client/src/net/voice.rs
 voice.screen_failed = Dein Bildschirm konnte nicht geteilt werden.
+voice.need_mic = Erlaube den Mikrofonzugriff, um am Anruf teilzunehmen.
+voice.unavailable = Sprachanrufe sind auf diesem Gerät nicht verfügbar.
 voice.listen_only = Hier kannst du zuhören, aber nicht sprechen.
 voice.disconnected = Sprachverbindung getrennt.
 voice.removed = Du wurdest aus dem Sprachkanal entfernt.

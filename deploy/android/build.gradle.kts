@@ -31,6 +31,7 @@ android {
 }
 
 dependencies {
+    implementation(files("build/rust/libwebrtc.jar"))
     // The version android-activity 0.6 is written against (see docs/mobile.md).
     implementation("androidx.games:games-activity:4.4.0")
     // GameActivity is an AppCompatActivity and needs an AppCompat theme.

@@ -1124,6 +1124,8 @@ find.server_unreachable = 現在このサーバーに接続できません。後
 
 # crates/client/src/net/voice.rs
 voice.screen_failed = 画面を共有できませんでした。
+voice.need_mic = 通話に参加するにはマイクへのアクセスを許可してください。
+voice.unavailable = この端末では音声通話を利用できません。
 voice.listen_only = ここでは聞くことはできますが、話すことはできません。
 voice.disconnected = ボイスが切断されました。
 voice.removed = ボイスチャンネルから外されました。

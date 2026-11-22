@@ -11,6 +11,7 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Android asks for microphone access when you join a voice call.
 - Experimental Android test build (APK) and unsigned iOS build (IPA)
 - Android: typing works, so you can sign up, sign in, join a server and chat
 - Enter now confirms the name and unlock screens

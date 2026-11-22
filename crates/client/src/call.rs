@@ -55,6 +55,8 @@ pub use stage::{Stage, full_view, stage};
 pub struct Voice {
     pub audio: Audio,
     pub call: Option<Call>,
+    #[cfg(target_os = "android")]
+    pending_join: Option<(url::Url, Id, bool)>,
     pub sounds: sounds::Detector,
     /// Ping history and packet loss for the connection popup.
     pub link: Link,
@@ -181,6 +183,8 @@ impl Voice {
         Self {
             audio,
             call: None,
+            #[cfg(target_os = "android")]
+            pending_join: None,
             sounds: sounds::Detector::default(),
             link: Link::default(),
             shares: Vec::new(),
@@ -216,6 +220,8 @@ impl Voice {
 
     /// The call ended or was left: stop sending audio and forget its shares and video.
     pub fn end_call(&mut self) {
+        #[cfg(target_os = "android")]
+        crate::android::communication_mode(false);
         self.call = None;
         self.audio.end_voice(self.sounds.end());
         self.link = Link::default();
@@ -268,7 +274,23 @@ pub fn join(home: &mut Home, index: usize, channel: Id) {
     if home.voice.in_call(&home.servers[index], &channel) {
         return;
     }
+    #[cfg(target_os = "android")]
+    {
+        let request = home
+            .voice
+            .pending_join
+            .as_ref()
+            .is_none_or(|pending| pending.2);
+        home.voice.pending_join = Some((home.servers[index].address.clone(), channel, request));
+    }
+    #[cfg(not(target_os = "android"))]
+    connect(home, index, channel);
+}
+
+fn connect(home: &mut Home, index: usize, channel: Id) {
     leave(home);
+    #[cfg(target_os = "android")]
+    crate::android::communication_mode(true);
     let server = &home.servers[index];
     server.send(Command::JoinVoice(channel));
     home.voice.call = Some(Call {
@@ -294,6 +316,32 @@ pub fn leave(home: &mut Home) {
 
 /// Once per frame: push-to-talk, the settings meter, and repaints for live indicators.
 pub fn frame(ctx: &egui::Context, home: &mut Home) {
+    #[cfg(target_os = "android")]
+    if let Some((address, channel, request)) = home.voice.pending_join.take() {
+        match crate::android::voice_permission(request) {
+            0 => {
+                home.voice.pending_join = Some((address, channel, false));
+                ctx.request_repaint_after(Duration::from_millis(100));
+            }
+            1 => {
+                if let Some(index) = home
+                    .servers
+                    .iter()
+                    .position(|s| s.address == address && s.is_voice(&channel))
+                {
+                    connect(home, index, channel);
+                }
+            }
+            result => {
+                let message = if result == -1 {
+                    t!("voice.need_mic")
+                } else {
+                    t!("voice.unavailable")
+                };
+                home.toast = Some((message.into(), ctx.input(|i| i.time) + 6.0));
+            }
+        }
+    }
     let recording = home.hotkeys.recording();
     let voice = &mut home.voice;
     let settings = voice.audio.settings();

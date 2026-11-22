@@ -297,6 +297,8 @@ pub enum Tab {
 
 impl Home {
     pub fn stop_for_sign_out(&mut self) {
+        #[cfg(target_os = "android")]
+        call::leave(self);
         self.net.stop_for_sign_out();
         self.voice.audio.stop_saving();
     }
