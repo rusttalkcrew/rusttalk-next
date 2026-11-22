@@ -123,6 +123,7 @@ impl Home {
 
     /// Show the DM with them, making it on a shared server first when there is none.
     pub(super) fn open_dm(&mut self, person: Id, now: f64) {
+        self.layout.list = false;
         if !self.replicas(&person).is_empty() {
             self.view = View::Direct(Some(person));
             return;

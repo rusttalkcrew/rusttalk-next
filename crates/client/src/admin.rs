@@ -510,7 +510,11 @@ fn overview_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Overvi
     ui.horizontal_top(|ui| {
         ui.vertical(|ui| {
             server_icon(ui, server, ICON_SIZE);
-            picked.icon = ui::secondary(ui, t!("admin.change_icon"))
+            picked.icon = ui
+                .add_enabled_ui(crate::files::PICKER, |ui| {
+                    ui::secondary(ui, t!("admin.change_icon"))
+                })
+                .inner
                 .on_hover_text(t!("admin.icon_types"))
                 .clicked();
         });
@@ -650,7 +654,7 @@ fn emoji_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> EmojiAsk 
             dir.emoji_max.0
         };
         let full = count(sticker) >= max;
-        let ready = emoji_name_ok(name) && !taken && !full;
+        let ready = emoji_name_ok(name) && !taken && !full && crate::files::PICKER;
         let pick = ui
             .add_enabled_ui(ready, |ui| ui::primary(ui, t!("admin.pick_picture")))
             .inner
@@ -691,7 +695,7 @@ fn emoji_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> EmojiAsk 
     });
     ui::page_section(ui, t!("admin.import_section"));
     ui.weak(t!("admin.import_help"));
-    let room = dir.packs.len() < dir.packs_max;
+    let room = dir.packs.len() < dir.packs_max && crate::files::PICKER;
     if ui
         .add_enabled_ui(room, |ui| ui::secondary(ui, t!("admin.import_button")))
         .inner

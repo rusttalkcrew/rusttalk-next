@@ -77,20 +77,25 @@ pub fn load_json<T: serde::de::DeserializeOwned + Default>(file: &Path) -> Resul
     }
 }
 
-/// Set by `android_main`: the window and the app's private folder come from it.
+/// The running Android activity: the window and the app's private folder come from it.
 #[cfg(target_os = "android")]
-static ANDROID_APP: std::sync::OnceLock<winit::platform::android::activity::AndroidApp> =
-    std::sync::OnceLock::new();
+type Android = winit::platform::android::activity::AndroidApp;
+#[cfg(not(target_os = "android"))]
+type Android = ();
 
-/// Android's GameActivity loads this library and calls this on its own thread.
+/// Android's GameActivity loads this library and calls this on its own thread, again
+/// for each new activity while the process lives.
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
-fn android_main(app: winit::platform::android::activity::AndroidApp) {
-    let _ = ANDROID_APP.set(app);
-    main();
+fn android_main(app: Android) {
+    start(Some(app));
 }
 
 pub fn main() -> ExitCode {
+    start(None)
+}
+
+fn start(android: Option<Android>) -> ExitCode {
     let command = env::args_os().nth(1);
     if command.as_deref() == Some("--version".as_ref()) {
         println!("{}", env!("CARGO_PKG_VERSION"));
@@ -115,7 +120,7 @@ pub fn main() -> ExitCode {
     let window_started = Cell::new(false);
     let mut log_path = None;
     let error = match panic::catch_unwind(AssertUnwindSafe(|| {
-        run(&window_started, &mut log_path, check_update)
+        run(&window_started, &mut log_path, check_update, android)
     })) {
         Ok(Ok(())) => return ExitCode::SUCCESS,
         Ok(Err(error)) => format!("{error:#}"),
@@ -164,9 +169,10 @@ fn run(
     window_started: &Cell<bool>,
     log_path: &mut Option<PathBuf>,
     #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] check_update: bool,
+    android: Option<Android>,
 ) -> Result<()> {
     let (config, service) = match env::var_os("RUSTTALK_PROFILE") {
-        None => (settings_folder()?, "RustTalk".to_owned()),
+        None => (settings_folder(android.as_ref())?, "RustTalk".to_owned()),
         Some(profile) => {
             let [letter @ b'a'..=b'z'] = profile.as_encoded_bytes() else {
                 bail!("RUSTTALK_PROFILE must be one lowercase letter (a-z)");
@@ -179,22 +185,9 @@ fn run(
     let path = std::path::absolute(config.join("rusttalk.log")).context("find log file path")?;
     *log_path = Some(path.clone());
     fs::create_dir_all(&config).context("create settings folder")?;
-    let log = log_file::LogFile::new(path).context("open log file")?;
-
-    tracing_subscriber::registry()
-        .with(
-            Targets::new()
-                .with_default(Level::WARN)
-                .with_target("rusttalk_", Level::INFO),
-        )
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_ansi(false)
-                .log_internal_errors(true)
-                .with_writer(Mutex::new(log)),
-        )
-        .try_init()
-        .context("start logging")?;
+    #[cfg(target_os = "ios")]
+    exclude_from_backup(&config)?;
+    start_logging(path)?;
 
     #[cfg(target_os = "linux")]
     if check_update {
@@ -230,7 +223,7 @@ fn run(
         // (paste.rs); it turns the other clipboard keys back into what they were.
         clipboard_shortcuts: false,
         #[cfg(target_os = "android")]
-        android_app: ANDROID_APP.get().cloned(),
+        android_app: android,
         // wgpu's OpenGL ES backend can't configure the window surface on phones
         // without Vulkan (and the emulator); OpenGL ES through glow works on all.
         #[cfg(target_os = "android")]
@@ -255,8 +248,34 @@ fn run(
     update::restart_if_requested()
 }
 
-#[cfg(not(target_os = "android"))]
-fn settings_folder() -> Result<PathBuf> {
+/// Start the log file once per process: Android can start the app again in the same
+/// process, and the logger can be set only once.
+fn start_logging(path: PathBuf) -> Result<()> {
+    static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if STARTED.load(std::sync::atomic::Ordering::Relaxed) {
+        return Ok(());
+    }
+    let log = log_file::LogFile::new(path).context("open log file")?;
+    tracing_subscriber::registry()
+        .with(
+            Targets::new()
+                .with_default(Level::WARN)
+                .with_target("rusttalk_", Level::INFO),
+        )
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .log_internal_errors(true)
+                .with_writer(Mutex::new(log)),
+        )
+        .try_init()
+        .context("start logging")?;
+    STARTED.store(true, std::sync::atomic::Ordering::Relaxed);
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn settings_folder(_: Option<&Android>) -> Result<PathBuf> {
     use etcetera::{BaseStrategy, base_strategy::choose_native_strategy};
     Ok(choose_native_strategy()
         .context("find settings folder")?
@@ -264,11 +283,37 @@ fn settings_folder() -> Result<PathBuf> {
         .join("RustTalk"))
 }
 
+/// iOS: Application Support in the app's sandbox, never shown to the person.
+#[cfg(target_os = "ios")]
+fn settings_folder(_: Option<&Android>) -> Result<PathBuf> {
+    use etcetera::{BaseStrategy, base_strategy::choose_native_strategy};
+    Ok(choose_native_strategy()
+        .context("find settings folder")?
+        .data_dir()
+        .join("RustTalk"))
+}
+
+/// iOS backs up Application Support to iCloud and computers; the key file must not go
+/// there. Set before the key storage opens, so it covers the first key written.
+#[cfg(target_os = "ios")]
+fn exclude_from_backup(folder: &Path) -> Result<()> {
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::{NSNumber, NSString, NSURL, NSURLIsExcludedFromBackupKey};
+    let path = folder
+        .to_str()
+        .context("settings folder path is not UTF-8")?;
+    let url = NSURL::fileURLWithPath_isDirectory(&NSString::from_str(path), true);
+    let yes = NSNumber::new_bool(true);
+    let value: &AnyObject = &yes;
+    // SAFETY: the key is a Foundation constant, and it takes a boolean NSNumber.
+    unsafe { url.setResourceValue_forKey_error(Some(value), NSURLIsExcludedFromBackupKey) }
+        .map_err(|error| anyhow!("keep the settings folder out of backups: {error}"))
+}
+
 /// Android has no home folder: settings go in the app's private storage.
 #[cfg(target_os = "android")]
-fn settings_folder() -> Result<PathBuf> {
-    ANDROID_APP
-        .get()
+fn settings_folder(android: Option<&Android>) -> Result<PathBuf> {
+    android
         .and_then(|app| app.internal_data_path())
         .context("find settings folder")
 }

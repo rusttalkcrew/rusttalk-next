@@ -10,7 +10,9 @@ on:
       - crates/core/**
       - deploy/android/**
       - deploy/ios/**
+      - Cargo.toml
       - Cargo.lock
+      - rust-toolchain.toml
       - .github/workflows/mobile.yml
   workflow_dispatch:
 
@@ -39,6 +41,7 @@ jobs:
           name: android-arm64-debug
           path: dist/*.apk
           if-no-files-found: error
+          retention-days: 7
 
   ios:
     runs-on: macos-latest
@@ -52,3 +55,4 @@ jobs:
           name: ios-unsigned
           path: dist/*.ipa
           if-no-files-found: error
+          retention-days: 7

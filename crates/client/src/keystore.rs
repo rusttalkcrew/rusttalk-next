@@ -46,6 +46,11 @@ const MEMORY_KIB: RangeInclusive<u32> = 8 * 1024..=1024 * 1024;
 const PASSES: RangeInclusive<u32> = 1..=10;
 const LANES: RangeInclusive<u32> = 1..=4;
 
+/// Phones keep keys only in the file with a password until RustTalk uses the device's
+/// own key store: app data can reach backups, and test builds are debuggable
+/// (docs/mobile.md).
+pub const PASSWORD_ONLY: bool = cfg!(any(target_os = "android", target_os = "ios"));
+
 /// Where the keys live.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -641,6 +646,10 @@ impl Keystore {
     }
 
     fn usable(&self, kind: Kind, sealer: Option<&Sealer>) -> Result<()> {
+        ensure!(
+            !PASSWORD_ONLY || kind == Kind::Password,
+            "this device keeps keys only in a file with a password"
+        );
         match kind {
             Kind::Keychain => self.keychain.available(),
             Kind::File => Ok(()),

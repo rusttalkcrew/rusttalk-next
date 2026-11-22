@@ -12,10 +12,13 @@ This page is the plan (issue #282) and the state after phase 1.
 - `rusttalk-client` and `rusttalk-core` build for `aarch64-linux-android`,
   LiveKit and WebRTC included. `deploy/android/build.sh` makes a debug APK.
 - On a headless Android 15 emulator (x86_64 image running the arm64 build) the
-  APK starts, draws the key storage screen, the welcome screen and the
-  recovery words, takes taps and opens the on-screen keyboard.
-- Typed text does not reach text fields yet (see Phase 2). Nothing past account
-  creation was tried on a device.
+  APK starts, draws the key storage screen, takes taps and opens the
+  on-screen keyboard. (An earlier build that still offered the protected file
+  also reached the welcome screen and the recovery words.)
+- Typed text does not reach text fields yet (see Phase 2). Phones ask for a
+  key password first, so for now the Android app stops at that screen.
+- The APK is a debug build: debuggable, so anyone with the phone and a USB cable
+  can read the app's files. Use test accounts only.
 - `deploy/ios/build.sh` makes an unsigned IPA. iOS can't be checked from Linux:
   `ring`, `cxx`, `webrtc-sys` and `coreaudio-sys` compile C, C++ and bindings
   against the iOS SDK through `xcrun`. The macOS runner in
@@ -37,8 +40,8 @@ use yet is allowed to be unused there (`allow(dead_code)` on phones only).
 | Text input | GameActivity shows the keyboard; winit 0.30 drops its text | winit IME | Android: broken, phase 2 blocker |
 | Voice and video (LiveKit, webrtc-sys) | Builds and links (prebuilt WebRTC for Android) | Prebuilt WebRTC for iOS; CI builds it | Untested at runtime; see Voice |
 | Audio (cpal 0.18) | AAudio (`libaaudio.so`, Android 8.0+) | Core Audio | Builds; needs mic permission and audio session |
-| Key storage (keyring 4) | No Android store | keyring has an Apple store, not enabled | Falls back to the existing Protected file / File with password choice |
-| File picker (rfd) | No backend | No backend | Gated: picking finds nothing |
+| Key storage (keyring 4) | No Android store | The data-protection Keychain store builds, not used yet | File with password only (see Privacy and permissions) |
+| File picker (rfd) | No backend | No backend | Gated: the buttons that open it are off (`files::PICKER`) |
 | Notifications (notify-rust) | Builds, no notification service | Builds, no notification service | Fail and are logged |
 | Camera (nokhwa) | No backend | No backend | Listing cameras fails, so no camera |
 | Screen share, app and system audio | Not offered (`screen` already says unavailable) | Same | App audio gated to `Unsupported` |
@@ -47,24 +50,40 @@ use yet is allowed to be unused there (`allow(dead_code)` on phones only).
 | Remote control | Not offered | Not offered | Unchanged (only Linux and macOS offer it) |
 | Clipboard | Text through egui only | Same | Picture and file paste gated off |
 | Deep links (`rusttalk://`) | Not registered | Not registered | Not started (desktop has none either) |
-| Settings folder | `AndroidApp::internal_data_path()` | Application Support in the app sandbox | Done |
+| Settings folder | `AndroidApp::internal_data_path()`, no backup or transfer | Application Support, excluded from backups | Done |
+
+### Android lifecycle
+
+winit 0.30 ignores `onDestroy` (a TODO in its Android backend), so
+`android_main` never returns, and GameActivity waits for it before a new
+activity can start in the same process. The activity therefore takes every
+configuration change itself (`configChanges` in the manifest): turning the
+phone, a new font size, language or dark mode keep the same activity, checked
+on the emulator. A real destroy without the process ending (Android freeing
+memory, "Don't keep activities") still hangs until Android ends the app. The
+client already takes the new `AndroidApp` on each start and starts its log
+once per process, ready for a winit that forwards `onDestroy`.
 
 ### Voice
 
 WebRTC's Android code calls into Java. Before a call works on Android:
 
-1. `JNI_OnLoad` in the library calls
-   `livekit::webrtc::android::initialize_android`, and `android_main` passes
-   the activity to `initialize_android_context`. Doing this from
-   `android_main` alone is not enough: that thread has no app class loader.
-2. `libwebrtc.jar`, which `webrtc-sys` copies next to the build, goes into the
+1. `livekit::webrtc::android::initialize_android_context` runs on a thread
+   that Java called into, through a native method the app's Java side calls
+   (for example from the activity's `onCreate`). On the `android_main` thread
+   it fails at `FindClass("livekit/org/webrtc/ContextUtils")`: native threads
+   have no app class loader. Keep GameActivity's own JNI registration as it
+   is; add the method next to it, not a `JNI_OnLoad` that replaces it.
+2. Check the boolean it returns, and log and turn voice off when it is false.
+3. `libwebrtc.jar`, which `webrtc-sys` copies next to the build, goes into the
    APK through Gradle.
-3. The app asks for the microphone (`RECORD_AUDIO`) when a person first joins
+4. The app asks for the microphone (`RECORD_AUDIO`) when a person first joins
    a voice channel, and sets Android's communication audio mode.
 
 On iOS the audio session needs `AVAudioSession` set to play and record for
 voice chat before the call starts, and the background audio mode keeps a
-call going with the screen off.
+call going with the screen off. Test microphone and playback on a real
+iPhone in that phase; the simulator's audio says little about a device.
 
 Until then joining a call on a phone is expected to fail.
 
@@ -144,7 +163,7 @@ Rough effort for one person who knows the code base.
 
 | Phase | What | Effort |
 | --- | --- | --- |
-| 2 | Usable chat on Android: typed text (forward GameActivity's text state to egui, or move to winit 0.31), safe areas, phone temp folder (`temp_dir()` is not writable on Android), system TLS roots for non-pinned hosts (check, then rustls-platform-verifier), file picker (Storage Access Framework), local notifications, Android Keystore for the keys, hide Updates and Shortcuts on phones, `rusttalk://` links, the layout list above | 3 to 4 weeks |
+| 2 | Usable chat on Android: a winit that forwards `onDestroy` (or a patch), typed text (forward GameActivity's text state to egui, or move to winit 0.31), safe areas, phone temp folder (`temp_dir()` is not writable on Android), system TLS roots for non-pinned hosts (check, then rustls-platform-verifier), file picker (Storage Access Framework), local notifications, Android Keystore for the keys, hide Updates and Shortcuts on phones, `rusttalk://` links, the layout list above | 3 to 4 weeks |
 | 3 | Voice on Android and iOS: WebRTC init, `libwebrtc.jar`, mic permission, audio session and Bluetooth headsets, calls with the screen off (foreground service on Android, background audio on iOS) | 2 weeks |
 | 4 | iOS on a device: Keychain, notifications (reuse `notify/macos.rs`), document picker, safe areas, background rules | 1 to 2 weeks |
 | 5 | Camera (Camera2, AVFoundation) | 1 week |
@@ -155,7 +174,9 @@ Rough effort for one person who knows the code base.
 
 - **No new connections.** The phone apps connect to what the desktop client
   does (see [Privacy](privacy.md#outbound-connections)). The updater makes
-  none on phones. Building downloads Gradle, the Android Gradle plugin,
+  none on phones. AppCompat's EmojiCompat would ask Google Play services for
+  an emoji font at start; the manifest removes its start-up entry, so the
+  APK never makes that request. Building downloads Gradle, the Android Gradle plugin,
   GameActivity and AppCompat from Google's Maven repository, next to the
   WebRTC archive the desktop build already downloads.
 - **Push notifications** (when the app is closed) would need Firebase Cloud
@@ -170,9 +191,19 @@ Rough effort for one person who knows the code base.
 - **iOS:** the bundle states why it uses the microphone and camera; iOS asks
   the person on first use.
 - **Storage:** settings and the key file live in the app's private storage.
-  Android backups are off (`allowBackup="false"`), so they don't go to
-  Google's cloud. iOS backups include Application Support: phase 4 moves the
-  keys to the Keychain (this device only) or excludes the key file.
-- **Keys:** until phase 2 and 4 phones use the existing protected file or
-  password file (see [Crypto](crypto.md#local-identity)). Zero-knowledge is
-  unchanged: phones run the same `crates/core` crypto.
+  Android: `allowBackup="false"` and data extraction rules that exclude
+  everything, so nothing goes to Google's cloud or to a new phone. iOS: the
+  folder is Application Support, marked excluded from backups
+  (`NSURLIsExcludedFromBackupKey`) before the key storage opens, so nothing
+  goes to iCloud or a computer.
+- **Keys:** phones offer only "File with password" (`keystore::PASSWORD_ONLY`,
+  see [Crypto](crypto.md#local-identity)) until phase 2 uses Android Keystore
+  and phase 4 the iOS Keychain. The iOS build already includes keyring's
+  data-protection Keychain store (`apple-native-keyring-store`, `protected`),
+  which can keep an item with `when-unlocked-this-device-only` access: never
+  in a backup or on another device. Using it needs a small keystore backend
+  of our own (keyring's `v1` API has no iOS store) and a test on a signed
+  device, so it waits for phase 4. The protected file without
+  a password is off on phones: a debuggable test build, a rooted phone or a
+  backup tool that ignores the rules above would hand over readable keys.
+  Zero-knowledge is unchanged: phones run the same `crates/core` crypto.

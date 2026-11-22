@@ -113,6 +113,14 @@ rfd = { version = "0.18", default-features = false, features = ["xdg-portal"] }
 eframe = { version = "0.37", features = ["android-game-activity", "glow"] }
 winit = { version = "0.30", default-features = false }
 
+[target.'cfg(target_os = "ios")'.dependencies]
+# keyring's Apple store builds for iOS only with its data-protection Keychain. The
+# app doesn't store keys there yet (docs/mobile.md, Privacy and permissions).
+apple-native-keyring-store = { version = "1", features = ["protected"] }
+# Keeps the settings folder, with the key file, out of iCloud and computer backups.
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSError", "NSString", "NSURL", "NSValue"] }
+
 [target.'cfg(windows)'.dependencies]
 # Pasting: registered picture formats and copied files, and bitmaps as a last resort.
 arboard = { version = "3.7", default-features = false, features = ["image-data"] }

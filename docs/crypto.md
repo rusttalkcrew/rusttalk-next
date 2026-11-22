@@ -107,6 +107,9 @@ profile's keys and is still to be removed):
   held in memory, and the password fields' egui state is removed once a screen
   is done with them.
 
+Phone builds offer only the file with password, until they use the phone's own
+key store (see [Phones and tablets](mobile.md#privacy-and-permissions)).
+
 At start the client looks in both places: the chosen one first, then the other.
 Keys found anywhere are used and `keystore.json` is repaired, so a lost or
 changed choice never hides them. Each file says its own format, so a switch

@@ -11,7 +11,7 @@ use zeroize::Zeroizing;
 
 use crate::{
     app::submitted,
-    keystore::{Job, Keystore, Kind, Sealer, WrongPassword},
+    keystore::{Job, Keystore, Kind, PASSWORD_ONLY, Sealer, WrongPassword},
     ui::{self, error_text, primary_large, secondary_large},
 };
 
@@ -104,18 +104,25 @@ pub fn choose(
     busy: bool,
 ) -> Option<Picked> {
     ui.heading(t!("keys.choose_title"));
-    ui.label(t!("keys.no_keychain"));
+    if PASSWORD_ONLY {
+        ui.label(t!("keys.password_only"));
+        password.get_or_insert_with(NewPassword::default);
+    } else {
+        ui.label(t!("keys.no_keychain"));
+    }
     ui.add_space(ui::SPACE_L);
     ui.add_enabled_ui(!busy, |ui| {
-        if primary_large(ui, t!("keys.file")).clicked() {
-            return Some(Picked::File);
+        if !PASSWORD_ONLY {
+            if primary_large(ui, t!("keys.file")).clicked() {
+                return Some(Picked::File);
+            }
+            ui.label(ui::caption(t!("keys.file_help")));
+            ui.add_space(ui::SPACE_S);
+            if secondary_large(ui, t!("keys.password_file")).clicked() && password.is_none() {
+                *password = Some(NewPassword::default());
+            }
+            ui.label(ui::caption(t!("keys.password_file_help")));
         }
-        ui.label(ui::caption(t!("keys.file_help")));
-        ui.add_space(ui::SPACE_S);
-        if secondary_large(ui, t!("keys.password_file")).clicked() && password.is_none() {
-            *password = Some(NewPassword::default());
-        }
-        ui.label(ui::caption(t!("keys.password_file_help")));
         let fields = password.as_mut()?;
         ui.add_space(ui::SPACE_L);
         let entered = fields.show(ui);
@@ -242,6 +249,25 @@ pub fn settings(
 ) {
     let current = keystore.kind();
     let mut pick = form.pick.or(current).unwrap_or(Kind::File);
+    let choices = [
+        (
+            Kind::Keychain,
+            t!("keys.keychain"),
+            t!("keys.keychain_help"),
+        ),
+        (Kind::File, t!("keys.file"), t!("keys.file_help")),
+        (
+            Kind::Password,
+            t!("keys.password_file"),
+            t!("keys.password_file_help"),
+        ),
+    ];
+    // Phones offer only the password file; there it changes the password.
+    let choices = if PASSWORD_ONLY {
+        &choices[2..]
+    } else {
+        &choices[..]
+    };
     if let Some(job) = form.busy.take_if(|job| job.done()) {
         let result = job
             .join()
@@ -253,23 +279,7 @@ pub fn settings(
     let busy = form.busy.is_some();
     ui::page_section(ui, t!("keys.section"));
     ui.add_enabled_ui(!busy, |ui| {
-        let changed = ui::segmented(
-            ui,
-            &mut pick,
-            &[
-                (
-                    Kind::Keychain,
-                    t!("keys.keychain"),
-                    t!("keys.keychain_help"),
-                ),
-                (Kind::File, t!("keys.file"), t!("keys.file_help")),
-                (
-                    Kind::Password,
-                    t!("keys.password_file"),
-                    t!("keys.password_file_help"),
-                ),
-            ],
-        );
+        let changed = ui::segmented(ui, &mut pick, choices);
         if changed {
             *form = Form {
                 pick: Some(pick),

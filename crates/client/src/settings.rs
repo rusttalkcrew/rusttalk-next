@@ -570,7 +570,7 @@ fn account_page(ui: &mut Ui, home: &mut Home) {
                 t!("settings.picture_help"),
                 |ui| {
                     let change = ui
-                        .add_enabled_ui(!home.servers.is_empty(), |ui| {
+                        .add_enabled_ui(!home.servers.is_empty() && crate::files::PICKER, |ui| {
                             ui::secondary(ui, t!("settings.change_picture"))
                         })
                         .inner

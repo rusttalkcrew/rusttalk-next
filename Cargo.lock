@@ -6526,6 +6526,7 @@ version = "0.1.11"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
+ "apple-native-keyring-store",
  "arboard",
  "argon2",
  "ashpd",

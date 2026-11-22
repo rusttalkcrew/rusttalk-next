@@ -33,6 +33,10 @@ use crate::{
     ui::{self, ON_FILL, OVERLAY, OVERLAY_BUTTON, OVERLAY_TEXT},
 };
 
+/// Whether this device has a file dialog. Phones need the system's own picker first
+/// (docs/mobile.md); until then the buttons that open one are off there.
+pub const PICKER: bool = !cfg!(any(target_os = "android", target_os = "ios"));
+
 /// Files per message, as the message format allows.
 pub const MAX_FILES: usize = 4;
 pub(crate) const THUMBNAIL: f32 = 320.0;
@@ -1297,7 +1301,7 @@ fn download(ui: &mut Ui, files: &mut Files, address: &Url, file: &Attachment) {
         }
         None => {}
     }
-    if ui::secondary(ui, t!("files.download")).clicked() {
+    if PICKER && ui::secondary(ui, t!("files.download")).clicked() {
         files.ask(ui.ctx(), Ask::Save(address.clone(), file.clone()));
     }
 }
@@ -1338,7 +1342,7 @@ pub fn viewer(ctx: &egui::Context, files: &mut Files) {
                         close = tool(ui, "×", t!("common.close")).clicked();
                         ui.add_space(12.0);
                         open_it = tool(ui, "↗", t!("files.open_default")).clicked();
-                        if tool(ui, "⬇", t!("common.save")).clicked() {
+                        if PICKER && tool(ui, "⬇", t!("common.save")).clicked() {
                             files.ask(ui.ctx(), Ask::Save(address.clone(), file.clone()));
                         }
                         let view = files.viewer.as_mut().expect("checked above");

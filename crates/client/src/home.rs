@@ -710,6 +710,9 @@ impl Home {
 
     /// The chat on screen: server index and channel or DM.
     fn viewing(&self) -> Vec<(usize, Id)> {
+        if self.layout.covered {
+            return Vec::new();
+        }
         match self.view {
             View::Server(index) => (self.servers[index].open)
                 .map(|channel| (index, channel))
@@ -728,12 +731,14 @@ impl Home {
         };
         if let Some(peer) = self.dm_peer(index, &channel) {
             self.view = View::Direct(Some(peer));
+            self.layout.list = false;
             return;
         }
         let server = &mut self.servers[index];
         if server.channel(&channel).is_some() {
             server.open = Some(channel);
             self.view = View::Server(index);
+            self.layout.list = false;
         }
     }
 
@@ -1756,7 +1761,6 @@ pub fn show(
     // Phones show the list or what is open, never both; picking something opens it.
     let phone = ui::is_phone(ui.ctx());
     let list = phone && home.layout.list;
-    let opened = open_page(home);
     let channels_width = if list {
         ui.available_width() - RAIL_WIDTH
     } else {
@@ -1787,9 +1791,6 @@ pub fn show(
             })
             .inner
     });
-    if list && open_page(home) != opened {
-        home.layout.list = false;
-    }
     let member_server = match home.view {
         View::Server(index)
             if !list
@@ -1802,6 +1803,7 @@ pub fn show(
     };
     // On phones the member list covers the column, and Back closes it first.
     let members_cover = phone && member_server.is_some() && home.layout.members_shown();
+    home.layout.covered = list || members_cover;
     if phone && !list {
         Panel::top("phone-back")
             .frame(panel_frame(colors.side))
@@ -1918,15 +1920,6 @@ pub fn show(
     action
 }
 
-/// What the main column shows, to tell when a phone's list opened something.
-fn open_page(home: &Home) -> (View, Option<Id>) {
-    let channel = match home.view {
-        View::Server(index) => home.servers.get(index).and_then(|server| server.open),
-        _ => None,
-    };
-    (home.view, channel)
-}
-
 fn show_compatibility(ui: &mut Ui, home: &mut Home, index: usize) -> bool {
     let compatibility = home.servers[index].compatibility;
     if compatibility_banner(ui, compatibility) {
@@ -2024,9 +2017,11 @@ fn server_rail(ui: &mut Ui, home: &mut Home) {
         ui::menu(&plus, |m| {
             if m.item("🔗", t!("home.join_with_invite")).clicked() {
                 home.view = View::Join;
+                home.layout.list = false;
             }
             if m.item("🔍", t!("home.find_servers")).clicked() {
                 home.view = View::Find;
+                home.layout.list = false;
                 home.find.open();
             }
         });
@@ -2234,6 +2229,7 @@ fn dm_list(ui: &mut Ui, home: &mut Home) {
     }
     if row.clicked() {
         home.view = View::Direct(None);
+        home.layout.list = false;
     }
     pokes::nav_row(ui, home);
     ui.add_space(ui::SPACE_XS);
@@ -2306,6 +2302,7 @@ fn dm_row(ui: &mut Ui, home: &mut Home, peer: &Id, request: bool) {
     }
     if row.clicked() {
         home.view = View::Direct(Some(*peer));
+        home.layout.list = false;
     }
 }
 
@@ -2536,6 +2533,7 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
     }
     if let Some(channel) = pick {
         home.servers[index].open = Some(channel);
+        home.layout.list = false;
     }
     if let Some(channel) = talk {
         call::join(home, index, channel);
@@ -3529,7 +3527,7 @@ fn files_view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat: &mu
     }
     let server = &home.servers[index];
     let online = server.status == Status::Online;
-    let can_upload = online && server.can_write(&channel);
+    let can_upload = online && server.can_write(&channel) && files::PICKER;
     if !chat.shared_asked {
         chat.shared_asked = true;
         server.send(Command::SharedFiles(channel));
@@ -3679,7 +3677,7 @@ fn page_view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat: &mut
                 }
                 let add = format!("🖼 {}", t!("home.page_add_pictures"));
                 if ui
-                    .add_enabled_ui(online && chat.staged.len() < room, |ui| {
+                    .add_enabled_ui(online && chat.staged.len() < room && files::PICKER, |ui| {
                         ui::secondary(ui, add.as_str())
                     })
                     .inner
@@ -4668,13 +4666,15 @@ fn composer(
                     })
                     .inner;
                 ui::menu_wide(&plus, |m| {
-                    let upload =
-                        Item::new("📎", t!("home.upload_file")).hint(t!("home.upload_file_help"));
+                    let upload = Item::new("📎", t!("home.upload_file"))
+                        .hint(t!("home.upload_file_help"))
+                        .enabled(files::PICKER);
                     if m.add(upload).clicked() {
                         attach = Some(false);
                     }
-                    let live =
-                        Item::new("📡", t!("home.send_live")).hint(t!("home.send_live_help"));
+                    let live = Item::new("📡", t!("home.send_live"))
+                        .hint(t!("home.send_live_help"))
+                        .enabled(files::PICKER);
                     if m.add(live).on_hover_text(t!("call.direct_chat")).clicked() {
                         attach = Some(true);
                     }

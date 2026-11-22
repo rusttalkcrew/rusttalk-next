@@ -1,17 +1,31 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
     <!-- Servers only; microphone, camera and notifications come with calls (docs/mobile.md). -->
     <uses-permission android:name="android.permission.INTERNET" />
 
     <application
         android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
         android:icon="@mipmap/ic_launcher"
         android:label="RustTalk"
         android:theme="@style/Theme.AppCompat.NoActionBar">
-        <!-- GameActivity loads librusttalk_client.so, which runs android_main. -->
+        <!-- AppCompat's EmojiCompat would ask Google Play services for an emoji font
+             at start: an outbound connection docs/privacy.md doesn't list. -->
+        <provider
+            android:name="androidx.startup.InitializationProvider"
+            android:authorities="${applicationId}.androidx-startup"
+            tools:node="merge">
+            <meta-data
+                android:name="androidx.emoji2.text.EmojiCompatInitializer"
+                tools:node="remove" />
+        </provider>
+        <!-- GameActivity loads librusttalk_client.so, which runs android_main. It takes
+             every configuration change itself: winit 0.30 ignores onDestroy, so a
+             recreated activity would wait forever for the old one (docs/mobile.md). -->
         <activity
             android:name="com.google.androidgamesdk.GameActivity"
-            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|uiMode|density|navigation"
+            android:configChanges="mcc|mnc|locale|touchscreen|keyboard|keyboardHidden|navigation|screenLayout|fontScale|uiMode|orientation|density|screenSize|smallestScreenSize|layoutDirection|colorMode|fontWeightAdjustment|grammaticalGender"
             android:exported="true"
             android:windowSoftInputMode="adjustResize">
             <meta-data
