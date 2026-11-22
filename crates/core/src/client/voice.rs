@@ -526,7 +526,7 @@ impl VoiceRoom {
         &self,
         permission: Option<&livekit_protocol::ParticipantPermission>,
         source: NativeAudioSource,
-        muted: bool,
+        muted: impl FnOnce() -> bool,
     ) -> Result<()> {
         if !allows_source(permission, livekit_protocol::TrackSource::Microphone) {
             // LiveKit stops forwarding the track, but the Rust SDK can retain the publication.
@@ -538,9 +538,38 @@ impl VoiceRoom {
             }
         } else if self.can_publish() && !self.has_microphone() {
             self.publish_audio(source).await?;
-            self.set_microphone_muted(muted);
+            self.set_microphone_muted(muted());
         }
         Ok(())
+    }
+
+    /// Whether a new app or stream audio capture may start now.
+    pub fn can_share_audio(&self) -> bool {
+        self.can_publish_source(livekit_protocol::TrackSource::ScreenShareAudio)
+    }
+
+    /// A deny ends every shared sound publication, including ones the SDK retained.
+    /// Return true on denial so the caller drops active captures and pending starts too.
+    pub async fn stop_denied_shared_audio(
+        &self,
+        permission: Option<&livekit_protocol::ParticipantPermission>,
+    ) -> bool {
+        if allows_source(permission, livekit_protocol::TrackSource::ScreenShareAudio) {
+            return false;
+        }
+        for publication in self
+            .room
+            .local_participant()
+            .track_publications()
+            .into_values()
+        {
+            if publication.source() == TrackSource::ScreenshareAudio
+                && let Err(error) = self.unpublish_audio(&publication.sid()).await
+            {
+                tracing::warn!(%error, "stopping denied shared audio failed");
+            }
+        }
+        true
     }
 
     /// Set the published microphone's mute state, leaving shared audio alone.

@@ -1116,22 +1116,11 @@ impl Home {
                     }
                     server.dir = *dir;
                     self.profile_loaded(index);
-                    let server = &mut self.servers[index];
-                    // The microphone itself comes back from LiveKit when the mute is lifted.
                     if changed
                         && muted
                         && (self.voice.call.as_ref()).is_some_and(|call| call.server == address)
                     {
                         self.toast = Some((t!("call.server_muted").into(), now + 6.0));
-                        // LiveKit drops shared app audio and a stream's sound too; stop
-                        // capturing them.
-                        for app in self.voice.shares.drain(..) {
-                            server.send(Command::StopApp(app.id));
-                        }
-                        if !self.voice.stream_audio.is_empty() {
-                            self.voice.stream_audio.clear();
-                            server.send(Command::StreamAudio(Vec::new()));
-                        }
                     }
                     self.load_dms(index);
                 }
@@ -1419,6 +1408,17 @@ impl Home {
                     } else {
                         rooms.insert(channel, peers);
                     }
+                }
+            }
+            Update::SharedAudioStopped(address, channel) => {
+                if self
+                    .voice
+                    .call
+                    .as_ref()
+                    .is_some_and(|call| call.server == address && call.channel == channel)
+                {
+                    self.voice.shares.clear();
+                    self.voice.stream_audio.clear();
                 }
             }
             update @ (Update::AppStopped(_) | Update::StreamAudio(_)) => {
