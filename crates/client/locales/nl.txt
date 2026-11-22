@@ -764,6 +764,7 @@ call.presentation_help = Toont een gedeeld scherm groot
 call.show_everyone = Iedereen tonen
 call.show_only_video = Alleen video tonen
 call.no_video = Niemand heeft video aan.
+call.all_minimized = Iedereen is geminimaliseerd. Klik hieronder op een foto om ze terug te halen.
 call.nobody_here = Er is nog niemand.
 call.show_name = {name} tonen
 call.join_voice = Spraak deelnemen

@@ -764,6 +764,7 @@ call.presentation_help = Zeigt einen geteilten Bildschirm groß
 call.show_everyone = Alle zeigen
 call.show_only_video = Nur Video zeigen
 call.no_video = Niemand hat Video an.
+call.all_minimized = Alle sind minimiert. Klicke unten auf ein Bild, um sie zurückzuholen.
 call.nobody_here = Noch niemand hier.
 call.show_name = {name} zeigen
 call.join_voice = Sprachkanal beitreten

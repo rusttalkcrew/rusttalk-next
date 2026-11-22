@@ -764,6 +764,7 @@ call.presentation_help = 共有画面を大きく表示します
 call.show_everyone = 全員を表示
 call.show_only_video = ビデオのみ表示
 call.no_video = ビデオをオンにしている人はいません。
+call.all_minimized = 全員が最小化されています。下の画像をクリックすると元に戻ります。
 call.nobody_here = まだ誰もいません。
 call.show_name = {name} を表示
 call.join_voice = ボイスに参加
