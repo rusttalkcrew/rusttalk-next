@@ -29,8 +29,9 @@ const LOCAL_TEST: bool = match option_env!("RUSTTALK_LOCAL_UPDATE_TEST") {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 static RESTART: std::sync::OnceLock<Target> = std::sync::OnceLock::new();
 
-/// How often a running app looks for a new version.
-const CHECK_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
+/// The check intervals people can pick, in minutes. The first is the default and the
+/// shortest: a hand-edited smaller value is raised to it, so GitHub is never hammered.
+const CHECK_MINUTES: [u64; 4] = [15, 60, 6 * 60, 24 * 60];
 
 #[derive(Deserialize, Serialize)]
 struct Settings {
@@ -38,6 +39,10 @@ struct Settings {
     automatic: bool,
     #[serde(default = "default_url")]
     url: String,
+    /// How often a running app looks for a new version; settings saved before this
+    /// existed get the default.
+    #[serde(default = "default_check_minutes")]
+    check_minutes: u64,
 }
 
 impl Default for Settings {
@@ -45,8 +50,13 @@ impl Default for Settings {
         Self {
             automatic: default_automatic(),
             url: default_url(),
+            check_minutes: default_check_minutes(),
         }
     }
+}
+
+fn default_check_minutes() -> u64 {
+    CHECK_MINUTES[0]
 }
 
 /// Release builds point at their own release directory.
@@ -82,6 +92,10 @@ fn check_due(next: Option<Instant>, now: Instant) -> bool {
 }
 
 impl Settings {
+    fn check_every(&self) -> Duration {
+        Duration::from_secs(self.check_minutes.max(CHECK_MINUTES[0]) * 60)
+    }
+
     fn load(path: &Path) -> Result<Self> {
         crate::load_json(path)
     }
@@ -146,22 +160,27 @@ fn release_key() -> Result<VerifyingKey> {
     VerifyingKey::from_bytes(&key).map_err(|_| anyhow!("invalid built-in release key"))
 }
 
-async fn get(client: &reqwest::Client, url: Url) -> Result<reqwest::Response> {
-    let response = client
-        .get(url)
-        .send()
-        .await
-        .map_err(reqwest::Error::without_url)?;
+/// `etag` asks the host to answer "not modified" (HTTP 304) when nothing changed.
+async fn get(client: &reqwest::Client, url: Url, etag: Option<&str>) -> Result<reqwest::Response> {
+    let mut request = client.get(url);
+    if let Some(etag) = etag {
+        request = request.header(reqwest::header::IF_NONE_MATCH, etag);
+    }
+    let response = request.send().await.map_err(reqwest::Error::without_url)?;
+    let status = response.status();
     ensure!(
-        response.status() == reqwest::StatusCode::OK,
-        "update host returned HTTP {}",
-        response.status()
+        status == reqwest::StatusCode::OK
+            || (etag.is_some() && status == reqwest::StatusCode::NOT_MODIFIED),
+        "update host returned HTTP {status}"
     );
     Ok(response)
 }
 
 async fn read_small(client: &reqwest::Client, url: Url, limit: usize) -> Result<Vec<u8>> {
-    let mut response = get(client, url).await?;
+    read_body(get(client, url, None).await?, limit).await
+}
+
+async fn read_body(mut response: reqwest::Response, limit: usize) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     while let Some(chunk) = response
         .chunk()
@@ -177,7 +196,18 @@ async fn read_small(client: &reqwest::Client, url: Url, limit: usize) -> Result<
     Ok(bytes)
 }
 
-async fn check(url: &str) -> Result<Option<Update>> {
+/// What a check found.
+enum Found {
+    /// The host says the manifest is the one already seen.
+    Unchanged,
+    /// Nothing newer; the manifest's ETag, to ask "unchanged?" next time.
+    Current(Option<String>),
+    Newer(Update),
+}
+
+/// Looks for a newer release. `etag` is the ETag of the last manifest that held
+/// nothing newer: GitHub then answers 304 and the 15 minute checks cost almost nothing.
+async fn check(url: &str, etag: Option<&str>) -> Result<Found> {
     let key = release_key()?;
     let mut base = Url::parse(url.trim()).map_err(|_| anyhow!("enter a valid update URL"))?;
     let local_http = LOCAL_TEST && base.scheme() == "http" && base.host_str() == Some("127.0.0.1");
@@ -209,12 +239,21 @@ async fn check(url: &str) -> Result<Option<Update>> {
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(300))
         .build()?;
-    let bytes = read_small(&client, base.join("latest.json")?, 16 * 1024).await?;
+    let response = get(&client, base.join("latest.json")?, etag).await?;
+    if response.status() == reqwest::StatusCode::NOT_MODIFIED {
+        return Ok(Found::Unchanged);
+    }
+    let etag = response
+        .headers()
+        .get(reqwest::header::ETAG)
+        .and_then(|etag| etag.to_str().ok())
+        .map(str::to_owned);
+    let bytes = read_body(response, 16 * 1024).await?;
     let signature = read_small(&client, base.join("latest.json.sig")?, 64).await?;
     let mut manifest = verify(&key, &bytes, &signature)?;
     let version = Version::parse(&manifest.version)?;
     if !newer(&version, &Version::parse(env!("CARGO_PKG_VERSION"))?)? {
-        return Ok(None);
+        return Ok(Found::Current(etag));
     }
     let platform = format!("{}-{}", env::consts::OS, env::consts::ARCH);
     let artifact = manifest
@@ -233,7 +272,7 @@ async fn check(url: &str) -> Result<Option<Update>> {
         artifact.size > 0 && artifact.size <= 1024 * 1024 * 1024,
         "invalid update size"
     );
-    Ok(Some(Update {
+    Ok(Found::Newer(Update {
         client,
         base,
         version,
@@ -305,7 +344,12 @@ impl Target {
         #[cfg(not(target_os = "macos"))]
         let mut file =
             NamedTempFile::new_in(self.path.parent().context("locate update directory")?)?;
-        let mut response = get(&update.client, update.base.join(&update.artifact.file)?).await?;
+        let mut response = get(
+            &update.client,
+            update.base.join(&update.artifact.file)?,
+            None,
+        )
+        .await?;
         let mut size = 0;
         let mut hasher = Sha256::new();
         while let Some(chunk) = response
@@ -833,7 +877,7 @@ pub fn check_now(config: &Path) -> Result<()> {
         Settings::load(&config.join("updates.json"))?.url
     };
     runtime()?.block_on(async {
-        if let Some(update) = check(&url).await? {
+        if let Found::Newer(update) = check(&url, None).await? {
             let version = update.version.clone();
             target.install(update, Arc::default()).await?;
             println!("Installed RustTalk {version}");
@@ -861,7 +905,8 @@ enum State {
     /// A check (no progress) or an install (with progress) runs in the background.
     Working(Receiver<Result<State>>, Option<Progress>),
     Available(Update),
-    Current,
+    /// Up to date, with the ETag of the manifest that said so.
+    Current(Option<String>),
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     Installed(Version, Target),
     #[cfg(target_os = "windows")]
@@ -877,6 +922,10 @@ pub struct Updater {
     next_check: Option<Instant>,
     /// The confirmation dialog is open, and stays open to show progress or a failure.
     asking: bool,
+    /// The banner was closed for this version; a newer one shows it again.
+    dismissed: Option<Version>,
+    /// "Update after the call" was picked: install once the call ends.
+    after_call: bool,
 }
 
 impl Updater {
@@ -896,15 +945,24 @@ impl Updater {
             state,
             next_check: None,
             asking: false,
+            dismissed: None,
+            after_call: false,
         }
     }
 
     fn start_check(&mut self, ctx: &egui::Context) {
         let url = self.settings.url.clone();
+        // Only "nothing new" is worth asking about again; any other state needs the full answer.
+        let seen = match &self.state {
+            State::Current(etag) => etag.clone(),
+            _ => None,
+        };
         self.state = background(ctx, None, move || {
-            Ok(runtime()?
-                .block_on(check(&url))?
-                .map_or(State::Current, State::Available))
+            Ok(match runtime()?.block_on(check(&url, seen.as_deref()))? {
+                Found::Unchanged => State::Current(seen),
+                Found::Current(etag) => State::Current(etag),
+                Found::Newer(update) => State::Available(update),
+            })
         });
     }
 
@@ -984,7 +1042,7 @@ impl Updater {
         if ready {
             let now = Instant::now();
             if check_due(self.next_check, now) {
-                self.next_check = Some(now + CHECK_EVERY);
+                self.next_check = Some(now + self.settings.check_every());
                 self.start_check(ctx);
             } else if let Some(next) = self.next_check {
                 ctx.request_repaint_after(next.saturating_duration_since(now));
@@ -994,6 +1052,97 @@ impl Updater {
 
     pub fn available(&self) -> bool {
         matches!(self.state, State::Available(_))
+    }
+
+    /// Whether the banner shows: a verified newer version the person has not closed it for.
+    fn banner_wanted(&self) -> bool {
+        matches!(&self.state, State::Available(update) if self.dismissed.as_ref() != Some(&update.version))
+    }
+
+    /// Whether a deferred "update after the call" should start now. Forgets the
+    /// request once there is nothing left to update.
+    fn due_after_call(&mut self, in_call: bool) -> bool {
+        self.after_call &= self.available();
+        let due = self.after_call && !in_call;
+        self.after_call &= !due;
+        due
+    }
+
+    /// Starts the install with the progress dialog; the app restarts when it is done.
+    fn begin(&mut self, ctx: &egui::Context) {
+        self.asking = true;
+        self.confirm(ctx);
+    }
+
+    /// The banner button: install now, or once the call is over. A restart must never
+    /// cut off a call.
+    fn choose(&mut self, ctx: &egui::Context, in_call: bool) {
+        if in_call {
+            self.after_call = true;
+        } else {
+            self.begin(ctx);
+        }
+    }
+
+    /// A slim bar across the top of the window while an update waits. It pushes the
+    /// layout down instead of floating, so it never covers the call controls.
+    pub fn banner(&mut self, ui: &mut egui::Ui, in_call: bool) {
+        if self.due_after_call(in_call) {
+            self.begin(ui.ctx());
+        }
+        let State::Available(update) = &self.state else {
+            return;
+        };
+        if !self.banner_wanted() {
+            return;
+        }
+        let version = update.version.clone();
+        let (c, accent) = (crate::ui::colors(ui), crate::ui::accent(ui));
+        let (mut go, mut close) = (false, false);
+        let bar = egui::Panel::top("update banner")
+            .frame(
+                egui::Frame::new()
+                    .fill(c.main.lerp_to_gamma(accent.base, 0.18))
+                    .inner_margin(egui::Margin::symmetric(
+                        crate::ui::SPACE_M as i8,
+                        crate::ui::SPACE_XS as i8,
+                    )),
+            )
+            .show(ui, |ui| {
+                // A fixed row height, so the text centres against the button.
+                let row = egui::vec2(ui.available_width(), crate::ui::CONTROL_HEIGHT);
+                ui.allocate_ui_with_layout(
+                    row,
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        let text =
+                            crate::ui::bold(t!("update.banner", version = version)).color(c.strong);
+                        ui.add(egui::Label::new(text).truncate());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            close = crate::ui::small_close(ui, t!("common.dismiss")).clicked();
+                            if self.after_call {
+                                ui.label(t!("update.banner_scheduled"));
+                            } else {
+                                let label = if in_call {
+                                    t!("update.banner_after_call")
+                                } else {
+                                    t!("update.banner_action")
+                                };
+                                go = crate::ui::primary(ui, label).clicked();
+                            }
+                        });
+                    },
+                );
+            });
+        let rect = bar.response.rect;
+        let line = egui::Stroke::new(1.0, accent.base.gamma_multiply(0.6));
+        ui.painter().hline(rect.x_range(), rect.bottom(), line);
+        if close {
+            self.dismissed = Some(version);
+            self.after_call = false;
+        } else if go {
+            self.choose(ui.ctx(), in_call);
+        }
     }
 
     /// The Update button, shown while a verified newer version waits.
@@ -1059,13 +1208,43 @@ impl Updater {
         let can_check = !self.busy();
         crate::ui::page_section(ui, t!("settings.updates"));
         ui.add_enabled_ui(can_check, |ui| {
-            let changed = crate::ui::toggle_row(
+            let mut changed = crate::ui::toggle_row(
                 ui,
                 &mut self.settings.automatic,
                 t!("update.automatic"),
                 t!("update.automatic_help"),
             )
             .changed();
+            let every = crate::ui::setting_row(
+                ui,
+                t!("update.interval"),
+                t!("update.interval_help"),
+                |ui| {
+                    ui.add_enabled_ui(self.settings.automatic, |ui| {
+                        ui.scope(|ui| {
+                            ui.set_width(300.0);
+                            crate::ui::segmented(
+                                ui,
+                                &mut self.settings.check_minutes,
+                                &[
+                                    (CHECK_MINUTES[0], t!("update.every_15m"), ""),
+                                    (CHECK_MINUTES[1], t!("update.every_1h"), ""),
+                                    (CHECK_MINUTES[2], t!("update.every_6h"), ""),
+                                    (CHECK_MINUTES[3], t!("update.every_24h"), ""),
+                                ],
+                            )
+                        })
+                        .inner
+                    })
+                    .inner
+                },
+            );
+            if every {
+                // A shorter interval takes effect now; a longer one after the next check.
+                let soonest = Instant::now() + self.settings.check_every();
+                self.next_check = self.next_check.map(|next| next.min(soonest));
+                changed = true;
+            }
             let url =
                 crate::ui::setting_row(ui, t!("update.address"), t!("update.address_help"), |ui| {
                     ui.add(
@@ -1081,7 +1260,7 @@ impl Updater {
                     t!("update.address"),
                 )
             });
-            if url.changed() && self.available() {
+            if url.changed() && matches!(self.state, State::Available(_) | State::Current(_)) {
                 self.state = State::Idle;
             }
             let check = ui
@@ -1117,7 +1296,7 @@ impl Updater {
                     self.asking = true;
                 }
             }
-            State::Current => {
+            State::Current(_) => {
                 ui.label(t!("update.up_to_date"));
             }
             #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1206,11 +1385,14 @@ mod tests {
             settings: Settings {
                 automatic: true,
                 url: "https://example.com/".into(),
+                check_minutes: default_check_minutes(),
             },
             target: Err(anyhow!("no target in tests")),
             state,
             next_check: None,
             asking: false,
+            dismissed: None,
+            after_call: false,
         }
     }
 
@@ -1227,16 +1409,74 @@ mod tests {
     }
 
     #[test]
-    fn schedule_checks_at_startup_then_every_six_hours() {
+    fn schedule_checks_at_startup_then_every_chosen_interval() {
         let start = Instant::now();
+        let every = Settings::default().check_every();
         assert!(check_due(None, start));
-        let next = Some(start + CHECK_EVERY);
-        assert!(!check_due(
-            next,
-            start + CHECK_EVERY - Duration::from_secs(1)
-        ));
-        assert!(check_due(next, start + CHECK_EVERY));
-        assert_eq!(CHECK_EVERY, Duration::from_secs(21_600));
+        let next = Some(start + every);
+        assert!(!check_due(next, start + every - Duration::from_secs(1)));
+        assert!(check_due(next, start + every));
+        assert_eq!(every, Duration::from_secs(15 * 60));
+    }
+
+    #[test]
+    fn settings_saved_before_the_interval_existed_check_every_15_minutes() {
+        let old: Settings = serde_json::from_str(r#"{"automatic":true,"url":"u"}"#).unwrap();
+        assert_eq!(old.check_minutes, 15);
+        assert_eq!(old.check_every(), Duration::from_secs(900));
+        let hourly: Settings = serde_json::from_str(r#"{"url":"u","check_minutes":60}"#).unwrap();
+        assert_eq!(hourly.check_every(), Duration::from_secs(3600));
+        // Every offered choice round-trips, and a hand-edited value is never shorter than 15 minutes.
+        for minutes in CHECK_MINUTES {
+            let saved = serde_json::to_string(&Settings {
+                check_minutes: minutes,
+                ..Settings::default()
+            })
+            .unwrap();
+            let back: Settings = serde_json::from_str(&saved).unwrap();
+            assert_eq!(back.check_every(), Duration::from_secs(minutes * 60));
+        }
+        let zero: Settings = serde_json::from_str(r#"{"url":"u","check_minutes":0}"#).unwrap();
+        assert_eq!(zero.check_every(), Duration::from_secs(900));
+    }
+
+    #[test]
+    fn banner_shows_for_an_undismissed_available_version() {
+        let mut updater = updater(State::Idle);
+        assert!(!updater.banner_wanted());
+        updater.state = State::Available(fake_update("https://example.com/"));
+        assert!(updater.banner_wanted());
+        // Closed for 0.2.0: stays hidden, however long the app runs.
+        updater.dismissed = Some(Version::new(0, 2, 0));
+        assert!(!updater.banner_wanted());
+        // A newer release shows it again.
+        let State::Available(update) = &mut updater.state else {
+            unreachable!()
+        };
+        update.version = Version::new(0, 3, 0);
+        assert!(updater.banner_wanted());
+        // Not available any more (installing, up to date): no banner.
+        updater.dismissed = None;
+        updater.state = State::Current(None);
+        assert!(!updater.banner_wanted());
+    }
+
+    #[test]
+    fn update_after_the_call_waits_for_the_call_to_end() {
+        let ctx = egui::Context::default();
+        let mut updater = updater(State::Available(fake_update("https://example.com/")));
+        // In a call the button only schedules: nothing installs, no dialog opens.
+        updater.choose(&ctx, true);
+        assert!(updater.after_call && updater.available() && !updater.asking);
+        assert!(!updater.due_after_call(true));
+        assert!(updater.after_call);
+        // The call ended: it is due once, then forgotten.
+        assert!(updater.due_after_call(false));
+        assert!(!updater.after_call && !updater.due_after_call(false));
+        // Closing the banner or losing the update cancels a pending request.
+        updater.after_call = true;
+        updater.state = State::Idle;
+        assert!(!updater.due_after_call(false) && !updater.after_call);
     }
 
     #[test]
