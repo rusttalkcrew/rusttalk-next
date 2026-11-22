@@ -12,6 +12,7 @@ Unreleased under the new version and date.
 ## Unreleased
 
 - Pages can show pictures, and links on a page get the same preview cards as in chat.
+- Link preview text no longer runs underneath the Open link button.
 - Removing a device changes chat and call keys on updated servers. Older apps must update to connect.
 
 ## v0.1.9 - 2026-11-22

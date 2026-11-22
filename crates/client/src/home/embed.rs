@@ -1,7 +1,7 @@
 //! A card under a message that previews something the message links to, such as a
 //! server invite. It only shows what it is given: building one never contacts anything.
 
-use eframe::egui::{Align, Align2, FontId, Layout, Sense, TextureHandle, Ui, Vec2};
+use eframe::egui::{Align2, FontId, Sense, TextureHandle, Ui, Vec2};
 
 use super::paint_hovered;
 use crate::{server::Picture, ui};
@@ -44,12 +44,6 @@ impl Embed<'_> {
         ui.add_space(ui::SPACE_XS);
         ui.scope(|ui| {
             ui.set_max_width(WIDTH.min(ui.available_width()));
-            // A big card, or one with a choice, puts its buttons under everything else.
-            let stacked = matches!(self.image, Some(Image::Wide(_)))
-                || !self.fields.is_empty()
-                || self.buttons.len() > 1
-                // Wrapped text has no room left beside it for a button.
-                || self.description.is_some_and(|d| d.chars().count() > 60);
             ui::card(ui, |ui| {
                 if let Some(Image::Wide(texture)) = &self.image {
                     let [w, h] = texture.size();
@@ -64,55 +58,46 @@ impl Embed<'_> {
                             .corner_radius(ui::RADIUS),
                     );
                 }
-                let clicked = ui
-                    .horizontal(|ui| {
-                        if let Some(Image::Icon(texture)) = &self.image {
-                            ui.add(
-                                eframe::egui::Image::new(*texture)
-                                    .fit_to_exact_size(Vec2::splat(IMAGE))
-                                    .corner_radius(IMAGE / 2.0),
-                            );
-                        }
-                        let icon = match &self.image {
-                            Some(Image::Picture(picture)) => Some(Ok(*picture)),
-                            Some(Image::Glyph(glyph)) => Some(Err(glyph)),
-                            _ => None,
-                        };
-                        if let Some(icon) = icon {
-                            let (rect, _) =
-                                ui.allocate_exact_size(Vec2::splat(IMAGE), Sense::hover());
-                            match icon {
-                                Ok(picture) => paint_hovered(ui, rect, picture, IMAGE / 2.0),
-                                Err(glyph) => {
-                                    let c = ui::colors(ui);
-                                    ui.painter()
-                                        .circle_filled(rect.center(), IMAGE / 2.0, c.main);
-                                    ui.painter().text(
-                                        rect.center(),
-                                        Align2::CENTER_CENTER,
-                                        glyph,
-                                        FontId::new(16.0, ui::bold_family()),
-                                        c.text,
-                                    );
-                                }
+                // Buttons go under the text, so long text never runs beneath one.
+                ui.horizontal(|ui| {
+                    if let Some(Image::Icon(texture)) = &self.image {
+                        ui.add(
+                            eframe::egui::Image::new(*texture)
+                                .fit_to_exact_size(Vec2::splat(IMAGE))
+                                .corner_radius(IMAGE / 2.0),
+                        );
+                    }
+                    let icon = match &self.image {
+                        Some(Image::Picture(picture)) => Some(Ok(*picture)),
+                        Some(Image::Glyph(glyph)) => Some(Err(glyph)),
+                        _ => None,
+                    };
+                    if let Some(icon) = icon {
+                        let (rect, _) = ui.allocate_exact_size(Vec2::splat(IMAGE), Sense::hover());
+                        match icon {
+                            Ok(picture) => paint_hovered(ui, rect, picture, IMAGE / 2.0),
+                            Err(glyph) => {
+                                let c = ui::colors(ui);
+                                ui.painter()
+                                    .circle_filled(rect.center(), IMAGE / 2.0, c.main);
+                                ui.painter().text(
+                                    rect.center(),
+                                    Align2::CENTER_CENTER,
+                                    glyph,
+                                    FontId::new(16.0, ui::bold_family()),
+                                    c.text,
+                                );
                             }
                         }
-                        ui.vertical(|ui| {
-                            ui.label(ui::caption(self.kind));
-                            ui.label(ui::bold(self.title));
-                            if let Some(description) = self.description {
-                                ui.weak(description);
-                            }
-                        });
-                        if stacked {
-                            return None;
+                    }
+                    ui.vertical(|ui| {
+                        ui.label(ui::caption(self.kind));
+                        ui.label(ui::bold(self.title));
+                        if let Some(description) = self.description {
+                            ui.weak(description);
                         }
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            buttons(ui, self.buttons)
-                        })
-                        .inner
-                    })
-                    .inner;
+                    });
+                });
                 if !self.fields.is_empty() {
                     eframe::egui::Grid::new(ui.next_auto_id())
                         .num_columns(2)
@@ -125,13 +110,7 @@ impl Embed<'_> {
                             }
                         });
                 }
-                if stacked {
-                    return ui
-                        .horizontal(|ui| buttons(ui, self.buttons))
-                        .inner
-                        .or(clicked);
-                }
-                clicked
+                ui.horizontal(|ui| buttons(ui, self.buttons)).inner
             })
         })
         .inner
