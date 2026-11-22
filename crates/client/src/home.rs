@@ -1753,92 +1753,145 @@ pub fn show(
     updates.banner(ui, home.voice.call.is_some());
     home.layout
         .set_window_width(ui.available_width() - RAIL_WIDTH);
+    // Phones show the list or what is open, never both; picking something opens it.
+    let phone = ui::is_phone(ui.ctx());
+    let list = phone && home.layout.list;
+    let opened = open_page(home);
+    let channels_width = if list {
+        ui.available_width() - RAIL_WIDTH
+    } else {
+        home.layout.channels
+    };
     // One column for rail and channel list, so the bottom panel spans both like Discord.
-    let channels = Panel::left("sidebar")
-        .resizable(false)
-        .exact_size(RAIL_WIDTH + home.layout.channels)
-        .frame(Frame::new())
-        .show(ui, |ui| {
-            Panel::bottom("you")
-                .frame(panel_frame(colors.side))
-                .show(ui, |ui| bottom_panel(ui, home, updates));
-            Panel::left("servers")
-                .resizable(false)
-                .exact_size(RAIL_WIDTH)
-                .frame(panel_frame(colors.rail))
-                .show(ui, |ui| server_rail(ui, home));
-            Panel::left("channels")
-                .resizable(false)
-                .exact_size(home.layout.channels)
-                .frame(panel_frame(colors.side))
-                .show(ui, |ui| sidebar(ui, home))
-                .response
-                .rect
-        })
-        .inner;
+    let channels = (!phone || list).then(|| {
+        Panel::left("sidebar")
+            .resizable(false)
+            .exact_size(RAIL_WIDTH + channels_width)
+            .frame(Frame::new())
+            .show(ui, |ui| {
+                Panel::bottom("you")
+                    .frame(panel_frame(colors.side))
+                    .show(ui, |ui| bottom_panel(ui, home, updates));
+                Panel::left("servers")
+                    .resizable(false)
+                    .exact_size(RAIL_WIDTH)
+                    .frame(panel_frame(colors.rail))
+                    .show(ui, |ui| server_rail(ui, home));
+                Panel::left("channels")
+                    .resizable(false)
+                    .exact_size(channels_width)
+                    .frame(panel_frame(colors.side))
+                    .show(ui, |ui| sidebar(ui, home))
+                    .response
+                    .rect
+            })
+            .inner
+    });
+    if list && open_page(home) != opened {
+        home.layout.list = false;
+    }
+    let member_server = match home.view {
+        View::Server(index)
+            if !list
+                && home.servers[index].status != Status::Connecting
+                && home.servers[index].compatibility != Compatibility::AppTooOld =>
+        {
+            Some(index)
+        }
+        _ => None,
+    };
+    // On phones the member list covers the column, and Back closes it first.
+    let members_cover = phone && member_server.is_some() && home.layout.members_shown();
+    if phone && !list {
+        Panel::top("phone-back")
+            .frame(panel_frame(colors.side))
+            .show(ui, |ui| {
+                if ui::icon_button(
+                    ui,
+                    "⬅",
+                    t!("common.back"),
+                    ui::Look::Ghost,
+                    Vec2::new(36.0, 32.0),
+                )
+                .clicked()
+                {
+                    if members_cover {
+                        home.layout.toggle_members();
+                    } else {
+                        home.layout.list = true;
+                    }
+                }
+            });
+    }
     let mut members = None;
-    if let View::Server(index) = home.view
-        && home.servers[index].status != Status::Connecting
-        && home.servers[index].compatibility != Compatibility::AppTooOld
-    {
+    if let Some(index) = member_server {
         // Toggled from the channel header; the panel only slides.
         let mut shown = home.layout.members_shown();
         members = Panel::right("members")
             .resizable(false)
-            .exact_size(home.layout.members)
+            .exact_size(if phone {
+                ui.available_width()
+            } else {
+                home.layout.members
+            })
             .frame(panel_frame(colors.side))
             .show_collapsible(ui, &mut shown, |ui| member_list(ui, home, index))
             .map(|panel| panel.response.rect);
     }
-    CentralPanel::default()
-        .frame(
-            Frame::new()
-                .fill(colors.main)
-                .inner_margin(Margin::same(ui::SPACE_M as i8)),
-        )
-        .show(ui, |ui| match home.view {
-            View::Join => join(ui, home),
-            View::Find => find(ui, home),
-            View::Direct(None) => friends::view(ui, home),
-            View::Pokes => pokes::view(ui, home),
-            View::Direct(Some(peer)) => dm_pane(ui, home, peer),
-            View::Server(index) => {
-                if !show_compatibility(ui, home, index) {
-                    return;
-                }
-                match home.servers[index].open {
-                    Some(channel) if home.servers[index].is_voice(&channel) => {
-                        voice_pane(ui, home, index, channel)
+    if !list && !members_cover {
+        CentralPanel::default()
+            .frame(
+                Frame::new()
+                    .fill(colors.main)
+                    .inner_margin(Margin::same(ui::SPACE_M as i8)),
+            )
+            .show(ui, |ui| match home.view {
+                View::Join => join(ui, home),
+                View::Find => find(ui, home),
+                View::Direct(None) => friends::view(ui, home),
+                View::Pokes => pokes::view(ui, home),
+                View::Direct(Some(peer)) => dm_pane(ui, home, peer),
+                View::Server(index) => {
+                    if !show_compatibility(ui, home, index) {
+                        return;
                     }
-                    Some(channel) => chat_pane(ui, home, index, channel),
-                    None => {
-                        let server = &home.servers[index];
-                        let hint = match &server.status {
-                            Status::Stopped(reason) => reason.clone(),
-                            Status::Connecting => t!("common.connecting").into(),
-                            _ if server.dir.categories.is_empty()
-                                && server.dir.perms.manage_channels =>
-                            {
-                                t!("home.no_channels").into()
-                            }
-                            _ => t!("home.pick_channel").into(),
-                        };
-                        empty(ui, server.name(), &hint);
+                    match home.servers[index].open {
+                        Some(channel) if home.servers[index].is_voice(&channel) => {
+                            voice_pane(ui, home, index, channel)
+                        }
+                        Some(channel) => chat_pane(ui, home, index, channel),
+                        None => {
+                            let server = &home.servers[index];
+                            let hint = match &server.status {
+                                Status::Stopped(reason) => reason.clone(),
+                                Status::Connecting => t!("common.connecting").into(),
+                                _ if server.dir.categories.is_empty()
+                                    && server.dir.perms.manage_channels =>
+                                {
+                                    t!("home.no_channels").into()
+                                }
+                                _ => t!("home.pick_channel").into(),
+                            };
+                            empty(ui, server.name(), &hint);
+                        }
                     }
                 }
-            }
-        });
+            });
+    }
     // Resize handles go last so they sit above the panels on both sides of each edge.
-    let mut dragging = layout::resize_edge(
-        ui,
-        t!("home.resize_channels"),
-        channels,
-        true,
-        &mut home.layout.channels,
-        layout::CHANNELS_WIDTH,
-        layout::CHANNELS_RANGE,
-    );
-    if let Some(members) = members {
+    let mut dragging = false;
+    if let Some(channels) = channels.filter(|_| !phone) {
+        dragging |= layout::resize_edge(
+            ui,
+            t!("home.resize_channels"),
+            channels,
+            true,
+            &mut home.layout.channels,
+            layout::CHANNELS_WIDTH,
+            layout::CHANNELS_RANGE,
+        );
+    }
+    if let Some(members) = members.filter(|_| !phone) {
         dragging |= layout::resize_edge(
             ui,
             t!("home.resize_members"),
@@ -1863,6 +1916,15 @@ pub fn show(
     updates.dialog(ui.ctx());
     crop_dialog(ui.ctx(), home);
     action
+}
+
+/// What the main column shows, to tell when a phone's list opened something.
+fn open_page(home: &Home) -> (View, Option<Id>) {
+    let channel = match home.view {
+        View::Server(index) => home.servers.get(index).and_then(|server| server.open),
+        _ => None,
+    };
+    (home.view, channel)
 }
 
 fn show_compatibility(ui: &mut Ui, home: &mut Home, index: usize) -> bool {

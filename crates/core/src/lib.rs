@@ -1,5 +1,11 @@
 //! Identity, crypto and protocol types shared by client, bot and api.
 
+// On phones, desktop code without a phone version yet is unused (docs/mobile.md).
+#![cfg_attr(
+    any(target_os = "android", target_os = "ios"),
+    allow(dead_code, unused_imports)
+)]
+
 pub mod auth;
 #[cfg(feature = "voice")]
 pub mod camera;

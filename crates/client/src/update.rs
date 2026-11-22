@@ -324,6 +324,12 @@ impl Target {
                 path: config.join("rusttalk-update.exe"),
             })
         }
+        // Phones update through their app store or a new download, never from here.
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        {
+            let _ = config;
+            anyhow::bail!("this app is updated through its download page or app store")
+        }
         #[cfg(target_os = "macos")]
         {
             let _ = config;
@@ -416,6 +422,9 @@ impl Target {
             install_dmg(file.path(), &self, &update.version, &cache)?;
             Ok(State::Installed(update.version, self))
         }
+        // `Target::new` fails on phones, so nothing gets here.
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        unreachable!("phones have no update target")
     }
 
     #[cfg(target_os = "macos")]

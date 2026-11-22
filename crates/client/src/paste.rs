@@ -422,6 +422,12 @@ mod macos {
     }
 }
 
+// Phones: only text pastes for now (docs/mobile.md).
+#[cfg(any(target_os = "android", target_os = "ios"))]
+fn system() -> Option<Clip> {
+    None
+}
+
 #[cfg(windows)]
 fn system() -> Option<Clip> {
     let found = {
