@@ -153,7 +153,7 @@ impl Control {
                     ..
                 } => {
                     // The key's place on the keyboard: the sharer's layout picks the letter.
-                    let name = physical_key.unwrap_or(key).name();
+                    let name = shortcut_key(physical_key.unwrap_or(key).name());
                     if scan_code(name).is_none() {
                         continue;
                     }
@@ -200,6 +200,17 @@ impl Control {
             self.escape_since = None;
         }
         (sent, false)
+    }
+}
+
+/// A Mac's Command key goes as Ctrl, so Command+C copies on a Windows or Linux
+/// sharer; a Mac sharer turns Ctrl back into Command. The Mac's own Control key also
+/// goes as Ctrl, for Ctrl+C in a terminal elsewhere.
+fn shortcut_key(name: &str) -> &str {
+    match name {
+        "SuperLeft" if cfg!(target_os = "macos") => "ControlLeft",
+        "SuperRight" if cfg!(target_os = "macos") => "ControlRight",
+        name => name,
     }
 }
 

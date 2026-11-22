@@ -805,6 +805,8 @@ call.limit_bandwidth = Bandbreite
 # crates/client/src/call/remote.rs
 remote.share_opt_in = Steuerungsanfragen erlauben
 remote.share_warning = Nur für Monitore. Wer deine Erlaubnis hat, kann Apps auf dem geteilten Bildschirm bedienen. Nur RustTalk fragt nach deiner Erlaubnis.
+remote.share_warning_mac = Wer deine Erlaubnis hat, kann den geteilten Bildschirm oder das Fenster bedienen. Nur RustTalk fragt nach deiner Erlaubnis.
+remote.mac_accessibility = Aktiviere RustTalk unter Systemeinstellungen, Datenschutz & Sicherheit, Bedienungshilfen, damit andere deinen Bildschirm steuern können.
 remote.allow_help = Die Person kann in dem, was du teilst, deine Maus und Tastatur benutzen. Du kannst das jederzeit zurücknehmen.
 remote.they = Die Person
 remote.no_answer = {name} hat nicht geantwortet.

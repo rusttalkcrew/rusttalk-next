@@ -22,6 +22,12 @@ use tokio::{
 #[cfg(windows)]
 #[path = "screen/input_windows.rs"]
 mod input;
+#[cfg(target_os = "macos")]
+#[path = "screen/input_macos.rs"]
+mod input;
+#[cfg(any(target_os = "macos", test))]
+#[path = "screen/macos_rules.rs"]
+mod macos_rules;
 #[cfg(target_os = "linux")]
 #[path = "screen/linux.rs"]
 mod platform;
@@ -42,6 +48,26 @@ pub fn linux_remote_control() -> bool {
     return hyprland::socket().is_some_and(|path| path.exists());
     #[cfg(not(target_os = "linux"))]
     false
+}
+
+/// Whether to offer the per-share macOS opt-in.
+pub fn mac_remote_control() -> bool {
+    cfg!(target_os = "macos")
+}
+
+/// macOS: whether the Accessibility permission lets RustTalk post input. Other systems
+/// need no such permission.
+pub fn control_permitted() -> bool {
+    #[cfg(target_os = "macos")]
+    return input::trusted();
+    #[cfg(not(target_os = "macos"))]
+    true
+}
+
+/// macOS: show the system's Accessibility prompt. Does nothing elsewhere.
+pub fn request_control_permission() {
+    #[cfg(target_os = "macos")]
+    input::request_access();
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -448,6 +474,9 @@ pub struct ScreenCapture {
     target: input::Target,
     #[cfg(target_os = "linux")]
     control: Option<hyprland::Control>,
+    /// Present when the sharer allowed control requests for this share.
+    #[cfg(target_os = "macos")]
+    control: Option<input::Control>,
     /// The published size, when frames are letterboxed into an earlier share's track.
     canvas: Option<(u32, u32)>,
     /// The newest captured frame's size, packed as width << 32 | height.
@@ -466,16 +495,18 @@ impl ScreenCapture {
                 .control
                 .as_ref()
                 .is_some_and(hyprland::Control::available);
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        return !self.is_finished() && self.control.as_ref().is_some_and(input::Control::usable);
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         cfg!(windows)
     }
 
     pub fn set_control_active(&self, active: bool) {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         if let Some(control) = &self.control {
             control.set_active(active);
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let _ = active;
     }
 
@@ -492,7 +523,7 @@ impl ScreenCapture {
         ensure!(event.valid(), "invalid remote input");
         #[cfg(windows)]
         return input::inject(self.target, event, |x, y| self.point(x, y));
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             ensure!(!self.is_finished(), "screen capture ended");
             return self
@@ -501,7 +532,7 @@ impl ScreenCapture {
                 .context("share does not support control")?
                 .inject(event, |x, y| self.point(x, y));
         }
-        #[cfg(not(any(windows, target_os = "linux")))]
+        #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
         anyhow::bail!("remote control is unsupported")
     }
 }
@@ -561,6 +592,10 @@ pub async fn start_into(
         options.validate()?;
         #[cfg(windows)]
         let target = input::Target::from(source.target);
+        #[cfg(target_os = "macos")]
+        let control = options
+            .remote_control
+            .then(|| input::Control::new(source.target));
         #[cfg(not(target_os = "linux"))]
         let (name, mut frames, backend) = platform::open(source, options, restore_token).await?;
         #[cfg(target_os = "linux")]
@@ -645,7 +680,7 @@ pub async fn start_into(
             task,
             #[cfg(windows)]
             target,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             control,
             canvas,
             size,
