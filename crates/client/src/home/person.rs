@@ -96,7 +96,10 @@ impl<'a> Person<'a> {
         }
         if let (true, Some(audio)) = (other, self.audio) {
             m.separator();
-            call::stream_menu(m, audio, &(self.person, None));
+            let apps = (self.server.voice.values().flatten())
+                .find(|peer| peer.person == self.person)
+                .map_or(&[][..], |peer| &peer.apps);
+            call::mixer::show(m, audio, self.person, true, apps);
             if let Some(shown) = self.video {
                 let item = ui::Item::new("📷", t!("call.show_video")).checked(shown);
                 if m.add(item).clicked() {
@@ -479,6 +482,46 @@ mod tests {
         assert!(shown(&harness, t!("call.mute")));
         assert!(shown(&harness, t!("home.message")));
         assert_eq!(moderation_shown(&harness), [false; 5]);
+    }
+
+    #[test]
+    fn the_mixer_has_a_row_per_app_and_links_them() {
+        let mut harness = menu(Case {
+            perms: Perms::default(),
+            person: ANN,
+            in_voice: true,
+            in_call: true,
+            ann_roles: &[],
+        });
+        let home = harness.state_mut().as_mut().unwrap();
+        let peer = &mut home.servers[0].voice.get_mut(&LOUNGE).unwrap()[0];
+        let sid = |s: &str| s.to_owned().try_into().unwrap();
+        peer.apps = vec![
+            (sid("TR_a"), "Spotify".into()),
+            (sid("TR_b"), "Game".into()),
+        ];
+        harness.run_steps(4);
+        // Each row's name is both its label and its slider's.
+        let any = |harness: &Harness<'static, Option<Home>>, label| {
+            harness.query_all_by_label(label).next().is_some()
+        };
+        for label in [t!("call.voice"), "Spotify", "Game"] {
+            assert!(any(&harness, label), "{label}");
+        }
+        assert!(!any(&harness, t!("call.all_apps")));
+        let switch = eframe::egui::accesskit::Role::Switch;
+        harness
+            .get_by_role_and_label(switch, t!("call.link"))
+            .click();
+        harness.run_steps(4);
+        // The menu stays open for the mixer.
+        assert!(any(&harness, t!("call.all_apps")));
+        let audio = &harness.state().as_ref().unwrap().voice.audio;
+        assert_eq!(audio.mix().person(&ANN).link, Some(1.0));
+        // Its items still close it.
+        harness.get_by_label(t!("pokes.poke")).click();
+        harness.run_steps(4);
+        assert!(!any(&harness, t!("call.all_apps")));
     }
 
     /// Moderation shown against Ann with `roles`, by someone of `rank`.

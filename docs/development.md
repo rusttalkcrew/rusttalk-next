@@ -89,9 +89,11 @@ The window shows "Connecting…" or "Offline" per server meanwhile.
 Voice audio runs on its own threads (`crates/client/src/audio.rs`): the
 microphone goes through WebRTC's echo cancellation, noise suppression and
 automatic gain, then the push-to-talk or voice-activity gate, into the
-published track. Each remote track is decoded separately, so every person
-has their own volume and mute; the mix plays on the chosen speakers and also
-feeds the echo canceller. On Linux the client talks to the sound server over
+published track. Each remote track is decoded separately, so every person's
+voice and each app they share has its own volume and mute (the mixer in
+`call/mixer.rs`, kept per person and app name in `voice.json`, scaled by the
+masters in Settings → Voice & audio and capped at 200%); the mix plays on the
+chosen speakers and also feeds the echo canceller. On Linux the client talks to the sound server over
 the PulseAudio protocol (PipeWire serves it too) and falls back to ALSA.
 Settings → Voice picks devices, shows the mic level, and calibrates voice
 activity ("stay quiet", then "say something"). Push-to-talk works only while

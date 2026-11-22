@@ -12,10 +12,10 @@ use eframe::egui::{
 use rusttalk_core::client::voice::VoiceStatus;
 
 use super::{
-    Sharing, Voice, call_server, join,
+    Sharing, Voice, call_server, join, mixer,
     overlay::{self, Overlay, Row},
     remote::Control,
-    ring, sound_badges, stop_watching, stream_menu, upload, watch,
+    ring, sound_badges, stop_watching, upload, watch,
 };
 use crate::{
     friends::Relation,
@@ -841,15 +841,7 @@ fn screen_menu(
             Row::Volume => {
                 m.separator();
                 // The sharer's apps, whose sound arrives with the screen.
-                match entry.peer.apps.as_slice() {
-                    [(sid, _)] => stream_menu(m, audio, &(person, Some(sid.clone()))),
-                    apps => {
-                        for (sid, app) in apps {
-                            let stream = (person, Some(sid.clone()));
-                            m.submenu("🎵", app, |m| stream_menu(m, audio, &stream));
-                        }
-                    }
-                }
+                mixer::show(m, audio, person, false, &entry.peer.apps);
             }
             Row::ShowFps => {
                 m.separator();
@@ -934,7 +926,7 @@ fn name_tag(ui: &mut Ui, rect: Rect, entry: &Entry, audio: &crate::audio::Audio)
         },
         _ => entry.peer.status,
     };
-    let local_mute = is_person && !entry.me && audio.volume(&(person, None)).1;
+    let local_mute = is_person && !entry.me && audio.stream_muted(&(person, None));
     let badges = sound_badges(status).chain(local_mute.then_some(("🔊", t!("call.muted_by_you"))));
     let badges_width = BADGE * badges.clone().count() as f32;
     let text = if entry.peer.connecting && is_person {
@@ -1033,7 +1025,9 @@ fn tools(
     if rect.height() < TOOL.y + 2.0 * GAP || fits == 0 {
         return;
     }
-    let volume = is_person && !entry.me && !entry.peer.unknown && state.joined;
+    // A person's voice and apps, or the sound of a screen.
+    let sound = is_person || !entry.peer.apps.is_empty();
+    let volume = sound && !entry.me && !entry.peer.unknown && state.joined;
     let full = entry.picture.is_some();
     let preview = entry.tile == Tile::Preview;
     let stop = entry.watched || preview;
@@ -1103,11 +1097,7 @@ fn tools(
     if volume && room() {
         let button = ui::icon_button(ui, "🔊", t!("call.volume"), Look::Plain, TOOL);
         ui::menu(&button, |m| {
-            stream_menu(m, audio, &(person, None));
-            for (sid, app) in &entry.peer.apps {
-                let stream = (person, Some(sid.clone()));
-                m.submenu("🎵", app, |m| stream_menu(m, audio, &stream));
-            }
+            mixer::show(m, audio, person, is_person, &entry.peer.apps)
         });
         let open = ui::menu_open(&button);
         ui.data_mut(|data| data.insert_temp(menu_id, open));
