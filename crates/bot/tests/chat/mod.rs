@@ -495,6 +495,41 @@ async fn page(
     );
     wait_event(c, page, &saved.id, true).await?;
     ensure!(newest_picture(c).await? == picture);
+    // #269: a picture the newest page version keeps outlives file expiry (12 s in e2e)
+    // and expires once a newer version drops it. Only editors may save a version.
+    let mut kept = body("Pinned rules");
+    kept.attachments = vec![
+        a.upload_file(&page.id, "kept.png", "image/png", picture, None)
+            .await?,
+    ];
+    let file = kept.attachments[0].file.clone();
+    let id = *keys::random_key()?;
+    ensure!(
+        c.post_page(&page.id, id, &kept).await.is_err(),
+        "a member saved a page version"
+    );
+    let pinned = a.post_page(&page.id, id, &kept).await?;
+    wait_event(c, page, &pinned.id, false).await?;
+    tokio::time::sleep(std::time::Duration::from_secs(18)).await;
+    ensure!(
+        c.download_file(&file, None).await? == picture,
+        "the page lost its kept picture"
+    );
+    let dropped = a
+        .post_page(
+            &page.id,
+            *keys::random_key()?,
+            &body("Rules without pictures"),
+        )
+        .await?;
+    wait_event(c, page, &dropped.id, false).await?;
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while c.download_file(&file, None).await.is_ok() {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    })
+    .await
+    .context("a dropped page picture did not expire")?;
     // Later key checks expect only the first text channel, so remove this one.
     a.request(
         Method::DELETE,
@@ -504,7 +539,7 @@ async fn page(
     .await?
     .error_for_status()?;
     println!(
-        "#210/#226 verified a page channel: members read it and its pictures, only moderators and up change it"
+        "#210/#226/#269 verified a page channel: members read it and its pictures, only moderators and up change it, kept pictures outlive file expiry"
     );
     Ok(())
 }

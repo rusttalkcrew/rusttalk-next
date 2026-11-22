@@ -208,7 +208,7 @@ errors may have an empty body. The API logs a request ID, status and reason.
 
 | Status | Codes |
 | --- | --- |
-| 400 | `invalid_json`, `invalid_encoding`, `invalid_query`, `invalid_forwarded_ip`, `invalid_revocation`, `invalid_invite_limits`, `invalid_role_rank`, `invalid_role_count`, `role_id_required`, `already_owner`, `unexpected_invite`, `invite_name_required`, `invalid_member_cap`, `invalid_certificate`, `invalid_metadata`, `invalid_envelope`, `invalid_channel_flags`, `invalid_audio_kbps`, `invalid_order`, `invalid_dm_peer`, `not_a_voice_channel`, `invalid_message`, `invalid_file_body`, `invalid_file_acceptance`, `invalid_event_query`, `invalid_sync_blob`, `invalid_listing`, `invalid_listing_settings`, `invalid_index_url`, `invalid_index_tls_fingerprint` |
+| 400 | `invalid_json`, `invalid_encoding`, `invalid_query`, `invalid_forwarded_ip`, `invalid_revocation`, `invalid_invite_limits`, `invalid_role_rank`, `invalid_role_count`, `role_id_required`, `already_owner`, `unexpected_invite`, `invite_name_required`, `invalid_member_cap`, `invalid_certificate`, `invalid_metadata`, `invalid_envelope`, `invalid_channel_flags`, `invalid_audio_kbps`, `invalid_order`, `invalid_dm_peer`, `not_a_voice_channel`, `invalid_message`, `invalid_keep`, `invalid_file_body`, `invalid_file_acceptance`, `invalid_event_query`, `invalid_sync_blob`, `invalid_listing`, `invalid_listing_settings`, `invalid_index_url`, `invalid_index_tls_fingerprint` |
 | 401 | `invalid_challenge`, `invalid_certificate`, `invalid_device_signature`, `invalid_session`, `token_expired`, `invalid_livekit_webhook` |
 | 403 | `invite_required`, `invalid_invite`, `person_banned`, `ip_banned`, `device_revoked`, `device_certificate_required`, `permission_denied`, `role_hierarchy`, `cannot_grant_permission`, `built_in_role`, `owner_required`, `open_joining_disabled`, `scope_read_denied`, `recipient_read_denied`, `channel_read_denied`, `channel_write_denied`, `live_file_peer_not_in_room` |
 | 404 | `invite_not_found`, `member_not_found`, `ban_not_found`, `role_not_found`, `category_not_found`, `channel_not_found`, `message_not_found`, `message_device_not_found`, `file_not_found`, `avatar_not_found`, `icon_not_found`, `emoji_not_found`, `pack_not_found` |
@@ -376,8 +376,19 @@ read and write (3) to Owner, Admin and Moderator and read (1) to Member, so only
 people with write can change the page. Older clients show it as a text channel. The page's pictures are
 that message's stored files (at most four, like any message). Saving a change
 sends the references of the pictures it keeps again in the new message, so their
-blobs are not uploaded twice; they expire with the server's file retention like
-any other file. A version saved with the same link also keeps its link preview.
+blobs are not uploaded twice. A version saved with the same link also keeps its
+link preview. The message post of a page version adds `keep`, the IDs of every
+stored file it references (files and thumbnails, at most 8, no repeats). The API
+keeps only those that are unexpired files stored in that page channel and leaves
+the others out, so a page whose picture is gone still saves; `keep` on any other
+channel, a malformed ID, a repeat or more than 8 IDs is `400 invalid_keep`. An
+editor can thus keep any 8 live files of the page channel; they still count toward
+their uploader's quota. Files the page's newest version keeps never expire. When a newer version (or deleting the
+newest) leaves a file out, it expires with the server's file retention from its
+upload time again, like any other file. A version saved without `keep`, as older
+clients do, keeps nothing. When the editor who saved a version leaves, is kicked
+or banned, or revokes the device that saved it, that version no longer keeps
+files. Older servers ignore `keep`, and the pictures expire as before.
 Several versions can thus reference one blob: when deleting a page version, the
 client skips the files another loaded version still references. Older clients,
 which show a page as a text channel, do not; a moderator's delete still cannot
@@ -633,7 +644,7 @@ and the client can restart from the newest page.
 | Method and path | Body or query | Permission and success |
 | --- | --- | --- |
 | GET `/v1/channels/{channel}/messages?before={id}&limit={n}` | Optional cursor and limit, 1–100, default 50 | `read`. 200, array of message records |
-| POST `/v1/channels/{channel}/messages` | `{id, epoch, envelope}` | `write`. 201, the stored message record |
+| POST `/v1/channels/{channel}/messages` | `{id, epoch, envelope}`, and a page version's optional `keep` (file IDs) | `write`. 201, the stored message record |
 | GET `/v1/channels/{channel}/messages/{id}` | Empty | `read`. 200, one message record |
 | DELETE `/v1/channels/{channel}/messages/{id}` | Empty | The author or a reader with `delete_messages`. 204 |
 | GET `/v1/channels/{channel}/message-devices/{device}/{person}` | Empty | `read`. 200, the public device certificate as a base64url JSON string, when the device authored a retained message here |

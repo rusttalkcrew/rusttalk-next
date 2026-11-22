@@ -608,8 +608,10 @@ pub async fn revoke(
         if removed != 0 {
             keys::member_removed(&app, &mut tx, &actor.person).await?;
         }
-        // Readers skip a revoked device's shared files, so they expire like any file.
+        // Readers skip a revoked device's shared files and page versions, so their files
+        // expire like any file.
         crate::files::unshare_from(&app, &mut tx, &actor.person, Some(device)).await?;
+        crate::page_files::release_from(&app, &mut tx, &actor.person, Some(device)).await?;
         audit(
             &mut tx,
             &actor.person,

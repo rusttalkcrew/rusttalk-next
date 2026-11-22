@@ -972,7 +972,14 @@ impl<'a> KeyClient<'a> {
                 };
                 let id = *keys::random_key()?;
                 if let Err(error) = self
-                    .post_at(&scope.id, id, epoch, &current, &body, None)
+                    .post_at(
+                        &scope.id,
+                        id,
+                        epoch,
+                        &current,
+                        &body,
+                        super::chat::Posting::Plain,
+                    )
                     .await
                 {
                     tracing::warn!(error = %format_args!("{error:#}"), "announcing a DM key failed");

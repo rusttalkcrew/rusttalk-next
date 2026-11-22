@@ -109,8 +109,13 @@ impl KeyClient<'_> {
             self.dm_private(channel, &item.peer),
             "untrusted destination DM"
         );
-        self.post_message_dated(channel, item.id, &item.body, Some(item.at))
-            .await?;
+        self.post_message_dated(
+            channel,
+            item.id,
+            &item.body,
+            super::chat::Posting::Backfill(item.at),
+        )
+        .await?;
         Ok(())
     }
 

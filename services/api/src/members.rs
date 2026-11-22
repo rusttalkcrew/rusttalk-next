@@ -339,6 +339,7 @@ async fn remove_member(app: &App, db: &mut SqliteConnection, person: &[u8]) -> A
             .await?;
         keys::member_removed(app, db, person).await?;
         crate::files::unshare_from(app, db, person, None).await?;
+        crate::page_files::release_from(app, db, person, None).await?;
     }
     let closed = query_scalar("DELETE FROM sessions WHERE person_id = ? RETURNING expires_at")
         .bind(person)

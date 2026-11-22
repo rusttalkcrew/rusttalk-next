@@ -37,7 +37,7 @@ pub(super) async fn send(
     ctx: &Ctx,
     url: &Url,
     client: &mut KeyClient<'_>,
-    (channel, id): (Id, Id),
+    (channel, id, page): (Id, Id, bool),
     mut body: MessageBody,
     (files, preview, inline): (Vec<PathBuf>, Option<Arc<Made>>, Vec<Inline>),
 ) -> Result<bool> {
@@ -91,7 +91,11 @@ pub(super) async fn send(
             }
         }
     }
-    let record = match client.post_message(&channel, id, &body).await {
+    let posted = match page {
+        true => client.post_page(&channel, id, &body).await,
+        false => client.post_message(&channel, id, &body).await,
+    };
+    let record = match posted {
         Ok(record) => record,
         Err(error) => {
             discard(client, &body.attachments[kept..]).await;
