@@ -77,6 +77,8 @@ pub(super) struct Live {
     pub(super) terminal: Option<Hosting>,
     /// The terminal we watch.
     pub(super) viewing: Option<rusttalk_core::terminal::Viewer>,
+    /// When the call last rang here.
+    rang: Option<std::time::Instant>,
 }
 
 /// A live file in the voice room or a chat, kept in `State::transfers` by transfer ID.
@@ -125,6 +127,7 @@ pub(super) fn voice_only(command: &Command) -> bool {
     matches!(
         command,
         Command::LeaveVoice
+            | Command::Ring
             | Command::SyncVoiceStatus
             | Command::StopApp(_)
             | Command::StopScreen
@@ -165,6 +168,14 @@ pub(super) async fn voice_command(
     if terminal::is_terminal(&command) {
         let changed = terminal::command(ctx, live, command).await;
         return Ok(changed.then_some(live.channel));
+    }
+    if let Command::Ring = command {
+        // The request went out as a DM either way; without the right to send data here
+        // only the two of them hear it.
+        if let Err(error) = live.room.send_ring().await {
+            tracing::info!(error = %format_args!("{error:#}"), "ringing the call failed");
+        }
+        return Ok(None);
     }
     let changed = match command {
         Command::StopApp(id) => {
@@ -674,6 +685,42 @@ pub(super) async fn control_received(
     if let Some(live) = &mut state.voice {
         control::received(ctx, live, &from, person, wire).await;
     }
+}
+
+/// A sealed ring from someone in the call. One every few seconds at most, whoever sends
+/// it, and only from a known person, so blocking and muting them silences it.
+pub(super) fn ring_received(
+    ctx: &Ctx,
+    url: &Url,
+    client: Option<&KeyClient<'_>>,
+    state: &mut State,
+    from: &RemoteParticipant,
+    wire: &[u8],
+) {
+    const APART: std::time::Duration = std::time::Duration::from_secs(3);
+    let from = from.identity();
+    let Some(live) = &mut state.voice else {
+        return;
+    };
+    if !live.room.open_ring(&from, wire) {
+        tracing::warn!("dropped a ring that did not authenticate");
+        return;
+    }
+    if live.rang.is_some_and(|at| at.elapsed() < APART) {
+        return;
+    }
+    let person = match client {
+        Some(client) => identities(client, &state.server_id)
+            .get(from.as_str())
+            .copied(),
+        None => state.identities.get(from.as_str()).copied(),
+    };
+    let Some(person) = person else {
+        tracing::info!("dropped a ring from an unknown device");
+        return;
+    };
+    live.rang = Some(std::time::Instant::now());
+    ctx.send(Update::CallRang(url.clone(), live.channel, person));
 }
 
 /// A sealed terminal message from someone in the call; `client` as for `control_received`.
@@ -1417,6 +1464,7 @@ pub(super) async fn start_call(
         control: ControlView::default(),
         terminal: None,
         viewing: None,
+        rang: None,
     });
     ctx.send(Update::Call(
         url.clone(),

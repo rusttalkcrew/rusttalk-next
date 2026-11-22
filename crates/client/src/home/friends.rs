@@ -70,6 +70,7 @@ impl Home {
                 friend: Some((signal, now_ms().max(0) as u64)),
                 poke: false,
                 poll: None,
+                voice_request: None,
                 preview: None,
                 inline: Vec::new(),
             }));

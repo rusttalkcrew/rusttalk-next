@@ -11,6 +11,7 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Ask someone to join your voice channel: it rings, and they can join, decline, come later or mute you for 15 minutes
 - Experimental Android test build (APK) and unsigned iOS build (IPA); typing on Android does not work yet
 
 ## v0.1.11 - 2026-11-22

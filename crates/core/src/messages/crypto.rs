@@ -5,7 +5,7 @@ use chacha20poly1305::{
 use ed25519_dalek::Signer;
 use zeroize::Zeroizing;
 
-use super::{poll::PollPart, *};
+use super::{poll::PollPart, voice_request::VoiceRequest, *};
 use crate::{
     identity::{DeviceCertificate, DeviceIdentity, random_bytes},
     keys::Key,
@@ -37,6 +37,9 @@ pub struct MessageBody {
     /// A poll, a vote or a poll's end instead of chat text, sent with nothing else.
     /// A poll's text is its question; the others have no text. Format 3 only.
     pub poll: Option<PollPart>,
+    /// A request to join a voice channel or its answer instead of chat text, sent
+    /// with nothing else. Format 3 only.
+    pub voice_request: Option<VoiceRequest>,
 }
 
 /// Sent by the person who starts a DM's next epoch, in the epoch before it, so the
@@ -79,14 +82,17 @@ const LINK: u8 = 32;
 const POKE: u8 = 64;
 const AUTHOR: u8 = 128;
 /// Format 3's kind byte after the flags: an ordinary message. Polls, votes and ends
-/// are kinds 1 to 3 (see `PollPart`); readers reject any other.
+/// are kinds 1 to 3 (see `PollPart`), voice requests kind 4 (see `VoiceRequest`);
+/// readers reject any other.
 const NORMAL: u8 = 0;
 
 impl MessageBody {
     /// Flags, in format 3 the kind byte and its fields, then text, references, stored
     /// attachments and the live offer.
     fn encode(&self, version: u8) -> Result<Zeroizing<Vec<u8>>, MessageError> {
-        if version == 2 && (self.quoted_author.is_some() || self.poll.is_some()) {
+        if version == 2
+            && (self.quoted_author.is_some() || self.poll.is_some() || self.voice_request.is_some())
+        {
             return Err(MessageError::Encoding);
         }
         if self.text.len() > MAX_TEXT_BYTES || self.text.chars().count() > MAX_TEXT_CHARS {
@@ -128,13 +134,22 @@ impl MessageBody {
             }
             part.check_text(&self.text)?;
         }
+        if self.voice_request.is_some()
+            && (flags != 0
+                || self.poll.is_some()
+                || !self.text.is_empty()
+                || !self.attachments.is_empty())
+        {
+            return Err(MessageError::Encoding);
+        }
         // Full capacity up front, so no plaintext copy is left behind by a reallocation.
         let mut body = Zeroizing::new(Vec::with_capacity(MAX_PLAINTEXT));
         body.push(flags);
         if version != 2 {
-            match &self.poll {
-                Some(part) => part.encode(&mut body)?,
-                None => body.push(NORMAL),
+            match (&self.poll, self.voice_request) {
+                (Some(part), _) => part.encode(&mut body)?,
+                (None, Some(request)) => request.encode(&mut body),
+                (None, None) => body.push(NORMAL),
             }
         }
         body.extend_from_slice(&(self.text.len() as u16).to_be_bytes());
@@ -167,10 +182,17 @@ impl MessageBody {
             return Err(MessageError::Encoding);
         }
         let (flags, mut rest) = bytes.split_first().ok_or(MessageError::Encoding)?;
+        let mut voice_request = None;
         let poll = match rest.first() {
             _ if version == 2 => None,
             Some(&NORMAL) => {
                 rest = &rest[1..];
+                None
+            }
+            // A voice request is its kind, action and ID, empty text and zero files.
+            Some(&super::voice_request::KIND) if *flags == 0 => {
+                rest = &rest[1..];
+                voice_request = Some(VoiceRequest::decode(&mut rest)?);
                 None
             }
             // A poll part is its kind and fields, its text and zero files: no flags.
@@ -184,6 +206,9 @@ impl MessageBody {
         let length = u16::from_be_bytes([*high, *low]) as usize;
         if length > MAX_TEXT_BYTES {
             return Err(MessageError::TextLimit);
+        }
+        if voice_request.is_some() && length != 0 {
+            return Err(MessageError::Encoding);
         }
         let (text, mut tail) = rest
             .split_at_checked(length)
@@ -246,7 +271,12 @@ impl MessageBody {
         // A sticker never has files or a live offer, so it stays within the plaintext limit.
         if count as usize > MAX_ATTACHMENTS
             || (sticker.is_some() && (count != 0 || flags & LIVE != 0))
-            || ((friend.is_some() || key_link.is_some() || poke || poll.is_some()) && count != 0)
+            || ((friend.is_some()
+                || key_link.is_some()
+                || poke
+                || poll.is_some()
+                || voice_request.is_some())
+                && count != 0)
         {
             return Err(MessageError::Attachment);
         }
@@ -282,6 +312,7 @@ impl MessageBody {
             key_link,
             poke,
             poll,
+            voice_request,
         })
     }
 }
@@ -431,6 +462,7 @@ mod tests {
             key_link: None,
             poke: false,
             poll: None,
+            voice_request: None,
         };
         let legacy = context.seal_version(&key, &sender, &body, 2).unwrap();
         assert_eq!(legacy[0], 2);
@@ -684,6 +716,7 @@ mod tests {
             key_link: None,
             poke: false,
             poll: None,
+            voice_request: None,
         };
         let encoded = body.encode(2).unwrap();
         assert_eq!(encoded.len(), MAX_PLAINTEXT - 1 - live::MAX_ATTACHMENT);
@@ -842,6 +875,62 @@ mod tests {
             [&[POKE | FRIEND, 0, 0, 1][..], &[0; 8], &[0]].concat(),
         ] {
             assert!(MessageBody::decode(2, &bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn voice_requests_round_trip_alone_in_format_3() {
+        use super::super::voice_request::VoiceAnswer;
+        let id = [7; 32];
+        for (action, request) in [
+            (0, VoiceRequest::Ask(id)),
+            (1, VoiceRequest::Answer(id, VoiceAnswer::Joining)),
+            (2, VoiceRequest::Answer(id, VoiceAnswer::Declined)),
+            (3, VoiceRequest::Answer(id, VoiceAnswer::Later)),
+        ] {
+            let body = MessageBody {
+                voice_request: Some(request),
+                ..Default::default()
+            };
+            let encoded = body.encode(VERSION).unwrap();
+            assert_eq!(*encoded, [&[0, 4, action][..], &id, &[0, 0, 0]].concat());
+            assert!(MessageBody::decode(VERSION, &encoded).unwrap() == body);
+            assert_eq!(body.encode(2).err(), Some(MessageError::Encoding));
+            for mixed in [
+                MessageBody {
+                    text: "hi".into(),
+                    ..body.clone()
+                },
+                MessageBody {
+                    reply_to: Some([1; 32]),
+                    ..body.clone()
+                },
+                MessageBody {
+                    poke: true,
+                    ..body.clone()
+                },
+                MessageBody {
+                    poll: Some(PollPart::End { poll: id }),
+                    ..body.clone()
+                },
+            ] {
+                assert_eq!(mixed.encode(VERSION).err(), Some(MessageError::Encoding));
+            }
+        }
+        let kind = [&[0, 4, 0][..], &id].concat();
+        for bad in [
+            // An unknown answer, an unknown kind, flags.
+            [&[0, 4, 4][..], &id, &[0, 0, 0]].concat(),
+            [&[0, 5, 0][..], &id, &[0, 0, 0]].concat(),
+            [&[POKE, 4, 0][..], &id, &[0, 0, 0]].concat(),
+            // Text, a file count, truncated, trailing bytes.
+            [&kind[..], &[0, 1, b'x', 0]].concat(),
+            [&kind[..], &[0, 0, 1]].concat(),
+            [&kind[..], &[0, 0]].concat(),
+            kind[..20].to_vec(),
+            [&kind[..], &[0, 0, 0, 0]].concat(),
+        ] {
+            assert!(MessageBody::decode(VERSION, &bad).is_err(), "{bad:?}");
         }
     }
 
@@ -1016,6 +1105,7 @@ mod tests {
             key_link: None,
             poke: false,
             poll: None,
+            voice_request: None,
         };
         // Format 2 has no kind byte, so its worst case is one byte shorter.
         assert_eq!(body.encode(2).unwrap().len(), MAX_PLAINTEXT - 1);

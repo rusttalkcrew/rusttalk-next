@@ -92,6 +92,7 @@ pub mod person;
 mod pokes;
 pub mod polls;
 pub(crate) mod user_bar;
+pub mod voice_requests;
 #[cfg(test)]
 mod voice_rows;
 mod welcome;
@@ -111,6 +112,8 @@ pub struct Home {
     pokes: crate::pokes::Pokes,
     /// The pop-up for the newest poke.
     popup: Option<pokes::Popup>,
+    /// Requests to join a voice channel that ring here, and this person's own.
+    requests: crate::voice_requests::Requests,
     /// This person's DM messages they deleted, on any device. All of them stay in
     /// `dm_deleted.json` here; the device sync copy holds the newest that fit.
     dm_deleted: dm::Tombstones,
@@ -352,6 +355,7 @@ impl Home {
             friends_tab: friends::Tab::default(),
             pokes: crate::pokes::Pokes::open(data_dir.join("pokes.json")),
             popup: None,
+            requests: Default::default(),
             dm_deleted,
             dm_deleted_path,
             invite: String::new(),
@@ -765,6 +769,13 @@ impl Home {
     /// A new message: mark it unread, count a mention and notify, as the person chose.
     fn arrived(&mut self, ctx: &egui::Context, index: usize, channel: Id, msg: Msg) {
         if msg.backfilled {
+            return;
+        }
+        // Voice requests ring instead, and this person's own answers count too.
+        if matches!(msg.body, Body::VoiceRequest(_)) {
+            if let Some(peer) = self.dm_peer(index, &channel) {
+                self.request_arrived(ctx, (index, channel), peer, &msg);
+            }
             return;
         }
         let me = *self.identity.certificate.person_id();
@@ -1414,6 +1425,7 @@ impl Home {
                     self.voice.audio.play_cue(cue);
                 }
             }
+            Update::CallRang(address, channel, person) => self.call_rang(&address, channel, person),
             Update::Room(address, channel, peers, sounds) => {
                 if let Some(snapshot) = sounds
                     && self.voice.call.as_ref().is_some_and(|call| {
@@ -1545,6 +1557,10 @@ impl Home {
                 }
             }
             Update::Unsent(address, draft) => {
+                if draft.voice_request.is_some() {
+                    self.requests.outgoing.retain(|sent| sent.id != draft.id);
+                    return;
+                }
                 // A poke's note doesn't belong in the composer, where it would go out as text.
                 // Nor do votes, or a poll's question.
                 let Some(index) =
@@ -1920,7 +1936,9 @@ pub fn show(
         home.layout.save(&home.voice.audio);
     }
     dialogs(ui.ctx(), home);
-    pokes::popup(ui.ctx(), home);
+    if !voice_requests::popup(ui.ctx(), home) {
+        pokes::popup(ui.ctx(), home);
+    }
     admin::window(ui.ctx(), home);
     files::viewer(ui.ctx(), &mut home.files);
     call::screen_dialog(ui.ctx(), home);
@@ -3836,6 +3854,7 @@ fn page_view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat: &mut
                     preview: None,
                     inline: Vec::new(),
                     poll: None,
+                    voice_request: None,
                 };
                 if let Some(draft) = queue_preview(ui, voice, sending, &to, draft) {
                     server.send(Command::Send(draft));
@@ -4137,7 +4156,10 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
         let mut last: Option<&Msg> = None;
         for msg in &chat.messages {
             if matches!(msg.body, Body::Friend(signal, _) if !friends::shown(signal))
-                || matches!(msg.body, Body::Poke(_) | Body::PollPart(_))
+                || matches!(
+                    msg.body,
+                    Body::Poke(_) | Body::PollPart(_) | Body::VoiceRequest(_)
+                )
             {
                 continue;
             }
@@ -4381,6 +4403,7 @@ fn poll_draft(channel: Id, text: String, part: PollPart) -> Option<Draft> {
         friend: None,
         poke: false,
         poll: Some(Box::new(part)),
+        voice_request: None,
         preview: None,
         inline: Vec::new(),
     })
@@ -4834,6 +4857,7 @@ fn composer(
             friend: None,
             poke: false,
             poll: None,
+            voice_request: None,
             preview: None,
             inline,
         });
@@ -4902,6 +4926,7 @@ fn composer(
         friend: None,
         poke: false,
         poll: None,
+        voice_request: None,
         preview: None,
         // Only the picked emoji of other servers that the text still uses.
         inline: if editing {

@@ -217,6 +217,11 @@ pub use poll::{
     Ballot, MAX_POLL_OPTION, MAX_POLL_OPTIONS, MAX_POLL_QUESTION, MIN_POLL_OPTIONS, Poll, PollPart,
     Tally, tally, valid_poll,
 };
+#[cfg(any(feature = "client", test))]
+mod voice_request;
+#[cfg(any(feature = "client", test))]
+pub use voice_request::{VoiceAnswer, VoiceRequest};
+
 // A poll is sent alone, so its kind, fields and question fit the plaintext limit.
 #[cfg(any(feature = "client", test))]
 const _: () = assert!(MIN_PLAINTEXT + MAX_POLL_QUESTION * 4 + poll::MAX_BYTES <= MAX_PLAINTEXT);

@@ -515,11 +515,33 @@ impl Notify {
 
     /// Show a desktop notification; a click on it comes back from `clicked`.
     pub fn show(&mut self, ctx: &eframe::egui::Context, title: &str, body: &str, target: Target) {
+        let sound = self.saved.prefs.sound;
+        self.present(ctx, title, body, target, sound);
+    }
+
+    /// `show` without the system's sound, for what makes its own.
+    pub fn show_silent(
+        &mut self,
+        ctx: &eframe::egui::Context,
+        title: &str,
+        body: &str,
+        target: Target,
+    ) {
+        self.present(ctx, title, body, target, false);
+    }
+
+    fn present(
+        &mut self,
+        ctx: &eframe::egui::Context,
+        title: &str,
+        body: &str,
+        target: Target,
+        sound: bool,
+    ) {
         let body: String = match body.chars().count() > PREVIEW_CHARS {
             true => body.chars().take(PREVIEW_CHARS).chain(['…']).collect(),
             false => body.to_owned(),
         };
-        let sound = self.saved.prefs.sound;
         let clicks = self.clicks.0.clone();
         let ctx = ctx.clone();
         // Its center delivers the click to us; without an app bundle it can't, so fall

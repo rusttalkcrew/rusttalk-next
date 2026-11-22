@@ -20,10 +20,11 @@ pub enum Cue {
     Undeafened,
     Muted,
     Unmuted,
+    Ring,
 }
 
 impl Cue {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::YouJoined,
         Self::YouLeft,
         Self::PeerJoined,
@@ -36,6 +37,7 @@ impl Cue {
         Self::Undeafened,
         Self::Muted,
         Self::Unmuted,
+        Self::Ring,
     ];
 
     pub fn label(self) -> &'static str {
@@ -52,6 +54,7 @@ impl Cue {
             Self::Undeafened => t!("sounds.undeafened"),
             Self::Muted => t!("sounds.muted"),
             Self::Unmuted => t!("sounds.unmuted"),
+            Self::Ring => t!("sounds.ring"),
         }
     }
 
@@ -72,6 +75,10 @@ impl Cue {
             // A single note, so it is not mistaken for any two- or three-note chime.
             Self::Muted => &[369.99],
             Self::Unmuted => &[554.37],
+            // Two short trills like a small phone, with a rest (0 Hz) between.
+            Self::Ring => &[
+                783.99, 987.77, 783.99, 987.77, 0.0, 783.99, 987.77, 783.99, 987.77,
+            ],
         };
         let volume = volume.clamp(0.0, 1.0);
         notes.iter().flat_map(move |&hz| {

@@ -610,6 +610,39 @@ pokes from one person per minute of server time and drops the rest. The history
 (the newest 200) stays on the device in `pokes.json`; it is not synced.
 Apps before pokes show one as a message they can't open.
 
+### Voice requests
+
+A voice request asks someone to join the voice channel the sender is in. It
+and its answer are DM messages of kind 4 (see [Crypto](crypto.md#messages)),
+each with a random ID. They go only over the channel's own server, in the DM
+with that person, and need protocol 2 or later there. The API has no routes
+for them.
+
+Apps keep both out of the DM's chat, and they don't mark it unread. A live
+request from the other person rings for 30 seconds with a pop-up and a silent
+desktop notification, following that DM's notification settings like a poke.
+The receiving app drops a request from a blocked person, from a non-friend
+with "Friends only", for a channel this person can't open or is already in,
+one more than 30 seconds old by the server's time against its own clock, a
+repeated one, and more than three from one person per minute. "Mute for 15
+min" drops that person's requests and rings on that device until the app
+closes or the time is up, and sends nothing.
+
+The asking app takes the first answer from the person it asked that names its
+request's ID, and shows "no answer" after 35 seconds. An answer also closes
+the pop-up on the answering person's other devices.
+
+So that the others in the call hear it, the asking app sends each other device
+in the room a LiveKit data packet with topic `rusttalk.ring`, reliable and
+sealed like [remote control](#remote-control) messages with HKDF info
+`rusttalk-ring-v1` in place of `rusttalk-control-v1`, up to 128 bytes on the
+wire. Its JSON is `null`: it doesn't say who is asked. Receivers play it at
+most once every 3 seconds, and not from blocked or muted people. A sender
+without write permission in the channel can't send data, so then only the two
+of them hear the ring.
+Apps before voice requests show both messages as ones they can't open, notify
+for them as new messages and ignore the data packet.
+
 ### Polls
 
 A poll is a message in a channel or DM whose format 3 kind byte says poll (see

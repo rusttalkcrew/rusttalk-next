@@ -148,6 +148,8 @@ pub enum Command {
     Admin(Admin),
     JoinVoice(Id),
     LeaveVoice,
+    /// Ring the others in the call: we asked someone to join it.
+    Ring,
     SyncVoiceStatus,
     ShareApp(App),
     /// Stop sharing an app, by its ID.
@@ -220,6 +222,8 @@ pub struct Draft {
     /// A poll (`text` is its question), a vote or a poll's end, sent with nothing else.
     // Boxed: a poll is rare and would make every command larger.
     pub poll: Option<Box<PollPart>>,
+    /// A request to join a voice channel or its answer, sent with nothing else.
+    pub voice_request: Option<rusttalk_core::messages::VoiceRequest>,
     /// A link preview made while sending, uploaded as a hidden file (see `link_cards`).
     pub preview: Option<std::sync::Arc<crate::link_cards::Made>>,
     /// Emoji and stickers of other servers, uploaded as small files (see `sticker_files`).
@@ -326,6 +330,8 @@ pub enum Update {
     /// Everyone in one voice channel.
     Room(Url, Id, Vec<Peer>, Option<crate::sounds::Snapshot>),
     CallVideoStopped(Url, Id, livekit::prelude::TrackSid),
+    /// This person rang the call in this channel: they asked someone to join it.
+    CallRang(Url, Id, Id),
     /// Sharing this app on its own stopped or never started.
     AppStopped(String),
     SharedAudioStopped(Url, Id),
@@ -1184,7 +1190,9 @@ async fn voice_next(
             topic,
             ..
         })) => {
-            if topic.as_deref() == Some(rusttalk_core::client::voice::terminal::TOPIC) {
+            if topic.as_deref() == Some(rusttalk_core::client::voice::ring::TOPIC) {
+                voice::ring_received(ctx, url, client, state, &participant, &payload);
+            } else if topic.as_deref() == Some(rusttalk_core::client::voice::terminal::TOPIC) {
                 voice::terminal_received(ctx, client, state, &participant, &payload).await;
             } else {
                 voice::control_received(ctx, client, state, &participant, &payload).await;
@@ -1326,8 +1334,9 @@ async fn latest(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, state: &State)
                 if let Some(peer) = peer
                     && (record.backfilled
                         || record.person != peer
-                        || !(client.open_message(&channel, record).await)
-                            .is_ok_and(|body| body.key_link.is_none() && !body.poke))
+                        || !(client.open_message(&channel, record).await).is_ok_and(|body| {
+                            body.key_link.is_none() && !body.poke && body.voice_request.is_none()
+                        }))
                 {
                     continue;
                 }
@@ -1527,6 +1536,7 @@ async fn on_command(
                 key_link: None,
                 poke: draft.poke,
                 poll: draft.poll.as_deref().cloned(),
+                voice_request: draft.voice_request,
             };
             if draft.peer.is_some()
                 && let Some(dir) = &state.last
@@ -1735,6 +1745,7 @@ async fn on_command(
             voice::share_camera(ctx, url, client, state, source, options).await?;
         }
         Command::LeaveVoice
+        | Command::Ring
         | Command::SyncVoiceStatus
         | Command::StopApp(_)
         | Command::StopScreen
@@ -1957,10 +1968,11 @@ fn to_msg(record: &MessageRecord, body: &MessageBody) -> Msg {
         body: match body.friend {
             Some(signal) => Body::Friend(signal, body.friend_sent),
             None if body.poke => Body::Poke(body.text.clone()),
-            None => match &body.poll {
-                Some(PollPart::Open(poll)) => Body::Poll(body.text.clone(), poll.clone()),
-                Some(part) => Body::PollPart(part.clone()),
-                None => Body::Text(body.text.clone()),
+            None => match (&body.poll, body.voice_request) {
+                (Some(PollPart::Open(poll)), _) => Body::Poll(body.text.clone(), poll.clone()),
+                (Some(part), _) => Body::PollPart(part.clone()),
+                (None, Some(request)) => Body::VoiceRequest(request),
+                (None, None) => Body::Text(body.text.clone()),
             },
         },
         files: body.attachments.clone(),

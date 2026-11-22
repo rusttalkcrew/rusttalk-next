@@ -76,6 +76,13 @@ messages, and the app hides them or keeps them quiet.
 Pokes are encrypted DM messages as well, so servers don't learn that a
 message is a poke or what its note says; they see a DM message's size and
 time. The poke history stays on the device (`pokes.json`) and is not synced.
+Voice requests and their answers are encrypted DM messages too, so servers
+don't learn that a message is one, which channel it names or what the answer
+is. They see a small DM message and its time, which next to someone joining a
+voice channel may suggest it. LiveKit sees a `rusttalk.ring` packet to each
+device in the asker's room, so it learns that someone there rang and when, not
+whom they asked. The packet is sealed with a key from the room's media key.
+Who is muted stays in the app's memory and is not stored or synced.
 Polls, votes and ending a poll are encrypted messages too: servers see a
 message's size and time, not the question, the answers or who picked what.
 A vote is a small message posted soon after a poll, and its size grows with
