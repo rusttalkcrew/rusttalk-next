@@ -23,6 +23,8 @@ use crate::{
 enum ChannelKind {
     Text,
     Voice,
+    /// A text channel shown as one Markdown page: its newest message.
+    Page,
 }
 
 #[derive(Deserialize)]
@@ -121,9 +123,19 @@ async fn manage(db: &mut SqliteConnection, actor: &Actor) -> ApiResult<()> {
         .require(Permission::ManageChannels)
 }
 
+const READ: u8 = 1;
 pub const WRITE: u8 = 2;
 pub const SPEAK: u8 = 4;
 pub const VIDEO: u8 = 8;
+
+/// Flags each built-in role gets on a new channel.
+const CHANNEL_DEFAULTS: [(&str, u8); 3] = [("owner", 15), ("admin", 15), ("member", 15)];
+const PAGE_DEFAULTS: [(&str, u8); 4] = [
+    ("owner", READ | WRITE),
+    ("admin", READ | WRITE),
+    ("moderator", READ | WRITE),
+    ("member", READ),
+];
 
 pub async fn has_flag(
     db: &mut SqliteConnection,
@@ -148,7 +160,7 @@ pub async fn has_flag(
 
 async fn channels(db: &mut SqliteConnection, person: Option<&[u8]>) -> ApiResult<Vec<Channel>> {
     let rows: Vec<ChannelRow> = query_as(
-        "SELECT id, kind, category_id, position, name_ct, topic_ct,
+        "SELECT id, CASE WHEN page THEN 'page' ELSE kind END AS kind, category_id, position, name_ct, topic_ct,
                 CASE WHEN dm_first = ? THEN dm_second ELSE dm_first END AS peer,
                 audio_kbps
          FROM channels c
@@ -275,22 +287,33 @@ pub async fn create_channel(
     if new == 0 || scope.id == keys::space(&app).id {
         return Err(keys::conflict("channel_exists"));
     }
+    let page = matches!(kind, ChannelKind::Page);
     // A new channel goes last in its category, so it never jumps ahead of a chosen order.
-    query("INSERT INTO channels (id, kind, category_id, position, name_ct, topic_ct)
-           SELECT ?, ?, ?, COALESCE(MAX(position) + 1, 0), ?, ? FROM channels WHERE category_id = ?")
-        .bind(&id).bind(match kind { ChannelKind::Text => "text", ChannelKind::Voice => "voice" })
+    query("INSERT INTO channels (id, kind, page, category_id, position, name_ct, topic_ct)
+           SELECT ?, ?, ?, ?, COALESCE(MAX(position) + 1, 0), ?, ? FROM channels WHERE category_id = ?")
+        .bind(&id).bind(match kind { ChannelKind::Voice => "voice", _ => "text" }).bind(page)
         .bind(&fields.category_id)
         .bind(metadata::checked(Metadata::ChannelName, epoch, fields.name_ct)?)
         .bind(metadata::optional(Metadata::ChannelTopic, epoch, fields.topic_ct)?)
         .bind(&fields.category_id)
         .execute(&mut *tx).await?;
-    query(
-        "INSERT INTO channel_permissions (channel_id, role_id, flags)
-           SELECT ?, id, 15 FROM roles WHERE id IN ('owner', 'admin', 'member')",
-    )
-    .bind(&id)
-    .execute(&mut *tx)
-    .await?;
+    // Everyone may read a page, but only staff may write (edit) it.
+    let (defaults, full) = if page {
+        (&PAGE_DEFAULTS[..], READ | WRITE)
+    } else {
+        (&CHANNEL_DEFAULTS[..], READ | WRITE | SPEAK | VIDEO)
+    };
+    for &(role, flags) in defaults {
+        query(
+            "INSERT INTO channel_permissions (channel_id, role_id, flags)
+               SELECT ?, id, ? FROM roles WHERE id = ?",
+        )
+        .bind(&id)
+        .bind(flags)
+        .bind(role)
+        .execute(&mut *tx)
+        .await?;
+    }
     // A custom channel manager can create a channel even without a built-in reader role.
     let can_read: bool = query_scalar(
         "SELECT EXISTS (SELECT 1 FROM channel_readers WHERE channel_id = ? AND person_id = ?)",
@@ -301,9 +324,9 @@ pub async fn create_channel(
     .await?;
     if !can_read {
         query("INSERT INTO channel_permissions (channel_id, role_id, flags)
-               SELECT ?, r.id, 15 FROM member_roles m JOIN roles r ON m.role_id = r.id
+               SELECT ?, r.id, ? FROM member_roles m JOIN roles r ON m.role_id = r.id
                WHERE m.person_id = ? AND (r.permissions & 64) <> 0 ORDER BY r.rank DESC, r.id LIMIT 1")
-            .bind(&id).bind(actor.person.as_slice()).execute(&mut *tx).await?;
+            .bind(&id).bind(full).bind(actor.person.as_slice()).execute(&mut *tx).await?;
     }
     keys::start_channel(
         &mut tx,
@@ -844,9 +867,13 @@ mod tests {
             .bind(id(10))
             .execute(&app.db)
             .await?;
-        for (channel, kind) in [(20_u8, "text"), (21, "voice")] {
-            query("INSERT INTO channels (id, kind, category_id, position, name_ct) VALUES (?, ?, ?, 0, x'00')")
-                .bind(id(channel)).bind(kind).bind(id(10)).execute(&app.db).await?;
+        for (channel, kind, page) in [
+            (20_u8, "text", false),
+            (21, "voice", false),
+            (22, "text", true),
+        ] {
+            query("INSERT INTO channels (id, kind, page, category_id, position, name_ct) VALUES (?, ?, ?, ?, 0, x'00')")
+                .bind(id(channel)).bind(kind).bind(page).bind(id(10)).execute(&app.db).await?;
         }
         let as_person = |person: u8| {
             let mut headers = HeaderMap::new();
@@ -903,14 +930,14 @@ mod tests {
         }
         assert_eq!(stored().await?, 64);
 
-        // Readers see it in the listing, for voice channels only.
+        // Readers see it in the listing, for voice channels only; a page lists as its own kind.
         let mut tx = app.db.begin().await?;
         let listed = channels(&mut tx, Some(person(1).as_slice())).await?;
         let shown: Vec<_> = listed
             .iter()
             .map(|c| (c.kind.as_str(), c.audio_kbps))
             .collect();
-        assert_eq!(shown, [("text", None), ("voice", Some(64))]);
+        assert_eq!(shown, [("text", None), ("voice", Some(64)), ("page", None)]);
         drop(tx);
         Ok(())
     }

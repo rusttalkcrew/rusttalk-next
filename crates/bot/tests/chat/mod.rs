@@ -23,7 +23,9 @@ const VOICE_B: &str = "W61 Onyx Voice Chat from B";
 const POLL_QUESTION: &str = "W204 Malachite Poll Question";
 const POLL_FIRST: &str = "W204 Beryl Poll Answer";
 const POLL_SECOND: &str = "W204 Zircon Poll Answer";
-pub(super) const TEXTS: [&str; 13] = [
+
+const PAGE: &str = "#210 Malachite Page by a moderator";
+pub(super) const TEXTS: [&str; 14] = [
     TEXT_A,
     TEXT_B,
     DM_A,
@@ -37,6 +39,7 @@ pub(super) const TEXTS: [&str; 13] = [
     POLL_QUESTION,
     POLL_FIRST,
     POLL_SECOND,
+    PAGE,
 ];
 
 fn body(text: &str) -> MessageBody {
@@ -331,6 +334,7 @@ pub(super) async fn scenario(
     .error_for_status()?;
     println!("W61 verified two-way chat, replies and paging in a voice channel");
     poll(a, b, c, text).await?;
+    page(a, b, c, &category).await?;
     Ok((dm, b_message))
 }
 
@@ -404,6 +408,52 @@ async fn poll(
     );
     ensure!(result.ended, "the creator's end did not count");
     println!("W204 verified an encrypted poll: two votes, a changed vote and the creator's end");
+    Ok(())
+}
+
+/// #210: a page channel is a text channel only staff may write to; everyone reads it.
+async fn page(
+    a: &mut KeyClient<'_>,
+    b: &mut KeyClient<'_>,
+    c: &mut KeyClient<'_>,
+    category: &[u8; 32],
+) -> Result<()> {
+    let page = a.create_channel(category, "page", b"Rules", b"").await?;
+    a.sync().await?;
+    receive_key(b, page, 1).await?;
+    receive_key(c, page, 1).await?;
+    let listed = c.catalog().await?.channels;
+    let listed = listed.iter().find(|channel| channel.id == page.id);
+    ensure!(
+        listed.is_some_and(|channel| channel.kind == "page"),
+        "page not listed as a page"
+    );
+    // C is a plain member: read only. B is a moderator: may change the page.
+    let Err(refused) = c.send_message(&page.id, &body(PAGE)).await else {
+        anyhow::bail!("a member changed a page");
+    };
+    ensure!(
+        format!("{refused:#}").contains("403"),
+        "unexpected refusal: {refused:#}"
+    );
+    let saved = b.send_message(&page.id, &body(PAGE)).await?;
+    wait_event(c, page, &saved.id, false).await?;
+    let [newest] = c
+        .message_page(&page.id, None, 1)
+        .await?
+        .try_into()
+        .ok()
+        .context("no page")?;
+    ensure!(c.open_message(&page.id, &newest).await?.text == PAGE);
+    // Later key checks expect only the first text channel, so remove this one.
+    a.request(
+        Method::DELETE,
+        &format!("/v1/channels/{}", encode(&page.id)),
+    )
+    .send()
+    .await?
+    .error_for_status()?;
+    println!("#210 verified a page channel: members read it, only moderators and up change it");
     Ok(())
 }
 

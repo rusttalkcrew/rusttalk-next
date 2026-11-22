@@ -102,7 +102,7 @@ pub enum Command {
         /// `None` creates a category named `new_category` first.
         category: Option<Id>,
         new_category: String,
-        voice: bool,
+        kind: crate::server::ChannelKind,
         name: String,
     },
     CreateCategory(String),
@@ -1486,16 +1486,15 @@ async fn on_command(
         Command::CreateChannel {
             category,
             new_category,
-            voice,
+            kind,
             name,
         } => {
             let category = match category {
                 Some(id) => id,
                 None => client.create_category(new_category.as_bytes()).await?,
             };
-            let kind = if voice { "voice" } else { "text" };
             client
-                .create_channel(&category, kind, name.as_bytes(), b"")
+                .create_channel(&category, kind.wire(), name.as_bytes(), b"")
                 .await?;
             directory(ctx, url, client, state).await?;
         }

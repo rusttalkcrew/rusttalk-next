@@ -1110,6 +1110,9 @@ fn channel_tab(ui: &mut Ui, server: &Server, channel: Id) -> Option<Admin> {
             (4, t!("admin.flag_speak")),
             (8, t!("admin.flag_video")),
         ]
+    } else if found.page {
+        // Writing in a page channel is changing the page.
+        &[(1, t!("admin.flag_read")), (2, t!("admin.flag_edit"))]
     } else {
         &[(1, t!("admin.flag_read")), (2, t!("admin.flag_write"))]
     };
@@ -1150,7 +1153,7 @@ fn channel_title(server: &Server, channel: Id) -> String {
     server.channel(&channel).map_or_else(
         || t!("home.channel_settings").into(),
         |found| {
-            let prefix = if found.voice { "🔊" } else { "#" };
+            let prefix = crate::home::channel_icon(found);
             t!("admin.channel_title", icon = prefix, channel = found.name)
         },
     )

@@ -24,7 +24,7 @@ tables in SQLite (WAL). IDs and digests are binary unless indicated. The `_ct` s
 | `open_joins` | `ip` (IPv4 address or IPv6 /64), `expires_at` (one-hour admission limit) |
 | `member_devices` | `device_id` (Ed25519 public key), `person_id`, `certificate` (public keys, timestamp, salted name commitment, root signature and format prefix) |
 | `categories` | `id` (text), `position`, `name_ct` |
-| `channels` | `id` (text), `kind` (text, voice or dm), nullable `category_id`, `position`, nullable `name_ct` and `topic_ct`, `audio_kbps` (a voice channel's Opus bitrate, 8 to 128, plain because it is a setting rather than user-written content), nullable `dm_first` and `dm_second` (person IDs) |
+| `channels` | `id` (text), `kind` (text, voice or dm), `page` (whether a text channel is shown as one page), nullable `category_id`, `position`, nullable `name_ct` and `topic_ct`, `audio_kbps` (a voice channel's Opus bitrate, 8 to 128, plain because it is a setting rather than user-written content), nullable `dm_first` and `dm_second` (person IDs) |
 | `channel_ids` | `id` (text, including deleted channel IDs to prevent reuse) |
 | `channel_permissions` | `channel_id`, `role_id`, `flags` (four-bit mask) |
 | `key_scopes` | `id` (text), `kind` (space or channel), nullable `channel_id`, `rotate` |
