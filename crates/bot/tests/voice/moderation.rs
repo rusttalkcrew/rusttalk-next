@@ -1,6 +1,7 @@
 //! Owner A mutes, removes and moves admin B in voice; member C may not.
 
 use anyhow::{Context, Result, ensure};
+use livekit::prelude::Participant;
 use reqwest::{Method, StatusCode};
 use rusttalk_core::{
     auth::encode,
@@ -59,6 +60,22 @@ pub async fn exercise(
         .map(|member| member["person_id"].as_str().unwrap_or_default())
         .collect();
     assert_eq!(flagged, [b_person.as_str()]);
+    // Keep the same local SDK participant for both transitions.
+    sync_mic_grant(&mut room_b, &b_source, false).await?;
+    a.request(Method::DELETE, &mute)
+        .send()
+        .await?
+        .error_for_status()?;
+    sync_mic_grant(&mut room_b, &b_source, true).await?;
+    timeout(hang_guard(), both_ways(room_a, &mut room_b, A_HZ, B_HZ))
+        .await
+        .context("duplex after lifting a mute without rejoining")??;
+
+    a.request(Method::PUT, &mute)
+        .send()
+        .await?
+        .error_for_status()?;
+    falls_silent(room_a, &b_id, B_HZ).await?;
     let _ = room_b.leave().await;
     room_b = b.join_voice(&voice.id).await?;
     ensure!(
@@ -71,19 +88,7 @@ pub async fn exercise(
         .error_for_status()?;
     // Lifting it gives the microphone back in the room B is in, with no rejoin and without
     // B's API connection: LiveKit's own permission change is enough, as the app relies on.
-    timeout(hang_guard(), async {
-        while !room_b.can_publish() {
-            room_b.next_event().await.context("room closed")?;
-        }
-        Ok::<_, anyhow::Error>(())
-    })
-    .await
-    .context("lifting the mute did not give B the microphone back")??;
-    ensure!(
-        !room_b.has_microphone(),
-        "LiveKit kept the muted microphone"
-    );
-    room_b.publish_audio(b_source.clone()).await?;
+    sync_mic_grant(&mut room_b, &b_source, true).await?;
     timeout(hang_guard(), both_ways(room_a, &mut room_b, A_HZ, B_HZ))
         .await
         .context("duplex after the mute was lifted")??;
@@ -163,6 +168,30 @@ pub async fn exercise(
     );
     println!("Voice remove and move disconnected B from the room, and only B learned the target");
     Ok(room_b)
+}
+
+async fn sync_mic_grant(
+    room: &mut VoiceRoom,
+    source: &NativeAudioSource,
+    allowed: bool,
+) -> Result<()> {
+    timeout(hang_guard(), async {
+        loop {
+            if let RoomEvent::ParticipantPermissionChanged {
+                participant: Participant::Local(_),
+                permission,
+            } = room.next_event().await.context("room closed")?
+            {
+                room.sync_microphone(permission.as_ref(), source.clone(), false)
+                    .await?;
+                if room.can_publish() == allowed && room.has_microphone() == allowed {
+                    return Ok::<_, anyhow::Error>(());
+                }
+            }
+        }
+    })
+    .await
+    .context("waiting for microphone publication to follow permission")?
 }
 
 /// Nobody but the moved device hears about a move.

@@ -1195,24 +1195,30 @@ async fn voice_next(
             }
         }
         Next::Event(event) => {
-            let lost = match &event {
-                Some(RoomEvent::ParticipantPermissionChanged {
-                    participant: Participant::Local(_),
-                    ..
-                }) => Some(None),
-                Some(RoomEvent::LocalTrackUnpublished { publication, .. }) => {
-                    Some(Some(publication.sid()))
+            if let Some(RoomEvent::ParticipantPermissionChanged {
+                participant: Participant::Local(_),
+                permission,
+            }) = &event
+                && let Some(live) = &state.voice
+            {
+                let muted = ctx.audio.muted() || ctx.audio.deafened();
+                if let Err(error) = live
+                    .room
+                    .sync_microphone(permission.as_ref(), ctx.audio.source(), muted)
+                    .await
+                {
+                    tracing::warn!(error = %format_args!("{error:#}"), "updating microphone publication failed");
                 }
-                _ => None,
-            };
-            on_voice(ctx, url, client, state, event).await;
-            if let Some(unpublished) = lost {
-                let permission = unpublished.is_none();
-                stop_lost_video(ctx, url, client, state, unpublished).await;
-                if permission {
-                    voice::sync_microphone(ctx, url, state).await;
-                }
+                ctx.send(Update::CanTalk(
+                    url.clone(),
+                    live.channel,
+                    live.room.can_publish() && live.room.has_microphone(),
+                ));
+                stop_lost_video(ctx, url, client, state, None).await;
+            } else if let Some(RoomEvent::LocalTrackUnpublished { publication, .. }) = &event {
+                stop_lost_video(ctx, url, client, state, Some(publication.sid())).await;
             }
+            on_voice(ctx, url, client, state, event).await;
         }
         Next::Capture(capture) => match client {
             Some(client) => share_screen(ctx, url, client, state, capture).await,

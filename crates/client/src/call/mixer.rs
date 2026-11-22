@@ -316,6 +316,25 @@ mod tests {
     }
 
     #[test]
+    fn unmute_restores_each_rows_previous_gain_including_zero() {
+        let mut mix = Mix::default();
+        let mut person = PersonMix::default();
+        person.voice.volume = 0.75;
+        person.apps.entry("Game".into()).or_default().volume = 0.0;
+        person.apps.entry("Stream".into()).or_default().volume = 0.5;
+        for muted in [true, false] {
+            person.voice.muted = muted;
+            for level in person.apps.values_mut() {
+                level.muted = muted;
+            }
+            mix.set_person(&ANN, person.clone());
+            assert_eq!(mix.gain(&(ANN, None)), if muted { 0.0 } else { 0.75 });
+            assert_eq!(mix.gain(&app("Stream")), if muted { 0.0 } else { 0.5 });
+            assert_eq!(mix.gain(&app("Game")), 0.0);
+        }
+    }
+
+    #[test]
     fn the_link_keeps_the_balance_and_unlinking_keeps_the_sound() {
         let mut ann = PersonMix::default();
         ann.apps.insert(

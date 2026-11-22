@@ -317,6 +317,17 @@ pub struct VoiceRoom {
     _grants_task: stream_audio::AbortOnDrop,
 }
 
+fn allows_source(
+    permission: Option<&livekit_protocol::ParticipantPermission>,
+    source: livekit_protocol::TrackSource,
+) -> bool {
+    permission.is_some_and(|p| {
+        p.can_publish
+            && (p.can_publish_sources.is_empty()
+                || p.can_publish_sources.contains(&(source as i32)))
+    })
+}
+
 impl VoiceRoom {
     /// Current installed channel-key epoch.
     pub fn epoch(&self) -> i64 {
@@ -334,11 +345,7 @@ impl VoiceRoom {
     }
 
     fn can_publish_source(&self, source: livekit_protocol::TrackSource) -> bool {
-        self.room.local_participant().permission().is_some_and(|p| {
-            p.can_publish
-                && (p.can_publish_sources.is_empty()
-                    || p.can_publish_sources.contains(&(source as i32)))
-        })
+        allows_source(self.room.local_participant().permission().as_ref(), source)
     }
 
     /// Install a newer verified channel key after KeyClient reconciles an API event.
@@ -512,6 +519,28 @@ impl VoiceRoom {
     pub fn has_microphone(&self) -> bool {
         (self.room.local_participant().track_publications().values())
             .any(|publication| publication.source() == TrackSource::Microphone)
+    }
+
+    /// Follow the local grant in this event, even if the SDK already received a newer grant.
+    pub async fn sync_microphone(
+        &self,
+        permission: Option<&livekit_protocol::ParticipantPermission>,
+        source: NativeAudioSource,
+        muted: bool,
+    ) -> Result<()> {
+        if !allows_source(permission, livekit_protocol::TrackSource::Microphone) {
+            // LiveKit stops forwarding the track, but the Rust SDK can retain the publication.
+            let local = self.room.local_participant();
+            for publication in local.track_publications().into_values() {
+                if publication.source() == TrackSource::Microphone {
+                    local.unpublish_track(&publication.sid()).await?;
+                }
+            }
+        } else if self.can_publish() && !self.has_microphone() {
+            self.publish_audio(source).await?;
+            self.set_microphone_muted(muted);
+        }
+        Ok(())
     }
 
     /// Set the published microphone's mute state, leaving shared audio alone.
@@ -701,6 +730,26 @@ impl VoiceRoom {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn microphone_grant_follows_the_publish_flag_and_source_list() {
+        use livekit_protocol::{
+            ParticipantPermission,
+            TrackSource::{Camera, Microphone},
+        };
+        let mut permission = ParticipantPermission {
+            can_publish: true,
+            ..Default::default()
+        };
+        assert!(allows_source(Some(&permission), Microphone));
+        permission.can_publish_sources.push(Camera as i32);
+        assert!(!allows_source(Some(&permission), Microphone));
+        permission.can_publish_sources.push(Microphone as i32);
+        assert!(allows_source(Some(&permission), Microphone));
+        permission.can_publish = false;
+        assert!(!allows_source(Some(&permission), Microphone));
+        assert!(!allows_source(None, Microphone));
+    }
 
     #[test]
     fn badges_follow_microphone_mute_and_exact_deafen_attribute() {
