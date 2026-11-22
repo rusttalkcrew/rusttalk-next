@@ -291,7 +291,7 @@ friends see them on the servers they share.
 newest message read. Both sync to the person's other devices inside the
 encrypted sync blob. Desktop notifications show the sender, channel and a short
 preview decrypted on this device; they go only to the operating system's
-notification service (D-Bus on Linux, toasts on Windows). Decrypted names, messages and pictures stay in
+notification service (D-Bus on Linux, toasts on Windows, the notification center on macOS). Decrypted names, messages and pictures stay in
 memory only; the log never contains them, file names or invite links. A
 downloaded file is written only where the person picks in the save dialog,
 through a temporary file in that folder that is removed if the download fails.

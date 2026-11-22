@@ -5182,6 +5182,8 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9df9128cbbfef73cda168416ccf7f837b62737d748333bfe9ab71c245d76613e"
 dependencies = [
+ "bitflags 2.13.2",
+ "block2 0.6.2",
  "objc2 0.6.5",
  "objc2-foundation 0.3.2",
 ]
@@ -6524,6 +6526,7 @@ dependencies = [
  "argon2",
  "ashpd",
  "base64 0.22.1",
+ "block2 0.6.2",
  "chacha20poly1305",
  "chrono",
  "clipboard-win",
@@ -6550,6 +6553,7 @@ dependencies = [
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
+ "objc2-user-notifications 0.3.2",
  "open",
  "portable-pty",
  "pulldown-cmark",
