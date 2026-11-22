@@ -1,0 +1,1 @@
+ALTER TABLE key_epochs ADD COLUMN excluded TEXT NOT NULL DEFAULT '[]';

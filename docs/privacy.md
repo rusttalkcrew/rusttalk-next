@@ -28,7 +28,7 @@ tables in SQLite (WAL). IDs and digests are binary unless indicated. The `_ct` s
 | `channel_ids` | `id` (text, including deleted channel IDs to prevent reuse) |
 | `channel_permissions` | `channel_id`, `role_id`, `flags` (four-bit mask) |
 | `key_scopes` | `id` (text), `kind` (space or channel), nullable `channel_id`, `rotate` |
-| `key_epochs` | `scope_id`, `epoch`, `commitment` (HMAC of the epoch context keyed by the epoch key) |
+| `key_epochs` | `scope_id`, `epoch`, `commitment` (key commitment), `excluded` (public signing keys excluded from this epoch) |
 | `key_envelopes` | `scope_id`, `epoch`, `recipient_device`, `sender_device`, `envelope` (HPKE ciphertext, encapsulation and signature) |
 | `key_envelope_rejections` | `scope_id`, `epoch`, `recipient_device`, `sender_person` |
 | `message_senders` | `device_id`, `person_id`, `certificate` (archived public certificate for signature verification) |
@@ -87,7 +87,7 @@ holds: their IDs and the addresses of the servers that held a copy.
 The app keeps verified signed revocations in the profile. During device sync it
 publishes its owner's revocations to each joined server, even for devices that
 never signed in there. Members can see the person ID, revoked public device key,
-signature and revocation time. Device names stay private.
+signature and revocation time. A reader can also present that signed record to start an epoch for an affected scope on another joined server. Readers see the excluded public signing keys for that epoch. Device names stay private.
 The API volume stores file blobs, including in-progress uploads and thumbnails,
 as ciphertext under opaque disk names. Committed blobs are named only by their
 random IDs. File names, types, keys, plaintext lengths and references linking

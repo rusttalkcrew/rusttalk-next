@@ -231,10 +231,10 @@ in a state response indicating that the first epoch is still pending.
 | Method and path | Body | Permission and success |
 | --- | --- | --- |
 | GET `/v1/member-devices` | Empty | Any member. 200, `[{person, certificate}]` of current devices |
-| GET `/v1/keys` | Empty | Any member. 200, `{scopes, envelopes, pending, revocations?}`. Each revocation is `[person_id, signed_record]`, both base64url |
+| GET `/v1/keys` | Empty | Any member. 200, `{scopes, envelopes, pending, revocations?, supports_exclusions?}`. Each revocation is `[person_id, signed_record]`, both base64url |
 | POST `/v1/keys` | `{scope, epoch, device, envelope}` | A reader of the scope. 204. The recipient must also be a current device of a reader |
 | POST `/v1/keys/reject` | `{scope, epoch, sender, envelope}` | A reader of the scope. 204. Deletes a matching envelope addressed to the caller's device |
-| POST `/v1/keys/epochs` | `{scope, epoch, commitment, envelope}` | A reader of a rotating scope, the owner for the initial space epoch, or either person in a DM at any time. 201. The envelope is addressed to the caller's device |
+| POST `/v1/keys/epochs` | `{scope, epoch, commitment, envelope, excluded?, revocations?}` | A reader of a rotating scope, the owner for the initial space epoch, or either person in a DM at any time. 201. The envelope is addressed to the caller's device |
 | GET `/v1/space` | Empty | Any member. 200, `{name_ct, description_ct, icon_hash}` |
 | GET `/v1/space/icon` | Empty | Any member. 200, `{icon_ct}`, or `404 icon_not_found` |
 | PUT `/v1/space` | `{name_ct?, description_ct?, icon_ct?}` | `manage_server`. 204 |
@@ -243,8 +243,16 @@ in a state response indicating that the first epoch is still pending.
 | PUT `/v1/me/profile` | `{display_name_ct?, avatar_ct?, bio_ct?}` | Updates the authenticated member's own profile. 204 |
 | POST `/v1/invite-preview` | `{code}` | No bearer. 200, `{space_key_ct, name_ct}`. Missing, expired, spent or unpreviewable invite returns 404 |
 
-Scope state entries have `{scope, epoch, rotate}`. Pending entries have
-`{scope, epoch, device}`. Envelope entries add `sender`, `commitment` and `envelope`
+With `supports_exclusions`, scopes and wrapped keys may carry `excluded`, a
+sorted set of `base64url(person_id).base64url(device_signing_key)` strings. New epochs carry forward the full
+set. Adding a key authorizes a reader to advance a scope even when the rotate
+flag is clear. Supply a root-signed `[person_id, record]` for each newly excluded
+key. The API checks current read access for each owner and limits each set and
+proof list to 4,096 entries, with at most 64 devices per owner in a scope. The signed envelope commitment authenticates the
+set (see docs/crypto.md).
+
+Scope state entries have `{scope, epoch, rotate, excluded?}`. Pending entries have
+`{scope, epoch, device}`. Envelope entries add `sender`, `commitment`, `envelope` and optional `excluded`
 to those fields. Each response exposes envelopes only for its authenticated
 device and readable scopes. Pending wraps include all epochs, and include
 records whose sender device is no longer current. Each new epoch is

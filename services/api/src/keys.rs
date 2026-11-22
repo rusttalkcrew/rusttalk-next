@@ -7,7 +7,7 @@ use rusttalk_core::{
     auth::{decode, decode_bytes, encode},
     identity::DeviceCertificate,
     keys::{
-        EnvelopeContext, Event, KeyNeed, KeyState, Kind, MemberDevice, Scope, ScopeState,
+        EnvelopeContext, Event, Excluded, KeyNeed, KeyState, Kind, MemberDevice, Scope, ScopeState,
         WrappedKey,
     },
 };
@@ -128,6 +128,7 @@ pub async fn mark(db: &mut SqliteConnection, id: &str) -> ApiResult<()> {
 
 #[derive(FromRow)]
 struct EpochRow {
+    excluded: String,
     id: String,
     kind: String,
     epoch: i64,
@@ -147,7 +148,7 @@ fn scope(id: &str, kind: &str) -> ApiResult<Scope> {
 
 pub async fn scopes(db: &mut SqliteConnection, actor: &Actor) -> ApiResult<Vec<ScopeState>> {
     let rows: Vec<EpochRow> = query_as(
-        "SELECT k.id, k.kind, COALESCE(MAX(e.epoch), 0) AS epoch, k.rotate
+        "SELECT k.id, k.kind, COALESCE(MAX(e.epoch), 0) AS epoch, k.rotate, COALESCE((SELECT excluded FROM key_epochs WHERE scope_id=k.id ORDER BY epoch DESC LIMIT 1), '[]') AS excluded
          FROM scope_readers r JOIN key_scopes k ON r.scope_id = k.id
          LEFT JOIN key_epochs e ON k.id = e.scope_id
          WHERE r.person_id = ? GROUP BY k.id, k.kind, k.rotate ORDER BY k.id",
@@ -161,6 +162,7 @@ pub async fn scopes(db: &mut SqliteConnection, actor: &Actor) -> ApiResult<Vec<S
                 scope: scope(&row.id, &row.kind)?,
                 epoch: row.epoch,
                 rotate: row.rotate,
+                excluded: exclusions(&row.excluded)?,
             })
         })
         .collect()
@@ -203,12 +205,17 @@ pub async fn pending(db: &mut SqliteConnection, actor: &Actor) -> ApiResult<Vec<
 
 #[derive(FromRow)]
 struct EnvelopeRow {
+    excluded: String,
     id: String,
     kind: String,
     epoch: i64,
     sender_device: Vec<u8>,
     commitment: Vec<u8>,
     envelope: Vec<u8>,
+}
+
+fn exclusions(json: &str) -> ApiResult<Excluded> {
+    serde_json::from_str(json).map_err(|_| ApiError::internal("invalid_stored_exclusions"))
 }
 
 fn stored_commitment(bytes: Vec<u8>) -> ApiResult<[u8; 32]> {
@@ -220,7 +227,7 @@ fn stored_commitment(bytes: Vec<u8>) -> ApiResult<[u8; 32]> {
 pub async fn state(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<KeyState>> {
     let (mut tx, actor) = authenticate_read(&app, &headers).await?;
     let rows: Vec<EnvelopeRow> = query_as(
-        "SELECT k.id, k.kind, e.epoch, e.sender_device, v.commitment, e.envelope FROM key_envelopes e
+        "SELECT k.id, k.kind, e.epoch, e.sender_device, v.commitment, v.excluded, e.envelope FROM key_envelopes e
          JOIN key_epochs v ON v.scope_id = e.scope_id AND v.epoch = e.epoch
          JOIN scope_readers r ON r.scope_id = e.scope_id JOIN key_scopes k ON k.id = e.scope_id
          JOIN member_devices s ON s.device_id = e.sender_device
@@ -242,6 +249,7 @@ pub async fn state(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json
                 sender: encode(&row.sender_device),
                 commitment: stored_commitment(row.commitment)?,
                 envelope: encode(&row.envelope),
+                excluded: exclusions(&row.excluded)?,
             })
         })
         .collect::<ApiResult<_>>()?;
@@ -251,6 +259,7 @@ pub async fn state(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json
     .fetch_all(&mut *tx)
     .await?;
     let state = KeyState {
+        supports_exclusions: true,
         revocations: records
             .into_iter()
             .map(|(person, record)| (encode(&person), encode(&record)))
@@ -368,7 +377,79 @@ pub async fn start_channel(
         epoch: 1,
         commitment,
     };
-    start_epoch(db, actor, context, envelope).await
+    start_epoch(db, actor, context, envelope, &Rotation::default()).await
+}
+
+#[derive(Default, Deserialize)]
+struct Rotation {
+    #[serde(default)]
+    excluded: Excluded,
+    #[serde(default)]
+    revocations: Vec<(String, String)>,
+}
+
+/// Only a root-signed removal for a reader can authorize an unscheduled epoch.
+/// Existing exclusions survive later rotations, including permission changes.
+async fn check_rotation(
+    db: &mut SqliteConnection,
+    scope: Scope,
+    current: i64,
+    rotation: &Rotation,
+) -> ApiResult<bool> {
+    let id = encode(&scope.id);
+    let previous: Option<String> =
+        query_scalar("SELECT excluded FROM key_epochs WHERE scope_id = ? AND epoch = ?")
+            .bind(&id)
+            .bind(current)
+            .fetch_optional(&mut *db)
+            .await?;
+    let mut expected = exclusions(previous.as_deref().unwrap_or("[]"))?;
+    let before = expected.len();
+    if rotation.excluded.len() > 4096 || rotation.revocations.len() > 4096 {
+        return Err(ApiError::bad_request("invalid_revocation"));
+    }
+    if rotation.excluded == expected {
+        return Ok(false);
+    }
+    if rotation.revocations.len() != rotation.excluded.len().saturating_sub(before) {
+        return Err(conflict("epoch_changed"));
+    }
+    for (owner, signed) in &rotation.revocations {
+        let owner = decode::<32>(owner)?;
+        let record = rusttalk_core::identity::Revocation::verify(owner, &decode_bytes(signed)?)
+            .map_err(|_| ApiError::bad_request("invalid_revocation"))?;
+        let reader: bool = query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM scope_readers WHERE scope_id=? AND person_id=?)",
+        )
+        .bind(&id)
+        .bind(owner.as_slice())
+        .fetch_one(&mut *db)
+        .await?;
+        if !reader {
+            return Err(ApiError::forbidden("recipient_read_denied"));
+        }
+        expected.insert(rusttalk_core::keys::exclusion_id(
+            &owner,
+            record.device_signing_key(),
+        ));
+    }
+    // One root cannot spend other members' slots by naming their public device keys.
+    let mut counts = std::collections::HashMap::new();
+    for device in &expected {
+        let owner = device
+            .split_once('.')
+            .ok_or(ApiError::bad_request("invalid_revocation"))?
+            .0;
+        let count = counts.entry(owner).or_insert(0);
+        *count += 1;
+        if *count > rusttalk_core::identity::REVOCATIONS_PER_PERSON {
+            return Err(conflict("revocation_limit"));
+        }
+    }
+    if expected != rotation.excluded {
+        return Err(conflict("epoch_changed"));
+    }
+    Ok(expected.len() > before)
 }
 
 async fn start_epoch(
@@ -376,6 +457,7 @@ async fn start_epoch(
     actor: &Actor,
     context: EnvelopeContext,
     envelope: &str,
+    rotation: &Rotation,
 ) -> ApiResult<()> {
     let EnvelopeContext {
         scope,
@@ -384,6 +466,9 @@ async fn start_epoch(
         ..
     } = context;
     let (current, rotate) = read_epoch(db, actor, scope).await?;
+    if current.checked_add(1) != Some(epoch) {
+        return Err(conflict("epoch_changed"));
+    }
     // read_epoch already checked that the actor reads this scope, so for a DM they are one of its two people.
     let dm = scope.kind == Kind::Channel
         && query_scalar::<_, bool>(
@@ -392,7 +477,17 @@ async fn start_epoch(
         .bind(encode(&scope.id))
         .fetch_one(&mut *db)
         .await?;
-    if !may_start_epoch(current, epoch, rotate, dm) {
+    if rotation
+        .excluded
+        .contains(&rusttalk_core::keys::exclusion_id(
+            &actor.person,
+            &actor.device,
+        ))
+    {
+        return Err(ApiError::forbidden("device_revoked"));
+    }
+    let removing = check_rotation(db, scope, current, rotation).await?;
+    if !may_start_epoch(current, epoch, rotate || removing, dm) {
         return Err(conflict("epoch_changed"));
     }
     if scope.kind == Kind::Space && current == 0 {
@@ -412,10 +507,11 @@ async fn start_epoch(
         .map_err(|_| ApiError::internal("invalid_stored_device"))?;
     let bytes = checked_envelope(db, actor, context, device, envelope).await?;
     let id = encode(&scope.id);
-    query("INSERT INTO key_epochs (scope_id, epoch, commitment) VALUES (?, ?, ?)")
+    query("INSERT INTO key_epochs (scope_id, epoch, commitment, excluded) VALUES (?, ?, ?, ?)")
         .bind(&id)
         .bind(epoch)
         .bind(commitment.as_slice())
+        .bind(serde_json::to_string(&rotation.excluded).expect("string set serializes"))
         .execute(&mut *db)
         .await?;
     query(
@@ -445,6 +541,8 @@ fn may_start_epoch(current: i64, epoch: i64, rotate: bool, dm: bool) -> bool {
 
 #[derive(Deserialize)]
 pub struct NewEpoch {
+    #[serde(flatten)]
+    rotation: Rotation,
     scope: Scope,
     epoch: i64,
     commitment: String,
@@ -457,6 +555,7 @@ pub async fn new_epoch(
     body: Result<Json<NewEpoch>, JsonRejection>,
 ) -> ApiResult<StatusCode> {
     let NewEpoch {
+        rotation,
         scope,
         epoch,
         commitment,
@@ -469,7 +568,7 @@ pub async fn new_epoch(
         commitment: decode(&commitment)?,
     };
     let (mut tx, actor) = authenticate(&app, &headers).await?;
-    start_epoch(&mut tx, &actor, context, &envelope).await?;
+    start_epoch(&mut tx, &actor, context, &envelope, &rotation).await?;
     tx.commit().await?;
     app.signal(Change::Keys);
     Ok(StatusCode::CREATED)
@@ -495,18 +594,23 @@ pub async fn upload(
         return Err(conflict("epoch_changed"));
     }
     let id = encode(&scope.id);
-    let eligible: bool = query_scalar("SELECT EXISTS (SELECT 1 FROM member_devices d
-        JOIN scope_readers r ON d.person_id = r.person_id WHERE d.device_id = ? AND r.scope_id = ?)")
-        .bind(device.as_slice()).bind(&id).fetch_one(&mut *tx).await?;
-    if !eligible {
-        return Err(ApiError::forbidden("recipient_read_denied"));
-    }
-    let commitment =
-        query_scalar("SELECT commitment FROM key_epochs WHERE scope_id = ? AND epoch = ?")
+    let recipient: Vec<u8> = query_scalar("SELECT d.person_id FROM member_devices d JOIN scope_readers r ON d.person_id = r.person_id WHERE d.device_id = ? AND r.scope_id = ?")
+        .bind(device.as_slice()).bind(&id).fetch_optional(&mut *tx).await?.ok_or(ApiError::forbidden("recipient_read_denied"))?;
+    let (commitment, excluded): (Vec<u8>, String) =
+        query_as("SELECT commitment, excluded FROM key_epochs WHERE scope_id = ? AND epoch = ?")
             .bind(&id)
             .bind(epoch)
             .fetch_one(&mut *tx)
             .await?;
+    let excluded = exclusions(&excluded)?;
+    if excluded.contains(&rusttalk_core::keys::exclusion_id(&recipient, &device))
+        || excluded.contains(&rusttalk_core::keys::exclusion_id(
+            &actor.person,
+            &actor.device,
+        ))
+    {
+        return Err(ApiError::forbidden("recipient_read_denied"));
+    }
     let context = EnvelopeContext {
         server_id: space(&app).id,
         scope,
@@ -617,6 +721,49 @@ mod tests {
         // Still only the next epoch.
         assert!(!may_start_epoch(3, 5, false, true));
         assert!(!may_start_epoch(3, 3, true, true));
+    }
+
+    #[tokio::test]
+    async fn only_a_new_signed_removal_for_a_reader_authorizes_rotation() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::store::open(dir.path()).await.unwrap();
+        let mut tx = crate::store::write(&db).await.unwrap();
+        let (words, device) = DeviceIdentity::create("device").unwrap();
+        let (other, stranger) = DeviceIdentity::create("other").unwrap();
+        let scope = Scope {
+            kind: Kind::Space,
+            id: [7; 32],
+        };
+        init_space(&mut tx, &scope.id).await.unwrap();
+        query("INSERT INTO members (person_id, joined_at) VALUES (?,0)")
+            .bind(device.certificate.person_id().as_slice())
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let signing = device.certificate.signing_key().to_bytes();
+        let proof = |phrase| {
+            encode(
+                &rusttalk_core::identity::revoke_device(phrase, signing)
+                    .unwrap()
+                    .to_bytes(),
+            )
+        };
+        let mut request = Rotation {
+            excluded: Excluded::from([rusttalk_core::keys::certificate_id(&device.certificate)]),
+            revocations: vec![(encode(device.certificate.person_id()), proof(&words))],
+        };
+        assert!(check_rotation(&mut tx, scope, 0, &request).await.unwrap());
+        query("INSERT INTO key_epochs (scope_id,epoch,commitment,excluded) VALUES (?,1,zeroblob(32),?)").bind(encode(&scope.id)).bind(serde_json::to_string(&request.excluded).unwrap()).execute(&mut *tx).await.unwrap();
+        assert!(!check_rotation(&mut tx, scope, 1, &request).await.unwrap());
+        assert!(
+            check_rotation(&mut tx, scope, 1, &Rotation::default())
+                .await
+                .is_err()
+        );
+        request.revocations[0].1 = proof(&other);
+        assert!(check_rotation(&mut tx, scope, 0, &request).await.is_err());
+        request.revocations[0].0 = encode(stranger.certificate.person_id());
+        assert!(check_rotation(&mut tx, scope, 0, &request).await.is_err());
     }
 
     #[tokio::test]

@@ -704,6 +704,8 @@ async fn run(
         voice: None,
         ..State::default()
     };
+    let records = rusttalk_core::client::revocations::Revocations::in_profile(&ctx.data);
+    let mut removals = records.changes();
     let mut delay = 1;
     // Verified once, then reused: each verification spends one of the server's rate-limited challenges.
     let mut api = None;
@@ -737,6 +739,7 @@ async fn run(
             &mut commands,
             connecting,
             Some(&mut queued),
+            &mut removals,
         )
         .await
         else {
@@ -760,6 +763,7 @@ async fn run(
                             &mut state,
                             &mut commands,
                             &mut queued,
+                            &mut removals,
                         )
                         .await;
                         state.identities = voice::identities(&client, &state.server_id);
@@ -804,9 +808,17 @@ async fn run(
         }
         ctx.send(Update::Status(url.clone(), Status::Offline));
         let wait = tokio::time::sleep(Duration::from_secs(delay));
-        if offline(&ctx, &url, &mut state, &mut commands, wait, None)
-            .await
-            .is_none()
+        if offline(
+            &ctx,
+            &url,
+            &mut state,
+            &mut commands,
+            wait,
+            None,
+            &mut removals,
+        )
+        .await
+        .is_none()
         {
             return;
         }
@@ -825,6 +837,7 @@ async fn offline<T>(
     commands: &mut UnboundedReceiver<Command>,
     until: impl Future<Output = T>,
     mut queued: Option<&mut VecDeque<Command>>,
+    removals: &mut tokio::sync::watch::Receiver<()>,
 ) -> Option<T> {
     tokio::pin!(until);
     // A capture that ends by itself (its window closed) still stops sharing, and control.
@@ -832,6 +845,10 @@ async fn offline<T>(
     loop {
         tokio::select! {
             done = &mut until => return Some(done),
+            _ = removals.changed(), if state.voice.is_some() => {
+                // Without the key connection this call cannot move its outgoing media.
+                voice::close(ctx, state);
+            }
             next = next_voice(&mut state.voice) => voice_next(ctx, url, None, state, next).await,
             _ = finished.tick(), if state.voice.is_some() => {
                 stop_finished_shares(ctx, url, None, state).await;
@@ -1031,6 +1048,7 @@ async fn serve(
     state: &mut State,
     commands: &mut UnboundedReceiver<Command>,
     queued: &mut VecDeque<Command>,
+    removals: &mut tokio::sync::watch::Receiver<()>,
 ) -> End {
     if let Err(error) = resume(ctx, url, client, state).await {
         tracing::warn!(error = %format_args!("{error:#}"), "loading server state failed");
@@ -1054,6 +1072,15 @@ async fn serve(
             }
         };
         tokio::select! {
+            _ = removals.changed() => {
+                if let Err(error) = client.sync().await {
+                    tracing::warn!(%error, "could not rotate after device removal");
+                    voice::close(ctx, state);
+                    return End::Error;
+                }
+                sync_voice_key(ctx, client, state);
+                save_pins(ctx, url, client, state);
+            }
             event = client.next_update() => match event {
                 Ok(Some(Pushed::Presence(PresenceEvent::PresenceChanged { person_id, status }))) => {
                     match decode(&person_id) {
@@ -1065,10 +1092,11 @@ async fn serve(
                     if let Err(error) = on_event(ctx, url, client, state, event).await {
                         tracing::warn!(error = %format_args!("{error:#}"), "handling a server event failed");
                     }
-                    sync_voice_key(client, state);
+                    sync_voice_key(ctx, client, state);
                 }
                 Ok(None) => return End::Closed(client.close_reason.clone()),
                 Err(error) => {
+                    sync_voice_key(ctx, client, state);
                     tracing::warn!(error = %format_args!("{error:#}"), "event stream failed");
                     return End::Error;
                 }
@@ -1239,7 +1267,7 @@ async fn resume(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, state: &mut St
             tracing::warn!(error = %format_args!("{error:#}"), "loading voice presence failed");
         }
     }
-    sync_voice_key(client, state);
+    sync_voice_key(ctx, client, state);
     Ok(())
 }
 

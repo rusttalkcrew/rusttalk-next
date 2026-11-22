@@ -85,6 +85,18 @@ pub struct KeyNeed {
     pub device: String,
 }
 
+/// Owner-qualified device keys in bytewise string order. Envelopes commit to the whole set.
+pub type Excluded = std::collections::BTreeSet<String>;
+
+/// A root can only exclude its own certificate for a device signing key.
+pub fn exclusion_id(owner: &[u8], device: &[u8]) -> String {
+    format!("{}.{}", encode(owner), encode(device))
+}
+
+pub fn certificate_id(cert: &DeviceCertificate) -> String {
+    exclusion_id(cert.person_id(), cert.signing_key().as_bytes())
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct WrappedKey {
     #[serde(flatten)]
@@ -93,6 +105,8 @@ pub struct WrappedKey {
     #[serde(with = "wire_id")]
     pub commitment: [u8; 32],
     pub envelope: String,
+    #[serde(default, skip_serializing_if = "Excluded::is_empty")]
+    pub excluded: Excluded,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -100,10 +114,14 @@ pub struct ScopeState {
     pub scope: Scope,
     pub epoch: i64,
     pub rotate: bool,
+    #[serde(default, skip_serializing_if = "Excluded::is_empty")]
+    pub excluded: Excluded,
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct KeyState {
+    #[serde(default)]
+    pub supports_exclusions: bool,
     /// Base64url person ID and root-signed revocation record, for current members.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub revocations: Vec<(String, String)>,
@@ -223,6 +241,23 @@ impl EnvelopeContext {
         self.dm_mac(key, pair)
             .verify_slice(&self.commitment)
             .is_ok()
+    }
+
+    /// Bind the sender-signed commitment (including a DM's pair) to the destinations
+    /// that must never receive this key, even from clients shown a stale directory.
+    pub fn excluding(mut self, devices: &Excluded) -> Self {
+        if !devices.is_empty() {
+            use sha2::Digest;
+            let mut hash = Sha256::new();
+            hash.update(b"rusttalk-excluded-devices-v1");
+            hash.update(self.commitment);
+            for device in devices {
+                hash.update(device.as_bytes());
+                hash.update([0]);
+            }
+            self.commitment = hash.finalize().into();
+        }
+        self
     }
 
     fn info(&self, recipient: &[u8; 32]) -> Vec<u8> {

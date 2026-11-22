@@ -1,11 +1,12 @@
 //! Root-signed, permanent device revocations shared by all connections in a profile.
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashMap},
     ffi::OsStr,
     fmt::Write,
     fs, io,
     io::Read,
     path::{Path, PathBuf},
+    sync::{Arc, LazyLock, Mutex, Weak},
 };
 
 use super::sync::{Peer, Snapshot};
@@ -19,9 +20,8 @@ use anyhow::{Result, ensure};
 const MAX_PEOPLE: usize = 1024;
 pub(super) const MAX_PER_REPLY: usize = 4096;
 
-#[cfg(feature = "voice")]
-pub(super) static CHANGED: std::sync::LazyLock<tokio::sync::watch::Sender<()>> =
-    std::sync::LazyLock::new(tokio::sync::watch::Sender::default);
+type Changes = tokio::sync::watch::Sender<()>;
+static PROFILES: LazyLock<Mutex<HashMap<PathBuf, Weak<Changes>>>> = LazyLock::new(Default::default);
 
 fn key_filename(name: &OsStr) -> bool {
     name.to_str()
@@ -57,7 +57,7 @@ fn read_record(person: &PersonId, path: &Path) -> Result<Revocation> {
 }
 
 #[derive(Clone)]
-pub struct Revocations(PathBuf);
+pub struct Revocations(PathBuf, Arc<Changes>);
 
 // Lowercase hex also distinguishes all keys on case-insensitive filesystems.
 fn filename(key: &[u8; 32]) -> String {
@@ -69,8 +69,28 @@ fn filename(key: &[u8; 32]) -> String {
 }
 
 impl Revocations {
+    /// Wake every server connection when another connection learns a signed removal.
+    pub fn changes(&self) -> tokio::sync::watch::Receiver<()> {
+        self.1.subscribe()
+    }
+
     pub fn in_profile(data: &Path) -> Self {
-        Self(data.join("revocations"))
+        let dir = data.join("revocations");
+        let mut profiles = PROFILES.lock().expect("profile revocations");
+        profiles.retain(|_, sender| sender.strong_count() > 0);
+        let sender = profiles
+            .get(&dir)
+            .and_then(Weak::upgrade)
+            .unwrap_or_else(|| {
+                let sender = Arc::new(Changes::default());
+                profiles.insert(dir.clone(), Arc::downgrade(&sender));
+                sender
+            });
+        Self(dir, sender)
+    }
+
+    pub(super) fn rotation_file(&self, server: &[u8; 32]) -> PathBuf {
+        self.0.join("scopes").join(filename(server))
     }
 
     pub(super) fn check(&self, person: &PersonId, device: &[u8; 32]) -> Result<()> {
@@ -142,8 +162,7 @@ impl Revocations {
             "device revocation owner limit reached"
         );
         super::save_json(&dir, &file, &encode(&record.to_bytes()))?;
-        #[cfg(feature = "voice")]
-        CHANGED.send_replace(());
+        self.1.send_replace(());
         #[cfg(unix)]
         for path in [&dir, &self.0, self.0.parent().expect("profile directory")] {
             fs::File::open(path)?.sync_all()?;
@@ -152,7 +171,7 @@ impl Revocations {
     }
 
     /// A damaged tombstone still blocks its key by filename. Never relay its contents.
-    fn records(&self, person: &PersonId) -> Result<Vec<Revocation>> {
+    pub(super) fn records(&self, person: &PersonId) -> Result<Vec<Revocation>> {
         let entries = match fs::read_dir(self.0.join(filename(person))) {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
             result => result?,

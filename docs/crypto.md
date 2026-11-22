@@ -62,9 +62,14 @@ key wraps, envelope senders, live-file acceptance and message verification
 (including cached or archived certificates). Unseen older messages from that
 device also fail verification: the delivery time cannot prove a signature
 predates revocation. Previously displayed plaintext and previously shared keys
-cannot be recalled. Until client-started rotation (#250) lands, a revoked device can keep
-reading new messages and listening to voice indefinitely on a server that
-does not rotate a key it already holds. Other clients drop tracks from the
+cannot be recalled. A client that knows about a removal requires a fresh epoch for the
+person's readable scopes, including DMs and voice channels. A sibling waits
+0–249 ms and other readers wait 250–1,249 ms, then fetch again. An online
+reader proposes a random key if the current epoch still lacks the exclusion.
+The API accepts only the next epoch and verifies a new root-signed removal
+for a scope reader before allowing an unscheduled rotation. Replays cannot
+authorize another advance. A server refusing rotation can prevent progress.
+Other clients drop tracks from the
 revoked device's server-specific voice identity.
 A fresh profile or peer to which every source withholds a record cannot know
 about it. Older servers can omit the field and older clients ignore it.
@@ -204,6 +209,30 @@ names. A DM epoch with the plain commitment, from an app before pair binding,
 stays readable but is never trusted for sending or wrapped to anyone; the app
 re-keys instead. Apps before pair binding reject DM keys with the new
 commitment, so a DM works only once both people are on this version.
+
+### Epochs after a device removal
+
+Each new epoch retains the preceding epoch's excluded device signing keys.
+For a nonempty set, its commitment is SHA-256 of the ASCII domain
+`rusttalk-excluded-devices-v1`, the 32-byte ordinary or pair-bound DM
+commitment, then each ASCII `base64url(person_id).base64url(device_signing_key)` in bytewise string
+order followed by a zero byte. The envelope signature covers this commitment.
+Recipients verify it with the opened key and the advertised exclusions.
+Even a reader unaware of the original removal refuses to wrap this key to
+a listed device. Earlier epochs keep their original commitments and keys.
+
+Updated clients use their verified removals and the visible channel permissions
+or pinned DM pair to determine which exclusions they require for sending.
+The profile records each verified removal and its affected scopes per server,
+so withholding a member or changing a role after restart cannot undo the
+requirement. The per-server file is bounded at 4,096 removals and 65,536
+scope associations. A storage error or exceeded limit fails reconciliation.
+They refuse an old key in those scopes if the server suppresses rotation.
+New media uses the rotated channel epoch for voice, camera, screen and shared
+audio. An offline call closes on a removal if it cannot refresh its keys.
+Clients that do not support this commitment cannot open affected epochs.
+A server can still hide a removal or a relationship that a device has never
+observed, or partition clients. Data already delivered stays with its readers.
 
 ### Envelopes
 

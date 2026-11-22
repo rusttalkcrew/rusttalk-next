@@ -12,6 +12,7 @@ Unreleased under the new version and date.
 ## Unreleased
 
 - Remove another device from Settings using your recovery words.
+- Chat and calls switch to new keys when a device is removed.
 
 - Once a device learns about a revoked device, it refuses its messages and stops sharing keys with it across servers
 

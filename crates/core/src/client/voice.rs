@@ -201,7 +201,7 @@ impl KeyClient<'_> {
         let (room, events) = Room::connect(url.as_str(), &reply.token, options)
             .await
             .context("connect to pinned LiveKit room")?;
-        let changes = super::revocations::CHANGED.subscribe();
+        let changes = self.revocations.changes();
         let blocked = self.revocations.voice_identities(&server.server_id)?;
         let room = Arc::new(room);
         let grants = Arc::new(stream_audio::Reconciler::new(stream_audio::RoomGrants {
