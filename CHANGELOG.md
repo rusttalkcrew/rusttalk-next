@@ -11,7 +11,9 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
-- Experimental Android test build (APK) and unsigned iOS build (IPA); typing on Android does not work yet
+- Experimental Android test build (APK) and unsigned iOS build (IPA)
+- Android: typing works, so you can sign up, sign in, join a server and chat
+- Enter now confirms the name and unlock screens
 
 ## v0.1.11 - 2026-11-22
 

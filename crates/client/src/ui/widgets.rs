@@ -179,12 +179,16 @@ pub fn secondary_large(ui: &mut Ui, text: &str) -> Response {
 /// A text field with roomy padding and an accent outline while typing in it.
 pub struct Field<'t> {
     edit: TextEdit<'t>,
+    private: bool,
+    password: bool,
 }
 
 /// A one-line text field.
 pub fn field(text: &mut dyn TextBuffer) -> Field<'_> {
     Field {
         edit: TextEdit::singleline(text).margin(Margin::symmetric(10, 7)),
+        private: false,
+        password: false,
     }
 }
 
@@ -192,6 +196,8 @@ pub fn field(text: &mut dyn TextBuffer) -> Field<'_> {
 pub fn text_area(text: &mut dyn TextBuffer) -> Field<'_> {
     Field {
         edit: TextEdit::multiline(text).margin(Margin::symmetric(10, 7)),
+        private: false,
+        password: false,
     }
 }
 
@@ -217,8 +223,16 @@ impl Field<'_> {
         self
     }
 
+    /// Secret but shown, like recovery words: phone keyboards offer no suggestions
+    /// and don't learn it. Password fields get that already.
+    pub fn private(mut self) -> Self {
+        self.private = true;
+        self
+    }
+
     /// Show dots instead of the typed text.
     pub fn password(mut self) -> Self {
+        self.password = true;
         self.edit = self.edit.password(true);
         self
     }
@@ -237,10 +251,47 @@ impl Field<'_> {
 
 impl Widget for Field<'_> {
     fn ui(self, ui: &mut Ui) -> Response {
-        let response = ui.add(self.edit);
+        let output = self.edit.show(ui);
+        share_with_keyboard(&output, self.private || self.password);
+        let response = output.response.response;
+        if self.private {
+            // For this frame only: another screen's field can get the same id.
+            let pass = ui.ctx().cumulative_pass_nr();
+            ui.ctx()
+                .data_mut(|data| data.insert_temp(private_id(response.id), pass));
+        }
         field_focus(ui, &response);
         response
     }
+}
+
+/// Phones: the on-screen keyboard works on the text around the cursor (to delete
+/// and correct it), so the focused field shares it (`android::share_field`); a
+/// `secret` field shares only its cursor and length.
+pub fn share_with_keyboard(output: &egui::text_edit::TextEditOutput, secret: bool) {
+    #[cfg(any(target_os = "android", test))]
+    if output.response.response.has_focus() {
+        let response = &output.response.response;
+        crate::android::share_field(
+            &response.ctx,
+            response.id,
+            output.galley.text(),
+            output.cursor_range,
+            secret,
+        );
+    }
+    #[cfg(not(any(target_os = "android", test)))]
+    let _ = (output, secret);
+}
+
+fn private_id(field: egui::Id) -> egui::Id {
+    field.with("private field")
+}
+
+/// Whether the field was marked [`Field::private`].
+#[cfg(target_os = "android")]
+pub fn is_private(ctx: &egui::Context, field: egui::Id) -> bool {
+    ctx.data(|data| data.get_temp(private_id(field))) == Some(ctx.cumulative_pass_nr())
 }
 
 /// The accent outline of a focused text field.

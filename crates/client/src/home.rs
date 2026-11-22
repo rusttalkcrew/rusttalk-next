@@ -121,6 +121,10 @@ pub struct Home {
     find: Find,
     dialog: Option<Dialog>,
     pub toast: Option<(String, f64)>,
+    /// Android: the note that messages were left unsent, pending until its own
+    /// notice was drawn (other toasts don't count).
+    #[cfg(target_os = "android")]
+    unsent: Option<PathBuf>,
     pub settings: Option<Tab>,
     pub voice: Voice,
     pub hotkeys: crate::hotkeys::Hotkeys,
@@ -300,6 +304,8 @@ impl Home {
     pub fn new(identity: DeviceIdentity, ctx: &egui::Context, data: PathBuf) -> Result<Self> {
         let identity = Arc::new(identity);
         let data_dir = data.clone();
+        #[cfg(target_os = "android")]
+        let unsent = crate::net::unsent_note(&data_dir);
         let fresh = !data.join("voice.json").exists();
         let audio = Audio::new(&data)?;
         // After an update, open "What's new" once; a first start has nothing new yet.
@@ -362,6 +368,8 @@ impl Home {
             },
             dialog: None,
             toast: None,
+            #[cfg(target_os = "android")]
+            unsent,
             settings: announce.then_some(Tab::WhatsNew),
             hotkeys: crate::hotkeys::Hotkeys::new(ctx, audio.clone()),
             voice: Voice::new(audio, video, runtime),
@@ -1763,6 +1771,15 @@ pub fn show(
                 }
             }
         }
+    }
+    // A phone had to end while messages were still on their way: say so in a
+    // chat, as the toast whenever no other one shows, until this notice was drawn.
+    #[cfg(target_os = "android")]
+    if home.unsent.is_some()
+        && unsent_notice(&mut home.toast, drawn_toast(ui.ctx()), now)
+        && let Some(note) = home.unsent.take()
+    {
+        let _ = std::fs::remove_file(note);
     }
     if home.toast.as_ref().is_some_and(|(_, until)| *until < now) {
         home.toast = None;
@@ -3821,6 +3838,7 @@ fn page_view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat: &mut
                     keep.extend(card.cloned());
                 }
                 let draft = Draft {
+                    queued: Default::default(),
                     id: *id,
                     channel,
                     peer: None,
@@ -4368,6 +4386,7 @@ fn poll_draft(channel: Id, text: String, part: PollPart) -> Option<Draft> {
         return None;
     };
     Some(Draft {
+        queued: Default::default(),
         id: *id,
         channel,
         peer: None,
@@ -4582,9 +4601,38 @@ fn composer_id(channel: Id) -> UiId {
     UiId::unique(("composer", channel))
 }
 
+/// The unsent notice: the toast whenever no other one shows. Done (`true`) only
+/// once its own text was drawn.
+#[cfg(any(target_os = "android", test))]
+fn unsent_notice(toast: &mut Option<(String, f64)>, drawn: Option<String>, now: f64) -> bool {
+    let notice = t!("home.unsent_after_close");
+    if drawn.as_deref() == Some(notice) {
+        return true;
+    }
+    if toast.is_none() {
+        *toast = Some((notice.to_owned(), now + 10.0));
+    }
+    false
+}
+
+#[cfg(target_os = "android")]
+fn drawn_toast_id() -> UiId {
+    UiId::unique("drawn toast")
+}
+
+/// The toast drawn since the last time this was asked.
+#[cfg(target_os = "android")]
+fn drawn_toast(ctx: &egui::Context) -> Option<String> {
+    ctx.data_mut(|data| data.remove_temp::<Option<String>>(drawn_toast_id()))
+        .flatten()
+}
+
 /// The latest problem, in red, with a close button.
 pub fn toast_line(ui: &mut Ui, toast: &mut Option<(String, f64)>) {
     if let Some((text, _)) = toast.as_ref() {
+        #[cfg(target_os = "android")]
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(drawn_toast_id(), Some(text.clone())));
         let mut close = false;
         ui.horizontal(|ui| {
             ui.colored_label(ui::colors(ui).danger_text, text.as_str());
@@ -4821,6 +4869,7 @@ fn composer(
             return (None, attach);
         };
         let command = Command::Send(Draft {
+            queued: Default::default(),
             id: *message,
             channel,
             peer: None,
@@ -4889,6 +4938,7 @@ fn composer(
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_millis() as u64);
     let command = Command::Send(Draft {
+        queued: Default::default(),
         id: *id,
         channel,
         peer: None,
@@ -4973,6 +5023,7 @@ fn composer_field(
                         }
                     },
                 );
+                ui::share_with_keyboard(&completion.text_edit, false);
                 if let Some(accepted) = completion.accepted
                     && !chat.mentions.accepted(&accepted.insert, choices)
                 {
@@ -5524,8 +5575,7 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
         }
         Dialog::MyName(index, name) => {
             ui.label(t!("home.my_name_help"));
-            let field = name_field(ui, name);
-            let submitted = submitted(ui, &field);
+            let (_, submitted) = name_field(ui, name);
             if !default_name.is_empty() {
                 ui.add_space(ui::SPACE_S);
                 let label = t!("home.use_default_name", name = default_name);
@@ -5649,7 +5699,8 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
             match tab {
                 ChannelTab::General => {
                     let label = ui.label(t!("home.channel_name")).id;
-                    let name_field = name_field(ui, name).labelled_by(label);
+                    let (name_field, name_entered) = name_field(ui, name);
+                    name_field.labelled_by(label);
                     let label = ui.label(t!("home.topic_optional")).id;
                     let field = ui
                         .add(
@@ -5676,7 +5727,7 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
                         });
                         *changed |= slider.changed();
                     }
-                    entered = submitted(ui, &name_field) || submitted(ui, &field);
+                    entered = name_entered || submitted(ui, &field);
                 }
                 ChannelTab::Permissions => admin::channel_flags(ui, data, channel, flags),
             }
@@ -5719,8 +5770,8 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
         }
         Dialog::RenameCategory(index, id, name) => {
             let label = ui.label(t!("home.category_name")).id;
-            let field = name_field(ui, name).labelled_by(label);
-            let submitted = submitted(ui, &field);
+            let (field, submitted) = name_field(ui, name);
+            field.labelled_by(label);
             if text_footer(ui, t!("common.save"), submitted, &mut close) && !name.trim().is_empty()
             {
                 command = Some((*index, Command::RenameCategory(*id, name.trim().to_owned())));
@@ -5940,17 +5991,18 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
 
 /// A name field with a confirm button; returns true when confirmed with a non-empty name.
 fn text_dialog(ui: &mut Ui, text: &mut String, confirm: &str, close: &mut bool) -> bool {
-    let field = name_field(ui, text);
-    let submitted = submitted(ui, &field);
+    let (_, submitted) = name_field(ui, text);
     text_footer(ui, confirm, submitted, close) && !text.trim().is_empty()
 }
 
-fn name_field(ui: &mut Ui, text: &mut String) -> Response {
+/// The field, and whether Enter was pressed in it (asked before it takes focus again).
+fn name_field(ui: &mut Ui, text: &mut String) -> (Response, bool) {
     let field = ui.add(ui::field(text).char_limit(100).desired_width(f32::INFINITY));
+    let entered = submitted(ui, &field);
     if ui.memory(|memory| memory.focused().is_none()) {
         field.request_focus();
     }
-    field
+    (field, entered)
 }
 
 fn text_footer(ui: &mut Ui, confirm: &str, mut done: bool, close: &mut bool) -> bool {
@@ -5964,6 +6016,27 @@ fn text_footer(ui: &mut Ui, confirm: &str, mut done: bool, close: &mut bool) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_its_own_toast_uses_up_the_unsent_notice() {
+        let notice = t!("home.unsent_after_close").to_owned();
+        // Another toast shows and is drawn: the notice waits.
+        let mut toast = Some(("Server offline".to_owned(), 5.0));
+        assert!(!unsent_notice(
+            &mut toast,
+            Some("Server offline".into()),
+            1.0
+        ));
+        assert_eq!(
+            toast.as_ref().map(|(text, _)| text.as_str()),
+            Some("Server offline")
+        );
+        // Once it is gone the notice takes its place, and counts only when drawn.
+        toast = None;
+        assert!(!unsent_notice(&mut toast, None, 6.0));
+        assert_eq!(toast.as_ref().map(|(text, _)| text), Some(&notice));
+        assert!(unsent_notice(&mut toast, Some(notice), 7.0));
+    }
 
     const ME: Id = [1; 32];
     const ANN: Id = [7; 32];

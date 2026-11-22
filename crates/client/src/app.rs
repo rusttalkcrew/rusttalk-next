@@ -446,6 +446,8 @@ fn problem(what: &str, error: &IdentityError) -> Screen {
 impl eframe::App for App<'_> {
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         crate::paste::keys(ctx, raw_input);
+        #[cfg(target_os = "android")]
+        crate::android::input(ctx, raw_input);
         #[cfg(target_os = "linux")]
         crate::wayland_drops::input(raw_input);
     }
@@ -462,6 +464,15 @@ impl eframe::App for App<'_> {
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        #[cfg(target_os = "android")]
+        crate::android::frame(ui, |ui| self.screens(ui));
+        #[cfg(not(target_os = "android"))]
+        self.screens(ui);
+    }
+}
+
+impl App<'_> {
+    fn screens(&mut self, ui: &mut Ui) {
         self.updates.poll(ui.ctx());
         self.poll();
         let action = match &mut self.screen {
@@ -548,8 +559,11 @@ fn card(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> Option<Action>) -> Option<Acti
         .inner
 }
 
+/// Plain Enter in a single-line field. Screens that focus a field when nothing has
+/// focus must ask before that: Enter ends the focus, and focusing again hides it.
 pub fn submitted(ui: &Ui, field: &Response) -> bool {
-    field.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter))
+    field.lost_focus()
+        && ui.input(|input| input.key_pressed(Key::Enter) && input.modifiers.is_none())
 }
 
 fn welcome(ui: &mut Ui) -> Option<Action> {
@@ -568,8 +582,10 @@ fn show_words(ui: &mut Ui, words: &str) -> Option<Action> {
     ui.heading(t!("app.words_title"));
     ui.label(t!("app.words_text"));
     ui.add_space(12.0);
+    // Four columns don't fit a phone.
+    let columns = if ui::is_phone(ui.ctx()) { 2 } else { 4 };
     Grid::new("recovery-words")
-        .num_columns(4)
+        .num_columns(columns)
         .spacing(Vec2::new(10.0, 10.0))
         .show(ui, |ui| {
             for (index, word) in words.split_whitespace().enumerate() {
@@ -578,7 +594,7 @@ fn show_words(ui: &mut Ui, words: &str) -> Option<Action> {
                     ui.label(ui::caption(format!("{}", index + 1)));
                     ui.label(ui::bold(word).size(16.0));
                 });
-                if index % 4 == 3 {
+                if index % columns == columns - 1 {
                     ui.end_row();
                 }
             }
@@ -602,12 +618,12 @@ fn confirm(
     for (slot, (answer, index)) in answers.iter_mut().zip(check.indices()).enumerate() {
         let label = ui.label(t!("app.word_number", number = index + 1));
         let field = ui
-            .add(ui::field(&mut **answer).desired_width(260.0))
+            .add(ui::field(&mut **answer).desired_width(260.0).private())
             .labelled_by(label.id);
+        done |= submitted(ui, &field);
         if slot == 0 && ui.memory(|memory| memory.focused().is_none()) {
             field.request_focus();
         }
-        done |= submitted(ui, &field);
     }
     error_text(ui, error);
     ui.add_space(12.0);
@@ -628,7 +644,8 @@ fn restore(ui: &mut Ui, words: &mut Zeroizing<String>, error: Option<&str>) -> O
         .add(
             ui::text_area(&mut **words)
                 .desired_rows(4)
-                .desired_width(f32::INFINITY),
+                .desired_width(f32::INFINITY)
+                .private(),
         )
         .labelled_by(label.id);
     if ui.memory(|memory| memory.focused().is_none()) {
@@ -648,6 +665,43 @@ fn restore(ui: &mut Ui, words: &mut Zeroizing<String>, error: Option<&str>) -> O
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn recovery_words_never_reach_the_keyboard() {
+        use crate::android::{Bridge, cursor, set_cursor, start};
+        let ctx = egui::Context::default();
+        let mut words = Zeroizing::new("apple banana cherry".to_owned());
+        let frame = |words: &mut Zeroizing<String>| {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                restore(ui, words, None);
+            });
+            output.textures_delta.clear();
+        };
+        // The screen focuses its field, which then shares itself with the keyboard.
+        frame(&mut words);
+        frame(&mut words);
+        let field = ctx
+            .memory(|memory| memory.focused())
+            .expect("focused field");
+        // What would go to GameTextInput_setState.
+        let sent = |bridge: &Bridge| bridge.buffer().to_java().0;
+        let mut bridge = Bridge::default();
+        let at = start(&ctx, &mut bridge, field, cursor(&ctx, field).unwrap(), true);
+        assert_eq!(at, (19, 19), "typing starts at the end");
+        assert_eq!(&sent(&bridge)[..], b"\0");
+        // Moving the cursor into the words starts over, still without them.
+        set_cursor(&ctx, field, (6, 6));
+        frame(&mut words);
+        let at = start(
+            &ctx,
+            &mut bridge,
+            field,
+            cursor(&ctx, field).unwrap(),
+            false,
+        );
+        assert_eq!(at, (6, 6));
+        assert_eq!(&sent(&bridge)[..], b"\0");
+    }
 
     #[test]
     fn sign_out_removes_account_data_and_preserves_device_setup() {

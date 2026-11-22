@@ -1169,6 +1169,7 @@ startup.message = RustTalk konnte nicht starten.\n\n{error}\n\n{log}
 
 # Direct messages (#100)
 home.waiting_try_again = Warte auf den Server. Versuche es gleich noch einmal.
+home.unsent_after_close = Eine Nachricht wurde vielleicht nicht gesendet.
 home.dm_read_only = Du teilst keinen Server mehr mit {name}. Du kannst deine Nachrichten lesen, aber keine neuen senden.
 home.no_shared_server = Kein gemeinsamer Server
 

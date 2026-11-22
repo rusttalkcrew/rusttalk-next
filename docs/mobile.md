@@ -5,20 +5,92 @@ RustTalk for Android and iOS is the desktop client, built from the same code:
 client is a library with a small `main.rs`, so Android can load it as
 `librusttalk_client.so`; iOS runs the normal binary inside an app bundle.
 
-This page is the plan (issue #282) and the state after phase 1.
+This page is the plan (issue #282) and the state after phase 2.
+
+## State after phase 2
+
+On the headless emulator the Android app goes through the whole first start
+with the on-screen keyboard: key password, recovery words, the word check,
+name, then joining a local server by invite link, creating a channel, sending
+messages and reading them again after a restart.
+
+- **Typing** (`src/android.rs`). The keyboard doesn't send keys to
+  GameActivity: it edits a text buffer that GameTextInput keeps, and winit 0.30
+  drops the events that say it changed. For a normal field the buffer starts
+  with its text for up to 100 characters each side of the cursor (at most 1,000
+  in all; a longer selection starts empty and is replaced), also right after the
+  field takes focus, so the keyboard can delete and correct what is already
+  there. Password and recovery-word fields never give the keyboard their text:
+  the field says it is secret before anything is shared, its buffer starts
+  empty, and on focus the cursor goes to the end, as in Android password fields
+  (Backspace deletes from there). Each change to the buffer (text, selection, composed word) becomes the same
+  change at the same place in the field, through the field's cursor and egui
+  text and delete events. Moving the cursor in the field starts the buffer over
+  there. Reading and setting the buffer happen on the Java thread, where the
+  keyboard edits it, through GameTextInput's C API. A start-over is numbered and
+  counts only once the Java thread reads back exactly what was set; until then
+  the field ignores the buffer, and the start-over is sent again every 300 ms.
+  A composed word shows as plain text (egui can't mark a range from outside).
+  While a field is focused the app paints every 40 ms to read the buffer, since
+  nothing else wakes it.
+- **Enter**: winit drops the keyboard's action key, so `MainActivity` (the only
+  Java in the app) counts presses of Done (not Next or Search) and the app turns
+  each into one Enter for the field that had focus when it came. The key shows
+  Done. Newlines are text, also a lone one from Enter on a hardware
+  keyboard or a paste, so nothing is sent by accident.
+- **Long text**: GameTextInput copies at most 64 KiB but reports the full
+  length, and android-activity's reader for winit trusts that length. A Java
+  `LengthFilter` keeps the keyboard's buffer under 21,845 UTF-16 units, which
+  always fits, and the app's own reader takes only the copied bytes, cut to
+  whole characters.
+- **Keyboard type**: password fields and recovery words (`ui::Field::private`)
+  get no suggestions and ask the keyboard not to learn
+  (`IME_FLAG_NO_PERSONALIZED_LEARNING`). When a field stops wanting text the app
+  hides the keyboard itself: winit's hide doesn't work once Android counts the
+  keyboard as opened on purpose.
+- **Typed secrets**: on Android, winit's "Unknown android_activity input event"
+  warning, which prints the keyboard's text, is dropped before it is formatted;
+  other warnings stay. GameTextInput's Java code logs typed text to logcat at
+  debug level; R8 strips those calls (`deploy/android/proguard-rules.pro`),
+  which needs a build that isn't debuggable. Rust copies are wiped: the buffer
+  and the bridge's copy (`Zeroizing`, dropped as soon as focus moves), and the
+  text events egui got, at the end of each frame. Leaving a secret field
+  overwrites GameTextInput's native buffer (which never shrinks) before
+  emptying it, in the same Java-thread job that then sets the next field's
+  keyboard type, so a keyboard reconnecting in between never sees the secret
+  with learning on. Some copies can't be wiped: android-activity's copy of the text
+  for winit's (dropped) event, egui's undo history inside a field, Java strings
+  (the keyboard's `Editable`), and whatever the keyboard app keeps.
+- **Safe area**: system bars, display cutout and the keyboard come from
+  GameActivity's window insets, read on the Java thread when the window
+  changes size, when the keyboard opens or closes (for a moment while it
+  slides), and every half second while it is open. The app draws inside
+  what is left, so the focused field sits above the keyboard and is scrolled
+  into view when the keyboard opens. The keyboard hides when focus leaves a
+  field (egui and winit already did that).
+- **Recovery words** show in two columns on phones.
+- **Destroy**: the app runs eframe on its own winit loop and ends it once
+  android-activity has handled `onDestroy`, waits up to 4 seconds for messages
+  still being sent (a new activity's window waits too, and Android reports it as
+  not responding after 5), then ends the process (see Android lifecycle). If
+  messages were still on their way, it leaves a note (`unsent`, no message
+  text); the next start says so in a chat and deletes the note once that showed. Drafts in the message box are lost, as
+  on a desktop quit: no platform saves them yet.
+- **Test build**: `deploy/android/build.sh` makes a release APK signed with the
+  local debug key (`rusttalk-<version>-android-arm64-test.apk`): not
+  debuggable, so a USB cable no longer opens the app's files, and R8 can strip
+  logging. Real signing keys come with phase 6.
 
 ## State after phase 1
 
 - `rusttalk-client` and `rusttalk-core` build for `aarch64-linux-android`,
-  LiveKit and WebRTC included. `deploy/android/build.sh` makes a debug APK.
+  LiveKit and WebRTC included. `deploy/android/build.sh` made a debug APK.
 - On a headless Android 15 emulator (x86_64 image running the arm64 build) the
   APK starts, draws the key storage screen, takes taps and opens the
   on-screen keyboard. (An earlier build that still offered the protected file
   also reached the welcome screen and the recovery words.)
-- Typed text does not reach text fields yet (see Phase 2). Phones ask for a
-  key password first, so for now the Android app stops at that screen.
-- The APK is a debug build: debuggable, so anyone with the phone and a USB cable
-  can read the app's files. Use test accounts only.
+- The APK was a debug build: debuggable, so anyone with the phone and a USB
+  cable could read the app's files (phase 2 changed that).
 - `deploy/ios/build.sh` makes an unsigned IPA. iOS can't be checked from Linux:
   `ring`, `cxx`, `webrtc-sys` and `coreaudio-sys` compile C, C++ and bindings
   against the iOS SDK through `xcrun`. The macOS runner in
@@ -37,7 +109,7 @@ use yet is allowed to be unused there (`allow(dead_code)` on phones only).
 | Subsystem | Android | iOS | Phase 1 |
 | --- | --- | --- | --- |
 | Window, input, drawing (eframe 0.37) | GameActivity through android-activity 0.6; drawn with glow (OpenGL ES) | winit's UIKit backend, wgpu on Metal | Builds. Android runs. |
-| Text input | GameActivity shows the keyboard; winit 0.30 drops its text | winit IME | Android: broken, phase 2 blocker |
+| Text input | GameActivity's text buffer, read each frame (`src/android.rs`) | winit IME | Android works (phase 2) |
 | Voice and video (LiveKit, webrtc-sys) | Builds and links (prebuilt WebRTC for Android) | Prebuilt WebRTC for iOS; CI builds it | Untested at runtime; see Voice |
 | Audio (cpal 0.18) | AAudio (`libaaudio.so`, Android 8.0+) | Core Audio | Builds; needs mic permission and audio session |
 | Key storage (keyring 4) | No Android store | The data-protection Keychain store builds, not used yet | File with password only (see Privacy and permissions) |
@@ -54,15 +126,20 @@ use yet is allowed to be unused there (`allow(dead_code)` on phones only).
 
 ### Android lifecycle
 
-winit 0.30 ignores `onDestroy` (a TODO in its Android backend), so
-`android_main` never returns, and GameActivity waits for it before a new
-activity can start in the same process. The activity therefore takes every
-configuration change itself (`configChanges` in the manifest): turning the
-phone, a new font size, language or dark mode keep the same activity, checked
-on the emulator. A real destroy without the process ending (Android freeing
-memory, "Don't keep activities") still hangs until Android ends the app. The
-client already takes the new `AndroidApp` on each start and starts its log
-once per process, ready for a winit that forwards `onDestroy`.
+winit 0.30 ignores `onDestroy` (a TODO in its Android backend), and
+GameActivity waits for `android_main` to return before the activity, or a new
+one, can go on. The app therefore runs eframe on its own winit loop
+(`eframe::create_native`) and ends that loop once android-activity has handled
+`onDestroy` (its app folder is then gone). winit 0.30 also makes only one event
+loop per process, so `android_main` then ends the process (`_exit`; the normal
+exit handlers call into Java from the wrong thread) and Android starts a fresh
+one for the next activity. Checked on the emulator by starting the app again
+with `FLAG_ACTIVITY_CLEAR_TASK`: the old process ends within a second, the new
+one shows the unlock screen, no "app not responding".
+
+The activity still takes every configuration change itself (`configChanges` in
+the manifest): turning the phone, a new font size, language or dark mode keep
+the same activity instead of restarting the process.
 
 ### Voice
 
@@ -101,8 +178,8 @@ cargo-ndk automates), builds the client library as a `cdylib` with
   add Android libraries (AARs).
 - **Gradle** is needed anyway: GameActivity ships as an AAR, and later phases
   need Java or Kotlin glue (notifications, Android Keystore, the file picker,
-  `libwebrtc.jar`). The shell has no Java code yet: the manifest starts
-  `com.google.androidgamesdk.GameActivity` directly.
+  `libwebrtc.jar`). Its only Java so far is `MainActivity`, a GameActivity that
+  counts the keyboard's action key.
 
 cargo-ndk can replace the few lines of environment in `build.sh` when more
 ABIs (32-bit ARM, x86_64) are added.
@@ -146,15 +223,13 @@ Still to do, screen by screen:
 - **Call panel and voice channel:** the call and its chat stacked, controls in
   a bottom bar, the participant list as a cover like the member list.
 - **Settings:** the page list, then the page, like the main layout.
-- **Dialogs:** full width with the keyboard in mind; the recovery words grid
-  has four fixed columns and is cut off on phones.
+- **Dialogs:** full width; some (Create channel) are wider than a phone.
 - **Touch targets:** phones get at least 44 points (Apple) / 48 dp (Android)
   for rows and icon buttons, set once in `ui::install` from the same
   breakpoint, not per screen.
 - **Hover:** tooltips and hover-only message actions need a long press
   instead (egui turns a long press into a secondary click, which already
   opens context menus).
-- **Safe areas:** the notch, status bar and gesture bar are drawn over today.
 - **Back:** Android's back gesture should do what the Back bar does.
 
 ## Later phases
@@ -163,7 +238,7 @@ Rough effort for one person who knows the code base.
 
 | Phase | What | Effort |
 | --- | --- | --- |
-| 2 | Usable chat on Android: a winit that forwards `onDestroy` (or a patch), typed text (forward GameActivity's text state to egui, or move to winit 0.31), safe areas, phone temp folder (`temp_dir()` is not writable on Android), system TLS roots for non-pinned hosts (check, then rustls-platform-verifier), file picker (Storage Access Framework), local notifications, Android Keystore for the keys, hide Updates and Shortcuts on phones, `rusttalk://` links, the layout list above | 3 to 4 weeks |
+| 2 | Usable chat on Android. Done: typed text, safe areas and the keyboard, `onDestroy`, recovery words. Left: phone temp folder (`temp_dir()` is not writable on Android), system TLS roots for non-pinned hosts (check, then rustls-platform-verifier), file picker (Storage Access Framework), local notifications, Android Keystore for the keys, hide Updates and Shortcuts on phones, `rusttalk://` links, the layout list above | 3 to 4 weeks |
 | 3 | Voice on Android and iOS: WebRTC init, `libwebrtc.jar`, mic permission, audio session and Bluetooth headsets, calls with the screen off (foreground service on Android, background audio on iOS) | 2 weeks |
 | 4 | iOS on a device: Keychain, notifications (reuse `notify/macos.rs`), document picker, safe areas, background rules | 1 to 2 weeks |
 | 5 | Camera (Camera2, AVFoundation) | 1 week |

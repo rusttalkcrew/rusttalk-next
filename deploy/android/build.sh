@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build a debug APK of the RustTalk client for 64-bit ARM phones.
+# Build a test APK of the RustTalk client for 64-bit ARM phones.
 # Usage: deploy/android/build.sh <out-dir>
 # Needs ANDROID_HOME, ANDROID_NDK_HOME, Gradle on PATH and the Rust target:
 # rustup target add aarch64-linux-android
@@ -30,5 +30,5 @@ mkdir -p "$shell/build/rust/jniLibs/arm64-v8a" "$shell/build/rust/res/mipmap" "$
 cp crates/client/assets/rusttalk.png "$shell/build/rust/res/mipmap/ic_launcher.png"
 cp LICENSE NOTICE "$shell/build/rust/assets/"
 version=$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "rusttalk-client") | .version')
-gradle --project-dir "$shell" --no-daemon -PrusttalkVersion="$version" assembleDebug
-cp "$shell/build/outputs/apk/debug/rusttalk-debug.apk" "$out/rusttalk-$version-android-arm64-debug.apk"
+gradle --project-dir "$shell" --no-daemon -PrusttalkVersion="$version" assembleRelease
+cp "$shell/build/outputs/apk/release/rusttalk-release.apk" "$out/rusttalk-$version-android-arm64-test.apk"

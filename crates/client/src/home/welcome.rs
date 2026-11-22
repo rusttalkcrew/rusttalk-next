@@ -84,6 +84,7 @@ pub fn show(ui: &mut Ui, home: &mut Home) -> bool {
                         .desired_width(320.0),
                 )
                 .labelled_by(label.id);
+            let entered = submitted(ui, &field);
             if ui.memory(|memory| memory.focused().is_none()) {
                 field.request_focus();
             }
@@ -93,7 +94,7 @@ pub fn show(ui: &mut Ui, home: &mut Home) -> bool {
             }
             ui.add_space(12.0);
             let go = ui.add_enabled_ui(!empty, |ui| primary_large(ui, t!("home.continue")));
-            if !empty && (go.inner.clicked() || submitted(ui, &field)) {
+            if !empty && (go.inner.clicked() || entered) {
                 next = Some(Some(name.trim().to_owned()));
             }
         }
@@ -115,14 +116,28 @@ pub fn show(ui: &mut Ui, home: &mut Home) -> bool {
             }
             ui.label(ui::caption(format!("{}/{BIO_CHARS}", bio.chars().count())));
             ui.add_space(12.0);
-            ui.horizontal(|ui| {
-                if primary_large(ui, t!("common.save")).clicked() {
-                    next = Some(Some(clean_bio(bio)));
+            // Two large buttons don't fit side by side on a phone: one row each.
+            let (save, skip) = match crate::ui::is_phone(ui.ctx()) {
+                true => (
+                    ui.horizontal(|ui| primary_large(ui, t!("common.save")))
+                        .inner,
+                    ui.horizontal(|ui| secondary_large(ui, t!("welcome.skip")))
+                        .inner,
+                ),
+                false => {
+                    ui.horizontal(|ui| {
+                        let save = primary_large(ui, t!("common.save"));
+                        (save, secondary_large(ui, t!("welcome.skip")))
+                    })
+                    .inner
                 }
-                if secondary_large(ui, t!("welcome.skip")).clicked() {
-                    next = Some(None);
-                }
-            });
+            };
+            if save.clicked() {
+                next = Some(Some(clean_bio(bio)));
+            }
+            if skip.clicked() {
+                next = Some(None);
+            }
         }
     });
     match (std::mem::take(&mut home.welcome), next) {

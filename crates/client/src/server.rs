@@ -173,7 +173,8 @@ impl Server {
         self.dir.members.iter().find(|m| m.person == *person)
     }
 
-    pub fn send(&self, command: Command) {
+    pub fn send(&self, mut command: Command) {
+        crate::net::Queued::count(&mut command);
         // The task only ends after the UI drops this sender or the server stopped for good.
         let _ = self.commands.send(command);
     }

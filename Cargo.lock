@@ -6549,6 +6549,7 @@ dependencies = [
  "hex",
  "html5ever",
  "image",
+ "jni 0.22.4",
  "keyring",
  "libc",
  "linkify",

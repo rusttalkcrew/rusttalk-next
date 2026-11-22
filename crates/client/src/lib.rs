@@ -11,6 +11,8 @@
 mod i18n;
 
 mod admin;
+#[cfg(any(target_os = "android", test))]
+mod android;
 mod app;
 mod audio;
 mod call;
@@ -89,6 +91,11 @@ type Android = ();
 #[unsafe(no_mangle)]
 fn android_main(app: Android) {
     start(Some(app));
+    // winit 0.30 makes one event loop per process, so a later activity couldn't
+    // start in this one; Android starts a fresh process for it. `_exit`: the exit
+    // handlers call into Java from this thread, which Android aborts.
+    // SAFETY: ends the process at once; nothing runs after it.
+    unsafe { libc::_exit(0) }
 }
 
 pub fn main() -> ExitCode {
@@ -230,20 +237,20 @@ fn run(
         renderer: eframe::Renderer::Glow,
         ..Default::default()
     };
-    eframe::run_native(
-        "RustTalk",
-        options,
-        Box::new(|cc| {
-            Ok(Box::new(app::App::new(
-                cc,
-                keystore,
-                start,
-                config,
-                window_started,
-            )))
-        }),
-    )
-    .map_err(|error| anyhow!("run window: {error}"))?;
+    let creator: eframe::AppCreator = Box::new(|cc| {
+        Ok(Box::new(app::App::new(
+            cc,
+            keystore,
+            start,
+            config,
+            window_started,
+        )))
+    });
+    #[cfg(target_os = "android")]
+    android::run(options, creator).context("run window")?;
+    #[cfg(not(target_os = "android"))]
+    eframe::run_native("RustTalk", options, creator)
+        .map_err(|error| anyhow!("run window: {error}"))?;
     window_started.set(true);
     update::restart_if_requested()
 }
@@ -262,6 +269,7 @@ fn start_logging(path: PathBuf) -> Result<()> {
                 .with_default(Level::WARN)
                 .with_target("rusttalk_", Level::INFO),
         )
+        .with(no_typed_text())
         .with(
             tracing_subscriber::fmt::layer()
                 .with_ansi(false)
@@ -272,6 +280,18 @@ fn start_logging(path: PathBuf) -> Result<()> {
         .context("start logging")?;
     STARTED.store(true, std::sync::atomic::Ordering::Relaxed);
     Ok(())
+}
+
+/// Android: winit logs every input event it doesn't handle with its contents, and
+/// that includes the keyboard's text (passwords, recovery words).
+#[cfg(target_os = "android")]
+fn no_typed_text() -> android::NoTypedText {
+    android::NoTypedText
+}
+
+#[cfg(not(target_os = "android"))]
+fn no_typed_text() -> tracing_subscriber::layer::Identity {
+    tracing_subscriber::layer::Identity::new()
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
