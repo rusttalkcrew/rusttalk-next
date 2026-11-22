@@ -21,3 +21,5 @@ pub mod presence;
 #[cfg(feature = "voice")]
 pub mod screen;
 pub mod sync;
+#[cfg(feature = "voice")]
+pub mod terminal;

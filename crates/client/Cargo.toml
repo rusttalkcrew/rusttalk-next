@@ -62,16 +62,26 @@ regex = "1"
 html5ever = "0.40.1"
 # System-wide shortcuts on Windows, macOS and X11; Wayland goes through the desktop portal.
 global-hotkey = "0.10"
+# The pseudo terminal a shared shell runs in (ConPTY on Windows).
+portable-pty = "0.9"
+# The terminal emulator a shared terminal is replayed in, on both sides.
+alacritty_terminal = { version = "0.26", default-features = false }
+# How wide a letter is, to limit the combining marks a viewer's terminal takes.
+unicode-width = "0.2"
 
 [target.'cfg(windows)'.build-dependencies]
 # Compiles rusttalk.rc so Windows shows the app icon on the executable.
 embed-resource = "3"
 
+[target.'cfg(unix)'.dependencies]
+# statvfs, to match the AppImage mount against the AppImage file before an update;
+# renamex_np, to swap the macOS app bundle for its update in one step; and ending a
+# shared shell's process group.
+libc = "0.2"
+
 [target.'cfg(target_os = "linux")'.dependencies]
 # Global shortcuts on Wayland, through the desktop's portal.
 ashpd = { version = "=0.14.0", default-features = false, features = ["global_shortcuts", "tokio"] }
-# statvfs, to match the AppImage mount against the AppImage file before an update.
-libc = "0.2"
 # Wayland file drops: our window's surface, and egui's clipboard patched to take
 # drags (see the workspace Cargo.toml).
 raw-window-handle = "0.6"
@@ -82,8 +92,6 @@ x11-clipboard = "0.9"
 x11rb = "0.13"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-# renamex_np, to swap the app bundle for its update in one step.
-libc = "0.2"
 # Pasting: the pasteboard's picture formats and copied files, and TIFF as PNG.
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSBitmapImageRep", "NSImageRep", "NSPasteboard", "NSPasteboardItem"] }
@@ -93,6 +101,8 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 # Pasting: registered picture formats and copied files, and bitmaps as a last resort.
 arboard = { version = "3.7", default-features = false, features = ["image-data"] }
 clipboard-win = "5.4"
+# A job object, so a shared shell's processes end with the share.
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
 [dev-dependencies]
 # Drives the window off-screen, to click rows and buttons in tests.

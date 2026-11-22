@@ -35,6 +35,7 @@ mod server;
 mod settings;
 mod share;
 mod sounds;
+mod terminal;
 mod ui;
 mod update;
 #[cfg(target_os = "linux")]

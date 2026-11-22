@@ -1209,3 +1209,14 @@ hotkeys.join_first = Tritt zuerst einem Sprachkanal bei.
 hotkeys.no_window = Kein Fenster zum Teilen. Klicke zuerst auf das Fenster und versuche es dann noch einmal.
 hotkeys.unavailable = Globale Tastenkürzel sind auf diesem Computer gerade nicht verfügbar.
 hotkeys.no_screen_access = Erlaube RustTalk die Bildschirmaufnahme in den Systemeinstellungen und öffne RustTalk dann neu.
+
+# crates/client/src/call/terminal.rs
+call.share_terminal = Terminal teilen
+call.stop_terminal = Terminal nicht mehr teilen
+call.share_cmd = Eingabeaufforderung teilen
+call.your_terminal = Dein Terminal
+call.someones_terminal = Terminal von {name}
+terminal.failed = Das Terminal konnte nicht gestartet werden.
+terminal.warn_title = Dein Terminal teilen?
+terminal.warn_text = Alle, die zuschauen, sehen alles darin, auch Passwörter oder Schlüssel, die angezeigt werden. Nur du kannst darin tippen.
+terminal.share = Teilen

@@ -1212,3 +1212,14 @@ hotkeys.join_first = Join a voice channel first.
 hotkeys.no_window = No window to share. Click the window first, then try again.
 hotkeys.unavailable = Global shortcuts aren't available on this computer right now.
 hotkeys.no_screen_access = Allow screen recording for RustTalk in System Settings, then reopen RustTalk.
+
+# crates/client/src/call/terminal.rs
+call.share_terminal = Share a terminal
+call.stop_terminal = Stop sharing terminal
+call.share_cmd = Share Command Prompt
+call.your_terminal = Your terminal
+call.someones_terminal = {name}'s terminal
+terminal.failed = Couldn't start a terminal.
+terminal.warn_title = Share your terminal?
+terminal.warn_text = Everyone who watches sees everything in it, also passwords or keys that show up. Only you can type in it.
+terminal.share = Share

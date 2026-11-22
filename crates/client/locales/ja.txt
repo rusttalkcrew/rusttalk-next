@@ -1209,3 +1209,14 @@ hotkeys.join_first = 先にボイスチャンネルに参加してください�
 hotkeys.no_window = 共有するウィンドウがありません。先にウィンドウをクリックしてから、もう一度お試しください。
 hotkeys.unavailable = このコンピューターでは今、グローバルショートカットを使えません。
 hotkeys.no_screen_access = システム設定で RustTalk の画面収録を許可してから、RustTalk を開き直してください。
+
+# crates/client/src/call/terminal.rs
+call.share_terminal = ターミナルを共有
+call.stop_terminal = ターミナルの共有を停止
+call.share_cmd = コマンドプロンプトを共有
+call.your_terminal = あなたのターミナル
+call.someones_terminal = {name} のターミナル
+terminal.failed = ターミナルを起動できませんでした。
+terminal.warn_title = ターミナルを共有しますか？
+terminal.warn_text = 見ている全員に、表示されるパスワードや鍵も含めてすべてが見えます。入力できるのはあなただけです。
+terminal.share = 共有

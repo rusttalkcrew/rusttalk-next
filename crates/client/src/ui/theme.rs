@@ -99,6 +99,45 @@ pub const ROLE_COLORS: [Color32; 10] = [
     rgb(0x607d8b),
 ];
 
+/// The 16 terminal colours (black, red, green, yellow, blue, magenta, cyan and white, then
+/// their bright versions) for a shared terminal, readable on dark and on light themes.
+pub const TERMINAL_DARK: [Color32; 16] = [
+    rgb(0x3b3f4c),
+    rgb(0xe06c75),
+    rgb(0x98c379),
+    rgb(0xe5c07b),
+    rgb(0x61afef),
+    rgb(0xc678dd),
+    rgb(0x56b6c2),
+    rgb(0xdcdfe4),
+    rgb(0x6b7280),
+    rgb(0xff7a85),
+    rgb(0xb5e890),
+    rgb(0xffd58f),
+    rgb(0x8cc8ff),
+    rgb(0xde94f0),
+    rgb(0x7fd8e4),
+    rgb(0xffffff),
+];
+pub const TERMINAL_LIGHT: [Color32; 16] = [
+    rgb(0x383a42),
+    rgb(0xc8243c),
+    rgb(0x3f8f3e),
+    rgb(0x986801),
+    rgb(0x3468d8),
+    rgb(0xa626a4),
+    rgb(0x0b7fa8),
+    rgb(0x9a9ba3),
+    rgb(0x696c77),
+    rgb(0xe0453c),
+    rgb(0x2f7d2c),
+    rgb(0xb07800),
+    rgb(0x2457c5),
+    rgb(0xb751b6),
+    rgb(0x0a8aa6),
+    rgb(0xc8c9ce),
+];
+
 const DARK_STATUS: (Color32, Color32, Color32, Color32) =
     (rgb(0x23a55a), rgb(0xf0b232), rgb(0xda373c), rgb(0xf6787c));
 const LIGHT_STATUS: (Color32, Color32, Color32, Color32) =

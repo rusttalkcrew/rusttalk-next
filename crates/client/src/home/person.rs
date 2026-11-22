@@ -363,6 +363,7 @@ mod tests {
                 apps: Vec::new(),
                 screens: Vec::new(),
                 camera: None,
+                terminal: None,
             };
             server.voice.insert(LOUNGE, vec![peer]);
         }

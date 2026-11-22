@@ -5,6 +5,7 @@ mod live_file;
 mod screen;
 mod stats;
 mod stream_audio;
+pub mod terminal;
 mod track_name;
 mod watch;
 
@@ -176,6 +177,8 @@ impl KeyClient<'_> {
         let screen_names = self.name_keys(channel, track_name::SCREEN);
         let stream_names = self.name_keys(channel, track_name::STREAM_AUDIO);
         let control_keys = self.name_keys(channel, control::LABEL);
+        let terminal_keys = self.name_keys(channel, terminal::LABEL);
+        let terminal_share_keys = self.name_keys(channel, terminal::SHARE_LABEL);
         let watch_keys = self.name_keys(channel, watch::LABEL);
         let key = media_key(key, &server.server_id, channel, epoch);
         let provider = KeyProvider::with_shared_key(
@@ -225,6 +228,8 @@ impl KeyClient<'_> {
             screen_names,
             stream_names,
             control_keys,
+            terminal_keys,
+            terminal_share_keys,
             watch_keys,
             stats: stats::Sampler::default(),
             files: live_file::LiveFiles::default(),
@@ -296,6 +301,9 @@ pub struct VoiceRoom {
     stream_names: HashMap<i64, Key>,
     /// Seal remote control messages; only the current epoch's is used.
     control_keys: HashMap<i64, Key>,
+    /// Seal terminal messages (current epoch only) and open shares (any held epoch).
+    terminal_keys: HashMap<i64, Key>,
+    terminal_share_keys: HashMap<i64, Key>,
     watch_keys: HashMap<i64, Key>,
     stats: stats::Sampler,
     files: live_file::LiveFiles,
@@ -339,6 +347,8 @@ impl VoiceRoom {
         self.screen_names = keys.name_keys(&self.channel, track_name::SCREEN);
         self.stream_names = keys.name_keys(&self.channel, track_name::STREAM_AUDIO);
         self.control_keys = keys.name_keys(&self.channel, control::LABEL);
+        self.terminal_keys = keys.name_keys(&self.channel, terminal::LABEL);
+        self.terminal_share_keys = keys.name_keys(&self.channel, terminal::SHARE_LABEL);
         self.watch_keys = keys.name_keys(&self.channel, watch::LABEL);
         // Tracks published under the new epoch's names could not be told apart before,
         // and a viewer's watch announcement may only open now.
@@ -384,13 +394,14 @@ impl VoiceRoom {
                     continue;
                 }
                 RoomEvent::Disconnected { .. } => self.files.disconnect(),
-                // Sealed remote control messages; open them with `open_control`.
+                // Sealed remote control and terminal messages; open them with
+                // `open_control` and `open_terminal`.
                 RoomEvent::DataReceived {
                     topic: Some(topic),
                     participant: Some(_),
                     ..
-                } if topic == control::TOPIC => {}
-                // Only the file and control protocols authenticate their data payloads.
+                } if topic == control::TOPIC || topic == terminal::TOPIC => {}
+                // Only the file, control and terminal protocols authenticate their data.
                 RoomEvent::DataReceived { .. }
                 | RoomEvent::ChatMessage { .. }
                 | RoomEvent::TranscriptionReceived { .. }

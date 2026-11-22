@@ -48,6 +48,7 @@ mod overlay;
 mod panel;
 pub mod remote;
 mod stage;
+pub mod terminal;
 pub use panel::{Link, call_bar};
 pub use stage::{Stage, full_view, stage};
 
@@ -90,6 +91,8 @@ pub struct Voice {
     pub stage: Stage,
     /// Remote control of our screen, or of one we watch.
     pub control: remote::Control,
+    /// Our shared terminal, and the one we watch.
+    pub terminals: terminal::Terminals,
     /// A hint about the microphone, once per call, until answered.
     pub mic_hint: Option<Verdict>,
     highlight: Option<Highlight>,
@@ -200,6 +203,7 @@ impl Voice {
             live_files: Vec::new(),
             stage: Stage::default(),
             control: remote::Control::default(),
+            terminals: terminal::Terminals::default(),
             mic_hint: None,
             highlight: None,
         }
@@ -219,6 +223,8 @@ impl Voice {
         self.clear_screens();
         self.stage = Stage::default();
         self.control = remote::Control::default();
+        // Leaving the call ends our shared shell.
+        self.terminals = terminal::Terminals::default();
         self.mic_hint = None;
         let _ = self.audio.take_trouble();
     }
@@ -313,6 +319,7 @@ pub fn frame(ctx: &egui::Context, home: &mut Home) {
         ctx.request_repaint_after(Duration::from_millis(100));
     }
     remote::frame(home, ctx.input(|input| input.time));
+    terminal::frame(home);
     // Stop watching a screen once it is no longer shared.
     if let Some(watching) = &home.voice.watching {
         let shared = call_server(home)
@@ -444,7 +451,7 @@ pub fn room_list(ui: &mut Ui, home: &Home, server: &Server, channel: &Id) -> Opt
                 if peer.connecting {
                     ui.label(ui::caption(t!("common.connecting")));
                 }
-                if !peer.screens.is_empty() {
+                if !peer.screens.is_empty() || peer.terminal.is_some() {
                     live_badge(ui);
                 }
             };

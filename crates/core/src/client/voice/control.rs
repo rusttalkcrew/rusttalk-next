@@ -4,6 +4,7 @@
 
 use anyhow::{Context, Result, ensure};
 use livekit::DataPacket;
+use serde::{Serialize, de::DeserializeOwned};
 
 use super::{ParticipantIdentity, VoiceRoom};
 use crate::{
@@ -16,11 +17,11 @@ pub(super) const LABEL: &[u8] = b"rusttalk-control-v1";
 /// Far more than any message needs.
 const MAX_WIRE_BYTES: usize = 1024;
 
-/// Binds a message to its epoch, sender and recipient. Lengths keep the names apart.
-fn aad(epoch: i64, from: &str, to: &str) -> Vec<u8> {
+/// Binds a message to its protocol, epoch, sender and recipient. Lengths keep the names apart.
+fn aad(label: &[u8], epoch: i64, from: &str, to: &str) -> Vec<u8> {
     let length = |name: &str| (name.len() as u32).to_be_bytes();
     [
-        LABEL,
+        label,
         &epoch.to_be_bytes(),
         &length(from),
         from.as_bytes(),
@@ -30,17 +31,32 @@ fn aad(epoch: i64, from: &str, to: &str) -> Vec<u8> {
     .concat()
 }
 
-/// `epoch || nonce || ciphertext`.
-fn seal(key: &Key, epoch: i64, from: &str, to: &str, message: &Message) -> Result<Vec<u8>> {
+/// `epoch || nonce || ciphertext` of a JSON message for one recipient, under the key
+/// derived with `label`. Terminal sharing seals its messages the same way.
+pub(super) fn seal_for<T: Serialize>(
+    label: &[u8],
+    max: usize,
+    key: &Key,
+    epoch: i64,
+    (from, to): (&str, &str),
+    message: &T,
+) -> Result<Vec<u8>> {
     let clear = serde_json::to_vec(message)?;
-    let sealed = keys::seal(key, &aad(epoch, from, to), &clear)?;
+    let sealed = keys::seal(key, &aad(label, epoch, from, to), &clear)?;
     let wire = [epoch.to_be_bytes().as_slice(), &sealed].concat();
-    ensure!(wire.len() <= MAX_WIRE_BYTES, "control message too large");
+    ensure!(wire.len() <= max, "sealed message too large");
     Ok(wire)
 }
 
-fn open(key: &Key, epoch: i64, from: &str, to: &str, wire: &[u8]) -> Option<Message> {
-    if wire.len() > MAX_WIRE_BYTES {
+pub(super) fn open_for<T: DeserializeOwned>(
+    label: &[u8],
+    max: usize,
+    key: &Key,
+    epoch: i64,
+    (from, to): (&str, &str),
+    wire: &[u8],
+) -> Option<T> {
+    if wire.len() > max {
         return None;
     }
     let (stated, sealed) = wire.split_first_chunk::<8>()?;
@@ -48,8 +64,16 @@ fn open(key: &Key, epoch: i64, from: &str, to: &str, wire: &[u8]) -> Option<Mess
     if i64::from_be_bytes(*stated) != epoch {
         return None;
     }
-    let clear = keys::open(key, &aad(epoch, from, to), sealed).ok()?;
-    let message: Message = serde_json::from_slice(&clear).ok()?;
+    let clear = keys::open(key, &aad(label, epoch, from, to), sealed).ok()?;
+    serde_json::from_slice(&clear).ok()
+}
+
+fn seal(key: &Key, epoch: i64, from: &str, to: &str, message: &Message) -> Result<Vec<u8>> {
+    seal_for(LABEL, MAX_WIRE_BYTES, key, epoch, (from, to), message)
+}
+
+fn open(key: &Key, epoch: i64, from: &str, to: &str, wire: &[u8]) -> Option<Message> {
+    let message: Message = open_for(LABEL, MAX_WIRE_BYTES, key, epoch, (from, to), wire)?;
     message.valid().then_some(message)
 }
 

@@ -27,7 +27,9 @@ use url::Url;
 use super::{
     Command, Ctx, LiveOffer, State, Update,
     control::{self, ControlView},
-    send_messages, to_msg,
+    send_messages,
+    terminal::{self, Hosting},
+    to_msg,
 };
 use crate::{
     screen,
@@ -69,6 +71,10 @@ pub(super) struct Live {
     pub(super) guest: Guest,
     /// What the window last heard about both.
     pub(super) control: ControlView,
+    /// Our shared terminal.
+    pub(super) terminal: Option<Hosting>,
+    /// The terminal we watch.
+    pub(super) viewing: Option<rusttalk_core::terminal::Viewer>,
 }
 
 /// A live file in the voice room or a chat, kept in `State::transfers` by transfer ID.
@@ -119,6 +125,7 @@ pub(super) fn voice_only(command: &Command) -> bool {
             | Command::StopCamera
             | Command::CancelFile(_)
     ) || control::is_control(command)
+        || terminal::is_terminal(command)
 }
 
 /// Run a `voice_only` command. Returns the call's channel when its roster changed.
@@ -145,6 +152,10 @@ pub(super) async fn voice_command(
     if control::is_control(&command) {
         control::command(ctx, live, command).await;
         return Ok(None);
+    }
+    if terminal::is_terminal(&command) {
+        let changed = terminal::command(ctx, live, command).await;
+        return Ok(changed.then_some(live.channel));
     }
     let changed = match command {
         Command::StopApp(id) => {
@@ -525,6 +536,8 @@ pub(super) enum Next {
     Capture(Result<(screen::Capture, screen::Options)>),
     /// The picker for another screen source finished.
     Swap(Result<screen::Capture>),
+    /// Time to send our terminal's output.
+    Flush,
 }
 
 pub(super) async fn next_voice(voice: &mut Option<Live>) -> Next {
@@ -543,8 +556,15 @@ pub(super) async fn next_voice(voice: &mut Option<Live>) -> Next {
             screen::Swap::Idle => std::future::pending().await,
         }
     };
+    let flush = async {
+        match live.terminal.as_mut() {
+            Some(hosting) => hosting.tick.tick().await,
+            None => std::future::pending().await,
+        }
+    };
     tokio::select! {
         event = live.room.next_event() => Next::Event(event),
+        _ = flush => Next::Flush,
         capture = starting => Next::Capture(capture.map_err(anyhow::Error::from).and_then(|c| c)),
         capture = swapping => Next::Swap(capture.map_err(anyhow::Error::from).and_then(|c| c)),
     }
@@ -644,6 +664,7 @@ fn send_roster(ctx: &Ctx, url: &Url, ids: &HashMap<String, Id>, state: &State, c
             apps: Vec::new(),
             screens: Vec::new(),
             camera: None,
+            terminal: None,
         })),
         Some(live) => {
             let mut live_people: HashMap<Id, bool> = HashMap::new();
@@ -651,6 +672,7 @@ fn send_roster(ctx: &Ctx, url: &Url, ids: &HashMap<String, Id>, state: &State, c
             let mut apps: HashMap<Id, Vec<(TrackSid, String)>> = HashMap::new();
             let mut screens: HashMap<Id, Vec<Screen>> = HashMap::new();
             let mut cameras: HashMap<Id, String> = HashMap::new();
+            let mut terminals: HashMap<Id, String> = HashMap::new();
             let mut sounds = Snapshot {
                 camera: live.camera.clone(),
                 screen: live.screen.as_ref().map(|(sid, ..)| sid.clone()),
@@ -663,6 +685,14 @@ fn send_roster(ctx: &Ctx, url: &Url, ids: &HashMap<String, Id>, state: &State, c
                 }
                 if let Some(person) = person {
                     *live_people.entry(*person).or_default() |= voice == VoiceState::Connected;
+                    // One per person: a second device's terminal shows after the first stops.
+                    if voice != VoiceState::Disconnected
+                        && live.room.terminal_share(&participant).is_some()
+                    {
+                        terminals
+                            .entry(*person)
+                            .or_insert_with(|| participant.identity().to_string());
+                    }
                     if *person != me && voice != VoiceState::Disconnected {
                         sounds.people.insert(*person);
                     }
@@ -729,6 +759,9 @@ fn send_roster(ctx: &Ctx, url: &Url, ids: &HashMap<String, Id>, state: &State, c
             if let Some(sid) = &live.camera {
                 cameras.insert(me, sid.to_string());
             }
+            if live.terminal.is_some() {
+                terminals.insert(me, live.room.identity().to_string());
+            }
             if let Some((sid, ..)) = &live.screen {
                 screens.insert(
                     me,
@@ -758,6 +791,7 @@ fn send_roster(ctx: &Ctx, url: &Url, ids: &HashMap<String, Id>, state: &State, c
                     apps: apps.remove(&person).unwrap_or_default(),
                     screens: screens.remove(&person).unwrap_or_default(),
                     camera: cameras.remove(&person),
+                    terminal: terminals.remove(&person),
                 });
             }
         }
@@ -771,6 +805,7 @@ fn send_roster(ctx: &Ctx, url: &Url, ids: &HashMap<String, Id>, state: &State, c
         apps: Vec::new(),
         screens: Vec::new(),
         camera: None,
+        terminal: None,
     }));
     ctx.send(Update::Room(url.clone(), channel, peers, call_sounds));
 }
@@ -912,6 +947,7 @@ pub(super) async fn on_voice(
         RoomEvent::ParticipantDisconnected(participant) => {
             if let Some(live) = &mut state.voice {
                 control::left(ctx, live, participant.identity().as_str());
+                terminal::left(ctx, live, participant.identity().as_str());
             }
         }
         RoomEvent::TrackUnpublished { publication, .. } => {
@@ -1293,6 +1329,8 @@ pub(super) async fn start_call(
         host: Host::default(),
         guest: Guest::default(),
         control: ControlView::default(),
+        terminal: None,
+        viewing: None,
     });
     ctx.send(Update::Call(
         url.clone(),

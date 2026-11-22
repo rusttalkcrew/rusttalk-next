@@ -21,6 +21,7 @@ use crate::{
     net::Command,
     server::{CallState, Id, Server, Stats},
     share::{self, App},
+    terminal::Shell,
     ui::{self, HOVER_SECONDS, ICON_BUTTON, Look, Palette, RADIUS, SPACE_XS},
 };
 
@@ -225,6 +226,7 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
         }
     }
     let mut voice_settings = false;
+    let mut terminal = None;
     Frame::new()
         .fill(c.field)
         .corner_radius(RADIUS)
@@ -248,7 +250,7 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
                 });
             });
             ui.add_space(6.0);
-            let count = if screen::SUPPORTED { 3.0 } else { 2.0 };
+            let count = if screen::SUPPORTED { 4.0 } else { 3.0 };
             let width = (ui.available_width() - SPACE_XS * (count - 1.0)) / count;
             let size = Vec2::new(width, ICON_BUTTON);
             ui.horizontal(|ui| {
@@ -301,6 +303,7 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
                         }
                     }
                 }
+                terminal = terminal_button(ui, voice.terminals.local.is_some(), connected, size);
                 share = app_button(ui, voice, connected && blocked.is_none(), blocked, size);
             });
             if let Some(action) = live_files(ui, &home.voice.live_files, server) {
@@ -349,12 +352,40 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
             None => {}
         }
     }
+    if let Some(shell) = terminal {
+        super::terminal::toggle(ui.ctx(), home, shell);
+    }
     if voice_settings {
         home.settings = Some(Tab::Voice);
     }
     if leave_now {
         leave(home);
     }
+}
+
+/// Share or stop sharing a terminal. On Windows its menu also offers Command Prompt.
+fn terminal_button(ui: &mut Ui, on: bool, connected: bool, size: Vec2) -> Option<Shell> {
+    let (tip, look) = if on {
+        (t!("call.stop_terminal"), Look::On(ui::colors(ui).success))
+    } else {
+        (t!("call.share_terminal"), Look::Plain)
+    };
+    let button = ui
+        .add_enabled_ui(connected, |ui| {
+            ui::icon_button(ui, crate::terminal::ICON, tip, look, size)
+        })
+        .inner;
+    let mut picked = button.clicked().then_some(Shell::Default);
+    if cfg!(windows) && !on {
+        ui::context_menu(&button, |m| {
+            if m.item(crate::terminal::ICON, t!("call.share_cmd"))
+                .clicked()
+            {
+                picked = Some(Shell::Cmd);
+            }
+        });
+    }
+    picked
 }
 
 /// A gentle hint above the panel when the microphone is noisy or too loud. Never while
