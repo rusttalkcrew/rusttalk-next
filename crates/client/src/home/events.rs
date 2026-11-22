@@ -6,7 +6,9 @@ use eframe::egui::{
     self, Align, Align2, CursorIcon, FontId, Label, Layout, Rect, Response, RichText, ScrollArea,
     Sense, Stroke, StrokeKind, Ui, Vec2, WidgetInfo, accesskit::Role, text::LayoutJob,
 };
-use rusttalk_core::calendar::{Details, HORIZON, MAX_DESCRIPTION, MAX_PLACE, MAX_TITLE, Place};
+use rusttalk_core::calendar::{
+    Answer, Details, HORIZON, MAX_DESCRIPTION, MAX_PLACE, MAX_TITLE, Place, REMIND_EVERY,
+};
 
 use super::Home;
 use crate::{
@@ -41,6 +43,8 @@ pub struct View {
     day: Option<NaiveDate>,
     form: Option<Form>,
     confirm: Option<Confirm>,
+    /// The event whose answers are open in a window.
+    people: Option<Id>,
     error: Option<String>,
 }
 
@@ -285,7 +289,10 @@ struct Asked {
     add: bool,
     /// A channel to open: where an event happens.
     open: Option<Id>,
-    approve: Option<Change>,
+    /// Approve, answer or remind.
+    change: Option<Change>,
+    /// Show who comes to this event.
+    people: Option<Id>,
     confirm: Option<Confirm>,
 }
 
@@ -333,9 +340,12 @@ pub fn pane(ui: &mut Ui, home: &mut Home, index: usize) {
                 }
             });
     }
-    if let Some(change) = asked.approve {
+    if let Some(change) = asked.change {
         view.error = None;
         server.send(Command::Calendar(change));
+    }
+    if asked.people.is_some() {
+        view.people = asked.people;
     }
     if asked.confirm.is_some() {
         view.error = None;
@@ -347,6 +357,7 @@ pub fn pane(ui: &mut Ui, home: &mut Home, index: usize) {
     }
     if let Some(change) = form_dialog(ui.ctx(), server, &mut view.form, now)
         .or_else(|| confirm_dialog(ui.ctx(), &mut view.confirm))
+        .or_else(|| people_dialog(ui.ctx(), server, &mut view.people, now))
     {
         server.send(Command::Calendar(change));
     }
@@ -699,6 +710,7 @@ fn card(ui: &mut Ui, server: &Server, event: &Event, now: i64, asked: &mut Asked
             if !record.approved {
                 ui.colored_label(c.warning, t!("events.not_approved"));
             }
+            answers(ui, server, event, now, asked);
             actions(ui, server, event, now, asked);
         });
     });
@@ -715,7 +727,7 @@ fn actions(ui: &mut Ui, server: &Server, event: &Event, now: i64, asked: &mut As
         let approvable =
             !record.approved && (event.details.as_ref()).is_some_and(|details| details.end > now);
         if manages && approvable && ui::primary(ui, t!("events.approve")).clicked() {
-            asked.approve = Some(Change::Approve(Box::new(record.clone())));
+            asked.change = Some(Change::Approve(Box::new(record.clone())));
         }
         let (action, question) = match (record.approved, own) {
             (true, _) => (t!("events.cancel"), t!("events.cancel_question")),
@@ -730,6 +742,177 @@ fn actions(ui: &mut Ui, server: &Server, event: &Event, now: i64, asked: &mut As
             });
         }
     });
+}
+
+/// Who is going, who isn't, who hasn't answered, and (while it runs in a voice channel)
+/// who said yes but isn't there.
+struct People {
+    going: Vec<Id>,
+    not_going: Vec<Id>,
+    open: Vec<Id>,
+    away: Vec<Id>,
+}
+
+fn people(server: &Server, event: &Event, now: i64) -> People {
+    let answer = |person: &Id| {
+        (event.answers.iter())
+            .find(|(who, _)| who == person)
+            .map(|(_, answer)| *answer)
+    };
+    let mut people = People {
+        going: Vec::new(),
+        not_going: Vec::new(),
+        open: Vec::new(),
+        away: Vec::new(),
+    };
+    for member in &server.dir.members {
+        match answer(&member.person) {
+            Some(Answer::Going) => people.going.push(member.person),
+            Some(Answer::NotGoing) => people.not_going.push(member.person),
+            None => people.open.push(member.person),
+        }
+    }
+    if let Some(details) = &event.details
+        && let Place::Channel(channel) = details.place
+        && server
+            .channel(&channel)
+            .is_some_and(|channel| channel.voice)
+        && (details.start..details.end).contains(&now)
+    {
+        let inside = server.voice.get(&channel).map_or(&[][..], Vec::as_slice);
+        people.away = (people.going.iter())
+            .filter(|person| !inside.iter().any(|peer| peer.person == **person))
+            .copied()
+            .collect();
+    }
+    people
+}
+
+/// Going and Not going, and how many answered, for an approved event still to come.
+fn answers(ui: &mut Ui, server: &Server, event: &Event, now: i64, asked: &mut Asked) {
+    let Some(details) = &event.details else {
+        return;
+    };
+    if !event.record.approved || details.end <= now {
+        return;
+    }
+    let mine = (event.answers.iter())
+        .find(|(person, _)| *person == server.dir.me)
+        .map(|(_, answer)| *answer);
+    ui.add_space(ui::SPACE_XS);
+    ui.horizontal_wrapped(|ui| {
+        for (answer, label) in [
+            (Answer::Going, t!("events.going")),
+            (Answer::NotGoing, t!("events.not_going")),
+        ] {
+            let size = Vec2::new(0.0, ui::CONTROL_HEIGHT);
+            let picked = mine == Some(answer);
+            let button = ui::choice_button(ui, picked, label, size);
+            if button.clicked() && !picked {
+                asked.change = Some(Change::Answer(event.record.id, answer));
+            }
+        }
+    });
+    let count = people(server, event, now);
+    let summary = t!(
+        "events.answer_counts",
+        going = count.going.len(),
+        open = count.open.len()
+    );
+    if ui.link(summary).on_hover_text(t!("events.who")).clicked() {
+        asked.people = Some(event.record.id);
+    }
+}
+
+/// The reminders this person hasn't answered yet: event, when it was sent, and the text.
+pub fn reminders(server: &Server, now: i64) -> Vec<(Id, i64, String)> {
+    let Some(calendar) = &server.dir.calendar else {
+        return Vec::new();
+    };
+    let me = server.dir.me;
+    (calendar.events.iter())
+        .filter(|event| event.record.approved && event.record.author != me)
+        .filter(|event| !event.answers.iter().any(|(person, _)| *person == me))
+        .filter_map(|event| {
+            let at = event.record.reminded_at?;
+            let details = event.details.as_ref().filter(|d| d.end > now)?;
+            let body = format!(
+                "{} · {}\n{}",
+                one_line(&details.title),
+                when_text(details),
+                t!("events.reminder_body")
+            );
+            Some((event.record.id, at, body))
+        })
+        .collect()
+}
+
+fn people_dialog(
+    ctx: &egui::Context,
+    server: &Server,
+    open: &mut Option<Id>,
+    now: i64,
+) -> Option<Change> {
+    let id = (*open)?;
+    let event = (server.dir.calendar.iter())
+        .flat_map(|calendar| &calendar.events)
+        .find(|event| event.record.id == id);
+    let Some((event, details)) = event.and_then(|e| Some((e, e.details.as_ref()?))) else {
+        *open = None;
+        return None;
+    };
+    let lists = people(server, event, now);
+    let record = &event.record;
+    let may_remind = record.author == server.dir.me || server.dir.perms.manage_events;
+    let next = record.reminded_at.map(|at| at + REMIND_EVERY);
+    let mut change = None;
+    let title = one_line(&details.title);
+    let room = (ctx.content_rect().height() - 200.0).max(160.0);
+    let (close, dismissed) = ui::dialog(ctx, "event-people", &title, |ui| {
+        ui.label(RichText::new(when_text(details)).color(ui::colors(ui).muted));
+        ScrollArea::vertical().max_height(room).show(ui, |ui| {
+            let list = |ui: &mut Ui, label: &str, people: &[Id]| {
+                ui::section(ui, &format!("{label} — {}", people.len()));
+                if people.is_empty() {
+                    ui.weak(t!("events.nobody"));
+                }
+                for person in people {
+                    ui.label(server.member_name(person));
+                }
+            };
+            if !lists.away.is_empty() {
+                list(ui, t!("events.not_there"), &lists.away);
+            }
+            list(ui, t!("events.going"), &lists.going);
+            list(ui, t!("events.missing"), &lists.open);
+            list(ui, t!("events.not_going"), &lists.not_going);
+        });
+        let mut close = false;
+        ui::footer(ui, |ui| {
+            close = ui::secondary(ui, t!("common.close")).clicked();
+            if may_remind && details.end > now {
+                let ready = next.is_none_or(|next| next <= now) && !lists.open.is_empty();
+                let remind = ui
+                    .add_enabled_ui(ready, |ui| ui::primary(ui, t!("events.remind")))
+                    .inner;
+                let remind = match next.filter(|next| *next > now) {
+                    Some(next) => remind.on_disabled_hover_text(t!(
+                        "events.remind_again_at",
+                        time = crate::i18n::time(local(next), t!("time.clock"))
+                    )),
+                    None => remind,
+                };
+                if remind.clicked() {
+                    change = Some(Change::Remind(id));
+                }
+            }
+        });
+        close
+    });
+    if close || dismissed {
+        *open = None;
+    }
+    change
 }
 
 fn confirm_dialog(ctx: &egui::Context, confirm: &mut Option<Confirm>) -> Option<Change> {
@@ -1059,5 +1242,106 @@ mod tests {
         view.form.as_mut().unwrap().sending = true;
         view.changed(Ok(()));
         assert!(view.form.is_none());
+    }
+
+    #[test]
+    fn lists_who_is_missing_and_reminds_only_those_who_havent_answered() {
+        use crate::server::{Category, Channel, Member, Peer};
+        const ME: Id = [1; 32];
+        const ANN: Id = [2; 32];
+        const BOB: Id = [3; 32];
+        const CID: Id = [4; 32];
+        const LOUNGE: Id = [9; 32];
+        let (commands, _) = tokio::sync::mpsc::unbounded_channel();
+        let known = rusttalk_core::auth::KnownServer {
+            address: "https://friends.example.org/".parse().unwrap(),
+            server_id: [5; 32],
+            tls_fingerprint: None,
+        };
+        let mut server = crate::home::new_server(known, "Friends", commands);
+        server.dir.me = ME;
+        let member = |person| Member {
+            person,
+            name: None,
+            devices: Vec::new(),
+            roles: vec!["member".into()],
+            avatar: None,
+            presence: Default::default(),
+            hide_offline: false,
+            bio: None,
+            voice_muted: false,
+        };
+        server.dir.members = vec![member(ME), member(ANN), member(BOB), member(CID)];
+        server.dir.categories = vec![Category {
+            id: None,
+            name: String::new(),
+            channels: vec![Channel {
+                id: LOUNGE,
+                name: "Lounge".into(),
+                topic: String::new(),
+                voice: true,
+                page: false,
+                audio_kbps: 64,
+                flags: Vec::new(),
+            }],
+        }];
+        let peer = |person| Peer {
+            person,
+            connecting: false,
+            unknown: false,
+            status: Default::default(),
+            apps: Vec::new(),
+            screens: Vec::new(),
+            camera: None,
+            terminal: None,
+        };
+        server.voice.insert(LOUNGE, vec![peer(ANN)]);
+
+        let now = 1_800_000_000;
+        let event = Event {
+            details: Some(Details {
+                title: "Quiz".into(),
+                start: now - 600,
+                end: now + 3600,
+                place: Place::Channel(LOUNGE),
+                ..Details::default()
+            }),
+            record: rusttalk_core::calendar::EventRecord {
+                id: [7; 32],
+                author: ANN,
+                author_device: [0; 32],
+                certificate: String::new(),
+                approved: true,
+                epoch: 1,
+                remove_at: now + 3600 + rusttalk_core::calendar::GRACE,
+                envelope: String::new(),
+                answers: Vec::new(),
+                reminded_at: Some(now - 60),
+            },
+            answers: vec![
+                (ANN, Answer::Going),
+                (BOB, Answer::Going),
+                (CID, Answer::NotGoing),
+            ],
+        };
+        let lists = people(&server, &event, now);
+        assert_eq!(lists.going, [ANN, BOB]);
+        assert_eq!(lists.not_going, [CID]);
+        assert_eq!(lists.open, [ME]);
+        assert_eq!(lists.away, [BOB], "Bob said yes but isn't in the lounge");
+        // Before it starts, nobody is missing from the channel yet.
+        assert!(people(&server, &event, now - 3600).away.is_empty());
+
+        server.dir.calendar = Some(Calendar {
+            enabled: true,
+            events: vec![event],
+        });
+        assert_eq!(reminders(&server, now).len(), 1, "I haven't answered");
+        let events = &mut server.dir.calendar.as_mut().unwrap().events;
+        events[0].answers.push((ME, Answer::NotGoing));
+        assert!(
+            reminders(&server, now).is_empty(),
+            "answered, so no reminder"
+        );
     }
 }

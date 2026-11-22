@@ -267,6 +267,8 @@ pub struct Event {
     /// `None` when this device could not read or verify it.
     pub details: Option<rusttalk_core::calendar::Details>,
     pub record: rusttalk_core::calendar::EventRecord,
+    /// Who answered what; answers this device can't verify are left out.
+    pub answers: Vec<(Id, rusttalk_core::calendar::Answer)>,
 }
 
 /// A named group of emoji and stickers.

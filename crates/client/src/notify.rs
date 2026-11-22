@@ -365,6 +365,8 @@ struct Saved {
     /// When this file was made: channels never opened count as read up to here, so
     /// old history doesn't light up every channel at once.
     since: i64,
+    /// The event reminders shown, by event ID: when that event's last reminder was sent.
+    reminded: BTreeMap<String, i64>,
 }
 
 pub struct Notify {
@@ -506,6 +508,30 @@ impl Notify {
         if changed {
             self.save();
         }
+    }
+
+    /// Whether an event's reminder sent `at` is new here, and remember it as shown.
+    pub fn new_reminder(&mut self, event: &Id, at: i64) -> bool {
+        let key = encode(event);
+        if self
+            .saved
+            .reminded
+            .get(&key)
+            .is_some_and(|&shown| shown >= at)
+        {
+            return false;
+        }
+        // Events go within a year, so the oldest entries are long gone.
+        while self.saved.reminded.len() >= 200 {
+            let oldest = (self.saved.reminded.iter()).min_by_key(|(_, at)| **at);
+            let Some(oldest) = oldest.map(|(key, _)| key.clone()) else {
+                break;
+            };
+            self.saved.reminded.remove(&oldest);
+        }
+        self.saved.reminded.insert(key, at);
+        self.save();
+        true
     }
 
     /// A clicked notification's server and channel.

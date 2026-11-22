@@ -4,7 +4,8 @@ use reqwest::{Method, StatusCode};
 use crate::{
     auth::{decode_bytes, encode},
     calendar::{
-        Calendar, Details, EventContext, EventError, EventRecord, MAX_EVENT_BYTES, NewEvent,
+        Answer, AnswerContext, AnswerRecord, Calendar, Details, EventContext, EventError,
+        EventRecord, MAX_EVENT_BYTES, NewAnswer, NewEvent,
     },
     identity::DeviceCertificate,
     keys,
@@ -111,6 +112,58 @@ impl KeyClient<'_> {
     /// Withdraw, decline or cancel an event.
     pub async fn delete_event(&self, id: &[u8; 32]) -> Result<()> {
         let reply = self.request(Method::DELETE, &path(id)).send().await?;
+        accepted(reply).await?;
+        Ok(())
+    }
+
+    /// Verify who answered and decrypt their answer to `event`.
+    pub fn open_answer(&self, event: &[u8; 32], record: &AnswerRecord) -> Result<Answer> {
+        self.revocations.check(&record.person, &record.device)?;
+        let person =
+            DeviceCertificate::verify_public(record.person, &decode_bytes(&record.certificate)?)?;
+        let key = self
+            .key(self.space(), record.epoch)
+            .ok_or(MessageError::MissingKey)?;
+        let context = AnswerContext {
+            server_id: self.server.known_server().server_id,
+            event_id: *event,
+            epoch: record.epoch,
+            device: record.device,
+            person: record.person,
+        };
+        Ok(context.open(key, &person, &decode_bytes(&record.envelope)?)?)
+    }
+
+    /// Say whether this person comes; a later answer replaces the earlier one.
+    pub async fn answer_event(&self, event: &[u8; 32], answer: Answer) -> Result<()> {
+        let (epoch, key) = self.current_key(self.space())?;
+        let cert = &self.identity.certificate;
+        let context = AnswerContext {
+            server_id: self.server.known_server().server_id,
+            event_id: *event,
+            epoch,
+            device: cert.signing_key().to_bytes(),
+            person: *cert.person_id(),
+        };
+        let body = NewAnswer {
+            epoch,
+            envelope: encode(&context.seal(key, self.identity, answer)?),
+        };
+        let reply = self
+            .request(Method::PUT, &format!("{}/answer", path(event)))
+            .json(&body)
+            .send()
+            .await?;
+        accepted(reply).await?;
+        Ok(())
+    }
+
+    /// Remind everyone who hasn't answered yet.
+    pub async fn remind_event(&self, event: &[u8; 32]) -> Result<()> {
+        let reply = self
+            .request(Method::POST, &format!("{}/remind", path(event)))
+            .send()
+            .await?;
         accepted(reply).await?;
         Ok(())
     }

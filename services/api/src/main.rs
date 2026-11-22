@@ -298,6 +298,8 @@ async fn serve(app: App) -> io::Result<()> {
         .route("/v1/catalog", get(channels::catalog))
         .route("/v1/calendar/{id}", delete(calendar::remove))
         .route("/v1/calendar/{id}/approve", post(calendar::approve))
+        .route("/v1/calendar/{id}/answer", put(calendar::answer))
+        .route("/v1/calendar/{id}/remind", post(calendar::remind))
         .route("/v1/settings/calendar", put(calendar::set_enabled))
         .route("/v1/voice/{id}/token", post(voice::token))
         .route("/v1/voice/{id}/participants", get(voice::participants))

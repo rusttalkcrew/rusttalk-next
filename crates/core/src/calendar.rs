@@ -292,6 +292,12 @@ pub struct EventRecord {
     pub epoch: i64,
     pub remove_at: i64,
     pub envelope: String,
+    /// Who answered; servers from before answers send none.
+    #[serde(default)]
+    pub answers: Vec<AnswerRecord>,
+    /// When the author or a manager last reminded those who haven't answered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reminded_at: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -312,6 +318,143 @@ pub struct Calendar {
 #[derive(Serialize, Deserialize)]
 pub struct CalendarSetting {
     pub enabled: bool,
+}
+
+/// Differs from the event domain, so an answer can't pass as an event or the other way.
+const ANSWER_DOMAIN: &[u8] = b"rusttalk-event-answer-v1";
+/// Format, nonce, the sealed answer byte with its tag, and the signature. Every answer is
+/// this long, so the server can't tell them apart by size.
+pub const ANSWER_BYTES: usize = HEADER + 1 + TAG + SIGNATURE;
+/// How often an event's author or a manager may remind people, in seconds.
+pub const REMIND_EVERY: i64 = 60 * 60;
+
+/// Whether someone comes to an event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Answer {
+    Going = 1,
+    NotGoing = 2,
+}
+
+/// Context authenticated by both encryption and the device signature of an answer.
+#[derive(Clone, Copy)]
+pub struct AnswerContext {
+    pub server_id: [u8; 32],
+    pub event_id: [u8; 32],
+    pub epoch: i64,
+    pub device: [u8; 32],
+    pub person: [u8; 32],
+}
+
+impl AnswerContext {
+    fn associated_data(self) -> Vec<u8> {
+        [
+            ANSWER_DOMAIN,
+            &self.server_id,
+            &self.event_id,
+            &self.epoch.to_be_bytes(),
+            &self.device,
+            &self.person,
+        ]
+        .concat()
+    }
+
+    /// Verify the framing and the signature against the person's device key.
+    pub fn verify(self, device: &VerifyingKey, envelope: &[u8]) -> Result<(), EventError> {
+        if self.epoch <= 0 || envelope.len() != ANSWER_BYTES || envelope[0] != FORMAT {
+            return Err(EventError::Encoding);
+        }
+        if device.as_bytes() != &self.device {
+            return Err(EventError::Signature);
+        }
+        let (sealed, signature) = envelope.split_last_chunk().ok_or(EventError::Encoding)?;
+        device
+            .verify_strict(
+                &[self.associated_data().as_slice(), sealed].concat(),
+                &Signature::from_bytes(signature),
+            )
+            .map_err(|_| EventError::Signature)
+    }
+
+    pub fn seal(
+        self,
+        key: &Key,
+        person: &DeviceIdentity,
+        answer: Answer,
+    ) -> Result<Vec<u8>, EventError> {
+        if self.epoch <= 0 {
+            return Err(EventError::Encoding);
+        }
+        if person.certificate.signing_key().as_bytes() != &self.device
+            || person.certificate.person_id() != &self.person
+        {
+            return Err(EventError::Signature);
+        }
+        let aad = self.associated_data();
+        let mut nonce = [0; NONCE];
+        random_bytes(&mut nonce).map_err(|_| EventError::Randomness)?;
+        let ciphertext = XChaCha20Poly1305::new(&(**key).into())
+            .encrypt(
+                &XNonce::from(nonce),
+                Payload {
+                    msg: &[answer as u8],
+                    aad: &aad,
+                },
+            )
+            .map_err(|_| EventError::Authentication)?;
+        let mut envelope = [&[FORMAT], nonce.as_slice(), &ciphertext].concat();
+        let signature = person
+            .signing_key
+            .sign(&[aad.as_slice(), &envelope].concat());
+        envelope.extend_from_slice(&signature.to_bytes());
+        Ok(envelope)
+    }
+
+    pub fn open(
+        self,
+        key: &Key,
+        person: &DeviceCertificate,
+        envelope: &[u8],
+    ) -> Result<Answer, EventError> {
+        if person.person_id() != &self.person {
+            return Err(EventError::Signature);
+        }
+        self.verify(person.signing_key(), envelope)?;
+        let nonce: [u8; NONCE] = envelope[1..HEADER]
+            .try_into()
+            .map_err(|_| EventError::Encoding)?;
+        let plaintext = XChaCha20Poly1305::new(&(**key).into())
+            .decrypt(
+                &XNonce::from(nonce),
+                Payload {
+                    msg: &envelope[HEADER..envelope.len() - SIGNATURE],
+                    aad: &self.associated_data(),
+                },
+            )
+            .map_err(|_| EventError::Authentication)?;
+        match plaintext.as_slice() {
+            [1] => Ok(Answer::Going),
+            [2] => Ok(Answer::NotGoing),
+            _ => Err(EventError::Encoding),
+        }
+    }
+}
+
+/// A stored answer and the fields the server sees: who answered, not what.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct AnswerRecord {
+    #[serde(with = "wire_id")]
+    pub person: [u8; 32],
+    #[serde(with = "wire_id")]
+    pub device: [u8; 32],
+    pub certificate: String,
+    pub epoch: i64,
+    pub envelope: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct NewAnswer {
+    pub epoch: i64,
+    pub envelope: String,
 }
 
 #[cfg(test)]
@@ -484,5 +627,46 @@ mod tests {
         for details in invalid {
             assert!(details.encode().is_err());
         }
+    }
+
+    #[test]
+    fn an_answer_opens_only_for_its_event_person_and_key() {
+        let (me, other) = (author(), author());
+        let key = random_key().unwrap();
+        let context = AnswerContext {
+            server_id: [1; 32],
+            event_id: [2; 32],
+            epoch: 3,
+            device: me.certificate.signing_key().to_bytes(),
+            person: *me.certificate.person_id(),
+        };
+        for answer in [Answer::Going, Answer::NotGoing] {
+            let sealed = context.seal(&key, &me, answer).unwrap();
+            assert_eq!(sealed.len(), ANSWER_BYTES);
+            assert_eq!(
+                context.open(&key, &me.certificate, &sealed).unwrap(),
+                answer
+            );
+        }
+        let sealed = context.seal(&key, &me, Answer::Going).unwrap();
+        let changes: [fn(&mut AnswerContext); 5] = [
+            |c| c.server_id[0] ^= 1,
+            |c| c.event_id[0] ^= 1,
+            |c| c.epoch += 1,
+            |c| c.device[0] ^= 1,
+            |c| c.person[0] ^= 1,
+        ];
+        for change in changes {
+            let mut changed = context;
+            change(&mut changed);
+            assert!(changed.open(&key, &me.certificate, &sealed).is_err());
+        }
+        for at in 0..sealed.len() {
+            let mut changed = sealed.clone();
+            changed[at] ^= 1;
+            assert!(context.open(&key, &me.certificate, &changed).is_err());
+        }
+        assert!(context.open(&key, &other.certificate, &sealed).is_err());
+        assert!(context.seal(&key, &other, Answer::Going).is_err());
     }
 }
