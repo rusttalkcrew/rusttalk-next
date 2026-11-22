@@ -109,7 +109,7 @@ impl<'a> App<'a> {
                 busy: None,
             },
             Start::Unlock => Screen::Unlock {
-                password: Zeroizing::default(),
+                password: key_storage::secret_input(),
                 error: None,
                 tries: 0,
                 busy: None,
@@ -136,7 +136,7 @@ impl<'a> App<'a> {
                 key_storage::forget(&self.ctx);
                 if restore {
                     Screen::Restore {
-                        words: Zeroizing::default(),
+                        words: key_storage::secret_input(),
                         error: None,
                     }
                 } else {
@@ -188,7 +188,7 @@ impl<'a> App<'a> {
                 Err(error) => problem("create account", &error),
             },
             (Action::Restore, _) => Screen::Restore {
-                words: Zeroizing::default(),
+                words: key_storage::secret_input(),
                 error: None,
             },
             (Action::Continue, Screen::Words { words, identity }) => {
@@ -197,7 +197,7 @@ impl<'a> App<'a> {
                         words,
                         identity,
                         check,
-                        answers: Default::default(),
+                        answers: std::array::from_fn(|_| key_storage::secret_input()),
                         error: None,
                     },
                     Err(error) => problem("pick words to confirm", &error),
@@ -333,7 +333,7 @@ impl<'a> App<'a> {
                     Err(error) => {
                         key_storage::forget(&self.ctx);
                         Screen::Unlock {
-                            password: Zeroizing::default(),
+                            password: key_storage::secret_input(),
                             error: Some(key_storage::unlock_error(&error)),
                             tries: tries + 1,
                             busy: None,

@@ -341,13 +341,17 @@ impl Revocation {
 
 pub fn revoke_device(
     words: &str,
+    person: &PersonId,
     device_signing_key: [u8; 32],
 ) -> Result<Revocation, IdentityError> {
     public_key(&device_signing_key)?;
     let (root, _) = derive_keys(&parse_words(words)?);
+    if root.verifying_key().as_bytes() != person {
+        return Err(IdentityError::InvalidWords);
+    }
     let revoked_at = unix_seconds()?;
     Ok(Revocation {
-        person_id: root.verifying_key().to_bytes(),
+        person_id: *person,
         device_signing_key,
         revoked_at,
         signature: root.sign(&revocation_payload(&device_signing_key, revoked_at)),

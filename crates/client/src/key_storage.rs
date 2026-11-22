@@ -35,11 +35,24 @@ pub fn forget(ctx: &Context) {
     }
 }
 
+/// Reserve space up front so typing a phrase or password does not leave old allocations behind.
+pub fn secret_input() -> Zeroizing<String> {
+    Zeroizing::new(String::with_capacity(256))
+}
+
 /// A password typed twice.
-#[derive(Default)]
 pub struct NewPassword {
     pub password: Zeroizing<String>,
     pub repeat: Zeroizing<String>,
+}
+
+impl Default for NewPassword {
+    fn default() -> Self {
+        Self {
+            password: secret_input(),
+            repeat: secret_input(),
+        }
+    }
 }
 
 impl NewPassword {

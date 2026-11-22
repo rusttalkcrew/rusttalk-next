@@ -465,7 +465,11 @@ async fn docker_keys(
             assert!(sibling_keys.key(scope, epoch) == c.key(scope, epoch));
         }
     }
-    let revoked = revoke_device(&c_words, sibling.certificate.signing_key().to_bytes())?;
+    let revoked = revoke_device(
+        &c_words,
+        sibling.certificate.person_id(),
+        sibling.certificate.signing_key().to_bytes(),
+    )?;
     c.revoke_device(&revoked).await?;
     expect_close(&mut sibling_keys, "revoked").await?;
     receive_key(a, space, 3).await?;
@@ -807,6 +811,7 @@ async fn docker_membership() -> Result<()> {
     let sibling_token = session(member_bot.sign_in(&sibling, None).await?, &mut secrets).await?;
     let revocation = revoke_device(
         &member_words,
+        member_id.certificate.person_id(),
         member_id.certificate.signing_key().to_bytes(),
     )?;
     let reply = member_bot

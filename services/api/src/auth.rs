@@ -846,7 +846,7 @@ mod tests {
         let (words, identity) = DeviceIdentity::create("test").unwrap();
         let person = identity.certificate.person_id();
         let device = identity.certificate.signing_key().as_bytes();
-        let revocation = revoke_device(&words, *device).unwrap();
+        let revocation = revoke_device(&words, person, *device).unwrap();
         let mut conn = db.acquire().await.unwrap();
         assert!(check_revoked(&mut conn, person, device).await.is_ok());
         query("INSERT INTO revocations (person_id, device_id, record) VALUES (?, ?, ?)")

@@ -246,18 +246,23 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let records = Revocations::in_profile(dir.path());
         let (words, current) = DeviceIdentity::create("current").unwrap();
-        let (foreign, _) = DeviceIdentity::create("other").unwrap();
+        let (foreign, signer) = DeviceIdentity::create("other").unwrap();
         let sibling = DeviceIdentity::add_device(&words, "sibling").unwrap();
         let current = current.certificate;
         let target = sibling.certificate.signing_key().to_bytes();
         for record in [
-            revoke_device(&foreign, target).unwrap(),
-            revoke_device(&words, current.signing_key().to_bytes()).unwrap(),
+            revoke_device(&foreign, signer.certificate.person_id(), target).unwrap(),
+            revoke_device(
+                &words,
+                current.person_id(),
+                current.signing_key().to_bytes(),
+            )
+            .unwrap(),
         ] {
             assert!(records.remove_other_device(&current, &record).is_err());
         }
         assert!(records.records(current.person_id()).unwrap().is_empty());
-        let signed = revoke_device(&words, target).unwrap();
+        let signed = revoke_device(&words, current.person_id(), target).unwrap();
         records.remove_other_device(&current, &signed).unwrap();
         assert_eq!(
             Revocations::in_profile(dir.path())
@@ -273,7 +278,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (words, cert) = DeviceIdentity::create("owner").unwrap();
         let person = cert.certificate.person_id();
-        let record = revoke_device(&words, cert.certificate.signing_key().to_bytes()).unwrap();
+        let record =
+            revoke_device(&words, person, cert.certificate.signing_key().to_bytes()).unwrap();
         let records = Revocations::in_profile(dir.path());
         records.remember(&record).unwrap();
         let folder = records.0.join(filename(person));
@@ -300,7 +306,8 @@ mod tests {
         for i in 0..REVOCATIONS_PER_PERSON {
             fs::write(folder.join(filename(&[i as u8; 32])), []).unwrap();
         }
-        let record = revoke_device(&words, cert.certificate.signing_key().to_bytes()).unwrap();
+        let record =
+            revoke_device(&words, person, cert.certificate.signing_key().to_bytes()).unwrap();
         assert!(records.remember(&record).is_err());
         assert_eq!(count_keys(&folder).unwrap(), REVOCATIONS_PER_PERSON);
         assert!(records.check(person, &[0; 32]).is_err());
@@ -311,14 +318,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (words, b1) = DeviceIdentity::create("B1").unwrap();
         let b2 = DeviceIdentity::add_device(&words, "B2").unwrap();
-        let (other, _) = DeviceIdentity::create("other").unwrap();
+        let (other, signer) = DeviceIdentity::create("other").unwrap();
         let person = b1.certificate.person_id();
         let device = b2.certificate.signing_key().to_bytes();
         let records = Revocations::in_profile(dir.path());
-        let signed = |words| encode(&revoke_device(words, device).unwrap().to_bytes());
-        assert!(!records.observe(person, &signed(&other)).unwrap());
+        let signed = |words: &str, owner: &PersonId| {
+            encode(&revoke_device(words, owner, device).unwrap().to_bytes())
+        };
+        assert!(
+            !records
+                .observe(person, &signed(&other, signer.certificate.person_id()))
+                .unwrap()
+        );
         assert!(records.allows(&b2.certificate));
-        let valid = signed(&words);
+        let valid = signed(&words, person);
         assert!(records.observe(person, &valid).unwrap());
         assert!(!records.observe(person, &valid).unwrap());
         let restarted = Revocations::in_profile(dir.path());

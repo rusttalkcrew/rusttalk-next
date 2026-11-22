@@ -497,8 +497,12 @@ pub fn show(
             ctx.data_mut(|d| d.remove::<egui::text_edit::TextEditState>(field));
             let form = home.remove_device.take().expect("open removal");
             if action == Some(true) {
-                match rusttalk_core::identity::revoke_device(&form.words, form.target) {
-                    Ok(record) if record.person_id() == home.identity.certificate.person_id() => {
+                match rusttalk_core::identity::revoke_device(
+                    &form.words,
+                    home.identity.certificate.person_id(),
+                    form.target,
+                ) {
+                    Ok(record) => {
                         if let Err(error) = home.remove_device(&record) {
                             tracing::warn!(%error, "could not save device removal");
                             home.error = Some(t!("settings.remove_failed").into());
@@ -506,7 +510,7 @@ pub fn show(
                             home.error = None;
                         }
                     }
-                    _ => {
+                    Err(_) => {
                         home.remove_device = Some(RemoveDevice {
                             error: Some(t!("settings.remove_words_error")),
                             ..RemoveDevice::new(form.target)
@@ -759,7 +763,7 @@ impl RemoveDevice {
     fn new(target: [u8; 32]) -> Self {
         Self {
             target,
-            words: Default::default(),
+            words: crate::key_storage::secret_input(),
             error: None,
         }
     }

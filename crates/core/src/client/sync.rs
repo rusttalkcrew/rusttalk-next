@@ -368,9 +368,12 @@ mod tests {
     fn an_older_snapshot_can_add_a_revocation_but_never_erase_one() {
         let dir = tempfile::tempdir().unwrap();
         let (words, device) = crate::identity::DeviceIdentity::create("device").unwrap();
-        let signed =
-            crate::identity::revoke_device(&words, device.certificate.signing_key().to_bytes())
-                .unwrap();
+        let signed = crate::identity::revoke_device(
+            &words,
+            device.certificate.person_id(),
+            device.certificate.signing_key().to_bytes(),
+        )
+        .unwrap();
         let record = crate::auth::encode(&signed.to_bytes());
         let mut state = State::default();
         state.revocations.insert(record.clone());
