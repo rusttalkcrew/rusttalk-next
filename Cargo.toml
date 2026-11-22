@@ -16,6 +16,11 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.tract-linalg]
 opt-level = 3
+# Unlocking a password key file takes seconds without optimisation.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3
 
 # egui's Wayland clipboard, patched to take file drops too: winit 0.30 has no Wayland
 # drag and drop, and compositors such as Hyprland offer a drag to only one data device

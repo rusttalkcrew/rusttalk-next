@@ -7,8 +7,12 @@ publish = false
 
 [dependencies]
 anyhow = "1"
+# Turns a key-storage password into a key (Argon2id).
+argon2 = { version = "0.6", default-features = false, features = ["alloc", "zeroize"] }
 # Pictures pasted from web pages as data: addresses.
 base64 = "0.22"
+# Locks the key file of the "File with password" key storage.
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc", "zeroize"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # The PulseAudio protocol (also served by PipeWire) gives real device names on Linux;
 # ALSA stays the fallback. Not cpal's PipeWire host: WebRTC's own PipeWire stubs shadow it.

@@ -120,6 +120,7 @@ pub struct Home {
     emoji_picker: Picker,
     pub confirm_sign_out: bool,
     pub error: Option<String>,
+    pub key_storage: crate::key_storage::Form,
     pub server_settings: Option<admin::Settings>,
     /// The crop step for a picked profile picture or server icon.
     crop: Option<crate::crop::Crop>,
@@ -322,6 +323,7 @@ impl Home {
             emoji_picker: Picker::new(&data_dir),
             confirm_sign_out: false,
             error: None,
+            key_storage: Default::default(),
             server_settings: None,
             crop: None,
             synced,
@@ -1397,7 +1399,12 @@ fn panel_frame(fill: Color32) -> Frame {
         .inner_margin(Margin::same(ui::SPACE_S as i8))
 }
 
-pub fn show(ui: &mut Ui, home: &mut Home, updates: &mut crate::update::Updater) -> Option<Action> {
+pub fn show(
+    ui: &mut Ui,
+    home: &mut Home,
+    updates: &mut crate::update::Updater,
+    keystore: &mut crate::keystore::Keystore,
+) -> Option<Action> {
     let now = ui.input(|input| input.time);
     let focused = ui.input(|input| input.viewport().focused).unwrap_or(true);
     if home.focused && !focused {
@@ -1634,7 +1641,7 @@ pub fn show(ui: &mut Ui, home: &mut Home, updates: &mut crate::update::Updater) 
     files::viewer(ui.ctx(), &mut home.files);
     call::screen_dialog(ui.ctx(), home);
     call::frame(ui.ctx(), home);
-    let action = crate::settings::show(ui.ctx(), home, updates);
+    let action = crate::settings::show(ui.ctx(), home, updates, keystore);
     updates.dialog(ui.ctx());
     crop_dialog(ui.ctx(), home);
     action
@@ -2725,7 +2732,7 @@ fn official_servers(ui: &mut Ui, home: &mut Home) {
     }
 }
 
-pub fn privacy_tab(ui: &mut Ui, home: &mut Home) {
+pub fn privacy_tab(ui: &mut Ui, home: &mut Home, keystore: &mut crate::keystore::Keystore) {
     let audio = home.voice.audio.clone();
     let mut settings = audio.settings();
     ui::page_section(ui, t!("home.direct_messages"));
@@ -2822,6 +2829,7 @@ pub fn privacy_tab(ui: &mut Ui, home: &mut Home) {
         error_text(ui, Some(&problem));
     }
     audio.set_settings(settings);
+    crate::key_storage::settings(ui, &mut home.key_storage, keystore, &home.identity);
 }
 
 /// The configured directory and its optional certificate pin, or the official one.

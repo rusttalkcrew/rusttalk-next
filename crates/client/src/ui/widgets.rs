@@ -211,6 +211,18 @@ impl Field<'_> {
         self
     }
 
+    /// Where egui keeps the field's cursor and undo history.
+    pub fn id(mut self, id: egui::Id) -> Self {
+        self.edit = self.edit.id(id);
+        self
+    }
+
+    /// Show dots instead of the typed text.
+    pub fn password(mut self) -> Self {
+        self.edit = self.edit.password(true);
+        self
+    }
+
     pub fn char_limit(mut self, limit: usize) -> Self {
         self.edit = self.edit.char_limit(limit);
         self

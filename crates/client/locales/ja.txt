@@ -822,6 +822,39 @@ app.restore_text = 24 個の復元ワードを順番どおりに、スペース�
 app.recovery_words = 復元ワード
 app.sign_in = サインイン
 
+# crates/client/src/key_storage.rs
+keys.section = 鍵の保存場所
+keys.choose_title = 鍵をどこに保存しますか？
+keys.no_keychain = このデバイスにはキーチェーンがありません（Steam Deck のゲームモードでよくあります）。RustTalk の鍵をどこに保存しますか？
+keys.keychain = キーチェーン
+keys.keychain_help = システムのキーチェーンに鍵を保存します。
+keys.file = 保護されたファイル
+keys.file_help = おすすめ。あなただけが開けるファイルです。入力は不要です。
+keys.password_file = パスワード付きファイル
+keys.password_file_help = 最も安全。起動するたびにパスワードを入力します。
+keys.password = パスワード
+keys.repeat_password = もう一度入力
+keys.password_empty = パスワードを決めてください。
+keys.password_mismatch = パスワードが一致しません。
+keys.continue = 続ける
+keys.choose_failed = 鍵の保存場所を設定できませんでした。もう一度お試しください。
+keys.unlock_title = RustTalk のロック解除
+keys.unlock_text = パスワードを入力して鍵を開きます。
+keys.unlock = ロック解除
+keys.wrong_password = パスワードが違います
+keys.unlock_failed = 鍵を開けませんでした。ログファイルを確認してください。
+keys.forgot = パスワードを忘れましたか？復元ワードでもう一度サインインしてください。
+keys.use_words = 復元ワードを使う
+keys.gone_title = 鍵はデスクトップのキーチェーンにあります
+keys.gone_text = デスクトップモードで一度 RustTalk を開き、設定で鍵の保存場所をファイルに切り替えるか、復元ワードで復元してください。
+keys.missing_title = 鍵が見つかりません
+keys.missing_text = このデバイスの鍵が見つかりません。復元ワードでもう一度サインインしてください。
+keys.move = 鍵を移動
+keys.change_password = パスワードを変更
+keys.moved = 完了しました。鍵は新しい場所にあります。
+keys.move_failed = 鍵を移動できませんでした。鍵は元の場所のままです。
+keys.no_keychain_here = 現在このデバイスにはキーチェーンがありません。
+
 # crates/client/src/net.rs
 net.dm_pins_unsaved = {server} のDMは一時停止中です: 相手の記録をこのデバイスに保存できませんでした。
 net.dm_not_private = {server} 経由では送信していません: そこでは他の人がこのDMを読める可能性があります。

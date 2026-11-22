@@ -34,8 +34,10 @@ License: Apache-2.0 (`LICENSE`, `NOTICE`). Add no dependency whose license is in
    Logs never contain keys, plaintext, invite codes or recovery words.
 6. **Fail closed, but locally.** A bad request or one broken session never takes
    down other sessions or the server.
-7. **Simple storage.** Keys live in the OS keystore. No root installers, no custom
-   filesystem permission checks. Server data: SQLite (WAL) through `sqlx`, written
+7. **Simple storage.** Keys live in the OS keystore or, on devices without a
+   keychain (e.g. Steam Deck Game Mode), in a protected file that can optionally
+   be locked with a password, as the person chooses (see `docs/crypto.md`, Local
+   identity). No root installers, no custom filesystem permission checks. Server data: SQLite (WAL) through `sqlx`, written
    in plain, portable SQL only, so Postgres can be added later if a real server
    ever measures the need; encrypted files live on disk, not in the database.
 

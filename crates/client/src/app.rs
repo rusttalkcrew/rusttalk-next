@@ -8,7 +8,8 @@ use zeroize::Zeroizing;
 
 use crate::{
     home::Home,
-    keystore::Keystore,
+    key_storage::{self, NewPassword, Picked, Unlock},
+    keystore::{Job, Keystore, Kind, Sealer, Start, Unlocked},
     ui::{self, error_text, primary_large as primary, secondary_large as secondary},
 };
 
@@ -43,6 +44,24 @@ enum Screen {
         words: Zeroizing<String>,
         error: Option<String>,
     },
+    /// No keychain on the first start; `restore` goes on to the recovery words.
+    Storage {
+        password: Option<NewPassword>,
+        error: Option<String>,
+        restore: bool,
+        /// The key for the chosen password, being derived.
+        busy: Option<Job<Sealer>>,
+    },
+    Unlock {
+        password: Zeroizing<String>,
+        error: Option<String>,
+        tries: u32,
+        busy: Option<Job<Unlocked>>,
+    },
+    /// This profile's keys aren't found; `keychain` when they're in an unreachable one.
+    Missing {
+        keychain: bool,
+    },
     Home(Box<Home>),
 }
 
@@ -52,13 +71,19 @@ pub enum Action {
     StartOver,
     Continue,
     SignOut,
+    Choose(Picked),
+    Unlock,
+    UseWords,
+    /// Password work finished.
+    Sealed(anyhow::Result<Sealer>),
+    Unlocked(anyhow::Result<Unlocked>),
 }
 
 impl<'a> App<'a> {
     pub fn new(
         cc: &eframe::CreationContext,
         keystore: Keystore,
-        identity: Option<DeviceIdentity>,
+        start: Start,
         data: PathBuf,
         window_started: &'a Cell<bool>,
     ) -> Self {
@@ -74,9 +99,23 @@ impl<'a> App<'a> {
             updates,
             window_started,
         };
-        if let Some(identity) = identity {
-            app.screen = app.home(identity);
-        }
+        app.screen = match start {
+            Start::Ready(Some(identity)) => app.home(*identity),
+            Start::Ready(None) => Screen::Welcome,
+            Start::Choose => Screen::Storage {
+                password: None,
+                error: None,
+                restore: false,
+                busy: None,
+            },
+            Start::Unlock => Screen::Unlock {
+                password: Zeroizing::default(),
+                error: None,
+                tries: 0,
+                busy: None,
+            },
+            Start::Missing { keychain } => Screen::Missing { keychain },
+        };
         app
     }
 
@@ -90,8 +129,57 @@ impl<'a> App<'a> {
         }
     }
 
+    /// After the first-start choice: on to the account screens.
+    fn chosen(&mut self, kind: Kind, sealer: Option<Sealer>, restore: bool) -> Screen {
+        match self.keystore.choose(kind, sealer) {
+            Ok(()) => {
+                key_storage::forget(&self.ctx);
+                if restore {
+                    Screen::Restore {
+                        words: Zeroizing::default(),
+                        error: None,
+                    }
+                } else {
+                    Screen::Welcome
+                }
+            }
+            Err(error) => {
+                tracing::error!(error = %format_args!("{error:#}"), "choosing key storage failed");
+                Screen::Storage {
+                    password: None,
+                    error: Some(t!("keys.choose_failed").into()),
+                    restore,
+                    busy: None,
+                }
+            }
+        }
+    }
+
+    /// Pick up finished password work.
+    fn poll(&mut self) {
+        let action = match &mut self.screen {
+            Screen::Storage { busy, .. } => busy
+                .take_if(|job| job.done())
+                .map(|job| Action::Sealed(job.join())),
+            Screen::Unlock { busy, .. } => busy
+                .take_if(|job| job.done())
+                .map(|job| Action::Unlocked(job.join())),
+            _ => return,
+        };
+        match action {
+            Some(action) => self.apply(action),
+            None => {
+                if matches!(
+                    self.screen,
+                    Screen::Storage { busy: Some(_), .. } | Screen::Unlock { busy: Some(_), .. }
+                ) {
+                    self.ctx.request_repaint_after(key_storage::POLL);
+                }
+            }
+        }
+    }
+
     fn apply(&mut self, action: Action) {
-        let keystore = &self.keystore;
         let screen = std::mem::replace(&mut self.screen, Screen::Welcome);
         self.screen = match (action, screen) {
             (Action::StartOver, _) => Screen::Welcome,
@@ -126,7 +214,7 @@ impl<'a> App<'a> {
                 },
             ) => {
                 let error = if check.matches(&words, answers.each_ref().map(|a| a.as_str())) {
-                    save(keystore, &identity)
+                    save(&mut self.keystore, &identity)
                 } else {
                     Some(t!("app.words_mismatch").into())
                 };
@@ -143,7 +231,7 @@ impl<'a> App<'a> {
             }
             (Action::Continue, Screen::Restore { words, .. }) => {
                 let error = match DeviceIdentity::add_device(&words, DEVICE_NAME) {
-                    Ok(identity) => match save(keystore, &identity) {
+                    Ok(identity) => match save(&mut self.keystore, &identity) {
                         None => {
                             tracing::info!("added this device to an existing account");
                             self.screen = self.home(identity);
@@ -165,7 +253,89 @@ impl<'a> App<'a> {
                 };
                 Screen::Restore { words, error }
             }
-            (Action::SignOut, Screen::Home(mut home)) => match keystore.delete() {
+            (Action::UseWords, _) => {
+                key_storage::forget(&self.ctx);
+                Screen::Storage {
+                    password: None,
+                    error: None,
+                    restore: true,
+                    busy: None,
+                }
+            }
+            (Action::Choose(Picked::File), Screen::Storage { restore, .. }) => {
+                self.chosen(Kind::File, None, restore)
+            }
+            (
+                Action::Choose(Picked::Password(typed)),
+                Screen::Storage {
+                    password,
+                    restore,
+                    busy: None,
+                    ..
+                },
+            ) => Screen::Storage {
+                password,
+                error: None,
+                restore,
+                busy: Some(self.keystore.new_password(typed)),
+            },
+            (
+                Action::Sealed(sealer),
+                Screen::Storage {
+                    password, restore, ..
+                },
+            ) => match sealer {
+                Ok(sealer) => self.chosen(Kind::Password, Some(sealer), restore),
+                Err(error) => {
+                    tracing::error!(error = %format_args!("{error:#}"), "choosing a password failed");
+                    Screen::Storage {
+                        password,
+                        error: Some(t!("keys.choose_failed").into()),
+                        restore,
+                        busy: None,
+                    }
+                }
+            },
+            (
+                Action::Unlock,
+                Screen::Unlock {
+                    password,
+                    tries,
+                    busy: None,
+                    ..
+                },
+            ) => match self.keystore.start_unlock(password.clone()) {
+                Ok(job) => Screen::Unlock {
+                    password,
+                    error: None,
+                    tries,
+                    busy: Some(job),
+                },
+                Err(error) => Screen::Unlock {
+                    password,
+                    error: Some(key_storage::unlock_error(&error)),
+                    tries,
+                    busy: None,
+                },
+            },
+            (Action::Unlocked(unlocked), Screen::Unlock { tries, .. }) => {
+                match unlocked.and_then(|unlocked| self.keystore.finish_unlock(unlocked)) {
+                    Ok(identity) => {
+                        key_storage::forget(&self.ctx);
+                        self.home(identity)
+                    }
+                    Err(error) => {
+                        key_storage::forget(&self.ctx);
+                        Screen::Unlock {
+                            password: Zeroizing::default(),
+                            error: Some(key_storage::unlock_error(&error)),
+                            tries: tries + 1,
+                            busy: None,
+                        }
+                    }
+                }
+            }
+            (Action::SignOut, Screen::Home(mut home)) => match self.keystore.delete() {
                 Ok(()) => {
                     // Stop the network first, so nothing writes these files again.
                     home.stop_for_sign_out();
@@ -250,7 +420,7 @@ fn forget_profile(data: &std::path::Path, settings: crate::audio::Settings) {
 }
 
 /// Returns the message to show when saving failed.
-fn save(keystore: &Keystore, identity: &DeviceIdentity) -> Option<String> {
+fn save(keystore: &mut Keystore, identity: &DeviceIdentity) -> Option<String> {
     let error = keystore.save(identity).err()?;
     tracing::error!(error = %format_args!("{error:#}"), "saving identity failed");
     Some(t!("app.save_failed").into())
@@ -281,6 +451,7 @@ impl eframe::App for App<'_> {
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.updates.poll(ui.ctx());
+        self.poll();
         let action = match &mut self.screen {
             Screen::Problem(details) => card(ui, |ui| {
                 ui.heading(t!("app.problem_title"));
@@ -298,7 +469,42 @@ impl eframe::App for App<'_> {
                 ..
             } => card(ui, |ui| confirm(ui, check, answers, error.as_deref())),
             Screen::Restore { words, error } => card(ui, |ui| restore(ui, words, error.as_deref())),
-            Screen::Home(home) => crate::home::show(ui, home, &mut self.updates),
+            Screen::Storage {
+                password,
+                error,
+                busy,
+                ..
+            } => {
+                let busy = busy.is_some();
+                card(ui, |ui| {
+                    key_storage::choose(ui, password, error, busy).map(Action::Choose)
+                })
+            }
+            Screen::Unlock {
+                password,
+                error,
+                tries,
+                busy,
+            } => {
+                let busy = busy.is_some();
+                card(ui, |ui| {
+                    key_storage::unlock(ui, password, error.as_deref(), *tries, busy).map(
+                        |unlock| match unlock {
+                            Unlock::Try => Action::Unlock,
+                            Unlock::UseWords => Action::UseWords,
+                        },
+                    )
+                })
+            }
+            Screen::Missing { keychain } => {
+                let keychain = *keychain;
+                card(ui, |ui| {
+                    key_storage::missing(ui, keychain).then_some(Action::UseWords)
+                })
+            }
+            Screen::Home(home) => {
+                crate::home::show(ui, home, &mut self.updates, &mut self.keystore)
+            }
         };
         if let Some(action) = action {
             self.apply(action);

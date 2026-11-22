@@ -379,7 +379,11 @@ pub fn show(
     ctx: &egui::Context,
     home: &mut Home,
     updates: &mut crate::update::Updater,
+    keystore: &mut crate::keystore::Keystore,
 ) -> Option<Action> {
+    if home.settings != Some(Tab::Privacy) {
+        crate::key_storage::leave(ctx, &mut home.key_storage);
+    }
     let mut tab = home.settings?;
     let page = |id, icon, label| Page { id, icon, label };
     let groups = [
@@ -442,7 +446,7 @@ pub fn show(
                 }
                 Tab::Notifications => notifications_page(ui, home),
                 Tab::Shortcuts => crate::hotkeys::settings_page(ui, home),
-                Tab::Privacy => privacy_tab(ui, home),
+                Tab::Privacy => privacy_tab(ui, home, keystore),
                 Tab::Devices => devices_page(ui, home),
                 Tab::Updates => updates.settings(ui),
                 Tab::About => {
