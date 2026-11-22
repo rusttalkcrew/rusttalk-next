@@ -1,7 +1,9 @@
 use std::{
+    collections::HashSet,
     fs::{self, File},
     io::{self, Write},
     path::Path,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -17,12 +19,15 @@ use anyhow::{Context, Result, ensure};
 use reqwest::{Client, RequestBuilder, Response};
 use url::Url;
 
+type RevokedDevice = (crate::identity::PersonId, [u8; 32]);
+
 /// A verified RustTalk HTTPS origin and its pinned transport.
 #[derive(Clone)]
 pub struct Server {
     /// Protocol advertised by this origin, used to choose the outgoing message format.
     pub protocol: u32,
     pub(super) revocations: Option<super::revocations::Revocations>,
+    known_revocations: Arc<Mutex<HashSet<RevokedDevice>>>,
     http: Client,
     server: KnownServer,
 }
@@ -51,6 +56,7 @@ impl Server {
         let mut server = Self {
             http,
             server: observed,
+            known_revocations: Default::default(),
             revocations: Some(super::revocations::Revocations::in_profile(data)),
             protocol: 1,
         };
@@ -75,6 +81,7 @@ impl Server {
             http,
             server,
             revocations: None,
+            known_revocations: Default::default(),
             protocol: 1,
         })
     }
@@ -143,15 +150,37 @@ impl Server {
             .map_err(|error| error.without_url().into())
     }
     /// Publish an owner's signed record to this member server. Replays are idempotent.
-    pub async fn publish_revocation(&self, session: &Session, record: &str) -> Result<()> {
+    pub async fn publish_revocation(
+        &self,
+        session: &Session,
+        record: &crate::identity::Revocation,
+    ) -> Result<()> {
+        let id = (*record.person_id(), *record.device_signing_key());
+        if self
+            .known_revocations
+            .lock()
+            .expect("known revocations")
+            .contains(&id)
+        {
+            return Ok(());
+        }
+        let encoded = crate::auth::encode(&record.to_bytes());
         self.request(reqwest::Method::POST, "/v1/me/revocations")
             .bearer_auth(&session.token)
-            .json(&serde_json::json!({"record": record}))
+            .json(&serde_json::json!({"record": encoded}))
             .send()
             .await
             .and_then(Response::error_for_status)
             .map_err(reqwest::Error::without_url)?;
+        self.note_revocation(record);
         Ok(())
+    }
+
+    pub(super) fn note_revocation(&self, record: &crate::identity::Revocation) {
+        self.known_revocations
+            .lock()
+            .expect("known revocations")
+            .insert((*record.person_id(), *record.device_signing_key()));
     }
 
     pub(super) async fn refresh(&self, session: &Session) -> Result<Session> {

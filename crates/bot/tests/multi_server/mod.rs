@@ -250,6 +250,31 @@ pub async fn exercise(
     owner_b.sync().await?;
     receive_key(&mut sibling_client, text_b, 1).await?;
     let device = sibling.certificate.signing_key().to_bytes();
+    #[cfg(feature = "media")]
+    let (mut listening, speaking) = {
+        use rusttalk_core::client::voice::RoomEvent;
+        let voice = owner_b
+            .create_channel(&category_b, "voice", b"Revocation check", b"")
+            .await?;
+        owner_b.sync().await?;
+        receive_key(&mut sibling_client, voice, 1).await?;
+        let (mut listening, speaking) = tokio::try_join!(
+            owner_b.join_voice(&voice.id),
+            sibling_client.join_voice(&voice.id)
+        )?;
+        speaking
+            .publish_audio(rusttalk_bot::voice::source())
+            .await?;
+        super::wait::within("B2 microphone subscription", async {
+            while let Some(event) = listening.next_event().await {
+                if matches!(event, RoomEvent::TrackSubscribed { participant, .. } if participant.identity() == speaking.identity()) {
+                    return Ok(());
+                }
+            }
+            anyhow::bail!("room closed before B2 subscribed")
+        }).await?;
+        (listening, speaking)
+    };
     let revoked = rusttalk_core::identity::revoke_device(&peer_words, device)?;
     peer_a
         .request(Method::POST, "/v1/me/revocations")
@@ -258,6 +283,23 @@ pub async fn exercise(
         .await?
         .error_for_status()?;
     owner_a.sync().await?;
+    #[cfg(feature = "media")]
+    {
+        use rusttalk_core::client::voice::RoomEvent;
+        super::wait::within("B2 microphone unsubscription on the stale server", async {
+            while let Some(event) = listening.next_event().await {
+                if matches!(event, RoomEvent::TrackUnsubscribed { participant, .. } if participant.identity() == speaking.identity()) {
+                    return Ok(());
+                }
+            }
+            anyhow::bail!("room closed before B2 unsubscribed")
+        }).await?;
+        assert!(listening.remote_audio_tracks().is_empty());
+        tokio::try_join!(listening.leave(), speaking.leave())?;
+        println!(
+            "W109 B2 microphone unsubscribed during a call after another server delivered its revocation"
+        );
+    }
     let post = sibling_client
         .send_message(
             &text_b.id,
@@ -294,6 +336,54 @@ pub async fn exercise(
             .any(|need| need.scope == new_scope && need.device == encode(&device))
     );
     println!("W109 server B still accepted B2, but the peer refused its message and key wrap");
+
+    // An authenticated sync blob can be made by any device holding the sync key.
+    // A restored owner must relay only records signed by the owner's root.
+    use rusttalk_core::client::{revocations::Revocations, sync};
+    let foreign_words = DeviceIdentity::create("foreign signer")?.0;
+    let forged = rusttalk_core::identity::revoke_device(
+        &foreign_words,
+        peer.certificate.signing_key().to_bytes(),
+    )?;
+    let signed = encode(&revoked.to_bytes());
+    let mut snapshot = sync::Snapshot::default();
+    snapshot.state.revocations = [signed.clone(), encode(&forged.to_bytes())].into();
+    let source = [peer_a.sync_peer()];
+    assert!(
+        sync::push_all(&source, &peer.sync_key, &mut snapshot)
+            .await?
+            .is_empty()
+    );
+    let (snapshots, failures) = sync::load_all(&source, &peer.sync_key).await;
+    assert!(failures.is_empty());
+    let relay = Revocations::in_profile(&pins.join("restored-owner"));
+    let kept = relay
+        .relay(
+            peer.certificate.person_id(),
+            &snapshots,
+            &[peer_b.sync_peer()],
+        )
+        .await?;
+    assert_eq!(kept, [signed.clone()].into());
+    let after: rusttalk_core::keys::KeyState = peer_b
+        .request(Method::GET, "/v1/keys")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert!(after.revocations.contains(&(peer_id.clone(), signed)));
+    assert_eq!(
+        sibling_client
+            .request(Method::GET, "/v1/me")
+            .send()
+            .await?
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    println!(
+        "W109 owner relayed the verified revocation from encrypted sync to B and discarded the forged record"
+    );
 
     owner_b
         .request(Method::PUT, &format!("/v1/members/{peer_id}/roles"))

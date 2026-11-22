@@ -24,7 +24,7 @@ const PUBLIC_LIMIT: i64 = 256;
 // Several friends behind one home router reconnect at once after a restart.
 const PUBLIC_LIMIT_PER_IP: i64 = 32;
 const SESSIONS_PER_PERSON: i64 = 16;
-const REVOCATIONS_PER_PERSON: i64 = 64;
+use rusttalk_core::identity::REVOCATIONS_PER_PERSON;
 const CHALLENGE_TTL: i64 = 60;
 pub const SESSION_TTL: i64 = Duration::from_hours(12).as_secs() as i64;
 
@@ -578,7 +578,7 @@ pub async fn revoke(
         .bind(actor.person.as_slice())
         .fetch_one(&mut *tx)
         .await?;
-    if stored >= REVOCATIONS_PER_PERSON {
+    if stored >= REVOCATIONS_PER_PERSON as i64 {
         return Err(ApiError::new(StatusCode::CONFLICT, "revocation_limit"));
     }
     let added = query(

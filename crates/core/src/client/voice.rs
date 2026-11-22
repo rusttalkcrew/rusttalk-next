@@ -201,11 +201,8 @@ impl KeyClient<'_> {
         let (room, events) = Room::connect(url.as_str(), &reply.token, options)
             .await
             .context("connect to pinned LiveKit room")?;
-        for participant in room.remote_participants().into_values() {
-            for publication in participant.track_publications().into_values() {
-                stream_audio::subscribe_audio(&publication, &name_keys, &stream_names, false);
-            }
-        }
+        let changes = super::revocations::CHANGED.subscribe();
+        let blocked = self.revocations.voice_identities(&server.server_id)?;
         let room = Arc::new(room);
         let grants = Arc::new(stream_audio::Reconciler::new(stream_audio::RoomGrants {
             room: room.clone(),
@@ -216,7 +213,10 @@ impl KeyClient<'_> {
             sound: Default::default(),
         }));
         let grants_task = tokio::spawn(grants.clone().run(room.subscribe()));
-        Ok(VoiceRoom {
+        let voice = VoiceRoom {
+            changes,
+            revocations: self.revocations.clone(),
+            blocked,
             room,
             events,
             server: server.clone(),
@@ -235,7 +235,9 @@ impl KeyClient<'_> {
             files: live_file::LiveFiles::default(),
             grants,
             _grants_task: stream_audio::AbortOnDrop(grants_task),
-        })
+        };
+        voice.reconcile_audio();
+        Ok(voice)
     }
 
     // Name keys for every held epoch, so app names published before a rotation still decrypt.
@@ -288,6 +290,9 @@ fn install_key(provider: &KeyProvider, key: &Key, epoch: i64) -> Result<()> {
 
 /// A joined voice channel. Use the API events to reconcile keys alongside room events.
 pub struct VoiceRoom {
+    revocations: super::revocations::Revocations,
+    changes: tokio::sync::watch::Receiver<()>,
+    blocked: std::collections::HashSet<String>,
     room: Arc<Room>,
     events: mpsc::UnboundedReceiver<RoomEvent>,
     server: KnownServer,
@@ -379,7 +384,22 @@ impl VoiceRoom {
 
     /// Next SDK event. Encrypted subscribed audio tracks arrive as `TrackSubscribed`.
     pub async fn next_event(&mut self) -> Option<RoomEvent> {
-        while let Some(event) = self.events.recv().await {
+        loop {
+            let event = tokio::select! {
+                biased;
+                _ = self.changes.changed() => {
+                    match self.revocations.voice_identities(&self.server.server_id) {
+                        Ok(blocked) => self.blocked = blocked,
+                        Err(error) => {
+                            tracing::warn!(%error, "cannot load revoked voice devices; closing room");
+                            return None;
+                        }
+                    }
+                    self.reconcile_audio();
+                    continue;
+                }
+                event = self.events.recv() => event?,
+            };
             #[allow(deprecated, reason = "discard the SDK's legacy raw stream events")]
             match &event {
                 RoomEvent::TokenRefreshed { .. } => continue,
@@ -410,6 +430,14 @@ impl VoiceRoom {
                 | RoomEvent::StreamHeaderReceived { .. }
                 | RoomEvent::StreamChunkReceived { .. }
                 | RoomEvent::StreamTrailerReceived { .. } => continue,
+                RoomEvent::TrackSubscribed {
+                    publication,
+                    participant,
+                    ..
+                } if self.blocked.contains(participant.identity().as_str()) => {
+                    publication.set_subscribed(false);
+                    continue;
+                }
                 RoomEvent::TrackSubscribed { publication, .. }
                     if publication.encryption_type() != EncryptionType::Gcm =>
                 {
@@ -425,7 +453,6 @@ impl VoiceRoom {
             }
             return Some(event);
         }
-        None
     }
 
     /// Current local connection state.
@@ -458,6 +485,7 @@ impl VoiceRoom {
         self.room
             .remote_participants()
             .into_values()
+            .filter(|participant| !self.blocked.contains(participant.identity().as_str()))
             .flat_map(|participant| {
                 let identity = participant.identity();
                 participant.track_publications().into_iter().filter_map(

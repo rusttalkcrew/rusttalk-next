@@ -110,6 +110,15 @@ impl VoiceRoom {
     pub(super) fn reconcile_audio(&self) {
         for participant in self.room.remote_participants().into_values() {
             let publications = participant.track_publications();
+            if self.blocked.contains(participant.identity().as_str()) {
+                for publication in publications
+                    .values()
+                    .filter(|p| p.is_desired() || p.is_subscribed())
+                {
+                    publication.set_subscribed(false);
+                }
+                continue;
+            }
             let watched = (publications.values())
                 .any(|p| p.source() == TrackSource::Screenshare && p.is_desired());
             for publication in publications.values() {

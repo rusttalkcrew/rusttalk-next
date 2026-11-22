@@ -224,11 +224,13 @@ impl DeviceSync {
             let (snapshots, failures) = sync::load_all(&peers, key).await;
             log("load", &failures);
             let mut deletes = dm_deleted(&saved.snapshot.state.settings);
-            for snapshot in std::iter::once(&saved.snapshot).chain(&snapshots) {
-                for record in &snapshot.state.revocations {
-                    records.observe(person, record)?;
-                }
-            }
+            let verified = records
+                .relay(
+                    person,
+                    std::iter::once(&saved.snapshot).chain(&snapshots),
+                    &peers,
+                )
+                .await?;
             for snapshot in &snapshots {
                 deletes.merge(&dm_deleted(&snapshot.state.settings));
             }
@@ -247,14 +249,7 @@ impl DeviceSync {
                 }
             }
             keep_deletes(&mut saved.snapshot.state, &deletes);
-            saved.snapshot.state.revocations = records.records(person)?;
-            for (api, session) in &peers {
-                for record in &saved.snapshot.state.revocations {
-                    if let Err(error) = api.publish_revocation(session, record).await {
-                        tracing::warn!(%error, "publishing device revocation failed");
-                    }
-                }
-            }
+            saved.snapshot.state.revocations = verified;
             let version = saved.snapshot.version;
             let failures = sync::push_all(&peers, key, &mut saved.snapshot).await?;
             if saved.snapshot.version > version {

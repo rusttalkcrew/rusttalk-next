@@ -288,6 +288,9 @@ impl DeviceCertificate {
     }
 }
 
+/// Maximum signed device revocations retained for one person.
+pub const REVOCATIONS_PER_PERSON: usize = 64;
+
 #[derive(Debug)]
 pub struct Revocation {
     person_id: PersonId,

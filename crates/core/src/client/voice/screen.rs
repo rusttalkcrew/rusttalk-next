@@ -177,6 +177,10 @@ impl VoiceRoom {
                 && publication.encryption_type() == EncryptionType::Gcm,
             "expected an encrypted video publication"
         );
+        ensure!(
+            !subscribed || !self.blocked.contains(participant.identity().as_str()),
+            "device revoked"
+        );
         if publication.is_desired() != subscribed {
             publication.set_subscribed(subscribed);
         }

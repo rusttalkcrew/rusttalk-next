@@ -50,7 +50,11 @@ Each key-state reply can include current members' signed revocations. Clients
 verify each signature against the full person ID and persist the record in
 their profile, indexed by person and device. All server connections consult
 that same append-only set. Reordering, omitting or replaying records cannot
-undo a revocation, including after a restart. No clock or list version is
+undo a revocation, including after a restart. Only the local person, pinned DM peers and people with verified member
+certificates qualify. Key sync rejects replies above 4,096 records. The
+profile stores at most 64 device records per person and 1,024 people. Reaching
+a storage limit fails the sync that would exceed it; earlier records remain.
+No clock or list version is
 needed because enrollment always generates fresh device keys.
 
 Once observed, a revocation excludes that device from space, channel and DM
@@ -58,7 +62,10 @@ key wraps, envelope senders, live-file acceptance and message verification
 (including cached or archived certificates). Unseen older messages from that
 device also fail verification: the delivery time cannot prove a signature
 predates revocation. Previously displayed plaintext and previously shared keys
-cannot be recalled. A dishonest server can suppress rotation of a known key.
+cannot be recalled. Until client-started rotation (#250) lands, a revoked device can keep
+reading new messages and listening to voice indefinitely on a server that
+does not rotate a key it already holds. Other clients drop tracks from the
+revoked device's server-specific voice identity.
 A fresh profile or peer to which every source withholds a record cannot know
 about it. Older servers can omit the field and older clients ignore it.
 

@@ -213,7 +213,7 @@ impl<'a> KeyClient<'a> {
     pub async fn sync(&mut self) -> Result<()> {
         loop {
             let state = self.key_state().await?;
-            self.sync_devices().await?;
+
             let mut refetch = false;
             let mut learned = false;
             for wrapped in state.envelopes {
@@ -403,15 +403,38 @@ impl<'a> KeyClient<'a> {
             .error_for_status()?
             .json()
             .await?;
+        ensure!(
+            state.revocations.len() <= super::revocations::MAX_PER_REPLY,
+            "oversized key-state revocation list"
+        );
+        self.sync_devices().await?;
+        let me = self.identity.certificate.person_id();
+        let mut people: HashSet<_> = self
+            .devices
+            .values()
+            .map(|cert| *cert.person_id())
+            .collect();
+        people.extend(self.dms.values().filter_map(|pin| match pin {
+            DmPin::With { peer, .. } => Some(*peer),
+            DmPin::Blocked => None,
+        }));
+        people.insert(*me);
         for (person, record) in &state.revocations {
             let Ok(person) = decode(person) else {
                 tracing::warn!("ignored invalid device revocation owner");
                 continue;
             };
-            if self.revocations.observe(&person, record)?
-                && &person == self.identity.certificate.person_id()
-            {
-                self.own_revocations_changed = true;
+            if !people.contains(&person) {
+                continue;
+            }
+            let Ok(record) = super::revocations::verify(&person, record) else {
+                tracing::warn!("ignored invalid device revocation");
+                continue;
+            };
+            let added = self.revocations.remember(&record)?;
+            if &person == me {
+                self.server.note_revocation(&record);
+                self.own_revocations_changed |= added;
             }
         }
         Ok(state)
@@ -425,9 +448,7 @@ impl<'a> KeyClient<'a> {
         );
         self.revocations.remember(record)?;
         self.own_revocations_changed = true;
-        self.server
-            .publish_revocation(&self.session, &encode(&record.to_bytes()))
-            .await
+        self.server.publish_revocation(&self.session, record).await
     }
 
     /// The owner's device sync must relay newly observed records to its other servers.
