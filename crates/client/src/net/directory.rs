@@ -417,6 +417,7 @@ async fn build(
             .unwrap_or_default(),
             voice: channel.kind == "voice",
             page: channel.kind == "page",
+            forum: channel.kind == "forum",
             audio_kbps: channel.audio_kbps.unwrap_or(DEFAULT_AUDIO_KBPS),
             flags: (channel.flags.iter())
                 .map(|entry| (entry.role_id.clone(), entry.flags))

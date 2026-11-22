@@ -500,6 +500,7 @@ mod tests {
                     name: format!("{ch}"),
                     voice: false,
                     page: false,
+                    forum: false,
                     audio_kbps: 64,
                     flags: Vec::new(),
                 })

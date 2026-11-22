@@ -25,7 +25,9 @@ const POLL_FIRST: &str = "W204 Beryl Poll Answer";
 const POLL_SECOND: &str = "W204 Zircon Poll Answer";
 
 const PAGE: &str = "#210 Malachite Page by a moderator";
-pub(super) const TEXTS: [&str; 14] = [
+const POST: &str = "# #211 Topaz Forum Post\nby a member";
+const REPLY: &str = "#211 Beryl Forum Reply";
+pub(super) const TEXTS: [&str; 16] = [
     TEXT_A,
     TEXT_B,
     DM_A,
@@ -40,6 +42,8 @@ pub(super) const TEXTS: [&str; 14] = [
     POLL_FIRST,
     POLL_SECOND,
     PAGE,
+    POST,
+    REPLY,
 ];
 
 fn body(text: &str) -> MessageBody {
@@ -339,6 +343,7 @@ pub(super) async fn scenario(
     println!("W61 verified two-way chat, replies and paging in a voice channel");
     poll(a, b, c, text).await?;
     page(a, b, c, &category).await?;
+    forum(a, b, c, &category).await?;
     Ok((dm, b_message))
 }
 
@@ -414,6 +419,41 @@ async fn poll(
     );
     ensure!(result.ended, "the creator's end did not count");
     println!("W204 verified an encrypted poll: two votes, a changed vote and the creator's end");
+    Ok(())
+}
+
+/// #211: a forum is a text channel; a reply carries its post in the encrypted `reply_to`.
+async fn forum(
+    a: &mut KeyClient<'_>,
+    b: &mut KeyClient<'_>,
+    c: &mut KeyClient<'_>,
+    category: &[u8; 32],
+) -> Result<()> {
+    let forum = a.create_channel(category, "forum", b"Board", b"").await?;
+    a.sync().await?;
+    receive_key(b, forum, 1).await?;
+    receive_key(c, forum, 1).await?;
+    let listed = c.catalog().await?.channels;
+    let listed = listed.iter().find(|channel| channel.id == forum.id);
+    ensure!(
+        listed.is_some_and(|channel| channel.kind == "forum"),
+        "forum not listed as a forum"
+    );
+    let post = c.send_message(&forum.id, &body(POST)).await?;
+    let mut reply = body(REPLY);
+    reply.reply_to = Some(post.id);
+    let answer = b.send_message(&forum.id, &reply).await?;
+    wait_event(c, forum, &answer.id, false).await?;
+    let received = c.message(&forum.id, &answer.id).await?;
+    ensure!(c.open_message(&forum.id, &received).await? == reply);
+    a.request(
+        Method::DELETE,
+        &format!("/v1/channels/{}", encode(&forum.id)),
+    )
+    .send()
+    .await?
+    .error_for_status()?;
+    println!("#211 verified a forum: members post, replies point at their post");
     Ok(())
 }
 

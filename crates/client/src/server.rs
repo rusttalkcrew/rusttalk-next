@@ -361,6 +361,7 @@ pub enum ChannelKind {
     Text,
     Voice,
     Page,
+    Forum,
 }
 
 impl ChannelKind {
@@ -370,14 +371,19 @@ impl ChannelKind {
             Self::Text => "text",
             Self::Voice => "voice",
             Self::Page => "page",
+            Self::Forum => "forum",
         }
     }
 
     pub fn of(channel: &Channel) -> Self {
-        match (channel.voice, channel.page) {
-            (true, _) => Self::Voice,
-            (_, true) => Self::Page,
-            _ => Self::Text,
+        if channel.voice {
+            Self::Voice
+        } else if channel.page {
+            Self::Page
+        } else if channel.forum {
+            Self::Forum
+        } else {
+            Self::Text
         }
     }
 }
@@ -398,6 +404,8 @@ pub struct Channel {
     pub voice: bool,
     /// Shows its newest message as one Markdown page instead of a chat.
     pub page: bool,
+    /// Shows its messages as posts, each with its own replies.
+    pub forum: bool,
     /// Opus bitrate of a voice channel, in kbps.
     pub audio_kbps: u32,
     /// Per role: read (1), write (2), speak (4) and video (8).
@@ -772,6 +780,20 @@ impl Chat {
             ballots,
             ends,
         ))
+    }
+
+    /// The up (option 0) and down (option 1) votes on a forum post. They are sent as
+    /// votes on the post itself, so they can be changed or taken back like poll votes,
+    /// and apps without forums leave them out.
+    pub fn post_votes(&self, msg: &Msg) -> Tally {
+        let both = rusttalk_core::messages::Poll {
+            options: vec![String::new(), String::new()],
+            multiple: false,
+            ends_at: 0,
+        };
+        let events = self.polls.get(&msg.id);
+        let ballots = events.map_or(&[][..], |events| &events.ballots);
+        rusttalk_core::messages::tally(&both, &msg.person, ballots, &[])
     }
 
     /// A verified sender wins over the reply's display hint. For colliding IDs,

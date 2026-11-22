@@ -25,6 +25,8 @@ enum ChannelKind {
     Voice,
     /// A text channel shown as one Markdown page: its newest message.
     Page,
+    /// A text channel the app groups into posts and their replies.
+    Forum,
 }
 
 #[derive(Deserialize)]
@@ -160,7 +162,7 @@ pub async fn has_flag(
 
 async fn channels(db: &mut SqliteConnection, person: Option<&[u8]>) -> ApiResult<Vec<Channel>> {
     let rows: Vec<ChannelRow> = query_as(
-        "SELECT id, CASE WHEN page THEN 'page' ELSE kind END AS kind, category_id, position, name_ct, topic_ct,
+        "SELECT id, CASE WHEN page THEN 'page' WHEN forum THEN 'forum' ELSE kind END AS kind, category_id, position, name_ct, topic_ct,
                 CASE WHEN dm_first = ? THEN dm_second ELSE dm_first END AS peer,
                 audio_kbps
          FROM channels c
@@ -288,10 +290,11 @@ pub async fn create_channel(
         return Err(keys::conflict("channel_exists"));
     }
     let page = matches!(kind, ChannelKind::Page);
+    let forum = matches!(kind, ChannelKind::Forum);
     // A new channel goes last in its category, so it never jumps ahead of a chosen order.
-    query("INSERT INTO channels (id, kind, page, category_id, position, name_ct, topic_ct)
-           SELECT ?, ?, ?, ?, COALESCE(MAX(position) + 1, 0), ?, ? FROM channels WHERE category_id = ?")
-        .bind(&id).bind(match kind { ChannelKind::Voice => "voice", _ => "text" }).bind(page)
+    query("INSERT INTO channels (id, kind, page, forum, category_id, position, name_ct, topic_ct)
+           SELECT ?, ?, ?, ?, ?, COALESCE(MAX(position) + 1, 0), ?, ? FROM channels WHERE category_id = ?")
+        .bind(&id).bind(match kind { ChannelKind::Voice => "voice", _ => "text" }).bind(page).bind(forum)
         .bind(&fields.category_id)
         .bind(metadata::checked(Metadata::ChannelName, epoch, fields.name_ct)?)
         .bind(metadata::optional(Metadata::ChannelTopic, epoch, fields.topic_ct)?)
@@ -867,13 +870,14 @@ mod tests {
             .bind(id(10))
             .execute(&app.db)
             .await?;
-        for (channel, kind, page) in [
-            (20_u8, "text", false),
-            (21, "voice", false),
-            (22, "text", true),
+        for (channel, kind, page, forum) in [
+            (20_u8, "text", false, false),
+            (21, "voice", false, false),
+            (22, "text", true, false),
+            (23, "text", false, true),
         ] {
-            query("INSERT INTO channels (id, kind, page, category_id, position, name_ct) VALUES (?, ?, ?, ?, 0, x'00')")
-                .bind(id(channel)).bind(kind).bind(page).bind(id(10)).execute(&app.db).await?;
+            query("INSERT INTO channels (id, kind, page, forum, category_id, position, name_ct) VALUES (?, ?, ?, ?, ?, 0, x'00')")
+                .bind(id(channel)).bind(kind).bind(page).bind(forum).bind(id(10)).execute(&app.db).await?;
         }
         let as_person = |person: u8| {
             let mut headers = HeaderMap::new();
@@ -930,14 +934,22 @@ mod tests {
         }
         assert_eq!(stored().await?, 64);
 
-        // Readers see it in the listing, for voice channels only; a page lists as its own kind.
+        // Readers see it in the listing, for voice channels only; pages and forums list as their own kinds.
         let mut tx = app.db.begin().await?;
         let listed = channels(&mut tx, Some(person(1).as_slice())).await?;
         let shown: Vec<_> = listed
             .iter()
             .map(|c| (c.kind.as_str(), c.audio_kbps))
             .collect();
-        assert_eq!(shown, [("text", None), ("voice", Some(64)), ("page", None)]);
+        assert_eq!(
+            shown,
+            [
+                ("text", None),
+                ("voice", Some(64)),
+                ("page", None),
+                ("forum", None)
+            ]
+        );
         drop(tx);
         Ok(())
     }

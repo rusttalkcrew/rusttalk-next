@@ -122,10 +122,11 @@ pub enum Action {
     Post,
 }
 
-/// The poll editor, in the composer's place.
-pub fn editor(ui: &mut Ui, editor: &mut Editor) -> Option<Action> {
+/// The poll editor, in the composer's place, or `attached` to a new forum post: then it
+/// has no Post button, and Cancel takes the poll off the post.
+pub fn editor(ui: &mut Ui, editor: &mut Editor, attached: bool) -> Option<Action> {
     let mut action = None;
-    let escape = ui.input(|input| input.key_pressed(Key::Escape));
+    let escape = !attached && ui.input(|input| input.key_pressed(Key::Escape));
     egui::Frame::new()
         // The page colour with a border, as text fields are made for it.
         .fill(ui::colors(ui).main)
@@ -219,6 +220,12 @@ pub fn editor(ui: &mut Ui, editor: &mut Editor) -> Option<Action> {
             );
             ui.add_space(ui::SPACE_M);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if attached {
+                    if ui::secondary(ui, t!("forum.remove_poll")).clicked() {
+                        action = Some(Action::Cancel);
+                    }
+                    return;
+                }
                 let valid = editor.valid();
                 if ui
                     .add_enabled_ui(valid, |ui| ui::primary(ui, t!("polls.post")))
@@ -281,7 +288,8 @@ fn status(tally: &Tally, now: i64) -> Option<String> {
     })
 }
 
-/// A poll in the chat. Returns your new choices when you click an option.
+/// A poll in the chat. Returns your new choices when you click an option. `more` goes
+/// on the footer line, after the vote count.
 pub fn card(
     ui: &mut Ui,
     question: &str,
@@ -289,6 +297,7 @@ pub fn card(
     tally: &Tally,
     me: &Id,
     names: impl Fn(&Id) -> String,
+    more: Option<&str>,
 ) -> Option<Vec<u8>> {
     let now = now();
     let open = tally.open(now);
@@ -390,6 +399,9 @@ pub fn card(
             if let Some(status) = status(tally, now) {
                 footer = format!("{footer}  ·  {status}");
             }
+            if let Some(more) = more {
+                footer = format!("{footer}  ·  {more}");
+            }
             ui.label(RichText::new(footer).size(ui::TEXT_CAPTION).color(c.muted));
         });
     picked
@@ -466,7 +478,7 @@ mod tests {
                         crate::ui::install(ui.ctx());
                         return;
                     }
-                    super::editor(ui, editor);
+                    super::editor(ui, editor, false);
                 },
                 (false, Editor::default()),
             );

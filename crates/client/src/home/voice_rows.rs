@@ -50,6 +50,7 @@ fn window() -> (Harness<'static, Option<Home>>, UnboundedReceiver<Command>) {
         topic: String::new(),
         voice,
         page: false,
+        forum: false,
         audio_kbps: 64,
         flags: Vec::new(),
     };

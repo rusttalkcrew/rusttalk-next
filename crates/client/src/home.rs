@@ -84,6 +84,7 @@ struct Embeds<'a> {
 const TOOLBAR_BUTTON: Vec2 = Vec2::new(30.0, 26.0);
 
 pub(crate) mod embed;
+mod forum;
 mod friends;
 pub mod layout;
 mod markdown;
@@ -2638,7 +2639,7 @@ fn default_category(server: &Server, kind: ChannelKind) -> Option<Id> {
 fn category_name(kind: ChannelKind) -> &'static str {
     match kind {
         ChannelKind::Voice => t!("home.voice_channels"),
-        ChannelKind::Text | ChannelKind::Page => t!("home.text_channels"),
+        ChannelKind::Text | ChannelKind::Page | ChannelKind::Forum => t!("home.text_channels"),
     }
 }
 
@@ -2652,6 +2653,7 @@ fn kind_icon(kind: ChannelKind) -> &'static str {
         ChannelKind::Text => "#",
         ChannelKind::Voice => "🔊",
         ChannelKind::Page => "📄",
+        ChannelKind::Forum => "💬",
     }
 }
 
@@ -3480,16 +3482,16 @@ fn chat_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
     });
     if files_shown(ui.ctx(), channel) {
         files_view(ui, home, index, channel, &mut chat);
-    } else if home.servers[index]
-        .channel(&channel)
-        .is_some_and(|c| c.page)
-    {
+    } else {
         // Reopening the files loads them again, with what others added meanwhile.
         chat.shared_asked = false;
-        page_view(ui, home, index, channel, &mut chat);
-    } else {
-        chat.shared_asked = false;
-        chat_view(ui, home, At::Channel(index, channel), &mut chat);
+        match home.servers[index].channel(&channel).map(ChannelKind::of) {
+            Some(ChannelKind::Page) => page_view(ui, home, index, channel, &mut chat),
+            Some(ChannelKind::Forum) => forum::view(ui, home, index, channel, &mut chat),
+            _ => {
+                chat_view(ui, home, At::Channel(index, channel), &mut chat);
+            }
+        }
     }
     home.servers[index].chats.insert(channel, chat);
 }
@@ -3886,22 +3888,21 @@ fn dm_pane(ui: &mut Ui, home: &mut Home, peer: Id) {
 
 /// Shows a chat. In a DM, also returns what the person picked on the friend card.
 fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Act> {
-    let (title, dm, in_voice) = match at {
+    let (title, dm, in_voice, icon) = match at {
         At::Channel(index, channel) => {
             let server = &home.servers[index];
             let (title, dm) = server.chat_title(&channel).unwrap_or_default();
-            (title, dm, server.is_voice(&channel))
+            let icon = server.channel(&channel).map_or("#", channel_icon);
+            (title, dm, server.is_voice(&channel), icon)
         }
-        At::Dm(peer) => (home.peer_name(&peer), true, false),
+        At::Dm(peer) => (home.peer_name(&peer), true, false, "@"),
     };
     let name = title.clone();
     // A voice channel's chat sits under its call, which already shows the title.
     let title = if dm {
         format!("@ {title}")
-    } else if in_voice {
-        format!("🔊 {title}")
     } else {
-        format!("# {title}")
+        format!("{icon} {title}")
     };
     // The server for names and pictures, the servers a message goes to, and the
     // channel for live files.
@@ -4321,44 +4322,62 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
         }
         Some(Pick::AddPicture(name, kind, bytes)) => {
             if let At::Channel(index, _) = at {
-                let taken: Vec<String> = (servers[index].dir.emoji.iter())
-                    .filter(|e| e.sticker == kind.sticker())
-                    .map(|e| e.name.clone())
-                    .collect();
-                servers[index].send(Command::Admin(Admin::AddEmoji {
-                    name: crate::emoji_zip::unique(&name, &taken),
-                    sticker: kind.sticker(),
-                    bytes: bytes.to_vec(),
-                    pack: None,
-                }));
+                add_picture(&servers[index], name, kind, &bytes);
             }
         }
-        Some(Pick::Previews(id, allow)) => {
-            let mut settings = voice.audio.settings();
-            settings.link_previews.insert(id.into(), allow);
-            voice.audio.set_settings(settings);
-            previews.allow(id, allow);
-        }
+        Some(Pick::Previews(id, allow)) => allow_previews(voice, previews, id, allow),
         Some(Pick::Invite(text)) => {
-            if let Ok(link) = InviteLink::parse(&text) {
-                match servers.iter().position(|s| s.known == link.server) {
-                    Some(index) => *view = View::Server(index),
-                    None => {
-                        *view = View::Join;
-                        // The click is the consent to contact the server, as Continue is on the
-                        // join page; its preview still asks for a name and confirmation.
-                        if !matches!(joining, Join::Checking | Join::Joining(_)) {
-                            *invite_text = text;
-                            net.preview(link, true);
-                            *joining = Join::Checking;
-                        }
-                    }
-                }
-            }
+            follow_invite(servers, view, (joining, invite_text, net), text);
         }
         None => {}
     }
     act
+}
+
+/// Add another server's emoji or sticker to this one, under a name not yet taken.
+fn add_picture(server: &Server, name: String, kind: Kind, bytes: &[u8]) {
+    let taken: Vec<String> = (server.dir.emoji.iter())
+        .filter(|e| e.sticker == kind.sticker())
+        .map(|e| e.name.clone())
+        .collect();
+    server.send(Command::Admin(Admin::AddEmoji {
+        name: crate::emoji_zip::unique(&name, &taken),
+        sticker: kind.sticker(),
+        bytes: bytes.to_vec(),
+        pack: None,
+    }));
+}
+
+fn allow_previews(voice: &Voice, previews: &mut Previews, id: &'static str, allow: bool) {
+    let mut settings = voice.audio.settings();
+    settings.link_previews.insert(id.into(), allow);
+    voice.audio.set_settings(settings);
+    previews.allow(id, allow);
+}
+
+/// An invite link clicked in a message: its server, or the join page for it.
+fn follow_invite(
+    servers: &[Server],
+    view: &mut View,
+    (joining, invite_text, net): (&mut Join, &mut String, &Net),
+    text: String,
+) {
+    let Ok(link) = InviteLink::parse(&text) else {
+        return;
+    };
+    match servers.iter().position(|s| s.known == link.server) {
+        Some(index) => *view = View::Server(index),
+        None => {
+            *view = View::Join;
+            // The click is the consent to contact the server, as Continue is on the
+            // join page; its preview still asks for a name and confirmation.
+            if !matches!(joining, Join::Checking | Join::Joining(_)) {
+                *invite_text = text;
+                net.preview(link, true);
+                *joining = Join::Checking;
+            }
+        }
+    }
 }
 
 /// A poll, vote or poll end to send; `None` without randomness for its ID.
@@ -4609,7 +4628,7 @@ fn composer(
     (toast, now): (&mut Option<(String, f64)>, f64),
 ) -> (Option<Command>, Option<bool>) {
     if let Some(editor) = &mut chat.poll_editor {
-        match polls::editor(ui, editor) {
+        match polls::editor(ui, editor, false) {
             Some(polls::Action::Cancel) => chat.poll_editor = None,
             Some(polls::Action::Post) if online => {
                 let (question, part) = editor.poll(polls::now());
@@ -5117,7 +5136,9 @@ fn message(
                     }
                     Body::Poll(question, poll) => {
                         let tally = chat.tally(msg).unwrap_or_default();
-                        if let Some(choices) = polls::card(ui, question, poll, &tally, &me, names) {
+                        if let Some(choices) =
+                            polls::card(ui, question, poll, &tally, &me, names, None)
+                        {
                             invite = Some(Pick::Poll(PollPart::Vote {
                                 poll: msg.id,
                                 sent: polls::now_ms(),
@@ -5567,9 +5588,19 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
                     ChannelKind::Page,
                     format!("{} {}", kind_icon(ChannelKind::Page), t!("home.kind_page")),
                 );
+                ui.selectable_value(
+                    kind,
+                    ChannelKind::Forum,
+                    format!("💬 {}", t!("home.kind_forum")),
+                );
             });
-            if *kind == ChannelKind::Page {
-                ui.weak(t!("home.kind_page_help"));
+            let help = match kind {
+                ChannelKind::Page => Some(t!("home.kind_page_help")),
+                ChannelKind::Forum => Some(t!("home.kind_forum_help")),
+                _ => None,
+            };
+            if let Some(help) = help {
+                ui.weak(help);
             }
             let data = &home.servers[*server];
             // Switching kind moves a default pick along, but keeps one the person made.
@@ -5851,6 +5882,14 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
                     let msg = chat.and_then(|chat| chat.messages.iter().find(|msg| msg.id == *id));
                     let files = chat.map_or_else(Vec::new, |chat| own_files(&chat.messages, id));
                     let sender = msg.map_or([0; 32], |msg| msg.person);
+                    // A forum post goes together with the poll it carries.
+                    let server = &home.servers[*index];
+                    if (server.channel(channel)).is_some_and(|c| c.forum)
+                        && let Some(chat) = server.chats.get(channel)
+                        && let Some(poll) = msg.and_then(|msg| forum::carried_poll(chat, msg))
+                    {
+                        server.send(Command::Delete(*channel, poll, sender, Vec::new()));
+                    }
                     command = Some((*index, Command::Delete(*channel, *id, sender, files)));
                 }
                 close |= ui::secondary(ui, t!("common.cancel")).clicked();
@@ -6026,6 +6065,7 @@ mod tests {
                 topic: String::new(),
                 voice: false,
                 page: false,
+                forum: false,
                 audio_kbps: 0,
                 flags: vec![("member".into(), 3)],
             }],
