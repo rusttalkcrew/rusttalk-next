@@ -5,7 +5,7 @@
 //! and only handed to the system's notification service; nothing is sent anywhere else.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, VecDeque},
     path::{Path, PathBuf},
     sync::mpsc::{Receiver, Sender, channel},
 };
@@ -316,6 +316,40 @@ pub struct Activity {
 /// A chat to open: server address and channel.
 type Target = (Url, Id);
 
+/// Open the clicked notification's chat and bring the window forward.
+fn deliver_click(clicks: &Sender<Target>, ctx: &eframe::egui::Context, target: Target) {
+    let _ = clicks.send(target);
+    ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Focus);
+    ctx.request_repaint();
+}
+
+/// Notifications shown and not clicked yet, by the system's identifier, for a backend
+/// that reports a click by identifier only. Capped: most are never clicked.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[derive(Default)]
+struct Pending(VecDeque<(String, Target)>);
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+impl Pending {
+    const MAX: usize = 100;
+
+    fn add(&mut self, id: String, target: Target) {
+        if self.0.len() == Self::MAX {
+            self.0.pop_front();
+        }
+        self.0.push_back((id, target));
+    }
+
+    /// The chat of a clicked notification, once.
+    fn take(&mut self, id: &str) -> Option<Target> {
+        let at = self.0.iter().position(|(known, _)| known == id)?;
+        self.0.remove(at).map(|(_, target)| target)
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod macos;
+
 fn read_key(server: &Url, channel: &Id) -> String {
     format!("{server} {}", encode(channel))
 }
@@ -488,6 +522,12 @@ impl Notify {
         let sound = self.saved.prefs.sound;
         let clicks = self.clicks.0.clone();
         let ctx = ctx.clone();
+        // Its center delivers the click to us; without an app bundle it can't, so fall
+        // through to the pop-up.
+        #[cfg(target_os = "macos")]
+        if macos::show(&ctx, &self.clicks.0, title, &body, sound, &target) {
+            return;
+        }
         let (title, failed) = (title.to_owned(), self.failed);
         self.failed = true;
         // Showing talks to the system's service and waiting for a click blocks: own thread.
@@ -496,9 +536,7 @@ impl Notify {
             .spawn(move || match popup(&title, &body, sound) {
                 Ok(handle) => handle.wait_for_action(|action| {
                     if action != "__closed" {
-                        let _ = clicks.send(target);
-                        ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Focus);
-                        ctx.request_repaint();
+                        deliver_click(&clicks, &ctx, target);
                     }
                 }),
                 Err(error) if !failed => {
@@ -562,6 +600,28 @@ mod tests {
 
     fn arrival(dm: bool, mention: Mention) -> Arrival {
         Arrival { dm, mention }
+    }
+
+    #[test]
+    fn a_click_finds_its_chat_once() {
+        let mut pending = Pending::default();
+        pending.add("a".into(), (url(), [1; 32]));
+        pending.add("b".into(), (url(), [2; 32]));
+        assert_eq!(pending.take("b"), Some((url(), [2; 32])));
+        assert_eq!(pending.take("b"), None);
+        assert_eq!(pending.take("unknown"), None);
+        assert_eq!(pending.take("a"), Some((url(), [1; 32])));
+    }
+
+    #[test]
+    fn pending_clicks_drop_the_oldest_past_the_cap() {
+        let mut pending = Pending::default();
+        for n in 0..=Pending::MAX {
+            pending.add(n.to_string(), (url(), [0; 32]));
+        }
+        assert_eq!(pending.take("0"), None);
+        assert!(pending.take("1").is_some());
+        assert!(pending.take(&Pending::MAX.to_string()).is_some());
     }
 
     #[test]
