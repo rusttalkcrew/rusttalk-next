@@ -3,6 +3,7 @@
 use anyhow::{Context, Result, ensure};
 use livekit::prelude::Participant;
 use reqwest::{Method, StatusCode};
+use rusttalk_bot::voice::{hear_track, send_tone, source};
 use rusttalk_core::{
     auth::encode,
     client::{
@@ -42,6 +43,13 @@ pub async fn exercise(
 
     // A server mute silences B's microphone in LiveKit, and holds when B rejoins.
     let b_id = room_b.identity();
+    const APP_HZ: u32 = 550;
+    let app_source = source();
+    let mut tones = tokio::task::JoinSet::new();
+    tones.spawn(send_tone(app_source.clone(), || APP_HZ));
+    let app = room_b.publish_app_audio("Game", app_source.clone()).await?;
+    timeout(hang_guard(), hear_track(room_a, &app.sid(), APP_HZ)).await??;
+    let stream = room_b.publish_stream_audio("Stream", source()).await?;
     a.request(Method::PUT, &mute)
         .send()
         .await?
@@ -61,15 +69,26 @@ pub async fn exercise(
         .collect();
     assert_eq!(flagged, [b_person.as_str()]);
     // Keep the same local SDK participant for both transitions.
-    sync_mic_grant(&mut room_b, &b_source, false).await?;
+    sync_audio_grant(&mut room_b, &b_source, false).await?;
+    ensure!(
+        app.track().is_none() && stream.track().is_none(),
+        "shared audio publications survived the deny"
+    );
     a.request(Method::DELETE, &mute)
         .send()
         .await?
         .error_for_status()?;
-    sync_mic_grant(&mut room_b, &b_source, true).await?;
+    sync_audio_grant(&mut room_b, &b_source, true).await?;
     timeout(hang_guard(), both_ways(room_a, &mut room_b, A_HZ, B_HZ))
         .await
         .context("duplex after lifting a mute without rejoining")??;
+
+    let again = room_b.publish_app_audio("Game", app_source).await?;
+    timeout(hang_guard(), hear_track(room_a, &again.sid(), APP_HZ))
+        .await
+        .context("restarted game audio after unmute")??;
+    room_b.unpublish_audio(&again.sid()).await?;
+    drop(tones);
 
     a.request(Method::PUT, &mute)
         .send()
@@ -88,7 +107,7 @@ pub async fn exercise(
         .error_for_status()?;
     // Lifting it gives the microphone back in the room B is in, with no rejoin and without
     // B's API connection: LiveKit's own permission change is enough, as the app relies on.
-    sync_mic_grant(&mut room_b, &b_source, true).await?;
+    sync_audio_grant(&mut room_b, &b_source, true).await?;
     timeout(hang_guard(), both_ways(room_a, &mut room_b, A_HZ, B_HZ))
         .await
         .context("duplex after the mute was lifted")??;
@@ -170,7 +189,7 @@ pub async fn exercise(
     Ok(room_b)
 }
 
-async fn sync_mic_grant(
+async fn sync_audio_grant(
     room: &mut VoiceRoom,
     source: &NativeAudioSource,
     allowed: bool,
@@ -182,9 +201,13 @@ async fn sync_mic_grant(
                 permission,
             } = room.next_event().await.context("room closed")?
             {
-                room.sync_microphone(permission.as_ref(), source.clone(), false)
+                let denied = room.stop_denied_shared_audio(permission.as_ref()).await;
+                room.sync_microphone(permission.as_ref(), source.clone(), || false)
                     .await?;
-                if room.can_publish() == allowed && room.has_microphone() == allowed {
+                if denied != allowed
+                    && room.can_publish() == allowed
+                    && room.has_microphone() == allowed
+                {
                     return Ok::<_, anyhow::Error>(());
                 }
             }

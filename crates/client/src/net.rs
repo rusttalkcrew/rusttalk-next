@@ -328,6 +328,7 @@ pub enum Update {
     CallVideoStopped(Url, Id, livekit::prelude::TrackSid),
     /// Sharing this app on its own stopped or never started.
     AppStopped(String),
+    SharedAudioStopped(Url, Id),
     /// What the screen share's sound is now, after a change or a failure.
     StreamAudio(Vec<App>),
     /// This device's screen share went live (`true`), or stopped or never started.
@@ -1199,21 +1200,35 @@ async fn voice_next(
                 participant: Participant::Local(_),
                 permission,
             }) = &event
-                && let Some(live) = &state.voice
+                && let Some(live) = &mut state.voice
             {
-                let muted = ctx.audio.muted() || ctx.audio.deafened();
+                let denied = live
+                    .room
+                    .stop_denied_shared_audio(permission.as_ref())
+                    .await;
+                if denied {
+                    live.stop_audio_captures();
+                    ctx.send(Update::SharedAudioStopped(url.clone(), live.channel));
+                }
                 if let Err(error) = live
                     .room
-                    .sync_microphone(permission.as_ref(), ctx.audio.source(), muted)
+                    .sync_microphone(permission.as_ref(), ctx.audio.source(), || {
+                        ctx.audio.muted() || ctx.audio.deafened()
+                    })
                     .await
                 {
                     tracing::warn!(error = %format_args!("{error:#}"), "updating microphone publication failed");
                 }
+                // Permission can return before microphone publication succeeds.
                 ctx.send(Update::CanTalk(
                     url.clone(),
                     live.channel,
                     live.room.can_publish() && live.room.has_microphone(),
                 ));
+                if denied {
+                    let channel = live.channel;
+                    voice::roster(ctx, url, client, state, channel);
+                }
                 stop_lost_video(ctx, url, client, state, None).await;
             } else if let Some(RoomEvent::LocalTrackUnpublished { publication, .. }) = &event {
                 stop_lost_video(ctx, url, client, state, Some(publication.sid())).await;

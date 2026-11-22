@@ -253,6 +253,11 @@ async fn unpublish_shares(live: &Live, shares: Vec<Share>) {
 /// Make the screen share carry `apps`' sound: stop the others and start the new ones.
 /// Before the screen is live this only notes them. True if a track changed.
 async fn set_stream_audio(ctx: &Ctx, live: &mut Live, apps: Vec<App>) -> bool {
+    if !apps.is_empty() && !live.room.can_share_audio() {
+        live.stream_audio.clear();
+        ctx.send(Update::StreamAudio(Vec::new()));
+        return false;
+    }
     live.stream_audio = apps;
     if live.screen.is_none() {
         return false;
@@ -1432,12 +1437,26 @@ pub(super) async fn start_call(
 /// Publish an app's audio as its own track once its capture starts.
 pub(super) fn share_app(ctx: &Ctx, state: &mut State, app: App) {
     // While live, sound goes with the stream instead (see `set_stream_audio`).
-    let Some(live) = state.voice.as_mut().filter(|live| live.screen.is_none()) else {
+    let Some(live) = state
+        .voice
+        .as_mut()
+        .filter(|live| live.screen.is_none() && live.room.can_share_audio())
+    else {
         ctx.send(Update::AppStopped(app.id));
         return;
     };
     if !live.pending.iter().any(|s| !s.stream && s.app.id == app.id) {
         start_share(live, app, false);
+    }
+}
+
+impl Live {
+    pub(super) fn stop_audio_captures(&mut self) {
+        for start in self.pending.drain(..) {
+            start.task.abort();
+        }
+        self.shares.clear();
+        self.stream_audio.clear();
     }
 }
 
@@ -1453,7 +1472,12 @@ pub(super) fn pick_screen(
         ctx.send(Update::Sharing(false));
         return Ok(());
     };
-    live.stream_audio = audio;
+    if live.room.can_share_audio() {
+        live.stream_audio = audio;
+    } else {
+        live.stream_audio.clear();
+        ctx.send(Update::StreamAudio(Vec::new()));
+    }
     let preview = ctx.video.preview.clone();
     // The system picker waits for the person; keep the server loop running meanwhile.
     live.starting = Some(tokio::spawn(async move {
