@@ -115,7 +115,8 @@ pub fn show(ui: &mut Ui, home: &mut Home) -> bool {
             }
             ui.label(ui::caption(format!("{}/{BIO_CHARS}", bio.chars().count())));
             ui.add_space(12.0);
-            ui.horizontal(|ui| {
+            // Wrapped: two large buttons don't fit side by side on a phone.
+            ui.horizontal_wrapped(|ui| {
                 if primary_large(ui, t!("common.save")).clicked() {
                     next = Some(Some(clean_bio(bio)));
                 }

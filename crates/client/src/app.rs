@@ -446,6 +446,8 @@ fn problem(what: &str, error: &IdentityError) -> Screen {
 impl eframe::App for App<'_> {
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         crate::paste::keys(ctx, raw_input);
+        #[cfg(target_os = "android")]
+        crate::android::input(ctx, raw_input);
         #[cfg(target_os = "linux")]
         crate::wayland_drops::input(raw_input);
     }
@@ -462,6 +464,15 @@ impl eframe::App for App<'_> {
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        #[cfg(target_os = "android")]
+        crate::android::frame(ui, |ui| self.screens(ui));
+        #[cfg(not(target_os = "android"))]
+        self.screens(ui);
+    }
+}
+
+impl App<'_> {
+    fn screens(&mut self, ui: &mut Ui) {
         self.updates.poll(ui.ctx());
         self.poll();
         let action = match &mut self.screen {
@@ -549,7 +560,10 @@ fn card(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> Option<Action>) -> Option<Acti
 }
 
 pub fn submitted(ui: &Ui, field: &Response) -> bool {
-    field.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter))
+    // Enter ends the field's focus, but screens that focus their field when nothing
+    // has focus take it back in the same frame, so `lost_focus` can't tell.
+    ui.memory(|memory| memory.had_focus_last_frame(field.id))
+        && ui.input(|input| input.key_pressed(Key::Enter))
 }
 
 fn welcome(ui: &mut Ui) -> Option<Action> {
@@ -568,8 +582,10 @@ fn show_words(ui: &mut Ui, words: &str) -> Option<Action> {
     ui.heading(t!("app.words_title"));
     ui.label(t!("app.words_text"));
     ui.add_space(12.0);
+    // Four columns don't fit a phone.
+    let columns = if ui::is_phone(ui.ctx()) { 2 } else { 4 };
     Grid::new("recovery-words")
-        .num_columns(4)
+        .num_columns(columns)
         .spacing(Vec2::new(10.0, 10.0))
         .show(ui, |ui| {
             for (index, word) in words.split_whitespace().enumerate() {
@@ -578,7 +594,7 @@ fn show_words(ui: &mut Ui, words: &str) -> Option<Action> {
                     ui.label(ui::caption(format!("{}", index + 1)));
                     ui.label(ui::bold(word).size(16.0));
                 });
-                if index % 4 == 3 {
+                if index % columns == columns - 1 {
                     ui.end_row();
                 }
             }
