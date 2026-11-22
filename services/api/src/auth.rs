@@ -24,7 +24,7 @@ const PUBLIC_LIMIT: i64 = 256;
 // Several friends behind one home router reconnect at once after a restart.
 const PUBLIC_LIMIT_PER_IP: i64 = 32;
 const SESSIONS_PER_PERSON: i64 = 16;
-const REVOCATIONS_PER_PERSON: i64 = 64;
+use rusttalk_core::identity::REVOCATIONS_PER_PERSON;
 const CHALLENGE_TTL: i64 = 60;
 pub const SESSION_TTL: i64 = Duration::from_hours(12).as_secs() as i64;
 
@@ -168,17 +168,20 @@ fn verify_device(
 }
 
 async fn check_revoked(db: &mut SqliteConnection, person: &[u8], device: &[u8]) -> ApiResult<()> {
-    let revoked: bool = query_scalar(
+    if revoked(db, person, device).await? {
+        return Err(ApiError::forbidden("device_revoked"));
+    }
+    Ok(())
+}
+
+async fn revoked(db: &mut SqliteConnection, person: &[u8], device: &[u8]) -> ApiResult<bool> {
+    Ok(query_scalar(
         "SELECT EXISTS (SELECT 1 FROM revocations WHERE person_id = ? AND device_id = ?)",
     )
     .bind(person)
     .bind(device)
     .fetch_one(db)
-    .await?;
-    if revoked {
-        return Err(ApiError::forbidden("device_revoked"));
-    }
-    Ok(())
+    .await?)
 }
 
 pub fn client_ip(headers: &HeaderMap) -> ApiResult<String> {
@@ -567,11 +570,15 @@ pub async fn revoke(
     let revocation = Revocation::verify(actor.person, &bytes)
         .map_err(|_| ApiError::bad_request("invalid_revocation"))?;
     let device = revocation.device_signing_key().as_slice();
+    // Other devices resend the same tombstone during sync, including at the limit.
+    if revoked(&mut tx, &actor.person, device).await? {
+        return Ok(StatusCode::NO_CONTENT);
+    }
     let stored: i64 = query_scalar("SELECT COUNT(*) FROM revocations WHERE person_id = ?")
         .bind(actor.person.as_slice())
         .fetch_one(&mut *tx)
         .await?;
-    if stored >= REVOCATIONS_PER_PERSON {
+    if stored >= REVOCATIONS_PER_PERSON as i64 {
         return Err(ApiError::new(StatusCode::CONFLICT, "revocation_limit"));
     }
     let added = query(

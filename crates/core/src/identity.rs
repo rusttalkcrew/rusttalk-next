@@ -288,6 +288,9 @@ impl DeviceCertificate {
     }
 }
 
+/// Maximum signed device revocations retained for one person.
+pub const REVOCATIONS_PER_PERSON: usize = 64;
+
 #[derive(Debug)]
 pub struct Revocation {
     person_id: PersonId,
@@ -297,6 +300,10 @@ pub struct Revocation {
 }
 
 impl Revocation {
+    pub fn person_id(&self) -> &PersonId {
+        &self.person_id
+    }
+
     pub fn device_signing_key(&self) -> &[u8; 32] {
         &self.device_signing_key
     }

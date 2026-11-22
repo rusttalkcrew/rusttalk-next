@@ -5,6 +5,7 @@ mod chat;
 mod files;
 mod keys;
 mod metadata;
+pub mod revocations;
 mod server;
 pub mod sync;
 #[cfg(feature = "voice")]

@@ -343,6 +343,8 @@ impl KeyClient<'_> {
         channel: &[u8; 32],
         record: &MessageRecord,
     ) -> Result<MessageBody> {
+        self.revocations
+            .check(&record.person, &record.sender_device)?;
         let cached = match self.opened.get(channel) {
             Some(opened) => opened.get(record)?,
             None => None,
@@ -421,6 +423,8 @@ impl KeyClient<'_> {
             sender_device: record.sender_device,
             person: record.person,
         };
+        self.revocations
+            .check(&record.person, &record.sender_device)?;
         Ok(context.open(key, &sender, &bytes)?)
     }
 

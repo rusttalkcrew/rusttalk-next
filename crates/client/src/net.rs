@@ -1277,7 +1277,7 @@ async fn latest(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, state: &State)
 async fn sync(ctx: &Ctx, edits: Vec<Edit>) {
     let result = ctx
         .sync
-        .run(&ctx.data, &ctx.identity.sync_key, edits, |synced| {
+        .run(&ctx.data, &ctx.identity, edits, |synced| {
             for address in &synced.conflicts {
                 let server = address.host_str().unwrap_or(t!("net.a_server"));
                 ctx.send(Update::Failed(t!("net.sync_conflict", server = server)));
@@ -1297,6 +1297,9 @@ async fn on_event(
     state: &mut State,
     event: Event,
 ) -> Result<()> {
+    if client.take_own_revocations_changed() {
+        sync(ctx, Vec::new()).await;
+    }
     match event {
         Event::MessageCreated { channel, id } => {
             let (channel, id) = (decode(&channel)?, decode(&id)?);

@@ -46,6 +46,29 @@ A device is revoked when a verified revocation for the same person matches
 its certified Ed25519 public key. The signed timestamp records when the
 revocation was issued. The match applies regardless of certificate time.
 
+Each key-state reply can include current members' signed revocations. Clients
+verify each signature against the full person ID and persist the record in
+their profile, indexed by person and device. All server connections consult
+that same append-only set. Reordering, omitting or replaying records cannot
+undo a revocation, including after a restart. Only the local person, pinned DM peers and people with verified member
+certificates qualify. Key sync rejects replies above 4,096 records. The
+profile stores at most 64 device records per person and 1,024 people. Reaching
+a storage limit fails the sync that would exceed it; earlier records remain.
+No clock or list version is
+needed because enrollment always generates fresh device keys.
+
+Once observed, a revocation excludes that device from space, channel and DM
+key wraps, envelope senders, live-file acceptance and message verification
+(including cached or archived certificates). Unseen older messages from that
+device also fail verification: the delivery time cannot prove a signature
+predates revocation. Previously displayed plaintext and previously shared keys
+cannot be recalled. Until client-started rotation (#250) lands, a revoked device can keep
+reading new messages and listening to voice indefinitely on a server that
+does not rotate a key it already holds. Other clients drop tracks from the
+revoked device's server-specific voice identity.
+A fresh profile or peer to which every source withholds a record cannot know
+about it. Older servers can omit the field and older clients ignore it.
+
 ### Local identity
 
 One OS keystore entry holds both device secrets, the sync key, the person ID
@@ -119,7 +142,10 @@ by hex person ID (see [Protocol](protocol.md#friends)). XChaCha20-Poly1305 uses 
 version. Associated data is the ASCII bytes `rusttalk-sync-v1` followed by
 the eight-byte big-endian version from the header. This authenticates the
 version along with the contents. Devices can send the resulting blob
-unchanged to every member server. Server-side device revocation blocks new
+unchanged to every member server. The owner's signed device revocations travel in the encrypted blob. On sync,
+the app verifies and unions them across all available snapshots and its local
+records, then publishes its own records to each connected member server.
+Disconnected servers catch up when they reconnect. Server-side device revocation blocks new
 requests from that device. A revoked device can still decrypt copies it
 already holds using its copy of the sync key.
 
@@ -436,11 +462,6 @@ ones, instead of pinning them again from the server's catalog. Either person
 can start a DM epoch at any time, so either can disrupt delivery by re-keying
 over and over; that is accepted.
 
-Device revocation still follows the server's device list (issue #109). A
-dishonest server can keep a revoked device eligible for future DM keys until
-#109 is fixed. This predates DMs over several servers and applies to every
-channel.
-
 This relies on both people's apps. An older app still wraps the key, also a
 re-keyed one, to any device the server names, so a dishonest server can still
 read along with a peer on an older app. This remains a high risk until both
@@ -459,18 +480,13 @@ server's copy. Only the author's own delete of a readable copy, kept on the
 author's devices and synced between them, removes the message from every
 copy.
 
-An archived sender is a device that is no longer in the current directory,
-for example after revocation or removal of its person. Clients accept its
-root-signed certificate for any epoch of retained history. Removal and
-revocation rotate every affected scope, and honest clients wrap later epoch
-keys only to current directory devices. A removed device therefore cannot
-encrypt a valid message for a later epoch. It can still sign records for
-epochs whose keys it held. An honest API refuses them because the device has
-no session and the API accepts only the current epoch. A malicious API could
-store such a back-dated record from a stolen, revoked device. Clients cannot
-detect this, because the API also controls the device directory and does not
-expose root-signed revocation records to other members. A removal epoch
-reported by the API would add no protection under the same assumption.
+An archived sender is a device that is no longer in the current directory.
+After membership removal, clients still verify its root-signed certificate
+for retained history. A device that held an epoch key can sign new records
+for that epoch. An honest API requires a current session and epoch. A peer
+that has seen the owner's signed revocation also rejects those records when
+a dishonest API backdates them or supplies the genuine archived certificate.
+Membership removal alone provides no such signed proof.
 
 ## Server-stored file encryption
 

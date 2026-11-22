@@ -104,6 +104,9 @@ pub struct ScopeState {
 
 #[derive(Serialize, Deserialize)]
 pub struct KeyState {
+    /// Base64url person ID and root-signed revocation record, for current members.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revocations: Vec<(String, String)>,
     pub scopes: Vec<ScopeState>,
     pub envelopes: Vec<WrappedKey>,
     pub pending: Vec<KeyNeed>,

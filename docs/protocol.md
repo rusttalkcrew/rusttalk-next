@@ -231,7 +231,7 @@ in a state response indicating that the first epoch is still pending.
 | Method and path | Body | Permission and success |
 | --- | --- | --- |
 | GET `/v1/member-devices` | Empty | Any member. 200, `[{person, certificate}]` of current devices |
-| GET `/v1/keys` | Empty | Any member. 200, `{scopes, envelopes, pending}` |
+| GET `/v1/keys` | Empty | Any member. 200, `{scopes, envelopes, pending, revocations?}`. Each revocation is `[person_id, signed_record]`, both base64url |
 | POST `/v1/keys` | `{scope, epoch, device, envelope}` | A reader of the scope. 204. The recipient must also be a current device of a reader |
 | POST `/v1/keys/reject` | `{scope, epoch, sender, envelope}` | A reader of the scope. 204. Deletes a matching envelope addressed to the caller's device |
 | POST `/v1/keys/epochs` | `{scope, epoch, commitment, envelope}` | A reader of a rotating scope, the owner for the initial space epoch, or either person in a DM at any time. 201. The envelope is addressed to the caller's device |
