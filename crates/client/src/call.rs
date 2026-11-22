@@ -898,13 +898,20 @@ fn open_screen_dialog(ctx: &egui::Context, voice: &mut Voice) {
     fill(ctx, &voice.targets, "screens", screen::targets);
 }
 
-fn linux_control_option(ui: &mut Ui, enabled: &mut bool) {
-    ui::toggle_row(
-        ui,
-        enabled,
-        t!("remote.share_opt_in"),
-        t!("remote.share_warning"),
-    );
+fn control_option(ui: &mut Ui, enabled: &mut bool) {
+    let warning = if cfg!(target_os = "macos") {
+        t!("remote.share_warning_mac")
+    } else {
+        t!("remote.share_warning")
+    };
+    let changed = ui::toggle_row(ui, enabled, t!("remote.share_opt_in"), warning).changed();
+    // macOS drops posted input until RustTalk has the Accessibility permission.
+    if *enabled && !rusttalk_core::screen::control_permitted() {
+        if changed {
+            rusttalk_core::screen::request_control_permission();
+        }
+        ui::error_text(ui, Some(t!("remote.mac_accessibility")));
+    }
 }
 
 /// The t!("call.share_screen") dialog: what to share (Windows), quality, frame rate, cursor.
@@ -1004,8 +1011,10 @@ pub fn screen_dialog(ctx: &egui::Context, home: &mut Home) {
                 fill(ctx, &voice.apps, "apps", share::list);
             }
         }
-        if rusttalk_core::screen::linux_remote_control() {
-            linux_control_option(ui, &mut options.remote_control);
+        if rusttalk_core::screen::linux_remote_control()
+            || rusttalk_core::screen::mac_remote_control()
+        {
+            control_option(ui, &mut options.remote_control);
         }
         ui::footer(ui, |ui| {
             let label = if portal.is_some() {

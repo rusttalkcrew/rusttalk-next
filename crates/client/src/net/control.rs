@@ -57,12 +57,12 @@ fn inject(live: &Live, inputs: &[Input]) {
 }
 
 fn end_input(live: &Live, releases: &[Input]) {
-    if cfg!(target_os = "linux") {
-        if let Some((_, capture, _)) = &live.screen {
-            capture.set_control_active(false);
-        }
-    } else {
+    if !cfg!(target_os = "linux") {
         inject(live, releases);
+    }
+    // Linux drops its virtual devices; macOS also lets go of whatever it still holds.
+    if let Some((_, capture, _)) = &live.screen {
+        capture.set_control_active(false);
     }
 }
 

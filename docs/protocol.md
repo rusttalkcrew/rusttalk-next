@@ -829,6 +829,75 @@ are dropped; releases always go through. Windows never lets an app inject
 Ctrl+Alt+Del, and it keeps input from reaching apps running as
 administrator unless RustTalk does too.
 
+On macOS, the sharer can enable control requests for each share, of a
+display or a window, and RustTalk posts `CGEvent`s to the HID event tap.
+That needs the Accessibility permission: until it is granted, the share
+dialog says so and asks macOS to show its prompt, and requests are answered
+`unsupported`. Every check fails closed: a window list, display list,
+session state, focus or keyboard layout that can't be read blocks the event.
+
+Positions map to the shared display's bounds, or to the shared window's
+current frame. Clicks, drags and scrolls land only on an ordinary app
+window: the topmost visible window under the pointer must be on layer 0,
+belong to an app with a Dock icon (activation policy "regular") that isn't
+RustTalk or a system process (WindowServer, Dock, SystemUIServer, Control
+Center, Notification Center, loginwindow, SecurityAgent, coreauthd,
+Spotlight), and be the shared window, or for a display share, be on that
+display. The bare desktop, the top 40 points of every display (the menu
+bar), a 4-point band along every display edge (where a hidden Dock or menu
+bar slides in) and 24-point squares in the corners (hot corners) never get
+remote pointer input. Nothing is posted while the login session isn't on
+the console or the screen is locked.
+
+Keys go through only while the Accessibility API reports the focused app
+as an ordinary app that isn't RustTalk or a system process, its focused
+window has the `AXWindow` role, the focused element is that window or
+inside it, no popup or context menu is open and no menu element has the
+focus, and that window is the shared window or has its centre on the
+shared display. The shared window is recognised by its window ID, which
+RustTalk reads with `_AXUIElementGetWindow` (private but long stable); if
+that fails, the focused window's frame must match exactly one window of the
+app, the shared one. Only "no value" or "attribute unsupported" answers
+count as no focused element; any other Accessibility error, a timeout or an
+unreadable role leaves the focus unknown and blocks the key.
+
+Ctrl is posted as Command, so Ctrl+C, V and Z do what a viewer on Windows
+or Linux expects; a viewer on a Mac sends Command as Ctrl. Alt is Option,
+the Mac's own Control and Fn keys are never posted, and Menu is dropped.
+F1 to F12 are never posted. With Command held, Tab, Space, Q and H are
+blocked; with Command and Option, Escape, D, W and M; with Command and
+Shift, 3 to 6 (the app switcher, Spotlight, quitting the whole app or
+logging out, hiding apps, Force Quit, the Dock, closing or minimizing every
+window and screenshots). On a window share, Command with ` or the ISO key
+beside it (with or without Shift) is blocked too, since it moves the focus
+to the app's other windows. A chord is checked by the key's US position and by the
+character the key types with Command in the sharer's current keyboard
+layout, read for each Command chord (so the AZERTY key that types Q is
+blocked too); if the layout can't be read, the chord is blocked. Every
+event carries only the modifiers the controller holds. A Command press is
+held back until another key, a click or a scroll needs it, and a Command
+press never posted isn't released, so a bare tap of Command (twice opens
+Siri) never reaches macOS.
+
+While a remote key or button is held, RustTalk rechecks the permission,
+the session, the keyboard focus (for held keys) and the window under the
+pointer (for held buttons) about every 100 ms. A failed check, or the
+permission or session failing at any event, releases held remote input,
+drops further input, and ends control at the next check of the share
+(within about 2 seconds), which tells the viewer. Held keys and buttons are
+also released when control ends or the share stops; releases macOS doesn't
+take are forgotten, so stale modifiers never return. Marking a failure,
+the cleanup and letting an event through share one lock, and every event
+checks for a failure after taking it, so nothing is pressed after the
+cleanup.
+
+Limits: each check is a snapshot, so the window under the pointer or the
+focus can change between the check and macOS delivering the event. Fully
+transparent windows are ignored when finding the window under the pointer.
+An app that reports no focused element counts as focused on its window,
+and one that doesn't report its focused window gets no keys. A drag image
+over the pointer while a button is held ends control.
+
 On Hyprland, the sharer can enable control requests for each monitor share.
 ScreenCast supplies the selected output's name, and RustTalk binds a Wayland
 virtual pointer to that output. It uses a Wayland virtual keyboard with the

@@ -805,6 +805,8 @@ call.limit_bandwidth = 帯域幅
 # crates/client/src/call/remote.rs
 remote.share_opt_in = 操作リクエストを許可
 remote.share_warning = モニター共有のみ。許可した相手は共有画面上のアプリを操作できます。操作の許可を求めるのは RustTalk のみです。
+remote.share_warning_mac = 許可した相手は共有中の画面やウィンドウを操作できます。操作の許可を求めるのは RustTalk のみです。
+remote.mac_accessibility = 画面を操作してもらうには、システム設定の「プライバシーとセキュリティ」>「アクセシビリティ」で RustTalk をオンにしてください。
 remote.allow_help = 共有している画面の中で、相手があなたのマウスとキーボードを使えるようになります。いつでも取り戻せます。
 remote.they = 相手
 remote.no_answer = {name} から応答がありませんでした。
