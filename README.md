@@ -14,10 +14,11 @@ Status: early development. See [docs/work-order.md](docs/work-order.md) for prog
 [![Linux ARM64](https://img.shields.io/badge/Linux-ARM64-FCC624?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/rusttalkcrew/rusttalk-next/releases/latest/download/RustTalk-linux-aarch64.AppImage)
 [![macOS](https://img.shields.io/badge/macOS-Apple%20Silicon%20%26%20Intel-000000?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/rusttalkcrew/rusttalk-next/releases/latest/download/RustTalk-macos-universal.dmg)
 
-Windows installs per user without admin rights. On Linux, make the AppImage
-executable (`chmod +x RustTalk-*.AppImage`) and run it. On macOS (14.2 or
-later), open the DMG and drag RustTalk to Applications. All three update
-themselves. All releases: [GitHub releases](https://github.com/rusttalkcrew/rusttalk-next/releases).
+Step-by-step guides: [Windows](docs/install/windows.md),
+[Linux](docs/install/linux.md), [macOS](docs/install/macos.md),
+[Steam Deck](docs/install/steam-deck.md) and
+[checking a download](docs/install/verify.md). All three desktop systems
+update themselves. All releases: [GitHub releases](https://github.com/rusttalkcrew/rusttalk-next/releases).
 
 ### Opening RustTalk on macOS
 
