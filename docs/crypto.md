@@ -266,6 +266,7 @@ Formats 2 and 3 (the envelope's first byte) have this plaintext, in order.
 | Field | Encoding | Maximum bytes |
 | --- | --- | --- |
 | Flags | Bit 0 reply-to, bit 1 edit-of, bit 2 live offer, bit 3 sticker, bit 4 friend message, bit 5 key link, bit 6 poke. In v3 only, bit 7 quoted author | 1 |
+| Kind | v3 only: 0 for an ordinary message, or a poll part (1 poll, 2 vote, 3 end) followed by its fields, below. Other kinds are rejected | 1 + 4,030 |
 | Text | Two-byte big-endian UTF-8 length, then text of at most 2,000 Unicode scalar values | 2 + 8,000 |
 | Reply ID | 32 bytes, present with bit 0 | 32 |
 | Quoted author | Raw 32-byte person ID, present with bit 7. Requires bit 0 and forbids bit 1 | 32 |
@@ -286,9 +287,21 @@ unknown kind (see [Protocol](protocol.md#friends)). A key link sets bit 5
 alone, with empty text and no stored files (44 bytes). A poke sets bit 6
 alone; its text is the poke's note, at most 100 Unicode scalar values and
 possibly empty, with no stored files (see [Protocol](protocol.md#pokes)).
+The sizes above are format 2's; format 3 adds the kind byte.
+
+A poll part has no flags and no stored files (see
+[Protocol](protocol.md#polls)). A poll's text is its question (1–300 Unicode
+scalar values, not blank); its fields are a multiple-answers byte (0 or 1), an
+eight-byte big-endian end time in unix seconds (0 for none), and a one-byte
+count of 2–10 options, each a two-byte big-endian UTF-8 length and 1–100
+Unicode scalar values, not blank. A vote has empty text; its fields are the
+poll's 32-byte message ID, an eight-byte big-endian sender clock in
+milliseconds, and a one-byte count of 0–10 option indexes, each one byte below
+10, strictly ascending. An end has empty text; its field is the poll's message
+ID. Format 2 can't carry a poll part.
 Apps before this format show any of these as a message they can't open.
-Nothing may follow the last field. The largest plaintext is 10,644 bytes
-and the largest envelope is 10,751 bytes. Every length is checked against
+Nothing may follow the last field. The largest plaintext is 10,645 bytes
+and the largest envelope is 10,752 bytes. Every length is checked against
 its field maximum before reading. Readers reject version 1 envelopes.
 Spaces and line breaks are preserved.
 

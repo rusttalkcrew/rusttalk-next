@@ -25,6 +25,7 @@ use rusttalk_core::{
         voice::{DataLiveFiles, LiveFileEvent, NativeVideoSource, RoomEvent, VoiceRoster},
     },
     identity::{DeviceIdentity, fingerprint},
+    messages::PollPart,
     presence::{Presence, PresenceEvent, Status as Choice, Update as Pushed},
 };
 use serde_json::Value;
@@ -190,6 +191,9 @@ pub struct Draft {
     pub friend: Option<(FriendSignal, u64)>,
     /// A poke: `text` is its note, sent with nothing else.
     pub poke: bool,
+    /// A poll (`text` is its question), a vote or a poll's end, sent with nothing else.
+    // Boxed: a poll is rare and would make every command larger.
+    pub poll: Option<Box<PollPart>>,
     /// A link preview made while sending, uploaded as a hidden file (see `link_cards`).
     pub preview: Option<std::sync::Arc<crate::link_cards::Made>>,
 }
@@ -1414,6 +1418,7 @@ async fn on_command(
                 friend_sent: draft.friend.map_or(0, |(_, sent)| sent),
                 key_link: None,
                 poke: draft.poke,
+                poll: draft.poll.as_deref().cloned(),
             };
             let files = (draft.files.clone(), draft.preview.clone());
             let target = (channel, draft.id);
@@ -1797,7 +1802,11 @@ fn to_msg(record: &MessageRecord, body: &MessageBody) -> Msg {
         body: match body.friend {
             Some(signal) => Body::Friend(signal, body.friend_sent),
             None if body.poke => Body::Poke(body.text.clone()),
-            None => Body::Text(body.text.clone()),
+            None => match &body.poll {
+                Some(PollPart::Open(poll)) => Body::Poll(body.text.clone(), poll.clone()),
+                Some(part) => Body::PollPart(part.clone()),
+                None => Body::Text(body.text.clone()),
+            },
         },
         files: body.attachments.clone(),
         live: (body.live.as_ref()).map(|file| (file.id, file.name.clone(), file.size)),

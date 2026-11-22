@@ -16,6 +16,7 @@ use rusttalk_core::{
         voice::{CallTraffic, TrackSid},
     },
     identity::fingerprint,
+    messages::{Ballot, Poll, PollPart, Tally},
     presence::{Presence, Status as Choice},
 };
 use serde::{Deserialize, Serialize};
@@ -461,6 +462,10 @@ pub enum Body {
     Friend(rusttalk_core::client::FriendSignal, u64),
     /// A poke and its note; listed under Pokes, not shown in the chat.
     Poke(String),
+    /// A poll and its question, shown as a card.
+    Poll(String, Poll),
+    /// A vote or a poll's end; counted on the poll's card, not shown in the chat.
+    PollPart(PollPart),
     /// Could not be verified or decrypted (yet).
     Unreadable,
     /// A member or device change, with fingerprints for the details view.
@@ -510,6 +515,10 @@ pub struct Chat {
     pub edited: HashMap<(Id, Id), Rank>,
     /// Edits whose original is not loaded yet, by person and original ID.
     pending_edits: HashMap<(Id, Id), Msg>,
+    /// Votes and ends by poll ID, kept out of `messages` so they never show as lines.
+    polls: HashMap<Id, PollEvents>,
+    /// The poll being written in place of the composer.
+    pub poll_editor: Option<crate::home::polls::Editor>,
     pub loading: bool,
     pub at_start: bool,
     pub draft: String,
@@ -541,6 +550,43 @@ impl Chat {
 
     /// Add records from a page or a live event, applying edits to their originals.
     pub fn merge(&mut self, items: Vec<Msg>, older: bool) {
+        let (parts, items): (Vec<_>, Vec<_>) = (items.into_iter())
+            .partition(|msg| matches!(msg.body, Body::PollPart(_)) && msg.edit_of.is_none());
+        // A retried vote replaces its "couldn't be opened" placeholder.
+        self.messages.retain(|msg| {
+            msg.body != Body::Unreadable
+                || !(parts.iter()).any(|part| part.id == msg.id && part.person == msg.person)
+        });
+        for msg in parts {
+            let Body::PollPart(part) = msg.body else {
+                continue;
+            };
+            let (poll, event) = match part {
+                PollPart::Vote {
+                    poll,
+                    sent,
+                    choices,
+                } => (poll, Ok((sent, choices))),
+                PollPart::End { poll } => (poll, Err(())),
+                PollPart::Open(_) => continue,
+            };
+            let events = self.polls.entry(poll).or_default();
+            // DM copies from several servers count once.
+            if events.seen.contains(&(msg.person, msg.id)) {
+                continue;
+            }
+            events.seen.push((msg.person, msg.id));
+            match event {
+                Ok((sent, choices)) => events.ballots.push(Ballot {
+                    person: msg.person,
+                    at: msg.at,
+                    sent,
+                    id: msg.id,
+                    choices,
+                }),
+                Err(()) => events.ends.push((msg.person, msg.at)),
+            }
+        }
         let (edits, plain): (Vec<_>, Vec<_>) =
             items.into_iter().partition(|msg| msg.edit_of.is_some());
         let mut fresh: Vec<Msg> = Vec::new();
@@ -623,6 +669,22 @@ impl Chat {
         }
     }
 
+    /// A poll message's results so far.
+    pub fn tally(&self, msg: &Msg) -> Option<Tally> {
+        let Body::Poll(_, poll) = &msg.body else {
+            return None;
+        };
+        let events = self.polls.get(&msg.id);
+        let ballots = events.map_or(&[][..], |events| &events.ballots);
+        let ends = events.map_or(&[][..], |events| &events.ends);
+        Some(rusttalk_core::messages::tally(
+            poll,
+            &msg.person,
+            ballots,
+            ends,
+        ))
+    }
+
     /// A verified sender wins over the reply's display hint. For colliding IDs,
     /// only the named person's verified message can supply a snippet.
     pub fn quoted(&self, id: &Id, author: Option<Id>) -> Option<&Msg> {
@@ -655,6 +717,16 @@ impl Chat {
         self.pending_edits.remove(&key);
         self.edited.remove(&key);
     }
+}
+
+/// One poll's votes and ends as received.
+#[derive(Default)]
+struct PollEvents {
+    ballots: Vec<Ballot>,
+    /// Who ended it and when, in server time.
+    ends: Vec<(Id, i64)>,
+    /// Person and record ID of each vote and end taken.
+    seen: Vec<(Id, Id)>,
 }
 
 fn add_replicas(replicas: &mut Vec<Url>, more: Vec<Url>) {
@@ -889,5 +961,59 @@ mod tests {
         chat.remove_one(&[8; 32], &[1; 32]);
         assert_eq!(texts(&chat), ["mine2"]);
         assert!(chat.edited.contains_key(&([9; 32], [1; 32])));
+    }
+
+    #[test]
+    fn votes_stay_out_of_the_chat_and_count_on_their_poll() {
+        let poll = Msg {
+            body: Body::Poll(
+                "Lunch?".into(),
+                Poll {
+                    options: vec!["Pizza".into(), "Sushi".into()],
+                    multiple: false,
+                    ends_at: 0,
+                },
+            ),
+            ..msg(1, 10, "", None)
+        };
+        let vote = |id: u8, person: u8, sent: u64, choice: u8| Msg {
+            person: [person; 32],
+            body: Body::PollPart(PollPart::Vote {
+                poll: [1; 32],
+                sent,
+                choices: vec![choice],
+            }),
+            ..msg(id, 20, "", None)
+        };
+        let mut chat = Chat::default();
+        // A vote can arrive before its poll is loaded.
+        chat.merge(vec![vote(2, 5, 1, 0)], false);
+        let unreadable = Msg {
+            body: Body::Unreadable,
+            ..vote(3, 6, 1, 1)
+        };
+        chat.merge(vec![poll.clone(), unreadable], true);
+        // The retry replaces its placeholder; a second DM copy counts once.
+        chat.merge(vec![vote(3, 6, 1, 1), vote(3, 6, 1, 1)], false);
+        assert_eq!(chat.messages.len(), 1);
+        let tally = chat.tally(&chat.messages[0]).unwrap();
+        assert_eq!(tally.voters, [vec![[5; 32]], vec![[6; 32]]]);
+        // Only the poll's creator ends it.
+        let end = |person: u8| Msg {
+            person: [person; 32],
+            body: Body::PollPart(PollPart::End { poll: [1; 32] }),
+            ..msg(4, 30, "", None)
+        };
+        chat.merge(vec![end(5)], false);
+        assert!(!chat.tally(&poll).unwrap().ended);
+        chat.merge(
+            vec![Msg {
+                id: [5; 32],
+                ..end(9)
+            }],
+            false,
+        );
+        assert!(chat.tally(&poll).unwrap().ended);
+        assert_eq!(chat.messages.len(), 1);
     }
 }

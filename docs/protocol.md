@@ -505,6 +505,26 @@ pokes from one person per minute of server time and drops the rest. The history
 (the newest 200) stays on the device in `pokes.json`; it is not synced.
 Apps before pokes show one as a message they can't open.
 
+### Polls
+
+A poll is a message in a channel or DM whose format 3 kind byte says poll (see
+[Crypto](crypto.md#messages)): its question, 2–10 options, whether more than
+one answer may be picked, and an optional end time. Votes and early ends are
+small messages of their own that name the poll's message ID inside the
+encrypted body, so the server sees only ciphertext, sizes and times. The API
+has no poll routes.
+
+Apps don't show votes or ends as chat lines; they count them on the poll's
+card, and they don't mark a chat unread or notify. Each person's vote with the
+highest sender clock (then server time, then record ID) counts, and replaces
+their earlier ones; an empty vote takes it back. Readers ignore a vote with an
+option index the poll doesn't have, more than one choice on a single-answer
+poll, or a server time after the poll closed. A poll closes at its end time, or
+at the server time of the first end from its creator; ends from anyone else are
+ignored. Apps before polls show a poll, vote or end as a message they can't
+open. Polls need format 3, so they can't be sent to a server below protocol
+version 2.
+
 ## Messages
 
 These routes require a bearer header and apply to text channels, voice channels and DMs.
@@ -531,9 +551,9 @@ ciphertext length, ciphertext including its authentication tag, and 64-byte
 device signature. Protocol 2 accepts versions `2` and `3`. New apps send v3 on
 protocol 2 servers for all messages, and v2 on protocol 1 servers. Older apps
 reject v3 envelopes as unreadable and prompt for an update on protocol 2
-servers. The envelope is at most 10,751 bytes
+servers. The envelope is at most 10,752 bytes
 (see [the plaintext format](crypto.md#messages)). The POST limit is
-14,847 bytes of JSON: the unpadded base64url envelope plus 512 bytes. The API verifies the
+14,848 bytes of JSON: the unpadded base64url envelope plus 512 bytes. The API verifies the
 envelope against the authenticated person and device and requires the current
 channel epoch. Rotation or a stale epoch returns `409 epoch_changed`, a
 duplicate retained ID returns `409 message_exists`, and malformed framing or

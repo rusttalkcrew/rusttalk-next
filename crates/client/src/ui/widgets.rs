@@ -227,6 +227,12 @@ impl Field<'_> {
         self.edit = self.edit.char_limit(limit);
         self
     }
+
+    /// A font that draws emoji too, like `crate::emoji::font`, for text people send.
+    pub fn font(mut self, font: FontId) -> Self {
+        self.edit = self.edit.font(font);
+        self
+    }
 }
 
 impl Widget for Field<'_> {

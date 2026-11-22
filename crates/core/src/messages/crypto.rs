@@ -5,7 +5,7 @@ use chacha20poly1305::{
 use ed25519_dalek::Signer;
 use zeroize::Zeroizing;
 
-use super::*;
+use super::{poll::PollPart, *};
 use crate::{
     identity::{DeviceCertificate, DeviceIdentity, random_bytes},
     keys::Key,
@@ -34,6 +34,9 @@ pub struct MessageBody {
     /// A poke instead of chat text: the text is its short note (at most
     /// `MAX_POKE_CHARS`), sent with nothing else.
     pub poke: bool,
+    /// A poll, a vote or a poll's end instead of chat text, sent with nothing else.
+    /// A poll's text is its question; the others have no text. Format 3 only.
+    pub poll: Option<PollPart>,
 }
 
 /// Sent by the person who starts a DM's next epoch, in the epoch before it, so the
@@ -75,9 +78,17 @@ const FRIEND: u8 = 16;
 const LINK: u8 = 32;
 const POKE: u8 = 64;
 const AUTHOR: u8 = 128;
+/// Format 3's kind byte after the flags: an ordinary message. Polls, votes and ends
+/// are kinds 1 to 3 (see `PollPart`); readers reject any other.
+const NORMAL: u8 = 0;
 
 impl MessageBody {
-    fn encode(&self) -> Result<Zeroizing<Vec<u8>>, MessageError> {
+    /// Flags, in format 3 the kind byte and its fields, then text, references, stored
+    /// attachments and the live offer.
+    fn encode(&self, version: u8) -> Result<Zeroizing<Vec<u8>>, MessageError> {
+        if version == 2 && (self.quoted_author.is_some() || self.poll.is_some()) {
+            return Err(MessageError::Encoding);
+        }
         if self.text.len() > MAX_TEXT_BYTES || self.text.chars().count() > MAX_TEXT_CHARS {
             return Err(MessageError::TextLimit);
         }
@@ -111,9 +122,21 @@ impl MessageBody {
                 return Err(MessageError::Encoding);
             }
         }
+        if let Some(part) = &self.poll {
+            if flags != 0 || !self.attachments.is_empty() {
+                return Err(MessageError::Encoding);
+            }
+            part.check_text(&self.text)?;
+        }
         // Full capacity up front, so no plaintext copy is left behind by a reallocation.
         let mut body = Zeroizing::new(Vec::with_capacity(MAX_PLAINTEXT));
         body.push(flags);
+        if version != 2 {
+            match &self.poll {
+                Some(part) => part.encode(&mut body)?,
+                None => body.push(NORMAL),
+            }
+        }
         body.extend_from_slice(&(self.text.len() as u16).to_be_bytes());
         body.extend_from_slice(self.text.as_bytes());
         body.extend(self.reply_to.iter().flatten());
@@ -143,7 +166,18 @@ impl MessageBody {
         if bytes.len() > MAX_PLAINTEXT {
             return Err(MessageError::Encoding);
         }
-        let ([flags, high, low], rest) = bytes.split_first_chunk().ok_or(MessageError::Encoding)?;
+        let (flags, mut rest) = bytes.split_first().ok_or(MessageError::Encoding)?;
+        let poll = match rest.first() {
+            _ if version == 2 => None,
+            Some(&NORMAL) => {
+                rest = &rest[1..];
+                None
+            }
+            // A poll part is its kind and fields, its text and zero files: no flags.
+            Some(_) if *flags == 0 => Some(PollPart::decode(&mut rest)?),
+            _ => return Err(MessageError::Encoding),
+        };
+        let ([high, low], rest) = rest.split_first_chunk().ok_or(MessageError::Encoding)?;
         if flags & AUTHOR != 0 && (version != VERSION || flags & (REPLY | EDIT) != REPLY) {
             return Err(MessageError::Encoding);
         }
@@ -212,7 +246,7 @@ impl MessageBody {
         // A sticker never has files or a live offer, so it stays within the plaintext limit.
         if count as usize > MAX_ATTACHMENTS
             || (sticker.is_some() && (count != 0 || flags & LIVE != 0))
-            || ((friend.is_some() || key_link.is_some() || poke) && count != 0)
+            || ((friend.is_some() || key_link.is_some() || poke || poll.is_some()) && count != 0)
         {
             return Err(MessageError::Attachment);
         }
@@ -232,6 +266,9 @@ impl MessageBody {
         {
             return Err(MessageError::TextLimit);
         }
+        if let Some(part) = &poll {
+            part.check_text(text)?;
+        }
         Ok(Self {
             text: text.to_owned(),
             reply_to,
@@ -244,6 +281,7 @@ impl MessageBody {
             friend_sent,
             key_link,
             poke,
+            poll,
         })
     }
 }
@@ -280,7 +318,7 @@ impl MessageContext {
         let aad = self.associated_data();
         let mut nonce = [0; NONCE];
         random_bytes(&mut nonce).map_err(|_| MessageError::Randomness)?;
-        let plaintext = body.encode()?;
+        let plaintext = body.encode(version)?;
         let ciphertext = XChaCha20Poly1305::new(&(**key).into())
             .encrypt(
                 &XNonce::from(nonce),
@@ -359,6 +397,7 @@ mod tests {
             friend_sent: 0,
             key_link: None,
             poke: false,
+            poll: None,
         };
         let legacy = context.seal_version(&key, &sender, &body, 2).unwrap();
         assert_eq!(legacy[0], 2);
@@ -459,22 +498,35 @@ mod tests {
             quoted_author: None,
             ..body.clone()
         };
-        let v2 = legacy.encode().unwrap();
-        let v3 = body.encode().unwrap();
+        let v2 = legacy.encode(2).unwrap();
+        let v3 = body.encode(VERSION).unwrap();
+        // Format 3 has the kind byte (0, an ordinary message) after the flags.
         assert_eq!(
             *v3,
-            [&[REPLY | AUTHOR, 0, 0][..], &[1; 32], &[2; 32], &[0]].concat()
+            [
+                &[REPLY | AUTHOR, NORMAL, 0, 0][..],
+                &[1; 32],
+                &[2; 32],
+                &[0]
+            ]
+            .concat()
         );
         assert_eq!(*v2, [&[REPLY, 0, 0][..], &[1; 32], &[0]].concat());
         assert!(MessageBody::decode(VERSION, &v3).unwrap() == body);
         assert!(MessageBody::decode(2, &v2).unwrap() == legacy);
-        assert!(MessageBody::decode(VERSION, &v2).unwrap() == legacy);
+        let legacy_v3 = legacy.encode(VERSION).unwrap();
+        assert!(MessageBody::decode(VERSION, &legacy_v3).unwrap() == legacy);
         assert!(MessageBody::decode(2, &v3).is_err());
+        assert_eq!(body.encode(2).err(), Some(MessageError::Encoding));
         for flags in [AUTHOR, REPLY | AUTHOR | EDIT, REPLY | AUTHOR | FRIEND] {
             let mut bad = v3.to_vec();
             bad[0] = flags;
             assert!(MessageBody::decode(VERSION, &bad).is_err());
         }
+        // An unknown kind is refused.
+        let mut unknown = v3.to_vec();
+        unknown[1] = 4;
+        assert!(MessageBody::decode(VERSION, &unknown).is_err());
         assert!(MessageBody::decode(VERSION, &v3[..v3.len() - 2]).is_err());
         assert!(MessageBody::decode(VERSION, &[&v3[..], &[0]].concat()).is_err());
         for bad in [
@@ -487,7 +539,7 @@ mod tests {
                 ..body
             },
         ] {
-            assert!(bad.encode().is_err());
+            assert!(bad.encode(VERSION).is_err());
         }
     }
 
@@ -562,15 +614,16 @@ mod tests {
             friend_sent: 0,
             key_link: None,
             poke: false,
+            poll: None,
         };
-        let encoded = body.encode().unwrap();
-        assert_eq!(encoded.len(), MAX_PLAINTEXT - live::MAX_ATTACHMENT);
-        assert!(MessageBody::decode(VERSION, &encoded).unwrap() == body);
-        assert!(MessageBody::decode(VERSION, &encoded[..encoded.len() - 1]).is_err());
+        let encoded = body.encode(2).unwrap();
+        assert_eq!(encoded.len(), MAX_PLAINTEXT - 1 - live::MAX_ATTACHMENT);
+        assert!(MessageBody::decode(2, &encoded).unwrap() == body);
+        assert!(MessageBody::decode(2, &encoded[..encoded.len() - 1]).is_err());
         body.attachments.push(body.attachments[0].clone());
-        assert_eq!(body.encode().err(), Some(MessageError::Attachment));
+        assert_eq!(body.encode(2).err(), Some(MessageError::Attachment));
         assert_eq!(
-            MessageBody::decode(VERSION, &[0, 0, 0, 5]).err(),
+            MessageBody::decode(2, &[0, 0, 0, 5]).err(),
             Some(MessageError::Attachment)
         );
 
@@ -585,10 +638,7 @@ mod tests {
         ] {
             let mut invalid = encoded.to_vec();
             invalid[attachment + offset] = byte;
-            assert!(
-                MessageBody::decode(VERSION, &invalid).is_err(),
-                "offset {offset}"
-            );
+            assert!(MessageBody::decode(2, &invalid).is_err(), "offset {offset}");
         }
     }
 
@@ -615,7 +665,7 @@ mod tests {
             }],
             ..MessageBody::default()
         };
-        let decoded = MessageBody::decode(VERSION, &body.encode().unwrap()).unwrap();
+        let decoded = MessageBody::decode(2, &body.encode(2).unwrap()).unwrap();
         assert!(decoded == body);
     }
 
@@ -628,17 +678,17 @@ mod tests {
             }),
             ..MessageBody::default()
         };
-        let encoded = body.encode().unwrap();
-        assert!(MessageBody::decode(VERSION, &encoded).unwrap() == body);
+        let encoded = body.encode(2).unwrap();
+        assert!(MessageBody::decode(2, &encoded).unwrap() == body);
         let with_text = MessageBody {
             text: "x".into(),
             ..body.clone()
         };
-        assert_eq!(with_text.encode().err(), Some(MessageError::Encoding));
+        assert_eq!(with_text.encode(2).err(), Some(MessageError::Encoding));
         let mut bad_epoch = encoded.to_vec();
         bad_epoch[3..11].copy_from_slice(&0i64.to_be_bytes());
         assert_eq!(
-            MessageBody::decode(VERSION, &bad_epoch).err(),
+            MessageBody::decode(2, &bad_epoch).err(),
             Some(MessageError::Encoding)
         );
     }
@@ -657,14 +707,14 @@ mod tests {
                 friend_sent: 0x0102,
                 ..Default::default()
             };
-            let encoded = body.encode().unwrap();
+            let encoded = body.encode(2).unwrap();
             // Flags, an empty text, the kind, the send time and a zero file count.
             let sent = [0, 0, 0, 0, 0, 0, 1, 2];
             assert_eq!(
                 *encoded,
                 [&[FRIEND, 0, 0, signal as u8][..], &sent, &[0]].concat()
             );
-            assert!(MessageBody::decode(VERSION, &encoded).unwrap() == body);
+            assert!(MessageBody::decode(2, &encoded).unwrap() == body);
         }
         let sent = [0u8; 8];
         for bad in [
@@ -677,7 +727,7 @@ mod tests {
             [&[FRIEND, 0, 1, b'x', 1][..], &sent, &[0]].concat(),
             [&[FRIEND | REPLY, 0, 0, 1][..], &sent, &[0]].concat(),
         ] {
-            assert!(MessageBody::decode(VERSION, &bad).is_err(), "{bad:?}");
+            assert!(MessageBody::decode(2, &bad).is_err(), "{bad:?}");
         }
         let with_text = MessageBody {
             text: "hi".into(),
@@ -686,7 +736,7 @@ mod tests {
             key_link: None,
             ..Default::default()
         };
-        assert_eq!(with_text.encode().err(), Some(MessageError::Encoding));
+        assert_eq!(with_text.encode(2).err(), Some(MessageError::Encoding));
     }
 
     #[test]
@@ -696,23 +746,23 @@ mod tests {
             poke: true,
             ..Default::default()
         };
-        let encoded = body.encode().unwrap();
-        assert!(MessageBody::decode(VERSION, &encoded).unwrap() == body);
+        let encoded = body.encode(2).unwrap();
+        assert!(MessageBody::decode(2, &encoded).unwrap() == body);
         let empty = MessageBody {
             poke: true,
             ..Default::default()
         };
-        assert_eq!(*empty.encode().unwrap(), [POKE, 0, 0, 0]);
+        assert_eq!(*empty.encode(2).unwrap(), [POKE, 0, 0, 0]);
         let long = MessageBody {
             text: "x".repeat(MAX_POKE_CHARS + 1),
             ..empty.clone()
         };
-        assert_eq!(long.encode().err(), Some(MessageError::Encoding));
+        assert_eq!(long.encode(2).err(), Some(MessageError::Encoding));
         let with_reply = MessageBody {
             reply_to: Some([1; 32]),
             ..empty.clone()
         };
-        assert_eq!(with_reply.encode().err(), Some(MessageError::Encoding));
+        assert_eq!(with_reply.encode(2).err(), Some(MessageError::Encoding));
         let long_text = [&[POKE, 0, 101][..], &[b'x'; 101], &[0]].concat();
         for bad in [
             long_text,
@@ -722,8 +772,78 @@ mod tests {
             [&[POKE | REPLY, 0, 0][..], &[1; 32], &[0]].concat(),
             [&[POKE | FRIEND, 0, 0, 1][..], &[0; 8], &[0]].concat(),
         ] {
-            assert!(MessageBody::decode(VERSION, &bad).is_err(), "{bad:?}");
+            assert!(MessageBody::decode(2, &bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn polls_round_trip_alone_in_format_3() {
+        use super::super::poll::{MAX_POLL_OPTION, MAX_POLL_OPTIONS, MAX_POLL_QUESTION, Poll};
+        // The largest poll still fits.
+        let open = MessageBody {
+            text: "é".repeat(MAX_POLL_QUESTION),
+            poll: Some(PollPart::Open(Poll {
+                options: vec!["🦀".repeat(MAX_POLL_OPTION); MAX_POLL_OPTIONS],
+                multiple: true,
+                ends_at: 1_700_000_000,
+            })),
+            ..Default::default()
+        };
+        let vote = MessageBody {
+            poll: Some(PollPart::Vote {
+                poll: [1; 32],
+                sent: 7,
+                choices: vec![2],
+            }),
+            ..Default::default()
+        };
+        let end = MessageBody {
+            poll: Some(PollPart::End { poll: [1; 32] }),
+            ..Default::default()
+        };
+        for body in [&open, &vote, &end] {
+            let encoded = body.encode(VERSION).unwrap();
+            // No flags, then the poll part's kind.
+            assert_eq!(encoded[0], 0);
+            assert_ne!(encoded[1], NORMAL);
+            assert!(MessageBody::decode(VERSION, &encoded).unwrap() == *body);
+            // Nothing may follow, no files, no flags, and format 2 can't carry one.
+            let longer = [&encoded[..], &[0]].concat();
+            assert!(MessageBody::decode(VERSION, &longer).is_err());
+            let mut with_file = encoded.to_vec();
+            *with_file.last_mut().unwrap() = 1;
+            assert!(MessageBody::decode(VERSION, &with_file).is_err());
+            let mut flagged = encoded.to_vec();
+            flagged[0] = REPLY;
+            assert!(MessageBody::decode(VERSION, &flagged).is_err());
+            assert_eq!(body.encode(2).err(), Some(MessageError::Encoding));
+        }
+        for bad in [
+            MessageBody {
+                text: "not empty".into(),
+                ..vote.clone()
+            },
+            MessageBody {
+                reply_to: Some([1; 32]),
+                ..end.clone()
+            },
+            MessageBody {
+                text: String::new(),
+                ..open.clone()
+            },
+            MessageBody {
+                text: "q".repeat(MAX_POLL_QUESTION + 1),
+                ..open.clone()
+            },
+        ] {
+            assert_eq!(bad.encode(VERSION).err(), Some(MessageError::Encoding));
+        }
+        // A vote that carries text is refused by readers too.
+        let encoded = end.encode(VERSION).unwrap();
+        let (fields, tail) = encoded.split_at(encoded.len() - 3);
+        assert_eq!(tail, [0, 0, 0]);
+        let texty = [fields, &[0, 1, b'x', 0]].concat();
+        assert!(MessageBody::decode(VERSION, &texty).is_err());
     }
 
     #[test]
@@ -734,13 +854,13 @@ mod tests {
             sticker: Some([7; 32]),
             ..Default::default()
         };
-        let encoded = body.encode().unwrap();
-        assert!(MessageBody::decode(VERSION, &encoded).unwrap() == body);
+        let encoded = body.encode(2).unwrap();
+        assert!(MessageBody::decode(2, &encoded).unwrap() == body);
         // The sticker follows the reply ID, then a zero file count.
         let mut with_file = encoded.to_vec();
         *with_file.last_mut().unwrap() = 1;
         assert_eq!(
-            MessageBody::decode(VERSION, &with_file).err(),
+            MessageBody::decode(2, &with_file).err(),
             Some(MessageError::Attachment)
         );
         body.live = Some(LiveAttachment {
@@ -751,7 +871,7 @@ mod tests {
             size: 1,
             chunk_size: 1,
         });
-        assert_eq!(body.encode().err(), Some(MessageError::Attachment));
+        assert_eq!(body.encode(2).err(), Some(MessageError::Attachment));
     }
 
     #[test]
@@ -769,17 +889,17 @@ mod tests {
             }),
             ..Default::default()
         };
-        let encoded = body.encode().unwrap();
-        assert!(MessageBody::decode(VERSION, &encoded).unwrap() == body);
-        assert!(MessageBody::decode(VERSION, &encoded[..encoded.len() - 1]).is_err());
+        let encoded = body.encode(2).unwrap();
+        assert!(MessageBody::decode(2, &encoded).unwrap() == body);
+        assert!(MessageBody::decode(2, &encoded[..encoded.len() - 1]).is_err());
 
         let size_at = MIN_PLAINTEXT + 32 + 32;
         let mut oversized = encoded.to_vec();
         oversized[size_at..size_at + 8].copy_from_slice(&(MAX_LIVE_FILE_SIZE + 1).to_be_bytes());
-        assert!(MessageBody::decode(VERSION, &oversized).is_err());
+        assert!(MessageBody::decode(2, &oversized).is_err());
 
         body.live.as_mut().unwrap().name = "../crab.txt".into();
-        assert!(body.encode().is_err());
+        assert!(body.encode(2).is_err());
     }
 
     /// The largest message every field allows still seals, opens and fits the envelope limit.
@@ -826,15 +946,18 @@ mod tests {
             friend_sent: 0,
             key_link: None,
             poke: false,
+            poll: None,
         };
-        let encoded = body.encode().unwrap();
+        // Format 2 has no kind byte, so its worst case is one byte shorter.
+        assert_eq!(body.encode(2).unwrap().len(), MAX_PLAINTEXT - 1);
+        let encoded = body.encode(VERSION).unwrap();
         assert_eq!(encoded.len(), MAX_PLAINTEXT);
         let full_reply = MessageBody {
             edit_of: None,
             quoted_author: Some([7; 32]),
             ..body.clone()
         };
-        assert_eq!(full_reply.encode().unwrap().len(), MAX_PLAINTEXT);
+        assert_eq!(full_reply.encode(VERSION).unwrap().len(), MAX_PLAINTEXT);
         assert!(MessageBody::decode(VERSION, &encoded).unwrap() == body);
         assert!(MessageBody::decode(VERSION, &[&encoded[..], &[0]].concat()).is_err());
         assert!(MessageBody::decode(VERSION, &encoded[..encoded.len() - 1]).is_err());
@@ -860,13 +983,13 @@ mod tests {
 
         let live = body.live.as_mut().unwrap();
         live.name.push('z');
-        assert_eq!(body.encode().err(), Some(MessageError::Encoding));
+        assert_eq!(body.encode(2).err(), Some(MessageError::Encoding));
         body.live.as_mut().unwrap().name.pop();
         body.attachments[0].name.push('a');
-        assert_eq!(body.encode().err(), Some(MessageError::Attachment));
+        assert_eq!(body.encode(2).err(), Some(MessageError::Attachment));
         body.attachments[0].name.pop();
         body.text.push('a');
-        assert_eq!(body.encode().err(), Some(MessageError::TextLimit));
+        assert_eq!(body.encode(2).err(), Some(MessageError::TextLimit));
     }
 
     #[test]
@@ -892,7 +1015,7 @@ mod tests {
             &[1, 0, 0, 0],
         ] {
             assert_eq!(
-                MessageBody::decode(VERSION, bad).err(),
+                MessageBody::decode(2, bad).err(),
                 Some(MessageError::Encoding)
             );
         }
@@ -901,7 +1024,7 @@ mod tests {
         oversized.extend_from_slice(&[b'x'; 2001]);
         oversized.push(0);
         assert_eq!(
-            MessageBody::decode(VERSION, &oversized).err(),
+            MessageBody::decode(2, &oversized).err(),
             Some(MessageError::TextLimit)
         );
     }
