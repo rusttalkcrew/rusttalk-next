@@ -15,38 +15,63 @@ name, then joining a local server by invite link, creating a channel, sending
 messages and reading them again after a restart.
 
 - **Typing** (`src/android.rs`). The keyboard doesn't send keys to
-  GameActivity: it edits a text buffer GameActivity keeps, and winit 0.30 drops
-  the events that say it changed. Each frame reads the buffer and turns what
-  changed into egui text, IME composition (autocorrect, Japanese input),
-  deletions and Enter. While a field is focused the app paints every 40 ms to
-  look, since nothing else wakes it. Checked: letters, backspace, Enter,
-  autocorrect replacing a word, and the buffer starting over after a sent
-  message. Gboard on the emulator sends no composing region for English, so
-  composition and Japanese input are covered by unit tests only.
-- **Keyboard type**: the field's purpose sets the keyboard: password fields get
-  no suggestions and ask the keyboard not to learn (`IME_FLAG_NO_PERSONALIZED_LEARNING`).
-  Every field asks for an Enter key instead of an action key, since winit drops
-  editor actions.
+  GameActivity: it edits a text buffer that GameTextInput keeps, and winit 0.30
+  drops the events that say it changed. The buffer stands for a stretch of the
+  focused field: it starts empty at the field's cursor (or for its selection),
+  and each change to it (text, selection, composed word) becomes the same change
+  at the same place in the field, through the field's cursor and egui text and
+  delete events. Moving the cursor in the field starts the buffer over there.
+  Reading and resetting the buffer happen on the Java thread, where the keyboard
+  edits it, through GameTextInput's C API; a reset is numbered, and the field
+  ignores the buffer until the Java thread has done the latest one, so text from
+  one field never lands in the next. A composed word shows as plain text (egui
+  can't mark a range from outside). While a field is focused the app paints
+  every 40 ms to read the buffer, since nothing else wakes it. Checked: letters,
+  backspace, Enter, autocorrect, typing in the middle of a field, and moving from
+  the password to the confirm field. Gboard on the emulator sends no composing
+  region for English, so Japanese input is covered by unit tests only.
+- **Enter**: winit drops the keyboard's action key, so every field asks for an
+  Enter key, which types a lone newline; that becomes Enter. Newlines that come
+  with other text (a paste) stay text, so pasting doesn't send a message.
+- **Keyboard type**: password fields and recovery words (`ui::Field::private`)
+  get no suggestions and ask the keyboard not to learn
+  (`IME_FLAG_NO_PERSONALIZED_LEARNING`).
+- **Typed secrets**: winit, egui-winit and android-activity log unhandled input
+  events, typed text included, so the log file takes only their errors.
+  GameTextInput's Java code logs typed text to logcat at debug level; R8 strips
+  those calls (`deploy/android/proguard-rules.pro`), which needs a build that
+  isn't debuggable. Rust copies of the buffer are wiped when dropped
+  (`Zeroizing`), and leaving a secret field overwrites GameTextInput's native
+  buffer (which never shrinks) before emptying it. Java strings (the keyboard's
+  own copy, `Editable`) can't be wiped; the garbage collector frees them when it
+  wants, and the keyboard app keeps whatever it keeps.
 - **Safe area**: system bars, display cutout and the keyboard come from
-  GameActivity's window insets (read on the Java thread). The app draws inside
+  GameActivity's window insets, read on the Java thread when the window
+  changes size, when the keyboard opens or closes (for a moment while it
+  slides), and every half second while it is open. The app draws inside
   what is left, so the focused field sits above the keyboard and is scrolled
   into view when the keyboard opens. The keyboard hides when focus leaves a
   field (egui and winit already did that).
 - **Recovery words** show in two columns on phones.
 - **Destroy**: the app runs eframe on its own winit loop and ends it once
-  android-activity has handled `onDestroy`, then ends the process (see Android
-  lifecycle).
+  android-activity has handled `onDestroy`, waits up to 3 seconds for messages
+  still being sent, then ends the process (see Android lifecycle). Drafts in the
+  message box are lost, as on a desktop quit: no platform saves them yet.
+- **Test build**: `deploy/android/build.sh` makes a release APK signed with the
+  local debug key (`rusttalk-<version>-android-arm64-test.apk`): not
+  debuggable, so a USB cable no longer opens the app's files, and R8 can strip
+  logging. Real signing keys come with phase 6.
 
 ## State after phase 1
 
 - `rusttalk-client` and `rusttalk-core` build for `aarch64-linux-android`,
-  LiveKit and WebRTC included. `deploy/android/build.sh` makes a debug APK.
+  LiveKit and WebRTC included. `deploy/android/build.sh` made a debug APK.
 - On a headless Android 15 emulator (x86_64 image running the arm64 build) the
   APK starts, draws the key storage screen, takes taps and opens the
   on-screen keyboard. (An earlier build that still offered the protected file
   also reached the welcome screen and the recovery words.)
-- The APK is a debug build: debuggable, so anyone with the phone and a USB cable
-  can read the app's files. Use test accounts only.
+- The APK was a debug build: debuggable, so anyone with the phone and a USB
+  cable could read the app's files (phase 2 changed that).
 - `deploy/ios/build.sh` makes an unsigned IPA. iOS can't be checked from Linux:
   `ring`, `cxx`, `webrtc-sys` and `coreaudio-sys` compile C, C++ and bindings
   against the iOS SDK through `xcrun`. The macOS runner in

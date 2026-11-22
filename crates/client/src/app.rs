@@ -559,11 +559,11 @@ fn card(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> Option<Action>) -> Option<Acti
         .inner
 }
 
+/// Plain Enter in a single-line field. Screens that focus a field when nothing has
+/// focus must ask before that: Enter ends the focus, and focusing again hides it.
 pub fn submitted(ui: &Ui, field: &Response) -> bool {
-    // Enter ends the field's focus, but screens that focus their field when nothing
-    // has focus take it back in the same frame, so `lost_focus` can't tell.
-    ui.memory(|memory| memory.had_focus_last_frame(field.id))
-        && ui.input(|input| input.key_pressed(Key::Enter))
+    field.lost_focus()
+        && ui.input(|input| input.key_pressed(Key::Enter) && input.modifiers.is_none())
 }
 
 fn welcome(ui: &mut Ui) -> Option<Action> {
@@ -618,12 +618,12 @@ fn confirm(
     for (slot, (answer, index)) in answers.iter_mut().zip(check.indices()).enumerate() {
         let label = ui.label(t!("app.word_number", number = index + 1));
         let field = ui
-            .add(ui::field(&mut **answer).desired_width(260.0))
+            .add(ui::field(&mut **answer).desired_width(260.0).private())
             .labelled_by(label.id);
+        done |= submitted(ui, &field);
         if slot == 0 && ui.memory(|memory| memory.focused().is_none()) {
             field.request_focus();
         }
-        done |= submitted(ui, &field);
     }
     error_text(ui, error);
     ui.add_space(12.0);
@@ -644,7 +644,8 @@ fn restore(ui: &mut Ui, words: &mut Zeroizing<String>, error: Option<&str>) -> O
         .add(
             ui::text_area(&mut **words)
                 .desired_rows(4)
-                .desired_width(f32::INFINITY),
+                .desired_width(f32::INFINITY)
+                .private(),
         )
         .labelled_by(label.id);
     if ui.memory(|memory| memory.focused().is_none()) {

@@ -174,8 +174,14 @@ impl Server {
     }
 
     pub fn send(&self, command: Command) {
+        let message = matches!(command, Command::Send(_));
+        if message {
+            crate::net::message_queued(true);
+        }
         // The task only ends after the UI drops this sender or the server stopped for good.
-        let _ = self.commands.send(command);
+        if self.commands.send(command).is_err() && message {
+            crate::net::message_queued(false);
+        }
     }
 
     pub fn channel(&self, id: &Id) -> Option<&Channel> {

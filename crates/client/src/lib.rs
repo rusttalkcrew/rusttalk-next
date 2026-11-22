@@ -267,7 +267,13 @@ fn start_logging(path: PathBuf) -> Result<()> {
         .with(
             Targets::new()
                 .with_default(Level::WARN)
-                .with_target("rusttalk_", Level::INFO),
+                .with_target("rusttalk_", Level::INFO)
+                // These print unhandled input events, typed text included (winit's
+                // "Unknown android_activity input event", egui-winit's IME warnings),
+                // and the log file must never hold passwords or recovery words.
+                .with_target("winit", Level::ERROR)
+                .with_target("egui_winit", Level::ERROR)
+                .with_target("android_activity", Level::ERROR),
         )
         .with(
             tracing_subscriber::fmt::layer()

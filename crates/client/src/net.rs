@@ -5,7 +5,11 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
-    sync::{Arc, mpsc},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+        mpsc,
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -75,6 +79,35 @@ pub enum Fetch {
     Full,
     /// Every frame shrunk to thumbnail size, to play in the chat.
     Inline,
+}
+
+/// Messages handed to the network that it hasn't sent or given back yet, so a
+/// phone can wait for them before its process ends (`wait_for_sends`).
+static SENDING: AtomicUsize = AtomicUsize::new(0);
+
+/// `Server::send` counts a message; `Sent` uncounts it when the network is done.
+pub fn message_queued(queued: bool) {
+    match queued {
+        true => SENDING.fetch_add(1, Ordering::Relaxed),
+        false => SENDING.fetch_sub(1, Ordering::Relaxed),
+    };
+}
+
+struct Sent;
+
+impl Drop for Sent {
+    fn drop(&mut self) {
+        message_queued(false);
+    }
+}
+
+/// Wait, at most `limit`, until no message is on its way.
+#[cfg(target_os = "android")]
+pub fn wait_for_sends(limit: Duration) {
+    let end = std::time::Instant::now() + limit;
+    while SENDING.load(Ordering::Relaxed) > 0 && std::time::Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 // A draft is big and rare next to the other commands, which are small.
@@ -920,6 +953,7 @@ fn refuse(ctx: &Ctx, url: &Url, command: Command) {
             ));
         }
         Command::Send(draft) => {
+            let _sent = Sent;
             ctx.send(Update::Unsent(url.clone(), draft));
             ctx.send(Update::Failed(t!("admin.offline").into()));
         }
@@ -1479,6 +1513,7 @@ async fn on_command(
             page(ctx, url, client, state, channel, Some(before)).await;
         }
         Command::Send(draft) => {
+            let _sent = Sent;
             let channel = match draft.peer {
                 Some(peer) => dm_channel(ctx, url, client, state, peer).await,
                 None => Ok(draft.channel),

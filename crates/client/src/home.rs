@@ -5524,8 +5524,7 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
         }
         Dialog::MyName(index, name) => {
             ui.label(t!("home.my_name_help"));
-            let field = name_field(ui, name);
-            let submitted = submitted(ui, &field);
+            let (_, submitted) = name_field(ui, name);
             if !default_name.is_empty() {
                 ui.add_space(ui::SPACE_S);
                 let label = t!("home.use_default_name", name = default_name);
@@ -5649,7 +5648,8 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
             match tab {
                 ChannelTab::General => {
                     let label = ui.label(t!("home.channel_name")).id;
-                    let name_field = name_field(ui, name).labelled_by(label);
+                    let (name_field, name_entered) = name_field(ui, name);
+                    name_field.labelled_by(label);
                     let label = ui.label(t!("home.topic_optional")).id;
                     let field = ui
                         .add(
@@ -5676,7 +5676,7 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
                         });
                         *changed |= slider.changed();
                     }
-                    entered = submitted(ui, &name_field) || submitted(ui, &field);
+                    entered = name_entered || submitted(ui, &field);
                 }
                 ChannelTab::Permissions => admin::channel_flags(ui, data, channel, flags),
             }
@@ -5719,8 +5719,8 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
         }
         Dialog::RenameCategory(index, id, name) => {
             let label = ui.label(t!("home.category_name")).id;
-            let field = name_field(ui, name).labelled_by(label);
-            let submitted = submitted(ui, &field);
+            let (field, submitted) = name_field(ui, name);
+            field.labelled_by(label);
             if text_footer(ui, t!("common.save"), submitted, &mut close) && !name.trim().is_empty()
             {
                 command = Some((*index, Command::RenameCategory(*id, name.trim().to_owned())));
@@ -5940,17 +5940,18 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
 
 /// A name field with a confirm button; returns true when confirmed with a non-empty name.
 fn text_dialog(ui: &mut Ui, text: &mut String, confirm: &str, close: &mut bool) -> bool {
-    let field = name_field(ui, text);
-    let submitted = submitted(ui, &field);
+    let (_, submitted) = name_field(ui, text);
     text_footer(ui, confirm, submitted, close) && !text.trim().is_empty()
 }
 
-fn name_field(ui: &mut Ui, text: &mut String) -> Response {
+/// The field, and whether Enter was pressed in it (asked before it takes focus again).
+fn name_field(ui: &mut Ui, text: &mut String) -> (Response, bool) {
     let field = ui.add(ui::field(text).char_limit(100).desired_width(f32::INFINITY));
+    let entered = submitted(ui, &field);
     if ui.memory(|memory| memory.focused().is_none()) {
         field.request_focus();
     }
-    field
+    (field, entered)
 }
 
 fn text_footer(ui: &mut Ui, confirm: &str, mut done: bool, close: &mut bool) -> bool {

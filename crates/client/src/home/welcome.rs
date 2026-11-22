@@ -84,6 +84,7 @@ pub fn show(ui: &mut Ui, home: &mut Home) -> bool {
                         .desired_width(320.0),
                 )
                 .labelled_by(label.id);
+            let entered = submitted(ui, &field);
             if ui.memory(|memory| memory.focused().is_none()) {
                 field.request_focus();
             }
@@ -93,7 +94,7 @@ pub fn show(ui: &mut Ui, home: &mut Home) -> bool {
             }
             ui.add_space(12.0);
             let go = ui.add_enabled_ui(!empty, |ui| primary_large(ui, t!("home.continue")));
-            if !empty && (go.inner.clicked() || submitted(ui, &field)) {
+            if !empty && (go.inner.clicked() || entered) {
                 next = Some(Some(name.trim().to_owned()));
             }
         }

@@ -177,10 +177,10 @@ pub fn unlock(
                     .desired_width(FIELD_WIDTH),
             )
             .labelled_by(label.id);
+        let entered = submitted(ui, &field);
         if !busy && ui.memory(|memory| memory.focused().is_none()) {
             field.request_focus();
         }
-        let entered = submitted(ui, &field);
         error_text(ui, error);
         ui.add_space(ui::SPACE_S);
         let pressed = ui

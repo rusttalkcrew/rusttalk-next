@@ -179,12 +179,14 @@ pub fn secondary_large(ui: &mut Ui, text: &str) -> Response {
 /// A text field with roomy padding and an accent outline while typing in it.
 pub struct Field<'t> {
     edit: TextEdit<'t>,
+    private: bool,
 }
 
 /// A one-line text field.
 pub fn field(text: &mut dyn TextBuffer) -> Field<'_> {
     Field {
         edit: TextEdit::singleline(text).margin(Margin::symmetric(10, 7)),
+        private: false,
     }
 }
 
@@ -192,6 +194,7 @@ pub fn field(text: &mut dyn TextBuffer) -> Field<'_> {
 pub fn text_area(text: &mut dyn TextBuffer) -> Field<'_> {
     Field {
         edit: TextEdit::multiline(text).margin(Margin::symmetric(10, 7)),
+        private: false,
     }
 }
 
@@ -217,6 +220,13 @@ impl Field<'_> {
         self
     }
 
+    /// Secret but shown, like recovery words: phone keyboards offer no suggestions
+    /// and don't learn it. Password fields get that already.
+    pub fn private(mut self) -> Self {
+        self.private = true;
+        self
+    }
+
     /// Show dots instead of the typed text.
     pub fn password(mut self) -> Self {
         self.edit = self.edit.password(true);
@@ -238,9 +248,25 @@ impl Field<'_> {
 impl Widget for Field<'_> {
     fn ui(self, ui: &mut Ui) -> Response {
         let response = ui.add(self.edit);
+        if self.private {
+            // For this frame only: another screen's field can get the same id.
+            let pass = ui.ctx().cumulative_pass_nr();
+            ui.ctx()
+                .data_mut(|data| data.insert_temp(private_id(response.id), pass));
+        }
         field_focus(ui, &response);
         response
     }
+}
+
+fn private_id(field: egui::Id) -> egui::Id {
+    field.with("private field")
+}
+
+/// Whether the field was marked [`Field::private`].
+#[cfg(target_os = "android")]
+pub fn is_private(ctx: &egui::Context, field: egui::Id) -> bool {
+    ctx.data(|data| data.get_temp(private_id(field))) == Some(ctx.cumulative_pass_nr())
 }
 
 /// The accent outline of a focused text field.
