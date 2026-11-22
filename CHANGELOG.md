@@ -15,6 +15,7 @@ Unreleased under the new version and date.
 - Minimizing everyone on the call stage no longer shows "Connecting…"
 - Edit channel is one dialog with General and Permissions tabs
 - Your microphone works again when a moderator unmutes you, without rejoining the call.
+- Update checks are on by default and the update address is filled in
 
 ## v0.1.10 - 2026-11-22
 
