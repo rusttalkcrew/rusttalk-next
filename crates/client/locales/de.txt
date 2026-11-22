@@ -1298,6 +1298,7 @@ hotkeys.no_screen_access = Erlaube RustTalk die Bildschirmaufnahme in den System
 call.share_terminal = Terminal teilen
 call.stop_terminal = Terminal nicht mehr teilen
 call.share_cmd = Eingabeaufforderung teilen
+call.more = Mehr
 call.your_terminal = Dein Terminal
 call.someones_terminal = Terminal von {name}
 terminal.failed = Das Terminal konnte nicht gestartet werden.

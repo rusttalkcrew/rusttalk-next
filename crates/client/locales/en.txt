@@ -1299,8 +1299,9 @@ hotkeys.no_screen_access = Allow screen recording for RustTalk in System Setting
 
 # crates/client/src/call/terminal.rs
 call.share_terminal = Share a terminal
-call.stop_terminal = Stop sharing terminal
+call.stop_terminal = Stop sharing the terminal
 call.share_cmd = Share Command Prompt
+call.more = More
 call.your_terminal = Your terminal
 call.someones_terminal = {name}'s terminal
 terminal.failed = Couldn't start a terminal.

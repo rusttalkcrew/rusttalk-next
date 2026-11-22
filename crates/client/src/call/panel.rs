@@ -303,8 +303,8 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
                         }
                     }
                 }
-                terminal = terminal_button(ui, voice.terminals.local.is_some(), connected, size);
                 share = app_button(ui, voice, connected && blocked.is_none(), blocked, size);
+                terminal = more_button(ui, voice.terminals.local.is_some(), connected, size);
             });
             if let Some(action) = live_files(ui, &home.voice.live_files, server) {
                 live = Some(action);
@@ -363,28 +363,34 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
     }
 }
 
-/// Share or stop sharing a terminal. On Windows its menu also offers Command Prompt.
-fn terminal_button(ui: &mut Ui, on: bool, connected: bool, size: Vec2) -> Option<Shell> {
-    let (tip, look) = if on {
-        (t!("call.stop_terminal"), Look::On(ui::colors(ui).success))
-    } else {
-        (t!("call.share_terminal"), Look::Plain)
-    };
+/// The "More" button: a menu for the less common shares, so the row stays short. Starts or
+/// stops a terminal share; on Windows it also offers Command Prompt.
+fn more_button(ui: &mut Ui, on: bool, connected: bool, size: Vec2) -> Option<Shell> {
     let button = ui
         .add_enabled_ui(connected, |ui| {
-            ui::icon_button(ui, crate::terminal::ICON, tip, look, size)
+            ui::icon_button(ui, "…", t!("call.more"), Look::Plain, size)
         })
         .inner;
-    let mut picked = button.clicked().then_some(Shell::Default);
-    if cfg!(windows) && !on {
-        ui::context_menu(&button, |m| {
-            if m.item(crate::terminal::ICON, t!("call.share_cmd"))
-                .clicked()
-            {
-                picked = Some(Shell::Cmd);
+    let mut picked = None;
+    ui::menu_wide(&button, |m| {
+        if on {
+            if m.danger("⏹", t!("call.stop_terminal")).clicked() {
+                picked = Some(Shell::Default);
             }
-        });
-    }
+            return;
+        }
+        if m.item(crate::terminal::ICON, t!("call.share_terminal"))
+            .clicked()
+        {
+            picked = Some(Shell::Default);
+        }
+        if cfg!(windows)
+            && m.item(crate::terminal::ICON, t!("call.share_cmd"))
+                .clicked()
+        {
+            picked = Some(Shell::Cmd);
+        }
+    });
     picked
 }
 
