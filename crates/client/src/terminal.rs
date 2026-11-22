@@ -4,8 +4,13 @@
 
 use std::{
     io::{Read, Write},
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{
+        Arc, Mutex, MutexGuard,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{SyncSender, TrySendError, sync_channel},
+    },
     thread,
+    time::{Duration, Instant},
 };
 
 use alacritty_terminal::{
@@ -25,7 +30,9 @@ use eframe::egui::{
     Align2, Color32, Event, EventFilter, FontId, Id as UiId, Key, Modifiers, MouseWheelUnit, Pos2,
     Rect, Response, Role, Sense, Stroke, StrokeKind, Ui, Vec2, WidgetInfo, pos2, vec2,
 };
-use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
+use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
+use rusttalk_core::terminal::MAX_SNAPSHOT;
+use unicode_width::UnicodeWidthChar;
 
 use crate::ui;
 
@@ -39,7 +46,43 @@ const PENDING_CAP: usize = 1024 * 1024;
 const MIN_COLS: u16 = 20;
 const MIN_ROWS: u16 = 5;
 
-type Writer = Arc<Mutex<Box<dyn Write + Send>>>;
+/// Combining marks one cell may carry on a viewer's side.
+const MAX_MARKS: u8 = 8;
+/// Pieces of typing waiting for the shell; more is dropped rather than waited for.
+const TYPING_QUEUE: usize = 256;
+
+/// Hands bytes to the thread that writes them to the shell, so nobody waits for a shell
+/// that doesn't read (and never while holding the terminal).
+#[derive(Clone)]
+struct Writer(SyncSender<Vec<u8>>);
+
+impl Writer {
+    fn start(mut pty: Box<dyn Write + Send>) -> Result<Self> {
+        let (sender, typed) = sync_channel::<Vec<u8>>(TYPING_QUEUE);
+        thread::Builder::new()
+            .name("terminal input".into())
+            .spawn(move || {
+                // Ends when the share is gone and nobody can send any more.
+                for bytes in typed {
+                    if let Err(error) = pty.write_all(&bytes).and_then(|()| pty.flush()) {
+                        tracing::debug!(%error, "writing to the shared shell failed");
+                        break;
+                    }
+                }
+            })?;
+        Ok(Self(sender))
+    }
+
+    fn send(&self, bytes: &[u8]) {
+        match self.0.try_send(bytes.to_vec()) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                tracing::debug!("the shared shell isn't reading; dropped typing");
+            }
+            Err(TrySendError::Disconnected(_)) => {}
+        }
+    }
+}
 
 /// Answers what programs ask the terminal (the cursor position, what it supports) on the
 /// sharer's side. Viewers never answer: the sharer's terminal already did.
@@ -47,11 +90,66 @@ struct Listener(Option<Writer>);
 
 impl EventListener for Listener {
     fn send_event(&self, event: TermEvent) {
-        if let (TermEvent::PtyWrite(text), Some(writer)) = (event, &self.0)
-            && let Ok(mut writer) = writer.lock()
-        {
-            let _ = writer.write_all(text.as_bytes());
+        if let (TermEvent::PtyWrite(text), Some(writer)) = (event, &self.0) {
+            writer.send(text.as_bytes());
         }
+    }
+}
+
+/// Keeps a sharer from piling endless combining marks onto one cell of a viewer's
+/// screen: past `MAX_MARKS` in a row, more are dropped. Escape sequences don't count,
+/// and only a printed letter starts a new row, so nothing in between resets it.
+#[derive(Default)]
+struct Marks {
+    /// In an escape sequence: 1 after Escape, 2 in a CSI, 3 in a string (OSC and kin).
+    escape: u8,
+    run: u8,
+    /// The start of a letter cut off at the end of the last bytes.
+    carry: Vec<u8>,
+}
+
+impl Marks {
+    fn filter(&mut self, bytes: &[u8]) -> Vec<u8> {
+        let mut input = std::mem::take(&mut self.carry);
+        input.extend_from_slice(bytes);
+        let mut out = Vec::with_capacity(input.len());
+        let mut chunks = input.utf8_chunks().peekable();
+        while let Some(chunk) = chunks.next() {
+            for c in chunk.valid().chars() {
+                if self.keep(c) {
+                    let mut buffer = [0; 4];
+                    out.extend_from_slice(c.encode_utf8(&mut buffer).as_bytes());
+                }
+            }
+            let invalid = chunk.invalid();
+            // A letter cut in two waits for the rest.
+            if chunks.peek().is_none() && !invalid.is_empty() && invalid.len() < 4 {
+                self.carry = invalid.to_vec();
+            } else {
+                out.extend_from_slice(invalid);
+            }
+        }
+        out
+    }
+
+    fn keep(&mut self, c: char) -> bool {
+        match (self.escape, c) {
+            (_, '\x1b') => self.escape = 1,
+            (1, '[') => self.escape = 2,
+            (1, ']' | 'P' | '_' | '^' | 'X') => self.escape = 3,
+            (1, _) => self.escape = 0,
+            (2, '\x40'..='\x7e') => self.escape = 0,
+            (3, '\x07') => self.escape = 0,
+            (2 | 3, _) => {}
+            (_, c) if !c.is_ascii() && UnicodeWidthChar::width(c) == Some(0) => {
+                self.run = self.run.saturating_add(1);
+                return self.run <= MAX_MARKS;
+            }
+            (_, '\x20'..='\x7e') => self.run = 0,
+            (_, c) if !c.is_ascii() => self.run = 0,
+            _ => {}
+        }
+        true
     }
 }
 
@@ -59,11 +157,16 @@ impl EventListener for Listener {
 pub struct Emulator {
     term: Term<Listener>,
     parser: Processor,
+    /// On a viewer's side, what the sharer may pile onto a cell is limited.
+    marks: Option<Marks>,
 }
 
 impl Emulator {
+    /// A viewer's terminal.
     pub fn new(cols: u16, rows: u16) -> Self {
-        Self::with(cols, rows, Listener(None))
+        let mut emulator = Self::with(cols, rows, Listener(None));
+        emulator.marks = Some(Marks::default());
+        emulator
     }
 
     fn with(cols: u16, rows: u16, listener: Listener) -> Self {
@@ -77,11 +180,18 @@ impl Emulator {
         Self {
             term: Term::new(config, &size, listener),
             parser: Processor::new(),
+            marks: None,
         }
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
-        self.parser.advance(&mut self.term, bytes);
+        match &mut self.marks {
+            Some(marks) => {
+                let bytes = marks.filter(bytes);
+                self.parser.advance(&mut self.term, &bytes);
+            }
+            None => self.parser.advance(&mut self.term, bytes),
+        }
     }
 
     pub fn size(&self) -> (u16, u16) {
@@ -93,9 +203,29 @@ impl Emulator {
     }
 
     /// Bytes that draw this screen, with some history, in a fresh terminal of the same
-    /// size. While a full-screen program runs only its screen is sent, and the second
-    /// value is true: the screen underneath can't be read until it ends.
+    /// size, at most `MAX_SNAPSHOT` of them: a very colourful screen first loses history,
+    /// then its colours. While a full-screen program runs only its screen is sent, and
+    /// the second value is true: the screen underneath can't be read until it ends.
     pub fn snapshot(&self) -> (Vec<u8>, bool) {
+        let alt = self.alt();
+        for (history, plain) in [
+            (SNAPSHOT_HISTORY, false),
+            (SNAPSHOT_HISTORY / 5, false),
+            (0, false),
+            (0, true),
+        ] {
+            let screen = self.draw(history, plain);
+            if screen.len() <= MAX_SNAPSHOT {
+                return (screen, alt);
+            }
+        }
+        // Only a screen full of combining marks gets here.
+        let mut screen = self.draw(0, true);
+        screen.truncate(MAX_SNAPSHOT);
+        (screen, alt)
+    }
+
+    fn draw(&self, history: usize, plain: bool) -> Vec<u8> {
         let grid = self.term.grid();
         let cols = grid.columns();
         let alt = self.term.mode().contains(TermMode::ALT_SCREEN);
@@ -103,9 +233,9 @@ impl Emulator {
         if alt {
             out.extend_from_slice(b"\x1b[?1049h");
         }
-        let mut pen = Pen::default();
+        let mut pen = Pen { last: None, plain };
         let lines = grid.screen_lines() as i32;
-        let history = grid.history_size().min(SNAPSHOT_HISTORY) as i32;
+        let history = grid.history_size().min(history) as i32;
         for line in -history..lines {
             let row = &grid[Line(line)];
             let wrapped = row[Column(cols - 1)].flags.contains(Flags::WRAPLINE);
@@ -152,7 +282,7 @@ impl Emulator {
                 out.extend_from_slice(set.as_bytes());
             }
         }
-        (out, alt)
+        out
     }
 
     fn mode(&self) -> TermMode {
@@ -166,9 +296,11 @@ impl Emulator {
 }
 
 /// The colours and attributes last written in a snapshot, to write only changes;
-/// `None` until something is written.
-#[derive(Default)]
-struct Pen(Option<(Color, Color, Flags)>);
+/// `None` until something is written. A `plain` pen writes no colours at all.
+struct Pen {
+    last: Option<(Color, Color, Flags)>,
+    plain: bool,
+}
 
 /// The attributes that SGR sets.
 const STYLE: Flags = Flags::BOLD
@@ -191,7 +323,10 @@ impl Pen {
 
     fn set(&mut self, out: &mut Vec<u8>, cell: &Cell) {
         let wanted = (cell.fg, cell.bg, cell.flags & STYLE);
-        let current = self.0.unwrap_or((
+        if self.plain {
+            return;
+        }
+        let current = self.last.unwrap_or((
             Color::Named(NamedColor::Foreground),
             Color::Named(NamedColor::Background),
             Flags::empty(),
@@ -222,7 +357,7 @@ impl Pen {
         sgr_color(&mut sgr, cell.bg, false);
         sgr.push('m');
         out.extend_from_slice(sgr.as_bytes());
-        self.0 = Some(wanted);
+        self.last = Some(wanted);
     }
 }
 
@@ -287,13 +422,19 @@ impl Inner {
 }
 
 #[derive(Clone)]
-pub struct Shared(Arc<Mutex<Inner>>);
+pub struct Shared {
+    inner: Arc<Mutex<Inner>>,
+    writer: Writer,
+}
 
 impl Shared {
     pub fn lock(&self) -> MutexGuard<'_, Inner> {
-        self.0
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        (self.inner.lock()).unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Type into the shell. Never waits: if the shell doesn't keep up, typing is dropped.
+    pub fn write(&self, bytes: &[u8]) {
+        self.writer.send(bytes);
     }
 }
 
@@ -324,6 +465,17 @@ fn commands(shell: Shell) -> Vec<CommandBuilder> {
             if let Ok(home) = etcetera::home_dir() {
                 command.cwd(home);
             }
+            // The shell is the person's own, not part of RustTalk: leave out what the
+            // AppImage and RustTalk set for themselves.
+            for (name, _) in std::env::vars_os() {
+                let own = name.to_str().is_some_and(|name| {
+                    name.starts_with("RUSTTALK_")
+                        || ["LD_LIBRARY_PATH", "APPDIR", "APPIMAGE", "ARGV0", "OWD"].contains(&name)
+                });
+                if own {
+                    command.env_remove(name);
+                }
+            }
             command.env("TERM", "xterm-256color");
             command.env("COLORTERM", "truecolor");
             command
@@ -334,9 +486,12 @@ fn commands(shell: Shell) -> Vec<CommandBuilder> {
 /// Our own shared terminal: the shell runs as long as this lives.
 pub struct Local {
     pub shared: Shared,
-    writer: Writer,
     master: Box<dyn MasterPty + Send>,
-    killer: Box<dyn ChildKiller + Send + Sync>,
+    /// Asks the thread that watches the shell to end it.
+    stop: Arc<AtomicBool>,
+    /// Closing it ends every process the shell started (Windows).
+    #[cfg(windows)]
+    _job: Option<job::Job>,
     /// The size the tile asks for, and since when, so resizing waits for it to settle.
     wanted: Option<((u16, u16), f64)>,
 }
@@ -386,17 +541,27 @@ impl Local {
         // Only the shell keeps the terminal's other end open, so it ends with the shell.
         drop(pair.slave);
         let reader = pair.master.try_clone_reader().map_err(anyhow::Error::msg)?;
-        let writer: Writer = Arc::new(Mutex::new(
-            pair.master.take_writer().map_err(anyhow::Error::msg)?,
-        ));
-        let shared = Shared(Arc::new(Mutex::new(Inner {
-            emulator: Emulator::with(cols, rows, Listener(Some(writer.clone()))),
-            pending: Vec::new(),
-            pending_bytes: 0,
-            overflowed: false,
-            exited: false,
-        })));
-        let killer = child.clone_killer();
+        #[cfg(windows)]
+        let job = (child.as_raw_handle()).and_then(|process| match job::Job::new(process) {
+            Ok(job) => Some(job),
+            Err(error) => {
+                tracing::warn!(%error, "grouping the shared shell's processes failed");
+                None
+            }
+        });
+        let writer = Writer::start(pair.master.take_writer().map_err(anyhow::Error::msg)?)?;
+        let shared = Shared {
+            inner: Arc::new(Mutex::new(Inner {
+                emulator: Emulator::with(cols, rows, Listener(Some(writer.clone()))),
+                pending: Vec::new(),
+                pending_bytes: 0,
+                overflowed: false,
+                exited: false,
+            })),
+            writer,
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopping = stop.clone();
         let repaint = Arc::new(repaint);
         let output = shared.clone();
         let wake = repaint.clone();
@@ -407,18 +572,16 @@ impl Local {
         thread::Builder::new()
             .name("terminal shell".into())
             .spawn(move || {
-                match child.wait() {
-                    Ok(status) => tracing::info!(code = status.exit_code(), "shared shell ended"),
-                    Err(error) => tracing::warn!(%error, "waiting for the shared shell failed"),
-                }
+                watch(&mut *child, &stopping);
                 ended.lock().exited = true;
                 repaint();
             })?;
         Ok(Self {
             shared,
-            writer,
             master: pair.master,
-            killer,
+            stop,
+            #[cfg(windows)]
+            _job: job,
             wanted: None,
         })
     }
@@ -426,18 +589,6 @@ impl Local {
     /// The shell ended by itself.
     pub fn exited(&self) -> bool {
         self.shared.lock().exited
-    }
-
-    /// Type into the shell.
-    pub fn write(&self, bytes: &[u8]) {
-        let result = self
-            .writer
-            .lock()
-            .map_err(|_| std::io::Error::other("poisoned"))
-            .and_then(|mut writer| writer.write_all(bytes).and_then(|()| writer.flush()));
-        if let Err(error) = result {
-            tracing::debug!(%error, "writing to the shared shell failed");
-        }
     }
 
     /// Follow the tile's size once it has stayed the same for a moment, at `now`.
@@ -472,10 +623,101 @@ impl Local {
 }
 
 impl Drop for Local {
-    /// Stopping the share ends the shell, and closing the terminal ends what runs in it.
+    /// Stopping the share ends the shell and what it started.
     fn drop(&mut self) {
-        if let Err(error) = self.killer.kill() {
-            tracing::debug!(%error, "ending the shared shell failed");
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+/// How long the shell's processes get to end after a hangup before they're killed.
+const GRACE: Duration = Duration::from_secs(2);
+
+/// Wait for the shell to end, or end it when asked. Only this thread reaps the shell,
+/// so while it hasn't, its process group can't be another's.
+fn watch(child: &mut dyn Child, stop: &AtomicBool) {
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                tracing::info!(code = status.exit_code(), "shared shell ended");
+                return;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(%error, "waiting for the shared shell failed");
+                return;
+            }
+        }
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    tracing::info!("ending the shared shell");
+    #[cfg(unix)]
+    if let Some(pid) = child.process_id() {
+        // The shell leads its own session and process group: hang up on all of it,
+        // then kill what is left once the grace period is over.
+        let group = pid as libc::pid_t;
+        unsafe { libc::killpg(group, libc::SIGHUP) };
+        let until = Instant::now() + GRACE;
+        while Instant::now() < until {
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        unsafe { libc::killpg(group, libc::SIGKILL) };
+    }
+    #[cfg(windows)]
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[cfg(windows)]
+mod job {
+    use std::os::windows::io::RawHandle;
+
+    use windows::{
+        Win32::{
+            Foundation::{CloseHandle, HANDLE},
+            System::JobObjects::{
+                AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+                JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+                SetInformationJobObject,
+            },
+        },
+        core::PCWSTR,
+    };
+
+    /// A job holding the shell and everything it starts; closing it ends them all.
+    pub struct Job(HANDLE);
+
+    // The handle is only closed, once, by its owner.
+    unsafe impl Send for Job {}
+
+    impl Job {
+        pub fn new(process: RawHandle) -> windows::core::Result<Self> {
+            unsafe {
+                let job = Self(CreateJobObjectW(None, PCWSTR::null())?);
+                let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+                limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                SetInformationJobObject(
+                    job.0,
+                    JobObjectExtendedLimitInformation,
+                    (&raw const limits).cast(),
+                    size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                )?;
+                AssignProcessToJobObject(job.0, HANDLE(process))?;
+                Ok(job)
+            }
+        }
+    }
+
+    impl Drop for Job {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = CloseHandle(self.0);
+            }
         }
     }
 }
@@ -1020,6 +1262,49 @@ mod tests {
             screen.feed(b"x");
         }
         assert_eq!(cells(&copy), cells(&emulator));
+    }
+
+    #[test]
+    fn a_very_colourful_screen_still_fits_a_snapshot() {
+        let mut emulator = Emulator::with(500, 200, Listener(None));
+        // Every cell its own colour, on the screen and in the history.
+        for line in 0..400u32 {
+            for col in 0..500u32 {
+                let (r, g, b) = (line % 256, col % 256, (line + col) % 256);
+                let cell = format!("\x1b[38;2;{r};{g};{b};48;2;{b};{g};{r}m{}", col % 10);
+                emulator.feed(cell.as_bytes());
+            }
+        }
+        assert!(emulator.draw(SNAPSHOT_HISTORY, false).len() > MAX_SNAPSHOT);
+        let (screen, _) = emulator.snapshot();
+        assert!(screen.len() <= MAX_SNAPSHOT);
+        // The screen's text is all there, even if its colours aren't.
+        let mut copy = Emulator::new(500, 200);
+        copy.feed(&screen);
+        let text = |emulator: &Emulator| -> String {
+            let grid = emulator.term.grid();
+            (0..200)
+                .flat_map(|line| (0..500).map(move |col| grid[Line(line)][Column(col)].c))
+                .collect()
+        };
+        assert_eq!(text(&copy), text(&emulator));
+    }
+
+    #[test]
+    fn a_viewer_takes_only_a_few_combining_marks_per_letter() {
+        let mut viewer = Emulator::new(20, 3);
+        let marks = "\u{301}".repeat(1000);
+        // Escape sequences in between don't start the count again.
+        viewer.feed(format!("e{marks}\x1b[0m{marks}").as_bytes());
+        let cell = &viewer.term.grid()[Line(0)][Column(0)];
+        assert_eq!(cell.zerowidth().unwrap().len(), usize::from(MAX_MARKS));
+        // A letter cut between two pieces of output still arrives whole.
+        let bytes = "xé\u{301}".as_bytes();
+        viewer.feed(&bytes[..2]);
+        viewer.feed(&bytes[2..]);
+        let grid = viewer.term.grid();
+        assert_eq!(grid[Line(0)][Column(2)].c, 'é');
+        assert_eq!(grid[Line(0)][Column(2)].zerowidth(), Some(&['\u{301}'][..]));
     }
 
     #[test]

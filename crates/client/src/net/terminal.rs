@@ -173,7 +173,8 @@ pub(super) async fn flush(live: &mut Live) {
 /// A sealed terminal message from someone in the call.
 pub(super) async fn received(ctx: &Ctx, live: &mut Live, from: &ParticipantIdentity, wire: &[u8]) {
     let Some(message) = live.room.open_terminal(from, wire) else {
-        tracing::warn!("dropped a terminal message that did not authenticate");
+        // Per message, and anyone in the call can send them: not worth a warning each.
+        tracing::debug!("dropped a terminal message that did not authenticate");
         return;
     };
     if let Some(hosting) = &mut live.terminal {

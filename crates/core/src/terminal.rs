@@ -26,6 +26,10 @@ pub const MAX_ROWS: u16 = 200;
 pub const MAX_SNAPSHOT: usize = 2 * 1024 * 1024;
 /// Each viewer gets at most one fresh screen this often, so asking can't flood the sharer.
 pub const SNAPSHOT_EVERY: Duration = Duration::from_millis(500);
+/// What a viewer takes from one share: this many bytes at once, refilled at `VIEW_RATE`
+/// per second. More asks for a fresh screen instead, so a sharer can't flood a viewer.
+const VIEW_BURST: f64 = 4.0 * 1024.0 * 1024.0;
+const VIEW_RATE: f64 = 2.0 * 1024.0 * 1024.0;
 
 /// What a sharer announces to the call (as a sealed participant attribute) while sharing.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -145,8 +149,10 @@ pub fn snapshot(host: &Host, cols: u16, rows: u16, bytes: &[u8]) -> Vec<Message>
 pub struct Host {
     pub id: Id,
     seq: u64,
-    /// Each watcher, with when they last got a screen.
-    watchers: BTreeMap<String, Option<Instant>>,
+    watchers: BTreeSet<String>,
+    /// When each device last got a screen. Kept after they stop watching, until they
+    /// leave or the share ends, so watching again doesn't skip the wait.
+    screens: BTreeMap<String, Instant>,
     /// Watchers waiting for a screen.
     owed: BTreeSet<String>,
 }
@@ -158,7 +164,8 @@ impl Default for Host {
         Self {
             id,
             seq: 0,
-            watchers: BTreeMap::new(),
+            watchers: BTreeSet::new(),
+            screens: BTreeMap::new(),
             owed: BTreeSet::new(),
         }
     }
@@ -166,7 +173,7 @@ impl Default for Host {
 
 impl Host {
     pub fn watchers(&self) -> impl Iterator<Item = &str> {
-        self.watchers.keys().map(String::as_str)
+        self.watchers.iter().map(String::as_str)
     }
 
     /// The number of the output sent last.
@@ -183,10 +190,13 @@ impl Host {
     pub fn receive(&mut self, from: &str, message: &Message) {
         match message {
             Message::Watch { id } if *id == self.id => {
-                self.watchers.entry(from.to_owned()).or_default();
+                self.watchers.insert(from.to_owned());
                 self.owed.insert(from.to_owned());
             }
-            Message::Unwatch { id } if *id == self.id => self.left(from),
+            Message::Unwatch { id } if *id == self.id => {
+                self.watchers.remove(from);
+                self.owed.remove(from);
+            }
             _ => {}
         }
     }
@@ -195,27 +205,29 @@ impl Host {
     pub fn left(&mut self, who: &str) {
         self.watchers.remove(who);
         self.owed.remove(who);
+        self.screens.remove(who);
     }
 
     /// This watcher needs the screen again.
     pub fn owe(&mut self, who: &str) {
-        if self.watchers.contains_key(who) {
+        if self.watchers.contains(who) {
             self.owed.insert(who.to_owned());
         }
     }
 
     /// Every watcher needs the screen again: output was dropped to keep up.
     pub fn resync(&mut self) {
-        self.owed.extend(self.watchers.keys().cloned());
+        self.owed.extend(self.watchers.iter().cloned());
     }
 
     /// Watchers who get a screen now; the others wait until `SNAPSHOT_EVERY` has passed.
     pub fn due(&mut self, now: Instant) -> Vec<String> {
         let mut due = Vec::new();
-        for (who, last) in &mut self.watchers {
-            let ready = last.is_none_or(|last| now.duration_since(last) >= SNAPSHOT_EVERY);
+        for who in &self.watchers {
+            let last = self.screens.get(who);
+            let ready = last.is_none_or(|last| now.duration_since(*last) >= SNAPSHOT_EVERY);
             if ready && self.owed.remove(who) {
-                *last = Some(now);
+                self.screens.insert(who.clone(), now);
                 due.push(who.clone());
             }
         }
@@ -262,6 +274,9 @@ pub struct Viewer {
     pub sharer: String,
     pub id: Id,
     sync: Sync,
+    /// Bytes we may still take now, and when that was worked out.
+    budget: f64,
+    at: Instant,
 }
 
 impl Viewer {
@@ -270,6 +285,8 @@ impl Viewer {
             sharer: sharer.to_owned(),
             id,
             sync: Sync::Waiting,
+            budget: VIEW_BURST,
+            at: Instant::now(),
         }
     }
 
@@ -280,9 +297,28 @@ impl Viewer {
 
     /// Handle a message `from` someone; only this share's sharer counts.
     pub fn receive(&mut self, from: &str, message: Message) -> Feed {
+        self.receive_at(from, message, Instant::now())
+    }
+
+    fn receive_at(&mut self, from: &str, message: Message, now: Instant) -> Feed {
         if from != self.sharer || message.id() != self.id {
             return Feed::Nothing;
         }
+        let size = match &message {
+            Message::Snapshot { data, .. } | Message::Data { data, .. } => data.len() as f64,
+            _ => 0.0,
+        };
+        let elapsed = now.saturating_duration_since(self.at).as_secs_f64();
+        self.budget = (self.budget + elapsed * VIEW_RATE).min(VIEW_BURST);
+        self.at = now;
+        if size > self.budget {
+            // Too much too fast: drop it, and take a fresh screen when there's room.
+            let resync =
+                matches!(message, Message::Snapshot { .. }) || !matches!(self.sync, Sync::Waiting);
+            self.sync = Sync::Waiting;
+            return if resync { Feed::Resync } else { Feed::Nothing };
+        }
+        self.budget -= size;
         match message {
             Message::Snapshot {
                 seq,
@@ -559,5 +595,40 @@ mod tests {
             last = viewer.receive(SHARER, part(true));
         }
         assert_eq!(last, Feed::Resync);
+    }
+
+    #[test]
+    fn watching_again_doesnt_skip_the_wait_for_a_screen() {
+        let now = Instant::now();
+        let (mut host, viewer) = watched(now);
+        for _ in 0..5 {
+            host.receive("ada", &Message::Unwatch { id: host.id });
+            host.receive("ada", &viewer.watch());
+            assert!(host.due(now).is_empty());
+        }
+        assert_eq!(host.due(now + SNAPSHOT_EVERY), ["ada"]);
+        // Leaving the call forgets it.
+        host.left("ada");
+        host.receive("ada", &viewer.watch());
+        assert_eq!(host.due(now + SNAPSHOT_EVERY), ["ada"]);
+    }
+
+    #[test]
+    fn a_flood_of_output_asks_for_a_screen_instead() {
+        let now = Instant::now();
+        let (mut host, mut viewer) = watched(now);
+        let flood = data(&mut host, &vec![0; VIEW_BURST as usize + MAX_CHUNK]);
+        let feeds: Vec<_> = (flood.into_iter())
+            .map(|message| viewer.receive_at(SHARER, message, now))
+            .collect();
+        assert_eq!(feeds.iter().filter(|f| **f == Feed::Resync).count(), 1);
+        // Later there's room again for a screen and what follows it.
+        let later = now + Duration::from_secs(2);
+        let screen = snapshot(&host, 80, 24, b"screen");
+        let reset = viewer.receive_at(SHARER, screen[0].clone(), later);
+        assert!(matches!(reset, Feed::Reset { .. }));
+        let next = data(&mut host, b"next");
+        let bytes = viewer.receive_at(SHARER, next[0].clone(), later);
+        assert_eq!(bytes, Feed::Bytes(b"next".to_vec()));
     }
 }

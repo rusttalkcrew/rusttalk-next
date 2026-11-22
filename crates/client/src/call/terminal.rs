@@ -185,7 +185,7 @@ pub fn ours(ui: &mut Ui, rect: Rect, local: &mut Local, active: bool, label: &st
         term::show(ui, rect, id, &mut inner.emulator, active, true, label).1
     };
     if !bytes.is_empty() {
-        local.write(&bytes);
+        local.shared.write(&bytes);
     }
 }
 

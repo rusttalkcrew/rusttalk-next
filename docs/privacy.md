@@ -177,7 +177,9 @@ sizes and timing of the sealed data packets, which reveal roughly how much
 the terminal prints and when. The output, the terminal's size and what
 viewers ask for are encrypted and authenticated with keys derived from the
 room's media key, and each message is bound to its sender and recipient.
-Everyone watching sees everything the terminal shows, so the app warns the
+Because those keys come from the channel's media key, a member of the
+channel who also controls the media server could read a shared terminal or
+pose as another device in the call. Everyone watching sees everything the terminal shows, so the app warns the
 first time someone shares one. Nothing about a shared terminal is stored by
 the API or LiveKit; the output lives only in each device's memory while it
 is shown.

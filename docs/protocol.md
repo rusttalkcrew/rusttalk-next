@@ -841,6 +841,10 @@ reliable and sent to one device, sealed exactly like remote control
 messages with HKDF info `rusttalk-terminal-v1` in place of
 `rusttalk-control-v1`, up to 15 KiB on the wire. Byte fields are base64
 strings. Every message carries the share's `id`; others are dropped.
+The SFU alone can't read or forge them. As with remote control and media,
+another member of the channel who holds the media key and controls the SFU
+could claim a different sender identity, and so read a terminal or send
+messages in another device's name.
 
 | Message (`t`) | From | Fields |
 | --- | --- | --- |
@@ -866,7 +870,10 @@ fresh screen instead; each watcher gets at most one screen every 500 ms.
 Stopping the share ends the shell and sends `end` to the watchers. Leaving
 the call does too. The terminal's own answers to programs (cursor position,
 device attributes) come from the sharer's emulator only, and neither side
-lets output read or write the clipboard.
+lets output read or write the clipboard. A viewer takes at most 4 MiB at once
+from a share, refilled at 2 MiB per second, and asks for a fresh screen past
+that; it keeps at most 8 combining marks in a row. A snapshot that would be
+bigger than 2 MiB loses history first, then its colours.
 
 ## Live events
 
