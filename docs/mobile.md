@@ -56,7 +56,9 @@ messages and reading them again after a restart.
   and the bridge's copy (`Zeroizing`, dropped as soon as focus moves), and the
   text events egui got, at the end of each frame. Leaving a secret field
   overwrites GameTextInput's native buffer (which never shrinks) before
-  emptying it. Some copies can't be wiped: android-activity's copy of the text
+  emptying it, in the same Java-thread job that then sets the next field's
+  keyboard type, so a keyboard reconnecting in between never sees the secret
+  with learning on. Some copies can't be wiped: android-activity's copy of the text
   for winit's (dropped) event, egui's undo history inside a field, Java strings
   (the keyboard's `Editable`), and whatever the keyboard app keeps.
 - **Safe area**: system bars, display cutout and the keyboard come from

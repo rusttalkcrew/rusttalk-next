@@ -475,6 +475,62 @@ impl fmt::Write for MessageStart {
     }
 }
 
+/// What the keyboard is set up for.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Kind {
+    Normal,
+    /// Recovery words: shown, but no suggestions and no learning.
+    Private,
+    Password,
+}
+
+/// A step of the Java-thread job at the end of a frame.
+#[derive(Debug, PartialEq)]
+pub enum Step {
+    /// Overwrite the buffer a secret field used, then empty it.
+    Wipe,
+    /// Set the keyboard type (and the length cap it clears).
+    Settings(Kind),
+    /// Note the action key count: later presses belong to the new field.
+    CountActions,
+}
+
+/// Focus and keyboard type across frames. Both are decided at the end of a frame,
+/// so leaving a secret field and setting up the next field's keyboard are one job
+/// in that order: a keyboard that reconnects in between can't read the secret
+/// with learning on.
+#[derive(Default)]
+pub struct Focus {
+    pub focused: Option<Id>,
+    kind: Option<Kind>,
+    /// A secret field had focus since the buffer was last wiped.
+    secret: bool,
+}
+
+impl Focus {
+    /// `focused` at the end of a frame, and the kind of the field there if it
+    /// wants text. The steps to run, in order, and whether focus moved.
+    pub fn frame_end(&mut self, focused: Option<Id>, kind: Option<Kind>) -> (Vec<Step>, bool) {
+        let mut steps = Vec::new();
+        let moved = focused != self.focused;
+        if moved {
+            self.focused = focused;
+            if std::mem::take(&mut self.secret) {
+                steps.push(Step::Wipe);
+            }
+            steps.push(Step::CountActions);
+        }
+        if let Some(kind) = kind {
+            self.secret |= kind != Kind::Normal;
+            if self.kind != Some(kind) {
+                self.kind = Some(kind);
+                steps.push(Step::Settings(kind));
+            }
+        }
+        (steps, moved)
+    }
+}
+
 #[cfg(target_os = "android")]
 mod activity {
     use std::{
@@ -509,8 +565,8 @@ mod activity {
     };
 
     use super::{
-        Bridge, Buffer, MAX_TYPED, NATIVE_BUFFER, copied, cursor, forget_shared, has_shared,
-        set_cursor, start, whole_chars, wipe_text,
+        Bridge, Buffer, Focus, Kind, MAX_TYPED, NATIVE_BUFFER, Step, copied, cursor, forget_shared,
+        has_shared, set_cursor, start, whole_chars, wipe_text,
     };
 
     /// The keyboard's action key (Done): Enter for egui.
@@ -570,17 +626,9 @@ mod activity {
         actions: i32,
     }
 
-    #[derive(Clone, Copy, PartialEq)]
-    enum Kind {
-        Normal,
-        /// Recovery words: shown, but no suggestions and no learning.
-        Private,
-        Password,
-    }
-
     struct Keyboard {
         bridge: Bridge,
-        focused: Option<Id>,
+        focus: Focus,
         /// Start the buffer over (with the field's text) once the field has a cursor;
         /// `on_focus` for the first start after focus moved.
         start: bool,
@@ -595,9 +643,6 @@ mod activity {
         /// focused field (unknown until the Java thread said how many there were).
         focus_moves: u64,
         actions: Option<i32>,
-        /// A secret field had focus since the buffer was last wiped.
-        secret: bool,
-        kind: Option<Kind>,
         ime: bool,
         insets_until: Instant,
         insets_next: Instant,
@@ -609,7 +654,7 @@ mod activity {
         fn default() -> Self {
             Self {
                 bridge: Bridge::default(),
-                focused: None,
+                focus: Focus::default(),
                 start: false,
                 on_focus: false,
                 waited: 0,
@@ -618,8 +663,6 @@ mod activity {
                 sent: Instant::now(),
                 focus_moves: 0,
                 actions: None,
-                secret: false,
-                kind: None,
                 ime: false,
                 insets_until: Instant::now(),
                 insets_next: Instant::now(),
@@ -629,10 +672,10 @@ mod activity {
     }
 
     impl Keyboard {
-        /// Focus moved: forget the last field's text at once (keeping what the new
-        /// field shared), wipe the buffer if it held a secret, and count the
-        /// action key presses from here on for the new field.
-        fn forget(&mut self, app: &AndroidApp, ctx: &egui::Context, focused: Option<Id>) {
+        /// Focus moved: forget the last field's text at once, keeping what the new
+        /// field shared, and start its buffer over (after the Java-thread job of
+        /// this frame end, which the start-over follows in the same queue).
+        fn forget(&mut self, ctx: &egui::Context, focused: Option<Id>) {
             self.bridge = Bridge::default();
             *lock(&READ) = None;
             forget_shared(ctx, focused);
@@ -642,18 +685,6 @@ mod activity {
             self.confirmed = true;
             self.focus_moves += 1;
             self.actions = None;
-            let (wipe, moves) = (std::mem::take(&mut self.secret), self.focus_moves);
-            on_java_thread(app, move |input, actions| {
-                if wipe {
-                    // Overwrite all the secret could have used, then empty it.
-                    let mut filler = vec![b'x'; NATIVE_BUFFER - 1];
-                    filler.push(0);
-                    // SAFETY: `input` is live on this thread; the texts end in NUL.
-                    unsafe { set_state(input, &filler, (0, 0)) };
-                    unsafe { set_state(input, b"\0", (0, 0)) };
-                }
-                *lock(&FOCUS_ACTIONS) = Some((moves, actions));
-            });
         }
 
         /// Put the bridge's buffer into the keyboard's, as start-over `generation`.
@@ -865,50 +896,96 @@ mod activity {
         }
     }
 
+    /// This activity's GameTextInput and the action key count; on the Java thread.
+    fn text_input(app: &AndroidApp) -> Option<(*mut c_void, i32)> {
+        let found = java(app, |env, activity| {
+            // This activity's GameActivity, unless a newer one took over.
+            // (`getGameActivityNativeHandle` returns 0 for the current one.)
+            let class = env.get_object_class(activity)?;
+            let owner = env
+                .get_static_field(
+                    &class,
+                    jni_str!("nativeHandleOwner"),
+                    jni_sig!("Lcom/google/androidgamesdk/GameActivity;"),
+                )?
+                .l()?;
+            if !env.is_same_object(&owner, activity)? {
+                return Ok((0, 0));
+            }
+            let handle = env
+                .get_static_field(&class, jni_str!("nativeHandle"), jni_sig!("J"))?
+                .j()?;
+            // MainActivity counts the Done key, which winit drops.
+            let actions = env
+                .get_static_field(&class, jni_str!("editorActions"), jni_sig!("I"))?
+                .i()?;
+            Ok((handle, actions))
+        });
+        let (handle, actions) = match found {
+            Ok((0, _)) => return None,
+            Ok(found) => found,
+            Err(error) => {
+                tracing::warn!(%error, "find the keyboard's text");
+                return None;
+            }
+        };
+        // SAFETY: the live GameActivity; it is only freed on this thread.
+        let input = unsafe { GameActivity_getTextInput(handle as *const c_void) };
+        (!input.is_null()).then_some((input, actions))
+    }
+
     /// Run `f` with GameTextInput and the action key count on the Java thread,
     /// where the keyboard edits the buffer.
     fn on_java_thread(app: &AndroidApp, f: impl FnOnce(*mut c_void, i32) + Send + 'static) {
         let main = app.clone();
         app.run_on_java_main_thread(Box::new(move || {
-            let found = java(&main, |env, activity| {
-                // This activity's GameActivity, unless a newer one took over.
-                // (`getGameActivityNativeHandle` returns 0 for the current one.)
-                let class = env.get_object_class(activity)?;
-                let owner = env
-                    .get_static_field(
-                        &class,
-                        jni_str!("nativeHandleOwner"),
-                        jni_sig!("Lcom/google/androidgamesdk/GameActivity;"),
-                    )?
-                    .l()?;
-                if !env.is_same_object(&owner, activity)? {
-                    return Ok((0, 0));
-                }
-                let handle = env
-                    .get_static_field(&class, jni_str!("nativeHandle"), jni_sig!("J"))?
-                    .j()?;
-                // MainActivity counts the action key, which winit drops.
-                let actions = env
-                    .get_static_field(&class, jni_str!("editorActions"), jni_sig!("I"))?
-                    .i()?;
-                Ok((handle, actions))
-            });
-            let (handle, actions) = match found {
-                Ok((0, _)) => return,
-                Ok(found) => found,
-                Err(error) => return tracing::warn!(%error, "find the keyboard's text"),
-            };
-            // SAFETY: the live GameActivity; it is only freed on this thread.
-            let input = unsafe { GameActivity_getTextInput(handle as *const c_void) };
-            if !input.is_null() {
+            if let Some((input, actions)) = text_input(&main) {
                 f(input, actions);
+            }
+        }));
+    }
+
+    /// The frame end's steps as one Java-thread job, in their order.
+    fn run_steps(app: &AndroidApp, steps: Vec<Step>, moves: u64) {
+        let main = app.clone();
+        app.run_on_java_main_thread(Box::new(move || {
+            let found = text_input(&main);
+            for step in steps {
+                match (step, found) {
+                    (Step::Wipe, Some((input, _))) => {
+                        let mut filler = vec![b'x'; NATIVE_BUFFER - 1];
+                        filler.push(0);
+                        // SAFETY: `input` is live on this thread; the texts end in NUL.
+                        unsafe { set_state(input, &filler, (0, 0)) };
+                        unsafe { set_state(input, b"\0", (0, 0)) };
+                    }
+                    (Step::Settings(kind), _) => {
+                        if let Err(error) = apply_settings(&main, kind) {
+                            tracing::warn!(%error, "set up the keyboard");
+                        }
+                    }
+                    (Step::CountActions, Some((_, actions))) => {
+                        *lock(&FOCUS_ACTIONS) = Some((moves, actions));
+                    }
+                    _ => {}
+                }
+            }
+        }));
+    }
+
+    /// Set the keyboard type and the length cap from the start.
+    fn configure_keyboard(app: &AndroidApp, kind: Kind) {
+        let main = app.clone();
+        app.run_on_java_main_thread(Box::new(move || {
+            if let Err(error) = apply_settings(&main, kind) {
+                tracing::warn!(%error, "set up the keyboard");
             }
         }));
     }
 
     /// The keyboard type for the field, and the length cap; on the Java thread,
     /// because setting the type clears the cap.
-    fn configure_keyboard(app: &AndroidApp, kind: Kind) {
+    fn apply_settings(app: &AndroidApp, kind: Kind) -> jni::errors::Result<()> {
         // Multi-line keeps newlines in pasted text; Done is the action key (Enter).
         let mut input = InputType::TYPE_CLASS_TEXT | InputType::TYPE_TEXT_FLAG_MULTI_LINE;
         let mut options = ImeOptions::IMG_FLAG_NO_EXTRACT_UI | ImeOptions::IME_FLAG_NO_FULLSCREEN;
@@ -921,64 +998,55 @@ mod activity {
             options |= ImeOptions::IME_FLAG_NO_PERSONALIZED_LEARNING;
         }
         let (input, options) = (input.bits() as i32, options.bits() as i32 | ACTION_DONE);
-        let main = app.clone();
-        app.run_on_java_main_thread(Box::new(move || {
-            let done = java(&main, |env, activity| {
-                env.call_method(
+        java(app, |env, activity| {
+            env.call_method(
+                activity,
+                jni_str!("setImeEditorInfoFields"),
+                jni_sig!("(III)V"),
+                &[
+                    JValue::Int(input),
+                    JValue::Int(ACTION_DONE),
+                    JValue::Int(options),
+                ],
+            )?;
+            let view = env
+                .get_field(
                     activity,
-                    jni_str!("setImeEditorInfoFields"),
-                    jni_sig!("(III)V"),
-                    &[
-                        JValue::Int(input),
-                        JValue::Int(ACTION_DONE),
-                        JValue::Int(options),
-                    ],
-                )?;
-                let view = env
-                    .get_field(
-                        activity,
-                        jni_str!("mSurfaceView"),
-                        jni_sig!(
-                            "Lcom/google/androidgamesdk/GameActivity$InputEnabledSurfaceView;"
-                        ),
-                    )?
-                    .l()?;
-                let connection = env
-                    .get_field(
-                        &view,
-                        jni_str!("mInputConnection"),
-                        jni_sig!("Lcom/google/androidgamesdk/gametextinput/InputConnection;"),
-                    )?
-                    .l()?;
-                let editable = env
-                    .call_method(
-                        &connection,
-                        jni_str!("getEditable"),
-                        jni_sig!("()Landroid/text/Editable;"),
-                        &[],
-                    )?
-                    .l()?;
-                // GameTextInput copies at most 64 KiB but reports the full length,
-                // which winit's reader trusts: keep the text short enough to fit.
-                let filter = env.new_object(
-                    jni_str!("android/text/InputFilter$LengthFilter"),
-                    jni_sig!("(I)V"),
-                    &[JValue::Int(MAX_TYPED)],
-                )?;
-                let filters =
-                    env.new_object_array(1, jni_str!("android/text/InputFilter"), &filter)?;
-                env.call_method(
-                    &editable,
-                    jni_str!("setFilters"),
-                    jni_sig!("([Landroid/text/InputFilter;)V"),
-                    &[JValue::Object(&filters)],
-                )?;
-                Ok(())
-            });
-            if let Err(error) = done {
-                tracing::warn!(%error, "set up the keyboard");
-            }
-        }));
+                    jni_str!("mSurfaceView"),
+                    jni_sig!("Lcom/google/androidgamesdk/GameActivity$InputEnabledSurfaceView;"),
+                )?
+                .l()?;
+            let connection = env
+                .get_field(
+                    &view,
+                    jni_str!("mInputConnection"),
+                    jni_sig!("Lcom/google/androidgamesdk/gametextinput/InputConnection;"),
+                )?
+                .l()?;
+            let editable = env
+                .call_method(
+                    &connection,
+                    jni_str!("getEditable"),
+                    jni_sig!("()Landroid/text/Editable;"),
+                    &[],
+                )?
+                .l()?;
+            // GameTextInput copies at most 64 KiB but reports the full length,
+            // which winit's reader trusts: keep the text short enough to fit.
+            let filter = env.new_object(
+                jni_str!("android/text/InputFilter$LengthFilter"),
+                jni_sig!("(I)V"),
+                &[JValue::Int(MAX_TYPED)],
+            )?;
+            let filters = env.new_object_array(1, jni_str!("android/text/InputFilter"), &filter)?;
+            env.call_method(
+                &editable,
+                jni_str!("setFilters"),
+                jni_sig!("([Landroid/text/InputFilter;)V"),
+                &[JValue::Object(&filters)],
+            )?;
+            Ok(())
+        })
     }
 
     /// Ask the activity for its insets on its own thread (views aren't thread
@@ -1041,12 +1109,12 @@ mod activity {
             bottom,
         }));
 
+        // Focus moves are handled at the frame end (`frame_end`).
         let focused = ctx.memory(|memory| memory.focused());
-        if focused != keyboard.focused {
-            keyboard.focused = focused;
-            keyboard.forget(app, ctx, focused);
-        }
-        let Some(field) = focused.filter(|_| ctx.egui_wants_keyboard_input()) else {
+        let Some(field) = focused
+            .filter(|_| ctx.egui_wants_keyboard_input())
+            .filter(|_| focused == keyboard.focus.focused)
+        else {
             return;
         };
         let Some(cursor) = cursor(ctx, field) else {
@@ -1139,7 +1207,7 @@ mod activity {
         let insets = *lock(&INSETS);
         if keyboard.insets != insets {
             keyboard.insets = insets;
-            if let Some(field) = keyboard.focused.and_then(|id| ctx.read_response(id)) {
+            if let Some(field) = keyboard.focus.focused.and_then(|id| ctx.read_response(id)) {
                 field.scroll_to_me(None);
             }
         }
@@ -1164,23 +1232,24 @@ mod activity {
                 app.hide_soft_input(false);
             }
         }
-        if Instant::now() < keyboard.insets_until {
+        if Instant::now() < keyboard.insets_until || ime.is_some() {
             ctx.request_repaint_after(TYPING_POLL);
         }
-        let Some(ime) = ime else { return };
-        ctx.request_repaint_after(TYPING_POLL);
-        let private = ctx
-            .memory(|memory| memory.focused())
-            .is_some_and(|field| crate::ui::is_private(ctx, field));
-        let kind = match ime.purpose {
+        // Focus and the keyboard type, decided together: leaving a secret field
+        // wipes the buffer before the next field's keyboard type is set.
+        let focused = ctx.memory(|memory| memory.focused());
+        let private = focused.is_some_and(|field| crate::ui::is_private(ctx, field));
+        let kind = ime.map(|ime| match ime.purpose {
             IMEPurpose::Password => Kind::Password,
             _ if private => Kind::Private,
             _ => Kind::Normal,
-        };
-        keyboard.secret |= kind != Kind::Normal;
-        if keyboard.kind != Some(kind) {
-            keyboard.kind = Some(kind);
-            configure_keyboard(app, kind);
+        });
+        let (steps, moved) = keyboard.focus.frame_end(focused, kind);
+        if moved {
+            keyboard.forget(ctx, focused);
+        }
+        if !steps.is_empty() {
+            run_steps(app, steps, keyboard.focus_moves);
         }
     }
 }
@@ -1435,6 +1504,45 @@ mod tests {
         assert!(!buffer.text.contains('\u{fffd}'));
         assert_eq!(buffer.text.chars().count(), 10_922);
         assert_eq!(whole_chars(b"ab"), b"ab");
+    }
+
+    #[test]
+    fn leaving_a_secret_field_wipes_before_the_next_keyboard_type() {
+        let mut focus = Focus::default();
+        let (password, name) = (Id::unique("password"), Id::unique("name"));
+        let (steps, moved) = focus.frame_end(Some(password), Some(Kind::Password));
+        assert!(moved);
+        assert_eq!(steps, [Step::CountActions, Step::Settings(Kind::Password)]);
+        assert_eq!(focus.frame_end(Some(password), Some(Kind::Password)).0, []);
+        // One frame: focus moves to a normal field, whose type is known already.
+        let steps = focus.frame_end(Some(name), Some(Kind::Normal)).0;
+        let at = |step: &Step| steps.iter().position(|s| s == step).unwrap();
+        assert!(at(&Step::Wipe) < at(&Step::Settings(Kind::Normal)));
+        // Normal to normal wipes nothing; a secret left for nothing is wiped.
+        assert!(!focus.frame_end(None, None).0.contains(&Step::Wipe));
+        focus.frame_end(Some(password), Some(Kind::Password));
+        assert_eq!(
+            focus.frame_end(None, None).0,
+            [Step::Wipe, Step::CountActions]
+        );
+        // Its type not known yet in the frame focus moves: the wipe still comes first.
+        focus.frame_end(Some(password), Some(Kind::Password));
+        assert_eq!(
+            focus.frame_end(Some(name), None).0,
+            [Step::Wipe, Step::CountActions]
+        );
+        assert_eq!(
+            focus.frame_end(Some(name), Some(Kind::Normal)).0,
+            [Step::Settings(Kind::Normal)]
+        );
+        // Recovery words are secret too.
+        let words = Id::unique("words");
+        focus.frame_end(Some(words), Some(Kind::Private));
+        let steps = focus.frame_end(Some(name), Some(Kind::Normal)).0;
+        assert_eq!(
+            steps,
+            [Step::Wipe, Step::CountActions, Step::Settings(Kind::Normal)]
+        );
     }
 
     #[test]
