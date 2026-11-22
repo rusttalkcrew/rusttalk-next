@@ -37,9 +37,12 @@ the join.
 
 ## Application audio
 
-The core `capture` feature lists and starts local app audio on Linux and
-Windows (macOS reports it unsupported until its backend lands) and emits 48 kHz stereo s16 PCM in 10 ms frames. On Windows it calls
-WASAPI process loopback from a COM MTA thread. On Linux the desktop client
+The core `capture` feature lists and starts local app audio on Linux,
+Windows and macOS and emits 48 kHz stereo s16 PCM in 10 ms frames. On Windows it calls
+WASAPI process loopback from a COM MTA thread. On macOS it creates a Core
+Audio process tap (one process, or every process except RustTalk), reads it
+through a private aggregate device and converts the device-rate float
+samples to the shared format. On Linux the desktop client
 and bot launch the sibling `rusttalk-pipewire` executable. It uses PipeWire
 0.10.1 and system libpipewire. Keeping its dependency graph separate
 prevents the weak PipeWire stubs in the prebuilt WebRTC archive from

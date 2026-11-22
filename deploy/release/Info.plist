@@ -28,6 +28,8 @@
 	<string>14.2</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>RustTalk records the sound of apps you choose only while you share it.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>RustTalk uses the camera when you turn on video in a call.</string>
 	<key>NSMicrophoneUsageDescription</key>

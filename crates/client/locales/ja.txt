@@ -728,7 +728,6 @@ call.lost_in = 受信ロスパケット
 call.lost_out = 送信ロスパケット
 call.share_app_audio = アプリの音声を共有
 call.needs_windows_11 = Windows 11 が必要です
-call.not_on_mac_yet = macOS ではまだ利用できません
 call.no_talk_here = ここでは話せません
 call.looking_for_apps = アプリを探しています…
 call.apps_failed = アプリを探せませんでした。
@@ -1109,6 +1108,7 @@ voice.disconnected = ボイスが切断されました。
 voice.removed = ボイスチャンネルから外されました。
 voice.moved = モデレーターにより {channel} へ移動しました。
 voice.app_failed = {app} を共有できませんでした。まだ再生中ですか?
+voice.app_audio_blocked = システム設定で RustTalk のシステムオーディオ収録を許可してください。
 voice.switch_failed = 共有するものを切り替えられませんでした。
 voice.camera_failed = カメラをオンにできませんでした。
 

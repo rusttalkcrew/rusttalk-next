@@ -52,8 +52,11 @@ nokhwa-bindings-macos = { version = "=0.2.4", optional = true }
 block2 = { version = "0.6", optional = true }
 dispatch2 = { version = "0.3", optional = true }
 objc2 = { version = "0.6", optional = true }
-# The frontmost app, so remote keys only reach a shared window that is in front.
+# The frontmost app, so remote keys only reach a shared window that is in front, and
+# the names of apps playing sound.
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "libc", "NSRunningApplication", "NSWorkspace"], optional = true }
+objc2-core-audio = { version = "0.3", default-features = false, features = ["std", "AudioHardware", "block2", "dispatch2", "objc2", "objc2-core-audio-types", "objc2-foundation"], optional = true }
+objc2-core-audio-types = { version = "0.3", default-features = false, features = ["std", "CoreAudioBaseTypes"], optional = true }
 objc2-core-foundation = { version = "0.3", optional = true }
 objc2-core-graphics = { version = "0.3", optional = true }
 objc2-core-media = { version = "0.3", optional = true }
@@ -71,7 +74,7 @@ windows = { version = "0.62.2", features = ["Wdk_System_SystemServices", "Win32_
 https-client = ["dep:reqwest", "dep:rustls"]
 client = ["dep:anyhow", "dep:image", "dep:futures-util", "https-client", "reqwest/json", "reqwest/stream", "dep:serde_json", "dep:tempfile", "dep:tokio", "dep:tokio-tungstenite", "dep:tracing"]
 livekit-tls = ["dep:async-trait", "dep:futures-util", "dep:livekit-net", "dep:livekit-protocol", "dep:prost", "dep:reqwest", "dep:rustls", "dep:tokio", "dep:tokio-tungstenite"]
-capture = ["dep:anyhow", "dep:serde_json", "dep:tracing", "dep:wasapi", "dep:windows"]
+capture = ["dep:anyhow", "dep:serde_json", "dep:tracing", "dep:wasapi", "dep:windows", "dep:block2", "dep:dispatch2", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-core-audio", "dep:objc2-core-audio-types", "dep:objc2-core-foundation", "dep:objc2-foundation"]
 voice = ["dep:rustix", "dep:wayland-client", "dep:wayland-protocols", "dep:wayland-protocols-misc", "dep:wayland-protocols-wlr", "dep:xkbcommon", "client", "livekit-tls", "dep:image", "dep:livekit", "dep:mime_guess", "dep:nokhwa", "dep:nokhwa-bindings-macos", "dep:block2", "dep:dispatch2", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-core-foundation", "dep:objc2-core-graphics", "dep:objc2-core-media", "dep:objc2-core-video", "dep:objc2-foundation", "dep:objc2-screen-capture-kit", "dep:windows", "dep:windows-capture", "tokio/fs", "tokio/io-util", "tokio/process", "tokio/rt"]
 
 [dev-dependencies]
