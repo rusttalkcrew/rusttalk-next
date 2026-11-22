@@ -710,7 +710,7 @@ impl Home {
 
     /// The chat on screen: server index and channel or DM.
     fn viewing(&self) -> Vec<(usize, Id)> {
-        if self.layout.covered {
+        if self.covered() {
             return Vec::new();
         }
         match self.view {
@@ -722,6 +722,26 @@ impl Home {
             View::Direct(Some(peer)) => self.replicas(&peer),
             View::Direct(None) | View::Pokes | View::Join | View::Find => Vec::new(),
         }
+    }
+
+    /// The server whose member list can show beside what is open.
+    fn member_server(&self) -> Option<usize> {
+        match self.view {
+            View::Server(index)
+                if self.servers[index].status != Status::Connecting
+                    && self.servers[index].compatibility != Compatibility::AppTooOld =>
+            {
+                Some(index)
+            }
+            _ => None,
+        }
+    }
+
+    /// Phones: what is open is behind the list or the member list, so nobody reads
+    /// it. From the navigation as it is now, so a message right after Back counts.
+    fn covered(&self) -> bool {
+        self.layout.phone
+            && (self.layout.list || (self.member_server().is_some() && self.layout.members_shown()))
     }
 
     /// Show a chat, like after a click on its notification.
@@ -1604,6 +1624,7 @@ pub fn show(
 ) -> Option<Action> {
     let now = ui.input(|input| input.time);
     let focused = ui.input(|input| input.viewport().focused).unwrap_or(true);
+    home.layout.phone = ui::is_phone(ui.ctx());
     if home.focused && !focused {
         // Stepping away: read marks reach the other devices.
         home.publish_settings();
@@ -1759,7 +1780,7 @@ pub fn show(
     home.layout
         .set_window_width(ui.available_width() - RAIL_WIDTH);
     // Phones show the list or what is open, never both; picking something opens it.
-    let phone = ui::is_phone(ui.ctx());
+    let phone = home.layout.phone;
     let list = phone && home.layout.list;
     let channels_width = if list {
         ui.available_width() - RAIL_WIDTH
@@ -1791,19 +1812,9 @@ pub fn show(
             })
             .inner
     });
-    let member_server = match home.view {
-        View::Server(index)
-            if !list
-                && home.servers[index].status != Status::Connecting
-                && home.servers[index].compatibility != Compatibility::AppTooOld =>
-        {
-            Some(index)
-        }
-        _ => None,
-    };
+    let member_server = home.member_server().filter(|_| !list);
     // On phones the member list covers the column, and Back closes it first.
     let members_cover = phone && member_server.is_some() && home.layout.members_shown();
-    home.layout.covered = list || members_cover;
     if phone && !list {
         Panel::top("phone-back")
             .frame(panel_frame(colors.side))
@@ -6038,6 +6049,67 @@ mod tests {
         *harness.state_mut() = Some(home);
         harness.run_steps(4);
         (harness, sent)
+    }
+
+    type Screen = (Home, crate::update::Updater, crate::keystore::Keystore);
+
+    /// Back on a phone hides the chat at once: a message handled before the next
+    /// frame draws the list stays unread.
+    #[test]
+    fn a_message_right_after_back_on_a_phone_stays_unread() {
+        use egui_kittest::kittest::Queryable;
+        let (mut files, _sent) = files_harness(true);
+        let mut home = files.state_mut().take().unwrap();
+        home.view = View::Server(0);
+        home.servers[0].open = Some(PROJECTS);
+        home.layout.list = false;
+        // Never a real desktop notification from a test.
+        let mut prefs = home.notify.prefs().clone();
+        prefs.desktop = false;
+        home.notify.set_prefs(prefs);
+        let data = tempfile::tempdir().unwrap();
+        let mut phone = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(390.0, 844.0))
+            .build_ui_state(
+                |ui, screen: &mut Option<Screen>| {
+                    if let Some((home, updates, keystore)) = screen {
+                        show(ui, home, updates, keystore);
+                    }
+                },
+                None,
+            );
+        ui::install(&phone.ctx);
+        *phone.state_mut() = Some((
+            home,
+            crate::update::Updater::new(data.path()),
+            crate::keystore::without_keychain(data.path()),
+        ));
+        phone.run_steps(4);
+        phone.get_by_label("Back").click();
+        phone.run_steps(1);
+        let ctx = phone.ctx.clone();
+        let (home, ..) = phone.state_mut().as_mut().unwrap();
+        let address = home.servers[0].address.clone();
+        let msg = Msg {
+            backfilled: false,
+            id: [9; 32],
+            person: ANN,
+            at: notify::unix_now() + 1,
+            reply_to: None,
+            quoted_author: None,
+            edit_of: None,
+            body: Body::Text("Are you there?".into()),
+            files: Vec::new(),
+            live: None,
+            sticker: None,
+            replicas: Vec::new(),
+            copy_files: Vec::new(),
+        };
+        home.arrived(&ctx, 0, PROJECTS, msg);
+        phone.run_steps(2);
+        let (home, ..) = phone.state().as_ref().unwrap();
+        assert!(home.layout.list);
+        assert!(home.notify.unread(&address, &PROJECTS));
     }
 
     #[test]

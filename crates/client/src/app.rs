@@ -132,7 +132,12 @@ impl<'a> App<'a> {
     /// After the first-start choice: on to the account screens.
     fn chosen(&mut self, kind: Kind, sealer: Option<Sealer>, restore: bool) -> Screen {
         match self.keystore.choose(kind, sealer) {
-            Ok(()) => {
+            // Keys found without a password, now locked with it.
+            Ok(Some(identity)) => {
+                key_storage::forget(&self.ctx);
+                self.home(identity)
+            }
+            Ok(None) => {
                 key_storage::forget(&self.ctx);
                 if restore {
                     Screen::Restore {

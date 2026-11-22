@@ -111,9 +111,8 @@ pub struct Layout {
     /// Phone-sized windows: the server and channel list fills the screen instead of
     /// what is open. Opening a channel, DM or page from the list clears it.
     pub list: bool,
-    /// Phones: what is open is behind the list or the member list this frame, so it
-    /// is not being read.
-    pub covered: bool,
+    /// The window is phone-sized, as of the start of this frame.
+    pub phone: bool,
     /// The voice channel split; `split_dragging` while its divider is held.
     pub split: Split,
     pub split_dragging: bool,
@@ -136,7 +135,7 @@ impl Layout {
             peek: false,
             narrow: false,
             list: true,
-            covered: false,
+            phone: false,
             split: saved.split,
             split_dragging: false,
             saved,

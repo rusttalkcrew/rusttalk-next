@@ -203,7 +203,10 @@ Rough effort for one person who knows the code base.
   which can keep an item with `when-unlocked-this-device-only` access: never
   in a backup or on another device. Using it needs a small keystore backend
   of our own (keyring's `v1` API has no iOS store) and a test on a signed
-  device, so it waits for phase 4. The protected file without
+  device, so it waits for phase 4. A key file found without a password, or a
+  profile recorded as the plain file, first asks for a password; existing keys
+  are then locked with it in one atomic replace before the account opens, and
+  no plain key file is ever written. The protected file without
   a password is off on phones: a debuggable test build, a rooted phone or a
   backup tool that ignores the rules above would hand over readable keys.
   Zero-knowledge is unchanged: phones run the same `crates/core` crypto.

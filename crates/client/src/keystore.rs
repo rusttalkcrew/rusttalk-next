@@ -324,6 +324,11 @@ pub struct Keystore {
     /// Set once the password file is unlocked or a password is chosen.
     sealer: Option<Sealer>,
     cost: Cost,
+    /// `PASSWORD_ONLY`, a field so tests can check the phone rules on any system.
+    password_only: bool,
+    /// Phones: keys found without a password, kept until one is chosen and they are
+    /// locked with it (see `choose`).
+    unprotected: Option<Zeroizing<Vec<u8>>>,
     /// Fail the next `keystore.json` write naming this storage, before or after
     /// (`true`) its rename.
     #[cfg(test)]
@@ -334,10 +339,20 @@ pub struct Keystore {
 impl Keystore {
     /// Lock the profile and find out what to show first.
     pub fn open(config: &Path, service: &str) -> Result<(Self, Start)> {
-        Self::open_with(config, Box::new(OsKeychain(service.to_owned())), COST)
+        Self::open_with(
+            config,
+            Box::new(OsKeychain(service.to_owned())),
+            COST,
+            PASSWORD_ONLY,
+        )
     }
 
-    fn open_with(dir: &Path, keychain: Box<dyn Keychain>, cost: Cost) -> Result<(Self, Start)> {
+    fn open_with(
+        dir: &Path,
+        keychain: Box<dyn Keychain>,
+        cost: Cost,
+        password_only: bool,
+    ) -> Result<(Self, Start)> {
         let lock = OpenOptions::new()
             .read(true)
             .write(true)
@@ -362,6 +377,8 @@ impl Keystore {
             state: state.unwrap_or_default(),
             sealer: None,
             cost,
+            password_only,
+            unprotected: None,
             #[cfg(test)]
             fail_state: Default::default(),
             _lock: lock,
@@ -420,6 +437,15 @@ impl Keystore {
                 (Kind::Keychain, Start::Ready(Some(Box::new(load(&secret)?))))
             }
             (Some(file), _) if file.starts_with(SEALED) => (Kind::Password, Start::Unlock),
+            // Phones never open keys without a password: ask for one first.
+            (Some(file), _) if self.password_only => {
+                let secret = Zeroizing::new(plain(&file)?.to_vec());
+                load(&secret)?;
+                tracing::warn!("key file has no password; asking for one before opening");
+                self.unprotected = Some(secret);
+                self.state.storage = None;
+                return Ok(Start::Choose);
+            }
             (Some(file), _) => (
                 Kind::File,
                 Start::Ready(Some(Box::new(load(plain(&file)?)?))),
@@ -453,6 +479,11 @@ impl Keystore {
             );
             return Start::Missing { keychain: gone };
         }
+        // Phones: a new account gets a password first, whatever was chosen before.
+        if self.password_only {
+            self.state.storage = None;
+            return Start::Choose;
+        }
         match (self.state.storage, keychain) {
             // Signed out: a new account goes to the same file.
             (Some(Kind::File), _) => Start::Ready(None),
@@ -479,16 +510,34 @@ impl Keystore {
     }
 
     /// Pick where a new account's keys go (first start without a keychain). A
-    /// password needs a key from [`Keystore::new_password`].
-    pub fn choose(&mut self, kind: Kind, sealer: Option<Sealer>) -> Result<()> {
+    /// password needs a key from [`Keystore::new_password`]. On a phone with keys
+    /// found without a password, it locks them with it and returns them.
+    pub fn choose(&mut self, kind: Kind, sealer: Option<Sealer>) -> Result<Option<DeviceIdentity>> {
         self.usable(kind, sealer.as_ref())?;
+        if let Some(secret) = self.unprotected.take() {
+            // The sealed file replaces the plain one in one rename, before the
+            // account opens; a failure keeps the keys here to try again.
+            if let Err(error @ WriteError::Before(_)) =
+                self.write_copy(kind, sealer.as_ref(), &secret)
+            {
+                self.unprotected = Some(secret);
+                return Err(error.into());
+            }
+            self.record(|state| {
+                state.storage = Some(kind);
+                state.keys_saved = true;
+            })?;
+            tracing::info!("key file locked with the new password");
+            self.sealer = sealer;
+            return load(&secret).map(Some);
+        }
         self.record(|state| {
             state.storage = Some(kind);
             state.keys_saved = false;
         })?;
         tracing::info!(?kind, "key storage chosen");
         self.sealer = sealer;
-        Ok(())
+        Ok(None)
     }
 
     /// Derive the key for a new password, away from the window's thread.
@@ -647,7 +696,7 @@ impl Keystore {
 
     fn usable(&self, kind: Kind, sealer: Option<&Sealer>) -> Result<()> {
         ensure!(
-            !PASSWORD_ONLY || kind == Kind::Password,
+            !self.password_only || kind == Kind::Password,
             "this device keeps keys only in a file with a password"
         );
         match kind {
@@ -765,6 +814,11 @@ impl Keystore {
         sealer: Option<&Sealer>,
         secret: &[u8],
     ) -> Result<(), WriteError> {
+        if self.password_only && kind != Kind::Password {
+            return Err(WriteError::Before(anyhow!(
+                "this device keeps keys only in a file with a password"
+            )));
+        }
         let file = self.dir.join(KEY_FILE);
         let written = match kind {
             Kind::Keychain => return self.keychain.set(secret).map_err(WriteError::Before),
@@ -878,6 +932,29 @@ fn load(secret: &[u8]) -> Result<DeviceIdentity> {
         .context("load stored device keys")
 }
 
+/// A profile without a keychain, for tests of screens that need a keystore.
+#[cfg(test)]
+pub(crate) fn without_keychain(dir: &Path) -> Keystore {
+    struct Unreachable;
+    impl Keychain for Unreachable {
+        fn available(&self) -> Result<()> {
+            bail!("no keychain in tests")
+        }
+        fn get(&self) -> Result<Option<Zeroizing<Vec<u8>>>> {
+            bail!("no keychain in tests")
+        }
+        fn set(&self, _: &[u8]) -> Result<()> {
+            bail!("no keychain in tests")
+        }
+        fn delete(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+    Keystore::open_with(dir, Box::new(Unreachable), COST, false)
+        .expect("open test keystore")
+        .0
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
@@ -938,12 +1015,21 @@ mod tests {
     }
 
     fn open(dir: &Path, keychain: &Mock) -> (Keystore, Start) {
+        open_as(dir, keychain, false)
+    }
+
+    /// Opened with the phone rules: keys only in the file with a password.
+    fn open_phone(dir: &Path) -> (Keystore, Start) {
+        open_as(dir, &down(), true)
+    }
+
+    fn open_as(dir: &Path, keychain: &Mock, password_only: bool) -> (Keystore, Start) {
         // The lock file is closed on exec, but a child that another test thread is
         // spawning right now holds a copy of the descriptor until its exec finishes, and
         // the flock outlives our close until then. Wait that out instead of racing it.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
-            match Keystore::open_with(dir, Box::new(keychain.clone()), CHEAP) {
+            match Keystore::open_with(dir, Box::new(keychain.clone()), CHEAP, password_only) {
                 Ok(opened) => return opened,
                 Err(error) => assert!(std::time::Instant::now() < deadline, "{error:#}"),
             }
@@ -1027,6 +1113,56 @@ mod tests {
         }
         drop(store);
         assert!(same(&ready(open(dir.path(), &down()).1).unwrap(), &me));
+    }
+
+    #[test]
+    fn a_phone_locks_a_key_file_without_password_before_opening_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, _) = open(dir.path(), &down());
+        store.choose(Kind::File, None).unwrap();
+        let me = identity();
+        store.save(&me).unwrap();
+        drop(store);
+
+        let (mut store, start) = open_phone(dir.path());
+        assert!(matches!(start, Start::Choose));
+        assert!(store.choose(Kind::File, None).is_err());
+        let key = sealer(&store, "hunter2");
+        let opened = store.choose(Kind::Password, key).unwrap().unwrap();
+        assert!(same(&opened, &me));
+        let file = fs::read(dir.path().join(KEY_FILE)).unwrap();
+        assert!(file.starts_with(SEALED));
+        assert!(!file.windows(32).any(|w| w == me.signing_key.as_bytes()));
+        drop(store);
+
+        let (mut store, start) = open_phone(dir.path());
+        assert!(matches!(start, Start::Unlock));
+        assert!(same(&unlock(&mut store, "hunter2").unwrap(), &me));
+    }
+
+    #[test]
+    fn a_signed_out_phone_profile_asks_for_a_password_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, _) = open(dir.path(), &down());
+        store.choose(Kind::File, None).unwrap();
+        store.save(&identity()).unwrap();
+        store.delete().unwrap();
+        drop(store);
+
+        let (mut store, start) = open_phone(dir.path());
+        assert!(matches!(start, Start::Choose));
+        // Even a profile still recorded as a plain file never gets one written.
+        store.state.storage = Some(Kind::File);
+        assert!(store.save(&identity()).is_err());
+        assert!(!dir.path().join(KEY_FILE).exists());
+        let key = sealer(&store, "hunter2");
+        assert!(store.choose(Kind::Password, key).unwrap().is_none());
+        store.save(&identity()).unwrap();
+        assert!(
+            fs::read(dir.path().join(KEY_FILE))
+                .unwrap()
+                .starts_with(SEALED)
+        );
     }
 
     #[test]
@@ -1126,7 +1262,8 @@ mod tests {
             memory_kib: 16 * 1024,
             ..CHEAP
         };
-        let (mut store, _) = Keystore::open_with(dir.path(), Box::new(down()), stronger).unwrap();
+        let (mut store, _) =
+            Keystore::open_with(dir.path(), Box::new(down()), stronger, false).unwrap();
         assert!(same(&unlock(&mut store, "pw").unwrap(), &me));
         let file = fs::read(dir.path().join(KEY_FILE)).unwrap();
         assert_eq!(header_cost(file[..HEADER].try_into().unwrap()), stronger);
@@ -1299,11 +1436,12 @@ mod tests {
         }
         let dir = tempfile::tempdir().unwrap();
         let me = file_profile(dir.path(), &down());
-        let (_, start) = Keystore::open_with(dir.path(), Box::new(Locked), CHEAP).unwrap();
+        let (_, start) = Keystore::open_with(dir.path(), Box::new(Locked), CHEAP, false).unwrap();
         assert!(same(&ready(start).unwrap(), &me));
         // Even with keystore.json gone or damaged.
         fs::write(dir.path().join(STATE_FILE), "{broken").unwrap();
-        let (store, start) = Keystore::open_with(dir.path(), Box::new(Locked), CHEAP).unwrap();
+        let (store, start) =
+            Keystore::open_with(dir.path(), Box::new(Locked), CHEAP, false).unwrap();
         assert!(same(&ready(start).unwrap(), &me));
         assert_eq!(store.kind(), Some(Kind::File));
         drop(store);
@@ -1312,7 +1450,7 @@ mod tests {
         let (mut store, _) = open(dir.path(), &Mock::default());
         store.save(&identity()).unwrap();
         drop(store);
-        let (_, start) = Keystore::open_with(dir.path(), Box::new(Locked), CHEAP).unwrap();
+        let (_, start) = Keystore::open_with(dir.path(), Box::new(Locked), CHEAP, false).unwrap();
         assert!(matches!(start, Start::Missing { keychain: true }));
     }
 
