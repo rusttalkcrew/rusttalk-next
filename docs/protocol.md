@@ -913,6 +913,12 @@ messages in another device's name.
 | `data` | Sharer | `seq`, `data`: output bytes, at most 8 KiB |
 | `resize` | Sharer | `seq`, `cols`, `rows` |
 | `end` | Sharer | The share stopped |
+| `request` | Viewer | May I type? |
+| `withdraw` | Viewer | Stop asking, or stop typing |
+| `grant` | Sharer | `session` (16 fresh random bytes) |
+| `deny` | Sharer | No, or the request lapsed |
+| `revoke` | Sharer | Typing taken back |
+| `input` | Viewer | `session`, `seq` (u64), `first` (starts a key press or paste), `data`: typed bytes, 1 to 1024 |
 
 Sizes run from 2 to 500 columns and 1 to 200 rows. Output and resizes are
 numbered by one rising `seq`. A snapshot is the screen as of `seq`, as bytes
@@ -925,6 +931,27 @@ ignores older ones, and on a gap asks again with `watch`. Anyone in the
 call may watch; only watchers get output. The sharer gathers output every
 33 ms. More than 32 KiB in that time is dropped and every watcher gets a
 fresh screen instead; each watcher gets at most one screen every 500 ms.
+
+A watcher can ask to type. The sharer must allow each person; nothing is
+allowed automatically, Allow can't be clicked until the prompt has been up
+for a second with the window in front, and a request nobody answers lapses
+after 30 seconds. After a no or a lapse, that device's requests are ignored
+for 30 seconds, and after three for the rest of the share. Several people
+may type at once, and the sharer sees who and can take it back from each.
+The sharer denies a request from a device that doesn't watch, or while its
+own server connection is down, since it can't then tell who asks. The
+viewer encodes keys as a terminal does (xterm sequences, control
+characters, bracketed paste with Escape and C1 controls removed) and sends
+them as `input`; it refuses a paste over 16 KiB. The sharer writes `input`
+to the shell only from a device it allowed, with that grant's `session`, a
+`seq` higher than the last one seen, while its server connection is up,
+and within a budget of 16 KiB at once refilled at 8 KiB per second;
+anything else is dropped. Once part of a key press or paste is dropped, the
+rest of it is too, until the next `input` with `first`. Typing ends when the
+sharer takes it back, the viewer withdraws or stops watching, either
+leaves, or the share stops; what was already started keeps running. Typing
+is a remote shell: a member of the channel who also controls the SFU could
+read the grant and type as the allowed device.
 
 Stopping the share ends the shell and sends `end` to the watchers. Leaving
 the call does too. The terminal's own answers to programs (cursor position,

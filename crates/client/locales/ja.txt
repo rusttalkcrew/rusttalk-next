@@ -1235,7 +1235,7 @@ call.your_terminal = あなたのターミナル
 call.someones_terminal = {name} のターミナル
 terminal.failed = ターミナルを起動できませんでした。
 terminal.warn_title = ターミナルを共有しますか？
-terminal.warn_text = 見ている全員に、表示されるパスワードや鍵も含めてすべてが見えます。入力できるのはあなただけです。
+terminal.warn_text = 見ている全員に、表示されるパスワードや鍵も含めてすべてが見えます。入力できるのは、あなたと、あなたが許可した人だけです。
 terminal.share = 共有
 polls.create = 投票を作成
 polls.create_help = 選択肢つきで質問します
@@ -1265,3 +1265,14 @@ polls.hours_left.one = 残り {count} 時間
 polls.hours_left.other = 残り {count} 時間
 polls.minutes_left.one = 残り {count} 分
 polls.minutes_left.other = 残り {count} 分
+
+# crates/client/src/call/terminal.rs
+terminal.ask_to_type = 入力を依頼
+terminal.stop_typing = 入力をやめる
+terminal.request_title = {name} があなたのターミナルへの入力を求めています
+terminal.allow_help = 相手はあなたとして、ターミナルで何でも実行できます。いつでも取り戻せますが、すでにバックグラウンドで始めたものは動き続けます。
+terminal.can_type = {name} は入力できます
+terminal.take_back = 取り戻す
+terminal.denied = {name} は入力を許可しませんでした。
+terminal.taken_back = {name} が入力を取り消しました。
+terminal.paste_too_long = 他の人のターミナルに貼り付けるには長すぎます。

@@ -1238,7 +1238,7 @@ call.your_terminal = Your terminal
 call.someones_terminal = {name}'s terminal
 terminal.failed = Couldn't start a terminal.
 terminal.warn_title = Share your terminal?
-terminal.warn_text = Everyone who watches sees everything in it, also passwords or keys that show up. Only you can type in it.
+terminal.warn_text = Everyone who watches sees everything in it, also passwords or keys that show up. Only you, and people you allow, can type in it.
 terminal.share = Share
 polls.create = Create poll
 polls.create_help = Ask a question with answers to pick
@@ -1268,3 +1268,14 @@ polls.hours_left.one = {count} hour left
 polls.hours_left.other = {count} hours left
 polls.minutes_left.one = {count} minute left
 polls.minutes_left.other = {count} minutes left
+
+# crates/client/src/call/terminal.rs
+terminal.ask_to_type = Ask to type
+terminal.stop_typing = Stop typing
+terminal.request_title = {name} wants to type in your terminal
+terminal.allow_help = They can run anything in your terminal, as you. You can take it back at any time, but what they already started in the background keeps running.
+terminal.can_type = {name} can type
+terminal.take_back = Take it back
+terminal.denied = {name} didn't let you type.
+terminal.taken_back = {name} stopped you typing.
+terminal.paste_too_long = That paste is too long to type in someone else's terminal.

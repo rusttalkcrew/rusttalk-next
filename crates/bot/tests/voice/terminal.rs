@@ -7,7 +7,7 @@ use std::time::Instant;
 use anyhow::{Context, Result, ensure};
 use rusttalk_core::{
     client::voice::{ParticipantIdentity, RoomEvent, VoiceRoom, terminal::TOPIC},
-    terminal::{self, Feed, Host, Message, Share, Viewer},
+    terminal::{self, Access, Feed, Host, Message, Share, Step, Viewer},
 };
 use tokio::time::timeout;
 
@@ -67,7 +67,7 @@ pub async fn exercise(a: &mut VoiceRoom, b: &mut VoiceRoom) -> Result<()> {
     let watch = timeout(LIMIT, receive(a, &b_id))
         .await
         .context("waiting for the watch request")??;
-    host.receive(b_id.as_str(), &watch);
+    host.receive(b_id.as_str(), watch, true, Instant::now());
     ensure!(
         host.due(Instant::now()) == [b_id.as_str()],
         "the watcher wasn't owed a screen"
@@ -104,10 +104,44 @@ pub async fn exercise(a: &mut VoiceRoom, b: &mut VoiceRoom) -> Result<()> {
         "the output arrived wrong"
     );
 
+    // B asks to type; A allows it, and what B types reaches A's shell.
+    b.send_terminal(&a_id, &viewer.ask()).await?;
+    let ask = timeout(LIMIT, receive(a, &b_id))
+        .await
+        .context("waiting for the request to type")??;
+    ensure!(
+        host.receive(b_id.as_str(), ask, true, Instant::now()) == Step::Ask,
+        "the request to type wasn't shown"
+    );
+    let grant = host
+        .answer(b_id.as_str(), true, Instant::now())
+        .context("no grant")?;
+    a.send_terminal(&b_id, &grant).await?;
+    let granted = timeout(LIMIT, receive(b, &a_id))
+        .await
+        .context("waiting for the grant")??;
+    ensure!(
+        viewer.receive(a_id.as_str(), granted) == Feed::Typing(Access::Granted),
+        "the grant wasn't taken"
+    );
+    for message in viewer.input(b"whoami\r") {
+        b.send_terminal(&a_id, &message).await?;
+    }
+    let typed = timeout(LIMIT, receive(a, &b_id))
+        .await
+        .context("waiting for typed input")??;
+    ensure!(
+        host.receive(b_id.as_str(), typed, true, Instant::now())
+            == Step::Type(b"whoami\r".to_vec()),
+        "typed input didn't reach the shell"
+    );
+
     a.set_terminal_share(None).await?;
     timeout(LIMIT, share(b, &a_id, false))
         .await
         .context("waiting for the terminal share to end")??;
-    println!("#191 a shared terminal's screen and output reached its watcher, sealed");
+    println!(
+        "#191 a shared terminal's screen and output reached its watcher, and an allowed watcher typed in it, sealed"
+    );
     Ok(())
 }
