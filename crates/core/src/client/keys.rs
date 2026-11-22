@@ -537,14 +537,12 @@ impl<'a> KeyClient<'a> {
 
     /// Historical plaintext may leave this server only if its own epoch key was
     /// committed to the pinned pair. A later DM pin cannot relabel ordinary chat.
-    pub(super) fn dm_history_epoch(&self, channel: [u8; 32], epoch: i64) -> bool {
+    pub(super) fn dm_history_epoch(&self, channel: [u8; 32], epoch: i64) -> Option<bool> {
         let scope = Scope {
             kind: Kind::Channel,
             id: channel,
         };
-        self.keys
-            .get(&(scope, epoch))
-            .is_some_and(|(.., bound)| *bound)
+        self.keys.get(&(scope, epoch)).map(|(.., bound)| *bound)
     }
 
     /// The newest DM epoch this device can tell only the two people hold: its anchor

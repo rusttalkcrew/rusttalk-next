@@ -977,6 +977,7 @@ impl Home {
                 }
                 let server = &mut self.servers[index];
                 if status == Status::Online {
+                    self.next_backfill = now;
                     server.order_unavailable = false;
                     // Opens that failed while offline.
                     for (channel, chat) in &server.chats {
@@ -1035,6 +1036,23 @@ impl Home {
                     let me = dir.me;
                     let muted = (dir.members.iter()).any(|m| m.person == me && m.voice_muted);
                     let changed = server.voice_muted(&me) != muted;
+                    if server
+                        .dir
+                        .members
+                        .iter()
+                        .map(|m| m.person)
+                        .collect::<HashSet<_>>()
+                        != dir.members.iter().map(|m| m.person).collect()
+                        || server
+                            .dir
+                            .dms
+                            .iter()
+                            .map(|dm| (dm.peer, dm.channel))
+                            .collect::<HashSet<_>>()
+                            != dir.dms.iter().map(|dm| (dm.peer, dm.channel)).collect()
+                    {
+                        self.next_backfill = now;
+                    }
                     server.dir = *dir;
                     self.profile_loaded(index);
                     let server = &mut self.servers[index];
@@ -1518,7 +1536,7 @@ pub fn show(
     }
     if now >= home.next_backfill && home.backfill.as_ref().is_none_or(|job| job.is_finished()) {
         home.backfill = Some(home.net.backfill(&home.servers, &home.dm_deleted));
-        home.next_backfill = now + 60.0;
+        home.next_backfill = now + 3600.0;
     }
     ui.ctx().request_repaint_after(Duration::from_secs(60));
     home.send_queued(ui.ctx(), now);

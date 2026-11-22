@@ -27,6 +27,7 @@ pub async fn server_info(State(app): State<App>) -> ApiResult<Json<ServerInfo>> 
         .fetch_one(&app.db)
         .await?;
     Ok(Json(ServerInfo {
+        dm_backfill: true,
         open_joining,
         version: Some(env!("CARGO_PKG_VERSION").into()),
         protocol: Some(PROTOCOL_VERSION),
@@ -732,6 +733,7 @@ mod tests {
                 serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
                 serde_json::json!({
                     "open_joining": open_joining,
+                    "dm_backfill": true,
                     "version": env!("CARGO_PKG_VERSION"),
                     "protocol": PROTOCOL_VERSION
                 })

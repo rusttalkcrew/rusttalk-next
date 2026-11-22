@@ -505,6 +505,7 @@ mod tests {
 
     fn msg(person: Id, text: impl Into<String>) -> Msg {
         Msg {
+            backfilled: false,
             id: [0; 32],
             person,
             at: 0,

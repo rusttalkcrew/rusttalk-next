@@ -609,6 +609,7 @@ mod tests {
         let roles = ["member".to_owned()];
         let check = |from, chat, text: String| {
             let msg = Msg {
+                backfilled: false,
                 id: [0; 32],
                 person: from,
                 at: 0,

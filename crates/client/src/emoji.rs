@@ -217,10 +217,15 @@ fn replace_codes<'a>(text: &'a str, custom: &[CustomEmoji]) -> Cow<'a, str> {
 /// Resolve named artwork in the destination server's catalog.
 pub fn for_replica(text: &mut String, sticker: &mut Option<Id>, custom: &[CustomEmoji]) {
     if sticker.is_some() {
-        *sticker = custom
+        let mut matches = custom
             .iter()
-            .find(|e| e.sticker && e.name.eq_ignore_ascii_case(text))
-            .map(|e| e.id);
+            .filter(|e| e.sticker && e.name.eq_ignore_ascii_case(text));
+        if !matches.clone().any(|e| Some(e.id) == *sticker) {
+            *sticker = matches
+                .next()
+                .map(|e| e.id)
+                .filter(|_| matches.next().is_none());
+        }
         if sticker.is_none() {
             *text = format!(":{text}:");
         }

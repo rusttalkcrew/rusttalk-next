@@ -44,6 +44,7 @@ pub struct Page {
 
 #[derive(FromRow)]
 struct Row {
+    backfilled: bool,
     id: String,
     epoch: i64,
     sender_person: Vec<u8>,
@@ -59,6 +60,7 @@ impl TryFrom<Row> for MessageRecord {
     fn try_from(row: Row) -> ApiResult<Self> {
         let invalid = |_| ApiError::internal("invalid_stored_sender");
         Ok(Self {
+            backfilled: row.backfilled,
             id: decode(&row.id).map_err(|_| ApiError::internal("invalid_stored_message"))?,
             epoch: row.epoch,
             person: row.sender_person.try_into().map_err(invalid)?,
@@ -143,7 +145,9 @@ pub async fn create(
     let (mut tx, actor) = authenticate(&app, &headers).await?;
     require_write(&mut tx, &actor, &channel).await?;
     let at = match backfill_at {
-        Some(at) if chat_kind(&mut tx, &actor, &channel).await? == "dm" => at.clamp(0, actor.at),
+        Some(at) if chat_kind(&mut tx, &actor, &channel).await? == "dm" => {
+            historical_time(at, actor.at)
+        }
         Some(_) => return Err(ApiError::bad_request("invalid_backfill")),
         None => actor.at,
     };
@@ -198,8 +202,8 @@ pub async fn create(
     reserve(&mut tx, &id).await?;
     let size = envelope_bytes.len();
     query(
-        "INSERT INTO messages (id, channel_id, epoch, sender_device, sender_person, at, size, envelope)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO messages (id, channel_id, epoch, sender_device, sender_person, at, size, envelope, backfilled)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(&channel)
@@ -209,6 +213,7 @@ pub async fn create(
     .bind(at)
     .bind(size as i64)
     .bind(envelope_bytes)
+    .bind(backfill_at.is_some())
     .execute(&mut *tx)
     .await?;
     let dropped = prune(&mut tx, &channel).await?;
@@ -223,6 +228,7 @@ pub async fn create(
     Ok((
         StatusCode::CREATED,
         Json(MessageRecord {
+            backfilled: backfill_at.is_some(),
             id: message_id,
             epoch,
             person: actor.person,
@@ -244,6 +250,10 @@ async fn reserve(db: &mut SqliteConnection, id: &str) -> ApiResult<()> {
         return Err(keys::conflict("message_exists"));
     }
     Ok(())
+}
+
+fn historical_time(requested: i64, now: i64) -> i64 {
+    requested.clamp(0, now)
 }
 
 async fn history_full(db: &mut SqliteConnection, channel: &str) -> ApiResult<bool> {
@@ -286,7 +296,7 @@ async fn records(
     limit: i64,
 ) -> ApiResult<Vec<MessageRecord>> {
     let rows: Vec<Row> = query_as(
-        "SELECT m.id, m.epoch, m.sender_person, m.sender_device, m.at, m.size, m.envelope
+        "SELECT m.backfilled, m.id, m.epoch, m.sender_person, m.sender_device, m.at, m.size, m.envelope
          FROM messages m
          WHERE m.channel_id = ? AND m.sequence <= ? ORDER BY m.sequence DESC LIMIT ?",
     )
@@ -424,6 +434,66 @@ mod tests {
         assert!(json.len() <= BODY_LIMIT);
         assert!(BODY_LIMIT - json.len() < 512);
         assert!(serde_json::from_str::<NewMessage>(&json).is_ok());
+    }
+
+    #[test]
+    fn historical_timestamp_stays_between_epoch_and_receipt() {
+        assert_eq!(historical_time(i64::MIN, 10), 0);
+        assert_eq!(historical_time(5, 10), 5);
+        assert_eq!(historical_time(i64::MAX, 10), 10);
+    }
+
+    #[tokio::test]
+    async fn backfill_endpoint_rejects_normal_channels_and_full_dms() -> anyhow::Result<()> {
+        use crate::testing::{app, as_person, person};
+        let dir = tempfile::tempdir()?;
+        let app = app(dir.path(), 2).await?;
+        let text = encode(&[3; 32]);
+        let dm = encode(&[4; 32]);
+        query("INSERT INTO categories VALUES ('category', 0, X'00')")
+            .execute(&app.db)
+            .await?;
+        query("INSERT INTO channels (id, kind, category_id, position, name_ct) VALUES (?, 'text', 'category', 0, X'00')")
+            .bind(&text).execute(&app.db).await?;
+        query("INSERT INTO channel_permissions VALUES (?, 'owner', 3)")
+            .bind(&text)
+            .execute(&app.db)
+            .await?;
+        query("INSERT INTO channels (id, kind, position, dm_first, dm_second) VALUES (?, 'dm', 0, ?, ?)")
+            .bind(&dm).bind(person(1)).bind(person(2)).execute(&app.db).await?;
+        query("INSERT INTO key_scopes (id, kind, channel_id) VALUES (?, 'channel', ?)")
+            .bind(&dm)
+            .bind(&dm)
+            .execute(&app.db)
+            .await?;
+        query("INSERT INTO key_epochs VALUES (?, 1, zeroblob(32))")
+            .bind(&dm)
+            .execute(&app.db)
+            .await?;
+        query("INSERT INTO message_senders VALUES (X'01', X'02', X'03')")
+            .execute(&app.db)
+            .await?;
+        query("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < ?)
+             INSERT INTO messages (id, channel_id, epoch, sender_device, sender_person, at, size, envelope)
+             SELECT CAST(i AS TEXT), ?, 1, X'01', X'02', 0, 111, zeroblob(111) FROM n")
+             .bind(RETAIN).bind(&dm).execute(&app.db).await?;
+        for (channel, code) in [(text, "invalid_backfill"), (dm, "history_full")] {
+            let post = NewMessage {
+                id: encode(&[9; 32]),
+                epoch: 1,
+                envelope: encode(&[]),
+                backfill_at: Some(1),
+            };
+            let result = create(
+                State(app.clone()),
+                as_person(1),
+                Path(channel),
+                Ok(Json(post)),
+            )
+            .await;
+            assert_eq!(result.err().expect("must reject backfill").code, code);
+        }
+        Ok(())
     }
 
     #[tokio::test]

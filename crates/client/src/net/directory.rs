@@ -228,6 +228,7 @@ pub(super) async fn directory(
             let mut id = state.server_id;
             id[..8].copy_from_slice(&state.notices.to_be_bytes());
             let msg = Msg {
+                backfilled: false,
                 id,
                 person,
                 at: now(),

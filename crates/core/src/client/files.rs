@@ -356,7 +356,7 @@ fn file_path(id: &[u8; 32]) -> String {
     format!("/v1/files/{}", encode(id))
 }
 
-pub(super) fn blob_ref(len: usize) -> Result<BlobRef> {
+fn blob_ref(len: usize) -> Result<BlobRef> {
     let reference = BlobRef {
         id: *random_key()?,
         key: random_key()?,

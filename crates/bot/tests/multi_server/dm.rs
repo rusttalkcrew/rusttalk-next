@@ -155,7 +155,10 @@ pub async fn replicas(
     let source = owner.0.message_page(&dm_a.id, None, 100).await?;
     let target = owner.1.message_page(&dm_b.id, None, 100).await?;
     let inventory = |records: &[rusttalk_core::client::MessageRecord]| {
-        records.iter().map(|m| (m.id, m.person)).collect::<Vec<_>>()
+        records
+            .iter()
+            .map(|m| (m.id, m.person, m.at))
+            .collect::<Vec<_>>()
     };
     let down = source
         .iter()
@@ -178,8 +181,19 @@ pub async fn replicas(
         .read_dm_copy(&dm_a.id, peer_person, down.id)
         .await?
         .context("missing backfill body")?;
-    owner.1.restore_dm_copy(&dm_b.id, item).await?;
+    let conflict = owner.1.restore_dm_copy(&dm_b.id, item).await.unwrap_err();
+    assert_eq!(
+        conflict.downcast_ref::<rusttalk_core::client::backfill::Refusal>(),
+        Some(&rusttalk_core::client::backfill::Refusal::Record)
+    );
+    assert!(
+        !owner
+            .1
+            .needs_dm_copy(&dm_b.id, peer_person, down.id)
+            .await?
+    );
     let restored = peer.1.message(&dm_b.id, &down.id).await?;
+    assert!(restored.backfilled && !down.backfilled);
     assert_eq!(restored.at, down.at);
     assert_ne!(restored.envelope, down.envelope);
     assert_eq!(peer.1.open_message(&dm_b.id, &restored).await?.text, DOWN);
