@@ -11,6 +11,13 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+## v0.1.8 - 2026-11-22
+
+- Type in a shared terminal when the sharer allows it
+- Page channels: one Markdown page that only editors can change
+- Emoji and sticker packs per server, usable on every server, import from a .zip
+- Update banner: update and restart in one click, checks every 15 minutes
+- More options menu (…) in the call panel
 - What's new page in Settings, shown once after the app updates
 - Polls in chat, end-to-end encrypted
 - Share a terminal in a voice channel (read-only)
