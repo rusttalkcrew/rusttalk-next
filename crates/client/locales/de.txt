@@ -193,6 +193,7 @@ home.no_wide_mentions = In diesem Chat kannst du keine Rollen, @everyone oder @h
 home.quote_sticker = {name}: ein Sticker
 home.a_file = eine Datei
 home.earlier_message = Frühere Nachricht
+home.restored = wiederhergestellt
 home.edited = (bearbeitet)
 home.message_unreadable = Diese Nachricht konnte nicht geöffnet werden.
 common.reply = Antworten

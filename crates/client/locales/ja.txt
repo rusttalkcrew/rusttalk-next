@@ -193,6 +193,7 @@ home.no_wide_mentions = このチャットではロール、@everyone、@here �
 home.quote_sticker = {name}: スタンプ
 home.a_file = ファイル
 home.earlier_message = 以前のメッセージ
+home.restored = 復元済み
 home.edited = (編集済み)
 home.message_unreadable = このメッセージを開けませんでした。
 common.reply = 返信

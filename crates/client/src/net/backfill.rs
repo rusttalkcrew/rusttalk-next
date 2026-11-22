@@ -64,7 +64,10 @@ impl Request {
             }
             Self::Page(channel, peer, before, reply) => {
                 let result = async {
-                    anyhow::ensure!(client.dm_private(&channel, &peer), "DM keys pending");
+                    if !client.dm_private(&channel, &peer) {
+                        ctx.send(Update::RetryDmBackfill);
+                        anyhow::bail!("DM keys pending");
+                    }
                     let page = client
                         .message_page(&channel, before.as_ref(), DM_PAGE)
                         .await?;
@@ -216,10 +219,16 @@ async fn repair(
         Ok(None) => return Ok(()),
         Err(error) => {
             let status = request_status(&error);
-            if matches!(
-                status,
-                Some(StatusCode::CONFLICT | StatusCode::FORBIDDEN | StatusCode::PAYLOAD_TOO_LARGE)
-            ) {
+            if !(known.is_none() && status == Some(StatusCode::CONFLICT))
+                && matches!(
+                    status,
+                    Some(
+                        StatusCode::CONFLICT
+                            | StatusCode::FORBIDDEN
+                            | StatusCode::PAYLOAD_TOO_LARGE
+                    )
+                )
+            {
                 completed.entry(key).or_default().refused = true;
             }
             return Err(error);
@@ -302,6 +311,85 @@ impl Net {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn repair_probes_first_skips_no_copy_and_stops_a_refused_route() {
+        let me = [1; 32];
+        let peer = [2; 32];
+        let channel = [3; 32];
+        let destination = [4; 32];
+        let (source, mut from_source) = unbounded_channel();
+        let (target, mut from_target) = unbounded_channel();
+        let route = || Route {
+            peer,
+            channel,
+            source: source.clone(),
+            target: target.clone(),
+            source_url: "https://source.example".parse().unwrap(),
+            target_url: "https://target.example".parse().unwrap(),
+        };
+        let held = [5; 32];
+        let no_copy = [6; 32];
+        let denied = [7; 32];
+        let later = [8; 32];
+        let responders = async {
+            // Listen to both connections so a read on the wrong side fails immediately.
+            for step in 0..8 {
+                let (is_source, command) = tokio::select! {
+                    Some(c) = from_source.recv() => (true,c),
+                    Some(c) = from_target.recv() => (false,c),
+                };
+                let Command::Backfill(request) = command else {
+                    panic!("unexpected command")
+                };
+                match (step, is_source, request) {
+                    (0 | 7, false, Request::Destination(p, false, reply)) if p == peer => {
+                        let _ = reply.send(Ok(Destination::Channel(destination)));
+                    }
+                    (1, false, Request::Page(c, _, None, reply)) if c == destination => {
+                        let _ = reply.send(Ok(vec![]));
+                    }
+                    (2, true, Request::Page(c, _, None, reply)) if c == channel => {
+                        let _ = reply.send(Ok(vec![
+                            (later, me, 4),
+                            (denied, me, 3),
+                            (no_copy, me, 2),
+                            (held, me, 1),
+                        ]));
+                    }
+                    (3, false, Request::Needs(_, _, id, reply)) if id == held => {
+                        let _ = reply.send(Ok(false));
+                    }
+                    (4, false, Request::Needs(_, _, id, reply)) if id == no_copy => {
+                        let _ = reply.send(Ok(true));
+                    }
+                    (5, true, Request::Read(_, _, id, reply)) if id == no_copy => {
+                        let _ = reply.send(Ok(None));
+                    }
+                    (6, false, Request::Needs(_, _, id, reply)) if id == denied => {
+                        let _ = reply.send(Err(Refusal::Destination.into()));
+                    }
+                    _ => panic!("unexpected repair request at step {step}"),
+                }
+            }
+        };
+        let mut completed = Completed::default();
+        let scans = async {
+            for _ in 0..2 {
+                repair(me, route(), &Default::default(), &mut completed)
+                    .await
+                    .unwrap();
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(15), async {
+            tokio::join!(scans, responders);
+        })
+        .await
+        .unwrap();
+        let progress = completed.values().next().unwrap();
+        assert!(progress.refused);
+        assert_eq!(progress.done, HashSet::from([held, no_copy, denied]));
+    }
+
     #[test]
     fn conflicted_post_is_terminal_only_for_that_record() {
         let mut progress = Progress::default();

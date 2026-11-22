@@ -89,7 +89,7 @@ impl Pokes {
             }
             recent.push_back(poke.at);
         }
-        poke.read = !poke.incoming || !(live || poke.at > now - FRESH);
+        poke.read |= !poke.incoming || !(live || poke.at > now - FRESH);
         // Kept in the order they come; loaded ones may be older than the newest.
         let at = self.list.partition_point(|seen| seen.at <= poke.at);
         self.list.insert(at, poke);

@@ -196,6 +196,7 @@ home.no_wide_mentions = You can’t mention roles, @everyone or @here in this ch
 home.quote_sticker = {name}: a sticker
 home.a_file = a file
 home.earlier_message = Earlier message
+home.restored = restored
 home.edited = (edited)
 home.message_unreadable = This message couldn't be opened.
 common.reply = Reply

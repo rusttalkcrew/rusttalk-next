@@ -193,6 +193,7 @@ home.no_wide_mentions = In deze chat kun je geen rollen, @everyone of @here noem
 home.quote_sticker = {name}: een sticker
 home.a_file = een bestand
 home.earlier_message = Eerder bericht
+home.restored = hersteld
 home.edited = (bewerkt)
 home.message_unreadable = Dit bericht kon niet worden geopend.
 common.reply = Beantwoorden

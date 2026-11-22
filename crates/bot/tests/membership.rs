@@ -125,7 +125,7 @@ async fn receive_key(client: &mut KeyClient<'_>, scope: Scope, epoch: i64) -> Re
     // An envelope can already be stored before the bot starts waiting for events.
     // Several peers may also take successive randomized pauses before wrapping.
     client.sync().await?;
-    tokio::time::timeout(Duration::from_secs(45), async {
+    tokio::time::timeout(Duration::from_secs(15), async {
         while client.key(scope, epoch).is_none() {
             ensure!(
                 client.next_event().await?.is_some(),

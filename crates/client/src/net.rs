@@ -255,6 +255,7 @@ impl Compatibility {
 }
 
 pub enum Update {
+    RetryDmBackfill,
     Preview(Result<Box<Preview>, String>),
     /// A page of directory results, by page number.
     Found(u32, Result<Vec<Listed>, String>),
@@ -1238,7 +1239,8 @@ async fn latest(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, state: &State)
                     continue;
                 };
                 if let Some(peer) = peer
-                    && (record.person != peer
+                    && (record.backfilled
+                        || record.person != peer
                         || !(client.open_message(&channel, record).await)
                             .is_ok_and(|body| body.key_link.is_none() && !body.poke))
                 {

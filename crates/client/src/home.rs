@@ -689,6 +689,9 @@ impl Home {
 
     /// A new message: mark it unread, count a mention and notify, as the person chose.
     fn arrived(&mut self, ctx: &egui::Context, index: usize, channel: Id, msg: Msg) {
+        if msg.backfilled {
+            return;
+        }
         let me = *self.identity.certificate.person_id();
         if msg.person == me
             || msg.edit_of.is_some()
@@ -1006,6 +1009,11 @@ impl Home {
             }
             Update::Directory(address, dir) => {
                 if let Some(index) = self.index(&address) {
+                    let peers: HashSet<_> = self
+                        .servers
+                        .iter()
+                        .flat_map(|s| s.dir.dms.iter().map(|dm| dm.peer))
+                        .collect();
                     let server = &mut self.servers[index];
                     for member in &dir.members {
                         if let Some(name) = &member.name {
@@ -1036,13 +1044,14 @@ impl Home {
                     let me = dir.me;
                     let muted = (dir.members.iter()).any(|m| m.person == me && m.voice_muted);
                     let changed = server.voice_muted(&me) != muted;
-                    if server
-                        .dir
-                        .members
-                        .iter()
-                        .map(|m| m.person)
-                        .collect::<HashSet<_>>()
-                        != dir.members.iter().map(|m| m.person).collect()
+                    let dm_members = |dir: &Directory| {
+                        dir.members
+                            .iter()
+                            .map(|m| m.person)
+                            .filter(|id| peers.contains(id))
+                            .collect::<HashSet<_>>()
+                    };
+                    if dm_members(&server.dir) != dm_members(&dir)
                         || server
                             .dir
                             .dms
@@ -1192,6 +1201,10 @@ impl Home {
                 if self.dm_deleted.gone(&id, &copy) {
                     self.record_delete(Edit::DmCopyGone(id, copy));
                 }
+            }
+            Update::RetryDmBackfill => {
+                self.next_backfill = self.next_backfill.min(now + 30.0);
+                ctx.request_repaint_after(Duration::from_secs(30));
             }
             Update::PageFailed(address, channel, missing) => {
                 if let Some(index) = self.index(&address)
@@ -3550,6 +3563,7 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
             }
             let start = !last.is_some_and(|prev| {
                 prev.person == msg.person
+                    && prev.backfilled == msg.backfilled
                     && !matches!(prev.body, Body::Notice { .. } | Body::Friend(..))
                     && msg.at - prev.at < 300
                     && msg.reply_to.is_none()
@@ -4286,6 +4300,13 @@ fn composer_field(
         .inner
 }
 
+fn message_time(ui: &mut Ui, msg: &Msg) {
+    ui.label(ui::caption(time(msg.at)));
+    if msg.backfilled {
+        ui.label(ui::caption(t!("home.restored")));
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn message(
     ui: &mut Ui,
@@ -4337,7 +4358,7 @@ fn message(
             ui.weak("•");
             let line = friends::line(signal, &names(&msg.person));
             ui.label(emoji::text(line).weak().italics());
-            ui.weak(time(msg.at));
+            message_time(ui, msg);
         });
         ui.add_space(4.0);
         return None;
@@ -4397,10 +4418,12 @@ fn message(
                     };
                     ui.label(emoji::text(line).size(ui::TEXT_CAPTION).weak());
                 }
-                if start {
+                if start || msg.backfilled {
                     ui.horizontal(|ui| {
-                        ui.label(ui::bold(&name));
-                        ui.label(ui::caption(time(msg.at)));
+                        if start {
+                            ui.label(ui::bold(&name));
+                        }
+                        message_time(ui, msg);
                     });
                 }
                 match &msg.body {

@@ -348,6 +348,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn replica_stickers_keep_exact_ids_and_only_remap_unambiguous_names() {
+        let sticker = |id| CustomEmoji {
+            id: [id; 32],
+            name: "Wave".into(),
+            sticker: true,
+            picture: None,
+        };
+        let catalog = [sticker(1), sticker(2)];
+        for (id, entries, expected) in [
+            (2, &catalog[..], Some([2; 32])),
+            (3, &catalog[..1], Some([1; 32])),
+            (3, &catalog[..], None),
+            (3, &catalog[..0], None),
+        ] {
+            let mut id = Some([id; 32]);
+            let mut text = String::from("wave");
+            for_replica(&mut text, &mut id, entries);
+            assert_eq!(id, expected);
+            assert_eq!(text, if expected.is_some() { "wave" } else { ":wave:" });
+        }
+    }
+
+    #[test]
     fn shortcode_lookup_and_replacement() {
         assert_eq!(lookup("ROFL"), Some("🤣"));
         assert_eq!(lookup("thumbsup_tone5"), Some("👍🏿"));
