@@ -11,11 +11,14 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
-- Pictures on a page no longer disappear after a while; they stay while the page uses them.
-- Pages can show pictures, and links on a page get the same preview cards as in chat.
-- Link preview text no longer runs underneath the Open link button.
-- Removing a device changes chat and call keys on updated servers. Older apps must update to connect.
-- Every channel has a Files list: upload files to share and download them later; they stay until removed
+## v0.1.10 - 2026-11-22
+
+- Update required: older apps must update (protocol version 3)
+- Removing a device changes chat and call keys, so it can't read new messages
+- Every channel has a Files list: share files and download them later
+- Pages can show pictures, and links on a page get preview cards
+- Pictures on a page stay while the page uses them
+- Link preview text no longer runs underneath the Open link button
 
 ## v0.1.9 - 2026-11-22
 
