@@ -113,7 +113,6 @@ home.name_your_server = サーバーに名前を付ける
 home.create_channel_in = {category} にチャンネルを作成
 home.rename_category = カテゴリーの名前を変更
 home.delete_category = カテゴリーを削除
-home.channel_settings = チャンネル設定
 home.edit_channel = チャンネルを編集
 home.delete_channel = チャンネルを削除
 home.invite_people = メンバーを招待
@@ -456,7 +455,6 @@ admin.flag_write = 書き込み
 admin.flag_edit = 編集
 admin.flag_speak = 発言
 admin.flag_video = ビデオ
-admin.channel_title = {icon} {channel} の設定
 
 # crates/client/src/server.rs
 perm.invite = メンバーを招待

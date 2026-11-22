@@ -113,7 +113,6 @@ home.name_your_server = Server benennen
 home.create_channel_in = Kanal in {category} erstellen
 home.rename_category = Kategorie umbenennen
 home.delete_category = Kategorie löschen
-home.channel_settings = Kanaleinstellungen
 home.edit_channel = Kanal bearbeiten
 home.delete_channel = Kanal löschen
 home.invite_people = Leute einladen
@@ -456,7 +455,6 @@ admin.flag_write = Schreiben
 admin.flag_edit = Bearbeiten
 admin.flag_speak = Sprechen
 admin.flag_video = Video
-admin.channel_title = Einstellungen für {icon} {channel}
 
 # crates/client/src/server.rs
 perm.invite = Leute einladen

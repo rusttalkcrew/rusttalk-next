@@ -214,6 +214,8 @@ enum Join {
 
 /// Voice channel bitrates a manager can pick, in kbps.
 const AUDIO_KBPS: std::ops::RangeInclusive<u32> = 8..=128;
+/// The least height of an Edit channel tab: General of a voice channel.
+const CHANNEL_TAB_HEIGHT: f32 = 188.0;
 
 enum Dialog {
     ServerName(usize, String),
@@ -226,14 +228,17 @@ enum Dialog {
         category: Option<Id>,
         new_category: String,
     },
-    RenameChannel {
+    EditChannel {
         server: usize,
         id: Id,
+        tab: ChannelTab,
         name: String,
         topic: String,
         topic_changed: bool,
         /// Voice channels only: the bitrate in kbps, and whether it was moved.
         audio: Option<(u32, bool)>,
+        /// Role flags changed on the Permissions tab, sent with Save.
+        flags: Vec<(String, u8)>,
     },
     RenameCategory(usize, Id, String),
     DeleteItem(usize, reorder::Item, String),
@@ -253,6 +258,12 @@ enum Dialog {
 pub(crate) enum ChannelEdit {
     Rename,
     Delete,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum ChannelTab {
+    General,
+    Permissions,
 }
 
 struct Invite {
@@ -865,13 +876,15 @@ impl Home {
         }
         if let Some(channel) = server.channel(&id) {
             self.dialog = Some(match edit {
-                ChannelEdit::Rename => Dialog::RenameChannel {
+                ChannelEdit::Rename => Dialog::EditChannel {
                     server: index,
                     id,
+                    tab: ChannelTab::General,
                     name: channel.name.clone(),
                     topic: channel.topic.clone(),
                     topic_changed: false,
                     audio: channel.voice.then_some((channel.audio_kbps, false)),
+                    flags: Vec::new(),
                 },
                 ChannelEdit::Delete => {
                     Dialog::DeleteItem(index, reorder::Item::Channel(id), channel.name.clone())
@@ -2323,7 +2336,6 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
     let mut add = None;
     let mut talk = None;
     let mut person_pick = None;
-    let mut configure = None;
     let mut moved = None;
     let mut channel_edit = None;
     let mut category_dialog = None;
@@ -2425,22 +2437,17 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
                     if let Some(rule) = notify::rule_menu(m, &rule, true, notify::unix_now()) {
                         rule_change = Some((channel.id, rule));
                     }
-                    if perms.manage_channels {
+                    if can_manage {
                         m.separator();
-                        if m.item("⚙", t!("home.channel_settings")).clicked() {
-                            configure = Some(channel.id);
+                        if m.item("✏", t!("home.edit_channel")).clicked() {
+                            channel_edit = Some((channel.id, ChannelEdit::Rename));
                         }
-                        if can_manage {
-                            if m.item("✏", t!("home.edit_channel")).clicked() {
-                                channel_edit = Some((channel.id, ChannelEdit::Rename));
-                            }
-                            if can_move {
-                                moved = moved.or(reorder::menu(m, categories, item));
-                            }
-                            m.separator();
-                            if m.danger("🗑", t!("home.delete_channel")).clicked() {
-                                channel_edit = Some((channel.id, ChannelEdit::Delete));
-                            }
+                        if can_move {
+                            moved = moved.or(reorder::menu(m, categories, item));
+                        }
+                        m.separator();
+                        if m.danger("🗑", t!("home.delete_channel")).clicked() {
+                            channel_edit = Some((channel.id, ChannelEdit::Delete));
                         }
                     }
                 });
@@ -2458,9 +2465,6 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
     }
     if let Some((channel, rule)) = rule_change {
         home.set_rule(index, Some(channel), rule);
-    }
-    if let Some(channel) = configure {
-        admin::open(home, index, admin::Tab::Channel(channel));
     }
     if let Some((id, edit)) = channel_edit {
         home.edit_channel(index, id, edit);
@@ -5387,7 +5391,7 @@ fn dialog_title(home: &Home, dialog: &Dialog) -> String {
         Dialog::MyName(..) => t!("home.your_name_dialog").into(),
         Dialog::Category(..) => t!("home.create_category").into(),
         Dialog::Channel { .. } => t!("home.create_channel").into(),
-        Dialog::RenameChannel { .. } => t!("home.edit_channel").into(),
+        Dialog::EditChannel { .. } => t!("home.edit_channel").into(),
         Dialog::RenameCategory(..) => t!("home.rename_category").into(),
         Dialog::DeleteItem(_, reorder::Item::Channel(_), _) => {
             t!("home.delete_channel_title").into()
@@ -5414,7 +5418,7 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
         return;
     };
     let managed = match dialog {
-        Dialog::RenameChannel { server, .. }
+        Dialog::EditChannel { server, .. }
         | Dialog::RenameCategory(server, ..)
         | Dialog::DeleteItem(server, ..) => Some(*server),
         _ => None,
@@ -5430,6 +5434,7 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
     let mut close = false;
     let mut command = None;
     let mut delete_dm = None;
+    let mut delete_channel = None;
     let mut poke = None;
     // Message (`None`) or a friend action, from a person's details.
     let mut person_action = None;
@@ -5540,54 +5545,102 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
                 ));
             }
         }
-        Dialog::RenameChannel {
+        Dialog::EditChannel {
             server,
             id,
+            tab,
             name,
             topic,
             topic_changed,
             audio,
+            flags,
         } => {
-            let label = ui.label(t!("home.channel_name")).id;
-            let name_field = name_field(ui, name).labelled_by(label);
-            let label = ui.label(t!("home.topic_optional")).id;
-            let field = ui
-                .add(
-                    ui::field(topic)
-                        .char_limit(250)
-                        .desired_width(f32::INFINITY),
-                )
-                .labelled_by(label);
-            *topic_changed |= field.changed();
-            if let Some((kbps, changed)) = audio {
-                ui.label(t!("home.audio_quality", kbps = *kbps));
-                ui.spacing_mut().slider_width = ui.available_width();
-                let slider = ui.add(
-                    egui::Slider::new(kbps, AUDIO_KBPS)
-                        .show_value(false)
-                        .integer(),
-                );
-                slider.widget_info(|| {
-                    egui::WidgetInfo::labeled(
-                        egui::Role::Slider,
-                        true,
-                        t!("home.audio_quality_label"),
-                    )
-                });
-                *changed |= slider.changed();
+            let data = &home.servers[*server];
+            let Some(channel) = data.channel(id) else {
+                ui.label(t!("admin.channel_deleted"));
+                close |= ui::secondary(ui, t!("common.close")).clicked();
+                return;
+            };
+            ui.add_space(ui::SPACE_S);
+            ui::tabs(
+                ui,
+                tab,
+                &[
+                    (ChannelTab::General, t!("admin.group_general")),
+                    (ChannelTab::Permissions, t!("admin.permissions")),
+                ],
+            );
+            let mut entered = false;
+            let top = ui.cursor().top();
+            match tab {
+                ChannelTab::General => {
+                    let label = ui.label(t!("home.channel_name")).id;
+                    let name_field = name_field(ui, name).labelled_by(label);
+                    let label = ui.label(t!("home.topic_optional")).id;
+                    let field = ui
+                        .add(
+                            ui::field(topic)
+                                .char_limit(250)
+                                .desired_width(f32::INFINITY),
+                        )
+                        .labelled_by(label);
+                    *topic_changed |= field.changed();
+                    if let Some((kbps, changed)) = audio {
+                        ui.label(t!("home.audio_quality", kbps = *kbps));
+                        ui.spacing_mut().slider_width = ui.available_width();
+                        let slider = ui.add(
+                            egui::Slider::new(kbps, AUDIO_KBPS)
+                                .show_value(false)
+                                .integer(),
+                        );
+                        slider.widget_info(|| {
+                            egui::WidgetInfo::labeled(
+                                egui::Role::Slider,
+                                true,
+                                t!("home.audio_quality_label"),
+                            )
+                        });
+                        *changed |= slider.changed();
+                    }
+                    entered = submitted(ui, &name_field) || submitted(ui, &field);
+                }
+                ChannelTab::Permissions => admin::channel_flags(ui, data, channel, flags),
             }
-            let submitted = submitted(ui, &name_field) || submitted(ui, &field);
-            if text_footer(ui, t!("common.save"), submitted, &mut close) && !name.trim().is_empty()
-            {
-                command = Some((
-                    *server,
-                    Command::RenameChannel {
-                        id: *id,
-                        name: name.trim().to_owned(),
-                        topic: topic_changed.then(|| topic.trim().to_owned()),
-                        audio_kbps: audio.and_then(|(kbps, changed)| changed.then_some(kbps)),
-                    },
-                ));
+            // The same height on both tabs, so the centred dialog doesn't jump on a switch.
+            ui.add_space((CHANNEL_TAB_HEIGHT - (ui.cursor().top() - top)).max(0.0));
+            let mut save = entered;
+            ui::footer(ui, |ui| {
+                save |= ui::primary(ui, t!("common.save")).clicked();
+                close |= ui::secondary(ui, t!("common.cancel")).clicked();
+                if *tab == ChannelTab::General {
+                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                        if ui::danger(ui, t!("home.delete_channel")).clicked() {
+                            delete_channel = Some((*server, *id));
+                        }
+                    });
+                }
+            });
+            if save && !name.trim().is_empty() {
+                // Only what changed, so saving permissions doesn't log a rename too.
+                let audio_kbps = audio.and_then(|(kbps, changed)| changed.then_some(kbps));
+                if name.trim() != channel.name || *topic_changed || audio_kbps.is_some() {
+                    command = Some((
+                        *server,
+                        Command::RenameChannel {
+                            id: *id,
+                            name: name.trim().to_owned(),
+                            topic: topic_changed.then(|| topic.trim().to_owned()),
+                            audio_kbps,
+                        },
+                    ));
+                }
+                for (role, role_flags) in flags.drain(..) {
+                    if role_flags != admin::channel_role_flags(channel, &role) {
+                        let change = Admin::ChannelFlags(*id, role, role_flags);
+                        data.send(Command::Admin(change));
+                    }
+                }
+                close = true;
             }
         }
         Dialog::RenameCategory(index, id, name) => {
@@ -5806,6 +5859,9 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
     if close || dismissed {
         home.dialog = None;
     }
+    if let Some((index, id)) = delete_channel {
+        home.edit_channel(index, id, ChannelEdit::Delete);
+    }
 }
 
 /// A name field with a confirm button; returns true when confirmed with a non-empty name.
@@ -5935,6 +5991,74 @@ mod tests {
         assert_eq!(harness.query_all_by_label("Download").count(), 2);
         assert_eq!(harness.query_all_by_label("Remove").count(), 1);
         assert!(harness.query_by_label("Upload").is_some());
+    }
+
+    /// Edit channel holds General and Permissions; Save sends only what changed.
+    #[test]
+    fn edit_channel_saves_permissions_with_the_same_save() {
+        use egui_kittest::kittest::{Queryable, by};
+        let (mut harness, mut sent) = files_harness(true);
+        while sent.try_recv().is_ok() {}
+        let mut harness = {
+            let home = harness.state_mut().take().unwrap();
+            let mut dialog = egui_kittest::Harness::builder()
+                .with_size(Vec2::new(620.0, 560.0))
+                .build_ui_state(
+                    |ui, home: &mut Option<Home>| {
+                        if let Some(home) = home {
+                            dialogs(ui.ctx(), home);
+                        }
+                    },
+                    None,
+                );
+            ui::install(&dialog.ctx);
+            *dialog.state_mut() = Some(home);
+            dialog
+        };
+        let home = harness.state_mut().as_mut().unwrap();
+        home.servers[0].dir.perms.manage_channels = true;
+        home.servers[0].dir.roles = vec![crate::server::Role {
+            id: "member".into(),
+            name: "Member".into(),
+            name_known: true,
+            rank: 0,
+            permissions: Vec::new(),
+            custom: false,
+            color: None,
+            separate: false,
+        }];
+        home.edit_channel(0, PROJECTS, ChannelEdit::Rename);
+        harness.run_steps(4);
+        assert!(harness.query_by_label("Delete channel").is_some());
+        harness.get_by_label("Permissions").click_accesskit();
+        harness.run_steps(4);
+        assert!(harness.query_by_label("Delete channel").is_none());
+        // Member may read and write; taking Write away waits for Save.
+        let write = harness
+            .query_all(by().role(egui::accesskit::Role::CheckBox))
+            .nth(1)
+            .unwrap();
+        write.click_accesskit();
+        harness.run_steps(4);
+        assert!(sent.try_recv().is_err(), "a permission saved before Save");
+        harness.get_by_label("Save").click_accesskit();
+        harness.run_steps(4);
+        assert!(matches!(
+            sent.try_recv(),
+            Ok(Command::Admin(Admin::ChannelFlags(PROJECTS, role, 1))) if role == "member"
+        ));
+        assert!(sent.try_recv().is_err(), "an unchanged name was saved");
+        assert!(harness.state().as_ref().unwrap().dialog.is_none());
+        // Delete channel on General asks first.
+        let home = harness.state_mut().as_mut().unwrap();
+        home.edit_channel(0, PROJECTS, ChannelEdit::Rename);
+        harness.run_steps(4);
+        harness.get_by_label("Delete channel").click_accesskit();
+        harness.run_steps(4);
+        assert!(matches!(
+            harness.state().as_ref().unwrap().dialog,
+            Some(Dialog::DeleteItem(0, reorder::Item::Channel(PROJECTS), _))
+        ));
     }
 
     #[test]
