@@ -3,17 +3,27 @@
 //! this sends and receives.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashMap},
     time::{Duration, Instant},
 };
 
 use rusttalk_core::{
     client::voice::ParticipantIdentity,
-    terminal::{self, Feed, Host, Message, Share, Viewer},
+    terminal::{self, Feed, Host, Message, Share, Step, Viewer},
 };
 
 use super::{Command, Ctx, Update, voice::Live};
-use crate::terminal::{Out, Shared};
+use crate::{
+    server::Id,
+    terminal::{Out, Shared},
+};
+
+/// Who asks to type in our terminal, and who may, by device, with their person.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Guests {
+    pub asking: Vec<(String, Id)>,
+    pub typing: Vec<(String, Id)>,
+}
 
 /// How often output is gathered and sent: often enough to feel live, seldom enough to
 /// send it in few messages.
@@ -30,13 +40,22 @@ pub(super) struct Hosting {
     /// Watchers who got only a full-screen program's screen; they get everything once
     /// it ends.
     partial: BTreeSet<String>,
+    /// The person behind each device that asked to type, to name them.
+    people: HashMap<String, Id>,
 }
 
 /// Whether a command is about terminal sharing.
 pub(super) fn is_terminal(command: &Command) -> bool {
     matches!(
         command,
-        Command::ShareTerminal(_) | Command::StopTerminal | Command::WatchTerminal(_)
+        Command::ShareTerminal(_)
+            | Command::StopTerminal
+            | Command::WatchTerminal(_)
+            | Command::AnswerTyping(..)
+            | Command::RevokeTyping(_)
+            | Command::AskToType
+            | Command::StopTyping
+            | Command::TypeInTerminal(_)
     )
 }
 
@@ -68,7 +87,9 @@ pub(super) async fn command(ctx: &Ctx, live: &mut Live, command: Command) -> boo
                 shared,
                 tick,
                 partial: BTreeSet::new(),
+                people: HashMap::new(),
             });
+            ctx.send(Update::TerminalGuests(Guests::default()));
             true
         }
         Command::StopTerminal => stop(live).await,
@@ -89,8 +110,72 @@ pub(super) async fn command(ctx: &Ctx, live: &mut Live, command: Command) -> boo
             }
             false
         }
+        Command::AnswerTyping(who, allow) => {
+            let Some(hosting) = &mut live.terminal else {
+                return false;
+            };
+            if let Some(reply) = hosting.host.answer(&who, allow, Instant::now()) {
+                let granted = matches!(reply, Message::Grant { .. });
+                tracing::info!(granted, "answered a request to type in our terminal");
+                guests(ctx, live);
+                send(live, &who, &reply).await;
+            }
+            false
+        }
+        Command::RevokeTyping(who) => {
+            let Some(hosting) = &mut live.terminal else {
+                return false;
+            };
+            if let Some(revoke) = hosting.host.revoke(&who) {
+                tracing::info!("took back typing in our terminal");
+                guests(ctx, live);
+                send(live, &who, &revoke).await;
+            }
+            false
+        }
+        Command::AskToType => {
+            if let Some(viewer) = &mut live.viewing {
+                tracing::info!("asking to type in a shared terminal");
+                let (to, ask) = (viewer.sharer.clone(), viewer.ask());
+                send(live, &to, &ask).await;
+            }
+            false
+        }
+        Command::StopTyping => {
+            if let Some(viewer) = &mut live.viewing
+                && let Some(withdraw) = viewer.release()
+            {
+                let to = viewer.sharer.clone();
+                send(live, &to, &withdraw).await;
+            }
+            false
+        }
+        Command::TypeInTerminal(bytes) => {
+            if let Some(viewer) = &mut live.viewing {
+                let to = viewer.sharer.clone();
+                for message in viewer.input(&bytes) {
+                    send(live, &to, &message).await;
+                }
+            }
+            false
+        }
         _ => false,
     }
+}
+
+/// Tell the window who asks to type in our terminal, and who may.
+fn guests(ctx: &Ctx, live: &Live) {
+    let Some(hosting) = &live.terminal else {
+        return;
+    };
+    let named = |who: &str| Some((who.to_owned(), *hosting.people.get(who)?));
+    let view = Guests {
+        asking: (hosting.host.askers(Instant::now()).into_iter())
+            .filter_map(named)
+            .collect(),
+        typing: hosting.host.typists().filter_map(named).collect(),
+    };
+    ctx.send(Update::TerminalGuests(view));
 }
 
 /// Stop our share: tell the watchers and the call. True if there was one.
@@ -170,15 +255,44 @@ pub(super) async fn flush(live: &mut Live) {
     }
 }
 
-/// A sealed terminal message from someone in the call.
-pub(super) async fn received(ctx: &Ctx, live: &mut Live, from: &ParticipantIdentity, wire: &[u8]) {
+/// A sealed terminal message from someone in the call; `person` is who they are, if the
+/// server connection is up to tell. Without it nobody may ask to type, or type.
+pub(super) async fn received(
+    ctx: &Ctx,
+    live: &mut Live,
+    from: &ParticipantIdentity,
+    person: Option<Id>,
+    wire: &[u8],
+) {
     let Some(message) = live.room.open_terminal(from, wire) else {
         // Per message, and anyone in the call can send them: not worth a warning each.
         tracing::debug!("dropped a terminal message that did not authenticate");
         return;
     };
     if let Some(hosting) = &mut live.terminal {
-        hosting.host.receive(from.as_str(), &message);
+        let mine = message.clone();
+        match hosting
+            .host
+            .receive(from.as_str(), mine, person.is_some(), Instant::now())
+        {
+            Step::Nothing => {}
+            Step::Ask => {
+                tracing::info!("someone asks to type in our terminal");
+                if let Some(person) = person {
+                    hosting.people.insert(from.to_string(), person);
+                }
+                guests(ctx, live);
+            }
+            Step::Reply(reply) => {
+                tracing::info!("refused a request to type in our terminal");
+                send(live, from.as_str(), &reply).await;
+            }
+            Step::Type(bytes) => hosting.shared.write(&bytes),
+            Step::Ended => {
+                tracing::info!("asking or typing in our terminal ended by the viewer");
+                guests(ctx, live);
+            }
+        }
     }
     let Some(viewer) = &mut live.viewing else {
         return;
@@ -201,8 +315,11 @@ pub(super) async fn received(ctx: &Ctx, live: &mut Live, from: &ParticipantIdent
 /// Someone left the call: they no longer watch, and their terminal is gone.
 pub(super) fn left(ctx: &Ctx, live: &mut Live, who: &str) {
     if let Some(hosting) = &mut live.terminal {
-        hosting.host.left(who);
         hosting.partial.remove(who);
+        if hosting.host.left(who) == Step::Ended {
+            tracing::info!("typing in our terminal ended: they left the call");
+            guests(ctx, live);
+        }
     }
     if live
         .viewing

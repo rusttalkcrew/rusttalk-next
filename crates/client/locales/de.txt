@@ -1255,7 +1255,7 @@ call.your_terminal = Dein Terminal
 call.someones_terminal = Terminal von {name}
 terminal.failed = Das Terminal konnte nicht gestartet werden.
 terminal.warn_title = Dein Terminal teilen?
-terminal.warn_text = Alle, die zuschauen, sehen alles darin, auch Passwörter oder Schlüssel, die angezeigt werden. Nur du kannst darin tippen.
+terminal.warn_text = Alle, die zuschauen, sehen alles darin, auch Passwörter oder Schlüssel, die angezeigt werden. Nur du und Personen, denen du es erlaubst, können darin tippen.
 terminal.share = Teilen
 polls.create = Umfrage erstellen
 polls.create_help = Eine Frage mit Antworten zur Auswahl stellen
@@ -1285,3 +1285,14 @@ polls.hours_left.one = noch {count} Stunde
 polls.hours_left.other = noch {count} Stunden
 polls.minutes_left.one = noch {count} Minute
 polls.minutes_left.other = noch {count} Minuten
+
+# crates/client/src/call/terminal.rs
+terminal.ask_to_type = Tippen anfragen
+terminal.stop_typing = Nicht mehr tippen
+terminal.request_title = {name} möchte in deinem Terminal tippen
+terminal.allow_help = Die Person kann in deinem Terminal alles ausführen, als du. Du kannst das jederzeit zurücknehmen, aber was sie schon im Hintergrund gestartet hat, läuft weiter.
+terminal.can_type = {name} kann tippen
+terminal.take_back = Zurücknehmen
+terminal.denied = {name} hat das Tippen nicht erlaubt.
+terminal.taken_back = {name} hat dir das Tippen wieder genommen.
+terminal.paste_too_long = Das ist zu lang, um es in ein fremdes Terminal einzufügen.

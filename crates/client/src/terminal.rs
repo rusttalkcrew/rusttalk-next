@@ -421,6 +421,7 @@ impl Inner {
     }
 }
 
+/// The writer is apart from the rest, so typing never waits for output being read.
 #[derive(Clone)]
 pub struct Shared {
     inner: Arc<Mutex<Inner>>,
@@ -750,6 +751,7 @@ fn cell(ui: &Ui, font: f32) -> Vec2 {
 
 /// How many columns and rows fit `rect` at the normal text size.
 pub fn fit(ui: &Ui, rect: Rect) -> (u16, u16) {
+    let rect = rect.shrink(ui::SPACE_XS);
     let size = cell(ui, ui::TEXT_MONO);
     let cols = (rect.width() / size.x).floor().clamp(0.0, 500.0) as u16;
     let rows = (rect.height() / size.y).floor().clamp(0.0, 200.0) as u16;
@@ -814,6 +816,8 @@ fn paint(ui: &Ui, rect: Rect, emulator: &Emulator, focused: bool) -> Layout {
     let (fg, bg) = (c.text, c.side);
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, ui::RADIUS, bg);
+    // A little room so text doesn't touch the tile's edge.
+    let rect = rect.shrink(ui::SPACE_XS);
     let (cols, rows) = emulator.size();
     let unit = cell(ui, 100.0) / 100.0;
     let font = (ui::TEXT_MONO)
@@ -923,26 +927,36 @@ fn paint(ui: &Ui, rect: Rect, emulator: &Emulator, focused: bool) -> Layout {
     layout
 }
 
+/// What a terminal's tile gave this frame.
+#[derive(Default)]
+pub struct Shown {
+    /// Typed, for the shell.
+    pub bytes: Vec<u8>,
+    /// A paste was longer than allowed and left out.
+    pub refused: bool,
+}
+
 /// The terminal in `rect`. With `active` it takes the pointer for selecting and
-/// scrolling and the keyboard (after a click) for copying; with `typing` too, keys are
-/// returned as the bytes to send to the shell.
+/// scrolling and the keyboard (after a click) for copying. With `typing` (the longest
+/// paste allowed) too, keys are returned as the bytes to send to the shell.
 pub fn show(
     ui: &mut Ui,
     rect: Rect,
     id: UiId,
     emulator: &mut Emulator,
     active: bool,
-    typing: bool,
+    typing: Option<usize>,
     label: &str,
-) -> (Option<Response>, Vec<u8>) {
+) -> Shown {
     if !active {
         paint(ui, rect, emulator, false);
-        return (None, Vec::new());
+        return Shown::default();
     }
+    let mut refused = false;
     let response = ui.interact(rect, id, Sense::click_and_drag());
     response.widget_info(|| WidgetInfo::labeled(Role::Terminal, true, label));
     let focused = response.has_focus();
-    let layout = paint(ui, rect, emulator, focused && typing);
+    let layout = paint(ui, rect, emulator, focused && typing.is_some());
     if focused {
         ui.painter().rect_stroke(
             rect,
@@ -959,7 +973,7 @@ pub fn show(
         scroll(ui, id, layout, emulator);
     }
     if !focused {
-        return (Some(response), Vec::new());
+        return Shown::default();
     }
     // Tab, arrows and Escape belong to the terminal, not to moving the focus.
     ui.memory_mut(|memory| {
@@ -991,15 +1005,17 @@ pub fn show(
             emulator.term.selection = None;
             continue;
         }
-        if typing {
-            bytes.extend(encode(&event, mode));
+        match (typing, &event) {
+            (Some(longest), Event::Paste(text)) if text.len() > longest => refused = true,
+            (Some(_), _) => bytes.extend(encode(&event, mode)),
+            (None, _) => {}
         }
     }
     if !bytes.is_empty() {
         emulator.term.selection = None;
         emulator.term.scroll_display(Scroll::Bottom);
     }
-    (Some(response), bytes)
+    Shown { bytes, refused }
 }
 
 /// The wheel scrolls through the history, a line at a time.
@@ -1073,12 +1089,13 @@ pub fn encode(event: &Event, mode: TermMode) -> Vec<u8> {
     }
 }
 
-/// Pasted text, marked as a paste when the program asked for that. Escape characters
-/// are dropped so a paste can't end the marking early.
+/// Pasted text, marked as a paste when the program asked for that. Escape and the C1
+/// control characters (another way to start an escape sequence) are dropped, so a
+/// paste can't end the marking early or slip in commands.
 fn paste(text: &str, mode: TermMode) -> Vec<u8> {
     let text: String = text
         .chars()
-        .filter(|c| *c != '\x1b')
+        .filter(|c| *c != '\x1b' && !('\u{80}'..='\u{9f}').contains(c))
         .collect::<String>()
         .replace("\r\n", "\r")
         .replace('\n', "\r");
@@ -1360,6 +1377,9 @@ mod tests {
             encode(&pasted, TermMode::BRACKETED_PASTE),
             b"\x1b[200~a\rb[201~\x1b[201~"
         );
+        // A C1 control (here CSI) starts an escape sequence too.
+        let c1 = Event::Paste("a\u{9b}201~b".into());
+        assert_eq!(encode(&c1, plain), b"a201~b");
     }
 
     #[cfg(unix)]

@@ -22,6 +22,7 @@ use rusttalk_core::{
     index::https_url,
     messages::PollPart,
     presence::{Presence, Status as Choice},
+    terminal::Feed,
 };
 
 use crate::{
@@ -1343,7 +1344,9 @@ impl Home {
             }
             Update::CameraStopped => self.voice.camera.reset(),
             Update::Control(view) => self.voice.control.update(view, now),
+            Update::Terminal(Feed::Typing(access)) => call::terminal::answered(self, access, now),
             Update::Terminal(feed) => self.voice.terminals.feed(feed),
+            Update::TerminalGuests(guests) => self.voice.terminals.guests = guests,
             Update::TerminalStopped => self.voice.terminals.local = None,
             Update::ControlEnded(sid, why) => {
                 self.toast = Some((call::remote::ended(self, &sid, why), now + 6.0));
@@ -1680,6 +1683,7 @@ pub fn show(
     let colors = ui::colors(ui);
     // Above everything, full screen too: who controls this screen, and the prompt.
     call::remote::sharer(ui, home);
+    call::terminal::prompt(ui.ctx(), home);
     if home.voice.stage.full.is_some() {
         CentralPanel::default()
             .frame(panel_frame(colors.main))

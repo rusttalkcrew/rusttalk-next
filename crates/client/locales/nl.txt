@@ -1255,7 +1255,7 @@ call.your_terminal = Jouw terminal
 call.someones_terminal = Terminal van {name}
 terminal.failed = De terminal kon niet starten.
 terminal.warn_title = Je terminal delen?
-terminal.warn_text = Iedereen die kijkt ziet alles erin, ook wachtwoorden of sleutels die in beeld komen. Alleen jij kunt erin typen.
+terminal.warn_text = Iedereen die kijkt ziet alles erin, ook wachtwoorden of sleutels die in beeld komen. Alleen jij, en mensen die jij toestaat, kunnen erin typen.
 terminal.share = Delen
 polls.create = Poll maken
 polls.create_help = Stel een vraag met antwoorden om te kiezen
@@ -1285,3 +1285,14 @@ polls.hours_left.one = nog {count} uur
 polls.hours_left.other = nog {count} uur
 polls.minutes_left.one = nog {count} minuut
 polls.minutes_left.other = nog {count} minuten
+
+# crates/client/src/call/terminal.rs
+terminal.ask_to_type = Vragen om te typen
+terminal.stop_typing = Stoppen met typen
+terminal.request_title = {name} wil typen in je terminal
+terminal.allow_help = Ze kunnen alles uitvoeren in je terminal, als jou. Je kunt het altijd terugnemen, maar wat ze al op de achtergrond hebben gestart blijft draaien.
+terminal.can_type = {name} kan typen
+terminal.take_back = Terugnemen
+terminal.denied = {name} liet je niet typen.
+terminal.taken_back = {name} heeft het typen teruggenomen.
+terminal.paste_too_long = Dat is te lang om in de terminal van iemand anders te plakken.
