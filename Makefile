@@ -109,16 +109,20 @@ e2e: ## Run the two-stack membership, keys, chat, stored files, voice, app audio
 	@set -eu; \
 		export RUSTTALK_E2E_PROJECT=rusttalk-e2e-$$$$ RUSTTALK_INDEX_TTL_SECONDS=8; \
 		export RUSTTALK_DEV_DATA=$$(mktemp -d); \
+		export RUSTTALK_E2E_DB=$$(mktemp -d /dev/shm/rusttalk-e2e.XXXXXX); \
+		for stack in "$$RUSTTALK_E2E_PROJECT" "$$RUSTTALK_E2E_PROJECT-second"; do \
+			mkdir "$$RUSTTALK_E2E_DB/$$stack-api" "$$RUSTTALK_E2E_DB/$$stack-index"; \
+		done; \
 		export RUSTTALK_E2E_SECOND_PROJECT="$$RUSTTALK_E2E_PROJECT-second"; \
 		export RUSTTALK_E2E_SECOND_HTTPS_PORT="$${RUSTTALK_E2E_SECOND_HTTPS_PORT:-9443}"; \
 		export RUSTTALK_FILE_MAX_BYTES=33554432 RUSTTALK_FILE_MEMBER_BYTES=3145728 RUSTTALK_FILE_SERVER_BYTES=5242880 RUSTTALK_FILE_TTL_SECS=12 RUSTTALK_STICKER_MAX=1; \
-		compose() { docker compose -f deploy/compose.dev.yml --profile index -p "$$RUSTTALK_E2E_PROJECT" "$$@"; }; \
+		compose() { docker compose -f deploy/compose.dev.yml -f deploy/compose.e2e.yml --profile index -p "$$RUSTTALK_E2E_PROJECT" "$$@"; }; \
 		compose_second() { \
 			RUSTTALK_DEV_DATA="$$RUSTTALK_E2E_SECOND_DATA" \
 			RUSTTALK_DEV_HTTPS_PORT="$$RUSTTALK_E2E_SECOND_HTTPS_PORT" \
 			RUSTTALK_DEV_MEDIA_TCP_PORT="$${RUSTTALK_E2E_SECOND_MEDIA_TCP_PORT:-8881}" \
 			RUSTTALK_DEV_MEDIA_UDP_PORT="$${RUSTTALK_E2E_SECOND_MEDIA_UDP_PORT:-8882}" \
-			docker compose -f deploy/compose.dev.yml -p "$$RUSTTALK_E2E_SECOND_PROJECT" "$$@"; \
+			docker compose -f deploy/compose.dev.yml -f deploy/compose.e2e.yml -p "$$RUSTTALK_E2E_SECOND_PROJECT" "$$@"; \
 		}; \
 		cleanup() { \
 			status=$$?; trap - EXIT; \
@@ -127,7 +131,7 @@ e2e: ## Run the two-stack membership, keys, chat, stored files, voice, app audio
 				rm -rf "$$RUSTTALK_E2E_SECOND_DATA"; \
 			fi; \
 			compose down --volumes --rmi local || status=1; \
-			rm -rf "$$RUSTTALK_DEV_DATA"; exit "$$status"; \
+			rm -rf "$$RUSTTALK_DEV_DATA" "$$RUSTTALK_E2E_DB"; exit "$$status"; \
 		}; \
 		trap cleanup EXIT; trap 'exit 130' INT; trap 'exit 143' TERM; \
 		export RUSTTALK_E2E_SECOND_DATA=$$(mktemp -d); \
