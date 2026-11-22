@@ -1624,7 +1624,10 @@ pub fn show(
 ) -> Option<Action> {
     let now = ui.input(|input| input.time);
     let focused = ui.input(|input| input.viewport().focused).unwrap_or(true);
+    // Window size first: whether a message is being read depends on it.
     home.layout.phone = ui::is_phone(ui.ctx());
+    home.layout
+        .set_window_width(ui.available_width() - RAIL_WIDTH);
     if home.focused && !focused {
         // Stepping away: read marks reach the other devices.
         home.publish_settings();
@@ -1777,8 +1780,6 @@ pub fn show(
     }
     // Joining or leaving a call counts: a restart must never cut one off.
     updates.banner(ui, home.voice.call.is_some());
-    home.layout
-        .set_window_width(ui.available_width() - RAIL_WIDTH);
     // Phones show the list or what is open, never both; picking something opens it.
     let phone = home.layout.phone;
     let list = phone && home.layout.list;

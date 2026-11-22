@@ -103,6 +103,16 @@ pub enum Start {
     Missing { keychain: bool },
 }
 
+/// What follows the key storage choice.
+pub enum Chosen {
+    /// On to creating or restoring an account.
+    New,
+    /// Keys that had no password, now locked with the new one.
+    Opened(Box<DeviceIdentity>),
+    /// The key file already has a password: unlock it.
+    Unlock,
+}
+
 /// The password didn't open the key file (or the file was changed).
 #[derive(Debug)]
 pub struct WrongPassword;
@@ -510,26 +520,36 @@ impl Keystore {
     }
 
     /// Pick where a new account's keys go (first start without a keychain). A
-    /// password needs a key from [`Keystore::new_password`]. On a phone with keys
-    /// found without a password, it locks them with it and returns them.
-    pub fn choose(&mut self, kind: Kind, sealer: Option<Sealer>) -> Result<Option<DeviceIdentity>> {
+    /// password needs a key from [`Keystore::new_password`].
+    pub fn choose(&mut self, kind: Kind, sealer: Option<Sealer>) -> Result<Chosen> {
         self.usable(kind, sealer.as_ref())?;
-        if let Some(secret) = self.unprotected.take() {
-            // The sealed file replaces the plain one in one rename, before the
-            // account opens; a failure keeps the keys here to try again.
-            if let Err(error @ WriteError::Before(_)) =
-                self.write_copy(kind, sealer.as_ref(), &secret)
-            {
-                self.unprotected = Some(secret);
-                return Err(error.into());
-            }
+        if let Some(secret) = &self.unprotected {
+            // Phones: keys found without a password are locked with it, the sealed
+            // file replacing the plain one in one rename, before the account opens.
+            // They stay here until the file and keystore.json are both on disk, so a
+            // failure can be tried again.
+            self.write_copy(kind, sealer.as_ref(), secret)?;
             self.record(|state| {
                 state.storage = Some(kind);
                 state.keys_saved = true;
             })?;
+            let secret = self.unprotected.take().expect("checked above");
             tracing::info!("key file locked with the new password");
             self.sealer = sealer;
-            return load(&secret).map(Some);
+            return load(&secret).map(|identity| Chosen::Opened(Box::new(identity)));
+        }
+        // A sealed key file already here (an earlier attempt locked it but couldn't
+        // record that) is this profile's keys: open it, never start a new account.
+        if self.password_only
+            && self
+                .read_key_file()?
+                .is_some_and(|file| file.starts_with(SEALED))
+        {
+            self.record(|state| {
+                state.storage = Some(Kind::Password);
+                state.keys_saved = true;
+            })?;
+            return Ok(Chosen::Unlock);
         }
         self.record(|state| {
             state.storage = Some(kind);
@@ -537,7 +557,7 @@ impl Keystore {
         })?;
         tracing::info!(?kind, "key storage chosen");
         self.sealer = sealer;
-        Ok(None)
+        Ok(Chosen::New)
     }
 
     /// Derive the key for a new password, away from the window's thread.
@@ -590,6 +610,14 @@ impl Keystore {
 
     pub fn save(&mut self, identity: &DeviceIdentity) -> Result<()> {
         let kind = self.state.storage.context("no key storage chosen")?;
+        // Phones: a new account never replaces a key file this profile still holds.
+        ensure!(
+            !self.password_only
+                || self.state.keys_saved
+                || self.state.cleanup.contains(&Place::File)
+                || self.read_key_file()?.is_none(),
+            "a key file is already here; unlock it instead"
+        );
         self.write_copy(kind, self.sealer.as_ref(), &encode(identity))?;
         self.record(|state| {
             state.keys_saved = true;
@@ -1128,7 +1156,9 @@ mod tests {
         assert!(matches!(start, Start::Choose));
         assert!(store.choose(Kind::File, None).is_err());
         let key = sealer(&store, "hunter2");
-        let opened = store.choose(Kind::Password, key).unwrap().unwrap();
+        let Chosen::Opened(opened) = store.choose(Kind::Password, key).unwrap() else {
+            panic!("the keys should open");
+        };
         assert!(same(&opened, &me));
         let file = fs::read(dir.path().join(KEY_FILE)).unwrap();
         assert!(file.starts_with(SEALED));
@@ -1137,6 +1167,56 @@ mod tests {
 
         let (mut store, start) = open_phone(dir.path());
         assert!(matches!(start, Start::Unlock));
+        assert!(same(&unlock(&mut store, "hunter2").unwrap(), &me));
+    }
+
+    #[test]
+    fn a_phone_keeps_its_keys_when_locking_them_is_cut_short() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, _) = open(dir.path(), &down());
+        store.choose(Kind::File, None).unwrap();
+        let me = identity();
+        store.save(&me).unwrap();
+        drop(store);
+
+        // The sealed file is in place, but recording that in keystore.json fails.
+        let (mut store, start) = open_phone(dir.path());
+        assert!(matches!(start, Start::Choose));
+        store.fail_state.set(Some((Kind::Password, false)));
+        let key = sealer(&store, "hunter2");
+        assert!(store.choose(Kind::Password, key).is_err());
+        assert!(
+            fs::read(dir.path().join(KEY_FILE))
+                .unwrap()
+                .starts_with(SEALED)
+        );
+        // Trying again in the same run opens the same account.
+        let key = sealer(&store, "hunter2");
+        let Chosen::Opened(opened) = store.choose(Kind::Password, key).unwrap() else {
+            panic!("the keys should open");
+        };
+        assert!(same(&opened, &me));
+        drop(store);
+
+        let (mut store, start) = open_phone(dir.path());
+        assert!(matches!(start, Start::Unlock));
+        assert!(same(&unlock(&mut store, "hunter2").unwrap(), &me));
+        drop(store);
+
+        // Had the keys been lost from memory, the sealed file is unlocked, not
+        // replaced by a new account.
+        let (mut store, _) = open_phone(dir.path());
+        store.state.storage = None;
+        store.state.keys_saved = false;
+        let key = sealer(&store, "other");
+        assert!(matches!(
+            store.choose(Kind::Password, key).unwrap(),
+            Chosen::Unlock
+        ));
+        store.state.keys_saved = false;
+        assert!(store.save(&identity()).is_err());
+        drop(store);
+        let (mut store, _) = open_phone(dir.path());
         assert!(same(&unlock(&mut store, "hunter2").unwrap(), &me));
     }
 
@@ -1156,7 +1236,10 @@ mod tests {
         assert!(store.save(&identity()).is_err());
         assert!(!dir.path().join(KEY_FILE).exists());
         let key = sealer(&store, "hunter2");
-        assert!(store.choose(Kind::Password, key).unwrap().is_none());
+        assert!(matches!(
+            store.choose(Kind::Password, key).unwrap(),
+            Chosen::New
+        ));
         store.save(&identity()).unwrap();
         assert!(
             fs::read(dir.path().join(KEY_FILE))
