@@ -171,7 +171,7 @@ pub struct Draft {
     /// The other person, for a DM.
     pub peer: Option<Id>,
     pub text: String,
-    /// The message replied to: person and ID. Only the ID goes on the wire.
+    /// The message replied to: person and ID.
     pub reply_to: Option<(Id, Id)>,
     pub edit_of: Option<Id>,
     /// An edit's revision (see `server::revision_id`); unused otherwise.
@@ -894,7 +894,7 @@ async fn session<'a>(
         .map_err(stop_or_retry)?;
         *api = Some(verified);
     }
-    let api = api.as_ref().expect("set above");
+    let api = api.as_mut().expect("set above");
     let protocol = match api.info().await {
         Ok(info) => Some(info.protocol),
         Err(error) if pin_changed(&error) => return Err(stop_or_retry(error)),
@@ -931,6 +931,8 @@ async fn session<'a>(
             .json()
             .await
             .map_err(|error| stop_or_retry(error.without_url().into()))?;
+        // Refresh only at sign-in. Missing server info keeps this session on v2 envelopes.
+        api.protocol = protocol.flatten().unwrap_or(1);
         return Ok((api, session));
     }
     let code = reply
@@ -1376,6 +1378,10 @@ async fn on_command(
                     Some(_) => Some(crate::server::revision_id(draft.revision)),
                     None => draft.reply_to.map(|(_, id)| id),
                 },
+                quoted_author: draft
+                    .reply_to
+                    .filter(|_| draft.edit_of.is_none())
+                    .map(|(person, _)| person),
                 edit_of: draft.edit_of,
                 attachments: Vec::new(),
                 live: None,
@@ -1742,6 +1748,7 @@ fn unreadable(record: &MessageRecord) -> Msg {
         person: record.person,
         at: record.at,
         reply_to: None,
+        quoted_author: None,
         edit_of: None,
         body: Body::Unreadable,
         files: Vec::new(),
@@ -1758,6 +1765,7 @@ fn to_msg(record: &MessageRecord, body: &MessageBody) -> Msg {
         person: record.person,
         at: record.at,
         reply_to: body.reply_to,
+        quoted_author: body.quoted_author,
         edit_of: body.edit_of,
         body: match body.friend {
             Some(signal) => Body::Friend(signal, body.friend_sent),

@@ -20,6 +20,8 @@ use url::Url;
 /// A verified RustTalk HTTPS origin and its pinned transport.
 #[derive(Clone)]
 pub struct Server {
+    /// Protocol advertised by this origin, used to choose the outgoing message format.
+    pub protocol: u32,
     http: Client,
     server: KnownServer,
 }
@@ -45,10 +47,17 @@ impl Server {
         let http = pinned_tls::https_client(tls_fingerprint).map_err(anyhow::Error::from_boxed)?;
         let observed = verified_server(&http, address, tls_fingerprint, trusted).await?;
         save_pin(data, &pins, &observed)?;
-        Ok(Self {
+        let mut server = Self {
             http,
             server: observed,
-        })
+            protocol: 1,
+        };
+        match server.info().await {
+            Ok(info) => server.protocol = info.protocol.unwrap_or(1),
+            Err(error) if pinned_tls::is_pin_mismatch(error.as_ref()) => return Err(error),
+            Err(_) => tracing::warn!("server protocol unavailable, using protocol 1"),
+        }
+        Ok(server)
     }
 
     /// Verify a server proof against `trusted` pins without saving them or sending device credentials.
@@ -60,7 +69,11 @@ impl Server {
         validate_origin(&address)?;
         let http = pinned_tls::https_client(tls_fingerprint).map_err(anyhow::Error::from_boxed)?;
         let server = verified_server(&http, address, tls_fingerprint, trusted).await?;
-        Ok(Self { http, server })
+        Ok(Self {
+            http,
+            server,
+            protocol: 1,
+        })
     }
 
     /// Return the saved pins for an origin, if this data folder has connected to it before.

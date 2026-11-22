@@ -348,6 +348,7 @@ mod tests {
             person: [person; 32],
             at,
             reply_to: None,
+            quoted_author: None,
             edit_of: None,
             body: Body::Text(text.into()),
             files: Vec::new(),

@@ -434,6 +434,7 @@ pub struct Msg {
     pub person: Id,
     pub at: i64,
     pub reply_to: Option<Id>,
+    pub quoted_author: Option<Id>,
     pub edit_of: Option<Id>,
     pub body: Body,
     /// Server-stored files; edits never change them.
@@ -555,6 +556,10 @@ impl Chat {
                 (true, false) => *old = msg,
                 // DM copies on several servers: keep the earliest server time.
                 (false, false) => {
+                    // A protocol 1 replica can arrive before the same v3 reply.
+                    if old.reply_to == msg.reply_to && old.quoted_author.is_none() {
+                        old.quoted_author = msg.quoted_author;
+                    }
                     old.at = old.at.min(msg.at);
                     for server in &msg.replicas {
                         if !old.replicas.contains(server) {
@@ -616,12 +621,20 @@ impl Chat {
         }
     }
 
-    /// The message a reply quotes. `None` while it isn't loaded, or when two people's
-    /// messages share the ID, since a reply names only the ID.
-    pub fn quoted(&self, id: &Id) -> Option<&Msg> {
+    /// A verified sender wins over the reply's display hint. For colliding IDs,
+    /// only the named person's verified message can supply a snippet.
+    pub fn quoted(&self, id: &Id, author: Option<Id>) -> Option<&Msg> {
         let mut found = self.messages.iter().filter(|msg| msg.id == *id);
+        if let Some(person) = author
+            && let Some(named) = found
+                .clone()
+                .find(|msg| msg.person == person && matches!(msg.body, Body::Text(_)))
+        {
+            return Some(named);
+        }
         let first = found.next()?;
-        found.all(|msg| msg.person == first.person).then_some(first)
+        (matches!(first.body, Body::Text(_)) && found.all(|msg| msg.person == first.person))
+            .then_some(first)
     }
 
     /// Drop a deleted record. Edits of a deleted original stay hidden.
@@ -742,6 +755,7 @@ mod tests {
             person: [9; 32],
             at,
             reply_to: None,
+            quoted_author: None,
             edit_of: edit_of.map(|id| [id; 32]),
             body: Body::Text(text.into()),
             files: Vec::new(),
@@ -839,7 +853,18 @@ mod tests {
         };
         let mut chat = Chat::default();
         chat.merge(vec![msg(1, 10, "mine", None)], false);
-        assert_eq!(chat.quoted(&[1; 32]).map(|m| m.person), Some([9; 32]));
+        assert_eq!(chat.quoted(&[1; 32], None).map(|m| m.person), Some([9; 32]));
+        assert_eq!(
+            chat.quoted(&[1; 32], Some([8; 32])).unwrap().person,
+            [9; 32]
+        );
+        let mut reply = msg(7, 20, "reply", None);
+        reply.reply_to = Some([1; 32]);
+        let mut replicas = Chat::default();
+        replicas.merge(vec![reply.clone()], false);
+        reply.quoted_author = Some([9; 32]);
+        replicas.merge(vec![reply], false);
+        assert_eq!(replicas.messages[0].quoted_author, Some([9; 32]));
         // The other person reuses the ID and "edits" it.
         chat.merge(
             vec![
@@ -851,8 +876,12 @@ mod tests {
         assert_eq!(texts(&chat), ["mine", "forged"]);
         assert!(!chat.edited.contains_key(&([9; 32], [1; 32])));
         // A reply naming that ID can't say whose message it was: no preview.
-        assert!(chat.quoted(&[1; 32]).is_none());
-        assert!(chat.quoted(&[5; 32]).is_none());
+        assert!(chat.quoted(&[1; 32], None).is_none());
+        assert!(chat.quoted(&[5; 32], None).is_none());
+        assert_eq!(
+            chat.quoted(&[1; 32], Some([8; 32])).unwrap().person,
+            [8; 32]
+        );
         // My own edit still applies to mine, and removing theirs leaves mine.
         chat.merge(vec![revised(3, 13, "mine2", 1, 1)], false);
         chat.remove_one(&[8; 32], &[1; 32]);

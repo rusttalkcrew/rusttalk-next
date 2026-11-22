@@ -8,7 +8,8 @@ base64url. Times are Unix seconds. Auth and membership responses carry
 ## Release compatibility
 
 The public `GET /v1/server-info` response reports the server's release
-`version` and integer API `protocol`. The app currently supports protocol 1.
+`version` and integer API `protocol`. The app supports protocols 1 and 2.
+Protocol 2 adds message format v3.
 If the endpoint returns 404 or the protocol field is missing, the app assumes
 protocol 1. The app reads this information over the verified connection.
 Protocol metadata never changes TLS or server pin checks, device authentication,
@@ -527,7 +528,10 @@ A message record has `{id, epoch, person, sender_device, at, size, envelope}`.
 `at` is the server's Unix timestamp. `size` is the binary envelope length.
 `envelope` carries a one-byte version, 24-byte nonce, two-byte big-endian
 ciphertext length, ciphertext including its authentication tag, and 64-byte
-device signature. The version is `2`. The envelope is at most 10,751 bytes
+device signature. Protocol 2 accepts versions `2` and `3`. New apps send v3 on
+protocol 2 servers for all messages, and v2 on protocol 1 servers. Older apps
+reject v3 envelopes as unreadable and prompt for an update on protocol 2
+servers. The envelope is at most 10,751 bytes
 (see [the plaintext format](crypto.md#messages)). The POST limit is
 14,847 bytes of JSON: the unpadded base64url envelope plus 512 bytes. The API verifies the
 envelope against the authenticated person and device and requires the current
@@ -566,9 +570,12 @@ a big-endian u64. The app sets it to its clock in milliseconds, or one above
 the revision it shows if that is higher. The edit with the highest revision
 wins, then the higher edit ID. An edit without a revision, from an older app,
 loses to one with a revision and is ordered by server time against others
-without one. Edit state is kept per person and original ID. A reply names
-only the original's ID, so when two people's loaded messages share it the app
-shows no preview. If retention or a
+without one. Edit state is kept per person and original ID. New replies include
+the quoted person ID inside the encrypted body. It is a display hint supplied by
+the replier. When the original is unavailable the preview can name that person.
+A unique locally verified sender takes precedence. When multiple senders share
+an ID, only a matching sender's message supplies the snippet. Legacy replies
+with an ambiguous ID show no snippet. If retention or a
 delete removes the original, clients suppress edits that still reference that
 ID. Deletes apply per stored record, because the API cannot see which records
 are edits. When a client deletes a message, including a moderator delete, it

@@ -261,13 +261,14 @@ epochs through the normal envelope flow.
 
 ## Messages
 
-Format version 2 (the envelope's first byte) has this plaintext, in order.
+Formats 2 and 3 (the envelope's first byte) have this plaintext, in order.
 
 | Field | Encoding | Maximum bytes |
 | --- | --- | --- |
-| Flags | Bit 0 reply-to, bit 1 edit-of, bit 2 live offer, bit 3 sticker, bit 4 friend message, bit 5 key link, bit 6 poke. Other bits clear | 1 |
+| Flags | Bit 0 reply-to, bit 1 edit-of, bit 2 live offer, bit 3 sticker, bit 4 friend message, bit 5 key link, bit 6 poke. In v3 only, bit 7 quoted author | 1 |
 | Text | Two-byte big-endian UTF-8 length, then text of at most 2,000 Unicode scalar values | 2 + 8,000 |
 | Reply ID | 32 bytes, present with bit 0 | 32 |
+| Quoted author | Raw 32-byte person ID, present with bit 7. Requires bit 0 and forbids bit 1 | 32 |
 | Original ID | 32 bytes, present with bit 1 | 32 |
 | Sticker ID | 32 bytes, present with bit 3 | 32 |
 | Friend kind | One byte, present with bit 4: request (1), accept (2), decline (3), cancel (4), remove (5) | 1 |
@@ -306,7 +307,7 @@ epoch (8 bytes, positive signed integer, big endian) || message_id (32 bytes) ||
 sender_device_Ed25519 (32 bytes) || sender_person (32 bytes)
 ```
 
-The sender signs the associated data followed by byte `2`, the nonce, the
+The sender signs the associated data followed by the envelope version byte, the nonce, the
 two-byte big-endian ciphertext length, and the ciphertext including the
 16-byte authentication tag. The signature is the final 64 bytes of the
 envelope. Integer fields and lengths are fixed-width. The API verifies the
