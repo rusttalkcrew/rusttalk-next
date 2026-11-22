@@ -364,8 +364,8 @@ is deleted and never used; the normal noise suppression keeps working.
   The host sees your IP address, requested files and timing. Requests carry no
   account, device or server identifiers. Redirects stay on HTTPS.
 - **Previews of links you send (asked first):** Off until you agree. When a
-  message you send links to a website that no reader-side link preview below
-  covers, the composer asks "Create a preview? Your app will visit <host> to
+  message you send (or a page you save) links to a website that no reader-side
+  link preview below covers, the app asks "Create a preview? Your app will visit <host> to
   make it." with **Always**, **Not now** (send without, ask again next time)
   and **Never**; Settings → Privacy → Link previews (**Create previews for
   links I send**) changes the choice. Until you pick Always nothing is
@@ -390,7 +390,7 @@ is deleted and never used; the normal noise suppression keeps working.
   site, either on the first card that asks ("Show Steam previews?") or in
   Settings → Privacy → Link previews, and off again there. Until then the
   link stays a plain link and nothing is requested. Once allowed, the app
-  showing a message fetches the preview itself, only for messages on screen;
+  showing a message (or a page) fetches the preview itself, only for messages on screen;
   the sender and the RustTalk server are not involved. Each site has its own
   question and toggle, and is asked only for its own kind of link:
   - **Steam**, `store.steampowered.com/app/<id>`: requests

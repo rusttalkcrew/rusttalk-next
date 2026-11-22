@@ -451,6 +451,50 @@ async fn page(
         .ok()
         .context("no page")?;
     ensure!(c.open_message(&page.id, &newest).await?.text == PAGE);
+    // #226: a page's picture is an encrypted file. A uploads it, B saves the page again
+    // with the same reference, and C still opens it from the newest version.
+    let picture = b"not really a png, just page picture bytes";
+    let mut first = body(PAGE);
+    first.attachments = vec![
+        a.upload_file(&page.id, "map.png", "image/png", picture, None)
+            .await?,
+    ];
+    let first = a.send_message(&page.id, &first).await?;
+    let mut again = body("Updated rules");
+    // B reads the page's picture reference, as the app does before saving.
+    again.attachments = b
+        .open_message(&page.id, &b.message(&page.id, &first.id).await?)
+        .await?
+        .attachments;
+    let saved = b.send_message(&page.id, &again).await?;
+    wait_event(c, page, &saved.id, false).await?;
+    let newest_picture = async |c: &mut KeyClient<'_>| -> Result<Vec<u8>> {
+        let [newest] = c
+            .message_page(&page.id, None, 1)
+            .await?
+            .try_into()
+            .ok()
+            .context("no page")?;
+        let opened = c.open_message(&page.id, &newest).await?;
+        let kept = opened
+            .attachments
+            .first()
+            .context("page lost its picture")?;
+        c.download_file(&kept.file, None).await
+    };
+    ensure!(newest_picture(c).await? == picture);
+    // B, a moderator, deletes their version and asks to remove its files the way an
+    // older app does: the picture is A's, so it stays for the version before.
+    b.delete_message(&page.id, &saved.id).await?;
+    let file = again.attachments.first().context("no picture")?;
+    ensure!(
+        b.delete_message_file(&file.file.id, &saved.person)
+            .await
+            .is_err(),
+        "a moderator removed another member's page picture"
+    );
+    wait_event(c, page, &saved.id, true).await?;
+    ensure!(newest_picture(c).await? == picture);
     // Later key checks expect only the first text channel, so remove this one.
     a.request(
         Method::DELETE,
@@ -459,7 +503,9 @@ async fn page(
     .send()
     .await?
     .error_for_status()?;
-    println!("#210 verified a page channel: members read it, only moderators and up change it");
+    println!(
+        "#210/#226 verified a page channel: members read it and its pictures, only moderators and up change it"
+    );
     Ok(())
 }
 

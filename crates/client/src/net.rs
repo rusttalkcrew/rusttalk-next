@@ -202,6 +202,9 @@ pub struct Draft {
     pub revision: u64,
     /// Uploaded first, then sent with the message.
     pub files: Vec<PathBuf>,
+    /// Files already stored in this channel, sent again with the message: a page
+    /// keeps its pictures when it is saved as a new message.
+    pub keep: Vec<rusttalk_core::client::Attachment>,
     /// A server sticker to send; `text` is its name.
     pub sticker: Option<Id>,
     /// A friend request or answer, sent with nothing else.
@@ -1483,7 +1486,7 @@ async fn on_command(
                     .filter(|_| draft.edit_of.is_none())
                     .map(|(person, _)| person),
                 edit_of: draft.edit_of,
-                attachments: Vec::new(),
+                attachments: draft.keep.clone(),
                 live: None,
                 sticker: draft.sticker,
                 friend: draft.friend.map(|(signal, _)| signal),

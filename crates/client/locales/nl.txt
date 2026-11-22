@@ -265,6 +265,7 @@ home.kind_voice = Spraak
 home.kind_page = Pagina
 home.kind_page_help = Eén pagina die iedereen kan lezen. Alleen wie hier mag schrijven, kan hem aanpassen.
 home.edit_page = Pagina bewerken
+home.page_add_pictures = Afbeeldingen toevoegen
 home.page_updated = Laatst gewijzigd door {name}, {time}
 home.page_unreadable = Deze pagina kan nog niet worden geopend. Hij verschijnt zodra de sleutel binnen is.
 home.page_empty = Hier staat nog niets.

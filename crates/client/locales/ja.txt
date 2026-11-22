@@ -265,6 +265,7 @@ home.kind_voice = ボイス
 home.kind_page = ページ
 home.kind_page_help = 全員が読める 1 枚のページです。ここで書き込みできる人だけが変更できます。
 home.edit_page = ページを編集
+home.page_add_pictures = 画像を追加
 home.page_updated = 最終更新: {name}、{time}
 home.page_unreadable = このページはまだ開けません。鍵が届くと表示されます。
 home.page_empty = まだ何もありません。

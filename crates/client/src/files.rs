@@ -160,6 +160,8 @@ pub enum Ask {
     Attach(Url, Id),
     /// Attach to the composer of a DM, by the other person.
     AttachDm(Id),
+    /// Add pictures to a page channel that is being edited.
+    PagePictures(Url, Id),
     /// Save a stored file.
     Save(Url, Attachment),
     /// Save a live file: transfer ID and suggested name.
@@ -283,6 +285,14 @@ impl Files {
         }
     }
 
+    /// The address of a loaded link preview file.
+    pub fn card_url(&self, id: &Id) -> Option<Url> {
+        match self.cards.get(id)? {
+            Card::Ready(card) => link_cards::web_url(&card.url),
+            _ => None,
+        }
+    }
+
     pub fn link_card(&mut self, id: Id, card: Result<link_cards::Card, bool>) {
         if let Some(slot) = self.cards.get_mut(&id) {
             *slot = card.map_or(Card::Missing, Card::Ready);
@@ -341,14 +351,21 @@ impl Files {
                 Ask::Accept(_, _, name) => Some(name.replace(['/', '\\'], "_")),
                 Ask::Attach(..)
                 | Ask::AttachDm(_)
+                | Ask::PagePictures(..)
                 | Ask::Live(..)
                 | Ask::Picture
                 | Ask::Icon(_)
                 | Ask::Emoji(..)
                 | Ask::EmojiZip(_) => None,
             };
-            let single = !matches!(ask, Ask::Attach(..) | Ask::AttachDm(_));
-            let pictures = matches!(ask, Ask::Picture | Ask::Icon(_) | Ask::Emoji(..));
+            let single = !matches!(
+                ask,
+                Ask::Attach(..) | Ask::AttachDm(_) | Ask::PagePictures(..)
+            );
+            let pictures = matches!(
+                ask,
+                Ask::Picture | Ask::Icon(_) | Ask::Emoji(..) | Ask::PagePictures(..)
+            );
             let zip = matches!(ask, Ask::EmojiZip(_));
             let test = *TEST_ANSWER.lock().unwrap_or_else(|e| e.into_inner());
             let paths = match (test, name) {
@@ -358,11 +375,15 @@ impl Files {
                     .save_file()
                     .into_iter()
                     .collect(),
-                (None, None) if pictures => rfd::FileDialog::new()
-                    .add_filter(t!("files.pictures"), &["png", "jpg", "jpeg", "gif", "webp"])
-                    .pick_file()
-                    .into_iter()
-                    .collect(),
+                (None, None) if pictures => {
+                    let dialog = rfd::FileDialog::new()
+                        .add_filter(t!("files.pictures"), &["png", "jpg", "jpeg", "gif", "webp"]);
+                    if single {
+                        dialog.pick_file().into_iter().collect()
+                    } else {
+                        dialog.pick_files().unwrap_or_default()
+                    }
+                }
                 (None, None) if zip => rfd::FileDialog::new()
                     .add_filter(t!("files.zip"), &["zip"])
                     .pick_file()

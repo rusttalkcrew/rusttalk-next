@@ -268,6 +268,7 @@ home.kind_voice = Voice
 home.kind_page = Page
 home.kind_page_help = One page everyone can read. Only people who can write here can change it.
 home.edit_page = Edit page
+home.page_add_pictures = Add pictures
 home.page_updated = Last changed by {name}, {time}
 home.page_unreadable = This page can't be opened yet. It will show once the key arrives.
 home.page_empty = Nothing here yet.

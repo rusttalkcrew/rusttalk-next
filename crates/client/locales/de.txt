@@ -265,6 +265,7 @@ home.kind_voice = Sprache
 home.kind_page = Seite
 home.kind_page_help = Eine Seite, die alle lesen können. Nur wer hier schreiben darf, kann sie ändern.
 home.edit_page = Seite bearbeiten
+home.page_add_pictures = Bilder hinzufügen
 home.page_updated = Zuletzt geändert von {name}, {time}
 home.page_unreadable = Diese Seite kann noch nicht geöffnet werden. Sie erscheint, sobald der Schlüssel ankommt.
 home.page_empty = Hier steht noch nichts.
