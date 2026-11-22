@@ -3428,6 +3428,7 @@ fn page_view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat: &mut
                     friend: None,
                     poke: false,
                     preview: None,
+                    poll: None,
                 };
                 server.send(Command::Send(draft));
                 chat.clear_draft();
