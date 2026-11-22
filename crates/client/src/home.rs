@@ -1674,6 +1674,8 @@ pub fn show(
         call::frame(ui.ctx(), home);
         return None;
     }
+    // Joining or leaving a call counts: a restart must never cut one off.
+    updates.banner(ui, home.voice.call.is_some());
     home.layout
         .set_window_width(ui.available_width() - RAIL_WIDTH);
     // One column for rail and channel list, so the bottom panel spans both like Discord.
