@@ -31,11 +31,7 @@ const FIELDS: [&str; 3] = ["unlock", "new", "repeat"];
 /// Remove what egui keeps of the password fields: their text in the undo history.
 pub fn forget(ctx: &Context) {
     for name in FIELDS {
-        let id = field_id(name);
-        if let Some(mut state) = TextEditState::load(ctx, id) {
-            state.clear_undoer();
-        }
-        ctx.data_mut(|data| data.remove::<TextEditState>(id));
+        ctx.data_mut(|data| data.remove::<TextEditState>(field_id(name)));
     }
 }
 

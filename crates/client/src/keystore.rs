@@ -342,7 +342,12 @@ impl Keystore {
             .context("open identity lock")?;
         lock.try_lock()
             .context("RustTalk is already open with this profile")?;
-        let state = crate::load_json::<Option<State>>(&dir.join(STATE_FILE))?;
+        // A damaged keystore.json is rebuilt from what is found.
+        let state =
+            crate::load_json::<Option<State>>(&dir.join(STATE_FILE)).unwrap_or_else(|error| {
+                tracing::warn!(error = %format_args!("{error:#}"), "keystore.json is unreadable");
+                None
+            });
         // Without keystore.json, an account in this profile means its keys exist.
         let had_account =
             state.is_none() && ACCOUNT_FILES.iter().any(|name| dir.join(name).exists());
@@ -369,13 +374,42 @@ impl Keystore {
 
     /// Use whichever place has keys, preferring the chosen one, and repair the record.
     fn reconcile(&mut self) -> Result<Start> {
-        let file = self.read_key_file()?;
-        let keychain = self.keychain.available();
-        let secret = match keychain {
-            Ok(()) => self.keychain.get()?,
-            Err(_) => None,
+        let current = self.state.storage.map(Kind::place);
+        // A copy still listed for cleanup is not this profile's keys: signed out, or
+        // an old or unfinished copy from a switch.
+        let state = &self.state;
+        let usable =
+            |place| !state.cleanup.contains(&place) || (state.keys_saved && Some(place) == current);
+        let (file_usable, keychain_usable) = (usable(Place::File), usable(Place::Keychain));
+        let file = if file_usable {
+            self.read_key_file()?
+        } else {
+            None
         };
-        let keychain_first = self.state.storage.map(Kind::place) == Some(Place::Keychain);
+        let keychain_first = current == Some(Place::Keychain);
+        // A file profile whose file has keys never asks the keychain (no unlock prompt).
+        let mut keychain = Ok(());
+        let mut secret = None;
+        if keychain_first || file.is_none() {
+            keychain = self.keychain.available();
+            if keychain.is_ok() && keychain_usable {
+                match self.keychain.get() {
+                    Ok(found) => secret = found,
+                    // A locked keychain whose prompt can't show counts as unreachable.
+                    Err(error) => {
+                        tracing::warn!(error = %format_args!("{error:#}"), "reading the keychain failed");
+                        keychain = Err(error);
+                    }
+                }
+            }
+        }
+        if let (Some(file), Some(secret)) = (&file, &secret)
+            && plain(file).is_ok_and(|plain| plain != &secret[..])
+        {
+            tracing::warn!(
+                "the keychain and the key file hold different keys; using the chosen one"
+            );
+        }
         let (kind, start) = match (file, secret) {
             (_, Some(secret)) if keychain_first => {
                 (Kind::Keychain, Start::Ready(Some(Box::new(load(&secret)?))))
@@ -576,7 +610,7 @@ impl Keystore {
         let switched = self.record(|state| {
             state.storage = Some(kind);
             state.keys_saved = true;
-            state.cleanup.retain(|place| *place != to);
+            state.cleanup.retain(|place| *place != to && *place != from);
             state.cleanup.push(from);
         });
         match switched {
@@ -1205,6 +1239,62 @@ mod tests {
         assert!(ready(start).is_none());
         assert!(!keychain.has_keys());
         assert_eq!(store.kind(), Some(Kind::File));
+    }
+
+    #[test]
+    fn a_signed_out_keychain_copy_that_could_not_be_removed_stays_signed_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let keychain = Mock::default();
+        let (mut store, _) = open(dir.path(), &keychain);
+        store.save(&identity()).unwrap();
+        drop(store);
+        let stuck = Mock {
+            stuck: true,
+            ..keychain.clone()
+        };
+        let (mut store, _) = open(dir.path(), &stuck);
+        store.delete().unwrap();
+        drop(store);
+        assert!(stuck.has_keys());
+        let (_, start) = open(dir.path(), &stuck);
+        assert!(ready(start).is_none());
+    }
+
+    #[test]
+    fn a_failing_keychain_never_blocks_a_file_profile() {
+        #[derive(Clone)]
+        struct Locked;
+        impl Keychain for Locked {
+            fn available(&self) -> Result<()> {
+                Ok(())
+            }
+            fn get(&self) -> Result<Option<Zeroizing<Vec<u8>>>> {
+                bail!("collection is locked")
+            }
+            fn set(&self, _: &[u8]) -> Result<()> {
+                bail!("collection is locked")
+            }
+            fn delete(&self) -> Result<()> {
+                bail!("collection is locked")
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let me = file_profile(dir.path(), &down());
+        let (_, start) = Keystore::open_with(dir.path(), Box::new(Locked), CHEAP).unwrap();
+        assert!(same(&ready(start).unwrap(), &me));
+        // Even with keystore.json gone or damaged.
+        fs::write(dir.path().join(STATE_FILE), "{broken").unwrap();
+        let (store, start) = Keystore::open_with(dir.path(), Box::new(Locked), CHEAP).unwrap();
+        assert!(same(&ready(start).unwrap(), &me));
+        assert_eq!(store.kind(), Some(Kind::File));
+        drop(store);
+        // A keychain profile whose keychain can't be read shows the recovery screen.
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, _) = open(dir.path(), &Mock::default());
+        store.save(&identity()).unwrap();
+        drop(store);
+        let (_, start) = Keystore::open_with(dir.path(), Box::new(Locked), CHEAP).unwrap();
+        assert!(matches!(start, Start::Missing { keychain: true }));
     }
 
     #[test]

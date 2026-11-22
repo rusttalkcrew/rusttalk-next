@@ -324,12 +324,15 @@ impl<'a> App<'a> {
                         key_storage::forget(&self.ctx);
                         self.home(identity)
                     }
-                    Err(error) => Screen::Unlock {
-                        password: Zeroizing::default(),
-                        error: Some(key_storage::unlock_error(&error)),
-                        tries: tries + 1,
-                        busy: None,
-                    },
+                    Err(error) => {
+                        key_storage::forget(&self.ctx);
+                        Screen::Unlock {
+                            password: Zeroizing::default(),
+                            error: Some(key_storage::unlock_error(&error)),
+                            tries: tries + 1,
+                            busy: None,
+                        }
+                    }
                 }
             }
             (Action::SignOut, Screen::Home(mut home)) => match self.keystore.delete() {
