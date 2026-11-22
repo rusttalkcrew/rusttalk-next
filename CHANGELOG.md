@@ -11,11 +11,13 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
-- A moderator mute stops shared app and stream sound. You can share sound again after unmute.
-- Minimizing everyone on the call stage no longer shows "Connecting…"
+## v0.1.11 - 2026-11-22
+
+- Your microphone works again when a moderator unmutes you, without rejoining the call
+- A moderator mute also stops shared app and stream sound; share it again after unmute
 - Edit channel is one dialog with General and Permissions tabs
-- Your microphone works again when a moderator unmutes you, without rejoining the call.
 - Update checks are on by default and the update address is filled in
+- Minimizing everyone on the call stage no longer shows "Connecting…"
 
 ## v0.1.10 - 2026-11-22
 
