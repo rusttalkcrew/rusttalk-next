@@ -32,6 +32,8 @@ fn compose_bytes(project: &str, args: &[&str]) -> Result<Vec<u8>> {
             "compose",
             "-f",
             "deploy/compose.dev.yml",
+            "-f",
+            "deploy/compose.e2e.yml",
             "--profile",
             "index",
             "-p",

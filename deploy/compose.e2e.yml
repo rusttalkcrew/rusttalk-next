@@ -1,0 +1,14 @@
+# Added on top of compose.dev.yml by `make e2e` only. SQLite commits fsync, and on a
+# slow disk that made requests time out, so the test stack keeps its data in /dev/shm
+# (memory). It is a host folder, not a tmpfs mount, so the data survives the stops and
+# restarts the scenarios do. The Makefile creates the folders, and the services run as
+# the current user so they can write to them.
+services:
+  api:
+    user: "${RUSTTALK_DEV_USER}"
+    volumes: !override
+      - ${RUSTTALK_E2E_DB}/${COMPOSE_PROJECT_NAME}-api:/data
+  index:
+    user: "${RUSTTALK_DEV_USER}"
+    volumes: !override
+      - ${RUSTTALK_E2E_DB}/${COMPOSE_PROJECT_NAME}-index:/data
