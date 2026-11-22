@@ -164,6 +164,8 @@ pub enum Ask {
     PagePictures(Url, Id),
     /// Save a stored file.
     Save(Url, Attachment),
+    /// Upload into a channel's shared files.
+    Share(Url, Id),
     /// Save a live file: transfer ID and suggested name.
     Accept(Url, Id, String),
     /// Offer a file live in a text channel or DM.
@@ -352,6 +354,7 @@ impl Files {
                 Ask::Attach(..)
                 | Ask::AttachDm(_)
                 | Ask::PagePictures(..)
+                | Ask::Share(..)
                 | Ask::Live(..)
                 | Ask::Picture
                 | Ask::Icon(_)
@@ -360,7 +363,7 @@ impl Files {
             };
             let single = !matches!(
                 ask,
-                Ask::Attach(..) | Ask::AttachDm(_) | Ask::PagePictures(..)
+                Ask::Attach(..) | Ask::AttachDm(_) | Ask::PagePictures(..) | Ask::Share(..)
             );
             let pictures = matches!(
                 ask,
@@ -1202,6 +1205,50 @@ fn card(ui: &mut Ui, files: &mut Files, address: &Url, file: &Attachment) {
         card.widget_info(|| WidgetInfo::labeled(Role::Button, true, &file.name));
         saved_menu(&card, path);
     }
+}
+
+/// A file in a channel's shared files: its name, size and `note` (who added it), with
+/// Download, and Remove when `removable`. Returns whether Remove was clicked.
+pub fn shared_card(
+    ui: &mut Ui,
+    files: &mut Files,
+    address: &Url,
+    file: &Attachment,
+    note: &str,
+    removable: bool,
+) -> bool {
+    if files.saves.get(&file.file.id) == Some(&Saving::Gone) {
+        gone(ui, file);
+        return false;
+    }
+    let mut remove = false;
+    let shown = attachment_frame(ui).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("📄").size(ui::TEXT_ICON_LARGE));
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                ui.label(ui::bold(&file.name));
+                ui.label(ui::caption(format!(
+                    "{} · {note}",
+                    size(file.file.size.into())
+                )));
+            });
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if removable {
+                    let size = Vec2::splat(ui::ICON_BUTTON);
+                    remove = ui::icon_button(ui, "🗑", t!("files.remove"), ui::Look::Ghost, size)
+                        .clicked();
+                }
+                download(ui, files, address, file);
+            });
+        });
+    });
+    if let Some(path) = files.saved_at(file) {
+        let card = shown.response.interact(Sense::click());
+        card.widget_info(|| WidgetInfo::labeled(Role::Button, true, &file.name));
+        saved_menu(&card, path);
+    }
+    remove
 }
 
 /// The box around a file or a live file in a message.

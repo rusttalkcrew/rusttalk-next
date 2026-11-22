@@ -10,7 +10,7 @@ use ed25519_dalek::VerifyingKey;
 use rusttalk_core::{
     auth::{decode, decode_bytes, encode},
     keys::{Event, Kind, Scope},
-    messages::{MAX_MESSAGE_BYTES, MessageContext, MessageRecord},
+    messages::{MAX_MESSAGE_BYTES, MessageContext, MessageRecord, Purpose},
 };
 use serde::Deserialize;
 use sqlx::{FromRow, SqliteConnection, query, query_as, query_scalar};
@@ -43,7 +43,7 @@ pub struct Page {
 }
 
 #[derive(FromRow)]
-struct Row {
+pub(crate) struct Row {
     backfilled: bool,
     id: String,
     epoch: i64,
@@ -139,7 +139,7 @@ pub async fn create(
         envelope,
         backfill_at,
     } = payload(body)?;
-    let channel_id = decode(&channel)?;
+    decode::<32>(&channel)?;
     let message_id = decode(&id)?;
     let envelope_bytes = decode_bytes(&envelope)?;
     let (mut tx, actor) = authenticate(&app, &headers).await?;
@@ -155,49 +155,15 @@ pub async fn create(
     if backfill_at.is_some() && history_full(&mut tx, &channel).await? {
         return Err(keys::conflict("history_full"));
     }
-    let scope = Scope {
-        kind: Kind::Channel,
-        id: channel_id,
-    };
-    let (current, rotate) = keys::read_epoch(&mut tx, &actor, scope).await?;
-    if rotate || epoch != current {
-        return Err(keys::conflict("epoch_changed"));
-    }
-    let device = actor
-        .device
-        .as_slice()
-        .try_into()
-        .map_err(|_| ApiError::internal("invalid_stored_device"))?;
-    let verification_key = VerifyingKey::from_bytes(&device)
-        .map_err(|_| ApiError::internal("invalid_stored_device"))?;
-    let context = MessageContext {
-        server_id: keys::space(&app).id,
-        channel_id,
+    let device = verify_signed(
+        (Purpose::Message, message_id),
+        &app,
+        &mut tx,
+        &actor,
+        &channel,
         epoch,
-        id: message_id,
-        sender_device: device,
-        person: actor.person,
-    };
-    context
-        .verify(&verification_key, &envelope_bytes)
-        .map_err(|_| ApiError::bad_request("invalid_message"))?;
-
-    let certificate: Vec<u8> = query_scalar(
-        "SELECT certificate FROM member_devices WHERE device_id = ? AND person_id = ?",
+        &envelope_bytes,
     )
-    .bind(&actor.device)
-    .bind(actor.person.as_slice())
-    .fetch_optional(&mut *tx)
-    .await?
-    .ok_or(ApiError::forbidden("device_certificate_required"))?;
-    query(
-        "INSERT INTO message_senders (device_id, person_id, certificate) VALUES (?, ?, ?)
-         ON CONFLICT (device_id, person_id) DO NOTHING",
-    )
-    .bind(&actor.device)
-    .bind(actor.person.as_slice())
-    .bind(certificate)
-    .execute(&mut *tx)
     .await?;
     reserve(&mut tx, &id).await?;
     let size = envelope_bytes.len();
@@ -238,6 +204,65 @@ pub async fn create(
             envelope,
         }),
     ))
+}
+
+/// Check a signed envelope made for `purpose` under `message_id` by this device in the channel's current
+/// epoch, and keep its sender's certificate so readers can verify it after the device is gone.
+pub(crate) async fn verify_signed(
+    (purpose, message_id): (Purpose, [u8; 32]),
+    app: &App,
+    tx: &mut SqliteConnection,
+    actor: &Actor,
+    channel: &str,
+    epoch: i64,
+    envelope_bytes: &[u8],
+) -> ApiResult<[u8; 32]> {
+    let channel_id = decode(channel)?;
+    let scope = Scope {
+        kind: Kind::Channel,
+        id: channel_id,
+    };
+    let (current, rotate) = keys::read_epoch(&mut *tx, actor, scope).await?;
+    if rotate || epoch != current {
+        return Err(keys::conflict("epoch_changed"));
+    }
+    let device = actor
+        .device
+        .as_slice()
+        .try_into()
+        .map_err(|_| ApiError::internal("invalid_stored_device"))?;
+    let verification_key = VerifyingKey::from_bytes(&device)
+        .map_err(|_| ApiError::internal("invalid_stored_device"))?;
+    let context = MessageContext {
+        server_id: keys::space(app).id,
+        channel_id,
+        epoch,
+        id: message_id,
+        sender_device: device,
+        person: actor.person,
+    };
+    context
+        .verify_as(purpose, &verification_key, envelope_bytes)
+        .map_err(|_| ApiError::bad_request("invalid_message"))?;
+
+    let certificate: Vec<u8> = query_scalar(
+        "SELECT certificate FROM member_devices WHERE device_id = ? AND person_id = ?",
+    )
+    .bind(&actor.device)
+    .bind(actor.person.as_slice())
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or(ApiError::forbidden("device_certificate_required"))?;
+    query(
+        "INSERT INTO message_senders (device_id, person_id, certificate) VALUES (?, ?, ?)
+         ON CONFLICT (device_id, person_id) DO NOTHING",
+    )
+    .bind(&actor.device)
+    .bind(actor.person.as_slice())
+    .bind(certificate)
+    .execute(&mut *tx)
+    .await?;
+    Ok(device)
 }
 
 async fn reserve(db: &mut SqliteConnection, id: &str) -> ApiResult<()> {
@@ -358,11 +383,15 @@ pub async fn device(
     let certificate: Vec<u8> = query_scalar(
         "SELECT s.certificate FROM message_senders s
          WHERE s.device_id = ? AND s.person_id = ?
-           AND EXISTS (SELECT 1 FROM messages m WHERE m.channel_id = ?
-             AND m.sender_device = s.device_id AND m.sender_person = s.person_id)",
+           AND (EXISTS (SELECT 1 FROM messages m WHERE m.channel_id = ?
+             AND m.sender_device = s.device_id AND m.sender_person = s.person_id)
+             OR EXISTS (SELECT 1 FROM shared_files h JOIN files f ON f.id = h.id
+               WHERE f.channel_id = ?
+               AND h.sender_device = s.device_id AND h.sender_person = s.person_id))",
     )
     .bind(device.as_slice())
     .bind(person.as_slice())
+    .bind(&channel)
     .bind(&channel)
     .fetch_optional(&mut *tx)
     .await?

@@ -98,6 +98,12 @@ pub enum Command {
     StickerFile(BlobRef, crate::sticker_files::Kind),
     /// Download a file and save it here.
     Save(BlobRef, PathBuf),
+    /// Load a channel's shared files.
+    SharedFiles(Id),
+    /// Upload files into a channel's shared files.
+    ShareFiles(Id, Vec<PathBuf>),
+    /// Remove a shared file: channel, file and who shared it.
+    Unshare(Id, Id, Id),
     /// Receive an offered file into this path.
     AcceptFile(Id, PathBuf),
     /// Stop our offer, or our download, of a live file.
@@ -341,6 +347,8 @@ pub enum Update {
     Stats(Url, Stats),
     /// A file upload in a channel started or went on (what to show, and how far), or ended.
     Uploading(Url, Id, Option<(String, f32)>),
+    /// A channel's shared files, newest first; empty when loading them failed.
+    SharedFiles(Url, Id, Vec<rusttalk_core::client::SharedFile>),
     /// How far saving a stored file got (0 to 1), by blob ID.
     SaveProgress(Id, f32),
     /// A picture's frames with their delays in ms, by blob ID, or why not: `true` when it
@@ -916,6 +924,10 @@ fn refuse(ctx: &Ctx, url: &Url, command: Command) {
         }
         Command::Image(file, fetch) => ctx.send(Update::Image(file.id, fetch, Err(false))),
         Command::Save(file, _) => ctx.send(Update::Saved(file.id, Err(false))),
+        Command::SharedFiles(channel) => {
+            ctx.send(Update::SharedFiles(url.clone(), channel, Vec::new()));
+            ctx.send(Update::Failed(t!("admin.offline").into()));
+        }
         Command::AcceptFile(id, _) => {
             let reason = t!("admin.offline").into();
             ctx.send(Update::LiveProgress(id, LiveFileEvent::Failed { reason }));
@@ -1546,6 +1558,11 @@ async fn on_command(
         Command::LinkCard(file) => files::link_card(ctx, client, file).await,
         Command::StickerFile(file, kind) => files::sticker_file(ctx, client, file, kind).await,
         Command::Save(file, path) => files::save(ctx, client, file, path).await,
+        Command::SharedFiles(channel) => files::shared(ctx, url, client, channel).await,
+        Command::ShareFiles(channel, paths) => files::share(ctx, url, client, channel, paths).await,
+        Command::Unshare(channel, id, uploader) => {
+            files::unshare(ctx, url, client, (channel, id, uploader)).await;
+        }
         Command::SendLive(channel, path) => {
             voice::offer_chat_file(ctx, url, client, state, channel, path).await?;
         }

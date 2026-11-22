@@ -7,6 +7,9 @@ use thiserror::Error;
 use crate::keys::wire_id;
 
 const DOMAIN: &[u8] = b"rusttalk-message-v1";
+const SHARED_FILE_DOMAIN: &[u8] = b"rusttalk-shared-file-v1";
+/// A shared file's envelope holds one file reference, so it stays well under this.
+pub const MAX_SHARED_ENVELOPE: usize = 1024;
 const VERSION: u8 = 3;
 const NONCE: usize = 24;
 const TAG: usize = 16;
@@ -122,10 +125,23 @@ pub struct MessageContext {
     pub person: [u8; 32],
 }
 
+/// What a signed envelope is for. Each has its own associated-data label, so a chat
+/// message can't pass as a shared file's record, or the other way round.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Purpose {
+    Message,
+    /// A file kept in a channel's file list, under the file's ID.
+    SharedFile,
+}
+
 impl MessageContext {
-    fn associated_data(self) -> Vec<u8> {
+    fn associated_data(self, purpose: Purpose) -> Vec<u8> {
+        let domain = match purpose {
+            Purpose::Message => DOMAIN,
+            Purpose::SharedFile => SHARED_FILE_DOMAIN,
+        };
         [
-            DOMAIN,
+            domain,
             &self.server_id,
             &self.channel_id,
             &self.epoch.to_be_bytes(),
@@ -138,6 +154,16 @@ impl MessageContext {
 
     /// Verify the public envelope framing and its signature against the sender's device key.
     pub fn verify(self, sender: &VerifyingKey, envelope: &[u8]) -> Result<(), MessageError> {
+        self.verify_as(Purpose::Message, sender, envelope)
+    }
+
+    /// `verify` for an envelope made for `purpose`.
+    pub fn verify_as(
+        self,
+        purpose: Purpose,
+        sender: &VerifyingKey,
+        envelope: &[u8],
+    ) -> Result<(), MessageError> {
         if self.epoch <= 0
             || !(HEADER + TAG + MIN_PLAINTEXT + SIGNATURE..=MAX_MESSAGE_BYTES)
                 .contains(&envelope.len())
@@ -155,7 +181,7 @@ impl MessageContext {
         }
         sender
             .verify_strict(
-                &[self.associated_data().as_slice(), sealed].concat(),
+                &[self.associated_data(purpose).as_slice(), sealed].concat(),
                 &Signature::from_bytes(signature),
             )
             .map_err(|_| MessageError::Signature)

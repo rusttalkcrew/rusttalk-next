@@ -35,6 +35,7 @@ tables in SQLite (WAL). IDs and digests are binary unless indicated. The `_ct` s
 | `messages` | `sequence` (insertion order), `id` and `channel_id` (text), `epoch`, `sender_device`, `sender_person`, `at` (Unix seconds), `size` (binary envelope length), `envelope` (public framing, nonce, ciphertext with tag, and signature) |
 | `message_ids` | `id` (opaque text, including deleted message IDs to prevent reuse) |
 | `files` | `id` and `channel_id` (opaque text), `uploader` (person public key), `size` (ciphertext bytes), `created_at`, `expires_at` (Unix seconds) |
+| `shared_files` | `id` (a stored file's opaque ID), `epoch`, `sender_device` and `sender_person` (public keys), `at` (Unix seconds), `envelope` (signed channel-key ciphertext holding the file's reference) |
 | `emoji` | `id` (opaque text), `kind` (emoji or sticker), `owner` (person public key), `size` (picture ciphertext bytes), `image_hash` (short hash of the picture ciphertext), `name_ct`, `created_at` (Unix seconds) |
 | `device_sync` | `person_id`, `version`, `ciphertext` (nonce and encrypted payload with tag), `size` (ciphertext bytes), `at` (Unix seconds) |
 | `_sqlx_migrations` | `version`, `description`, `installed_on`, `success`, `checksum`, `execution_time` (migration bookkeeping) |
@@ -95,6 +96,9 @@ thumbnails to originals are inside the encrypted message. Server emoji and
 sticker pictures are space-key ciphertext in `emoji/`, named by their random IDs. File operation logs
 carry the opaque ID and ciphertext size. The expiry sweep unlinks blobs and
 removes their metadata.
+A file shared to a channel's file list stays until it is removed, its
+channel is deleted, or its sharer leaves or revokes the device that shared it, so the API knows which stored files are kept that way, who
+shared each and when. Its name and type stay inside the sealed envelope.
 Each member has at most one current sync row per server. It is removed with
 membership. Settings, joined origins and pins, and contacts are encrypted
 on the device before upload. The sync key stays on the person's devices.

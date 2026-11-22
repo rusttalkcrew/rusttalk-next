@@ -213,7 +213,7 @@ errors may have an empty body. The API logs a request ID, status and reason.
 | 403 | `invite_required`, `invalid_invite`, `person_banned`, `ip_banned`, `device_revoked`, `device_certificate_required`, `permission_denied`, `role_hierarchy`, `cannot_grant_permission`, `built_in_role`, `owner_required`, `open_joining_disabled`, `scope_read_denied`, `recipient_read_denied`, `channel_read_denied`, `channel_write_denied`, `live_file_peer_not_in_room` |
 | 404 | `invite_not_found`, `member_not_found`, `ban_not_found`, `role_not_found`, `category_not_found`, `channel_not_found`, `message_not_found`, `message_device_not_found`, `file_not_found`, `avatar_not_found`, `icon_not_found`, `emoji_not_found`, `pack_not_found` |
 | 408 | `file_upload_timeout` |
-| 409 | `owner_cannot_leave`, `already_banned`, `no_active_ip`, `role_exists`, `role_in_use`, `role_limit`, `member_cap_reached`, `device_limit`, `device_certificate_changed`, `revocation_limit`, `epoch_changed`, `space_key_unavailable`, `metadata_epoch_changed`, `category_exists`, `category_in_use`, `channel_exists`, `order_changed`, `message_exists`, `file_exists`, `emoji_exists`, `emoji_limit`, `sticker_limit`, `pack_exists`, `pack_limit`, `last_pack` |
+| 409 | `owner_cannot_leave`, `already_banned`, `no_active_ip`, `role_exists`, `role_in_use`, `role_limit`, `member_cap_reached`, `device_limit`, `device_certificate_changed`, `revocation_limit`, `epoch_changed`, `space_key_unavailable`, `metadata_epoch_changed`, `category_exists`, `category_in_use`, `channel_exists`, `order_changed`, `message_exists`, `file_exists`, `file_shared`, `shared_limit`, `emoji_exists`, `emoji_limit`, `sticker_limit`, `pack_exists`, `pack_limit`, `last_pack` |
 | 413 | `body_too_large` when generated after reading the body, `file_too_large`, `file_member_quota`, `file_server_quota`, `emoji_too_large` |
 | 415 | `expected_json` |
 | 429 | `challenge_limit`, `invite_preview_limit`, `open_join_limit` |
@@ -1141,6 +1141,8 @@ quota charge and expiry. DMs grant read and write to both participants.
 | POST `/v1/files?channel={channel}&id={id}` | Stream of raw ciphertext with `application/octet-stream` | Channel `write`. 201, `{id}` |
 | GET `/v1/files/{id}` | Empty | Channel `read`. 200, streamed ciphertext with `Content-Type: application/octet-stream` and `Content-Length` |
 | DELETE `/v1/files/{id}?uploader={person}` | Empty | Uploader, or a channel reader with `delete_messages` when `uploader` names the file's uploader. 204 |
+| POST `/v1/channels/{channel}/files` | `{id, epoch, envelope}` | Channel `write`, for the caller's own unexpired file stored in that channel. 204 |
+| GET `/v1/channels/{channel}/files` | Empty | Channel `read`. 200, all of its (at most 500) shared files newest first, each a message record |
 
 The upload rejects a blob below 16 bytes and caps the bytes as they arrive,
 including when the request has no Content-Length. An oversized upload is read
@@ -1182,6 +1184,29 @@ Readers accept power-of-two chunk sizes from 16 KiB through 1 MiB, with
 64 KiB used by senders. The client bounds the full ciphertext to 32 MiB.
 Recipients treat the name as display text and choose a local save path
 independently. The filename and media type are never part of the HTTP request.
+
+#### Shared files
+
+A channel's file list holds stored files shared there directly, outside any
+message. The client uploads the file without a thumbnail, then shares it with
+an `envelope` built like a signed [message](crypto.md#messages) in the
+channel's current epoch, under its own shared-file label and with the file ID
+as the message ID. Its plaintext has no
+flags, empty text and exactly that one file reference without a thumbnail;
+readers skip any record that holds anything else. The API checks the
+signature (with the shared-file label) and epoch like a message post (`409 epoch_changed` on a stale
+epoch), answers `409 file_shared` when the file is already shared and
+`404 file_not_found` for a file that is missing, expired, someone else's or
+stored in another channel. The envelope is at most 1,024 bytes
+(`400 invalid_message` past that), and a channel keeps at most 500 shared
+files (`409 shared_limit`). A shared file no longer expires; it counts toward
+the same quotas and is removed with the existing DELETE route (its uploader,
+or a moderator naming the uploader) or when its channel is deleted. When
+its sharer leaves, is kicked or banned, or revokes the device that shared it,
+the file leaves the list and expires like any file again. The list
+returns the same record fields as a message page, and
+`/v1/channels/{channel}/message-devices` also finds senders of shared files.
+Apps refresh the list when it is opened; no event announces changes.
 
 #### Link previews
 

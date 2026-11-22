@@ -612,6 +612,10 @@ pub struct Chat {
     pub foreign: Vec<CustomEmoji>,
     /// What is uploading now and how far (0 to 1), shown above the composer.
     pub uploading: Option<(String, f32)>,
+    /// The channel's shared files, newest first; `None` until loaded.
+    pub shared: Option<Vec<rusttalk_core::client::SharedFile>>,
+    /// Whether the shared files were asked for since the files view opened.
+    pub shared_asked: bool,
     /// Content height last frame, and before older messages were added,
     /// so the view stays in place when a page is added above it.
     pub content_height: f32,

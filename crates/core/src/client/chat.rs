@@ -13,7 +13,7 @@ use crate::{
     auth::{decode_bytes, encode},
     identity::{DeviceCertificate, DeviceIdentity, PersonId},
     keys::{self, EnvelopeContext, Key, Kind, Scope, wire_id},
-    messages::{MAX_MESSAGE_BYTES, MessageContext, MessageError},
+    messages::{Attachment, MAX_MESSAGE_BYTES, MessageContext, MessageError, Purpose},
 };
 
 use super::{KeyClient, keys::DmPin};
@@ -72,6 +72,15 @@ fn digest(record: &MessageRecord) -> [u8; 32] {
         .chain_update(record.envelope.as_bytes())
         .finalize()
         .into()
+}
+
+/// A file kept in a channel's file list, checked and opened like a message.
+#[derive(Clone)]
+pub struct SharedFile {
+    /// Who shared it, and when (server time).
+    pub person: PersonId,
+    pub at: i64,
+    pub file: Attachment,
 }
 
 /// A readable channel and its encrypted metadata.
@@ -351,7 +360,9 @@ impl KeyClient<'_> {
         let body = match cached {
             Some(body) => body,
             None => {
-                let body = self.decrypt_record(channel, record).await?;
+                let body = self
+                    .decrypt_record(channel, record, Purpose::Message)
+                    .await?;
                 if let Some(original) = body.edit_of {
                     self.check_edit(channel, &record.id, &record.person, &original)
                         .await?;
@@ -395,10 +406,82 @@ impl KeyClient<'_> {
         Ok(())
     }
 
+    /// Keep an uploaded file (without a thumbnail) in its channel's file list: a signed
+    /// record under the file's ID, sealed with the channel key, whose only content is the
+    /// file's reference.
+    pub async fn share_file(&self, channel: &[u8; 32], file: &Attachment) -> Result<()> {
+        ensure!(file.thumbnail.is_none(), "a shared file has no thumbnail");
+        let scope = Scope {
+            kind: Kind::Channel,
+            id: *channel,
+        };
+        let (epoch, key) = self.current_key(scope)?;
+        let cert = &self.identity.certificate;
+        let context = MessageContext {
+            server_id: self.server.known_server().server_id,
+            channel_id: *channel,
+            epoch,
+            id: file.file.id,
+            sender_device: cert.signing_key().to_bytes(),
+            person: *cert.person_id(),
+        };
+        let body = shared_body(file.clone());
+        let envelope = context.seal_as(Purpose::SharedFile, key, self.identity, &body)?;
+        let envelope =
+            json!({ "id": encode(&file.file.id), "epoch": epoch, "envelope": encode(&envelope) });
+        let response = (self.request(Method::POST, &shared_path(channel)))
+            .json(&envelope)
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            #[derive(Deserialize)]
+            struct Problem {
+                error: String,
+            }
+            let code = response.json::<Problem>().await.map(|p| p.error);
+            return Err(super::UploadRejected {
+                status,
+                code: code.unwrap_or_default(),
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    /// A channel's shared files, newest first. A record that fails its checks is left out.
+    pub async fn shared_files(&mut self, channel: &[u8; 32]) -> Result<Vec<SharedFile>> {
+        let records: Vec<MessageRecord> = self
+            .request(Method::GET, &shared_path(channel))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        let mut files = Vec::new();
+        for record in records {
+            let opened = self
+                .decrypt_record(channel, &record, Purpose::SharedFile)
+                .await;
+            match opened.and_then(|body| shared_file(&record, body)) {
+                Ok(file) => files.push(SharedFile {
+                    person: record.person,
+                    at: record.at,
+                    file,
+                }),
+                Err(error) => {
+                    tracing::warn!(error = %format_args!("{error:#}"), "skipping a shared file");
+                }
+            }
+        }
+        Ok(files)
+    }
+
     async fn decrypt_record(
         &mut self,
         channel: &[u8; 32],
         record: &MessageRecord,
+        purpose: Purpose,
     ) -> Result<MessageBody> {
         ensure!(
             record.envelope.len() <= (MAX_MESSAGE_BYTES * 4).div_ceil(3),
@@ -424,7 +507,7 @@ impl KeyClient<'_> {
         };
         self.revocations
             .check(&record.person, &record.sender_device)?;
-        Ok(context.open(key, &sender, &bytes)?)
+        Ok(context.open_as(purpose, key, &sender, &bytes)?)
     }
 
     async fn message_sender(
@@ -472,7 +555,9 @@ impl KeyClient<'_> {
     ) -> Result<()> {
         ensure!(id != original, MessageError::EditAuthor);
         let record = self.message(channel, original).await?;
-        let body = self.decrypt_record(channel, &record).await?;
+        let body = self
+            .decrypt_record(channel, &record, Purpose::Message)
+            .await?;
         authorize_edit(author, &record.person, &body)?;
         Ok(())
     }
@@ -495,6 +580,28 @@ fn seal_for_protocol(
     } else {
         context.seal(key, sender, body)
     }
+}
+
+fn shared_body(file: Attachment) -> MessageBody {
+    MessageBody {
+        attachments: vec![file],
+        ..Default::default()
+    }
+}
+
+/// A shared file's record holds exactly its own file, under the file's ID, and nothing else.
+fn shared_file(record: &MessageRecord, body: MessageBody) -> Result<Attachment> {
+    let [file] = <[Attachment; 1]>::try_from(body.attachments.clone())
+        .map_err(|_| MessageError::Encoding)?;
+    ensure!(
+        file.file.id == record.id && file.thumbnail.is_none() && body == shared_body(file.clone()),
+        MessageError::Encoding
+    );
+    Ok(file)
+}
+
+fn shared_path(channel: &[u8; 32]) -> String {
+    format!("/v1/channels/{}/files", encode(channel))
 }
 
 fn message_path(channel: &[u8; 32]) -> String {
@@ -597,6 +704,22 @@ mod tests {
             opened.insert(&filler, &MessageBody::default());
         }
         assert!(opened.edits.is_empty() && opened.bodies.len() == OPENED_PER_CHANNEL);
+    }
+
+    #[test]
+    fn a_shared_file_record_holds_only_its_own_file() {
+        let (file, _) = super::super::prepare_file("a.txt", "text/plain", b"hello", &[]).unwrap();
+        let mut held = record(0, "shared");
+        held.id = file.file.id;
+        assert!(shared_file(&held, shared_body(file.clone())).is_ok());
+        let other = record(1, "other");
+        assert!(shared_file(&other, shared_body(file.clone())).is_err());
+        let mut texted = shared_body(file.clone());
+        texted.text = "hi".into();
+        assert!(shared_file(&held, texted).is_err());
+        let mut two = shared_body(file.clone());
+        two.attachments.push(file);
+        assert!(shared_file(&held, two).is_err());
     }
 
     #[test]
