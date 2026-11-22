@@ -20,7 +20,7 @@ use rusttalk_core::{
     keys::{Kind, Scope},
 };
 
-use super::LIMIT;
+use super::hang_guard;
 
 pub(super) async fn exercise(
     a: &VoiceRoom,
@@ -43,25 +43,27 @@ pub(super) async fn exercise(
         .await?
         .sid();
     let result = async {
-        let found =
-            tokio::time::timeout(LIMIT, screen::find(&mut listener, TrackSource::Screenshare))
-                .await??;
+        let found = tokio::time::timeout(
+            hang_guard(),
+            screen::find(&mut listener, TrackSource::Screenshare),
+        )
+        .await??;
         assert_eq!(found.sid, sid);
         assert!(found.track.is_none());
-        tokio::time::timeout(LIMIT, screen::hear(b, TrackSource::Screenshare))
+        tokio::time::timeout(hang_guard(), screen::hear(b, TrackSource::Screenshare))
             .await
             .context("screen pattern with current key")??;
         // Watching is announced, as the app does once the video arrives; only then does
         // the publisher allow the sound.
         b.set_video_watches(std::slice::from_ref(&sid)).await?;
-        tokio::time::timeout(LIMIT, stream_sound(b, true))
+        tokio::time::timeout(hang_guard(), stream_sound(b, true))
             .await
             .context("stream sound arriving with the watched share")??;
         // A member who joins now is not on the permission list yet, but must still
         // receive everything except the share's sound.
         let mut late = newcomer.join_voice(channel_id).await?;
         tokio::time::timeout(
-            LIMIT,
+            hang_guard(),
             hear_tone(&mut late, Some(&a.identity()), super::A_HZ),
         )
         .await
@@ -106,7 +108,7 @@ pub(super) async fn exercise(
         wrong_key(server, c, channel_id, a, &sid, &sound).await?;
         b.set_subscribed(&sid, false)?;
         b.set_video_watches(&[]).await?;
-        tokio::time::timeout(LIMIT, stream_sound(b, false))
+        tokio::time::timeout(hang_guard(), stream_sound(b, false))
             .await
             .context("stream sound leaving with the share")??;
         println!(
@@ -196,7 +198,7 @@ async fn wrong_key(
             .remove(sound)
             .context("missing stream sound publication")?
             .set_subscribed(true);
-        let mut video = tokio::time::timeout(LIMIT, async {
+        let mut video = tokio::time::timeout(hang_guard(), async {
             while let Some(event) = events.recv().await {
                 match event {
                     RoomEvent::TrackSubscribed {
@@ -253,7 +255,7 @@ async fn wrong_key(
         for slot in 0..16 {
             assert!(provider.set_shared_key(key.to_vec(), slot));
         }
-        tokio::time::timeout(LIMIT, screen::verify(&mut video))
+        tokio::time::timeout(hang_guard(), screen::verify(&mut video))
             .await
             .context("screen pattern after installing the correct key")??;
         Ok::<_, anyhow::Error>(())

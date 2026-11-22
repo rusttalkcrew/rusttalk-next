@@ -27,20 +27,22 @@ async fn member(client: &KeyClient<'_>, person: &str) -> Result<Value> {
 }
 
 async fn presence_is(a: &mut KeyClient<'_>, person: &str, expected: Presence) -> Result<()> {
-    timeout(Duration::from_secs(5), async {
-        loop {
-            let update = a.next_update().await?.context("presence socket closed")?;
-            if let Update::Presence(PresenceEvent::PresenceChanged { person_id, status }) = update
-                && person_id == person
-            {
-                assert_eq!(status, expected);
-                return Ok::<_, anyhow::Error>(());
-            }
-        }
-    })
+    // The directory reports what members were last told. A notice only triggers a re-check:
+    // an older one for the same status can still be queued from a wait that ended early.
+    super::wait::until(
+        a,
+        "presence change",
+        async |a| Ok(member(a, person).await?["presence"] == json!(expected)),
+        |_| false,
+    )
     .await
-    .context("waiting for presence event")??;
-    assert_eq!(member(a, person).await?["presence"], json!(expected));
+}
+
+/// Read every update already sent, so a later window only sees new ones.
+async fn drain(a: &mut KeyClient<'_>) -> Result<()> {
+    while let Ok(update) = timeout(Duration::from_millis(200), a.next_update()).await {
+        update?.context("event socket closed")?;
+    }
     Ok(())
 }
 
@@ -75,6 +77,8 @@ pub async fn presence<'a>(
     presence_is(a, &person, Presence::Offline).await?;
     drop(b);
     tokio::time::sleep(Duration::from_millis(1500)).await;
+    // The wait above can end on the directory before the offline notice is read.
+    drain(a).await?;
     let b = KeyClient::connect(bot, identity, token).await?;
     let leaked = timeout(Duration::from_millis(1500), async {
         loop {
@@ -396,19 +400,13 @@ pub async fn emoji(a: &mut KeyClient<'_>, b: &KeyClient<'_>) -> Result<()> {
         .await?
         .error_for_status()?;
     // Everyone hears that the server changed and reloads its emoji with the directory.
-    timeout(Duration::from_secs(5), async {
-        loop {
-            let update = a.next_update().await?.context("event socket closed")?;
-            if matches!(
-                update,
-                Update::Event(rusttalk_core::keys::Event::ChannelChanged)
-            ) {
-                return Ok::<_, anyhow::Error>(());
-            }
-        }
+    super::wait::notice(a, "the emoji change event", |update| {
+        matches!(
+            update,
+            Update::Event(rusttalk_core::keys::Event::ChannelChanged)
+        )
     })
-    .await
-    .context("waiting for the emoji change event")??;
+    .await?;
     super::rejected(
         add(b, body(b, &party, "emoji", b"again")?).await?,
         StatusCode::CONFLICT,

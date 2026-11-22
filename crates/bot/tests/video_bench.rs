@@ -14,6 +14,11 @@
 //! The stack's owner invite is single-use: start a fresh stack for every run.
 #![cfg(feature = "media")]
 
+// Shared with the e2e suite, of which this bench only needs `until`.
+#[allow(dead_code)]
+#[path = "wait/mod.rs"]
+mod wait;
+
 use std::{
     env,
     path::Path,
@@ -67,13 +72,13 @@ fn cli(project: &str, command: &str) -> Result<String> {
 }
 
 async fn receive_key(client: &mut KeyClient<'_>, scope: Scope) -> Result<()> {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while client.key(scope, 1).is_none() {
-            ensure!(client.next_event().await?.is_some(), "socket closed");
-        }
-        Ok(())
-    })
-    .await?
+    wait::until(
+        client,
+        "envelope delivery",
+        async |client| Ok(client.key(scope, 1).is_some()),
+        |_| false,
+    )
+    .await
 }
 
 /// A tall page of text-like cells, scrolled a little every frame.

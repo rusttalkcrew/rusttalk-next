@@ -11,7 +11,7 @@ use rusttalk_core::{
 };
 use tokio::time::timeout;
 
-use super::LIMIT;
+use super::hang_guard;
 
 /// The next terminal message `from` someone, opened.
 async fn receive(room: &mut VoiceRoom, from: &ParticipantIdentity) -> Result<Message> {
@@ -56,7 +56,7 @@ pub async fn exercise(a: &mut VoiceRoom, b: &mut VoiceRoom) -> Result<()> {
     let (a_id, b_id) = (a.identity(), b.identity());
     let mut host = Host::default();
     a.set_terminal_share(Some(&Share { id: host.id })).await?;
-    let found = timeout(LIMIT, share(b, &a_id, true))
+    let found = timeout(hang_guard(), share(b, &a_id, true))
         .await
         .context("waiting for the terminal share")??
         .context("no share")?;
@@ -64,7 +64,7 @@ pub async fn exercise(a: &mut VoiceRoom, b: &mut VoiceRoom) -> Result<()> {
 
     let mut viewer = Viewer::new(a_id.as_str(), found.id);
     b.send_terminal(&a_id, &viewer.watch()).await?;
-    let watch = timeout(LIMIT, receive(a, &b_id))
+    let watch = timeout(hang_guard(), receive(a, &b_id))
         .await
         .context("waiting for the watch request")??;
     host.receive(b_id.as_str(), watch, true, Instant::now());
@@ -82,7 +82,7 @@ pub async fn exercise(a: &mut VoiceRoom, b: &mut VoiceRoom) -> Result<()> {
     }
     let mut feeds = Vec::new();
     while feeds.len() < 2 {
-        let message = timeout(LIMIT, receive(b, &a_id))
+        let message = timeout(hang_guard(), receive(b, &a_id))
             .await
             .context("waiting for terminal output")??;
         match viewer.receive(a_id.as_str(), message) {
@@ -106,7 +106,7 @@ pub async fn exercise(a: &mut VoiceRoom, b: &mut VoiceRoom) -> Result<()> {
 
     // B asks to type; A allows it, and what B types reaches A's shell.
     b.send_terminal(&a_id, &viewer.ask()).await?;
-    let ask = timeout(LIMIT, receive(a, &b_id))
+    let ask = timeout(hang_guard(), receive(a, &b_id))
         .await
         .context("waiting for the request to type")??;
     ensure!(
@@ -117,7 +117,7 @@ pub async fn exercise(a: &mut VoiceRoom, b: &mut VoiceRoom) -> Result<()> {
         .answer(b_id.as_str(), true, Instant::now())
         .context("no grant")?;
     a.send_terminal(&b_id, &grant).await?;
-    let granted = timeout(LIMIT, receive(b, &a_id))
+    let granted = timeout(hang_guard(), receive(b, &a_id))
         .await
         .context("waiting for the grant")??;
     ensure!(
@@ -127,7 +127,7 @@ pub async fn exercise(a: &mut VoiceRoom, b: &mut VoiceRoom) -> Result<()> {
     for message in viewer.input(b"whoami\r") {
         b.send_terminal(&a_id, &message).await?;
     }
-    let typed = timeout(LIMIT, receive(a, &b_id))
+    let typed = timeout(hang_guard(), receive(a, &b_id))
         .await
         .context("waiting for typed input")??;
     ensure!(
@@ -137,7 +137,7 @@ pub async fn exercise(a: &mut VoiceRoom, b: &mut VoiceRoom) -> Result<()> {
     );
 
     a.set_terminal_share(None).await?;
-    timeout(LIMIT, share(b, &a_id, false))
+    timeout(hang_guard(), share(b, &a_id, false))
         .await
         .context("waiting for the terminal share to end")??;
     println!(

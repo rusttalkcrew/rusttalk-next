@@ -6,9 +6,9 @@ use rusttalk_core::{
     client::{Event, KeyClient, MessageBody, MessageError},
     keys::{self, KeyState, Scope},
     messages::{Ballot, MessageContext, Poll, PollPart, tally},
+    presence::Update,
 };
 use serde_json::{Value, json};
-use std::time::Duration;
 
 const TEXT_A: &str = "W07 Quartz Text from A";
 const TEXT_B: &str = "W07 Amethyst Text from B";
@@ -61,26 +61,30 @@ pub(super) async fn wait_event(
 ) -> Result<()> {
     let channel = encode(&scope.id);
     let id = encode(id);
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let event = client.next_event().await?.context("chat socket closed")?;
-            match event {
-                Event::MessageCreated { channel: c, id: m }
-                    if !deleted && c == channel && m == id =>
-                {
-                    return Ok(());
-                }
-                Event::MessageDeleted { channel: c, id: m }
-                    if deleted && c == channel && m == id =>
-                {
-                    return Ok(());
-                }
-                _ => (),
+    let record = path(scope, &format!("/{id}"));
+    super::wait::until(
+        client,
+        "message event",
+        // The record is stored before its notice goes out, so it settles the wait as well.
+        async |client| {
+            let status = client.request(Method::GET, &record).send().await?.status();
+            ensure!(
+                status.is_success() || status == StatusCode::NOT_FOUND,
+                "reading the message got {status}"
+            );
+            Ok(status.is_success() != deleted)
+        },
+        |update| match update {
+            Update::Event(Event::MessageCreated { channel: c, id: m }) => {
+                !deleted && *c == channel && *m == id
             }
-        }
-    })
+            Update::Event(Event::MessageDeleted { channel: c, id: m }) => {
+                deleted && *c == channel && *m == id
+            }
+            _ => false,
+        },
+    )
     .await
-    .context("waiting for message event")?
 }
 
 pub(super) async fn exchange(
@@ -200,7 +204,8 @@ pub(super) async fn scenario(
     let record = a.send_message(&text.id, &edit).await?;
     wait_event(b, text, &record.id, false).await?;
     let dm_id = encode(&dm.id);
-    tokio::time::timeout(Duration::from_secs(5), async {
+    // About the notices themselves: C's socket is older than the message, so it can't miss them.
+    super::wait::within("a public-channel event on outsider socket", async {
         loop {
             match c.next_event().await?.context("outsider socket closed")? {
                 Event::DmCreated { channel }
@@ -218,8 +223,7 @@ pub(super) async fn scenario(
             }
         }
     })
-    .await
-    .context("waiting for a public-channel event on outsider socket")??;
+    .await?;
     let delivered = b.message(&text.id, &record.id).await?;
     assert!(b.open_message(&text.id, &delivered).await? == edit);
     assert_eq!(
@@ -379,7 +383,9 @@ async fn poll(
     // A counts from what it reads back, as the app does.
     let (mut ballots, mut ends) = (Vec::new(), Vec::new());
     let mut question = None;
-    for record in a.message_page(&text.id, None, 10).await? {
+    // Just the poll's five records: an older page reaches W07's forged edit, whose original
+    // is deleted, so opening it fails.
+    for record in a.message_page(&text.id, None, 5).await? {
         match a.open_message(&text.id, &record).await?.poll {
             Some(PollPart::Open(poll)) if record.id == posted.id => question = Some(poll),
             Some(PollPart::Vote {

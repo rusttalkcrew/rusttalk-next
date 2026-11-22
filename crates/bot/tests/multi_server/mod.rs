@@ -363,7 +363,6 @@ async fn tone(
     hz: u32,
 ) -> Result<()> {
     use rusttalk_bot::voice::{hear_tone, send_tone, source};
-    use std::time::Duration;
     use tokio::{task::JoinSet, time::timeout};
 
     let voice = owner
@@ -378,7 +377,7 @@ async fn tone(
     let mut tones = JoinSet::new();
     tones.spawn(send_tone(source, move || hz));
     timeout(
-        Duration::from_secs(5),
+        super::wait::hang_guard(),
         hear_tone(&mut listener, Some(&sender.identity()), hz),
     )
     .await??;
