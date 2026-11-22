@@ -498,6 +498,7 @@ pub struct Picture {
 
 #[derive(Clone)]
 pub struct Device {
+    pub signing_key: Id,
     pub name: String,
     pub fingerprint: String,
 }

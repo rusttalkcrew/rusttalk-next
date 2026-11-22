@@ -132,6 +132,7 @@ pub struct Home {
     sending: VecDeque<Outgoing>,
     emoji_picker: Picker,
     pub confirm_sign_out: bool,
+    pub remove_device: Option<crate::settings::RemoveDevice>,
     pub error: Option<String>,
     pub key_storage: crate::key_storage::Form,
     pub server_settings: Option<admin::Settings>,
@@ -356,6 +357,7 @@ impl Home {
             sending: VecDeque::new(),
             emoji_picker: Picker::new(&data_dir),
             confirm_sign_out: false,
+            remove_device: None,
             error: None,
             key_storage: Default::default(),
             server_settings: None,
@@ -593,6 +595,23 @@ impl Home {
             tracing::warn!(error = %format_args!("{error:#}"), "saving deleted DM messages failed");
         }
         self.net.sync(vec![edit]);
+    }
+
+    pub fn remove_device(
+        &mut self,
+        record: &rusttalk_core::identity::Revocation,
+    ) -> anyhow::Result<()> {
+        self.net.remove_device(record)?;
+        for server in &mut self.servers {
+            for member in &mut server.dir.members {
+                if &member.person == record.person_id() {
+                    member
+                        .devices
+                        .retain(|d| &d.signing_key != record.device_signing_key());
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Publish the synced settings that changed since the last sync.

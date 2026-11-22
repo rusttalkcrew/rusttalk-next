@@ -96,6 +96,24 @@ impl Revocations {
         self.remember(&record)
     }
 
+    /// Save a locally signed removal before device sync attempts any network delivery.
+    pub fn remove_other_device(
+        &self,
+        current: &DeviceCertificate,
+        record: &Revocation,
+    ) -> Result<()> {
+        ensure!(
+            record.person_id() == current.person_id(),
+            "wrong revocation owner"
+        );
+        ensure!(
+            record.device_signing_key() != current.signing_key().as_bytes(),
+            "cannot remove current device"
+        );
+        self.remember(record)?;
+        Ok(())
+    }
+
     pub(super) fn remember(&self, record: &Revocation) -> Result<bool> {
         let dir = self.0.join(filename(record.person_id()));
         let file = dir.join(filename(record.device_signing_key()));
@@ -222,6 +240,33 @@ impl Revocations {
 mod tests {
     use super::*;
     use crate::identity::{DeviceIdentity, revoke_device};
+
+    #[test]
+    fn removal_only_saves_a_sibling_signed_by_this_account() {
+        let dir = tempfile::tempdir().unwrap();
+        let records = Revocations::in_profile(dir.path());
+        let (words, current) = DeviceIdentity::create("current").unwrap();
+        let (foreign, _) = DeviceIdentity::create("other").unwrap();
+        let sibling = DeviceIdentity::add_device(&words, "sibling").unwrap();
+        let current = current.certificate;
+        let target = sibling.certificate.signing_key().to_bytes();
+        for record in [
+            revoke_device(&foreign, target).unwrap(),
+            revoke_device(&words, current.signing_key().to_bytes()).unwrap(),
+        ] {
+            assert!(records.remove_other_device(&current, &record).is_err());
+        }
+        assert!(records.records(current.person_id()).unwrap().is_empty());
+        let signed = revoke_device(&words, target).unwrap();
+        records.remove_other_device(&current, &signed).unwrap();
+        assert_eq!(
+            Revocations::in_profile(dir.path())
+                .records(current.person_id())
+                .unwrap()[0]
+                .to_bytes(),
+            signed.to_bytes()
+        );
+    }
 
     #[test]
     fn corrupt_or_misfiled_records_do_not_block_other_records_or_get_relayed() {

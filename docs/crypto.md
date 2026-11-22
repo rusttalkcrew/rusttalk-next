@@ -130,7 +130,9 @@ password file can be guessed offline, slowed by Argon2id, and protects nothing
 once RustTalk is running and unlocked.
 
 The recovery words and root signing key are never stored. Adding or revoking
-a device requires the recovery words again. The client records the person
+a device requires the recovery words again. Settings lists other verified devices
+from joined servers by their signing-key fingerprint. Removal signs one record
+with the re-derived root and saves it before attempting device sync. The client records the person
 fingerprint in the startup log.
 
 ### Device sync
