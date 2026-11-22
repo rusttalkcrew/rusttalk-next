@@ -208,8 +208,9 @@ Rough effort for one person who knows the code base.
   are then locked with it in one atomic replace before the account opens, and
   no plain key file is ever written. A key file is never refused or
   destroyed: writing other keys over it (recovery words on a locked profile,
-  a new account after a cut-short save) first renames it to
-  `identity.key.replaced-<unix time>`, and writing the same keys again only
+  a new account after a cut-short save) first moves it to
+  `identity.key.replaced-<unix time>`, a file without a password locked with
+  the new one on the way, and writing the same keys again only
   finishes what was missing. Those files are kept until sign-out removes them;
   they can also be deleted by hand once the account works. The protected file without
   a password is off on phones: a debuggable test build, a rooted phone or a

@@ -528,14 +528,19 @@ impl Keystore {
             // file replacing the plain one in one rename, before the account opens.
             // They stay here until the file and keystore.json are both on disk, so a
             // failure can be tried again.
-            self.write_copy(kind, sealer.as_ref(), secret)?;
+            let written = self.write_copy(kind, sealer.as_ref(), secret);
+            // Once the sealed file is in place, its key stays, so a retry with a new
+            // key still recognises these keys on disk instead of setting them aside.
+            if !matches!(written, Err(WriteError::Before(_))) {
+                self.sealer = sealer;
+            }
+            written?;
             self.record(|state| {
                 state.storage = Some(kind);
                 state.keys_saved = true;
             })?;
             let secret = self.unprotected.take().expect("checked above");
             tracing::info!("key file locked with the new password");
-            self.sealer = sealer;
             return load(&secret).map(|identity| Chosen::Opened(Box::new(identity)));
         }
         self.record(|state| {
@@ -615,16 +620,17 @@ impl Keystore {
             cleanup.push(Place::Keychain);
         }
         self.remove_temp_files();
-        remove(&self.dir.join(KEY_FILE))?;
-        // Signing out means no keys stay behind, set-aside ones included.
-        for entry in fs::read_dir(&self.dir)
-            .context("list profile folder")?
-            .flatten()
-        {
-            if entry.file_name().to_string_lossy().starts_with(REPLACED) {
-                remove(&entry.path())?;
+        // Phones: no keys stay behind, set-aside ones included. They go first, so a
+        // failure leaves the profile signed in and sign-out can be tried again.
+        if self.password_only {
+            for entry in fs::read_dir(&self.dir).context("list profile folder")? {
+                let entry = entry.context("list profile folder")?;
+                if entry.file_name().to_string_lossy().starts_with(REPLACED) {
+                    remove(&entry.path())?;
+                }
             }
         }
+        remove(&self.dir.join(KEY_FILE))?;
         self.sync()?;
         cleanup.retain(|place| *place != Place::File);
         self.record(|state| {
@@ -859,9 +865,10 @@ impl Keystore {
         let Some(file) = self.read_key_file()? else {
             return Ok(());
         };
-        let on_disk = match plain(&file) {
-            Ok(keys) => Some(Zeroizing::new(keys.to_vec())),
-            Err(_) => [self.sealer.as_ref(), sealer]
+        let unsealed = plain(&file).ok();
+        let on_disk = match unsealed {
+            Some(keys) => Some(Zeroizing::new(keys.to_vec())),
+            None => [self.sealer.as_ref(), sealer]
                 .into_iter()
                 .flatten()
                 .find_map(|sealer| sealer.decrypt(file.strip_prefix(&sealer.header)?).ok()),
@@ -880,7 +887,19 @@ impl Keystore {
             .map(|name| self.dir.join(name))
             .find(|path| !path.exists())
             .expect("a free name");
-        fs::rename(self.dir.join(KEY_FILE), &aside).context("set the old key file aside")?;
+        match unsealed {
+            // Keys without a password are kept locked with the new one; the plain
+            // file goes only when the new key file replaces it.
+            Some(keys) => {
+                let sealer = (sealer.or(self.sealer.as_ref()))
+                    .context("no password to lock the old key file with")?;
+                write_atomic(&aside, &sealer.seal(keys)?)?;
+            }
+            None => {
+                fs::rename(self.dir.join(KEY_FILE), &aside)
+                    .context("set the old key file aside")?;
+            }
+        }
         self.sync()?;
         tracing::warn!(file = %aside.display(), "kept a key file with other keys");
         Ok(())
@@ -1225,12 +1244,15 @@ mod tests {
                 .unwrap()
                 .starts_with(SEALED)
         );
-        // Trying again in the same run opens the same account.
+        // Trying again in the same run opens the same account. The password is
+        // typed again, so its key has a new salt: the file on disk still counts as
+        // these keys, and nothing is set aside.
         let key = sealer(&store, "hunter2");
         let Chosen::Opened(opened) = store.choose(Kind::Password, key).unwrap() else {
             panic!("the keys should open");
         };
         assert!(same(&opened, &me));
+        assert!(set_aside(dir.path()).is_empty());
         drop(store);
 
         let (mut store, start) = open_phone(dir.path());
@@ -1280,6 +1302,41 @@ mod tests {
         fs::rename(&aside[0], dir.path().join(KEY_FILE)).unwrap();
         let (mut store, _) = open_phone(dir.path());
         assert!(same(&unlock(&mut store, "forgotten").unwrap(), &old));
+    }
+
+    #[test]
+    fn a_phone_locks_a_plain_key_file_it_sets_aside() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, _) = open(dir.path(), &down());
+        store.choose(Kind::File, None).unwrap();
+        let old = identity();
+        store.save(&old).unwrap();
+        drop(store);
+
+        // The plain keys are no longer pending (as after recovery words), so a new
+        // account is written over them.
+        let (mut store, start) = open_phone(dir.path());
+        assert!(matches!(start, Start::Choose));
+        store.unprotected = None;
+        let key = sealer(&store, "hunter2");
+        store.choose(Kind::Password, key).unwrap();
+        let new = identity();
+        store.save(&new).unwrap();
+        drop(store);
+
+        let aside = set_aside(dir.path());
+        assert_eq!(aside.len(), 1);
+        for path in fs::read_dir(dir.path()).unwrap().flatten() {
+            let bytes = fs::read(path.path()).unwrap();
+            assert!(!bytes.starts_with(PLAIN), "no plain key file is left");
+        }
+        assert!(fs::read(&aside[0]).unwrap().starts_with(SEALED));
+        let (mut store, _) = open_phone(dir.path());
+        assert!(same(&unlock(&mut store, "hunter2").unwrap(), &new));
+        drop(store);
+        fs::rename(&aside[0], dir.path().join(KEY_FILE)).unwrap();
+        let (mut store, _) = open_phone(dir.path());
+        assert!(same(&unlock(&mut store, "hunter2").unwrap(), &old));
     }
 
     #[test]
