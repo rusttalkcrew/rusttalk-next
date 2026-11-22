@@ -275,7 +275,8 @@ pub async fn exercise(
         }).await?;
         (listening, speaking)
     };
-    let revoked = rusttalk_core::identity::revoke_device(&peer_words, device)?;
+    let revoked =
+        rusttalk_core::identity::revoke_device(&peer_words, peer.certificate.person_id(), device)?;
     peer_a
         .request(Method::POST, "/v1/me/revocations")
         .json(&json!({"record": encode(&revoked.to_bytes())}))
@@ -340,9 +341,10 @@ pub async fn exercise(
     // An authenticated sync blob can be made by any device holding the sync key.
     // A restored owner must relay only records signed by the owner's root.
     use rusttalk_core::client::{revocations::Revocations, sync};
-    let foreign_words = DeviceIdentity::create("foreign signer")?.0;
+    let (foreign_words, foreign) = DeviceIdentity::create("foreign signer")?;
     let forged = rusttalk_core::identity::revoke_device(
         &foreign_words,
+        foreign.certificate.person_id(),
         peer.certificate.signing_key().to_bytes(),
     )?;
     let signed = encode(&revoked.to_bytes());

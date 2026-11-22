@@ -341,13 +341,17 @@ impl Revocation {
 
 pub fn revoke_device(
     words: &str,
+    person: &PersonId,
     device_signing_key: [u8; 32],
 ) -> Result<Revocation, IdentityError> {
     public_key(&device_signing_key)?;
     let (root, _) = derive_keys(&parse_words(words)?);
+    if root.verifying_key().as_bytes() != person {
+        return Err(IdentityError::InvalidWords);
+    }
     let revoked_at = unix_seconds()?;
     Ok(Revocation {
-        person_id: root.verifying_key().to_bytes(),
+        person_id: *person,
         device_signing_key,
         revoked_at,
         signature: root.sign(&revocation_payload(&device_signing_key, revoked_at)),
@@ -394,8 +398,9 @@ impl WordConfirmation {
 }
 
 fn parse_words(words: &str) -> Result<Mnemonic, IdentityError> {
-    let mnemonic = Mnemonic::parse_in_normalized(Language::English, &words.to_lowercase())
-        .map_err(|_| IdentityError::InvalidWords)?;
+    let mnemonic =
+        Mnemonic::parse_in_normalized(Language::English, &Zeroizing::new(words.to_lowercase()))
+            .map_err(|_| IdentityError::InvalidWords)?;
     if mnemonic.word_count() != WORD_COUNT {
         return Err(IdentityError::InvalidWords);
     }

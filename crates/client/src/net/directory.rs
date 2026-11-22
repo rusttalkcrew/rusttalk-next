@@ -470,6 +470,7 @@ async fn build(
             .devices()
             .filter(|device| device.person_id() == &person)
             .map(|device| Device {
+                signing_key: device.signing_key().to_bytes(),
                 name: device.name().to_owned(),
                 fingerprint: fingerprint(device.signing_key().as_bytes()),
             })
@@ -802,6 +803,7 @@ mod tests {
             devices: devices
                 .iter()
                 .map(|fp| Device {
+                    signing_key: [0; 32],
                     name: "Desktop".into(),
                     fingerprint: (*fp).into(),
                 })

@@ -185,7 +185,7 @@ fn revocation_requires_the_same_person_and_device() {
         .certificate;
     let person = *first.person_id();
     let device = first.signing_key().to_bytes();
-    let bytes = revoke_device(&words, device).unwrap().to_bytes();
+    let bytes = revoke_device(&words, &person, device).unwrap().to_bytes();
     let revocation = Revocation::verify(person, &bytes).unwrap();
     assert_eq!(revocation.to_bytes(), bytes);
     assert!(!first.is_revoked(&[]));
@@ -193,7 +193,12 @@ fn revocation_requires_the_same_person_and_device() {
     assert!(first.is_revoked(&revocations));
     assert!(!second.is_revoked(&revocations));
 
-    let foreign = revoke_device(&other_words(), device).unwrap();
+    let other = DeviceIdentity::add_device(&other_words(), "Other").unwrap();
+    assert!(matches!(
+        revoke_device(&other_words(), &person, device),
+        Err(IdentityError::InvalidWords)
+    ));
+    let foreign = revoke_device(&other_words(), other.certificate.person_id(), device).unwrap();
     let foreign_bytes = foreign.to_bytes();
     assert!(matches!(
         Revocation::verify(person, &foreign_bytes),

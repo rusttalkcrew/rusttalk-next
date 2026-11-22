@@ -479,7 +479,7 @@ pub fn show(
         },
     );
     home.settings = Some(if open_news { Tab::WhatsNew } else { tab });
-    if close && !home.confirm_sign_out {
+    if close && !home.confirm_sign_out && home.remove_device.is_none() {
         home.settings = None;
         home.error = None;
         home.name_draft = None;
@@ -487,6 +487,39 @@ pub fn show(
         home.publish_settings();
     }
 
+    if let Some(form) = &mut home.remove_device {
+        let field = UiId::unique("remove-device-words");
+        let (action, dismissed) =
+            ui::dialog(ctx, "remove-device", t!("settings.remove_device"), |ui| {
+                form.show(ui, field)
+            });
+        if dismissed || action.is_some() {
+            ctx.data_mut(|d| d.remove::<egui::text_edit::TextEditState>(field));
+            let form = home.remove_device.take().expect("open removal");
+            if action == Some(true) {
+                match rusttalk_core::identity::revoke_device(
+                    &form.words,
+                    home.identity.certificate.person_id(),
+                    form.target,
+                ) {
+                    Ok(record) => {
+                        if let Err(error) = home.remove_device(&record) {
+                            tracing::warn!(%error, "could not save device removal");
+                            home.error = Some(t!("settings.remove_failed").into());
+                        } else {
+                            home.error = None;
+                        }
+                    }
+                    Err(_) => {
+                        home.remove_device = Some(RemoveDevice {
+                            error: Some(t!("settings.remove_words_error")),
+                            ..RemoveDevice::new(form.target)
+                        })
+                    }
+                }
+            }
+        }
+    }
     if !home.confirm_sign_out {
         return None;
     }
@@ -720,14 +753,81 @@ fn call_sounds(ui: &mut Ui, prefs: &mut crate::sounds::Preferences) {
     });
 }
 
+pub struct RemoveDevice {
+    target: [u8; 32],
+    words: zeroize::Zeroizing<String>,
+    error: Option<&'static str>,
+}
+
+impl RemoveDevice {
+    fn new(target: [u8; 32]) -> Self {
+        Self {
+            target,
+            words: crate::key_storage::secret_input(),
+            error: None,
+        }
+    }
+
+    fn show(&mut self, ui: &mut Ui, field: UiId) -> Option<bool> {
+        ui.monospace(fingerprint(&self.target));
+        ui.label(t!("settings.remove_effect"));
+        let label = ui.label(t!("app.recovery_words"));
+        ui.add(
+            ui::field(&mut *self.words)
+                .password()
+                .id(field)
+                .desired_width(f32::INFINITY),
+        )
+        .labelled_by(label.id);
+        error_text(ui, self.error);
+        let mut answer = None;
+        ui::footer(ui, |ui| {
+            if ui
+                .add_enabled_ui(!self.words.trim().is_empty(), |ui| {
+                    ui::danger(ui, t!("settings.remove_device"))
+                })
+                .inner
+                .clicked()
+            {
+                answer = Some(true);
+            }
+            if ui::secondary(ui, t!("common.cancel")).clicked() {
+                answer = Some(false);
+            }
+        });
+        answer
+    }
+}
+
 fn devices_page(ui: &mut Ui, home: &mut Home) {
     ui::page_section(ui, t!("settings.this_device"));
     ui::setting_row(
         ui,
         home.identity.certificate.name(),
-        t!("settings.this_computer"),
+        &format!(
+            "{} · {}",
+            t!("settings.this_computer"),
+            fingerprint(home.identity.certificate.signing_key().as_bytes())
+        ),
         |_| {},
     );
+    let current = &home.identity.certificate;
+    let devices: std::collections::BTreeMap<_, _> = home
+        .servers
+        .iter()
+        .filter_map(|server| server.member(current.person_id()))
+        .flat_map(|member| &member.devices)
+        .filter(|device| &device.signing_key != current.signing_key().as_bytes())
+        .map(|device| (device.signing_key, device))
+        .collect();
+    if !devices.is_empty() {
+        ui::page_section(ui, t!("settings.other_devices"));
+        for (key, device) in devices {
+            if ui.push_id(key, |ui| other_device_row(ui, device)).inner {
+                home.remove_device = Some(RemoveDevice::new(key));
+            }
+        }
+    }
     ui::danger_zone(ui, |ui| {
         ui::setting_row(
             ui,
@@ -740,6 +840,17 @@ fn devices_page(ui: &mut Ui, home: &mut Home) {
             },
         );
     });
+}
+
+fn other_device_row(ui: &mut Ui, device: &crate::server::Device) -> bool {
+    let name = if device.name.is_empty() {
+        t!("settings.device")
+    } else {
+        &device.name
+    };
+    ui::setting_row(ui, name, &device.fingerprint, |ui| {
+        ui::danger(ui, t!("settings.remove_device")).clicked()
+    })
 }
 
 /// Settings → Appearance: dark, light or the system's mode, a theme for each, and

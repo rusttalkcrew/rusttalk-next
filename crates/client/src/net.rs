@@ -485,6 +485,13 @@ impl Net {
         commands
     }
 
+    pub fn remove_device(&self, record: &rusttalk_core::identity::Revocation) -> Result<()> {
+        rusttalk_core::client::revocations::Revocations::in_profile(&self.ctx.data)
+            .remove_other_device(&self.ctx.identity.certificate, record)?;
+        self.sync(Vec::new());
+        Ok(())
+    }
+
     /// Publish local edits to this person's other devices.
     pub fn sync(&self, edits: Vec<Edit>) {
         let ctx = self.ctx.clone();
