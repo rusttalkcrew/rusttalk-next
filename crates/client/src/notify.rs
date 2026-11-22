@@ -525,7 +525,7 @@ impl Notify {
         // Its center delivers the click to us; without an app bundle it can't, so fall
         // through to the pop-up.
         #[cfg(target_os = "macos")]
-        if macos::show(ctx, &self.clicks.0, title, &body, sound, &target) {
+        if macos::show(&ctx, &self.clicks.0, title, &body, sound, &target) {
             return;
         }
         let (title, failed) = (title.to_owned(), self.failed);
