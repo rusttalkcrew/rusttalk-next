@@ -739,7 +739,6 @@ async fn run(
             &mut commands,
             connecting,
             Some(&mut queued),
-            &mut removals,
         )
         .await
         else {
@@ -808,17 +807,9 @@ async fn run(
         }
         ctx.send(Update::Status(url.clone(), Status::Offline));
         let wait = tokio::time::sleep(Duration::from_secs(delay));
-        if offline(
-            &ctx,
-            &url,
-            &mut state,
-            &mut commands,
-            wait,
-            None,
-            &mut removals,
-        )
-        .await
-        .is_none()
+        if offline(&ctx, &url, &mut state, &mut commands, wait, None)
+            .await
+            .is_none()
         {
             return;
         }
@@ -837,7 +828,6 @@ async fn offline<T>(
     commands: &mut UnboundedReceiver<Command>,
     until: impl Future<Output = T>,
     mut queued: Option<&mut VecDeque<Command>>,
-    removals: &mut tokio::sync::watch::Receiver<()>,
 ) -> Option<T> {
     tokio::pin!(until);
     // A capture that ends by itself (its window closed) still stops sharing, and control.
@@ -845,10 +835,6 @@ async fn offline<T>(
     loop {
         tokio::select! {
             done = &mut until => return Some(done),
-            _ = removals.changed(), if state.voice.is_some() => {
-                // Without the key connection this call cannot move its outgoing media.
-                voice::close(ctx, state);
-            }
             next = next_voice(&mut state.voice) => voice_next(ctx, url, None, state, next).await,
             _ = finished.tick(), if state.voice.is_some() => {
                 stop_finished_shares(ctx, url, None, state).await;
@@ -1075,7 +1061,7 @@ async fn serve(
             _ = removals.changed() => {
                 if let Err(error) = client.sync().await {
                     tracing::warn!(%error, "could not rotate after device removal");
-                    voice::close(ctx, state);
+                    sync_voice_key(ctx, client, state);
                     return End::Error;
                 }
                 sync_voice_key(ctx, client, state);
@@ -1109,7 +1095,7 @@ async fn serve(
             }
             () = rekey_due => {
                 match client.sync().await {
-                    Ok(()) => save_pins(ctx, url, client, state),
+                    Ok(()) => { sync_voice_key(ctx, client, state); save_pins(ctx, url, client, state); },
                     Err(error) => {
                         tracing::warn!(error = %format_args!("{error:#}"), "DM key recovery failed");
                         // Wait before the next try, so a fast failure can't spin.
@@ -1151,6 +1137,7 @@ async fn run_command(
     if let Err(error) = on_command(ctx, url, client, state, command).await {
         tracing::warn!(error = %format_args!("{error:#}"), "server request failed");
         let text = match error.downcast_ref::<MessageError>() {
+            Some(MessageError::ServerUpdateRequired) => t!("net.rotation_update"),
             Some(MessageError::TextLimit) => t!("net.text_limit"),
             _ => t!("admin.failed"),
         };

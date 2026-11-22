@@ -959,6 +959,7 @@ net.needs_invite = Deze server vraagt nu om een uitnodiging. Vraag iemand erom.
 net.full = Deze server is vol. Vraag iemand daar om een uitnodiging.
 net.join_limit = Er zijn onlangs te veel mensen aan deze server deelgenomen. Probeer het over een uur opnieuw.
 net.device_limit = Je account heeft al 10 apparaten op deze server. Verwijder er eerst een.
+net.rotation_update = Deze server heeft een update nodig voordat je hier berichten kunt sturen.
 net.sign_in_failed = Kon niet aanmelden bij deze server.
 net.text_limit = Berichten mogen maximaal 2.000 tekens zijn.
 net.a_server = een server

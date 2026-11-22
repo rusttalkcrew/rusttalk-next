@@ -12,6 +12,9 @@ use std::{
 
 use crate::keys::Excluded;
 
+const MAX_REMOVALS: usize = 4096;
+const MAX_LINKS: usize = 65_536;
+
 type Proof = (String, String);
 #[derive(Default)]
 pub(super) struct Rotations(HashMap<Scope, HashMap<String, Arc<Proof>>>);
@@ -70,22 +73,32 @@ impl Rotations {
             .open(dir.join("store.lock"))?;
         lock.lock()?;
         let mut saved = read(path)?;
+        let mut links = saved.values().map(|s| s.scopes.len()).sum::<usize>();
+        let mut capped = false;
         for (scope, records) in &self.0 {
             for (device, proof) in records {
-                saved
+                if links >= MAX_LINKS
+                    || (saved.len() >= MAX_REMOVALS && !saved.contains_key(device))
+                {
+                    capped = true;
+                    continue;
+                }
+                if saved
                     .entry(device.clone())
                     .or_insert_with(|| Saved {
                         proof: proof.as_ref().clone(),
                         scopes: Default::default(),
                     })
                     .scopes
-                    .insert(*scope);
+                    .insert(*scope)
+                {
+                    links += 1;
+                }
             }
         }
-        ensure!(
-            saved.len() <= 4096 && saved.values().map(|s| s.scopes.len()).sum::<usize>() <= 65_536,
-            "rotation profile limit reached"
-        );
+        if capped {
+            tracing::warn!("rotation profile limit reached");
+        }
         crate::client::save_json(dir, path, &saved)?;
         #[cfg(unix)]
         for parent in [dir, dir.parent().context("missing profile revocations")?] {
@@ -126,7 +139,7 @@ fn could_read(
     scope: Scope,
     channel: Option<&crate::client::Channel>,
     pin: Option<&DmPin>,
-    roles: &[String],
+    member_roles: Option<&[String]>,
     me: &PersonId,
     person: &PersonId,
 ) -> bool {
@@ -134,11 +147,12 @@ fn could_read(
         return true;
     }
     if scope.kind == Kind::Space {
-        return !roles.is_empty();
+        return member_roles.is_some();
     }
     if let Some(pin) = pin {
         return matches!(pin, DmPin::With {peer, ..} if peer == person);
     }
+    let roles = member_roles.unwrap_or_default();
     channel.is_some_and(|ch| {
         ch.kind != "dm"
             && (roles.iter().any(|r| r == "owner")
@@ -152,17 +166,21 @@ fn could_read(
 impl KeyClient<'_> {
     pub(super) async fn find_rotations(&mut self, scopes: &[ScopeState]) -> Result<bool> {
         let me = *self.identity.certificate.person_id();
-        let mut people: HashSet<_> = self.devices.values().map(|d| *d.person_id()).collect();
-        people.insert(me);
-        for pin in self.dms.values() {
-            if let DmPin::With { peer, .. } = pin {
-                people.insert(*peer);
-            }
-        }
         let mut removed = Vec::new();
         let mut own = false;
+        let seen: HashSet<_> = self
+            .devices
+            .values()
+            .chain(self.historical_devices.values())
+            .map(|d| (*d.person_id(), d.signing_key().to_bytes()))
+            .chain(self.former_devices.iter().copied())
+            .collect();
+        let people: HashSet<_> = seen.iter().map(|(p, _)| *p).collect();
         for person in people {
             for record in self.revocations.records(&person)? {
+                if !seen.contains(&(person, *record.device_signing_key())) {
+                    continue;
+                }
                 own |= person == me;
                 removed.push((
                     person,
@@ -199,22 +217,48 @@ impl KeyClient<'_> {
             }
         }
         let channels: HashMap<_, _> = catalog.channels.iter().map(|c| (c.id, c)).collect();
+        let mut tracked: HashSet<_> = self
+            .rotations
+            .0
+            .values()
+            .flat_map(|m| m.keys().cloned())
+            .collect();
+        let mut links: usize = self.rotations.0.values().map(HashMap::len).sum();
+        let mut capped = false;
         let mut added = false;
         for state in scopes {
             let scope = state.scope;
             let channel = channels.get(&scope.id).copied();
             for (person, device, proof) in &removed {
-                let roles = roles.get(&proof.0).map_or(&[][..], Vec::as_slice);
+                let roles = roles.get(&proof.0).map(Vec::as_slice);
                 if could_read(scope, channel, self.dms.get(&scope.id), roles, &me, person) {
-                    added |= self
+                    if self
                         .rotations
+                        .0
+                        .get(&scope)
+                        .is_some_and(|m| m.contains_key(device))
+                    {
+                        continue;
+                    }
+                    if links >= MAX_LINKS
+                        || (tracked.len() >= MAX_REMOVALS && !tracked.contains(device))
+                    {
+                        capped = true;
+                        continue;
+                    }
+                    tracked.insert(device.clone());
+                    links += 1;
+                    added = true;
+                    self.rotations
                         .0
                         .entry(scope)
                         .or_default()
-                        .insert(device.clone(), Arc::clone(proof))
-                        .is_none();
+                        .insert(device.clone(), Arc::clone(proof));
                 }
             }
+        }
+        if capped {
+            tracing::warn!("rotation profile limit reached");
         }
         if added {
             self.rotation_save_pending = true;
@@ -226,6 +270,9 @@ impl KeyClient<'_> {
     }
 
     pub(super) fn rotation_proposal(&self, scope: Scope) -> (Excluded, Vec<&Proof>) {
+        if !self.create_protected_epochs {
+            return Default::default();
+        }
         match self.scopes.iter().find(|s| s.scope == scope) {
             Some(state) => {
                 // Inherit a verified envelope's policy. Without its key, only already
@@ -258,7 +305,7 @@ mod tests {
         let (words, identity) = DeviceIdentity::create("sibling").unwrap();
         let owner = identity.certificate.person_id();
         let target = identity.certificate.signing_key().to_bytes();
-        let signed = crate::identity::revoke_device(&words, target).unwrap();
+        let signed = crate::identity::revoke_device(&words, owner, target).unwrap();
         let device = keys::exclusion_id(owner, &target);
         let scope = Scope {
             kind: Kind::Channel,
@@ -311,18 +358,31 @@ mod tests {
             scope,
             Some(&channel),
             None,
-            &["friends".into()],
+            Some(&["friends".into()]),
             &me,
             &peer
         ));
-        assert!(!could_read(scope, Some(&channel), None, &[], &me, &peer));
+        assert!(!could_read(
+            scope,
+            Some(&channel),
+            None,
+            Some(&[]),
+            &me,
+            &peer
+        ));
+        let space = Scope {
+            kind: Kind::Space,
+            ..scope
+        };
+        assert!(could_read(space, None, None, Some(&[]), &me, &peer));
+        assert!(!could_read(space, None, None, None, &me, &peer));
         let pin = DmPin::With { peer, anchor: None };
-        assert!(could_read(scope, None, Some(&pin), &[], &me, &peer));
+        assert!(could_read(scope, None, Some(&pin), None, &me, &peer));
         assert!(!could_read(
             scope,
             None,
             Some(&pin),
-            &["owner".into()],
+            Some(&["owner".into()]),
             &me,
             &[4; 32]
         ));

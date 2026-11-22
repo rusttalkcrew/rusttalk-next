@@ -40,6 +40,9 @@ struct HeldKey {
 /// Wraps between refreshes of the still-missing set.
 const WRAP_BATCH: usize = 20;
 
+// Enable only after older clients can read protected commitments.
+const CREATE_PROTECTED_EPOCHS: bool = false;
+
 /// An authenticated client with a live event stream and an in-memory epoch key store.
 pub struct KeyClient<'a> {
     pub(super) server: &'a Server,
@@ -48,6 +51,9 @@ pub struct KeyClient<'a> {
     pub(super) revocations: &'a super::revocations::Revocations,
     changes: tokio::sync::watch::Receiver<()>,
     checked_removals: bool,
+    create_protected_epochs: bool,
+    update_required: HashSet<Scope>,
+    rotation_retry: Option<std::time::Instant>,
     own_revocations_changed: bool,
     session: Session,
     events: tokio_tungstenite::WebSocketStream<
@@ -73,6 +79,7 @@ pub struct KeyClient<'a> {
     pub(super) historical_devices: HashMap<HistoricalDevice, DeviceCertificate>,
     rotations: rotation::Rotations,
     rotation_save_pending: bool,
+    former_devices: HashSet<(PersonId, [u8; 32])>,
     scopes: Vec<ScopeState>,
     pub(super) opened: HashMap<[u8; 32], Opened>,
     /// Received events not yet returned, and whether key state must sync before returning them.
@@ -114,6 +121,9 @@ impl<'a> KeyClient<'a> {
             revocations,
             changes: revocations.changes(),
             checked_removals: false,
+            create_protected_epochs: CREATE_PROTECTED_EPOCHS,
+            update_required: Default::default(),
+            rotation_retry: None,
             own_revocations_changed: false,
             session: session.clone(),
             events,
@@ -125,10 +135,15 @@ impl<'a> KeyClient<'a> {
             links: HashMap::new(),
             devices: HashMap::new(),
             historical_devices: HashMap::new(),
-            rotations: rotation::Rotations::load(
-                &revocations.rotation_file(&server.known_server().server_id),
-            )?,
+            rotations: if CREATE_PROTECTED_EPOCHS {
+                rotation::Rotations::load(
+                    &revocations.rotation_file(&server.known_server().server_id),
+                )?
+            } else {
+                Default::default()
+            },
             rotation_save_pending: false,
+            former_devices: Default::default(),
             scopes: Vec::new(),
             opened: HashMap::new(),
             queued: VecDeque::new(),
@@ -138,6 +153,14 @@ impl<'a> KeyClient<'a> {
         };
         client.sync().await?;
         Ok(client)
+    }
+
+    #[cfg(feature = "rotation-test")]
+    pub fn enable_protected_epochs_for_test(&mut self) -> Result<()> {
+        self.rotations =
+            rotation::Rotations::load(&self.revocations.rotation_file(&self.space().id))?;
+        self.create_protected_epochs = true;
+        Ok(())
     }
 
     /// Return the expiry time of the active bearer token as Unix seconds.
@@ -219,8 +242,13 @@ impl<'a> KeyClient<'a> {
     /// The latest verified key once the scope is ready for use.
     pub fn current_key(&self, scope: Scope) -> Result<(i64, &Key)> {
         ensure!(
-            self.checked_removals && !self.changes.has_changed()?,
+            !self.create_protected_epochs
+                || (self.checked_removals && !self.changes.has_changed()?),
             "checking device removals"
+        );
+        ensure!(
+            !self.update_required.contains(&scope),
+            crate::messages::MessageError::ServerUpdateRequired
         );
         let current = self
             .scopes
@@ -247,7 +275,8 @@ impl<'a> KeyClient<'a> {
             let state = self.key_state().await?;
             self.checked_removals = false;
             self.changes.borrow_and_update();
-            let sibling = self.find_rotations(&state.scopes).await?;
+            let sibling =
+                self.create_protected_epochs && self.find_rotations(&state.scopes).await?;
             self.checked_removals = true;
             let missing: HashSet<_> = state
                 .scopes
@@ -381,6 +410,11 @@ impl<'a> KeyClient<'a> {
                 })
             });
             self.scopes = state.scopes;
+            self.update_required = if state.supports_exclusions {
+                Default::default()
+            } else {
+                missing.clone()
+            };
             for current in &mut self.scopes {
                 current.rotate |= missing.contains(&current.scope);
             }
@@ -389,6 +423,7 @@ impl<'a> KeyClient<'a> {
             let states: Vec<_> = (self.scopes.iter())
                 .map(|state| (state.scope, state.epoch, state.rotate))
                 .collect();
+            let mut retry = false;
             for (scope, epoch, rotate) in states {
                 if rotate || (epoch == 0 && self.is_owner().await?) {
                     if scope.kind == Kind::Channel
@@ -396,10 +431,11 @@ impl<'a> KeyClient<'a> {
                     {
                         continue;
                     }
-                    if (missing.contains(&scope) && !state.supports_exclusions)
-                        || !attempted.insert(scope)
-                    {
-                        tracing::warn!("scope paused until device removal rotation succeeds");
+                    if self.update_required.contains(&scope) || !self.may_create_epoch(scope) {
+                        continue;
+                    }
+                    if !attempted.insert(scope) {
+                        retry = true;
                         continue;
                     }
                     let next = epoch.checked_add(1).context("epoch overflow")?;
@@ -416,6 +452,7 @@ impl<'a> KeyClient<'a> {
                 }
             }
 
+            self.rotation_retry = retry.then(|| std::time::Instant::now() + backoff(1));
             let mut pending = state.pending;
             if pending.iter().any(|need| need.scope.kind == Kind::Channel) {
                 // Learn which channels are DMs before wrapping any channel key.
@@ -590,6 +627,18 @@ impl<'a> KeyClient<'a> {
             .context("missing roles")?
             .iter()
             .any(|role| role == "owner"))
+    }
+
+    fn may_create_epoch(&self, scope: Scope) -> bool {
+        self.create_protected_epochs
+            || !self.scopes.iter().any(|s| {
+                s.scope == scope
+                    && (!s.excluded.is_empty()
+                        || self
+                            .keys
+                            .get(&(scope, s.epoch))
+                            .is_some_and(|held| !held.excluded.is_empty()))
+            })
     }
 
     /// Start an epoch with this key. Its commitment, or `None` when another epoch or
@@ -896,6 +945,9 @@ impl<'a> KeyClient<'a> {
                 self.rekeyed.remove(&slot);
                 continue;
             }
+            if !self.may_create_epoch(scope) {
+                continue;
+            }
             let current = self.key(scope, epoch).cloned();
             let linked = match recovery(current.is_some(), tries) {
                 Recovery::Wait => continue,
@@ -937,16 +989,23 @@ impl<'a> KeyClient<'a> {
         Ok(changed)
     }
 
-    /// The earliest time a DM epoch that isn't trusted yet should be tried again,
+    /// The earliest retry for an untrusted DM epoch or a lost rotation race,
     /// so the connection can sync then even without an event.
     pub fn next_rekey(&self) -> Option<std::time::Instant> {
-        self.rekeyed.values().map(|(_, next)| *next).min()
+        self.rekeyed
+            .values()
+            .map(|(_, next)| *next)
+            .chain(self.rotation_retry)
+            .min()
     }
 
     /// A timer-driven sync failed before it could move the due attempts on: push
     /// them back, waiting longer after each failure in a row, so it can't spin.
     pub fn rekey_failed(&mut self) {
         self.rekey_failures += 1;
+        if let Some(next) = &mut self.rotation_retry {
+            *next = std::time::Instant::now() + backoff(self.rekey_failures);
+        }
         delay_due(
             &mut self.rekeyed,
             std::time::Instant::now(),
@@ -1019,6 +1078,16 @@ impl<'a> KeyClient<'a> {
         }
         for (id, certificate) in &self.devices {
             if !devices.contains_key(id) {
+                if self.create_protected_epochs {
+                    if self.former_devices.len() < super::revocations::MAX_PER_REPLY {
+                        self.former_devices.insert((
+                            *certificate.person_id(),
+                            certificate.signing_key().to_bytes(),
+                        ));
+                    } else {
+                        tracing::warn!("former device limit reached");
+                    }
+                }
                 tracing::info!(
                     person = %fingerprint(certificate.person_id()),
                     device = %fingerprint(certificate.signing_key().as_bytes()),

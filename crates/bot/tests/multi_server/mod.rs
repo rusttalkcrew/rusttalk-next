@@ -284,6 +284,11 @@ pub async fn exercise(
         .await?
         .error_for_status()?;
     owner_a.sync().await?;
+    // A default reader keeps the ordinary epoch usable after the profile learns a removal.
+    let before = owner_b.current_key(text_b)?.0;
+    owner_b.sync().await?;
+    assert_eq!(owner_b.current_key(text_b)?.0, before);
+    owner_b.enable_protected_epochs_for_test()?;
     let post = sibling_client
         .send_message(
             &text_b.id,

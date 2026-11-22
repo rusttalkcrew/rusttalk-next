@@ -62,7 +62,7 @@ key wraps, envelope senders, live-file acceptance and message verification
 (including cached or archived certificates). Unseen older messages from that
 device also fail verification: the delivery time cannot prove a signature
 predates revocation. Previously displayed plaintext and previously shared keys
-cannot be recalled. A client that knows about a removal requires a fresh epoch for the
+cannot be recalled. Client-started protected epochs are disabled during rollout. When enabled, a client that knows about a removal requires a fresh epoch for the
 person's readable scopes, including DMs and voice channels. A sibling waits
 0–249 ms and other readers wait 250–1,249 ms, then fetch again. An online
 reader proposes a random key if the current epoch still lacks the exclusion.
@@ -221,15 +221,15 @@ Recipients verify it with the opened key and the advertised exclusions.
 Even a reader unaware of the original removal refuses to wrap this key to
 a listed device. Earlier epochs keep their original commitments and keys.
 
-Updated clients use their verified removals and the visible channel permissions
+With creation enabled, clients use their verified removals and the visible channel permissions
 or pinned DM pair to determine which exclusions they require for sending.
 The profile records each verified removal and its affected scopes per server,
 so withholding a member or changing a role after restart cannot undo the
 requirement. The per-server file is bounded at 4,096 removals and 65,536
-scope associations. A storage error or exceeded limit fails reconciliation.
+scope associations. At either limit clients log and skip additional entries.
 They refuse an old key in those scopes if the server suppresses rotation.
 New media uses the rotated channel epoch for voice, camera, screen and shared
-audio. An offline call closes on a removal if it cannot refresh its keys.
+audio. A call keeps its current key while waiting for a wrap. A confirmed removal that requires a server update ends the affected call.
 Clients that do not support this commitment cannot open affected epochs.
 A server can still hide a removal or a relationship that a device has never
 observed, or partition clients. Data already delivered stays with its readers.

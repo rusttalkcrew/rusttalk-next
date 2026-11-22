@@ -71,6 +71,7 @@ windows-capture = { version = "=2.0.1", optional = true }
 windows = { version = "0.62.2", features = ["Wdk_System_SystemServices", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_System_Com", "Win32_System_Threading", "Win32_System_SystemInformation", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"], optional = true }
 
 [features]
+rotation-test = []
 https-client = ["dep:reqwest", "dep:rustls"]
 client = ["dep:anyhow", "dep:image", "dep:futures-util", "https-client", "reqwest/json", "reqwest/stream", "dep:serde_json", "dep:tempfile", "dep:tokio", "dep:tokio-tungstenite", "dep:tracing"]
 livekit-tls = ["dep:async-trait", "dep:futures-util", "dep:livekit-net", "dep:livekit-protocol", "dep:prost", "dep:reqwest", "dep:rustls", "dep:tokio", "dep:tokio-tungstenite"]

@@ -247,9 +247,12 @@ With `supports_exclusions`, scopes and wrapped keys may carry `excluded`, a
 sorted set of `base64url(person_id).base64url(device_signing_key)` strings. New epochs carry forward the full
 set. Adding a key authorizes a reader to advance a scope even when the rotate
 flag is clear. Supply a root-signed `[person_id, record]` for each newly excluded
-key. The API checks current read access for each owner and limits each set and
-proof list to 4,096 entries, with at most 64 devices per owner in a scope. The signed envelope commitment authenticates the
-set (see docs/crypto.md).
+key. The API checks that the device was registered to that owner on this server
+and that the owner currently reads the scope. Dropping previous exclusions returns
+HTTP 422 `epoch_exclusions_required`. Each set and proof list is limited to 4,096
+entries, with at most 64 devices per owner in a scope. The signed envelope
+commitment authenticates the set (see docs/crypto.md). Protocol version 2
+clients ship with protected epoch creation disabled during rollout.
 
 Scope state entries have `{scope, epoch, rotate, excluded?}`. Pending entries have
 `{scope, epoch, device}`. Envelope entries add `sender`, `commitment`, `envelope` and optional `excluded`

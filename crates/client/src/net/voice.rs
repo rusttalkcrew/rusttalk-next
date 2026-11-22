@@ -12,7 +12,7 @@ use rusttalk_core::{
     auth::{decode, encode, voice_identity},
     camera::CameraOptions,
     client::{
-        Event, KeyClient, MessageRecord,
+        Event, KeyClient, MessageError, MessageRecord,
         voice::{
             ConnectionState, DataLiveFiles, LiveDownload, LiveFileEvent, NativeAudioSource,
             NativeVideoSource, RemoteParticipant, RoomEvent, TrackSid, TrackSource, VoiceRoom,
@@ -589,8 +589,10 @@ pub(super) fn sync_voice_key(ctx: &Ctx, client: &KeyClient<'_>, state: &mut Stat
     if let Some(live) = &mut state.voice
         && let Err(error) = live.room.sync_key(client)
     {
-        tracing::warn!(error = %format_args!("{error:#}"), "voice key rotation failed; leaving room");
-        close(ctx, state);
+        tracing::warn!(error = %format_args!("{error:#}"), "voice key rotation pending");
+        if error.downcast_ref::<MessageError>() == Some(&MessageError::ServerUpdateRequired) {
+            close(ctx, state);
+        }
     }
 }
 

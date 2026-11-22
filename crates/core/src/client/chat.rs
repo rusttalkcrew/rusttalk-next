@@ -257,6 +257,7 @@ impl KeyClient<'_> {
             self.check_edit(channel, &id, cert.person_id(), &original)
                 .await?;
         }
+        let (epoch, key) = self.current_key(scope)?;
         // A pinned DM only takes messages on an epoch that is the pair's alone.
         match self.dms.get(channel) {
             Some(DmPin::With { peer, .. }) => {
@@ -268,7 +269,6 @@ impl KeyClient<'_> {
             Some(DmPin::Blocked) => anyhow::bail!("DMs on this server are paused"),
             None => {}
         }
-        let (epoch, key) = self.current_key(scope)?;
         let key = key.clone();
         self.post_at(channel, id, epoch, &key, body, backfill_at)
             .await

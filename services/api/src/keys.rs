@@ -408,6 +408,12 @@ async fn check_rotation(
     if rotation.excluded.len() > 4096 || rotation.revocations.len() > 4096 {
         return Err(ApiError::bad_request("invalid_revocation"));
     }
+    if !expected.is_subset(&rotation.excluded) {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "epoch_exclusions_required",
+        ));
+    }
     if rotation.excluded == expected {
         return Ok(false);
     }
@@ -427,6 +433,14 @@ async fn check_rotation(
         .await?;
         if !reader {
             return Err(ApiError::forbidden("recipient_read_denied"));
+        }
+        let registered: bool = query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM member_devices WHERE person_id=?1 AND device_id=?2
+             UNION ALL SELECT 1 FROM message_senders WHERE person_id=?1 AND device_id=?2
+             UNION ALL SELECT 1 FROM revocations WHERE person_id=?1 AND device_id=?2 AND was_registered)",
+        ).bind(owner.as_slice()).bind(record.device_signing_key().as_slice()).fetch_one(&mut *db).await?;
+        if !registered {
+            return Err(ApiError::bad_request("unknown_removed_device"));
         }
         expected.insert(rusttalk_core::keys::exclusion_id(
             &owner,
@@ -741,26 +755,52 @@ mod tests {
             .await
             .unwrap();
         let signing = device.certificate.signing_key().to_bytes();
-        let proof = |phrase| {
+        let proof = |phrase, person| {
             encode(
-                &rusttalk_core::identity::revoke_device(phrase, signing)
+                &rusttalk_core::identity::revoke_device(phrase, person, signing)
                     .unwrap()
                     .to_bytes(),
             )
         };
         let mut request = Rotation {
             excluded: Excluded::from([rusttalk_core::keys::certificate_id(&device.certificate)]),
-            revocations: vec![(encode(device.certificate.person_id()), proof(&words))],
+            revocations: vec![(
+                encode(device.certificate.person_id()),
+                proof(&words, device.certificate.person_id()),
+            )],
         };
+        assert_eq!(
+            check_rotation(&mut tx, scope, 0, &request)
+                .await
+                .unwrap_err()
+                .code,
+            "unknown_removed_device"
+        );
+        register_device(&mut tx, &device.certificate).await.unwrap();
+        assert!(check_rotation(&mut tx, scope, 0, &request).await.unwrap());
+        query("INSERT INTO revocations (person_id,device_id,record) VALUES (?,?,?)")
+            .bind(device.certificate.person_id().as_slice())
+            .bind(signing.as_slice())
+            .bind(decode_bytes(&request.revocations[0].1).unwrap())
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        query("DELETE FROM member_devices WHERE device_id=?")
+            .bind(signing.as_slice())
+            .execute(&mut *tx)
+            .await
+            .unwrap();
         assert!(check_rotation(&mut tx, scope, 0, &request).await.unwrap());
         query("INSERT INTO key_epochs (scope_id,epoch,commitment,excluded) VALUES (?,1,zeroblob(32),?)").bind(encode(&scope.id)).bind(serde_json::to_string(&request.excluded).unwrap()).execute(&mut *tx).await.unwrap();
         assert!(!check_rotation(&mut tx, scope, 1, &request).await.unwrap());
-        assert!(
+        assert_eq!(
             check_rotation(&mut tx, scope, 1, &Rotation::default())
                 .await
-                .is_err()
+                .unwrap_err()
+                .status,
+            StatusCode::UNPROCESSABLE_ENTITY
         );
-        request.revocations[0].1 = proof(&other);
+        request.revocations[0].1 = proof(&other, stranger.certificate.person_id());
         assert!(check_rotation(&mut tx, scope, 0, &request).await.is_err());
         request.revocations[0].0 = encode(stranger.certificate.person_id());
         assert!(check_rotation(&mut tx, scope, 0, &request).await.is_err());
