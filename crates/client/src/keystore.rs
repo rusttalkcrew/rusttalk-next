@@ -1,16 +1,19 @@
 //! Where this device keeps its keys: the OS keychain, a protected file, or a file
 //! locked with a password (for Steam Deck Game Mode and other desktops without a
-//! keychain). `keystore.json` records the choice, so a missing keychain never
-//! silently turns into a new account.
+//! keychain). `keystore.json` records the choice, whether an account's keys were
+//! saved, and copies still to be removed. At start every place is checked, so a lost
+//! or wrong `keystore.json` never hides existing keys behind a new account.
 
 use std::{
     fs::{self, File, OpenOptions},
     io::{ErrorKind, Write},
+    ops::RangeInclusive,
     path::{Path, PathBuf},
+    thread::JoinHandle,
 };
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
-use argon2::{Algorithm, Argon2, Params, Version};
+use argon2::{Algorithm, Argon2, Block, Params, Version};
 use chacha20poly1305::{
     KeyInit, XChaCha20Poly1305, XNonce,
     aead::{Aead, Payload},
@@ -21,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 const KEY_FILE: &str = "identity.key";
-const CHOICE_FILE: &str = "keystore.json";
+const STATE_FILE: &str = "keystore.json";
 /// Profiles from before `keystore.json` kept their keys in the keychain; these files
 /// show such a profile has an account.
 const ACCOUNT_FILES: [&str; 2] = ["servers.json", "sync.json"];
@@ -37,6 +40,11 @@ const COST: Cost = Cost {
     passes: 3,
     lanes: 1,
 };
+/// The costs a key file may ask for. The header is read before it is authenticated,
+/// so a changed file must not be able to make unlocking hang or eat all memory.
+const MEMORY_KIB: RangeInclusive<u32> = 8 * 1024..=1024 * 1024;
+const PASSES: RangeInclusive<u32> = 1..=10;
+const LANES: RangeInclusive<u32> = 1..=4;
 
 /// Where the keys live.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,9 +55,34 @@ pub enum Kind {
     Password,
 }
 
-#[derive(Serialize, Deserialize)]
-struct Choice {
-    storage: Kind,
+impl Kind {
+    fn place(self) -> Place {
+        match self {
+            Kind::Keychain => Place::Keychain,
+            Kind::File | Kind::Password => Place::File,
+        }
+    }
+}
+
+/// Where a copy of the keys can be: both file kinds share `identity.key`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum Place {
+    Keychain,
+    File,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+struct State {
+    storage: Option<Kind>,
+    /// An account's keys were saved and not signed out, so finding none means they
+    /// are missing, not that there is no account.
+    #[serde(default)]
+    keys_saved: bool,
+    /// Places whose copy is not the profile's keys: an unfinished or old copy from a
+    /// switch, or one a sign-out couldn't reach. Removed at start and sign-out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    cleanup: Vec<Place>,
 }
 
 /// What the app shows first.
@@ -60,8 +93,9 @@ pub enum Start {
     Choose,
     /// The key file is locked with a password.
     Unlock,
-    /// The keys are in a keychain this session can't reach.
-    KeychainGone,
+    /// This profile had keys but none are found; `keychain` when they were in a
+    /// keychain this session can't reach.
+    Missing { keychain: bool },
 }
 
 /// The password didn't open the key file (or the file was changed).
@@ -75,6 +109,24 @@ impl std::fmt::Display for WrongPassword {
 }
 
 impl std::error::Error for WrongPassword {}
+
+/// A write that failed before its rename (nothing changed) or after it (the new file
+/// is in place but may not have reached the disk).
+#[derive(Debug)]
+enum WriteError {
+    Before(anyhow::Error),
+    After(anyhow::Error),
+}
+
+impl std::fmt::Display for WriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Before(error) | Self::After(error) => write!(f, "{error:#}"),
+        }
+    }
+}
+
+impl std::error::Error for WriteError {}
 
 /// The OS keychain, behind a seam so tests never touch the real one.
 pub trait Keychain {
@@ -132,8 +184,25 @@ struct Cost {
     lanes: u32,
 }
 
+impl Cost {
+    fn check(self) -> Result<Params> {
+        ensure!(
+            MEMORY_KIB.contains(&self.memory_kib)
+                && PASSES.contains(&self.passes)
+                && LANES.contains(&self.lanes),
+            "key file asks for unsupported password settings"
+        );
+        Params::new(self.memory_kib, self.passes, self.lanes, Some(32))
+            .map_err(|error| anyhow!("key file settings: {error}"))
+    }
+
+    fn weaker_than(self, other: Cost) -> bool {
+        self.memory_kib < other.memory_kib || self.passes < other.passes
+    }
+}
+
 /// The key derived from a password, and the header that says how.
-struct Sealer {
+pub struct Sealer {
     key: Zeroizing<[u8; 32]>,
     header: [u8; HEADER],
 }
@@ -152,12 +221,17 @@ impl Sealer {
     }
 
     fn derive(password: &str, header: [u8; HEADER]) -> Result<Self> {
-        let cost = header_cost(&header);
-        let params = Params::new(cost.memory_kib, cost.passes, cost.lanes, Some(32))
-            .map_err(|error| anyhow!("key file settings: {error}"))?;
+        let params = header_cost(&header).check()?;
+        // Argon2's own buffer is freed unwiped; this one is zeroed on drop.
+        let mut blocks = Zeroizing::new(vec![Block::default(); params.block_count()]);
         let mut key = Zeroizing::new([0; 32]);
         Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
-            .hash_password_into(password.as_bytes(), &header[20..], key.as_mut())
+            .hash_password_into_with_memory(
+                password.as_bytes(),
+                &header[20..],
+                key.as_mut(),
+                blocks.as_mut_slice(),
+            )
             .map_err(|error| anyhow!("derive key from password: {error}"))?;
         Ok(Self { key, header })
     }
@@ -210,14 +284,45 @@ fn header_cost(header: &[u8; HEADER]) -> Cost {
     }
 }
 
+/// Password work (about half a second) on its own thread, so the window keeps drawing.
+pub struct Job<T>(JoinHandle<Result<T>>);
+
+impl<T: Send + 'static> Job<T> {
+    fn spawn(work: impl FnOnce() -> Result<T> + Send + 'static) -> Self {
+        Self(std::thread::spawn(work))
+    }
+
+    pub fn done(&self) -> bool {
+        self.0.is_finished()
+    }
+
+    pub fn join(self) -> Result<T> {
+        self.0
+            .join()
+            .map_err(|_| anyhow!("password work stopped"))?
+    }
+}
+
+/// An opened password file: its key, the keys inside, and a stronger key to lock it
+/// again with when it was made with weaker settings than today's.
+pub struct Unlocked {
+    sealer: Sealer,
+    secret: Zeroizing<Vec<u8>>,
+    upgrade: Option<Sealer>,
+}
+
 /// The profile's key storage, held under a file lock for the app's lifetime.
 pub struct Keystore {
     dir: PathBuf,
     keychain: Box<dyn Keychain>,
-    kind: Option<Kind>,
+    state: State,
     /// Set once the password file is unlocked or a password is chosen.
     sealer: Option<Sealer>,
     cost: Cost,
+    /// Fail the next `keystore.json` write naming this storage, before or after
+    /// (`true`) its rename.
+    #[cfg(test)]
+    fail_state: std::cell::Cell<Option<(Kind, bool)>>,
     _lock: File,
 }
 
@@ -237,162 +342,396 @@ impl Keystore {
             .context("open identity lock")?;
         lock.try_lock()
             .context("RustTalk is already open with this profile")?;
-        let chosen = crate::load_json::<Option<Choice>>(&dir.join(CHOICE_FILE))?
-            .map(|choice| choice.storage);
+        let state = crate::load_json::<Option<State>>(&dir.join(STATE_FILE))?;
+        // Without keystore.json, an account in this profile means its keys exist.
+        let had_account =
+            state.is_none() && ACCOUNT_FILES.iter().any(|name| dir.join(name).exists());
         let mut store = Self {
             dir: dir.to_owned(),
             keychain,
-            kind: chosen,
+            state: state.unwrap_or_default(),
             sealer: None,
             cost,
+            #[cfg(test)]
+            fail_state: Default::default(),
             _lock: lock,
         };
-        let start = match chosen {
-            // The file says which of the two it is, even after a switch cut short.
-            Some(Kind::File | Kind::Password) => match store.read_key_file()? {
-                // Signed out: a new account goes to the same file.
-                None if chosen == Some(Kind::File) => Start::Ready(None),
-                // A new password is needed first.
-                None => {
-                    store.kind = None;
-                    Start::Choose
-                }
-                Some(file) if file.starts_with(SEALED) => {
-                    store.kind = Some(Kind::Password);
-                    Start::Unlock
-                }
-                Some(file) => {
-                    store.kind = Some(Kind::File);
-                    Start::Ready(Some(Box::new(load(plain(&file)?)?)))
-                }
-            },
-            Some(Kind::Keychain) | None => match store.keychain.available() {
-                Ok(()) => {
-                    if chosen.is_none() {
-                        write_choice(dir, Kind::Keychain)?;
-                        store.kind = Some(Kind::Keychain);
-                    }
-                    let secret = store.keychain.get()?;
-                    Start::Ready(
-                        secret
-                            .map(|secret| load(&secret).map(Box::new))
-                            .transpose()?,
-                    )
-                }
-                Err(error)
-                    if chosen.is_some() || ACCOUNT_FILES.iter().any(|f| dir.join(f).exists()) =>
-                {
-                    tracing::warn!(error = %format_args!("{error:#}"), "the keychain with this profile's keys is unavailable");
-                    store.kind = Some(Kind::Keychain);
-                    Start::KeychainGone
-                }
-                Err(error) => {
-                    tracing::info!(error = %format_args!("{error:#}"), "no keychain, asking where to keep keys");
-                    Start::Choose
-                }
-            },
-        };
+        store.state.keys_saved |= had_account;
+        store.remove_temp_files();
+        store.retry_cleanup();
+        let start = store.reconcile()?;
         Ok((store, start))
     }
 
     pub fn kind(&self) -> Option<Kind> {
-        self.kind
+        self.state.storage
     }
 
-    /// Pick where a new account's keys go (first start without a keychain).
-    pub fn choose(&mut self, kind: Kind, password: &str) -> Result<()> {
-        let sealer = self.prepare(kind, password)?;
-        write_choice(&self.dir, kind)?;
+    /// Use whichever place has keys, preferring the chosen one, and repair the record.
+    fn reconcile(&mut self) -> Result<Start> {
+        let file = self.read_key_file()?;
+        let keychain = self.keychain.available();
+        let secret = match keychain {
+            Ok(()) => self.keychain.get()?,
+            Err(_) => None,
+        };
+        let keychain_first = self.state.storage.map(Kind::place) == Some(Place::Keychain);
+        let (kind, start) = match (file, secret) {
+            (_, Some(secret)) if keychain_first => {
+                (Kind::Keychain, Start::Ready(Some(Box::new(load(&secret)?))))
+            }
+            (Some(file), _) if file.starts_with(SEALED) => (Kind::Password, Start::Unlock),
+            (Some(file), _) => (
+                Kind::File,
+                Start::Ready(Some(Box::new(load(plain(&file)?)?))),
+            ),
+            (None, Some(secret)) => (Kind::Keychain, Start::Ready(Some(Box::new(load(&secret)?)))),
+            (None, None) => return Ok(self.no_keys(keychain)),
+        };
+        if self.state.storage != Some(kind) || !self.state.keys_saved {
+            if self.state.storage.is_some_and(|chosen| chosen != kind) {
+                tracing::warn!(chosen = ?self.state.storage, found = ?kind, "keys found in another place than recorded");
+            }
+            let repaired = self.record(|state| {
+                state.storage = Some(kind);
+                state.keys_saved = true;
+            });
+            if let Err(error) = repaired {
+                tracing::warn!(error = %format_args!("{error:#}"), "repairing keystore.json failed");
+                self.state.storage = Some(kind);
+            }
+        }
+        Ok(start)
+    }
+
+    fn no_keys(&mut self, keychain: Result<()>) -> Start {
+        if self.state.keys_saved {
+            let in_keychain = self.state.storage.is_none_or(|kind| kind == Kind::Keychain);
+            let gone = in_keychain && keychain.is_err();
+            tracing::warn!(
+                keychain_unreachable = gone,
+                "this profile's keys are missing"
+            );
+            return Start::Missing { keychain: gone };
+        }
+        match (self.state.storage, keychain) {
+            // Signed out: a new account goes to the same file.
+            (Some(Kind::File), _) => Start::Ready(None),
+            (Some(Kind::Keychain) | None, Ok(())) => {
+                if self.state.storage.is_none()
+                    && let Err(error) = self.record(|state| state.storage = Some(Kind::Keychain))
+                {
+                    tracing::warn!(error = %format_args!("{error:#}"), "recording key storage failed");
+                    self.state.storage = Some(Kind::Keychain);
+                }
+                Start::Ready(None)
+            }
+            // A password file needs a new password first.
+            (Some(Kind::Password), _) => {
+                self.state.storage = None;
+                Start::Choose
+            }
+            (_, Err(error)) => {
+                tracing::info!(error = %format_args!("{error:#}"), "no keychain, asking where to keep keys");
+                self.state.storage = None;
+                Start::Choose
+            }
+        }
+    }
+
+    /// Pick where a new account's keys go (first start without a keychain). A
+    /// password needs a key from [`Keystore::new_password`].
+    pub fn choose(&mut self, kind: Kind, sealer: Option<Sealer>) -> Result<()> {
+        self.usable(kind, sealer.as_ref())?;
+        self.record(|state| {
+            state.storage = Some(kind);
+            state.keys_saved = false;
+        })?;
         tracing::info!(?kind, "key storage chosen");
-        self.kind = Some(kind);
         self.sealer = sealer;
         Ok(())
     }
 
-    /// Open the password file. Fails with [`WrongPassword`] for a wrong password.
-    pub fn unlock(&mut self, password: &str) -> Result<DeviceIdentity> {
+    /// Derive the key for a new password, away from the window's thread.
+    pub fn new_password(&self, password: Zeroizing<String>) -> Job<Sealer> {
+        let cost = self.cost;
+        Job::spawn(move || {
+            ensure!(!password.is_empty(), "empty password");
+            Sealer::new(&password, cost)
+        })
+    }
+
+    /// Open the password file away from the window's thread; finish with
+    /// [`Keystore::finish_unlock`]. Fails with [`WrongPassword`] for a wrong password.
+    pub fn start_unlock(&self, password: Zeroizing<String>) -> Result<Job<Unlocked>> {
         let file = self.read_key_file()?.context("key file is missing")?;
-        let (sealer, secret) = Sealer::open(password, &file)?;
-        let identity = load(&secret)?;
-        self.sealer = Some(sealer);
+        let cost = self.cost;
+        Ok(Job::spawn(move || {
+            let (sealer, secret) = Sealer::open(&password, &file)?;
+            let upgrade = header_cost(&sealer.header)
+                .weaker_than(cost)
+                .then(|| Sealer::new(&password, cost))
+                .transpose()?;
+            Ok(Unlocked {
+                sealer,
+                secret,
+                upgrade,
+            })
+        }))
+    }
+
+    pub fn finish_unlock(&mut self, unlocked: Unlocked) -> Result<DeviceIdentity> {
+        let identity = load(&unlocked.secret)?;
+        self.sealer = Some(unlocked.sealer);
+        if let Some(upgrade) = unlocked.upgrade {
+            match self.write_copy(Kind::Password, Some(&upgrade), &unlocked.secret) {
+                Ok(()) => {
+                    tracing::info!("key file locked again with today's password settings");
+                    self.sealer = Some(upgrade);
+                }
+                Err(error) => {
+                    tracing::warn!(error = %format_args!("{error:#}"), "locking the key file with stronger settings failed");
+                    if matches!(error, WriteError::After(_)) {
+                        self.sealer = Some(upgrade);
+                    }
+                }
+            }
+        }
         Ok(identity)
     }
 
-    pub fn save(&self, identity: &DeviceIdentity) -> Result<()> {
-        let kind = self.kind.context("no key storage chosen")?;
-        self.write(kind, self.sealer.as_ref(), &encode(identity))
+    pub fn save(&mut self, identity: &DeviceIdentity) -> Result<()> {
+        let kind = self.state.storage.context("no key storage chosen")?;
+        self.write_copy(kind, self.sealer.as_ref(), &encode(identity))?;
+        self.record(|state| {
+            state.keys_saved = true;
+            state.cleanup.retain(|place| *place != kind.place());
+        })?;
+        Ok(())
     }
 
-    /// Sign-out: remove the keys from the keychain and the key file.
-    pub fn delete(&self) -> Result<()> {
-        if self.kind == Some(Kind::Keychain) {
-            self.keychain.delete()?;
+    /// Sign-out: remove every copy (keychain, key file, temporary files), whatever
+    /// the current choice. A keychain copy that can't be removed now is retried.
+    pub fn delete(&mut self) -> Result<()> {
+        let mut cleanup = self.state.cleanup.clone();
+        cleanup.retain(|place| *place != Place::Keychain);
+        if let Err(error) = self.keychain.delete() {
+            tracing::warn!(error = %format_args!("{error:#}"), "removing the keychain copy at sign-out failed; trying again at the next start");
+            cleanup.push(Place::Keychain);
         }
-        remove(&self.dir.join(KEY_FILE))
+        self.remove_temp_files();
+        remove(&self.dir.join(KEY_FILE))?;
+        self.sync()?;
+        cleanup.retain(|place| *place != Place::File);
+        self.record(|state| {
+            state.keys_saved = false;
+            state.cleanup = cleanup;
+        })?;
+        Ok(())
     }
 
-    /// Move the keys to `kind` (or change the password): write the new copy, read it
-    /// back, record the choice, and only then remove the old copy.
-    pub fn switch(&mut self, identity: &DeviceIdentity, kind: Kind, password: &str) -> Result<()> {
-        let old = self.kind.context("no key storage chosen")?;
-        let sealer = self.prepare(kind, password)?;
+    /// Move the keys to `kind` (or change the password, with a key from
+    /// [`Keystore::new_password`]). Between the keychain and the file it marks the new
+    /// copy unfinished, writes and reads it back, records the new choice with the old
+    /// copy to remove, and then removes it, so a crash at any point loses no keys.
+    pub fn switch(
+        &mut self,
+        identity: &DeviceIdentity,
+        kind: Kind,
+        sealer: Option<Sealer>,
+    ) -> Result<()> {
+        let old = self.state.storage.context("no key storage chosen")?;
+        self.usable(kind, sealer.as_ref())?;
         let secret = encode(identity);
-        let moved = (old == Kind::Keychain) != (kind == Kind::Keychain);
-        self.write(kind, sealer.as_ref(), &secret)?;
-        let checked = self.read(kind, sealer.as_ref()).and_then(|back| {
-            ensure!(
-                back.is_some_and(|back| *back == *secret),
-                "the new key storage gave back different keys"
-            );
-            write_choice(&self.dir, kind)
+        let (from, to) = (old.place(), kind.place());
+        if from == to {
+            // The key file is replaced in one step and says its own format.
+            if let Err(WriteError::Before(error)) = self.write_copy(kind, sealer.as_ref(), &secret)
+            {
+                return Err(error);
+            }
+            self.sealer = sealer;
+            let recorded = self.record(|state| state.storage = Some(kind));
+            self.state.storage = Some(kind);
+            recorded?;
+            tracing::info!(?old, new = ?kind, "key storage switched");
+            return Ok(());
+        }
+        self.record(|state| {
+            if !state.cleanup.contains(&to) {
+                state.cleanup.push(to);
+            }
+        })?;
+        if let Err(error) = self.write_copy(kind, sealer.as_ref(), &secret) {
+            self.roll_back(to);
+            return Err(error.into());
+        }
+        let back = self.read(kind, sealer.as_ref());
+        if !matches!(&back, Ok(Some(back)) if **back == *secret) {
+            self.roll_back(to);
+            return Err(back
+                .err()
+                .unwrap_or_else(|| anyhow!("the new key storage gave back different keys")));
+        }
+        let switched = self.record(|state| {
+            state.storage = Some(kind);
+            state.keys_saved = true;
+            state.cleanup.retain(|place| *place != to);
+            state.cleanup.push(from);
         });
-        if moved {
-            // Remove the half-made copy on failure, the old one on success.
-            let (target, what) = match checked {
-                Err(_) => (kind, "unfinished"),
-                Ok(()) => (old, "old"),
-            };
-            let removed = match target {
-                Kind::Keychain => self.keychain.delete(),
-                _ => remove(&self.dir.join(KEY_FILE)),
-            };
-            if let Err(error) = removed {
-                tracing::warn!(error = %format_args!("{error:#}"), copy = what, "removing a key copy failed");
+        match switched {
+            Err(WriteError::Before(error)) => {
+                self.roll_back(to);
+                return Err(error);
+            }
+            // The new choice may not have reached the disk: keep both copies and let
+            // the next start settle it from what it finds.
+            Err(error @ WriteError::After(_)) => {
+                self.sealer = sealer;
+                return Err(error.into());
+            }
+            Ok(()) => self.sealer = sealer,
+        }
+        match self.remove_place(from).and_then(|()| self.sync()) {
+            Ok(()) => {
+                if let Err(error) = self.record(|state| state.cleanup.retain(|p| *p != from)) {
+                    tracing::warn!(error = %format_args!("{error:#}"), "recording the removed key copy failed");
+                }
+            }
+            Err(error) => {
+                tracing::warn!(error = %format_args!("{error:#}"), "removing the old key copy failed; trying again at the next start");
             }
         }
-        // A replaced key file says its own format, so it is current even if recording
-        // the choice failed.
-        if checked.is_ok() || !moved {
-            self.kind = Some(kind);
-            self.sealer = sealer;
-        }
-        checked?;
         tracing::info!(?old, new = ?kind, "key storage switched");
         Ok(())
     }
 
-    /// Check that `kind` can be used, deriving the key for a password.
-    fn prepare(&self, kind: Kind, password: &str) -> Result<Option<Sealer>> {
+    fn usable(&self, kind: Kind, sealer: Option<&Sealer>) -> Result<()> {
         match kind {
-            Kind::Keychain => self.keychain.available().map(|()| None),
-            Kind::File => Ok(None),
-            Kind::Password => {
-                ensure!(!password.is_empty(), "empty password");
-                Sealer::new(password, self.cost).map(Some)
+            Kind::Keychain => self.keychain.available(),
+            Kind::File => Ok(()),
+            Kind::Password => sealer.map(|_| ()).context("no password"),
+        }
+    }
+
+    /// Remove an unfinished copy after a failed switch.
+    fn roll_back(&mut self, place: Place) {
+        match self.remove_place(place).and_then(|()| self.sync()) {
+            Ok(()) => {
+                if let Err(error) = self.record(|state| state.cleanup.retain(|p| *p != place)) {
+                    tracing::warn!(error = %format_args!("{error:#}"), "recording the removed key copy failed");
+                }
+            }
+            Err(error) => {
+                tracing::warn!(error = %format_args!("{error:#}"), "removing the unfinished key copy failed; trying again at the next start");
             }
         }
     }
 
-    fn write(&self, kind: Kind, sealer: Option<&Sealer>, secret: &[u8]) -> Result<()> {
-        let file = self.dir.join(KEY_FILE);
-        match kind {
-            Kind::Keychain => self.keychain.set(secret),
-            Kind::File => write_atomic(&file, &Zeroizing::new([PLAIN, secret].concat())),
-            Kind::Password => {
-                let sealer = sealer.context("key file is locked")?;
-                write_atomic(&file, &sealer.seal(secret)?)
+    /// Remove the copies listed for cleanup, except the profile's own keys.
+    fn retry_cleanup(&mut self) {
+        if self.state.cleanup.is_empty() {
+            return;
+        }
+        // Act only on a list that is on disk.
+        if let Err(error) = self.sync() {
+            tracing::warn!(error = %format_args!("{error:#}"), "flushing keystore.json failed");
+            return;
+        }
+        let current = self.state.storage.map(Kind::place);
+        let mut left = Vec::new();
+        for place in self.state.cleanup.clone() {
+            if self.state.keys_saved && Some(place) == current {
+                continue;
+            }
+            if let Err(error) = self.remove_place(place) {
+                tracing::warn!(error = %format_args!("{error:#}"), ?place, "removing a leftover key copy failed");
+                left.push(place);
             }
         }
+        if let Err(error) = self.sync() {
+            tracing::warn!(error = %format_args!("{error:#}"), "flushing the profile folder failed");
+            return;
+        }
+        if let Err(error) = self.record(|state| state.cleanup = left) {
+            tracing::warn!(error = %format_args!("{error:#}"), "recording removed key copies failed");
+        }
+    }
+
+    /// Temporary files left by a crash mid-write can hold keys.
+    fn remove_temp_files(&self) {
+        let prefixes = [KEY_FILE, STATE_FILE].map(temp_prefix);
+        let Ok(entries) = fs::read_dir(&self.dir) else {
+            return;
+        };
+        let mut removed = false;
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if prefixes
+                .iter()
+                .any(|p| name.to_string_lossy().starts_with(p.as_str()))
+            {
+                match fs::remove_file(entry.path()) {
+                    Ok(()) => removed = true,
+                    Err(error) => {
+                        tracing::warn!(%error, "removing a leftover temporary key file failed");
+                    }
+                }
+            }
+        }
+        if removed && let Err(error) = self.sync() {
+            tracing::warn!(error = %format_args!("{error:#}"), "flushing the profile folder failed");
+        }
+    }
+
+    fn remove_place(&self, place: Place) -> Result<()> {
+        match place {
+            Place::Keychain => self.keychain.delete(),
+            Place::File => remove(&self.dir.join(KEY_FILE)),
+        }
+    }
+
+    /// Write `keystore.json` with `change` applied.
+    fn record(&mut self, change: impl FnOnce(&mut State)) -> Result<(), WriteError> {
+        let mut next = self.state.clone();
+        change(&mut next);
+        #[cfg(test)]
+        let fail = self
+            .fail_state
+            .get()
+            .filter(|(kind, _)| next.storage == Some(*kind));
+        #[cfg(test)]
+        if let Some((_, false)) = fail {
+            self.fail_state.set(None);
+            return Err(WriteError::Before(anyhow!("test failure")));
+        }
+        let json = serde_json::to_vec(&next).map_err(|error| WriteError::Before(error.into()))?;
+        write_atomic(&self.dir.join(STATE_FILE), &json).map_err(WriteError::Before)?;
+        self.state = next;
+        #[cfg(test)]
+        if let Some((_, true)) = fail {
+            self.fail_state.set(None);
+            return Err(WriteError::After(anyhow!("test failure")));
+        }
+        self.sync().map_err(WriteError::After)
+    }
+
+    fn write_copy(
+        &self,
+        kind: Kind,
+        sealer: Option<&Sealer>,
+        secret: &[u8],
+    ) -> Result<(), WriteError> {
+        let file = self.dir.join(KEY_FILE);
+        let written = match kind {
+            Kind::Keychain => return self.keychain.set(secret).map_err(WriteError::Before),
+            Kind::File => write_atomic(&file, &Zeroizing::new([PLAIN, secret].concat())),
+            Kind::Password => sealer
+                .context("key file is locked")
+                .and_then(|sealer| write_atomic(&file, &sealer.seal(secret)?)),
+        };
+        written.map_err(WriteError::Before)?;
+        self.sync().map_err(WriteError::After)
     }
 
     fn read(&self, kind: Kind, sealer: Option<&Sealer>) -> Result<Option<Zeroizing<Vec<u8>>>> {
@@ -404,10 +743,11 @@ impl Keystore {
         };
         Ok(Some(match kind {
             Kind::Password => {
+                let sealer = sealer.context("key file is locked")?;
                 let rest = file
-                    .strip_prefix(&sealer.context("key file is locked")?.header)
+                    .strip_prefix(&sealer.header)
                     .context("key file has a different password")?;
-                sealer.expect("checked above").decrypt(rest)?
+                sealer.decrypt(rest)?
             }
             _ => Zeroizing::new(plain(&file)?.to_vec()),
         }))
@@ -420,6 +760,15 @@ impl Keystore {
             Err(error) => Err(error).context("read key file"),
         }
     }
+
+    /// Flush the folder, so renames and removals reach the disk.
+    fn sync(&self) -> Result<()> {
+        #[cfg(unix)]
+        File::open(&self.dir)
+            .and_then(|dir| dir.sync_all())
+            .context("flush profile folder")?;
+        Ok(())
+    }
 }
 
 fn plain(file: &[u8]) -> Result<&[u8]> {
@@ -429,26 +778,26 @@ fn plain(file: &[u8]) -> Result<&[u8]> {
     }
 }
 
-fn write_choice(dir: &Path, kind: Kind) -> Result<()> {
-    let json = serde_json::to_vec(&Choice { storage: kind })?;
-    write_atomic(&dir.join(CHOICE_FILE), &json)
+fn temp_prefix(name: &str) -> String {
+    format!(".{name}.tmp-")
 }
 
-/// Write to a temporary file, flush it to disk, then rename it over `path`, so a crash
-/// leaves the old file or the new one. The temporary file is created 0600 on Unix; on
-/// Windows the profile folder in the per-user AppData already admits only this user.
+/// Write to a temporary file, flush it, then rename it over `path`, so a crash leaves
+/// the old file or the new one (and maybe a temporary file, removed at the next
+/// start). The temporary file is created 0600 on Unix; on Windows the profile folder
+/// in the per-user AppData already admits only this user.
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let dir = path.parent().context("key folder")?;
-    let mut file = tempfile::NamedTempFile::new_in(dir).context("create key file")?;
+    let name = path.file_name().context("key file name")?.to_string_lossy();
+    let mut file = tempfile::Builder::new()
+        .prefix(&temp_prefix(&name))
+        .tempfile_in(dir)
+        .context("create key file")?;
     file.write_all(bytes).context("write key file")?;
     file.as_file().sync_all().context("flush key file")?;
     file.persist(path)
         .map_err(|error| error.error)
         .with_context(|| format!("replace {}", path.display()))?;
-    #[cfg(unix)]
-    File::open(dir)
-        .and_then(|dir| dir.sync_all())
-        .context("flush key folder")?;
     Ok(())
 }
 
@@ -492,8 +841,9 @@ mod tests {
 
     use super::*;
 
+    /// The cheapest settings a key file may use, so tests stay fast.
     const CHEAP: Cost = Cost {
-        memory_kib: 64,
+        memory_kib: 8 * 1024,
         passes: 1,
         lanes: 1,
     };
@@ -501,7 +851,14 @@ mod tests {
     #[derive(Clone, Default)]
     struct Mock {
         down: bool,
+        stuck: bool,
         secret: Arc<Mutex<Option<Vec<u8>>>>,
+    }
+
+    impl Mock {
+        fn has_keys(&self) -> bool {
+            self.secret.lock().unwrap().is_some()
+        }
     }
 
     impl Keychain for Mock {
@@ -519,8 +876,17 @@ mod tests {
             Ok(())
         }
         fn delete(&self) -> Result<()> {
+            self.available()?;
+            ensure!(!self.stuck, "keychain refused");
             *self.secret.lock().unwrap() = None;
             Ok(())
+        }
+    }
+
+    fn down() -> Mock {
+        Mock {
+            down: true,
+            ..Mock::default()
         }
     }
 
@@ -543,30 +909,59 @@ mod tests {
         *encode(a) == *encode(b)
     }
 
+    fn sealer(store: &Keystore, password: &str) -> Option<Sealer> {
+        Some(
+            store
+                .new_password(Zeroizing::new(password.into()))
+                .join()
+                .unwrap(),
+        )
+    }
+
+    fn unlock(store: &mut Keystore, password: &str) -> Result<DeviceIdentity> {
+        let unlocked = store
+            .start_unlock(Zeroizing::new(password.into()))?
+            .join()?;
+        store.finish_unlock(unlocked)
+    }
+
+    fn state(dir: &Path) -> State {
+        serde_json::from_slice(&fs::read(dir.join(STATE_FILE)).unwrap()).unwrap()
+    }
+
+    fn key_file(dir: &Path) -> bool {
+        dir.join(KEY_FILE).exists()
+    }
+
+    /// A profile with its keys in a protected file.
+    fn file_profile(dir: &Path, keychain: &Mock) -> DeviceIdentity {
+        let (mut store, _) = open(dir, keychain);
+        let me = identity();
+        store.choose(Kind::File, None).unwrap();
+        store.save(&me).unwrap();
+        me
+    }
+
     #[test]
     fn keychain_round_trips_and_is_the_default() {
         let dir = tempfile::tempdir().unwrap();
         let keychain = Mock::default();
-        let (store, start) = open(dir.path(), &keychain);
+        let (mut store, start) = open(dir.path(), &keychain);
         assert!(ready(start).is_none());
         assert_eq!(store.kind(), Some(Kind::Keychain));
         let me = identity();
         store.save(&me).unwrap();
         drop(store);
         assert!(same(&ready(open(dir.path(), &keychain).1).unwrap(), &me));
-        assert!(!dir.path().join(KEY_FILE).exists());
+        assert!(!key_file(dir.path()));
     }
 
     #[test]
     fn file_round_trips_with_owner_only_permissions() {
         let dir = tempfile::tempdir().unwrap();
-        let keychain = Mock {
-            down: true,
-            ..Mock::default()
-        };
-        let (mut store, start) = open(dir.path(), &keychain);
+        let (mut store, start) = open(dir.path(), &down());
         assert!(matches!(start, Start::Choose));
-        store.choose(Kind::File, "").unwrap();
+        store.choose(Kind::File, None).unwrap();
         let me = identity();
         store.save(&me).unwrap();
         #[cfg(unix)]
@@ -578,27 +973,28 @@ mod tests {
             assert_eq!(mode.mode() & 0o777, 0o600);
         }
         drop(store);
-        assert!(same(&ready(open(dir.path(), &keychain).1).unwrap(), &me));
+        assert!(same(&ready(open(dir.path(), &down()).1).unwrap(), &me));
     }
 
     #[test]
     fn password_file_round_trips_and_rejects_wrong_passwords_and_tampering() {
         let dir = tempfile::tempdir().unwrap();
-        let keychain = Mock {
-            down: true,
-            ..Mock::default()
-        };
-        let (mut store, _) = open(dir.path(), &keychain);
-        store.choose(Kind::Password, "hunter2").unwrap();
+        let (mut store, _) = open(dir.path(), &down());
+        let key = sealer(&store, "hunter2");
+        store.choose(Kind::Password, key).unwrap();
         let me = identity();
         store.save(&me).unwrap();
         drop(store);
 
-        let (mut store, start) = open(dir.path(), &keychain);
+        let (mut store, start) = open(dir.path(), &down());
         assert!(matches!(start, Start::Unlock));
-        let wrong = store.unlock("hunter3").err().unwrap();
-        assert!(wrong.is::<WrongPassword>());
-        assert!(same(&store.unlock("hunter2").unwrap(), &me));
+        assert!(
+            unlock(&mut store, "hunter3")
+                .err()
+                .unwrap()
+                .is::<WrongPassword>()
+        );
+        assert!(same(&unlock(&mut store, "hunter2").unwrap(), &me));
         // Saving again keeps the password.
         store.save(&me).unwrap();
         drop(store);
@@ -608,8 +1004,13 @@ mod tests {
         let last = bytes.len() - 1;
         bytes[last] ^= 1;
         fs::write(&path, bytes).unwrap();
-        let (mut store, _) = open(dir.path(), &keychain);
-        assert!(store.unlock("hunter2").err().unwrap().is::<WrongPassword>());
+        let (mut store, _) = open(dir.path(), &down());
+        assert!(
+            unlock(&mut store, "hunter2")
+                .err()
+                .unwrap()
+                .is::<WrongPassword>()
+        );
     }
 
     #[test]
@@ -632,6 +1033,54 @@ mod tests {
     }
 
     #[test]
+    fn header_costs_are_bounded_before_any_work() {
+        let cost = |memory_kib, passes, lanes| Cost {
+            memory_kib,
+            passes,
+            lanes,
+        };
+        for good in [cost(8192, 1, 1), cost(1024 * 1024, 10, 4), COST] {
+            assert!(good.check().is_ok(), "{good:?}");
+        }
+        for bad in [
+            cost(8191, 3, 1),
+            cost(1024 * 1024 + 1, 3, 1),
+            cost(65536, 0, 1),
+            cost(65536, 11, 1),
+            cost(65536, u32::MAX, 1),
+            cost(65536, 3, 0),
+            cost(65536, 3, 5),
+        ] {
+            assert!(bad.check().is_err(), "{bad:?}");
+        }
+        // A file asking for endless passes is refused at once, not derived.
+        let mut file = Sealer::new("pw", CHEAP).unwrap().seal(b"secret").unwrap();
+        file[12..16].copy_from_slice(&u32::MAX.to_be_bytes());
+        let error = Sealer::open("pw", &file).err().unwrap();
+        assert!(!error.is::<WrongPassword>());
+    }
+
+    #[test]
+    fn weak_password_files_are_locked_again_with_todays_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, _) = open(dir.path(), &down());
+        let key = sealer(&store, "pw");
+        store.choose(Kind::Password, key).unwrap();
+        let me = identity();
+        store.save(&me).unwrap();
+        drop(store);
+        let stronger = Cost {
+            memory_kib: 16 * 1024,
+            ..CHEAP
+        };
+        let (mut store, _) = Keystore::open_with(dir.path(), Box::new(down()), stronger).unwrap();
+        assert!(same(&unlock(&mut store, "pw").unwrap(), &me));
+        let file = fs::read(dir.path().join(KEY_FILE)).unwrap();
+        assert_eq!(header_cost(file[..HEADER].try_into().unwrap()), stronger);
+        assert!(same(&unlock(&mut store, "pw").unwrap(), &me));
+    }
+
+    #[test]
     fn switching_moves_keys_between_all_three() {
         let dir = tempfile::tempdir().unwrap();
         let keychain = Mock::default();
@@ -639,73 +1088,190 @@ mod tests {
         let me = identity();
         store.save(&me).unwrap();
 
-        store.switch(&me, Kind::File, "").unwrap();
-        assert!(keychain.secret.lock().unwrap().is_none());
-        store.switch(&me, Kind::Password, "one").unwrap();
-        store.switch(&me, Kind::Password, "two").unwrap();
+        store.switch(&me, Kind::File, None).unwrap();
+        assert!(!keychain.has_keys());
+        let one = sealer(&store, "one");
+        store.switch(&me, Kind::Password, one).unwrap();
+        let two = sealer(&store, "two");
+        store.switch(&me, Kind::Password, two).unwrap();
         drop(store);
         let (mut store, start) = open(dir.path(), &keychain);
         assert!(matches!(start, Start::Unlock));
-        assert!(store.unlock("one").is_err());
-        store.unlock("two").unwrap();
-        store.switch(&me, Kind::Keychain, "").unwrap();
-        assert!(!dir.path().join(KEY_FILE).exists());
+        assert!(unlock(&mut store, "one").is_err());
+        unlock(&mut store, "two").unwrap();
+        store.switch(&me, Kind::Keychain, None).unwrap();
+        assert!(!key_file(dir.path()));
+        assert!(state(dir.path()).cleanup.is_empty());
         drop(store);
         assert!(same(&ready(open(dir.path(), &keychain).1).unwrap(), &me));
     }
 
     #[test]
-    fn interrupted_switch_keeps_the_old_keys() {
+    fn a_switch_failing_before_the_choice_is_recorded_keeps_the_old_keys() {
         let dir = tempfile::tempdir().unwrap();
         let keychain = Mock::default();
         let (mut store, _) = open(dir.path(), &keychain);
         let me = identity();
         store.save(&me).unwrap();
-        // Recording the new choice fails after the new copy was written.
-        fs::remove_file(dir.path().join(CHOICE_FILE)).unwrap();
-        fs::create_dir(dir.path().join(CHOICE_FILE)).unwrap();
-        assert!(store.switch(&me, Kind::File, "").is_err());
-        assert!(keychain.secret.lock().unwrap().is_some());
-        assert!(!dir.path().join(KEY_FILE).exists());
+        store.fail_state.set(Some((Kind::File, false)));
+        assert!(store.switch(&me, Kind::File, None).is_err());
+        assert!(keychain.has_keys());
+        assert!(!key_file(dir.path()));
         assert_eq!(store.kind(), Some(Kind::Keychain));
-        store.save(&me).unwrap();
+        drop(store);
+        assert!(same(&ready(open(dir.path(), &keychain).1).unwrap(), &me));
     }
 
     #[test]
-    fn a_missing_keychain_never_starts_a_new_account() {
+    fn a_switch_failing_after_the_choice_rename_keeps_both_copies() {
         let dir = tempfile::tempdir().unwrap();
         let keychain = Mock::default();
-        let (store, _) = open(dir.path(), &keychain);
-        store.save(&identity()).unwrap();
+        let (mut store, _) = open(dir.path(), &keychain);
+        let me = identity();
+        store.save(&me).unwrap();
+        store.fail_state.set(Some((Kind::File, true)));
+        assert!(store.switch(&me, Kind::File, None).is_err());
+        assert!(keychain.has_keys());
+        assert!(key_file(dir.path()));
         drop(store);
-        let gone = Mock {
-            down: true,
+        // The next start finds the new choice and removes the old copy.
+        let (store, start) = open(dir.path(), &keychain);
+        assert!(same(&ready(start).unwrap(), &me));
+        assert_eq!(store.kind(), Some(Kind::File));
+        assert!(!keychain.has_keys());
+    }
+
+    #[test]
+    fn crashes_mid_switch_leave_no_extra_copies() {
+        let keychain = Mock::default();
+        let me = identity();
+        // Keychain to file, crashed after writing the file but before the new choice.
+        let dir = tempfile::tempdir().unwrap();
+        keychain.set(&encode(&me)).unwrap();
+        fs::write(
+            dir.path().join(KEY_FILE),
+            [PLAIN, &encode(&me)[..]].concat(),
+        )
+        .unwrap();
+        let unfinished = r#"{"storage":"keychain","keys_saved":true,"cleanup":["file"]}"#;
+        fs::write(dir.path().join(STATE_FILE), unfinished).unwrap();
+        fs::write(dir.path().join(".identity.key.tmp-abc"), b"plain keys").unwrap();
+        let (store, start) = open(dir.path(), &keychain);
+        assert!(same(&ready(start).unwrap(), &me));
+        assert_eq!(store.kind(), Some(Kind::Keychain));
+        assert!(!key_file(dir.path()));
+        assert!(!dir.path().join(".identity.key.tmp-abc").exists());
+        assert!(state(dir.path()).cleanup.is_empty());
+        drop(store);
+
+        // Keychain to password file, crashed before the keychain copy was removed.
+        let dir = tempfile::tempdir().unwrap();
+        let stuck = Mock {
+            stuck: true,
             ..keychain.clone()
         };
-        let (store, start) = open(dir.path(), &gone);
-        assert!(matches!(start, Start::KeychainGone));
-        assert!(store.save(&identity()).is_err());
-        assert!(!dir.path().join(KEY_FILE).exists());
-
-        // A profile from before keystore.json that has an account counts too.
-        let old = tempfile::tempdir().unwrap();
-        fs::write(old.path().join("servers.json"), "[]").unwrap();
-        assert!(matches!(open(old.path(), &gone).1, Start::KeychainGone));
+        let (mut store, _) = open(dir.path(), &stuck);
+        let key = sealer(&store, "pw");
+        store.switch(&me, Kind::Password, key).unwrap();
+        assert!(keychain.has_keys());
+        assert_eq!(state(dir.path()).cleanup, [Place::Keychain]);
+        drop(store);
+        let (_, start) = open(dir.path(), &keychain);
+        assert!(matches!(start, Start::Unlock));
+        assert!(!keychain.has_keys());
+        assert!(state(dir.path()).cleanup.is_empty());
     }
 
     #[test]
-    fn sign_out_removes_the_key_file() {
+    fn sign_out_removes_every_copy_and_retries_the_keychain() {
+        let dir = tempfile::tempdir().unwrap();
+        let keychain = Mock::default();
+        file_profile(dir.path(), &keychain);
+        // An older keychain copy the current choice doesn't use.
+        keychain.set(b"old copy").unwrap();
+        let stuck = Mock {
+            stuck: true,
+            ..keychain.clone()
+        };
+        let (mut store, _) = open(dir.path(), &stuck);
+        fs::write(dir.path().join(".keystore.json.tmp-x"), b"{}").unwrap();
+        store.delete().unwrap();
+        assert!(!key_file(dir.path()));
+        assert!(!dir.path().join(".keystore.json.tmp-x").exists());
+        assert_eq!(state(dir.path()).cleanup, [Place::Keychain]);
+        drop(store);
+        // The keychain works again: the next start removes the copy.
+        let (store, start) = open(dir.path(), &keychain);
+        assert!(ready(start).is_none());
+        assert!(!keychain.has_keys());
+        assert_eq!(store.kind(), Some(Kind::File));
+    }
+
+    #[test]
+    fn keys_are_found_whatever_keystore_json_says() {
+        let keychain = Mock::default();
+        for broken in [None, Some("null"), Some(r#"{"storage":"keychain"}"#)] {
+            let dir = tempfile::tempdir().unwrap();
+            let me = file_profile(dir.path(), &keychain);
+            match broken {
+                None => fs::remove_file(dir.path().join(STATE_FILE)).unwrap(),
+                Some(json) => fs::write(dir.path().join(STATE_FILE), json).unwrap(),
+            }
+            let (store, start) = open(dir.path(), &keychain);
+            assert!(same(&ready(start).unwrap(), &me), "{broken:?}");
+            assert_eq!(store.kind(), Some(Kind::File));
+            assert_eq!(state(dir.path()).storage, Some(Kind::File));
+            assert!(state(dir.path()).keys_saved);
+        }
+        // Keychain keys with the choice changed to a file.
         let dir = tempfile::tempdir().unwrap();
         let keychain = Mock::default();
         let (mut store, _) = open(dir.path(), &keychain);
         let me = identity();
         store.save(&me).unwrap();
-        store.switch(&me, Kind::File, "").unwrap();
-        store.delete().unwrap();
-        assert!(!dir.path().join(KEY_FILE).exists());
         drop(store);
+        fs::write(dir.path().join(STATE_FILE), r#"{"storage":"file"}"#).unwrap();
         let (store, start) = open(dir.path(), &keychain);
-        assert!(ready(start).is_none());
-        assert_eq!(store.kind(), Some(Kind::File));
+        assert!(same(&ready(start).unwrap(), &me));
+        assert_eq!(store.kind(), Some(Kind::Keychain));
+    }
+
+    #[test]
+    fn missing_keys_never_start_a_new_account() {
+        // The keychain with the keys is unreachable.
+        let dir = tempfile::tempdir().unwrap();
+        let keychain = Mock::default();
+        let (mut store, _) = open(dir.path(), &keychain);
+        store.save(&identity()).unwrap();
+        drop(store);
+        let (mut store, start) = open(dir.path(), &down());
+        assert!(matches!(start, Start::Missing { keychain: true }));
+        assert!(store.save(&identity()).is_err());
+        assert!(!key_file(dir.path()));
+        drop(store);
+
+        // The key file is gone.
+        let keychain = Mock::default();
+        let dir = tempfile::tempdir().unwrap();
+        file_profile(dir.path(), &keychain);
+        fs::remove_file(dir.path().join(KEY_FILE)).unwrap();
+        let (_, start) = open(dir.path(), &keychain);
+        assert!(matches!(start, Start::Missing { keychain: false }));
+
+        // A profile from before keystore.json that has an account.
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("servers.json"), "[]").unwrap();
+        assert!(matches!(
+            open(dir.path(), &down()).1,
+            Start::Missing { keychain: true }
+        ));
+
+        // A signed-out profile starts fresh.
+        let dir = tempfile::tempdir().unwrap();
+        file_profile(dir.path(), &keychain);
+        let (mut store, _) = open(dir.path(), &keychain);
+        store.delete().unwrap();
+        drop(store);
+        assert!(ready(open(dir.path(), &keychain).1).is_none());
     }
 }

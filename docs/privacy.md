@@ -228,13 +228,14 @@ The device signing secret, device agreement secret, sync key, person ID and
 public device certificate live in Windows Credential Manager or Linux Secret
 Service by default. Without a keychain (Steam Deck Game Mode) or by choice in
 Settings > Privacy > Key storage they live in `identity.key` in the profile
-folder instead: a file only the current user can read (mode 0600 on Unix,
-per-user AppData on Windows), optionally locked with a password that is never
-stored (see [Crypto](crypto.md#local-identity)). `keystore.json` records which
-of the three holds the keys. Development profiles use separate entries. The client logs the
+folder instead: a file other normal users can't read (mode 0600 on Unix,
+per-user AppData on Windows; administrators and software running as the same
+user can), optionally locked with a password that is never stored (see
+[Crypto](crypto.md#local-identity)). `keystore.json` records which of the three
+holds the keys, whether keys were saved, and leftover copies still to remove. Development profiles use separate entries. The client logs the
 person fingerprint locally. Creating an account shows the recovery words once
 in the app window. The client never stores or logs the words or the root
-signing key. "Sign out of this device" deletes the keychain entry, `identity.key` and the
+signing key. "Sign out of this device" deletes the keychain entry, `identity.key`, leftover temporary key files and the
 profile's `sync.json`, `servers.json`, `saved.json`, `notify.json`,
 `pokes.json`, `dm_deleted.json`, `dm_pins/`, recent and favourite emoji,
 cached link previews and both local logs. This clears the previous person's

@@ -381,6 +381,9 @@ pub fn show(
     updates: &mut crate::update::Updater,
     keystore: &mut crate::keystore::Keystore,
 ) -> Option<Action> {
+    if home.settings != Some(Tab::Privacy) {
+        crate::key_storage::leave(ctx, &mut home.key_storage);
+    }
     let mut tab = home.settings?;
     let page = |id, icon, label| Page { id, icon, label };
     let groups = [

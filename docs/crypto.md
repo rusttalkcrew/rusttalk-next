@@ -55,30 +55,56 @@ the 32-byte Ed25519 secret, 32-byte X25519 secret, 32-byte sync key, 32-byte
 person ID and the certificate bytes in that order. On load the client verifies
 the signature and checks both device secrets against the certificate.
 
-Where these bytes live is the profile's key storage, recorded as
-`{"storage":"keychain"|"file"|"password"}` in `keystore.json`:
+Where these bytes live is the profile's key storage. `keystore.json` records
+`storage` (`keychain`, `file` or `password`), `keys_saved` (an account's keys
+were saved and not signed out) and `cleanup` (places whose copy is not the
+profile's keys and is still to be removed):
 
 - **Keychain** (the default when one is reachable): the OS keystore entry above.
 - **Protected file:** `identity.key` in the profile folder, `RTKEYP01` followed
-  by the same bytes. It is written to a temporary file (mode 0600 on Unix),
-  flushed, and renamed over the old one. On Windows the per-user AppData folder
-  already admits only the current user.
+  by the same bytes, not encrypted. Files are written to a temporary file named
+  `.identity.key.tmp-*` (mode 0600 on Unix), flushed, renamed over the old one,
+  and the folder is flushed. Leftover temporary files are removed at start.
 - **File with password:** `identity.key` holds `RTKEYE01 || m_cost || t_cost ||
   p_cost || salt || nonce || ciphertext`. The costs are big-endian u32 values
   (64 MiB, 3 passes, 1 lane when written today) and the salt is 16 random
-  bytes. Argon2id over the password with that salt and those costs gives a
-  32-byte XChaCha20-Poly1305 key; the 24-byte nonce is fresh per write and the
-  36-byte header is the associated data, so changed costs fail like a wrong
-  password. The password and derived key are only held in memory.
+  bytes. Costs outside 8 MiB to 1 GiB, 1 to 10 passes and 1 to 4 lanes are
+  refused before any work, because the header is read before it is
+  authenticated. Argon2id over the password with that salt and those costs
+  gives a 32-byte XChaCha20-Poly1305 key, in a block buffer that is zeroed
+  afterwards; the 24-byte nonce is fresh per write and the 36-byte header is the
+  associated data, so changed costs fail like a wrong password. A file with
+  weaker costs than today's is locked again with today's after unlocking. The
+  derivation runs off the window's thread. The password and derived key are only
+  held in memory, and the password fields' egui state is removed once a screen
+  is done with them.
 
-Each file says its own format, so a switch between the two file kinds that is
-cut short still loads. Without a reachable keychain and without a choice, the
-client asks which file kind to use. If the keychain was chosen (or an older
-profile already has servers) but is unreachable, the client creates no new
-identity and points to Desktop Mode or the recovery words. Switching storage in
-Settings writes the new copy, reads it back, records the choice and only then
-removes the old copy. A forgotten password is recovered by adding the device
-again with the recovery words.
+At start the client looks in both places: the chosen one first, then the other.
+Keys found anywhere are used and `keystore.json` is repaired, so a lost or
+changed choice never hides them. Each file says its own format, so a switch
+between the two file kinds that is cut short still loads. With no keys found,
+a profile with `keys_saved` (or, without `keystore.json`, with `servers.json` or
+`sync.json`) shows a recovery screen and creates no new identity; when the keys
+were in an unreachable keychain it points to Desktop Mode. Otherwise a missing
+keychain leads to the choice between the two file kinds.
+
+Switching between the keychain and the file first lists the new place under
+`cleanup`, writes and reads back the new copy, then records the new choice with
+the old place under `cleanup`, and removes the old copy. A failure before the
+choice is renamed into place removes the new copy. A failure after the rename
+keeps both copies, and the next start removes whatever `cleanup` lists, so a
+crash at any point keeps one complete copy. Sign-out removes the keychain entry,
+`identity.key` and temporary files whatever the choice; an entry it can't reach
+stays under `cleanup` and is retried at each start. A forgotten password is
+recovered by adding the device again with the recovery words.
+
+What the files protect against: mode 0600 (Unix) and the per-user AppData
+folder (Windows) keep other normal users out. They don't stop administrators,
+root, SYSTEM or malware running as the same user. Development profiles under
+`.dev/profiles/` lack the AppData guarantee on Windows. The protected file is
+not encrypted, so a copy of it (a backup, a stolen disk) holds the keys. The
+password file can be guessed offline, slowed by Argon2id, and protects nothing
+once RustTalk is running and unlocked.
 
 The recovery words and root signing key are never stored. Adding or revoking
 a device requires the recovery words again. The client records the person
