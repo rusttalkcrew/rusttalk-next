@@ -373,7 +373,16 @@ A `page` channel works exactly like a text channel on the server (same messages,
 keys and flags); clients show only its newest message, as one Markdown page, and
 saving a change posts the whole page as a new message. A new page channel gives
 read and write (3) to Owner, Admin and Moderator and read (1) to Member, so only
-people with write can change the page. Older clients show it as a text channel.
+people with write can change the page. Older clients show it as a text channel. The page's pictures are
+that message's stored files (at most four, like any message). Saving a change
+sends the references of the pictures it keeps again in the new message, so their
+blobs are not uploaded twice; they expire with the server's file retention like
+any other file. A version saved with the same link also keeps its link preview.
+Several versions can thus reference one blob: when deleting a page version, the
+client skips the files another loaded version still references. Older clients,
+which show a page as a text channel, do not; a moderator's delete still cannot
+remove another member's file (see Files). Link previews on a page work exactly as
+in chat.
 Channel and category IDs are client-generated random 32-byte values.
 `position` is an integer used for ordering with ID as the tiebreaker.
 Text and voice channels each have one category. Channel kind is fixed at creation.

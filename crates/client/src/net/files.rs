@@ -32,6 +32,7 @@ use std::time::Instant;
 
 /// Upload the files, then send the message with them; `false` when an upload failed.
 /// A link preview that fails to upload is left out, without failing the message.
+/// Files already in `body` are kept ones (see `Draft::keep`): never removed here.
 pub(super) async fn send(
     ctx: &Ctx,
     url: &Url,
@@ -40,6 +41,7 @@ pub(super) async fn send(
     mut body: MessageBody,
     (files, preview, inline): (Vec<PathBuf>, Option<Arc<Made>>, Vec<Inline>),
 ) -> Result<bool> {
+    let kept = body.attachments.len();
     if let Some(first) = files.first() {
         let label = match files.len() {
             1 => file_name(first),
@@ -60,7 +62,7 @@ pub(super) async fn send(
         ctx.send(Update::Uploading(url.clone(), channel, None));
         if let Err(error) = uploaded {
             tracing::warn!(error = %format_args!("{error:#}"), "uploading a file failed");
-            discard(client, &body.attachments).await;
+            discard(client, &body.attachments[kept..]).await;
             ctx.send(Update::Failed(upload_problem(&error).into()));
             return Ok(false);
         }
@@ -82,7 +84,7 @@ pub(super) async fn send(
             Ok(attachment) => body.attachments.push(attachment),
             Err(error) => {
                 tracing::warn!(error = %format_args!("{error:#}"), "uploading an emoji file failed");
-                discard(client, &body.attachments).await;
+                discard(client, &body.attachments[kept..]).await;
                 at_most(CLEANUP, discard(client, &leftover)).await;
                 ctx.send(Update::Failed(upload_problem(&error).into()));
                 return Ok(false);
@@ -92,7 +94,7 @@ pub(super) async fn send(
     let record = match client.post_message(&channel, id, &body).await {
         Ok(record) => record,
         Err(error) => {
-            discard(client, &body.attachments).await;
+            discard(client, &body.attachments[kept..]).await;
             at_most(CLEANUP, discard(client, &leftover)).await;
             return Err(error);
         }

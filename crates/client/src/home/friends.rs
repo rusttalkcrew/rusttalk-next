@@ -65,6 +65,7 @@ impl Home {
                 edit_of: None,
                 revision: 0,
                 files: Vec::new(),
+                keep: Vec::new(),
                 sticker: None,
                 friend: Some((signal, now_ms().max(0) as u64)),
                 poke: false,
