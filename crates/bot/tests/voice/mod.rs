@@ -29,11 +29,10 @@ use rusttalk_core::{
 use serde_json::json;
 use tokio::{task::JoinSet, time::timeout};
 
-use super::{invite, receive_key, rejected, session};
+use super::{invite, receive_key, rejected, session, wait::hang_guard};
 
 const A_HZ: u32 = 440;
 const B_HZ: u32 = 660;
-const LIMIT: Duration = Duration::from_secs(5);
 
 async fn both_ways(a: &mut VoiceRoom, b: &mut VoiceRoom, a_hz: u32, b_hz: u32) -> Result<()> {
     let (a_id, b_id) = (a.identity(), b.identity());
@@ -49,7 +48,7 @@ async fn wait_for_microphone(
     who: &ParticipantIdentity,
     muted: bool,
 ) -> Result<()> {
-    timeout(LIMIT, async {
+    timeout(hang_guard(), async {
         while let Some(event) = room.next_event().await {
             let (participant, publication, event_muted) = match event {
                 RoomEvent::TrackMuted {
@@ -200,24 +199,27 @@ pub async fn exercise(
     }));
     let a_id = room_a.identity();
     let flow = async {
-        timeout(LIMIT, both_ways(&mut room_a, &mut room_b, A_HZ, B_HZ))
-            .await
-            .context("initial duplex")??;
+        timeout(
+            hang_guard(),
+            both_ways(&mut room_a, &mut room_b, A_HZ, B_HZ),
+        )
+        .await
+        .context("initial duplex")??;
         // A new bitrate republishes our audio; the call keeps flowing both ways.
         let replaced = room_a.set_audio_kbps(32).await?;
         assert_eq!(replaced.len(), 1);
         let b_id = room_b.identity();
-        timeout(LIMIT, hear_track(&mut room_b, &replaced[0].1, A_HZ))
+        timeout(hang_guard(), hear_track(&mut room_b, &replaced[0].1, A_HZ))
             .await
             .context("B hearing A after a bitrate change")??;
-        timeout(LIMIT, hear_tone(&mut room_a, Some(&b_id), B_HZ))
+        timeout(hang_guard(), hear_tone(&mut room_a, Some(&b_id), B_HZ))
             .await
             .context("A hearing B after a bitrate change")??;
         for muted in [true, false] {
             room_a.set_microphone_muted(muted);
             wait_for_microphone(&mut room_b, &a_id, muted).await?;
         }
-        let people = timeout(LIMIT, async {
+        let people = timeout(hang_guard(), async {
             loop {
                 let event = a
                     .next_event()
@@ -238,7 +240,7 @@ pub async fn exercise(
         }
 
         room_a.simulate_signal_reconnect().await?;
-        timeout(LIMIT, async {
+        timeout(hang_guard(), async {
             let mut reconnecting = false;
             while let Some(event) = room_a.next_event().await {
                 match event {
@@ -252,7 +254,7 @@ pub async fn exercise(
         .await
         .context("waiting for reconnect events")??;
         b_pitch.store(780, Ordering::Relaxed);
-        timeout(LIMIT, both_ways(&mut room_a, &mut room_b, A_HZ, 780))
+        timeout(hang_guard(), both_ways(&mut room_a, &mut room_b, A_HZ, 780))
             .await
             .context("duplex after reconnect")??;
         Ok::<_, anyhow::Error>(())
@@ -263,7 +265,7 @@ pub async fn exercise(
             .await
             .context("waiting for LiveKit publication result")?;
         ensure!(error.is_err(), "LiveKit allowed the listener to publish");
-        timeout(LIMIT, hear_tone(&mut listener, Some(&a_id), A_HZ))
+        timeout(hang_guard(), hear_tone(&mut listener, Some(&a_id), A_HZ))
             .await
             .context("listener did not receive encrypted audio")??;
         Ok(())
@@ -272,7 +274,7 @@ pub async fn exercise(
     let listener_id = listener.identity();
     for deafened in [true, false] {
         listener.set_deafened(deafened).await?;
-        timeout(LIMIT, async {
+        timeout(hang_guard(), async {
             while let Some(event) = room_b.next_event().await {
                 if let RoomEvent::ParticipantAttributesChanged { participant, .. } = event
                     && participant.identity() == listener_id
@@ -307,7 +309,7 @@ pub async fn exercise(
         "W09 app audio needs PipeWire with pipewire-pulse on the host; set E2E_FEATURES= to skip media"
     );
     let capture = app_audio::share(&room_a).await?;
-    timeout(LIMIT, app_audio::hear(&mut room_b, Some(&a_id)))
+    timeout(hang_guard(), app_audio::hear(&mut room_b, Some(&a_id)))
         .await
         .context("waiting for two per-app tracks")??;
     capture.stop(&room_a).await?;
@@ -351,7 +353,7 @@ pub async fn exercise(
     let _ = room_b.leave().await;
     room_b = b.join_voice(&voice.id).await?;
     room_b.publish_audio(b_source.clone()).await?;
-    timeout(LIMIT, both_ways(&mut room_a, &mut room_b, A_HZ, 780))
+    timeout(hang_guard(), both_ways(&mut room_a, &mut room_b, A_HZ, 780))
         .await
         .context("duplex after speak returned")??;
     println!("W08 removing speak stopped the speaker's audio, and rejoining restored it");
@@ -377,7 +379,7 @@ pub async fn exercise(
     .send()
     .await?
     .error_for_status()?;
-    timeout(LIMIT, async {
+    timeout(hang_guard(), async {
         while let Some(event) = room_b.next_event().await {
             if let RoomEvent::Disconnected { .. } = event {
                 return Ok(());
@@ -394,7 +396,7 @@ pub async fn exercise(
     assert_eq!((room_a.epoch(), listener.epoch()), (2, 2));
     // A new tone separates post-rotation media from the jitter buffer's concealed audio.
     a_pitch.store(880, Ordering::Relaxed);
-    timeout(LIMIT, hear_tone(&mut listener, Some(&a_id), 880))
+    timeout(hang_guard(), hear_tone(&mut listener, Some(&a_id), 880))
         .await
         .context("listener after key rotation")??;
     for room in [&mut room_a, &mut listener] {
@@ -449,7 +451,7 @@ async fn switch(
     let room = a.join_voice(to).await?;
     leaving.await??;
     let left = encode(from);
-    timeout(LIMIT, async {
+    timeout(hang_guard(), async {
         loop {
             let event = a.next_event().await?.context("event stream closed")?;
             if matches!(event, Event::VoiceChanged { channel } if channel == left) {
@@ -464,7 +466,7 @@ async fn switch(
         !roster.people.contains(&me),
         "still listed in the channel it left"
     );
-    timeout(LIMIT, async {
+    timeout(hang_guard(), async {
         while !a.voice_participants(to).await?.people.contains(&me) {
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
@@ -476,9 +478,9 @@ async fn switch(
 }
 
 /// Wait until `who`'s tone stops reaching `room`. Only a full second without it ends the
-/// wait; a closed room or stream keeps waiting until LIMIT fails.
+/// wait; a closed room or stream keeps waiting until the hang guard fails.
 async fn falls_silent(room: &mut VoiceRoom, who: &ParticipantIdentity, hz: u32) -> Result<()> {
-    timeout(LIMIT, async {
+    timeout(hang_guard(), async {
         while timeout(Duration::from_secs(1), hear_tone(room, Some(who), hz))
             .await
             .is_ok()
@@ -502,7 +504,7 @@ async fn set_flags(a: &KeyClient<'_>, channel: &str, role: &str, flags: u8) -> R
 
 /// Wait out the API's short roster cache until only `people` known people remain.
 async fn roster(a: &KeyClient<'_>, voice: &[u8; 32], people: usize) -> Result<()> {
-    timeout(LIMIT, async {
+    timeout(hang_guard(), async {
         loop {
             let roster = a.voice_participants(voice).await?;
             if roster.people.len() == people && roster.unknown == 0 {

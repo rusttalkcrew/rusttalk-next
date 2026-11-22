@@ -13,7 +13,7 @@ use rusttalk_core::{
 use serde_json::{Value, json};
 use tokio::time::timeout;
 
-use super::{A_HZ, LIMIT, both_ways, falls_silent};
+use super::{A_HZ, both_ways, falls_silent, hang_guard};
 use crate::{receive_key, rejected};
 
 const B_HZ: u32 = 780;
@@ -71,7 +71,7 @@ pub async fn exercise(
         .error_for_status()?;
     // Lifting it gives the microphone back in the room B is in, with no rejoin and without
     // B's API connection: LiveKit's own permission change is enough, as the app relies on.
-    timeout(LIMIT, async {
+    timeout(hang_guard(), async {
         while !room_b.can_publish() {
             room_b.next_event().await.context("room closed")?;
         }
@@ -84,7 +84,7 @@ pub async fn exercise(
         "LiveKit kept the muted microphone"
     );
     room_b.publish_audio(b_source.clone()).await?;
-    timeout(LIMIT, both_ways(room_a, &mut room_b, A_HZ, B_HZ))
+    timeout(hang_guard(), both_ways(room_a, &mut room_b, A_HZ, B_HZ))
         .await
         .context("duplex after the mute was lifted")??;
     println!(
@@ -122,7 +122,7 @@ pub async fn exercise(
         .error_for_status()?;
     disconnected(&mut room_b).await?;
     let b_device = encode(b.identity.certificate.signing_key().as_bytes());
-    timeout(LIMIT, async {
+    timeout(hang_guard(), async {
         loop {
             let event = b.next_event().await?.context("socket closed")?;
             if let Event::VoiceMoved { devices, from, to } = event {
@@ -141,7 +141,7 @@ pub async fn exercise(
     receive_key(b, lobby, 1).await?;
     let lobby_room = b.join_voice(&lobby.id).await?;
     let me = *b.identity.certificate.person_id();
-    timeout(LIMIT, async {
+    timeout(hang_guard(), async {
         while !a.voice_participants(&lobby.id).await?.people.contains(&me) {
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         }
@@ -189,14 +189,14 @@ async fn rejoin(
 ) -> Result<VoiceRoom> {
     let mut room_b = b.join_voice(&voice.id).await?;
     room_b.publish_audio(source.clone()).await?;
-    timeout(LIMIT, both_ways(room_a, &mut room_b, A_HZ, B_HZ))
+    timeout(hang_guard(), both_ways(room_a, &mut room_b, A_HZ, B_HZ))
         .await
         .context("duplex after rejoining")??;
     Ok(room_b)
 }
 
 async fn disconnected(room: &mut VoiceRoom) -> Result<Option<DisconnectReason>> {
-    timeout(LIMIT, async {
+    timeout(hang_guard(), async {
         while let Some(event) = room.next_event().await {
             if let RoomEvent::Disconnected { reason } = event {
                 return Some(reason);

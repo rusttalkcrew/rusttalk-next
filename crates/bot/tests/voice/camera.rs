@@ -7,7 +7,7 @@ use rusttalk_core::client::{
     voice::{TrackSid, TrackSource, VoiceRoom},
 };
 
-use super::{LIMIT, set_flags};
+use super::{hang_guard, set_flags};
 
 /// A publishes a synthetic camera that B decodes. A member who may speak but not share
 /// video gets a token that LiveKit holds to the microphone.
@@ -28,9 +28,10 @@ pub(super) async fn exercise(
         .await?
         .sid();
     let result = async {
-        let camera = tokio::time::timeout(LIMIT, screen::find(b, TrackSource::Camera)).await??;
+        let camera =
+            tokio::time::timeout(hang_guard(), screen::find(b, TrackSource::Camera)).await??;
         assert_eq!((camera.sid, camera.name.as_str()), (sid.clone(), "Camera"));
-        tokio::time::timeout(LIMIT, screen::hear(b, TrackSource::Camera))
+        tokio::time::timeout(hang_guard(), screen::hear(b, TrackSource::Camera))
             .await
             .context("camera pattern")??;
         b.set_subscribed(&sid, false)?;
@@ -78,7 +79,7 @@ pub(super) async fn exercise(
             .any(|video| video.sid == *sid)
     };
     let revoked = async {
-        tokio::time::timeout(LIMIT, async {
+        tokio::time::timeout(hang_guard(), async {
             while !shown(&sid) {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
@@ -86,7 +87,7 @@ pub(super) async fn exercise(
         .await
         .context("waiting for B's camera")?;
         set_flags(owner, channel, "admin", 7).await?;
-        tokio::time::timeout(LIMIT, async {
+        tokio::time::timeout(hang_guard(), async {
             while b.can_use_camera() || shown(&sid) {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }

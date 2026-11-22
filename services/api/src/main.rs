@@ -186,7 +186,11 @@ async fn main() -> ExitCode {
                 .with_default(Level::WARN)
                 .with_target("rusttalk_", Level::INFO),
         )
-        .with(tracing_subscriber::fmt::layer().json().with_writer(log_writer()))
+        .with(
+            tracing_subscriber::fmt::layer()
+                .json()
+                .with_writer(log_writer()),
+        )
         .init();
     if let Err(error) = run().await {
         tracing::error!(error = %format_args!("{error:#}"), "API command failed");

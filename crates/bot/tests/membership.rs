@@ -8,8 +8,9 @@ mod soak;
 mod sync;
 #[cfg(feature = "media")]
 mod voice;
+mod wait;
 
-use std::{env, path::Path, process::Command, time::Duration};
+use std::{env, path::Path, process::Command};
 
 use anyhow::{Context, Result, ensure};
 use reqwest::{Method, Response, StatusCode};
@@ -18,7 +19,7 @@ use rusttalk_core::{
     auth::{InviteLink, KnownServer, ProtocolError, Session, decode, encode},
     client::{KeyClient, Server, invite_name},
     identity::{DeviceIdentity, revoke_device},
-    keys::{self, EnvelopeContext, Event, KeyState, Metadata, Scope},
+    keys::{self, EnvelopeContext, KeyState, Metadata, Scope},
     pinned_tls::fingerprint,
 };
 use serde_json::{Value, json};
@@ -122,47 +123,43 @@ async fn pin_dm_as_peer(
 }
 
 async fn receive_key(client: &mut KeyClient<'_>, scope: Scope, epoch: i64) -> Result<()> {
-    // An envelope can already be stored before the bot starts waiting for events.
-    // Several peers may also take successive randomized pauses before wrapping.
-    client.sync().await?;
-    tokio::time::timeout(Duration::from_secs(15), async {
-        while client.key(scope, epoch).is_none() {
-            ensure!(
-                client.next_event().await?.is_some(),
-                "socket closed waiting for key"
-            );
-        }
-        Ok(())
-    })
+    // Several peers may take successive randomized pauses before wrapping.
+    wait::until(
+        client,
+        "envelope delivery",
+        async |client| Ok(client.key(scope, epoch).is_some()),
+        |_| false,
+    )
     .await
-    .context("waiting for envelope delivery")?
 }
 
+/// Wait until `client` has wrapped every key the new `device` needs. Another reader's
+/// wrap counts too: nothing is left pending for that device either way.
 async fn wait_for_device(client: &mut KeyClient<'_>, device: &str) -> Result<()> {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            match client.next_event().await? {
-                Some(Event::KeysNeeded(need)) if need.device == device => return Ok(()),
-                Some(Event::MemberChanged {
-                    device: Some(changed),
-                    ..
-                }) if changed == device => return Ok(()),
-                Some(_) => (),
-                None => anyhow::bail!("socket closed waiting for a wrap request"),
-            }
-        }
-    })
+    wait::until(
+        client,
+        "the wraps for a new device",
+        async |client| {
+            let state: KeyState = client
+                .request(Method::GET, "/v1/keys")
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            Ok(state.pending.iter().all(|need| need.device != device))
+        },
+        |_| false,
+    )
     .await
-    .context("waiting for the keys_needed event")?
 }
 
 async fn expect_close(client: &mut KeyClient<'_>, reason: &str) -> Result<()> {
-    tokio::time::timeout(Duration::from_secs(5), async {
+    wait::within("event socket closure", async {
         while client.next_event().await?.is_some() {}
-        Ok::<_, anyhow::Error>(())
+        Ok(())
     })
-    .await
-    .context("waiting for event socket closure")??;
+    .await?;
     assert_eq!(client.close_reason.as_deref(), Some(reason));
     Ok(())
 }
@@ -391,18 +388,14 @@ async fn docker_keys(
     })).send().await?;
     rejected(reply, StatusCode::CONFLICT, "space_key_unavailable").await?;
 
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while a.key(channel, 2).is_none() {
-            match a.next_event().await? {
-                Some(Event::RotateNeeded { scope }) if scope == channel => return Ok(()),
-                Some(_) => (),
-                None => anyhow::bail!("owner socket closed"),
-            }
-        }
-        Ok(())
-    })
-    .await
-    .context("waiting for the rotate_needed event")??;
+    // The owner's key sync rotates the channel once B has lost read access.
+    wait::until(
+        a,
+        "the channel rotation after the kick",
+        async |a| Ok(a.key(channel, 2).is_some()),
+        |_| false,
+    )
+    .await?;
     receive_key(&mut c, channel, 2).await?;
     receive_key(&mut c, space, 2).await?;
     expect_close(&mut b, "kicked").await?;

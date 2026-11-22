@@ -33,7 +33,7 @@ pub(super) async fn exercise(
     let channel = encode(&voice.id);
     assert!(room_a.can_publish_data() && room_b.can_publish_data());
     super::set_flags(a, &channel, "admin", 13).await?;
-    timeout(super::LIMIT, async {
+    timeout(super::hang_guard(), async {
         while room_b.can_publish_data() {
             sleep(Duration::from_millis(20)).await;
         }
@@ -94,7 +94,7 @@ pub(super) async fn exercise(
     }
     std::fs::write(&source, &file)?;
     let record = room_a.offer_live_file(a, &source).await?;
-    let offer = timeout(super::LIMIT, async {
+    let offer = timeout(super::hang_guard(), async {
         while let Some(event) = b.next_event().await? {
             if let Event::MessageCreated {
                 channel: id,
@@ -114,7 +114,7 @@ pub(super) async fn exercise(
     assert_eq!(attachment.name, NAME);
     assert_eq!(attachment.size, file.len() as u64);
     let mut download = room_b.accept_live_file(b, &offer, &target).await?;
-    timeout(super::LIMIT, async {
+    timeout(super::hang_guard(), async {
         while let Some(event) = a.next_event().await? {
             room_a.handle_live_file_event(a, &event)?;
             if matches!(event, Event::LiveFileAccepted { .. }) {
@@ -303,7 +303,7 @@ pub(super) async fn data_only(
         }).await.context("waiting for data-only transfer")??;
         assert_eq!(Sha256::digest(std::fs::read(path)?), digest);
         if scope == text {
-            timeout(super::LIMIT, async {
+            timeout(super::hang_guard(), async {
                 while !observer.remote_participants().is_empty() {
                     if matches!(
                         observer_events.recv().await,
