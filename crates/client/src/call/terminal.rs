@@ -3,11 +3,11 @@
 //! to type too; the sharer allows each person and can take it back.
 
 use eframe::egui::{self, Align, Id as UiId, Layout, Rect, Ui, UiBuilder, vec2};
-use rusttalk_core::terminal::{Access, Feed, REQUEST_TIMEOUT};
+use rusttalk_core::terminal::{Access, Feed, MAX_PASTE, REQUEST_TIMEOUT};
 
 use super::call_server;
 use crate::{
-    home::Home,
+    home::{Home, face},
     net::{Command, terminal::Guests},
     server::Server,
     terminal::{self as term, Emulator, Local, Shell},
@@ -43,8 +43,9 @@ pub struct Terminals {
     confirm: Option<Shell>,
     /// Who asks to type in ours, and who may.
     pub guests: Guests,
-    /// The device whose request the prompt shows, since when.
-    prompt: Option<(String, f64)>,
+    /// The device whose request the prompt shows, since when, and since when the window
+    /// had the focus (Allow waits for that).
+    prompt: Option<(String, f64, f64)>,
     /// Typing in the one we watch.
     pub typing: Typing,
 }
@@ -275,22 +276,37 @@ pub fn prompt(ctx: &egui::Context, home: &mut Home) {
     if terms
         .prompt
         .as_ref()
-        .is_none_or(|(shown, _)| *shown != device)
+        .is_none_or(|(shown, ..)| *shown != device)
     {
-        terms.prompt = Some((device.clone(), now));
+        terms.prompt = Some((device.clone(), now, now));
+        // The person may be in another window: show them something is waiting.
+        let attention = egui::UserAttentionType::Informational;
+        ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(attention));
     }
-    let since = terms.prompt.as_ref().map_or(now, |(_, since)| *since);
-    let answer = if now - since > REQUEST_TIMEOUT.as_secs_f64() {
+    let focused = ctx.input(|input| input.viewport().focused).unwrap_or(true);
+    let Some((_, shown, ready_from)) = &mut terms.prompt else {
+        return;
+    };
+    // The wait before Allow starts over while the window isn't in front.
+    if !focused {
+        *ready_from = now;
+    }
+    let (shown, ready_from) = (*shown, *ready_from);
+    let answer = if now - shown > REQUEST_TIMEOUT.as_secs_f64() {
         Some(false)
     } else {
-        let ready = now - since >= ALLOW_DELAY;
+        let ready = now - ready_from >= ALLOW_DELAY;
         if !ready {
             ctx.request_repaint();
         }
         let name = server.member_name(&person);
         let title = t!("terminal.request_title", name = name);
         let (picked, closed) = ui::dialog(ctx, "terminal typing", &title, |ui| {
-            ui.add(egui::Label::new(t!("terminal.allow_help")).wrap());
+            // Their picture too, to tell apart people with the same name.
+            ui.horizontal(|ui| {
+                face(ui, &server.dir, &person, &name, 32.0, false);
+                ui.add(egui::Label::new(t!("terminal.allow_help")).wrap());
+            });
             let mut picked = None;
             ui::footer(ui, |ui| {
                 let allow = ui.add_enabled_ui(ready, |ui| ui::primary(ui, t!("remote.allow")));
@@ -366,7 +382,8 @@ pub fn ours(
     let id = UiId::unique("own terminal");
     let bytes = {
         let mut inner = local.shared.lock();
-        term::show(ui, screen, id, &mut inner.emulator, active, true, label).1
+        let typing = Some(usize::MAX);
+        term::show(ui, screen, id, &mut inner.emulator, active, typing, label).bytes
     };
     if !bytes.is_empty() {
         local.shared.write(&bytes);
@@ -376,24 +393,32 @@ pub fn ours(
 
 /// A terminal we watch, in its tile: it can be scrolled, selected and copied from, and
 /// typed in once the sharer allowed it. `None` until its screen arrived. Returns what
-/// was typed.
+/// was typed, and whether a paste was too long to send.
 pub fn theirs(
     ui: &mut Ui,
     rect: Rect,
     screen: Option<&mut Emulator>,
     (active, typing): (bool, bool),
     label: &str,
-) -> Vec<u8> {
+) -> (Vec<u8>, bool) {
     match screen {
         Some(screen) => {
             let id = UiId::unique(("terminal", label));
-            term::show(ui, rect, id, screen, active, typing, label).1
+            // The sharer would drop a longer paste part way; refuse it here instead.
+            let typing = typing.then_some(MAX_PASTE);
+            let shown = term::show(ui, rect, id, screen, active, typing, label);
+            (shown.bytes, shown.refused)
         }
         None => {
             term::placeholder(ui, rect, t!("call.waiting_picture"));
-            Vec::new()
+            (Vec::new(), false)
         }
     }
+}
+
+/// The note when a paste is too long to type in someone's terminal.
+pub fn paste_refused(home: &mut Home, now: f64) {
+    home.toast = Some((t!("terminal.paste_too_long").into(), now + 6.0));
 }
 
 /// Send what was typed into the terminal we watch.

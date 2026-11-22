@@ -33,10 +33,16 @@ const VIEW_RATE: f64 = 2.0 * 1024.0 * 1024.0;
 /// Typed bytes per message; a longer paste is split.
 pub const MAX_INPUT: usize = 1024;
 /// What someone may type: this many bytes at once, refilled at `TYPE_RATE` per second.
-const TYPE_BURST: f64 = 16.0 * 1024.0;
+/// A longer paste is refused before it is sent.
+pub const MAX_PASTE: usize = 16 * 1024;
+const TYPE_BURST: f64 = MAX_PASTE as f64;
 const TYPE_RATE: f64 = 8.0 * 1024.0;
 /// A request nobody answered in this time counts as denied.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// After a no, a device's requests are ignored this long; after `MAX_DENIALS` of them,
+/// for the rest of the share.
+const COOLDOWN: Duration = Duration::from_secs(30);
+const MAX_DENIALS: u32 = 3;
 
 /// Random, unguessable handle for the right to type, given with a grant.
 pub type Session = [u8; 16];
@@ -98,11 +104,13 @@ pub enum Message {
     Deny { id: Id },
     /// Sharer to viewer: typing taken back.
     Revoke { id: Id },
-    /// Viewer to sharer: typed bytes. `seq` rises with every message, so a replay is dropped.
+    /// Viewer to sharer: typed bytes. `seq` rises with every message, so a replay is
+    /// dropped. `first` marks the start of a key press or paste, which may span messages.
     Input {
         id: Id,
         session: Session,
         seq: u64,
+        first: bool,
         #[serde(with = "bytes")]
         data: Vec<u8>,
     },
@@ -194,6 +202,9 @@ struct Typist {
     /// Bytes they may still type now, and when that was worked out.
     budget: f64,
     at: Instant,
+    /// Part of what they typed was dropped: drop the rest of it too, so no fragments of
+    /// a paste reach the shell.
+    dropping: bool,
 }
 
 /// What the sharer does with a viewer's message.
@@ -223,6 +234,8 @@ pub struct Host {
     /// Who asks to type, since when.
     asking: BTreeMap<String, Instant>,
     typists: BTreeMap<String, Typist>,
+    /// Each device's last denial, and how many it had.
+    denied: BTreeMap<String, (Instant, u32)>,
 }
 
 impl Default for Host {
@@ -235,6 +248,7 @@ impl Default for Host {
             owed: BTreeSet::new(),
             asking: BTreeMap::new(),
             typists: BTreeMap::new(),
+            denied: BTreeMap::new(),
         }
     }
 }
@@ -274,7 +288,10 @@ impl Host {
                 if !online || !self.watchers.contains(from) {
                     return Step::Reply(Message::Deny { id });
                 }
-                if self.typists.contains_key(from) {
+                let cooling = self.denied.get(from).is_some_and(|(at, count)| {
+                    *count >= MAX_DENIALS || now.duration_since(*at) < COOLDOWN
+                });
+                if self.typists.contains_key(from) || cooling {
                     return Step::Nothing;
                 }
                 // Asking again restarts the wait.
@@ -291,7 +308,11 @@ impl Host {
                 }
             }
             Message::Input {
-                session, seq, data, ..
+                session,
+                seq,
+                first,
+                data,
+                ..
             } => {
                 let Some(typist) = self.typists.get_mut(from) else {
                     return Step::Nothing;
@@ -300,10 +321,15 @@ impl Host {
                     return Step::Nothing;
                 }
                 typist.seq = seq;
+                if typist.dropping && !first {
+                    return Step::Nothing;
+                }
+                typist.dropping = false;
                 let elapsed = now.saturating_duration_since(typist.at).as_secs_f64();
                 typist.budget = (typist.budget + elapsed * TYPE_RATE).min(TYPE_BURST);
                 typist.at = now;
                 if (data.len() as f64) > typist.budget {
+                    typist.dropping = true;
                     return Step::Nothing;
                 }
                 typist.budget -= data.len() as f64;
@@ -334,6 +360,8 @@ impl Host {
         let id = self.id;
         let open = now.duration_since(at) < REQUEST_TIMEOUT && self.watchers.contains(who);
         if !allow || !open {
+            let (_, count) = self.denied.get(who).copied().unwrap_or((now, 0));
+            self.denied.insert(who.to_owned(), (now, count + 1));
             return Some(Message::Deny { id });
         }
         let session = random();
@@ -342,6 +370,7 @@ impl Host {
             seq: 0,
             budget: TYPE_BURST,
             at: now,
+            dropping: false,
         };
         self.typists.insert(who.to_owned(), typist);
         Some(Message::Grant { id, session })
@@ -495,14 +524,14 @@ impl Viewer {
         let Typing::Granted { session, seq } = &mut self.typing else {
             return Vec::new();
         };
-        bytes
-            .chunks(MAX_INPUT)
-            .map(|chunk| {
+        (bytes.chunks(MAX_INPUT).enumerate())
+            .map(|(at, chunk)| {
                 *seq += 1;
                 Message::Input {
                     id: self.id,
                     session: *session,
                     seq: *seq,
+                    first: at == 0,
                     data: chunk.to_vec(),
                 }
             })
@@ -927,6 +956,7 @@ mod tests {
             id,
             session: [0; 16],
             seq,
+            first: true,
             data: b"x".to_vec(),
         };
         assert_eq!(host.receive("ada", forged(99), true, now), Step::Nothing);
@@ -974,10 +1004,81 @@ mod tests {
         assert_eq!(host.typists().count(), 0);
         // An answer to nobody does nothing; a withdrawn request can't be allowed.
         assert_eq!(host.answer("bob", true, now), None);
-        host.receive("bob", request, true, now);
+        host.receive("cy", Message::Watch { id: host.id }, true, now);
+        host.receive("cy", request, true, now);
         let withdraw = Message::Withdraw { id: host.id };
-        assert_eq!(host.receive("bob", withdraw, true, now), Step::Ended);
-        assert_eq!(host.answer("bob", true, now), None);
+        assert_eq!(host.receive("cy", withdraw, true, now), Step::Ended);
+        assert_eq!(host.answer("cy", true, now), None);
+    }
+
+    #[test]
+    fn after_a_no_asking_again_waits() {
+        let now = Instant::now();
+        let (mut host, mut viewer) = watched(now);
+        let mut at = now;
+        for _ in 0..MAX_DENIALS {
+            assert_eq!(host.receive("ada", viewer.ask(), true, at), Step::Ask);
+            assert!(host.answer("ada", false, at).is_some());
+            // Ignored for a while, without a prompt.
+            let soon = at + COOLDOWN / 2;
+            assert_eq!(host.receive("ada", viewer.ask(), true, soon), Step::Nothing);
+            assert!(host.askers(soon).is_empty());
+            at += COOLDOWN;
+        }
+        // After three, for the rest of the share.
+        let much_later = at + 100 * COOLDOWN;
+        assert_eq!(
+            host.receive("ada", viewer.ask(), true, much_later),
+            Step::Nothing
+        );
+    }
+
+    #[test]
+    fn a_paste_over_the_budget_is_dropped_whole() {
+        let now = Instant::now();
+        let (mut host, mut viewer) = typing(now);
+        // A paste twice the budget (the window refuses those; a modified one may not):
+        // what fits goes through, and once a part is dropped, so is all that follows.
+        let paste = viewer.input(&vec![b'x'; 2 * MAX_PASTE]);
+        let steps: Vec<_> = (paste.into_iter())
+            .map(|part| host.receive("ada", part, true, now))
+            .collect();
+        let typed = steps.iter().filter(|step| matches!(step, Step::Type(_)));
+        assert_eq!(typed.count(), MAX_PASTE / MAX_INPUT);
+        assert!(
+            steps[MAX_PASTE / MAX_INPUT..]
+                .iter()
+                .all(|s| *s == Step::Nothing)
+        );
+        // The next key press, once there is room, goes through.
+        let key = viewer.input(b"\r");
+        let later = now + Duration::from_secs(1);
+        assert_eq!(
+            host.receive("ada", key[0].clone(), true, later),
+            Step::Type(b"\r".to_vec())
+        );
+    }
+
+    #[test]
+    fn the_old_session_is_dropped_after_a_new_grant() {
+        let now = Instant::now();
+        let (mut host, mut viewer) = typing(now);
+        let old = viewer.input(b"old");
+        let revoke = host.revoke("ada").unwrap();
+        viewer.receive(SHARER, revoke);
+        assert_eq!(host.receive("ada", viewer.ask(), true, now), Step::Ask);
+        let grant = host.answer("ada", true, now).unwrap();
+        assert_eq!(viewer.receive(SHARER, grant), Feed::Typing(Access::Granted));
+        // Input from the earlier grant is refused, the new one's taken.
+        assert_eq!(
+            host.receive("ada", old[0].clone(), true, now),
+            Step::Nothing
+        );
+        let new = viewer.input(b"new");
+        assert_eq!(
+            host.receive("ada", new[0].clone(), true, now),
+            Step::Type(b"new".to_vec())
+        );
     }
 
     #[test]

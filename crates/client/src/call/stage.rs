@@ -348,6 +348,7 @@ enum Act {
     /// Ask to type in the terminal we watch, or stop asking or typing.
     AskToType,
     TypeInTerminal(Vec<u8>),
+    PasteRefused,
 }
 
 /// The tiles in this room: shared screens first, then people.
@@ -867,9 +868,13 @@ fn tile(
                 .watching
                 .as_mut()
                 .and_then(|(_, screen)| screen.as_mut());
-            let typed = terminal::theirs(ui, rect, screen, (active, typing), &entry.name);
+            let (typed, refused) =
+                terminal::theirs(ui, rect, screen, (active, typing), &entry.name);
             if !typed.is_empty() {
                 acts.push(Act::TypeInTerminal(typed));
+            }
+            if refused {
+                acts.push(Act::PasteRefused);
             }
         }
     }
@@ -1245,6 +1250,7 @@ fn apply(home: &mut Home, index: usize, now: f64, acts: Vec<Act>) {
             Act::Control(inputs) => send(home, Command::ControlInput(inputs)),
             Act::AskToType => terminal::ask(home, now),
             Act::TypeInTerminal(bytes) => terminal::send_typed(home, bytes),
+            Act::PasteRefused => terminal::paste_refused(home, now),
             Act::WatchTerminal(sharer) => terminal::watch(home, &sharer),
             Act::StopWatchingTerminal => {
                 // Like a screen: a big terminal would be watched again at once.
@@ -1328,7 +1334,7 @@ pub fn full_view(ui: &mut Ui, home: &mut Home) {
             .as_ref()
             .and_then(|call| (home.servers.iter()).find(|s| s.address == call.server));
         let terms = &mut home.voice.terminals;
-        let mut typed = Vec::new();
+        let (mut typed, mut refused) = (Vec::new(), false);
         if let (true, Some(local)) = (me, &mut terms.local) {
             terminal::ours(ui, rect, local, (&terms.guests, server), true, &name);
         } else {
@@ -1337,9 +1343,12 @@ pub fn full_view(ui: &mut Ui, home: &mut Home) {
                 .watching
                 .as_mut()
                 .and_then(|(_, screen)| screen.as_mut());
-            typed = terminal::theirs(ui, rect, screen, (true, typing), &name);
+            (typed, refused) = terminal::theirs(ui, rect, screen, (true, typing), &name);
         }
         terminal::send_typed(home, typed);
+        if refused {
+            terminal::paste_refused(home, ui.input(|input| input.time));
+        }
         if exit {
             home.voice.stage.full = None;
         }

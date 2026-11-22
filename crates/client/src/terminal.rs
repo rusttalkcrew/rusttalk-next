@@ -927,26 +927,36 @@ fn paint(ui: &Ui, rect: Rect, emulator: &Emulator, focused: bool) -> Layout {
     layout
 }
 
+/// What a terminal's tile gave this frame.
+#[derive(Default)]
+pub struct Shown {
+    /// Typed, for the shell.
+    pub bytes: Vec<u8>,
+    /// A paste was longer than allowed and left out.
+    pub refused: bool,
+}
+
 /// The terminal in `rect`. With `active` it takes the pointer for selecting and
-/// scrolling and the keyboard (after a click) for copying; with `typing` too, keys are
-/// returned as the bytes to send to the shell.
+/// scrolling and the keyboard (after a click) for copying. With `typing` (the longest
+/// paste allowed) too, keys are returned as the bytes to send to the shell.
 pub fn show(
     ui: &mut Ui,
     rect: Rect,
     id: UiId,
     emulator: &mut Emulator,
     active: bool,
-    typing: bool,
+    typing: Option<usize>,
     label: &str,
-) -> (Option<Response>, Vec<u8>) {
+) -> Shown {
     if !active {
         paint(ui, rect, emulator, false);
-        return (None, Vec::new());
+        return Shown::default();
     }
+    let mut refused = false;
     let response = ui.interact(rect, id, Sense::click_and_drag());
     response.widget_info(|| WidgetInfo::labeled(Role::Terminal, true, label));
     let focused = response.has_focus();
-    let layout = paint(ui, rect, emulator, focused && typing);
+    let layout = paint(ui, rect, emulator, focused && typing.is_some());
     if focused {
         ui.painter().rect_stroke(
             rect,
@@ -963,7 +973,7 @@ pub fn show(
         scroll(ui, id, layout, emulator);
     }
     if !focused {
-        return (Some(response), Vec::new());
+        return Shown::default();
     }
     // Tab, arrows and Escape belong to the terminal, not to moving the focus.
     ui.memory_mut(|memory| {
@@ -995,15 +1005,17 @@ pub fn show(
             emulator.term.selection = None;
             continue;
         }
-        if typing {
-            bytes.extend(encode(&event, mode));
+        match (typing, &event) {
+            (Some(longest), Event::Paste(text)) if text.len() > longest => refused = true,
+            (Some(_), _) => bytes.extend(encode(&event, mode)),
+            (None, _) => {}
         }
     }
     if !bytes.is_empty() {
         emulator.term.selection = None;
         emulator.term.scroll_display(Scroll::Bottom);
     }
-    (Some(response), bytes)
+    Shown { bytes, refused }
 }
 
 /// The wheel scrolls through the history, a line at a time.
@@ -1077,12 +1089,13 @@ pub fn encode(event: &Event, mode: TermMode) -> Vec<u8> {
     }
 }
 
-/// Pasted text, marked as a paste when the program asked for that. Escape characters
-/// are dropped so a paste can't end the marking early.
+/// Pasted text, marked as a paste when the program asked for that. Escape and the C1
+/// control characters (another way to start an escape sequence) are dropped, so a
+/// paste can't end the marking early or slip in commands.
 fn paste(text: &str, mode: TermMode) -> Vec<u8> {
     let text: String = text
         .chars()
-        .filter(|c| *c != '\x1b')
+        .filter(|c| *c != '\x1b' && !('\u{80}'..='\u{9f}').contains(c))
         .collect::<String>()
         .replace("\r\n", "\r")
         .replace('\n', "\r");
@@ -1364,6 +1377,9 @@ mod tests {
             encode(&pasted, TermMode::BRACKETED_PASTE),
             b"\x1b[200~a\rb[201~\x1b[201~"
         );
+        // A C1 control (here CSI) starts an escape sequence too.
+        let c1 = Event::Paste("a\u{9b}201~b".into());
+        assert_eq!(encode(&c1, plain), b"a201~b");
     }
 
     #[cfg(unix)]
