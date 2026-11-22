@@ -1083,30 +1083,6 @@ pub(super) async fn on_voice(
     roster(ctx, url, client, state, channel);
 }
 
-/// Follow LiveKit's microphone grant: publish the microphone again when a moderator's mute
-/// is lifted. LiveKit tells the call directly, so this works even if the API connection
-/// missed the change.
-pub(super) async fn sync_microphone(ctx: &Ctx, url: &Url, state: &mut State) {
-    let Some(live) = &mut state.voice else {
-        return;
-    };
-    let can_talk = live.room.can_publish();
-    if can_talk && !live.room.has_microphone() {
-        match live.room.publish_audio(ctx.audio.source()).await {
-            Ok(_) => {
-                tracing::info!("microphone allowed again");
-                live.room
-                    .set_microphone_muted(ctx.audio.muted() || ctx.audio.deafened());
-            }
-            Err(error) => {
-                tracing::warn!(error = %format_args!("{error:#}"), "publishing the microphone again failed");
-                return;
-            }
-        }
-    }
-    ctx.send(Update::CanTalk(url.clone(), live.channel, can_talk));
-}
-
 /// Stop the camera and screen once LiveKit no longer carries them: `video` was removed
 /// mid-call (LiveKit drops the grant) or the SDK unpublished the track itself.
 pub(super) async fn stop_lost_video(
