@@ -21,7 +21,9 @@ cpal = { version = "0.18", features = ["pulseaudio"] }
 deep-filter-rt = "0.2"
 rtrb = "0.3"
 ed25519-dalek = { version = "2.2", default-features = false, features = ["fast"] }
-eframe = "0.37"
+# Desktops add the default features below. Their `wayland` feature makes arboard
+# build Wayland's clipboard on iOS, which arboard counts as a Linux-like system.
+eframe = { version = "0.37", default-features = false, features = ["accesskit", "default_fonts", "links", "system_fonts", "wgpu"] }
 # Bundled emoji glyphs, so icons and chat emoji render without system fonts.
 egui = { version = "0.37", default-features = false, features = ["monochrome_emoji_fonts"] }
 etcetera = "0.11"
@@ -102,6 +104,7 @@ objc2-user-notifications = { version = "0.3", default-features = false, features
 
 # Desktop-only: phones have none of these, or need their own (see docs/mobile.md).
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+eframe = { version = "0.37", features = ["default"] }
 rfd = { version = "0.18", default-features = false, features = ["xdg-portal"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
