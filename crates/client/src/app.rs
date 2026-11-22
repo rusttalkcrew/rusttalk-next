@@ -9,7 +9,7 @@ use zeroize::Zeroizing;
 use crate::{
     home::Home,
     key_storage::{self, NewPassword, Picked, Unlock},
-    keystore::{Job, Keystore, Kind, Sealer, Start, Unlocked},
+    keystore::{Chosen, Job, Keystore, Kind, Sealer, Start, Unlocked},
     ui::{self, error_text, primary_large as primary, secondary_large as secondary},
 };
 
@@ -132,7 +132,11 @@ impl<'a> App<'a> {
     /// After the first-start choice: on to the account screens.
     fn chosen(&mut self, kind: Kind, sealer: Option<Sealer>, restore: bool) -> Screen {
         match self.keystore.choose(kind, sealer) {
-            Ok(()) => {
+            Ok(Chosen::Opened(identity)) => {
+                key_storage::forget(&self.ctx);
+                self.home(*identity)
+            }
+            Ok(Chosen::New) => {
                 key_storage::forget(&self.ctx);
                 if restore {
                     Screen::Restore {

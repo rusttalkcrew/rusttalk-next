@@ -710,6 +710,9 @@ impl Home {
 
     /// The chat on screen: server index and channel or DM.
     fn viewing(&self) -> Vec<(usize, Id)> {
+        if self.covered() {
+            return Vec::new();
+        }
         match self.view {
             View::Server(index) => (self.servers[index].open)
                 .map(|channel| (index, channel))
@@ -721,6 +724,26 @@ impl Home {
         }
     }
 
+    /// The server whose member list can show beside what is open.
+    fn member_server(&self) -> Option<usize> {
+        match self.view {
+            View::Server(index)
+                if self.servers[index].status != Status::Connecting
+                    && self.servers[index].compatibility != Compatibility::AppTooOld =>
+            {
+                Some(index)
+            }
+            _ => None,
+        }
+    }
+
+    /// Phones: what is open is behind the list or the member list, so nobody reads
+    /// it. From the navigation as it is now, so a message right after Back counts.
+    fn covered(&self) -> bool {
+        self.layout.phone
+            && (self.layout.list || (self.member_server().is_some() && self.layout.members_shown()))
+    }
+
     /// Show a chat, like after a click on its notification.
     fn open_chat(&mut self, address: &url::Url, channel: Id) {
         let Some(index) = self.index(address) else {
@@ -728,12 +751,14 @@ impl Home {
         };
         if let Some(peer) = self.dm_peer(index, &channel) {
             self.view = View::Direct(Some(peer));
+            self.layout.list = false;
             return;
         }
         let server = &mut self.servers[index];
         if server.channel(&channel).is_some() {
             server.open = Some(channel);
             self.view = View::Server(index);
+            self.layout.list = false;
         }
     }
 
@@ -1599,6 +1624,10 @@ pub fn show(
 ) -> Option<Action> {
     let now = ui.input(|input| input.time);
     let focused = ui.input(|input| input.viewport().focused).unwrap_or(true);
+    // Window size first: whether a message is being read depends on it.
+    home.layout.phone = ui::is_phone(ui.ctx());
+    home.layout
+        .set_window_width(ui.available_width() - RAIL_WIDTH);
     if home.focused && !focused {
         // Stepping away: read marks reach the other devices.
         home.publish_settings();
@@ -1751,94 +1780,132 @@ pub fn show(
     }
     // Joining or leaving a call counts: a restart must never cut one off.
     updates.banner(ui, home.voice.call.is_some());
-    home.layout
-        .set_window_width(ui.available_width() - RAIL_WIDTH);
+    // Phones show the list or what is open, never both; picking something opens it.
+    let phone = home.layout.phone;
+    let list = phone && home.layout.list;
+    let channels_width = if list {
+        ui.available_width() - RAIL_WIDTH
+    } else {
+        home.layout.channels
+    };
     // One column for rail and channel list, so the bottom panel spans both like Discord.
-    let channels = Panel::left("sidebar")
-        .resizable(false)
-        .exact_size(RAIL_WIDTH + home.layout.channels)
-        .frame(Frame::new())
-        .show(ui, |ui| {
-            Panel::bottom("you")
-                .frame(panel_frame(colors.side))
-                .show(ui, |ui| bottom_panel(ui, home, updates));
-            Panel::left("servers")
-                .resizable(false)
-                .exact_size(RAIL_WIDTH)
-                .frame(panel_frame(colors.rail))
-                .show(ui, |ui| server_rail(ui, home));
-            Panel::left("channels")
-                .resizable(false)
-                .exact_size(home.layout.channels)
-                .frame(panel_frame(colors.side))
-                .show(ui, |ui| sidebar(ui, home))
-                .response
-                .rect
-        })
-        .inner;
+    let channels = (!phone || list).then(|| {
+        Panel::left("sidebar")
+            .resizable(false)
+            .exact_size(RAIL_WIDTH + channels_width)
+            .frame(Frame::new())
+            .show(ui, |ui| {
+                Panel::bottom("you")
+                    .frame(panel_frame(colors.side))
+                    .show(ui, |ui| bottom_panel(ui, home, updates));
+                Panel::left("servers")
+                    .resizable(false)
+                    .exact_size(RAIL_WIDTH)
+                    .frame(panel_frame(colors.rail))
+                    .show(ui, |ui| server_rail(ui, home));
+                Panel::left("channels")
+                    .resizable(false)
+                    .exact_size(channels_width)
+                    .frame(panel_frame(colors.side))
+                    .show(ui, |ui| sidebar(ui, home))
+                    .response
+                    .rect
+            })
+            .inner
+    });
+    let member_server = home.member_server().filter(|_| !list);
+    // On phones the member list covers the column, and Back closes it first.
+    let members_cover = phone && member_server.is_some() && home.layout.members_shown();
+    if phone && !list {
+        Panel::top("phone-back")
+            .frame(panel_frame(colors.side))
+            .show(ui, |ui| {
+                if ui::icon_button(
+                    ui,
+                    "⬅",
+                    t!("common.back"),
+                    ui::Look::Ghost,
+                    Vec2::new(36.0, 32.0),
+                )
+                .clicked()
+                {
+                    if members_cover {
+                        home.layout.toggle_members();
+                    } else {
+                        home.layout.list = true;
+                    }
+                }
+            });
+    }
     let mut members = None;
-    if let View::Server(index) = home.view
-        && home.servers[index].status != Status::Connecting
-        && home.servers[index].compatibility != Compatibility::AppTooOld
-    {
+    if let Some(index) = member_server {
         // Toggled from the channel header; the panel only slides.
         let mut shown = home.layout.members_shown();
         members = Panel::right("members")
             .resizable(false)
-            .exact_size(home.layout.members)
+            .exact_size(if phone {
+                ui.available_width()
+            } else {
+                home.layout.members
+            })
             .frame(panel_frame(colors.side))
             .show_collapsible(ui, &mut shown, |ui| member_list(ui, home, index))
             .map(|panel| panel.response.rect);
     }
-    CentralPanel::default()
-        .frame(
-            Frame::new()
-                .fill(colors.main)
-                .inner_margin(Margin::same(ui::SPACE_M as i8)),
-        )
-        .show(ui, |ui| match home.view {
-            View::Join => join(ui, home),
-            View::Find => find(ui, home),
-            View::Direct(None) => friends::view(ui, home),
-            View::Pokes => pokes::view(ui, home),
-            View::Direct(Some(peer)) => dm_pane(ui, home, peer),
-            View::Server(index) => {
-                if !show_compatibility(ui, home, index) {
-                    return;
-                }
-                match home.servers[index].open {
-                    Some(channel) if home.servers[index].is_voice(&channel) => {
-                        voice_pane(ui, home, index, channel)
+    if !list && !members_cover {
+        CentralPanel::default()
+            .frame(
+                Frame::new()
+                    .fill(colors.main)
+                    .inner_margin(Margin::same(ui::SPACE_M as i8)),
+            )
+            .show(ui, |ui| match home.view {
+                View::Join => join(ui, home),
+                View::Find => find(ui, home),
+                View::Direct(None) => friends::view(ui, home),
+                View::Pokes => pokes::view(ui, home),
+                View::Direct(Some(peer)) => dm_pane(ui, home, peer),
+                View::Server(index) => {
+                    if !show_compatibility(ui, home, index) {
+                        return;
                     }
-                    Some(channel) => chat_pane(ui, home, index, channel),
-                    None => {
-                        let server = &home.servers[index];
-                        let hint = match &server.status {
-                            Status::Stopped(reason) => reason.clone(),
-                            Status::Connecting => t!("common.connecting").into(),
-                            _ if server.dir.categories.is_empty()
-                                && server.dir.perms.manage_channels =>
-                            {
-                                t!("home.no_channels").into()
-                            }
-                            _ => t!("home.pick_channel").into(),
-                        };
-                        empty(ui, server.name(), &hint);
+                    match home.servers[index].open {
+                        Some(channel) if home.servers[index].is_voice(&channel) => {
+                            voice_pane(ui, home, index, channel)
+                        }
+                        Some(channel) => chat_pane(ui, home, index, channel),
+                        None => {
+                            let server = &home.servers[index];
+                            let hint = match &server.status {
+                                Status::Stopped(reason) => reason.clone(),
+                                Status::Connecting => t!("common.connecting").into(),
+                                _ if server.dir.categories.is_empty()
+                                    && server.dir.perms.manage_channels =>
+                                {
+                                    t!("home.no_channels").into()
+                                }
+                                _ => t!("home.pick_channel").into(),
+                            };
+                            empty(ui, server.name(), &hint);
+                        }
                     }
                 }
-            }
-        });
+            });
+    }
     // Resize handles go last so they sit above the panels on both sides of each edge.
-    let mut dragging = layout::resize_edge(
-        ui,
-        t!("home.resize_channels"),
-        channels,
-        true,
-        &mut home.layout.channels,
-        layout::CHANNELS_WIDTH,
-        layout::CHANNELS_RANGE,
-    );
-    if let Some(members) = members {
+    let mut dragging = false;
+    if let Some(channels) = channels.filter(|_| !phone) {
+        dragging |= layout::resize_edge(
+            ui,
+            t!("home.resize_channels"),
+            channels,
+            true,
+            &mut home.layout.channels,
+            layout::CHANNELS_WIDTH,
+            layout::CHANNELS_RANGE,
+        );
+    }
+    if let Some(members) = members.filter(|_| !phone) {
         dragging |= layout::resize_edge(
             ui,
             t!("home.resize_members"),
@@ -1962,9 +2029,11 @@ fn server_rail(ui: &mut Ui, home: &mut Home) {
         ui::menu(&plus, |m| {
             if m.item("🔗", t!("home.join_with_invite")).clicked() {
                 home.view = View::Join;
+                home.layout.list = false;
             }
             if m.item("🔍", t!("home.find_servers")).clicked() {
                 home.view = View::Find;
+                home.layout.list = false;
                 home.find.open();
             }
         });
@@ -2172,6 +2241,7 @@ fn dm_list(ui: &mut Ui, home: &mut Home) {
     }
     if row.clicked() {
         home.view = View::Direct(None);
+        home.layout.list = false;
     }
     pokes::nav_row(ui, home);
     ui.add_space(ui::SPACE_XS);
@@ -2244,6 +2314,7 @@ fn dm_row(ui: &mut Ui, home: &mut Home, peer: &Id, request: bool) {
     }
     if row.clicked() {
         home.view = View::Direct(Some(*peer));
+        home.layout.list = false;
     }
 }
 
@@ -2474,6 +2545,7 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
     }
     if let Some(channel) = pick {
         home.servers[index].open = Some(channel);
+        home.layout.list = false;
     }
     if let Some(channel) = talk {
         call::join(home, index, channel);
@@ -3467,7 +3539,7 @@ fn files_view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat: &mu
     }
     let server = &home.servers[index];
     let online = server.status == Status::Online;
-    let can_upload = online && server.can_write(&channel);
+    let can_upload = online && server.can_write(&channel) && files::PICKER;
     if !chat.shared_asked {
         chat.shared_asked = true;
         server.send(Command::SharedFiles(channel));
@@ -3617,7 +3689,7 @@ fn page_view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat: &mut
                 }
                 let add = format!("🖼 {}", t!("home.page_add_pictures"));
                 if ui
-                    .add_enabled_ui(online && chat.staged.len() < room, |ui| {
+                    .add_enabled_ui(online && chat.staged.len() < room && files::PICKER, |ui| {
                         ui::secondary(ui, add.as_str())
                     })
                     .inner
@@ -4606,13 +4678,15 @@ fn composer(
                     })
                     .inner;
                 ui::menu_wide(&plus, |m| {
-                    let upload =
-                        Item::new("📎", t!("home.upload_file")).hint(t!("home.upload_file_help"));
+                    let upload = Item::new("📎", t!("home.upload_file"))
+                        .hint(t!("home.upload_file_help"))
+                        .enabled(files::PICKER);
                     if m.add(upload).clicked() {
                         attach = Some(false);
                     }
-                    let live =
-                        Item::new("📡", t!("home.send_live")).hint(t!("home.send_live_help"));
+                    let live = Item::new("📡", t!("home.send_live"))
+                        .hint(t!("home.send_live_help"))
+                        .enabled(files::PICKER);
                     if m.add(live).on_hover_text(t!("call.direct_chat")).clicked() {
                         attach = Some(true);
                     }
@@ -5976,6 +6050,67 @@ mod tests {
         *harness.state_mut() = Some(home);
         harness.run_steps(4);
         (harness, sent)
+    }
+
+    type Screen = (Home, crate::update::Updater, crate::keystore::Keystore);
+
+    /// Back on a phone hides the chat at once: a message handled before the next
+    /// frame draws the list stays unread.
+    #[test]
+    fn a_message_right_after_back_on_a_phone_stays_unread() {
+        use egui_kittest::kittest::Queryable;
+        let (mut files, _sent) = files_harness(true);
+        let mut home = files.state_mut().take().unwrap();
+        home.view = View::Server(0);
+        home.servers[0].open = Some(PROJECTS);
+        home.layout.list = false;
+        // Never a real desktop notification from a test.
+        let mut prefs = home.notify.prefs().clone();
+        prefs.desktop = false;
+        home.notify.set_prefs(prefs);
+        let data = tempfile::tempdir().unwrap();
+        let mut phone = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(390.0, 844.0))
+            .build_ui_state(
+                |ui, screen: &mut Option<Screen>| {
+                    if let Some((home, updates, keystore)) = screen {
+                        show(ui, home, updates, keystore);
+                    }
+                },
+                None,
+            );
+        ui::install(&phone.ctx);
+        *phone.state_mut() = Some((
+            home,
+            crate::update::Updater::new(data.path()),
+            crate::keystore::without_keychain(data.path()),
+        ));
+        phone.run_steps(4);
+        phone.get_by_label("Back").click();
+        phone.run_steps(1);
+        let ctx = phone.ctx.clone();
+        let (home, ..) = phone.state_mut().as_mut().unwrap();
+        let address = home.servers[0].address.clone();
+        let msg = Msg {
+            backfilled: false,
+            id: [9; 32],
+            person: ANN,
+            at: notify::unix_now() + 1,
+            reply_to: None,
+            quoted_author: None,
+            edit_of: None,
+            body: Body::Text("Are you there?".into()),
+            files: Vec::new(),
+            live: None,
+            sticker: None,
+            replicas: Vec::new(),
+            copy_files: Vec::new(),
+        };
+        home.arrived(&ctx, 0, PROJECTS, msg);
+        phone.run_steps(2);
+        let (home, ..) = phone.state().as_ref().unwrap();
+        assert!(home.layout.list);
+        assert!(home.notify.unread(&address, &PROJECTS));
     }
 
     #[test]

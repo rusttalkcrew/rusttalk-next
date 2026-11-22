@@ -700,7 +700,9 @@ fn receiving(ui: &mut Ui, id: Id, name: &str, size: u64, saved: Option<u64>) -> 
     match saved {
         None => {
             ui.horizontal(|ui| {
-                if ui::primary(ui, t!("common.save")).clicked() {
+                let save =
+                    ui.add_enabled_ui(files::PICKER, |ui| ui::primary(ui, t!("common.save")));
+                if save.inner.clicked() {
                     action = Some(LiveAction::Save(id, name.to_owned()));
                 }
                 if ui::secondary(ui, t!("call.decline")).clicked() {

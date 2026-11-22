@@ -33,6 +33,14 @@ pub const SPACE_M: f32 = 12.0;
 pub const SPACE_L: f32 = 16.0;
 pub const SPACE_XL: f32 = 24.0;
 
+/// Windows narrower than this are phone-sized: they show one column at a time
+/// (see docs/mobile.md).
+pub const PHONE_WIDTH: f32 = 600.0;
+
+pub fn is_phone(ctx: &Context) -> bool {
+    ctx.content_rect().width() < PHONE_WIDTH
+}
+
 // Corner radii.
 pub const RADIUS_S: u8 = 4;
 /// List rows: channels, menu items, sidebar pages.

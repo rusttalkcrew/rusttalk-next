@@ -12,6 +12,19 @@ mod platform;
 #[cfg(windows)]
 #[path = "capture/windows.rs"]
 mod platform;
+// Phones can't capture other apps' audio; the call offers no app audio there.
+#[cfg(any(target_os = "android", target_os = "ios"))]
+mod platform {
+    use super::{App, Capture, Unsupported};
+
+    pub fn list_apps() -> anyhow::Result<Vec<App>> {
+        Err(Unsupported.into())
+    }
+
+    pub fn capture(_: &App, _: impl FnMut(&[i16]) + Send + 'static) -> anyhow::Result<Capture> {
+        Err(Unsupported.into())
+    }
+}
 #[cfg(any(target_os = "macos", test))]
 #[path = "capture/tap.rs"]
 mod tap;

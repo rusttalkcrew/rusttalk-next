@@ -915,6 +915,7 @@ app.sign_in = Sign in
 keys.section = Key storage
 keys.choose_title = Where should RustTalk keep your keys?
 keys.no_keychain = This device has no keychain (common in Steam Deck Game Mode). How should RustTalk keep your keys?
+keys.password_only = On this device RustTalk locks your keys with a password. You type it at every start.
 keys.keychain = Keychain
 keys.keychain_help = Your system's keychain keeps your keys.
 keys.file = Protected file

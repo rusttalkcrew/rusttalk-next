@@ -33,6 +33,10 @@ use crate::{
     ui::{self, ON_FILL, OVERLAY, OVERLAY_BUTTON, OVERLAY_TEXT},
 };
 
+/// Whether this device has a file dialog. Phones need the system's own picker first
+/// (docs/mobile.md); until then the buttons that open one are off there.
+pub const PICKER: bool = !cfg!(any(target_os = "android", target_os = "ios"));
+
 /// Files per message, as the message format allows.
 pub const MAX_FILES: usize = 4;
 pub(crate) const THUMBNAIL: f32 = 320.0;
@@ -373,11 +377,21 @@ impl Files {
             let test = *TEST_ANSWER.lock().unwrap_or_else(|e| e.into_inner());
             let paths = match (test, name) {
                 (Some(answer), name) => answer(name.as_deref()),
+                // shortcut: phones need the system file picker (docs/mobile.md); until
+                // then a pick finds nothing.
+                #[cfg(any(target_os = "android", target_os = "ios"))]
+                (None, _) => {
+                    tracing::warn!("no file picker on this device yet");
+                    let _ = (single, pictures, zip);
+                    Vec::new()
+                }
+                #[cfg(not(any(target_os = "android", target_os = "ios")))]
                 (None, Some(name)) => rfd::FileDialog::new()
                     .set_file_name(name)
                     .save_file()
                     .into_iter()
                     .collect(),
+                #[cfg(not(any(target_os = "android", target_os = "ios")))]
                 (None, None) if pictures => {
                     let dialog = rfd::FileDialog::new()
                         .add_filter(t!("files.pictures"), &["png", "jpg", "jpeg", "gif", "webp"]);
@@ -387,12 +401,15 @@ impl Files {
                         dialog.pick_files().unwrap_or_default()
                     }
                 }
+                #[cfg(not(any(target_os = "android", target_os = "ios")))]
                 (None, None) if zip => rfd::FileDialog::new()
                     .add_filter(t!("files.zip"), &["zip"])
                     .pick_file()
                     .into_iter()
                     .collect(),
+                #[cfg(not(any(target_os = "android", target_os = "ios")))]
                 (None, None) if single => rfd::FileDialog::new().pick_file().into_iter().collect(),
+                #[cfg(not(any(target_os = "android", target_os = "ios")))]
                 (None, None) => rfd::FileDialog::new().pick_files().unwrap_or_default(),
             };
             let _ = answers.send((ask, paths));
@@ -1284,7 +1301,7 @@ fn download(ui: &mut Ui, files: &mut Files, address: &Url, file: &Attachment) {
         }
         None => {}
     }
-    if ui::secondary(ui, t!("files.download")).clicked() {
+    if PICKER && ui::secondary(ui, t!("files.download")).clicked() {
         files.ask(ui.ctx(), Ask::Save(address.clone(), file.clone()));
     }
 }
@@ -1325,7 +1342,7 @@ pub fn viewer(ctx: &egui::Context, files: &mut Files) {
                         close = tool(ui, "×", t!("common.close")).clicked();
                         ui.add_space(12.0);
                         open_it = tool(ui, "↗", t!("files.open_default")).clicked();
-                        if tool(ui, "⬇", t!("common.save")).clicked() {
+                        if PICKER && tool(ui, "⬇", t!("common.save")).clicked() {
                             files.ask(ui.ctx(), Ask::Save(address.clone(), file.clone()));
                         }
                         let view = files.viewer.as_mut().expect("checked above");

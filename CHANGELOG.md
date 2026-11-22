@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Experimental Android test build (APK) and unsigned iOS build (IPA); typing on Android does not work yet
+
 ## v0.1.11 - 2026-11-22
 
 - Your microphone works again when a moderator unmutes you, without rejoining the call

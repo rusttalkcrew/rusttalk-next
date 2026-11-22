@@ -274,5 +274,6 @@ pub fn nav_row(ui: &mut Ui, home: &mut Home) {
     }
     if row.clicked() {
         home.view = View::Pokes;
+        home.layout.list = false;
     }
 }

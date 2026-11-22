@@ -108,6 +108,11 @@ pub struct Layout {
     /// Opened by hand in a narrow window; forgotten when the window size class changes.
     peek: bool,
     narrow: bool,
+    /// Phone-sized windows: the server and channel list fills the screen instead of
+    /// what is open. Opening a channel, DM or page from the list clears it.
+    pub list: bool,
+    /// The window is phone-sized, as of the start of this frame.
+    pub phone: bool,
     /// The voice channel split; `split_dragging` while its divider is held.
     pub split: Split,
     pub split_dragging: bool,
@@ -129,6 +134,8 @@ impl Layout {
             members_open: saved.members_open,
             peek: false,
             narrow: false,
+            list: true,
+            phone: false,
             split: saved.split,
             split_dragging: false,
             saved,
@@ -151,7 +158,7 @@ impl Layout {
         }
     }
 
-    fn toggle_members(&mut self) {
+    pub fn toggle_members(&mut self) {
         if self.narrow {
             self.peek = !self.peek;
         } else {

@@ -243,6 +243,7 @@ dependencies = [
  "ndk-context",
  "ndk-sys",
  "num_enum",
+ "simd_cesu8",
  "thiserror 2.0.21",
 ]
 
@@ -2094,6 +2095,7 @@ dependencies = [
  "egui-winit",
  "egui_glow",
  "egui_system_font_provider",
+ "glow",
  "glutin",
  "glutin-winit",
  "image",
@@ -6524,6 +6526,7 @@ version = "0.1.11"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
+ "apple-native-keyring-store",
  "arboard",
  "argon2",
  "ashpd",
@@ -6581,6 +6584,7 @@ dependencies = [
  "unicode-width",
  "url",
  "windows",
+ "winit",
  "wl-clipboard-rs",
  "x11-clipboard",
  "x11rb",

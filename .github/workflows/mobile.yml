@@ -1,0 +1,58 @@
+name: Mobile apps
+
+# Builds a debug Android APK and an unsigned iOS IPA from the client's code, so a pull
+# request that touches the client proves the phone builds still work (docs/mobile.md).
+# Run it by hand from the Actions tab for test builds of any branch. Not released yet.
+on:
+  pull_request:
+    paths:
+      - crates/client/**
+      - crates/core/**
+      - deploy/android/**
+      - deploy/ios/**
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - .github/workflows/mobile.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mobile-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install && rustup target add aarch64-linux-android
+      # The NDK release the build is tested with; the runner's default one changes.
+      - run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;29.0.14206865" >/dev/null
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 9.8.2
+      - run: ANDROID_NDK_HOME="$ANDROID_HOME/ndk/29.0.14206865" deploy/android/build.sh dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-arm64-debug
+          path: dist/*.apk
+          if-no-files-found: error
+          retention-days: 7
+
+  ios:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install && rustup target add aarch64-apple-ios
+      - run: deploy/ios/build.sh dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios-unsigned
+          path: dist/*.ipa
+          if-no-files-found: error
+          retention-days: 7
