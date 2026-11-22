@@ -320,7 +320,12 @@ that ID and `:name:` otherwise. A sticker is its own message, see
 
 ## Channels and categories
 
-All routes require a bearer header. Channel kind is `text`, `voice`, or `dm`.
+All routes require a bearer header. Channel kind is `text`, `voice`, `page`, or `dm`.
+A `page` channel works exactly like a text channel on the server (same messages,
+keys and flags); clients show only its newest message, as one Markdown page, and
+saving a change posts the whole page as a new message. A new page channel gives
+read and write (3) to Owner, Admin and Moderator and read (1) to Member, so only
+people with write can change the page. Older clients show it as a text channel.
 Channel and category IDs are client-generated random 32-byte values.
 `position` is an integer used for ordering with ID as the tiebreaker.
 Text and voice channels each have one category. Channel kind is fixed at creation.

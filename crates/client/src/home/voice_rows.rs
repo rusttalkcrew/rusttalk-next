@@ -49,6 +49,7 @@ fn window() -> (Harness<'static, Option<Home>>, UnboundedReceiver<Command>) {
         name: name.into(),
         topic: String::new(),
         voice,
+        page: false,
         audio_kbps: 64,
         flags: Vec::new(),
     };

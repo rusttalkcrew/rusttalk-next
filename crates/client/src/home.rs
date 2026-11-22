@@ -48,7 +48,10 @@ use crate::{
     previews::{self, Previews},
     reorder,
     screen::Video,
-    server::{Body, Chat, Directory, Id, Member, Msg, Picture, Server, Status, member_name},
+    server::{
+        Body, Channel, ChannelKind, Chat, Directory, Id, Member, Msg, Picture, Server, Status,
+        member_name,
+    },
     ui::{self, Item, Look, Palette, error_text},
 };
 
@@ -213,7 +216,7 @@ enum Dialog {
     Channel {
         server: usize,
         name: String,
-        voice: bool,
+        kind: ChannelKind,
         category: Option<Id>,
         new_category: String,
     },
@@ -2315,7 +2318,7 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
                 let item = reorder::Item::Channel(channel.id);
                 let selected = server.open == Some(channel.id);
                 let button = list.row(ui, item, block, |ui| {
-                    let icon = if channel.voice { "🔊" } else { "#" };
+                    let icon = channel_icon(channel);
                     let label = format!("{icon}  {}", channel.name);
                     // Voice rows keep room for the Join button.
                     let trailing = if channel.voice { call::JOIN_SLOT } else { 0.0 };
@@ -2467,15 +2470,17 @@ fn new_channel(server: &Server, index: usize, category: Option<Id>) -> Dialog {
     Dialog::Channel {
         server: index,
         name: String::new(),
-        voice: false,
-        category: category.or_else(|| default_category(server, false)),
-        new_category: category_name(false).into(),
+        kind: ChannelKind::Text,
+        category: category.or_else(|| default_category(server, ChannelKind::Text)),
+        new_category: category_name(ChannelKind::Text).into(),
     }
 }
 
 /// A category that already holds this kind of channel, else an empty one;
 /// `None` makes a new category named after the kind.
-fn default_category(server: &Server, voice: bool) -> Option<Id> {
+/// Pages go with the text channels; only voice has a category of its own.
+fn default_category(server: &Server, kind: ChannelKind) -> Option<Id> {
+    let voice = kind == ChannelKind::Voice;
     let categories = || server.dir.categories.iter().filter(|c| c.id.is_some());
     categories()
         .find(|c| c.channels.iter().any(|channel| channel.voice == voice))
@@ -2483,11 +2488,23 @@ fn default_category(server: &Server, voice: bool) -> Option<Id> {
         .and_then(|c| c.id)
 }
 
-fn category_name(voice: bool) -> &'static str {
-    if voice {
-        t!("home.voice_channels")
-    } else {
-        t!("home.text_channels")
+fn category_name(kind: ChannelKind) -> &'static str {
+    match kind {
+        ChannelKind::Voice => t!("home.voice_channels"),
+        ChannelKind::Text | ChannelKind::Page => t!("home.text_channels"),
+    }
+}
+
+/// The glyph before a channel's name.
+pub fn channel_icon(channel: &Channel) -> &'static str {
+    kind_icon(ChannelKind::of(channel))
+}
+
+fn kind_icon(kind: ChannelKind) -> &'static str {
+    match kind {
+        ChannelKind::Text => "#",
+        ChannelKind::Voice => "🔊",
+        ChannelKind::Page => "📄",
     }
 }
 
@@ -3280,8 +3297,147 @@ fn chat_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
         chat.loading = true;
         chat
     });
-    chat_view(ui, home, At::Channel(index, channel), &mut chat);
+    if home.servers[index]
+        .channel(&channel)
+        .is_some_and(|c| c.page)
+    {
+        page_view(ui, home, index, channel, &mut chat);
+    } else {
+        chat_view(ui, home, At::Channel(index, channel), &mut chat);
+    }
     home.servers[index].chats.insert(channel, chat);
+}
+
+/// A page channel: its newest message, shown as one Markdown page. Saving an edit
+/// posts the whole page again as a new message, so it stays end-to-end encrypted.
+fn page_view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat: &mut Chat) {
+    let in_server = matches!(home.view, View::Server(_));
+    let server = &home.servers[index];
+    let title = server
+        .channel(&channel)
+        .map_or_else(String::new, |c| format!("{} {}", channel_icon(c), c.name));
+    let can_edit = server.can_write(&channel);
+    let online = server.status == Status::Online;
+    pane_title(
+        ui,
+        "chat-title",
+        &title,
+        in_server.then_some(&mut home.layout),
+        false,
+    );
+    toast_line(ui, &mut home.toast);
+    let server = &home.servers[index];
+    let dir = &server.dir;
+    // Member and device notices are not part of the page.
+    let page = (chat.messages.iter().rev())
+        .find(|msg| matches!(msg.body, Body::Text(_) | Body::Unreadable) && msg.sticker.is_none());
+    let editing_id = UiId::unique(("page-editing", channel));
+    let mut editing = can_edit && ui.data(|d| d.get_temp(editing_id)).unwrap_or(false);
+    let mut save = false;
+    let mut cancel = false;
+    ui.add_space(ui::SPACE_S);
+    if can_edit {
+        ui.horizontal(|ui| {
+            if editing {
+                let ready = online && !chat.draft.trim().is_empty();
+                save = ui
+                    .add_enabled_ui(ready, |ui| ui::primary(ui, t!("common.save")))
+                    .inner
+                    .clicked();
+                if ui::secondary(ui, t!("common.cancel")).clicked() {
+                    cancel = true;
+                    editing = false;
+                }
+                let count = chat.draft.chars().count();
+                ui.weak(format!("{count} / {MAX_TEXT_CHARS}"));
+            } else if ui::secondary(ui, format!("✏ {}", t!("home.edit_page")).as_str()).clicked()
+            {
+                // A draft kept from a failed save wins over the page as it is.
+                if chat.draft.is_empty()
+                    && let Some(Msg {
+                        body: Body::Text(text),
+                        ..
+                    }) = page
+                {
+                    chat.draft = text.clone();
+                }
+                editing = true;
+            }
+        });
+        ui.add_space(ui::SPACE_S);
+    }
+    ScrollArea::vertical()
+        .id_salt(("page", channel))
+        .auto_shrink(false)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            if editing {
+                ui.add(
+                    ui::text_area(&mut chat.draft)
+                        .char_limit(MAX_TEXT_CHARS)
+                        .desired_rows(20)
+                        .desired_width(f32::INFINITY),
+                );
+                return;
+            }
+            match page {
+                Some(
+                    msg @ Msg {
+                        body: Body::Text(_),
+                        ..
+                    },
+                ) => {
+                    let mention = mentions::Message::cached(ui, msg, dir, channel);
+                    mention.doc.show(ui, dir, &mention, false, false);
+                    ui.add_space(ui::SPACE_S);
+                    let edited = t!(
+                        "home.page_updated",
+                        name = server.member_name(&msg.person),
+                        time = time(msg.at)
+                    );
+                    ui.label(ui::caption(&edited));
+                }
+                Some(_) => {
+                    ui.weak(t!("home.page_unreadable"));
+                }
+                None if chat.loading => {
+                    ui.vertical_centered(|ui| ui.spinner());
+                }
+                None if can_edit => empty(ui, &title, t!("home.page_empty_editor")),
+                None => empty(ui, &title, t!("home.page_empty")),
+            }
+        });
+    if cancel {
+        // Else the next Edit reopens the cancelled text, not the current page.
+        chat.clear_draft();
+    }
+    if save {
+        match rusttalk_core::keys::random_key() {
+            Ok(id) => {
+                let draft = Draft {
+                    id: *id,
+                    channel,
+                    peer: None,
+                    // Keep leading indentation: a page may start with a code block.
+                    text: chat.draft.trim_end().to_owned(),
+                    reply_to: None,
+                    edit_of: None,
+                    revision: 0,
+                    files: Vec::new(),
+                    sticker: None,
+                    friend: None,
+                    poke: false,
+                    preview: None,
+                    poll: None,
+                };
+                server.send(Command::Send(draft));
+                chat.clear_draft();
+                editing = false;
+            }
+            Err(_) => tracing::warn!("no randomness for a page ID"),
+        }
+    }
+    ui.data_mut(|d| d.insert_temp(editing_id, editing));
 }
 
 fn dm_pane(ui: &mut Ui, home: &mut Home, peer: Id) {
@@ -4834,21 +4990,37 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
         Dialog::Channel {
             server,
             name,
-            voice,
+            kind,
             category,
             new_category,
         } => {
-            let was_voice = *voice;
+            let was = *kind;
             ui.horizontal(|ui| {
-                ui.selectable_value(voice, false, format!("# {}", t!("home.kind_text")));
-                ui.selectable_value(voice, true, format!("🔊 {}", t!("home.kind_voice")));
+                ui.selectable_value(
+                    kind,
+                    ChannelKind::Text,
+                    format!("# {}", t!("home.kind_text")),
+                );
+                ui.selectable_value(
+                    kind,
+                    ChannelKind::Voice,
+                    format!("🔊 {}", t!("home.kind_voice")),
+                );
+                ui.selectable_value(
+                    kind,
+                    ChannelKind::Page,
+                    format!("{} {}", kind_icon(ChannelKind::Page), t!("home.kind_page")),
+                );
             });
+            if *kind == ChannelKind::Page {
+                ui.weak(t!("home.kind_page_help"));
+            }
             let data = &home.servers[*server];
             // Switching kind moves a default pick along, but keeps one the person made.
-            if *voice != was_voice && *category == default_category(data, was_voice) {
-                *category = default_category(data, *voice);
-                if *new_category == category_name(was_voice) {
-                    *new_category = category_name(*voice).into();
+            if *kind != was && *category == default_category(data, was) {
+                *category = default_category(data, *kind);
+                if *new_category == category_name(was) {
+                    *new_category = category_name(*kind).into();
                 }
             }
             let categories: Vec<_> = data
@@ -4885,7 +5057,7 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
                     Command::CreateChannel {
                         category: *category,
                         new_category: new_category.trim().to_owned(),
-                        voice: *voice,
+                        kind: *kind,
                         name: name.trim().to_owned(),
                     },
                 ));

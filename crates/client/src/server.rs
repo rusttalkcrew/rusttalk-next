@@ -190,6 +190,18 @@ impl Server {
         self.channel(id).is_some_and(|channel| channel.voice)
     }
 
+    /// Whether this person may post in a channel: one of their roles has its Write flag.
+    pub fn can_write(&self, id: &Id) -> bool {
+        let Some(channel) = self.channel(id) else {
+            return false;
+        };
+        let roles = self
+            .member(&self.dir.me)
+            .map_or(&[][..], |m| m.roles.as_slice());
+        self.dir.perms.owner
+            || (channel.flags.iter()).any(|(role, flags)| flags & 2 != 0 && roles.contains(role))
+    }
+
     /// Find a text channel or DM by ID: (title, is a DM).
     pub fn chat_title(&self, id: &Id) -> Option<(String, bool)> {
         if let Some(dm) = self.dir.dms.iter().find(|dm| dm.channel == *id) {
@@ -322,6 +334,33 @@ pub fn parse_role_display(bytes: &[u8]) -> (Option<Color32>, bool) {
     }
 }
 
+/// What a new channel is for.
+#[derive(Clone, Copy, PartialEq)]
+pub enum ChannelKind {
+    Text,
+    Voice,
+    Page,
+}
+
+impl ChannelKind {
+    /// The kind as the server names it.
+    pub fn wire(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Voice => "voice",
+            Self::Page => "page",
+        }
+    }
+
+    pub fn of(channel: &Channel) -> Self {
+        match (channel.voice, channel.page) {
+            (true, _) => Self::Voice,
+            (_, true) => Self::Page,
+            _ => Self::Text,
+        }
+    }
+}
+
 /// Channels without a category go in a category without an ID or name.
 #[derive(Clone)]
 pub struct Category {
@@ -336,6 +375,8 @@ pub struct Channel {
     pub name: String,
     pub topic: String,
     pub voice: bool,
+    /// Shows its newest message as one Markdown page instead of a chat.
+    pub page: bool,
     /// Opus bitrate of a voice channel, in kbps.
     pub audio_kbps: u32,
     /// Per role: read (1), write (2), speak (4) and video (8).

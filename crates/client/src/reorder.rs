@@ -499,6 +499,7 @@ mod tests {
                     id: [ch; 32],
                     name: format!("{ch}"),
                     voice: false,
+                    page: false,
                     audio_kbps: 64,
                     flags: Vec::new(),
                 })
