@@ -550,6 +550,16 @@ truncation fail. The image decoder checks actual bytes and accepts only
 pure-Rust PNG and JPEG decoding. It caps compressed input at 32 MiB and
 sets `image::Limits` to 4,096 pixels per axis and a 64 MiB allocation budget.
 
+A file shared to a channel's file list (see [Protocol](protocol.md#shared-files))
+carries its reference in a format 3 envelope sealed with the channel key,
+under the file's ID as the message ID. It is built and signed like a message,
+but its associated data starts with `"rusttalk-shared-file-v1"` instead of
+`"rusttalk-message-v1"`, with the same fields after it. So a server can't
+replay a shared file's record as a chat message, or a chat message as a shared
+file: the API and readers check each with its own label, and the signature and
+tag fail under the other. Readers accept the record only when it holds that one
+file, without a thumbnail, and nothing else.
+
 ## Media encryption
 
 Before joining, RustTalk derives a 32-byte key with HKDF-SHA256 using

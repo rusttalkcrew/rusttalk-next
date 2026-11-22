@@ -465,6 +465,8 @@ async fn docker_keys(
             assert!(sibling_keys.key(scope, epoch) == c.key(scope, epoch));
         }
     }
+    let sibling_file = files::share(&sibling_keys, &channel.id).await?;
+    assert_eq!(files::shared_records(a, &channel.id).await?.len(), 1);
     let revoked = revoke_device(
         &c_words,
         sibling.certificate.person_id(),
@@ -472,6 +474,15 @@ async fn docker_keys(
     )?;
     c.revoke_device(&revoked).await?;
     expect_close(&mut sibling_keys, "revoked").await?;
+    // A revoked device's shared file leaves the list and expires like any file.
+    assert!(files::shared_records(a, &channel.id).await?.is_empty());
+    assert!(
+        a.request(Method::GET, &format!("/v1/files/{}", encode(&sibling_file)))
+            .send()
+            .await?
+            .status()
+            .is_success()
+    );
     receive_key(a, space, 3).await?;
     receive_key(a, channel, 3).await?;
     receive_key(&mut c, channel, 3).await?;
@@ -511,6 +522,26 @@ async fn docker_keys(
     let mut d = KeyClient::connect(bot, &d_identity, &d_token).await?;
     wait_for_device(a, &encode(d_identity.certificate.signing_key().as_bytes())).await?;
     receive_key(&mut d, space, 3).await?;
+    // Someone who leaves takes their shared files out of the list; they expire like any file.
+    let leave_files = a
+        .create_channel(&category, "text", b"Leave files", b"")
+        .await?;
+    a.request(
+        Method::PUT,
+        &format!(
+            "/v1/channels/{}/permissions/member",
+            encode(&leave_files.id)
+        ),
+    )
+    .json(&json!({"flags": 3}))
+    .send()
+    .await?
+    .error_for_status()?;
+    a.sync().await?;
+    wait_for_device(a, &encode(d_identity.certificate.signing_key().as_bytes())).await?;
+    receive_key(&mut d, leave_files, 1).await?;
+    let d_file = files::share(&d, &leave_files.id).await?;
+    assert_eq!(files::shared_records(a, &leave_files.id).await?.len(), 1);
     rejected(
         a.request(Method::DELETE, "/v1/me/membership")
             .send()
@@ -525,6 +556,14 @@ async fn docker_keys(
         .await?;
     assert_eq!(reply.status(), StatusCode::NO_CONTENT);
     expect_close(&mut d, "kicked").await?;
+    assert!(files::shared_records(a, &leave_files.id).await?.is_empty());
+    assert!(
+        a.request(Method::GET, &format!("/v1/files/{}", encode(&d_file)))
+            .send()
+            .await?
+            .status()
+            .is_success()
+    );
     receive_key(a, space, 4).await?;
     receive_key(&mut c, space, 4).await?;
     assert!(d.key(space, 4).is_none());

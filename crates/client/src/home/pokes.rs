@@ -202,7 +202,7 @@ pub fn dialog(ui: &mut Ui, note: &mut String, close: &mut bool) -> Option<String
 /// The Pokes page: received and sent, newest first.
 pub fn view(ui: &mut Ui, home: &mut Home) {
     let now = ui.input(|input| input.time);
-    pane_title(ui, "pokes-title", t!("pokes.title"), None, false);
+    pane_title(ui, "pokes-title", t!("pokes.title"), None, false, None);
     super::toast_line(ui, &mut home.toast);
     if home.focused {
         home.pokes.mark_read();

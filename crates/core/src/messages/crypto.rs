@@ -304,6 +304,28 @@ impl MessageContext {
         body: &MessageBody,
         version: u8,
     ) -> Result<Vec<u8>, MessageError> {
+        self.seal_in(Purpose::Message, key, sender, body, version)
+    }
+
+    /// `seal` for an envelope made for `purpose`.
+    pub fn seal_as(
+        self,
+        purpose: Purpose,
+        key: &Key,
+        sender: &DeviceIdentity,
+        body: &MessageBody,
+    ) -> Result<Vec<u8>, MessageError> {
+        self.seal_in(purpose, key, sender, body, VERSION)
+    }
+
+    fn seal_in(
+        self,
+        purpose: Purpose,
+        key: &Key,
+        sender: &DeviceIdentity,
+        body: &MessageBody,
+        version: u8,
+    ) -> Result<Vec<u8>, MessageError> {
         if !matches!(version, 2 | VERSION) || (version == 2 && body.quoted_author.is_some()) {
             return Err(MessageError::Encoding);
         }
@@ -315,7 +337,7 @@ impl MessageContext {
         {
             return Err(MessageError::Signature);
         }
-        let aad = self.associated_data();
+        let aad = self.associated_data(purpose);
         let mut nonce = [0; NONCE];
         random_bytes(&mut nonce).map_err(|_| MessageError::Randomness)?;
         let plaintext = body.encode(version)?;
@@ -347,11 +369,22 @@ impl MessageContext {
         sender: &DeviceCertificate,
         envelope: &[u8],
     ) -> Result<MessageBody, MessageError> {
+        self.open_as(Purpose::Message, key, sender, envelope)
+    }
+
+    /// `open` for an envelope made for `purpose`.
+    pub fn open_as(
+        self,
+        purpose: Purpose,
+        key: &Key,
+        sender: &DeviceCertificate,
+        envelope: &[u8],
+    ) -> Result<MessageBody, MessageError> {
         if sender.person_id() != &self.person {
             return Err(MessageError::Signature);
         }
-        self.verify(sender.signing_key(), envelope)?;
-        let aad = self.associated_data();
+        self.verify_as(purpose, sender.signing_key(), envelope)?;
+        let aad = self.associated_data(purpose);
         let nonce: [u8; NONCE] = envelope[1..1 + NONCE].try_into().expect("verified length");
         let plaintext = Zeroizing::new(
             XChaCha20Poly1305::new(&(**key).into())
@@ -409,6 +442,41 @@ mod tests {
             MAX_MESSAGE_BYTES - MAX_ATTACHMENTS * MAX_ATTACHMENT_BYTES - live::MAX_ATTACHMENT
         );
         assert!(context.open(&key, &sender.certificate, &envelope).unwrap() == body);
+        // The largest shared file's record fits its server limit.
+        let largest = MessageBody {
+            attachments: vec![Attachment {
+                file: BlobRef {
+                    id: [1; 32],
+                    key: Key::new([2; 32]),
+                    // Fixed-width fields: any valid size makes the same length.
+                    size: 1024,
+                    chunk_size: CHUNK_BYTES,
+                },
+                name: "n".repeat(255),
+                media_type: "t".repeat(127),
+                thumbnail: None,
+            }],
+            ..Default::default()
+        };
+        let sealed = context.seal_as(Purpose::SharedFile, &key, &sender, &largest);
+        assert!(sealed.unwrap().len() <= MAX_SHARED_ENVELOPE);
+        // A shared file's record and a chat message never pass for each other.
+        let shared = (context.seal_as(Purpose::SharedFile, &key, &sender, &body)).unwrap();
+        let signer = sender.certificate.signing_key();
+        assert!(
+            context
+                .open_as(Purpose::SharedFile, &key, &sender.certificate, &shared)
+                .unwrap()
+                == body
+        );
+        assert_eq!(
+            context.verify(signer, &shared),
+            Err(MessageError::Signature)
+        );
+        assert_eq!(
+            context.verify_as(Purpose::SharedFile, signer, &envelope),
+            Err(MessageError::Signature)
+        );
         for changed in [
             MessageContext {
                 server_id: [9; 32],
@@ -441,7 +509,8 @@ mod tests {
             );
             if changed.sender_device == context.sender_device && changed.person == context.person {
                 let (sealed, _) = envelope.split_last_chunk::<SIGNATURE>().unwrap();
-                let signed = [changed.associated_data().as_slice(), sealed].concat();
+                let signed =
+                    [changed.associated_data(Purpose::Message).as_slice(), sealed].concat();
                 let signature = sender.signing_key.sign(&signed);
                 let resigned = [sealed, &signature.to_bytes()].concat();
                 assert_eq!(

@@ -142,7 +142,7 @@ impl Home {
 /// The Friends page: tabs, and a row per person with what can be done.
 pub fn view(ui: &mut Ui, home: &mut Home) {
     let now = ui.input(|input| input.time);
-    pane_title(ui, "friends-title", t!("friends.title"), None, false);
+    pane_title(ui, "friends-title", t!("friends.title"), None, false, None);
     super::toast_line(ui, &mut home.toast);
     let incoming = (home.friends.contacts())
         .filter(|(_, c)| c.relation == Relation::Incoming)

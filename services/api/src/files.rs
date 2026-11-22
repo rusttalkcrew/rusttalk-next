@@ -10,12 +10,18 @@ use anyhow::{Context, Result, ensure};
 use axum::{
     Json,
     body::{Body, BodyDataStream},
-    extract::{Path as RoutePath, Query, State, rejection::QueryRejection},
+    extract::{
+        Path as RoutePath, Query, State,
+        rejection::{JsonRejection, QueryRejection},
+    },
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
 use futures_util::TryStreamExt;
-use rusttalk_core::auth::{FileLimits, decode};
+use rusttalk_core::{
+    auth::{FileLimits, decode, decode_bytes},
+    messages::{MAX_SHARED_ENVELOPE, MessageRecord, Purpose},
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::{FromRow, SqliteConnection, SqlitePool, query, query_as, query_scalar};
@@ -417,6 +423,151 @@ pub async fn delete(
     .map_err(|_| ApiError::internal("file_task_failed"))?
 }
 
+/// Shared files one channel may keep. The list returns them all.
+const SHARED_LIMIT: i64 = 500;
+/// JSON for the largest shared-file envelope plus 512 bytes for the ID and epoch.
+pub const SHARE_BODY_LIMIT: usize = MAX_SHARED_ENVELOPE.div_ceil(3) * 4 + 512;
+
+#[derive(Deserialize)]
+pub struct Share {
+    id: String,
+    epoch: i64,
+    envelope: String,
+}
+
+/// Keep the caller's uploaded file in its channel's file list until it is removed. The
+/// envelope is a signed message under the file's ID that carries its reference.
+pub async fn share(
+    State(app): State<App>,
+    headers: HeaderMap,
+    RoutePath(channel): RoutePath<String>,
+    body: Result<Json<Share>, JsonRejection>,
+) -> ApiResult<StatusCode> {
+    let Share {
+        id,
+        epoch,
+        envelope,
+    } = crate::payload(body)?;
+    decode::<32>(&channel)?;
+    let file_id = decode(&id)?;
+    let envelope = decode_bytes(&envelope)?;
+    if envelope.len() > MAX_SHARED_ENVELOPE {
+        return Err(ApiError::bad_request("invalid_message"));
+    }
+    let (mut tx, actor) = authenticate(&app, &headers).await?;
+    messages::require_write(&mut tx, &actor, &channel).await?;
+    let row = lookup(&mut tx, &id, actor.at).await?;
+    if row.channel_id != channel || row.uploader != actor.person {
+        return Err(missing());
+    }
+    // Shared files never expire, so their count per channel is bounded instead.
+    let count: i64 = query_scalar(
+        "SELECT COUNT(*) FROM shared_files h JOIN files f ON f.id = h.id WHERE f.channel_id = ?",
+    )
+    .bind(&channel)
+    .fetch_one(&mut *tx)
+    .await?;
+    if count >= SHARED_LIMIT {
+        return Err(ApiError::new(StatusCode::CONFLICT, "shared_limit"));
+    }
+    let device = messages::verify_signed(
+        (Purpose::SharedFile, file_id),
+        &app,
+        &mut tx,
+        &actor,
+        &channel,
+        epoch,
+        &envelope,
+    )
+    .await?;
+    let shared = query(
+        "INSERT INTO shared_files (id, epoch, sender_device, sender_person, at, envelope)
+         VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING",
+    )
+    .bind(&id)
+    .bind(epoch)
+    .bind(device.as_slice())
+    .bind(actor.person.as_slice())
+    .bind(actor.at)
+    .bind(envelope)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if shared == 0 {
+        return Err(ApiError::new(StatusCode::CONFLICT, "file_shared"));
+    }
+    query("UPDATE files SET expires_at = ? WHERE id = ?")
+        .bind(i64::MAX)
+        .bind(&id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    tracing::info!(id, size = row.size, "file shared");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Give a person's shared files (only those from `device`, when given) normal expiry
+/// again: they left, were removed, or that device was revoked, so readers no longer
+/// trust or list them.
+pub(crate) async fn unshare_from(
+    app: &App,
+    db: &mut SqliteConnection,
+    person: &[u8],
+    device: Option<&[u8]>,
+) -> ApiResult<()> {
+    let retention = file_settings::effective(&mut *db, app.files.ceilings)
+        .await?
+        .retention_secs;
+    let ids: Vec<String> = query_scalar(
+        "DELETE FROM shared_files WHERE sender_person = ? AND (? IS NULL OR sender_device = ?)
+         RETURNING id",
+    )
+    .bind(person)
+    .bind(device)
+    .bind(device)
+    .fetch_all(&mut *db)
+    .await?;
+    for id in &ids {
+        query("UPDATE files SET expires_at = created_at + ? WHERE id = ?")
+            .bind(retention)
+            .bind(id)
+            .execute(&mut *db)
+            .await?;
+    }
+    if !ids.is_empty() {
+        tracing::info!(count = ids.len(), "shared files returned to normal expiry");
+    }
+    Ok(())
+}
+
+/// A channel's shared files, newest first, as signed records like messages.
+pub async fn shared(
+    State(app): State<App>,
+    headers: HeaderMap,
+    RoutePath(channel): RoutePath<String>,
+) -> ApiResult<Json<Vec<MessageRecord>>> {
+    let (mut tx, actor) = authenticate_read(&app, &headers).await?;
+    messages::chat_kind(&mut tx, &actor, &channel).await?;
+    let rows: Vec<messages::Row> = query_as(
+        "SELECT FALSE AS backfilled, h.id, h.epoch, h.sender_person, h.sender_device, h.at,
+             LENGTH(h.envelope) AS size, h.envelope
+         FROM shared_files h JOIN files f ON f.id = h.id
+         WHERE f.channel_id = ? AND f.expires_at > ?
+         ORDER BY h.at DESC, h.id LIMIT ?",
+    )
+    .bind(&channel)
+    .bind(actor.at)
+    .bind(SHARED_LIMIT)
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(Json(
+        rows.into_iter()
+            .map(MessageRecord::try_from)
+            .collect::<ApiResult<_>>()?,
+    ))
+}
+
 impl Files {
     async fn sync_dir(&self) -> ApiResult<()> {
         fs::File::open(&self.dir)
@@ -457,8 +608,10 @@ async fn expire_batch(app: &App) -> ApiResult<()> {
     let limits = file_settings::effective(&mut tx, app.files.ceilings).await?;
     let now = store::now()?;
     // Shorter retention also applies to files uploaded before the setting changed.
+    // Shared files stay until removed or their channel is deleted.
     let rows: Vec<(String, i64)> = query_as(
-        "SELECT id, size FROM files WHERE expires_at <= ? OR created_at <= ?
+        "SELECT id, size FROM files WHERE expires_at <= ?
+             OR (created_at <= ? AND id NOT IN (SELECT id FROM shared_files))
          ORDER BY expires_at LIMIT 64",
     )
     .bind(now)
@@ -547,6 +700,171 @@ mod tests {
         let Json(after) = file_settings::get(State(app.clone()), as_person(2)).await?;
         assert_eq!(after.used_bytes, 0);
         assert_eq!(send(2, 5, 16).await?.0, StatusCode::CREATED);
+        Ok(())
+    }
+
+    /// A DM between persons 1 and 2, holding `count` shared files of person `by` from
+    /// device `[by; 32]`, made directly so the test needs no signatures.
+    async fn seed_shared(app: &App, by: u8, count: i64) -> Result<String> {
+        let channel = encode(&[3; 32]);
+        query("INSERT INTO channels (id, kind, position, dm_first, dm_second) VALUES (?, 'dm', 0, ?, ?)
+               ON CONFLICT DO NOTHING")
+            .bind(&channel)
+            .bind(person(1))
+            .bind(person(2))
+            .execute(&app.db)
+            .await?;
+        query("INSERT INTO message_senders VALUES (?, ?, X'00') ON CONFLICT DO NOTHING")
+            .bind(vec![by; 32])
+            .bind(person(by))
+            .execute(&app.db)
+            .await?;
+        query(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < ?)
+             INSERT INTO files (id, channel_id, uploader, size, created_at, expires_at)
+                 SELECT ? || i, ?, ?, 16, 100, ? FROM n",
+        )
+        .bind(count)
+        .bind(format!("seed{by}-"))
+        .bind(&channel)
+        .bind(person(by))
+        .bind(i64::MAX)
+        .execute(&app.db)
+        .await?;
+        query(
+            "INSERT INTO shared_files (id, epoch, sender_device, sender_person, at, envelope)
+             SELECT id, 1, ?, uploader, 100, X'00' FROM files WHERE id LIKE ?",
+        )
+        .bind(vec![by; 32])
+        .bind(format!("seed{by}-%"))
+        .execute(&app.db)
+        .await?;
+        Ok(channel)
+    }
+
+    fn share_body(id: [u8; 32], envelope: usize) -> Result<Json<Share>, JsonRejection> {
+        Ok(Json(Share {
+            id: encode(&id),
+            epoch: 1,
+            envelope: encode(&vec![0; envelope]),
+        }))
+    }
+
+    #[tokio::test]
+    async fn a_channel_keeps_at_most_500_shared_files_with_small_envelopes() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let app = app(dir.path(), 2).await?;
+        let channel = seed_shared(&app, 1, SHARED_LIMIT).await?;
+        let uploaded = upload(
+            State(app.clone()),
+            as_person(1),
+            Ok(Query(Upload {
+                channel: channel.clone(),
+                id: encode(&[4; 32]),
+            })),
+            Body::from(vec![0; 32]),
+        )
+        .await?;
+        assert_eq!(uploaded.0, StatusCode::CREATED);
+        let share = |envelope| {
+            share(
+                State(app.clone()),
+                as_person(1),
+                RoutePath(channel.clone()),
+                share_body([4; 32], envelope),
+            )
+        };
+        assert_eq!(
+            share(MAX_SHARED_ENVELOPE + 1).await.unwrap_err().code,
+            "invalid_message"
+        );
+        assert_eq!(share(700).await.unwrap_err().code, "shared_limit");
+        // The listing returns every shared file the cap allows.
+        assert_eq!(SHARED_LIMIT, 500);
+        let listed: i64 = query_scalar("SELECT COUNT(*) FROM shared_files")
+            .fetch_one(&app.db)
+            .await?;
+        assert_eq!(listed, SHARED_LIMIT);
+        query("DELETE FROM shared_files WHERE id = 'seed1-1'")
+            .execute(&app.db)
+            .await?;
+        // Under the cap, the share goes on to the key and signature checks.
+        assert_ne!(share(700).await.unwrap_err().code, "shared_limit");
+        Ok(())
+    }
+
+    #[test]
+    fn the_largest_share_body_fits() {
+        let json = serde_json::json!({
+            "id": encode(&[1; 32]),
+            "epoch": i64::MAX,
+            "envelope": encode(&vec![0; MAX_SHARED_ENVELOPE]),
+        })
+        .to_string();
+        assert!(json.len() <= SHARE_BODY_LIMIT);
+    }
+
+    #[tokio::test]
+    async fn leaving_or_a_revoked_device_returns_shared_files_to_normal_expiry() -> Result<()> {
+        use rusttalk_core::identity::{DeviceIdentity, revoke_device};
+        let dir = tempfile::tempdir()?;
+        let app = app(dir.path(), 2).await?;
+        seed_shared(&app, 2, 2).await?;
+        let kept = |id: &'static str| {
+            let db = app.db.clone();
+            async move {
+                query_scalar::<_, i64>("SELECT expires_at FROM files WHERE id = ?")
+                    .bind(id)
+                    .fetch_one(&db)
+                    .await
+            }
+        };
+        crate::members::leave(State(app.clone()), as_person(2)).await?;
+        let shared: i64 = query_scalar("SELECT COUNT(*) FROM shared_files")
+            .fetch_one(&app.db)
+            .await?;
+        assert_eq!(shared, 0);
+        let retention = app.files.ceilings.retention_secs;
+        assert_eq!(kept("seed2-1").await?, 100 + retention);
+
+        // A revoked device's shared files go back to normal expiry; another device's stay.
+        let (words, identity) = DeviceIdentity::create("test").unwrap();
+        let me = *identity.certificate.person_id();
+        // Any valid device key; the revocation only names it.
+        let (_, other) = DeviceIdentity::create("other").unwrap();
+        let revoked = other.certificate.signing_key().to_bytes();
+        query("INSERT INTO members (person_id, joined_at) VALUES (?, 0)")
+            .bind(me.as_slice())
+            .execute(&app.db)
+            .await?;
+        query("INSERT INTO sessions (token_hash, person_id, device_id, ip, expires_at, session_id) VALUES (?, ?, X'09', '192.0.2.1', ?, X'09')")
+            .bind(store::hash(&[9; 32]).as_slice()).bind(me.as_slice()).bind(i64::MAX).execute(&app.db).await?;
+        let channel = encode(&[3; 32]);
+        for (id, device) in [("revoked", revoked), ("other", [6; 32])] {
+            query("INSERT INTO message_senders VALUES (?, ?, X'00')")
+                .bind(device.as_slice())
+                .bind(me.as_slice())
+                .execute(&app.db)
+                .await?;
+            query("INSERT INTO files (id, channel_id, uploader, size, created_at, expires_at) VALUES (?, ?, ?, 16, 100, ?)")
+                .bind(id).bind(&channel).bind(me.as_slice()).bind(i64::MAX).execute(&app.db).await?;
+            query("INSERT INTO shared_files VALUES (?, 1, ?, ?, 100, X'00')")
+                .bind(id)
+                .bind(device.as_slice())
+                .bind(me.as_slice())
+                .execute(&app.db)
+                .await?;
+        }
+        let record = revoke_device(&words, &me, revoked).unwrap().to_bytes();
+        let mut headers = as_person(9);
+        headers.insert(
+            "authorization",
+            format!("Bearer {}", encode(&[9; 32])).parse().unwrap(),
+        );
+        let body = serde_json::from_value(serde_json::json!({ "record": encode(&record) }))?;
+        crate::auth::revoke(State(app.clone()), headers, Ok(Json(body))).await?;
+        assert_eq!(kept("revoked").await?, 100 + retention);
+        assert_eq!(kept("other").await?, i64::MAX);
         Ok(())
     }
 

@@ -12,8 +12,8 @@ use eframe::egui;
 use reqwest::StatusCode;
 use rusttalk_core::{
     client::{
-        Attachment, BlobRef, KeyClient, MessageBody, MessageError, UploadRejected, decode_frames,
-        decode_thumbnail,
+        Attachment, BlobRef, KeyClient, MessageBody, MessageError, Progress, UploadRejected,
+        decode_frames, decode_thumbnail,
     },
     messages::fit_file_name,
 };
@@ -355,15 +355,7 @@ async fn upload(
     for (at, path) in files.into_iter().enumerate() {
         let name = file_name(&path);
         let media_type = media_type(&path);
-        let bytes = tokio::task::spawn_blocking(move || {
-            let mut bytes = Vec::new();
-            fs::File::open(&path)?
-                .take(MAX_FILE + 1)
-                .read_to_end(&mut bytes)?;
-            anyhow::ensure!(bytes.len() as u64 <= MAX_FILE, "file too large");
-            Ok(bytes)
-        })
-        .await??;
+        let bytes = read(path).await?;
         let shown = shown.clone();
         let progress = Arc::new(move |done: u64, total: u64| {
             shown(at as f32 + done as f32 / total.max(1) as f32);
@@ -375,6 +367,91 @@ async fn upload(
         );
     }
     Ok(())
+}
+
+/// A file to upload, refusing one bigger than the server's blob limit.
+async fn read(path: PathBuf) -> Result<Vec<u8>> {
+    tokio::task::spawn_blocking(move || {
+        let mut bytes = Vec::new();
+        fs::File::open(&path)?
+            .take(MAX_FILE + 1)
+            .read_to_end(&mut bytes)?;
+        anyhow::ensure!(bytes.len() as u64 <= MAX_FILE, "file too large");
+        Ok(bytes)
+    })
+    .await?
+}
+
+/// Load a channel's shared files; when that fails, say so and show none.
+pub(super) async fn shared(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, channel: Id) {
+    let list = client.shared_files(&channel).await.unwrap_or_else(|error| {
+        tracing::warn!(error = %format_args!("{error:#}"), "loading shared files failed");
+        ctx.send(Update::Failed(t!("files.shared_failed").into()));
+        Vec::new()
+    });
+    ctx.send(Update::SharedFiles(url.clone(), channel, list));
+}
+
+/// Upload files into a channel's shared files one at a time, then load the list again.
+/// They go without thumbnails: a thumbnail would expire while its file stays.
+pub(super) async fn share(
+    ctx: &Ctx,
+    url: &Url,
+    client: &mut KeyClient<'_>,
+    channel: Id,
+    paths: Vec<PathBuf>,
+) {
+    for path in paths {
+        let name = file_name(&path);
+        let shown: Progress = {
+            let (ctx, url, name) = (ctx.clone(), url.clone(), name.clone());
+            Arc::new(move |done: u64, total: u64| {
+                let what = Some((name.clone(), done as f32 / total.max(1) as f32));
+                ctx.send(Update::Uploading(url.clone(), channel, what));
+            })
+        };
+        shown(0, 1);
+        let shared = async {
+            let bytes = read(path.clone()).await?;
+            let (file, _) = prepare_file(&name, media_type(&path), &bytes, &[])?;
+            client
+                .upload_prepared(&channel, &file, &bytes, None, Some(shown))
+                .await?;
+            let mut shared = client.share_file(&channel, &file).await;
+            // The channel just got a new key: take it and try once more.
+            if code(shared.as_ref().err()) == Some("epoch_changed") && client.sync().await.is_ok() {
+                shared = client.share_file(&channel, &file).await;
+            }
+            if let Err(error) = shared {
+                discard(client, std::slice::from_ref(&file)).await;
+                return Err(error);
+            }
+            Ok(())
+        };
+        if let Err(error) = shared.await {
+            tracing::warn!(error = %format_args!("{error:#}"), "sharing a file failed");
+            ctx.send(Update::Failed(upload_problem(&error).into()));
+            break;
+        }
+    }
+    ctx.send(Update::Uploading(url.clone(), channel, None));
+    shared(ctx, url, client, channel).await;
+}
+
+/// Remove a shared file, then load the list again.
+pub(super) async fn unshare(
+    ctx: &Ctx,
+    url: &Url,
+    client: &mut KeyClient<'_>,
+    (channel, id, uploader): (Id, Id, Id),
+) {
+    if let Err(error) = client.delete_message_file(&id, &uploader).await
+        && !gone(&error)
+    {
+        tracing::warn!(error = %format_args!("{error:#}"), "removing a shared file failed");
+        ctx.send(Update::Failed(t!("files.remove_failed").into()));
+    }
+    shared(ctx, url, client, channel).await;
 }
 
 /// Remove uploaded files that will not be sent after all.
@@ -432,14 +509,19 @@ pub(super) fn gone(error: &anyhow::Error) -> bool {
     status(error) == Some(StatusCode::NOT_FOUND)
 }
 
+/// The API's error code for a refused upload or share.
+fn code(error: Option<&anyhow::Error>) -> Option<&str> {
+    error?
+        .downcast_ref::<UploadRejected>()
+        .map(|r| r.code.as_str())
+}
+
 fn upload_problem(error: &anyhow::Error) -> &'static str {
     if error.downcast_ref::<MessageError>() == Some(&MessageError::ServerUpdateRequired) {
         return t!("net.rotation_update");
     }
-    let code = error
-        .downcast_ref::<UploadRejected>()
-        .map(|r| r.code.as_str());
-    match (status(error), code) {
+    match (status(error), code(Some(error))) {
+        (_, Some("shared_limit")) => t!("files.err_shared_limit"),
         (_, Some("file_too_large")) => t!("files.err_too_large"),
         (_, Some("file_member_quota")) => t!("files.err_member_quota"),
         (_, Some("file_server_quota")) => t!("files.err_server_quota"),

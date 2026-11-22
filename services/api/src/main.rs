@@ -383,6 +383,14 @@ async fn serve(app: App) -> io::Result<()> {
                 .route("/v1/channels/order", put(channels::reorder))
                 .layer(RequestBodyLimitLayer::new(channels::ORDER_BODY_LIMIT)),
         )
+        .merge(
+            Router::new()
+                .route(
+                    "/v1/channels/{id}/files",
+                    get(files::shared).post(files::share),
+                )
+                .layer(RequestBodyLimitLayer::new(files::SHARE_BODY_LIMIT)),
+        )
         .route("/v1/files", post(files::upload))
         .route("/internal/livekit", post(voice::webhook))
         .route(rusttalk_core::sync::PATH, get(sync::get).put(sync::put))

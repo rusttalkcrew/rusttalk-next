@@ -6,7 +6,7 @@ use image::{DynamicImage, ImageFormat, Rgb, RgbImage};
 use reqwest::{Body, Method, StatusCode};
 use rusttalk_core::{
     auth::encode,
-    client::{KeyClient, MessageBody, Server, decode_thumbnail},
+    client::{KeyClient, MessageBody, MessageRecord, Server, decode_thumbnail, prepare_file},
     keys::random_key,
 };
 use serde_json::json;
@@ -220,6 +220,64 @@ pub(super) async fn scenario(
     )
     .await?;
 
+    // A shared file lists for readers with its sealed name and outlives the expiry sweep.
+    let (shared, _) = prepare_file(FILE, "application/octet-stream", MARKER, &[])?;
+    a.upload_prepared(&channel.id, &shared, MARKER, None, None)
+        .await?;
+    a.share_file(&channel.id, &shared).await?;
+    let files_path = format!("/v1/channels/{}/files", encode(&channel.id));
+    rejected(
+        c.request(Method::GET, &files_path).send().await?,
+        StatusCode::FORBIDDEN,
+        "channel_read_denied",
+    )
+    .await?;
+    // Shared-file records and chat messages are sealed under separate labels: neither
+    // route takes the other's envelope, even under a matching ID.
+    let listed: Vec<MessageRecord> = a
+        .request(Method::GET, &files_path)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let record = listed.first().context("missing shared record")?;
+    let as_message =
+        json!({"id": encode(&record.id), "epoch": record.epoch, "envelope": record.envelope});
+    rejected(
+        a.request(
+            Method::POST,
+            &format!("/v1/channels/{}/messages", encode(&channel.id)),
+        )
+        .json(&as_message)
+        .send()
+        .await?,
+        StatusCode::BAD_REQUEST,
+        "invalid_message",
+    )
+    .await?;
+    let (other, _) = prepare_file(FILE, "application/octet-stream", MARKER, &[])?;
+    a.upload_prepared(&channel.id, &other, MARKER, None, None)
+        .await?;
+    let body = MessageBody {
+        attachments: vec![other.clone()],
+        ..Default::default()
+    };
+    let message = a.post_message(&channel.id, other.file.id, &body).await?;
+    let as_shared =
+        json!({"id": encode(&message.id), "epoch": message.epoch, "envelope": message.envelope});
+    rejected(
+        a.request(Method::POST, &files_path)
+            .json(&as_shared)
+            .send()
+            .await?,
+        StatusCode::BAD_REQUEST,
+        "invalid_message",
+    )
+    .await?;
+    a.delete_message(&channel.id, &message.id).await?;
+    a.delete_file(&other.file.id).await?;
+
     tokio::time::timeout(Duration::from_secs(24), async {
         loop {
             let state = compose(
@@ -243,6 +301,26 @@ pub(super) async fn scenario(
     })
     .await
     .context("waiting for file expiry sweep")??;
+    let listed = b.shared_files(&channel.id).await?;
+    let [listed] = listed.as_slice() else {
+        anyhow::bail!("expected one shared file")
+    };
+    assert_eq!((&*listed.file.name, listed.person), (FILE, a_person));
+    assert_eq!(b.download_file(&listed.file.file, None).await?, MARKER);
+    b.delete_message_file(&shared.file.id, &a_person).await?;
+    assert!(b.shared_files(&channel.id).await?.is_empty());
+    // A channel keeps at most 500 shared files; the list returns them all.
+    for _ in 0..500 {
+        share(a, &channel.id).await?;
+    }
+    let full = share(a, &channel.id)
+        .await
+        .expect_err("a 501st shared file");
+    let rejected_code = full
+        .downcast_ref::<rusttalk_core::client::UploadRejected>()
+        .map(|r| (r.status, r.code.as_str()));
+    assert_eq!(rejected_code, Some((StatusCode::CONFLICT, "shared_limit")));
+    assert_eq!(shared_records(a, &channel.id).await?.len(), 500);
     rejected(
         a.request(Method::GET, &path).send().await?,
         StatusCode::NOT_FOUND,
@@ -261,7 +339,34 @@ pub(super) async fn scenario(
         .await?;
     check_storage(project, &encode(&replacement.file.id))?;
     println!(
-        "W13 verified encrypted file SHA-256, PNG thumbnail, access, streaming cap, quota races, deletion, moderator deletes limited to the sender's files, expiry, no ID reuse and zero plaintext in SQLite, WAL, blobs and logs"
+        "W13 verified encrypted file SHA-256, PNG thumbnail, shared files kept past expiry, access, streaming cap, quota races, deletion, moderator deletes limited to the sender's files, expiry, no ID reuse and zero plaintext in SQLite, WAL, blobs and logs"
     );
     Ok(())
+}
+
+/// Upload a small file and share it to the channel's file list.
+pub(super) async fn share(client: &KeyClient<'_>, channel: &[u8; 32]) -> Result<[u8; 32]> {
+    let (file, _) = prepare_file("shared.bin", "application/octet-stream", b"shared", &[])?;
+    client
+        .upload_prepared(channel, &file, b"shared", None, None)
+        .await?;
+    client.share_file(channel, &file).await?;
+    Ok(file.file.id)
+}
+
+/// The channel's shared-file records as the API lists them, before any app-side checks.
+pub(super) async fn shared_records(
+    client: &KeyClient<'_>,
+    channel: &[u8; 32],
+) -> Result<Vec<MessageRecord>> {
+    Ok(client
+        .request(
+            Method::GET,
+            &format!("/v1/channels/{}/files", encode(channel)),
+        )
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?)
 }

@@ -17,7 +17,7 @@ pub use crate::messages::{
 };
 pub use chat::{
     Catalog, Category, Channel, MAX_POKE_CHARS, MAX_TEXT_CHARS, MessageBody, MessageRecord,
-    RoleFlags,
+    RoleFlags, SharedFile,
 };
 pub use files::{
     Progress, UploadRejected, decode_frames, decode_frames_until, decode_image, decode_thumbnail,

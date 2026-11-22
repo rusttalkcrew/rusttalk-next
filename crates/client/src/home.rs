@@ -240,6 +240,8 @@ enum Dialog {
     Invite(Invite),
     Member(usize, Id),
     Delete(usize, Id, Id),
+    /// Remove a file from a channel's shared files: server, channel and the file.
+    Unshare(usize, Id, Box<rusttalk_core::client::SharedFile>),
     /// Delete my DM message with this person, on every server holding it.
     DeleteDm(Id, Id),
     /// Leave a server, with the reason it didn't work.
@@ -1428,6 +1430,11 @@ impl Home {
                     call.stats = stats;
                 }
             }
+            Update::SharedFiles(address, channel, list) => {
+                if let Some(index) = self.index(&address) {
+                    self.chat(index, channel).shared = Some(list);
+                }
+            }
             Update::Uploading(address, channel, what) => {
                 if let Some(index) = self.index(&address) {
                     self.chat(index, channel).uploading = what;
@@ -1629,6 +1636,7 @@ pub fn show(
         }
         let (Ask::Attach(address, _)
         | Ask::PagePictures(address, _)
+        | Ask::Share(address, _)
         | Ask::Save(address, _)
         | Ask::Live(address, _)
         | Ask::Icon(address)
@@ -1647,6 +1655,11 @@ pub fn show(
                 let chat = server.chats.entry(channel).or_default();
                 if let Some(problem) = files::stage(chat, paths) {
                     home.toast = Some((problem, now + 6.0));
+                }
+            }
+            Ask::Share(_, channel) => {
+                if !paths.is_empty() {
+                    server.send(Command::ShareFiles(channel, paths));
                 }
             }
             Ask::Save(_, file) => {
@@ -3250,6 +3263,7 @@ fn voice_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
         &format!("🔊 {title}"),
         Some(&mut home.layout),
         true,
+        Some(channel),
     );
     // Problems from the call and the voice panel show here; the chat has its own line.
     toast_line(ui, &mut home.toast);
@@ -3388,15 +3402,138 @@ fn chat_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
         chat.loading = true;
         chat
     });
-    if home.servers[index]
+    if files_shown(ui.ctx(), channel) {
+        files_view(ui, home, index, channel, &mut chat);
+    } else if home.servers[index]
         .channel(&channel)
         .is_some_and(|c| c.page)
     {
+        // Reopening the files loads them again, with what others added meanwhile.
+        chat.shared_asked = false;
         page_view(ui, home, index, channel, &mut chat);
     } else {
+        chat.shared_asked = false;
         chat_view(ui, home, At::Channel(index, channel), &mut chat);
     }
     home.servers[index].chats.insert(channel, chat);
+}
+
+fn files_id(channel: Id) -> UiId {
+    UiId::unique(("files-shown", channel))
+}
+
+/// Whether a channel shows its shared files instead of its chat or page.
+fn files_shown(ctx: &egui::Context, channel: Id) -> bool {
+    ctx.data(|d| d.get_temp(files_id(channel))).unwrap_or(false)
+}
+
+/// Switch a channel between its chat (or page) and its shared files.
+fn files_button(ui: &mut Ui, channel: Id) {
+    let shown = files_shown(ui.ctx(), channel);
+    let tip = if shown {
+        t!("files.shared_hide")
+    } else {
+        t!("files.shared_show")
+    };
+    // A soft fill while the files show, like the members toggle.
+    let look = if shown {
+        ui::Look::Plain
+    } else {
+        ui::Look::Ghost
+    };
+    if ui::icon_button(ui, "🗀", tip, look, Vec2::new(30.0, 26.0)).clicked() {
+        ui.ctx()
+            .data_mut(|d| d.insert_temp(files_id(channel), !shown));
+    }
+}
+
+/// A channel's shared files, like a small drive: everyone who can read the channel
+/// downloads them, people who can write upload, and the uploader or a moderator removes.
+fn files_view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat: &mut Chat) {
+    let server = &home.servers[index];
+    // A voice channel's call above already shows the title.
+    if !server.is_voice(&channel) {
+        let title = server
+            .channel(&channel)
+            .map_or_else(String::new, |c| format!("{} {}", channel_icon(c), c.name));
+        let in_server = matches!(home.view, View::Server(_));
+        let layout = in_server.then_some(&mut home.layout);
+        pane_title(ui, "chat-title", &title, layout, false, Some(channel));
+        toast_line(ui, &mut home.toast);
+    }
+    let server = &home.servers[index];
+    let online = server.status == Status::Online;
+    let can_upload = online && server.can_write(&channel);
+    if !chat.shared_asked {
+        chat.shared_asked = true;
+        server.send(Command::SharedFiles(channel));
+    }
+    let mut upload = false;
+    let mut remove = None;
+    ui.add_space(ui::SPACE_S);
+    ui.horizontal(|ui| {
+        ui.label(ui::heading(t!("files.shared_title")));
+        if can_upload {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                upload = ui::primary(ui, t!("files.upload")).clicked();
+            });
+        }
+    });
+    if let Some((what, done)) = &chat.uploading {
+        ui.horizontal(|ui| {
+            ui.weak(t!("home.uploading", file = what));
+            ui.add(
+                egui::ProgressBar::new(*done)
+                    .show_percentage()
+                    .desired_width(200.0),
+            );
+        });
+    }
+    ui.add_space(ui::SPACE_S);
+    ScrollArea::vertical()
+        .id_salt(("shared-files", channel))
+        .auto_shrink(false)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            match &chat.shared {
+                None => {
+                    ui.vertical_centered(|ui| ui.spinner());
+                }
+                Some(list) if list.is_empty() => {
+                    let hint = if can_upload {
+                        t!("files.shared_empty_upload")
+                    } else {
+                        t!("files.shared_empty")
+                    };
+                    empty(ui, t!("files.shared_title"), hint);
+                }
+                Some(list) => {
+                    for shared in list {
+                        let note = t!(
+                            "files.shared_by",
+                            name = server.member_name(&shared.person),
+                            time = time(shared.at)
+                        );
+                        let removable = online
+                            && (shared.person == server.dir.me || server.dir.perms.delete_messages);
+                        let address = &server.address;
+                        let file = &shared.file;
+                        if files::shared_card(ui, &mut home.files, address, file, &note, removable)
+                        {
+                            remove = Some(shared.clone());
+                        }
+                        ui.add_space(ui::SPACE_S);
+                    }
+                }
+            }
+        });
+    if upload {
+        let ask = Ask::Share(server.address.clone(), channel);
+        home.files.ask(ui.ctx(), ask);
+    }
+    if let Some(shared) = remove {
+        home.dialog = Some(Dialog::Unshare(index, channel, Box::new(shared)));
+    }
 }
 
 /// A page channel: its newest message, shown as one Markdown page with its pictures
@@ -3416,6 +3553,7 @@ fn page_view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat: &mut
         &title,
         in_server.then_some(&mut home.layout),
         false,
+        Some(channel),
     );
     toast_line(ui, &mut home.toast);
     let Home {
@@ -3765,7 +3903,18 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
     let now = ui.input(|input| input.time);
     // A DM has its own title, with their profile (`dm_title`).
     if !in_voice && !dm {
-        pane_title(ui, "chat-title", &title, in_server.then_some(layout), false);
+        let files = match at {
+            At::Channel(_, channel) => Some(channel),
+            At::Dm(_) => None,
+        };
+        pane_title(
+            ui,
+            "chat-title",
+            &title,
+            in_server.then_some(layout),
+            false,
+            files,
+        );
     }
     let act = friends::dm_card(ui, relation, request, &name);
     let (hovered, dropped) = ui.input(|input| {
@@ -4269,6 +4418,7 @@ pub fn pane_title(
     title: &str,
     members: Option<&mut layout::Layout>,
     split: bool,
+    files: Option<Id>,
 ) {
     Panel::top(id)
         .frame(Frame::new().inner_margin(Margin {
@@ -4281,15 +4431,18 @@ pub fn pane_title(
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(ui::title(title));
-                if let Some(layout) = members {
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if let Some(layout) = members {
                         layout::members_button(ui, layout);
                         if split {
                             ui.add_space(ui::SPACE_S);
                             layout::split_buttons(ui, &mut layout.split);
                         }
-                    });
-                }
+                    }
+                    if let Some(channel) = files {
+                        files_button(ui, channel);
+                    }
+                });
             });
         });
 }
@@ -5250,6 +5403,7 @@ fn dialog_title(home: &Home, dialog: &Dialog) -> String {
         }
         Dialog::Member(index, person) => home.servers[*index].member_name(person),
         Dialog::Delete(..) | Dialog::DeleteDm(..) => t!("home.delete_message_title").into(),
+        Dialog::Unshare(..) => t!("files.remove_title").into(),
         Dialog::Leave(index, _) => t!("home.leave_title", server = home.servers[*index].name()),
         Dialog::Poke(person, _) => t!("pokes.poke_title", name = home.peer_name(person)),
     }
@@ -5575,6 +5729,16 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
                 close |= ui::secondary(ui, t!("common.cancel")).clicked();
             });
         }
+        Dialog::Unshare(index, channel, shared) => {
+            ui.label(t!("files.remove_help", name = shared.file.name));
+            ui::footer(ui, |ui| {
+                if ui::danger(ui, t!("files.remove")).clicked() {
+                    let unshare = Command::Unshare(*channel, shared.file.file.id, shared.person);
+                    command = Some((*index, unshare));
+                }
+                close |= ui::secondary(ui, t!("common.cancel")).clicked();
+            });
+        }
         Dialog::DeleteDm(peer, id) => {
             ui.label(t!("home.delete_message_help"));
             ui::footer(ui, |ui| {
@@ -5670,6 +5834,108 @@ fn text_footer(ui: &mut Ui, confirm: &str, mut done: bool, close: &mut bool) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const ME: Id = [1; 32];
+    const ANN: Id = [7; 32];
+    const PROJECTS: Id = [3; 32];
+
+    /// A server with a text channel this person can write in, showing its files: one
+    /// from Ann and one of their own. Also returns the commands the view sends.
+    pub(super) fn files_harness(
+        dark: bool,
+    ) -> (
+        egui_kittest::Harness<'static, Option<Home>>,
+        tokio::sync::mpsc::UnboundedReceiver<Command>,
+    ) {
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(720.0, 420.0))
+            .build_ui_state(
+                |ui, home: &mut Option<Home>| {
+                    if let Some(home) = home {
+                        chat_pane(ui, home, 0, PROJECTS);
+                    }
+                },
+                None,
+            );
+        ui::install(&harness.ctx);
+        harness.ctx.set_theme(if dark {
+            egui::Theme::Dark
+        } else {
+            egui::Theme::Light
+        });
+        let (_, identity) = rusttalk_core::identity::DeviceIdentity::create("Desktop").unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let mut home = Home::new(identity, &harness.ctx, data.path().to_owned()).unwrap();
+        let (commands, sent) = tokio::sync::mpsc::unbounded_channel();
+        let known = KnownServer {
+            address: "https://friends.example.org/".parse().unwrap(),
+            server_id: [2; 32],
+            tls_fingerprint: None,
+        };
+        let mut server = new_server(known, "Friends", commands);
+        server.status = Status::Online;
+        server.dir.me = ME;
+        let member = |person, name: &str| Member {
+            person,
+            name: Some(name.into()),
+            devices: Vec::new(),
+            roles: vec!["member".into()],
+            avatar: None,
+            presence: Presence::Online,
+            hide_offline: false,
+            bio: None,
+            voice_muted: false,
+        };
+        server.dir.members = vec![member(ME, "Me"), member(ANN, "Ann")];
+        server.dir.categories = vec![crate::server::Category {
+            id: None,
+            name: "Text".into(),
+            channels: vec![crate::server::Channel {
+                id: PROJECTS,
+                name: "projects".into(),
+                topic: String::new(),
+                voice: false,
+                page: false,
+                audio_kbps: 0,
+                flags: vec![("member".into(), 3)],
+            }],
+        }];
+        let shared = |person, name: &str, size: usize| rusttalk_core::client::SharedFile {
+            person,
+            at: 1_700_000_000,
+            file: rusttalk_core::client::prepare_file(name, "application/pdf", &vec![0; size], &[])
+                .unwrap()
+                .0,
+        };
+        let mut chat = Chat::default();
+        chat.shared = Some(vec![
+            shared(ANN, "Trip plan.pdf", 240_000),
+            shared(ME, "Budget.xlsx", 18_000),
+        ]);
+        server.chats.insert(PROJECTS, chat);
+        home.servers.push(server);
+        harness
+            .ctx
+            .data_mut(|d| d.insert_temp(files_id(PROJECTS), true));
+        *harness.state_mut() = Some(home);
+        harness.run_steps(4);
+        (harness, sent)
+    }
+
+    #[test]
+    fn files_list_downloads_for_all_and_removes_only_own_files() {
+        use egui_kittest::kittest::Queryable;
+        let (harness, mut sent) = files_harness(true);
+        assert!(matches!(
+            sent.try_recv(),
+            Ok(Command::SharedFiles(PROJECTS))
+        ));
+        assert!(harness.query_by_label("Trip plan.pdf").is_some());
+        assert!(harness.query_by_label("Budget.xlsx").is_some());
+        assert_eq!(harness.query_all_by_label("Download").count(), 2);
+        assert_eq!(harness.query_all_by_label("Remove").count(), 1);
+        assert!(harness.query_by_label("Upload").is_some());
+    }
 
     #[test]
     fn a_name_this_device_cannot_read_is_never_overwritten() {
