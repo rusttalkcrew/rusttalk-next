@@ -21,11 +21,11 @@ use rusttalk_core::{
 use crate::{
     files::Ask,
     home::{
-        ChannelEdit, Home, initials, paint_hovered,
+        Home, initials, paint_hovered,
         person::{self, Person, Pick},
     },
     net::{Admin, AdminUpdate, AuditEntry, Ban, Command, Invite, PublicListing},
-    server::{Id, Perms, Server, Status},
+    server::{Channel, Id, Perms, Server},
     settings::{self as panel, Group, Page},
     ui::{self, Item, danger, error_text},
 };
@@ -69,8 +69,6 @@ pub enum Tab {
     Listing,
     /// Server emoji and stickers.
     Emoji,
-    /// The settings of one channel.
-    Channel(Id),
 }
 
 enum MemberAction {
@@ -297,41 +295,13 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
     // `Person` reads these two parts of `home` while `settings` borrows another.
     let (friends, voice) = (&home.friends, &home.voice);
     let mut person_pick = None;
-    let mut request = None;
+    let mut request;
     let mut icon = false;
     let mut upload = None;
     let mut zip = false;
-    let mut channel_edit = None;
     let mut rename = None;
     let mut batch = Vec::new();
-    let close = if let Tab::Channel(channel) = settings.tab {
-        if !server.dir.perms.manage_channels {
-            home.server_settings = None;
-            return;
-        }
-        let title = channel_title(server, channel);
-        let mut close = false;
-        let ((), dismissed) = ui::dialog(ctx, "channel-settings", &title, |ui| {
-            ui.set_width(560.0);
-            request = channel_tab(ui, server, channel);
-            if server.status == Status::Online && server.channel(&channel).is_some() {
-                ui.separator();
-                ui.horizontal(|ui| {
-                    if ui::secondary(ui, t!("home.edit_channel")).clicked() {
-                        channel_edit = Some((settings.server, channel, ChannelEdit::Rename));
-                    }
-                    if ui::danger(ui, t!("home.delete_channel")).clicked() {
-                        channel_edit = Some((settings.server, channel, ChannelEdit::Delete));
-                    }
-                });
-            }
-            message(ui, settings);
-            ui::footer(ui, |ui| {
-                close = ui::secondary(ui, t!("common.close")).clicked()
-            });
-        });
-        close || dismissed
-    } else {
+    let close = {
         let perms = server.dir.perms;
         let page = |id, icon, label, allowed: bool| allowed.then_some(Page { id, icon, label });
         let group = |title, pages: Vec<Option<Page<Tab>>>| Group {
@@ -429,7 +399,6 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
                         (upload, zip) = (asked.upload, asked.zip);
                         asked.request
                     }
-                    Tab::Channel(_) => None,
                 };
                 message(ui, settings);
                 changed
@@ -495,11 +464,8 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
         settings.message = None;
         home.files.ask(ctx, Ask::EmojiZip(server.address.clone()));
     }
-    if close || channel_edit.is_some() {
+    if close {
         home.server_settings = None;
-    }
-    if let Some((index, id, edit)) = channel_edit {
-        home.edit_channel(index, id, edit);
     }
     if let Some((person, pick)) = person_pick {
         // Their card, a poke or a chat belongs on top of the page, not under it.
@@ -1292,27 +1258,28 @@ fn check_listing(listing: &mut PublicListing) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Read, write, speak and video per role. Changes save right away.
-fn channel_tab(ui: &mut Ui, server: &Server, channel: Id) -> Option<Admin> {
-    let Some(found) = server.channel(&channel) else {
-        ui.label(t!("admin.channel_deleted"));
-        return None;
-    };
+/// Read, write, speak and video per role, for the Edit channel dialog. Changes wait in
+/// `pending` (role and flags) until the dialog is saved.
+pub(crate) fn channel_flags(
+    ui: &mut Ui,
+    server: &Server,
+    channel: &Channel,
+    pending: &mut Vec<(String, u8)>,
+) {
     ui.label(t!("admin.who_can_use_channel"));
-    let columns: &[(u8, &str)] = if found.voice {
+    let columns: &[(u8, &str)] = if channel.voice {
         &[
             (1, t!("admin.flag_read")),
             (2, t!("admin.flag_write")),
             (4, t!("admin.flag_speak")),
             (8, t!("admin.flag_video")),
         ]
-    } else if found.page {
+    } else if channel.page {
         // Writing in a page channel is changing the page.
         &[(1, t!("admin.flag_read")), (2, t!("admin.flag_edit"))]
     } else {
         &[(1, t!("admin.flag_read")), (2, t!("admin.flag_write"))]
     };
-    let mut request = None;
     Grid::new("channel-flags").striped(true).show(ui, |ui| {
         ui.label("");
         for (_, label) in columns {
@@ -1320,11 +1287,11 @@ fn channel_tab(ui: &mut Ui, server: &Server, channel: Id) -> Option<Admin> {
         }
         ui.end_row();
         for role in &server.dir.roles {
-            let flags = found
-                .flags
+            let flags = pending
                 .iter()
                 .find(|(id, _)| *id == role.id)
-                .map_or(0, |(_, flags)| *flags);
+                .map(|(_, flags)| *flags)
+                .unwrap_or_else(|| channel_role_flags(channel, &role.id));
             ui.label(&role.name);
             for (bit, _) in columns {
                 let mut on = flags & bit != 0;
@@ -1335,24 +1302,22 @@ fn channel_tab(ui: &mut Ui, server: &Server, channel: Id) -> Option<Admin> {
                         (true, bit) => flags | bit | 1,
                         (false, bit) => flags & !bit,
                     };
-                    request = Some(Admin::ChannelFlags(channel, role.id.clone(), flags));
+                    pending.retain(|(id, _)| *id != role.id);
+                    pending.push((role.id.clone(), flags));
                 }
             }
             ui.end_row();
         }
     });
-    request
 }
 
-/// The channel settings title, like "# general settings".
-fn channel_title(server: &Server, channel: Id) -> String {
-    server.channel(&channel).map_or_else(
-        || t!("home.channel_settings").into(),
-        |found| {
-            let prefix = crate::home::channel_icon(found);
-            t!("admin.channel_title", icon = prefix, channel = found.name)
-        },
-    )
+/// What a role may do in a channel, as saved on the server.
+pub(crate) fn channel_role_flags(channel: &Channel, role: &str) -> u8 {
+    channel
+        .flags
+        .iter()
+        .find(|(id, _)| id == role)
+        .map_or(0, |(_, flags)| *flags)
 }
 
 fn date(at: i64) -> String {

@@ -113,7 +113,6 @@ home.name_your_server = Geef je server een naam
 home.create_channel_in = Kanaal maken in {category}
 home.rename_category = Categorie hernoemen
 home.delete_category = Categorie verwijderen
-home.channel_settings = Kanaalinstellingen
 home.edit_channel = Kanaal bewerken
 home.delete_channel = Kanaal verwijderen
 home.invite_people = Mensen uitnodigen
@@ -456,7 +455,6 @@ admin.flag_write = Schrijven
 admin.flag_edit = Bewerken
 admin.flag_speak = Spreken
 admin.flag_video = Video
-admin.channel_title = Instellingen van {icon} {channel}
 
 # crates/client/src/server.rs
 perm.invite = Mensen uitnodigen
