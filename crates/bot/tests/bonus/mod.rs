@@ -241,6 +241,116 @@ pub async fn profile(a: &KeyClient<'_>, b: &KeyClient<'_>) -> Result<()> {
     Ok(())
 }
 
+/// Emoji packs: the Default pack, encrypted names, moving, reordering, limits and deleting.
+async fn packs(a: &KeyClient<'_>, b: &KeyClient<'_>, png: &[u8]) -> Result<()> {
+    let default = encode(&[0; 32]);
+    let list = || async {
+        Ok::<Value, anyhow::Error>(
+            a.request(Method::GET, "/v1/emoji")
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?,
+        )
+    };
+    let before = list().await?;
+    assert_eq!(before["packs"].as_array().map(Vec::len), Some(1));
+    assert_eq!(before["packs"][0]["id"], default);
+    let cats = [51; 32];
+    let new_pack = |client: &KeyClient<'_>, id: &[u8; 32], name: &[u8]| -> Result<Value> {
+        Ok(json!({
+            "id": encode(id),
+            "name_ct": client.encrypt_metadata(Metadata::EmojiPackName, id, name)?,
+        }))
+    };
+    b.request(Method::POST, "/v1/emoji/packs")
+        .json(&new_pack(b, &cats, b"Cats")?)
+        .send()
+        .await?
+        .error_for_status()?;
+    super::rejected(
+        a.request(Method::POST, "/v1/emoji/packs")
+            .json(&new_pack(a, &cats, b"Again")?)
+            .send()
+            .await?,
+        StatusCode::CONFLICT,
+        "pack_exists",
+    )
+    .await?;
+    // An emoji goes into a named pack and moves between packs.
+    let id = [52; 32];
+    let item = json!({
+        "id": encode(&id),
+        "kind": "emoji",
+        "name_ct": b.encrypt_metadata(Metadata::EmojiName, &id, b"meow")?,
+        "image_ct": b.encrypt_metadata(Metadata::EmojiImage, &id, png)?,
+        "pack_id": encode(&cats),
+    });
+    b.request(Method::POST, "/v1/emoji")
+        .json(&item)
+        .send()
+        .await?
+        .error_for_status()?;
+    let listed = list().await?;
+    let row = &listed["items"][0];
+    assert_eq!(row["pack_id"], encode(&cats));
+    let name = listed["packs"][1]["name_ct"]
+        .as_str()
+        .context("pack name")?;
+    assert_eq!(
+        a.decrypt_metadata(Metadata::EmojiPackName, &cats, name)?,
+        b"Cats"
+    );
+    b.request(Method::PUT, &format!("/v1/emoji/{}/pack", encode(&id)))
+        .json(&json!({"pack_id": default}))
+        .send()
+        .await?
+        .error_for_status()?;
+    b.request(Method::PUT, "/v1/emoji/packs/order")
+        .json(&json!({"ids": [encode(&cats), default]}))
+        .send()
+        .await?
+        .error_for_status()?;
+    let listed = list().await?;
+    assert_eq!(listed["packs"][0]["id"], encode(&cats));
+    assert_eq!(listed["items"][0]["pack_id"], default);
+    let renamed = b.encrypt_metadata(Metadata::EmojiPackName, &cats, b"Kittens")?;
+    b.request(
+        Method::PUT,
+        &format!("/v1/emoji/packs/{}/name", encode(&cats)),
+    )
+    .json(&json!({"name_ct": renamed}))
+    .send()
+    .await?
+    .error_for_status()?;
+    // Deleting a pack deletes what is in it; the last pack stays.
+    b.request(Method::PUT, &format!("/v1/emoji/{}/pack", encode(&id)))
+        .json(&json!({"pack_id": encode(&cats)}))
+        .send()
+        .await?
+        .error_for_status()?;
+    b.request(
+        Method::DELETE,
+        &format!("/v1/emoji/packs/{}", encode(&cats)),
+    )
+    .send()
+    .await?
+    .error_for_status()?;
+    let after = list().await?;
+    assert_eq!(after["items"].as_array().map(Vec::len), Some(0));
+    super::rejected(
+        b.request(Method::DELETE, &format!("/v1/emoji/packs/{default}"))
+            .send()
+            .await?,
+        StatusCode::CONFLICT,
+        "last_pack",
+    )
+    .await?;
+    println!("B5 packs: named, moved, reordered and deleted with their emoji; the last pack stays");
+    Ok(())
+}
+
 /// Server emoji: the Manage emoji permission, encrypted names and pictures, limits,
 /// rename, delete, audit entries and the change event.
 pub async fn emoji(a: &mut KeyClient<'_>, b: &KeyClient<'_>) -> Result<()> {
@@ -395,6 +505,7 @@ pub async fn emoji(a: &mut KeyClient<'_>, b: &KeyClient<'_>) -> Result<()> {
             "missing audit entry {action}"
         );
     }
+    packs(a, b, &png).await?;
     a.request(Method::PUT, &roles)
         .json(&json!({"role_ids": ["member"]}))
         .send()

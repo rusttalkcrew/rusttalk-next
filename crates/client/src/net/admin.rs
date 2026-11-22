@@ -72,14 +72,37 @@ pub enum Admin {
         name: String,
         sticker: bool,
         bytes: Vec<u8>,
+        /// The pack to put it in; the server's first when `None`.
+        pack: Option<Id>,
     },
     RenameEmoji(Id, String),
     DeleteEmoji(Id),
+    /// A new emoji and sticker pack with this name.
+    AddPack(String),
+    RenamePack(Id, String),
+    /// Delete a pack and everything in it.
+    DeletePack(Id),
+    /// Every pack, in the new order.
+    OrderPacks(Vec<Id>),
+    /// Move an emoji or sticker to another pack.
+    MoveEmoji(Id, Id),
+    /// Make a new pack and add these pictures to it, each fitted like a normal upload.
+    ImportPack {
+        name: String,
+        items: Vec<ImportItem>,
+    },
     /// The owner's public listing setting.
     LoadListing,
     LoadUpdates,
     /// List the server publicly with these details, or stop (`None`).
     SaveListing(Option<PublicListing>),
+}
+
+/// One picture of an imported pack, as read from the file.
+pub struct ImportItem {
+    pub name: String,
+    pub sticker: bool,
+    pub bytes: Vec<u8>,
 }
 
 /// What the owner publishes in a server directory. Unlike everything else, in plain text.
@@ -127,6 +150,8 @@ pub enum AdminUpdate {
     /// Whether the server is listed, and the saved details.
     Listing(bool, Option<PublicListing>),
     ServerUpdates(ServerUpdates),
+    /// An import is under way: pictures added so far, and in all.
+    Progress(usize, usize),
     /// A change went through; the text says what happened.
     Done(&'static str),
     Failed(String),
@@ -333,7 +358,60 @@ pub(super) async fn run(
             name,
             sticker,
             bytes,
-        } => add_emoji(client, &name, sticker, &bytes).await,
+            pack,
+        } => add_emoji(client, &name, sticker, &bytes, pack.as_ref()).await,
+        Admin::AddPack(name) => add_pack(client, &name)
+            .await
+            .map(|_| t!("admin.done_pack_added")),
+        Admin::RenamePack(id, name) => {
+            match emoji_ct(client, &id, Metadata::EmojiPackName, name.as_bytes()) {
+                Ok(name_ct) => {
+                    let path = format!("/v1/emoji/packs/{}/name", encode(&id));
+                    call(
+                        client,
+                        Method::PUT,
+                        &path,
+                        Some(json!({"name_ct": name_ct})),
+                    )
+                    .await
+                    .map(|()| t!("admin.done_renamed"))
+                }
+                Err(text) => Err(text),
+            }
+        }
+        Admin::DeletePack(id) => call(
+            client,
+            Method::DELETE,
+            &format!("/v1/emoji/packs/{}", encode(&id)),
+            None,
+        )
+        .await
+        .map(|()| t!("admin.done_deleted")),
+        Admin::OrderPacks(ids) => {
+            let ids: Vec<String> = ids.iter().map(|id| encode(id)).collect();
+            call(
+                client,
+                Method::PUT,
+                "/v1/emoji/packs/order",
+                Some(json!({ "ids": ids })),
+            )
+            .await
+            .map(|()| t!("admin.done_pack_order"))
+        }
+        Admin::MoveEmoji(id, pack) => call(
+            client,
+            Method::PUT,
+            &format!("/v1/emoji/{}/pack", encode(&id)),
+            Some(json!({"pack_id": encode(&pack)})),
+        )
+        .await
+        .map(|()| t!("admin.done_moved")),
+        Admin::ImportPack { name, items } => {
+            import_pack(client, &name, items, |done, all| {
+                send(AdminUpdate::Progress(done, all))
+            })
+            .await
+        }
         Admin::RenameEmoji(id, name) => {
             match emoji_ct(client, &id, Metadata::EmojiName, name.as_bytes()) {
                 Ok(name_ct) => {
@@ -559,22 +637,94 @@ async fn style_role(
     .map(|()| t!("admin.done_role_saved"))
 }
 
+/// Make a pack; its ID.
+async fn add_pack(client: &KeyClient<'_>, name: &str) -> Result<Id, String> {
+    let id = random_key().map_err(|error| {
+        tracing::error!(%error, "making a pack ID failed");
+        t!("admin.failed").to_owned()
+    })?;
+    let body = json!({
+        "id": encode(id.as_ref()),
+        "name_ct": emoji_ct(client, &id[..], Metadata::EmojiPackName, name.as_bytes())?,
+    });
+    call(client, Method::POST, "/v1/emoji/packs", Some(body)).await?;
+    Ok(*id)
+}
+
+/// Make a pack and add the pictures to it one by one, fitting each like a normal upload.
+/// A busy server (429) is waited for; a picture that fails is skipped and counted.
+// shortcut: runs inside this server's loop like other uploads, so its events wait.
+async fn import_pack(
+    client: &KeyClient<'_>,
+    name: &str,
+    items: Vec<ImportItem>,
+    progress: impl Fn(usize, usize),
+) -> Result<&'static str, String> {
+    let pack = add_pack(client, name).await?;
+    let total = items.len();
+    let mut failed = 0;
+    progress(0, total);
+    for (done, item) in items.into_iter().enumerate() {
+        let sticker = item.sticker;
+        let fitted =
+            tokio::task::spawn_blocking(move || crate::crop::fit(&item.bytes, sticker)).await;
+        let added = match fitted {
+            Ok(Ok(bytes)) => add_emoji_retrying(client, &item.name, sticker, &bytes, &pack).await,
+            _ => Err(t!("admin.failed").to_owned()),
+        };
+        if added.is_err() {
+            failed += 1;
+        }
+        progress(done + 1, total);
+        // Easy on the server: a pause between pictures, even when it never says it is busy.
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    }
+    match failed {
+        0 => Ok(t!("admin.done_import")),
+        count if count == total => Err(t!("admin.import_all_failed").to_owned()),
+        count => Err(t!("admin.import_some_failed", count = count)),
+    }
+}
+
+/// `add_emoji`, waiting and trying again while the server says it is busy.
+async fn add_emoji_retrying(
+    client: &KeyClient<'_>,
+    name: &str,
+    sticker: bool,
+    bytes: &[u8],
+    pack: &Id,
+) -> Result<&'static str, String> {
+    for attempt in 0..4 {
+        match add_emoji(client, name, sticker, bytes, Some(pack)).await {
+            Err(text) if text == t!("admin.busy") && attempt < 3 => {
+                tokio::time::sleep(std::time::Duration::from_secs(2 << attempt)).await;
+            }
+            done => return done,
+        }
+    }
+    Err(t!("admin.busy").to_owned())
+}
+
 async fn add_emoji(
     client: &KeyClient<'_>,
     name: &str,
     sticker: bool,
     bytes: &[u8],
+    pack: Option<&Id>,
 ) -> Result<&'static str, String> {
     let id = random_key().map_err(|error| {
         tracing::error!(%error, "making an emoji ID failed");
         t!("admin.failed").to_owned()
     })?;
-    let body = json!({
+    let mut body = json!({
         "id": encode(id.as_ref()),
         "kind": if sticker { "sticker" } else { "emoji" },
         "name_ct": emoji_ct(client, &id[..], Metadata::EmojiName, name.as_bytes())?,
         "image_ct": emoji_ct(client, &id[..], Metadata::EmojiImage, bytes)?,
     });
+    if let Some(pack) = pack {
+        body["pack_id"] = encode(pack).into();
+    }
     call(client, Method::POST, "/v1/emoji", Some(body))
         .await
         .map(|()| {
@@ -658,6 +808,9 @@ async fn request(
     if status.is_success() {
         return Ok(reply);
     }
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return Err(t!("admin.busy").into());
+    }
     let code = reply
         .json::<Value>()
         .await
@@ -694,6 +847,9 @@ fn problem(code: &str) -> &'static str {
         "invalid_index_url" => t!("admin.directory_https"),
         "invalid_index_tls_fingerprint" => t!("home.bad_fingerprint"),
         "invalid_channel_flags" => t!("admin.invalid_channel_flags"),
+        "pack_limit" => t!("admin.pack_limit"),
+        "last_pack" => t!("admin.last_pack"),
+        "pack_not_found" => t!("admin.pack_not_found"),
         "emoji_limit" => t!("admin.emoji_limit"),
         "sticker_limit" => t!("admin.sticker_limit"),
         "emoji_too_large" | "body_too_large" => t!("admin.emoji_too_large"),

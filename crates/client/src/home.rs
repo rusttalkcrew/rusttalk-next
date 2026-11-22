@@ -49,9 +49,10 @@ use crate::{
     reorder,
     screen::Video,
     server::{
-        Body, Channel, ChannelKind, Chat, Directory, Id, Member, Msg, Picture, Server, Status,
-        member_name,
+        Body, Channel, ChannelKind, Chat, CustomEmoji, Directory, Id, Member, Msg, Picture, Server,
+        Status, member_name,
     },
+    sticker_files::{self, Inline, Kind},
     ui::{self, Item, Look, Palette, error_text},
 };
 
@@ -68,7 +69,10 @@ const RAIL_WIDTH: f32 = 72.0;
 const RAIL_BUTTON: f32 = 48.0;
 const SERVER_HEADER: f32 = 44.0;
 const MESSAGE_AVATAR: f32 = 38.0;
-const STICKER_SIZE: f32 = 160.0;
+pub(crate) const STICKER_SIZE: f32 = 160.0;
+/// Emoji of other servers one message may carry as files: a file stays free for a
+/// picture or a link preview.
+const MAX_FOREIGN: usize = 3;
 
 /// What the cards under messages need: joined servers for invites, and link previews.
 struct Embeds<'a> {
@@ -1409,6 +1413,7 @@ impl Home {
             }
             Update::Image(id, fetch, frames) => self.files.image(ctx, id, fetch, frames),
             Update::LinkCard(id, card) => self.files.link_card(id, card),
+            Update::StickerFile(id, picture) => self.files.sticker_loaded(ctx, id, picture),
             Update::Saved(id, saved) => self.files.saved(id, saved),
             Update::Synced(synced) => {
                 self.synced_once = true;
@@ -1605,6 +1610,7 @@ pub fn show(
         | Ask::Live(address, _)
         | Ask::Icon(address)
         | Ask::Emoji(address, ..)
+        | Ask::EmojiZip(address)
         | Ask::Accept(address, ..)) = &ask
         else {
             continue;
@@ -1630,10 +1636,11 @@ pub fn show(
                     continue;
                 };
                 let target = match ask {
-                    Ask::Emoji(address, name, sticker) => Target::Emoji {
+                    Ask::Emoji(address, name, sticker, pack) => Target::Emoji {
                         address,
                         name,
                         sticker,
+                        pack,
                     },
                     Ask::Icon(address) => Target::Icon(address),
                     _ => unreachable!("matched above"),
@@ -1655,6 +1662,11 @@ pub fn show(
                     home.toast = Some((t!("home.live_file_too_big").into(), now + 6.0));
                 } else {
                     server.send(Command::SendLive(channel, path));
+                }
+            }
+            Ask::EmojiZip(_) => {
+                if let Some(path) = paths.into_iter().next() {
+                    admin::start_import(home, &path, ui.ctx());
                 }
             }
             Ask::Picture | Ask::AttachDm(_) => {}
@@ -1994,12 +2006,14 @@ fn crop_dialog(ctx: &egui::Context, home: &mut Home) {
             address,
             name,
             sticker,
+            pack,
         } => {
             if let Some(index) = home.index(&address) {
                 let add = Admin::AddEmoji {
                     name,
                     sticker,
                     bytes,
+                    pack,
                 };
                 home.servers[index].send(Command::Admin(add));
             }
@@ -2041,6 +2055,14 @@ pub fn emoji_image(ui: &mut Ui, picture: &Picture, size: f32, label: &str) -> Re
     egui::Image::new(&frame_when(ui, picture, play)).paint_at(ui, rect);
     response.widget_info(|| WidgetInfo::labeled(Role::Image, true, label));
     response
+}
+
+/// Drop the textures of a picture, for one that is no longer kept.
+pub fn forget_textures(ctx: &egui::Context, key: &[u8; 32]) {
+    ctx.data_mut(|data| {
+        data.remove::<TextureHandle>(UiId::unique(("picture", *key)));
+        data.remove::<Arc<Vec<TextureHandle>>>(UiId::unique(("picture frames", *key)));
+    });
 }
 
 /// The texture for a picture's current frame, or its first with `play` false (and no
@@ -3440,6 +3462,7 @@ fn page_view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat: &mut
                     friend: None,
                     poke: false,
                     preview: None,
+                    inline: Vec::new(),
                     poll: None,
                 };
                 server.send(Command::Send(draft));
@@ -3634,7 +3657,30 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
             {
                 preview_status(ui, voice, out);
             }
-            let (command, attach) = composer(ui, chat, dir, online, key, &hint, emoji_picker);
+            // This server's emoji go by ID in a channel; every other server's picture goes
+            // along as a small file (and in a DM, all of them do).
+            let local = matches!(at, At::Channel(..)).then_some(dir);
+            let here = match at {
+                At::Channel(index, _) => Some(index),
+                At::Dm(_) => None,
+            };
+            let scope = picker::Scope {
+                local,
+                others: (servers.iter().enumerate())
+                    .filter(|(index, server)| Some(*index) != here && !server.dir.emoji.is_empty())
+                    .map(|(_, server)| (server.name(), &server.dir))
+                    .collect(),
+            };
+            let (command, attach) = composer(
+                ui,
+                chat,
+                dir,
+                online,
+                key,
+                &hint,
+                (emoji_picker, &scope),
+                (toast, now),
+            );
             // A new message with a link to some other site waits for its preview; any
             // message sent meanwhile waits behind it.
             let command = match command {
@@ -3907,6 +3953,20 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
                 }
             }
         }
+        Some(Pick::AddPicture(name, kind, bytes)) => {
+            if let At::Channel(index, _) = at {
+                let taken: Vec<String> = (servers[index].dir.emoji.iter())
+                    .filter(|e| e.sticker == kind.sticker())
+                    .map(|e| e.name.clone())
+                    .collect();
+                servers[index].send(Command::Admin(Admin::AddEmoji {
+                    name: crate::emoji_zip::unique(&name, &taken),
+                    sticker: kind.sticker(),
+                    bytes: bytes.to_vec(),
+                    pack: None,
+                }));
+            }
+        }
         Some(Pick::Previews(id, allow)) => {
             let mut settings = voice.audio.settings();
             settings.link_previews.insert(id.into(), allow);
@@ -3955,6 +4015,7 @@ fn poll_draft(channel: Id, text: String, part: PollPart) -> Option<Draft> {
         poke: false,
         poll: Some(Box::new(part)),
         preview: None,
+        inline: Vec::new(),
     })
 }
 
@@ -4121,6 +4182,8 @@ enum Pick {
     Previews(&'static str, bool),
     /// A vote or a poll's end to send.
     Poll(PollPart),
+    /// Add another server's emoji or sticker to this server: name, kind and picture file.
+    AddPicture(String, Kind, std::sync::Arc<Vec<u8>>),
 }
 
 fn composer_id(channel: Id) -> UiId {
@@ -4142,6 +4205,7 @@ pub fn toast_line(ui: &mut Ui, toast: &mut Option<(String, f64)>) {
 }
 
 /// Returns a message to send, and whether a file was chosen to attach: stored (`false`) or live.
+#[allow(clippy::too_many_arguments)]
 fn composer(
     ui: &mut Ui,
     chat: &mut Chat,
@@ -4149,7 +4213,8 @@ fn composer(
     online: bool,
     channel: Id,
     hint: &str,
-    emoji_picker: &mut Picker,
+    (emoji_picker, scope): (&mut Picker, &picker::Scope),
+    (toast, now): (&mut Option<(String, f64)>, f64),
 ) -> (Option<Command>, Option<bool>) {
     if let Some(editor) = &mut chat.poll_editor {
         match polls::editor(ui, editor) {
@@ -4274,14 +4339,46 @@ fn composer(
             .inner
         });
     let field = bar.inner;
-    let (was_open, picked) = emoji_picker.show(ui, bar.response.rect, dir);
+    let (was_open, picked) = emoji_picker.show(ui, bar.response.rect, scope);
     for (response, tab) in &tabs {
         emoji_picker.button(response, *tab, editor, was_open);
     }
-    let mut sticker = None;
+    // A sticker to send now: of this server by ID, or of another as a file.
+    let mut sticker: Option<(Option<Id>, String, Vec<Inline>)> = None;
     match picked {
         Some(Picked::Text(sequence)) => emoji_picker.insert(&field, &mut chat.draft, &sequence),
-        Some(Picked::Sticker(id, name)) => sticker = Some((id, name)),
+        Some(Picked::Sticker(id, name)) => sticker = Some((Some(id), name, Vec::new())),
+        Some(Picked::Foreign(emoji)) => {
+            let kind = if emoji.sticker {
+                Kind::Sticker
+            } else {
+                Kind::Emoji
+            };
+            let picture = (emoji.picture.as_ref())
+                .filter(|picture| sticker_files::sendable(&picture.bytes, kind))
+                .filter(|_| emoji::name_ok(&emoji.name));
+            let known = chat.foreign.iter().any(|other| other.name == emoji.name);
+            match picture {
+                None => *toast = Some((t!("picker.cannot_share").into(), now + 6.0)),
+                Some(picture) if emoji.sticker => {
+                    let inline = Inline {
+                        kind,
+                        name: emoji.name.clone(),
+                        bytes: picture.bytes.clone(),
+                    };
+                    sticker = Some((None, format!(":{}:", emoji.name), vec![inline]));
+                }
+                Some(_) if !known && chat.foreign.len() >= MAX_FOREIGN => {
+                    *toast = Some((t!("picker.too_many_foreign").into(), now + 6.0));
+                }
+                Some(_) => {
+                    let code = format!(":{}:", emoji.name);
+                    emoji_picker.insert(&field, &mut chat.draft, &code);
+                    chat.foreign.retain(|other| other.name != emoji.name);
+                    chat.foreign.push(emoji);
+                }
+            }
+        }
         None => {}
     }
     let (enter, escape, up) = ui.input(|input| {
@@ -4324,7 +4421,7 @@ fn composer(
         }
     }
     // A sticker goes out on its own, leaving the draft as it is.
-    if let Some((id, name)) = sticker {
+    if let Some((id, name, inline)) = sticker {
         let Ok(message) = rusttalk_core::keys::random_key() else {
             tracing::warn!("no randomness for a message ID");
             return (None, attach);
@@ -4338,18 +4435,26 @@ fn composer(
             edit_of: None,
             revision: 0,
             files: Vec::new(),
-            sticker: Some(id),
+            sticker: id,
             friend: None,
             poke: false,
             poll: None,
             preview: None,
+            inline,
         });
         field.request_focus();
         return (Some(command), attach);
     }
     let parser_input = chat.mentions.parser_input(&chat.draft);
+    // Picked emoji of other servers come first: the one picked is the one meant.
+    let known: std::borrow::Cow<[CustomEmoji]> = if chat.foreign.is_empty() {
+        std::borrow::Cow::Borrowed(&dir.emoji)
+    } else {
+        let all = chat.foreign.iter().chain(&dir.emoji).cloned();
+        std::borrow::Cow::Owned(all.collect())
+    };
     let converted = markdown::cached(ui, &parser_input).map_source(&chat.draft, |s| {
-        emoji::replace(&chat.mentions.encode(s), &dir.emoji).into_owned()
+        emoji::replace(&chat.mentions.encode(s), &known).into_owned()
     });
     let count = converted.chars().count();
     if count >= COUNT_FROM {
@@ -4402,6 +4507,22 @@ fn composer(
         poke: false,
         poll: None,
         preview: None,
+        // Only the picked emoji of other servers that the text still uses.
+        inline: if editing {
+            Vec::new()
+        } else {
+            (chat.foreign.iter())
+                .filter(|emoji| text.contains(&emoji::token(&emoji.name, &emoji.id)))
+                .filter_map(|emoji| {
+                    let picture = emoji.picture.as_ref()?;
+                    Some(Inline {
+                        kind: Kind::Emoji,
+                        name: emoji.name.clone(),
+                        bytes: picture.bytes.clone(),
+                    })
+                })
+                .collect()
+        },
     });
     chat.clear_draft();
     field.request_focus();
@@ -4609,7 +4730,9 @@ fn message(
                         }
                     }
                     Body::Text(text) => {
-                        if !text.is_empty() {
+                        // Another server's sticker is its picture alone, drawn with the files.
+                        let sticker = crate::sticker_files::sticker_of(&msg.files, text);
+                        if !text.is_empty() && sticker.is_none() {
                             ui.vertical(|ui| {
                                 let jumbo = emoji::jumbo(text)
                                     && msg.files.is_empty()
@@ -4671,6 +4794,18 @@ fn message(
     let can_delete =
         authored || (dir.perms.delete_messages && !dir.dms.iter().any(|dm| dm.channel == channel));
     let mut pick = invite;
+    // Emoji and stickers of other servers in the message, for people who may add them.
+    let in_dm = dir.dms.iter().any(|dm| dm.channel == channel);
+    let addable: Vec<(Kind, String, Id)> = if dir.perms.manage_emoji && !in_dm {
+        (msg.files.iter())
+            .filter_map(|file| {
+                let (kind, name) = sticker_files::of(file)?;
+                Some((kind, name, file.file.id))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     ui::context_menu(&row.response, |m| {
         if can_reply && m.item("↩", t!("common.reply")).clicked() {
             pick = Some(Pick::Reply(msg.person, msg.id));
@@ -4686,6 +4821,17 @@ fn message(
         }
         if can_end_poll && m.item("🏁", t!("polls.end")).clicked() {
             pick = Some(Pick::Poll(PollPart::End { poll: msg.id }));
+        }
+        for (kind, name, blob) in &addable {
+            let label = match kind {
+                Kind::Sticker => t!("home.add_sticker_here").to_owned(),
+                Kind::Emoji => t!("home.add_emoji_here", name = name),
+            };
+            if let Some(picture) = sticker_files::picture(m.ui().ctx(), blob)
+                && m.item("➕", &label).clicked()
+            {
+                pick = Some(Pick::AddPicture(name.clone(), *kind, picture.bytes));
+            }
         }
         if can_delete {
             m.separator();

@@ -2,6 +2,8 @@
 
 mod file_limits;
 
+mod import;
+
 mod members;
 
 mod roles;
@@ -105,6 +107,16 @@ pub struct Settings {
     emoji_sticker: bool,
     /// An emoji or sticker being renamed, and the new name.
     emoji_renaming: Option<(Id, String)>,
+    /// The pack the next upload goes to; the first when `None`.
+    emoji_pack: Option<Id>,
+    /// The name typed for a new pack.
+    new_pack: String,
+    /// A pack being renamed, and the new name.
+    pack_renaming: Option<(Id, String)>,
+    /// The pack waiting for its delete to be confirmed.
+    pack_deleting: Option<Id>,
+    /// "Import pack from .zip", while its dialog is open.
+    import: Option<import::Import>,
     /// The last result: text and whether it went wrong.
     message: Option<(String, bool)>,
 }
@@ -124,19 +136,40 @@ impl Settings {
                 self.listing = Some((on, saved.unwrap_or_default()));
             }
             AdminUpdate::ServerUpdates(updates) => self.updates = updates,
+            AdminUpdate::Progress(done, total) => {
+                if let Some(import) = &mut self.import {
+                    import.progress(done, total);
+                }
+            }
             AdminUpdate::Done(text) => {
                 self.member = None;
                 self.roles.done();
                 self.revoking = None;
                 self.emoji_renaming = None;
+                self.pack_renaming = None;
+                self.pack_deleting = None;
+                self.import = None;
                 self.message = Some((text.into(), false));
             }
             AdminUpdate::Failed(text) => {
                 self.roles.failed();
+                if let Some(import) = &mut self.import {
+                    import.failed();
+                }
                 self.message = Some((text, true));
             }
         }
     }
+}
+
+/// Start "Import pack from .zip" on the open server settings, with the picked file.
+pub fn start_import(home: &mut Home, path: &std::path::Path, ctx: &egui::Context) {
+    let Some(settings) = &mut home.server_settings else {
+        return;
+    };
+    let dir = &home.servers[settings.server].dir;
+    let max = dir.emoji_max.0.max(dir.emoji_max.1);
+    settings.import = Some(import::Import::start(path, max, ctx));
 }
 
 /// Open server settings on a tab, loading what that person may see.
@@ -193,6 +226,11 @@ pub fn open(home: &mut Home, index: usize, mut tab: Tab) {
         emoji_name: String::new(),
         emoji_sticker: false,
         emoji_renaming: None,
+        emoji_pack: None,
+        new_pack: String::new(),
+        pack_renaming: None,
+        pack_deleting: None,
+        import: None,
         message: None,
     });
 }
@@ -262,6 +300,7 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
     let mut request = None;
     let mut icon = false;
     let mut upload = None;
+    let mut zip = false;
     let mut channel_edit = None;
     let mut rename = None;
     let mut batch = Vec::new();
@@ -386,9 +425,9 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
                     }
                     Tab::Listing => listing_tab(ui, server, settings),
                     Tab::Emoji => {
-                        let (picked, request) = emoji_tab(ui, server, settings);
-                        upload = picked;
-                        request
+                        let asked = emoji_tab(ui, server, settings);
+                        (upload, zip) = (asked.upload, asked.zip);
+                        asked.request
                     }
                     Tab::Channel(_) => None,
                 };
@@ -424,6 +463,13 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
     {
         request = Some(asked);
     }
+    if let Some(import) = &mut settings.import {
+        match import.show(ctx, &server.dir) {
+            import::Outcome::Open => {}
+            import::Outcome::Close => settings.import = None,
+            import::Outcome::Start(start) => request = Some(start),
+        }
+    }
     if let Some(request) = request {
         settings.message = None;
         server.send(Command::Admin(request));
@@ -439,11 +485,15 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
         settings.message = None;
         home.files.ask(ctx, Ask::Icon(server.address.clone()));
     }
-    if let Some((name, sticker)) = upload {
+    if let Some((name, sticker, pack)) = upload {
         settings.message = None;
         settings.emoji_name.clear();
         home.files
-            .ask(ctx, Ask::Emoji(server.address.clone(), name, sticker));
+            .ask(ctx, Ask::Emoji(server.address.clone(), name, sticker, pack));
+    }
+    if zip {
+        settings.message = None;
+        home.files.ask(ctx, Ask::EmojiZip(server.address.clone()));
     }
     if close || channel_edit.is_some() {
         home.server_settings = None;
@@ -572,35 +622,29 @@ fn server_icon(ui: &mut Ui, server: &Server, size: f32) {
 
 /// Names people type as `:name:`: 2 to 32 lowercase letters, digits or `_`.
 fn emoji_name_ok(name: &str) -> bool {
-    (2..=32).contains(&name.len())
-        && name
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+    crate::emoji::name_ok(name)
 }
 
 /// Keep a typed name to the characters a `:name:` allows.
 fn clean_emoji_name(name: &mut String) {
-    *name = name
-        .chars()
-        .filter_map(|c| match c {
-            ' ' | '-' => Some('_'),
-            c if c.is_ascii_alphanumeric() || c == '_' => Some(c.to_ascii_lowercase()),
-            _ => None,
-        })
-        .take(32)
-        .collect();
+    *name = crate::emoji::clean_name(name);
 }
 
-/// Upload, rename and delete server emoji and stickers. Returns a name and kind to
-/// pick a picture for, or a change to send.
-fn emoji_tab(
-    ui: &mut Ui,
-    server: &Server,
-    settings: &mut Settings,
-) -> (Option<(String, bool)>, Option<Admin>) {
+/// What the Emoji & stickers tab asks for this frame.
+#[derive(Default)]
+struct EmojiAsk {
+    /// A name, kind and pack to pick a picture for.
+    upload: Option<(String, bool, Option<Id>)>,
+    request: Option<Admin>,
+    /// Pick a .zip to import as a pack.
+    zip: bool,
+}
+
+/// Upload, import, rename, move and delete server emoji and stickers, and manage the
+/// packs they are in.
+fn emoji_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> EmojiAsk {
     let dir = &server.dir;
-    let mut upload = None;
-    let mut request = None;
+    let mut ask = EmojiAsk::default();
     let count = |sticker: bool| dir.emoji.iter().filter(|e| e.sticker == sticker).count();
     ui::page_section(ui, t!("admin.upload"));
     ui.horizontal(|ui| {
@@ -618,6 +662,9 @@ fn emoji_tab(
         }
     });
     let sticker = settings.emoji_sticker;
+    let pack = (settings.emoji_pack)
+        .filter(|id| dir.packs.iter().any(|pack| pack.id == *id))
+        .or_else(|| dir.packs.first().map(|pack| pack.id));
     let label = ui.label(ui::bold(t!("common.name")));
     ui.horizontal(|ui| {
         let field = ui
@@ -643,7 +690,7 @@ fn emoji_tab(
             .inner
             .clicked();
         if pick || (ready && crate::app::submitted(ui, &field)) {
-            upload = Some((name.to_owned(), sticker));
+            ask.upload = Some((name.to_owned(), sticker, pack));
         }
         if taken {
             ui.label(RichText::new(t!("admin.name_taken")).color(ui::colors(ui).danger_text));
@@ -651,79 +698,227 @@ fn emoji_tab(
             ui.label(RichText::new(t!("admin.emoji_full")).color(ui::colors(ui).danger_text));
         }
     });
+    if dir.packs.len() > 1 {
+        ui.horizontal(|ui| {
+            let label = ui.label(ui::bold(t!("admin.pack")));
+            let shown = pack
+                .and_then(|id| dir.packs.iter().find(|p| p.id == id))
+                .map(|pack| pack.title())
+                .unwrap_or_default();
+            let combo = ComboBox::from_id_salt("emoji-pack")
+                .selected_text(shown)
+                .show_ui(ui, |ui| {
+                    for item in &dir.packs {
+                        let on = Some(item.id) == pack;
+                        if ui.selectable_label(on, item.title()).clicked() {
+                            settings.emoji_pack = Some(item.id);
+                        }
+                    }
+                });
+            combo.response.labelled_by(label.id);
+        });
+    }
     ui.weak(if sticker {
         t!("admin.sticker_help")
     } else {
         t!("admin.emoji_help")
     });
-    for (sticker, title, max) in [
-        (false, t!("admin.emoji"), dir.emoji_max.0),
-        (true, t!("admin.stickers"), dir.emoji_max.1),
-    ] {
-        ui::page_section(
-            ui,
-            &t!(
-                "admin.emoji_count",
-                kind = title,
-                count = count(sticker),
-                max = max
-            ),
+    ui::page_section(ui, t!("admin.import_section"));
+    ui.weak(t!("admin.import_help"));
+    let room = dir.packs.len() < dir.packs_max;
+    if ui
+        .add_enabled_ui(room, |ui| ui::secondary(ui, t!("admin.import_button")))
+        .inner
+        .clicked()
+    {
+        ask.zip = true;
+    }
+    ui::page_section(ui, t!("admin.packs"));
+    ui.weak(t!(
+        "admin.emoji_count",
+        kind = t!("admin.emoji"),
+        count = count(false),
+        max = dir.emoji_max.0
+    ));
+    ui.weak(t!(
+        "admin.emoji_count",
+        kind = t!("admin.stickers"),
+        count = count(true),
+        max = dir.emoji_max.1
+    ));
+    ui.horizontal(|ui| {
+        let field = ui.add(
+            ui::field(&mut settings.new_pack)
+                .char_limit(32)
+                .hint_text(t!("admin.pack_name_hint")),
         );
-        let mut empty = true;
-        for item in dir.emoji.iter().filter(|e| e.sticker == sticker) {
-            empty = false;
-            ui.push_id(item.id, |ui| {
-                ui.horizontal(|ui| {
-                    let (rect, _) =
-                        ui.allocate_exact_size(egui::Vec2::splat(32.0), egui::Sense::hover());
-                    if let Some(picture) = &item.picture {
-                        paint_hovered(ui, rect, picture, 0.0);
+        let ready = !settings.new_pack.trim().is_empty() && dir.packs.len() < dir.packs_max;
+        let add = ui
+            .add_enabled_ui(ready, |ui| ui::primary(ui, t!("admin.pack_add")))
+            .inner
+            .clicked();
+        if add || (ready && crate::app::submitted(ui, &field)) {
+            ask.request = Some(Admin::AddPack(settings.new_pack.trim().to_owned()));
+            settings.new_pack.clear();
+        }
+        if dir.packs.len() >= dir.packs_max {
+            ui.label(RichText::new(t!("admin.pack_limit")).color(ui::colors(ui).danger_text));
+        }
+    });
+    for (at, pack) in dir.packs.iter().enumerate() {
+        ui.push_id(pack.id, |ui| {
+            pack_block(ui, server, settings, (at, pack), &mut ask);
+        });
+    }
+    ask
+}
+
+/// One pack: its header with rename, reorder and delete, and its emoji and stickers.
+fn pack_block(
+    ui: &mut Ui,
+    server: &Server,
+    settings: &mut Settings,
+    (at, pack): (usize, &crate::server::EmojiPack),
+    ask: &mut EmojiAsk,
+) {
+    let dir = &server.dir;
+    ui.add_space(ui::SPACE_S);
+    ui.horizontal(|ui| match &mut settings.pack_renaming {
+        Some((id, name)) if *id == pack.id => {
+            ui.add(ui::field(name).char_limit(32));
+            let ok = !name.trim().is_empty();
+            if ui
+                .add_enabled_ui(ok, |ui| ui::primary(ui, t!("common.save")))
+                .inner
+                .clicked()
+            {
+                ask.request = Some(Admin::RenamePack(*id, name.trim().to_owned()));
+            }
+            if ui::secondary(ui, t!("common.cancel")).clicked() {
+                settings.pack_renaming = None;
+            }
+        }
+        _ => {
+            ui.label(ui::title(pack.title()));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let only = dir.packs.len() <= 1;
+                if ui
+                    .add_enabled_ui(!only, |ui| danger(ui, t!("common.delete")))
+                    .inner
+                    .clicked()
+                {
+                    settings.pack_deleting = Some(pack.id);
+                }
+                if ui::secondary(ui, t!("common.rename")).clicked() {
+                    settings.pack_renaming = Some((pack.id, pack.name.clone().unwrap_or_default()));
+                }
+                let size = egui::Vec2::splat(ui::ICON_BUTTON);
+                for (glyph, tip, step) in [
+                    ("↓", t!("admin.move_down"), 1isize),
+                    ("↑", t!("admin.move_up"), -1),
+                ] {
+                    let to = at
+                        .checked_add_signed(step)
+                        .filter(|to| *to < dir.packs.len());
+                    let moved = ui
+                        .add_enabled_ui(to.is_some(), |ui| {
+                            ui::icon_button(ui, glyph, tip, ui::Look::Ghost, size)
+                        })
+                        .inner
+                        .clicked();
+                    if let (true, Some(to)) = (moved, to) {
+                        let mut ids: Vec<Id> = dir.packs.iter().map(|p| p.id).collect();
+                        ids.swap(at, to);
+                        ask.request = Some(Admin::OrderPacks(ids));
                     }
-                    match &mut settings.emoji_renaming {
-                        Some((id, name)) if *id == item.id => {
-                            if ui.add(ui::field(name).char_limit(32)).changed() {
-                                clean_emoji_name(name);
-                            }
-                            let taken = dir
-                                .emoji
-                                .iter()
-                                .any(|e| e.sticker == sticker && e.name == *name && e.id != *id);
-                            let ok = emoji_name_ok(name) && !taken;
-                            if ui
-                                .add_enabled_ui(ok, |ui| ui::primary(ui, t!("common.save")))
-                                .inner
-                                .clicked()
-                            {
-                                request = Some(Admin::RenameEmoji(*id, name.clone()));
-                            }
-                            if ui::secondary(ui, t!("common.cancel")).clicked() {
-                                settings.emoji_renaming = None;
-                            }
-                        }
-                        _ => {
-                            ui.label(format!(":{}:", item.name));
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if danger(ui, t!("common.delete")).clicked() {
-                                        request = Some(Admin::DeleteEmoji(item.id));
-                                    }
-                                    if ui::secondary(ui, t!("common.rename")).clicked() {
-                                        settings.emoji_renaming =
-                                            Some((item.id, item.name.clone()));
-                                    }
-                                },
-                            );
-                        }
-                    }
-                });
+                }
             });
         }
-        if empty {
-            ui.weak(t!("admin.none_yet"));
-        }
+    });
+    let items: Vec<_> = dir.emoji.iter().filter(|e| e.pack == pack.id).collect();
+    if settings.pack_deleting == Some(pack.id) {
+        ui::card(ui, |ui| {
+            ui.label(t!("admin.pack_delete_help", count = items.len()));
+            ui.horizontal(|ui| {
+                if danger(ui, t!("admin.pack_delete")).clicked() {
+                    ask.request = Some(Admin::DeletePack(pack.id));
+                }
+                if ui::secondary(ui, t!("common.cancel")).clicked() {
+                    settings.pack_deleting = None;
+                }
+            });
+        });
     }
-    (upload, request)
+    if items.is_empty() {
+        ui.weak(t!("admin.none_yet"));
+    }
+    for item in items {
+        ui.push_id(item.id, |ui| {
+            ui.horizontal(|ui| {
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::Vec2::splat(32.0), egui::Sense::hover());
+                if let Some(picture) = &item.picture {
+                    paint_hovered(ui, rect, picture, 0.0);
+                }
+                match &mut settings.emoji_renaming {
+                    Some((id, name)) if *id == item.id => {
+                        if ui.add(ui::field(name).char_limit(32)).changed() {
+                            clean_emoji_name(name);
+                        }
+                        let taken = dir
+                            .emoji
+                            .iter()
+                            .any(|e| e.sticker == item.sticker && e.name == *name && e.id != *id);
+                        let ok = emoji_name_ok(name) && !taken;
+                        if ui
+                            .add_enabled_ui(ok, |ui| ui::primary(ui, t!("common.save")))
+                            .inner
+                            .clicked()
+                        {
+                            ask.request = Some(Admin::RenameEmoji(*id, name.clone()));
+                        }
+                        if ui::secondary(ui, t!("common.cancel")).clicked() {
+                            settings.emoji_renaming = None;
+                        }
+                    }
+                    _ => {
+                        ui.label(format!(":{}:", item.name));
+                        if item.sticker {
+                            ui.label(ui::caption(t!("admin.sticker")));
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if danger(ui, t!("common.delete")).clicked() {
+                                ask.request = Some(Admin::DeleteEmoji(item.id));
+                            }
+                            if ui::secondary(ui, t!("common.rename")).clicked() {
+                                settings.emoji_renaming = Some((item.id, item.name.clone()));
+                            }
+                            if dir.packs.len() > 1 {
+                                let combo = ComboBox::from_id_salt("move-emoji")
+                                    .selected_text(t!("admin.move_to"))
+                                    .width(90.0)
+                                    .show_ui(ui, |ui| {
+                                        for other in dir.packs.iter().filter(|p| p.id != pack.id) {
+                                            if ui.selectable_label(false, other.title()).clicked() {
+                                                ask.request =
+                                                    Some(Admin::MoveEmoji(item.id, other.id));
+                                            }
+                                        }
+                                    });
+                                combo.response.widget_info(|| {
+                                    egui::WidgetInfo::labeled(
+                                        Role::ComboBox,
+                                        true,
+                                        t!("admin.move_to"),
+                                    )
+                                });
+                            }
+                        });
+                    }
+                }
+            });
+        });
+    }
 }
 
 fn members_tab<'a>(
@@ -965,6 +1160,7 @@ fn sentence(server: &Server, entry: &AuditEntry) -> String {
         "emoji_added" => t!("audit.emoji_added", actor = actor),
         "emoji_renamed" => t!("audit.emoji_renamed", actor = actor),
         "emoji_deleted" => t!("audit.emoji_deleted", actor = actor),
+        "emoji_pack_changed" => t!("audit.emoji_pack_changed", actor = actor),
         "device_certificate_changed" => t!("audit.device_certificate_changed", actor = actor),
         "owner_claimed" => t!("audit.owner_claimed", actor = actor),
         other => format!("{actor}: {}", other.replace('_', " ")),

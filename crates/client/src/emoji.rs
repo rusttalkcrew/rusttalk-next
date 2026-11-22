@@ -139,6 +139,27 @@ static SHORTCODES: LazyLock<Vec<(&str, &str)>> = LazyLock::new(|| {
         .collect()
 });
 
+/// Whether `name` is a valid emoji or sticker name: 2 to 32 lowercase letters, digits
+/// and `_`.
+pub fn name_ok(name: &str) -> bool {
+    (2..=32).contains(&name.len())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// Keep a typed name to the characters a `:name:` allows, at most 32.
+pub fn clean_name(name: &str) -> String {
+    name.chars()
+        .filter_map(|c| match c {
+            ' ' | '-' => Some('_'),
+            c if c.is_ascii_alphanumeric() || c == '_' => Some(c.to_ascii_lowercase()),
+            _ => None,
+        })
+        .take(32)
+        .collect()
+}
+
 pub fn shortcode_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '+')
 }
@@ -216,6 +237,17 @@ fn replace_codes<'a>(text: &'a str, custom: &[CustomEmoji]) -> Cow<'a, str> {
 
 /// Resolve named artwork in the destination server's catalog.
 pub fn for_replica(text: &mut String, sticker: &mut Option<Id>, custom: &[CustomEmoji]) {
+    for_replica_keeping(text, sticker, custom, &[]);
+}
+
+/// `for_replica`, leaving the tokens of the `keep`-named emoji alone: the message carries
+/// their pictures as files (see `sticker_files`), so they need no emoji of this server.
+pub fn for_replica_keeping(
+    text: &mut String,
+    sticker: &mut Option<Id>,
+    custom: &[CustomEmoji],
+    keep: &[&str],
+) {
     if sticker.is_some() {
         let mut matches = custom
             .iter()
@@ -234,6 +266,11 @@ pub fn for_replica(text: &mut String, sticker: &mut Option<Id>, custom: &[Custom
             .into_iter()
             .map(|part| match part {
                 Part::Text(s) => s.to_owned(),
+                Part::Custom { token, name, .. }
+                    if keep.iter().any(|kept| kept.eq_ignore_ascii_case(name)) =>
+                {
+                    token.to_owned()
+                }
                 Part::Custom { name, .. } => custom
                     .iter()
                     .find(|e| !e.sticker && e.name.eq_ignore_ascii_case(name))
@@ -353,6 +390,7 @@ mod tests {
             id: [id; 32],
             name: "Wave".into(),
             sticker: true,
+            pack: [0; 32],
             picture: None,
         };
         let catalog = [sticker(1), sticker(2)];
@@ -368,6 +406,11 @@ mod tests {
             assert_eq!(id, expected);
             assert_eq!(text, if expected.is_some() { "wave" } else { ":wave:" });
         }
+        // An emoji whose picture travels with the message keeps its token.
+        let party = token("party", &[9; 32]);
+        let mut text = format!("{party} <:other:{}>", encode(&[8; 32]));
+        for_replica_keeping(&mut text, &mut None, &catalog[..0], &["PARTY"]);
+        assert_eq!(text, format!("{party} :other:"));
     }
 
     #[test]
@@ -389,6 +432,7 @@ mod tests {
             id: [7; 32],
             name: "party".into(),
             sticker: false,
+            pack: [0; 32],
             picture: None,
         };
         let smile = CustomEmoji {

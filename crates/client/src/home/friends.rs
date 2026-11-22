@@ -70,6 +70,7 @@ impl Home {
                 poke: false,
                 poll: None,
                 preview: None,
+                inline: Vec::new(),
             }));
         }
     }

@@ -239,6 +239,7 @@ uncommitted blobs.
 | `RUSTTALK_EMOJI_MAX` | 100 emoji |
 | `RUSTTALK_STICKER_MAX` | 50 stickers |
 | `RUSTTALK_EMOJI_MAX_BYTES` | 262,144 (256 KiB per encrypted picture, also the maximum) |
+| `RUSTTALK_EMOJI_PACKS_MAX` | 20 packs |
 
 `RUSTTALK_STICKER_MAX` is the host ceiling for the sticker limit in
 **Server settings → Files** and the default until a limit is saved. Pictures

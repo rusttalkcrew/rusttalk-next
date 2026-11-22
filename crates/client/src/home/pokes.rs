@@ -51,6 +51,7 @@ impl Home {
                 poke: true,
                 poll: None,
                 preview: None,
+                inline: Vec::new(),
             }));
         }
         let at = notify::unix_now();

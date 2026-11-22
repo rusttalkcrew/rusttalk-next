@@ -245,6 +245,25 @@ pub struct Directory {
     pub emoji: Vec<CustomEmoji>,
     /// How many emoji and stickers the server allows.
     pub emoji_max: (usize, usize),
+    /// Emoji and sticker packs in display order, and how many the server allows.
+    pub packs: Vec<EmojiPack>,
+    pub packs_max: usize,
+}
+
+/// A named group of emoji and stickers.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EmojiPack {
+    pub id: Id,
+    /// `None` for the Default pack nobody named: apps say "Default".
+    pub name: Option<String>,
+}
+
+impl EmojiPack {
+    pub fn title(&self) -> String {
+        self.name
+            .clone()
+            .unwrap_or_else(|| t!("picker.default_pack").to_owned())
+    }
 }
 
 /// A server emoji or sticker, its name decrypted here.
@@ -253,6 +272,8 @@ pub struct CustomEmoji {
     pub id: Id,
     pub name: String,
     pub sticker: bool,
+    /// The pack it is in.
+    pub pack: Id,
     /// `None` until the image is fetched, or when it could not be read.
     pub picture: Option<Picture>,
 }
@@ -471,6 +492,8 @@ pub struct Picture {
     /// A hash of the image file, to keep its textures.
     pub key: [u8; 32],
     pub frames: Arc<Vec<(ColorImage, u32)>>,
+    /// The image file as received, so an emoji or sticker can be sent to another server.
+    pub bytes: Arc<Vec<u8>>,
 }
 
 #[derive(Clone)]
@@ -584,6 +607,8 @@ pub struct Chat {
     pub editing: Option<Id>,
     /// Files picked or dropped, sent with the next message.
     pub staged: Vec<Staged>,
+    /// Emoji of other servers picked for the draft; they go along as small files.
+    pub foreign: Vec<CustomEmoji>,
     /// What is uploading now and how far (0 to 1), shown above the composer.
     pub uploading: Option<(String, f32)>,
     /// Content height last frame, and before older messages were added,
@@ -600,6 +625,7 @@ impl Chat {
 
     pub fn clear_draft(&mut self) {
         self.draft.clear();
+        self.foreign.clear();
         self.mentions = Default::default();
     }
 

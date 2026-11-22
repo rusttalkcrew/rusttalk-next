@@ -17,6 +17,75 @@ mod dm;
 
 const SETTINGS: &str = "/v1/settings/open-joining";
 
+/// A sticker of server A used on server B: the sender attaches its picture as a small file
+/// of the sticker type on B, and a member of B downloads the same bytes.
+async fn sticker_across_servers(
+    owner_a: &KeyClient<'_>,
+    owner_b: &mut KeyClient<'_>,
+    peer_b: &mut KeyClient<'_>,
+    text_b: rusttalk_core::keys::Scope,
+) -> Result<()> {
+    use rusttalk_core::client::{MessageBody, prepare_file};
+    const TYPE: &str = "application/vnd.rusttalk.sticker";
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgba8(8, 8).write_to(&mut png, image::ImageFormat::Png)?;
+    let png = png.into_inner();
+    let id = [61; 32];
+    owner_a
+        .request(Method::POST, "/v1/emoji")
+        .json(&json!({
+            "id": encode(&id),
+            "kind": "sticker",
+            "name_ct": owner_a.encrypt_metadata(rusttalk_core::keys::Metadata::EmojiName, &id, b"hug")?,
+            "image_ct": owner_a.encrypt_metadata(rusttalk_core::keys::Metadata::EmojiImage, &id, &png)?,
+        }))
+        .send()
+        .await?
+        .error_for_status()?;
+    // The app reads the picture from A, then uploads it to B without a thumbnail.
+    let image: Value = owner_a
+        .request(Method::GET, &format!("/v1/emoji/{}/image", encode(&id)))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let bytes = owner_a.decrypt_metadata(
+        rusttalk_core::keys::Metadata::EmojiImage,
+        &id,
+        image["image_ct"].as_str().context("sticker picture")?,
+    )?;
+    let (attachment, _) = prepare_file("hug.png", TYPE, &bytes, &[])?;
+    owner_b
+        .upload_prepared(&text_b.id, &attachment, &bytes, None, None)
+        .await?;
+    let post = owner_b
+        .send_message(
+            &text_b.id,
+            &MessageBody {
+                text: ":hug:".into(),
+                attachments: vec![attachment],
+                ..Default::default()
+            },
+        )
+        .await?;
+    let record = peer_b.message(&text_b.id, &post.id).await?;
+    let body = peer_b.open_message(&text_b.id, &record).await?;
+    let [file] = body.attachments.as_slice() else {
+        anyhow::bail!("expected the sticker file")
+    };
+    assert_eq!((&*file.name, &*file.media_type), ("hug.png", TYPE));
+    assert!(file.thumbnail.is_none());
+    assert_eq!(peer_b.download_file(&file.file, None).await?, png);
+    owner_a
+        .request(Method::DELETE, &format!("/v1/emoji/{}", encode(&id)))
+        .send()
+        .await?
+        .error_for_status()?;
+    println!("W203 a sticker of server A reached members of server B as a small file");
+    Ok(())
+}
+
 pub async fn exercise(
     first_project: &str,
     project: &str,
@@ -128,6 +197,9 @@ pub async fn exercise(
     )
     .await?;
     println!("W15 same bot identity exchanged encrypted chat on both servers");
+    sticker_across_servers(owner_a, &mut owner_b, &mut peer_b, text_b)
+        .await
+        .context("a sticker of server A sent on server B")?;
     let dms = dm::replicas(
         project,
         &server_b,

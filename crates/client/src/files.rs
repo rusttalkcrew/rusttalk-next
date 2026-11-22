@@ -28,7 +28,8 @@ use crate::{
     home::frame_at,
     link_cards,
     net::{Command, Fetch, MAX_FILE, file_name},
-    server::{Chat, Id, Staged},
+    server::{Chat, Id, Picture as Picture2, Staged},
+    sticker_files,
     ui::{self, ON_FILL, OVERLAY, OVERLAY_BUTTON, OVERLAY_TEXT},
 };
 
@@ -43,6 +44,8 @@ const MAX_INLINE: usize = 8;
 const INLINE_IDLE: f64 = 1.0;
 /// Pictures kept before the cache is emptied; shown ones load again on demand.
 const MAX_PICTURES: usize = 200;
+/// Decoded bytes all received emoji and sticker files may hold together.
+const STICKER_BUDGET: usize = 256 * 1024 * 1024;
 
 /// Tests answer file dialogs here instead of opening one: given the suggested
 /// name when saving (`None` when opening), return the chosen paths.
@@ -76,6 +79,11 @@ pub struct Files {
     pastes: (mpsc::Sender<Answer>, mpsc::Receiver<Answer>),
     /// Link previews sent along with messages, by file blob ID.
     cards: HashMap<Id, Card>,
+    /// Emoji and sticker files of other servers that were loaded, oldest first, with the
+    /// bytes each holds decoded, and the total; their pictures are in egui's memory
+    /// (see `sticker_files`).
+    stickers: std::collections::VecDeque<(Id, usize)>,
+    sticker_bytes: usize,
 }
 
 /// A link preview file as loaded.
@@ -162,8 +170,11 @@ pub enum Ask {
     Picture,
     /// A new server icon.
     Icon(Url),
-    /// A new server emoji or (`true`) sticker with this name.
-    Emoji(Url, String, bool),
+    /// A new server emoji or (`true`) sticker with this name, for this pack (the first
+    /// when `None`).
+    Emoji(Url, String, bool, Option<Id>),
+    /// A .zip of pictures to import as an emoji pack.
+    EmojiZip(Url),
 }
 
 pub type Answer = (Ask, Vec<PathBuf>);
@@ -191,6 +202,8 @@ impl Files {
             answers: None,
             pastes: mpsc::channel(),
             cards: HashMap::new(),
+            stickers: Default::default(),
+            sticker_bytes: 0,
         }
     }
 
@@ -249,6 +262,25 @@ impl Files {
             }
         });
         inline.seen = now;
+    }
+
+    /// An emoji or sticker file of another server finished loading. The oldest pictures
+    /// go when together they hold more than `STICKER_BUDGET` decoded bytes; they load
+    /// again when shown.
+    pub fn sticker_loaded(&mut self, ctx: &egui::Context, id: Id, picture: Result<Picture2, bool>) {
+        let (state, bytes) = match picture {
+            Ok(picture) => {
+                let bytes = sticker_files::decoded_bytes(&picture);
+                (sticker_files::State::Ready(picture), bytes)
+            }
+            Err(_) => (sticker_files::State::Failed, 0),
+        };
+        sticker_files::set(ctx, &id, state);
+        self.stickers.push_back((id, bytes));
+        self.sticker_bytes += bytes;
+        for old in evict(&mut self.stickers, &mut self.sticker_bytes, STICKER_BUDGET) {
+            sticker_files::forget(ctx, &old);
+        }
     }
 
     pub fn link_card(&mut self, id: Id, card: Result<link_cards::Card, bool>) {
@@ -312,10 +344,12 @@ impl Files {
                 | Ask::Live(..)
                 | Ask::Picture
                 | Ask::Icon(_)
-                | Ask::Emoji(..) => None,
+                | Ask::Emoji(..)
+                | Ask::EmojiZip(_) => None,
             };
             let single = !matches!(ask, Ask::Attach(..) | Ask::AttachDm(_));
             let pictures = matches!(ask, Ask::Picture | Ask::Icon(_) | Ask::Emoji(..));
+            let zip = matches!(ask, Ask::EmojiZip(_));
             let test = *TEST_ANSWER.lock().unwrap_or_else(|e| e.into_inner());
             let paths = match (test, name) {
                 (Some(answer), name) => answer(name.as_deref()),
@@ -326,6 +360,11 @@ impl Files {
                     .collect(),
                 (None, None) if pictures => rfd::FileDialog::new()
                     .add_filter(t!("files.pictures"), &["png", "jpg", "jpeg", "gif", "webp"])
+                    .pick_file()
+                    .into_iter()
+                    .collect(),
+                (None, None) if zip => rfd::FileDialog::new()
+                    .add_filter(t!("files.zip"), &["zip"])
                     .pick_file()
                     .into_iter()
                     .collect(),
@@ -874,6 +913,13 @@ pub fn attachments(
 ) {
     let (cards, list): (Vec<&Attachment>, Vec<&Attachment>) =
         list.iter().partition(|file| is_card(file));
+    // Emoji and stickers from other servers are drawn inline, not as files.
+    let (pictures, list): (Vec<&Attachment>, Vec<&Attachment>) = list
+        .into_iter()
+        .partition(|file| sticker_files::of(file).is_some());
+    for file in pictures {
+        sticker_file(ui, files, (address, commands), file);
+    }
     for file in list {
         let play = plays_inline(&file.name, &file.media_type, file.file.size.into());
         // Files sent before thumbnails existed for GIFs have none; they still play.
@@ -970,6 +1016,43 @@ pub fn attachments(
     }
 }
 
+/// An emoji or sticker file of another server: loaded when on screen. A sticker is drawn
+/// here; an emoji is drawn by the message text that uses it. A file that fails the checks
+/// shows as an ordinary file.
+fn sticker_file(
+    ui: &mut Ui,
+    files: &mut Files,
+    (address, commands): (&Url, &UnboundedSender<Command>),
+    file: &Attachment,
+) {
+    let Some((kind, name)) = sticker_files::of(file) else {
+        return;
+    };
+    let id = file.file.id;
+    let area = Rect::from_min_size(ui.cursor().min, Vec2::splat(crate::home::STICKER_SIZE));
+    if sticker_files::state(ui.ctx(), &id).is_none() && ui.is_rect_visible(area) {
+        sticker_files::set(ui.ctx(), &id, sticker_files::State::Loading);
+        let _ = commands.send(Command::StickerFile(file.file.clone(), kind));
+    }
+    match sticker_files::state(ui.ctx(), &id) {
+        Some(sticker_files::State::Failed) => card(ui, files, address, file),
+        Some(sticker_files::State::Ready(picture)) if kind == sticker_files::Kind::Sticker => {
+            let code = format!(":{name}:");
+            crate::home::emoji_image(
+                ui,
+                &picture,
+                crate::home::STICKER_SIZE,
+                &t!("home.sticker", code = code),
+            )
+            .on_hover_text(code);
+        }
+        Some(sticker_files::State::Loading) if kind == sticker_files::Kind::Sticker => {
+            ui.allocate_ui(Vec2::splat(64.0), |ui| ui.spinner());
+        }
+        _ => {}
+    }
+}
+
 /// A link preview the sender's app made: loaded when on screen, then drawn as a card
 /// with the page's picture from its thumbnail.
 fn link_card(
@@ -1033,6 +1116,23 @@ fn link_card(
     if clicked.is_some() {
         ui.ctx().open_url(egui::OpenUrl::new_tab(card.url));
     }
+}
+
+/// Take the oldest entries off `queue` until the rest hold at most `budget` bytes in
+/// total (the newest always stays), and return them.
+fn evict(
+    queue: &mut std::collections::VecDeque<(Id, usize)>,
+    total: &mut usize,
+    budget: usize,
+) -> Vec<Id> {
+    let mut out = Vec::new();
+    while *total > budget && queue.len() > 1 {
+        if let Some((old, bytes)) = queue.pop_front() {
+            *total -= bytes;
+            out.push(old);
+        }
+    }
+    out
 }
 
 /// Empty the picture cache once it holds too many, except the viewer's (`open`);
@@ -1262,6 +1362,23 @@ mod tests {
         cards.insert([254; 32], Card::Loading);
         bound_cards(&mut cards);
         assert_eq!(cards.len(), 1);
+    }
+
+    #[test]
+    fn received_pictures_are_dropped_oldest_first_by_decoded_bytes() {
+        let mut queue: std::collections::VecDeque<(Id, usize)> =
+            (1..=5).map(|n| ([n; 32], 100)).collect();
+        let mut total = 500;
+        // Within the budget nothing goes.
+        assert!(evict(&mut queue, &mut total, 500).is_empty());
+        let gone = evict(&mut queue, &mut total, 250);
+        assert_eq!(gone, [[1; 32], [2; 32], [3; 32]]);
+        assert_eq!((queue.len(), total), (2, 200));
+        // One picture bigger than the whole budget still stays, as the newest.
+        queue.push_back(([6; 32], 900));
+        total += 900;
+        assert_eq!(evict(&mut queue, &mut total, 250).len(), 2);
+        assert_eq!((queue.len(), total), (1, 900));
     }
 
     #[test]

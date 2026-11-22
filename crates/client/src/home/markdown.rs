@@ -482,9 +482,10 @@ fn show_line(
                         }
                         emoji::Part::Custom { name, id, .. } => {
                             let label = format!(":{name}:");
-                            if let Some(picture) =
-                                dir.emoji_by_id(&id).and_then(|e| e.picture.as_ref())
-                            {
+                            let picture = (dir.emoji_by_id(&id))
+                                .and_then(|e| e.picture.clone())
+                                .or_else(|| message.inline_picture(ui.ctx(), name));
+                            if let Some(picture) = &picture {
                                 flush(ui, &mut job);
                                 let size = if jumbo { 48. } else { size + 6. };
                                 emoji_image(ui, picture, size, &label).on_hover_text(label);
