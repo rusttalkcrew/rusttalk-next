@@ -142,9 +142,14 @@ mod tests {
     #[test]
     fn the_real_changelog_parses() {
         let releases = parse(CHANGELOG).unwrap();
-        assert_eq!(releases[0].title, "Unreleased");
-        assert!(releases[0].date.is_none());
-        let shipped = &releases[1..];
+        // Unreleased is empty (and so absent) right after a release.
+        let shipped = match releases[0].title.as_str() {
+            "Unreleased" => {
+                assert!(releases[0].date.is_none());
+                &releases[1..]
+            }
+            _ => &releases[..],
+        };
         assert!(shipped.len() >= 8, "v0.1.0 to v0.1.7 are listed");
         assert_eq!(shipped.last().unwrap().title, "v0.1.0");
         for release in shipped {
