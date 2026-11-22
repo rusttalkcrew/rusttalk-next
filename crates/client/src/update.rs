@@ -1833,11 +1833,24 @@ mod tests {
         assert!(error.to_string().contains("another window"));
         assert_eq!(version_of(&bundle), "0.1.0");
         assert_eq!(fs::read_dir(&apps).unwrap().count(), 1);
+        // The lock file is closed on exec, but a child that another test thread is
+        // spawning right now holds a copy of the descriptor until its exec finishes, and
+        // the flock outlives our close until then. Wait that out instead of racing it.
+        let free = || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                match lock_bundle(cache.path(), &bundle) {
+                    Ok(lock) => return lock,
+                    Err(error) => assert!(std::time::Instant::now() < deadline, "{error:#}"),
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        };
         // While one window installs, another can't start.
-        let (held, _) = lock_bundle(cache.path(), &bundle).unwrap();
+        let (held, _) = free();
         assert!(lock_bundle(cache.path(), &bundle).is_err());
         drop(held);
-        assert!(lock_bundle(cache.path(), &bundle).is_ok());
+        drop(free());
     }
 
     /// Writes a minimal type 2 AppImage: an ELF64 header with the AppImage magic, no
