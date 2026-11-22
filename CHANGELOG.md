@@ -3,17 +3,16 @@
 <!--
 One source for the in-app "What's new" page and the website roadmap's Shipped timeline.
 Format (parsed by crates/client/src/whats_new.rs, keep it strict):
-  - `## Unreleased` first, then `## vX.Y.Z - YYYY-MM-DD`, newest first.
-  - Under each heading only `- ` bullets, one line each, short and user-facing.
-Every user-visible change adds one line under Unreleased in the same PR. A release moves
-Unreleased under the new version and date.
--->
+  - `## Unreleased
 
-## Unreleased
+## v0.1.9 - 2026-11-22
 
-- Remove another device from Settings using your recovery words.
-
-- Once a device learns about a revoked device, it refuses its messages and stops sharing keys with it across servers
+- Remove another device from Settings using your recovery words
+- A removed device is refused and stops getting keys on every server
+- Let viewers control a shared screen on macOS
+- Share app audio and all system audio on macOS
+- Clicking a macOS notification opens the chat
+- Install guides for Windows, Linux, macOS and the Steam Deck
 
 ## v0.1.8 - 2026-11-22
 
