@@ -60,7 +60,8 @@ fn default_check_minutes() -> u64 {
 }
 
 /// The official release directory, so every build starts with a working address.
-const OFFICIAL_URL: &str = "https://github.com/rusttalkcrew/rusttalk-next/releases/latest/download/";
+const OFFICIAL_URL: &str =
+    "https://github.com/rusttalkcrew/rusttalk-next/releases/latest/download/";
 
 /// Release builds point at their own release directory (forks set their own).
 fn default_url() -> String {
