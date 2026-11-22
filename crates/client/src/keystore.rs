@@ -929,7 +929,17 @@ mod tests {
     }
 
     fn open(dir: &Path, keychain: &Mock) -> (Keystore, Start) {
-        Keystore::open_with(dir, Box::new(keychain.clone()), CHEAP).unwrap()
+        // The lock file is closed on exec, but a child that another test thread is
+        // spawning right now holds a copy of the descriptor until its exec finishes, and
+        // the flock outlives our close until then. Wait that out instead of racing it.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            match Keystore::open_with(dir, Box::new(keychain.clone()), CHEAP) {
+                Ok(opened) => return opened,
+                Err(error) => assert!(std::time::Instant::now() < deadline, "{error:#}"),
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
 
     fn ready(start: Start) -> Option<DeviceIdentity> {
