@@ -2497,7 +2497,11 @@ fn category_name(kind: ChannelKind) -> &'static str {
 
 /// The glyph before a channel's name.
 pub fn channel_icon(channel: &Channel) -> &'static str {
-    match ChannelKind::of(channel) {
+    kind_icon(ChannelKind::of(channel))
+}
+
+fn kind_icon(kind: ChannelKind) -> &'static str {
+    match kind {
         ChannelKind::Text => "#",
         ChannelKind::Voice => "🔊",
         ChannelKind::Page => "📄",
@@ -3311,7 +3315,7 @@ fn page_view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat: &mut
     let server = &home.servers[index];
     let title = server
         .channel(&channel)
-        .map_or_else(String::new, |c| format!("📄 {}", c.name));
+        .map_or_else(String::new, |c| format!("{} {}", channel_icon(c), c.name));
     let can_edit = server.can_write(&channel);
     let online = server.status == Status::Online;
     pane_title(
@@ -3340,6 +3344,8 @@ fn page_view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat: &mut
                     .inner
                     .clicked();
                 if ui::secondary(ui, t!("common.cancel")).clicked() {
+                    // Else the next Edit reopens the cancelled text, not the current page.
+                    chat.clear_draft();
                     editing = false;
                 }
                 let count = chat.draft.chars().count();
@@ -3408,7 +3414,8 @@ fn page_view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat: &mut
                     id: *id,
                     channel,
                     peer: None,
-                    text: chat.draft.trim().to_owned(),
+                    // Keep leading indentation: a page may start with a code block.
+                    text: chat.draft.trim_end().to_owned(),
                     reply_to: None,
                     edit_of: None,
                     revision: 0,
@@ -4997,7 +5004,7 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
                 ui.selectable_value(
                     kind,
                     ChannelKind::Page,
-                    format!("📄 {}", t!("home.kind_page")),
+                    format!("{} {}", kind_icon(ChannelKind::Page), t!("home.kind_page")),
                 );
             });
             if *kind == ChannelKind::Page {
