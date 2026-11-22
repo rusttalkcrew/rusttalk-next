@@ -466,11 +466,7 @@ async fn docker_keys(
         }
     }
     let revoked = revoke_device(&c_words, sibling.certificate.signing_key().to_bytes())?;
-    c.request(Method::POST, "/v1/me/revocations")
-        .json(&json!({"record": encode(&revoked.to_bytes())}))
-        .send()
-        .await?
-        .error_for_status()?;
+    c.revoke_device(&revoked).await?;
     expect_close(&mut sibling_keys, "revoked").await?;
     receive_key(a, space, 3).await?;
     receive_key(a, channel, 3).await?;

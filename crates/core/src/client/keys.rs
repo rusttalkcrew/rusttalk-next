@@ -36,6 +36,8 @@ pub struct KeyClient<'a> {
     pub(super) server: &'a Server,
     /// The authenticated device identity.
     pub identity: &'a DeviceIdentity,
+    pub(super) revocations: &'a super::revocations::Revocations,
+    own_revocations_changed: bool,
     session: Session,
     events: tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -92,6 +94,11 @@ impl<'a> KeyClient<'a> {
         let mut client = Self {
             server,
             identity,
+            revocations: server
+                .revocations
+                .as_ref()
+                .context("key sync needs a connected profile")?,
+            own_revocations_changed: false,
             session: session.clone(),
             events,
             keys: HashMap::new(),
@@ -210,7 +217,7 @@ impl<'a> KeyClient<'a> {
             let mut refetch = false;
             let mut learned = false;
             for wrapped in state.envelopes {
-                let Some(sender) = self.devices.get(&wrapped.sender) else {
+                let Some(sender) = self.device(&wrapped.sender) else {
                     // A directory change can overtake the key-state request.
                     continue;
                 };
@@ -326,8 +333,7 @@ impl<'a> KeyClient<'a> {
                 self.learn_dms().await?;
             }
             pending.retain(|need| {
-                self.key(need.scope, need.epoch).is_some()
-                    && self.devices.contains_key(&need.device)
+                self.key(need.scope, need.epoch).is_some() && self.device(&need.device).is_some()
             });
             if !pending.is_empty() {
                 // Every online member sees the same need; a random pause lets one wrap and the rest skip.
@@ -345,7 +351,7 @@ impl<'a> KeyClient<'a> {
                 for need in pending {
                     let (Some(held), Some(device)) = (
                         self.keys.get(&(need.scope, need.epoch)),
-                        self.devices.get(&need.device),
+                        self.device(&need.device),
                     ) else {
                         continue;
                     };
@@ -389,14 +395,44 @@ impl<'a> KeyClient<'a> {
         }
     }
 
-    async fn key_state(&self) -> Result<KeyState> {
-        Ok(self
+    async fn key_state(&mut self) -> Result<KeyState> {
+        let state: KeyState = self
             .request(Method::GET, "/v1/keys")
             .send()
             .await?
             .error_for_status()?
             .json()
-            .await?)
+            .await?;
+        for (person, record) in &state.revocations {
+            let Ok(person) = decode(person) else {
+                tracing::warn!("ignored invalid device revocation owner");
+                continue;
+            };
+            if self.revocations.observe(&person, record)?
+                && &person == self.identity.certificate.person_id()
+            {
+                self.own_revocations_changed = true;
+            }
+        }
+        Ok(state)
+    }
+
+    /// Keep a locally issued revocation before contacting any server, so sync can retry it.
+    pub async fn revoke_device(&mut self, record: &crate::identity::Revocation) -> Result<()> {
+        ensure!(
+            record.person_id() == self.identity.certificate.person_id(),
+            "wrong revocation owner"
+        );
+        self.revocations.remember(record)?;
+        self.own_revocations_changed = true;
+        self.server
+            .publish_revocation(&self.session, &encode(&record.to_bytes()))
+            .await
+    }
+
+    /// The owner's device sync must relay newly observed records to its other servers.
+    pub fn take_own_revocations_changed(&mut self) -> bool {
+        std::mem::take(&mut self.own_revocations_changed)
     }
 
     async fn is_owner(&self) -> Result<bool> {
@@ -458,6 +494,8 @@ impl<'a> KeyClient<'a> {
 
     pub(super) fn wrap_for_self(&self, context: EnvelopeContext, key: &Key) -> Result<String> {
         let cert = &self.identity.certificate;
+        self.revocations
+            .check(cert.person_id(), cert.signing_key().as_bytes())?;
         tracing::info!(
             person = %fingerprint(cert.person_id()),
             device = %fingerprint(cert.signing_key().as_bytes()),
@@ -468,7 +506,15 @@ impl<'a> KeyClient<'a> {
 
     /// Iterate current verified member-device certificates for fingerprint display.
     pub fn devices(&self) -> impl Iterator<Item = &DeviceCertificate> {
-        self.devices.values()
+        self.devices
+            .values()
+            .filter(|cert| self.revocations.allows(cert))
+    }
+
+    pub(super) fn device(&self, id: &str) -> Option<&DeviceCertificate> {
+        self.devices
+            .get(id)
+            .filter(|cert| self.revocations.allows(cert))
     }
 
     /// Pin a DM channel to the person it is with. `false` when it is pinned to

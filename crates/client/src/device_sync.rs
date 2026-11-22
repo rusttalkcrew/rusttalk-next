@@ -11,7 +11,9 @@ use anyhow::{Context, Result};
 use rusttalk_core::{
     auth::{KnownServer, Session},
     client::{
-        Server as Api, save_json,
+        Server as Api,
+        revocations::Revocations,
+        save_json,
         sync::{self, Failures, Snapshot, State, VersionConflict},
     },
     identity::fingerprint,
@@ -197,7 +199,7 @@ impl DeviceSync {
     pub async fn run(
         &self,
         data: &Path,
-        key: &[u8; 32],
+        identity: &rusttalk_core::identity::DeviceIdentity,
         edits: Vec<Edit>,
         show: impl FnOnce(Synced),
     ) -> Result<()> {
@@ -213,12 +215,20 @@ impl DeviceSync {
             .cloned()
             .collect();
         let peers: Vec<sync::Peer> = peers.iter().map(|(api, session)| (api, session)).collect();
+        let key = &identity.sync_key;
+        let person = identity.certificate.person_id();
+        let records = Revocations::in_profile(data);
         let mut conflicts = Vec::new();
         // A version conflict means another device published in between: load and merge again.
         for _ in 0..3 {
             let (snapshots, failures) = sync::load_all(&peers, key).await;
             log("load", &failures);
             let mut deletes = dm_deleted(&saved.snapshot.state.settings);
+            for snapshot in std::iter::once(&saved.snapshot).chain(&snapshots) {
+                for record in &snapshot.state.revocations {
+                    records.observe(person, record)?;
+                }
+            }
             for snapshot in &snapshots {
                 deletes.merge(&dm_deleted(&snapshot.state.settings));
             }
@@ -237,6 +247,14 @@ impl DeviceSync {
                 }
             }
             keep_deletes(&mut saved.snapshot.state, &deletes);
+            saved.snapshot.state.revocations = records.records(person)?;
+            for (api, session) in &peers {
+                for record in &saved.snapshot.state.revocations {
+                    if let Err(error) = api.publish_revocation(session, record).await {
+                        tracing::warn!(%error, "publishing device revocation failed");
+                    }
+                }
+            }
             let version = saved.snapshot.version;
             let failures = sync::push_all(&peers, key, &mut saved.snapshot).await?;
             if saved.snapshot.version > version {

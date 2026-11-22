@@ -402,8 +402,7 @@ impl LiveFiles {
             "file acceptance has wrong recipient"
         );
         let certificate = client
-            .devices
-            .get(device)
+            .device(device)
             .context("file acceptance has unknown device")?;
         let peer = certificate.signing_key();
         acceptance
@@ -577,8 +576,7 @@ async fn prepare_accept(
         "live file offer from outside the DM, or DMs here are paused"
     );
     let sender = client
-        .devices
-        .get(&encode(&record.sender_device))
+        .device(&encode(&record.sender_device))
         .filter(|cert| cert.person_id() == &record.person)
         .context("live file sender has no current verified device")?;
     let mut nonce = [0; 16];

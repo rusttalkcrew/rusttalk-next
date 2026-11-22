@@ -389,6 +389,7 @@ fn forget_profile(data: &std::path::Path, settings: crate::audio::Settings) {
     ] {
         remove(name, fs::remove_file(data.join(name)));
     }
+    remove("revocations", fs::remove_dir_all(data.join("revocations")));
     remove("dm_pins", fs::remove_dir_all(data.join("dm_pins")));
     crate::previews::forget(data);
 

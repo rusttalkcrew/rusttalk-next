@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Once a device learns about a revoked device, it refuses its messages and stops sharing keys with it across servers
+
 ## v0.1.8 - 2026-11-22
 
 - Type in a shared terminal when the sharer allows it

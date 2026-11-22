@@ -297,6 +297,10 @@ pub struct Revocation {
 }
 
 impl Revocation {
+    pub fn person_id(&self) -> &PersonId {
+        &self.person_id
+    }
+
     pub fn device_signing_key(&self) -> &[u8; 32] {
         &self.device_signing_key
     }

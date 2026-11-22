@@ -22,6 +22,7 @@ use url::Url;
 pub struct Server {
     /// Protocol advertised by this origin, used to choose the outgoing message format.
     pub protocol: u32,
+    pub(super) revocations: Option<super::revocations::Revocations>,
     http: Client,
     server: KnownServer,
 }
@@ -50,6 +51,7 @@ impl Server {
         let mut server = Self {
             http,
             server: observed,
+            revocations: Some(super::revocations::Revocations::in_profile(data)),
             protocol: 1,
         };
         match server.info().await {
@@ -72,6 +74,7 @@ impl Server {
         Ok(Self {
             http,
             server,
+            revocations: None,
             protocol: 1,
         })
     }
@@ -139,6 +142,18 @@ impl Server {
             .await
             .map_err(|error| error.without_url().into())
     }
+    /// Publish an owner's signed record to this member server. Replays are idempotent.
+    pub async fn publish_revocation(&self, session: &Session, record: &str) -> Result<()> {
+        self.request(reqwest::Method::POST, "/v1/me/revocations")
+            .bearer_auth(&session.token)
+            .json(&serde_json::json!({"record": record}))
+            .send()
+            .await
+            .and_then(Response::error_for_status)
+            .map_err(reqwest::Error::without_url)?;
+        Ok(())
+    }
+
     pub(super) async fn refresh(&self, session: &Session) -> Result<Session> {
         Ok(self
             .request(reqwest::Method::POST, "/v1/auth/refresh")

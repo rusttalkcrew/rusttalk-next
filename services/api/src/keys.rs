@@ -245,7 +245,16 @@ pub async fn state(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json
             })
         })
         .collect::<ApiResult<_>>()?;
+    let records: Vec<(Vec<u8>, Vec<u8>)> = query_as(
+        "SELECT r.person_id, r.record FROM revocations r JOIN members m ON m.person_id = r.person_id",
+    )
+    .fetch_all(&mut *tx)
+    .await?;
     let state = KeyState {
+        revocations: records
+            .into_iter()
+            .map(|(person, record)| (encode(&person), encode(&record)))
+            .collect(),
         scopes: scopes(&mut tx, &actor).await?,
         envelopes,
         pending: pending(&mut tx, &actor).await?,

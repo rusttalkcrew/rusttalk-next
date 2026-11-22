@@ -30,6 +30,8 @@ use super::{
 
 #[derive(Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct State {
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub revocations: BTreeSet<String>,
     pub settings: BTreeMap<String, Value>,
     pub servers: Vec<KnownServer>,
     pub contacts: BTreeMap<String, Value>,
@@ -118,6 +120,7 @@ pub async fn load_all<'a>(peers: &[Peer<'a>], key: &[u8; 32]) -> (Vec<Snapshot>,
 /// Apply pending local edits to the merged state before pushing.
 pub fn merge(data: &Path, local: &mut Snapshot, remote: Snapshot) -> Result<Vec<PinConflict>> {
     let pins = load_pins(&data.join("servers.json"))?;
+    local.state.revocations.extend(remote.state.revocations);
     let newer = remote.version > local.version;
     for address in remote.state.left {
         if newer || !local.state.servers.iter().any(|s| s.address == address) {
@@ -342,6 +345,7 @@ mod tests {
             settings: [("theme".into(), json!("night"))].into(),
             servers: vec![server("home", 1, 2)],
             contacts: [("friend".into(), json!({"name": "Finch"}))].into(),
+            revocations: BTreeSet::new(),
             left: ["https://gone.example/".parse().unwrap()].into(),
         };
         let body = seal(&KEY, 1, &state).unwrap();
@@ -358,6 +362,25 @@ mod tests {
         let mut replayed = body;
         replayed[..8].copy_from_slice(&2i64.to_be_bytes());
         assert!(open(&KEY, &replayed).is_err());
+    }
+
+    #[test]
+    fn an_older_snapshot_can_add_a_revocation_but_never_erase_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let (words, device) = crate::identity::DeviceIdentity::create("device").unwrap();
+        let signed =
+            crate::identity::revoke_device(&words, device.certificate.signing_key().to_bytes())
+                .unwrap();
+        let record = crate::auth::encode(&signed.to_bytes());
+        let mut state = State::default();
+        state.revocations.insert(record.clone());
+        let older = open(&KEY, &seal(&KEY, 1, &state).unwrap()).unwrap();
+        let empty = seal(&KEY, 2, &State::default()).unwrap();
+        let mut local = open(&KEY, &empty).unwrap();
+        merge(dir.path(), &mut local, older).unwrap();
+        merge(dir.path(), &mut local, open(&KEY, &empty).unwrap()).unwrap();
+        assert_eq!(local.version, 2);
+        assert_eq!(local.state.revocations, [record].into());
     }
 
     #[test]

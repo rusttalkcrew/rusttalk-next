@@ -168,17 +168,20 @@ fn verify_device(
 }
 
 async fn check_revoked(db: &mut SqliteConnection, person: &[u8], device: &[u8]) -> ApiResult<()> {
-    let revoked: bool = query_scalar(
+    if revoked(db, person, device).await? {
+        return Err(ApiError::forbidden("device_revoked"));
+    }
+    Ok(())
+}
+
+async fn revoked(db: &mut SqliteConnection, person: &[u8], device: &[u8]) -> ApiResult<bool> {
+    Ok(query_scalar(
         "SELECT EXISTS (SELECT 1 FROM revocations WHERE person_id = ? AND device_id = ?)",
     )
     .bind(person)
     .bind(device)
     .fetch_one(db)
-    .await?;
-    if revoked {
-        return Err(ApiError::forbidden("device_revoked"));
-    }
-    Ok(())
+    .await?)
 }
 
 pub fn client_ip(headers: &HeaderMap) -> ApiResult<String> {
@@ -567,6 +570,10 @@ pub async fn revoke(
     let revocation = Revocation::verify(actor.person, &bytes)
         .map_err(|_| ApiError::bad_request("invalid_revocation"))?;
     let device = revocation.device_signing_key().as_slice();
+    // Other devices resend the same tombstone during sync, including at the limit.
+    if revoked(&mut tx, &actor.person, device).await? {
+        return Ok(StatusCode::NO_CONTENT);
+    }
     let stored: i64 = query_scalar("SELECT COUNT(*) FROM revocations WHERE person_id = ?")
         .bind(actor.person.as_slice())
         .fetch_one(&mut *tx)
