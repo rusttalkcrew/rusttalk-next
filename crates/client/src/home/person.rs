@@ -263,21 +263,18 @@ fn voice_channel(server: &Server, person: &Id) -> Option<Id> {
 /// The card on a left click on `response` (opening where it was clicked with
 /// `at_click`, for big tiles) and the menu on a right click.
 pub fn interact(ui: &Ui, response: &Response, person: &Person, at_click: bool) -> Option<Pick> {
-    let response = bound_response(response, person);
-    let response = &response;
+    let id = popup_id(response, person);
     let name = person.server.member_name(&person.person);
-    let card = ui::card_popup(ui, response, &name, at_click, |ui| person.card(ui)).flatten();
-    let menu = ui::context_menu(response, |m| person.menu(m)).flatten();
+    let card = ui::card_popup(ui, id, response, &name, at_click, |ui| person.card(ui)).flatten();
+    let menu = ui::context_menu_with_id(response, id, |m| person.menu(m)).flatten();
     card.or(menu)
 }
 
 /// A popup must never inherit a different person when a positional row is reused.
-pub(crate) fn bound_response(response: &Response, person: &Person) -> Response {
-    let mut response = response.clone();
-    response.id = response
-        .id
-        .with((person.server.known.server_id, person.person));
+pub(crate) fn popup_id(response: &Response, person: &Person) -> eframe::egui::Id {
     response
+        .id
+        .with((person.server.known.server_id, person.person))
 }
 
 /// Do what was picked for `person` on server `index`.

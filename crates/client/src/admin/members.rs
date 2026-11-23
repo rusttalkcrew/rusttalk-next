@@ -301,8 +301,8 @@ fn row(ui: &mut Ui, dir: &Directory, member: &Member, person: &Person) -> Option
         Look::Ghost,
         Vec2::splat(ui::ICON_BUTTON),
     );
-    let more = crate::home::person::bound_response(&more, person);
-    let menu = ui::menu(&more, |m| person.menu(m)).flatten();
+    let id = crate::home::person::popup_id(&more, person);
+    let menu = ui::menu_with_id(&more, id, |m| person.menu(m)).flatten();
     interact(ui, &row, person, false).or(menu)
 }
 
@@ -548,7 +548,17 @@ mod tests {
             ..Default::default()
         };
         let mut harness = table(perms, 0);
-        harness.get_by_label("Actions for Bob").click();
+        harness.get_by_label("Actions for Bob").focus();
+        harness.run_steps(2);
+        harness.key_press(egui::Key::Enter);
+        harness.run_steps(4);
+        assert!(harness.query_by_label(t!("home.message")).is_some());
+        harness.key_press(egui::Key::ArrowDown);
+        harness.run_steps(2);
+        assert!(harness.get_by_label(t!("home.message")).is_focused());
+        harness.key_press(egui::Key::ArrowDown);
+        harness.run_steps(2);
+        assert!(harness.get_by_label(t!("pokes.poke")).is_focused());
         harness.run_steps(4);
         for label in [
             t!("home.message"),

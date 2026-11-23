@@ -4879,7 +4879,14 @@ fn dm_title(ui: &mut Ui, home: &Home, peer: Id) -> Option<(usize, person::Pick)>
                     let size = Vec2::splat(ui::ICON_BUTTON);
                     let button =
                         ui::icon_button(ui, "👤", t!("person.profile"), ui::Look::Plain, size);
-                    let card = ui::card_popup(ui, &button, &name, false, |ui| target.card(ui));
+                    let card = ui::card_popup(
+                        ui,
+                        person::popup_id(&button, &target),
+                        &button,
+                        &name,
+                        false,
+                        |ui| target.card(ui),
+                    );
                     pick = pick.take().or(card.flatten());
                 });
             });
