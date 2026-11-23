@@ -289,12 +289,21 @@ Rough effort for one person who knows the code base.
 
 | Phase | What | Effort |
 | --- | --- | --- |
-| 2 | Usable chat on Android. Done: typed text, safe areas and the keyboard, `onDestroy`, recovery words, Android Keystore. Left: phone temp folder (`temp_dir()` is not writable on Android), system TLS roots for non-pinned hosts (check, then rustls-platform-verifier), file picker (Storage Access Framework), local notifications, hide Updates and Shortcuts on phones, `rusttalk://` links, the layout list above | 3 to 4 weeks |
+| 2 | Usable chat on Android. Done: typed text, safe areas and the keyboard, `onDestroy`, recovery words, Android Keystore. Left: phone temp folder (`temp_dir()` is not writable on Android), file picker (Storage Access Framework), local notifications, hide Updates and Shortcuts on phones, `rusttalk://` links, the layout list above | 3 to 4 weeks |
 | 3 | Foreground voice on Android. Left: iOS audio session, Bluetooth headsets and calls with the screen off (foreground service on Android, background audio on iOS) | 2 weeks |
 | 4 | iOS on a device. Done: Keychain, safe area and taps. Left: notifications (reuse `notify/macos.rs`), document picker, status bar colours, background rules | 1 to 2 weeks |
 | 5 | Camera (Camera2, AVFoundation) | 1 week |
 | 6 | Release: signing keys, store listings or a sideload page, release.yml jobs, store updates | 1 week plus store review |
 | Later | Screen share (MediaProjection; ReplayKit broadcast extension), push notifications | 2 to 4 weeks each |
+
+## TLS trust
+
+On Android and iOS, HTTPS and WebSockets (including LiveKit signaling) use
+Mozilla's public roots bundled with the app. The locked native loader looks
+for OpenSSL files on both platforms. The bundle updates with the app and
+needs no runtime download. Device-installed CAs and OS revocation policy
+do not apply. An explicitly pinned server still requires its exact leaf
+certificate.
 
 ## Privacy and permissions
 
