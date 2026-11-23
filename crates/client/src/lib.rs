@@ -94,6 +94,7 @@ type Android = ();
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
 fn android_main(app: Android) {
+    android::init(app.clone());
     start(Some(app));
     // winit 0.30 makes one event loop per process, so a later activity couldn't
     // start in this one; Android starts a fresh process for it. `_exit`: the exit

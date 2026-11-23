@@ -11,7 +11,7 @@ use zeroize::Zeroizing;
 
 use crate::{
     app::submitted,
-    keystore::{Job, Keystore, Kind, RULES, Rules, Sealer, WrongPassword},
+    keystore::{Job, Keystore, Kind, RULES, Sealer, WrongPassword},
     ui::{self, error_text, primary_large, secondary_large},
 };
 
@@ -107,9 +107,9 @@ pub fn choose(
 ) -> Option<Picked> {
     ui.heading(t!("keys.choose_title"));
     if RULES.phone() {
-        // iOS lands here when the Keychain refused a test write (an app signed
-        // without a team), so it says why.
-        ui.label(if RULES == Rules::KeychainOrPassword && !keychain {
+        ui.label(if !keychain && cfg!(target_os = "android") {
+            t!("keys.no_android_keystore")
+        } else if !keychain {
             t!("keys.no_keychain_phone")
         } else {
             t!("keys.password_only")
@@ -261,7 +261,11 @@ pub fn settings(
     let choices = [
         (
             Kind::Keychain,
-            t!("keys.keychain"),
+            if cfg!(target_os = "android") {
+                t!("keys.android_keystore")
+            } else {
+                t!("keys.keychain")
+            },
             t!("keys.keychain_help"),
         ),
         (Kind::File, t!("keys.file"), t!("keys.file_help")),
@@ -271,8 +275,7 @@ pub fn settings(
             t!("keys.password_file_help"),
         ),
     ];
-    // Phones never offer the protected file; Android offers only the password file,
-    // where this changes the password.
+    // Phones never offer the protected file.
     let choices: Vec<_> = choices
         .into_iter()
         .filter(|(kind, ..)| RULES.allows(*kind))

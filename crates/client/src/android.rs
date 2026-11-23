@@ -712,7 +712,6 @@ mod activity {
     /// which then waits for `android_main` to return.
     pub fn run(options: eframe::NativeOptions, creator: eframe::AppCreator<'_>) -> Result<()> {
         let app = options.android_app.clone().context("no Android activity")?;
-        let _ = APP.set(app.clone());
         if let Some(data) = app.internal_data_path() {
             let _ = DATA.set(data);
         }
@@ -836,6 +835,10 @@ mod activity {
         {
             tracing::warn!(%error, "setting call audio mode failed");
         }
+    }
+
+    pub fn init(app: AndroidApp) {
+        let _ = APP.set(app);
     }
 
     /// The activity, for Java calls elsewhere (`phone_clipboard`).

@@ -166,7 +166,7 @@ use yet is allowed to be unused there (`allow(dead_code)` on phones only).
 | Text input | GameActivity's text buffer, read each frame (`src/android.rs`) | winit IME | Android works (phase 2) |
 | Voice and video (LiveKit, webrtc-sys) | Builds and links (prebuilt WebRTC for Android) | Prebuilt WebRTC for iOS; CI builds it | Android foreground voice in phase 3; see Voice |
 | Audio (cpal 0.18) | AAudio (`libaaudio.so`, Android 8.0+) | Core Audio | Android uses communication mode during calls; iOS needs its audio session |
-| Key storage (keyring 4) | No Android store: file with password only | Data-protection Keychain, file with password as fallback | Android: password only. iOS: Keychain (phase 4) |
+| Key storage (keyring 4) | Android Keystore wraps the identity in private app storage | Data-protection Keychain, file with password as fallback | Both default to system key storage with password fallback |
 | File picker (rfd) | No backend | No backend | Gated: the buttons that open it are off (`files::PICKER`) |
 | Notifications (notify-rust) | Builds, no notification service | Builds, no notification service | Fail and are logged |
 | Camera (nokhwa) | No backend | No backend | Listing cameras fails, so no camera |
@@ -289,7 +289,7 @@ Rough effort for one person who knows the code base.
 
 | Phase | What | Effort |
 | --- | --- | --- |
-| 2 | Usable chat on Android. Done: typed text, safe areas and the keyboard, `onDestroy`, recovery words. Left: phone temp folder (`temp_dir()` is not writable on Android), system TLS roots for non-pinned hosts (check, then rustls-platform-verifier), file picker (Storage Access Framework), local notifications, Android Keystore for the keys, hide Updates and Shortcuts on phones, `rusttalk://` links, the layout list above | 3 to 4 weeks |
+| 2 | Usable chat on Android. Done: typed text, safe areas and the keyboard, `onDestroy`, recovery words, Android Keystore. Left: phone temp folder (`temp_dir()` is not writable on Android), system TLS roots for non-pinned hosts (check, then rustls-platform-verifier), file picker (Storage Access Framework), local notifications, hide Updates and Shortcuts on phones, `rusttalk://` links, the layout list above | 3 to 4 weeks |
 | 3 | Foreground voice on Android. Left: iOS audio session, Bluetooth headsets and calls with the screen off (foreground service on Android, background audio on iOS) | 2 weeks |
 | 4 | iOS on a device. Done: Keychain, safe area and taps. Left: notifications (reuse `notify/macos.rs`), document picker, status bar colours, background rules | 1 to 2 weeks |
 | 5 | Camera (Camera2, AVFoundation) | 1 week |
@@ -323,7 +323,11 @@ Rough effort for one person who knows the code base.
   (`NSURLIsExcludedFromBackupKey`) before the key storage opens, so nothing
   goes to iCloud or a computer.
 - **Keys** (`keystore::RULES`, see [Crypto](crypto.md#local-identity)):
-  Android offers only "File with password" until it uses Android Keystore. iOS
+  Android wraps the identity with a non-exportable Android Keystore key. A new
+  account uses a password if the encryption and decryption probe fails. Existing
+  password files still require their password until moved in Settings > Privacy >
+  Key storage. Uninstall removes the wrapping key. Restoring a wrapped file alone
+  leads to recovery with words. iOS
   keeps keys in the data-protection Keychain with `when-unlocked-this-device-only`
   access (never in iCloud Keychain; a backup restores it only to the same
   iPhone), through a small

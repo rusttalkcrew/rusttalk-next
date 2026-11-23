@@ -18,12 +18,16 @@ use chacha20poly1305::{
     KeyInit, XChaCha20Poly1305, XNonce,
     aead::{Aead, Payload},
 };
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 use keyring::{Entry, Error};
 use rusttalk_core::identity::{DeviceCertificate, DeviceIdentity, random_bytes};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 const KEY_FILE: &str = "identity.key";
+const WRAPPED: &str = "identity.wrapped";
+#[cfg(target_os = "android")]
+mod android;
 const STATE_FILE: &str = "keystore.json";
 /// Phones: older key files set aside instead of overwritten (see `write_copy`).
 const REPLACED: &str = "identity.key.replaced-";
@@ -56,15 +60,15 @@ pub enum Rules {
     /// The keychain, the protected file or the password file.
     Desktop,
     /// iOS: the Keychain, or the password file when the Keychain can't be used.
-    KeychainOrPassword,
-    /// Android: only the password file, until RustTalk uses Android Keystore.
-    PasswordOnly,
+    Ios,
+    /// Android: the Keystore, or the password file when the Keystore cannot be used.
+    Android,
 }
 
 pub const RULES: Rules = if cfg!(target_os = "android") {
-    Rules::PasswordOnly
+    Rules::Android
 } else if cfg!(target_os = "ios") {
-    Rules::KeychainOrPassword
+    Rules::Ios
 } else {
     Rules::Desktop
 };
@@ -77,8 +81,7 @@ impl Rules {
     pub fn allows(self, kind: Kind) -> bool {
         match self {
             Rules::Desktop => true,
-            Rules::KeychainOrPassword => kind != Kind::File,
-            Rules::PasswordOnly => kind == Kind::Password,
+            Rules::Ios | Rules::Android => kind != Kind::File,
         }
     }
 }
@@ -183,8 +186,10 @@ pub trait Keychain {
     fn delete(&self) -> Result<()>;
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 struct OsKeychain(String);
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 impl OsKeychain {
     fn entry(&self) -> Result<Entry> {
         self.available()?;
@@ -192,6 +197,7 @@ impl OsKeychain {
     }
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 impl Keychain for OsKeychain {
     fn available(&self) -> Result<()> {
         Entry::store_status()
@@ -270,7 +276,7 @@ impl Keychain for IosKeychain {
     fn get(&self) -> Result<Option<Zeroizing<Vec<u8>>>> {
         match self.entry("identity-v1")?.inner.get_secret() {
             Ok(secret) => Ok(Some(Zeroizing::new(secret))),
-            Err(Error::NoEntry) => Ok(None),
+            Err(keyring::Error::NoEntry) => Ok(None),
             Err(error) => Err(error).context("read identity from Keychain"),
         }
     }
@@ -284,7 +290,7 @@ impl Keychain for IosKeychain {
 
     fn delete(&self) -> Result<()> {
         match self.entry("identity-v1")?.inner.delete_credential() {
-            Ok(()) | Err(Error::NoEntry) => Ok(()),
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
             Err(error) => Err(error).context("remove identity from Keychain"),
         }
     }
@@ -449,7 +455,9 @@ impl Keystore {
     pub fn open(config: &Path, service: &str) -> Result<(Self, Start)> {
         #[cfg(target_os = "ios")]
         let keychain = Box::new(IosKeychain(service.to_owned()));
-        #[cfg(not(target_os = "ios"))]
+        #[cfg(target_os = "android")]
+        let keychain = Box::new(android::AndroidKeystore::new(config, service));
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
         let keychain = Box::new(OsKeychain(service.to_owned()));
         Self::open_with(config, keychain, COST, RULES)
     }
@@ -491,12 +499,15 @@ impl Keystore {
             fail_state: Default::default(),
             _lock: lock,
         };
-        store.state.keys_saved |= had_account;
+        store.state.keys_saved |= had_account
+            || (rules == Rules::Android
+                && !store.state.cleanup.contains(&Place::Keychain)
+                && dir.join(WRAPPED).try_exists()?);
         // iOS keeps Keychain items when the app is deleted. A fresh install (no
         // keystore.json, no account files, no key file) starts over like a new phone
         // instead of silently taking the old, maybe removed, device's keys. A damaged
         // keystore.json is not fresh: its keys are still found below.
-        if rules == Rules::KeychainOrPassword
+        if rules == Rules::Ios
             && fresh
             && !had_account
             && !dir.join(KEY_FILE).exists()
@@ -609,18 +620,8 @@ impl Keystore {
             );
             return Start::Missing { keychain: gone };
         }
-        match self.rules {
-            // Android: a new account gets a password first, whatever was chosen before.
-            Rules::PasswordOnly => {
-                self.state.storage = None;
-                return Start::Choose;
-            }
-            // iOS: a new account goes to the Keychain whenever it works, else it gets a
-            // password first.
-            Rules::KeychainOrPassword => {
-                self.state.storage = self.state.storage.filter(|kind| *kind == Kind::Keychain);
-            }
-            Rules::Desktop => {}
+        if self.rules.phone() {
+            self.state.storage = self.state.storage.filter(|kind| *kind == Kind::Keychain);
         }
         match (self.state.storage, keychain) {
             // Signed out: a new account goes to the same file.
@@ -902,7 +903,7 @@ impl Keystore {
 
     /// Temporary files left by a crash mid-write can hold keys.
     fn remove_temp_files(&self) {
-        let prefixes = [KEY_FILE, STATE_FILE].map(temp_prefix);
+        let prefixes = [KEY_FILE, STATE_FILE, WRAPPED].map(temp_prefix);
         let Ok(entries) = fs::read_dir(&self.dir) else {
             return;
         };
@@ -1228,9 +1229,9 @@ mod tests {
         open_as(dir, keychain, Rules::Desktop)
     }
 
-    /// Opened with the phone rules: keys only in the file with a password.
+    /// Android with an unavailable Keystore falls back to a password file.
     fn open_phone(dir: &Path) -> (Keystore, Start) {
-        open_as(dir, &down(), Rules::PasswordOnly)
+        open_as(dir, &down(), Rules::Android)
     }
 
     fn open_as(dir: &Path, keychain: &Mock, rules: Rules) -> (Keystore, Start) {
@@ -1548,36 +1549,46 @@ mod tests {
     }
 
     fn open_ios(dir: &Path, keychain: &Mock) -> (Keystore, Start) {
-        open_as(dir, keychain, Rules::KeychainOrPassword)
+        open_as(dir, keychain, Rules::Ios)
     }
 
     #[test]
-    fn an_iphone_keeps_new_keys_in_the_keychain_and_never_in_a_plain_file() {
+    fn phones_keep_new_keys_in_the_keychain_and_never_in_a_plain_file() {
+        for rules in [Rules::Ios, Rules::Android] {
+            let dir = tempfile::tempdir().unwrap();
+            let keychain = Mock::default();
+            let (mut store, start) = open_as(dir.path(), &keychain, rules);
+            assert!(ready(start).is_none());
+            assert_eq!(store.kind(), Some(Kind::Keychain));
+            let me = identity();
+            store.save(&me).unwrap();
+            assert!(keychain.has_keys() && !key_file(dir.path()));
+            assert!(store.switch(&me, Kind::File, None).is_err());
+            assert!(!key_file(dir.path()));
+            // To the password file and back, as on desktops.
+            let key = sealer(&store, "hunter2");
+            store.switch(&me, Kind::Password, key).unwrap();
+            assert!(!keychain.has_keys());
+            drop(store);
+            let (mut store, start) = open_as(dir.path(), &keychain, rules);
+            assert!(matches!(start, Start::Unlock));
+            let opened = unlock(&mut store, "hunter2").unwrap();
+            store.switch(&opened, Kind::Keychain, None).unwrap();
+            assert!(keychain.has_keys() && !key_file(dir.path()));
+            drop(store);
+            assert!(same(
+                &ready(open_as(dir.path(), &keychain, rules).1).unwrap(),
+                &me
+            ));
+        }
+    }
+
+    #[test]
+    fn restored_android_blob_without_its_alias_offers_recovery() {
         let dir = tempfile::tempdir().unwrap();
-        let keychain = Mock::default();
-        let (mut store, start) = open_ios(dir.path(), &keychain);
-        assert!(ready(start).is_none());
-        assert_eq!(store.kind(), Some(Kind::Keychain));
-        let me = identity();
-        store.save(&me).unwrap();
-        assert!(keychain.has_keys() && !key_file(dir.path()));
-        assert!(store.switch(&me, Kind::File, None).is_err());
-        assert!(!key_file(dir.path()));
-        // To the password file and back, as on desktops.
-        let key = sealer(&store, "hunter2");
-        store.switch(&me, Kind::Password, key).unwrap();
-        assert!(!keychain.has_keys());
-        drop(store);
-        let (mut store, start) = open_ios(dir.path(), &keychain);
-        assert!(matches!(start, Start::Unlock));
-        let opened = unlock(&mut store, "hunter2").unwrap();
-        store.switch(&opened, Kind::Keychain, None).unwrap();
-        assert!(keychain.has_keys() && !key_file(dir.path()));
-        drop(store);
-        assert!(same(
-            &ready(open_ios(dir.path(), &keychain).1).unwrap(),
-            &me
-        ));
+        fs::write(dir.path().join(WRAPPED), b"restored").unwrap();
+        let (_, start) = open_as(dir.path(), &Mock::default(), Rules::Android);
+        assert!(matches!(start, Start::Missing { .. }));
     }
 
     #[test]
