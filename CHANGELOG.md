@@ -10,6 +10,9 @@ Unreleased under the new version and date.
 -->
 
 ## Unreleased
+
+- Oversized stored uploads show their size and the app limit beside chat or shared files, including voice channels.
+
 ## v0.2.0 - 2026-11-23
 
 - Reopen RustTalk offline to see previously loaded server icons, avatars and recent chat messages.

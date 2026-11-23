@@ -586,7 +586,7 @@ pub fn stage(chat: &mut Chat, paths: Vec<PathBuf>) -> Option<String> {
             }
         };
         if size > MAX_FILE {
-            problem = Some(t!("files.too_big", name = name));
+            problem = Some(too_big(&name, size));
             discard(&path);
         } else if chat.staged.len() >= MAX_FILES {
             problem = Some(t!("files.too_many", max = MAX_FILES));
@@ -596,6 +596,16 @@ pub fn stage(chat: &mut Chat, paths: Vec<PathBuf>) -> Option<String> {
         }
     }
     problem
+}
+
+/// The local stored-file cap also applies before the Files tab starts an upload.
+pub(crate) fn too_big(name: &str, bytes: u64) -> String {
+    t!(
+        "files.too_big",
+        name = name,
+        size = size(bytes),
+        limit = size(MAX_FILE)
+    )
 }
 
 const KIB: u64 = 1024;
