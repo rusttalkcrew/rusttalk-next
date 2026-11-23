@@ -11,6 +11,7 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Choose one channel for joins and leaves, or turn them off. Device changes appear only in the audit log.
 - Android can keep your account keys on this phone without asking for a password at every start.
 - Find servers and join public servers on iPhone and Android.
 - New look for the first-start screens, with a Back button, Copy for your recovery words and Paste to fill them in

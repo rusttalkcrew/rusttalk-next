@@ -307,7 +307,8 @@ object_id || epoch (8 bytes, big endian)
 The object type values are server name (1), description (2), icon (3),
 channel name (4), topic (5), category name (6), role name (7), display
 name (8), avatar (9), server emoji or sticker name (10), server emoji
-or sticker picture (11), role display (12), profile bio (13) and emoji pack name (14). Server objects use the raw server ID. Channels
+or sticker picture (11), role display (12), profile bio (13), emoji pack name (14)
+and system message destination (15). Server objects use the raw server ID. Channels
 and categories use their raw 32-byte IDs. Members (display name, avatar and bio) use the raw person ID.
 Server emoji, stickers and emoji packs use their raw 32-byte IDs.
 Role names use the role ID's UTF-8 bytes. New metadata uses the newest
@@ -608,8 +609,8 @@ The server decides membership and channel access. A malicious server
 can add a person it controls, or misrepresent who has access, and induce
 clients to wrap keys to that person's devices. A root signature binds
 a known person's device keys. It cannot show that the person belongs
-in a space or channel. Clients surface every observed member and device
-change with person and device fingerprints. The bot also logs the person
+in a space or channel. Clients show observed joins and leaves in the configured text channel.
+Members with audit access can inspect device changes and their fingerprints. The bot also logs the person
 and device fingerprints for every wrap. The API never receives the
 decryption keys from an honest client. Former readers retain anything
 they already decrypted or saved. Rotation excludes them from subsequent

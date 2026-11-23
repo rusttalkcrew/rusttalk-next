@@ -1071,7 +1071,12 @@ impl Home {
                     server.order_unavailable = false;
                     // Opens that failed while offline.
                     for (channel, chat) in &server.chats {
-                        if chat.loading && chat.messages.is_empty() {
+                        if chat.loading
+                            && chat
+                                .messages
+                                .iter()
+                                .all(|m| matches!(m.body, Body::Notice { .. }))
+                        {
                             let _ = server.commands.send(Command::Open(*channel));
                         }
                     }
@@ -1148,6 +1153,13 @@ impl Home {
                             != dir.dms.iter().map(|dm| (dm.peer, dm.channel)).collect()
                     {
                         self.next_backfill = now;
+                    }
+                    if let Some(old) = server.dir.notice_channel()
+                        && Some(old) != dir.notice_channel()
+                        && let Some(chat) = server.chats.get_mut(&old)
+                    {
+                        chat.messages
+                            .retain(|msg| !matches!(msg.body, Body::Notice { .. }));
                     }
                     server.dir = *dir;
                     self.profile_loaded(index);
@@ -1290,15 +1302,13 @@ impl Home {
                     thread.page_failed(&address, channel, missing);
                 }
             }
-            Update::Notice(address, person, msg) => {
-                let Some(index) = self.index(&address) else {
-                    return;
-                };
-                for chat in self.servers[index].chats.values_mut() {
-                    chat.merge(vec![msg.clone()], false);
-                }
-                if let Some(thread) = self.threads.get_mut(&person) {
-                    thread.chat.merge(vec![msg], false);
+            Update::Notice(address, channel, msg) => {
+                if let Some(index) = self.index(&address) {
+                    self.servers[index]
+                        .chats
+                        .entry(channel)
+                        .or_default()
+                        .merge(vec![msg], false);
                 }
             }
             Update::DmReady(address, channel) => {
@@ -3327,8 +3337,6 @@ fn notice(name: &str, action: &str) -> String {
     match action {
         "joined" => t!("notice.joined", name = name),
         "left" => t!("notice.left", name = name),
-        "added a new device" => t!("notice.added_device", name = name),
-        "removed a device" => t!("notice.removed_device", name = name),
         other => format!("{name} {other}"),
     }
 }
@@ -3490,13 +3498,13 @@ fn chat_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
         return;
     }
     let server = &mut home.servers[index];
-    let mut chat = server.chats.remove(&channel).unwrap_or_else(|| {
-        // First look at this channel: load it, then follow live updates.
+    let mut chat = server.chats.remove(&channel).unwrap_or_default();
+    // A membership notice can arrive before anyone has opened this channel.
+    if !chat.opened {
+        chat.opened = true;
         server.send(Command::Open(channel));
-        let mut chat = Chat::default();
         chat.loading = true;
-        chat
-    });
+    }
     if files_shown(ui.ctx(), channel) {
         files_view(ui, home, index, channel, &mut chat);
     } else if home.servers[index]
@@ -3664,7 +3672,7 @@ fn page_view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat: &mut
     let dir = &server.dir;
     let to = To::Channel(server.address.clone());
     let now = ui.input(|input| input.time);
-    // Member and device notices are not part of the page.
+    // Membership notices are not part of the page.
     // A copy, so the editor below can change the chat's staged pictures.
     let page = (chat.messages.iter().rev())
         .find(|msg| matches!(msg.body, Body::Text(_) | Body::Unreadable) && msg.sticker.is_none())
@@ -6111,6 +6119,7 @@ mod tests {
                 .0,
         };
         let mut chat = Chat::default();
+        chat.opened = true;
         chat.shared = Some(vec![
             shared(ANN, "Trip plan.pdf", 240_000),
             shared(ME, "Budget.xlsx", 18_000),
@@ -6123,6 +6132,43 @@ mod tests {
         *harness.state_mut() = Some(home);
         harness.run_steps(4);
         (harness, sent)
+    }
+
+    #[test]
+    fn a_notice_before_first_open_still_loads_channel_history() {
+        let (mut h, mut sent) = files_harness(true);
+        while sent.try_recv().is_ok() {}
+        let ctx = h.ctx.clone();
+        let home = h.state_mut().as_mut().unwrap();
+        let server = &mut home.servers[0];
+        server.chats.remove(&PROJECTS);
+        let other = [42; 32];
+        server.chats.insert(other, Chat::default());
+        let address = server.address.clone();
+        let msg = Msg {
+            backfilled: false,
+            id: [12; 32],
+            person: ANN,
+            at: 1,
+            reply_to: None,
+            quoted_author: None,
+            edit_of: None,
+            body: Body::Notice {
+                name: "Ann".into(),
+                action: "joined",
+                detail: String::new(),
+            },
+            files: vec![],
+            live: None,
+            sticker: None,
+            replicas: vec![],
+            copy_files: vec![],
+        };
+        home.apply(&ctx, Update::Notice(address, PROJECTS, msg), 0.0);
+        assert!(home.servers[0].chats[&other].messages.is_empty());
+        assert_eq!(home.servers[0].chats[&PROJECTS].messages.len(), 1);
+        h.run_steps(2);
+        assert!(matches!(sent.try_recv(), Ok(Command::Open(PROJECTS))));
     }
 
     type Screen = (Home, crate::update::Updater, crate::keystore::Keystore);
