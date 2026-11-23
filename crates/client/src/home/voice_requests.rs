@@ -578,6 +578,32 @@ mod tests {
     }
 
     #[test]
+    fn newer_call_decision_wins_over_delayed_join_approval() {
+        for switch in [false, true] {
+            let (mut harness, mut sent) = window(Vec2::new(420.0, 720.0), false);
+            let mut current = home(&mut harness).voice.call.take().unwrap();
+            current.channel = [5; 32];
+            ann_asks(&mut harness, 3);
+            let home = home(&mut harness);
+            home.voice.call = Some(current);
+            let address = home.servers[0].address.clone();
+            home.check_voice_destination(0, [3; 32]);
+            if switch {
+                call::join(home, 0, [6; 32]);
+            } else {
+                call::leave(home);
+            }
+            while sent.try_recv().is_ok() {}
+            home.voice_destination(&address, [3; 32], true, 1.0);
+            assert_eq!(
+                home.voice.call.as_ref().map(|call| call.channel),
+                switch.then_some([6; 32])
+            );
+            assert!(sent.try_recv().is_err());
+        }
+    }
+
+    #[test]
     fn failed_destination_check_keeps_the_current_call() {
         let (mut harness, mut sent) = window(Vec2::new(420.0, 720.0), false);
         let mut current = home(&mut harness).voice.call.take().unwrap();

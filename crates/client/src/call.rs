@@ -274,13 +274,17 @@ impl Voice {
 
 /// Join a voice channel, leaving any other room first, and show it.
 pub fn join(home: &mut Home, index: usize, channel: Id) {
+    cancel_invitation_join(home);
     home.servers[index].open = Some(channel);
     if home.voice.in_call(&home.servers[index], &channel) {
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        {
+            home.voice.pending_join = None;
+        }
         return;
     }
     #[cfg(any(target_os = "android", target_os = "ios"))]
     {
-        home.voice.pending_invitation = None;
         let request = home
             .voice
             .pending_join
@@ -324,7 +328,23 @@ fn connect(home: &mut Home, index: usize, channel: Id) {
     home.voice.audio.start_voice();
 }
 
+// A late destination check must never override a newer call decision.
+fn cancel_invitation_join(home: &mut Home) {
+    home.requests
+        .incoming
+        .retain(|request| request.check == crate::voice_requests::JoinCheck::Idle);
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        home.voice.pending_invitation = None;
+    }
+}
+
 pub fn leave(home: &mut Home) {
+    cancel_invitation_join(home);
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        home.voice.pending_join = None;
+    }
     let Some(call) = home.voice.call.take() else {
         return;
     };
