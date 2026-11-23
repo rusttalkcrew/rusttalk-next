@@ -3,7 +3,7 @@
 //! an older account is only asked when the synced account data has no default name
 //! and none could be taken from the names it already uses on its servers.
 
-use eframe::egui::{CentralPanel, ScrollArea, Ui};
+use eframe::egui::Ui;
 
 use super::{Home, Join, View};
 use crate::{
@@ -12,8 +12,6 @@ use crate::{
     profile::{BIO_CHARS, NAME_CHARS, clean_bio, fit_bio},
     ui::{self, error_text, primary_large, secondary_large},
 };
-
-const WIDTH: f32 = 560.0;
 
 /// Where the person is in the steps.
 #[derive(Default)]
@@ -69,38 +67,36 @@ pub fn show(ui: &mut Ui, home: &mut Home) -> bool {
         home.welcome = Step::Name(String::new());
     }
     let mut next = None;
-    column(ui, |ui| match &mut home.welcome {
+    // The bio goes back to the name; the name is the first step here.
+    let back = matches!(home.welcome, Step::Bio(_)).then(|| t!("common.back"));
+    let id = matches!(home.welcome, Step::Bio(_));
+    let (back, ()) = ui::onboarding(ui, ("welcome", id), back, |ui| match &mut home.welcome {
         Step::Idle => {}
         Step::Name(name) => {
-            ui.heading(t!("welcome.name_title"));
-            ui.label(t!("welcome.name_help"));
-            ui.add_space(12.0);
+            ui::step_title(ui, t!("welcome.name_title"), t!("welcome.name_help"));
             let label = ui.label(t!("settings.name"));
             let field = ui
                 .add(
                     ui::field(name)
                         .char_limit(NAME_CHARS)
                         .hint_text(t!("home.name_hint"))
-                        .desired_width(320.0),
+                        .desired_width(f32::INFINITY),
                 )
                 .labelled_by(label.id);
-            if ui.memory(|memory| memory.focused().is_none()) {
-                field.request_focus();
-            }
+            let entered = submitted(ui, &field);
+            ui::focus_when_none(ui, &field);
             let empty = name.trim().is_empty();
             if empty && !name.is_empty() {
                 error_text(ui, Some(t!("welcome.name_needed")));
             }
-            ui.add_space(12.0);
+            ui.add_space(ui::SPACE_M);
             let go = ui.add_enabled_ui(!empty, |ui| primary_large(ui, t!("home.continue")));
-            if !empty && (go.inner.clicked() || submitted(ui, &field)) {
+            if !empty && (go.inner.clicked() || entered) {
                 next = Some(Some(name.trim().to_owned()));
             }
         }
         Step::Bio(bio) => {
-            ui.heading(t!("welcome.bio_title"));
-            ui.label(t!("welcome.bio_help"));
-            ui.add_space(12.0);
+            ui::step_title(ui, t!("welcome.bio_title"), t!("welcome.bio_help"));
             let label = ui.label(t!("settings.bio"));
             ui.add(
                 ui::text_area(bio)
@@ -114,18 +110,22 @@ pub fn show(ui: &mut Ui, home: &mut Home) -> bool {
                 *bio = fitted;
             }
             ui.label(ui::caption(format!("{}/{BIO_CHARS}", bio.chars().count())));
-            ui.add_space(12.0);
-            ui.horizontal(|ui| {
-                if primary_large(ui, t!("common.save")).clicked() {
-                    next = Some(Some(clean_bio(bio)));
-                }
-                if secondary_large(ui, t!("welcome.skip")).clicked() {
-                    next = Some(None);
-                }
-            });
+            ui.add_space(ui::SPACE_M);
+            let save = primary_large(ui, t!("common.save"));
+            let skip = secondary_large(ui, t!("welcome.skip"));
+            if save.clicked() {
+                next = Some(Some(clean_bio(bio)));
+            }
+            if skip.clicked() {
+                next = Some(None);
+            }
         }
     });
     match (std::mem::take(&mut home.welcome), next) {
+        // The saved name, to change it.
+        (Step::Bio(_), None) if back => {
+            home.welcome = Step::Name(home.voice.audio.settings().display_name);
+        }
         (step, None) => home.welcome = step,
         // The name is saved at once, so it counts even if the bio is never answered.
         (Step::Name(_), Some(Some(name))) => {
@@ -148,23 +148,6 @@ pub fn show(ui: &mut Ui, home: &mut Home) -> bool {
         _ => home.new_account = false,
     }
     true
-}
-
-/// A centred column, like the sign-up screens before it.
-fn column(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
-    CentralPanel::default().show(ui, |ui| {
-        ScrollArea::vertical().show(ui, |ui| {
-            let width = WIDTH.min(ui.available_width());
-            ui.horizontal(|ui| {
-                ui.add_space((ui.available_width() - width) / 2.0);
-                ui.vertical(|ui| {
-                    ui.set_width(width);
-                    ui.add_space(48.0);
-                    add(ui);
-                });
-            });
-        });
-    });
 }
 
 #[cfg(test)]
@@ -216,6 +199,12 @@ mod tests {
         let home = harness.state().as_ref().unwrap();
         assert_eq!(home.voice.audio.settings().display_name, "Ann");
         assert!(harness.query_by_label(t!("welcome.bio_title")).is_some());
+        // Back to the name, which can still change.
+        harness.get_by_label(t!("common.back")).click_accesskit();
+        harness.run_steps(3);
+        assert!(asking(&harness));
+        harness.get_by_label(t!("home.continue")).click_accesskit();
+        harness.run_steps(3);
         harness.get_by_label(t!("welcome.skip")).click_accesskit();
         harness.run_steps(3);
         let home = harness.state().as_ref().unwrap();

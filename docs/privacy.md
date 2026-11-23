@@ -273,17 +273,31 @@ holds the keys, whether keys were saved, and leftover copies still to remove.
 Development profiles use separate entries. The client logs the person
 fingerprint locally. Creating an account shows the recovery words once in the
 app window. The client never stores or logs the words or the root signing key.
+Copy on that screen puts them on the clipboard only when pressed: phones mark
+the copy sensitive (Android hides it from the clipboard preview and keyboard
+suggestions; iOS keeps it off Universal Clipboard and lets it expire after two
+minutes), and desktops clear the clipboard after two minutes if it still holds
+the words and the app is still running.
+After the device keys are unlocked, the app can show its last server directory,
+icons, avatars and recent messages without contacting the server. These local
+files are authenticated and encrypted with a key derived from the unlocked device identity and bound to
+the device and pinned server. The app checks locally known device revocations
+before opening messages. Changes made while the device is offline become
+visible when it reconnects. Removing a server clears its files.
+
 "Sign out of this device" deletes the keychain entry, `identity.key`, leftover
 temporary key files and the profile's `sync.json`, `servers.json`,
 `saved.json`, `notify.json`, `pokes.json`, `dm_deleted.json`, `dm_pins/`,
-recent and favourite emoji, cached link previews and both local logs. This
+the encrypted recent-view cache, recent and favourite emoji, cached link previews and both local logs. This
 clears the previous person's fingerprint, DM history markers, server records
 and preview consent. Hardware, local sound and window preferences in
 `voice.json`, the downloaded noise removal model and updater settings stay on
 the device.
 
 Next to the settings, `servers.json` holds each server's address, server ID
-and TLS fingerprint. `sync.json` holds the last merged device sync snapshot
+and TLS fingerprint. On Android, an empty `unsent` file means the app had to
+end while messages were still being sent; the app deletes it once it has told
+the person, in a chat. Desktops never write or read it. `sync.json` holds the last merged device sync snapshot
 with its version: joined servers with their pins, servers left, synced
 settings, friends (with pending requests, blocks and each person's last seen
 name), and local edits not yet uploaded. `voice.json` holds the
@@ -321,7 +335,10 @@ starts and when the person signs out. A picture pasted into the composer
 (Ctrl+V) is written the same way, to a `rusttalk-<random>` folder, so it can be
 sent like a picked file; removing it from the message deletes it, and otherwise
 it goes with the other folders. The client reads the clipboard only when the
-person pastes into the composer.
+person pastes, and on desktops once more two minutes after copying the recovery
+words: it empties the clipboard only if it still holds them (read, compared by
+hash and emptied in one step; nothing is kept), and a newer copy in the app
+cancels that.
 `emoji-recent.json` holds up to 32 emoji selected through the picker or
 autocomplete, and `emoji-favourites.json` up to 64 emoji marked as favourites
 in the picker. Both stay on this device.

@@ -26,6 +26,8 @@ const TOGGLE: Vec2 = Vec2::new(40.0, 22.0);
 const CLOSE: f32 = 22.0;
 /// Room above and below the content of a `setting_row`.
 const ROW_PAD: f32 = SPACE_XS;
+/// Narrower settings rows put the control under the text, so neither gets squeezed.
+const STACK_WIDTH: f32 = 440.0;
 
 /// The sections of the page being drawn, collected while a sectioned page draws.
 #[derive(Clone, Default)]
@@ -125,10 +127,14 @@ pub fn tagged_row<R>(
     help: &str,
     control: impl FnOnce(&mut Ui) -> R,
 ) -> R {
+    let width = ui.available_width();
     let id = ui.scope_id().with(("setting row", label));
     let (control_size, text_height): (Vec2, f32) =
         ui.data(|data| data.get_temp(id)).unwrap_or_default();
-    let width = ui.available_width();
+    // Also when the control would leave the text less than its share.
+    if width < STACK_WIDTH || control_size.x + SPACE_L > width * 0.6 {
+        return stacked_row(ui, id, label, tag, help, control);
+    }
     let height = control_size.y.max(text_height).max(CONTROL_HEIGHT);
     let min = ui.cursor().min + Vec2::new(0.0, ROW_PAD);
     let text_width = (width - control_size.x - SPACE_L).max(width * 0.4);
@@ -142,17 +148,7 @@ pub fn tagged_row<R>(
             ))
             .layout(Layout::top_down(Align::Min)),
     );
-    text.spacing_mut().item_spacing.y = 2.0;
-    text.horizontal_wrapped(|ui| {
-        ui.add(Label::new(bold(label).color(colors(ui).strong)).wrap());
-        if let Some(tag) = tag {
-            badge(ui, tag, colors(ui).danger);
-        }
-    });
-    if !help.is_empty() {
-        let help = RichText::new(help).size(TEXT_SMALL).color(colors(ui).muted);
-        text.add(Label::new(help).wrap());
-    }
+    row_text(&mut text, label, tag, help);
     let new_text = text.min_rect().height();
 
     let control_top = min.y + (height - control_size.y) / 2.0;
@@ -197,6 +193,44 @@ pub fn tagged_row<R>(
         Sense::hover(),
     );
     inner
+}
+
+/// The label (with its tag) and help of a settings row.
+fn row_text(ui: &mut Ui, label: &str, tag: Option<&str>, help: &str) {
+    ui.spacing_mut().item_spacing.y = 2.0;
+    ui.horizontal_wrapped(|ui| {
+        ui.add(Label::new(bold(label).color(colors(ui).strong)).wrap());
+        if let Some(tag) = tag {
+            badge(ui, tag, colors(ui).danger);
+        }
+    });
+    if !help.is_empty() {
+        let help = RichText::new(help).size(TEXT_SMALL).color(colors(ui).muted);
+        ui.add(Label::new(help).wrap());
+    }
+}
+
+/// A settings row too narrow for the control beside the text: the control goes under it.
+fn stacked_row<R>(
+    ui: &mut Ui,
+    id: Id,
+    label: &str,
+    tag: Option<&str>,
+    help: &str,
+    control: impl FnOnce(&mut Ui) -> R,
+) -> R {
+    ui.vertical(|ui| {
+        ui.add_space(ROW_PAD);
+        ui.scope(|ui| row_text(ui, label, tag, help));
+        ui.add_space(SPACE_XS);
+        let shown = ui.horizontal(control);
+        // Measured here too, so a row goes back beside its text when there is room.
+        let size = shown.response.rect.size();
+        ui.data_mut(|data| data.insert_temp(id, (size, 0.0_f32)));
+        ui.add_space(ROW_PAD);
+        shown.inner
+    })
+    .inner
 }
 
 /// A `setting_row` with a toggle.

@@ -159,6 +159,8 @@ pub struct Settings {
     pub mix: crate::call::mixer::Mix,
     /// The warning before sharing a terminal was accepted once. This device only.
     pub terminal_warned: bool,
+    /// This Android device may host a terminal in a call. Never synced.
+    pub android_terminal_hosting: bool,
     /// The app version whose "What's new" was shown last, so it opens once per update.
     /// This device only.
     pub whats_new_seen: String,
@@ -239,6 +241,7 @@ impl Default for Settings {
             hotkeys: Default::default(),
             mix: Default::default(),
             terminal_warned: false,
+            android_terminal_hosting: false,
             whats_new_seen: String::new(),
             display_name: String::new(),
             bio: String::new(),
@@ -303,6 +306,12 @@ struct Shared {
     ai_session: AtomicU64,
     /// In a voice room: open both devices and feed the source.
     voice: AtomicBool,
+    #[cfg(target_os = "ios")]
+    ios_session: Mutex<Option<Arc<crate::ios::voice::Session>>>,
+    #[cfg(target_os = "ios")]
+    capture_frames: AtomicU32,
+    #[cfg(target_os = "ios")]
+    last_capture_ms: AtomicU64,
     /// Settings are open: open the microphone for the meter.
     testing: AtomicBool,
     /// Push-to-talk key held while the window has focus.
@@ -414,6 +423,12 @@ impl Audio {
             processing: AtomicU64::new(0),
             ai_session: AtomicU64::new(0),
             voice: AtomicBool::new(false),
+            #[cfg(target_os = "ios")]
+            ios_session: Mutex::default(),
+            #[cfg(target_os = "ios")]
+            capture_frames: AtomicU32::new(0),
+            #[cfg(target_os = "ios")]
+            last_capture_ms: AtomicU64::new(0),
             testing: AtomicBool::new(false),
             key_down: AtomicBool::new(false),
             hotkey_down: AtomicBool::new(false),
@@ -478,6 +493,12 @@ impl Audio {
         self.shared().source.clone()
     }
 
+    pub fn can_host_terminal(&self) -> bool {
+        cfg!(any(target_os = "linux", target_os = "macos", windows))
+            || (cfg!(target_os = "android")
+                && lock(&self.shared().settings).android_terminal_hosting)
+    }
+
     pub fn settings(&self) -> Settings {
         self.shared().settings()
     }
@@ -514,6 +535,41 @@ impl Audio {
         self.refresh();
     }
 
+    #[cfg(target_os = "ios")]
+    pub fn prepare_ios_voice(&self) -> Result<()> {
+        let session = Arc::new(crate::ios::voice::Session::start()?);
+        let shared = self.0.shared.clone();
+        shared
+            .last_capture_ms
+            .store(shared.start.elapsed().as_millis() as u64, Relaxed);
+        let current = Arc::downgrade(&session);
+        *lock(&shared.ios_session) = Some(session);
+        let mut previous = shared.capture_frames.load(Relaxed);
+        self.0
+            .runtime
+            .as_ref()
+            .expect("audio runtime")
+            .spawn(async move {
+                for second in 1..=5 {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    if !lock(&shared.ios_session)
+                        .as_ref()
+                        .is_some_and(|s| current.ptr_eq(&Arc::downgrade(s)))
+                    {
+                        break;
+                    }
+                    let total = shared.capture_frames.load(Relaxed);
+                    tracing::info!(
+                        second,
+                        frames = total.wrapping_sub(previous),
+                        "iOS microphone capture"
+                    );
+                    previous = total;
+                }
+            });
+        Ok(())
+    }
+
     /// Joined a voice room.
     pub fn start_voice(&self) {
         self.shared().ai_session.fetch_add(1, Relaxed);
@@ -533,6 +589,8 @@ impl Audio {
             self.play_cue(cue);
         }
         self.shared().voice.store(false, Relaxed);
+        #[cfg(target_os = "ios")]
+        lock(&self.shared().ios_session).take();
         self.refresh();
     }
 
@@ -600,6 +658,22 @@ impl Audio {
 
     pub fn muted(&self) -> bool {
         self.shared().muted.load(Relaxed)
+    }
+
+    /// cpal stops callbacks during an iOS interruption. Keep the person's own mute
+    /// setting while showing that the microphone is unavailable.
+    pub fn display_muted(&self) -> bool {
+        #[cfg(target_os = "ios")]
+        {
+            let shared = self.shared();
+            let last = shared.last_capture_ms.load(Relaxed);
+            if shared.voice.load(Relaxed)
+                && (shared.start.elapsed().as_millis() as u64).saturating_sub(last) > 1500
+            {
+                return true;
+            }
+        }
+        self.muted()
     }
 
     /// Plays the matching chime once per change. Not while deafened: deafening already
@@ -897,6 +971,9 @@ fn devices(
 ) {
     let host = cpal::default_host();
     let (lost, lost_rx) = mpsc::channel::<()>();
+    // Declared before the streams so they close before the session on worker exit.
+    #[cfg(target_os = "ios")]
+    let mut active_session = None;
     let mut input: Option<(Option<String>, Stream)> = None;
     let mut output: Option<(Option<String>, Stream)> = None;
     let mut saved = shared.settings();
@@ -937,7 +1014,17 @@ fn devices(
             *lock(&shared.devices) = list(&host);
         }
         let mut problem = None;
-        let want_input = (voice || testing).then_some(settings.input);
+        let want_input = voice || testing;
+        #[cfg(target_os = "ios")]
+        let want_input = {
+            let session = lock(&shared.ios_session).clone();
+            let permitted = session.is_some() && !crate::ios::voice::needs_rejoin();
+            if permitted {
+                active_session = session;
+            }
+            want_input && permitted
+        };
+        let want_input = want_input.then_some(settings.input);
         if want_input.as_ref() != input.as_ref().map(|(id, _)| id) {
             input = None;
             if let Some(id) = want_input {
@@ -962,6 +1049,8 @@ fn devices(
             .filter(|until| *until > Instant::now());
         close_output_at = if voice { None } else { playing_cue };
         let want_output = (voice || playing_cue.is_some()).then_some(settings.output);
+        #[cfg(target_os = "ios")]
+        let want_output = want_output.filter(|_| !crate::ios::voice::needs_rejoin());
         if want_output.as_ref() != output.as_ref().map(|(id, _)| id) {
             output = None;
             if let Some(id) = want_output {
@@ -979,6 +1068,10 @@ fn devices(
                     }
                 }
             }
+        }
+        #[cfg(target_os = "ios")]
+        if input.is_none() && output.is_none() {
+            active_session.take();
         }
         retry = problem.is_some();
         *lock(&shared.problem) = problem.map(str::to_owned);
@@ -1123,12 +1216,23 @@ fn capture<T: SizedSample>(
 where
     i16: FromSample<T>,
 {
+    #[cfg(target_os = "ios")]
+    anyhow::ensure!(config.channels > 0, "microphone has no input channels");
     let channels = usize::from(config.channels);
     let rate = config.sample_rate;
     let shared = shared.clone();
     Ok(device.build_input_stream(
         config,
         move |data: &[T], info: &cpal::InputCallbackInfo| {
+            #[cfg(target_os = "ios")]
+            {
+                shared
+                    .capture_frames
+                    .fetch_add((data.len() / channels) as u32, Relaxed);
+                shared
+                    .last_capture_ms
+                    .store(shared.start.elapsed().as_millis() as u64, Relaxed);
+            }
             let at = info.timestamp();
             let delay = at.callback.duration_since(at.capture).as_millis() as u32;
             shared.input_delay.store(delay, Relaxed);

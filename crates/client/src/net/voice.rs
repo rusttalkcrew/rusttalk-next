@@ -27,9 +27,7 @@ use url::Url;
 use super::{
     Command, Ctx, LiveOffer, State, Update,
     control::{self, ControlView},
-    send_messages,
     terminal::{self, Hosting},
-    to_msg,
 };
 use crate::{
     screen,
@@ -1342,7 +1340,7 @@ pub(super) async fn offer_chat_file(
         size: file.size,
         chat: true,
     }));
-    send_messages(ctx, url, channel, vec![to_msg(&record, &body)], false, None);
+    state.sent(ctx, url, channel, &record, &body);
     Ok(())
 }
 

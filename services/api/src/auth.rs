@@ -143,6 +143,17 @@ async fn sign_in_device(
 
     keys::init_space(&mut tx, &server_id).await?;
     let added = keys::register_device(&mut tx, &cert).await?;
+    if member && added {
+        audit(
+            &mut tx,
+            person,
+            "device_added",
+            Some(person),
+            Some(&encode(device)),
+            at,
+        )
+        .await?;
+    }
     let closed = remove_device_sessions(&mut tx, person, device).await?;
     let session = issue_session(&mut tx, person, device, &ip, at, app.session_ttl).await?;
     tx.commit().await?;

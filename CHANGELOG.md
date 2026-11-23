@@ -10,9 +10,28 @@ Unreleased under the new version and date.
 -->
 
 ## Unreleased
-
 - Ask someone to join your voice channel: it rings, and they can join, decline, come later or mute you for 15 minutes
-- Experimental Android test build (APK) and unsigned iOS build (IPA); typing on Android does not work yet
+
+- Reopen RustTalk offline to see previously loaded server icons, avatars and recent chat messages.
+- Chat fills empty voice channels. Use Join voice to start a call.
+- Choose one channel for joins and leaves, or turn them off. Device changes appear only in the audit log.
+- Phones can watch shared terminals. Android can also share its own terminal when enabled in Settings > Advanced.
+- Android can keep your account keys on this phone without asking for a password at every start.
+- Find servers and join public servers on iPhone and Android.
+- Phones and small windows: Settings, dialogs and every screen now fit the screen, with bigger buttons to tap
+- New look for the first-start screens, with a Back button, Copy for your recovery words and Paste to fill them in
+- Phones: tapping a text field that is already open no longer closes and reopens the keyboard
+- iPhone: the keyboard no longer covers what you type, Return works, a tap outside closes the keyboard, and the edges match the theme
+- iPhone calls ask for microphone access and can continue with the screen locked.
+- Android asks for microphone access when you join a voice call.
+- Share your front or back camera in calls on Android and iPhone.
+- Experimental Android test build (APK) and unsigned iOS build (IPA)
+- Android: typing works, so you can sign up, sign in, join a server and chat
+- Enter now confirms the name and unlock screens
+- On touch screens, hold to open a menu or tap a message or call tile to show its controls.
+- Phones: press and hold a text field to paste, copy, cut or select all, using the phone's clipboard
+- iPhone: taps land where you touch, and the app stays clear of the notch and home bar
+- iPhone: your keys are kept in the Keychain, so there's no password to type
 
 ## v0.1.11 - 2026-11-22
 

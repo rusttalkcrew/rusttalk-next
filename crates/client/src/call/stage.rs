@@ -768,6 +768,7 @@ fn tile(
     }
     // Above the picture, so a click on it lands here.
     let response = ui.interact(rect, UiId::unique(("tile", &entry.tile)), Sense::click());
+    let (tapped, reveal) = ui::touch_tools(&response);
     let screen = match &entry.tile {
         Tile::Screen(sid) => entry.peer.screens.iter().find(|s| s.sid == *sid),
         Tile::Person(_) | Tile::Preview | Tile::Terminal(_) => None,
@@ -796,19 +797,19 @@ fn tile(
     } else if state.spotlight && !state.big {
         let label = t!("call.focus_name", name = entry.name);
         response.widget_info(|| WidgetInfo::labeled(Role::Button, true, &label));
-        if response.clicked() {
+        if response.clicked() && !reveal {
             acts.push(Act::Focus(entry.tile.clone()));
         }
     } else if let Some(screen) = watch_click {
         let label = t!("call.watch_name", name = entry.name);
         response.widget_info(|| WidgetInfo::labeled(Role::Button, true, &label));
-        if response.clicked() {
+        if response.clicked() && !reveal {
             acts.push(Act::Watch(screen.clone()));
         }
     } else if let Some(sharer) = terminal_click {
         let label = t!("call.watch_name", name = entry.name);
         response.widget_info(|| WidgetInfo::labeled(Role::Button, true, &label));
-        if response.clicked() {
+        if response.clicked() && !reveal {
             acts.push(Act::WatchTerminal(sharer.clone()));
         }
     } else {
@@ -836,7 +837,7 @@ fn tile(
             video: (others && entry.peer.camera.is_some()).then_some(entry.video),
         };
         // In the strip a click focuses the tile, so only the menu is there.
-        let picked = if state.spotlight && !state.big {
+        let picked = if reveal || (state.spotlight && !state.big) {
             ui::context_menu(&response, |m| target.menu(m)).flatten()
         } else {
             person::interact(ui, &response, &target, true)
@@ -893,7 +894,7 @@ fn tile(
     }
     overlay.paint(ui, rect);
     name_tag(ui, rect, entry, audio);
-    tools(ui, rect, entry, state, audio, acts);
+    tools(ui, rect, entry, state, audio, acts, tapped);
 }
 
 /// The right-click menu of a screen tile; the same actions as its hover buttons, its
@@ -1021,7 +1022,7 @@ fn name_tag(ui: &mut Ui, rect: Rect, entry: &Entry, audio: &crate::audio::Audio)
     let status = match () {
         _ if !is_person => VoiceStatus::default(),
         _ if entry.me => VoiceStatus {
-            muted: audio.muted() && !audio.deafened(),
+            muted: audio.display_muted() && !audio.deafened(),
             deafened: audio.deafened(),
         },
         _ => entry.peer.status,
@@ -1112,17 +1113,19 @@ fn tools(
     state: TileState,
     audio: &crate::audio::Audio,
     acts: &mut Vec<Act>,
+    tapped: bool,
 ) {
     let person = entry.peer.person;
     let is_person = matches!(entry.tile, Tile::Person(_));
     // Kept while the volume menu is open, which the pointer leaves the tile for.
     let menu_id = UiId::unique(("tile volume open", &entry.tile));
     let menu_open = ui.data(|data| data.get_temp::<bool>(menu_id).unwrap_or(false));
-    if !ui.rect_contains_pointer(rect) && !menu_open {
+    if !tapped && !menu_open && (!ui.rect_contains_pointer(rect) || ui.input(|i| i.any_touches())) {
         return;
     }
-    let fits = ((rect.width() - 2.0 * GAP) / (TOOL.x + 4.0)).floor() as usize;
-    if rect.height() < TOOL.y + 2.0 * GAP || fits == 0 {
+    let available = rect.size() - Vec2::splat(2.0 * GAP);
+    let fits = (available.x / (TOOL.x + 4.0)).floor() as usize;
+    if available.y < TOOL.y || fits == 0 {
         return;
     }
     let terminal = matches!(entry.tile, Tile::Terminal(_));
@@ -1137,10 +1140,20 @@ fn tools(
     // In order of importance; the first ones win on a small tile.
     let wanted = [true, is_person, full, remote, volume, stop];
     let count = wanted.iter().filter(|on| **on).count().min(fits);
-    let width = count as f32 * (TOOL.x + 4.0);
+    // Enlarge touch targets when there is room for the same set of actions.
+    let tool = if tapped {
+        Vec2::splat(
+            ui::TOUCH_TARGET
+                .min(available.y)
+                .min(available.x / count as f32 - 4.0),
+        )
+    } else {
+        TOOL
+    };
+    let width = count as f32 * (tool.x + 4.0);
     let bar = Rect::from_min_size(
         pos2(rect.right() - GAP - width, rect.top() + GAP),
-        vec2(width, TOOL.y),
+        vec2(width, tool.y),
     );
     let mut child = ui.new_child(
         UiBuilder::new()
@@ -1161,7 +1174,7 @@ fn tools(
         } else {
             ("🗖", t!("call.focus"))
         };
-        if ui::icon_button(ui, glyph, tip, Look::Plain, TOOL).clicked() {
+        if ui::icon_button(ui, glyph, tip, Look::Plain, tool).clicked() {
             acts.push(if state.focused {
                 Act::Unfocus
             } else {
@@ -1171,13 +1184,13 @@ fn tools(
     }
     if is_person
         && room()
-        && ui::icon_button(ui, "🗕", t!("call.minimize"), Look::Plain, TOOL).clicked()
+        && ui::icon_button(ui, "🗕", t!("call.minimize"), Look::Plain, tool).clicked()
     {
         acts.push(Act::Minimize(person));
     }
     if full
         && room()
-        && ui::icon_button(ui, "⛶", t!("call.full_screen"), Look::Plain, TOOL).clicked()
+        && ui::icon_button(ui, "⛶", t!("call.full_screen"), Look::Plain, tool).clicked()
     {
         acts.push(Act::Full(entry.tile.clone()));
     }
@@ -1188,7 +1201,7 @@ fn tools(
             Typing::Asking(_) => (t!("call.cancel_request"), on),
             Typing::On => (t!("terminal.stop_typing"), on),
         };
-        if ui::icon_button(ui, "⌨", tip, look, TOOL).clicked() {
+        if ui::icon_button(ui, "⌨", tip, look, tool).clicked() {
             acts.push(Act::AskToType);
         }
     } else if remote && room() {
@@ -1198,7 +1211,7 @@ fn tools(
             Some(false) => (t!("call.cancel_request"), on),
             Some(true) => (t!("call.stop_control"), on),
         };
-        if ui::icon_button(ui, "🖱", tip, look, TOOL).clicked() {
+        if ui::icon_button(ui, "🖱", tip, look, tool).clicked() {
             acts.push(match (&entry.tile, state.remote) {
                 (Tile::Screen(sid), None) => Act::RequestControl(sid.clone()),
                 _ => Act::ReleaseControl,
@@ -1206,7 +1219,7 @@ fn tools(
         }
     }
     if volume && room() {
-        let button = ui::icon_button(ui, "🔊", t!("call.volume"), Look::Plain, TOOL);
+        let button = ui::icon_button(ui, "🔊", t!("call.volume"), Look::Plain, tool);
         ui::menu(&button, |m| {
             mixer::show(m, audio, person, is_person, &entry.peer.apps)
         });
@@ -1220,7 +1233,7 @@ fn tools(
     } else {
         (t!("call.stop_watching"), Act::StopWatching)
     };
-    if stop && room() && ui::icon_button(ui, "⏹", tip, Look::Plain, TOOL).clicked() {
+    if stop && room() && ui::icon_button(ui, "⏹", tip, Look::Plain, tool).clicked() {
         acts.push(act);
     }
 }

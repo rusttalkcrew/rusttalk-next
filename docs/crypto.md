@@ -107,8 +107,21 @@ profile's keys and is still to be removed):
   held in memory, and the password fields' egui state is removed once a screen
   is done with them.
 
-Phone builds offer only the file with password, until they use the phone's own
-key store (see [Phones and tablets](mobile.md#privacy-and-permissions)).
+Phones never use the protected file. iOS keeps the same bytes in the
+data-protection Keychain (generic password, service as above, account
+`identity-v1`, `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`, the app's default
+access group: never in iCloud Keychain, and an encrypted backup restores it only
+to the same iPhone) and falls back to the file with password when the Keychain refuses
+a test write. Android Keystore holds a non-exportable AES-256-GCM key under
+`<service>/identity-v1`. The app prefers StrongBox when available, otherwise it
+uses the regular Android Keystore provider. The provider chooses a fresh 12-byte
+IV for every write. The private, backup-excluded `identity.wrapped` holds the IV,
+ciphertext and 16-byte tag. A disposable alias tests encryption and decryption
+before the app relies on Keystore. The key requires neither user authentication
+nor an unlocked screen, so a lock during background voice cannot prevent a
+key-storage operation. Anyone controlling the running app can use the key.
+Sign-out deletes both the alias and the file. Android removes aliases on
+uninstall. Without the alias, the recovery words are needed.
 
 At start the client looks in both places: the chosen one first, then the other.
 Keys found anywhere are used and `keystore.json` is repaired, so a lost or
@@ -188,6 +201,13 @@ The owner creates space epoch 1 on claim and uploads a self-addressed
 envelope. A channel creator creates channel epoch 1 and uploads its
 self-addressed envelope with channel creation. The identity sync key is used
 exclusively for device sync.
+
+The local recent-view cache derives a separate 32-byte key from the device
+agreement secret using HKDF-SHA256 with info `rusttalk local cache v1`. Files
+use XChaCha20-Poly1305 with a fresh random nonce. Associated data binds the
+cache domain, person, device, pinned server and file type. Only verified
+message bodies enter this cache. Opening it requires the unlocked device
+identity and honors the profile’s signed device removals.
 
 The epoch creator stores a 32-byte commitment with the epoch. It computes
 HMAC-SHA256 keyed by the epoch key over these bytes.
@@ -294,7 +314,8 @@ object_id || epoch (8 bytes, big endian)
 The object type values are server name (1), description (2), icon (3),
 channel name (4), topic (5), category name (6), role name (7), display
 name (8), avatar (9), server emoji or sticker name (10), server emoji
-or sticker picture (11), role display (12), profile bio (13) and emoji pack name (14). Server objects use the raw server ID. Channels
+or sticker picture (11), role display (12), profile bio (13), emoji pack name (14)
+and system message destination (15). Server objects use the raw server ID. Channels
 and categories use their raw 32-byte IDs. Members (display name, avatar and bio) use the raw person ID.
 Server emoji, stickers and emoji packs use their raw 32-byte IDs.
 Role names use the role ID's UTF-8 bytes. New metadata uses the newest
@@ -602,8 +623,8 @@ The server decides membership and channel access. A malicious server
 can add a person it controls, or misrepresent who has access, and induce
 clients to wrap keys to that person's devices. A root signature binds
 a known person's device keys. It cannot show that the person belongs
-in a space or channel. Clients surface every observed member and device
-change with person and device fingerprints. The bot also logs the person
+in a space or channel. Clients show observed joins and leaves in the configured text channel.
+Members with audit access can inspect device changes and their fingerprints. The bot also logs the person
 and device fingerprints for every wrap. The API never receives the
 decryption keys from an honest client. Former readers retain anything
 they already decrypted or saved. Rotation excludes them from subsequent

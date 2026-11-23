@@ -45,7 +45,7 @@ pub fn register(
         };
     }
 
-    // No pin means a domain server with a public certificate: use system trust,
+    // No pin means a domain server with a public certificate: use the configured trust roots,
     // like the HTTPS API and the event socket do.
     let tls = pin.map(pinned_config).transpose()?;
     let http = build_https_client(tls.clone())?;

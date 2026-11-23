@@ -13,6 +13,14 @@ android {
         versionCode = 1
         versionName = providers.gradleProperty("rusttalkVersion").getOrElse("0.0.0")
     }
+    // A test build: not debuggable, so a USB cable doesn't open the app's files, and
+    // R8 can strip GameTextInput's logging of typed text (proguard-rules.pro). Signed
+    // with the local debug key until there are release keys.
+    buildTypes.getByName("release") {
+        isMinifyEnabled = true
+        proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+        signingConfig = signingConfigs.getByName("debug")
+    }
     // build.sh already stripped the debug info; function names stay for panic backtraces.
     packaging.jniLibs.keepDebugSymbols += "**/*.so"
     // Filled by build.sh: the Rust library, the app icon, and LICENSE and NOTICE,
@@ -23,6 +31,7 @@ android {
 }
 
 dependencies {
+    implementation(files("build/rust/libwebrtc.jar"))
     // The version android-activity 0.6 is written against (see docs/mobile.md).
     implementation("androidx.games:games-activity:4.4.0")
     // GameActivity is an AppCompatActivity and needs an AppCompat theme.
