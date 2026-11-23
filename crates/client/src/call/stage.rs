@@ -78,6 +78,27 @@ pub struct Stage {
 }
 
 impl Stage {
+    #[cfg(test)]
+    pub(crate) fn set_presenting_and_full_screen(&mut self, sid: &str) {
+        self.presenting = true;
+        self.full = Some(Tile::Screen(sid.to_owned()));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_presenting(&self) -> bool {
+        self.presenting
+    }
+
+    pub(super) fn replace_video(&mut self, old: &str, new: &str) {
+        for tile in [&mut self.focus, &mut self.full] {
+            if let Some(Tile::Screen(sid)) = tile
+                && sid == old
+            {
+                *sid = new.to_owned();
+            }
+        }
+    }
+
     /// Stopping a screen also drops its big tile: a big screen is received on its
     /// own (see `stage`), so keeping it big would start watching again at once.
     fn stop_watching(&mut self) {
@@ -459,12 +480,16 @@ pub fn stage(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
     let voice = &mut home.voice;
     let video_only = &mut home.layout.split.video_only;
     let all = entries(&ctx, voice, server, &channel, &peers, joined);
+    let retaining = voice
+        .watching
+        .as_ref()
+        .is_some_and(|w| voice.retaining_watch(&w.sid));
     let stage = &mut voice.stage;
     stage
         .minimized
         .retain(|person| peers.iter().any(|p| p.person == *person));
     let presentable = all.iter().position(|e| e.tile.shared());
-    if presentable.is_none() {
+    if presentable.is_none() && !retaining {
         stage.presenting = false;
     }
 
@@ -557,7 +582,10 @@ pub fn stage(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
     {
         acts.push(Act::WatchTerminal(sharer.clone()));
     }
-    if !stage.presenting && big.is_none() {
+    if !stage.presenting
+        && big.is_none()
+        && !matches!(&stage.focus, Some(Tile::Screen(sid)) if voice.watching.as_ref().is_some_and(|watch| watch.sid == *sid))
+    {
         stage.focus = None;
     }
     let share = if stage.presenting {
@@ -1391,7 +1419,15 @@ pub fn full_view(ui: &mut Ui, home: &mut Home) {
             }
         });
     let Some((name, peer, me)) = found else {
-        // It ended or the call did.
+        // A replacement publication may still be arriving after a restart.
+        if matches!(&tile, Tile::Screen(sid) if home.voice.retaining_watch(sid)) {
+            if ui.input(|input| input.key_pressed(Key::Escape))
+                || ui::secondary(ui, t!("call.exit_full_screen")).clicked()
+            {
+                home.voice.stage.full = None;
+            }
+            return;
+        }
         home.voice.stage.full = None;
         return;
     };
@@ -1666,6 +1702,20 @@ mod tests {
         assert_eq!(bubbles_height(5, stage, GAP), 2.0 * (BUBBLE + GAP));
         // Never zero per row, even on a stage narrower than one bubble.
         assert_eq!(bubble(1, area(20.0, 300.0), GAP).left(), GAP);
+    }
+
+    #[test]
+    fn republished_screen_keeps_focus_and_fullscreen() {
+        let mut stage = Stage {
+            focus: Some(Tile::Screen("old".into())),
+            full: Some(Tile::Screen("old".into())),
+            ..Stage::default()
+        };
+        stage.replace_video("other", "unrelated");
+        assert_eq!(stage.focus, Some(Tile::Screen("old".into())));
+        stage.replace_video("old", "new");
+        assert_eq!(stage.focus, Some(Tile::Screen("new".into())));
+        assert_eq!(stage.full, stage.focus);
     }
 
     #[test]

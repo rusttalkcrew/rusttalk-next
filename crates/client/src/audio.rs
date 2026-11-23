@@ -1012,6 +1012,13 @@ impl Audio {
         });
     }
 
+    /// Discard old transport readers without changing microphone, deafen, or PTT settings.
+    pub fn clear_voice_tracks(&self) {
+        let mut mixer = lock(&self.shared().mixer);
+        mixer.tracks.clear();
+        mixer.listening.clear();
+    }
+
     pub fn stop_listening(&self) {
         let mut mixer = lock(&self.shared().mixer);
         mixer.listening.clear();
@@ -2312,6 +2319,39 @@ mod tests {
             }
         }
         assert_eq!(frames, 100);
+    }
+
+    #[test]
+    fn replacing_transport_clears_old_audio_without_resetting_local_choices() {
+        let data = tempfile::tempdir().unwrap();
+        let audio = Audio::new(data.path()).unwrap();
+        audio.shared().muted.store(true, Relaxed);
+        audio.shared().deafened.store(true, Relaxed);
+        audio.shared().key_down.store(true, Relaxed);
+        let mut mixer = lock(&audio.shared().mixer);
+        mixer.listening.insert("old".into());
+        mixer.tracks.insert(
+            "old".into(),
+            Track {
+                serial: 1,
+                gain: 1.0,
+                stream: ([1; 32], None),
+                queue: VecDeque::from([1000; FRAME]),
+                primed: true,
+                loud: 0,
+            },
+        );
+        drop(mixer);
+        audio.clear_voice_tracks();
+        assert!(audio.muted() && audio.deafened());
+        assert!(audio.shared().key_down.load(Relaxed));
+        let mut mixer = lock(&audio.shared().mixer);
+        assert!(mixer.tracks.is_empty() && mixer.listening.is_empty());
+        assert!(
+            mix_tracks(&mut mixer, false, None)
+                .iter()
+                .all(|&sample| sample == 0)
+        );
     }
 
     #[test]

@@ -23,6 +23,7 @@ Unreleased under the new version and date.
 - While you are in a voice call, RustTalk keeps you Online even when another app has the focus.
 - Reopen the last chat picture instantly, even if the connection drops after it loads.
 - Unavailable servers show an exclamation mark in the server sidebar until they reconnect.
+- Recover voice calls and watched video after a server restart, keeping mute settings and asking again before shared audio plays.
 
 ## v0.2.1 - 2026-11-23
 

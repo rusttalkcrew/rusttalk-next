@@ -1607,3 +1607,6 @@ phone.withdraw = Mein Mikrofon nicht mehr teilen
 
 phone.withdrawing = Freigabe wird beendet… Mikrofon bis zur Bestätigung pausiert.
 phone.withdraw_failed = Beenden nicht bestätigt. Mikrofon bleibt pausiert; erneuter Versuch.
+
+voice.recovery_failed = Die Verbindung konnte nicht wiederhergestellt werden. Tritt dem Anruf erneut bei.
+voice.recovery_denied = Du kannst diesem Anruf nicht erneut beitreten. Dein Zugriff hat sich geändert.

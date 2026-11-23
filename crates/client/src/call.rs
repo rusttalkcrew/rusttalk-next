@@ -180,6 +180,9 @@ pub enum Sharing {
 /// The screen this device receives; one at a time.
 pub struct Watching {
     pub sid: String,
+    missing_since: Option<Instant>,
+    /// Brief window after `Reconnecting -> Connected` for a remote sharer to republish.
+    pub(crate) grace_until: Option<Instant>,
     texture: Option<TextureHandle>,
 }
 
@@ -190,7 +193,54 @@ enum Calibration {
     Done(String),
 }
 
+impl Watching {
+    /// Keep watch intent while reconnecting (bounded to 180s) or during the brief
+    /// post-recovery grace window, never during a normal stop-share in a healthy call.
+    fn expired(&mut self, shared: bool, reconnecting: bool, now: Instant) -> bool {
+        if shared {
+            self.missing_since = None;
+            self.grace_until = None;
+            return false;
+        }
+        if reconnecting {
+            return now.saturating_duration_since(*self.missing_since.get_or_insert(now))
+                >= Duration::from_secs(180);
+        }
+        if let Some(until) = self.grace_until {
+            return now >= until;
+        }
+        true
+    }
+}
+
 impl Voice {
+    pub(crate) fn retaining_watch(&self, sid: &str) -> bool {
+        let reconnecting = self
+            .call
+            .as_ref()
+            .is_some_and(|call| call.state == CallState::Reconnecting);
+        self.watching
+            .as_ref()
+            .is_some_and(|w| w.sid == sid && (reconnecting || w.grace_until.is_some()))
+    }
+
+    pub fn replace_video(&mut self, old: &str, new: &str) {
+        if let Some(watching) = &mut self.watching
+            && watching.sid == old
+        {
+            watching.sid = new.to_owned();
+            watching.texture = None;
+            watching.missing_since = None;
+        }
+        if self.cameras.remove(old).is_some() {
+            self.cameras.entry(new.to_owned()).or_insert(None);
+        }
+        if self.shown.remove(old) {
+            self.shown.insert(new.to_owned());
+        }
+        self.stage.replace_video(old, new);
+    }
+
     pub fn new(audio: Audio, video: Video, runtime: tokio::runtime::Handle) -> Self {
         Self {
             audio,
@@ -495,8 +545,13 @@ pub fn frame(ctx: &egui::Context, home: &mut Home) {
     }
     remote::frame(home, ctx.input(|input| input.time));
     terminal::frame(home, ctx.input(|input| input.time));
-    // Stop watching a screen once it is no longer shared.
+    // Keep watch intent through a bounded outage while the owner republishes.
     if let Some(watching) = &home.voice.watching {
+        let reconnecting = home
+            .voice
+            .call
+            .as_ref()
+            .is_some_and(|call| call.state == CallState::Reconnecting);
         let shared = call_server(home)
             .zip(home.voice.call.as_ref())
             .and_then(|(server, call)| server.voice.get(&call.channel))
@@ -505,7 +560,8 @@ pub fn frame(ctx: &egui::Context, home: &mut Home) {
                     .iter()
                     .any(|peer| peer.screens.iter().any(|s| s.sid == watching.sid))
             });
-        if !shared {
+        let watching = home.voice.watching.as_mut().expect("checked above");
+        if watching.expired(shared, reconnecting, Instant::now()) {
             stop_watching(home);
         }
     }
@@ -567,6 +623,8 @@ fn watch(home: &mut Home, screen: &Screen) {
         server.send(Command::Watch(screen.sid.clone(), true));
         home.voice.watching = Some(Watching {
             sid: screen.sid.clone(),
+            missing_since: None,
+            grace_until: None,
             texture: None,
         });
     }
@@ -1621,6 +1679,36 @@ mod tests {
             }
         }
         assert!(screen_qualities().into_iter().any(|q| q.0 == Some(1440)));
+    }
+
+    #[test]
+    fn watching_survives_reconnecting_and_grace_but_expires_on_normal_stop() {
+        let now = Instant::now();
+        let mut watch = Watching {
+            sid: "old".into(),
+            texture: None,
+            missing_since: None,
+            grace_until: None,
+        };
+        // Normal healthy call: stop-share expires immediately.
+        assert!(watch.expired(false, false, now));
+
+        // While reconnecting: retained up to 180 seconds, then expires.
+        assert!(!watch.expired(false, true, now));
+        assert!(!watch.expired(false, true, now + Duration::from_secs(179)));
+        assert!(!watch.expired(true, true, now + Duration::from_secs(180)));
+        assert!(!watch.expired(false, true, now + Duration::from_secs(181)));
+        assert!(watch.expired(false, true, now + Duration::from_secs(361)));
+
+        // Brief post-recovery grace window retains until deadline, then clears once seen again.
+        watch.missing_since = None;
+        watch.grace_until = Some(now + Duration::from_secs(15));
+        assert!(!watch.expired(false, false, now + Duration::from_secs(14)));
+        assert!(watch.expired(false, false, now + Duration::from_secs(15)));
+        watch.grace_until = Some(now + Duration::from_secs(15));
+        assert!(!watch.expired(true, false, now + Duration::from_secs(5)));
+        assert!(watch.grace_until.is_none());
+        assert!(watch.expired(false, false, now + Duration::from_secs(6)));
     }
 
     #[test]

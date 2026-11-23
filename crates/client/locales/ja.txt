@@ -1607,3 +1607,6 @@ phone.withdraw = マイク音声の共有を停止
 
 phone.withdrawing = 共有を停止中…電話側の確認までマイクを一時停止しています。
 phone.withdraw_failed = 停止を確認できません。マイクを一時停止したまま再試行します。
+
+voice.recovery_failed = 再接続できませんでした。通話に参加し直してください。
+voice.recovery_denied = この通話に再参加できませんでした。アクセス権が変更されています。

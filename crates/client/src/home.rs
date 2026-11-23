@@ -1551,12 +1551,34 @@ impl Home {
                 }
                 match state {
                     Some(state) => {
+                        let was_reconnecting = call.state == crate::server::CallState::Reconnecting;
+                        call.state = state;
                         if state == crate::server::CallState::Reconnecting {
                             self.voice.sounds.reconnecting();
+                            if let Some(watching) = &mut self.voice.watching {
+                                watching.grace_until = None;
+                            }
+                        } else if was_reconnecting
+                            && state == crate::server::CallState::Connected
+                            && let Some(watching) = &mut self.voice.watching
+                        {
+                            // Remote sharers may finish rejoining and republishing shortly after us.
+                            watching.grace_until = Some(
+                                std::time::Instant::now() + std::time::Duration::from_secs(15),
+                            );
                         }
-                        call.state = state;
                     }
                     None => self.voice.end_call(),
+                }
+            }
+            Update::VideoReplaced(address, channel, old, new) => {
+                if self
+                    .voice
+                    .call
+                    .as_ref()
+                    .is_some_and(|call| call.server == address && call.channel == channel)
+                {
+                    self.voice.replace_video(&old, &new);
                 }
             }
             Update::CanTalk(address, channel, can_talk) => {
