@@ -10,7 +10,9 @@ use ed25519_dalek::SigningKey;
 use rusttalk_core::identity::random_bytes;
 use sha2::{Digest, Sha256};
 use sqlx::{
-    Sqlite, SqliteConnection, SqlitePool, Transaction, query, query_scalar,
+    Sqlite, SqliteConnection, SqlitePool, Transaction,
+    migrate::Migrate,
+    query, query_scalar,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
 };
 use zeroize::Zeroizing;
@@ -28,7 +30,21 @@ pub async fn open(dir: &Path) -> Result<SqlitePool> {
         .max_connections(4)
         .connect_with(options)
         .await?;
-    sqlx::migrate!().run(&pool).await?;
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    tx.ensure_migrations_table().await?;
+    query("CREATE TEMP TABLE upgrading_to_calendar AS SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM _sqlx_migrations WHERE version = 34)")
+        .execute(&mut *tx).await?;
+    // Only this exact preview migration moved. SQLx still validates every other checksum.
+    let preview = sha2::Sha384::digest(include_bytes!("../preview/0035_calendar_delegation.sql"));
+    query("DELETE FROM _sqlx_migrations WHERE version = 35 AND success AND checksum = ?")
+        .bind(&preview[..])
+        .execute(&mut *tx)
+        .await?;
+    sqlx::migrate!().run(&mut *tx).await?;
+    query("DROP TABLE IF EXISTS temp.upgrading_to_calendar")
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
     crate::metadata::hash_pictures(&pool).await?;
     Ok(pool)
 }

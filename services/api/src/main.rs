@@ -265,7 +265,27 @@ async fn serve(app: App) -> io::Result<()> {
     voice::start_enforcer(&app);
     let publisher = tokio::spawn(index::refresh(app.clone(), app.listing_changed.subscribe()));
     let file_expiry = tokio::spawn(files::expire(app.clone()));
-    let app = Router::new()
+    let app = routes(app)
+        .layer(middleware::from_fn(finish_changes))
+        .layer(middleware::from_fn(log_request))
+        .layer(PropagateRequestIdLayer::x_request_id())
+        .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
+        .layer(middleware::map_request(|mut request: Request| async {
+            request.headers_mut().remove("x-request-id");
+            request
+        }));
+
+    let listener = TcpListener::bind("0.0.0.0:8080").await?;
+    tracing::info!("API listening on port 8080");
+    let result = axum::serve(listener, app).await;
+    expiry.abort();
+    publisher.abort();
+    file_expiry.abort();
+    result
+}
+
+fn routes(app: App) -> Router {
+    Router::new()
         .route("/v1/health", get(|| async { "ok\n" }))
         .route("/v1/server-info", get(members::server_info))
         .route("/v1/settings/updates", get(updates::status))
@@ -422,22 +442,6 @@ async fn serve(app: App) -> io::Result<()> {
                 .layer(RequestBodyLimitLayer::new(messages::BODY_LIMIT)),
         )
         .with_state(app)
-        .layer(middleware::from_fn(finish_changes))
-        .layer(middleware::from_fn(log_request))
-        .layer(PropagateRequestIdLayer::x_request_id())
-        .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
-        .layer(middleware::map_request(|mut request: Request| async {
-            request.headers_mut().remove("x-request-id");
-            request
-        }));
-
-    let listener = TcpListener::bind("0.0.0.0:8080").await?;
-    tracing::info!("API listening on port 8080");
-    let result = axum::serve(listener, app).await;
-    expiry.abort();
-    publisher.abort();
-    file_expiry.abort();
-    result
 }
 
 /// Changes running at once. Each keeps running after its client leaves, so this bounds what

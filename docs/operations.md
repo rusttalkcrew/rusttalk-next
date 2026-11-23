@@ -66,6 +66,12 @@ The volumes, server key and TLS pin carry over. To roll back, set the previous
 version again. Back up first, because a newer API may migrate the database.
 After migration 0029, the v0.1.9 server image cannot start against the upgraded database. Restore the pre-upgrade backup to roll back to v0.1.9.
 
+The calendar preview used migration 0035 for delegation. Startup recognizes
+its original checksum and moves its recorded Moderator grants into 0037.
+A database already running a calendar preview has no record of its original
+custom-role grants. To retain those grants automatically, upgrade from a
+pre-calendar backup. Restoring a backup discards changes made after it.
+
 ## Behind your own reverse proxy
 
 If the host already runs a reverse proxy on 80/443, let it terminate TLS for a
