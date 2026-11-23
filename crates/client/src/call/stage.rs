@@ -1015,7 +1015,7 @@ fn name_tag(ui: &mut Ui, rect: Rect, entry: &Entry, audio: &crate::audio::Audio)
     let status = match () {
         _ if !is_person => VoiceStatus::default(),
         _ if entry.me => VoiceStatus {
-            muted: audio.muted() && !audio.deafened(),
+            muted: audio.display_muted() && !audio.deafened(),
             deafened: audio.deafened(),
         },
         _ => entry.peer.status,

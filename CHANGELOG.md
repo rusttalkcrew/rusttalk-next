@@ -21,6 +21,7 @@ Unreleased under the new version and date.
 - New look for the first-start screens, with a Back button, Copy for your recovery words and Paste to fill them in
 - Phones: tapping a text field that is already open no longer closes and reopens the keyboard
 - iPhone: the keyboard no longer covers what you type, Return works, a tap outside closes the keyboard, and the edges match the theme
+- iPhone calls ask for microphone access and can continue with the screen locked.
 - Android asks for microphone access when you join a voice call.
 - Share your front or back camera in calls on Android and iPhone.
 - Experimental Android test build (APK) and unsigned iOS build (IPA)

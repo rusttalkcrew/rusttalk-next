@@ -55,7 +55,7 @@ pub use stage::{Stage, full_view, stage};
 pub struct Voice {
     pub audio: Audio,
     pub call: Option<Call>,
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     pending_join: Option<(url::Url, Id, bool)>,
     pub sounds: sounds::Detector,
     /// Ping history and packet loss for the connection popup.
@@ -183,7 +183,7 @@ impl Voice {
         Self {
             audio,
             call: None,
-            #[cfg(target_os = "android")]
+            #[cfg(any(target_os = "android", target_os = "ios"))]
             pending_join: None,
             sounds: sounds::Detector::default(),
             link: Link::default(),
@@ -274,7 +274,7 @@ pub fn join(home: &mut Home, index: usize, channel: Id) {
     if home.voice.in_call(&home.servers[index], &channel) {
         return;
     }
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     {
         let request = home
             .voice
@@ -283,12 +283,14 @@ pub fn join(home: &mut Home, index: usize, channel: Id) {
             .is_none_or(|pending| pending.2);
         home.voice.pending_join = Some((home.servers[index].address.clone(), channel, request));
     }
-    #[cfg(not(target_os = "android"))]
-    connect(home, index, channel);
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        leave(home);
+        connect(home, index, channel);
+    }
 }
 
 fn connect(home: &mut Home, index: usize, channel: Id) {
-    leave(home);
     #[cfg(target_os = "android")]
     crate::android::communication_mode(true);
     let server = &home.servers[index];
@@ -316,9 +318,13 @@ pub fn leave(home: &mut Home) {
 
 /// Once per frame: push-to-talk, the settings meter, and repaints for live indicators.
 pub fn frame(ctx: &egui::Context, home: &mut Home) {
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     if let Some((address, channel, request)) = home.voice.pending_join.take() {
-        match crate::android::voice_permission(request) {
+        #[cfg(target_os = "android")]
+        use crate::android::voice_permission;
+        #[cfg(target_os = "ios")]
+        use crate::ios::voice::voice_permission;
+        match voice_permission(request) {
             0 => {
                 home.voice.pending_join = Some((address, channel, false));
                 ctx.request_repaint_after(Duration::from_millis(100));
@@ -329,6 +335,16 @@ pub fn frame(ctx: &egui::Context, home: &mut Home) {
                     .iter()
                     .position(|s| s.address == address && s.is_voice(&channel))
                 {
+                    leave(home);
+                    #[cfg(target_os = "ios")]
+                    {
+                        if let Err(error) = home.voice.audio.prepare_ios_voice() {
+                            tracing::warn!(%error, "iOS voice session failed");
+                            home.toast =
+                                Some((t!("voice.unavailable").into(), ctx.input(|i| i.time) + 6.0));
+                            return;
+                        }
+                    }
                     connect(home, index, channel);
                 }
             }
@@ -489,7 +505,7 @@ pub fn room_list(ui: &mut Ui, home: &Home, server: &Server, channel: &Id) -> Opt
             }
             let status = if peer.person == server.dir.me && home.voice.in_call(server, channel) {
                 VoiceStatus {
-                    muted: home.voice.audio.muted(),
+                    muted: home.voice.audio.display_muted(),
                     deafened: home.voice.audio.deafened(),
                 }
             } else {

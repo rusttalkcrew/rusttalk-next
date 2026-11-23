@@ -122,6 +122,8 @@ jni = "0.22"
 livekit-jni = { package = "jni", version = "0.21" }
 
 [target.'cfg(target_os = "ios")'.dependencies]
+block2 = "0.6"
+objc2-avf-audio = { version = "0.3", default-features = false, features = ["std", "AVAudioSession", "AVAudioSessionRoute", "AVAudioSessionTypes", "block2"] }
 # The data-protection Keychain for the keys (keystore.rs `IosKeychain`); keyring's
 # `v1` API has no iOS store.
 apple-native-keyring-store = { version = "1", features = ["protected"] }
