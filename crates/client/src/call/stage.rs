@@ -370,6 +370,7 @@ fn entries<'p>(
     ctx: &egui::Context,
     voice: &mut Voice,
     server: &Server,
+    channel: &Id,
     peers: &'p [Peer],
     joined: bool,
 ) -> Vec<Entry<'p>> {
@@ -378,7 +379,7 @@ fn entries<'p>(
     for peer in peers {
         let name = peer.name(server);
         let me = peer.person == server.dir.me;
-        let speaking = voice.speaking(server, &peer.person);
+        let speaking = voice.speaking(server, channel, &peer.person);
         let camera = joined && peer.camera.is_some();
         let video = camera && (me || !voice.hidden.contains(&peer.person));
         let sharing = if me {
@@ -457,7 +458,7 @@ pub fn stage(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
     let ctx = ui.ctx().clone();
     let voice = &mut home.voice;
     let video_only = &mut home.layout.split.video_only;
-    let all = entries(&ctx, voice, server, &peers, joined);
+    let all = entries(&ctx, voice, server, &channel, &peers, joined);
     let stage = &mut voice.stage;
     stage
         .minimized

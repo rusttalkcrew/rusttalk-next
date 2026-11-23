@@ -20,7 +20,7 @@ use crate::{
     camera::{Camera, Change},
     denoise, files,
     home::{
-        Home, Tab, face,
+        Home, Tab,
         person::{self, Person, Pick},
     },
     mic_check::Verdict,
@@ -298,11 +298,35 @@ impl Voice {
             .is_some_and(|call| call.server == server.address && call.channel == *channel)
     }
 
-    fn speaking(&self, server: &Server, person: &Id) -> bool {
+    /// Whether this device is actively transmitting voice in its current call.
+    pub(crate) fn local_speaking(&self, servers: &[Server]) -> bool {
+        let Some(call) = &self.call else {
+            return false;
+        };
+        let Some(server) = servers.iter().find(|s| s.address == call.server) else {
+            return false;
+        };
+        self.local_speaking_in(server, &call.channel)
+    }
+
+    fn local_speaking_in(&self, server: &Server, channel: &Id) -> bool {
+        let Some(call) = &self.call else {
+            return false;
+        };
+        call.server == server.address
+            && call.channel == *channel
+            && call.state == CallState::Connected
+            && call.can_talk
+            && !server.voice_muted(&server.dir.me)
+            && !self.audio.channel_mic_paused()
+            && self.audio.talking()
+    }
+
+    fn speaking(&self, server: &Server, channel: &Id, person: &Id) -> bool {
         if *person == server.dir.me {
-            self.audio.talking()
+            self.local_speaking_in(server, channel)
         } else {
-            self.audio.speaking(person)
+            self.in_call(server, channel) && self.audio.speaking(person)
         }
     }
 }
@@ -591,10 +615,8 @@ pub fn room_list(ui: &mut Ui, home: &Home, server: &Server, channel: &Id) -> Opt
         let name = peer.name(server);
         let row = ui.horizontal(|ui| {
             ui.add_space(22.0);
-            let face = face(ui, &server.dir, &peer.person, &name, 22.0, true);
-            if home.voice.speaking(server, &peer.person) {
-                ring(ui, face.rect);
-            }
+            let speaking = home.voice.speaking(server, channel, &peer.person);
+            crate::home::face_speaking(ui, &server.dir, &peer.person, &name, 22.0, true, speaking);
             let status = if peer.person == server.dir.me && home.voice.in_call(server, channel) {
                 VoiceStatus {
                     muted: home.voice.audio.display_muted(),
@@ -781,11 +803,7 @@ fn sound_mark(ui: &mut Ui, glyph: &str, tip: &str) {
 }
 
 fn ring(ui: &Ui, rect: egui::Rect) {
-    ui.painter().circle_stroke(
-        rect.center(),
-        rect.width() / 2.0 + 2.0,
-        Stroke::new(2.0, ui::colors(ui).success),
-    );
+    ui::speaking_outline(ui, rect);
 }
 
 /// Each file offered in the call with what can be done with it.

@@ -2293,20 +2293,72 @@ fn empty(ui: &mut Ui, title: &str, hint: &str) {
     });
 }
 
-/// A round server button that turns into a rounded square when hovered or open.
+/// Corner radius of a sidebar rail avatar: rounded square at rest, subtly
+/// tightened on hover or selection while keeping the same hit target.
+fn rail_radius(active: f32) -> f32 {
+    ui::avatar_radius(RAIL_BUTTON) - active * 2.0
+}
+
+/// Subtle outer border on a hovered or selected rail icon, without shifting layout.
+fn paint_rail_outline(
+    ui: &Ui,
+    rect: Rect,
+    radius: f32,
+    hover: f32,
+    selected: f32,
+    is_picture: bool,
+) {
+    let c = ui::colors(ui);
+    let accent = ui::accent(ui);
+    let hover_color = c
+        .muted
+        .lerp_to_gamma(c.strong, 0.35)
+        .gamma_multiply(0.75 * hover);
+    let border = if is_picture {
+        let hover_target = if c.dark { accent.tint } else { accent.strong };
+        let picked = accent.base.lerp_to_gamma(hover_target, 0.35 * hover);
+        hover_color.lerp_to_gamma(picked, selected)
+    } else {
+        hover_color.gamma_multiply(1.0 - selected)
+    };
+    if border.a() > 0 {
+        let width = if is_picture {
+            1.5 + 0.5 * selected
+        } else {
+            1.5
+        };
+        ui.painter().rect_stroke(
+            rect.expand(1.5),
+            radius + 1.5,
+            Stroke::new(width, border),
+            StrokeKind::Middle,
+        );
+    }
+}
+
+/// A rounded-square rail button (server initials, DMs or "+") with subtle hover and selection states.
 fn rail_button(ui: &mut Ui, text: &str, selected: bool) -> Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(RAIL_BUTTON), Sense::click());
     let c = ui::colors(ui);
     let accent = ui::accent(ui);
     let hover = ui.ctx().animate_bool_with_time(
         response.id.with("hover"),
-        response.hovered() || selected,
+        response.hovered(),
         ui::HOVER_SECONDS,
     );
-    let radius = RAIL_BUTTON / 2.0 - hover * (RAIL_BUTTON / 2.0 - 16.0);
-    let fill = c.main.lerp_to_gamma(accent.base, hover);
-    let glyph = c.text.lerp_to_gamma(ui::ON_FILL, hover);
+    let selected_t =
+        ui.ctx()
+            .animate_bool_with_time(response.id.with("selected"), selected, ui::STATE_SECONDS);
+    let radius = rail_radius(hover.max(selected_t));
+    let idle = c.main.lerp_to_gamma(accent.base, 0.16 * hover);
+    let picked = accent.base.lerp_to_gamma(ui::ON_FILL, 0.10 * hover);
+    let fill = idle.lerp_to_gamma(picked, selected_t);
+    let glyph = c
+        .text
+        .lerp_to_gamma(c.strong, hover)
+        .lerp_to_gamma(ui::ON_FILL, selected_t);
     ui.painter().rect_filled(rect, radius, fill);
+    paint_rail_outline(ui, rect, radius, hover, selected_t, false);
     ui.painter().text(
         rect.center(),
         Align2::CENTER_CENTER,
@@ -2346,6 +2398,29 @@ fn rail_label(button: Response, name: &str, unavailable: bool) -> Response {
     button
 }
 
+/// A rounded-square server picture in the sidebar rail, with subtle hover and selection feedback.
+fn rail_icon(ui: &mut Ui, icon: &Picture, selected: bool) -> Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(RAIL_BUTTON), Sense::click());
+    let c = ui::colors(ui);
+    let hover = ui.ctx().animate_bool_with_time(
+        response.id.with("hover"),
+        response.hovered(),
+        ui::HOVER_SECONDS,
+    );
+    let selected_t =
+        ui.ctx()
+            .animate_bool_with_time(response.id.with("selected"), selected, ui::STATE_SECONDS);
+    let radius = rail_radius(hover.max(selected_t));
+    paint_hovered(ui, rect, icon, radius);
+    if hover > 0.0 {
+        ui.painter()
+            .rect_filled(rect, radius, c.strong.gamma_multiply(0.08 * hover));
+    }
+    paint_rail_outline(ui, rect, radius, hover, selected_t, true);
+    ui::focus_ring(ui, &response, radius as u8);
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 fn server_rail(ui: &mut Ui, home: &mut Home) {
     ui.vertical_centered(|ui| {
         ui.add_space(4.0);
@@ -2365,14 +2440,7 @@ fn server_rail(ui: &mut Ui, home: &mut Home) {
             let server = &home.servers[index];
             let selected = home.view == View::Server(index);
             let button = match &server.dir.icon {
-                Some(icon) => {
-                    let (rect, button) =
-                        ui.allocate_exact_size(Vec2::splat(RAIL_BUTTON), Sense::click());
-                    let radius = if selected { 16.0 } else { 24.0 };
-                    paint_hovered(ui, rect, icon, radius);
-                    ui::focus_ring(ui, &button, radius as u8);
-                    button
-                }
+                Some(icon) => rail_icon(ui, icon, selected),
                 None => rail_button(ui, &initials(server.name()), selected),
             };
             let unavailable = matches!(server.status, Status::Offline | Status::Stopped(_));
@@ -3060,7 +3128,8 @@ pub fn avatar(ui: &mut Ui, person: &Id, name: &str, size: f32) -> Response {
 fn paint_avatar(ui: &Ui, rect: Rect, person: &Id, name: &str) {
     let size = rect.width();
     let color: Color32 = Hsva::new(f32::from(person[0]) / 255.0, 0.45, 0.6, 1.0).into();
-    ui.painter().circle_filled(rect.center(), size / 2.0, color);
+    ui.painter()
+        .rect_filled(rect, ui::avatar_radius(size), color);
     ui.painter().text(
         rect.center(),
         Align2::CENTER_CENTER,
@@ -3075,7 +3144,7 @@ fn avatar_atom(member: &Member, name: &str) -> egui::Atom<'static> {
     if let Some(picture) = &member.avatar {
         let picture = picture.clone();
         return egui::Atom::paint(Vec2::splat(size), move |ui, args| {
-            paint_hovered(ui, args.rect, &picture, size / 2.0);
+            paint_hovered(ui, args.rect, &picture, ui::avatar_radius(size));
         });
     }
     let person = member.person;
@@ -3095,8 +3164,21 @@ pub fn face(
     size: f32,
     dot: bool,
 ) -> Response {
+    face_speaking(ui, dir, person, name, size, dot, false)
+}
+
+/// `face` with an optional speaking outline painted beneath any presence dot.
+pub fn face_speaking(
+    ui: &mut Ui,
+    dir: &Directory,
+    person: &Id,
+    name: &str,
+    size: f32,
+    dot: bool,
+    speaking: bool,
+) -> Response {
     let member = dir.members.iter().find(|m| m.person == *person);
-    member_face(ui, member, person, name, size, dot)
+    member_face_speaking(ui, member, person, name, size, dot, speaking)
 }
 
 /// `face` for a member already looked up (`None` when not a member).
@@ -3108,14 +3190,29 @@ fn member_face(
     size: f32,
     dot: bool,
 ) -> Response {
+    member_face_speaking(ui, member, person, name, size, dot, false)
+}
+
+fn member_face_speaking(
+    ui: &mut Ui,
+    member: Option<&Member>,
+    person: &Id,
+    name: &str,
+    size: f32,
+    dot: bool,
+    speaking: bool,
+) -> Response {
     let response = match member.and_then(|m| m.avatar.as_ref()) {
         Some(picture) => {
             let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
-            paint_hovered(ui, rect, picture, size / 2.0);
+            paint_hovered(ui, rect, picture, ui::avatar_radius(size));
             response
         }
         None => avatar(ui, person, name, size),
     };
+    if speaking {
+        ui::speaking_outline(ui, response.rect);
+    }
     if dot {
         let c = ui::colors(ui);
         let color = presence_color(c, member.map_or(Presence::Offline, |m| m.presence));
@@ -6553,6 +6650,7 @@ mod tests {
     const ANN: Id = [7; 32];
     const PROJECTS: Id = [3; 32];
 
+    mod avatars;
     mod emoji;
     mod image_reload;
     mod rail;

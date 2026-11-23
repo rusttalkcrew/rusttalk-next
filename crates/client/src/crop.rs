@@ -176,8 +176,7 @@ impl Crop {
         })
     }
 
-    /// The crop dialog, with a round preview for profile pictures and a rounded
-    /// square for server icons.
+    /// The crop dialog, with a rounded-square preview matching how avatars and icons render.
     pub fn show(&mut self, ctx: &Context) -> Outcome {
         let title = match self.target {
             Target::Avatar => t!("crop.avatar"),
@@ -238,33 +237,22 @@ impl Crop {
             let c = ui::colors(ui);
             let painter = ui.painter_at(rect);
             painter.image(texture.id(), rect, self.square.uv(), Color32::WHITE);
-            // Dim what falls outside the round or rounded mask: a wide outside
-            // stroke covers the corners and the clip keeps it in the view.
+            // Dim what falls outside the rounded mask: a wide outside stroke covers the
+            // corners and the clip keeps it in the view.
             let dim = c.main.gamma_multiply(0.85);
             let edge = Stroke::new(2.0, ui::accent(ui).base);
-            match self.target {
-                Target::Avatar => {
-                    let r = VIEW / 2.0;
-                    let wide = r * (std::f32::consts::SQRT_2 - 1.0) + 2.0;
-                    painter.circle_stroke(rect.center(), r + wide / 2.0, Stroke::new(wide, dim));
-                    painter.circle_stroke(rect.center(), r - 1.0, edge);
-                }
-                Target::Icon(_) | Target::Emoji { .. } => {
-                    let corner = if matches!(self.target, Target::Icon(_)) {
-                        0.25
-                    } else {
-                        0.08
-                    };
-                    let round = CornerRadius::same((VIEW * corner) as u8);
-                    painter.rect_stroke(
-                        rect,
-                        round,
-                        Stroke::new(VIEW * 0.3, dim),
-                        StrokeKind::Outside,
-                    );
-                    painter.rect_stroke(rect, round, edge, StrokeKind::Inside);
-                }
-            }
+            let radius = match self.target {
+                Target::Avatar | Target::Icon(_) => ui::avatar_radius(VIEW),
+                Target::Emoji { .. } => VIEW * 0.08,
+            };
+            let round = CornerRadius::same(radius.round() as u8);
+            painter.rect_stroke(
+                rect,
+                round,
+                Stroke::new(VIEW * 0.3, dim),
+                StrokeKind::Outside,
+            );
+            painter.rect_stroke(rect, round, edge, StrokeKind::Inside);
             ui.add_space(ui::SPACE_S);
             ui.horizontal(|ui| {
                 ui.label(t!("crop.zoom"));
