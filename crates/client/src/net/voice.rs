@@ -27,6 +27,7 @@ use url::Url;
 use super::{
     Command, Ctx, LiveOffer, State, Update,
     control::{self, ControlView},
+    phone,
     terminal::{self, Hosting},
 };
 use crate::{
@@ -44,6 +45,9 @@ pub(super) struct Live {
     deafened: Option<bool>,
     /// Apps this device shares, each with its own track.
     shares: Vec<Share>,
+    /// The phone call bridged in, shown like a shared app.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    pub(super) phone: Option<phone::Phone>,
     /// App captures still starting; `app_started` publishes them.
     pending: Vec<Pending>,
     /// The sound the screen share should carry; started once the screen is live.
@@ -136,6 +140,7 @@ pub(super) fn voice_only(command: &Command) -> bool {
             | Command::CancelFile(_)
     ) || control::is_control(command)
         || terminal::is_terminal(command)
+        || phone::is_phone(command)
 }
 
 /// Run a `voice_only` command. Returns the call's channel when its roster changed.
@@ -174,6 +179,11 @@ pub(super) async fn voice_command(
             tracing::info!(error = %format_args!("{error:#}"), "ringing the call failed");
         }
         return Ok(None);
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    if let Command::PhoneCall(dial) = command {
+        let changed = phone::call(ctx, live, *dial).await;
+        return Ok(changed.then_some(live.channel));
     }
     let changed = match command {
         Command::StopApp(id) => {
@@ -883,13 +893,14 @@ fn send_roster(ctx: &Ctx, url: &Url, ids: &HashMap<String, Id>, state: &State, c
             for names in apps.values_mut() {
                 names.sort_by(|a, b| a.1.cmp(&b.1));
             }
-            apps.insert(
-                me,
-                live.shares
-                    .iter()
-                    .map(|share| (share.sid.clone(), share.app.name.clone()))
-                    .collect(),
-            );
+            let mine = live
+                .shares
+                .iter()
+                .map(|share| (share.sid.clone(), share.app.name.clone()));
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            let mine = mine
+                .chain((live.phone.iter()).map(|phone| (phone.sid.clone(), phone.label.clone())));
+            apps.insert(me, mine.collect());
             for video in live.room.remote_video_tracks() {
                 let Some(person) = ids.get(video.participant.as_str()) else {
                     continue;
@@ -1186,6 +1197,7 @@ pub(super) async fn stop_finished_shares(
         .into_iter()
         .partition(|share| share.capture.is_finished());
     live.shares = kept;
+    let phone_ended = phone::stop_ended(ctx, live).await;
     if live.host.controller().is_some()
         && live
             .screen
@@ -1202,7 +1214,7 @@ pub(super) async fn stop_finished_shares(
         tracing::info!("screen capture ended");
         stop_screen(ctx, live).await;
         ctx.send(Update::Sharing(false));
-    } else if ended.is_empty() {
+    } else if ended.is_empty() && !phone_ended {
         return;
     }
     for share in &mut ended {
@@ -1447,6 +1459,8 @@ pub(super) async fn start_call(
         channel,
         deafened: Some(false),
         shares: Vec::new(),
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        phone: None,
         pending: Vec::new(),
         stream_audio: Vec::new(),
         apps: HashMap::new(),

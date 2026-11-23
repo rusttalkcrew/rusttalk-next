@@ -303,6 +303,8 @@ pub enum Tab {
     Devices,
     Notifications,
     Shortcuts,
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    Phone,
     #[cfg(target_os = "android")]
     Advanced,
     Updates,
@@ -1655,6 +1657,8 @@ impl Home {
             update @ (Update::AppStopped(_) | Update::StreamAudio(_)) => {
                 call::shared_sound(&mut self.voice, update);
             }
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            Update::Phone(event) => call::phone::update(&mut self.voice.phone, event),
             Update::Sharing(on) => {
                 // A late result after Stop or leaving doesn't turn the chip back on.
                 if self.voice.sharing != call::Sharing::Off || !on {
@@ -2178,6 +2182,8 @@ pub fn show(
     admin::window(ui.ctx(), home);
     files::viewer(ui.ctx(), &mut home.files);
     call::screen_dialog(ui.ctx(), home);
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    call::phone::windows(ui.ctx(), home);
     call::terminal::dialog(ui.ctx(), home);
     call::frame(ui.ctx(), home);
     let action = crate::settings::show(ui.ctx(), home, updates, keystore);

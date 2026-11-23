@@ -54,6 +54,7 @@ mod control;
 mod directory;
 mod files;
 mod find;
+mod phone;
 mod recent;
 pub mod terminal;
 mod voice;
@@ -231,6 +232,9 @@ pub enum Command {
     ShareApp(App),
     /// Stop sharing an app, by its ID.
     StopApp(String),
+    /// Call a phone and bridge it into the voice room, as an app of ours.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    PhoneCall(Box<crate::phone::call::Dial>),
     /// Share a screen or window, or open the system picker (Linux), with the sound of
     /// these apps (or all system audio) as part of the stream.
     ShareScreen(screen::Target, screen::Options, Vec<App>),
@@ -421,6 +425,9 @@ pub enum Update {
     CallRang(Url, Id, Id),
     /// Sharing this app on its own stopped or never started.
     AppStopped(String),
+    /// How the phone call is going.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    Phone(crate::phone::call::Event),
     SharedAudioStopped(Url, Id),
     /// What the screen share's sound is now, after a change or a failure.
     StreamAudio(Vec<App>),
@@ -2055,6 +2062,8 @@ async fn on_command(
         | Command::AskToType
         | Command::StopTyping
         | Command::TypeInTerminal(_) => unreachable!("handled by voice_command"),
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        Command::PhoneCall(_) => unreachable!("handled by voice_command"),
     }
     Ok(())
 }

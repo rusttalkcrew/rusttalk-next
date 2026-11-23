@@ -172,6 +172,11 @@ pub struct Settings {
     pub name_overrides: Vec<String>,
     /// What servers still have to be told about name and bio changes made here.
     pub profile_pending: crate::profile::Pending,
+    /// The SIP account for phone calls into a voice room; its password is in the
+    /// keychain (see `phone`). This device only, never synced.
+    pub phone: crate::phone::Account,
+    /// People to call by phone. This device only, never synced.
+    pub phone_contacts: Vec<crate::phone::Contact>,
 }
 
 impl Settings {
@@ -247,6 +252,8 @@ impl Default for Settings {
             bio: String::new(),
             name_overrides: Vec::new(),
             profile_pending: Default::default(),
+            phone: Default::default(),
+            phone_contacts: Vec::new(),
         }
     }
 }
@@ -344,6 +351,84 @@ struct Shared {
     ai_failed: AtomicBool,
     source: NativeAudioSource,
     start: Instant,
+    /// What a phone call bridged into the room hears (see `PhoneLine`).
+    phone: Mutex<Option<PhoneTap>>,
+}
+
+/// The mixer key of a bridged phone call's sound, kept out of what the phone hears.
+const PHONE_TRACK: &str = "phone";
+/// The most the phone's share of the call may fall behind, in samples.
+const PHONE_LAG: usize = RATE as usize / 5;
+
+/// The room's voices and this microphone, at 48 kHz, waiting for the phone.
+#[derive(Default)]
+struct PhoneTap {
+    room: VecDeque<i16>,
+    mic: VecDeque<i16>,
+}
+
+impl PhoneTap {
+    fn push(queue: &mut VecDeque<i16>, samples: impl IntoIterator<Item = i16>) {
+        queue.extend(samples);
+        if queue.len() > PHONE_LAG {
+            let extra = queue.len() - PHONE_LAG;
+            queue.drain(..extra);
+        }
+    }
+}
+
+/// A phone call bridged into this call: what the phone says plays here, and the room's
+/// voices and this microphone go to the phone. Dropping it ends both.
+pub struct PhoneLine {
+    shared: Arc<Shared>,
+    serial: u64,
+}
+
+impl PhoneLine {
+    /// Play what the phone says, 48 kHz mono.
+    pub fn play(&self, samples: &[i16]) {
+        let mut mixer = lock(&self.shared.mixer);
+        let Some(track) = (mixer.tracks.get_mut(PHONE_TRACK)).filter(|t| t.serial == self.serial)
+        else {
+            return;
+        };
+        track.queue.extend(samples);
+        if track.queue.len() > CAP {
+            let extra = track.queue.len() - PRIME;
+            track.queue.drain(..extra);
+        }
+        if level_db(samples) > SILENT_DB {
+            track.loud = self.shared.now();
+        }
+    }
+
+    /// Fill `out` with what the phone hears next; silence where nothing is queued.
+    pub fn take(&self, out: &mut [i16]) {
+        let mut tap = lock(&self.shared.phone);
+        let Some(tap) = tap.as_mut() else {
+            out.fill(0);
+            return;
+        };
+        for slot in out {
+            let room = tap.room.pop_front().unwrap_or(0);
+            let mic = tap.mic.pop_front().unwrap_or(0);
+            *slot = room.saturating_add(mic);
+        }
+    }
+}
+
+impl Drop for PhoneLine {
+    fn drop(&mut self) {
+        let mut mixer = lock(&self.shared.mixer);
+        if mixer
+            .tracks
+            .get(PHONE_TRACK)
+            .is_some_and(|t| t.serial == self.serial)
+        {
+            mixer.tracks.remove(PHONE_TRACK);
+            *lock(&self.shared.phone) = None;
+        }
+    }
 }
 
 /// A person's voice (`None`) or one app they share, by its name.
@@ -454,6 +539,7 @@ impl Audio {
             // Queue size 0: we hand over exact 10 ms frames, nothing is buffered.
             source: NativeAudioSource::new(off, RATE, 1, 0),
             start: Instant::now(),
+            phone: Mutex::default(),
         });
         let (control, commands) = mpsc::channel();
         let (mic, frames) = mpsc::sync_channel(MIC_QUEUE);
@@ -838,6 +924,30 @@ impl Audio {
 
     pub fn remove_track(&self, sid: &str) {
         lock(&self.shared().mixer).tracks.remove(sid);
+    }
+
+    /// Bridge a phone call into this call; it plays as `stream`, at its volume.
+    pub fn phone_line(&self, stream: StreamId) -> PhoneLine {
+        let settings = lock(&self.shared().settings);
+        let mut mixer = lock(&self.shared().mixer);
+        mixer.serial += 1;
+        let serial = mixer.serial;
+        mixer.tracks.insert(
+            PHONE_TRACK.into(),
+            Track {
+                serial,
+                gain: settings.mix.gain(&stream),
+                stream,
+                queue: VecDeque::with_capacity(CAP + FRAME),
+                primed: false,
+                loud: 0,
+            },
+        );
+        *lock(&self.shared().phone) = Some(PhoneTap::default());
+        PhoneLine {
+            shared: self.0.shared.clone(),
+            serial,
+        }
     }
 
     /// Whose a playing track is, once known: a device that joined while it couldn't be
@@ -1331,11 +1441,15 @@ fn mix(shared: &Shared, play_cues: bool) -> [i16; FRAME] {
     if !play_cues {
         mixer.cues.clear();
     }
-    mix_tracks(&mut mixer, shared.deafened.load(Relaxed))
+    let mut phone = lock(&shared.phone);
+    mix_tracks(&mut mixer, shared.deafened.load(Relaxed), phone.as_mut())
 }
 
-fn mix_tracks(mixer: &mut Mixer, deafened: bool) -> [i16; FRAME] {
+/// Also queues the remote tracks, at full volume, for a bridged phone call: it hears the
+/// room even when this person turned someone down or deafened.
+fn mix_tracks(mixer: &mut Mixer, deafened: bool, phone: Option<&mut PhoneTap>) -> [i16; FRAME] {
     let mut sum = [0f32; FRAME];
+    let mut room = phone.is_some().then_some([0f32; FRAME]);
     let Mixer {
         tracks,
         cues,
@@ -1348,8 +1462,9 @@ fn mix_tracks(mixer: &mut Mixer, deafened: bool) -> [i16; FRAME] {
     for (slot, sample) in sum.iter_mut().zip(cues.drain(..cues.len().min(FRAME))) {
         *slot = f32::from(sample);
     }
-    for track in tracks.values_mut() {
+    for (sid, track) in tracks.iter_mut() {
         let gain = if deafened { 0.0 } else { track.gain };
+        let mut room = room.as_mut().filter(|_| sid != PHONE_TRACK);
         track.primed |= track.queue.len() >= PRIME;
         if !track.primed {
             continue;
@@ -1364,15 +1479,22 @@ fn mix_tracks(mixer: &mut Mixer, deafened: bool) -> [i16; FRAME] {
             // Less than a frame would remain after this one.
             track.queue.push_back(last);
         }
-        for slot in &mut sum {
+        for (at, slot) in sum.iter_mut().enumerate() {
             let Some(sample) = track.queue.pop_front() else {
                 track.primed = false;
                 break;
             };
             *slot += f32::from(sample) * gain;
+            if let Some(room) = room.as_deref_mut() {
+                room[at] += f32::from(sample);
+            }
         }
     }
-    sum.map(|s| s.clamp(-32768.0, 32767.0) as i16)
+    let clamp = |s: f32| s.clamp(-32768.0, 32767.0) as i16;
+    if let (Some(tap), Some(room)) = (phone, room) {
+        PhoneTap::push(&mut tap.room, room.map(clamp));
+    }
+    sum.map(clamp)
 }
 
 struct VoiceGain {
@@ -1665,6 +1787,9 @@ fn process(shared: &Shared, frames: &Receiver<Mic>) {
             }
             if shared.voice.load(Relaxed) {
                 send(&shared.source, &frame);
+                if let Some(tap) = lock(&shared.phone).as_mut() {
+                    PhoneTap::push(&mut tap.mic, frame);
+                }
             }
         }
     }
@@ -2029,14 +2154,14 @@ mod tests {
             ..Mixer::default()
         };
         assert!(
-            mix_tracks(&mut mixer, false)
+            mix_tracks(&mut mixer, false, None)
                 .iter()
                 .any(|&sample| sample != 0)
         );
         assert_eq!(mixer.cues.len(), samples.len() - FRAME);
         // Deafening silences voices, not the chime that confirms it.
         assert!(
-            mix_tracks(&mut mixer, true)
+            mix_tracks(&mut mixer, true, None)
                 .iter()
                 .any(|&sample| sample != 0)
         );
@@ -2061,14 +2186,48 @@ mod tests {
             loud: 0,
         };
         mixer.tracks.insert("a".into(), track(loud.clone(), 8000));
-        let alone = mix_tracks(&mut mixer, false);
+        let alone = mix_tracks(&mut mixer, false, None);
         assert!(alone.iter().all(|&s| s == 8000));
 
         mixer.tracks.clear();
         mixer.tracks.insert("b".into(), track(quiet, 8000));
-        let quarter = mix_tracks(&mut mixer, false);
+        let quarter = mix_tracks(&mut mixer, false, None);
         assert!(quarter.iter().all(|&s| s == 2000));
 
-        assert!(mix_tracks(&mut mixer, true).iter().all(|&s| s == 0));
+        assert!(mix_tracks(&mut mixer, true, None).iter().all(|&s| s == 0));
+    }
+
+    #[test]
+    fn a_phone_hears_the_room_but_not_itself() {
+        let track = |gain, sample| Track {
+            serial: 0,
+            gain,
+            stream: ([1; 32], None),
+            queue: VecDeque::from(vec![sample; PRIME]),
+            primed: false,
+            loud: 0,
+        };
+        let mut mixer = Mixer::default();
+        // Turned down here, but the phone hears it at full volume.
+        mixer.tracks.insert("voice".into(), track(0.25, 4000));
+        mixer.tracks.insert(PHONE_TRACK.into(), track(1.0, 1000));
+        let mut tap = PhoneTap::default();
+        let speakers = mix_tracks(&mut mixer, false, Some(&mut tap));
+        assert!(
+            speakers.iter().all(|&s| s == 2000),
+            "the voice and the phone play here"
+        );
+        assert_eq!(tap.room.len(), FRAME);
+        assert!(
+            tap.room.iter().all(|&s| s == 4000),
+            "the phone never hears itself"
+        );
+        // Deafened, this person hears nothing, the phone still hears the room.
+        let speakers = mix_tracks(&mut mixer, true, Some(&mut tap));
+        assert!(speakers.iter().all(|&s| s == 0));
+        assert!(tap.room.iter().all(|&s| s == 4000));
+        // It never lags more than PHONE_LAG behind.
+        PhoneTap::push(&mut tap.mic, vec![1; 2 * PHONE_LAG]);
+        assert_eq!(tap.mic.len(), PHONE_LAG);
     }
 }

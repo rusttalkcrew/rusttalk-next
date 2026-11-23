@@ -251,7 +251,11 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
             });
             ui.add_space(6.0);
             let more = home.voice.audio.can_host_terminal();
-            let count = 2.0 + f32::from(screen::SUPPORTED) + f32::from(more);
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            let phone = super::phone::shows(&mut home.voice);
+            #[cfg(any(target_os = "android", target_os = "ios"))]
+            let phone = false;
+            let count = 2.0 + f32::from(screen::SUPPORTED) + f32::from(more) + f32::from(phone);
             let width = (ui.available_width() - SPACE_XS * (count - 1.0)) / count;
             let size = Vec2::new(width, ICON_BUTTON);
             ui.horizontal(|ui| {
@@ -305,6 +309,10 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
                     }
                 }
                 share = app_button(ui, voice, connected && blocked.is_none(), blocked, size);
+                #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                if phone {
+                    super::phone::button(ui, voice, connected && blocked.is_none(), size);
+                }
                 if more {
                     terminal = more_button(ui, voice.terminals.local.is_some(), connected, size);
                 }
@@ -360,6 +368,10 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
     }
     if voice_settings {
         home.settings = Some(Tab::Voice);
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    if leave_now && super::phone::leave_or_ask(home, super::phone::Leave::Leave) {
+        return;
     }
     if leave_now {
         leave(home);
