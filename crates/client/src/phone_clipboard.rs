@@ -459,4 +459,70 @@ mod tests {
             Some((0, 5))
         );
     }
+
+    #[test]
+    fn private_fields_never_copy_or_cut() {
+        let ctx = Context::default();
+        let mut words = "apple banana cherry".to_owned();
+        let frame = |words: &mut String, events: Vec<Event>| {
+            let mut raw = RawInput {
+                events,
+                ..RawInput::default()
+            };
+            // A hardware keyboard's Ctrl+C and Ctrl+X become Copy and Cut here.
+            crate::paste::keys(&ctx, &mut raw);
+            let mut output = ctx.run_ui(raw, |ui| {
+                let field = ui.add(ui::field(words).id(Id::unique("words")).private());
+                field.request_focus();
+            });
+            output.textures_delta.clear();
+            output
+                .platform_output
+                .commands
+                .iter()
+                .any(|command| matches!(command, OutputCommand::CopyText(_)))
+        };
+        let key = |key| Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::COMMAND,
+        };
+        frame(&mut words, Vec::new());
+        frame(&mut words, Vec::new());
+        crate::android::set_cursor(&ctx, Id::unique("words"), (0, 19));
+        for events in [
+            vec![key(Key::C)],
+            vec![key(Key::X)],
+            vec![Event::Copy],
+            vec![Event::Cut],
+        ] {
+            assert!(!frame(&mut words, events), "nothing is copied");
+            assert_eq!(words, "apple banana cherry", "nothing is cut");
+        }
+        // The same field without `private` does copy, so the check above can see one.
+        let mut text = "hello".to_owned();
+        let mut copied = false;
+        for events in [Vec::new(), Vec::new(), vec![Event::Copy]] {
+            if events.is_empty() {
+                crate::android::set_cursor(&ctx, Id::unique("normal"), (0, 5));
+            }
+            let raw = RawInput {
+                events,
+                ..RawInput::default()
+            };
+            let mut output = ctx.run_ui(raw, |ui| {
+                let field = ui.add(ui::field(&mut text).id(Id::unique("normal")));
+                field.request_focus();
+            });
+            output.textures_delta.clear();
+            copied |= output
+                .platform_output
+                .commands
+                .iter()
+                .any(|command| matches!(command, OutputCommand::CopyText(_)));
+        }
+        assert!(copied);
+    }
 }
