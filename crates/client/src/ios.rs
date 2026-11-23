@@ -8,21 +8,55 @@
 //! area, where the drawable fits it exactly, and egui gets that area as its screen,
 //! with touches moved into it. VoiceOver gets the same move through AccessKit's root
 //! transform (docs/mobile.md, iPhone).
+//!
+//! The on-screen keyboard covers the bottom of the safe area: its overlap becomes
+//! egui's bottom safe-area inset, and `frame` draws the app above it, as Android
+//! does with its insets. The strips outside the safe area show the theme's
+//! background, and the keyboard's Return reaches egui as Enter.
 
-use std::cell::Cell;
+use std::{
+    cell::Cell,
+    sync::{
+        OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant},
+};
 
 use eframe::egui::{
-    self, Context, Event, Pos2, RawInput, Rect, SafeAreaInsets, Vec2, accesskit::Affine,
+    self, Color32, Context, Event, Key, Modifiers, Pos2, RawInput, Rect, SafeAreaInsets, Ui,
+    UiBuilder, Vec2, accesskit::Affine, epaint::MarginF32,
 };
-use objc2::{MainThreadMarker, msg_send, rc::Retained, runtime::NSObjectProtocol};
+use objc2::{
+    MainThreadMarker, msg_send,
+    rc::Retained,
+    runtime::{AnyClass, AnyObject, Imp, NSObjectProtocol, Sel},
+    sel,
+};
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+use objc2_foundation::NSString;
 use objc2_quartz_core::{CALayer, CATransaction};
-use objc2_ui_kit::{UIApplication, UIWindow};
+use objc2_ui_kit::{UIApplication, UIColor, UIView, UIWindow};
+use winit::platform::ios::{StatusBarStyle, WindowExtIOS as _};
+
+/// How long frames keep coming after the keyboard moved, while it slides.
+const KEYBOARD_SETTLE: Duration = Duration::from_millis(600);
+/// How often a frame looks at the keyboard while a field has focus: nothing tells
+/// the app when it moves.
+const KEYBOARD_POLL: Duration = Duration::from_millis(100);
 
 thread_local! {
     /// Where the safe area starts, in egui points (from `input`, for `accessibility`).
     static OFFSET: Cell<Vec2> = const { Cell::new(Vec2::ZERO) };
+    /// How far the keyboard covers the safe area, in egui points, and since when.
+    static KEYBOARD: Cell<(f32, Option<Instant>)> = const { Cell::new((0.0, None)) };
+    /// The background last given to the window, and whether it was dark.
+    static BACKGROUND: Cell<Option<(Color32, bool)>> = const { Cell::new(None) };
 }
+
+/// The keyboard's Return was typed (see `watch_return`).
+static RETURN: AtomicBool = AtomicBool::new(false);
+static INSERT_TEXT: OnceLock<Imp> = OnceLock::new();
 
 /// Call from `raw_input_hook` every frame, before egui sees the input.
 pub fn input(ctx: &Context, raw_input: &mut RawInput) {
@@ -56,8 +90,29 @@ pub fn input(ctx: &Context, raw_input: &mut RawInput) {
     let size = Vec2::new(safe.size.width as f32, safe.size.height as f32) / zoom;
     OFFSET.set(offset);
     raw_input.screen_rect = Some(Rect::from_min_size(Pos2::ZERO, size));
-    // Already inside the safe area: nothing left to keep clear.
-    raw_input.safe_area_insets = Some(SafeAreaInsets::default());
+    // Inside the safe area already; only the keyboard is left to keep clear.
+    let covered = keyboard_overlap(&window, safe) / zoom;
+    let (last, _) = KEYBOARD.get();
+    if (covered - last).abs() >= 1.0 {
+        tracing::info!(points = covered as u32, "iOS keyboard");
+        KEYBOARD.set((covered, Some(Instant::now())));
+    }
+    raw_input.safe_area_insets = Some(SafeAreaInsets(MarginF32 {
+        bottom: covered,
+        ..MarginF32::ZERO
+    }));
+    watch_return();
+    if RETURN.swap(false, Ordering::Relaxed) {
+        for pressed in [true, false] {
+            raw_input.events.push(Event::Key {
+                key: Key::Enter,
+                physical_key: None,
+                pressed,
+                repeat: false,
+                modifiers: Modifiers::NONE,
+            });
+        }
+    }
     for event in &mut raw_input.events {
         match event {
             Event::PointerMoved(pos)
@@ -81,6 +136,121 @@ pub fn accessibility(ctx: &Context) {
     ctx.accesskit_node_builder(egui::accesskit_root_id(), |root| {
         root.set_transform(transform)
     });
+}
+
+/// Bring the keyboard back for a tap on the focused field, if it was put away:
+/// winit's view takes text input while it is the first responder.
+pub fn show_keyboard() {
+    let Some(view) = key_window().and_then(|window| root_view(&window)) else {
+        return;
+    };
+    if !view.isFirstResponder() {
+        let _ = view.becomeFirstResponder();
+    }
+}
+
+/// How far the docked keyboard reaches into `safe`, in UIKit points (0 without it).
+/// UIKit's keyboard layout guide follows it; hidden, it is the bottom safe area.
+fn keyboard_overlap(window: &UIWindow, safe: CGRect) -> f32 {
+    let Some(view) = root_view(window) else {
+        return 0.0;
+    };
+    let keyboard = view.keyboardLayoutGuide().layoutFrame();
+    let top = view.convertPoint_toView(keyboard.origin, Some(window)).y;
+    (safe.origin.y + safe.size.height - top).max(0.0) as f32
+}
+
+/// Draw the app above the keyboard, keep the focused field in view when the
+/// keyboard moves, and give the strips outside the safe area the theme's
+/// background (with a matching status bar).
+pub fn frame(ui: &mut Ui, window: Option<&winit::window::Window>, add: impl FnOnce(&mut Ui)) {
+    let ctx = ui.ctx().clone();
+    let fill = ui.visuals().panel_fill;
+    let dark = ui.visuals().dark_mode;
+    if BACKGROUND.get() != Some((fill, dark)) {
+        BACKGROUND.set(Some((fill, dark)));
+        background(fill);
+        if let Some(window) = window {
+            window.set_preferred_status_bar_style(if dark {
+                StatusBarStyle::LightContent
+            } else {
+                StatusBarStyle::DarkContent
+            });
+        }
+    }
+    let (_, moved) = KEYBOARD.get();
+    let settling = moved.is_some_and(|at| at.elapsed() < KEYBOARD_SETTLE);
+    if settling {
+        // The middle, so the button under the field shows too.
+        if let Some(field) = ctx
+            .memory(|memory| memory.focused())
+            .and_then(|id| ctx.read_response(id))
+        {
+            field.scroll_to_me(Some(egui::Align::Center));
+        }
+    }
+    if settling || ctx.egui_wants_keyboard_input() {
+        ctx.request_repaint_after(KEYBOARD_POLL);
+    }
+    ui.painter().rect_filled(ctx.viewport_rect(), 0.0, fill);
+    let free = ctx.content_rect();
+    ui.scope_builder(UiBuilder::new().max_rect(free), |ui| {
+        ui.set_clip_rect(free);
+        add(ui);
+    });
+}
+
+/// The window's and winit's view's background: what shows around the Metal layer.
+fn background(fill: Color32) {
+    let Some(window) = key_window() else { return };
+    let [r, g, b, _] = fill.to_array();
+    let channel = |value: u8| f64::from(value) / 255.0;
+    let color = UIColor::colorWithRed_green_blue_alpha(channel(r), channel(g), channel(b), 1.0);
+    window.setBackgroundColor(Some(&color));
+    if let Some(view) = root_view(&window) {
+        view.setBackgroundColor(Some(&color));
+    }
+}
+
+/// winit turns the keyboard's Return into the text "\n", which egui-winit drops as
+/// a control character, so Return did nothing. Once, winit's view gets an
+/// `insertText:` that notes a Return (for `input`, which sends Enter) before
+/// winit's own runs.
+fn watch_return() {
+    if INSERT_TEXT.get().is_some() {
+        return;
+    }
+    let Some(method) =
+        AnyClass::get(c"WinitUIView").and_then(|class| class.instance_method(sel!(insertText:)))
+    else {
+        return;
+    };
+    let ours: InsertText = insert_text;
+    // SAFETY: the same signature as winit's method (`-insertText:` takes an
+    // NSString), on the main thread; winit's stays in `INSERT_TEXT` and is called.
+    let winits = unsafe { method.set_implementation(std::mem::transmute::<InsertText, Imp>(ours)) };
+    let _ = INSERT_TEXT.set(winits);
+}
+
+type InsertText = extern "C-unwind" fn(*mut AnyObject, Sel, *const NSString);
+
+extern "C-unwind" fn insert_text(this: *mut AnyObject, cmd: Sel, text: *const NSString) {
+    // SAFETY: UIKit passes the typed text, an NSString, or nil.
+    if let Some(text) = unsafe { text.as_ref() }
+        && text.length() == 1
+        && text.to_string() == "\n"
+    {
+        RETURN.store(true, Ordering::Relaxed);
+    }
+    if let Some(winits) = INSERT_TEXT.get() {
+        // SAFETY: winit's implementation of this method, with its own arguments.
+        let winits = unsafe { std::mem::transmute::<Imp, InsertText>(*winits) };
+        winits(this, cmd, text);
+    }
+}
+
+fn root_view(window: &UIWindow) -> Option<Retained<UIView>> {
+    window.rootViewController()?.view()
 }
 
 fn key_window() -> Option<Retained<UIWindow>> {

@@ -6001,9 +6001,7 @@ fn text_dialog(ui: &mut Ui, text: &mut String, confirm: &str, close: &mut bool) 
 fn name_field(ui: &mut Ui, text: &mut String) -> (Response, bool) {
     let field = ui.add(ui::field(text).char_limit(100).desired_width(f32::INFINITY));
     let entered = submitted(ui, &field);
-    if ui.memory(|memory| memory.focused().is_none()) {
-        field.request_focus();
-    }
+    ui::focus_when_none(ui, &field);
     (field, entered)
 }
 

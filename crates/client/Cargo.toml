@@ -123,12 +123,19 @@ livekit-jni = { package = "jni", version = "0.21" }
 apple-native-keyring-store = { version = "1", features = ["protected"] }
 # Keeps the settings folder, with the key file, out of iCloud and computer backups.
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSEnumerator", "NSError", "NSString", "NSURL", "NSValue"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSDate", "NSDictionary", "NSEnumerator", "NSError", "NSString", "NSURL", "NSValue"] }
 # The system clipboard (UIPasteboard) and drawing inside the safe area (src/ios.rs);
 # the versions winit, egui-winit and wgpu already use.
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFCGTypes"] }
 objc2-quartz-core = { version = "0.3", default-features = false, features = ["std", "CALayer", "CATransaction"] }
-objc2-ui-kit = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "objc2-quartz-core", "UIApplication", "UIGeometry", "UIPasteboard", "UIResponder", "UIScreen", "UIView", "UIViewController", "UIWindow"] }
+objc2-ui-kit = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "objc2-quartz-core", "UIApplication", "UIColor", "UIGeometry", "UIKeyboardLayoutGuide", "UILayoutGuide", "UIPasteboard", "UIResponder", "UIScreen", "UITrackingLayoutGuide", "UIView", "UIViewController", "UIWindow"] }
+# The status bar's text colour (src/ios.rs); the version eframe already uses.
+winit = { version = "0.30", default-features = false }
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+# Clearing copied recovery words: read and emptied in one step (src/words.rs). Already
+# built for egui's clipboard.
+arboard = { version = "3.7", default-features = false, features = ["wayland-data-control"] }
 
 [target.'cfg(windows)'.dependencies]
 # Pasting: registered picture formats and copied files, and bitmaps as a last resort.

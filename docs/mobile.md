@@ -21,8 +21,24 @@ The unsigned IPA, signed and installed with xtool, starts on a real iPhone.
   fits it exactly, gives egui that area as its screen and moves touches into it.
   VoiceOver gets the same shift through the AccessKit root node's transform
   (accesskit_ios places nodes and hit-tests in the whole-screen view). The
-  status bar and home indicator areas stay black. Once per run the log
-  records the window, safe area, drawable size and scales (`iOS window`).
+  status bar and home indicator areas show the theme's background (the window's
+  and winit's view's `backgroundColor`), and the status bar text is light on
+  dark themes and dark on light ones (winit's `set_preferred_status_bar_style`).
+  Once per run the log records the window, safe area, drawable size and scales
+  (`iOS window`).
+- **Keyboard** (`src/ios.rs`). Each frame reads UIKit's keyboard layout guide;
+  how far the docked keyboard reaches into the safe area becomes egui's bottom
+  safe-area inset, and the app draws above it, as on Android, so pages scroll
+  and the focused field is scrolled to the middle of what is left (the button
+  under it shows too). Frames keep coming every 100 ms while a field has focus
+  and for a moment after the keyboard moved; the log notes each change (`iOS
+  keyboard`, in points). winit sends Return as the text "\n", which egui-winit
+  drops, so the app replaces winit's view's `insertText:` once with one that
+  notes a Return and then calls winit's: Return reaches egui as Enter, which
+  ends a one-line field (closing the keyboard) and is a new line in a text box.
+  Tapping outside the field ends the focus and closes the keyboard. Phones never
+  give a field focus by themselves (desktops focus a screen's first field), as
+  that would open the keyboard again right after a tap closed it.
 - **Keys in the Keychain** (`keystore.rs`, `IosKeychain`). A new account's keys
   go to the data-protection Keychain, readable only while the phone is unlocked
   and never in iCloud Keychain (`WhenUnlockedThisDeviceOnly`). An encrypted
@@ -91,7 +107,19 @@ messages and reading them again after a restart.
   all; Copy and Cut only with a selection, and never in password or
   recovery-word fields. A paste moves the field's cursor, which starts the
   keyboard's buffer over with the pasted text. While the menu is open, picking
-  a row keeps the field focused, so the keyboard stays up.
+  a row keeps the field focused, so the keyboard stays up. A tap on the cursor
+  of a field that already has focus opens the menu too, as on phones. While a
+  finger rests on the screen the app draws a frame every 100 ms, as iOS sends
+  no touches then and egui only sees a press and hold on a frame after it. On
+  iOS the log notes each tap and long press on a field (how long it was held,
+  never any text: `text field touch`), to check this on a device.
+- **Tapping a focused field** asks egui for focus again, which also asks to
+  interrupt the keyboard's typing; egui-winit does that by turning the
+  keyboard off and on (winit hides and shows Android's keyboard, and resigns
+  and becomes first responder on iOS), so it closed and opened again. Such a
+  frame now runs a second egui pass without input, which drops that request
+  (`phone_clipboard::keep_keyboard`); the tap still shows a keyboard that was
+  put away.
 - **Long text**: GameTextInput copies at most 64 KiB but reports the full
   length, and android-activity's reader for winit trusts that length. A Java
   `LengthFilter` keeps the keyboard's buffer under 21,845 UTF-16 units, which

@@ -189,9 +189,7 @@ pub fn dialog(ui: &mut Ui, note: &mut String, close: &mut bool) -> Option<String
             .char_limit(MAX_POKE_CHARS)
             .desired_width(f32::INFINITY),
     );
-    if ui.memory(|memory| memory.focused().is_none()) {
-        field.request_focus();
-    }
+    ui::focus_when_none(ui, &field);
     let mut send = field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
     ui::footer(ui, |ui| {
         send |= ui::primary(ui, t!("pokes.poke")).clicked();

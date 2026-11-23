@@ -266,6 +266,11 @@ holds the keys, whether keys were saved, and leftover copies still to remove.
 Development profiles use separate entries. The client logs the person
 fingerprint locally. Creating an account shows the recovery words once in the
 app window. The client never stores or logs the words or the root signing key.
+Copy on that screen puts them on the clipboard only when pressed: phones mark
+the copy sensitive (Android hides it from the clipboard preview and keyboard
+suggestions; iOS keeps it off Universal Clipboard and lets it expire after two
+minutes), and desktops clear the clipboard after two minutes if it still holds
+the words and the app is still running.
 "Sign out of this device" deletes the keychain entry, `identity.key`, leftover
 temporary key files and the profile's `sync.json`, `servers.json`,
 `saved.json`, `notify.json`, `pokes.json`, `dm_deleted.json`, `dm_pins/`,
@@ -316,7 +321,10 @@ starts and when the person signs out. A picture pasted into the composer
 (Ctrl+V) is written the same way, to a `rusttalk-<random>` folder, so it can be
 sent like a picked file; removing it from the message deletes it, and otherwise
 it goes with the other folders. The client reads the clipboard only when the
-person pastes into the composer.
+person pastes, and on desktops once more two minutes after copying the recovery
+words: it empties the clipboard only if it still holds them (read, compared by
+hash and emptied in one step; nothing is kept), and a newer copy in the app
+cancels that.
 `emoji-recent.json` holds up to 32 emoji selected through the picker or
 autocomplete, and `emoji-favourites.json` up to 64 emoji marked as favourites
 in the picker. Both stay on this device.

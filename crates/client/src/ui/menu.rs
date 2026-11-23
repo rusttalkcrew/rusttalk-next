@@ -411,6 +411,36 @@ pub fn context_menu<R>(anchor: &Response, add: impl FnOnce(&mut Menu) -> R) -> O
     show(Popup::context_menu(anchor), MENU_WIDTH, add)
 }
 
+#[cfg(any(target_os = "android", target_os = "ios", test))]
+/// A text field's menu on a phone: it opens at the finger on a long press, or
+/// when `open` (a tap on the field's cursor), and a plain tap closes it.
+pub fn touch_menu<R>(anchor: &Response, open: bool, add: impl FnOnce(&mut Menu) -> R) -> Option<R> {
+    let ctx = &anchor.ctx;
+    let at = anchor.id.with("touch menu at");
+    let opening = open || anchor.secondary_clicked();
+    if opening {
+        // A lifted finger leaves no pointer position, so keep where it pressed.
+        let pressed = ctx.input(|input| input.pointer.press_origin());
+        let pos = pressed.unwrap_or(anchor.rect.left_bottom());
+        ctx.data_mut(|data| data.insert_temp(at, pos));
+    }
+    let pos = ctx
+        .data(|data| data.get_temp(at))
+        .unwrap_or(anchor.rect.left_bottom());
+    let set = if opening {
+        Some(egui::SetOpenCommand::Bool(true))
+    } else if anchor.clicked() {
+        Some(egui::SetOpenCommand::Bool(false))
+    } else {
+        None
+    };
+    show(
+        Popup::menu(anchor).open_memory(set).at_position(pos),
+        MENU_WIDTH,
+        add,
+    )
+}
+
 /// Whether the menu of `anchor` (from `menu` or `menu_below`) is open.
 pub fn is_open(anchor: &Response) -> bool {
     Popup::is_id_open(&anchor.ctx, Popup::default_response_id(anchor))

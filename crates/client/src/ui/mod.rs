@@ -12,14 +12,18 @@ use eframe::egui::{
 mod completion;
 mod menu;
 mod page;
+mod start;
 mod theme;
 mod widgets;
 
 pub use completion::completion;
+#[cfg(any(target_os = "android", target_os = "ios", test))]
+pub use menu::touch_menu;
 pub use menu::{
     Item, Menu, context_menu, is_open as menu_open, menu, menu_above, menu_below, menu_wide,
 };
 pub use page::*;
+pub use start::{onboarding, step_title};
 pub use theme::{
     ACCENTS, Accent, Appearance, DARK_THEMES, LIGHT_THEMES, Mode, Palette, ROLE_COLORS,
     TERMINAL_DARK, TERMINAL_LIGHT, contrast,
