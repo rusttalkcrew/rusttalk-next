@@ -45,37 +45,63 @@ pub fn answer(sdp: &str) -> Option<Answer> {
     let mut media: Option<(u16, Vec<u8>)> = None;
     let mut tones = None;
     let mut in_audio = false;
+    let mut seen_media = false;
+    let mut direction = "sendrecv";
     for line in sdp.lines().map(str::trim) {
         if let Some(rest) = line.strip_prefix("m=") {
+            seen_media = true;
             in_audio = media.is_none() && rest.starts_with("audio ");
             if in_audio {
                 let mut parts = rest.split_whitespace().skip(1);
-                let port = parts.next()?.split('/').next()?.parse().ok()?;
-                let _profile = parts.next()?;
+                let port = parts.next()?.parse().ok()?;
+                if parts.next()? != "RTP/AVP" {
+                    return None;
+                }
                 media = Some((port, parts.filter_map(|pt| pt.parse().ok()).collect()));
             }
         } else if let Some(rest) = line.strip_prefix("c=") {
-            let address = rest
-                .split_whitespace()
-                .nth(2)
-                .and_then(|a| a.split('/').next()?.parse::<IpAddr>().ok());
+            if !in_audio && seen_media {
+                continue;
+            }
+            let parts: Vec<_> = rest.split_whitespace().collect();
+            if parts.len() != 3 || parts[0] != "IN" {
+                return None;
+            }
+            let address: IpAddr = parts[2].parse().ok()?;
+            if (parts[1] != "IP4" || !address.is_ipv4())
+                && (parts[1] != "IP6" || !address.is_ipv6())
+            {
+                return None;
+            }
+            if address.is_unspecified()
+                || address.is_multicast()
+                || address == IpAddr::V4(std::net::Ipv4Addr::BROADCAST)
+            {
+                return None;
+            }
+            let address = Some(address);
             if in_audio {
                 media_address = address;
             } else if media.is_none() {
                 session_address = address;
             }
+        } else if (!seen_media || in_audio)
+            && matches!(
+                line,
+                "a=sendrecv" | "a=sendonly" | "a=recvonly" | "a=inactive"
+            )
+        {
+            direction = &line[2..];
         } else if in_audio && let Some(rest) = line.strip_prefix("a=rtpmap:") {
             let (pt, codec) = rest.split_once(' ')?;
-            if codec
-                .to_ascii_lowercase()
-                .starts_with("telephone-event/8000")
-            {
+            if codec.to_ascii_lowercase().eq("telephone-event/8000") {
                 tones = pt.parse().ok();
             }
         }
     }
     let (port, payload_types) = media?;
-    if port == 0 {
+    // Hold and one-way calls are not supported; never export sound against direction.
+    if port == 0 || direction != "sendrecv" {
         return None;
     }
     let law = payload_types
@@ -92,6 +118,27 @@ pub fn answer(sdp: &str) -> Option<Answer> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unsupported_or_unsafe_answers_are_rejected() {
+        let valid = offer("192.0.2.7".parse().unwrap(), 40000, 99);
+        for (from, to) in [
+            ("RTP/AVP", "RTP/SAVP"),
+            ("RTP/AVP", "UDP/TLS/RTP/SAVPF"),
+            ("IN IP4 192.0.2.7", "IN IP6 192.0.2.7"),
+            ("IN IP4 192.0.2.7", "XX IP4 192.0.2.7"),
+            ("192.0.2.7", "0.0.0.0"),
+            ("192.0.2.7", "224.0.0.1"),
+            ("192.0.2.7", "255.255.255.255"),
+            ("192.0.2.7", "192.0.2.7/2"),
+            ("sendrecv", "sendonly"),
+            ("sendrecv", "recvonly"),
+            ("sendrecv", "inactive"),
+            ("PCMA/8000", "opus/48000"),
+        ] {
+            assert!(answer(&valid.replace(from, to)).is_none(), "{to}");
+        }
+    }
 
     #[test]
     fn our_offer_reads_as_an_answer() {

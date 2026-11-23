@@ -1,4 +1,5 @@
 mod camera;
+mod consent;
 mod live_file;
 mod moderation;
 mod ring;
@@ -310,6 +311,7 @@ pub async fn exercise(
         app_audio::available(),
         "W09 app audio needs PipeWire with pipewire-pulse on the host; set E2E_FEATURES= to skip media"
     );
+    consent::exercise(&room_a, &mut room_b, A_HZ, &mut d, &voice.id).await?;
     let capture = app_audio::share(&room_a).await?;
     timeout(hang_guard(), app_audio::hear(&mut room_b, Some(&a_id)))
         .await

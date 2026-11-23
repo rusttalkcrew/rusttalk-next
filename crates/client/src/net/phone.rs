@@ -1,5 +1,5 @@
 //! The phone call bridged into our voice room (see `crate::phone`). It is published
-//! like a shared app, with its sealed name, so everyone in the call hears it and sees it
+//! like a shared app, with its sealed name, so members can listen to it and see it
 //! under us; older apps show it as shared app audio. Desktop only.
 
 use super::{Command, Ctx, voice::Live};
@@ -102,4 +102,46 @@ mod desktop {
         }
         true
     }
+}
+
+/// Refresh external-call notices and the exact microphone tracks allowed to leave the room.
+pub(super) async fn sync(ctx: &Ctx, url: &url::Url, live: &mut Live) {
+    let calls = live.room.external_phone_calls();
+    live.phone_consents.retain(|call| calls.contains(call));
+    let hosted = None;
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    let hosted = live.phone.as_ref().map(|phone| &phone.sid).or(hosted);
+    if let Some(sid) = hosted {
+        ctx.audio.phone_consent(
+            live.room
+                .phone_microphones(&live.room.local_phone_call(sid)),
+        );
+    } else {
+        ctx.audio.end_phone();
+    }
+    let announcement = (hosted.cloned(), live.phone_consents.clone());
+    if live.phone_announcement.as_ref() != Some(&announcement) {
+        match live.room.announce_phone(hosted, &live.phone_consents).await {
+            Ok(()) => live.phone_announcement = Some(announcement),
+            Err(_) => tracing::warn!("announcing phone consent failed"),
+        }
+    }
+    let names = live.room.shared_audio();
+    let calls = calls
+        .into_iter()
+        .map(|call| {
+            let label = names
+                .iter()
+                .find(|(_, sid, _)| sid.as_str() == call.track)
+                .map(|(_, _, name)| name.clone())
+                .unwrap_or_default();
+            let allowed = live.phone_consents.contains(&call);
+            (call, label, allowed)
+        })
+        .collect();
+    ctx.send(super::Update::ExternalPhones(
+        url.clone(),
+        live.channel,
+        calls,
+    ));
 }

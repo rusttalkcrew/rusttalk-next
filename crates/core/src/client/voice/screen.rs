@@ -14,8 +14,7 @@ pub use livekit::{
 use crate::{camera::CameraOptions, screen::ScreenOptions};
 
 use super::{
-    LocalTrackPublication, ParticipantIdentity, TrackSid, TrackSource, VoiceRoom,
-    stream_audio::is_stream_audio, track_name,
+    LocalTrackPublication, ParticipantIdentity, TrackSid, TrackSource, VoiceRoom, track_name,
 };
 
 /// A remote video publication. The track becomes available after subscription.
@@ -160,9 +159,9 @@ impl VoiceRoom {
             .collect()
     }
 
-    /// Start or stop receiving one remote video publication. A screen share's sound
-    /// comes and goes with it, so only its viewers receive it.
-    pub fn set_subscribed(&self, sid: &TrackSid, subscribed: bool) -> Result<()> {
+    /// Start or stop receiving video. Screen sound additionally requires Listen;
+    /// stopping the video discards consent to that participant's screen sound.
+    pub fn set_subscribed(&mut self, sid: &TrackSid, subscribed: bool) -> Result<()> {
         let (participant, publication) = self
             .room
             .remote_participants()
@@ -184,13 +183,16 @@ impl VoiceRoom {
         if publication.is_desired() != subscribed {
             publication.set_subscribed(subscribed);
         }
-        if publication.source() == TrackSource::Screenshare {
+        if !subscribed && publication.source() == TrackSource::Screenshare {
             for audio in participant.track_publications().into_values() {
-                if is_stream_audio(&audio, &self.stream_names) && audio.is_desired() != subscribed {
-                    audio.set_subscribed(subscribed);
+                if track_name::decrypt(&self.stream_names, track_name::STREAM_AUDIO, &audio.name())
+                    .is_some()
+                {
+                    self.listening.remove(&audio.sid());
                 }
             }
         }
+        self.reconcile_audio();
         Ok(())
     }
 }

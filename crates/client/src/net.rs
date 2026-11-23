@@ -245,6 +245,8 @@ pub enum Command {
     ChangeScreen(screen::Target, bool),
     /// Start or stop receiving a screen or camera, by track.
     Watch(String, bool),
+    Listen(String, bool),
+    PhoneConsent(rusttalk_core::client::voice::phone::Call, bool),
     /// Publish a running camera, replacing an earlier one.
     ShareCamera(NativeVideoSource, CameraOptions),
     StopCamera,
@@ -368,6 +370,11 @@ impl Compatibility {
 }
 
 pub enum Update {
+    ExternalPhones(
+        Url,
+        Id,
+        Vec<(rusttalk_core::client::voice::phone::Call, String, bool)>,
+    ),
     RetryDmBackfill,
     VoiceDestination(Url, Id, bool),
     Preview(Result<Box<Preview>, String>),
@@ -1343,6 +1350,9 @@ async fn serve(
 /// Apply any newly verified epoch keys to the call and waiting calendar records.
 fn apply_keys(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &mut State) {
     voice::sync_voice_key(ctx, client, state);
+    if let Some(live) = &state.voice {
+        voice::send_room(ctx, url, client, state, live.channel);
+    }
     if let Some(dir) = &mut state.last
         && let Some(calendar) = &mut dir.calendar
         && calendar::retry(
@@ -1416,6 +1426,7 @@ async fn voice_next(
                     .await;
                 if denied {
                     live.stop_audio_captures();
+                    ctx.audio.end_phone();
                     ctx.send(Update::SharedAudioStopped(url.clone(), live.channel));
                 }
                 if let Err(error) = live
@@ -2047,6 +2058,8 @@ async fn on_command(
         | Command::StreamAudio(_)
         | Command::ChangeScreen(..)
         | Command::Watch(..)
+        | Command::Listen(..)
+        | Command::PhoneConsent(..)
         | Command::StopCamera
         | Command::CancelFile(_)
         | Command::RequestControl(_)

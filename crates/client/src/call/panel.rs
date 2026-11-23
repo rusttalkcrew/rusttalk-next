@@ -169,6 +169,22 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
     if home.voice.call.is_none() {
         return;
     }
+    for (call, label, allowed) in &home.voice.external_phones {
+        ui.push_id(&call.track, |ui| {
+            ui.label(format!("{}: {label}", t!("phone.external_notice")));
+            ui.label(t!("phone.external_help"));
+            let text = if *allowed {
+                t!("phone.withdraw")
+            } else {
+                t!("phone.allow")
+            };
+            if ui::primary(ui, text).clicked()
+                && let Some(server) = super::call_server(home)
+            {
+                server.send(Command::PhoneConsent(call.clone(), !allowed));
+            }
+        });
+    }
     mic_hint_card(ui, home);
     let Some(call) = &home.voice.call else {
         return;
@@ -250,6 +266,12 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
                 });
             });
             ui.add_space(6.0);
+            #[cfg(any(target_os = "android", target_os = "ios"))]
+            {
+                let mut settings = home.voice.audio.settings();
+                home.voice.camera.mobile_controls(ui, &mut settings);
+                home.voice.audio.set_settings(settings);
+            }
             let more = home.voice.audio.can_host_terminal();
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             let phone = super::phone::shows(&mut home.voice);

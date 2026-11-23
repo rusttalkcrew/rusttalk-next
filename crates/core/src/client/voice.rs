@@ -2,6 +2,7 @@
 
 mod control;
 mod live_file;
+pub mod phone;
 pub mod ring;
 mod screen;
 mod stats;
@@ -219,6 +220,7 @@ impl KeyClient<'_> {
             changes,
             revocations: self.revocations.clone(),
             blocked,
+            listening: HashMap::new(),
             room,
             events,
             server: server.clone(),
@@ -296,6 +298,7 @@ pub struct VoiceRoom {
     revocations: super::revocations::Revocations,
     changes: tokio::sync::watch::Receiver<()>,
     blocked: std::collections::HashSet<String>,
+    listening: HashMap<TrackSid, (ParticipantIdentity, String)>,
     room: Arc<Room>,
     events: mpsc::UnboundedReceiver<RoomEvent>,
     server: KnownServer,
@@ -458,6 +461,44 @@ impl VoiceRoom {
                     tracing::warn!("refused unencrypted voice track");
                     continue;
                 }
+                RoomEvent::TrackSubscribed {
+                    publication,
+                    participant,
+                    ..
+                } if publication.kind() == livekit::prelude::TrackKind::Audio
+                    && !self.audio_wanted(participant, publication) =>
+                {
+                    publication.set_subscribed(false);
+                    continue;
+                }
+                RoomEvent::TrackUnpublished {
+                    publication,
+                    participant,
+                } => {
+                    self.listening.remove(&publication.sid());
+                    if publication.source() == TrackSource::Screenshare {
+                        for audio in participant.track_publications().into_values() {
+                            if track_name::decrypt(
+                                &self.stream_names,
+                                track_name::STREAM_AUDIO,
+                                &audio.name(),
+                            )
+                            .is_some()
+                            {
+                                self.listening.remove(&audio.sid());
+                            }
+                        }
+                    }
+                    self.reconcile_audio();
+                }
+                RoomEvent::ParticipantDisconnected(participant) => {
+                    self.listening
+                        .retain(|_, (id, _)| id != &participant.identity());
+                }
+                RoomEvent::Reconnecting | RoomEvent::Reconnected => {
+                    self.listening.clear();
+                    self.reconcile_audio();
+                }
                 RoomEvent::TrackPublished { .. } => self.reconcile_audio(),
                 RoomEvent::LocalTrackPublished { .. } | RoomEvent::LocalTrackRepublished { .. } => {
                     self.switch_senders();
@@ -504,7 +545,8 @@ impl VoiceRoom {
                 participant.track_publications().into_iter().filter_map(
                     move |(sid, publication)| match publication.track() {
                         Some(RemoteTrack::Audio(track))
-                            if publication.encryption_type() == EncryptionType::Gcm =>
+                            if publication.encryption_type() == EncryptionType::Gcm
+                                && self.audio_wanted(&participant, &publication) =>
                         {
                             Some((identity.clone(), sid, track))
                         }

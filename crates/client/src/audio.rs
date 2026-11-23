@@ -363,6 +363,7 @@ const PHONE_LAG: usize = RATE as usize / 5;
 /// The room's voices and this microphone, at 48 kHz, waiting for the phone.
 #[derive(Default)]
 struct PhoneTap {
+    allowed: std::collections::HashSet<String>,
     room: VecDeque<i16>,
     mic: VecDeque<i16>,
 }
@@ -436,6 +437,7 @@ pub type StreamId = (Id, Option<String>);
 
 #[derive(Default)]
 struct Mixer {
+    listening: std::collections::HashSet<String>,
     tracks: HashMap<String, Track>,
     serial: u64,
     cues: VecDeque<i16>,
@@ -668,6 +670,8 @@ impl Audio {
         {
             let mut mixer = lock(&self.shared().mixer);
             mixer.tracks.clear();
+            *lock(&self.shared().phone) = None;
+            mixer.listening.clear();
             mixer.cues.clear();
             mixer.cue_until = None;
         }
@@ -876,6 +880,9 @@ impl Audio {
             // Settings before the mixer, as everywhere, so a new mix can't slip between.
             let settings = lock(&self.shared().settings);
             let mut mixer = lock(&self.shared().mixer);
+            if stream.1.is_some() && !mixer.listening.contains(&sid) {
+                return;
+            }
             mixer.serial += 1;
             let serial = mixer.serial;
             // Replaces an older reader of the same track, which then stops.
@@ -922,8 +929,46 @@ impl Audio {
         });
     }
 
+    pub fn stop_listening(&self) {
+        let mut mixer = lock(&self.shared().mixer);
+        mixer.listening.clear();
+        // The local phone bridge is explicitly started by dialing, not remote Listen consent.
+        mixer
+            .tracks
+            .retain(|sid, track| sid == PHONE_TRACK || track.stream.1.is_none());
+    }
+
+    pub fn is_listening(&self, sid: &str) -> bool {
+        lock(&self.shared().mixer).listening.contains(sid)
+    }
+
+    pub fn set_listening(&self, sid: &str, on: bool) {
+        let mut mixer = lock(&self.shared().mixer);
+        if on {
+            mixer.listening.insert(sid.to_owned());
+        } else {
+            mixer.listening.remove(sid);
+            mixer.tracks.remove(sid);
+        }
+    }
+
     pub fn remove_track(&self, sid: &str) {
         lock(&self.shared().mixer).tracks.remove(sid);
+    }
+
+    pub fn end_phone(&self) {
+        lock(&self.shared().mixer).tracks.remove(PHONE_TRACK);
+        *lock(&self.shared().phone) = None;
+    }
+
+    pub fn phone_consent(&self, allowed: Vec<String>) {
+        if let Some(tap) = lock(&self.shared().phone).as_mut() {
+            let allowed = allowed.into_iter().collect();
+            if tap.allowed != allowed {
+                tap.allowed = allowed;
+                tap.room.clear();
+            }
+        }
     }
 
     /// Bridge a phone call into this call; it plays as `stream`, at its volume.
@@ -1449,6 +1494,7 @@ fn mix(shared: &Shared, play_cues: bool) -> [i16; FRAME] {
 /// room even when this person turned someone down or deafened.
 fn mix_tracks(mixer: &mut Mixer, deafened: bool, phone: Option<&mut PhoneTap>) -> [i16; FRAME] {
     let mut sum = [0f32; FRAME];
+    let allowed = phone.as_ref().map(|tap| &tap.allowed);
     let mut room = phone.is_some().then_some([0f32; FRAME]);
     let Mixer {
         tracks,
@@ -1464,7 +1510,9 @@ fn mix_tracks(mixer: &mut Mixer, deafened: bool, phone: Option<&mut PhoneTap>) -
     }
     for (sid, track) in tracks.iter_mut() {
         let gain = if deafened { 0.0 } else { track.gain };
-        let mut room = room.as_mut().filter(|_| sid != PHONE_TRACK);
+        let mut room = room.as_mut().filter(|_| {
+            track.stream.1.is_none() && allowed.is_some_and(|allowed| allowed.contains(sid))
+        });
         track.primed |= track.queue.len() >= PRIME;
         if !track.primed {
             continue;
@@ -2147,6 +2195,54 @@ mod tests {
     }
 
     #[test]
+    fn shared_playback_requires_consent_and_stop_discards_buffered_samples() {
+        let data = tempfile::tempdir().unwrap();
+        let audio = Audio::new(data.path()).unwrap();
+        let source = NativeAudioSource::new(AudioSourceOptions::default(), RATE, 1, 0);
+        let track = livekit::prelude::LocalAudioTrack::create_audio_track(
+            "synthetic",
+            livekit::webrtc::audio_source::RtcAudioSource::Native(source),
+        );
+        let shared = ([1; 32], Some("Music".to_owned()));
+        audio.add_track("TR_app".into(), shared.clone(), track.rtc_track());
+        assert!(lock(&audio.shared().mixer).tracks.is_empty());
+        audio.set_listening("TR_app", true);
+        audio.add_track("TR_app".into(), shared, track.rtc_track());
+        audio.add_track("TR_mic".into(), ([1; 32], None), track.rtc_track());
+        {
+            let mut mixer = lock(&audio.shared().mixer);
+            for t in mixer.tracks.values_mut() {
+                t.queue.extend(std::iter::repeat_n(1000, PRIME * 2));
+            }
+            assert!(mix_tracks(&mut mixer, false, None).iter().any(|&v| v != 0));
+        }
+        audio.set_listening("TR_app", false);
+        let mut mixer = lock(&audio.shared().mixer);
+        assert!(!mixer.tracks.contains_key("TR_app"));
+        assert!(
+            mix_tracks(&mut mixer, false, None).iter().any(|&v| v != 0),
+            "microphone continues"
+        );
+        assert!(
+            mix_tracks(&mut mixer, true, None).iter().all(|&v| v == 0),
+            "deafen still applies"
+        );
+        drop(mixer);
+        let line = audio.phone_line(([1; 32], Some("Phone".to_owned())));
+        audio.stop_listening();
+        assert!(lock(&audio.shared().mixer).tracks.contains_key("TR_mic"));
+        assert!(lock(&audio.shared().mixer).tracks.contains_key(PHONE_TRACK));
+        drop(line);
+        assert!(lock(&audio.shared().phone).is_none());
+        let line = audio.phone_line(([1; 32], Some("Phone".to_owned())));
+        audio.end_voice(None);
+        assert!(lock(&audio.shared().phone).is_none());
+        let mut samples = [1; FRAME];
+        line.take(&mut samples);
+        assert!(samples.iter().all(|&sample| sample == 0));
+    }
+
+    #[test]
     fn mixer_consumes_cues_and_still_plays_them_while_deafened() {
         let samples: VecDeque<_> = Cue::YouJoined.samples(RATE, 0.5).collect();
         let mut mixer = Mixer {
@@ -2198,6 +2294,33 @@ mod tests {
     }
 
     #[test]
+    fn phone_export_needs_consent_and_excludes_shared_audio() {
+        let track = |app| Track {
+            serial: 0,
+            gain: 1.0,
+            stream: ([1; 32], app),
+            queue: VecDeque::from(vec![1000; PRIME * 4]),
+            primed: false,
+            loud: 0,
+        };
+        let mut mixer = Mixer::default();
+        mixer.tracks.insert("voice".into(), track(None));
+        mixer.tracks.insert("newcomer".into(), track(None));
+        mixer
+            .tracks
+            .insert("app".into(), track(Some("music".into())));
+        let mut tap = PhoneTap::default();
+        mix_tracks(&mut mixer, false, Some(&mut tap));
+        assert!(tap.room.drain(..).all(|sample| sample == 0));
+        tap.allowed.extend(["voice".into(), "app".into()]);
+        mix_tracks(&mut mixer, true, Some(&mut tap));
+        assert!(tap.room.drain(..).all(|sample| sample == 1000));
+        tap.allowed.clear();
+        mix_tracks(&mut mixer, false, Some(&mut tap));
+        assert!(tap.room.drain(..).all(|sample| sample == 0));
+    }
+
+    #[test]
     fn a_phone_hears_the_room_but_not_itself() {
         let track = |gain, sample| Track {
             serial: 0,
@@ -2212,6 +2335,7 @@ mod tests {
         mixer.tracks.insert("voice".into(), track(0.25, 4000));
         mixer.tracks.insert(PHONE_TRACK.into(), track(1.0, 1000));
         let mut tap = PhoneTap::default();
+        tap.allowed.insert("voice".into());
         let speakers = mix_tracks(&mut mixer, false, Some(&mut tap));
         assert!(
             speakers.iter().all(|&s| s == 2000),

@@ -296,11 +296,12 @@ fn person_picture(
 ) -> Option<Picture> {
     let sid = peer.camera.as_ref()?;
     if me {
+        let mirrored = voice.camera.mirrored();
         let texture = voice.camera.self_texture(ctx)?;
         return Some(Picture {
             texture: texture.id(),
             size: texture.size_vec2(),
-            mirrored: true,
+            mirrored,
             cover: true,
         });
     }
@@ -327,6 +328,7 @@ struct Entry<'p> {
 
 /// What a tile asked for this frame.
 enum Act {
+    Listen(String, bool),
     Focus(Tile),
     Unfocus,
     Minimize(Id),
@@ -942,7 +944,9 @@ fn screen_menu(
             Row::Volume => {
                 m.separator();
                 // The sharer's apps, whose sound arrives with the screen.
-                mixer::show(m, audio, person, false, &entry.peer.apps);
+                mixer::show(m, audio, person, false, &entry.peer.apps, |sid, on| {
+                    acts.push(Act::Listen(sid, on))
+                });
             }
             Row::ShowFps => {
                 m.separator();
@@ -1221,7 +1225,9 @@ fn tools(
     if volume && room() {
         let button = ui::icon_button(ui, "🔊", t!("call.volume"), Look::Plain, tool);
         ui::menu(&button, |m| {
-            mixer::show(m, audio, person, is_person, &entry.peer.apps)
+            mixer::show(m, audio, person, is_person, &entry.peer.apps, |sid, on| {
+                acts.push(Act::Listen(sid, on))
+            })
         });
         let open = ui::menu_open(&button);
         ui.data_mut(|data| data.insert_temp(menu_id, open));
@@ -1258,6 +1264,7 @@ fn apply(home: &mut Home, index: usize, now: f64, acts: Vec<Act>) {
                 }
             }
             Act::Full(tile) => stage.full = Some(tile),
+            Act::Listen(sid, on) => send(home, Command::Listen(sid, on)),
             Act::Watch(screen) => watch(home, &screen),
             Act::StopWatching => {
                 stage.stop_watching();

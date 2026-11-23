@@ -1545,7 +1545,7 @@ clipboard.select_all = すべて選択
 # ボイスチャンネルへの電話 (SIP)
 phone.settings = 電話
 phone.account = 電話アカウント (SIP)
-phone.account_help = 電話会社の SIP アカウントを追加すると、ボイスチャンネルから電話番号に発信できます。チャンネルの全員が通話を聞けます。パスワードはこのコンピューターのキーチェーンに保存されます。
+phone.account_help = 電話会社の SIP アカウントを追加すると、ボイスチャンネルから電話番号に発信できます。メンバーは通話を聴くことができます。パスワードはこのコンピューターのキーチェーンに保存されます。
 phone.server = サーバー
 phone.server_help = 例: sip.provider.jp または sip.provider.jp:5060
 phone.user = ユーザー名
@@ -1570,7 +1570,7 @@ phone.add_contact = 連絡先を追加
 phone.edit_contact = 編集
 phone.remove_contact = 削除
 phone.contact_name = 名前
-phone.not_encrypted = 電話は電話会社を経由するため、エンドツーエンドで暗号化されません。
+phone.not_encrypted = 電話は電話会社を経由するため、エンドツーエンドで暗号化されません。 発信するとマイク音声が電話会社に共有されます。他のメンバーは、自分のマイク音声の共有に個別に同意する必要があります。
 phone.leave_title = 通話中です
 phone.leave_help = チャンネルを退出すると、全員の通話が終了します。
 phone.leave_and_hang_up = 切って退出
@@ -1587,3 +1587,15 @@ phone.declined = 通話が拒否されました。
 phone.cancelled = 通話がキャンセルされました。
 phone.no_sound = 通話はつながりましたが、使える音声がありません。
 phone.failed = 通話できませんでした。
+
+camera.flip = カメラを切り替え
+camera.torch_on = ライトをオン
+camera.torch_off = ライトをオフ
+camera.switch_failed = カメラを変更できません。
+call.listen = 聴く
+call.stop_listening = 聴くのをやめる
+
+phone.external_notice = 外部の電話通話
+phone.external_help = 許可するまでマイク音声は共有されません。電話音声はエンドツーエンドで暗号化されません。「聴く」は通話をここで再生するだけです。
+phone.allow = この通話にマイク音声を共有
+phone.withdraw = マイク音声の共有を停止

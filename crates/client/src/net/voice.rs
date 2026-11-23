@@ -43,6 +43,11 @@ pub(super) struct Live {
     pub(super) channel: Id,
     /// The last acknowledged deafen state, so failures can be retried.
     deafened: Option<bool>,
+    pub(super) phone_consents: Vec<rusttalk_core::client::voice::phone::Call>,
+    pub(super) phone_announcement: Option<(
+        Option<TrackSid>,
+        Vec<rusttalk_core::client::voice::phone::Call>,
+    )>,
     /// Apps this device shares, each with its own track.
     shares: Vec<Share>,
     /// The phone call bridged in, shown like a shared app.
@@ -136,6 +141,8 @@ pub(super) fn voice_only(command: &Command) -> bool {
             | Command::StreamAudio(_)
             | Command::ChangeScreen(..)
             | Command::Watch(..)
+            | Command::Listen(..)
+            | Command::PhoneConsent(..)
             | Command::StopCamera
             | Command::CancelFile(_)
     ) || control::is_control(command)
@@ -186,6 +193,14 @@ pub(super) async fn voice_command(
         return Ok(changed.then_some(live.channel));
     }
     let changed = match command {
+        Command::PhoneConsent(call, on) => {
+            live.phone_consents.retain(|old| old != &call);
+            if on && live.room.external_phone_calls().contains(&call) {
+                live.phone_consents.push(call);
+            }
+            phone::sync(ctx, url, live).await;
+            false
+        }
         Command::StopApp(id) => {
             live.pending
                 .retain(|start| start.stream || start.app.id != id);
@@ -215,6 +230,14 @@ pub(super) async fn voice_command(
             control::stop_hosting(ctx, live).await;
             change_screen(ctx, live, target, remote_control);
             false
+        }
+        Command::Listen(sid, on) => {
+            live.room.set_listening(
+                &TrackSid::try_from(sid.clone()).map_err(anyhow::Error::msg)?,
+                on,
+            )?;
+            ctx.audio.set_listening(&sid, on);
+            true
         }
         Command::Watch(sid, on) => {
             watch(ctx, live, sid, on)?;
@@ -428,6 +451,13 @@ pub(super) fn watch(ctx: &Ctx, live: &mut Live, sid: String, on: bool) -> Result
         return Ok(());
     };
     live.room.set_subscribed(&video.sid, on)?;
+    if !on {
+        for (identity, audio, _) in live.room.shared_audio() {
+            if identity == video.participant && !live.room.is_listening(&audio) {
+                ctx.audio.set_listening(audio.as_str(), false);
+            }
+        }
+    }
     // Already subscribed: no new event will come.
     if let (true, Some(track)) = (on, video.track) {
         ctx.video.add_track(sid, track.rtc_track());
@@ -879,15 +909,11 @@ fn send_roster(ctx: &Ctx, url: &Url, ids: &HashMap<String, Id>, state: &State, c
                             })
                             .or_insert(status);
                     }
-                    apps.entry(*person).or_default().extend(
-                        participant
-                            .track_publications()
-                            .into_keys()
-                            .filter_map(|sid| {
-                                let name = live.apps.get(&sid)?.clone();
-                                Some((sid, name))
-                            }),
-                    );
+                }
+            }
+            for (identity, sid, name) in live.room.shared_audio() {
+                if let Some(person) = ids.get(identity.as_str()) {
+                    apps.entry(*person).or_default().push((sid, name));
                 }
             }
             for names in apps.values_mut() {
@@ -1008,6 +1034,19 @@ pub(super) async fn on_voice(
         roster(ctx, url, client, state, channel);
         return;
     };
+    if let Some(live) = &state.voice {
+        for (_, sid, _) in live.room.shared_audio() {
+            if !live.room.is_listening(&sid) {
+                ctx.audio.set_listening(sid.as_str(), false);
+            }
+        }
+        let allowed = live.room.remote_audio_tracks();
+        for sid in live.apps.keys() {
+            if !allowed.iter().any(|(_, active, _)| active == sid) {
+                ctx.audio.remove_track(sid.as_str());
+            }
+        }
+    }
     match event {
         RoomEvent::TrackSubscribed {
             track: RemoteTrack::Audio(track),
@@ -1070,6 +1109,16 @@ pub(super) async fn on_voice(
             ctx.video.remove_track(track.sid().as_str());
         }
         RoomEvent::Reconnecting => {
+            if let Some(live) = &mut state.voice {
+                live.phone_consents.clear();
+                live.phone_announcement = None;
+                #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                {
+                    live.phone = None;
+                }
+                ctx.audio.end_phone();
+            }
+            ctx.audio.stop_listening();
             tracing::info!("voice reconnecting");
             ctx.send(Update::Call(
                 url.clone(),
@@ -1078,8 +1127,11 @@ pub(super) async fn on_voice(
             ));
         }
         RoomEvent::Reconnected => {
+            ctx.audio.stop_listening();
             tracing::info!("voice reconnected");
             if let Some(live) = &mut state.voice {
+                live.phone_consents.clear();
+                live.phone_announcement = None;
                 live.deafened = None;
                 live.announced_watches = None;
                 sync_video_watches(live).await;
@@ -1112,6 +1164,8 @@ pub(super) async fn on_voice(
             }
         }
         RoomEvent::TrackUnpublished { publication, .. } => {
+            ctx.audio.set_listening(publication.sid().as_str(), false);
+            ctx.audio.remove_track(publication.sid().as_str());
             if let Some(live) = &mut state.voice {
                 control::unpublished(ctx, live, publication.sid().as_str());
             }
@@ -1122,6 +1176,12 @@ pub(super) async fn on_voice(
             ..
         } => {
             if let Some(live) = &mut state.voice {
+                #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                if let Some(phone) = &mut live.phone
+                    && phone.sid == previous_sid
+                {
+                    phone.sid = publication.sid();
+                }
                 if live.camera.as_ref() == Some(&previous_sid) {
                     live.camera = Some(publication.sid());
                 }
@@ -1141,6 +1201,9 @@ pub(super) async fn on_voice(
         | RoomEvent::ConnectionStateChanged(_) => {}
         _ => return,
     }
+    if let Some(live) = &mut state.voice {
+        phone::sync(ctx, url, live).await;
+    }
     roster(ctx, url, client, state, channel);
 }
 
@@ -1159,6 +1222,16 @@ pub(super) async fn stop_lost_video(
     let (camera, screen) = (live.room.can_use_camera(), live.room.can_share_screen());
     let gone = |sid: &TrackSid, allowed: bool| !allowed || unpublished.as_ref() == Some(sid);
     let mut changed = false;
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    if live
+        .phone
+        .as_ref()
+        .is_some_and(|phone| gone(&phone.sid, live.room.can_share_audio()))
+    {
+        live.phone = None;
+        ctx.audio.end_phone();
+        changed = true;
+    }
     if live.camera.as_ref().is_some_and(|sid| gone(sid, camera)) {
         stop_camera(live).await;
         ctx.send(Update::CameraStopped);
@@ -1198,6 +1271,7 @@ pub(super) async fn stop_finished_shares(
         .partition(|share| share.capture.is_finished());
     live.shares = kept;
     let phone_ended = phone::stop_ended(ctx, live).await;
+    phone::sync(ctx, url, live).await;
     if live.host.controller().is_some()
         && live
             .screen
@@ -1461,6 +1535,8 @@ pub(super) async fn start_call(
         shares: Vec::new(),
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         phone: None,
+        phone_consents: Vec::new(),
+        phone_announcement: None,
         pending: Vec::new(),
         stream_audio: Vec::new(),
         apps: HashMap::new(),
@@ -1517,6 +1593,10 @@ impl Live {
         }
         self.shares.clear();
         self.stream_audio.clear();
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        {
+            self.phone = None;
+        }
     }
 }
 

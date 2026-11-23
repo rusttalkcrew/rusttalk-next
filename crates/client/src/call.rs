@@ -55,6 +55,7 @@ pub use panel::{Link, call_bar};
 pub use stage::{Stage, full_view, stage};
 
 pub struct Voice {
+    pub external_phones: Vec<(rusttalk_core::client::voice::phone::Call, String, bool)>,
     pub audio: Audio,
     pub call: Option<Call>,
     #[cfg(any(target_os = "android", target_os = "ios"))]
@@ -220,6 +221,7 @@ impl Voice {
             mic_hint: None,
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             phone: phone::Phone::default(),
+            external_phones: Vec::new(),
             highlight: None,
         }
     }
@@ -235,6 +237,7 @@ impl Voice {
         crate::android::communication_mode(false);
         self.call = None;
         self.audio.end_voice(self.sounds.end());
+        self.external_phones.clear();
         self.link = Link::default();
         self.shares.clear();
         self.clear_screens();
@@ -420,7 +423,7 @@ pub fn frame(ctx: &egui::Context, home: &mut Home) {
     }
     let recording = home.hotkeys.recording();
     let voice = &mut home.voice;
-    let settings = voice.audio.settings();
+    let mut settings = voice.audio.settings();
     let key = Key::from_name(&settings.key);
     // While another app is in front, the global shortcut (see `hotkeys`) talks instead.
     let down = settings.push_to_talk
@@ -464,7 +467,12 @@ pub fn frame(ctx: &egui::Context, home: &mut Home) {
         .as_ref()
         .is_some_and(|call| call.can_share_video);
     let preview = home.settings == Some(Tab::Video);
-    let change = home.voice.camera.update(ctx, &settings, can_video, preview);
+    let change = home
+        .voice
+        .camera
+        .update(ctx, &mut settings, can_video, preview);
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    home.voice.audio.set_settings(settings.clone());
     if let Some(text) = home.voice.camera.problem.take() {
         home.toast = Some((text, ctx.input(|input| input.time) + 6.0));
     }
@@ -639,7 +647,9 @@ pub fn room_list(ui: &mut Ui, home: &Home, server: &Server, channel: &Id) -> Opt
                 let row = row.response.interact(Sense::click());
                 let apps = std::slice::from_ref(shared);
                 ui::context_menu(&row, |m| {
-                    mixer::show(m, &home.voice.audio, peer.person, false, apps);
+                    mixer::show(m, &home.voice.audio, peer.person, false, apps, |sid, on| {
+                        server.send(Command::Listen(sid, on))
+                    });
                 });
             }
         }

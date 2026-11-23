@@ -158,16 +158,32 @@ public class MainActivity extends GameActivity {
         return mask;
     }
 
-    public synchronized boolean startCamera(boolean front, int w, int h, int fps) {
-        if (!resumed || !voiceReady) return false;
-        camera = new CallCamera();
-        return camera.start(getApplicationContext(), front, w, h, fps);
+    public boolean startCamera(boolean front, int w, int h, int fps, long generation) {
+        CallCamera next = new CallCamera(this, w, h, fps, generation);
+        synchronized (this) {
+            if (!resumed || !voiceReady || camera != null) return false;
+            camera = next;
+        }
+        return next.start(front);
     }
 
-    public synchronized boolean cameraEnded() { return camera == null || camera.ended; }
+    public synchronized int cameraState() { return camera == null ? 0 : camera.state(); }
+    public boolean selectCamera(boolean front) {
+        CallCamera current;
+        synchronized (this) { current = resumed ? camera : null; }
+        return current != null && current.select(front);
+    }
+    public boolean cameraTorch(boolean on) {
+        CallCamera current;
+        synchronized (this) { current = resumed ? camera : null; }
+        return current != null && current.torch(on);
+    }
+
+    public synchronized boolean cameraEnded() { return camera == null || camera.ended(); }
 
     public synchronized void stopCamera() {
-        if (camera != null) camera.close();
+        // cancel only invalidates and posts cleanup; it never waits for native work.
+        if (camera != null) camera.cancel();
         camera = null;
     }
 
