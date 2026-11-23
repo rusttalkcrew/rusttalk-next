@@ -237,11 +237,61 @@ async fn preview_upgrade_recognizes_only_the_original_checksum_and_recorded_gran
                 .await?;
         assert_eq!(grants, [(person(2), "moderator".into())]);
         let versions: Vec<i64> = query_scalar(
-            "SELECT version FROM _sqlx_migrations WHERE version IN (34, 37) ORDER BY version",
+            "SELECT version FROM _sqlx_migrations WHERE version IN (34, 35, 37) ORDER BY version",
         )
         .fetch_all(&db)
         .await?;
-        assert_eq!(versions, [34, 37]);
+        assert_eq!(versions, [34, 35, 37]);
+        db.close().await;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn upgrade_from_either_feature_branch_preserves_calendar_data() -> anyhow::Result<()> {
+    for existing in [35, 37] {
+        let (dir, mut old) = before_events().await?;
+        for migration in sqlx::migrate!()
+            .iter()
+            .filter(|m| m.version == 34 || m.version == existing)
+        {
+            old.apply(migration).await?;
+        }
+        query("INSERT INTO channel_ids VALUES ('event')")
+            .execute(&mut old)
+            .await?;
+        query("INSERT INTO calendar_events (id, author, author_device, certificate, approved, epoch, remove_at, envelope) VALUES ('event', X'01', X'02', X'03', 1, 1, 123, X'04')")
+            .execute(&mut old).await?;
+        if existing == 35 {
+            query("UPDATE calendar_events SET reminded_at = 42")
+                .execute(&mut old)
+                .await?;
+            query("INSERT INTO calendar_answers VALUES ('event', X'05', X'06', X'07', 2, X'08')")
+                .execute(&mut old)
+                .await?;
+        }
+        old.close().await?;
+        let db = store::open(dir.path()).await?;
+        let reminder: Option<i64> =
+            query_scalar("SELECT reminded_at FROM calendar_events WHERE id = 'event'")
+                .fetch_one(&db)
+                .await?;
+        assert_eq!(reminder, (existing == 35).then_some(42));
+        let answers: Vec<(i64, Vec<u8>)> =
+            query_as("SELECT epoch, envelope FROM calendar_answers WHERE event_id = 'event'")
+                .fetch_all(&db)
+                .await?;
+        if existing == 35 {
+            assert_eq!(answers, [(2, vec![8])]);
+        } else {
+            assert!(answers.is_empty());
+        }
+        let versions: Vec<i64> = query_scalar(
+            "SELECT version FROM _sqlx_migrations WHERE version IN (34, 35, 37) ORDER BY version",
+        )
+        .fetch_all(&db)
+        .await?;
+        assert_eq!(versions, [34, 35, 37]);
         db.close().await;
     }
     Ok(())

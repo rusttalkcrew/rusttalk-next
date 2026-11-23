@@ -26,7 +26,8 @@ tables in SQLite (WAL). IDs and digests are binary unless indicated. The `_ct` s
 | `categories` | `id` (text), `position`, `name_ct` |
 | `channels` | `id` (text), `kind` (text, voice or dm), `page` (whether a text channel is shown as one page), nullable `category_id`, `position`, nullable `name_ct` and `topic_ct`, `audio_kbps` (a voice channel's Opus bitrate, 8 to 128, plain because it is a setting rather than user-written content), nullable `dm_first` and `dm_second` (person IDs) |
 | `channel_ids` | `id` (text, including event IDs and deleted channel IDs to prevent reuse) |
-| `calendar_events` | `id` (opaque text), `author` and `author_device` (public keys), `certificate` (public device certificate), `approved`, `epoch`, `remove_at` (Unix seconds: the end plus two hours, plain so the server can delete it), `envelope` (signed space-key ciphertext holding title, description, place, start and end) |
+| `calendar_events` | `id` (opaque text), `author` and `author_device` (public keys), `certificate` (public device certificate), `approved`, `epoch`, `remove_at` (Unix seconds: the end plus two hours, plain so the server can delete it), `envelope` (signed space-key ciphertext holding title, description, place, start and end), nullable `reminded_at` (Unix seconds) |
+| `calendar_answers` | `event_id`, `person` and `device` (public keys), `certificate` (public device certificate), `epoch`, `envelope` (signed space-key ciphertext of going or not going, always the same size) |
 | `channel_permissions` | `channel_id`, `role_id`, `flags` (four-bit mask) |
 | `key_scopes` | `id` (text), `kind` (space or channel), nullable `channel_id`, `rotate` |
 | `key_epochs` | `scope_id`, `epoch`, `commitment` (key commitment), `excluded` (public signing keys excluded from this epoch) |
@@ -62,7 +63,8 @@ ciphertext. Explicit deletes and the retention cap remove message rows.
 Public sender certificates and audit IDs are retained for history and
 accountability.
 The server knows who made an event or suggestion, whether it was approved,
-and when it ends. It never learns the title, description, place or start. Events
+and when it ends, who answered and when someone was last reminded. It never learns
+the title, description, place, start or anyone's answer. Events
 are deleted two hours after their end; their IDs stay reserved.
 A DM is copied to every server both people share. Each of those servers
 learns that the two people have a DM, plus the size and time of each copy

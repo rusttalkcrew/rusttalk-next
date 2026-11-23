@@ -1,6 +1,6 @@
 use axum::extract::Path as RoutePath;
 use rusttalk_core::{
-    calendar::Details,
+    calendar::{Answer, Details},
     identity::DeviceIdentity,
     keys::{Key, random_key},
 };
@@ -294,3 +294,123 @@ async fn events_go_two_hours_after_their_end() -> anyhow::Result<()> {
 }
 
 mod upgrade;
+
+impl Server {
+    fn sealed_answer(&self, who: u8, id: u8, answer: Answer) -> NewAnswer {
+        let person = self.person(who);
+        let context = AnswerContext {
+            server_id: keys::space(&self.app).id,
+            event_id: [id; 32],
+            epoch: 1,
+            device: person.certificate.signing_key().to_bytes(),
+            person: *person.certificate.person_id(),
+        };
+        NewAnswer {
+            epoch: 1,
+            envelope: encode(&context.seal(&self.key, person, answer).expect("sealed")),
+        }
+    }
+
+    async fn answer(&self, who: u8, id: u8, new: NewAnswer) -> ApiResult<StatusCode> {
+        let path = RoutePath(encode(&[id; 32]));
+        answer(State(self.app.clone()), as_person(who), path, Ok(Json(new))).await
+    }
+
+    async fn remind(&self, who: u8, id: u8) -> ApiResult<StatusCode> {
+        let path = RoutePath(encode(&[id; 32]));
+        remind(State(self.app.clone()), as_person(who), path).await
+    }
+
+    async fn record(&self, who: u8, id: u8) -> EventRecord {
+        let Json(list) = list(State(self.app.clone()), as_person(who))
+            .await
+            .expect("calendar");
+        let found = list.events.into_iter().find(|event| event.id == [id; 32]);
+        found.expect("event listed")
+    }
+}
+
+#[tokio::test]
+async fn people_answer_approved_events_and_change_their_mind() -> anyhow::Result<()> {
+    let server = Server::new().await?;
+    server.switch(OWNER, true).await?;
+    server.add(MOD, 10).await?;
+    server.add(MEMBER, 11).await?;
+
+    let going = server.sealed_answer(OTHER, 10, Answer::Going);
+    server.answer(OTHER, 10, going).await?;
+    let not = server.sealed_answer(MEMBER, 10, Answer::NotGoing);
+    server.answer(MEMBER, 10, not).await?;
+    let changed = server.sealed_answer(OTHER, 10, Answer::NotGoing);
+    server.answer(OTHER, 10, changed).await?;
+    let record = server.record(MOD, 10).await;
+    assert_eq!(
+        record.answers.len(),
+        2,
+        "a second answer replaces the first"
+    );
+    let other = server.person(OTHER).certificate.person_id();
+    let stored = record.answers.iter().find(|a| &a.person == other).unwrap();
+    let context = AnswerContext {
+        server_id: keys::space(&server.app).id,
+        event_id: [10; 32],
+        epoch: 1,
+        device: stored.device,
+        person: stored.person,
+    };
+    let envelope = rusttalk_core::auth::decode_bytes(&stored.envelope)?;
+    let opened = context.open(&server.key, &server.person(OTHER).certificate, &envelope)?;
+    assert_eq!(opened, Answer::NotGoing);
+
+    // A suggestion waits for approval before anyone answers it.
+    let early = server.sealed_answer(OTHER, 11, Answer::Going);
+    assert_eq!(
+        code(server.answer(OTHER, 11, early).await),
+        "event_not_found"
+    );
+    let forged = server.sealed_answer(MEMBER, 10, Answer::Going);
+    assert_eq!(
+        code(server.answer(OTHER, 10, forged).await),
+        "invalid_answer"
+    );
+
+    // Answers go with their event.
+    server.remove(MOD, 10).await?;
+    let left: i64 = query_scalar("SELECT COUNT(*) FROM calendar_answers")
+        .fetch_one(&server.app.db)
+        .await?;
+    assert_eq!(left, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_author_or_a_manager_reminds_at_most_once_an_hour() -> anyhow::Result<()> {
+    let server = Server::new().await?;
+    server.switch(OWNER, true).await?;
+    server.add(MOD, 10).await?;
+    server.add(MEMBER, 11).await?;
+    server.approve(MOD, 11).await?;
+
+    assert_eq!(code(server.remind(OTHER, 10).await), "permission_denied");
+    let (author, manager) = tokio::join!(server.remind(MEMBER, 11), server.remind(MOD, 11));
+    match (author, manager) {
+        (Ok(_), rejected) | (rejected, Ok(_)) => assert_eq!(code(rejected), "remind_too_soon"),
+        (Err(_), Err(_)) => panic!("one concurrent reminder should succeed"),
+    }
+    assert!(server.record(OTHER, 11).await.reminded_at.is_some());
+    assert_eq!(code(server.remind(MOD, 11).await), "remind_too_soon");
+    query("UPDATE calendar_events SET reminded_at = reminded_at - ? WHERE id = ?")
+        .bind(REMIND_EVERY)
+        .bind(encode(&[11; 32]))
+        .execute(&server.app.db)
+        .await?;
+    server.remind(MOD, 11).await?;
+
+    query("UPDATE calendar_events SET remove_at = ? WHERE id = ?")
+        .bind(store::now().expect("clock") + GRACE - 60)
+        .bind(encode(&[10; 32]))
+        .execute(&server.app.db)
+        .await?;
+    assert_eq!(code(server.remind(MOD, 10).await), "event_ended");
+    Ok(())
+}

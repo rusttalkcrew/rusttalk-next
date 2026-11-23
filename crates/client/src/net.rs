@@ -1318,6 +1318,7 @@ fn apply_keys(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &mut State) {
             calendar,
             |epoch| client.key(client.space(), epoch).is_some(),
             |record| client.open_event(record),
+            |id, record| client.open_answer(id, record),
         )
     {
         ctx.send(Update::Directory(url.clone(), Box::new(dir.clone())));

@@ -216,12 +216,12 @@ errors may have an empty body. The API logs a request ID, status and reason.
 
 | Status | Codes |
 | --- | --- |
-| 400 | `invalid_json`, `invalid_encoding`, `invalid_query`, `invalid_forwarded_ip`, `invalid_revocation`, `invalid_invite_limits`, `invalid_role_rank`, `invalid_role_count`, `role_id_required`, `already_owner`, `unexpected_invite`, `invite_name_required`, `invalid_member_cap`, `invalid_certificate`, `invalid_metadata`, `invalid_envelope`, `invalid_channel_flags`, `invalid_audio_kbps`, `invalid_order`, `invalid_dm_peer`, `not_a_voice_channel`, `invalid_message`, `invalid_keep`, `invalid_file_body`, `invalid_file_acceptance`, `invalid_event_query`, `invalid_sync_blob`, `invalid_event`, `invalid_event_time`, `invalid_listing`, `invalid_listing_settings`, `invalid_index_url`, `invalid_index_tls_fingerprint` |
+| 400 | `invalid_json`, `invalid_encoding`, `invalid_query`, `invalid_forwarded_ip`, `invalid_revocation`, `invalid_invite_limits`, `invalid_role_rank`, `invalid_role_count`, `role_id_required`, `already_owner`, `unexpected_invite`, `invite_name_required`, `invalid_member_cap`, `invalid_certificate`, `invalid_metadata`, `invalid_envelope`, `invalid_channel_flags`, `invalid_audio_kbps`, `invalid_order`, `invalid_dm_peer`, `not_a_voice_channel`, `invalid_message`, `invalid_keep`, `invalid_file_body`, `invalid_file_acceptance`, `invalid_event_query`, `invalid_sync_blob`, `invalid_event`, `invalid_answer`, `invalid_event_time`, `invalid_listing`, `invalid_listing_settings`, `invalid_index_url`, `invalid_index_tls_fingerprint` |
 | 401 | `invalid_challenge`, `invalid_certificate`, `invalid_device_signature`, `invalid_session`, `token_expired`, `invalid_livekit_webhook` |
 | 403 | `invite_required`, `invalid_invite`, `person_banned`, `ip_banned`, `device_revoked`, `device_certificate_required`, `permission_denied`, `role_hierarchy`, `cannot_grant_permission`, `built_in_role`, `owner_required`, `open_joining_disabled`, `scope_read_denied`, `recipient_read_denied`, `channel_read_denied`, `channel_write_denied`, `live_file_peer_not_in_room` |
 | 404 | `invite_not_found`, `member_not_found`, `ban_not_found`, `role_not_found`, `category_not_found`, `channel_not_found`, `message_not_found`, `message_device_not_found`, `file_not_found`, `avatar_not_found`, `icon_not_found`, `emoji_not_found`, `pack_not_found`, `event_not_found` |
 | 408 | `file_upload_timeout` |
-| 409 | `owner_cannot_leave`, `already_banned`, `no_active_ip`, `role_exists`, `role_in_use`, `role_limit`, `member_cap_reached`, `device_limit`, `device_certificate_changed`, `revocation_limit`, `epoch_changed`, `space_key_unavailable`, `metadata_epoch_changed`, `category_exists`, `category_in_use`, `channel_exists`, `order_changed`, `message_exists`, `file_exists`, `file_shared`, `shared_limit`, `emoji_exists`, `emoji_limit`, `sticker_limit`, `pack_exists`, `pack_limit`, `last_pack`, `events_disabled`, `event_exists`, `event_approved`, `event_ended`, `event_limit`, `suggestion_limit` |
+| 409 | `owner_cannot_leave`, `already_banned`, `no_active_ip`, `role_exists`, `role_in_use`, `role_limit`, `member_cap_reached`, `device_limit`, `device_certificate_changed`, `revocation_limit`, `epoch_changed`, `space_key_unavailable`, `metadata_epoch_changed`, `category_exists`, `category_in_use`, `channel_exists`, `order_changed`, `message_exists`, `file_exists`, `file_shared`, `shared_limit`, `emoji_exists`, `emoji_limit`, `sticker_limit`, `pack_exists`, `pack_limit`, `last_pack`, `events_disabled`, `event_exists`, `event_approved`, `event_ended`, `event_limit`, `suggestion_limit`, `remind_too_soon` |
 | 413 | `body_too_large` when generated after reading the body, `file_too_large`, `file_member_quota`, `file_server_quota`, `emoji_too_large` |
 | 415 | `expected_json` |
 | 429 | `challenge_limit`, `invite_preview_limit`, `open_join_limit` |
@@ -457,15 +457,18 @@ They are off until someone with `manage_server` turns them on.
 | POST `/v1/calendar` | `{id, epoch, remove_at, envelope}` (body up to 4,840 bytes) | `create_events` (approved at once) or `suggest_events` (waits). 201, the event |
 | POST `/v1/calendar/{id}/approve` | Empty | `manage_events`. 204 |
 | DELETE `/v1/calendar/{id}` | Empty | The author or `manage_events`. 204, also while off |
+| PUT `/v1/calendar/{id}/answer` | `{epoch, envelope}` | Any member, for an approved event that hasn't ended. 204. Replaces their earlier answer |
+| POST `/v1/calendar/{id}/remind` | Empty | The author or `manage_events`, for an approved event that hasn't ended, once an hour. 204, sets `reminded_at` |
 
-An event is `{id, author, author_device, certificate, approved, epoch, remove_at, envelope}`
+An event is `{id, author, author_device, certificate, approved, epoch, remove_at, envelope, answers, reminded_at?}`, each answer `{person, device, certificate, epoch, envelope}`
 (see `docs/crypto.md`, Server events). `id` is a client-generated random 32-byte
 value from the same namespace as channel IDs and is never reused. `epoch` must
 be the current space epoch. `remove_at` is the end plus two hours; the end must
 be in the future and at most 366 days away. A server holds 50 events and a
 person can have 5 suggestions waiting. Due events are left out at once and
 deleted within 30 seconds. Every change sends `channel_changed`, which older
-apps understand. Changes other than a new suggestion, its withdrawal and
+apps understand; apps that haven't answered show a newer `reminded_at` once as a
+desktop notification. Changes other than a new suggestion, its withdrawal, answers, reminders and
 expiry are audited.
 
 ## Direct messages

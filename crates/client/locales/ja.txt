@@ -1462,6 +1462,18 @@ events.open_channel = チャンネルを開く
 events.channel_hidden = あなたが見られないチャンネル
 events.need_address = 住所または集合場所を入力してください。
 events.need_channel = チャンネルを選んでください。
+events.going = 参加
+events.not_going = 不参加
+events.answer_counts = 参加{going}人 · 未回答{open}人
+events.who = 参加者と未回答の人を見る
+events.nobody = いません
+events.not_there = 参加予定だがチャンネルにいない
+events.missing = 未回答
+events.remind = リマインドする
+events.remind_again_at = {time} にもう一度リマインドできます。
+events.remind_too_soon = 1時間以内にリマインド済みです。
+events.reminder_title = {server} のイベントのリマインド
+events.reminder_body = 参加しますか？お知らせください。
 
 # crates/client/src/phone_clipboard.rs
 clipboard.paste = 貼り付け

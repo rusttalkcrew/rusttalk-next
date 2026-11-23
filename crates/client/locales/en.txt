@@ -1465,6 +1465,18 @@ events.open_channel = Open channel
 events.channel_hidden = In a channel you can't see
 events.need_address = Add an address or meeting point.
 events.need_channel = Pick a channel.
+events.going = Going
+events.not_going = Not going
+events.answer_counts = {going} going · {open} haven't answered
+events.who = See who's coming and who's missing
+events.nobody = Nobody
+events.not_there = Said yes, not in the channel
+events.missing = Haven't answered
+events.remind = Remind them
+events.remind_again_at = You can remind them again at {time}.
+events.remind_too_soon = They were reminded less than an hour ago.
+events.reminder_title = Event reminder on {server}
+events.reminder_body = Are you coming? Let them know.
 
 # crates/client/src/phone_clipboard.rs
 clipboard.paste = Paste

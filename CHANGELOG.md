@@ -13,6 +13,8 @@ Unreleased under the new version and date.
 ## v0.2.0 - 2026-11-23
 
 - Servers can turn on Events: a calendar above the channels to suggest, approve and add events, in real life or in a channel
+- Say whether you are going to an event, see who is still missing, and remind them
+- Event reminders reach unanswered authors and respect “Only when RustTalk isn’t focused” without repeating later
 - Reopen RustTalk offline to see previously loaded server icons, avatars and recent chat messages.
 - Chat fills empty voice channels. Use Join voice to start a call.
 - Choose one channel for joins and leaves, or turn them off. Device changes appear only in the audit log.

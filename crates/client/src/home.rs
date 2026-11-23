@@ -809,6 +809,37 @@ impl Home {
             server.open = Some(channel);
             self.view = View::Server(index);
             self.layout.list = false;
+        } else if (server.dir.calendar.iter())
+            .any(|c| c.events.iter().any(|e| e.record.id == channel))
+        {
+            // A reminder: its ID is the event's.
+            server.open = None;
+            server.events_open = true;
+            self.view = View::Server(index);
+            self.layout.list = false;
+        }
+    }
+
+    /// Notify once about each new reminder to answer an event, unless the server is muted.
+    fn remind(&mut self, ctx: &egui::Context, index: usize) {
+        let server = &self.servers[index];
+        let now = notify::unix_now();
+        self.notify.expire_reminders(now);
+        let prefs = self.notify.prefs();
+        let rule = prefs.server(&server.address);
+        if !prefs.desktop || rule.muted(now) || rule.level == Some(notify::Level::Nothing) {
+            return;
+        }
+        let due = events::reminders(server, now);
+        let address = server.address.clone();
+        for (id, at, remove_at, body) in due {
+            if self
+                .notify
+                .new_reminder(&address, &id, at, remove_at, self.focused)
+            {
+                let title = t!("events.reminder_title", server = self.servers[index].name());
+                self.notify.show(ctx, &title, &body, (address.clone(), id));
+            }
         }
     }
 
@@ -1273,6 +1304,7 @@ impl Home {
                             .any(|c| &c.id == id)
                     });
                     server.dir = *dir;
+                    self.remind(ctx, index);
                     self.profile_loaded(index);
                     if changed
                         && muted

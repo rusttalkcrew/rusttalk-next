@@ -9,7 +9,10 @@ use axum::{
 use ed25519_dalek::VerifyingKey;
 use rusttalk_core::{
     auth::{decode, decode_bytes, encode},
-    calendar::{Calendar, CalendarSetting, EventContext, EventRecord, GRACE, HORIZON, NewEvent},
+    calendar::{
+        AnswerContext, AnswerRecord, Calendar, CalendarSetting, EventContext, EventRecord, GRACE,
+        HORIZON, NewAnswer, NewEvent, REMIND_EVERY,
+    },
     keys::Event,
 };
 use sqlx::{FromRow, SqliteConnection, query, query_as, query_scalar};
@@ -40,10 +43,20 @@ struct Row {
     epoch: i64,
     remove_at: i64,
     envelope: Vec<u8>,
+    reminded_at: Option<i64>,
+}
+
+#[derive(FromRow)]
+struct AnswerRow {
+    person: Vec<u8>,
+    device: Vec<u8>,
+    certificate: Vec<u8>,
+    epoch: i64,
+    envelope: Vec<u8>,
 }
 
 impl Row {
-    fn record(self) -> ApiResult<EventRecord> {
+    fn record(self, answers: Vec<AnswerRow>) -> ApiResult<EventRecord> {
         let invalid = || ApiError::internal("invalid_stored_event");
         Ok(EventRecord {
             id: decode(&self.id).map_err(|_| invalid())?,
@@ -54,6 +67,19 @@ impl Row {
             epoch: self.epoch,
             remove_at: self.remove_at,
             envelope: encode(&self.envelope),
+            answers: answers
+                .into_iter()
+                .map(|row| {
+                    Ok(AnswerRecord {
+                        person: row.person.try_into().map_err(|_| invalid())?,
+                        device: row.device.try_into().map_err(|_| invalid())?,
+                        certificate: encode(&row.certificate),
+                        epoch: row.epoch,
+                        envelope: encode(&row.envelope),
+                    })
+                })
+                .collect::<ApiResult<_>>()?,
+            reminded_at: self.reminded_at,
         })
     }
 }
@@ -80,7 +106,8 @@ pub async fn list(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<
         .await?
         .has(Permission::ManageEvents);
     let rows: Vec<Row> = query_as(
-        "SELECT id, author, author_device, certificate, approved, epoch, remove_at, envelope
+        "SELECT id, author, author_device, certificate, approved, epoch, remove_at, envelope,
+                reminded_at
          FROM calendar_events
          WHERE ? AND remove_at > ? AND (approved OR ? OR author = ?)
          ORDER BY remove_at, id",
@@ -91,14 +118,19 @@ pub async fn list(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<
     .bind(actor.person.as_slice())
     .fetch_all(&mut *tx)
     .await?;
+    let mut events = Vec::with_capacity(rows.len());
+    for row in rows {
+        let answers = query_as(
+            "SELECT person, device, certificate, epoch, envelope FROM calendar_answers
+             WHERE event_id = ? ORDER BY person",
+        )
+        .bind(&row.id)
+        .fetch_all(&mut *tx)
+        .await?;
+        events.push(row.record(answers)?);
+    }
     tx.commit().await?;
-    Ok(Json(Calendar {
-        enabled,
-        events: rows
-            .into_iter()
-            .map(Row::record)
-            .collect::<ApiResult<_>>()?,
-    }))
+    Ok(Json(Calendar { enabled, events }))
 }
 
 pub async fn set_enabled(
@@ -249,6 +281,8 @@ pub async fn create(
             epoch: new.epoch,
             remove_at: new.remove_at,
             envelope: new.envelope,
+            answers: Vec::new(),
+            reminded_at: None,
         }),
     ))
 }
@@ -357,4 +391,120 @@ pub async fn expire(app: &App) -> ApiResult<()> {
         app.notify(Event::ChannelChanged);
     }
     Ok(())
+}
+
+/// The event `id` if it is approved and not over yet; answering and reminding need both.
+async fn upcoming(db: &mut SqliteConnection, id: &str, at: i64) -> ApiResult<Vec<u8>> {
+    let (author, approved, remove_at): (Vec<u8>, bool, i64) = query_as(
+        "SELECT author, approved, remove_at FROM calendar_events WHERE id = ? AND remove_at > ?",
+    )
+    .bind(id)
+    .bind(at)
+    .fetch_optional(&mut *db)
+    .await?
+    .ok_or(ApiError::not_found("event_not_found"))?;
+    if !approved {
+        return Err(ApiError::not_found("event_not_found"));
+    }
+    if remove_at <= at + GRACE {
+        return Err(keys::conflict("event_ended"));
+    }
+    Ok(author)
+}
+
+/// Going or not going, sealed so the server only learns that someone answered.
+pub async fn answer(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: Result<Json<NewAnswer>, JsonRejection>,
+) -> ApiResult<StatusCode> {
+    let event_id = decode(&id)?;
+    let new = payload(body)?;
+    let envelope = decode_bytes(&new.envelope)?;
+    let (mut tx, actor) = authenticate(&app, &headers).await?;
+    require_enabled(&mut tx).await?;
+    upcoming(&mut tx, &id, actor.at).await?;
+    let space = keys::space(&app);
+    let (current, rotate) = keys::read_epoch(&mut tx, &actor, space).await?;
+    if rotate || new.epoch != current {
+        return Err(keys::conflict("epoch_changed"));
+    }
+    let invalid_device = || ApiError::internal("invalid_stored_device");
+    let device: [u8; 32] = actor
+        .device
+        .as_slice()
+        .try_into()
+        .map_err(|_| invalid_device())?;
+    let context = AnswerContext {
+        server_id: space.id,
+        event_id,
+        epoch: new.epoch,
+        device,
+        person: actor.person,
+    };
+    let signer = VerifyingKey::from_bytes(&device).map_err(|_| invalid_device())?;
+    context
+        .verify(&signer, &envelope)
+        .map_err(|_| ApiError::bad_request("invalid_answer"))?;
+    let certificate: Vec<u8> = query_scalar(
+        "SELECT certificate FROM member_devices WHERE device_id = ? AND person_id = ?",
+    )
+    .bind(&actor.device)
+    .bind(actor.person.as_slice())
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or(ApiError::forbidden("device_certificate_required"))?;
+    query(
+        "INSERT INTO calendar_answers (event_id, person, device, certificate, epoch, envelope)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT (event_id, person) DO UPDATE SET device = excluded.device,
+             certificate = excluded.certificate, epoch = excluded.epoch,
+             envelope = excluded.envelope",
+    )
+    .bind(&id)
+    .bind(actor.person.as_slice())
+    .bind(&actor.device)
+    .bind(&certificate)
+    .bind(new.epoch)
+    .bind(&envelope)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    app.notify(Event::ChannelChanged);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Remind those who haven't answered: the author or an event manager, once an hour.
+pub async fn remind(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    decode::<32>(&id)?;
+    let (mut tx, actor) = authenticate(&app, &headers).await?;
+    let manages = roles::authority(&mut tx, &actor.person)
+        .await?
+        .has(Permission::ManageEvents);
+    require_enabled(&mut tx).await?;
+    let author = upcoming(&mut tx, &id, actor.at).await?;
+    if !manages && author != actor.person {
+        return Err(ApiError::forbidden("permission_denied"));
+    }
+    let reminded = query(
+        "UPDATE calendar_events SET reminded_at = ?
+         WHERE id = ? AND (reminded_at IS NULL OR reminded_at <= ?)",
+    )
+    .bind(actor.at)
+    .bind(&id)
+    .bind(actor.at - REMIND_EVERY)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if reminded == 0 {
+        return Err(keys::conflict("remind_too_soon"));
+    }
+    tx.commit().await?;
+    app.notify(Event::ChannelChanged);
+    Ok(StatusCode::NO_CONTENT)
 }

@@ -371,6 +371,13 @@ roles, the server decides it, so a malicious server can show a suggestion as
 approved, hide events or replay a deleted one. It can't change one or make
 one up in someone's name.
 
+An answer to an event (going or not going) has the same framing: format 1, a
+random nonce, the sealed answer byte (1 going, 2 not going) with its tag under
+the space epoch key, and the device signature, 106 bytes in all. Its associated
+data is `"rusttalk-event-answer-v1" || server_id || event_id || epoch (8 bytes,
+big endian) || device || person`. Every answer has the same size, so the server
+learns who answered but not what. Readers verify it like an event.
+
 ## Messages
 
 Formats 2 and 3 (the envelope's first byte) have this plaintext, in order.

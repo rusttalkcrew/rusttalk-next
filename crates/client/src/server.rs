@@ -277,9 +277,13 @@ pub struct Calendar {
 #[derive(Clone)]
 pub struct Event {
     pub waiting_for_key: bool,
+    /// Indices into this snapshot’s answer records that need a historical space key.
+    pub waiting_answers: Vec<usize>,
     /// `None` when this device could not read or verify it.
     pub details: Option<rusttalk_core::calendar::Details>,
     pub record: rusttalk_core::calendar::EventRecord,
+    /// Who answered what; answers this device can't verify are left out.
+    pub answers: Vec<(Id, rusttalk_core::calendar::Answer)>,
 }
 
 /// A named group of emoji and stickers.
