@@ -407,9 +407,26 @@ pub fn menu_above<R>(anchor: &Response, add: impl FnOnce(&mut Menu) -> R) -> Opt
     show(popup, MENU_WIDE, add)
 }
 
-/// A menu that opens at the pointer when `anchor` is right-clicked.
+/// Open at the pointer on a right click or a stationary long press.
 pub fn context_menu<R>(anchor: &Response, add: impl FnOnce(&mut Menu) -> R) -> Option<R> {
-    show(Popup::context_menu(anchor), MENU_WIDTH, add)
+    let ctx = &anchor.ctx;
+    let mut popup = Popup::context_menu(anchor);
+    // A selectable label or link can own the hold inside a row. Nested menus
+    // (e.g. a saved file inside a message) get first choice as children draw first.
+    if anchor.enabled()
+        && ctx.interaction_snapshot(|s| s.long_touched.is_some())
+        && anchor.container_contains_pointer()
+    {
+        let key = egui::Id::unique("handled context hold");
+        let pass = ctx.cumulative_pass_nr();
+        let first = ctx.data_mut(|data| {
+            let first = data.get_temp::<u64>(key) != Some(pass);
+            data.insert_temp(key, pass);
+            first
+        });
+        popup = popup.open_memory(first.then_some(egui::SetOpenCommand::Bool(true)));
+    }
+    show(popup, MENU_WIDTH, add)
 }
 
 #[cfg(any(target_os = "android", target_os = "ios", test))]

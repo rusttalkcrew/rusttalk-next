@@ -2608,11 +2608,13 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
     let categories = &server.dir.categories;
     let can_manage = perms.manage_channels && online;
     let can_move = can_manage && !server.order_unavailable && reorder::order(categories).is_some();
+    // On phones, drag scrolls the list; the hold menu still offers every move.
+    let can_drag = can_move && !ui::TOUCH;
     let area = ScrollArea::vertical().animated(false);
     area.show_viewport(ui, |ui, viewport| {
         ui.spacing_mut().item_spacing.y = 2.0;
         let list_id = UiId::unique(("channel order", &server.address));
-        let mut list = reorder::List::begin(ui, list_id, categories, can_move);
+        let mut list = reorder::List::begin(ui, list_id, categories, can_drag);
         for category in categories {
             let block = category.id.unwrap_or_default();
             if let Some(id) = category.id.filter(|_| !category.name.is_empty()) {
@@ -2641,7 +2643,7 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
                     .inner
                 });
                 if can_manage {
-                    let header = if can_move {
+                    let header = if can_drag {
                         header
                     } else {
                         header.interact(Sense::click())
@@ -5317,7 +5319,10 @@ fn message(
     }
     // The row senses clicks behind its contents, for the right-click menu. Not a Tab
     // stop: the hover toolbar has the same actions as buttons.
-    let row = ui.scope_builder(UiBuilder::new().sense(Sense::CLICK), |ui| {
+    let builder = UiBuilder::new()
+        .scope_id(ui.make_persistent_id((channel, msg.person, msg.id)))
+        .sense(Sense::CLICK);
+    let row = ui.scope_builder(builder, |ui| {
         ui.horizontal_top(|ui| {
             if start {
                 face(ui, dir, &msg.person, &name, MESSAGE_AVATAR, false);
@@ -5499,10 +5504,13 @@ fn message(
             Shape::rect_filled(rect.expand(2.0), ui::RADIUS_S, ui::colors(ui).hover_soft),
         );
     }
-    if !hovered {
+    let (tapped, _) = ui::touch_tools(&row.response);
+    if (tapped && ui::menu_open(&row.response))
+        || (!tapped && (!hovered || ui.input(|i| i.any_touches())))
+    {
         return pick;
     }
-    // A small floating toolbar on the top right of the row.
+    // Give touch controls their own space below the text; hover controls float above it.
     let buttons = [can_reply, can_edit, can_delete]
         .into_iter()
         .filter(|on| *on)
@@ -5510,11 +5518,21 @@ fn message(
     if buttons == 0.0 {
         return pick;
     }
+    let button = if tapped {
+        Vec2::splat(ui::TOUCH_TARGET)
+    } else {
+        TOOLBAR_BUTTON
+    };
     let size = Vec2::new(
-        buttons * TOOLBAR_BUTTON.x + (buttons - 1.0) * 2.0 + 8.0,
-        TOOLBAR_BUTTON.y + 8.0,
+        buttons * button.x + (buttons - 1.0) * 2.0 + 8.0,
+        button.y + 8.0,
     );
-    let bar = Rect::from_min_size(rect.right_top() + Vec2::new(-size.x - 8.0, -14.0), size);
+    let top = if tapped {
+        ui.allocate_space(size).1.top()
+    } else {
+        rect.top() - 14.0
+    };
+    let bar = Rect::from_min_size(egui::pos2(rect.right() - size.x - 8.0, top), size);
     let c = ui::colors(ui);
     ui.painter()
         .add(ui.visuals().popup_shadow.as_shape(bar, ui::RADIUS));
@@ -5525,40 +5543,24 @@ fn message(
         egui::Stroke::new(1.0, c.border),
         egui::StrokeKind::Inside,
     );
-    // A child that takes no space, so the toolbar floats over the row.
     let mut ui = ui.new_child(
         UiBuilder::new()
             .max_rect(bar.shrink(4.0))
             .layout(Layout::left_to_right(Align::Center)),
     );
     ui.spacing_mut().item_spacing.x = 2.0;
-    if can_reply
-        && ui::icon_button(
-            &mut ui,
-            "↩",
-            t!("common.reply"),
-            Look::Ghost,
-            TOOLBAR_BUTTON,
-        )
-        .clicked()
+    if can_reply && ui::icon_button(&mut ui, "↩", t!("common.reply"), Look::Ghost, button).clicked()
     {
         pick = Some(Pick::Reply(msg.person, msg.id));
     }
     if can_edit
         && let Some(text) = &text
-        && ui::icon_button(&mut ui, "✏", t!("common.edit"), Look::Ghost, TOOLBAR_BUTTON).clicked()
+        && ui::icon_button(&mut ui, "✏", t!("common.edit"), Look::Ghost, button).clicked()
     {
         pick = Some(Pick::Edit(msg.id, edit_text(text)));
     }
     if can_delete
-        && ui::icon_button(
-            &mut ui,
-            "🗑",
-            t!("common.delete"),
-            Look::Ghost,
-            TOOLBAR_BUTTON,
-        )
-        .clicked()
+        && ui::icon_button(&mut ui, "🗑", t!("common.delete"), Look::Ghost, button).clicked()
     {
         pick = Some(Pick::Delete(msg.id));
     }
@@ -6242,6 +6244,8 @@ mod tests {
     const ME: Id = [1; 32];
     const ANN: Id = [7; 32];
     const PROJECTS: Id = [3; 32];
+
+    mod touch;
 
     /// A server with a text channel this person can write in, showing its files: one
     /// from Ann and one of their own. Also returns the commands the view sends.

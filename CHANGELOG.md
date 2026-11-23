@@ -23,6 +23,7 @@ Unreleased under the new version and date.
 - Experimental Android test build (APK) and unsigned iOS build (IPA)
 - Android: typing works, so you can sign up, sign in, join a server and chat
 - Enter now confirms the name and unlock screens
+- On touch screens, hold to open a menu or tap a message or call tile to show its controls.
 - Phones: press and hold a text field to paste, copy, cut or select all, using the phone's clipboard
 - iPhone: taps land where you touch, and the app stays clear of the notch and home bar
 - iPhone: your keys are kept in the Keychain, so there's no password to type

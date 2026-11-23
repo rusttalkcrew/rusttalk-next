@@ -15,6 +15,46 @@ use super::{
     TEXT_ICON, TEXT_SMALL, accent, bold, bold_family, colors, heading,
 };
 
+/// Latch one toolbar after a completed touch tap. A swipe never clicks.
+/// Returns (visible, first tap) so a tile can reserve its first tap for the tools.
+pub fn touch_tools(response: &Response) -> (bool, bool) {
+    let ctx = &response.ctx;
+    if !ctx.input(|i| i.has_touch_screen()) {
+        return (false, false);
+    }
+    let key = Id::unique("touch toolbar");
+    let (tap, mouse) = ctx.input(|input| {
+        let tap = input.pointer.primary_clicked()
+            && input.events.iter().any(|event| {
+                matches!(
+                    event,
+                    egui::Event::Touch {
+                        phase: egui::TouchPhase::End,
+                        ..
+                    }
+                )
+            });
+        (
+            tap,
+            !input.any_touches() && input.pointer.hover_pos().is_some() && !tap,
+        )
+    });
+    let inside = response.container_contains_pointer();
+    ctx.data_mut(|data| {
+        let selected = data.get_temp::<Id>(key) == Some(response.id);
+        if selected && (mouse || (tap && !inside)) {
+            data.remove::<Id>(key);
+            // Keep drawing on the release frame: a floating button may extend past the row.
+            (tap, false)
+        } else if tap && inside {
+            data.insert_temp(key, response.id);
+            (true, !selected)
+        } else {
+            (selected, false)
+        }
+    })
+}
+
 /// How an icon button looks when it is not just hovered.
 #[derive(Clone, Copy, PartialEq)]
 pub enum Look {
