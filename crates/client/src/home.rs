@@ -1844,7 +1844,7 @@ pub fn show(
                     "⬅",
                     t!("common.back"),
                     ui::Look::Ghost,
-                    Vec2::new(36.0, 32.0),
+                    Vec2::new(ui::ICON_BUTTON.max(36.0), ui::ICON_BUTTON),
                 )
                 .clicked()
                 {
@@ -2824,7 +2824,7 @@ fn member_list(ui: &mut Ui, home: &mut Home, index: usize) {
 fn join(ui: &mut Ui, home: &mut Home) {
     ui.vertical_centered(|ui| {
         ui.add_space(ui.available_height() * 0.2);
-        ui.set_max_width(440.0);
+        ui::max_width(ui, 440.0);
         match &mut home.join {
             Join::Idle(error) => {
                 // A device restored from the words knows no servers until it signs in to one,
@@ -3012,13 +3012,9 @@ fn official_servers(ui: &mut Ui, home: &mut Home) {
     }
     for listed in shown {
         ui::card(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = 2.0;
-                    ui.label(ui::bold(&listed.name));
-                    ui.label(ui::caption(host(&listed.server.address)));
-                });
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui::trailing_row(
+                ui,
+                |ui| {
                     let join = ui::primary(ui, t!("common.join"));
                     join.widget_info(|| {
                         WidgetInfo::labeled(
@@ -3041,8 +3037,13 @@ fn official_servers(ui: &mut Ui, home: &mut Home) {
                     } else if join.clicked() {
                         pick = Some(listed.clone());
                     }
-                });
-            });
+                },
+                |ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    ui.add(Label::new(ui::bold(&listed.name)).wrap());
+                    ui.add(Label::new(ui::caption(host(&listed.server.address))).truncate());
+                },
+            );
         });
     }
     if !settings.dismissed_official.is_empty() && ui.link(t!("home.show_official_again")).clicked()
@@ -3181,7 +3182,7 @@ fn directory(settings: &crate::audio::Settings) -> Result<(url::Url, Option<Fing
 fn find(ui: &mut Ui, home: &mut Home) {
     ui.vertical_centered(|ui| {
         ui.add_space(ui::SPACE_XL);
-        ui.set_max_width(640.0);
+        ui::max_width(ui, 640.0);
         ui.label(ui::heading(t!("home.find_servers")));
         if ui.link(t!("home.join_with_invite")).clicked() {
             home.view = View::Join;
@@ -3217,12 +3218,9 @@ fn find(ui: &mut Ui, home: &mut Home) {
             ui.with_layout(Layout::top_down(Align::Min), |ui| {
                 for listed in &find.results {
                     ui::card(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(ui::title(&listed.name));
-                            if listed.open {
-                                ui::badge(ui, t!("home.open_joining"), ui::accent(ui).base);
-                            }
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui::trailing_row(
+                            ui,
+                            |ui| {
                                 let join = ui
                                     .add_enabled_ui(!find.checking, |ui| {
                                         ui::primary(ui, t!("common.join"))
@@ -3238,8 +3236,17 @@ fn find(ui: &mut Ui, home: &mut Home) {
                                 if join.clicked() {
                                     pick = Some(listed.clone());
                                 }
-                            });
-                        });
+                            },
+                            |ui| {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.add(Label::new(ui::title(&listed.name)).wrap());
+                                    if listed.open {
+                                        let fill = ui::accent(ui).base;
+                                        ui::badge(ui, t!("home.open_joining"), fill);
+                                    }
+                                });
+                            },
+                        );
                         if !listed.description.is_empty() {
                             ui.add(Label::new(&listed.description).wrap());
                         }
@@ -6126,6 +6133,91 @@ mod tests {
     }
 
     type Screen = (Home, crate::update::Updater, crate::keystore::Keystore);
+
+    /// Every main screen fits a phone (390 by 844) and a desktop window (1100 by
+    /// 700): nothing reaches past the window's left or right edge. A screen with a
+    /// fixed width, or a row that doesn't wrap, fails here (see docs/development.md,
+    /// Responsive UI).
+    #[test]
+    fn main_screens_fit_phone_and_desktop_widths() {
+        use egui_kittest::kittest::{NodeT, Queryable};
+        type Scene = (&'static str, fn(&mut Home));
+        let scenes: [Scene; 9] = [
+            ("channel list", |home| home.layout.list = true),
+            ("chat", |_| {}),
+            ("find servers", |home| {
+                home.view = View::Find;
+                home.find.error = Some(
+                    "Couldn't reach the server directory. Check its address in Settings.".into(),
+                );
+            }),
+            ("join", |home| home.view = View::Join),
+            ("settings", |home| home.settings = Some(Tab::Profile)),
+            ("appearance", |home| home.settings = Some(Tab::Appearance)),
+            ("voice settings", |home| home.settings = Some(Tab::Voice)),
+            ("server roles", |home| {
+                crate::admin::open(home, 0, crate::admin::Tab::Roles);
+            }),
+            ("edit channel", |home| {
+                home.edit_channel(0, PROJECTS, ChannelEdit::Rename);
+            }),
+        ];
+        for size in [Vec2::new(390.0, 844.0), Vec2::new(1100.0, 700.0)] {
+            for (name, set) in scenes {
+                let (mut files, _sent) = files_harness(true);
+                let mut home = files.state_mut().take().unwrap();
+                home.view = View::Server(0);
+                home.servers[0].open = Some(PROJECTS);
+                home.servers[0].dir.perms.manage_roles = true;
+                home.servers[0].dir.perms.manage_channels = true;
+                home.layout.list = false;
+                // Never a search on the real directory from a test.
+                home.find.opened = false;
+                let mut prefs = home.notify.prefs().clone();
+                prefs.desktop = false;
+                home.notify.set_prefs(prefs);
+                set(&mut home);
+                let data = tempfile::tempdir().unwrap();
+                let mut harness = egui_kittest::Harness::builder()
+                    .with_size(size)
+                    .build_ui_state(
+                        |ui, screen: &mut Option<Screen>| {
+                            if let Some((home, updates, keystore)) = screen {
+                                show(ui, home, updates, keystore);
+                            }
+                        },
+                        None,
+                    );
+                ui::install(&harness.ctx);
+                *harness.state_mut() = Some((
+                    home,
+                    crate::update::Updater::new(data.path()),
+                    crate::keystore::without_keychain(data.path()),
+                ));
+                harness.run_steps(6);
+                if name == "settings" && size.x < ui::PHONE_WIDTH {
+                    // Phones list the pages first.
+                    harness.get_by_label("My account").click_accesskit();
+                    harness.run_steps(6);
+                }
+                let width = f64::from(size.x);
+                let outside: Vec<_> = harness
+                    .root()
+                    .children_recursive()
+                    .filter_map(|node| {
+                        let node = node.accesskit_node();
+                        let b = node.bounding_box()?;
+                        (b.x1 > b.x0 && (b.x0 < -1.0 || b.x1 > width + 1.0))
+                            .then(|| format!("{:?} {:?}", node.role(), node.label()))
+                    })
+                    .collect();
+                assert!(
+                    outside.is_empty(),
+                    "{name} at {size:?} runs off the window: {outside:?}"
+                );
+            }
+        }
+    }
 
     /// Back on a phone hides the chat at once: a message handled before the next
     /// frame draws the list stays unread.

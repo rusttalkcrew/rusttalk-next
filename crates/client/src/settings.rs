@@ -74,16 +74,22 @@ struct Nav {
     search: String,
     /// The frame the window was last shown in, to start fresh when it opens again.
     frame: u64,
+    /// Phones: the open page shows instead of the page list.
+    phone_page: bool,
 }
 
-/// Show a settings window: `header` (true when clicked, to open the first page) and
-/// `groups` in the sidebar, and the `open` page drawn by `content` as one long page.
-/// Its `ui::page_section`s show under the open page in the sidebar, which scrolls to
-/// them. Returns what `content` returned and whether the window should close (×,
+/// Show a settings window named `name`: `header` (true when clicked, to open the
+/// first page) and `groups` in the sidebar, and the `open` page drawn by `content` as
+/// one long page. Its `ui::page_section`s show under the open page in the sidebar,
+/// which scrolls to them. Phones show it full screen: the page list, then the page
+/// with Back, like a phone's own settings. Returns what `content` returned (the
+/// default while only the list shows) and whether the window should close (×,
 /// Escape or a click outside).
-pub fn window<T: Copy + PartialEq, S, R>(
+#[allow(clippy::too_many_arguments)]
+pub fn window<T: Copy + PartialEq, S, R: Default>(
     ctx: &egui::Context,
     id: &str,
+    name: &str,
     groups: &[Group<T>],
     open: &mut T,
     state: &mut S,
@@ -102,7 +108,12 @@ pub fn window<T: Copy + PartialEq, S, R>(
         .map_or("", |page| page.label);
     let frame = ctx.cumulative_frame_nr();
     if nav.frame + 1 < frame {
-        nav = Nav::default();
+        let first = groups.iter().flat_map(|group| &group.pages).next();
+        nav = Nav {
+            // Phones start on the page list, unless a particular page was asked for.
+            phone_page: first.is_some_and(|page| page.id != *open),
+            ..Nav::default()
+        };
     }
     nav.frame = frame;
     if nav.page != title {
@@ -110,8 +121,16 @@ pub fn window<T: Copy + PartialEq, S, R>(
             page: title.to_owned(),
             search: std::mem::take(&mut nav.search),
             frame,
+            phone_page: nav.phone_page,
             ..Nav::default()
         };
+    }
+    if ui::is_phone(ctx) {
+        let shown = phone(
+            ctx, id, name, title, groups, open, &mut nav, state, header, content,
+        );
+        ctx.data_mut(|data| data.insert_temp(nav_id, nav));
+        return shown;
     }
     let mut close = false;
     let modal = egui::Modal::new(UiId::unique(id))
@@ -153,7 +172,7 @@ pub fn window<T: Copy + PartialEq, S, R>(
             {
                 *open = first.id;
             }
-            let jump = sidebar(side_ui, id, groups, open, &mut nav);
+            let (jump, _) = sidebar(side_ui, id, groups, open, &mut nav, false);
 
             let close_rect = Rect::from_min_size(
                 egui::pos2(rect.right() - close_width, rect.top() + CLOSE_TOP),
@@ -176,7 +195,7 @@ pub fn window<T: Copy + PartialEq, S, R>(
             page_body(
                 &mut child(ui, body, Align::Min),
                 (id, title),
-                title,
+                Some(title),
                 colors.side,
                 jump,
                 &mut nav,
@@ -186,6 +205,65 @@ pub fn window<T: Copy + PartialEq, S, R>(
     ctx.data_mut(|data| data.insert_temp(nav_id, nav));
     let close = close || modal.should_close();
     (modal.inner, close)
+}
+
+/// The settings window on a phone: a full-screen sheet with the page list, or the
+/// open page under a bar with Back.
+#[allow(clippy::too_many_arguments)]
+fn phone<T: Copy + PartialEq, S, R: Default>(
+    ctx: &egui::Context,
+    id: &str,
+    name: &str,
+    title: &str,
+    groups: &[Group<T>],
+    open: &mut T,
+    nav: &mut Nav,
+    state: &mut S,
+    header: impl FnOnce(&mut Ui, &mut S) -> bool,
+    content: impl FnOnce(&mut Ui, &mut S) -> R,
+) -> (R, bool) {
+    let modal = ui::sheet(ctx, UiId::unique(id), |ui| {
+        let colors = ui::colors(ui);
+        if nav.phone_page {
+            let (back, close) = ui::sheet_bar(ui, title, Some(t!("common.back")));
+            nav.phone_page = !back;
+            let body = ui
+                .available_rect_before_wrap()
+                .shrink2(Vec2::new(ui::SPACE_L, 0.0));
+            let mut body = child(ui, body, Align::Min);
+            body.add_space(ui::SPACE_L);
+            let content = |ui: &mut Ui| content(ui, state);
+            let inner = page_body(
+                &mut body,
+                (id, title),
+                None,
+                colors.side,
+                None,
+                nav,
+                content,
+            );
+            return (inner, close);
+        }
+        let (_, close) = ui::sheet_bar(ui, name, None);
+        let list = ui
+            .available_rect_before_wrap()
+            .shrink2(Vec2::new(ui::SPACE_S, 0.0));
+        let mut list = child(ui, list, Align::Min);
+        list.add_space(ui::SPACE_S);
+        let first = groups.iter().flat_map(|group| &group.pages).next();
+        if header(&mut list, state)
+            && let Some(first) = first
+        {
+            *open = first.id;
+            nav.phone_page = true;
+        }
+        let (_, picked) = sidebar(&mut list, id, groups, open, nav, true);
+        nav.phone_page |= picked;
+        (R::default(), close)
+    });
+    let close = modal.should_close();
+    let (inner, closed) = modal.inner;
+    (inner, closed || close)
 }
 
 /// A top-down child UI filling `rect`.
@@ -228,12 +306,12 @@ fn keyboard_scroll(ui: &mut Ui, view: f32) {
     }
 }
 
-/// The page in a scroll area of reading width: its title, then its sections. Records
-/// the sections in `nav` and which one is in view.
+/// The page in a scroll area of reading width: its title (if not shown elsewhere),
+/// then its sections. Records the sections in `nav` and which one is in view.
 fn page_body<R>(
     ui: &mut Ui,
     id: impl std::hash::Hash + std::fmt::Debug,
-    title: &str,
+    title: Option<&str>,
     fields: egui::Color32,
     jump: Option<usize>,
     nav: &mut Nav,
@@ -250,8 +328,10 @@ fn page_body<R>(
             ui.set_max_width((ui.available_width() - 12.0).clamp(0.0, CONTENT_MAX_WIDTH));
             // Text fields and cards stand out from the page.
             ui.visuals_mut().extreme_bg_color = fields;
-            ui.label(ui::heading(title).size(TEXT_HEADING));
-            ui.add_space(SPACE_S);
+            if let Some(title) = title {
+                ui.label(ui::heading(title).size(TEXT_HEADING));
+                ui.add_space(SPACE_S);
+            }
             let (inner, sections) = ui::collect_sections(ui, jump, content);
             ui.add_space(CONTENT_BOTTOM);
             (inner, sections)
@@ -270,14 +350,16 @@ fn page_body<R>(
 }
 
 /// The sidebar under the header: a search box, then the pages by group, with the
-/// open page's sections under it. Returns the section to scroll to.
+/// open page's sections under it. On a phone (`list`) it is a plain list of pages.
+/// Returns the section to scroll to, and whether a page was picked.
 fn sidebar<T: Copy + PartialEq>(
     ui: &mut Ui,
     id: &str,
     groups: &[Group<T>],
     open: &mut T,
     nav: &mut Nav,
-) -> Option<usize> {
+    list: bool,
+) -> (Option<usize>, bool) {
     ui.add_space(SPACE_S);
     let search = ui.add(
         ui::field(&mut nav.search)
@@ -288,6 +370,7 @@ fn sidebar<T: Copy + PartialEq>(
         .widget_info(|| egui::WidgetInfo::labeled(Role::SearchInput, true, t!("settings.search")));
     let query = nav.search.trim().to_lowercase();
     let mut jump = None;
+    let mut picked = false;
     ui.add_space(SPACE_S);
     ScrollArea::vertical()
         .id_salt((id, "pages"))
@@ -316,11 +399,12 @@ fn sidebar<T: Copy + PartialEq>(
                 group_caption(ui, title);
                 ui.add_space(2.0);
                 for page in pages {
-                    let selected = *open == page.id;
+                    let selected = *open == page.id && !list;
                     let row =
                         ui::nav_row(ui, page.icon, page.label, selected, Role::Tab, page.label);
                     if row.clicked() {
                         *open = page.id;
+                        picked = true;
                     }
                     // A page with more than one section lists them, to jump to.
                     if selected && nav.page == page.label && nav.sections.len() > 1 {
@@ -336,10 +420,10 @@ fn sidebar<T: Copy + PartialEq>(
                 ui.weak(t!("settings.nothing_found"));
             }
         });
-    if jump.is_some() {
+    if jump.is_some() || picked {
         ui.ctx().request_repaint();
     }
-    jump
+    (jump, picked)
 }
 
 /// A group header in the sidebar, like "USER SETTINGS".
@@ -350,9 +434,13 @@ fn group_caption(ui: &mut Ui, text: &str) {
     });
 }
 
-/// The round × with "ESC" under it. True when clicked.
+/// The round × with "ESC" under it (touch screens have no Escape key). True when
+/// clicked.
 fn close_button(ui: &mut Ui) -> bool {
     let clicked = ui::close_button(ui, CLOSE_SIZE).clicked();
+    if ui::TOUCH {
+        return clicked;
+    }
     let text = RichText::new("ESC")
         .size(TEXT_CAPTION)
         .family(ui::bold_family())
@@ -428,6 +516,7 @@ pub fn show(
     let ((), close) = window(
         ctx,
         "settings",
+        t!("settings.title"),
         &groups,
         &mut tab,
         home,
@@ -905,7 +994,14 @@ fn appearance_page(ui: &mut Ui, home: &mut Home) {
             t!("settings.system_help"),
         ),
     ];
-    let width = ((ui.available_width() - 2.0 * SPACE_S) / 3.0).clamp(140.0, 200.0);
+    // Three in a row, or two when three would be squeezed.
+    let room = ui.available_width();
+    let columns = if room >= 3.0 * 140.0 + 2.0 * SPACE_S {
+        3.0
+    } else {
+        2.0
+    };
+    let width = ((room - (columns - 1.0) * SPACE_S) / columns).clamp(140.0, 200.0);
     ui.horizontal_wrapped(|ui| {
         for (mode, icon, title, help) in modes {
             let selected = look.mode == mode;
