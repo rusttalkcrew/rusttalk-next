@@ -2315,7 +2315,8 @@ fn paint_rail_outline(
         .lerp_to_gamma(c.strong, 0.35)
         .gamma_multiply(0.75 * hover);
     let border = if is_picture {
-        let picked = accent.base.lerp_to_gamma(accent.text(c.dark), 0.35 * hover);
+        let hover_target = if c.dark { accent.tint } else { accent.strong };
+        let picked = accent.base.lerp_to_gamma(hover_target, 0.35 * hover);
         hover_color.lerp_to_gamma(picked, selected)
     } else {
         hover_color.gamma_multiply(1.0 - selected)

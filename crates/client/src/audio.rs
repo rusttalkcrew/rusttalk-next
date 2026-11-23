@@ -334,7 +334,7 @@ struct Shared {
     auto_threshold: AtomicU32,
     /// The microphone problem noticed in this call, until the UI takes it (`trouble`).
     trouble: AtomicU8,
-    /// When this person last sent sound, in ms since `start`.
+    /// When this person last sent sound, in ms since `start` + 1 (`0` = never/cleared).
     talked: AtomicU64,
     /// Device latencies for the echo canceller, in ms.
     input_delay: AtomicU32,
@@ -749,11 +749,27 @@ impl Audio {
     }
 
     pub fn set_key_down(&self, down: bool) {
-        self.shared().key_down.store(down, Relaxed);
+        let shared = self.shared();
+        let was_down = shared.key_down.swap(down, Relaxed);
+        if was_down
+            && !down
+            && !shared.hotkey_down.load(Relaxed)
+            && lock(&shared.settings).push_to_talk
+        {
+            shared.talked.store(0, Relaxed);
+        }
     }
 
     pub fn set_hotkey_down(&self, down: bool) {
-        self.shared().hotkey_down.store(down, Relaxed);
+        let shared = self.shared();
+        let was_down = shared.hotkey_down.swap(down, Relaxed);
+        if was_down
+            && !down
+            && !shared.key_down.load(Relaxed)
+            && lock(&shared.settings).push_to_talk
+        {
+            shared.talked.store(0, Relaxed);
+        }
     }
 
     pub fn muted(&self) -> bool {
@@ -2464,7 +2480,10 @@ mod tests {
         assert!(audio.talking());
         audio.set_key_down(false);
         assert!(!audio.talking());
+        // Re-pressing PTT silently after release must not briefly flash speaking.
         audio.set_hotkey_down(true);
+        assert!(!audio.talking());
+        audio.set_talked_for_test(true);
         assert!(audio.talking());
         audio.set_hotkey_down(false);
         assert!(!audio.talking());

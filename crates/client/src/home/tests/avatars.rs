@@ -13,7 +13,12 @@ const GENERAL: Id = [1; 32];
 const DESIGN_GENERAL: Id = [4; 32];
 const RUST_GENERAL: Id = [5; 32];
 
-type Screen = (Home, crate::update::Updater, crate::keystore::Keystore);
+type Screen = (
+    Home,
+    crate::update::Updater,
+    crate::keystore::Keystore,
+    tempfile::TempDir,
+);
 
 fn sample_picture(key: u8, primary: [u8; 4], accent: [u8; 4]) -> Picture {
     let mut img = RgbaImage::new(64, 64);
@@ -51,7 +56,7 @@ fn demo_window(size: Vec2, dark: bool) -> Harness<'static, Option<Screen>> {
         .with_step_dt(0.05)
         .build_ui_state(
             |ui, screen: &mut Option<Screen>| {
-                if let Some((home, updates, keystore)) = screen {
+                if let Some((home, updates, keystore, _dir)) = screen {
                     super::super::show(ui, home, updates, keystore);
                 }
             },
@@ -60,7 +65,8 @@ fn demo_window(size: Vec2, dark: bool) -> Harness<'static, Option<Screen>> {
     ui::install(&harness.ctx);
     let (_, identity) = rusttalk_core::identity::DeviceIdentity::create("Desktop").unwrap();
     let me_id = *identity.certificate.person_id();
-    let data = tempfile::tempdir().unwrap().keep();
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().to_path_buf();
     let mut home = Home::new(identity, &harness.ctx, data.clone()).unwrap();
     let mut settings = home.voice.audio.settings();
     settings.theme_mode = if dark { "dark" } else { "light" }.into();
@@ -234,28 +240,47 @@ fn demo_window(size: Vec2, dark: bool) -> Harness<'static, Option<Screen>> {
         home,
         crate::update::Updater::new(&data),
         crate::keystore::without_keychain(&data),
+        dir,
     ));
     harness.run_steps(4);
     harness
 }
 
-fn region_pixels(img: &RgbaImage, rect: Rect) -> Vec<[u8; 4]> {
-    let x0 = rect.left().floor().max(0.0) as u32;
-    let y0 = rect.top().floor().max(0.0) as u32;
-    let x1 = rect.right().ceil().min(img.width() as f32) as u32;
-    let y1 = rect.bottom().ceil().min(img.height() as f32) as u32;
-    let mut out = Vec::new();
-    for y in y0..y1 {
-        for x in x0..x1 {
-            out.push(img.get_pixel(x, y).0);
-        }
-    }
-    out
+fn rect_shapes_in(
+    h: &Harness<'static, Option<Screen>>,
+    area: Rect,
+) -> Vec<eframe::egui::epaint::RectShape> {
+    h.output()
+        .shapes
+        .iter()
+        .filter_map(|clipped| match &clipped.shape {
+            Shape::Rect(r) if area.intersects(r.rect) => Some(r.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
-fn diff_count(a: &[[u8; 4]], b: &[[u8; 4]]) -> usize {
-    assert_eq!(a.len(), b.len());
-    a.iter().zip(b).filter(|(p, q)| p != q).count()
+fn has_rail_hover_outline(shapes: &[eframe::egui::epaint::RectShape], button: Rect) -> bool {
+    let expected = button.expand(1.5);
+    shapes.iter().any(|r| {
+        (r.rect.left() - expected.left()).abs() < 0.5
+            && (r.rect.top() - expected.top()).abs() < 0.5
+            && (r.rect.width() - expected.width()).abs() < 0.5
+            && (r.rect.height() - expected.height()).abs() < 0.5
+            && r.stroke.width > 0.0
+            && r.stroke.color.a() > 0
+    })
+}
+
+fn has_rail_hover_sheen(shapes: &[eframe::egui::epaint::RectShape], button: Rect) -> bool {
+    shapes.iter().any(|r| {
+        (r.rect.left() - button.left()).abs() < 0.5
+            && (r.rect.top() - button.top()).abs() < 0.5
+            && (r.rect.width() - button.width()).abs() < 0.5
+            && (r.rect.height() - button.height()).abs() < 0.5
+            && r.fill.a() > 0
+            && r.fill.a() < 255
+    })
 }
 
 fn home_mut<'a>(h: &'a mut Harness<'static, Option<Screen>>) -> &'a mut Home {
@@ -344,6 +369,8 @@ fn canonical_local_speaking_state_covers_voice_modes_and_call_transitions() {
     home.voice.audio.set_key_down(false);
     assert!(!home.voice.local_speaking(&home.servers));
     home.voice.audio.set_hotkey_down(true);
+    assert!(!home.voice.local_speaking(&home.servers));
+    home.voice.audio.set_talked_for_test(true);
     assert!(home.voice.local_speaking(&home.servers));
     home.voice.audio.set_hotkey_down(false);
     assert!(!home.voice.local_speaking(&home.servers));
@@ -367,28 +394,63 @@ fn bottom_left_avatar_lights_up_on_speaking_transitions_in_both_themes() {
         let avatar_band =
             Rect::from_min_size(account_rect.min, Vec2::new(50.0, account_rect.height()));
 
+        let find_presence_dot = |h: &Harness<'static, Option<Screen>>| {
+            h.output()
+                .shapes
+                .iter()
+                .enumerate()
+                .find_map(|(i, s)| match &s.shape {
+                    Shape::Circle(c)
+                        if avatar_band.contains(c.center) && (c.radius - 5.0).abs() < 0.5 =>
+                    {
+                        Some((i, c.fill))
+                    }
+                    _ => None,
+                })
+        };
+        let find_speaking_ring = |h: &Harness<'static, Option<Screen>>, success: Color32| {
+            h.output()
+                .shapes
+                .iter()
+                .enumerate()
+                .find_map(|(i, s)| match &s.shape {
+                    Shape::Rect(r)
+                        if avatar_band.expand(4.0).intersects(r.rect)
+                            && (r.stroke.width - 2.0).abs() < 0.2
+                            && r.stroke.color == success
+                            && r.fill == Color32::TRANSPARENT =>
+                    {
+                        Some(i)
+                    }
+                    _ => None,
+                })
+        };
+
         home_mut(&mut h).voice.audio.set_talked_for_test(false);
         h.run_steps(2);
-        let silent_img = h.render().unwrap();
-        let silent = region_pixels(&silent_img, avatar_band);
+        let (_, success) = find_presence_dot(&h).expect("online presence dot must be painted");
+        assert!(
+            find_speaking_ring(&h, success).is_none(),
+            "silent bottom-left avatar must not paint a speaking outline (dark={dark})"
+        );
 
         home_mut(&mut h).voice.audio.set_talked_for_test(true);
         h.run_steps(2);
-        let speaking_img = h.render().unwrap();
-        let speaking = region_pixels(&speaking_img, avatar_band);
+        let (dot_idx, success) =
+            find_presence_dot(&h).expect("online presence dot must be painted");
+        let ring_idx = find_speaking_ring(&h, success).unwrap_or_else(|| {
+            panic!("bottom-left avatar must paint speaking outline (dark={dark})")
+        });
         assert!(
-            diff_count(&silent, &speaking) > 20,
-            "bottom-left avatar must visually light up while speaking (dark={dark})"
+            ring_idx < dot_idx,
+            "presence dot must paint on top of speaking outline (dark={dark})"
         );
 
-        // Muting extinguishes the speaking outline back to silent pixels.
+        // Muting extinguishes the speaking outline back to silent state.
         home_mut(&mut h).voice.audio.set_muted(true);
         h.run_steps(2);
-        let muted_img = h.render().unwrap();
-        let muted = region_pixels(&muted_img, avatar_band);
-        assert_eq!(
-            diff_count(&silent, &muted),
-            0,
+        assert!(
+            find_speaking_ring(&h, success).is_none(),
             "muting must clear the bottom-left speaking outline (dark={dark})"
         );
 
@@ -413,10 +475,13 @@ fn sidebar_server_hover_gives_subtle_feedback_without_layout_shift_and_clears_on
             // Move pointer away to capture rest state.
             h.hover_at(Pos2::new(600.0, 350.0));
             h.run_steps(8);
-            let rest_img = h.render().unwrap();
-            let rest = region_pixels(&rest_img, probe);
+            let rest = rect_shapes_in(&h, probe);
+            assert!(
+                !has_rail_hover_outline(&rest, before_rect),
+                "unselected {name} must have no hover outline at rest (dark={dark})"
+            );
 
-            // Hover over server icon: pixels change, rect does NOT shift.
+            // Hover over server icon: visuals change, rect does NOT shift.
             h.hover_at(before_rect.center());
             h.run_steps(8);
             let hovered_rect = h.get_by_role_and_label(egui::Role::Button, name).rect();
@@ -424,21 +489,22 @@ fn sidebar_server_hover_gives_subtle_feedback_without_layout_shift_and_clears_on
                 before_rect, hovered_rect,
                 "hovering {name} must not shift layout"
             );
-            let hover_img = h.render().unwrap();
-            let hovered = region_pixels(&hover_img, probe);
+            let hovered = rect_shapes_in(&h, probe);
             assert!(
-                diff_count(&rest, &hovered) > 30,
+                has_rail_hover_outline(&hovered, before_rect),
+                "hovering {name} must paint subtle outer hover outline (dark={dark})"
+            );
+            assert_ne!(
+                rest, hovered,
                 "hovering {name} must give visible feedback (dark={dark})"
             );
 
-            // Hover exit: smoothly returns to rest pixels.
+            // Hover exit: smoothly returns to exact rest shapes.
             h.hover_at(Pos2::new(600.0, 350.0));
             h.run_steps(8);
-            let exit_img = h.render().unwrap();
-            let exited = region_pixels(&exit_img, probe);
+            let exited = rect_shapes_in(&h, probe);
             assert_eq!(
-                diff_count(&rest, &exited),
-                0,
+                rest, exited,
                 "hover exit on {name} must restore rest appearance (dark={dark})"
             );
         }
@@ -481,10 +547,8 @@ fn touch_tap_on_server_icon_navigates_without_stuck_hover_and_fits_phone_tablet_
             Vec2::new(1100.0, 700.0),
         ] {
             let mut h = demo_window(size, dark);
-            let pos = h
-                .get_by_role_and_label(egui::Role::Button, "Design")
-                .rect()
-                .center();
+            let design_rect = h.get_by_role_and_label(egui::Role::Button, "Design").rect();
+            let pos = design_rect.center();
             assert!(
                 pos.x >= 0.0 && pos.x <= size.x && pos.y >= 0.0 && pos.y <= size.y,
                 "server icon must fit within viewport {size:?}"
@@ -521,8 +585,13 @@ fn touch_tap_on_server_icon_navigates_without_stuck_hover_and_fits_phone_tablet_
                 modifiers: Modifiers::NONE,
             });
             events.push(Event::PointerGone);
-            h.run_steps(6);
+            h.run_steps(8);
             assert!(home_mut(&mut h).view == View::Server(1));
+            let after_shapes = rect_shapes_in(&h, design_rect.expand(4.0));
+            assert!(
+                !has_rail_hover_sheen(&after_shapes, design_rect),
+                "touch tap must not leave hover sheen stuck on Design (dark={dark}, size={size:?})"
+            );
         }
     }
 }
