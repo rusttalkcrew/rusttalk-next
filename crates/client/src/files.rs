@@ -1345,6 +1345,7 @@ pub fn viewer(ctx: &egui::Context, files: &mut Files) {
             let screen = ctx.content_rect();
             ui.set_min_size(screen.size());
             ui.set_max_size(screen.size());
+            let backdrop = ui.interact(screen, ui.scope_id().with("dismiss"), Sense::click());
             Frame::new().inner_margin(Margin::same(12)).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(ui::bold(&file.name).color(ON_FILL));
@@ -1397,6 +1398,9 @@ pub fn viewer(ctx: &egui::Context, files: &mut Files) {
                         let area = (outline * scale).max(room);
                         ScrollArea::both().auto_shrink(false).show(ui, |ui| {
                             let (rect, _) = ui.allocate_exact_size(area, Sense::hover());
+                            // Match the painted bounds, including rotation and scroll offset.
+                            let displayed = Rect::from_center_size(rect.center(), outline * scale);
+                            ui.interact(displayed, ui.scope_id().with("image"), Sense::click());
                             let unturned = Rect::from_center_size(rect.center(), size * scale);
                             Image::new(texture)
                                 .rotate(f32::from(view.turns) * FRAC_PI_2, Vec2::splat(0.5))
@@ -1414,6 +1418,7 @@ pub fn viewer(ctx: &egui::Context, files: &mut Files) {
                     }
                 }
             });
+            close |= backdrop.clicked();
         });
     if open_it {
         files.open_file(&commands, &file);
@@ -1428,6 +1433,212 @@ pub fn viewer(ctx: &egui::Context, files: &mut Files) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use egui_kittest::{Harness, kittest::Queryable};
+
+    fn lightbox(dark: bool) -> Harness<'static, Files> {
+        lightbox_size(dark, Vec2::new(800.0, 600.0))
+    }
+
+    fn lightbox_size(dark: bool, size: Vec2) -> Harness<'static, Files> {
+        let mut harness = Harness::builder().with_size(size).build_ui_state(
+            |ui, files: &mut Files| {
+                let clicked = ui
+                    .put(ui.max_rect(), egui::Button::new("Chat image"))
+                    .clicked();
+                if clicked {
+                    assert!(files.viewer.is_none(), "dismissal must not reach chat");
+                    let texture = ui.ctx().load_texture(
+                        "test image",
+                        egui::ColorImage::filled([400, 200], egui::Color32::GREEN),
+                        TextureOptions::LINEAR,
+                    );
+                    files.images.insert(
+                        [1; 32],
+                        Picture::Ready(Anim {
+                            frames: vec![texture],
+                            delays: vec![100],
+                        }),
+                    );
+                    files.viewer = Some(Viewer {
+                        address: Url::parse("https://localhost/").unwrap(),
+                        file: Attachment {
+                            file: rusttalk_core::client::BlobRef::for_tests([1; 32]),
+                            name: "Test image".into(),
+                            media_type: "image/png".into(),
+                            thumbnail: None,
+                        },
+                        commands: tokio::sync::mpsc::unbounded_channel().0,
+                        zoom: 1.0,
+                        turns: 0,
+                    });
+                }
+                viewer(ui.ctx(), files);
+            },
+            Files::new(Path::new("/nonexistent/rusttalk-viewer-test")),
+        );
+        ui::install(&harness.ctx);
+        harness.ctx.set_visuals(if dark {
+            egui::Visuals::dark()
+        } else {
+            egui::Visuals::light()
+        });
+        harness.run_steps(3);
+        // Open from a spot which will be dimmed: the opening click must survive.
+        pointer(&mut harness, egui::pos2(50.0, 300.0), true, false);
+        pointer(&mut harness, egui::pos2(50.0, 300.0), false, false);
+        harness.run_steps(3);
+        assert!(harness.state().viewer.is_some());
+        harness
+    }
+
+    fn pointer(harness: &mut Harness<'_, Files>, pos: egui::Pos2, pressed: bool, touch: bool) {
+        harness.event(egui::Event::PointerMoved(pos));
+        if touch {
+            harness.event(egui::Event::Touch {
+                device_id: egui::TouchDeviceId(0),
+                id: egui::TouchId(0),
+                phase: if pressed {
+                    egui::TouchPhase::Start
+                } else {
+                    egui::TouchPhase::End
+                },
+                pos,
+                force: None,
+            });
+        }
+        // Native touch integrations also emit primary pointer events.
+        harness.event(egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        });
+        harness.run_steps(1);
+    }
+
+    fn click(harness: &mut Harness<'_, Files>, pos: egui::Pos2, touch: bool) {
+        pointer(harness, pos, true, touch);
+        pointer(harness, pos, false, touch);
+        harness.run_steps(3);
+    }
+
+    #[test]
+    fn viewer_backdrop_mouse_and_touch_preserve_image_and_toolbar() {
+        for dark in [false, true] {
+            for touch in [false, true] {
+                let mut harness = lightbox(dark);
+                click(&mut harness, egui::pos2(400.0, 320.0), touch);
+                assert!(harness.state().viewer.is_some(), "image click");
+                harness.get_by_label(t!("files.rotate")).click();
+                harness.run_steps(3);
+                assert_eq!(harness.state().viewer.as_ref().unwrap().turns, 1);
+                click(&mut harness, egui::pos2(400.0, 180.0), touch);
+                assert!(harness.state().viewer.is_some(), "rotated image click");
+                harness.get_by_label(t!("files.zoom_in")).click();
+                harness.run_steps(3);
+                assert_eq!(harness.state().viewer.as_ref().unwrap().zoom, 1.25);
+                harness.get_by_label(t!("files.zoom_out")).click();
+                harness.run_steps(3);
+                assert_eq!(harness.state().viewer.as_ref().unwrap().zoom, 1.0);
+                // This was inside the unrotated image, but is now dimmed.
+                click(&mut harness, egui::pos2(230.0, 320.0), touch);
+                assert!(harness.state().viewer.is_none(), "backdrop dismissal");
+                assert!(!harness.state().images.contains_key(&[1; 32]));
+            }
+        }
+    }
+
+    fn painted_image(harness: &Harness<'_, Files>) -> Rect {
+        let Some(Picture::Ready(anim)) = harness.state().images.get(&[1; 32]) else {
+            panic!("missing image");
+        };
+        harness
+            .output()
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::epaint::Shape::Mesh(mesh) if mesh.texture_id == anim.frames[0].id() => {
+                    Some(mesh.calc_bounds())
+                }
+                _ => None,
+            })
+            .expect("painted image")
+    }
+
+    #[test]
+    fn viewer_dismisses_at_phone_tablet_and_desktop_sizes() {
+        for dark in [false, true] {
+            for size in [
+                Vec2::new(390.0, 844.0),
+                Vec2::new(820.0, 1180.0),
+                Vec2::new(1100.0, 700.0),
+            ] {
+                let mut harness = lightbox_size(dark, size);
+                let image = painted_image(&harness);
+                click(&mut harness, image.center(), true);
+                assert!(harness.state().viewer.is_some());
+                click(
+                    &mut harness,
+                    egui::pos2(size.x / 2.0, image.bottom() + 30.0),
+                    true,
+                );
+                assert!(harness.state().viewer.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn viewer_keeps_drag_scroll_escape_and_close() {
+        let mut harness = lightbox(true);
+        harness.state_mut().viewer.as_mut().unwrap().zoom = 4.0;
+        harness.run_steps(3);
+        click(&mut harness, egui::pos2(400.0, 320.0), true);
+        let before_drag = painted_image(&harness);
+        pointer(&mut harness, egui::pos2(400.0, 320.0), true, true);
+        harness.event(egui::Event::Touch {
+            device_id: egui::TouchDeviceId(0),
+            id: egui::TouchId(0),
+            phase: egui::TouchPhase::Move,
+            pos: egui::pos2(100.0, 200.0),
+            force: None,
+        });
+        harness.event(egui::Event::PointerMoved(egui::pos2(100.0, 200.0)));
+        harness.run_steps(3);
+        pointer(&mut harness, egui::pos2(100.0, 200.0), false, true);
+        let after_drag = painted_image(&harness);
+        assert!(
+            after_drag.left() < before_drag.left(),
+            "drag must pan the image"
+        );
+        harness.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Unknown,
+            delta: Vec2::new(-200.0, -200.0),
+            modifiers: egui::Modifiers::NONE,
+        });
+        harness.run_steps(10);
+        assert!(
+            painted_image(&harness).left() < after_drag.left(),
+            "wheel must scroll the image"
+        );
+        click(&mut harness, egui::pos2(400.0, 320.0), false);
+        assert!(harness.state().viewer.is_some(), "panned image");
+        harness.get_by_label(t!("common.close")).click();
+        harness.run_steps(3);
+        assert!(harness.state().viewer.is_none());
+        let mut harness = lightbox(false);
+        harness.event(egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        harness.run_steps(3);
+        assert!(harness.state().viewer.is_none());
+    }
 
     #[test]
     fn pictures_and_link_previews_stay_bounded() {
