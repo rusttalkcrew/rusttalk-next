@@ -28,7 +28,7 @@ use super::{
     server::{load_pins, validate_origin},
 };
 
-#[derive(Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct State {
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub revocations: BTreeSet<String>,

@@ -291,7 +291,7 @@ pub struct Member {
     voice_muted: bool,
 }
 
-/// Person, display name, avatar hash, bio, `hide_offline` and `voice_muted`.
+/// Person, display name, avatar hash, bio, `hide_offline`, `voice_muted`, and `avatar_initialized`.
 type MemberRow = (
     Vec<u8>,
     Ciphertext,

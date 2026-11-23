@@ -11,6 +11,7 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- A temporary error syncing your account picture no longer disconnects the server.
 - Your account picture now follows you to new servers and repairs missing pictures after reconnecting.
 - Rounded-square avatars across the app, a speaking highlight on your bottom-left avatar during voice calls, and subtle hover feedback on sidebar server icons.
 - Incoming live file offers now have a single Download button.

@@ -818,6 +818,10 @@ struct State {
     order_unavailable: bool,
     /// Whether `last` was built with the space key.
     named: bool,
+    /// Whether this server advertised an uninitialized, empty own avatar eligible for default repair.
+    avatar_uninitialized: bool,
+    /// A picture selected while this server was still waiting for the space key.
+    pending_avatar: Option<Vec<u8>>,
     display_name: Option<String>,
     notices: u64,
     server_id: Id,
@@ -1286,7 +1290,10 @@ async fn serve(
         run_command(ctx, url, client, state, command).await;
     }
     let mut stats = tokio::time::interval(Duration::from_secs(2));
-    let mut avatar_retry = tokio::time::interval(Duration::from_secs(30));
+    let retry_every = Duration::from_secs(30);
+    let mut avatar_retry =
+        tokio::time::interval_at(tokio::time::Instant::now() + retry_every, retry_every);
+    avatar_retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         // Refresh ten minutes before the 12-hour token expires.
         let refresh = Duration::from_secs((client.expires_at() - 600 - now()).max(0) as u64);
@@ -1366,12 +1373,8 @@ async fn serve(
                     tracing::warn!(error = %format_args!("{error:#}"), "reloading after refresh failed");
                 }
             }
-            _ = avatar_retry.tick() => {
-                let missing = state.last.as_ref().is_some_and(|dir| dir.members.iter()
-                    .any(|m| &m.person == ctx.identity.certificate.person_id() && m.avatar.is_none()));
-                if missing && let Err(error) = directory(ctx, url, client, state).await {
-                    tracing::warn!(%error, "retrying account picture failed");
-                }
+            _ = avatar_retry.tick(), if state.avatar_uninitialized && client.has_space_key() => {
+                repair_default_avatar(ctx, url, client, state).await;
             }
             next = next_voice(&mut state.voice) => voice_next(ctx, url, Some(client), state, next).await,
             _ = stats.tick(), if state.voice.is_some() => {
@@ -1569,6 +1572,8 @@ async fn reload_pages(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, state: &
         page(ctx, url, client, state, channel, None).await;
     }
     set_display_name(ctx, url, client, state).await;
+    publish_selected_avatar(ctx, url, client, state).await;
+    repair_default_avatar(ctx, url, client, state).await;
     latest(ctx, url, client, state).await;
     let voice: Vec<Id> = state
         .last
@@ -1726,7 +1731,7 @@ async fn on_event(
         Event::MemberChanged { ref person, .. }
             if person == &encode(ctx.identity.certificate.person_id()) =>
         {
-            sync_devices(ctx, Vec::new()).await?;
+            sync(ctx, Vec::new()).await;
             directory(ctx, url, client, state).await?;
         }
         Event::MemberChanged { .. } | Event::ChannelChanged | Event::DmCreated { .. } => {
@@ -1741,6 +1746,8 @@ async fn on_event(
             }
             retry_messages(ctx, url, client, state).await?;
             set_display_name(ctx, url, client, state).await;
+            publish_selected_avatar(ctx, url, client, state).await;
+            repair_default_avatar(ctx, url, client, state).await;
         }
         Event::VoiceChanged { channel } => {
             room_changed(ctx, url, client, state, decode(&channel)?).await?;
@@ -2052,22 +2059,8 @@ async fn on_command(
         }
         Command::SetBio(_) => {}
         Command::SetAvatar(bytes) => {
-            sync_devices(ctx, Vec::new()).await?;
-            if ctx
-                .sync
-                .avatar(&ctx.data, ctx.identity.certificate.person_id(), None)
-                .await?
-                .as_deref()
-                != Some(bytes.as_slice())
-            {
-                return Ok(());
-            }
-            if let Err(error) = client.set_avatar(&bytes).await {
-                tracing::warn!(error = %format_args!("{error:#}"), "setting picture failed");
-                ctx.send(Update::Failed(t!("net.picture_failed").into()));
-                return Ok(());
-            }
-            directory(ctx, url, client, state).await?;
+            state.pending_avatar = Some(bytes);
+            publish_selected_avatar(ctx, url, client, state).await;
         }
         Command::SetStatus(choice) => client.set_status(choice).await?,
         Command::SetHideOffline(hide) => client.set_hide_offline(hide).await?,
@@ -2464,6 +2457,115 @@ fn send_messages(
         older,
         page,
     });
+}
+
+/// Cache this account's decrypted own picture if present. Best-effort: never fails `directory`.
+async fn cache_own_avatar(ctx: &Ctx, client: &KeyClient<'_>, state: &State) {
+    if !client.has_space_key() {
+        return;
+    }
+    let person = ctx.identity.certificate.person_id();
+    let candidate = state
+        .last
+        .as_ref()
+        .and_then(|dir| dir.members.iter().find(|member| &member.person == person))
+        .and_then(|member| member.avatar.as_ref())
+        .map(|picture| picture.bytes.as_slice());
+    if let Err(error) = ctx.sync.avatar(&ctx.data, person, candidate).await {
+        tracing::warn!(error = %format_args!("{error:#}"), "caching account picture failed");
+        return;
+    }
+    if candidate.is_some() && ctx.sync.has_pending().await {
+        sync(ctx, Vec::new()).await;
+    }
+}
+
+/// Publish an explicit selection once this server's encryption key arrives.
+async fn publish_selected_avatar(
+    ctx: &Ctx,
+    url: &Url,
+    client: &mut KeyClient<'_>,
+    state: &mut State,
+) {
+    if !client.has_space_key() {
+        return;
+    }
+    let Some(bytes) = state.pending_avatar.take() else {
+        return;
+    };
+    let result = async {
+        sync_devices(ctx, Vec::new()).await?;
+        if ctx
+            .sync
+            .avatar(&ctx.data, ctx.identity.certificate.person_id(), None)
+            .await?
+            .as_deref()
+            == Some(bytes.as_slice())
+        {
+            client.set_avatar(&bytes).await?;
+            state.avatar_uninitialized = false;
+            if let Err(error) = directory(ctx, url, client, state).await {
+                tracing::warn!(error = %format_args!("{error:#}"), "reloading directory after picture change failed");
+            }
+        }
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    if let Err(error) = result {
+        tracing::warn!(error = %format_args!("{error:#}"), "setting picture failed");
+        ctx.send(Update::Failed(t!("net.picture_failed").into()));
+    }
+}
+
+/// Fill an uninitialized membership with this account's cached default picture once
+/// keys are available. Best-effort: errors are logged and never disconnect the server.
+async fn repair_default_avatar(
+    ctx: &Ctx,
+    url: &Url,
+    client: &mut KeyClient<'_>,
+    state: &mut State,
+) {
+    if !state.avatar_uninitialized || !client.has_space_key() {
+        return;
+    }
+    let person = ctx.identity.certificate.person_id();
+    // Check locally first so accounts with no default picture cause zero network traffic.
+    match ctx.sync.avatar(&ctx.data, person, None).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return,
+        Err(error) => {
+            tracing::warn!(error = %format_args!("{error:#}"), "reading cached account picture failed");
+            return;
+        }
+    }
+    // Confirm another device has not since chosen a different default or cleared it.
+    if let Err(error) = sync_devices(ctx, Vec::new()).await {
+        tracing::warn!(error = %format_args!("{error:#}"), "syncing account picture before repair failed");
+        return;
+    }
+    let bytes = match ctx.sync.avatar(&ctx.data, person, None).await {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::warn!(error = %format_args!("{error:#}"), "reading cached account picture failed");
+            return;
+        }
+    };
+    match client.publish_default_avatar(&bytes).await {
+        Ok(true) => {
+            state.avatar_uninitialized = false;
+            if let Err(error) = directory(ctx, url, client, state).await {
+                tracing::warn!(error = %format_args!("{error:#}"), "reloading directory after default picture failed");
+            }
+        }
+        Ok(false) => {
+            // 412 Precondition Failed: already initialized or cleared on this server.
+            state.avatar_uninitialized = false;
+        }
+        Err(error) => {
+            tracing::warn!(error = %format_args!("{error:#}"), "publishing default account picture failed");
+        }
+    }
 }
 
 /// Set a display name chosen before the space key arrived, once it has.
