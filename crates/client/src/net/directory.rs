@@ -175,6 +175,26 @@ pub(super) async fn directory(
     state: &mut State,
 ) -> Result<()> {
     let catalog = client.catalog().await?;
+    if let Some(before) = &state.last {
+        let readable: HashMap<_, _> = catalog.channels.iter().map(|c| (c.id, c)).collect();
+        let channels = before
+            .categories
+            .iter()
+            .flat_map(|c| &c.channels)
+            .filter(|c| readable.get(&c.id).is_none_or(|new| new.kind == "dm"))
+            .map(|c| c.id);
+        let dms = before
+            .dms
+            .iter()
+            .filter(|dm| {
+                readable.get(&dm.channel).is_none_or(|new| {
+                    new.kind != "dm"
+                        || new.peer.as_deref().and_then(|p| decode(p).ok()) != Some(dm.peer)
+                })
+            })
+            .map(|dm| dm.channel);
+        state.discard_channels(ctx, url, channels.chain(dms).collect());
+    }
     let joined_kbps = state.voice.as_ref().and_then(|live| {
         let channel = catalog.channels.iter().find(|c| c.id == live.channel)?;
         channel.audio_kbps

@@ -244,18 +244,27 @@ pub(super) struct Record {
     id: Id,
     person: Id,
     device: Id,
+    #[serde(default)]
+    epoch: Option<i64>,
     at: i64,
     backfilled: bool,
     body: String,
     edit_of: Option<Id>,
 }
 
+pub(super) type Source = (Id, Id, Option<i64>);
+
 impl Record {
+    pub fn source(&self) -> Source {
+        (self.person, self.device, self.epoch)
+    }
+
     pub fn new(record: &MessageRecord, body: &MessageBody) -> Option<Self> {
         Some(Self {
             id: record.id,
             person: record.person,
             device: record.sender_device,
+            epoch: Some(record.epoch),
             at: record.at,
             backfilled: record.backfilled,
             body: encode(&body.cache_bytes().ok()?),
@@ -350,6 +359,34 @@ pub(super) fn visible(dir: &Directory, id: &Id) -> bool {
 }
 
 impl State {
+    pub fn sent(
+        &mut self,
+        ctx: &Ctx,
+        url: &Url,
+        channel: Id,
+        record: &MessageRecord,
+        body: &MessageBody,
+    ) {
+        self.sources.entry(channel).or_default().insert((
+            record.person,
+            record.sender_device,
+            Some(record.epoch),
+        ));
+        if let Some(record) = Record::new(record, body) {
+            self.remember(channel, vec![record], false);
+        }
+        send_messages(ctx, url, channel, vec![to_msg(record, body)], false, None);
+    }
+
+    pub fn deleted(&mut self, ctx: &Ctx, url: &Url, channel: Id, id: Id) {
+        self.history.delete(channel, id);
+        if let Some(ids) = self.waiting.get_mut(&channel) {
+            ids.remove(&id);
+        }
+        self.save_history();
+        ctx.send(Update::Deleted(url.clone(), channel, id));
+    }
+
     pub fn remember(&mut self, channel: Id, records: Vec<Record>, replace: bool) {
         let Some(dir) = self.last.as_ref().filter(|dir| visible(dir, &channel)) else {
             return;
@@ -371,10 +408,79 @@ impl State {
         self.store().write("messages", &self.history);
     }
 
+    // A successful catalog or access denial is authoritative even if a later request times out.
+    pub fn discard_channels(&mut self, ctx: &Ctx, url: &Url, ids: HashSet<Id>) {
+        if ids.is_empty() {
+            return;
+        }
+        self.history.0.retain(|page| !ids.contains(&page.channel));
+        self.save_history();
+        self.loaded.retain(|id| !ids.contains(id));
+        self.waiting.retain(|id, _| !ids.contains(id));
+        self.sources.retain(|id, _| !ids.contains(id));
+        if let Some(dir) = &mut self.last {
+            dir.discard_channels(&ids);
+        }
+        match self.store().read::<Listing>("directory") {
+            Ok(Some(mut listing)) => {
+                listing.dms.retain(|dm| !ids.contains(&dm.channel));
+                for category in &mut listing.categories {
+                    category
+                        .channels
+                        .retain(|channel| !ids.contains(&channel.id));
+                }
+                self.store().write("directory", &listing);
+            }
+            Err(error) => tracing::warn!(%error, "could not read obsolete directory"),
+            Ok(None) => {}
+        }
+        ctx.send(Update::Inaccessible(url.clone(), ids));
+    }
+
     pub fn prune_history(&mut self, dir: &Directory) {
         self.history.0.retain(|page| page.visible(dir));
         self.loaded.retain(|id| visible(dir, id));
         self.save_history();
+    }
+
+    pub fn revalidate(
+        &mut self,
+        ctx: &Ctx,
+        url: &Url,
+        revoked: &Revocations,
+        client: Option<&KeyClient<'_>>,
+    ) {
+        use rusttalk_core::keys::{Kind, Scope};
+        let mut pages = Vec::new();
+        for (id, sources) in &mut self.sources {
+            let scope = Scope {
+                kind: Kind::Channel,
+                id: *id,
+            };
+            let trusted = |(person, device, epoch): &Source| {
+                revoked.check(person, device).is_ok()
+                    && client.is_none_or(|client| match epoch {
+                        Some(epoch) => client.key(scope, *epoch).is_some(),
+                        // Older caches only recorded the source device and channel.
+                        None => client.current_key(scope).is_ok(),
+                    })
+            };
+            let before = sources.len();
+            sources.retain(trusted);
+            if sources.len() == before {
+                continue;
+            }
+            let mut items = Vec::new();
+            if let Some(page) = self.history.0.iter_mut().find(|p| p.channel == *id) {
+                page.records.retain(|r| sources.contains(&r.source()));
+                items.extend(page.records.iter().filter_map(|r| r.message(revoked)));
+            }
+            pages.push((*id, items));
+        }
+        if !pages.is_empty() {
+            self.save_history();
+            ctx.send(Update::ResetHistory(url.clone(), pages));
+        }
     }
 
     pub fn restore(&mut self, ctx: &Ctx, url: &Url, records: &Revocations) -> Result<()> {
@@ -392,19 +498,23 @@ impl State {
                 None
             })
             .unwrap_or_default();
+        self.history.0.retain(|page| page.visible(&dir));
         let mut pages = Vec::new();
         for page in &self.history.0 {
-            if page.visible(&dir) {
-                self.loaded.insert(page.channel);
-                pages.push((
-                    page.channel,
-                    page.records
-                        .iter()
-                        .filter_map(|r| r.message(records))
-                        .collect(),
-                ));
-            }
+            self.loaded.insert(page.channel);
+            self.sources.insert(
+                page.channel,
+                page.records.iter().map(Record::source).collect(),
+            );
+            pages.push((
+                page.channel,
+                page.records
+                    .iter()
+                    .filter_map(|r| r.message(records))
+                    .collect(),
+            ));
         }
+        self.last = Some(dir.clone());
         ctx.send(Update::Cached(url.clone(), Box::new(dir), pages));
         Ok(())
     }
@@ -419,6 +529,7 @@ mod tests {
     #[test]
     fn cold_start_before_server_responds() -> Result<()> {
         const PROFILE: &str = "RUSTTALK_TEST_OFFLINE_PROFILE";
+        const EXPECTED: &str = "RUSTTALK_TEST_OFFLINE_COUNT";
         if let Some(path) = std::env::var_os(PROFILE) {
             let path = PathBuf::from(path);
             let (_lock, start) = crate::keystore::Keystore::open(&path, "RustTalk-offline-test")?;
@@ -441,6 +552,7 @@ mod tests {
             };
             assert_eq!(dir.name.as_deref(), Some("Workshop"));
             assert!(dir.icon.is_some() && dir.members[0].avatar.is_some());
+            assert_eq!(pages[0].1.len(), std::env::var(EXPECTED)?.parse::<usize>()?);
             assert!(matches!(&pages[0].1[0].body, Body::Text(text) if text == "Saturday"));
             return Ok(());
         }
@@ -488,35 +600,78 @@ mod tests {
         };
         store.write("directory", &listing);
         let mut history = History::default();
-        history.put(
-            channel,
-            None,
-            vec![Record {
-                id: [9; 32],
-                person,
-                device: device.certificate.signing_key().to_bytes(),
-                at: 1,
-                backfilled: false,
-                edit_of: None,
-                body: encode(
-                    &MessageBody {
-                        text: "Saturday".into(),
-                        ..Default::default()
-                    }
-                    .cache_bytes()?,
-                ),
-            }],
-            true,
-        );
+        let records = [9, 10]
+            .into_iter()
+            .map(|n| {
+                Ok(Record {
+                    id: [n; 32],
+                    person,
+                    epoch: Some(1),
+                    device: device.certificate.signing_key().to_bytes(),
+                    at: n.into(),
+                    backfilled: false,
+                    edit_of: None,
+                    body: encode(
+                        &MessageBody {
+                            text: "Saturday".into(),
+                            ..Default::default()
+                        }
+                        .cache_bytes()?,
+                    ),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        history.put(channel, None, records, true);
         store.write("messages", &history);
-        let child = std::process::Command::new(std::env::current_exe()?)
-            .args([
-                "--exact",
-                "net::recent::tests::cold_start_before_server_responds",
-            ])
-            .env(PROFILE, path)
-            .status()?;
-        anyhow::ensure!(child.success(), "cold-start process failed");
+        // A successful live directory followed by a first-page timeout must leave
+        // the same readable page for a second process with the network still down.
+        let device = Arc::new(device);
+        for pass in 0..2 {
+            let child = std::process::Command::new(std::env::current_exe()?)
+                .args([
+                    "--exact",
+                    "net::recent::tests::cold_start_before_server_responds",
+                ])
+                .env(PROFILE, path)
+                .env(EXPECTED, (2 - pass).to_string())
+                .status()?;
+            anyhow::ensure!(child.success(), "cold-start process failed");
+            if pass == 0 {
+                let ctx = egui::Context::default();
+                let net = Net::new(
+                    ctx.clone(),
+                    device.clone(),
+                    path.into(),
+                    Audio::new(path)?,
+                    Video::new(ctx),
+                )?;
+                let mut state = State {
+                    cache: Some(Arc::new(Store::new(path, &device, &known))),
+                    ..Default::default()
+                };
+                state.restore(&net.ctx, &known.address, &Revocations::in_profile(path))?;
+                let dir = state.last.clone().unwrap();
+                state.prune_history(&dir);
+                state.deleted(&net.ctx, &known.address, channel, [10; 32]);
+                let error = net.handle().block_on(async {
+                    reqwest::Client::new()
+                        .get(known.address.clone())
+                        .timeout(Duration::from_millis(100))
+                        .send()
+                        .await
+                        .unwrap_err()
+                });
+                assert!(error.is_timeout());
+                page_failed(
+                    &net.ctx,
+                    &known.address,
+                    &mut state,
+                    channel,
+                    None,
+                    &error.into(),
+                );
+            }
+        }
         Ok(())
     }
 
@@ -542,6 +697,7 @@ mod tests {
             Record {
                 id: [n; 32],
                 person,
+                epoch: Some(1),
                 device: signing_key,
                 at: n.into(),
                 backfilled: false,

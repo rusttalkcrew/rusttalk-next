@@ -556,6 +556,34 @@ impl Home {
         }
     }
 
+    fn restore_pages(&mut self, index: usize, pages: Vec<(Id, Vec<Msg>)>) {
+        let server = &mut self.servers[index];
+        for (channel, items) in pages {
+            if let Some(dm) = server.dir.dms.iter().find(|dm| dm.channel == channel) {
+                self.threads.entry(dm.peer).or_default().add(
+                    &server.address,
+                    channel,
+                    items,
+                    false,
+                    None,
+                    &dm::Pair {
+                        me: *self.identity.certificate.person_id(),
+                        peer: dm.peer,
+                        deleted: &self.dm_deleted,
+                    },
+                );
+            } else if server
+                .dir
+                .categories
+                .iter()
+                .flat_map(|c| &c.channels)
+                .any(|c| c.id == channel)
+            {
+                server.chats.entry(channel).or_default().merge(items, false);
+            }
+        }
+    }
+
     /// Delete my DM message on every server holding it that is online. The delete
     /// is kept and synced to my other devices, so a server that is away deletes it
     /// once it shows it again, also after a restart (see `Thread::add`).
@@ -1045,30 +1073,46 @@ impl Home {
                 if let Some(i) = self.index(&address) {
                     let server = &mut self.servers[i];
                     server.dir = *dir;
-                    for (channel, items) in pages {
-                        if server.dir.dms.iter().any(|dm| dm.channel == channel) {
-                            server.cached.insert(channel, items);
-                        } else {
-                            let chat = server.chats.entry(channel).or_default();
-                            chat.clear_history();
-                            chat.merge(items, false);
-
-                            if !chat.messages.is_empty() && !server.is_voice(&channel) {
-                                server.open = Some(channel);
-                            }
+                    for (channel, items) in &pages {
+                        if !items.is_empty()
+                            && !server.is_voice(channel)
+                            && !server.dir.dms.iter().any(|dm| dm.channel == *channel)
+                        {
+                            server.open = Some(*channel);
                         }
+                    }
+                    self.restore_pages(i, pages);
+                }
+            }
+            Update::Inaccessible(address, ids) => {
+                if let Some(i) = self.index(&address) {
+                    let server = &mut self.servers[i];
+                    for dm in &server.dir.dms {
+                        if ids.contains(&dm.channel)
+                            && let Some(thread) = self.threads.get_mut(&dm.peer)
+                        {
+                            thread.forget(&address);
+                        }
+                    }
+                    server.chats.retain(|id, _| !ids.contains(id));
+                    server.dir.discard_channels(&ids);
+                    if server.open.is_some_and(|id| ids.contains(&id)) {
+                        server.open = None;
                     }
                 }
             }
-            Update::ResetHistory(address) => {
+            Update::ResetHistory(address, pages) => {
                 if let Some(i) = self.index(&address) {
-                    self.servers[i].cached.clear();
-                    for chat in self.servers[i].chats.values_mut() {
-                        chat.clear_history();
+                    for (channel, _) in &pages {
+                        if let Some(peer) = self.dm_peer(i, channel) {
+                            if let Some(thread) = self.threads.get_mut(&peer) {
+                                thread.forget(&address);
+                            }
+                        } else if let Some(chat) = self.servers[i].chats.get_mut(channel) {
+                            chat.clear_history();
+                        }
                     }
-                    for thread in self.threads.values_mut() {
-                        thread.forget(&address);
-                    }
+                    self.restore_pages(i, pages);
                     self.load_dms(i);
                 }
             }
@@ -1127,7 +1171,6 @@ impl Home {
                     }
                 }
                 if matches!(status, Status::Stopped(_)) {
-                    server.cached.clear();
                     server.chats.clear();
                     server.names.clear();
                     server.dir = Directory::default();
@@ -1220,7 +1263,6 @@ impl Home {
                             thread.forget(&address);
                         }
                     }
-                    server.cached.clear();
                     server.chats.retain(|id, _| {
                         dir.categories
                             .iter()
@@ -1272,6 +1314,10 @@ impl Home {
                     }
                     let me = *self.identity.certificate.person_id();
                     let thread = self.threads.entry(peer).or_default();
+                    if !older && at_start.is_some() {
+                        thread.forget(&server);
+                        thread.open(&server, channel);
+                    }
                     if older && !items.is_empty() {
                         thread.chat.keep_scroll = Some(thread.chat.content_height);
                     }
@@ -1296,6 +1342,14 @@ impl Home {
                 let chat = self.servers[index].chats.entry(channel).or_default();
                 if older && !items.is_empty() {
                     chat.keep_scroll = Some(chat.content_height);
+                }
+                if !older && at_start.is_some() {
+                    let notices: Vec<_> = chat
+                        .messages
+                        .extract_if(.., |m| matches!(m.body, Body::Notice { .. }))
+                        .collect();
+                    chat.clear_history();
+                    chat.messages = notices;
                 }
                 chat.merge(items, older);
                 if let Some(at_start) = at_start {
@@ -3422,7 +3476,6 @@ pub(crate) fn new_server(
         order_unavailable: false,
         dir: Directory::default(),
         chats: HashMap::new(),
-        cached: HashMap::new(),
         open: None,
         voice: HashMap::new(),
         names: HashMap::new(),
@@ -4020,27 +4073,6 @@ fn dm_pane(ui: &mut Ui, home: &mut Home, peer: Id) {
     }
     if let Some((index, pick)) = dm_title(ui, home, peer) {
         person::apply(home, index, peer, pick, ui.input(|input| input.time));
-    }
-    let mut preview = Thread::default();
-    let pair = dm::Pair {
-        me: *home.identity.certificate.person_id(),
-        peer,
-        deleted: &home.dm_deleted,
-    };
-    for (index, channel) in home.replicas(&peer) {
-        let server = &home.servers[index];
-        if let Some(items) = server.cached.get(&channel) {
-            preview.add(&server.address, channel, items.clone(), false, None, &pair);
-        }
-    }
-    if !preview.chat.messages.is_empty()
-        && home
-            .threads
-            .get(&peer)
-            .is_none_or(|t| t.chat.messages.is_empty())
-    {
-        chat_view(ui, home, At::Dm(peer), &mut preview.chat);
-        return;
     }
     let mut chat = std::mem::take(&mut home.threads.entry(peer).or_default().chat);
     let act = chat_view(ui, home, At::Dm(peer), &mut chat);
@@ -6293,6 +6325,102 @@ mod tests {
         *harness.state_mut() = Some(home);
         harness.run_steps(4);
         (harness, sent)
+    }
+
+    #[test]
+    fn cached_dm_keeps_the_composer_and_other_replicas_on_refresh() {
+        for dark in [true, false] {
+            let (mut base, _sent) = files_harness(dark);
+            let mut home = base.state_mut().take().unwrap();
+            let mut dir = home.servers[0].dir.clone();
+            dir.dms.push(crate::server::Dm {
+                channel: PROJECTS,
+                peer: ANN,
+            });
+            dir.categories.clear();
+            let online = home.servers[0].address.clone();
+            let offline: url::Url = "https://offline.example.org/".parse().unwrap();
+            let known = KnownServer {
+                address: offline.clone(),
+                server_id: [4; 32],
+                tls_fingerprint: None,
+            };
+            home.servers.push(new_server(
+                known,
+                "Offline",
+                home.servers[0].commands.clone(),
+            ));
+            let msg = |n| Msg {
+                id: [n; 32],
+                person: ANN,
+                at: n.into(),
+                body: Body::Text(format!("cached {n}")),
+                backfilled: false,
+                reply_to: None,
+                quoted_author: None,
+                edit_of: None,
+                files: vec![],
+                live: None,
+                sticker: None,
+                replicas: vec![],
+                copy_files: vec![],
+            };
+            for (url, items) in [
+                (offline.clone(), vec![msg(1), msg(2)]),
+                (online.clone(), vec![msg(2), msg(3)]),
+            ] {
+                home.apply(
+                    &base.ctx,
+                    Update::Cached(url, Box::new(dir.clone()), vec![(PROJECTS, items)]),
+                    0.0,
+                );
+            }
+            let mut h = egui_kittest::Harness::builder()
+                .with_size(Vec2::new(720., 420.))
+                .with_context_setup(ui::install)
+                .build_ui_state(|ui, home| dm_pane(ui, home, ANN), home);
+            h.ctx.set_theme(if dark {
+                egui::Theme::Dark
+            } else {
+                egui::Theme::Light
+            });
+            h.run_steps(2);
+            h.ctx.memory_mut(|m| m.request_focus(composer_id(PROJECTS)));
+            h.event(egui::Event::Text("still typing".into()));
+            h.run_steps(2);
+            let ctx = h.ctx.clone();
+            let home = h.state_mut();
+            let chat = &mut home.threads.get_mut(&ANN).unwrap().chat;
+            assert_eq!(chat.draft, "still typing");
+            assert_eq!(chat.messages.len(), 3);
+            chat.reply_to = Some((ANN, [1; 32]));
+            home.apply(
+                &ctx,
+                Update::PageFailed(online.clone(), PROJECTS, false),
+                0.0,
+            );
+            assert_eq!(home.threads[&ANN].chat.messages.len(), 3);
+            home.apply(
+                &ctx,
+                Update::Messages {
+                    server: online,
+                    channel: PROJECTS,
+                    items: vec![],
+                    older: false,
+                    at_start: Some(true),
+                },
+                0.0,
+            );
+            let chat = &home.threads[&ANN].chat;
+            assert_eq!(chat.messages.len(), 2);
+            assert!(
+                chat.messages
+                    .iter()
+                    .all(|m| m.replicas == [offline.clone()])
+            );
+            assert_eq!(chat.draft, "still typing");
+            assert_eq!(chat.reply_to, Some((ANN, [1; 32])));
+        }
     }
 
     #[test]

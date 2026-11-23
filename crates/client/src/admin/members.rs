@@ -485,7 +485,6 @@ mod tests {
             compatibility: Default::default(),
             order_unavailable: false,
             dir: Directory::default(),
-            cached: Default::default(),
             chats: Default::default(),
             open: None,
             voice: Default::default(),

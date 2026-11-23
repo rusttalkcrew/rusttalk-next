@@ -39,7 +39,6 @@ pub struct Server {
     pub order_unavailable: bool,
     pub dir: Directory,
     pub chats: HashMap<Id, Chat>,
-    pub cached: HashMap<Id, Vec<Msg>>,
     /// The channel shown when this server is picked.
     pub open: Option<Id>,
     /// Who is in each voice channel.
@@ -292,6 +291,15 @@ pub struct CustomEmoji {
 }
 
 impl Directory {
+    pub fn discard_channels(&mut self, ids: &std::collections::HashSet<Id>) {
+        self.dms.retain(|dm| !ids.contains(&dm.channel));
+        for category in &mut self.categories {
+            category
+                .channels
+                .retain(|channel| !ids.contains(&channel.id));
+        }
+    }
+
     pub fn text_channels(&self) -> impl Iterator<Item = &Channel> {
         self.categories
             .iter()

@@ -13,6 +13,9 @@ use crate::server::{Body, Chat, Id, Msg};
 #[derive(Default)]
 pub struct Thread {
     pub chat: Chat,
+    /// Recent source records for rebuilding after a replica changes. Older history
+    /// can be paged again from the first retained record.
+    recent: Vec<(Url, Vec<Msg>)>,
     /// Paging per replica: server and DM channel there.
     pages: HashMap<(Url, Id), Page>,
     /// Person and ID of messages that arrived live, so each notifies once.
@@ -242,6 +245,33 @@ impl Thread {
         for msg in &mut items {
             msg.replicas = vec![server.clone()];
         }
+        let replica = match self.recent.iter_mut().find(|(at, _)| at == server) {
+            Some((_, records)) => records,
+            None => {
+                self.recent.push((server.clone(), Vec::new()));
+                &mut self.recent.last_mut().unwrap().1
+            }
+        };
+        let mut fresh = Vec::new();
+        for msg in &items {
+            if let Some(old) = replica
+                .iter_mut()
+                .chain(&mut fresh)
+                .find(|old: &&mut Msg| old.id == msg.id && old.person == msg.person)
+            {
+                if old.body == Body::Unreadable {
+                    *old = msg.clone();
+                }
+            } else {
+                fresh.push(msg.clone());
+            }
+        }
+        if older {
+            replica.splice(0..0, fresh);
+        } else {
+            replica.extend(fresh);
+        }
+        replica.drain(..replica.len().saturating_sub(crate::net::PAGE as usize));
         self.chat.merge(items, older);
         self.refresh();
         stale
@@ -251,33 +281,34 @@ impl Thread {
     /// who deleted it, and retention deletes old messages on each server separately.
     /// The message goes once no server that showed it holds it any more.
     pub fn remove(&mut self, server: &Url, id: &Id) {
-        let mut gone = Vec::new();
-        for msg in (self.chat.messages.iter_mut()).filter(|msg| msg.id == *id) {
-            if !msg.replicas.contains(server) {
-                continue;
-            }
-            let shown = msg.replicas[0] == *server;
-            msg.replicas.retain(|held| held != server);
-            msg.copy_files.retain(|(held, _)| held != server);
-            match msg.replicas.first() {
-                None => gone.push(msg.person),
-                // The next copy shows now, with its own files.
-                Some(next) if shown => {
-                    if let Some(at) = msg.copy_files.iter().position(|(held, _)| held == next) {
-                        msg.files = msg.copy_files.remove(at).1;
-                    }
-                }
-                Some(_) => {}
-            }
-        }
-        for person in gone {
-            self.chat.remove_one(&person, id);
+        if let Some((_, records)) = self.recent.iter_mut().find(|(at, _)| at == server) {
+            records.retain(|msg| msg.id != *id && msg.edit_of != Some(*id));
+            self.rebuild();
         }
     }
 
-    /// I deleted my message: hide it whichever servers still hold it.
     pub fn deleted(&mut self, me: &Id, id: &Id) {
+        for (_, records) in &mut self.recent {
+            records.retain(|msg| msg.person != *me || (msg.id != *id && msg.edit_of != Some(*id)));
+        }
         self.chat.remove_one(me, id);
+    }
+
+    fn rebuild(&mut self) {
+        self.chat.clear_history();
+        for (server, records) in &self.recent {
+            self.chat.merge(records.clone(), false);
+            for ((at, _), page) in &mut self.pages {
+                if at == server {
+                    let oldest = records.first().map(|msg| msg.id);
+                    if page.oldest != oldest {
+                        page.oldest = oldest;
+                        page.at_start = false;
+                    }
+                }
+            }
+        }
+        self.refresh();
     }
 
     /// Older pages to ask for, on servers that are online: server, channel and the
@@ -311,17 +342,11 @@ impl Thread {
 
     /// Drop copies belonging to a removed server or an obsolete session.
     pub fn forget(&mut self, server: &Url) {
-        let ids: Vec<_> = self
-            .chat
-            .messages
-            .iter()
-            .filter(|m| m.replicas.contains(server))
-            .map(|m| m.id)
-            .collect();
-        for id in ids {
-            self.remove(server, &id);
-        }
         self.pages.retain(|(at, _), _| at != server);
+        if let Some(at) = self.recent.iter().position(|(at, _)| at == server) {
+            self.recent.remove(at);
+            self.rebuild();
+        }
         self.refresh();
     }
 
@@ -401,6 +426,58 @@ mod tests {
                 _ => "?",
             })
             .collect()
+    }
+
+    #[test]
+    fn forgetting_a_replica_drops_its_vote_and_pending_edit() {
+        use rusttalk_core::messages::{Poll, PollPart};
+        let (a, b) = (server(1), server(2));
+        let deleted = Tombstones::default();
+        let pair = pair(&deleted);
+        let mut thread = Thread::default();
+        let vote = Msg {
+            body: Body::PollPart(PollPart::Vote {
+                poll: [1; 32],
+                sent: 1,
+                choices: vec![0],
+            }),
+            ..msg(3, 8, 3, "")
+        };
+        let edit = Msg {
+            edit_of: Some([2; 32]),
+            ..msg(4, 8, 4, "revoked edit")
+        };
+        thread.add(&a, [1; 32], vec![vote, edit], false, None, &pair);
+        thread.forget(&a);
+        let poll = Msg {
+            body: Body::Poll(
+                "Lunch?".into(),
+                Poll {
+                    options: vec!["A".into(), "B".into()],
+                    multiple: false,
+                    ends_at: 0,
+                },
+            ),
+            ..msg(1, 8, 1, "")
+        };
+        thread.add(
+            &b,
+            [2; 32],
+            vec![poll.clone(), msg(2, 8, 2, "original")],
+            false,
+            Some(true),
+            &pair,
+        );
+        assert!(
+            thread
+                .chat
+                .tally(&poll)
+                .unwrap()
+                .voters
+                .iter()
+                .all(Vec::is_empty)
+        );
+        assert_eq!(texts(&thread), ["?", "original"]);
     }
 
     #[test]
