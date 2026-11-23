@@ -494,6 +494,10 @@ is deleted and never used; the normal noise suppression keeps working.
   The dev health checks use loopback HTTPS at Caddy and loopback
   HTTP at LiveKit.
 
+Mobile updates are manual. Downloading a release contacts GitHub through
+your browser. On iOS, your sideloading tool handles signing with your Apple
+account. RustTalk does not receive those credentials or check for updates on phones.
+
 Docker image pulls and Cargo dependency downloads happen during setup or build.
 WebRTC builds download the pinned LiveKit prebuilt archive from GitHub
 Releases. Linux release builds let appimagetool fetch the AppImage runtime

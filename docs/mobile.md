@@ -5,8 +5,14 @@ RustTalk for Android and iOS is the desktop client, built from the same code:
 client is a library with a small `main.rs`, so Android can load it as
 `librusttalk_client.so`; iOS runs the normal binary inside an app bundle.
 
-This page is the plan (issue #282) and the state after phase 3, with the first
-iPhone fixes from phase 4.
+## Install and update
+
+Download the experimental phone packages from [RustTalk releases](https://github.com/rusttalkcrew/rusttalk-next/releases).
+
+- **Android 8 or newer, ARM64:** open `RustTalk-android-arm64.apk` and allow installation from that source. Install later releases over the existing app. An Actions test APK has a different signer. Before removing a test install, check that you have your recovery words. Uninstalling clears the app's local data.
+- **iOS 16 or newer:** sign `RustTalk-ios-unsigned.ipa` with your Apple account using a sideloading tool such as AltStore or xtool. Use the same signing team for updates so the app can still read your keys in Keychain.
+
+Phone updates are manual. Microphone audio and camera capture still need verification on a physical iPhone.
 
 ## iPhone (phase 4, started)
 
@@ -161,7 +167,7 @@ messages and reading them again after a restart.
 - **Test build**: `deploy/android/build.sh` makes a release APK signed with the
   local debug key (`rusttalk-<version>-android-arm64-test.apk`): not
   debuggable, so a USB cable no longer opens the app's files, and R8 can strip
-  logging. Real signing keys come with phase 6.
+  logging. Published releases use the production signing key.
 
 ## State after phase 1
 
@@ -299,8 +305,10 @@ deploy/ios/build.sh dist
 ```
 
 CI builds both on pull requests that touch the client, and on request from
-the Actions tab (`Mobile apps`), and keeps the APK and IPA as artifacts. It is
-not part of releases yet.
+the Actions tab (`Mobile apps`), and keeps the test APK and IPA as artifacts.
+Release tags build both with the Rust release profile. Only the protected
+release job signs the Android package. Android version codes increase with
+`major × 1,000,000 + minor × 1,000 + patch + 1` (0.2.0 is 2001).
 
 ## Phone layout
 
@@ -331,7 +339,7 @@ Rough effort for one person who knows the code base.
 | 3 | Foreground voice on Android and iOS; iOS requests microphone access and supports background audio. Left: iPhone device verification, Android Bluetooth routing and foreground service | 2 weeks |
 | 4 | iOS on a device. Done: Keychain, safe area and taps. Left: notifications (reuse `notify/macos.rs`), document picker, status bar colours, background rules | 1 to 2 weeks |
 | 5 | Foreground call camera and front/back selection. Left: verify capture and interruptions on a real iPhone | Device verification |
-| 6 | Release: signing keys, store listings or a sideload page, release.yml jobs, store updates | 1 week plus store review |
+| 6 | Release downloads and signing are in place. Left: store listings and store updates | 1 week plus store review |
 | Later | Screen share (MediaProjection; ReplayKit broadcast extension), push notifications | 2 to 4 weeks each |
 
 ## TLS trust
