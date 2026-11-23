@@ -16,7 +16,13 @@ pub(super) fn permission(request: bool) -> i32 {
 pub(super) fn devices() -> Result<i32> {
     Ok(unsafe { rt_camera_devices() })
 }
-pub(super) fn start(front: bool, _width: u32, height: u32, fps: u32) -> Result<()> {
+pub(super) fn start(
+    front: bool,
+    _width: u32,
+    height: u32,
+    fps: u32,
+    _generation: u64,
+) -> Result<()> {
     ensure!(
         unsafe { rt_camera_start(front, height, fps) },
         "camera unavailable"

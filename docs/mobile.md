@@ -261,6 +261,17 @@ turning off video, leaving the call or backgrounding the app releases the light.
 Turning off video, leaving the call or backgrounding the app releases the camera.
 After an interruption, turn video on again to resume sharing.
 
+Android lifecycle invalidation is immediate: Activity locks only protect the camera
+reference, and camera commands run on one process-wide worker. JNI callers wait at
+most five seconds; native open and close waits are bounded. A device whose closure
+is unconfirmed keeps its lease, so another capture cannot overlap it. Callback
+handling stays alive to close delayed devices; retrying video after their close
+acknowledgement can recover. Capture generation tags reject old frames even when
+Rust has already started preparing another call. `make android-camera-test` drives
+delayed callback, pause, timeout, rollback and resume cases with a fake backend; the
+Android build runs it too. These tests and APK builds do not verify physical torch
+or camera behavior. Device checks remain pending while Agent device access is off.
+
 Joining a call on iOS is still untested.
 On an iPhone, check the device log for permission, the active category/mode and
 input route type, then five one-second capture counts. Verify a peer can hear

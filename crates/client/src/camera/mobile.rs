@@ -38,16 +38,25 @@ pub(super) fn list_cameras() -> Result<Vec<Device>> {
 }
 
 struct Stream {
+    generation: u64,
     source: NativeVideoSource,
     latest: Mutex<(Instant, Option<I420Buffer>)>,
 }
 // The call controller joins the previous stop before starting another session.
 static ACTIVE: Mutex<Option<Arc<Stream>>> = Mutex::new(None);
 
+#[cfg(not(target_os = "android"))]
 fn frame(buffer: I420Buffer) {
+    frame_for_generation(buffer, None);
+}
+
+fn frame_for_generation(buffer: I420Buffer, generation: Option<u64>) {
     let Some(stream) = ACTIVE.lock().unwrap().clone() else {
         return;
     };
+    if generation.is_some_and(|generation| generation != stream.generation) {
+        return;
+    }
     let frame = VideoFrame::new(VideoRotation::VideoRotation0, buffer);
     stream.source.capture_frame(&frame);
     *stream.latest.lock().unwrap() = (Instant::now(), Some(frame.buffer));
@@ -122,10 +131,14 @@ impl Capture {
 
 impl Drop for Capture {
     fn drop(&mut self) {
+        ACTIVE.lock().unwrap().take();
+        // Android cancellation wakes the pending JNI command without waiting on native callbacks.
+        #[cfg(target_os = "android")]
+        platform::stop();
         if let Some(job) = self.control.take() {
             let _ = job.join();
         }
-        ACTIVE.lock().unwrap().take();
+        #[cfg(not(target_os = "android"))]
         platform::stop();
     }
 }
@@ -144,7 +157,10 @@ pub(super) fn start(
         },
         false,
     );
+    static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let generation = GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let stream = Arc::new(Stream {
+        generation,
         source: source.clone(),
         latest: Mutex::new((Instant::now(), None)),
     });
@@ -161,7 +177,13 @@ pub(super) fn start(
     };
     let cancelled = || cancelled.load(std::sync::atomic::Ordering::Acquire);
     ensure!(!cancelled(), "camera start cancelled");
-    platform::start(device.name == "front", width, options.height, options.fps)?;
+    platform::start(
+        device.name == "front",
+        width,
+        options.height,
+        options.fps,
+        generation,
+    )?;
     loop {
         let size = capture
             .stream
@@ -199,7 +221,7 @@ mod platform {
     pub fn state() -> i32 {
         STATE.load(SeqCst)
     }
-    pub fn start(front: bool, w: u32, h: u32, _: u32) -> anyhow::Result<()> {
+    pub fn start(front: bool, w: u32, h: u32, _: u32, _: u64) -> anyhow::Result<()> {
         STATE.store(if front { 1 } else { 6 }, SeqCst);
         super::frame(super::I420Buffer::new(w, h));
         Ok(())
@@ -259,6 +281,16 @@ mod tests {
         assert!(capture.multiple);
         assert!(capture.take_preview().is_some());
         assert!(capture.take_preview().is_none());
+        frame_for_generation(
+            I420Buffer::new(16, 16),
+            Some(stream.generation.wrapping_sub(1)),
+        );
+        assert!(
+            capture.take_preview().is_none(),
+            "late callbacks must not cross publications"
+        );
+        frame_for_generation(I420Buffer::new(16, 16), Some(stream.generation));
+        assert!(capture.take_preview().is_some());
         assert_eq!(capture.name(), "front");
         assert_eq!(capture.torch(), None);
         platform::DENIED.store(true, SeqCst);
@@ -271,6 +303,8 @@ mod tests {
         capture.select(Some("back"));
         assert!(settle(&mut capture));
         assert_eq!(capture.torch(), Some(false));
+        assert!(Arc::ptr_eq(&stream, &capture.stream));
+        assert_eq!(capture.stream.generation, stream.generation);
         capture.set_torch(true);
         assert!(settle(&mut capture));
         assert_eq!(capture.torch(), Some(true));
@@ -292,6 +326,13 @@ mod tests {
             &AtomicBool::new(false),
         )
         .unwrap();
+        assert_ne!(capture.stream.generation, stream.generation);
+        capture.take_preview();
+        frame_for_generation(I420Buffer::new(16, 16), Some(stream.generation));
+        assert!(
+            capture.take_preview().is_none(),
+            "a stopped capture must not feed its replacement"
+        );
         capture.set_torch(true);
         // Stop joins outstanding control work before releasing the device and preview.
         capture.stop().join().unwrap();

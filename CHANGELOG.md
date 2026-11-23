@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Backgrounding Android during a camera switch no longer waits for the camera or reopens it after pause.
+
 - Retry a failed forum post with its title, body and poll. Replies stay visible when a poll and its post arrive separately.
 - Forum channels: searchable posts with folded replies, polls, up and down votes and sorting.
 - Oversized stored uploads show their size and the app limit beside chat or shared files, including voice channels.

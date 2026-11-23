@@ -1,4 +1,4 @@
-use super::{I420Buffer, frame};
+use super::{I420Buffer, frame_for_generation};
 use anyhow::{Context, Result, ensure};
 use jni::{JValue, jni_sig, jni_str};
 use livekit_jni::{
@@ -33,18 +33,19 @@ pub(super) fn devices() -> Result<i32> {
             .i()
     })
 }
-pub(super) fn start(front: bool, w: u32, h: u32, fps: u32) -> Result<()> {
+pub(super) fn start(front: bool, w: u32, h: u32, fps: u32, generation: u64) -> Result<()> {
     ensure!(
         activity(|env, a| env
             .call_method(
                 a,
                 jni_str!("startCamera"),
-                jni_sig!("(ZIII)Z"),
+                jni_sig!("(ZIIIJ)Z"),
                 &[
                     JValue::Bool(front),
                     JValue::Int(w as i32),
                     JValue::Int(h as i32),
-                    JValue::Int(fps as i32)
+                    JValue::Int(fps as i32),
+                    JValue::Long(generation as i64)
                 ]
             )?
             .z())?,
@@ -75,6 +76,7 @@ extern "system" fn Java_io_github_rusttalkcrew_rusttalk_CallCamera_frame(
     bytes: JByteBuffer,
     w: i32,
     h: i32,
+    generation: i64,
 ) {
     if !(1..=8192).contains(&w) || !(1..=8192).contains(&h) {
         return;
@@ -96,7 +98,7 @@ extern "system" fn Java_io_github_rusttalkcrew_rusttalk_CallCamera_frame(
     y.copy_from_slice(luma);
     u.copy_from_slice(&chroma[..u.len()]);
     v.copy_from_slice(&chroma[u.len()..u.len() + v.len()]);
-    frame(buffer);
+    frame_for_generation(buffer, Some(generation as u64));
 }
 
 pub(super) fn state() -> i32 {
