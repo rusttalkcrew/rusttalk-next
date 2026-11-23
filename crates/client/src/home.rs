@@ -1551,10 +1551,22 @@ impl Home {
                 }
                 match state {
                     Some(state) => {
+                        let was_reconnecting = call.state == crate::server::CallState::Reconnecting;
+                        call.state = state;
                         if state == crate::server::CallState::Reconnecting {
                             self.voice.sounds.reconnecting();
+                            if let Some(watching) = &mut self.voice.watching {
+                                watching.grace_until = None;
+                            }
+                        } else if was_reconnecting
+                            && state == crate::server::CallState::Connected
+                            && let Some(watching) = &mut self.voice.watching
+                        {
+                            // Remote sharers may finish rejoining and republishing shortly after us.
+                            watching.grace_until = Some(
+                                std::time::Instant::now() + std::time::Duration::from_secs(15),
+                            );
                         }
-                        call.state = state;
                     }
                     None => self.voice.end_call(),
                 }

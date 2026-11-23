@@ -155,3 +155,180 @@ fn stream_cards_keep_people_opt_in_and_preview_follows_focus() {
         }
     }
 }
+
+#[test]
+fn normal_stop_share_exits_fullscreen_and_camera_remap_avoids_spurious_unwatch() {
+    let (mut fixture, mut sent) = files_harness(true);
+    let mut home = fixture.state_mut().take().unwrap();
+    let address = home.servers[0].address.clone();
+    home.voice.call = Some(Call {
+        server: address.clone(),
+        channel: PROJECTS,
+        state: CallState::Connected,
+        stats: Stats::default(),
+        can_talk: true,
+        can_share_video: true,
+    });
+    home.servers[0].voice.insert(
+        PROJECTS,
+        vec![
+            Peer {
+                person: ME,
+                connecting: false,
+                unknown: false,
+                status: Default::default(),
+                apps: vec![],
+                camera: None,
+                terminal: None,
+                screens: vec![],
+            },
+            Peer {
+                person: ANN,
+                connecting: false,
+                unknown: false,
+                status: Default::default(),
+                apps: vec![],
+                camera: Some("ann-cam-1".into()),
+                terminal: None,
+                screens: vec![],
+            },
+        ],
+    );
+    let mut h = Harness::builder()
+        .with_context_setup(ui::install)
+        .with_size(Vec2::new(1100.0, 700.0))
+        .build_ui_state(
+            |ui, home| {
+                call::frame(ui.ctx(), home);
+                if home.voice.stage.full.is_some() {
+                    call::full_view(ui, home);
+                } else {
+                    call::stage(ui, home, 0, PROJECTS);
+                }
+            },
+            home,
+        );
+    h.run_steps(3);
+    // Remote camera is watched while visible on stage.
+    let initial: Vec<_> = std::iter::from_fn(|| sent.try_recv().ok()).collect();
+    assert!(
+        initial
+            .iter()
+            .any(|cmd| matches!(cmd, Command::Watch(sid, true) if sid == "ann-cam-1"))
+    );
+
+    // Camera track ID changes on restart: replace_video remaps Voice::cameras so the next frame
+    // does not send Watch("ann-cam-1", false) or re-subscribe redundantly.
+    let ctx = h.ctx.clone();
+    h.state_mut().apply(
+        &ctx,
+        Update::VideoReplaced(
+            address.clone(),
+            PROJECTS,
+            "ann-cam-1".into(),
+            "ann-cam-2".into(),
+        ),
+        0.0,
+    );
+    h.state_mut().servers[0].voice.get_mut(&PROJECTS).unwrap()[1].camera = Some("ann-cam-2".into());
+    h.run_steps(3);
+    let cam_cmds: Vec<_> = std::iter::from_fn(|| sent.try_recv().ok())
+        .filter_map(|cmd| match cmd {
+            Command::Watch(sid, on) if sid.starts_with("ann-cam-") => Some((sid, on)),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        cam_cmds.is_empty(),
+        "expected no camera watch churn after remap, got {cam_cmds:?}"
+    );
+
+    // Ann shares a screen; watch it, enter presentation mode and fullscreen, then Ann stops normally.
+    h.state_mut().servers[0].voice.get_mut(&PROJECTS).unwrap()[1].screens = vec![Screen {
+        sid: "ann-scr-1".into(),
+        name: "Display".into(),
+        viewers: 1,
+        local: false,
+    }];
+    h.run_steps(2);
+    h.get_by_label("Watch Ann").click();
+    h.run_steps(2);
+    assert_eq!(h.state().voice.watching.as_ref().unwrap().sid, "ann-scr-1");
+    h.state_mut()
+        .voice
+        .stage
+        .set_presenting_and_full_screen("ann-scr-1");
+    h.run_steps(2);
+    assert!(h.state().voice.stage.full.is_some());
+
+    // Healthy call: presenter stops sharing -> watching, fullscreen, and presentation clear immediately.
+    h.state_mut().servers[0].voice.get_mut(&PROJECTS).unwrap()[1]
+        .screens
+        .clear();
+    h.run_steps(2);
+    assert!(h.state().voice.watching.is_none());
+    assert!(h.state().voice.stage.full.is_none());
+    assert!(!h.state().voice.stage.is_presenting());
+
+    // A later screen share from the same presenter stays opt-in.
+    h.state_mut().servers[0].voice.get_mut(&PROJECTS).unwrap()[1].screens = vec![Screen {
+        sid: "ann-scr-2".into(),
+        name: "Display".into(),
+        viewers: 0,
+        local: false,
+    }];
+    h.run_steps(2);
+    assert!(h.state().voice.watching.is_none());
+    assert!(h.state().voice.stage.full.is_none());
+
+    // Post-recovery grace window keeps watching briefly after Reconnecting -> Connected until
+    // the remote sharer republishes, then clears normally on a subsequent stop-share.
+    h.get_by_label("Watch Ann").click();
+    h.run_steps(2);
+    assert_eq!(h.state().voice.watching.as_ref().unwrap().sid, "ann-scr-2");
+    h.state_mut()
+        .voice
+        .stage
+        .set_presenting_and_full_screen("ann-scr-2");
+    h.state_mut().apply(
+        &ctx,
+        Update::Call(address.clone(), PROJECTS, Some(CallState::Reconnecting)),
+        0.0,
+    );
+    h.state_mut().servers[0].voice.get_mut(&PROJECTS).unwrap()[1]
+        .screens
+        .clear();
+    h.run_steps(2);
+    assert!(h.state().voice.stage.full.is_some());
+    // Local call reconnects before Ann finishes republishing.
+    h.state_mut().apply(
+        &ctx,
+        Update::Call(address.clone(), PROJECTS, Some(CallState::Connected)),
+        0.0,
+    );
+    h.run_steps(2);
+    assert_eq!(h.state().voice.watching.as_ref().unwrap().sid, "ann-scr-2");
+    assert!(h.state().voice.stage.full.is_some());
+    // Ann republishes with a new track SID, then later stops sharing normally.
+    h.state_mut().apply(
+        &ctx,
+        Update::VideoReplaced(address, PROJECTS, "ann-scr-2".into(), "ann-scr-3".into()),
+        0.0,
+    );
+    h.state_mut().servers[0].voice.get_mut(&PROJECTS).unwrap()[1].screens = vec![Screen {
+        sid: "ann-scr-3".into(),
+        name: "Display".into(),
+        viewers: 1,
+        local: false,
+    }];
+    h.run_steps(2);
+    assert_eq!(h.state().voice.watching.as_ref().unwrap().sid, "ann-scr-3");
+    assert!(h.state().voice.stage.full.is_some());
+    h.state_mut().servers[0].voice.get_mut(&PROJECTS).unwrap()[1]
+        .screens
+        .clear();
+    h.run_steps(2);
+    assert!(h.state().voice.watching.is_none());
+    assert!(h.state().voice.stage.full.is_none());
+    assert!(!h.state().voice.stage.is_presenting());
+}

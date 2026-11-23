@@ -78,6 +78,17 @@ pub struct Stage {
 }
 
 impl Stage {
+    #[cfg(test)]
+    pub(crate) fn set_presenting_and_full_screen(&mut self, sid: &str) {
+        self.presenting = true;
+        self.full = Some(Tile::Screen(sid.to_owned()));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_presenting(&self) -> bool {
+        self.presenting
+    }
+
     pub(super) fn replace_video(&mut self, old: &str, new: &str) {
         for tile in [&mut self.focus, &mut self.full] {
             if let Some(Tile::Screen(sid)) = tile
@@ -469,12 +480,16 @@ pub fn stage(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
     let voice = &mut home.voice;
     let video_only = &mut home.layout.split.video_only;
     let all = entries(&ctx, voice, server, &channel, &peers, joined);
+    let retaining = voice
+        .watching
+        .as_ref()
+        .is_some_and(|w| voice.retaining_watch(&w.sid));
     let stage = &mut voice.stage;
     stage
         .minimized
         .retain(|person| peers.iter().any(|p| p.person == *person));
     let presentable = all.iter().position(|e| e.tile.shared());
-    if presentable.is_none() && voice.watching.is_none() {
+    if presentable.is_none() && !retaining {
         stage.presenting = false;
     }
 
@@ -1405,8 +1420,7 @@ pub fn full_view(ui: &mut Ui, home: &mut Home) {
         });
     let Some((name, peer, me)) = found else {
         // A replacement publication may still be arriving after a restart.
-        if matches!(&tile, Tile::Screen(sid) if home.voice.watching.as_ref().is_some_and(|watch| watch.sid == *sid))
-        {
+        if matches!(&tile, Tile::Screen(sid) if home.voice.retaining_watch(sid)) {
             if ui.input(|input| input.key_pressed(Key::Escape))
                 || ui::secondary(ui, t!("call.exit_full_screen")).clicked()
             {

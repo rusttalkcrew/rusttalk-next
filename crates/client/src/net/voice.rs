@@ -37,6 +37,8 @@ use crate::{
     sounds::Snapshot,
 };
 
+type WatchOwners = HashMap<String, (String, TrackSource, String)>;
+
 /// Retry transport failures, never removals, duplicate devices, or explicit closes.
 fn recoverable_disconnect(reason: DisconnectReason) -> bool {
     matches!(
@@ -55,15 +57,114 @@ pub(super) fn recovery_delay(attempt: u32) -> Option<Duration> {
     (attempt < 5).then(|| Duration::from_secs(1 << attempt))
 }
 
-fn silence_lost_transport(ctx: &Ctx, live: &mut Live) {
+/// Start fresh-auth recovery immediately on disconnect without overriding active retry backoff.
+fn schedule_immediate_recovery(
+    recovery: &mut Option<(std::time::Instant, u32)>,
+    now: std::time::Instant,
+) {
+    match recovery {
+        None | Some((_, 0)) => *recovery = Some((now, 0)),
+        Some(_) => {}
+    }
+}
+
+fn watch_on(
+    watched: &mut HashSet<String>,
+    owners: &mut WatchOwners,
+    sid: &str,
+    owner: Option<(String, TrackSource)>,
+) {
+    if let Some((owner, source)) = owner {
+        owners.insert(sid.to_owned(), (owner, source, sid.to_owned()));
+    }
+    watched.insert(sid.to_owned());
+}
+
+/// Drop watch intent for `sid`, returning track SIDs that no remaining watch still needs.
+fn watch_off(watched: &mut HashSet<String>, owners: &mut WatchOwners, sid: &str) -> Vec<String> {
+    let removed: Vec<_> = owners
+        .iter()
+        .filter(|(requested, (_, _, current))| requested.as_str() == sid || current.as_str() == sid)
+        .map(|(requested, (_, _, current))| (requested.clone(), current.clone()))
+        .collect();
+    for (requested, _) in &removed {
+        owners.remove(requested);
+    }
+    let still_tracks =
+        |target: &str, owners: &WatchOwners| owners.values().any(|(_, _, active)| active == target);
+    let mut dropped = Vec::new();
+    if !still_tracks(sid, owners) {
+        watched.remove(sid);
+        dropped.push(sid.to_owned());
+    }
+    for (_, current) in removed {
+        if current != sid && !still_tracks(&current, owners) {
+            watched.remove(&current);
+            dropped.push(current);
+        }
+    }
+    dropped
+}
+
+fn remap_watch(
+    watched: &mut HashSet<String>,
+    owners: &mut WatchOwners,
+    participant: &str,
+    source: TrackSource,
+    sid: &str,
+) -> Option<Vec<(String, String)>> {
+    let mut matched = false;
+    let mut replacements = Vec::new();
+    for (owner, kind, current) in owners.values_mut() {
+        if owner != participant || *kind != source {
+            continue;
+        }
+        matched = true;
+        if current != sid {
+            let old = std::mem::replace(current, sid.to_owned());
+            watched.remove(&old);
+            watched.insert(sid.to_owned());
+            if !replacements.iter().any(|(prev, _)| prev == &old) {
+                replacements.push((old, sid.to_owned()));
+            }
+        }
+    }
+    matched.then_some(replacements)
+}
+
+fn unpublish_watch(watched: &mut HashSet<String>, owners: &mut WatchOwners, sid: &str) {
+    let _ = watch_off(watched, owners, sid);
+}
+
+fn participant_left_watch(watched: &mut HashSet<String>, owners: &mut WatchOwners, identity: &str) {
+    let removed: Vec<_> = owners
+        .iter()
+        .filter(|(_, (owner, _, _))| owner == identity)
+        .map(|(requested, (_, _, current))| (requested.clone(), current.clone()))
+        .collect();
+    for (requested, current) in removed {
+        owners.remove(&requested);
+        watched.remove(&requested);
+        watched.remove(&current);
+    }
+}
+
+fn silence_lost_transport(ctx: &Ctx, url: &Url, live: &mut Live) {
+    control::leave(live);
+    live.guest = Default::default();
+    live.control = Default::default();
+    ctx.send(Update::Control(live.control.clone()));
     ctx.audio.stop_listening();
     ctx.audio.end_phone();
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     if let Some(phone) = &live.phone {
         phone.stop.cancel();
     }
-    // Mobile has no phone bridge, but still discards shared-audio consent above.
-    let _ = live;
+    ctx.send(Update::ExternalPhones(
+        url.clone(),
+        live.channel,
+        Vec::new(),
+    ));
 }
 
 /// The voice room this device is in, on this server.
@@ -71,7 +172,7 @@ pub(super) struct Live {
     pub(super) recovery: Option<(std::time::Instant, u32)>,
     pub(super) transport_closed: bool,
     camera_source: Option<(NativeVideoSource, CameraOptions)>,
-    watch_owners: HashMap<String, (String, TrackSource, String)>,
+    watch_owners: WatchOwners,
     pub(super) room: VoiceRoom,
     pub(super) channel: Id,
     /// The last acknowledged deafen state, so failures can be retried.
@@ -481,35 +582,26 @@ pub(super) async fn stop_camera(live: &mut Live) {
 /// Start or stop receiving a screen or camera track.
 pub(super) fn watch(ctx: &Ctx, live: &mut Live, sid: String, on: bool) -> Result<()> {
     if on {
-        if let Some(video) = live
+        let owner = live
             .room
             .remote_video_tracks()
             .into_iter()
             .find(|v| v.sid.as_str() == sid)
-        {
-            live.watch_owners.insert(
-                sid.clone(),
-                (video.participant.to_string(), video.source, sid.clone()),
-            );
-        }
-        live.watched.insert(sid.clone());
+            .map(|v| (v.participant.to_string(), v.source));
+        watch_on(&mut live.watched, &mut live.watch_owners, &sid, owner);
     } else {
-        live.watched.remove(&sid);
-        let removed: Vec<_> = live
-            .watch_owners
-            .iter()
-            .filter(|(requested, (_, _, current))| **requested == sid || *current == sid)
-            .map(|(requested, (_, _, current))| (requested.clone(), current.clone()))
-            .collect();
-        for (requested, current) in removed {
-            live.watch_owners.remove(&requested);
-            live.watched.remove(&current);
-            ctx.video.remove_track(&current);
-            if let Ok(current) = TrackSid::try_from(current) {
-                let _ = live.room.set_subscribed(&current, false);
+        let dropped = watch_off(&mut live.watched, &mut live.watch_owners, &sid);
+        for track in &dropped {
+            ctx.video.remove_track(track);
+            if track != &sid
+                && let Ok(track_sid) = TrackSid::try_from(track.clone())
+            {
+                let _ = live.room.set_subscribed(&track_sid, false);
             }
         }
-        ctx.video.remove_track(&sid);
+        if !dropped.iter().any(|track| track == &sid) {
+            return Ok(());
+        }
     }
     let Some(video) = live
         .room
@@ -694,25 +786,23 @@ pub(super) async fn restore_media(ctx: &Ctx, url: &Url, live: &mut Live) -> Resu
 
 fn restore_watches(ctx: &Ctx, url: &Url, live: &mut Live) {
     for video in live.room.remote_video_tracks() {
-        let Some((_, _, current)) = live.watch_owners.values_mut().find(|(owner, source, _)| {
-            owner == video.participant.as_str() && *source == video.source
-        }) else {
+        let sid = video.sid.to_string();
+        let Some(replacements) = remap_watch(
+            &mut live.watched,
+            &mut live.watch_owners,
+            video.participant.as_str(),
+            video.source,
+            &sid,
+        ) else {
             continue;
         };
-        let sid = video.sid.to_string();
-        if *current != sid {
-            live.watched.remove(current);
-            ctx.video.remove_track(current);
-            ctx.send(Update::VideoReplaced(
-                url.clone(),
-                live.channel,
-                current.clone(),
-                sid.clone(),
-            ));
-            *current = sid.clone();
-            live.watched.insert(sid);
+        for (old, new) in replacements {
+            ctx.video.remove_track(&old);
+            ctx.send(Update::VideoReplaced(url.clone(), live.channel, old, new));
         }
-        if let Err(error) = live.room.set_subscribed(&video.sid, true) {
+        if video.track.is_none()
+            && let Err(error) = live.room.set_subscribed(&video.sid, true)
+        {
             tracing::warn!(%error, "restoring video subscription failed");
         }
     }
@@ -1224,9 +1314,9 @@ pub(super) async fn on_voice(
     let Some(event) = event else {
         tracing::warn!("voice room closed");
         if let Some(live) = &mut state.voice {
-            silence_lost_transport(ctx, live);
+            silence_lost_transport(ctx, url, live);
             live.transport_closed = true;
-            live.recovery.get_or_insert((std::time::Instant::now(), 0));
+            schedule_immediate_recovery(&mut live.recovery, std::time::Instant::now());
         }
         ctx.send(Update::Call(
             url.clone(),
@@ -1315,6 +1405,10 @@ pub(super) async fn on_voice(
         }
         RoomEvent::Reconnecting => {
             if let Some(live) = &mut state.voice {
+                control::leave(live);
+                live.guest = Default::default();
+                live.control = Default::default();
+                ctx.send(Update::Control(live.control.clone()));
                 live.recovery
                     .get_or_insert((std::time::Instant::now() + Duration::from_secs(10), 0));
                 for call in live.phone_consents.drain(..) {
@@ -1362,8 +1456,8 @@ pub(super) async fn on_voice(
             tracing::info!(?reason, "voice disconnected");
             if recoverable_disconnect(reason) {
                 if let Some(live) = &mut state.voice {
-                    silence_lost_transport(ctx, live);
-                    live.recovery.get_or_insert((std::time::Instant::now(), 0));
+                    silence_lost_transport(ctx, url, live);
+                    schedule_immediate_recovery(&mut live.recovery, std::time::Instant::now());
                     live.transport_closed = true;
                 }
                 ctx.send(Update::Call(
@@ -1388,6 +1482,13 @@ pub(super) async fn on_voice(
         }
         RoomEvent::ParticipantDisconnected(participant) => {
             if let Some(live) = &mut state.voice {
+                if live.recovery.is_none() {
+                    participant_left_watch(
+                        &mut live.watched,
+                        &mut live.watch_owners,
+                        participant.identity().as_str(),
+                    );
+                }
                 control::left(ctx, live, participant.identity().as_str());
                 terminal::left(ctx, live, participant.identity().as_str());
             }
@@ -1396,6 +1497,13 @@ pub(super) async fn on_voice(
             ctx.audio.set_listening(publication.sid().as_str(), false);
             ctx.audio.remove_track(publication.sid().as_str());
             if let Some(live) = &mut state.voice {
+                if live.recovery.is_none() {
+                    unpublish_watch(
+                        &mut live.watched,
+                        &mut live.watch_owners,
+                        publication.sid().as_str(),
+                    );
+                }
                 control::unpublished(ctx, live, publication.sid().as_str());
             }
         }
@@ -2021,6 +2129,108 @@ mod tests {
                 .map(|seconds| seconds.map(Duration::from_secs))
         );
         assert_eq!(recovery_delay(u32::MAX), None);
+    }
+
+    #[test]
+    fn immediate_recovery_clears_reconnecting_grace_but_keeps_active_backoff() {
+        let now = std::time::Instant::now();
+        let later = now + Duration::from_secs(10);
+        let mut recovery = Some((later, 0));
+        schedule_immediate_recovery(&mut recovery, now);
+        assert_eq!(recovery, Some((now, 0)));
+
+        let mut backoff = Some((later, 2));
+        schedule_immediate_recovery(&mut backoff, now);
+        assert_eq!(backoff, Some((later, 2)));
+
+        let mut none = None;
+        schedule_immediate_recovery(&mut none, now);
+        assert_eq!(none, Some((now, 0)));
+    }
+
+    #[test]
+    fn camera_remap_and_old_unwatch_keep_replacement_subscribed() {
+        let mut watched = HashSet::new();
+        let mut owners = WatchOwners::new();
+        watch_on(
+            &mut watched,
+            &mut owners,
+            "cam-old",
+            Some(("ann".into(), TrackSource::Camera)),
+        );
+        let replaced = remap_watch(
+            &mut watched,
+            &mut owners,
+            "ann",
+            TrackSource::Camera,
+            "cam-new",
+        );
+        assert_eq!(replaced, Some(vec![("cam-old".into(), "cam-new".into())]));
+        assert!(watched.contains("cam-new") && !watched.contains("cam-old"));
+
+        // UI learned the new camera from Room before VideoReplaced: Watch(new, true) then Watch(old, false).
+        watch_on(
+            &mut watched,
+            &mut owners,
+            "cam-new",
+            Some(("ann".into(), TrackSource::Camera)),
+        );
+        let dropped = watch_off(&mut watched, &mut owners, "cam-old");
+        assert_eq!(dropped, vec!["cam-old"]);
+        assert!(watched.contains("cam-new"));
+
+        // Explicit unwatch of the old SID without a new watch still unsubscribes the remapped track.
+        let mut watched = HashSet::new();
+        let mut owners = WatchOwners::new();
+        watch_on(
+            &mut watched,
+            &mut owners,
+            "scr-old",
+            Some(("ann".into(), TrackSource::Screenshare)),
+        );
+        remap_watch(
+            &mut watched,
+            &mut owners,
+            "ann",
+            TrackSource::Screenshare,
+            "scr-new",
+        );
+        let dropped = watch_off(&mut watched, &mut owners, "scr-old");
+        assert!(dropped.contains(&"scr-new".to_owned()));
+        assert!(!watched.contains("scr-new"));
+    }
+
+    #[test]
+    fn normal_unpublish_and_departure_clear_watch_owners_so_later_shares_stay_opt_in() {
+        let mut watched = HashSet::new();
+        let mut owners = WatchOwners::new();
+        watch_on(
+            &mut watched,
+            &mut owners,
+            "scr-1",
+            Some(("ann".into(), TrackSource::Screenshare)),
+        );
+        unpublish_watch(&mut watched, &mut owners, "scr-1");
+        assert!(watched.is_empty() && owners.is_empty());
+        assert_eq!(
+            remap_watch(
+                &mut watched,
+                &mut owners,
+                "ann",
+                TrackSource::Screenshare,
+                "scr-2"
+            ),
+            None
+        );
+
+        watch_on(
+            &mut watched,
+            &mut owners,
+            "scr-2",
+            Some(("ann".into(), TrackSource::Screenshare)),
+        );
+        participant_left_watch(&mut watched, &mut owners, "ann");
+        assert!(watched.is_empty() && owners.is_empty());
     }
 
     #[test]

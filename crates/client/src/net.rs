@@ -1395,7 +1395,9 @@ async fn serve(
             }
             next = next_voice(&mut state.voice) => voice_next(ctx, url, Some(client), state, next).await,
             _ = stats.tick(), if state.voice.is_some() => {
-                recover_voice(ctx, url, client, state, commands, removals, queued).await;
+                if !recover_voice(ctx, url, client, state, commands, removals, queued).await {
+                    return End::Quit;
+                }
                 if state.voice.as_ref().is_some_and(|live| live.transport_closed) {
                     stop_finished_shares(ctx, url, Some(client), state).await;
                     continue;
@@ -1412,7 +1414,57 @@ async fn serve(
     }
 }
 
+enum RecoveryWait<T> {
+    Done(T),
+    /// Explicit leave or channel switch preempted recovery.
+    Cancel,
+    /// Local device was revoked or the window closed; `serve` must quit.
+    Quit,
+}
+
+/// Wait for one recovery step while letting self-revocation, window close, or explicit
+/// leave/switch preempt it; routine commands are queued and peer revocations are deferred.
+async fn await_recovery_step<T>(
+    commands: &mut UnboundedReceiver<Command>,
+    removals: &mut tokio::sync::watch::Receiver<()>,
+    queued: &mut VecDeque<Command>,
+    saw_removal: &mut bool,
+    is_self_revoked: impl Fn() -> bool,
+    step: impl Future<Output = T>,
+) -> RecoveryWait<T> {
+    tokio::pin!(step);
+    loop {
+        tokio::select! {
+            biased;
+            _ = removals.changed() => {
+                if is_self_revoked() {
+                    return RecoveryWait::Quit;
+                }
+                *saw_removal = true;
+            }
+            command = commands.recv() => match command {
+                None => return RecoveryWait::Quit,
+                Some(command @ (Command::LeaveVoice | Command::JoinVoice(_))) => {
+                    if matches!(command, Command::LeaveVoice) {
+                        cancel_queued(queued, &command);
+                    }
+                    queued.push_back(command);
+                    return RecoveryWait::Cancel;
+                }
+                Some(command) => {
+                    if voice_only(&command) {
+                        cancel_queued(queued, &command);
+                    }
+                    queued.push_back(command);
+                }
+            },
+            result = &mut step => return RecoveryWait::Done(result),
+        }
+    }
+}
+
 /// Fresh authorization replaces a media connection that exhausted SDK recovery.
+/// Returns `false` when the device was revoked or the window closed, so `serve` quits.
 async fn recover_voice(
     ctx: &Ctx,
     url: &Url,
@@ -1421,17 +1473,25 @@ async fn recover_voice(
     commands: &mut UnboundedReceiver<Command>,
     removals: &mut tokio::sync::watch::Receiver<()>,
     queued: &mut VecDeque<Command>,
-) {
+) -> bool {
     let Some(live) = &mut state.voice else {
-        return;
+        return true;
     };
     let Some((due, attempt)) = live.recovery else {
-        return;
+        return true;
     };
     if due > std::time::Instant::now() {
-        return;
+        return true;
     }
     let channel = live.channel;
+    let is_self_revoked = || {
+        let records = rusttalk_core::client::revocations::Revocations::in_profile(&ctx.data);
+        let cert = &ctx.identity.certificate;
+        records
+            .check(cert.person_id(), cert.signing_key().as_bytes())
+            .is_err()
+    };
+    let mut saw_removal = false;
     // Close the old SDK worker before minting a replacement identity's token.
     live.transport_closed = true;
     control::leave(live);
@@ -1443,31 +1503,60 @@ async fn recover_voice(
     {
         live.phone = None;
     }
+    ctx.send(Update::ExternalPhones(url.clone(), channel, Vec::new()));
     ctx.audio.clear_voice_tracks();
     for sid in &live.watched {
         ctx.video.remove_track(sid);
     }
-    let closed = {
-        let closing = tokio::time::timeout(Duration::from_secs(5), live.room.disconnect());
-        tokio::pin!(closing);
-        tokio::select! {
-            biased;
-            command = commands.recv() => Err(command),
-            result = &mut closing => Ok(result),
-        }
-    };
+    let closed = await_recovery_step(
+        commands,
+        removals,
+        queued,
+        &mut saw_removal,
+        is_self_revoked,
+        tokio::time::timeout(Duration::from_secs(5), live.room.disconnect()),
+    )
+    .await;
     let closed = match closed {
-        Ok(result) => result,
-        Err(command) => {
-            match command {
-                Some(command) => run_command(ctx, url, client, state, command).await,
-                None => {
+        RecoveryWait::Done(result) => result,
+        RecoveryWait::Quit => {
+            let records = rusttalk_core::client::revocations::Revocations::in_profile(&ctx.data);
+            let _ = revoked(ctx, url, state, &records);
+            voice::close(ctx, state);
+            ctx.send(Update::Call(url.clone(), channel, None));
+            return false;
+        }
+        RecoveryWait::Cancel => {
+            if saw_removal {
+                let records =
+                    rusttalk_core::client::revocations::Revocations::in_profile(&ctx.data);
+                if revoked(ctx, url, state, &records) {
                     voice::close(ctx, state);
+                    ctx.send(Update::Call(url.clone(), channel, None));
+                    return false;
                 }
+                state.revalidate(ctx, url, &records, Some(client));
             }
-            return;
+            if let Some(left) = voice::close(ctx, state) {
+                ctx.send(Update::Call(url.clone(), left, None));
+                voice::send_room(ctx, url, client, state, left);
+            }
+            for command in std::mem::take(queued) {
+                run_command(ctx, url, client, state, command).await;
+            }
+            return true;
         }
     };
+    if saw_removal {
+        saw_removal = false;
+        let records = rusttalk_core::client::revocations::Revocations::in_profile(&ctx.data);
+        if revoked(ctx, url, state, &records) {
+            voice::close(ctx, state);
+            ctx.send(Update::Call(url.clone(), channel, None));
+            return false;
+        }
+        state.revalidate(ctx, url, &records, Some(client));
+    }
     if !matches!(closed, Ok(Ok(()))) {
         tracing::warn!("old media transport is still closing or failed");
         if closed.is_err()
@@ -1481,7 +1570,10 @@ async fn recover_voice(
             ctx.send(Update::Call(url.clone(), channel, None));
             ctx.send(Update::Failed(t!("voice.recovery_failed").into()));
         }
-        return;
+        for command in std::mem::take(queued) {
+            run_command(ctx, url, client, state, command).await;
+        }
+        return true;
     }
     if let Some(live) = &mut state.voice {
         live.phone_withdrawals = Default::default();
@@ -1491,6 +1583,10 @@ async fn recover_voice(
         live.terminal = None;
         live.viewing = None;
         ctx.send(Update::Control(live.control.clone()));
+        ctx.send(Update::TerminalStopped);
+        ctx.send(Update::TerminalGuests(Default::default()));
+        ctx.send(Update::Terminal(rusttalk_core::terminal::Feed::Ended));
+        ctx.send(Update::ExternalPhones(url.clone(), channel, Vec::new()));
     }
     ctx.audio.pause_phone_withdrawal(false);
     let joined = offline(
@@ -1509,7 +1605,7 @@ async fn recover_voice(
     if joined.is_none() {
         voice::close(ctx, state);
         ctx.send(Update::Call(url.clone(), channel, None));
-        return;
+        return false;
     }
     let (api, session) = client.sync_peer();
     ctx.sync.set_peer(url, Some((api.clone(), session.clone())));
@@ -1532,49 +1628,69 @@ async fn recover_voice(
         for command in std::mem::take(queued) {
             run_command(ctx, url, client, state, command).await;
         }
-        return;
+        return true;
     }
     let result = match result {
         Ok(room) => {
             let live = state.voice.as_mut().expect("checked above");
             let old = std::mem::replace(&mut live.room, room);
             drop(old);
-            let restored = {
-                let restoring = tokio::time::timeout(
+            let restored = await_recovery_step(
+                commands,
+                removals,
+                queued,
+                &mut saw_removal,
+                is_self_revoked,
+                tokio::time::timeout(
                     Duration::from_secs(15),
                     voice::restore_media(ctx, url, live),
-                );
-                tokio::pin!(restoring);
-                tokio::select! {
-                    biased;
-                    _ = removals.changed() => Err(None),
-                    command = commands.recv() => Err(command),
-                    result = &mut restoring => Ok(result),
-                }
-            };
+                ),
+            )
+            .await;
             match restored {
-                Ok(Ok(result)) => result,
-                Ok(Err(_)) => Err(anyhow::anyhow!("restoring media timed out")),
-                Err(command) => {
-                    if let Some(live) = &mut state.voice {
-                        live.transport_closed = true;
-                        live.recovery = Some((std::time::Instant::now(), attempt));
-                        let _ =
-                            tokio::time::timeout(Duration::from_secs(5), live.room.disconnect())
-                                .await;
-                    }
-                    match command {
-                        Some(command) => run_command(ctx, url, client, state, command).await,
-                        None => {
+                RecoveryWait::Done(Ok(result)) => result,
+                RecoveryWait::Done(Err(_)) => Err(anyhow::anyhow!("restoring media timed out")),
+                RecoveryWait::Quit => {
+                    let records =
+                        rusttalk_core::client::revocations::Revocations::in_profile(&ctx.data);
+                    let _ = revoked(ctx, url, state, &records);
+                    voice::close(ctx, state);
+                    ctx.send(Update::Call(url.clone(), channel, None));
+                    return false;
+                }
+                RecoveryWait::Cancel => {
+                    if saw_removal {
+                        let records =
+                            rusttalk_core::client::revocations::Revocations::in_profile(&ctx.data);
+                        if revoked(ctx, url, state, &records) {
                             voice::close(ctx, state);
+                            ctx.send(Update::Call(url.clone(), channel, None));
+                            return false;
                         }
+                        state.revalidate(ctx, url, &records, Some(client));
                     }
-                    return;
+                    if let Some(left) = voice::close(ctx, state) {
+                        ctx.send(Update::Call(url.clone(), left, None));
+                        voice::send_room(ctx, url, client, state, left);
+                    }
+                    for command in std::mem::take(queued) {
+                        run_command(ctx, url, client, state, command).await;
+                    }
+                    return true;
                 }
             }
         }
         Err(error) => Err(error),
     };
+    if saw_removal {
+        let records = rusttalk_core::client::revocations::Revocations::in_profile(&ctx.data);
+        if revoked(ctx, url, state, &records) {
+            voice::close(ctx, state);
+            ctx.send(Update::Call(url.clone(), channel, None));
+            return false;
+        }
+        state.revalidate(ctx, url, &records, Some(client));
+    }
     match result {
         Ok(()) => {
             // Replacing the event socket can miss notices; reload authoritative state.
@@ -1589,7 +1705,7 @@ async fn recover_voice(
                     channel,
                     live.room.can_publish() && live.room.has_microphone(),
                 ));
-                if !live.room.can_use_camera() {
+                if !(live.room.can_use_camera() && live.room.can_share_screen()) {
                     ctx.send(Update::NoVideo(url.clone(), channel));
                 }
                 if !live.room.can_share_audio() {
@@ -1624,18 +1740,23 @@ async fn recover_voice(
                     .into(),
                 ));
             } else if let Some(live) = &mut state.voice {
+                if !live.transport_closed {
+                    live.transport_closed = true;
+                    let _ =
+                        tokio::time::timeout(Duration::from_secs(5), live.room.disconnect()).await;
+                }
                 live.recovery = Some((
                     std::time::Instant::now()
                         + voice::recovery_delay(attempt).expect("checked above"),
                     attempt + 1,
                 ));
-                live.transport_closed = true;
             }
         }
     }
     for command in std::mem::take(queued) {
         run_command(ctx, url, client, state, command).await;
     }
+    true
 }
 
 /// Apply any newly verified epoch keys to the call and waiting calendar records.
@@ -2848,5 +2969,116 @@ mod protocol_tests {
         assert!(matches!(queued[0], Command::Open(_)));
         cancel_queued(&mut queued, &Command::StopControl);
         assert_eq!(queued.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn recovery_step_queues_routine_commands_and_peer_removals_without_aborting() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (rem_tx, mut rem_rx) = tokio::sync::watch::channel(());
+        let mut queued = VecDeque::new();
+        let mut saw_removal = false;
+
+        tx.send(Command::SyncVoiceStatus).unwrap();
+        tx.send(Command::Open([9; 32])).unwrap();
+        rem_tx.send(()).unwrap();
+
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let wait = tokio::spawn(async move {
+            let outcome = await_recovery_step(
+                &mut rx,
+                &mut rem_rx,
+                &mut queued,
+                &mut saw_removal,
+                || false,
+                async { done_rx.await.unwrap() },
+            )
+            .await;
+            (outcome, queued, saw_removal)
+        });
+        tokio::task::yield_now().await;
+        done_tx.send(42).unwrap();
+        let (outcome, queued, saw_removal) = wait.await.unwrap();
+        assert!(matches!(outcome, RecoveryWait::Done(42)));
+        assert!(saw_removal);
+        assert_eq!(queued.len(), 2);
+        assert!(matches!(queued[0], Command::SyncVoiceStatus));
+        assert!(matches!(queued[1], Command::Open(_)));
+    }
+
+    #[tokio::test]
+    async fn recovery_step_preempts_on_explicit_leave_switch_self_revocation_or_close() {
+        // Explicit LeaveVoice cancels recovery and drops queued shares.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_rem_tx, mut rem_rx) = tokio::sync::watch::channel(());
+        let mut queued = VecDeque::from([Command::ShareApp(App {
+            id: "a".into(),
+            name: "Music".into(),
+        })]);
+        let mut saw_removal = false;
+        tx.send(Command::LeaveVoice).unwrap();
+        let outcome = await_recovery_step(
+            &mut rx,
+            &mut rem_rx,
+            &mut queued,
+            &mut saw_removal,
+            || false,
+            std::future::pending::<()>(),
+        )
+        .await;
+        assert!(matches!(outcome, RecoveryWait::Cancel));
+        assert_eq!(queued.len(), 1);
+        assert!(matches!(queued[0], Command::LeaveVoice));
+
+        // Explicit JoinVoice cancels recovery and queues the channel switch.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_rem_tx, mut rem_rx) = tokio::sync::watch::channel(());
+        let mut queued = VecDeque::new();
+        let mut saw_removal = false;
+        tx.send(Command::JoinVoice([7; 32])).unwrap();
+        let outcome = await_recovery_step(
+            &mut rx,
+            &mut rem_rx,
+            &mut queued,
+            &mut saw_removal,
+            || false,
+            std::future::pending::<()>(),
+        )
+        .await;
+        assert!(matches!(outcome, RecoveryWait::Cancel));
+        assert!(matches!(queued.front(), Some(Command::JoinVoice(id)) if *id == [7; 32]));
+
+        // Self-revocation quits immediately.
+        let (_tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (rem_tx, mut rem_rx) = tokio::sync::watch::channel(());
+        let mut queued = VecDeque::new();
+        let mut saw_removal = false;
+        rem_tx.send(()).unwrap();
+        let outcome = await_recovery_step(
+            &mut rx,
+            &mut rem_rx,
+            &mut queued,
+            &mut saw_removal,
+            || true,
+            std::future::pending::<()>(),
+        )
+        .await;
+        assert!(matches!(outcome, RecoveryWait::Quit));
+
+        // Closed command channel quits immediately.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_rem_tx, mut rem_rx) = tokio::sync::watch::channel(());
+        drop(tx);
+        let mut queued = VecDeque::new();
+        let mut saw_removal = false;
+        let outcome = await_recovery_step(
+            &mut rx,
+            &mut rem_rx,
+            &mut queued,
+            &mut saw_removal,
+            || false,
+            std::future::pending::<()>(),
+        )
+        .await;
+        assert!(matches!(outcome, RecoveryWait::Quit));
     }
 }
