@@ -72,14 +72,15 @@ impl Overlay {
         }
     }
 
-    /// At the top left of `rect`, clear of the hover buttons at the right. The
+    /// At the top left of `rect`, below the streaming badge when present. The
     /// fuller panel gives way to the one line when the tile is too small for it.
-    pub fn paint(&self, ui: &Ui, rect: Rect) {
+    pub fn paint(&self, ui: &Ui, rect: Rect, badge: Option<Rect>) {
         let Some(track) = &self.track else { return };
         if rect.width() < MIN_TILE.x || rect.height() < MIN_TILE.y {
             return;
         }
-        let at = rect.min + Vec2::splat(MARGIN);
+        let top = badge.map_or(rect.top() + MARGIN, |badge| badge.bottom() + ui::SPACE_XS);
+        let at = pos2(rect.left() + MARGIN, top);
         if self.nerd {
             let rows = nerd_rows(track, self.ping_ms);
             if panel(ui, rect, at, &rows) {
@@ -209,7 +210,10 @@ fn panel(ui: &Ui, tile: Rect, at: Pos2, rows: &[(String, String)]) -> bool {
         labels.size().y.max(values.size().y),
     ) + 2.0 * PAD;
     // Leave the bottom for the name tag.
-    let room = tile.shrink(MARGIN).size() - vec2(0.0, 2.0 * MARGIN + ui::TEXT_SMALL);
+    let room = vec2(
+        tile.width() - 2.0 * MARGIN,
+        tile.bottom() - at.y - 3.0 * MARGIN - ui::TEXT_SMALL,
+    );
     if size.x > room.x || size.y > room.y {
         return false;
     }
@@ -316,7 +320,7 @@ mod tests {
     fn painted(overlay: &Overlay, size: Vec2) -> Vec<String> {
         let ctx = egui::Context::default();
         let mut output = ctx.run_ui(Default::default(), |ui| {
-            overlay.paint(ui, Rect::from_min_size(pos2(0.0, 0.0), size));
+            overlay.paint(ui, Rect::from_min_size(pos2(0.0, 0.0), size), None);
         });
         output.textures_delta.clear();
         output

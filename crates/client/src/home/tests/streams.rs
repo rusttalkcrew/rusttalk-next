@@ -1,6 +1,7 @@
 use super::*;
-use crate::server::{Call, CallState, Peer, Screen, Stats};
+use crate::server::{Call, CallState, Peer, Screen, Stats, TrackStats};
 use egui_kittest::{Harness, kittest::Queryable};
+use rusttalk_core::client::voice::VideoFormat;
 
 #[test]
 fn stream_cards_keep_people_opt_in_and_preview_follows_focus() {
@@ -12,7 +13,26 @@ fn stream_cards_keep_people_opt_in_and_preview_follows_focus() {
                 server: home.servers[0].address.clone(),
                 channel: PROJECTS,
                 state: CallState::Connected,
-                stats: Stats::default(),
+                stats: Stats {
+                    tracks: vec![TrackStats {
+                        person: ANN,
+                        sid: "remote".into(),
+                        mine: false,
+                        screen: false,
+                        app: None,
+                        kbps: 6120.0,
+                        video: Some(VideoFormat {
+                            width: 1920,
+                            height: 1080,
+                            fps: 60.0,
+                        }),
+                        detail: None,
+                        jitter_ms: Some(4.0),
+                        lost: Some(0),
+                        received: Some(4000),
+                    }],
+                    ..Stats::default()
+                },
                 can_talk: true,
                 can_share_video: true,
             });
@@ -56,6 +76,52 @@ fn stream_cards_keep_people_opt_in_and_preview_follows_focus() {
             assert!(h.state().voice.watching.is_none());
             assert!(h.query_by_label("Streaming · 0 watching").is_some());
             assert!(h.query_by_label("Streaming · 2 watching").is_some());
+            let badge = "Streaming · 2 watching";
+            let painted = |h: &Harness<'_, Home>, find: &str| {
+                h.output()
+                    .shapes
+                    .iter()
+                    .find_map(|shape| match &shape.shape {
+                        egui::Shape::Text(text) if text.galley.text().contains(find) => {
+                            Some(text.visual_bounding_rect())
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| panic!("could not find {find:?} at {width}×{height}"))
+            };
+            let compact = h.get_by_label(badge).rect();
+            assert!(compact.contains_rect(painted(&h, "👁 2")));
+
+            h.state_mut().layout.split.show_fps = true;
+            h.run_steps(2);
+            assert!(painted(&h, "60 fps").top() > compact.bottom());
+
+            h.hover_at(compact.center());
+            h.state_mut().layout.split.nerd_stats = true;
+            h.run_steps(2);
+            let expanded = h.get_by_label(badge).rect();
+            assert!(expanded.width() > compact.width());
+            assert!(expanded.contains_rect(painted(&h, badge)));
+            assert!(painted(&h, "60 fps").top() > expanded.bottom());
+            if width == 1100.0 {
+                assert!(painted(&h, "1920×1080").top() > expanded.bottom());
+            }
+
+            let capture = |h: &mut Harness<'_, Home>, state| {
+                if let Ok(dir) = std::env::var("RUSTTALK_STREAM_BADGE_SCREENSHOTS") {
+                    std::fs::create_dir_all(&dir).unwrap();
+                    let theme = if dark { "dark" } else { "light" };
+                    h.render()
+                        .unwrap()
+                        .save(format!("{dir}/{width}-{theme}-{state}.png"))
+                        .unwrap();
+                }
+            };
+            capture(&mut h, "expanded");
+            h.remove_cursor();
+            h.run_steps(2);
+            assert_eq!(h.get_by_label(badge).rect(), compact);
+            capture(&mut h, "compact");
             if let Ok(dir) = std::env::var("RUSTTALK_STREAM_SCREENSHOTS") {
                 std::fs::create_dir_all(&dir).unwrap();
                 h.render()
