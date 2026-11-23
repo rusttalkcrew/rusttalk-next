@@ -1495,3 +1495,6 @@ clipboard.paste = Paste
 clipboard.copy = Copy
 clipboard.cut = Cut
 clipboard.select_all = Select all
+
+call.listen = Listen
+call.stop_listening = Stop listening

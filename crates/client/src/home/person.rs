@@ -104,7 +104,9 @@ impl<'a> Person<'a> {
             let apps = (self.server.voice.values().flatten())
                 .find(|peer| peer.person == self.person)
                 .map_or(&[][..], |peer| &peer.apps);
-            call::mixer::show(m, audio, self.person, true, apps);
+            call::mixer::show(m, audio, self.person, true, apps, |sid, on| {
+                self.server.send(Command::Listen(sid, on))
+            });
             if let Some(shown) = self.video {
                 let item = ui::Item::new("📷", t!("call.show_video")).checked(shown);
                 if m.add(item).clicked() {

@@ -48,6 +48,7 @@ pub async fn exercise(
     let mut tones = tokio::task::JoinSet::new();
     tones.spawn(send_tone(app_source.clone(), || APP_HZ));
     let app = room_b.publish_app_audio("Game", app_source.clone()).await?;
+    super::consent::listen(room_a, &app.sid()).await?;
     timeout(hang_guard(), hear_track(room_a, &app.sid(), APP_HZ)).await??;
     let stream = room_b.publish_stream_audio("Stream", source()).await?;
     a.request(Method::PUT, &mute)
@@ -84,6 +85,7 @@ pub async fn exercise(
         .context("duplex after lifting a mute without rejoining")??;
 
     let again = room_b.publish_app_audio("Game", app_source).await?;
+    super::consent::listen(room_a, &again.sid()).await?;
     timeout(hang_guard(), hear_track(room_a, &again.sid(), APP_HZ))
         .await
         .context("restarted game audio after unmute")??;

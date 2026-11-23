@@ -1492,3 +1492,6 @@ clipboard.paste = Einfügen
 clipboard.copy = Kopieren
 clipboard.cut = Ausschneiden
 clipboard.select_all = Alles auswählen
+
+call.listen = Anhören
+call.stop_listening = Nicht mehr zuhören
