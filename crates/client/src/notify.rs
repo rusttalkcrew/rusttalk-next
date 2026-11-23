@@ -354,6 +354,31 @@ fn read_key(server: &Url, channel: &Id) -> String {
     format!("{server} {}", encode(channel))
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum Reminder {
+    Seen { at: i64, remove_at: i64 },
+    // Older clients saved only the reminder timestamp, under the bare event ID.
+    Legacy(i64),
+}
+
+impl Reminder {
+    fn at(&self) -> i64 {
+        match *self {
+            Self::Seen { at, .. } | Self::Legacy(at) => at,
+        }
+    }
+
+    fn remove_at(&self) -> i64 {
+        match *self {
+            Self::Seen { remove_at, .. } => remove_at,
+            Self::Legacy(at) => {
+                at.saturating_add(rusttalk_core::calendar::HORIZON + rusttalk_core::calendar::GRACE)
+            }
+        }
+    }
+}
+
 /// `notify.json`.
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -365,6 +390,8 @@ struct Saved {
     /// When this file was made: channels never opened count as read up to here, so
     /// old history doesn't light up every channel at once.
     since: i64,
+    /// Consumed reminders, keyed by server and event (older files used just the event).
+    reminded: BTreeMap<String, Reminder>,
 }
 
 pub struct Notify {
@@ -397,14 +424,16 @@ impl Notify {
                 }
             }
         };
-        Self {
+        let mut notify = Self {
             path,
             data: data.to_owned(),
             saved,
             activity: HashMap::new(),
             clicks: channel(),
             failed: false,
-        }
+        };
+        notify.expire_reminders(now);
+        notify
     }
 
     pub fn prefs(&self) -> &Prefs {
@@ -508,6 +537,43 @@ impl Notify {
         }
     }
 
+    pub fn expire_reminders(&mut self, now: i64) {
+        let count = self.saved.reminded.len();
+        self.saved.reminded.retain(|_, mark| mark.remove_at() > now);
+        if self.saved.reminded.len() != count {
+            self.save();
+        }
+    }
+
+    /// Consume the stamp even when focus suppresses the popup.
+    pub fn new_reminder(
+        &mut self,
+        server: &Url,
+        event: &Id,
+        at: i64,
+        remove_at: i64,
+        focused: bool,
+    ) -> bool {
+        let key = read_key(server, event);
+        let legacy = self.saved.reminded.remove(&encode(event));
+        let previous = self.saved.reminded.get(&key);
+        let seen = previous.into_iter().chain(&legacy).map(Reminder::at).max();
+        let newest = seen.map_or(at, |seen| seen.max(at));
+        if legacy.is_some()
+            || previous.is_none_or(|mark| mark.at() != newest || mark.remove_at() != remove_at)
+        {
+            self.saved.reminded.insert(
+                key,
+                Reminder::Seen {
+                    at: newest,
+                    remove_at,
+                },
+            );
+            self.save();
+        }
+        seen.is_none_or(|seen| at > seen) && !(focused && self.saved.prefs.unfocused_only)
+    }
+
     /// A clicked notification's server and channel.
     pub fn clicked(&self) -> Option<Target> {
         self.clicks.1.try_recv().ok()
@@ -515,11 +581,33 @@ impl Notify {
 
     /// Show a desktop notification; a click on it comes back from `clicked`.
     pub fn show(&mut self, ctx: &eframe::egui::Context, title: &str, body: &str, target: Target) {
+        let sound = self.saved.prefs.sound;
+        self.present(ctx, title, body, target, sound);
+    }
+
+    /// `show` without the system's sound, for what makes its own.
+    pub fn show_silent(
+        &mut self,
+        ctx: &eframe::egui::Context,
+        title: &str,
+        body: &str,
+        target: Target,
+    ) {
+        self.present(ctx, title, body, target, false);
+    }
+
+    fn present(
+        &mut self,
+        ctx: &eframe::egui::Context,
+        title: &str,
+        body: &str,
+        target: Target,
+        sound: bool,
+    ) {
         let body: String = match body.chars().count() > PREVIEW_CHARS {
             true => body.chars().take(PREVIEW_CHARS).chain(['…']).collect(),
             false => body.to_owned(),
         };
-        let sound = self.saved.prefs.sound;
         let clicks = self.clicks.0.clone();
         let ctx = ctx.clone();
         // Its center delivers the click to us; without an app bundle it can't, so fall
@@ -805,6 +893,46 @@ mod tests {
         assert!(counts(loud, everyone));
         assert!(!counts(rule(Level::All, true), me));
         assert!(!counts(rule(Level::Nothing, false), dm));
+    }
+
+    #[test]
+    fn reminder_marks_survive_busy_calendars_and_offline_restarts_until_event_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut notify = Notify::open(dir.path(), NOW);
+        let other: Url = "https://203.0.113.9/".parse().unwrap();
+        let event = [0; 32];
+        for id in 0..=200 {
+            assert!(notify.new_reminder(&url(), &[id; 32], NOW, NOW + 10, false));
+        }
+        assert!(notify.new_reminder(&other, &event, NOW, NOW + 10, false));
+        let mut notify = Notify::open(dir.path(), NOW + 9);
+        for id in 0..=200 {
+            assert!(!notify.new_reminder(&url(), &[id; 32], NOW, NOW + 10, false));
+        }
+        assert!(!notify.new_reminder(&other, &event, NOW, NOW + 20, false));
+        notify.expire_reminders(NOW + 10);
+        assert_eq!(notify.saved.reminded.len(), 1);
+        assert!(!notify.new_reminder(&other, &event, NOW, NOW + 20, false));
+        assert!(Notify::open(dir.path(), NOW + 20).saved.reminded.is_empty());
+    }
+
+    #[test]
+    fn existing_marks_migrate_and_focused_reminders_stay_consumed() {
+        let dir = tempfile::tempdir().unwrap();
+        let event = [3; 32];
+        let file = serde_json::json!({
+            "prefs": {"unfocused_only": true},
+            "reminded": {encode(&event): NOW}
+        });
+        std::fs::write(dir.path().join("notify.json"), file.to_string()).unwrap();
+        let mut notify = Notify::open(dir.path(), NOW);
+        assert!(notify.prefs().unfocused_only);
+        assert!(!notify.new_reminder(&url(), &event, NOW, NOW + 50, false));
+        assert!(!notify.new_reminder(&url(), &event, NOW + 1, NOW + 50, true));
+        let mut notify = Notify::open(dir.path(), NOW + 2);
+        assert!(!notify.new_reminder(&url(), &event, NOW + 1, NOW + 50, false));
+        assert!(notify.new_reminder(&url(), &event, NOW + 2, NOW + 50, false));
+        assert!(Notify::open(dir.path(), NOW + 50).saved.reminded.is_empty());
     }
 
     #[test]

@@ -719,8 +719,16 @@ impl Audio {
         // Keep cues timely if several people join at once or the output stalls.
         if mixer.cues.len() < RATE as usize / 2 {
             mixer.cues.extend(cue.samples(RATE, prefs.volume));
-            mixer.cue_until = Some(now + Duration::from_secs(1));
+            // A ring is longer, and may first have to open the speakers.
+            let secs = if cue == Cue::Ring { 2 } else { 1 };
+            mixer.cue_until = Some(now + Duration::from_secs(secs));
         }
+    }
+
+    /// Ring for a voice request, also outside a call: that opens the speakers for it.
+    pub fn ring(&self) {
+        self.play_cue(Cue::Ring);
+        self.refresh();
     }
 
     /// The last microphone level in dBFS.

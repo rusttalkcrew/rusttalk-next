@@ -368,7 +368,10 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
                         let picked = overview_tab(ui, server, settings);
                         icon = picked.icon;
                         rename = picked.rename;
-                        picked.system_messages.map(Admin::SystemMessages)
+                        picked
+                            .events
+                            .map(Admin::Events)
+                            .or_else(|| picked.system_messages.map(Admin::SystemMessages))
                     }
                     Tab::Members => {
                         let target = |person| Person::with(friends, voice, server, person);
@@ -499,6 +502,8 @@ struct Overview {
     icon: bool,
     /// The new server name to save.
     rename: Option<String>,
+    /// Events switched on or off.
+    events: Option<bool>,
 }
 
 /// The server icon and name, for people who may manage the server.
@@ -507,6 +512,7 @@ fn overview_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Overvi
         system_messages: None,
         icon: false,
         rename: None,
+        events: None,
     };
     let saved = server.dir.name.clone().unwrap_or_default();
     ui::page_section(ui, t!("admin.server"));
@@ -549,6 +555,13 @@ fn overview_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Overvi
             }
         });
     });
+    if let Some(calendar) = &server.dir.calendar {
+        ui::page_section(ui, t!("events.title"));
+        let mut on = calendar.enabled;
+        if ui::toggle_row(ui, &mut on, t!("admin.events"), t!("admin.events_help")).changed() {
+            picked.events = Some(on);
+        }
+    }
     ui.add_space(ui::SPACE_L);
     picked.system_messages = system_messages_row(ui, &server.dir);
     if server.dir.perms.owner {
@@ -1199,6 +1212,12 @@ fn sentence(server: &Server, entry: &AuditEntry) -> String {
         "category_updated" => t!("audit.category_updated", actor = actor),
         "category_deleted" => t!("audit.category_deleted", actor = actor),
         "channels_reordered" => t!("audit.channels_reordered", actor = actor),
+        "events_enabled" => t!("audit.events_enabled", actor = actor),
+        "events_disabled" => t!("audit.events_disabled", actor = actor),
+        "event_created" => t!("audit.event_created", actor = actor),
+        "event_approved" => t!("audit.event_approved", actor = actor, target = target),
+        "event_declined" => t!("audit.event_declined", actor = actor, target = target),
+        "event_cancelled" => t!("audit.event_cancelled", actor = actor),
         "invite_created" => t!("audit.invite_created", actor = actor),
         "invite_revoked" => t!("audit.invite_revoked", actor = actor),
         "open_joining_changed" => t!("audit.open_joining_changed", actor = actor),

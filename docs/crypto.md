@@ -340,6 +340,44 @@ only in the invite fragment. After rotation an invite can still preview
 its original snapshot. Once the invitee joins, it obtains readable
 epochs through the normal envelope flow.
 
+## Server events
+
+An event is a format byte (1), a random 24-byte nonce, the XChaCha20-Poly1305
+ciphertext with its tag under the space epoch key, and a 64-byte Ed25519
+device signature. It is at most 3,246 bytes. The associated data is
+
+```text
+"rusttalk-event-v1" || server_id (32 bytes) || event_id (32 bytes) ||
+epoch (8 bytes, big endian) || remove_at (8 bytes, big endian) ||
+author_device (32 bytes) || author (32 bytes)
+```
+
+The signature covers the associated data, then the envelope without the
+signature. The domain differs from messages and metadata, so none can pass
+as another. The plaintext is the start and end (8 bytes each, Unix seconds,
+big endian), the place, the title's length (2 bytes, big endian), the title (1 to 80
+characters) and the description (up to 500 characters), both UTF-8. The place is
+one byte: 0 for none; 1 followed by a 2-byte big-endian length and up to 200
+characters of UTF-8 for a place in real life; or 2 followed by a 32-byte
+channel ID. Apps show a channel only by the name they can already see.
+
+`remove_at` must be the end plus two hours. The server needs it in the clear
+to delete events, so it learns the end but not the start. Readers verify the
+author's root-signed certificate sent with the record, refuse devices they
+know were removed, verify the signature, decrypt and then check `remove_at`
+against the signed end. An event that fails any check shows as unreadable
+and can't be approved from that app. Approval itself is not signed: like
+roles, the server decides it, so a malicious server can show a suggestion as
+approved, hide events or replay a deleted one. It can't change one or make
+one up in someone's name.
+
+An answer to an event (going or not going) has the same framing: format 1, a
+random nonce, the sealed answer byte (1 going, 2 not going) with its tag under
+the space epoch key, and the device signature, 106 bytes in all. Its associated
+data is `"rusttalk-event-answer-v1" || server_id || event_id || epoch (8 bytes,
+big endian) || device || person`. Every answer has the same size, so the server
+learns who answered but not what. Readers verify it like an event.
+
 ## Messages
 
 Formats 2 and 3 (the envelope's first byte) have this plaintext, in order.
@@ -347,7 +385,7 @@ Formats 2 and 3 (the envelope's first byte) have this plaintext, in order.
 | Field | Encoding | Maximum bytes |
 | --- | --- | --- |
 | Flags | Bit 0 reply-to, bit 1 edit-of, bit 2 live offer, bit 3 sticker, bit 4 friend message, bit 5 key link, bit 6 poke. In v3 only, bit 7 quoted author | 1 |
-| Kind | v3 only: 0 for an ordinary message, or a poll part (1 poll, 2 vote, 3 end) followed by its fields, below. Other kinds are rejected | 1 + 4,030 |
+| Kind | v3 only: 0 for an ordinary message, or a poll part (1 poll, 2 vote, 3 end) or voice request (4) followed by its fields, below. Other kinds are rejected | 1 + 4,030 |
 | Text | Two-byte big-endian UTF-8 length, then text of at most 2,000 Unicode scalar values | 2 + 8,000 |
 | Reply ID | 32 bytes, present with bit 0 | 32 |
 | Quoted author | Raw 32-byte person ID, present with bit 7. Requires bit 0 and forbids bit 1 | 32 |
@@ -381,6 +419,14 @@ milliseconds, and a one-byte count of 0–10 option indexes, each one byte below
 10, strictly ascending. An end has empty text; its field is the poll's message
 ID. Format 2 can't carry a poll part.
 Apps before this format show any of these as a message they can't open.
+
+A voice request (kind 4) has no flags, empty text and no stored files (46
+bytes of plaintext for an ask, 38 for an answer). Its fields are an action byte and 32 bytes: action 0 asks
+someone to join and holds the voice channel's ID followed by signed 64-bit
+big-endian Unix seconds when the sender asked; 1 (joining), 2 (declined)
+and 3 (coming later) answer and hold the request's message ID. Readers reject
+other actions, and format 2 can't carry one (see
+[Protocol](protocol.md#voice-requests)).
 Nothing may follow the last field. The largest plaintext is 10,645 bytes
 and the largest envelope is 10,752 bytes. Every length is checked against
 its field maximum before reading. Readers reject version 1 envelopes.

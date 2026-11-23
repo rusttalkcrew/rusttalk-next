@@ -7,6 +7,7 @@
 )]
 
 pub mod auth;
+pub mod calendar;
 #[cfg(feature = "voice")]
 pub mod camera;
 #[cfg(feature = "capture")]

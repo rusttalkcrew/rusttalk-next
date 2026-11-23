@@ -1,4 +1,5 @@
 mod bonus;
+mod calendar;
 mod chat;
 mod files;
 mod index;
@@ -359,6 +360,7 @@ async fn docker_keys(
     receive_key(&mut c, space, 1).await?;
     let (dm, history_message) = chat::scenario(a, &mut b, &mut c, channel).await?;
     files::scenario(project, bot, a, &mut b, &c, &category).await?;
+    calendar::scenario(a, &b, &c).await?;
     let channel_path = format!("/v1/channels/{}/permissions", encode(&channel.id));
     let b_person = encode(b_identity.certificate.person_id());
     a.request(Method::PUT, &format!("/v1/members/{b_person}/roles"))
@@ -621,7 +623,7 @@ async fn docker_keys(
                 );
             }
         }
-        for secret in chat::TEXTS {
+        for secret in chat::TEXTS.iter().chain(&calendar::TEXTS) {
             let encoded = encode(secret.as_bytes());
             for needle in [secret.as_bytes(), encoded.as_bytes()] {
                 let needle = needle.to_ascii_lowercase();

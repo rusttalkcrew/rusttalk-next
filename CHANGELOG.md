@@ -12,6 +12,10 @@ Unreleased under the new version and date.
 ## Unreleased
 
 - Oversized stored uploads show their size and the app limit beside chat or shared files, including voice channels.
+- Ask someone to join your voice channel: it rings, and they can join, decline, come later or mute you for 15 minutes
+- Servers can turn on Events: a calendar above the channels to suggest, approve and add events, in real life or in a channel
+- Say whether you are going to an event, see who is still missing, and remind them
+- Event reminders reach unanswered authors and respect “Only when RustTalk isn’t focused” without repeating later
 
 ## v0.2.0 - 2026-11-23
 
