@@ -492,6 +492,8 @@ pub fn show(
                 page(Tab::Video, "🎥", t!("settings.video")),
                 page(Tab::Shortcuts, "⌨", t!("settings.shortcuts")),
                 page(Tab::Notifications, "🔔", t!("settings.notifications")),
+                #[cfg(target_os = "android")]
+                page(Tab::Advanced, "⚙", t!("settings.advanced")),
                 page(
                     Tab::Updates,
                     "🔄",
@@ -542,6 +544,23 @@ pub fn show(
                 Tab::Shortcuts => crate::hotkeys::settings_page(ui, home),
                 Tab::Privacy => privacy_tab(ui, home, keystore),
                 Tab::Devices => devices_page(ui, home),
+                #[cfg(target_os = "android")]
+                Tab::Advanced => {
+                    let mut settings = home.voice.audio.settings();
+                    if ui::toggle_row(
+                        ui,
+                        &mut settings.android_terminal_hosting,
+                        t!("call.share_terminal"),
+                        t!("settings.terminal_hosting_help"),
+                    )
+                    .changed()
+                    {
+                        if !settings.android_terminal_hosting {
+                            call::terminal::stop(home);
+                        }
+                        home.voice.audio.set_settings(settings);
+                    }
+                }
                 Tab::Updates => updates.settings(ui),
                 Tab::WhatsNew => crate::whats_new::page(ui),
                 Tab::About => {

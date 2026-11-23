@@ -298,6 +298,8 @@ pub enum Tab {
     Devices,
     Notifications,
     Shortcuts,
+    #[cfg(target_os = "android")]
+    Advanced,
     Updates,
     About,
     WhatsNew,
