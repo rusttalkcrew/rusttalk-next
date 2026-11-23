@@ -1141,6 +1141,7 @@ find.server_unreachable = Kan deze server nu niet bereiken. Probeer het later op
 # crates/client/src/net/voice.rs
 voice.screen_failed = Kon je scherm niet delen.
 voice.need_mic = Geef toegang tot de microfoon om deel te nemen aan het gesprek.
+voice.audio_reset = De audio van je iPhone is opnieuw gestart. Neem opnieuw deel aan het gesprek.
 voice.unavailable = Spraakoproepen zijn niet beschikbaar op dit apparaat.
 voice.listen_only = Je kunt hier luisteren, maar niet praten.
 voice.disconnected = Spraak verbroken.

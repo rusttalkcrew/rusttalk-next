@@ -318,6 +318,11 @@ pub fn leave(home: &mut Home) {
 
 /// Once per frame: push-to-talk, the settings meter, and repaints for live indicators.
 pub fn frame(ctx: &egui::Context, home: &mut Home) {
+    #[cfg(target_os = "ios")]
+    if home.voice.call.is_some() && crate::ios::voice::needs_rejoin() {
+        leave(home);
+        home.toast = Some((t!("voice.audio_reset").into(), ctx.input(|i| i.time) + 6.0));
+    }
     #[cfg(any(target_os = "android", target_os = "ios"))]
     if let Some((address, channel, request)) = home.voice.pending_join.take() {
         #[cfg(target_os = "android")]

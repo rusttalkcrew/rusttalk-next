@@ -1141,6 +1141,7 @@ find.server_unreachable = Dieser Server ist gerade nicht erreichbar. Versuche es
 # crates/client/src/net/voice.rs
 voice.screen_failed = Dein Bildschirm konnte nicht geteilt werden.
 voice.need_mic = Erlaube den Mikrofonzugriff, um am Anruf teilzunehmen.
+voice.audio_reset = Die Audiofunktion deines iPhones wurde neu gestartet. Tritt dem Anruf erneut bei.
 voice.unavailable = Sprachanrufe sind auf diesem Gerät nicht verfügbar.
 voice.listen_only = Hier kannst du zuhören, aber nicht sprechen.
 voice.disconnected = Sprachverbindung getrennt.

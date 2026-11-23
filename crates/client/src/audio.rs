@@ -1010,7 +1010,7 @@ fn devices(
         #[cfg(target_os = "ios")]
         let want_input = {
             let session = lock(&shared.ios_session).clone();
-            let permitted = session.is_some();
+            let permitted = session.is_some() && !crate::ios::voice::needs_rejoin();
             if permitted {
                 active_session = session;
             }
@@ -1041,6 +1041,8 @@ fn devices(
             .filter(|until| *until > Instant::now());
         close_output_at = if voice { None } else { playing_cue };
         let want_output = (voice || playing_cue.is_some()).then_some(settings.output);
+        #[cfg(target_os = "ios")]
+        let want_output = want_output.filter(|_| !crate::ios::voice::needs_rejoin());
         if want_output.as_ref() != output.as_ref().map(|(id, _)| id) {
             output = None;
             if let Some(id) = want_output {

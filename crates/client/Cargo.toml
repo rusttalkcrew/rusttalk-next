@@ -129,7 +129,7 @@ objc2-avf-audio = { version = "0.3", default-features = false, features = ["std"
 apple-native-keyring-store = { version = "1", features = ["protected"] }
 # Keeps the settings folder, with the key file, out of iCloud and computer backups.
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSDate", "NSDictionary", "NSEnumerator", "NSError", "NSString", "NSURL", "NSValue"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSDate", "NSDictionary", "NSEnumerator", "NSNotification", "NSOperation", "block2", "NSError", "NSString", "NSURL", "NSValue"] }
 # The system clipboard (UIPasteboard) and drawing inside the safe area (src/ios.rs);
 # the versions winit, egui-winit and wgpu already use.
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFCGTypes"] }

@@ -1,13 +1,21 @@
 //! The app owns the audio session. cpal's RemoteIO units use its active route.
-use std::sync::Mutex;
+use std::{
+    ptr::NonNull,
+    sync::{
+        Mutex, Once,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use anyhow::{Result, anyhow};
 use block2::RcBlock;
 use objc2::runtime::Bool;
 use objc2_avf_audio::{
     AVAudioSession, AVAudioSessionCategoryOptions, AVAudioSessionCategoryPlayAndRecord,
-    AVAudioSessionModeVoiceChat, AVAudioSessionRecordPermission, AVAudioSessionSetActiveOptions,
+    AVAudioSessionMediaServicesWereResetNotification, AVAudioSessionModeVoiceChat,
+    AVAudioSessionRecordPermission, AVAudioSessionSetActiveOptions,
 };
+use objc2_foundation::{NSNotification, NSNotificationCenter};
 
 // AVAudioApplication needs iOS 17. RustTalk supports iOS 16.
 #[allow(deprecated)]
@@ -39,11 +47,36 @@ pub fn voice_permission(request: bool) -> i32 {
 static USERS: Mutex<usize> = Mutex::new(0);
 pub struct Session(());
 
+static RESET: AtomicBool = AtomicBool::new(false);
+
+pub fn needs_rejoin() -> bool {
+    RESET.load(Ordering::Relaxed)
+}
+
 impl Session {
     pub fn start() -> Result<Self> {
         let mut users = USERS.lock().unwrap();
         // SAFETY: The framework constants and selectors are available on iOS 16.
         unsafe {
+            static OBSERVE_RESET: Once = Once::new();
+            OBSERVE_RESET.call_once(|| {
+                // NotificationCenter retains this process-wide observer. The callback may
+                // run off the main thread and touches only the atomic flag.
+                let block =
+                    RcBlock::new(|_: NonNull<NSNotification>| RESET.store(true, Ordering::Relaxed));
+                let _observer = NSNotificationCenter::defaultCenter()
+                    .addObserverForName_object_queue_usingBlock(
+                        Some(
+                            AVAudioSessionMediaServicesWereResetNotification
+                                .expect("available since iOS 6"),
+                        ),
+                        None,
+                        None,
+                        &block,
+                    );
+            });
+            // Only an explicit join starts recording again after a media-services reset.
+            RESET.store(false, Ordering::Relaxed);
             let session = AVAudioSession::sharedInstance();
             session
                 .setCategory_mode_options_error(
