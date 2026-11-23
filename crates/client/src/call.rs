@@ -56,6 +56,8 @@ pub struct Voice {
     pub audio: Audio,
     pub call: Option<Call>,
     #[cfg(any(target_os = "android", target_os = "ios"))]
+    pub(crate) pending_invitation: Option<Id>,
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     pending_join: Option<(url::Url, Id, bool)>,
     pub sounds: sounds::Detector,
     /// Ping history and packet loss for the connection popup.
@@ -184,6 +186,8 @@ impl Voice {
             audio,
             call: None,
             #[cfg(any(target_os = "android", target_os = "ios"))]
+            pending_invitation: None,
+            #[cfg(any(target_os = "android", target_os = "ios"))]
             pending_join: None,
             sounds: sounds::Detector::default(),
             link: Link::default(),
@@ -276,6 +280,7 @@ pub fn join(home: &mut Home, index: usize, channel: Id) {
     }
     #[cfg(any(target_os = "android", target_os = "ios"))]
     {
+        home.voice.pending_invitation = None;
         let request = home
             .voice
             .pending_join
@@ -288,6 +293,19 @@ pub fn join(home: &mut Home, index: usize, channel: Id) {
         leave(home);
         connect(home, index, channel);
     }
+}
+
+pub(crate) fn join_ready(home: &mut Home, index: usize, channel: Id, _now: f64) -> bool {
+    leave(home);
+    #[cfg(target_os = "ios")]
+    if let Err(error) = home.voice.audio.prepare_ios_voice() {
+        tracing::warn!(%error, "iOS voice session failed");
+        home.toast = Some((t!("voice.unavailable").into(), _now + 6.0));
+        return false;
+    }
+    home.servers[index].open = Some(channel);
+    connect(home, index, channel);
+    true
 }
 
 fn connect(home: &mut Home, index: usize, channel: Id) {
@@ -329,28 +347,33 @@ pub fn frame(ctx: &egui::Context, home: &mut Home) {
         use crate::android::voice_permission;
         #[cfg(target_os = "ios")]
         use crate::ios::voice::voice_permission;
+        if let Some(id) = home.voice.pending_invitation
+            && !home.requests.incoming.iter().any(|r| {
+                r.id == id
+                    && r.server == address
+                    && r.channel == channel
+                    && r.until > crate::notify::unix_now()
+            })
+        {
+            home.voice.pending_invitation = None;
+            return;
+        }
         match voice_permission(request) {
             0 => {
                 home.voice.pending_join = Some((address, channel, false));
                 ctx.request_repaint_after(Duration::from_millis(100));
             }
             1 => {
-                if let Some(index) = home
-                    .servers
-                    .iter()
-                    .position(|s| s.address == address && s.is_voice(&channel))
-                {
-                    leave(home);
-                    #[cfg(target_os = "ios")]
-                    {
-                        if let Err(error) = home.voice.audio.prepare_ios_voice() {
-                            tracing::warn!(%error, "iOS voice session failed");
-                            home.toast =
-                                Some((t!("voice.unavailable").into(), ctx.input(|i| i.time) + 6.0));
-                            return;
-                        }
+                if let Some(index) = home.servers.iter().position(|s| {
+                    s.address == address
+                        && s.status == crate::server::Status::Online
+                        && s.is_voice(&channel)
+                }) {
+                    if let Some(id) = home.voice.pending_invitation.take() {
+                        home.check_voice_destination(index, id);
+                    } else {
+                        join_ready(home, index, channel, ctx.input(|i| i.time));
                     }
-                    connect(home, index, channel);
                 }
             }
             result => {

@@ -121,16 +121,43 @@ pub(super) async fn scenario(
     b: &mut KeyClient<'_>,
     c: &mut KeyClient<'_>,
     text: Scope,
+    category: [u8; 32],
 ) -> Result<(Scope, [u8; 32])> {
     let [original, b_message] = exchange(a, b, text, [TEXT_A, TEXT_B]).await?;
     let b_person = *b.identity.certificate.person_id();
     let b_id = encode(&b_person);
     let a_person = *a.identity.certificate.person_id();
     let dm = a.create_dm(&b_person).await?;
+    let voice = a.create_channel(&category, "voice", b"Lounge", b"").await?;
+    let ask = rusttalk_core::messages::VoiceRequest::Ask(
+        voice.id,
+        rusttalk_core::index::now_ms().context("timestamp")? / 1000,
+    );
+    let signal = |request| MessageBody {
+        voice_request: Some(request),
+        ..Default::default()
+    };
+    let first = a.send_message(&dm.id, &signal(ask)).await?;
     receive_key(b, dm, 1).await?;
+    let delivered = b.message(&dm.id, &first.id).await?;
+    assert_eq!(
+        b.open_message(&dm.id, &delivered).await?.voice_request,
+        Some(ask)
+    );
     // B asking for the same DM gets A's, pins it and re-keys it for the two of them.
     assert_eq!(b.create_dm(&a_person).await?, dm);
     pin_dm_as_peer(b, a, dm).await?;
+    let answer = rusttalk_core::messages::VoiceRequest::Answer(
+        first.id,
+        rusttalk_core::messages::VoiceAnswer::Later,
+    );
+    let reply = b.send_message(&dm.id, &signal(answer)).await?;
+    let delivered = a.message(&dm.id, &reply.id).await?;
+    assert_eq!(
+        a.open_message(&dm.id, &delivered).await?.voice_request,
+        Some(answer)
+    );
+    println!("W294 first-ever DM delivered the encrypted invitation and its matching answer");
     let [dm_message, _] = exchange(a, b, dm, [DM_A, DM_B]).await?;
     for (client, peer) in [(&*a, b_person), (&*b, a_person)] {
         let direct = client

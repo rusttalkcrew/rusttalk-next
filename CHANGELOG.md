@@ -10,8 +10,8 @@ Unreleased under the new version and date.
 -->
 
 ## Unreleased
-- Ask someone to join your voice channel: it rings, and they can join, decline, come later or mute you for 15 minutes
 
+- Ask someone to join your voice channel: it rings, and they can join, decline, come later or mute you for 15 minutes
 - Reopen RustTalk offline to see previously loaded server icons, avatars and recent chat messages.
 - Chat fills empty voice channels. Use Join voice to start a call.
 - Choose one channel for joins and leaves, or turn them off. Device changes appear only in the audit log.

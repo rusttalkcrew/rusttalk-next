@@ -382,9 +382,10 @@ milliseconds, and a one-byte count of 0–10 option indexes, each one byte below
 ID. Format 2 can't carry a poll part.
 Apps before this format show any of these as a message they can't open.
 
-A voice request (kind 4) has no flags, empty text and no stored files (38
-bytes of plaintext). Its fields are an action byte and 32 bytes: action 0 asks
-someone to join and holds the voice channel's ID; 1 (joining), 2 (declined)
+A voice request (kind 4) has no flags, empty text and no stored files (46
+bytes of plaintext for an ask, 38 for an answer). Its fields are an action byte and 32 bytes: action 0 asks
+someone to join and holds the voice channel's ID followed by signed 64-bit
+big-endian Unix seconds when the sender asked; 1 (joining), 2 (declined)
 and 3 (coming later) answer and hold the request's message ID. Readers reject
 other actions, and format 2 can't carry one (see
 [Protocol](protocol.md#voice-requests)).

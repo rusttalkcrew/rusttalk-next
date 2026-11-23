@@ -2,7 +2,7 @@
 //! is muted. Requests and answers are encrypted DM messages, like pokes; all of this
 //! lives in memory only.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 
 use rusttalk_core::messages::VoiceAnswer;
 use url::Url;
@@ -31,6 +31,16 @@ pub struct Incoming {
     pub channel: Id,
     pub channel_name: String,
     pub until: i64,
+    pub check: JoinCheck,
+}
+
+/// Only a click can authorize starting a call. An automatic reply acknowledges
+/// a call already joined and loses its purpose if that call ends during validation.
+#[derive(Clone, Copy, PartialEq)]
+pub enum JoinCheck {
+    Idle,
+    Join,
+    AlreadyThere,
 }
 
 /// A request from here, then its outcome.
@@ -54,7 +64,7 @@ pub struct Requests {
     pub incoming: Vec<Incoming>,
     pub outgoing: Vec<Outgoing>,
     muted: HashMap<Id, i64>,
-    seen: HashSet<(Id, Id)>,
+    seen: HashMap<(Id, Id), i64>,
     /// When requests were taken from each person lately, for `LIMIT`.
     recent: HashMap<Id, VecDeque<i64>>,
     /// The request on top and since when, in the window's clock.
@@ -62,15 +72,17 @@ pub struct Requests {
 }
 
 impl Requests {
-    /// Let a request sent at `at` (server time) ring, unless it is old, known, muted
+    /// Let a request sent at `at` (authenticated sender time) ring, unless it is old, known, muted
     /// or one too many. A person's newer request replaces their older one.
     pub fn take(&mut self, mut request: Incoming, at: i64, now: i64) -> bool {
         let person = request.person;
-        if now - at > SHOWN {
-            tracing::info!(age = now - at, "voice request dropped: too old to ring");
+        let age = now.saturating_sub(at);
+        if !(0..SHOWN).contains(&age) {
+            tracing::info!(age, "voice request dropped: too old to ring");
             return false;
         }
-        if self.muted(&person, now) || !self.seen.insert((person, request.id)) {
+        self.seen.retain(|_, until| *until > now);
+        if self.muted(&person, now) || self.seen.contains_key(&(person, request.id)) {
             return false;
         }
         let recent = self.recent.entry(person).or_default();
@@ -79,8 +91,10 @@ impl Requests {
             tracing::debug!("voice request dropped: too many from one person");
             return false;
         }
+        self.seen
+            .insert((person, request.id), now.saturating_add(WINDOW));
         recent.push_back(now);
-        request.until = now + SHOWN;
+        request.until = at.saturating_add(SHOWN);
         self.incoming.retain(|old| old.person != person);
         self.incoming.push(request);
         true
@@ -101,6 +115,15 @@ impl Requests {
             .retain(|request| request.person != *person || request.id != *id);
     }
 
+    /// An own answer can decrypt before its live invitation during key recovery.
+    pub fn answered_elsewhere(&mut self, person: Id, id: Id, at: i64, now: i64) {
+        self.close(&person, &id);
+        if (0..SHOWN).contains(&now.saturating_sub(at)) {
+            self.seen.retain(|_, until| *until > now);
+            self.seen.insert((person, id), at.saturating_add(SHOWN));
+        }
+    }
+
     pub fn waiting(&self, person: &Id) -> bool {
         (self.outgoing.iter()).any(|sent| sent.person == *person && sent.state == State::Waiting)
     }
@@ -118,8 +141,12 @@ impl Requests {
 
     /// An answer counts once, and only from the person who was asked.
     pub fn answered(&mut self, person: &Id, id: &Id, answer: VoiceAnswer, now: i64) {
-        let asked = (self.outgoing.iter_mut())
-            .find(|sent| sent.person == *person && sent.id == *id && sent.state == State::Waiting);
+        let asked = (self.outgoing.iter_mut()).find(|sent| {
+            sent.person == *person
+                && sent.id == *id
+                && sent.state == State::Waiting
+                && now < sent.until
+        });
         if let Some(sent) = asked {
             sent.state = State::Answered(answer);
             sent.until = now + NOTICE;
@@ -166,6 +193,7 @@ mod tests {
             channel: [2; 32],
             channel_name: String::new(),
             until: 0,
+            check: JoinCheck::Idle,
         }
     }
 
@@ -173,7 +201,9 @@ mod tests {
     fn old_repeated_excess_and_muted_requests_do_not_ring() {
         let mut requests = Requests::default();
         assert!(!requests.take(request(1, ANN), 100, 100 + SHOWN + 1));
-        assert!(requests.take(request(1, ANN), 100, 100 + SHOWN));
+        assert!(!requests.take(request(1, ANN), 100, 100 + SHOWN));
+        assert!(requests.take(request(1, ANN), 100, 100 + SHOWN - 1));
+        assert_eq!(requests.incoming[0].until, 100 + SHOWN);
         assert!(!requests.take(request(1, ANN), 130, 130));
         assert!(requests.take(request(2, ANN), 131, 131));
         assert!(requests.take(request(3, ANN), 132, 132));

@@ -13,7 +13,7 @@ use crate::{
     notify::{self, Arrival, Mention},
     server::{CallState, Id, Msg, Server, Status},
     ui,
-    voice_requests::{Incoming, State},
+    voice_requests::{Incoming, JoinCheck, State},
 };
 
 /// How long a pop-up that just appeared ignores clicks, in seconds.
@@ -47,9 +47,10 @@ impl Home {
             self.toast = Some((t!("home.waiting_try_again").into(), now + 6.0));
             return;
         };
-        self.send_request(index, person, *id, VoiceRequest::Ask(channel));
+        let sent = notify::unix_now();
+        self.send_request(index, person, *id, VoiceRequest::Ask(channel, sent));
         let name = self.servers[index].member_name(&person);
-        self.requests.asked(*id, person, name, notify::unix_now());
+        self.requests.asked(*id, person, name, sent);
         self.servers[index].send(Command::Ring);
         self.voice.audio.ring();
     }
@@ -73,6 +74,7 @@ impl Home {
             voice_request: Some(request),
             preview: None,
             inline: Vec::new(),
+            queued: Default::default(),
         }));
     }
 
@@ -94,15 +96,15 @@ impl Home {
             if msg.person == *self.identity.certificate.person_id()
                 && let VoiceRequest::Answer(id, _) = request
             {
-                self.requests.close(&peer, &id);
+                self.requests.answered_elsewhere(peer, id, msg.at, now);
             }
             return;
         }
         if self.friends.relation(&peer) == Relation::Blocked {
             return;
         }
-        let channel = match request {
-            VoiceRequest::Ask(channel) => channel,
+        let (channel, sent) = match request {
+            VoiceRequest::Ask(channel, sent) => (channel, sent),
             VoiceRequest::Answer(id, answer) => {
                 self.requests.answered(&peer, &id, answer, now);
                 ctx.request_repaint();
@@ -133,11 +135,12 @@ impl Home {
             channel,
             channel_name: found.name.clone(),
             until: 0,
+            check: JoinCheck::Idle,
         };
         let title = t!("voice_request.asks_you", name = incoming.name);
         let body = format!("🔊 {}", incoming.channel_name);
         let target = (server.address.clone(), channel);
-        if !self.requests.take(incoming, msg.at, now) {
+        if !self.requests.take(incoming, sent, now) {
             return;
         }
         // A request calls on this person, like a mention.
@@ -171,14 +174,91 @@ impl Home {
             self.toast = Some((t!("home.waiting_try_again").into(), now + 6.0));
             return;
         };
+        if answer == VoiceAnswer::Joining {
+            if request.check != JoinCheck::Idle {
+                return;
+            }
+            if !self.servers[index].is_voice(&request.channel)
+                || request.until <= notify::unix_now()
+            {
+                self.requests.close(&request.person, &request.id);
+                return;
+            }
+            #[cfg(any(target_os = "android", target_os = "ios"))]
+            if !self.voice.in_call(&self.servers[index], &request.channel) {
+                call::join(self, index, request.channel);
+                self.voice.pending_invitation = Some(request.id);
+                return;
+            }
+            self.check_voice_destination(index, request.id);
+            return;
+        }
         self.requests.close(&request.person, &request.id);
         let reply = VoiceRequest::Answer(request.id, answer);
         self.send_request(index, request.person, *id, reply);
-        if answer == VoiceAnswer::Joining {
-            call::join(self, index, request.channel);
-            self.view = View::Server(index);
-            self.layout.list = false;
+    }
+
+    pub(crate) fn check_voice_destination(&mut self, index: usize, id: Id) {
+        if let Some(request) = self.requests.incoming.iter_mut().find(|r| {
+            r.id == id && r.server == self.servers[index].address && r.check == JoinCheck::Idle
+        }) {
+            request.check = if self.voice.in_call(&self.servers[index], &request.channel) {
+                JoinCheck::AlreadyThere
+            } else {
+                JoinCheck::Join
+            };
+            self.servers[index].send(Command::CheckVoiceDestination {
+                request: id,
+                channel: request.channel,
+            });
         }
+    }
+
+    pub(super) fn voice_destination(
+        &mut self,
+        address: &url::Url,
+        id: Id,
+        allowed: bool,
+        now: f64,
+    ) {
+        let Some(index) = self.index(address) else {
+            return;
+        };
+        let Some(request) = self
+            .requests
+            .incoming
+            .iter()
+            .find(|r| r.id == id && r.server == *address && r.check != JoinCheck::Idle)
+            .cloned()
+        else {
+            return;
+        };
+        self.requests.close(&request.person, &id);
+        if !allowed
+            || request.until <= notify::unix_now()
+            || self.servers[index].status != Status::Online
+            || !self.servers[index].is_voice(&request.channel)
+        {
+            self.toast = Some((t!("home.waiting_try_again").into(), now + 6.0));
+            return;
+        }
+        let Ok(reply) = rusttalk_core::keys::random_key() else {
+            return;
+        };
+        if !self.voice.in_call(&self.servers[index], &request.channel)
+            && (request.check == JoinCheck::AlreadyThere
+                || !call::join_ready(self, index, request.channel, now))
+        {
+            return;
+        }
+        self.send_request(
+            index,
+            request.person,
+            *reply,
+            VoiceRequest::Answer(id, VoiceAnswer::Joining),
+        );
+        self.view = View::Server(index);
+        self.layout.list = false;
     }
 }
 
@@ -409,7 +489,7 @@ mod tests {
             reply_to: None,
             quoted_author: None,
             edit_of: None,
-            body: crate::server::Body::VoiceRequest(VoiceRequest::Ask(LOUNGE)),
+            body: crate::server::Body::VoiceRequest(VoiceRequest::Ask(LOUNGE, notify::unix_now())),
             files: Vec::new(),
             live: None,
             sticker: None,
@@ -440,7 +520,7 @@ mod tests {
             command,
             Command::Send(Draft {
                 peer: Some(ANN),
-                voice_request: Some(VoiceRequest::Ask(LOUNGE)),
+                voice_request: Some(VoiceRequest::Ask(LOUNGE, _)),
                 ..
             })
         )));
@@ -472,6 +552,21 @@ mod tests {
         harness.get_by_label("Join now").click();
         harness.run_steps(2);
         let commands: Vec<_> = std::iter::from_fn(|| sent.try_recv().ok()).collect();
+        assert!(commands.iter().any(|c| matches!(
+            c,
+            Command::CheckVoiceDestination {
+                channel: LOUNGE,
+                ..
+            }
+        )));
+        assert!(
+            !commands
+                .iter()
+                .any(|c| matches!(c, Command::JoinVoice(_) | Command::Send(_)))
+        );
+        let address = home(&mut harness).servers[0].address.clone();
+        home(&mut harness).voice_destination(&address, [3; 32], true, 1.0);
+        let commands: Vec<_> = std::iter::from_fn(|| sent.try_recv().ok()).collect();
         assert!(commands.iter().any(|command| matches!(command,
             Command::Send(Draft { voice_request: Some(VoiceRequest::Answer(id, VoiceAnswer::Joining)), .. }) if *id == [3; 32])));
         assert!(
@@ -480,6 +575,83 @@ mod tests {
                 .any(|command| matches!(command, Command::JoinVoice(LOUNGE)))
         );
         assert!(home(&mut harness).requests.incoming.is_empty());
+    }
+
+    #[test]
+    fn failed_destination_check_keeps_the_current_call() {
+        let (mut harness, mut sent) = window(Vec2::new(420.0, 720.0), false);
+        let mut current = home(&mut harness).voice.call.take().unwrap();
+        current.channel = [5; 32];
+        ann_asks(&mut harness, 3);
+        let home = home(&mut harness);
+        home.voice.call = Some(current);
+        let address = home.servers[0].address.clone();
+        home.check_voice_destination(0, [3; 32]);
+        home.voice_destination(&address, [3; 32], false, 1.0);
+        assert_eq!(home.voice.call.as_ref().unwrap().channel, [5; 32]);
+        assert!(home.requests.incoming.is_empty());
+        assert!(
+            !std::iter::from_fn(|| sent.try_recv().ok()).any(|c| matches!(
+                c,
+                Command::JoinVoice(_) | Command::LeaveVoice | Command::Send(_)
+            ))
+        );
+    }
+
+    #[test]
+    fn verified_pages_reconcile_answers_and_cached_asks_stay_silent() {
+        let (mut harness, _) = window(Vec2::new(900.0, 600.0), true);
+        let ctx = harness.ctx.clone();
+        ann_asks(&mut harness, 3);
+        let home = home(&mut harness);
+        let address = home.servers[0].address.clone();
+        let now = notify::unix_now();
+        let message = |person, request| Msg {
+            backfilled: false,
+            id: [4; 32],
+            person,
+            at: now,
+            reply_to: None,
+            quoted_author: None,
+            edit_of: None,
+            body: crate::server::Body::VoiceRequest(request),
+            files: vec![],
+            live: None,
+            sticker: None,
+            replicas: vec![],
+            copy_files: vec![],
+        };
+        let other_ask = message(ANN, VoiceRequest::Ask(LOUNGE, now));
+        let answer = VoiceRequest::Answer([3; 32], VoiceAnswer::Later);
+        let mine = *home.identity.certificate.person_id();
+        home.requests.asked([3; 32], ANN, String::new(), now);
+        home.apply(
+            &ctx,
+            crate::net::Update::Cached(
+                address.clone(),
+                Box::new(home.servers[0].dir.clone()),
+                vec![(DM, vec![other_ask.clone(), message(ANN, answer)])],
+            ),
+            0.0,
+        );
+        assert!(home.requests.waiting(&ANN));
+        assert_eq!(home.requests.incoming[0].id, [3; 32]);
+        home.apply(
+            &ctx,
+            crate::net::Update::Messages {
+                server: address,
+                channel: DM,
+                items: vec![message(mine, answer), other_ask, message(ANN, answer)],
+                older: false,
+                at_start: Some(true),
+            },
+            0.0,
+        );
+        assert!(home.requests.incoming.is_empty());
+        assert_eq!(
+            home.requests.outgoing[0].state,
+            State::Answered(VoiceAnswer::Later)
+        );
     }
 
     #[test]

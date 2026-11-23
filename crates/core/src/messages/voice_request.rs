@@ -11,7 +11,7 @@ const ASK: u8 = 0;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VoiceRequest {
     /// Join this voice channel, on the server that carries the DM message.
-    Ask([u8; 32]),
+    Ask([u8; 32], i64),
     /// The answer to the request with this message ID.
     Answer([u8; 32], VoiceAnswer),
 }
@@ -26,11 +26,14 @@ pub enum VoiceAnswer {
 impl VoiceRequest {
     pub(super) fn encode(self, body: &mut Vec<u8>) {
         let (action, id) = match self {
-            Self::Ask(channel) => (ASK, channel),
+            Self::Ask(channel, _) => (ASK, channel),
             Self::Answer(request, answer) => (answer as u8, request),
         };
         body.extend_from_slice(&[KIND, action]);
         body.extend_from_slice(&id);
+        if let Self::Ask(_, sent) = self {
+            body.extend_from_slice(&sent.to_be_bytes());
+        }
     }
 
     /// What follows the kind byte.
@@ -39,14 +42,20 @@ impl VoiceRequest {
             .split_first_chunk::<33>()
             .ok_or(MessageError::Encoding)?;
         let id = *id;
+        *tail = rest;
         let request = match *action {
-            ASK => Self::Ask(id),
+            ASK => {
+                let (sent, rest) = tail
+                    .split_first_chunk::<8>()
+                    .ok_or(MessageError::Encoding)?;
+                *tail = rest;
+                Self::Ask(id, i64::from_be_bytes(*sent))
+            }
             1 => Self::Answer(id, VoiceAnswer::Joining),
             2 => Self::Answer(id, VoiceAnswer::Declined),
             3 => Self::Answer(id, VoiceAnswer::Later),
             _ => return Err(MessageError::Encoding),
         };
-        *tail = rest;
         Ok(request)
     }
 }

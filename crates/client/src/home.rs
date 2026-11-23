@@ -121,7 +121,7 @@ pub struct Home {
     /// The pop-up for the newest poke.
     popup: Option<pokes::Popup>,
     /// Requests to join a voice channel that ring here, and this person's own.
-    requests: crate::voice_requests::Requests,
+    pub(crate) requests: crate::voice_requests::Requests,
     /// This person's DM messages they deleted, on any device. All of them stay in
     /// `dm_deleted.json` here; the device sync copy holds the newest that fit.
     dm_deleted: dm::Tombstones,
@@ -1319,6 +1319,12 @@ impl Home {
                 };
                 if let Some(peer) = self.dm_peer(index, &channel) {
                     for msg in &items {
+                        if matches!(
+                            msg.body,
+                            Body::VoiceRequest(rusttalk_core::messages::VoiceRequest::Answer(..))
+                        ) {
+                            self.request_arrived(ctx, (index, channel), peer, msg);
+                        }
                         self.friend_message(peer, msg);
                         // The newest page holds pokes sent while this device was away.
                         if !older {
@@ -1566,6 +1572,9 @@ impl Home {
                 {
                     self.voice.audio.play_cue(cue);
                 }
+            }
+            Update::VoiceDestination(address, id, allowed) => {
+                self.voice_destination(&address, id, allowed, now)
             }
             Update::CallRang(address, channel, person) => self.call_rang(&address, channel, person),
             Update::Room(address, channel, peers, sounds) => {

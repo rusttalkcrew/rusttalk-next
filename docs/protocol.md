@@ -631,20 +631,23 @@ request from the other person rings for 30 seconds with a pop-up and a silent
 desktop notification, following that DM's notification settings like a poke.
 The receiving app drops a request from a blocked person, from a non-friend
 with "Friends only", for a channel this person can't open or is already in,
-one more than 30 seconds old by the server's time against its own clock, a
+one outside the 30-second window starting at the authenticated sender timestamp, a
 repeated one, and more than three from one person per minute. "Mute for 15
 min" drops that person's requests and rings on that device until the app
 closes or the time is up, and sends nothing.
 
 The asking app takes the first answer from the person it asked that names its
 request's ID, and shows "no answer" after 35 seconds. An answer also closes
-the pop-up on the answering person's other devices.
+the pop-up on the answering person's other devices. Verified DM history can resolve
+an active request. Historical invitations and locally restored pages never ring.
 
 So that the others in the call hear it, the asking app sends each other device
 in the room a LiveKit data packet with topic `rusttalk.ring`, reliable and
 sealed like [remote control](#remote-control) messages with HKDF info
 `rusttalk-ring-v1` in place of `rusttalk-control-v1`, up to 128 bytes on the
-wire. Its JSON is `null`: it doesn't say who is asked. Receivers play it at
+wire. The sealed JSON integer records Unix milliseconds. Receivers accept it only
+within 30 seconds of that timestamp. Each process remembers up to 256 fresh packets
+across room reconnects and drops duplicates and overflow. Receivers play it at
 most once every 3 seconds, and not from blocked or muted people. A sender
 without write permission in the channel can't send data, so then only the two
 of them hear the ring.

@@ -283,7 +283,10 @@ pub async fn friends(
     newest_poke(peer.1, dms[1], id).await?;
     println!("W112 a poke arrived on both servers as an encrypted DM message");
     // A voice request and its answer stay on the channel's server.
-    let ask = VoiceRequest::Ask(ASKED.as_bytes().try_into()?);
+    let ask = VoiceRequest::Ask(
+        ASKED.as_bytes().try_into()?,
+        rusttalk_core::index::now_ms().unwrap() / 1000,
+    );
     let request = *keys::random_key()?;
     let message = |voice_request| MessageBody {
         voice_request: Some(voice_request),

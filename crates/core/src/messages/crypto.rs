@@ -892,7 +892,7 @@ mod tests {
         use super::super::voice_request::VoiceAnswer;
         let id = [7; 32];
         for (action, request) in [
-            (0, VoiceRequest::Ask(id)),
+            (0, VoiceRequest::Ask(id, 123)),
             (1, VoiceRequest::Answer(id, VoiceAnswer::Joining)),
             (2, VoiceRequest::Answer(id, VoiceAnswer::Declined)),
             (3, VoiceRequest::Answer(id, VoiceAnswer::Later)),
@@ -902,7 +902,16 @@ mod tests {
                 ..Default::default()
             };
             let encoded = body.encode(VERSION).unwrap();
-            assert_eq!(*encoded, [&[0, 4, action][..], &id, &[0, 0, 0]].concat());
+            let timestamp = 123i64.to_be_bytes();
+            let extra = if action == 0 {
+                timestamp.as_slice()
+            } else {
+                &[]
+            };
+            assert_eq!(
+                *encoded,
+                [&[0, 4, action][..], &id, extra, &[0, 0, 0]].concat()
+            );
             assert!(MessageBody::decode(VERSION, &encoded).unwrap() == body);
             assert_eq!(body.encode(2).err(), Some(MessageError::Encoding));
             for mixed in [
