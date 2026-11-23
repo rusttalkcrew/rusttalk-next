@@ -2,10 +2,12 @@ package io.github.rusttalkcrew.rusttalk;
 
 import android.content.Context;
 import java.nio.ByteBuffer;
+import java.util.concurrent.CountDownLatch;
 import livekit.org.webrtc.Camera2Enumerator;
 import livekit.org.webrtc.CameraVideoCapturer;
 import livekit.org.webrtc.CapturerObserver;
 import livekit.org.webrtc.SurfaceTextureHelper;
+import livekit.org.webrtc.ThreadUtils;
 import livekit.org.webrtc.VideoFrame;
 import livekit.org.webrtc.YuvHelper;
 
@@ -34,10 +36,16 @@ final class CallCamera implements CapturerObserver {
 
     void close() {
         ended = true;
-        if (camera != null) {
-            camera.dispose(); // Includes stopCapture; waits for the camera thread.
+        if (camera != null) camera.dispose();
+        if (textures != null) {
+            // WebRTC queues the session stop. Its texture disposal jumps the queue
+            // and can quit the looper, so wait for the queued stop first.
+            CountDownLatch stopped = new CountDownLatch(1);
+            if (textures.getHandler().post(stopped::countDown)) {
+                ThreadUtils.awaitUninterruptibly(stopped);
+                textures.dispose();
+            }
         }
-        if (textures != null) textures.dispose();
     }
 
     @Override public void onCapturerStarted(boolean success) { if (!success) ended = true; }
