@@ -430,9 +430,11 @@ impl Home {
         }
     }
 
-    /// Turn "Online" into "Away" after a while without input, and back once used again.
+    /// Turn "Online" into "Away" after a while without input or call, and back once used again.
     fn track_activity(&mut self, ui: &Ui) {
-        let (now, active) = ui.input(|input| (input.time, !input.events.is_empty()));
+        let (now, input) = ui.input(|input| (input.time, !input.events.is_empty()));
+        // In a call people talk while another app has the focus, so the call counts as activity.
+        let active = input || self.voice.call.is_some();
         if active {
             self.active_at = now;
             if self.auto_away {
@@ -917,6 +919,8 @@ impl Home {
         let rule = prefs.effective(&server.address, &channel, dm, notify::unix_now());
         let viewing = self.viewing().contains(&(index, channel));
         let mention = !(viewing && self.focused) && notify::counts(rule, arrival);
+        // Our own chime is heard even when the system keeps its notifications quiet.
+        let chimed = mention && prefs.sound && self.voice.audio.message();
         if notify::should_notify(prefs, rule, arrival, self.focused, viewing) {
             let sender = server.member_name(&msg.person);
             let title = match server.channel(&channel) {
@@ -938,7 +942,11 @@ impl Home {
                 _ => t!("notify.new_message").into(),
             };
             let target = (server.address.clone(), channel);
-            self.notify.show(ctx, &title, &body, target);
+            if chimed {
+                self.notify.show_silent(ctx, &title, &body, target);
+            } else {
+                self.notify.show(ctx, &title, &body, target);
+            }
         }
         let address = self.servers[index].address.clone();
         self.notify.arrived(&address, channel, msg.at, mention);
@@ -2286,7 +2294,7 @@ fn empty(ui: &mut Ui, title: &str, hint: &str) {
 }
 
 /// A round server button that turns into a rounded square when hovered or open.
-fn rail_button(ui: &mut Ui, text: &str, label: &str, selected: bool) -> Response {
+fn rail_button(ui: &mut Ui, text: &str, selected: bool) -> Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(RAIL_BUTTON), Sense::click());
     let c = ui::colors(ui);
     let accent = ui::accent(ui);
@@ -2307,17 +2315,46 @@ fn rail_button(ui: &mut Ui, text: &str, label: &str, selected: bool) -> Response
         glyph,
     );
     ui::focus_ring(ui, &response, radius as u8);
-    response.widget_info(|| WidgetInfo::labeled(Role::Button, true, label));
-    response
-        .on_hover_text(label)
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+fn rail_label(button: Response, name: &str, unavailable: bool) -> Response {
+    button.widget_info(|| WidgetInfo::labeled(Role::Button, true, name));
+    if !unavailable {
+        return button.on_hover_text(name);
+    }
+    let status = t!("home.server_unavailable");
+    button
+        .ctx
+        .accesskit_node_builder(button.id, |node| node.set_description(status));
+    let (has_touch, touching) = button
+        .ctx
+        .input(|i| (i.has_touch_screen(), i.any_touches()));
+    if !touching {
+        let mut tooltip = if button.has_focus() && !has_touch && !ui::menu_open(&button) {
+            egui::Tooltip::for_widget(&button)
+        } else {
+            egui::Tooltip::for_enabled(&button)
+        };
+        tooltip.popup = tooltip.popup.align(egui::RectAlign::RIGHT_START);
+        tooltip.show(|ui| {
+            ui.set_max_width(ui.spacing().tooltip_width);
+            ui.label(name);
+            ui.weak(status);
+        });
+    }
+    button
 }
 
 fn server_rail(ui: &mut Ui, home: &mut Home) {
     ui.vertical_centered(|ui| {
         ui.add_space(4.0);
         let dms = matches!(home.view, View::Direct(_));
-        let button = rail_button(ui, "💬", t!("home.direct_messages"), dms);
+        let button = rail_label(
+            rail_button(ui, "💬", dms),
+            t!("home.direct_messages"),
+            false,
+        );
         rail_marks(ui, &button, dms, home.dm_marks());
         if button.clicked() {
             home.view = View::Direct(None);
@@ -2333,13 +2370,17 @@ fn server_rail(ui: &mut Ui, home: &mut Home) {
                         ui.allocate_exact_size(Vec2::splat(RAIL_BUTTON), Sense::click());
                     let radius = if selected { 16.0 } else { 24.0 };
                     paint_hovered(ui, rect, icon, radius);
-                    let button = button.on_hover_text(server.name());
-                    let name = server.name().to_owned();
-                    button.widget_info(|| WidgetInfo::labeled(Role::Button, true, &name));
+                    ui::focus_ring(ui, &button, radius as u8);
                     button
                 }
-                None => rail_button(ui, &initials(server.name()), server.name(), selected),
+                None => rail_button(ui, &initials(server.name()), selected),
             };
+            let unavailable = matches!(server.status, Status::Offline | Status::Stopped(_));
+            if unavailable {
+                let at = button.rect.right_top() + Vec2::new(-8.0, 8.0);
+                ui::unavailable_badge(ui, at, ui::colors(ui).rail);
+            }
+            let button = rail_label(button, server.name(), unavailable);
             rail_marks(ui, &button, selected, marks);
             if button.clicked() {
                 home.view = View::Server(index);
@@ -2347,7 +2388,7 @@ fn server_rail(ui: &mut Ui, home: &mut Home) {
             ui::context_menu(&button, |m| server_menu(m, home, index));
         }
         let adding = matches!(home.view, View::Join | View::Find);
-        let plus = rail_button(ui, "+", t!("home.add_server"), adding);
+        let plus = rail_label(rail_button(ui, "+", adding), t!("home.add_server"), false);
         ui::menu(&plus, |m| {
             if m.item("🔗", t!("home.join_with_invite")).clicked() {
                 home.view = View::Join;
@@ -2380,15 +2421,23 @@ fn rail_marks(ui: &Ui, button: &Response, selected: bool, (unread, mentions): (b
 /// The same on a channel or DM row, unless that chat is muted.
 /// A DM row counts its copy on every server.
 fn chat_marks(ui: &Ui, home: &Home, chats: &[(&url::Url, Id)], dm: bool, row: Rect) {
+    paint_marks(ui, row, chat_counts(home, chats, dm));
+}
+
+/// Whether the chats are unread and their mentions, leaving out muted ones.
+fn chat_counts(home: &Home, chats: &[(&url::Url, Id)], dm: bool) -> (bool, u32) {
     let (prefs, now) = (home.notify.prefs(), notify::unix_now());
     let chats =
         (chats.iter()).filter(|(server, channel)| !prefs.effective(server, channel, dm, now).muted);
-    let (unread, mentions) = chats.fold((false, 0), |(unread, mentions), (server, channel)| {
+    chats.fold((false, 0), |(unread, mentions), (server, channel)| {
         (
             unread || home.notify.unread(server, channel),
             mentions + home.notify.mentions(server, channel),
         )
-    });
+    })
+}
+
+fn paint_marks(ui: &Ui, row: Rect, (unread, mentions): (bool, u32)) {
     if unread {
         ui::unread_pill(ui, row, 4.0);
     }
@@ -2606,9 +2655,14 @@ fn dm_row(ui: &mut Ui, home: &mut Home, peer: &Id, request: bool) {
     let selected = home.view == View::Direct(Some(*peer));
     let name = home.peer_name(peer);
     let dir = home.dm_server(peer).map_or(&none, |i| &home.servers[i].dir);
-    let shared: Vec<&str> = (home.shared(peer).into_iter())
-        .map(|i| home.servers[i].name())
-        .collect();
+    // A server saved twice, or two with one name, reads as one.
+    let mut shared: Vec<&str> = Vec::new();
+    for index in home.shared(peer) {
+        let server = home.servers[index].name();
+        if !shared.contains(&server) {
+            shared.push(server);
+        }
+    }
     let caption = if shared.is_empty() {
         t!("home.no_shared_server").to_owned()
     } else {
@@ -2619,21 +2673,27 @@ fn dm_row(ui: &mut Ui, home: &mut Home, peer: &Id, request: bool) {
         ui.painter()
             .rect_filled(rect, ui::RADIUS_ROW, ui::colors(ui).selected);
     }
+    let marks = if request {
+        (false, 0)
+    } else {
+        let replicas = home.replicas(peer);
+        let chats: Vec<_> = (replicas.iter())
+            .map(|(index, channel)| (&home.servers[*index].address, *channel))
+            .collect();
+        chat_counts(home, &chats, true)
+    };
     let row = ui::row_button(ui, 44.0, &name, |ui| {
         face(ui, dir, peer, &name, 30.0, true);
+        // The text ends before the mention badge instead of running under it.
+        let badge = if marks.1 > 0 { 24.0 } else { 0.0 };
         ui.vertical(|ui| {
+            ui.set_max_width(ui.available_width() - badge);
             ui.spacing_mut().item_spacing.y = 0.0;
             ui.add(Label::new(ui::bold(&name)).truncate());
             ui.add(Label::new(ui::caption(&caption)).truncate());
         });
     });
-    if !request {
-        let replicas = home.replicas(peer);
-        let chats: Vec<_> = (replicas.iter())
-            .map(|(index, channel)| (&home.servers[*index].address, *channel))
-            .collect();
-        chat_marks(ui, home, &chats, true, row.rect);
-    }
+    paint_marks(ui, row.rect, marks);
     if row.clicked() {
         home.view = View::Direct(Some(*peer));
         home.layout.list = false;
@@ -6495,6 +6555,7 @@ mod tests {
 
     mod emoji;
     mod image_reload;
+    mod rail;
     mod streams;
     mod touch;
     mod uploads;

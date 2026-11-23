@@ -3,7 +3,7 @@ use super::*;
 use eframe::egui::{Event, Modifiers, PointerButton, Pos2, TouchDeviceId, TouchId, TouchPhase};
 use egui_kittest::{Harness, kittest::Queryable};
 
-fn finger<S>(h: &mut Harness<'_, S>, phase: TouchPhase, pos: Pos2) {
+pub(super) fn finger<S>(h: &mut Harness<'_, S>, phase: TouchPhase, pos: Pos2) {
     let events = &mut h.input_mut().events;
     events.push(Event::Touch {
         device_id: TouchDeviceId(0),

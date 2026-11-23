@@ -145,6 +145,7 @@ pub struct TrackStats {
 
 #[derive(Clone, PartialEq)]
 pub enum Status {
+    /// The first connection attempt has not finished.
     Connecting,
     Online,
     /// Retrying in the background.

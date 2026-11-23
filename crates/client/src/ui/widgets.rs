@@ -1260,7 +1260,12 @@ pub fn unread_pill(ui: &Ui, row: Rect, gap: f32) {
         egui::pos2(row.left() - gap, row.center().y),
         Vec2::new(4.0, 8.0),
     );
-    ui.painter().rect_filled(pill, 2.0, colors(ui).strong);
+    // A scroll area clips at the row's left edge; the pill sits just outside it.
+    let mut clip = ui.clip_rect();
+    clip.min.x = clip.min.x.min(pill.left());
+    ui.painter()
+        .with_clip_rect(clip)
+        .rect_filled(pill, 2.0, colors(ui).strong);
 }
 
 /// A red count of mentions centred on `at`, ringed in `ring`, the surface it sits on.
@@ -1270,6 +1275,15 @@ pub fn mention_badge(ui: &Ui, at: Pos2, count: u32, ring: Color32) {
     } else {
         count.to_string()
     };
+    ringed_badge(ui, at, text, ring);
+}
+
+/// A painted availability badge, so the server button still owns the whole tap target.
+pub fn unavailable_badge(ui: &Ui, at: Pos2, ring: Color32) {
+    ringed_badge(ui, at, "!".to_owned(), ring);
+}
+
+fn ringed_badge(ui: &Ui, at: Pos2, text: String, ring: Color32) {
     let painter = ui.painter();
     let galley = painter.layout_no_wrap(
         text,
