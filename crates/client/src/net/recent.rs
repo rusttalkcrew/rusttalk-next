@@ -662,14 +662,44 @@ mod tests {
                         .unwrap_err()
                 });
                 assert!(error.is_timeout());
-                page_failed(
-                    &net.ctx,
-                    &known.address,
-                    &mut state,
-                    channel,
-                    None,
-                    &error.into(),
-                );
+                let error = anyhow::Error::from(error);
+                assert!(verification_incomplete(&error));
+                page_failed(&net.ctx, &known.address, &mut state, channel, None, &error);
+
+                // The page itself arrived, but fetching the original for an edit
+                // ended in the middle of its JSON response.
+                use std::io::{BufRead, BufReader, Write};
+                let original = std::net::TcpListener::bind("127.0.0.1:0")?;
+                let address = original.local_addr()?;
+                let responder = std::thread::spawn(move || -> std::io::Result<()> {
+                    let (mut stream, _) = original.accept()?;
+                    for line in BufReader::new(&stream).lines() {
+                        if line?.is_empty() {
+                            break;
+                        }
+                    }
+                    stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 128\r\n\r\n{")
+                });
+                let error = net
+                    .handle()
+                    .block_on(async {
+                        reqwest::Client::builder()
+                            .no_proxy()
+                            .build()?
+                            .get(format!("http://{address}/original"))
+                            .send()
+                            .await?
+                            .error_for_status()?
+                            .json::<MessageRecord>()
+                            .await
+                            .map(|_| ())
+                    })
+                    .unwrap_err();
+                responder.join().unwrap()?;
+                assert!(error.is_decode() || error.is_body());
+                let error = anyhow::Error::from(error);
+                assert!(verification_incomplete(&error));
+                page_failed(&net.ctx, &known.address, &mut state, channel, None, &error);
             }
         }
         Ok(())

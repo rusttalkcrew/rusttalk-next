@@ -2193,12 +2193,7 @@ async fn open(
             )
         }
         Err(error) => {
-            if error.downcast_ref::<reqwest::Error>().is_some_and(|e| {
-                e.is_timeout()
-                    || e.is_connect()
-                    || e.status()
-                        .is_some_and(|s| s.is_server_error() || s == StatusCode::TOO_MANY_REQUESTS)
-            }) {
+            if verification_incomplete(&error) {
                 return Err(error);
             }
             if error.downcast_ref::<MessageError>() == Some(&MessageError::MissingKey) {
@@ -2207,6 +2202,22 @@ async fn open(
             tracing::warn!(error = %format_args!("{error:#}"), "message could not be opened");
             (Some(unreadable(record)), None)
         }
+    })
+}
+
+/// A failed fetch of verification data (such as an edit's original) leaves
+/// the page incomplete. Only a definitive response can disqualify the record.
+fn verification_incomplete(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<reqwest::Error>().is_some_and(|e| {
+        e.status().is_none_or(|s| {
+            s.is_server_error()
+                || matches!(
+                    s,
+                    StatusCode::TOO_MANY_REQUESTS
+                        | StatusCode::REQUEST_TIMEOUT
+                        | StatusCode::UNAUTHORIZED
+                )
+        })
     })
 }
 
