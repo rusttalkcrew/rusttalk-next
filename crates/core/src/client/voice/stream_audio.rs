@@ -33,53 +33,112 @@ use crate::keys::Key;
 /// each member gets all tracks (`None`) or only the listed ones.
 pub(super) type Permissions = Option<Vec<(ParticipantIdentity, Option<Vec<TrackSid>>)>>;
 
-/// Whether to receive an audio track: voices always, shared apps once their name
-/// opens as app audio, and a share's sound only while watching the share. A label we
-/// cannot open yet (a newer epoch's key is still on its way) stays off until it opens.
-fn wanted(
-    source: TrackSource,
-    name: &str,
-    app_names: &HashMap<i64, Key>,
-    stream_names: &HashMap<i64, Key>,
-    screen_watched: bool,
-) -> bool {
-    if source != TrackSource::ScreenshareAudio {
-        return true;
+impl VoiceRoom {
+    /// Explicit consent belongs to this publication and this participant session only.
+    pub fn set_listening(&mut self, sid: &TrackSid, on: bool) -> Result<()> {
+        if !on {
+            self.listening.remove(sid);
+            self.reconcile_audio();
+            return Ok(());
+        }
+        let (participant, publication) = self
+            .room
+            .remote_participants()
+            .into_values()
+            .find_map(|p| {
+                p.track_publications()
+                    .remove(sid)
+                    .map(|publication| (p, publication))
+            })
+            .ok_or_else(|| anyhow::anyhow!("audio publication is no longer available"))?;
+        anyhow::ensure!(
+            publication.kind() == TrackKind::Audio
+                && publication.source() == TrackSource::ScreenshareAudio
+                && publication.encryption_type() == EncryptionType::Gcm,
+            "expected encrypted shared audio"
+        );
+        anyhow::ensure!(
+            !self.blocked.contains(participant.identity().as_str()),
+            "device revoked"
+        );
+        self.listening.insert(
+            sid.clone(),
+            (participant.identity(), participant.sid().to_string()),
+        );
+        self.reconcile_audio();
+        Ok(())
     }
-    if track_name::decrypt(app_names, track_name::APP_AUDIO, name).is_some() {
-        return true;
+
+    /// Whether this publication still has explicit consent in its current session.
+    pub fn is_listening(&self, sid: &TrackSid) -> bool {
+        self.listening.get(sid).is_some_and(|(identity, session)| {
+            self.room.remote_participants().values().any(|p| {
+                &p.identity() == identity
+                    && &p.sid().to_string() == session
+                    && p.track_publications().contains_key(sid)
+            })
+        })
     }
-    screen_watched && track_name::decrypt(stream_names, track_name::STREAM_AUDIO, name).is_some()
-}
 
-pub(super) fn is_stream_audio(
-    publication: &RemoteTrackPublication,
-    stream_names: &HashMap<i64, Key>,
-) -> bool {
-    publication.source() == TrackSource::ScreenshareAudio
-        && track_name::decrypt(stream_names, track_name::STREAM_AUDIO, &publication.name())
-            .is_some()
-}
+    /// Discover shared sound before subscribing, including labels whose keys arrived late.
+    pub fn shared_audio(&self) -> Vec<(ParticipantIdentity, TrackSid, String)> {
+        self.room
+            .remote_participants()
+            .into_values()
+            .flat_map(|p| {
+                p.track_publications()
+                    .into_values()
+                    .filter_map(move |publication| {
+                        if publication.source() != TrackSource::ScreenshareAudio
+                            || publication.encryption_type() != EncryptionType::Gcm
+                        {
+                            return None;
+                        }
+                        let name = track_name::decrypt(
+                            &self.name_keys,
+                            track_name::APP_AUDIO,
+                            &publication.name(),
+                        )
+                        .or_else(|| {
+                            track_name::decrypt(
+                                &self.stream_names,
+                                track_name::STREAM_AUDIO,
+                                &publication.name(),
+                            )
+                        })?;
+                        Some((p.identity(), publication.sid(), name))
+                    })
+            })
+            .collect()
+    }
 
-/// Subscribe a publication when `wanted`; never unsubscribes (see `set_subscribed`).
-pub(super) fn subscribe_audio(
-    publication: &RemoteTrackPublication,
-    app_names: &HashMap<i64, Key>,
-    stream_names: &HashMap<i64, Key>,
-    screen_watched: bool,
-) {
-    if publication.kind() == TrackKind::Audio
-        && publication.encryption_type() == EncryptionType::Gcm
-        && !publication.is_desired()
-        && wanted(
-            publication.source(),
+    pub(super) fn audio_wanted(
+        &self,
+        p: &livekit::prelude::RemoteParticipant,
+        publication: &RemoteTrackPublication,
+    ) -> bool {
+        if self.blocked.contains(p.identity().as_str()) {
+            return false;
+        }
+        if publication.source() != TrackSource::ScreenshareAudio {
+            return true;
+        }
+        let consent =
+            self.listening.get(&publication.sid()) == Some(&(p.identity(), p.sid().to_string()));
+        let app = track_name::decrypt(&self.name_keys, track_name::APP_AUDIO, &publication.name())
+            .is_some();
+        let stream = track_name::decrypt(
+            &self.stream_names,
+            track_name::STREAM_AUDIO,
             &publication.name(),
-            app_names,
-            stream_names,
-            screen_watched,
         )
-    {
-        publication.set_subscribed(true);
+        .is_some();
+        consent
+            && (app
+                || (stream
+                    && p.track_publications().values().any(|video| {
+                        video.source() == TrackSource::Screenshare && video.is_desired()
+                    })))
     }
 }
 
@@ -119,10 +178,15 @@ impl VoiceRoom {
                 }
                 continue;
             }
-            let watched = (publications.values())
-                .any(|p| p.source() == TrackSource::Screenshare && p.is_desired());
-            for publication in publications.values() {
-                subscribe_audio(publication, &self.name_keys, &self.stream_names, watched);
+            for publication in publications
+                .values()
+                .filter(|p| p.kind() == TrackKind::Audio)
+            {
+                let wanted = publication.encryption_type() == EncryptionType::Gcm
+                    && self.audio_wanted(&participant, publication);
+                if wanted != publication.is_desired() {
+                    publication.set_subscribed(wanted);
+                }
             }
         }
     }
@@ -323,7 +387,6 @@ impl Drop for AbortOnDrop {
 
 #[cfg(test)]
 mod tests {
-    use zeroize::Zeroizing;
 
     use super::*;
 
@@ -333,26 +396,6 @@ mod tests {
 
     fn id(s: &str) -> ParticipantIdentity {
         ParticipantIdentity::from(s.to_owned())
-    }
-
-    #[test]
-    fn audio_is_received_only_once_its_label_opens() {
-        let old = HashMap::from([(3, Zeroizing::new([1; 32]))]);
-        let new = Zeroizing::new([2; 32]);
-        let both = HashMap::from([(3, old[&3].clone()), (4, new.clone())]);
-        let app = track_name::encrypt(&new, track_name::APP_AUDIO, 4, "Spotify").unwrap();
-        let sound = track_name::encrypt(&new, track_name::STREAM_AUDIO, 4, "Game").unwrap();
-        let mic = TrackSource::Microphone;
-        let shared = TrackSource::ScreenshareAudio;
-        assert!(wanted(mic, "microphone", &old, &old, false));
-        // Published in epoch 4 before its key arrived: neither app audio nor sound yet.
-        assert!(!wanted(shared, &app, &old, &old, false));
-        assert!(!wanted(shared, &sound, &old, &old, true));
-        // With the key, the app plays; the share's sound only while watching.
-        assert!(wanted(shared, &app, &both, &both, false));
-        assert!(!wanted(shared, &sound, &both, &both, false));
-        assert!(wanted(shared, &sound, &both, &both, true));
-        assert!(!wanted(shared, "plain name", &both, &both, true));
     }
 
     #[test]

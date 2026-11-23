@@ -132,6 +132,7 @@ pub(super) fn voice_only(command: &Command) -> bool {
             | Command::StreamAudio(_)
             | Command::ChangeScreen(..)
             | Command::Watch(..)
+            | Command::Listen(..)
             | Command::StopCamera
             | Command::CancelFile(_)
     ) || control::is_control(command)
@@ -205,6 +206,14 @@ pub(super) async fn voice_command(
             control::stop_hosting(ctx, live).await;
             change_screen(ctx, live, target, remote_control);
             false
+        }
+        Command::Listen(sid, on) => {
+            live.room.set_listening(
+                &TrackSid::try_from(sid.clone()).map_err(anyhow::Error::msg)?,
+                on,
+            )?;
+            ctx.audio.set_listening(&sid, on);
+            true
         }
         Command::Watch(sid, on) => {
             watch(ctx, live, sid, on)?;
@@ -418,6 +427,13 @@ pub(super) fn watch(ctx: &Ctx, live: &mut Live, sid: String, on: bool) -> Result
         return Ok(());
     };
     live.room.set_subscribed(&video.sid, on)?;
+    if !on {
+        for (identity, audio, _) in live.room.shared_audio() {
+            if identity == video.participant && !live.room.is_listening(&audio) {
+                ctx.audio.set_listening(audio.as_str(), false);
+            }
+        }
+    }
     // Already subscribed: no new event will come.
     if let (true, Some(track)) = (on, video.track) {
         ctx.video.add_track(sid, track.rtc_track());
@@ -869,15 +885,11 @@ fn send_roster(ctx: &Ctx, url: &Url, ids: &HashMap<String, Id>, state: &State, c
                             })
                             .or_insert(status);
                     }
-                    apps.entry(*person).or_default().extend(
-                        participant
-                            .track_publications()
-                            .into_keys()
-                            .filter_map(|sid| {
-                                let name = live.apps.get(&sid)?.clone();
-                                Some((sid, name))
-                            }),
-                    );
+                }
+            }
+            for (identity, sid, name) in live.room.shared_audio() {
+                if let Some(person) = ids.get(identity.as_str()) {
+                    apps.entry(*person).or_default().push((sid, name));
                 }
             }
             for names in apps.values_mut() {
@@ -997,6 +1009,19 @@ pub(super) async fn on_voice(
         roster(ctx, url, client, state, channel);
         return;
     };
+    if let Some(live) = &state.voice {
+        for (_, sid, _) in live.room.shared_audio() {
+            if !live.room.is_listening(&sid) {
+                ctx.audio.set_listening(sid.as_str(), false);
+            }
+        }
+        let allowed = live.room.remote_audio_tracks();
+        for sid in live.apps.keys() {
+            if !allowed.iter().any(|(_, active, _)| active == sid) {
+                ctx.audio.remove_track(sid.as_str());
+            }
+        }
+    }
     match event {
         RoomEvent::TrackSubscribed {
             track: RemoteTrack::Audio(track),
@@ -1059,6 +1084,7 @@ pub(super) async fn on_voice(
             ctx.video.remove_track(track.sid().as_str());
         }
         RoomEvent::Reconnecting => {
+            ctx.audio.stop_listening();
             tracing::info!("voice reconnecting");
             ctx.send(Update::Call(
                 url.clone(),
@@ -1067,6 +1093,7 @@ pub(super) async fn on_voice(
             ));
         }
         RoomEvent::Reconnected => {
+            ctx.audio.stop_listening();
             tracing::info!("voice reconnected");
             if let Some(live) = &mut state.voice {
                 live.deafened = None;
@@ -1101,6 +1128,8 @@ pub(super) async fn on_voice(
             }
         }
         RoomEvent::TrackUnpublished { publication, .. } => {
+            ctx.audio.set_listening(publication.sid().as_str(), false);
+            ctx.audio.remove_track(publication.sid().as_str());
             if let Some(live) = &mut state.voice {
                 control::unpublished(ctx, live, publication.sid().as_str());
             }

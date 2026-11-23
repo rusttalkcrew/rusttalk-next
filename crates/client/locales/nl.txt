@@ -1541,3 +1541,6 @@ clipboard.paste = Plakken
 clipboard.copy = Kopiëren
 clipboard.cut = Knippen
 clipboard.select_all = Alles selecteren
+
+call.listen = Luisteren
+call.stop_listening = Stoppen met luisteren

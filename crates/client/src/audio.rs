@@ -351,6 +351,7 @@ pub type StreamId = (Id, Option<String>);
 
 #[derive(Default)]
 struct Mixer {
+    listening: std::collections::HashSet<String>,
     tracks: HashMap<String, Track>,
     serial: u64,
     cues: VecDeque<i16>,
@@ -582,6 +583,7 @@ impl Audio {
         {
             let mut mixer = lock(&self.shared().mixer);
             mixer.tracks.clear();
+            mixer.listening.clear();
             mixer.cues.clear();
             mixer.cue_until = None;
         }
@@ -790,6 +792,9 @@ impl Audio {
             // Settings before the mixer, as everywhere, so a new mix can't slip between.
             let settings = lock(&self.shared().settings);
             let mut mixer = lock(&self.shared().mixer);
+            if stream.1.is_some() && !mixer.listening.contains(&sid) {
+                return;
+            }
             mixer.serial += 1;
             let serial = mixer.serial;
             // Replaces an older reader of the same track, which then stops.
@@ -834,6 +839,26 @@ impl Audio {
                 mixer.tracks.remove(&sid);
             }
         });
+    }
+
+    pub fn stop_listening(&self) {
+        let mut mixer = lock(&self.shared().mixer);
+        mixer.listening.clear();
+        mixer.tracks.retain(|_, track| track.stream.1.is_none());
+    }
+
+    pub fn is_listening(&self, sid: &str) -> bool {
+        lock(&self.shared().mixer).listening.contains(sid)
+    }
+
+    pub fn set_listening(&self, sid: &str, on: bool) {
+        let mut mixer = lock(&self.shared().mixer);
+        if on {
+            mixer.listening.insert(sid.to_owned());
+        } else {
+            mixer.listening.remove(sid);
+            mixer.tracks.remove(sid);
+        }
     }
 
     pub fn remove_track(&self, sid: &str) {
@@ -2019,6 +2044,44 @@ mod tests {
             }
         }
         assert_eq!(frames, 100);
+    }
+
+    #[test]
+    fn shared_playback_requires_consent_and_stop_discards_buffered_samples() {
+        let data = tempfile::tempdir().unwrap();
+        let audio = Audio::new(data.path()).unwrap();
+        let source = NativeAudioSource::new(AudioSourceOptions::default(), RATE, 1, 0);
+        let track = livekit::prelude::LocalAudioTrack::create_audio_track(
+            "synthetic",
+            livekit::webrtc::audio_source::RtcAudioSource::Native(source),
+        );
+        let shared = ([1; 32], Some("Music".to_owned()));
+        audio.add_track("TR_app".into(), shared.clone(), track.rtc_track());
+        assert!(lock(&audio.shared().mixer).tracks.is_empty());
+        audio.set_listening("TR_app", true);
+        audio.add_track("TR_app".into(), shared, track.rtc_track());
+        audio.add_track("TR_mic".into(), ([1; 32], None), track.rtc_track());
+        {
+            let mut mixer = lock(&audio.shared().mixer);
+            for t in mixer.tracks.values_mut() {
+                t.queue.extend(std::iter::repeat_n(1000, PRIME * 2));
+            }
+            assert!(mix_tracks(&mut mixer, false).iter().any(|&v| v != 0));
+        }
+        audio.set_listening("TR_app", false);
+        let mut mixer = lock(&audio.shared().mixer);
+        assert!(!mixer.tracks.contains_key("TR_app"));
+        assert!(
+            mix_tracks(&mut mixer, false).iter().any(|&v| v != 0),
+            "microphone continues"
+        );
+        assert!(
+            mix_tracks(&mut mixer, true).iter().all(|&v| v == 0),
+            "deafen still applies"
+        );
+        drop(mixer);
+        audio.stop_listening();
+        assert!(lock(&audio.shared().mixer).tracks.contains_key("TR_mic"));
     }
 
     #[test]
