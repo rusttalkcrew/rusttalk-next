@@ -87,6 +87,32 @@ fn open_answers(
     event.waiting_answers.len() != pending
 }
 
+/// Drop decrypted content signed by a removed device, even while this server is offline.
+pub(super) fn revalidate(
+    calendar: &mut Calendar,
+    revoked: &rusttalk_core::client::revocations::Revocations,
+) -> bool {
+    let mut changed = false;
+    for event in &mut calendar.events {
+        if revoked
+            .check(&event.record.author, &event.record.author_device)
+            .is_err()
+        {
+            changed |= event.details.take().is_some() || event.waiting_for_key;
+            event.waiting_for_key = false;
+        }
+        for (index, answer) in event.record.answers.iter().enumerate() {
+            if revoked.check(&answer.person, &answer.device).is_err() {
+                let before = (event.answers.len(), event.waiting_answers.len());
+                event.answers.retain(|(person, _)| *person != answer.person);
+                event.waiting_answers.retain(|i| *i != index);
+                changed |= before != (event.answers.len(), event.waiting_answers.len());
+            }
+        }
+    }
+    changed
+}
+
 /// Retry only records whose missing epoch has arrived. Verification still runs in full.
 pub(super) fn retry(
     calendar: &mut Calendar,
@@ -154,6 +180,8 @@ mod tests {
         };
 
         let (_, identity) = DeviceIdentity::create("calendar test")?;
+        let (words, attendee) = DeviceIdentity::create("attendee")?;
+        let attendee_cert = &attendee.certificate;
         let key = random_key()?;
         let details = Details {
             title: "Historical event".into(),
@@ -175,17 +203,17 @@ mod tests {
             server_id: context.server_id,
             event_id: context.id,
             epoch: 3,
-            device: context.author_device,
-            person: context.author,
+            device: attendee_cert.signing_key().to_bytes(),
+            person: *attendee_cert.person_id(),
         };
         let record = EventRecord {
             reminded_at: None,
             answers: vec![AnswerRecord {
-                person: context.author,
-                device: context.author_device,
-                certificate: encode(cert.public_bytes()?),
+                person: answer_context.person,
+                device: answer_context.device,
+                certificate: encode(attendee_cert.public_bytes()?),
                 epoch: answer_context.epoch,
-                envelope: encode(&answer_context.seal(&answer_key, &identity, Answer::Going)?),
+                envelope: encode(&answer_context.seal(&answer_key, &attendee, Answer::Going)?),
             }],
             id: context.id,
             author: context.author,
@@ -233,12 +261,16 @@ mod tests {
             |_| unreachable!(),
             |id, answer| {
                 assert_eq!(*id, answer_context.event_id);
-                Ok(answer_context.open(&answer_key, cert, &decode_bytes(&answer.envelope)?)?)
+                Ok(answer_context.open(
+                    &answer_key,
+                    attendee_cert,
+                    &decode_bytes(&answer.envelope)?,
+                )?)
             }
         ));
         assert_eq!(
             calendar.events[0].answers,
-            [(context.author, Answer::Going)]
+            [(answer_context.person, Answer::Going)]
         );
         assert!(!retry(
             &mut calendar,
@@ -246,6 +278,42 @@ mod tests {
             |_| unreachable!(),
             |_, _| unreachable!()
         ));
+        // Another connection learns a signed revocation after both records were opened.
+        // This check runs with no server connection or decryption keys.
+        let profile = tempfile::tempdir()?;
+        let revoked = rusttalk_core::client::revocations::Revocations::in_profile(profile.path());
+        let removal = rusttalk_core::identity::revoke_device(
+            &words,
+            &answer_context.person,
+            answer_context.device,
+        )?;
+        assert!(revoked.observe(&answer_context.person, &encode(&removal.to_bytes()))?);
+        let ctx = eframe::egui::Context::default();
+        let net = super::super::Net::new(
+            ctx.clone(),
+            std::sync::Arc::new(identity),
+            profile.path().into(),
+            crate::audio::Audio::new(profile.path())?,
+            crate::screen::Video::new(ctx),
+        )?;
+        let mut state = super::super::State {
+            last: Some(crate::server::Directory {
+                calendar: Some(calendar),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let url = Url::parse("https://offline.example")?;
+        state.revalidate(&net.ctx, &url, &revoked, None);
+        let Update::Directory(address, dir) = net.updates.try_recv()? else {
+            anyhow::bail!("expected updated attendance while offline");
+        };
+        assert_eq!(address, url);
+        let event = &dir.calendar.unwrap().events[0];
+        assert_eq!(event.details.as_ref(), Some(&details));
+        assert!(event.answers.is_empty());
+        state.revalidate(&net.ctx, &url, &revoked, None);
+        assert!(net.updates.try_recv().is_err());
         Ok(())
     }
 }
