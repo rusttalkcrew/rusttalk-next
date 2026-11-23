@@ -83,6 +83,15 @@ const AUTHOR: u8 = 128;
 const NORMAL: u8 = 0;
 
 impl MessageBody {
+    /// Use the same bounded format for locally sealed copies of verified messages.
+    pub fn cache_bytes(&self) -> Result<Zeroizing<Vec<u8>>, MessageError> {
+        self.encode(3)
+    }
+
+    pub fn from_cache(bytes: &[u8]) -> Result<Self, MessageError> {
+        Self::decode(3, bytes)
+    }
+
     /// Flags, in format 3 the kind byte and its fields, then text, references, stored
     /// attachments and the live offer.
     fn encode(&self, version: u8) -> Result<Zeroizing<Vec<u8>>, MessageError> {

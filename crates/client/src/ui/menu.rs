@@ -358,6 +358,7 @@ fn show<R>(popup: Popup, width: f32, add: impl FnOnce(&mut Menu) -> R) -> Option
     // What the menu held last frame: a click lands after it was shown.
     let keep = popup.get_id().with("keep open");
     let ctx = popup.ctx().clone();
+    let width = super::fit(&ctx, width);
     let popup = if ctx.data(|data| data.get_temp(keep)).unwrap_or(false) {
         popup.close_behavior(PopupCloseBehavior::CloseOnClickOutside)
     } else {
@@ -406,9 +407,56 @@ pub fn menu_above<R>(anchor: &Response, add: impl FnOnce(&mut Menu) -> R) -> Opt
     show(popup, MENU_WIDE, add)
 }
 
-/// A menu that opens at the pointer when `anchor` is right-clicked.
+/// Open at the pointer on a right click or a stationary long press.
 pub fn context_menu<R>(anchor: &Response, add: impl FnOnce(&mut Menu) -> R) -> Option<R> {
-    show(Popup::context_menu(anchor), MENU_WIDTH, add)
+    let ctx = &anchor.ctx;
+    let mut popup = Popup::context_menu(anchor);
+    // A selectable label or link can own the hold inside a row. Nested menus
+    // (e.g. a saved file inside a message) get first choice as children draw first.
+    if anchor.enabled()
+        && ctx.interaction_snapshot(|s| s.long_touched.is_some())
+        && anchor.container_contains_pointer()
+    {
+        let key = egui::Id::unique("handled context hold");
+        let pass = ctx.cumulative_pass_nr();
+        let first = ctx.data_mut(|data| {
+            let first = data.get_temp::<u64>(key) != Some(pass);
+            data.insert_temp(key, pass);
+            first
+        });
+        popup = popup.open_memory(first.then_some(egui::SetOpenCommand::Bool(true)));
+    }
+    show(popup, MENU_WIDTH, add)
+}
+
+#[cfg(any(target_os = "android", target_os = "ios", test))]
+/// A text field's menu on a phone: it opens at the finger on a long press, or
+/// when `open` (a tap on the field's cursor), and a plain tap closes it.
+pub fn touch_menu<R>(anchor: &Response, open: bool, add: impl FnOnce(&mut Menu) -> R) -> Option<R> {
+    let ctx = &anchor.ctx;
+    let at = anchor.id.with("touch menu at");
+    let opening = open || anchor.secondary_clicked();
+    if opening {
+        // A lifted finger leaves no pointer position, so keep where it pressed.
+        let pressed = ctx.input(|input| input.pointer.press_origin());
+        let pos = pressed.unwrap_or(anchor.rect.left_bottom());
+        ctx.data_mut(|data| data.insert_temp(at, pos));
+    }
+    let pos = ctx
+        .data(|data| data.get_temp(at))
+        .unwrap_or(anchor.rect.left_bottom());
+    let set = if opening {
+        Some(egui::SetOpenCommand::Bool(true))
+    } else if anchor.clicked() {
+        Some(egui::SetOpenCommand::Bool(false))
+    } else {
+        None
+    };
+    show(
+        Popup::menu(anchor).open_memory(set).at_position(pos),
+        MENU_WIDTH,
+        add,
+    )
 }
 
 /// Whether the menu of `anchor` (from `menu` or `menu_below`) is open.

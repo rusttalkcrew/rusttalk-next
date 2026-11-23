@@ -58,7 +58,7 @@ pub fn is_pin_mismatch(error: &(dyn std::error::Error + 'static)) -> bool {
     false
 }
 
-/// Build an HTTPS-only client using system trust or an explicit leaf certificate pin.
+/// Build an HTTPS-only client using the configured trust roots or an explicit leaf certificate pin.
 #[cfg(feature = "https-client")]
 pub fn https_client(
     pin: Option<Fingerprint>,

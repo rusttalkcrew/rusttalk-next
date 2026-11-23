@@ -103,6 +103,17 @@ Two people must never build the same thing. Before you write any code:
 - Check the change in a dark and a light theme and attach screenshots.
 - Keep accessibility labels.
 
+### Responsive UI
+
+- Every screen must work on phones, tablets and desktops. Build it from the
+  kit's responsive parts: `ui::dialog` (a full-screen sheet on phones),
+  `ui::setting_row` (stacks when narrow), `ui::trailing_row`, `ui::max_width`,
+  `ui::fit`, `ui::Width` and `ui::TOUCH`. Details in `docs/development.md`.
+- Never hard-code a width that can be wider than the window. Let text wrap.
+- Check every UI change at phone (390x844), tablet (820x1180) and desktop
+  (1100x700) size, in a dark and a light theme; screenshots at 390x844 and
+  1100x700.
+
 ### Pull requests
 
 - Title: what it does, in plain words. Body: follow

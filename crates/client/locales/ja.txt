@@ -15,6 +15,8 @@ settings.video = ビデオ
 settings.notifications = 通知
 settings.shortcuts = ショートカット
 settings.updates_new = アップデート (新着)
+settings.advanced = 詳細設定
+settings.terminal_hosting_help = 通話でこのアプリのシェルを共有できるようにします。オフにすると自分のターミナルの共有が終了します。
 settings.updates = アップデート
 settings.group_info = 情報
 settings.whats_new = 新機能
@@ -195,6 +197,7 @@ home.emoji_picker = 絵文字を選ぶ
 home.sticker_picker = スタンプ
 home.send = 送信
 home.message_hint = {channel} へメッセージを送信
+home.message_hint_short = メッセージ
 home.waiting_for_server = サーバーを待っています…
 home.no_wide_mentions = このチャットではロール、@everyone、@here をメンションできません。
 home.quote_sticker = {name}: スタンプ
@@ -376,6 +379,13 @@ admin.change_roles = ロールを変更
 admin.kick = キック
 admin.ban = BAN
 admin.server = サーバー
+admin.system_messages = システムメッセージ
+admin.system_help = 参加と退出をここに表示します。
+admin.system_first = 最初のテキストチャンネル
+admin.system_none = なし
+admin.system_missing = 利用できないチャンネル
+admin.system_update = 変更するにはサーバーを更新してください。
+admin.system_saved = システムメッセージの設定を保存しました。
 admin.overview = 概要
 admin.server_updates = サーバーの更新
 admin.update_waiting = 更新 {version} は通話が終わるまで待機中
@@ -456,6 +466,7 @@ audit.voice_moved = {actor} が {target} を別のボイスチャンネルへ移
 audit.left = {actor} が退出しました
 audit.member_roles_changed = {actor} が {target} のロールを変更しました
 audit.ownership_transferred = {actor} が {target} をオーナーにしました
+audit.device_id = デバイス {fingerprint}
 audit.joined = {actor} が参加しました
 audit.role_created = {actor} がロールを作成しました
 audit.role_renamed = {actor} がロールの名前を変更しました
@@ -634,9 +645,7 @@ role.moderator = モデレーター
 role.member = メンバー
 role.new = 新しいロール
 server.default_category = チャンネル
-notice.new_device_detail = {id}\n新しいデバイス {fingerprint} ({device})
 server.default_channel = チャンネル
-notice.removed_device_detail = {id}\n削除されたデバイス {fingerprint} ({device})
 
 # crates/client/src/call.rs
 call.quality_720 = 720p — 遅い回線でも軽い
@@ -941,15 +950,16 @@ welcome.skip = スキップ
 app.create_account = アカウントを作成
 app.have_account = すでにアカウントがあります
 app.words_title = 復元ワード
-app.words_text = この 24 個の単語を順番どおりに紙に書き、大切に保管してください。アカウントに戻る唯一の手段です。表示されるのは一度だけです。
+app.words_text = 順番どおりに書き留めて、大切に保管してください。アカウントに戻る唯一の手段です。
 app.wrote_them = 書き留めました
+app.copied = コピーしました
+app.words_manager = ヒント: パスワードマネージャーに保存すると安全です。
 app.check_title = 単語の確認
 app.check_text = リストにある次の単語を入力してください。
 app.word_number = {number} 番目の単語
 app.confirm = 確認
-app.start_over = 最初からやり直す
 app.restore_title = 復元ワードでサインイン
-app.restore_text = 24 個の復元ワードを順番どおりに、スペースで区切って入力してください。このコンピューターがアカウントの新しいデバイスになります。
+app.restore_text = 24 個の単語を順番どおりに入力するか貼り付けてください。このデバイスがアカウントに追加されます。
 app.recovery_words = 復元ワード
 app.sign_in = サインイン
 
@@ -958,6 +968,9 @@ keys.section = 鍵の保存場所
 keys.choose_title = 鍵をどこに保存しますか？
 keys.no_keychain = このデバイスにはキーチェーンがありません（Steam Deck のゲームモードでよくあります）。RustTalk の鍵をどこに保存しますか？
 keys.password_only = このデバイスでは、RustTalk は鍵をパスワードで保護します。起動するたびに入力してください。
+keys.no_keychain_phone = キーチェーンを使用できないため、RustTalk は鍵をパスワードで保護します。起動するたびに入力してください。
+keys.no_android_keystore = Android Keystore を使用できません。起動時に鍵のロックを解除するためのパスワードを設定してください。
+keys.android_keystore = Android Keystore
 keys.keychain = キーチェーン
 keys.keychain_help = システムのキーチェーンに鍵を保存します。
 keys.file = 保護されたファイル
@@ -1099,6 +1112,9 @@ crop.zoom = ズーム
 # crates/client/src/camera.rs
 camera.stopped = カメラが停止しました。
 camera.none = カメラが見つかりません。
+camera.front = フロントカメラ
+camera.back = 背面カメラ
+camera.permission = ビデオをオンにするにはカメラへのアクセスを許可してください。
 camera.start_failed = カメラを起動できませんでした。ほかのアプリが使っていませんか?
 camera.camera = カメラ
 camera.first = 最初のカメラ
@@ -1169,6 +1185,9 @@ find.server_unreachable = 現在このサーバーに接続できません。後
 
 # crates/client/src/net/voice.rs
 voice.screen_failed = 画面を共有できませんでした。
+voice.need_mic = 通話に参加するにはマイクへのアクセスを許可してください。
+voice.audio_reset = iPhoneのオーディオが再起動しました。もう一度通話に参加してください。
+voice.unavailable = この端末では音声通話を利用できません。
 voice.listen_only = ここでは聞くことはできますが、話すことはできません。
 voice.disconnected = ボイスが切断されました。
 voice.removed = ボイスチャンネルから外されました。
@@ -1214,6 +1233,7 @@ startup.message = RustTalk を起動できませんでした。\n\n{error}\n\n{l
 
 # Direct messages (#100)
 home.waiting_try_again = サーバーを待っています。少ししてからもう一度お試しください。
+home.unsent_after_close = メッセージが送信されなかった可能性があります。
 home.dm_read_only = {name} と共通のサーバーがなくなりました。メッセージは読めますが、新しく送ることはできません。
 home.no_shared_server = 共通のサーバーなし
 
@@ -1412,3 +1432,9 @@ terminal.take_back = 取り戻す
 terminal.denied = {name} は入力を許可しませんでした。
 terminal.taken_back = {name} が入力を取り消しました。
 terminal.paste_too_long = 他の人のターミナルに貼り付けるには長すぎます。
+
+# crates/client/src/phone_clipboard.rs
+clipboard.paste = 貼り付け
+clipboard.copy = コピー
+clipboard.cut = 切り取り
+clipboard.select_all = すべて選択

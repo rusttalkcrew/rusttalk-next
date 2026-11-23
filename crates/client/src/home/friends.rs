@@ -57,6 +57,7 @@ impl Home {
         };
         for index in targets {
             self.servers[*index].send(Command::Send(Draft {
+                queued: Default::default(),
                 id: *id,
                 channel: [0; 32],
                 peer: Some(person),
@@ -143,7 +144,7 @@ impl Home {
 /// The Friends page: tabs, and a row per person with what can be done.
 pub fn view(ui: &mut Ui, home: &mut Home) {
     let now = ui.input(|input| input.time);
-    pane_title(ui, "friends-title", t!("friends.title"), None, false, None);
+    pane_title(ui, "friends-title", t!("friends.title"), None, None);
     super::toast_line(ui, &mut home.toast);
     let incoming = (home.friends.contacts())
         .filter(|(_, c)| c.relation == Relation::Incoming)

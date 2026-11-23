@@ -62,7 +62,15 @@ const FIELD_WIDTH: f32 = 280.0;
 /// Show the character count once a message gets this long.
 const COUNT_FROM: usize = 1_800;
 /// The buttons in the message bar.
-const COMPOSER_BUTTON: f32 = 36.0;
+const COMPOSER_BUTTON: f32 = ui::ICON_BUTTON + 4.0;
+/// Above and below a line of text in the message bar, centring it on the buttons
+/// (a line of body text is about 18 points tall).
+const COMPOSER_TEXT_PAD: i8 = ((COMPOSER_BUTTON - 18.0) / 2.0) as i8;
+/// Around the buttons inside the message bar.
+const COMPOSER_PADDING: f32 = ui::SPACE_XS + 2.0;
+/// The message bar's height with one line of text. The user bar in the bottom left
+/// is as tall plus its frame, so both share one centre line.
+pub const COMPOSER_HEIGHT: f32 = COMPOSER_BUTTON + 2.0 * COMPOSER_PADDING;
 const DAY: u32 = 24 * 60 * 60;
 /// Seconds without any input before "Online" turns into "Away" by itself.
 const AWAY_AFTER: f64 = 10.0 * 60.0;
@@ -122,6 +130,10 @@ pub struct Home {
     find: Find,
     dialog: Option<Dialog>,
     pub toast: Option<(String, f64)>,
+    /// Android: the note that messages were left unsent, pending until its own
+    /// notice was drawn (other toasts don't count).
+    #[cfg(target_os = "android")]
+    unsent: Option<PathBuf>,
     pub settings: Option<Tab>,
     pub voice: Voice,
     pub hotkeys: crate::hotkeys::Hotkeys,
@@ -287,6 +299,8 @@ pub enum Tab {
     Devices,
     Notifications,
     Shortcuts,
+    #[cfg(target_os = "android")]
+    Advanced,
     Updates,
     About,
     WhatsNew,
@@ -294,6 +308,8 @@ pub enum Tab {
 
 impl Home {
     pub fn stop_for_sign_out(&mut self) {
+        #[cfg(target_os = "android")]
+        call::leave(self);
         self.net.stop_for_sign_out();
         self.voice.audio.stop_saving();
     }
@@ -301,6 +317,8 @@ impl Home {
     pub fn new(identity: DeviceIdentity, ctx: &egui::Context, data: PathBuf) -> Result<Self> {
         let identity = Arc::new(identity);
         let data_dir = data.clone();
+        #[cfg(target_os = "android")]
+        let unsent = crate::net::unsent_note(&data_dir);
         let fresh = !data.join("voice.json").exists();
         let audio = Audio::new(&data)?;
         // After an update, open "What's new" once; a first start has nothing new yet.
@@ -363,6 +381,8 @@ impl Home {
             },
             dialog: None,
             toast: None,
+            #[cfg(target_os = "android")]
+            unsent,
             settings: announce.then_some(Tab::WhatsNew),
             hotkeys: crate::hotkeys::Hotkeys::new(ctx, audio.clone()),
             voice: Voice::new(audio, video, runtime),
@@ -431,6 +451,7 @@ impl Home {
         self.dialog = None;
         self.server_settings = None;
         let server = self.servers.remove(index);
+        self.net.forget(&server.address);
         let mut settings = self.voice.audio.settings();
         settings.hide_offline.left(&server.address);
         settings.left(&server.address);
@@ -534,6 +555,34 @@ impl Home {
             let thread = self.threads.entry(dm.peer).or_default();
             if thread.open(&server.address, dm.channel) {
                 server.send(Command::Open(dm.channel));
+            }
+        }
+    }
+
+    fn restore_pages(&mut self, index: usize, pages: Vec<(Id, Vec<Msg>)>) {
+        let server = &mut self.servers[index];
+        for (channel, items) in pages {
+            if let Some(dm) = server.dir.dms.iter().find(|dm| dm.channel == channel) {
+                self.threads.entry(dm.peer).or_default().add(
+                    &server.address,
+                    channel,
+                    items,
+                    false,
+                    None,
+                    &dm::Pair {
+                        me: *self.identity.certificate.person_id(),
+                        peer: dm.peer,
+                        deleted: &self.dm_deleted,
+                    },
+                );
+            } else if server
+                .dir
+                .categories
+                .iter()
+                .flat_map(|c| &c.channels)
+                .any(|c| c.id == channel)
+            {
+                server.chats.entry(channel).or_default().merge(items, false);
             }
         }
     }
@@ -1023,6 +1072,53 @@ impl Home {
                     Err(error) => self.find.error = Some(error),
                 }
             }
+            Update::Cached(address, dir, pages) => {
+                if let Some(i) = self.index(&address) {
+                    let server = &mut self.servers[i];
+                    server.dir = *dir;
+                    for (channel, items) in &pages {
+                        if !items.is_empty()
+                            && !server.is_voice(channel)
+                            && !server.dir.dms.iter().any(|dm| dm.channel == *channel)
+                        {
+                            server.open = Some(*channel);
+                        }
+                    }
+                    self.restore_pages(i, pages);
+                }
+            }
+            Update::Inaccessible(address, ids) => {
+                if let Some(i) = self.index(&address) {
+                    let server = &mut self.servers[i];
+                    for dm in &server.dir.dms {
+                        if ids.contains(&dm.channel)
+                            && let Some(thread) = self.threads.get_mut(&dm.peer)
+                        {
+                            thread.forget(&address);
+                        }
+                    }
+                    server.chats.retain(|id, _| !ids.contains(id));
+                    server.dir.discard_channels(&ids);
+                    if server.open.is_some_and(|id| ids.contains(&id)) {
+                        server.open = None;
+                    }
+                }
+            }
+            Update::ResetHistory(address, pages) => {
+                if let Some(i) = self.index(&address) {
+                    for (channel, _) in &pages {
+                        if let Some(peer) = self.dm_peer(i, channel) {
+                            if let Some(thread) = self.threads.get_mut(&peer) {
+                                thread.forget(&address);
+                            }
+                        } else if let Some(chat) = self.servers[i].chats.get_mut(channel) {
+                            chat.clear_history();
+                        }
+                    }
+                    self.restore_pages(i, pages);
+                    self.load_dms(i);
+                }
+            }
             Update::Status(address, status) => {
                 let Some(index) = self.index(&address) else {
                     return;
@@ -1062,7 +1158,12 @@ impl Home {
                     server.order_unavailable = false;
                     // Opens that failed while offline.
                     for (channel, chat) in &server.chats {
-                        if chat.loading && chat.messages.is_empty() {
+                        if chat.loading
+                            && chat
+                                .messages
+                                .iter()
+                                .all(|m| matches!(m.body, Body::Notice { .. }))
+                        {
                             let _ = server.commands.send(Command::Open(*channel));
                         }
                     }
@@ -1070,6 +1171,14 @@ impl Home {
                         for channel in thread.unanswered(&address) {
                             server.send(Command::Open(channel));
                         }
+                    }
+                }
+                if matches!(status, Status::Stopped(_)) {
+                    server.chats.clear();
+                    server.names.clear();
+                    server.dir = Directory::default();
+                    for thread in self.threads.values_mut() {
+                        thread.forget(&address);
                     }
                 }
                 server.status = status;
@@ -1140,6 +1249,29 @@ impl Home {
                     {
                         self.next_backfill = now;
                     }
+                    if let Some(old) = server.dir.notice_channel()
+                        && Some(old) != dir.notice_channel()
+                        && let Some(chat) = server.chats.get_mut(&old)
+                    {
+                        chat.messages
+                            .retain(|msg| !matches!(msg.body, Body::Notice { .. }));
+                    }
+                    for old in &server.dir.dms {
+                        if !dir
+                            .dms
+                            .iter()
+                            .any(|dm| dm.peer == old.peer && dm.channel == old.channel)
+                            && let Some(thread) = self.threads.get_mut(&old.peer)
+                        {
+                            thread.forget(&address);
+                        }
+                    }
+                    server.chats.retain(|id, _| {
+                        dir.categories
+                            .iter()
+                            .flat_map(|c| &c.channels)
+                            .any(|c| &c.id == id)
+                    });
                     server.dir = *dir;
                     self.profile_loaded(index);
                     if changed
@@ -1185,6 +1317,10 @@ impl Home {
                     }
                     let me = *self.identity.certificate.person_id();
                     let thread = self.threads.entry(peer).or_default();
+                    if !older && at_start.is_some() {
+                        thread.forget(&server);
+                        thread.open(&server, channel);
+                    }
                     if older && !items.is_empty() {
                         thread.chat.keep_scroll = Some(thread.chat.content_height);
                     }
@@ -1209,6 +1345,14 @@ impl Home {
                 let chat = self.servers[index].chats.entry(channel).or_default();
                 if older && !items.is_empty() {
                     chat.keep_scroll = Some(chat.content_height);
+                }
+                if !older && at_start.is_some() {
+                    let notices: Vec<_> = chat
+                        .messages
+                        .extract_if(.., |m| matches!(m.body, Body::Notice { .. }))
+                        .collect();
+                    chat.clear_history();
+                    chat.messages = notices;
                 }
                 chat.merge(items, older);
                 if let Some(at_start) = at_start {
@@ -1281,15 +1425,13 @@ impl Home {
                     thread.page_failed(&address, channel, missing);
                 }
             }
-            Update::Notice(address, person, msg) => {
-                let Some(index) = self.index(&address) else {
-                    return;
-                };
-                for chat in self.servers[index].chats.values_mut() {
-                    chat.merge(vec![msg.clone()], false);
-                }
-                if let Some(thread) = self.threads.get_mut(&person) {
-                    thread.chat.merge(vec![msg], false);
+            Update::Notice(address, channel, msg) => {
+                if let Some(index) = self.index(&address) {
+                    self.servers[index]
+                        .chats
+                        .entry(channel)
+                        .or_default()
+                        .merge(vec![msg], false);
                 }
             }
             Update::DmReady(address, channel) => {
@@ -1765,6 +1907,15 @@ pub fn show(
             }
         }
     }
+    // A phone had to end while messages were still on their way: say so in a
+    // chat, as the toast whenever no other one shows, until this notice was drawn.
+    #[cfg(target_os = "android")]
+    if home.unsent.is_some()
+        && unsent_notice(&mut home.toast, drawn_toast(ui.ctx()), now)
+        && let Some(note) = home.unsent.take()
+    {
+        let _ = std::fs::remove_file(note);
+    }
     if home.toast.as_ref().is_some_and(|(_, until)| *until < now) {
         home.toast = None;
     }
@@ -1817,26 +1968,26 @@ pub fn show(
     let member_server = home.member_server().filter(|_| !list);
     // On phones the member list covers the column, and Back closes it first.
     let members_cover = phone && member_server.is_some() && home.layout.members_shown();
-    if phone && !list {
+    // Back sits in the open pane's header when it has one (`header_back`), else in
+    // a bar of its own; which one is known from the last frame.
+    let back_id = phone_back_id();
+    let last: PhoneBack = ui.data(|data| data.get_temp(back_id)).unwrap_or_default();
+    let wants_back = phone && !list;
+    let in_header = wants_back && !members_cover;
+    ui.data_mut(|data| {
+        data.insert_temp(
+            back_id,
+            PhoneBack {
+                wanted: in_header,
+                ..PhoneBack::default()
+            },
+        );
+    });
+    let mut back = false;
+    if wants_back && !(in_header && last.in_header) {
         Panel::top("phone-back")
             .frame(panel_frame(colors.side))
-            .show(ui, |ui| {
-                if ui::icon_button(
-                    ui,
-                    "⬅",
-                    t!("common.back"),
-                    ui::Look::Ghost,
-                    Vec2::new(36.0, 32.0),
-                )
-                .clicked()
-                {
-                    if members_cover {
-                        home.layout.toggle_members();
-                    } else {
-                        home.layout.list = true;
-                    }
-                }
-            });
+            .show(ui, |ui| back = back_button(ui).clicked());
     }
     let mut members = None;
     if let Some(index) = member_server {
@@ -1893,6 +2044,18 @@ pub fn show(
                 }
             });
     }
+    let header: PhoneBack = ui.data(|data| data.get_temp(back_id)).unwrap_or_default();
+    if header.in_header != last.in_header {
+        ui.ctx()
+            .request_discard("Back moved between its bar and the header");
+    }
+    if back || header.clicked {
+        if members_cover {
+            home.layout.toggle_members();
+        } else {
+            home.layout.list = true;
+        }
+    }
     // Resize handles go last so they sit above the panels on both sides of each edge.
     let mut dragging = false;
     if let Some(channels) = channels.filter(|_| !phone) {
@@ -1931,6 +2094,39 @@ pub fn show(
     updates.dialog(ui.ctx());
     crop_dialog(ui.ctx(), home);
     action
+}
+
+/// Back on a phone: in the open pane's header, or in a bar of its own.
+#[derive(Clone, Copy, Default)]
+struct PhoneBack {
+    /// The pane's header should show it this frame.
+    wanted: bool,
+    /// A header showed it.
+    in_header: bool,
+    clicked: bool,
+}
+
+fn phone_back_id() -> UiId {
+    UiId::unique("phone back")
+}
+
+fn back_button(ui: &mut Ui) -> Response {
+    let size = Vec2::new(ui::ICON_BUTTON.max(36.0), ui::ICON_BUTTON);
+    ui::icon_button(ui, "⬅", t!("common.back"), ui::Look::Ghost, size)
+}
+
+/// Phones: Back at the start of a pane's header, so the header and the Back bar
+/// take one row together.
+fn header_back(ui: &mut Ui) {
+    let id = phone_back_id();
+    let Some(mut back) = ui.data(|data| data.get_temp::<PhoneBack>(id)) else {
+        return;
+    };
+    if back.wanted {
+        back.in_header = true;
+        back.clicked |= back_button(ui).clicked();
+        ui.data_mut(|data| data.insert_temp(id, back));
+    }
 }
 
 fn show_compatibility(ui: &mut Ui, home: &mut Home, index: usize) -> bool {
@@ -2415,11 +2611,13 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
     let categories = &server.dir.categories;
     let can_manage = perms.manage_channels && online;
     let can_move = can_manage && !server.order_unavailable && reorder::order(categories).is_some();
+    // On phones, drag scrolls the list; the hold menu still offers every move.
+    let can_drag = can_move && !ui::TOUCH;
     let area = ScrollArea::vertical().animated(false);
     area.show_viewport(ui, |ui, viewport| {
         ui.spacing_mut().item_spacing.y = 2.0;
         let list_id = UiId::unique(("channel order", &server.address));
-        let mut list = reorder::List::begin(ui, list_id, categories, can_move);
+        let mut list = reorder::List::begin(ui, list_id, categories, can_drag);
         for category in categories {
             let block = category.id.unwrap_or_default();
             if let Some(id) = category.id.filter(|_| !category.name.is_empty()) {
@@ -2448,7 +2646,7 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
                     .inner
                 });
                 if can_manage {
-                    let header = if can_move {
+                    let header = if can_drag {
                         header
                     } else {
                         header.interact(Sense::click())
@@ -2807,7 +3005,7 @@ fn member_list(ui: &mut Ui, home: &mut Home, index: usize) {
 fn join(ui: &mut Ui, home: &mut Home) {
     ui.vertical_centered(|ui| {
         ui.add_space(ui.available_height() * 0.2);
-        ui.set_max_width(440.0);
+        ui::max_width(ui, 440.0);
         match &mut home.join {
             Join::Idle(error) => {
                 // A device restored from the words knows no servers until it signs in to one,
@@ -2995,13 +3193,9 @@ fn official_servers(ui: &mut Ui, home: &mut Home) {
     }
     for listed in shown {
         ui::card(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = 2.0;
-                    ui.label(ui::bold(&listed.name));
-                    ui.label(ui::caption(host(&listed.server.address)));
-                });
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui::trailing_row(
+                ui,
+                |ui| {
                     let join = ui::primary(ui, t!("common.join"));
                     join.widget_info(|| {
                         WidgetInfo::labeled(
@@ -3024,8 +3218,13 @@ fn official_servers(ui: &mut Ui, home: &mut Home) {
                     } else if join.clicked() {
                         pick = Some(listed.clone());
                     }
-                });
-            });
+                },
+                |ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    ui.add(Label::new(ui::bold(&listed.name)).wrap());
+                    ui.add(Label::new(ui::caption(host(&listed.server.address))).truncate());
+                },
+            );
         });
     }
     if !settings.dismissed_official.is_empty() && ui.link(t!("home.show_official_again")).clicked()
@@ -3164,7 +3363,7 @@ fn directory(settings: &crate::audio::Settings) -> Result<(url::Url, Option<Fing
 fn find(ui: &mut Ui, home: &mut Home) {
     ui.vertical_centered(|ui| {
         ui.add_space(ui::SPACE_XL);
-        ui.set_max_width(640.0);
+        ui::max_width(ui, 640.0);
         ui.label(ui::heading(t!("home.find_servers")));
         if ui.link(t!("home.join_with_invite")).clicked() {
             home.view = View::Join;
@@ -3200,12 +3399,9 @@ fn find(ui: &mut Ui, home: &mut Home) {
             ui.with_layout(Layout::top_down(Align::Min), |ui| {
                 for listed in &find.results {
                     ui::card(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(ui::title(&listed.name));
-                            if listed.open {
-                                ui::badge(ui, t!("home.open_joining"), ui::accent(ui).base);
-                            }
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui::trailing_row(
+                            ui,
+                            |ui| {
                                 let join = ui
                                     .add_enabled_ui(!find.checking, |ui| {
                                         ui::primary(ui, t!("common.join"))
@@ -3221,8 +3417,17 @@ fn find(ui: &mut Ui, home: &mut Home) {
                                 if join.clicked() {
                                     pick = Some(listed.clone());
                                 }
-                            });
-                        });
+                            },
+                            |ui| {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.add(Label::new(ui::title(&listed.name)).wrap());
+                                    if listed.open {
+                                        let fill = ui::accent(ui).base;
+                                        ui::badge(ui, t!("home.open_joining"), fill);
+                                    }
+                                });
+                            },
+                        );
                         if !listed.description.is_empty() {
                             ui.add(Label::new(&listed.description).wrap());
                         }
@@ -3310,8 +3515,6 @@ fn notice(name: &str, action: &str) -> String {
     match action {
         "joined" => t!("notice.joined", name = name),
         "left" => t!("notice.left", name = name),
-        "added a new device" => t!("notice.added_device", name = name),
-        "removed a device" => t!("notice.removed_device", name = name),
         other => format!("{name} {other}"),
     }
 }
@@ -3328,26 +3531,50 @@ fn time(at: i64) -> String {
     }
 }
 
-/// A voice channel: the call on top and its chat below. Issue #63 replaces this
-/// fixed split with a draggable one and layout choices; only this function changes.
+/// A voice channel shares its chat pane with the stage only while someone is in voice.
 fn voice_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
-    let title = home.servers[index]
+    let server = &home.servers[index];
+    let occupied = home.voice.in_call(server, &channel)
+        || server
+            .voice
+            .get(&channel)
+            .is_some_and(|peers| !peers.is_empty());
+    let title = server
         .chat_title(&channel)
         .map(|(name, _)| name)
         .unwrap_or_default();
-    pane_title(
+    let mut join = false;
+    pane_title_with(
         ui,
         "room-title",
         &format!("🔊 {title}"),
-        Some(&mut home.layout),
-        true,
         Some(channel),
+        |ui| {
+            layout::members_button(ui, &mut home.layout);
+            ui.add_space(ui::SPACE_S);
+            if occupied {
+                layout::split_buttons(ui, &mut home.layout.split);
+            } else {
+                join = ui
+                    .add_enabled_ui(server.status == Status::Online, |ui| {
+                        ui::primary(ui, t!("call.join_voice")).clicked()
+                    })
+                    .inner;
+            }
+        },
     );
+    if join {
+        call::join(home, index, channel);
+    }
     // Problems from the call and the voice panel show here; the chat has its own line.
     toast_line(ui, &mut home.toast);
     ui.add_space(ui::SPACE_S);
     let area = ui.available_rect_before_wrap();
-    let (stage, divider, chat) = layout::split(area, &home.layout.split);
+    let (stage, divider, chat) = if occupied {
+        layout::split(area, &home.layout.split)
+    } else {
+        (None, None, Some(area))
+    };
     if let Some(rect) = stage {
         let mut ui = ui.new_child(UiBuilder::new().max_rect(rect));
         call::stage(&mut ui, home, index, channel);
@@ -3473,13 +3700,13 @@ fn chat_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
         return;
     }
     let server = &mut home.servers[index];
-    let mut chat = server.chats.remove(&channel).unwrap_or_else(|| {
-        // First look at this channel: load it, then follow live updates.
+    let mut chat = server.chats.remove(&channel).unwrap_or_default();
+    // A membership notice can arrive before anyone has opened this channel.
+    if !chat.opened && server.status == Status::Online {
+        chat.opened = true;
         server.send(Command::Open(channel));
-        let mut chat = Chat::default();
         chat.loading = true;
-        chat
-    });
+    }
     if files_shown(ui.ctx(), channel) {
         files_view(ui, home, index, channel, &mut chat);
     } else {
@@ -3536,7 +3763,7 @@ fn files_view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat: &mu
             .map_or_else(String::new, |c| format!("{} {}", channel_icon(c), c.name));
         let in_server = matches!(home.view, View::Server(_));
         let layout = in_server.then_some(&mut home.layout);
-        pane_title(ui, "chat-title", &title, layout, false, Some(channel));
+        pane_title(ui, "chat-title", &title, layout, Some(channel));
         toast_line(ui, &mut home.toast);
     }
     let server = &home.servers[index];
@@ -3630,7 +3857,6 @@ fn page_view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat: &mut
         "chat-title",
         &title,
         in_server.then_some(&mut home.layout),
-        false,
         Some(channel),
     );
     toast_line(ui, &mut home.toast);
@@ -3647,7 +3873,7 @@ fn page_view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat: &mut
     let dir = &server.dir;
     let to = To::Channel(server.address.clone());
     let now = ui.input(|input| input.time);
-    // Member and device notices are not part of the page.
+    // Membership notices are not part of the page.
     // A copy, so the editor below can change the chat's staged pictures.
     let page = (chat.messages.iter().rev())
         .find(|msg| matches!(msg.body, Body::Text(_) | Body::Unreadable) && msg.sticker.is_none())
@@ -3823,6 +4049,7 @@ fn page_view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat: &mut
                     keep.extend(card.cloned());
                 }
                 let draft = Draft {
+                    queued: Default::default(),
                     id: *id,
                     channel,
                     peer: None,
@@ -3984,14 +4211,7 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
             At::Channel(_, channel) => Some(channel),
             At::Dm(_) => None,
         };
-        pane_title(
-            ui,
-            "chat-title",
-            &title,
-            in_server.then_some(layout),
-            false,
-            files,
-        );
+        pane_title(ui, "chat-title", &title, in_server.then_some(layout), files);
     }
     let act = friends::dm_card(ui, relation, request, &name);
     let (hovered, dropped) = ui.input(|input| {
@@ -4018,12 +4238,11 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
         files.paste(ui.ctx(), ask);
     }
     let attach = Panel::bottom("composer")
-        // It floats over the chat: no line above, room around it.
+        // It floats over the chat: no line above, and the pane's margin on the
+        // sides and below it, so its centre lines up with the user bar's.
         .frame(Frame::new().inner_margin(Margin {
-            left: 8,
-            right: 8,
-            top: 4,
-            bottom: 8,
+            top: ui::SPACE_S as i8,
+            ..Margin::ZERO
         }))
         .show_separator_line(false)
         .show(ui, |ui| {
@@ -4211,6 +4430,7 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
     chat.content_height = content;
     // A DM asks each copy on its own, so one slow server doesn't hold up the others.
     if settled
+        && online
         && output.state.clamped_offset().y < 4.0
         && (!chat.loading || matches!(at, At::Dm(_)))
         && !chat.at_start
@@ -4387,6 +4607,7 @@ fn poll_draft(channel: Id, text: String, part: PollPart) -> Option<Draft> {
         return None;
     };
     Some(Draft {
+        queued: Default::default(),
         id: *id,
         channel,
         peer: None,
@@ -4512,8 +4733,21 @@ pub fn pane_title(
     id: &'static str,
     title: &str,
     members: Option<&mut layout::Layout>,
-    split: bool,
     files: Option<Id>,
+) {
+    pane_title_with(ui, id, title, files, |ui| {
+        if let Some(layout) = members {
+            layout::members_button(ui, layout);
+        }
+    });
+}
+
+fn pane_title_with(
+    ui: &mut Ui,
+    id: &'static str,
+    title: &str,
+    files: Option<Id>,
+    controls: impl FnOnce(&mut Ui),
 ) {
     Panel::top(id)
         .frame(Frame::new().inner_margin(Margin {
@@ -4525,18 +4759,16 @@ pub fn pane_title(
         .show_separator_line(true)
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(ui::title(title));
+                header_back(ui);
+                // Buttons first, so a long name is cut short instead of pushing them off.
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if let Some(layout) = members {
-                        layout::members_button(ui, layout);
-                        if split {
-                            ui.add_space(ui::SPACE_S);
-                            layout::split_buttons(ui, &mut layout.split);
-                        }
-                    }
+                    controls(ui);
                     if let Some(channel) = files {
                         files_button(ui, channel);
                     }
+                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                        ui.add(Label::new(ui::title(title)).truncate());
+                    });
                 });
             });
         });
@@ -4558,6 +4790,7 @@ fn dm_title(ui: &mut Ui, home: &Home, peer: Id) -> Option<(usize, person::Pick)>
         .show_separator_line(true)
         .show(ui, |ui| {
             ui.horizontal(|ui| {
+                header_back(ui);
                 let Some(index) = index else {
                     ui.label(ui::title(format!("@ {name}")));
                     return;
@@ -4601,9 +4834,38 @@ fn composer_id(channel: Id) -> UiId {
     UiId::unique(("composer", channel))
 }
 
+/// The unsent notice: the toast whenever no other one shows. Done (`true`) only
+/// once its own text was drawn.
+#[cfg(any(target_os = "android", test))]
+fn unsent_notice(toast: &mut Option<(String, f64)>, drawn: Option<String>, now: f64) -> bool {
+    let notice = t!("home.unsent_after_close");
+    if drawn.as_deref() == Some(notice) {
+        return true;
+    }
+    if toast.is_none() {
+        *toast = Some((notice.to_owned(), now + 10.0));
+    }
+    false
+}
+
+#[cfg(target_os = "android")]
+fn drawn_toast_id() -> UiId {
+    UiId::unique("drawn toast")
+}
+
+/// The toast drawn since the last time this was asked.
+#[cfg(target_os = "android")]
+fn drawn_toast(ctx: &egui::Context) -> Option<String> {
+    ctx.data_mut(|data| data.remove_temp::<Option<String>>(drawn_toast_id()))
+        .flatten()
+}
+
 /// The latest problem, in red, with a close button.
 pub fn toast_line(ui: &mut Ui, toast: &mut Option<(String, f64)>) {
     if let Some((text, _)) = toast.as_ref() {
+        #[cfg(target_os = "android")]
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(drawn_toast_id(), Some(text.clone())));
         let mut close = false;
         ui.horizontal(|ui| {
             ui.colored_label(ui::colors(ui).danger_text, text.as_str());
@@ -4676,7 +4938,7 @@ fn composer(
     let bar = Frame::new()
         .fill(ui::colors(ui).composer)
         .corner_radius(ui::RADIUS_WINDOW)
-        .inner_margin(Margin::same(ui::SPACE_XS as i8 + 2))
+        .inner_margin(Margin::same(COMPOSER_PADDING as i8))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             if !chat.staged.is_empty() {
@@ -4716,7 +4978,7 @@ fn composer(
                 });
                 // Room for the buttons right of the box: emoji, sticker and send.
                 let right = 3.0 * (COMPOSER_BUTTON + 2.0);
-                let size = Vec2::new(ui.available_width() - right, 0.0);
+                let size = Vec2::new((ui.available_width() - right).max(0.0), 0.0);
                 let field = ui
                     .allocate_ui_with_layout(size, Layout::top_down(Align::Min), |ui| {
                         composer_field(ui, chat, dir, online, channel, hint, wide, emoji_picker)
@@ -4840,6 +5102,7 @@ fn composer(
             return (None, attach);
         };
         let command = Command::Send(Draft {
+            queued: Default::default(),
             id: *message,
             channel,
             peer: None,
@@ -4908,6 +5171,7 @@ fn composer(
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_millis() as u64);
     let command = Command::Send(Draft {
+        queued: Default::default(),
         id: *id,
         channel,
         peer: None,
@@ -4967,8 +5231,11 @@ fn composer_field(
                 };
                 let edit = TextEdit::multiline(&mut chat.draft)
                     .layouter(&mut layouter)
-                    .frame(Frame::NONE.inner_margin(Margin::symmetric(6, 9)))
-                    .hint_text(if online {
+                    .frame(Frame::NONE.inner_margin(Margin::symmetric(6, COMPOSER_TEXT_PAD)))
+                    .hint_text(if online && !fits(ui, hint) {
+                        // A narrow bar would wrap the channel's name over lines.
+                        t!("home.message_hint_short").into()
+                    } else if online {
                         t!("home.message_hint", channel = hint)
                     } else {
                         t!("home.waiting_for_server").into()
@@ -4992,6 +5259,7 @@ fn composer_field(
                         }
                     },
                 );
+                ui::share_with_keyboard(&completion.text_edit, false);
                 if let Some(accepted) = completion.accepted
                     && !chat.mentions.accepted(&accepted.insert, choices)
                 {
@@ -5002,6 +5270,19 @@ fn composer_field(
             .inner
         })
         .inner
+}
+
+/// Whether "Message `channel`" fits the message bar on one line.
+fn fits(ui: &Ui, channel: &str) -> bool {
+    let hint = t!("home.message_hint", channel = channel);
+    let font = emoji::font(ui::TEXT_BODY);
+    let width = ui
+        .painter()
+        .layout_no_wrap(hint, font, Color32::WHITE)
+        .size()
+        .x;
+    // The field's own padding (6 each side) comes off the room.
+    width + 12.0 <= ui.available_width()
 }
 
 fn message_time(ui: &mut Ui, msg: &Msg) {
@@ -5082,7 +5363,10 @@ fn message(
     }
     // The row senses clicks behind its contents, for the right-click menu. Not a Tab
     // stop: the hover toolbar has the same actions as buttons.
-    let row = ui.scope_builder(UiBuilder::new().sense(Sense::CLICK), |ui| {
+    let builder = UiBuilder::new()
+        .scope_id(ui.make_persistent_id((channel, msg.person, msg.id)))
+        .sense(Sense::CLICK);
+    let row = ui.scope_builder(builder, |ui| {
         ui.horizontal_top(|ui| {
             if start {
                 face(ui, dir, &msg.person, &name, MESSAGE_AVATAR, false);
@@ -5266,10 +5550,13 @@ fn message(
             Shape::rect_filled(rect.expand(2.0), ui::RADIUS_S, ui::colors(ui).hover_soft),
         );
     }
-    if !hovered {
+    let (tapped, _) = ui::touch_tools(&row.response);
+    if (tapped && ui::menu_open(&row.response))
+        || (!tapped && (!hovered || ui.input(|i| i.any_touches())))
+    {
         return pick;
     }
-    // A small floating toolbar on the top right of the row.
+    // Give touch controls their own space below the text; hover controls float above it.
     let buttons = [can_reply, can_edit, can_delete]
         .into_iter()
         .filter(|on| *on)
@@ -5277,11 +5564,21 @@ fn message(
     if buttons == 0.0 {
         return pick;
     }
+    let button = if tapped {
+        Vec2::splat(ui::TOUCH_TARGET)
+    } else {
+        TOOLBAR_BUTTON
+    };
     let size = Vec2::new(
-        buttons * TOOLBAR_BUTTON.x + (buttons - 1.0) * 2.0 + 8.0,
-        TOOLBAR_BUTTON.y + 8.0,
+        buttons * button.x + (buttons - 1.0) * 2.0 + 8.0,
+        button.y + 8.0,
     );
-    let bar = Rect::from_min_size(rect.right_top() + Vec2::new(-size.x - 8.0, -14.0), size);
+    let top = if tapped {
+        ui.allocate_space(size).1.top()
+    } else {
+        rect.top() - 14.0
+    };
+    let bar = Rect::from_min_size(egui::pos2(rect.right() - size.x - 8.0, top), size);
     let c = ui::colors(ui);
     ui.painter()
         .add(ui.visuals().popup_shadow.as_shape(bar, ui::RADIUS));
@@ -5292,40 +5589,24 @@ fn message(
         egui::Stroke::new(1.0, c.border),
         egui::StrokeKind::Inside,
     );
-    // A child that takes no space, so the toolbar floats over the row.
     let mut ui = ui.new_child(
         UiBuilder::new()
             .max_rect(bar.shrink(4.0))
             .layout(Layout::left_to_right(Align::Center)),
     );
     ui.spacing_mut().item_spacing.x = 2.0;
-    if can_reply
-        && ui::icon_button(
-            &mut ui,
-            "↩",
-            t!("common.reply"),
-            Look::Ghost,
-            TOOLBAR_BUTTON,
-        )
-        .clicked()
+    if can_reply && ui::icon_button(&mut ui, "↩", t!("common.reply"), Look::Ghost, button).clicked()
     {
         pick = Some(Pick::Reply(msg.person, msg.id));
     }
     if can_edit
         && let Some(text) = &text
-        && ui::icon_button(&mut ui, "✏", t!("common.edit"), Look::Ghost, TOOLBAR_BUTTON).clicked()
+        && ui::icon_button(&mut ui, "✏", t!("common.edit"), Look::Ghost, button).clicked()
     {
         pick = Some(Pick::Edit(msg.id, edit_text(text)));
     }
     if can_delete
-        && ui::icon_button(
-            &mut ui,
-            "🗑",
-            t!("common.delete"),
-            Look::Ghost,
-            TOOLBAR_BUTTON,
-        )
-        .clicked()
+        && ui::icon_button(&mut ui, "🗑", t!("common.delete"), Look::Ghost, button).clicked()
     {
         pick = Some(Pick::Delete(msg.id));
     }
@@ -5545,8 +5826,7 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
         }
         Dialog::MyName(index, name) => {
             ui.label(t!("home.my_name_help"));
-            let field = name_field(ui, name);
-            let submitted = submitted(ui, &field);
+            let (_, submitted) = name_field(ui, name);
             if !default_name.is_empty() {
                 ui.add_space(ui::SPACE_S);
                 let label = t!("home.use_default_name", name = default_name);
@@ -5680,7 +5960,8 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
             match tab {
                 ChannelTab::General => {
                     let label = ui.label(t!("home.channel_name")).id;
-                    let name_field = name_field(ui, name).labelled_by(label);
+                    let (name_field, name_entered) = name_field(ui, name);
+                    name_field.labelled_by(label);
                     let label = ui.label(t!("home.topic_optional")).id;
                     let field = ui
                         .add(
@@ -5707,7 +5988,7 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
                         });
                         *changed |= slider.changed();
                     }
-                    entered = submitted(ui, &name_field) || submitted(ui, &field);
+                    entered = name_entered || submitted(ui, &field);
                 }
                 ChannelTab::Permissions => admin::channel_flags(ui, data, channel, flags),
             }
@@ -5750,8 +6031,8 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
         }
         Dialog::RenameCategory(index, id, name) => {
             let label = ui.label(t!("home.category_name")).id;
-            let field = name_field(ui, name).labelled_by(label);
-            let submitted = submitted(ui, &field);
+            let (field, submitted) = name_field(ui, name);
+            field.labelled_by(label);
             if text_footer(ui, t!("common.save"), submitted, &mut close) && !name.trim().is_empty()
             {
                 command = Some((*index, Command::RenameCategory(*id, name.trim().to_owned())));
@@ -5979,17 +6260,16 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
 
 /// A name field with a confirm button; returns true when confirmed with a non-empty name.
 fn text_dialog(ui: &mut Ui, text: &mut String, confirm: &str, close: &mut bool) -> bool {
-    let field = name_field(ui, text);
-    let submitted = submitted(ui, &field);
+    let (_, submitted) = name_field(ui, text);
     text_footer(ui, confirm, submitted, close) && !text.trim().is_empty()
 }
 
-fn name_field(ui: &mut Ui, text: &mut String) -> Response {
+/// The field, and whether Enter was pressed in it (asked before it takes focus again).
+fn name_field(ui: &mut Ui, text: &mut String) -> (Response, bool) {
     let field = ui.add(ui::field(text).char_limit(100).desired_width(f32::INFINITY));
-    if ui.memory(|memory| memory.focused().is_none()) {
-        field.request_focus();
-    }
-    field
+    let entered = submitted(ui, &field);
+    ui::focus_when_none(ui, &field);
+    (field, entered)
 }
 
 fn text_footer(ui: &mut Ui, confirm: &str, mut done: bool, close: &mut bool) -> bool {
@@ -6004,9 +6284,32 @@ fn text_footer(ui: &mut Ui, confirm: &str, mut done: bool, close: &mut bool) -> 
 mod tests {
     use super::*;
 
+    #[test]
+    fn only_its_own_toast_uses_up_the_unsent_notice() {
+        let notice = t!("home.unsent_after_close").to_owned();
+        // Another toast shows and is drawn: the notice waits.
+        let mut toast = Some(("Server offline".to_owned(), 5.0));
+        assert!(!unsent_notice(
+            &mut toast,
+            Some("Server offline".into()),
+            1.0
+        ));
+        assert_eq!(
+            toast.as_ref().map(|(text, _)| text.as_str()),
+            Some("Server offline")
+        );
+        // Once it is gone the notice takes its place, and counts only when drawn.
+        toast = None;
+        assert!(!unsent_notice(&mut toast, None, 6.0));
+        assert_eq!(toast.as_ref().map(|(text, _)| text), Some(&notice));
+        assert!(unsent_notice(&mut toast, Some(notice), 7.0));
+    }
+
     const ME: Id = [1; 32];
     const ANN: Id = [7; 32];
     const PROJECTS: Id = [3; 32];
+
+    mod touch;
 
     /// A server with a text channel this person can write in, showing its files: one
     /// from Ann and one of their own. Also returns the commands the view sends.
@@ -6078,6 +6381,7 @@ mod tests {
                 .0,
         };
         let mut chat = Chat::default();
+        chat.opened = true;
         chat.shared = Some(vec![
             shared(ANN, "Trip plan.pdf", 240_000),
             shared(ME, "Budget.xlsx", 18_000),
@@ -6092,7 +6396,238 @@ mod tests {
         (harness, sent)
     }
 
+    #[test]
+    fn cached_dm_keeps_the_composer_and_other_replicas_on_refresh() {
+        for dark in [true, false] {
+            let (mut base, _sent) = files_harness(dark);
+            let mut home = base.state_mut().take().unwrap();
+            let mut dir = home.servers[0].dir.clone();
+            dir.dms.push(crate::server::Dm {
+                channel: PROJECTS,
+                peer: ANN,
+            });
+            dir.categories.clear();
+            let online = home.servers[0].address.clone();
+            let offline: url::Url = "https://offline.example.org/".parse().unwrap();
+            let known = KnownServer {
+                address: offline.clone(),
+                server_id: [4; 32],
+                tls_fingerprint: None,
+            };
+            home.servers.push(new_server(
+                known,
+                "Offline",
+                home.servers[0].commands.clone(),
+            ));
+            let msg = |n| Msg {
+                id: [n; 32],
+                person: ANN,
+                at: n.into(),
+                body: Body::Text(format!("cached {n}")),
+                backfilled: false,
+                reply_to: None,
+                quoted_author: None,
+                edit_of: None,
+                files: vec![],
+                live: None,
+                sticker: None,
+                replicas: vec![],
+                copy_files: vec![],
+            };
+            for (url, items) in [
+                (offline.clone(), vec![msg(1), msg(2)]),
+                (online.clone(), vec![msg(2), msg(3)]),
+            ] {
+                home.apply(
+                    &base.ctx,
+                    Update::Cached(url, Box::new(dir.clone()), vec![(PROJECTS, items)]),
+                    0.0,
+                );
+            }
+            let mut h = egui_kittest::Harness::builder()
+                .with_size(Vec2::new(720., 420.))
+                .with_context_setup(ui::install)
+                .build_ui_state(|ui, home| dm_pane(ui, home, ANN), home);
+            h.ctx.set_theme(if dark {
+                egui::Theme::Dark
+            } else {
+                egui::Theme::Light
+            });
+            h.run_steps(2);
+            h.ctx.memory_mut(|m| m.request_focus(composer_id(PROJECTS)));
+            h.event(egui::Event::Text("still typing".into()));
+            h.run_steps(2);
+            let ctx = h.ctx.clone();
+            let home = h.state_mut();
+            let chat = &mut home.threads.get_mut(&ANN).unwrap().chat;
+            assert_eq!(chat.draft, "still typing");
+            assert_eq!(chat.messages.len(), 3);
+            chat.reply_to = Some((ANN, [1; 32]));
+            home.apply(
+                &ctx,
+                Update::PageFailed(online.clone(), PROJECTS, false),
+                0.0,
+            );
+            assert_eq!(home.threads[&ANN].chat.messages.len(), 3);
+            home.apply(
+                &ctx,
+                Update::Messages {
+                    server: online,
+                    channel: PROJECTS,
+                    items: vec![],
+                    older: false,
+                    at_start: Some(true),
+                },
+                0.0,
+            );
+            let chat = &home.threads[&ANN].chat;
+            assert_eq!(chat.messages.len(), 2);
+            assert!(
+                chat.messages
+                    .iter()
+                    .all(|m| m.replicas == [offline.clone()])
+            );
+            assert_eq!(chat.draft, "still typing");
+            assert_eq!(chat.reply_to, Some((ANN, [1; 32])));
+        }
+    }
+
+    #[test]
+    fn a_notice_before_first_open_still_loads_channel_history() {
+        let (mut h, mut sent) = files_harness(true);
+        while sent.try_recv().is_ok() {}
+        let ctx = h.ctx.clone();
+        let home = h.state_mut().as_mut().unwrap();
+        let server = &mut home.servers[0];
+        server.chats.remove(&PROJECTS);
+        let other = [42; 32];
+        server.chats.insert(other, Chat::default());
+        let address = server.address.clone();
+        let msg = Msg {
+            backfilled: false,
+            id: [12; 32],
+            person: ANN,
+            at: 1,
+            reply_to: None,
+            quoted_author: None,
+            edit_of: None,
+            body: Body::Notice {
+                name: "Ann".into(),
+                action: "joined",
+                detail: String::new(),
+            },
+            files: vec![],
+            live: None,
+            sticker: None,
+            replicas: vec![],
+            copy_files: vec![],
+        };
+        home.apply(&ctx, Update::Notice(address, PROJECTS, msg), 0.0);
+        assert!(home.servers[0].chats[&other].messages.is_empty());
+        assert_eq!(home.servers[0].chats[&PROJECTS].messages.len(), 1);
+        h.run_steps(2);
+        assert!(matches!(sent.try_recv(), Ok(Command::Open(PROJECTS))));
+    }
+
     type Screen = (Home, crate::update::Updater, crate::keystore::Keystore);
+
+    /// Every main screen fits a phone (390 by 844) and a desktop window (1100 by
+    /// 700): nothing reaches past the window's left or right edge. A screen with a
+    /// fixed width, or a row that doesn't wrap, fails here (see docs/development.md,
+    /// Responsive UI).
+    #[test]
+    fn main_screens_fit_phone_and_desktop_widths() {
+        use egui_kittest::kittest::{NodeT, Queryable};
+        type Scene = (&'static str, fn(&mut Home));
+        let scenes: [Scene; 9] = [
+            ("channel list", |home| home.layout.list = true),
+            ("chat", |_| {}),
+            ("find servers", |home| {
+                home.view = View::Find;
+                home.find.error = Some(
+                    "Couldn't reach the server directory. Check its address in Settings.".into(),
+                );
+                home.find.results = (0..3)
+                    .map(|at| crate::net::Listed {
+                        server: KnownServer {
+                            address: format!("https://s{at}.example.org/").parse().unwrap(),
+                            server_id: [at; 32],
+                            tls_fingerprint: None,
+                        },
+                        name: "RustTalk Official Server with a long name".into(),
+                        description: "A friendly place to talk about anything, with voice channels for games and music.".into(),
+                        members: 9,
+                        open: true,
+                    })
+                    .collect();
+            }),
+            ("join", |home| home.view = View::Join),
+            ("settings", |home| home.settings = Some(Tab::Profile)),
+            ("appearance", |home| home.settings = Some(Tab::Appearance)),
+            ("voice settings", |home| home.settings = Some(Tab::Voice)),
+            ("server roles", |home| {
+                crate::admin::open(home, 0, crate::admin::Tab::Roles);
+            }),
+            ("edit channel", |home| {
+                home.edit_channel(0, PROJECTS, ChannelEdit::Rename);
+            }),
+        ];
+        for size in [Vec2::new(390.0, 844.0), Vec2::new(1100.0, 700.0)] {
+            for (name, set) in scenes {
+                let (mut files, _sent) = files_harness(true);
+                let mut home = files.state_mut().take().unwrap();
+                home.view = View::Server(0);
+                home.servers[0].open = Some(PROJECTS);
+                home.servers[0].dir.perms.manage_roles = true;
+                home.servers[0].dir.perms.manage_channels = true;
+                home.layout.list = false;
+                // Never a search on the real directory from a test.
+                home.find.opened = false;
+                let mut prefs = home.notify.prefs().clone();
+                prefs.desktop = false;
+                home.notify.set_prefs(prefs);
+                set(&mut home);
+                let data = tempfile::tempdir().unwrap();
+                let mut harness = egui_kittest::Harness::builder()
+                    .with_size(size)
+                    .build_ui_state(
+                        |ui, screen: &mut Option<Screen>| {
+                            if let Some((home, updates, keystore)) = screen {
+                                show(ui, home, updates, keystore);
+                            }
+                        },
+                        None,
+                    );
+                ui::install(&harness.ctx);
+                *harness.state_mut() = Some((
+                    home,
+                    crate::update::Updater::new(data.path()),
+                    crate::keystore::without_keychain(data.path()),
+                ));
+                harness.run_steps(6);
+                if name == "settings" && size.x < ui::PHONE_WIDTH {
+                    // Phones list the pages first.
+                    harness.get_by_label("My account").click_accesskit();
+                    harness.run_steps(6);
+                }
+                let width = f64::from(size.x);
+                let outside: Vec<_> = harness
+                    .root()
+                    .children_recursive()
+                    .filter_map(|node| {
+                        let node = node.accesskit_node();
+                        let b = node.bounding_box()?;
+                        (b.x1 > b.x0 && (b.x0 < -1.0 || b.x1 > width + 1.0))
+                            .then(|| format!("{:?} {:?}", node.role(), node.label()))
+                    })
+                    .collect();
+                assert!(
+                    outside.is_empty(),
+                    "{name} at {size:?} runs off the window: {outside:?}"
+                );
+            }
+        }
+    }
 
     /// Back on a phone hides the chat at once: a message handled before the next
     /// frame draws the list stays unread.

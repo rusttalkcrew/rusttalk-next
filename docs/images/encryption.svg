@@ -1,0 +1,106 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 420" role="img" aria-labelledby="t d">
+  <title id="t">How RustTalk encrypts a message</title>
+  <desc id="d">Your device locks a message with the channel key. The server only stores and forwards the locked message. Your friends' devices unlock it with their copy of the key.</desc>
+  <style>
+    .bg { fill: #ffffff; }
+    .card { fill: #f6f8fa; stroke: #d0d7de; stroke-width: 1.5; }
+    .server { fill: #fff4ee; stroke: #b7410e; stroke-width: 2; stroke-dasharray: 7 5; }
+    .h { font: 700 19px -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; fill: #1f2328; }
+    .p { font: 15px -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; fill: #424a53; }
+    .s { font: 13px -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; fill: #656d76; }
+    .mono { font: 14px ui-monospace, "Cascadia Mono", Consolas, Menlo, monospace; fill: #6e3a1f; }
+    .bubble { fill: #ffffff; stroke: #d0d7de; stroke-width: 1.2; }
+    .blob { fill: #fbe3d6; stroke: #e3b39a; stroke-width: 1.2; }
+    .msg { font: 600 15px -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; fill: #1f2328; }
+    .accent { fill: #b7410e; }
+    .accent-s { stroke: #b7410e; }
+    .arrow { stroke: #b7410e; stroke-width: 3; fill: none; }
+    .lbl { font: 600 13px -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; fill: #b7410e; }
+    .ok { fill: #1a7f37; }
+    .no { fill: #cf222e; }
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #0d1117; }
+      .card { fill: #161b22; stroke: #30363d; }
+      .server { fill: #221510; stroke: #e0673a; }
+      .h, .msg { fill: #e6edf3; }
+      .p { fill: #c9d1d9; }
+      .s { fill: #8b949e; }
+      .mono { fill: #f0b496; }
+      .bubble { fill: #21262d; stroke: #30363d; }
+      .blob { fill: #3a2118; stroke: #6b3a26; }
+      .accent { fill: #e0673a; }
+      .accent-s { stroke: #e0673a; }
+      .arrow { stroke: #e0673a; }
+      .lbl { fill: #e0673a; }
+      .ok { fill: #3fb950; }
+      .no { fill: #f85149; }
+    }
+  </style>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" class="accent"/>
+    </marker>
+    <g id="lock">
+      <rect x="0" y="8" width="16" height="12" rx="2.5" class="accent"/>
+      <path d="M3.5 8 V5.5 a4.5 4.5 0 0 1 9 0 V8" fill="none" stroke-width="2.4" class="accent-s"/>
+    </g>
+    <g id="key">
+      <circle cx="5.5" cy="10" r="4.5" fill="none" stroke-width="2.4" class="accent-s"/>
+      <path d="M10 10 H20 M16 10 V14 M19 10 V13" fill="none" stroke-width="2.4" stroke-linecap="round" class="accent-s"/>
+    </g>
+  </defs>
+
+  <rect width="960" height="420" rx="16" class="bg"/>
+
+  <!-- Your device -->
+  <rect x="24" y="24" width="276" height="300" rx="14" class="card"/>
+  <text x="44" y="60" class="h">Your device</text>
+  <rect x="44" y="80" width="236" height="44" rx="12" class="bubble"/>
+  <text x="62" y="108" class="msg">Raid tonight at 8?</text>
+  <use href="#key" x="44" y="146"/>
+  <text x="74" y="162" class="p">Locked with the channel</text>
+  <text x="74" y="182" class="p">key, then signed by you</text>
+  <rect x="44" y="204" width="236" height="44" rx="12" class="blob"/>
+  <use href="#lock" x="58" y="215"/>
+  <text x="84" y="232" class="mono">x9Qe…7fA2</text>
+  <text x="44" y="282" class="s">Keys are made on your devices.</text>
+  <text x="44" y="302" class="s">Your 24 recovery words stay with you.</text>
+
+  <!-- Arrow 1 -->
+  <path d="M308 226 H344" class="arrow" marker-end="url(#a)"/>
+
+  <!-- Server -->
+  <rect x="352" y="24" width="256" height="300" rx="14" class="server"/>
+  <text x="372" y="60" class="h">RustTalk server</text>
+  <text x="372" y="84" class="s">Stores and forwards. That's all.</text>
+  <rect x="372" y="100" width="216" height="40" rx="10" class="blob"/>
+  <use href="#lock" x="386" y="109"/>
+  <text x="412" y="125" class="mono">x9Qe…7fA2</text>
+  <rect x="372" y="148" width="216" height="40" rx="10" class="blob"/>
+  <use href="#lock" x="386" y="157"/>
+  <text x="412" y="173" class="mono">c41Z…Lm0p</text>
+  <text x="372" y="218" class="s">Can't read:</text>
+  <text x="372" y="240" class="p"><tspan class="no">✕</tspan> messages, files, pictures</text>
+  <text x="372" y="262" class="p"><tspan class="no">✕</tspan> names of servers, channels</text>
+  <text x="372" y="284" class="p"><tspan class="no">✕</tspan> voice, video, screen shares</text>
+  <text x="372" y="306" class="p"><tspan class="no">✕</tspan> keys or recovery words</text>
+
+  <!-- Arrow 2 -->
+  <path d="M616 226 H652" class="arrow" marker-end="url(#a)"/>
+
+  <!-- Friends -->
+  <rect x="660" y="24" width="276" height="300" rx="14" class="card"/>
+  <text x="680" y="60" class="h">Your friends' devices</text>
+  <rect x="680" y="204" width="236" height="44" rx="12" class="bubble"/>
+  <text x="698" y="232" class="msg">Raid tonight at 8?</text>
+  <use href="#key" x="680" y="146"/>
+  <text x="710" y="162" class="p">Unlocked with their copy</text>
+  <text x="710" y="182" class="p">of the key, signature checked</text>
+  <text x="680" y="100" class="p"><tspan class="ok">✓</tspan> Members of the channel</text>
+  <text x="680" y="122" class="p"><tspan class="ok">✓</tspan> Each of their devices</text>
+  <text x="680" y="282" class="s">Removed members and devices</text>
+  <text x="680" y="302" class="s">don't get the next key.</text>
+
+  <text x="480" y="372" text-anchor="middle" class="p">Channel keys travel between devices in sealed envelopes that only the receiving device can open.</text>
+  <text x="480" y="396" text-anchor="middle" class="s">Details: docs/crypto.md and docs/privacy.md</text>
+</svg>

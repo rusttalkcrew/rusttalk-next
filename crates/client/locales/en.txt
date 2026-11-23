@@ -18,6 +18,8 @@ settings.video = Video
 settings.notifications = Notifications
 settings.shortcuts = Shortcuts
 settings.updates_new = Updates (new)
+settings.advanced = Advanced
+settings.terminal_hosting_help = Allow sharing this app’s shell in a call. Turning this off ends your terminal share.
 settings.updates = Updates
 settings.group_info = Info
 settings.whats_new = What's new
@@ -198,6 +200,7 @@ home.emoji_picker = Emoji picker
 home.sticker_picker = Stickers
 home.send = Send
 home.message_hint = Message {channel}
+home.message_hint_short = Message
 home.waiting_for_server = Waiting for the server…
 home.no_wide_mentions = You can’t mention roles, @everyone or @here in this chat.
 home.quote_sticker = {name}: a sticker
@@ -379,6 +382,13 @@ admin.change_roles = Change roles
 admin.kick = Kick
 admin.ban = Ban
 admin.server = Server
+admin.system_messages = System messages
+admin.system_help = Show joins and leaves here.
+admin.system_first = First text channel
+admin.system_none = None
+admin.system_missing = Unavailable channel
+admin.system_update = Update the server to change this setting.
+admin.system_saved = System messages saved.
 admin.overview = Overview
 admin.server_updates = Server updates
 admin.update_waiting = Update {version} waiting for a quiet moment
@@ -459,6 +469,7 @@ audit.voice_moved = {actor} moved {target} to another voice channel
 audit.left = {actor} left
 audit.member_roles_changed = {actor} changed {target}'s roles
 audit.ownership_transferred = {actor} made {target} the owner
+audit.device_id = Device {fingerprint}
 audit.joined = {actor} joined
 audit.role_created = {actor} made a role
 audit.role_renamed = {actor} renamed a role
@@ -637,9 +648,7 @@ role.moderator = Moderator
 role.member = Member
 role.new = New role
 server.default_category = Channels
-notice.new_device_detail = {id}\nNew device {fingerprint} ({device})
 server.default_channel = channel
-notice.removed_device_detail = {id}\nRemoved device {fingerprint} ({device})
 
 # crates/client/src/call.rs
 call.quality_720 = 720p — light on slow connections
@@ -944,15 +953,16 @@ welcome.skip = Skip
 app.create_account = Create account
 app.have_account = I already have an account
 app.words_title = Your recovery words
-app.words_text = Write these 24 words on paper, in this order, and keep them safe. They are the only way back into your account. You will see them only once.
+app.words_text = Write them down in this order and keep them safe. They're the only way back into your account.
 app.wrote_them = I wrote them down
+app.copied = Copied
+app.words_manager = Tip: a password manager is a safe place to keep them.
 app.check_title = Check your words
 app.check_text = Type these words from your list.
 app.word_number = Word {number}
 app.confirm = Confirm
-app.start_over = Start over
 app.restore_title = Sign in with your recovery words
-app.restore_text = Type your 24 recovery words in order, with a space between them. This computer becomes a new device on your account.
+app.restore_text = Type or paste your 24 words in order. This device joins your account.
 app.recovery_words = Recovery words
 app.sign_in = Sign in
 
@@ -961,6 +971,9 @@ keys.section = Key storage
 keys.choose_title = Where should RustTalk keep your keys?
 keys.no_keychain = This device has no keychain (common in Steam Deck Game Mode). How should RustTalk keep your keys?
 keys.password_only = On this device RustTalk locks your keys with a password. You type it at every start.
+keys.no_keychain_phone = The Keychain isn't available, so RustTalk locks your keys with a password. You type it at every start.
+keys.no_android_keystore = Android Keystore isn't available. Choose a password to unlock your keys at each start.
+keys.android_keystore = Android Keystore
 keys.keychain = Keychain
 keys.keychain_help = Your system's keychain keeps your keys.
 keys.file = Protected file
@@ -1102,6 +1115,9 @@ crop.zoom = Zoom
 # crates/client/src/camera.rs
 camera.stopped = Your camera stopped.
 camera.none = No camera found.
+camera.front = Front camera
+camera.back = Back camera
+camera.permission = Allow camera access to turn on video.
 camera.start_failed = Couldn't start your camera. Is another app using it?
 camera.camera = Camera
 camera.first = First camera
@@ -1172,6 +1188,9 @@ find.server_unreachable = Can't reach this server right now. Try again later.
 
 # crates/client/src/net/voice.rs
 voice.screen_failed = Couldn't share your screen.
+voice.need_mic = Allow microphone access to join the call.
+voice.audio_reset = iPhone audio restarted. Join voice again to reconnect.
+voice.unavailable = Voice calls are unavailable on this device.
 voice.listen_only = You can listen here, but not talk.
 voice.disconnected = Voice disconnected.
 voice.removed = You were removed from the voice channel.
@@ -1217,6 +1236,7 @@ startup.message = RustTalk couldn't start.\n\n{error}\n\n{log}
 
 # Direct messages (#100)
 home.waiting_try_again = Waiting for the server. Try again in a moment.
+home.unsent_after_close = A message may not have been sent.
 home.dm_read_only = You no longer share a server with {name}. You can read your messages but not send new ones.
 home.no_shared_server = No shared server
 
@@ -1415,3 +1435,9 @@ terminal.take_back = Take it back
 terminal.denied = {name} didn't let you type.
 terminal.taken_back = {name} stopped you typing.
 terminal.paste_too_long = That paste is too long to type in someone else's terminal.
+
+# crates/client/src/phone_clipboard.rs
+clipboard.paste = Paste
+clipboard.copy = Copy
+clipboard.cut = Cut
+clipboard.select_all = Select all

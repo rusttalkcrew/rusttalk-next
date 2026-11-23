@@ -21,7 +21,7 @@ use rusttalk_core::client::voice::DEFAULT_AUDIO_KBPS;
 use super::{Ctx, State, Update, leave_voice, now};
 use crate::server::{
     Body, Category, Channel, CustomEmoji, Device, Directory, Dm, EmojiPack, Id, Member, Msg, Perms,
-    Picture, Role, member_name, parse_role_display,
+    Picture, Role, SystemMessages, member_name, parse_role_display,
 };
 
 pub(super) async fn get(client: &KeyClient<'_>, path: &str) -> Result<Value> {
@@ -175,6 +175,26 @@ pub(super) async fn directory(
     state: &mut State,
 ) -> Result<()> {
     let catalog = client.catalog().await?;
+    if let Some(before) = &state.last {
+        let readable: HashMap<_, _> = catalog.channels.iter().map(|c| (c.id, c)).collect();
+        let channels = before
+            .categories
+            .iter()
+            .flat_map(|c| &c.channels)
+            .filter(|c| readable.get(&c.id).is_none_or(|new| new.kind == "dm"))
+            .map(|c| c.id);
+        let dms = before
+            .dms
+            .iter()
+            .filter(|dm| {
+                readable.get(&dm.channel).is_none_or(|new| {
+                    new.kind != "dm"
+                        || new.peer.as_deref().and_then(|p| decode(p).ok()) != Some(dm.peer)
+                })
+            })
+            .map(|dm| dm.channel);
+        state.discard_channels(ctx, url, channels.chain(dms).collect());
+    }
     let joined_kbps = state.voice.as_ref().and_then(|live| {
         let channel = catalog.channels.iter().find(|c| c.id == live.channel)?;
         channel.audio_kbps
@@ -215,7 +235,9 @@ pub(super) async fn directory(
     });
     super::save_pins(ctx, url, client, state);
     state.pictures = pictures;
-    if let Some(before) = &state.last {
+    if let Some(before) = &state.last
+        && let Some(channel) = dir.notice_channel()
+    {
         for (person, action, detail) in changes(before, &dir) {
             let name = member_name(&dir, &person);
             let name = if dir.members.iter().any(|m| m.person == person) {
@@ -224,7 +246,6 @@ pub(super) async fn directory(
                 member_name(before, &person)
             };
             state.notices += 1;
-            // The server ID keeps notices from different servers apart in a DM.
             let mut id = state.server_id;
             id[..8].copy_from_slice(&state.notices.to_be_bytes());
             let msg = Msg {
@@ -246,7 +267,7 @@ pub(super) async fn directory(
                 replicas: Vec::new(),
                 copy_files: Vec::new(),
             };
-            ctx.send(Update::Notice(url.clone(), person, msg));
+            ctx.send(Update::Notice(url.clone(), channel, msg));
         }
     }
     // Everyone in the call follows the channel's bitrate, also after a manager changes it.
@@ -260,6 +281,8 @@ pub(super) async fn directory(
             .flat_map(|category| &category.channels)
             .any(|channel| channel.id == *joined)
     });
+    state.prune_history(&dir);
+    super::recent::Listing::save(state, &dir, &members, &space);
     state.last = Some(dir.clone());
     state.named = client.has_space_key();
     ctx.send(Update::Directory(url.clone(), Box::new(dir)));
@@ -523,7 +546,34 @@ async fn build(
     }
     let limit = |key: &str| emoji[key].as_u64().unwrap_or_default() as usize;
     let server_id = client.space().id;
+    let system_messages_supported = space.get("system_messages_ct").is_some();
+    let system_messages = if space["system_messages_ct"].is_null() {
+        SystemMessages::First
+    } else {
+        bytes(
+            Metadata::SystemMessages,
+            &server_id,
+            space["system_messages_ct"].as_str(),
+        )
+        .and_then(|v| Id::try_from(v.as_slice()).ok())
+        .map_or(SystemMessages::None, SystemMessages::Channel)
+    };
+    let first_text_channel = if system_messages_supported {
+        space["first_text_channel"]
+            .as_str()
+            .map(decode)
+            .transpose()?
+    } else {
+        categories
+            .iter()
+            .flat_map(|c| &c.channels)
+            .find(|c| !c.page && !c.voice)
+            .map(|c| c.id)
+    };
     Ok(Directory {
+        system_messages_supported,
+        system_messages,
+        first_text_channel,
         name: text(Metadata::ServerName, &server_id, space["name_ct"].as_str()),
         icon: picture(&server_id, space["icon_hash"].as_str()),
         status: serde_json::from_value(me["status"].clone()).ok(),
@@ -551,7 +601,7 @@ fn received_bio(bio: Option<String>) -> Option<String> {
 
 /// The cache key of a member's avatar or the server icon: its owner and ciphertext hash.
 /// The owner is part of the key so one member cannot reuse another's picture.
-fn picture_key(owner: &Id, hash: &str) -> [u8; 32] {
+pub(super) fn picture_key(owner: &Id, hash: &str) -> [u8; 32] {
     Sha256::new()
         .chain_update(owner)
         .chain_update(hash.as_bytes())
@@ -653,7 +703,7 @@ pub(crate) fn frame_image(frame: image::Frame) -> (ColorImage, u32) {
 }
 
 /// Decode a profile picture, server icon, emoji or sticker.
-fn picture(bytes: &[u8]) -> Option<Picture> {
+pub(super) fn picture(bytes: &[u8]) -> Option<Picture> {
     let key: [u8; 32] = Sha256::digest(bytes).into();
     let frames = match decode_profile_image(bytes) {
         Ok(frames) => frames,
@@ -670,52 +720,13 @@ fn picture(bytes: &[u8]) -> Option<Picture> {
     })
 }
 
-/// Member and device changes between two directory loads: (person, action, details).
+/// Membership changes between two directory loads: (person, action, details).
 fn changes(before: &Directory, after: &Directory) -> Vec<(Id, &'static str, String)> {
     let mut out = Vec::new();
     for member in &after.members {
-        let id = t!("home.detail_id", fingerprint = fingerprint(&member.person));
-        let Some(old) = before
-            .members
-            .iter()
-            .find(|old| old.person == member.person)
-        else {
+        if !before.members.iter().any(|old| old.person == member.person) {
+            let id = t!("home.detail_id", fingerprint = fingerprint(&member.person));
             out.push((member.person, "joined", id));
-            continue;
-        };
-        // A new member's first device arrives just after the join; that is not news.
-        if old.devices.is_empty() {
-            continue;
-        }
-        for device in &member.devices {
-            if old
-                .devices
-                .iter()
-                .all(|d| d.fingerprint != device.fingerprint)
-            {
-                let detail = t!(
-                    "notice.new_device_detail",
-                    id = id,
-                    fingerprint = device.fingerprint,
-                    device = device.name
-                );
-                out.push((member.person, "added a new device", detail));
-            }
-        }
-        for device in &old.devices {
-            if member
-                .devices
-                .iter()
-                .all(|d| d.fingerprint != device.fingerprint)
-            {
-                let detail = t!(
-                    "notice.removed_device_detail",
-                    id = id,
-                    fingerprint = device.fingerprint,
-                    device = device.name
-                );
-                out.push((member.person, "removed a device", detail));
-            }
         }
     }
     for old in &before.members {
@@ -828,7 +839,7 @@ mod tests {
     }
 
     #[test]
-    fn reports_joins_leaves_and_device_changes_but_not_a_first_device() {
+    fn reports_joins_and_leaves_but_skips_device_changes() {
         let dir = |members| Directory {
             members,
             ..Directory::default()
@@ -843,9 +854,6 @@ mod tests {
             .into_iter()
             .map(|(person, action, _)| (person[0], action))
             .collect();
-        assert_eq!(
-            lines,
-            [(1, "added a new device"), (4, "joined"), (3, "left")]
-        );
+        assert_eq!(lines, [(4, "joined"), (3, "left")]);
     }
 }

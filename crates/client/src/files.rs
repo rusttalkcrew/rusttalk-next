@@ -427,7 +427,7 @@ impl Files {
                 Some(paths) => {
                     let _ = pastes.send((ask, paths));
                 }
-                None => ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaste),
+                None => crate::paste::request_text(&ctx),
             }
             ctx.request_repaint();
         });
@@ -894,7 +894,7 @@ fn picture_tile(ui: &mut Ui, file: &Staged, anim: Option<&Anim>) -> (bool, bool)
 /// A staged picture large, before it is sent. True when it should close.
 fn staged_dialog(ui: &Ui, previews: &Previews, file: &Staged) -> bool {
     let ((), close) = ui::dialog(ui.ctx(), "staged-preview", &file.name, |ui| {
-        let room = Vec2::new(ui::DIALOG_WIDTH, 420.0);
+        let room = Vec2::new(ui.available_width(), 420.0);
         previews.with(ui, &file.path, true, |ui, anim, failed| match anim {
             Some(anim) => {
                 let texture = anim.current(ui, true);
