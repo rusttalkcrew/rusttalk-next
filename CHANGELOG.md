@@ -12,6 +12,7 @@ Unreleased under the new version and date.
 ## Unreleased
 
 - Screen shares show simpler controls, preview automatically while focused, and start with system audio selected where supported.
+- Reopen the last chat picture instantly, even if the connection drops after it loads.
 
 ## v0.2.1 - 2026-11-23
 

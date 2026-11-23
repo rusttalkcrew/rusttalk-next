@@ -465,7 +465,12 @@ pub enum Update {
     SaveProgress(Id, f32),
     /// A picture's frames with their delays in ms, by blob ID, or why not: `true` when it
     /// expired or was deleted.
-    Image(Id, Fetch, Result<Vec<(egui::ColorImage, u32)>, bool>),
+    Image(
+        Url,
+        BlobRef,
+        Fetch,
+        Result<Vec<(egui::ColorImage, u32)>, bool>,
+    ),
     /// A link preview file by blob ID, or why not: `true` when it expired or was deleted.
     LinkCard(Id, Result<crate::link_cards::Card, bool>),
     /// An emoji or sticker file by blob ID, or why not: `true` when it expired or was deleted.
@@ -806,6 +811,7 @@ struct State {
     chat_files: HashMap<Id, DataLiveFiles>,
     /// Decoded pictures in the last directory, by hash.
     pictures: HashMap<[u8; 32], Picture>,
+    image_originals: files::ImageOriginals,
     /// The DM pins `dm_pins` last saved, to save again when they change.
     pins_saved: HashMap<Id, DmPin>,
     /// `dm_pins` couldn't be read: it is left as it is, and DMs here stay blocked.
@@ -1112,7 +1118,9 @@ fn refuse(ctx: &Ctx, url: &Url, command: Command) {
             ctx.send(Update::Unsent(url.clone(), draft));
             ctx.send(Update::Failed(t!("admin.offline").into()));
         }
-        Command::Image(file, fetch) => ctx.send(Update::Image(file.id, fetch, Err(false))),
+        Command::Image(file, fetch) => {
+            ctx.send(Update::Image(url.clone(), file, fetch, Err(false)))
+        }
         Command::Save(file, _) => ctx.send(Update::Saved(file.id, Err(false))),
         Command::SharedFiles(channel) => {
             ctx.send(Update::SharedFiles(url.clone(), channel, Vec::new()));
@@ -1887,7 +1895,9 @@ async fn on_command(
         Command::Delete(channel, id, sender, blobs) => {
             files::delete(ctx, url, client, state, (channel, id, sender), blobs).await?;
         }
-        Command::Image(file, fetch) => files::image(ctx, client, file, fetch).await,
+        Command::Image(file, fetch) => {
+            files::image(ctx, url, client, &mut state.image_originals, file, fetch).await
+        }
         Command::LinkCard(file) => files::link_card(ctx, client, file).await,
         Command::StickerFile(file, kind) => files::sticker_file(ctx, client, file, kind).await,
         Command::Save(file, path) => files::save(ctx, client, file, path).await,
