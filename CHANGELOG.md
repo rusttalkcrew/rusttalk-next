@@ -11,6 +11,7 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Incoming live file offers now have a single Download button.
 - Screen shares show simpler controls, preview automatically while focused, and start with system audio selected where supported.
 - Direct messages and mentions play a short chime from RustTalk itself, also when the system keeps notifications quiet; turn it off in Call sounds.
 - In the direct message list, the red badge no longer covers the server names, a server name shows only once, and the unread mark is no longer cut off.
