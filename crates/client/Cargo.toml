@@ -122,12 +122,14 @@ jni = "0.22"
 livekit-jni = { package = "jni", version = "0.21" }
 
 [target.'cfg(target_os = "ios")'.dependencies]
+block2 = "0.6"
+objc2-avf-audio = { version = "0.3", default-features = false, features = ["std", "AVAudioSession", "AVAudioSessionRoute", "AVAudioSessionTypes", "block2"] }
 # The data-protection Keychain for the keys (keystore.rs `IosKeychain`); keyring's
 # `v1` API has no iOS store.
 apple-native-keyring-store = { version = "1", features = ["protected"] }
 # Keeps the settings folder, with the key file, out of iCloud and computer backups.
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSDate", "NSDictionary", "NSEnumerator", "NSError", "NSString", "NSURL", "NSValue"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSDate", "NSDictionary", "NSEnumerator", "NSNotification", "NSOperation", "block2", "NSError", "NSString", "NSURL", "NSValue"] }
 # The system clipboard (UIPasteboard) and drawing inside the safe area (src/ios.rs);
 # the versions winit, egui-winit and wgpu already use.
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFCGTypes"] }

@@ -192,7 +192,7 @@ use yet is allowed to be unused there (`allow(dead_code)` on phones only).
 | --- | --- | --- | --- |
 | Window, input, drawing (eframe 0.37) | GameActivity through android-activity 0.6; drawn with glow (OpenGL ES) | winit's UIKit backend, wgpu on Metal | Builds. Android runs. |
 | Text input | GameActivity's text buffer, read each frame (`src/android.rs`) | winit IME | Android works (phase 2) |
-| Voice and video (LiveKit, webrtc-sys) | Builds and links (prebuilt WebRTC for Android) | Prebuilt WebRTC for iOS; CI builds it | Android foreground voice in phase 3; see Voice |
+| Voice and video (LiveKit, webrtc-sys) | Builds and links (prebuilt WebRTC for Android) | Prebuilt WebRTC for iOS; CI builds it | Android and iOS voice in phase 3; see Voice |
 | Audio (cpal 0.18) | AAudio (`libaaudio.so`, Android 8.0+) | Core Audio | Android uses communication mode during calls; iOS needs its audio session |
 | Key storage (keyring 4) | Android Keystore wraps the identity in private app storage | Data-protection Keychain, file with password as fallback | Both default to system key storage with password fallback |
 | File picker (rfd) | No backend | No backend | Gated: the buttons that open it are off (`files::PICKER`) |
@@ -236,10 +236,14 @@ Android requests `RECORD_AUDIO` at join. After permission is granted the app
 sets `MODE_IN_COMMUNICATION` before opening the microphone and releases the
 mode when the call ends. Bluetooth routing and background calls are still open.
 
-On iOS the audio session needs `AVAudioSession` set to play and record for
-voice chat before the call starts, and the background audio mode keeps a
-call going with the screen off. Test microphone and playback on a real
-iPhone in that phase; the simulator's audio says little about a device.
+On iOS, joining asks for microphone access. With permission, RustTalk activates
+a play-and-record voice chat session with speaker fallback and Bluetooth HFP.
+cpal uses RemoteIO for capture and playback and resumes after interruptions when
+iOS allows it. Its route errors feed the device reopen path. LiveKit publishes
+our processed frames through a native audio source and uses a synthetic audio
+device; it does not open a second hardware microphone. After leaving, the audio
+worker releases the session when the leave sound finishes. The IPA declares
+background audio for calls with the screen locked.
 
 Turning on video asks for camera access. The front camera is the default;
 Settings → Video selects the back camera on phones that have one. Turning
@@ -247,6 +251,9 @@ off video, leaving the call or backgrounding the app releases the camera.
 After an interruption, turn video on again to resume sharing.
 
 Joining a call on iOS is still untested.
+On an iPhone, check the device log for permission, the active category/mode and
+input route type, then five one-second capture counts. Verify a peer can hear
+speech, including after an interruption, a headset switch and locking the screen.
 
 ## Build tools
 
@@ -321,7 +328,7 @@ Rough effort for one person who knows the code base.
 | Phase | What | Effort |
 | --- | --- | --- |
 | 2 | Usable chat on Android. Done: typed text, safe areas and the keyboard, `onDestroy`, recovery words, Android Keystore. Left: phone temp folder (`temp_dir()` is not writable on Android), file picker (Storage Access Framework), local notifications, hide Updates and Shortcuts on phones, `rusttalk://` links, the layout list above | 3 to 4 weeks |
-| 3 | Foreground voice on Android. Left: iOS audio session, Bluetooth headsets and calls with the screen off (foreground service on Android, background audio on iOS) | 2 weeks |
+| 3 | Foreground voice on Android and iOS; iOS requests microphone access and supports background audio. Left: iPhone device verification, Android Bluetooth routing and foreground service | 2 weeks |
 | 4 | iOS on a device. Done: Keychain, safe area and taps. Left: notifications (reuse `notify/macos.rs`), document picker, status bar colours, background rules | 1 to 2 weeks |
 | 5 | Foreground call camera and front/back selection. Left: verify capture and interruptions on a real iPhone | Device verification |
 | 6 | Release: signing keys, store listings or a sideload page, release.yml jobs, store updates | 1 week plus store review |

@@ -14,6 +14,8 @@
 //! does with its insets. The strips outside the safe area show the theme's
 //! background, and the keyboard's Return reaches egui as Enter.
 
+pub mod voice;
+
 use std::{
     cell::Cell,
     sync::{
