@@ -389,13 +389,18 @@ make release
 It signs and pushes the tag `v<version>`. The
 [release workflow](../.github/workflows/release.yml) then:
 
-1. builds the Linux AppImage (x86_64, aarch64), the Windows installer
-   (x86_64, aarch64) and a universal macOS DMG on native GitHub runners;
-2. pushes `ghcr.io/rusttalkcrew/rusttalk-api` and `rusttalk-index` as
-   `<version>`, `<major>.<minor>` and `latest` for amd64 and arm64;
-3. writes `latest.json` (size and SHA-256 of every installer, and the image
-   digests) and signs it with the release key;
-4. publishes the GitHub release with all files.
+1. Builds the Linux AppImages and Windows installers (x86_64 and aarch64),
+   universal macOS DMG, ARM64 Android APK, unsigned iOS IPA and server images.
+2. Signs and verifies the APK, then assembles the amd64 and arm64 server
+   images under their exact version tags.
+3. Writes and signs `latest.json` with each download's size and SHA-256 and
+   the server image digests.
+4. Publishes the GitHub release, then updates the `<major>.<minor>` and
+   `latest` tags for the API and index images.
+
+Mobile packages have versioned names (`rusttalk-<version>-android-arm64.apk`
+and `rusttalk-<version>-ios-unsigned.ipa`) and identical stable copies
+(`RustTalk-android-arm64.apk` and `RustTalk-ios-unsigned.ipa`).
 
 ### Release key
 
@@ -405,7 +410,12 @@ maintainer keeps it in `pass` at `apps/rusttalk/release_key`. GitHub holds:
 
 - repository variable `RUSTTALK_RELEASE_PUBLIC_KEY`: the 32-byte public key in hex;
 - secret `RUSTTALK_RELEASE_KEY` in the `release` environment, which only `v*`
-  tags may use.
+  tags may use;
+- secrets `RUSTTALK_ANDROID_KEYSTORE` (base64-encoded PKCS12) and
+  `RUSTTALK_ANDROID_KEYSTORE_PASSWORD` in that same tag-only environment.
+  Use alias `rusttalk` with the same password for the key and the store.
+  Back up this key to sign future Android updates. A missing key or wrong
+  password stops publication.
 
 ```sh
 pass show apps/rusttalk/release_key | gh secret set RUSTTALK_RELEASE_KEY --env release

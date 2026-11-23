@@ -10,16 +10,19 @@ android {
         // AAudio, which cpal plays and records through, came in Android 8.0.
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = providers.gradleProperty("rusttalkVersion").getOrElse("0.0.0")
+        val version = providers.gradleProperty("rusttalkVersion").get()
+        val (major, minor, patch) = version.split('.').map(String::toInt)
+        require(major in 0..2099 && minor in 0..999 && patch in 0..999)
+        versionCode = major * 1_000_000 + minor * 1_000 + patch + 1
+        versionName = version
     }
-    // A test build: not debuggable, so a USB cable doesn't open the app's files, and
-    // R8 can strip GameTextInput's logging of typed text (proguard-rules.pro). Signed
-    // with the local debug key until there are release keys.
+    // R8 strips GameTextInput logging in both release and test packages.
     buildTypes.getByName("release") {
         isMinifyEnabled = true
         proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-        signingConfig = signingConfigs.getByName("debug")
+        if (providers.gradleProperty("rusttalkTestSigning").isPresent) {
+            signingConfig = signingConfigs.getByName("debug")
+        }
     }
     // build.sh already stripped the debug info; function names stay for panic backtraces.
     packaging.jniLibs.keepDebugSymbols += "**/*.so"
