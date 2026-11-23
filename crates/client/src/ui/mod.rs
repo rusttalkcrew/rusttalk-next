@@ -40,9 +40,54 @@ pub const SPACE_XL: f32 = 24.0;
 /// Windows narrower than this are phone-sized: they show one column at a time
 /// (see docs/mobile.md).
 pub const PHONE_WIDTH: f32 = 600.0;
+/// Windows narrower than this (tablets, small desktop windows) show one sidebar at
+/// a time: the member list opens over the chat.
+pub const DESKTOP_WIDTH: f32 = 900.0;
+
+/// How much room the window gives: screens lay out by this, never by fixed widths.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Width {
+    Phone,
+    Tablet,
+    Desktop,
+}
+
+impl Width {
+    pub fn of(ctx: &Context) -> Self {
+        let width = ctx.content_rect().width();
+        if width < PHONE_WIDTH {
+            Self::Phone
+        } else if width < DESKTOP_WIDTH {
+            Self::Tablet
+        } else {
+            Self::Desktop
+        }
+    }
+}
 
 pub fn is_phone(ctx: &Context) -> bool {
-    ctx.content_rect().width() < PHONE_WIDTH
+    Width::of(ctx) == Width::Phone
+}
+
+/// Phones and tablets: touched, not pointed at, so no hover and no Escape key, and
+/// bigger targets.
+pub const TOUCH: bool = cfg!(any(target_os = "android", target_os = "ios"));
+
+/// The smallest a tap target gets on a touch screen (Apple asks 44 points).
+pub const TOUCH_TARGET: f32 = 44.0;
+
+/// `desktop` points on a desktop, at least `TOUCH_TARGET` on a touch screen.
+const fn target(desktop: f32) -> f32 {
+    if TOUCH && desktop < TOUCH_TARGET {
+        TOUCH_TARGET
+    } else {
+        desktop
+    }
+}
+
+/// Keep `ui` at most `width` wide, never wider than it already is.
+pub fn max_width(ui: &mut Ui, width: f32) {
+    ui.set_max_width(width.min(ui.available_width()));
 }
 
 // Corner radii.
@@ -78,13 +123,13 @@ const INTER_SEMIBOLD: &str = "Inter-SemiBold";
 
 // Sizes.
 /// Buttons and fields.
-pub const CONTROL_HEIGHT: f32 = 32.0;
-pub const LARGE_CONTROL: Vec2 = Vec2::new(240.0, 40.0);
-pub const ROW_HEIGHT: f32 = 32.0;
-pub const ICON_BUTTON: f32 = 32.0;
+pub const CONTROL_HEIGHT: f32 = target(32.0);
+pub const LARGE_CONTROL: Vec2 = Vec2::new(240.0, target(40.0));
+pub const ROW_HEIGHT: f32 = target(32.0);
+pub const ICON_BUTTON: f32 = target(32.0);
 pub const MENU_WIDTH: f32 = 220.0;
 pub const MENU_PADDING: i8 = 8;
-pub const MENU_ROW: f32 = 34.0;
+pub const MENU_ROW: f32 = target(34.0);
 /// A menu row with a second line of help.
 pub const MENU_ROW_TALL: f32 = 46.0;
 pub const POPUP_WIDTH: f32 = 300.0;
@@ -229,6 +274,11 @@ fn base_style(style: &mut Style) {
     interaction.tooltip_delay = 0.0;
     interaction.tooltip_grace_time = 0.0;
     interaction.show_tooltips_only_when_still = false;
+    if TOUCH {
+        // A finger is less precise than a pointer: a tap this close to a small
+        // target (a ×, a swatch, a toolbar glyph) still hits it.
+        interaction.interact_radius = 12.0;
+    }
 }
 
 fn theme(visuals: &mut Visuals, c: &Palette, accent: &Accent) {

@@ -195,6 +195,7 @@ home.emoji_picker = Emoji-Auswahl
 home.sticker_picker = Sticker
 home.send = Senden
 home.message_hint = Nachricht an {channel}
+home.message_hint_short = Nachricht
 home.waiting_for_server = Warte auf den Server…
 home.no_wide_mentions = In diesem Chat kannst du keine Rollen, @everyone oder @here erwähnen.
 home.quote_sticker = {name}: ein Sticker

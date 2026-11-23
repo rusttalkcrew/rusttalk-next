@@ -353,6 +353,7 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
         let (changed, close) = panel::window(
             ctx,
             "server-settings",
+            t!("home.server_settings"),
             &groups,
             &mut tab,
             settings,

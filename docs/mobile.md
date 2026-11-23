@@ -297,18 +297,16 @@ single column, in this order: server list and channels, then the open
 channel, with the member list as a cover over it and Back to return. Picking a
 channel, DM or page opens it.
 
-Still to do, screen by screen:
+Dialogs and the settings windows are full-screen sheets on phones (see
+[Responsive UI](development.md#responsive-ui)); Settings and Server settings
+list their pages first, then show the picked page with Back. Touch builds
+make buttons, rows and menu rows at least 44 points tall and widen every
+widget's tap area by 12 points.
 
-- **Call panel and voice channel:** the call and its chat stacked, controls in
-  a bottom bar, the participant list as a cover like the member list.
-- **Settings:** the page list, then the page, like the main layout.
-- **Dialogs:** full width; some (Create channel) are wider than a phone.
-- **Touch targets:** phones get at least 44 points (Apple) / 48 dp (Android)
-  for rows and icon buttons, set once in `ui::install` from the same
-  breakpoint, not per screen.
-- **Hover:** tooltips and hover-only message actions need a long press
-  instead (egui turns a long press into a secondary click, which already
-  opens context menus).
+Still to do:
+
+- **Call panel and voice channel:** controls in a bottom bar, the participant
+  list as a cover like the member list.
 - **Back:** Android's back gesture should do what the Back bar does.
 
 ## Later phases

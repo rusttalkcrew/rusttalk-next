@@ -14,6 +14,7 @@ Unreleased under the new version and date.
 - Choose one channel for joins and leaves, or turn them off. Device changes appear only in the audit log.
 - Android can keep your account keys on this phone without asking for a password at every start.
 - Find servers and join public servers on iPhone and Android.
+- Phones and small windows: Settings, dialogs and every screen now fit the screen, with bigger buttons to tap
 - New look for the first-start screens, with a Back button, Copy for your recovery words and Paste to fill them in
 - Phones: tapping a text field that is already open no longer closes and reopens the keyboard
 - iPhone: the keyboard no longer covers what you type, Return works, a tap outside closes the keyboard, and the edges match the theme

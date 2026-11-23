@@ -358,6 +358,7 @@ fn show<R>(popup: Popup, width: f32, add: impl FnOnce(&mut Menu) -> R) -> Option
     // What the menu held last frame: a click lands after it was shown.
     let keep = popup.get_id().with("keep open");
     let ctx = popup.ctx().clone();
+    let width = super::fit(&ctx, width);
     let popup = if ctx.data(|data| data.get_temp(keep)).unwrap_or(false) {
         popup.close_behavior(PopupCloseBehavior::CloseOnClickOutside)
     } else {

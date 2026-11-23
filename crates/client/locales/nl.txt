@@ -195,6 +195,7 @@ home.emoji_picker = Emojikiezer
 home.sticker_picker = Stickers
 home.send = Versturen
 home.message_hint = Bericht aan {channel}
+home.message_hint_short = Bericht
 home.waiting_for_server = Wachten op de server…
 home.no_wide_mentions = In deze chat kun je geen rollen, @everyone of @here noemen.
 home.quote_sticker = {name}: een sticker

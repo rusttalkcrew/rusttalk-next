@@ -3,9 +3,9 @@
 
 use eframe::egui::{
     self, Align, Align2, Area, Button, Color32, Context, CornerRadius, CursorIcon, FontId, Frame,
-    Id, Layout, Margin, Modal, Order, Popup, PopupCloseBehavior, PopupKind, Pos2, Rect, RectAlign,
-    Response, RichText, Sense, Shape, Stroke, StrokeKind, TextBuffer, TextEdit, Ui, UiBuilder,
-    Vec2, Widget, WidgetInfo, WidgetText, accesskit::Role, text::LayoutJob,
+    Id, Layout, Margin, Modal, ModalResponse, Order, Popup, PopupCloseBehavior, PopupKind, Pos2,
+    Rect, RectAlign, Response, RichText, Sense, Shape, Stroke, StrokeKind, TextBuffer, TextEdit,
+    Ui, UiBuilder, Vec2, Widget, WidgetInfo, WidgetText, accesskit::Role, text::LayoutJob,
 };
 
 use super::{
@@ -185,10 +185,13 @@ pub struct Field<'t> {
     password: bool,
 }
 
-/// A one-line text field.
+/// A one-line text field, as tall as a button (a touch target on phones).
 pub fn field(text: &mut dyn TextBuffer) -> Field<'_> {
     Field {
-        edit: TextEdit::singleline(text).margin(Margin::symmetric(10, 7)),
+        edit: TextEdit::singleline(text)
+            .margin(Margin::symmetric(10, 7))
+            .min_size(Vec2::new(0.0, CONTROL_HEIGHT))
+            .align(Align2::LEFT_CENTER),
         private: false,
         password: false,
     }
@@ -570,9 +573,9 @@ pub fn popup<R>(anchor: &Response, add: impl FnOnce(&mut Ui) -> R) -> Option<R> 
     Popup::menu(anchor)
         .align(RectAlign::TOP_START)
         .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
-        .width(POPUP_WIDTH)
+        .width(fit(&anchor.ctx, POPUP_WIDTH))
         .show(|ui| {
-            ui.set_width(POPUP_WIDTH);
+            ui.set_width(fit(ui.ctx(), POPUP_WIDTH));
             add(ui)
         })
         .map(|inner| inner.inner)
@@ -621,7 +624,7 @@ pub fn card_popup<R>(
         .frame(frame)
         .accessible_name(label)
         .show(|ui| {
-            ui.set_width(POPUP_WIDTH - 2.0 * SPACE_L);
+            ui.set_width(fit(ui.ctx(), POPUP_WIDTH) - 2.0 * SPACE_L);
             add(ui)
         })
         .map(|inner| inner.inner)
@@ -723,6 +726,24 @@ pub fn right_row<R>(ui: &mut Ui, height: f32, add: impl FnOnce(&mut Ui) -> R) ->
     let size = Vec2::new(ui.available_width(), height);
     ui.allocate_ui_with_layout(size, Layout::right_to_left(Align::Center), add)
         .inner
+}
+
+/// A row with `trailing` (buttons, added right to left) at its right end and
+/// `content` in the room left of them, top down, so long text wraps or is cut short
+/// instead of running under the buttons on a narrow window.
+pub fn trailing_row<R>(
+    ui: &mut Ui,
+    trailing: impl FnOnce(&mut Ui),
+    content: impl FnOnce(&mut Ui) -> R,
+) -> R {
+    ui.horizontal(|ui| {
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            trailing(ui);
+            ui.with_layout(Layout::top_down(Align::Min), content).inner
+        })
+        .inner
+    })
+    .inner
 }
 
 /// A list row with an icon and a label: a channel or a settings page. Muted until
@@ -831,35 +852,120 @@ pub fn close_button(ui: &mut Ui, size: f32) -> Response {
     }
     focus_ring(ui, &response, (size / 2.0) as u8);
     response.widget_info(|| WidgetInfo::labeled(Role::Button, true, t!("common.close")));
+    // Touch screens have no Escape key to mention.
+    let tip = if super::TOUCH {
+        t!("common.close")
+    } else {
+        t!("common.close_esc")
+    };
     response
-        .on_hover_text(t!("common.close_esc"))
+        .on_hover_text(tip)
         .on_hover_cursor(CursorIcon::PointingHand)
 }
 
 /// A dialog over the window: a heading with a ×, then `add`. Returns what `add`
-/// returned and whether it should close (×, Escape or a click outside).
+/// returned and whether it should close (×, Escape or a click outside). Phones show
+/// it as a full-screen sheet with a top bar, smaller windows narrower.
 pub fn dialog<R>(
     ctx: &Context,
     id: &str,
     title: &str,
     add: impl FnOnce(&mut Ui) -> R,
 ) -> (R, bool) {
-    let mut close = false;
-    let modal = Modal::new(Id::unique(("dialog", id)))
-        .frame(dialog_frame(ctx))
-        .show(ctx, |ui| {
-            ui.set_width(DIALOG_WIDTH);
-            ui.horizontal(|ui| {
-                ui.add(egui::Label::new(heading(title)).wrap());
-                ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-                    close = close_button(ui, 28.0).clicked();
-                });
-            });
-            ui.add_space(2.0);
-            add(ui)
+    let id = Id::unique(("dialog", id));
+    if super::is_phone(ctx) {
+        let modal = sheet(ctx, id, |ui| {
+            let (_, close) = sheet_bar(ui, title, None);
+            let inner = sheet_page(ui, id, add);
+            (inner, close)
         });
+        let close = modal.should_close();
+        let (inner, closed) = modal.inner;
+        return (inner, closed || close);
+    }
+    let mut close = false;
+    // Leave the window's edge visible around it.
+    let room = ctx.content_rect().width() - 2.0 * (SPACE_L + f32::from(DIALOG_PADDING));
+    let modal = Modal::new(id).frame(dialog_frame(ctx)).show(ctx, |ui| {
+        ui.set_width(DIALOG_WIDTH.min(room));
+        ui.horizontal(|ui| {
+            ui.add(egui::Label::new(heading(title)).wrap());
+            ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                close = close_button(ui, 28.0).clicked();
+            });
+        });
+        ui.add_space(2.0);
+        add(ui)
+    });
     let close = close || modal.should_close();
     (modal.inner, close)
+}
+
+/// A modal that covers the whole window, for dialogs and settings on phones.
+pub fn sheet<R>(ctx: &Context, id: Id, add: impl FnOnce(&mut Ui) -> R) -> ModalResponse<R> {
+    let screen = ctx.content_rect();
+    let c = super::appearance(ctx).palette(ctx.global_style().visuals.dark_mode);
+    Modal::new(id)
+        .area(Modal::default_area(id).anchor(Align2::LEFT_TOP, Vec2::ZERO))
+        .frame(Frame::new().fill(c.main))
+        .show(ctx, |ui| {
+            ui.set_min_size(screen.size());
+            ui.set_max_size(screen.size());
+            ui.spacing_mut().item_spacing.y = 0.0;
+            add(ui)
+        })
+}
+
+/// The height of `sheet_bar`.
+pub const SHEET_BAR: f32 = super::TOUCH_TARGET + SPACE_S;
+
+/// The top bar of a `sheet`: Back with `back` as its label (when given), the title
+/// and a ×. Returns whether Back and × were tapped.
+pub fn sheet_bar(ui: &mut Ui, title: &str, back: Option<&str>) -> (bool, bool) {
+    let c = colors(ui);
+    let mut pressed = (false, false);
+    let size = Vec2::new(ui.available_width(), SHEET_BAR);
+    let bar = ui.allocate_ui_with_layout(size, Layout::left_to_right(Align::Center), |ui| {
+        ui.set_min_size(size);
+        ui.add_space(SPACE_S);
+        if let Some(back) = back {
+            let button = Vec2::splat(super::TOUCH_TARGET);
+            pressed.0 = icon_button(ui, "⬅", back, Look::Ghost, button).clicked();
+        } else {
+            ui.add_space(SPACE_S);
+        }
+        let close = super::TOUCH_TARGET + SPACE_S;
+        ui.scope(|ui| {
+            ui.set_max_width((ui.available_width() - close).max(0.0));
+            ui.add(egui::Label::new(bold(title).size(super::TEXT_TITLE)).truncate());
+        });
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.add_space(SPACE_S);
+            pressed.1 = close_button(ui, 32.0).clicked();
+        });
+    });
+    let rect = bar.response.rect;
+    ui.painter()
+        .hline(rect.x_range(), rect.bottom(), Stroke::new(1.0, c.border));
+    pressed
+}
+
+/// The rest of a `sheet` under its bar: `add` in a scrolling page with a gutter.
+pub fn sheet_page<R>(ui: &mut Ui, id: Id, add: impl FnOnce(&mut Ui) -> R) -> R {
+    egui::ScrollArea::vertical()
+        .id_salt(id.with("page"))
+        .auto_shrink(false)
+        .show(ui, |ui| {
+            Frame::new()
+                .inner_margin(Margin::same(SPACE_L as i8))
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = SPACE_S;
+                    ui.set_width(ui.available_width());
+                    add(ui)
+                })
+                .inner
+        })
+        .inner
 }
 
 /// The frame of dialogs and the settings windows: the page surface, rounded, with a shadow.
@@ -884,12 +990,18 @@ pub fn toast<R>(ctx: &Context, id: &str, add: impl FnOnce(&mut Ui) -> R) -> R {
             dialog_frame(ctx)
                 .inner_margin(Margin::same(SPACE_M as i8))
                 .show(ui, |ui| {
-                    ui.set_width(POPUP_WIDTH);
+                    ui.set_width(fit(ctx, POPUP_WIDTH));
                     add(ui)
                 })
                 .inner
         })
         .inner
+}
+
+/// `width`, or less on a window too narrow to show it with a gutter on both sides:
+/// for things that float, like popups, menus and toasts.
+pub fn fit(ctx: &Context, width: f32) -> f32 {
+    width.min(ctx.content_rect().width() - 2.0 * (SPACE_L + SPACE_M))
 }
 
 /// The buttons at the bottom of a dialog, right-aligned: add the main one first.
@@ -939,20 +1051,20 @@ pub fn choice_card_sized(
         icon_color,
     );
     let x = rect.left() + 46.0;
-    painter.text(
-        egui::pos2(x, mid - 1.0),
-        Align2::LEFT_BOTTOM,
-        title,
-        FontId::new(TEXT_BODY, bold_family()),
+    // Cut short with "…" in a card narrowed by a small window.
+    let line = |text: &str, font: FontId, color: Color32| {
+        let mut job = LayoutJob::simple_singleline(text.to_owned(), font, color);
+        job.wrap = egui::text::TextWrapping::truncate_at_width(rect.right() - x - SPACE_S);
+        painter.layout_job(job)
+    };
+    let heading = line(title, FontId::new(TEXT_BODY, bold_family()), c.strong);
+    painter.galley(
+        egui::pos2(x, mid - 1.0 - heading.size().y),
+        heading,
         c.strong,
     );
-    painter.text(
-        egui::pos2(x, mid + 2.0),
-        Align2::LEFT_TOP,
-        help,
-        FontId::proportional(TEXT_SMALL),
-        c.muted,
-    );
+    let help = line(help, FontId::proportional(TEXT_SMALL), c.muted);
+    painter.galley(egui::pos2(x, mid + 2.0), help, c.muted);
     response.widget_info(|| WidgetInfo::selected(Role::RadioButton, true, selected, title));
     response.on_hover_cursor(CursorIcon::PointingHand)
 }

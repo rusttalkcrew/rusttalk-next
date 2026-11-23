@@ -782,7 +782,7 @@ pub fn chat_live(
     let fresh = chrono::Utc::now().timestamp() - msg.at < OFFER_SECONDS;
     let mut action = None;
     files::attachment_frame(ui).show(ui, |ui| {
-        ui.set_max_width(360.0);
+        ui::max_width(ui, 360.0);
         ui.horizontal(|ui| {
             ui.label(RichText::new("📡").size(ui::TEXT_ICON_LARGE))
                 .on_hover_text(t!("call.direct_chat"));
@@ -1156,7 +1156,7 @@ pub fn settings_tab(ui: &mut Ui, voice: &mut Voice) {
         key_picker(ui, voice, &mut s);
     } else {
         // As wide as the meter, so the handle sits on the line.
-        ui.spacing_mut().slider_width = METER_WIDTH;
+        ui.spacing_mut().slider_width = meter_width(ui);
         if s.auto_threshold {
             // Shows the live automatic level; turning automatic off keeps the person's own.
             let mut live = audio.auto_threshold();
@@ -1334,11 +1334,16 @@ fn device_picker(
     });
 }
 
+/// The meter's width: `METER_WIDTH`, or the page's on a phone.
+fn meter_width(ui: &Ui) -> f32 {
+    METER_WIDTH.min(ui.available_width())
+}
+
 /// The live input level, with the voice activation line.
 fn meter(ui: &mut Ui, audio: &Audio, s: &Settings) {
     let fraction = |db: f32| ((db - FLOOR) / (CEILING - FLOOR)).clamp(0.0, 1.0);
     let level = audio.level();
-    let width = METER_WIDTH;
+    let width = meter_width(ui);
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 10.0), Sense::hover());
     let painter = ui.painter();
     let c = ui::colors(ui);
