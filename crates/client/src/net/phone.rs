@@ -173,16 +173,14 @@ pub(super) async fn sync(ctx: &Ctx, url: &url::Url, live: &mut Live) {
     let hosted = None;
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     let hosted = live.phone.as_ref().map(|phone| &phone.sid).or(hosted);
-    let mut acknowledgements = Vec::new();
-    if let Some(sid) = hosted {
-        let call = live.room.local_phone_call(sid);
-        let (microphones, withdrawn) = live.room.phone_bridge_state(&call);
+    let call = hosted.map(|sid| live.room.local_phone_call(sid));
+    let (microphones, acknowledgements) = live.room.phone_bridge_state(call.as_ref());
+    if hosted.is_some() {
         ctx.audio.phone_consent(microphones);
-        // The acknowledgement uses the same snapshot and follows discarding queued samples.
-        acknowledgements = withdrawn;
     } else {
         ctx.audio.end_phone();
     }
+    // Acknowledge only after removing excluded audio or tearing down the mixer tap.
     if live.phone_acknowledgements != acknowledgements {
         match tokio::time::timeout(
             std::time::Duration::from_secs(2),
@@ -224,7 +222,7 @@ pub(super) async fn sync(ctx: &Ctx, url: &url::Url, live: &mut Live) {
         }
     }
     live.phone_withdrawals.resolve(|call, revision| {
-        live.room.phone_call_ended(call)
+        live.room.phone_host_session_ended(call)
             || revision
                 .is_some_and(|revision| live.room.phone_withdrawal_acknowledged(call, revision))
     });

@@ -168,19 +168,28 @@ impl VoiceRoom {
 
     /// A single consent snapshot drives both mixer filtering and acknowledgements.
     /// Apply the microphones first, then publish these acknowledgements.
-    pub fn phone_bridge_state(&self, call: &Call) -> (Vec<String>, Vec<Acknowledgement>) {
+    pub fn phone_bridge_state(&self, hosted: Option<&Call>) -> (Vec<String>, Vec<Acknowledgement>) {
         let mut microphones = Vec::new();
         let mut acknowledgements = Vec::new();
+        let local = self.room.local_participant();
         for (p, connection) in self.participants() {
             let state = self.phone_state(&p);
-            if state.allowed.contains(call) && connection == VoiceState::Connected {
+            if hosted.is_some_and(|call| state.allowed.contains(call))
+                && connection == VoiceState::Connected
+            {
                 microphones.extend(
                     p.track_publications()
                         .into_values()
                         .filter(|track| track.source() == TrackSource::Microphone)
                         .map(|track| track.sid().to_string()),
                 );
-            } else if state.withdrawn.contains(call) && !state.allowed.contains(call) {
+            }
+            // A member may withdraw after our last phone track was unpublished.
+            for call in state.withdrawn.iter().filter(|call| {
+                call.host == local.identity().as_str()
+                    && call.session == local.sid().as_str()
+                    && !state.allowed.contains(call)
+            }) {
                 acknowledgements.push(Acknowledgement {
                     member: p.identity().to_string(),
                     session: p.sid().to_string(),
@@ -253,18 +262,16 @@ impl VoiceRoom {
         })
     }
 
-    /// Missing/invalid consent metadata is not evidence that the bridge ended.
-    pub fn phone_call_ended(&self, call: &Call) -> bool {
+    /// An unpublished phone track does not stop its host from receiving room audio.
+    pub fn phone_host_session_ended(&self, call: &Call) -> bool {
         if self.connection_state() != super::ConnectionState::Connected {
             return false;
         }
-        !self.room.remote_participants().into_values().any(|p| {
-            p.identity().as_str() == call.host
-                && p.sid().as_str() == call.session
-                && p.track_publications()
-                    .keys()
-                    .any(|sid| sid.as_str() == call.track)
-        })
+        !self
+            .room
+            .remote_participants()
+            .into_values()
+            .any(|p| p.identity().as_str() == call.host && p.sid().as_str() == call.session)
     }
 
     pub fn external_phone_calls(&self) -> Vec<Call> {
@@ -289,7 +296,7 @@ impl VoiceRoom {
 
     /// Only microphones from the exact consenting device session; never app sound.
     pub fn phone_microphones(&self, call: &Call) -> Vec<String> {
-        self.phone_bridge_state(call).0
+        self.phone_bridge_state(Some(call)).0
     }
 }
 

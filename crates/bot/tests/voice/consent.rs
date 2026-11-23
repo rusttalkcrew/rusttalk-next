@@ -87,7 +87,7 @@ pub(super) async fn exercise(
         "publication alone acknowledged withdrawal"
     );
     wait_phone(|| sender.phone_microphones(&call).is_empty()).await?;
-    let (microphones, acknowledgements) = sender.phone_bridge_state(&call);
+    let (microphones, acknowledgements) = sender.phone_bridge_state(Some(&call));
     ensure!(
         microphones.is_empty(),
         "withdrawal ack before microphone exclusion"
@@ -144,7 +144,27 @@ pub(super) async fn exercise(
     .await??;
     listen(listener, &first).await?;
     timeout(super::hang_guard(), hear_track(listener, &first, 990)).await??;
+    sender.announce_phone(Some(&first), &[], &[]).await?;
+    listener
+        .announce_phone(None, std::slice::from_ref(&call), &[])
+        .await?;
+    wait_phone(|| !sender.phone_microphones(&call).is_empty()).await?;
     sender.unpublish_audio(&first).await?;
+    wait_phone(|| listener.external_phone_calls().is_empty()).await?;
+    // A delayed withdrawal has not reached the host. Its receive session is still live.
+    ensure!(!listener.phone_host_session_ended(&call));
+    ensure!(!sender.phone_microphones(&call).is_empty());
+    let revision = listener
+        .announce_phone(None, &[], std::slice::from_ref(&call))
+        .await?;
+    ensure!(!listener.phone_withdrawal_acknowledged(&call, revision));
+    wait_phone(|| !sender.phone_bridge_state(None).1.is_empty()).await?;
+    let (microphones, acknowledgements) = sender.phone_bridge_state(None);
+    ensure!(microphones.is_empty());
+    sender
+        .acknowledge_phone_withdrawals(&acknowledgements)
+        .await?;
+    wait_phone(|| listener.phone_withdrawal_acknowledged(&call, revision)).await?;
     let replacement = sender
         .publish_app_audio("Consent tone", source)
         .await?

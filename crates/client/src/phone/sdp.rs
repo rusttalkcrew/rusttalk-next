@@ -94,8 +94,9 @@ pub fn answer(sdp: &str) -> Option<Answer> {
             direction = &line[2..];
         } else if in_audio && let Some(rest) = line.strip_prefix("a=rtpmap:") {
             let (pt, codec) = rest.split_once(' ')?;
-            if (pt == "8" && !codec.eq_ignore_ascii_case("PCMA/8000"))
-                || (pt == "0" && !codec.eq_ignore_ascii_case("PCMU/8000"))
+            let mono = codec.strip_suffix("/1").unwrap_or(codec);
+            if (pt == "8" && !mono.eq_ignore_ascii_case("PCMA/8000"))
+                || (pt == "0" && !mono.eq_ignore_ascii_case("PCMU/8000"))
             {
                 return None;
             }
@@ -142,6 +143,23 @@ mod tests {
             ("PCMA/8000", "opus/48000"),
         ] {
             assert!(answer(&valid.replace(from, to)).is_none(), "{to}");
+        }
+    }
+
+    #[test]
+    fn provider_can_specify_one_g711_channel() {
+        for (pt, codec, law) in [(0, "PCMU", Law::Mu), (8, "PCMA", Law::A)] {
+            for (params, valid) in [
+                ("8000", true),
+                ("8000/1", true),
+                ("8000/2", false),
+                ("16000/1", false),
+            ] {
+                let sdp = format!(
+                    "c=IN IP4 192.0.2.9\nm=audio 6000 RTP/AVP {pt}\na=rtpmap:{pt} {codec}/{params}\n"
+                );
+                assert_eq!(answer(&sdp).map(|a| a.law), valid.then_some(law));
+            }
         }
     }
 
