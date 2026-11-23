@@ -43,7 +43,8 @@ pub(super) async fn search(
         base.set_path(&format!("{}/", base.path()));
     }
     let url = base.join("v1/servers").map_err(|e| unreachable(&e))?;
-    let client = https_client(pin).map_err(|e| unreachable(&e))?;
+    let client = https_client(pin)
+        .map_err(|e| unreachable(&format_args!("{:#}", anyhow::Error::from_boxed(e))))?;
     let mut reply = client
         .get(url)
         .query(&[("q", query), ("page", &page.to_string())])
@@ -51,7 +52,7 @@ pub(super) async fn search(
         .send()
         .await
         .and_then(reqwest::Response::error_for_status)
-        .map_err(|e| unreachable(&e.without_url()))?;
+        .map_err(|e| unreachable(&format_args!("{:#}", anyhow::Error::new(e.without_url()))))?;
     // The index is a third party: read a bounded body only.
     let mut body = Vec::new();
     while let Some(chunk) = reply
