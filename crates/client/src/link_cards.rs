@@ -249,21 +249,33 @@ impl Fetcher {
     fn get(&self, url: &Url, max: u64, stop: &Stop, page: bool) -> Option<(Url, Vec<u8>)> {
         let mut url = url.clone();
         for _ in 0..=MAX_REDIRECTS {
-            stop.left()?;
-            let addresses = self.resolve(&url)?;
+            let left = stop.left()?;
+            let resolution =
+                rusttalk_core::route::resolve_for_link_card(&url, self.allow_local, public, left)
+                    .ok()?;
+            let addresses = match resolution {
+                rusttalk_core::route::LinkCardResolution::Direct => Some(self.resolve(&url)?),
+                rusttalk_core::route::LinkCardResolution::RemoteDns => None,
+                rusttalk_core::route::LinkCardResolution::Resolved(addrs) => Some(addrs),
+            };
             // Name lookup can take long; check again, and give the request only what's left.
             let left = stop.left()?;
-            let mut client = reqwest::blocking::Client::builder()
+            let builder = reqwest::blocking::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .referer(false)
-                .no_proxy()
                 .user_agent("RustTalk")
                 .timeout(left);
-            // Connect to exactly the checked addresses, so a second lookup can't
-            // point somewhere else.
-            if let Some(Host::Domain(domain)) = url.host() {
-                client = client.resolve_to_addrs(domain, &addresses);
-            }
+            // Connect to exactly the checked addresses when resolved locally or in-tunnel,
+            // using a strict DNS resolver override (and `socks5://` for WireGuard) so a
+            // second DNS lookup can never rebind to a private IP while keeping original
+            // Host header and TLS SNI intact.
+            let client = match (addresses, url.host()) {
+                (Some(addresses), Some(Host::Domain(domain))) => {
+                    crate::route::configure_blocking_reqwest_resolved(builder, domain, addresses)
+                        .ok()?
+                }
+                _ => crate::route::configure_blocking_reqwest(builder).ok()?,
+            };
             let reply = client.build().ok()?.get(url.clone()).send().ok()?;
             if reply.status().is_redirection() {
                 let next = reply
@@ -600,6 +612,7 @@ mod tests {
             assert!(public(ip.parse().unwrap()), "{ip}");
         }
         // The real guard: these never get a connection, and `localhost` resolves locally.
+        let _route = crate::route::test_lock();
         let fetcher = Fetcher::new();
         for url in [
             "http://127.0.0.1:9/",
@@ -663,6 +676,7 @@ mod tests {
 
     #[test]
     fn a_page_becomes_a_card_with_its_picture() {
+        let _route = crate::route::test_lock();
         let html = r#"<head><meta property="og:title" content="Big news">
             <meta property="og:description" content="Something happened.">
             <meta property="og:image" content="/moved.png"></head>"#;
@@ -706,6 +720,7 @@ mod tests {
 
     #[test]
     fn too_many_redirects_or_no_page_give_nothing() {
+        let _route = crate::route::test_lock();
         let port = serve(vec![
             ("/1", "302 Found\r\nLocation: /2\r\n".into(), Vec::new()),
             ("/2", "302 Found\r\nLocation: /3\r\n".into(), Vec::new()),
@@ -741,6 +756,7 @@ mod tests {
 
     #[test]
     fn a_cancelled_or_late_preview_makes_no_request() {
+        let _route = crate::route::test_lock();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let url = Url::parse(&format!(

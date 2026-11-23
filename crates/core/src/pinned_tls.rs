@@ -10,17 +10,15 @@ use rustls::{
 };
 use sha2::{Digest, Sha256};
 #[cfg(feature = "client")]
-use tokio::net::TcpStream;
-#[cfg(feature = "client")]
 use tokio_tungstenite::{
-    Connector, MaybeTlsStream, WebSocketStream, connect_async_tls_with_config,
+    Connector, MaybeTlsStream, WebSocketStream, client_async_tls_with_config,
     tungstenite::client::IntoClientRequest,
 };
 
 pub use crate::auth::Fingerprint;
 
 #[cfg(feature = "client")]
-type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+pub(crate) type Socket = WebSocketStream<MaybeTlsStream<crate::route::RouteStream>>;
 
 #[cfg(feature = "livekit-tls")]
 mod livekit;
@@ -83,12 +81,18 @@ pub(crate) async fn events_socket(
         .map(pinned_config)
         .transpose()?
         .map(|config| Connector::Rustls(Arc::new(config)));
+    let host = url.host_str().ok_or("event origin has no host")?.to_owned();
+    let port = url
+        .port_or_known_default()
+        .ok_or("event origin has no port")?;
     let limits = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
         .max_message_size(Some(4096))
         .max_frame_size(Some(4096));
+    let timeout = Duration::from_secs(10);
+    let stream = crate::route::connect_tcp(&host, port, timeout).await?;
     let (socket, _) = tokio::time::timeout(
-        Duration::from_secs(10),
-        connect_async_tls_with_config(request, Some(limits), false, connector),
+        timeout,
+        client_async_tls_with_config(request, stream, Some(limits), connector),
     )
     .await??;
     Ok(socket)
@@ -114,6 +118,10 @@ fn build_https_client(
         .https_only(true)
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none());
+    #[cfg(feature = "client")]
+    {
+        builder = crate::route::configure_reqwest(builder)?;
+    }
     if let Some(tls) = tls {
         builder = builder.use_preconfigured_tls(tls);
     }

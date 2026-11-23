@@ -859,6 +859,7 @@ enum Failure {
 enum End {
     Quit,
     Closed(Option<String>),
+    RouteChanged,
     Error,
 }
 
@@ -881,6 +882,7 @@ async fn run(
     };
     let records = rusttalk_core::client::revocations::Revocations::in_profile(&ctx.data);
     let mut removals = records.changes();
+    let mut route_rx = rusttalk_core::route::subscribe();
     if revoked(&ctx, &url, &state, &records) {
         return;
     }
@@ -892,31 +894,79 @@ async fn run(
     let mut delay = 1;
     // Verified once, then reused: each verification spends one of the server's rate-limited challenges.
     let mut api = None;
+    let mut api_generation = 0u64;
     // Commands that came while connecting, for when it is done. Not in `State`: some
     // hold Windows handles, and `State` is borrowed across awaits so must stay `Sync`.
     let mut queued = VecDeque::new();
     // Once an attempt fails or the session drops, stay Offline until recovery.
     ctx.send(Update::Status(url.clone(), Status::Connecting));
     loop {
+        let route_snap = route_rx.borrow_and_update().clone();
+        if !route_snap.status.is_active() {
+            api = None;
+            if let Some(channel) = voice::close(&ctx, &mut state) {
+                ctx.send(Update::Call(url.clone(), channel, None));
+            }
+            state.chat_files.clear();
+            state.transfers.clear();
+            ctx.send(Update::Status(url.clone(), Status::Offline));
+            let wait_route = async {
+                let _ = route_rx.changed().await;
+            };
+            if offline(
+                &ctx,
+                &url,
+                &mut state,
+                &mut commands,
+                &mut removals,
+                wait_route,
+                None,
+            )
+            .await
+            .is_none()
+            {
+                return;
+            }
+            delay = 1;
+            continue;
+        }
+        if api_generation != route_snap.generation {
+            api = None;
+            api_generation = route_snap.generation;
+        }
+        enum ConnectStep<T> {
+            RouteChanged,
+            Done(T),
+        }
+        let expected_generation = route_snap.generation;
         let connecting = {
-            let (ctx, server, api, admission) = (&ctx, &server, &mut api, &mut admission);
+            let (ctx, server, api, admission, route_rx) =
+                (&ctx, &server, &mut api, &mut admission, &mut route_rx);
             async move {
-                let (api, session, dm_backfill) =
-                    session(ctx, server, api, admission.as_ref()).await?;
-                if admission.take().is_some() {
-                    tracing::info!(server = %fingerprint(&server.server_id), "joined server");
-                    let joined = vec![Edit::Join(api.known_server().clone())];
-                    if let Err(error) = ctx.sync.edit(&ctx.data, joined).await {
-                        tracing::error!(error = %format_args!("{error:#}"), "saving joined server failed");
+                let attempt = async {
+                    let (api, session, dm_backfill) =
+                        session(ctx, server, api, admission.as_ref()).await?;
+                    if admission.take().is_some() {
+                        tracing::info!(server = %fingerprint(&server.server_id), "joined server");
+                        let joined = vec![Edit::Join(api.known_server().clone())];
+                        if let Err(error) = ctx.sync.edit(&ctx.data, joined).await {
+                            tracing::error!(error = %format_args!("{error:#}"), "saving joined server failed");
+                        }
                     }
+                    let pins = load_pins(&ctx.data, &server.server_id);
+                    let client =
+                        KeyClient::connect_with_dms(api, &ctx.identity, &session, pins.clone())
+                            .await;
+                    Ok::<_, Failure>((client, pins, dm_backfill))
+                };
+                tokio::select! {
+                    biased;
+                    _ = route_rx.changed() => ConnectStep::RouteChanged,
+                    res = attempt => ConnectStep::Done(res),
                 }
-                let pins = load_pins(&ctx.data, &server.server_id);
-                let client =
-                    KeyClient::connect_with_dms(api, &ctx.identity, &session, pins.clone()).await;
-                Ok::<_, Failure>((client, pins, dm_backfill))
             }
         };
-        let Some(connected) = offline(
+        let Some(step) = offline(
             &ctx,
             &url,
             &mut state,
@@ -929,6 +979,21 @@ async fn run(
         else {
             return;
         };
+        let connected = match step {
+            ConnectStep::RouteChanged => {
+                tracing::info!("network route changed while connecting; cancelling attempt");
+                api = None;
+                if let Some(channel) = voice::close(&ctx, &mut state) {
+                    ctx.send(Update::Call(url.clone(), channel, None));
+                }
+                state.chat_files.clear();
+                state.transfers.clear();
+                delay = 1;
+                continue;
+            }
+            ConnectStep::Done(connected) => connected,
+        };
+        let mut route_changed = false;
         match connected {
             Ok((connected, pins, dm_backfill)) => {
                 state.dm_backfill = dm_backfill;
@@ -947,12 +1012,23 @@ async fn run(
                             &mut commands,
                             &mut queued,
                             &mut removals,
+                            &mut route_rx,
+                            expected_generation,
                         )
                         .await;
                         state.identities = voice::identities(&client, &state.server_id);
                         ctx.sync.set_peer(&url, None);
                         match end {
                             End::Quit => return,
+                            End::RouteChanged => {
+                                api = None;
+                                if let Some(channel) = voice::close(&ctx, &mut state) {
+                                    ctx.send(Update::Call(url.clone(), channel, None));
+                                }
+                                state.chat_files.clear();
+                                state.transfers.clear();
+                                route_changed = true;
+                            }
                             End::Closed(Some(reason))
                                 if matches!(reason.as_str(), "kicked" | "banned" | "revoked") =>
                             {
@@ -996,9 +1072,18 @@ async fn run(
         if revoked(&ctx, &url, &state, &records) {
             return;
         }
+        if route_changed {
+            delay = 1;
+            continue;
+        }
         ctx.send(Update::Status(url.clone(), Status::Offline));
-        let wait = tokio::time::sleep(Duration::from_secs(delay));
-        if offline(
+        let wait = async {
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(delay)) => false,
+                _ = route_rx.changed() => true,
+            }
+        };
+        let Some(woke_for_route) = offline(
             &ctx,
             &url,
             &mut state,
@@ -1008,11 +1093,15 @@ async fn run(
             None,
         )
         .await
-        .is_none()
-        {
+        else {
             return;
+        };
+        if woke_for_route {
+            api = None;
+            delay = 1;
+        } else {
+            delay = (delay * 2).min(30);
         }
-        delay = (delay * 2).min(30);
     }
 }
 
@@ -1290,6 +1379,7 @@ async fn session<'a>(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn serve(
     ctx: &Ctx,
     url: &Url,
@@ -1298,15 +1388,43 @@ async fn serve(
     commands: &mut UnboundedReceiver<Command>,
     queued: &mut VecDeque<Command>,
     removals: &mut tokio::sync::watch::Receiver<()>,
+    route_rx: &mut tokio::sync::watch::Receiver<rusttalk_core::route::RouteSnapshot>,
+    expected_generation: u64,
 ) -> End {
-    if let Err(error) = resume(ctx, url, client, state).await {
+    {
+        let current = route_rx.borrow();
+        if route_rx.has_changed().unwrap_or(false)
+            || current.generation != expected_generation
+            || !current.status.is_active()
+        {
+            tracing::info!("network route changed before resume; closing server session");
+            return End::RouteChanged;
+        }
+    }
+    let resumed = tokio::select! {
+        biased;
+        _ = route_rx.changed() => {
+            tracing::info!("network route changed during resume; closing server session");
+            return End::RouteChanged;
+        }
+        res = resume(ctx, url, client, state) => res,
+    };
+    if let Err(error) = resumed {
         tracing::warn!(error = %format_args!("{error:#}"), "loading server state failed");
         return End::Error;
     }
     apply_keys(ctx, url, client, state);
     voice::name_audio(ctx, client, state);
-    // What was asked while connecting.
-    for command in std::mem::take(queued) {
+    // What was asked while connecting. Never drain commands over a stale route.
+    while let Some(command) = queued.pop_front() {
+        if route_rx.has_changed().unwrap_or(false)
+            || route_rx.borrow().generation != expected_generation
+            || !route_rx.borrow().status.is_active()
+        {
+            queued.push_front(command);
+            tracing::info!("network route changed while draining queued commands");
+            return End::RouteChanged;
+        }
         run_command(ctx, url, client, state, command).await;
     }
     let mut stats = tokio::time::interval(Duration::from_secs(2));
@@ -1327,6 +1445,10 @@ async fn serve(
         };
         tokio::select! {
             biased;
+            _ = route_rx.changed() => {
+                tracing::info!("network route changed; closing server session to reconnect");
+                return End::RouteChanged;
+            }
             _ = removals.changed() => {
                 let records = rusttalk_core::client::revocations::Revocations::in_profile(&ctx.data);
                 if revoked(ctx,url,state,&records) { return End::Quit; }
@@ -2327,12 +2449,26 @@ async fn on_command(
             files::unshare(ctx, url, client, (channel, id, uploader)).await;
         }
         Command::SendLive(channel, path) => {
+            if let Err(error) = rusttalk_core::route::allow_realtime_media("Live file transfers") {
+                ctx.send(Update::Failed(error.to_string()));
+                return Ok(());
+            }
             voice::offer_chat_file(ctx, url, client, state, channel, path).await?;
         }
         Command::AcceptFile(id, path) if state.transfers.get(&id).is_some_and(|t| t.chat) => {
+            if let Err(error) = rusttalk_core::route::allow_realtime_media("Live file transfers") {
+                ctx.send(Update::Failed(error.to_string()));
+                return Ok(());
+            }
             voice::accept_chat_file(ctx, client, state, id, path).await?;
         }
-        Command::AcceptFile(id, path) => voice::accept_file(ctx, client, state, id, path).await?,
+        Command::AcceptFile(id, path) => {
+            if let Err(error) = rusttalk_core::route::allow_realtime_media("Live file transfers") {
+                ctx.send(Update::Failed(error.to_string()));
+                return Ok(());
+            }
+            voice::accept_file(ctx, client, state, id, path).await?;
+        }
         Command::CreateChannel {
             category,
             new_category,
@@ -2467,7 +2603,14 @@ async fn on_command(
         }
         Command::Admin(request) => admin::run(ctx, url, client, state, request).await,
         Command::Calendar(change) => calendar::change(ctx, url, client, change).await,
-        Command::JoinVoice(channel) => voice::start_call(ctx, url, client, state, channel).await?,
+        Command::JoinVoice(channel) => {
+            if let Err(error) = rusttalk_core::route::allow_realtime_media("Voice calls") {
+                ctx.send(Update::Call(url.clone(), channel, None));
+                ctx.send(Update::Failed(error.to_string()));
+                return Ok(());
+            }
+            voice::start_call(ctx, url, client, state, channel).await?;
+        }
         command if voice_only(&command) => {
             if let Some(channel) = voice_command(ctx, url, state, command).await? {
                 send_room(ctx, url, client, state, channel);

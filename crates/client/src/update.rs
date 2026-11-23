@@ -141,7 +141,6 @@ impl Artifact {
 }
 
 struct Update {
-    client: reqwest::Client,
     base: Url,
     version: Version,
     artifact: Artifact,
@@ -216,6 +215,26 @@ enum Found {
     Newer(Update),
 }
 
+fn update_client(local_http: bool) -> Result<reqwest::Client> {
+    Ok(rusttalk_core::route::configure_reqwest(
+        reqwest::Client::builder()
+            .https_only(!local_http)
+            // Release hosts such as GitHub redirect downloads to a CDN. The signed
+            // manifest pins every byte, so only the scheme needs checking here.
+            .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+                if attempt.previous().len() < 5 && (attempt.url().scheme() == "https" || local_http)
+                {
+                    attempt.follow()
+                } else {
+                    attempt.stop()
+                }
+            }))
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(300)),
+    )?
+    .build()?)
+}
+
 /// Looks for a newer release. `etag` is the ETag of the last manifest that held
 /// nothing newer: GitHub then answers 304 and the 15 minute checks cost almost nothing.
 async fn check(url: &str, etag: Option<&str>) -> Result<Found> {
@@ -235,21 +254,7 @@ async fn check(url: &str, etag: Option<&str>) -> Result<Found> {
         .expect("HTTP URL has a path")
         .pop_if_empty()
         .push("");
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .https_only(!local_http)
-        // Release hosts such as GitHub redirect downloads to a CDN. The signed
-        // manifest pins every byte, so only the scheme needs checking here.
-        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
-            if attempt.previous().len() < 5 && (attempt.url().scheme() == "https" || local_http) {
-                attempt.follow()
-            } else {
-                attempt.stop()
-            }
-        }))
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(300))
-        .build()?;
+    let client = update_client(local_http)?;
     let response = get(&client, base.join("latest.json")?, etag).await?;
     if response.status() == reqwest::StatusCode::NOT_MODIFIED {
         return Ok(Found::Unchanged);
@@ -284,7 +289,6 @@ async fn check(url: &str, etag: Option<&str>) -> Result<Found> {
         "invalid update size"
     );
     Ok(Found::Newer(Update {
-        client,
         base,
         version,
         artifact,
@@ -361,12 +365,13 @@ impl Target {
         #[cfg(not(target_os = "macos"))]
         let mut file =
             NamedTempFile::new_in(self.path.parent().context("locate update directory")?)?;
-        let mut response = get(
-            &update.client,
-            update.base.join(&update.artifact.file)?,
-            None,
-        )
-        .await?;
+        // Always build a fresh routed HTTP client at install time so a route switch or
+        // route block after the check cannot download through an old direct client.
+        let local_http = LOCAL_TEST
+            && update.base.scheme() == "http"
+            && update.base.host_str() == Some("127.0.0.1");
+        let client = update_client(local_http)?;
+        let mut response = get(&client, update.base.join(&update.artifact.file)?, None).await?;
         let mut size = 0;
         let mut hasher = Sha256::new();
         while let Some(chunk) = response
@@ -1053,7 +1058,8 @@ impl Updater {
         if matches!(self.state, State::InstallerStarted(_)) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
-        let ready = self.settings.automatic
+        let ready = rusttalk_core::route::is_active()
+            && self.settings.automatic
             && !self.settings.url.trim().is_empty()
             && self.target.is_ok()
             && !self.busy()
@@ -1068,6 +1074,15 @@ impl Updater {
                 ctx.request_repaint_after(next.saturating_duration_since(now));
             }
         }
+    }
+
+    /// Clear cached update clients/status when the network route changes so the next
+    /// check and download use the new route.
+    pub fn on_route_changed(&mut self) {
+        if !self.busy() {
+            self.state = State::Idle;
+        }
+        self.next_check = None;
     }
 
     pub fn available(&self) -> bool {
@@ -1388,7 +1403,6 @@ mod tests {
 
     fn fake_update(base: &str) -> Update {
         Update {
-            client: reqwest::Client::new(),
             base: Url::parse(base).unwrap(),
             version: Version::new(0, 2, 0),
             artifact: Artifact {
@@ -1501,6 +1515,7 @@ mod tests {
 
     #[test]
     fn poll_starts_one_scheduled_check_and_respects_the_switch() {
+        let _route = crate::route::test_lock();
         let ctx = egui::Context::default();
         // No usable target, so even a due check must not start.
         let mut idle = updater(State::Idle);
@@ -1550,6 +1565,7 @@ mod tests {
 
     #[test]
     fn update_flow_goes_from_available_to_failed() {
+        let _route = crate::route::test_lock();
         let ctx = egui::Context::default();
         let mut updater = updater(State::Available(fake_update("https://example.com/")));
         assert!(updater.available());
@@ -1581,6 +1597,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn finished_install_goes_to_restart() {
+        let _route = crate::route::test_lock();
         let ctx = egui::Context::default();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("app");

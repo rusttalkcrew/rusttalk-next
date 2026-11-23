@@ -251,6 +251,7 @@ impl DataLiveFiles {
         client: &mut KeyClient<'_>,
         path: &Path,
     ) -> Result<MessageRecord> {
+        crate::route::allow_realtime_media("Live file transfers")?;
         self.check_client(client)?;
         self.files.offer(client, &self.channel, path).await
     }
@@ -519,6 +520,7 @@ fn data_request(client: &KeyClient<'_>, channel: &[u8; 32], nonce: &[u8; 16]) ->
 }
 
 async fn connect_data(server: &KnownServer, request: RequestBuilder) -> Result<ConnectedData> {
+    crate::route::allow_realtime_media("Live file transfers")?;
     let token: Token = request
         .timeout(IDLE)
         .send()
@@ -561,6 +563,7 @@ async fn prepare_accept(
     save_path: &Path,
     data: bool,
 ) -> Result<(DownloadSetup, Option<ConnectedData>)> {
+    crate::route::allow_realtime_media("Live file transfers")?;
     let body = client
         .open_message(channel, record)
         .await

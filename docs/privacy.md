@@ -350,6 +350,15 @@ autocomplete, and `emoji-favourites.json` up to 64 emoji marked as favourites
 in the picker. Both stay on this device.
 `updates.json` holds the chosen release directory URL and the automatic
 check preference (on by default in release builds) on this device.
+`route.json` holds this device's network routing choice (Direct, SOCKS5, WireGuard,
+or Tor) and non-secret endpoints, addresses, DNS servers, and AllowedIPs; it stays
+on this device and is never included in encrypted device sync or removed on sign-out.
+Route credentials (SOCKS5 password, Tor SOCKS5 password, WireGuard private key and
+preshared key) are never written to `route.json` or logs: desktops store them in the
+OS keychain (or a mode-`0600` `route.secret` file when no keychain exists, such as
+Steam Deck Game Mode); Android wraps them with Android Keystore AES-256-GCM in
+`route.wrapped`; iOS stores them in the data-protection Keychain
+(`WhenUnlockedThisDeviceOnly`).
 `deepfilternet3.tar.gz` is the AI noise removal model, present only after the
 person downloads it; `voice.json` keeps whether it's on (`ai_noise`), on this
 device only.
@@ -596,3 +605,85 @@ fingerprint mismatch and left no LiveKit participant.
   route selection against `8.8.8.8:53` and `[2001:4860:4860::8888]:53`.
   Neither socket sent data. Host `tcpdump` captured zero packets to or from
   either address during the checks.
+
+## Per-app network routing
+
+By default RustTalk connects **Direct**. On first start (before RustTalk makes its
+first network request, including automatic update checks) and in **Settings →
+Network** on Linux, macOS, Windows, Android, and iOS, a person can choose **Direct**,
+**SOCKS5**, app-only **WireGuard**, or **Tor**. See [Routing](routing.md) for setup
+and platform constraints.
+
+- **Scope:** Only RustTalk's own traffic uses the chosen route. RustTalk does not
+  modify system routing tables, OS VPN profiles, or other apps' traffic. Clicking a
+  link in chat, a preview card, or release notes opens the system web browser, which
+  uses the browser's own network settings.
+- **Permitted direct connections while routed:** Only the connection required to
+  establish the selected route itself (TCP to the SOCKS5 or Tor SOCKS5 endpoint, or
+  UDP to the WireGuard peer endpoint, plus local DNS resolution of the proxy/peer
+  hostname if not given as an IP literal). OS/environment proxy variables are
+  ignored (`.no_proxy()`).
+- **Fail closed:** On onboarding (until confirmed), cold start while connecting,
+  missing/unreadable credentials, proxy/tunnel failure, or WireGuard handshake
+  expiry, RustTalk enters **Blocked** and refuses outbound traffic instead of
+  silently falling back to Direct. Returning to Direct requires an explicit user
+  choice.
+- **Preserved guarantees:** End-to-end encryption (messages, files, metadata, sync)
+  and TLS certificate pinning (`PinnedCertificate` and server identity proofs) are
+  enforced identically over Direct, SOCKS5, WireGuard, and Tor.
+- **DNS isolation:** SOCKS5 and Tor always use `socks5h` remote DNS (`ATYP=0x03`)
+  so destination hostnames (including `.onion` addresses on Tor) are never sent to
+  local OS DNS. For optional sender-side link previews under SOCKS5 or Tor,
+  RustTalk blocks literal private IPs and local hostnames before contacting the
+  proxy, but cannot inspect what IP a remote proxy resolves a public-looking
+  hostname to (enforcing private-network egress rules on the proxy host is up to
+  the proxy/Tor operator). App-only WireGuard resolves destination hostnames
+  exclusively over UDP inside the encrypted WireGuard tunnel using the configured
+  WireGuard `DNS` servers (and refuses domain lookups if no tunnel DNS server is
+  configured); for sender-side link previews it validates the returned public IPs
+  and pins them directly over the tunnel bridge so DNS rebinding cannot occur.
+- **Calls, live file transfers, and SIP:** Because `livekit`/`libwebrtc` and
+  `rsipstack` open direct OS UDP/TCP sockets and gather local host ICE candidates
+  without a routed socket-factory hook, voice/video calls, screen sharing, shared
+  terminals, remote control, LiveKit live file transfers, and desktop SIP phone
+  calls are blocked whenever SOCKS5, app-only WireGuard, or Tor is active.
+  Server-stored encrypted file transfers (up to 32 MiB) remain available over HTTPS.
+- **What operators can observe:**
+  - **SOCKS5 proxy operator:** Sees your IP address, timing, traffic volume,
+    destination hostnames and ports (because of remote DNS), and TLS SNI / handshake
+    metadata. Cannot read E2EE RustTalk content or break server certificate pins.
+    For opt-in link previews, pasted web pictures, or updates, sees the requested
+    destination hosts and timing.
+  - **WireGuard peer operator:** Sees your IP address, WireGuard public key,
+    encrypted tunnel timing/volume, inner destination IPs/ports, in-tunnel DNS
+    queries sent to your chosen DNS server, and TLS SNI. Cannot read E2EE RustTalk
+    content or break server certificate pins. Your local ISP sees only encrypted
+    WireGuard UDP packets to the peer endpoint.
+  - **Tor network:** Your local ISP and guard relay see that you connect to Tor (and
+    timing/volume), not your destinations. For clearnet servers, the Tor exit relay
+    sees destination hostnames, ports, TLS SNI, and timing (not E2EE content or
+    pinned-TLS plaintext). For `.onion` servers, traffic stays inside the Tor
+    network end to end. If you connect to a remote Tor SOCKS5 proxy instead of
+    localhost (`127.0.0.1`), that proxy host sees the same metadata as a SOCKS5
+    proxy.
+
+### Routing traffic check (Linux isolated network namespace)
+
+On Linux, running the `rusttalk-core` controlled-endpoint routing test suite inside an
+isolated `unshare -rn` network namespace with a `dummy0` default route (`198.51.100.10/24`,
+`fd99::10/64`) and a concurrent unrelated direct TCP client, while capturing all frames
+with `AF_PACKET` (`SOCK_RAW`, `ETH_P_ALL`) across `lo` and `dummy0`, observed:
+
+- **381 total frames captured** across SOCKS5h (IPv4/IPv6/WebSocket/pinning/failure),
+  Tor SOCKS5h (`.onion` remote DNS with stream isolation), and userspace WireGuard
+  (`boringtun` + `smoltcp` dual-stack IPv4/IPv6, in-tunnel UDP DNS, AllowedIPs, pinning):
+  - `0` external frames on `dummy0`;
+  - `0` host DNS packets (port 53 TCP or UDP);
+  - `0` unencrypted packets to/from WireGuard inner addresses (`10.77.0.0/24`, `fd77::/64`)
+    on the OS network stack (all 44 UDP packets on `lo` were encrypted WireGuard frames with
+    `0` plaintext marker leaks);
+  - `0` WebRTC/STUN/SIP packets (ports 3478, 5060, 7881, 7882).
+- IPv4 and IPv6 routing tables remained identical before and after the run, and the
+  concurrent unrelated direct TCP process completed all exchanges without errors.
+- **Unverified platforms:** Runtime and packet-capture verification has not yet been
+  performed on macOS, Windows, Android, or iOS devices (see [Routing](routing.md)).

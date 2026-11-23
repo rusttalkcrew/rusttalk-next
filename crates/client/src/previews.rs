@@ -316,15 +316,19 @@ pub fn plain(text: &str, max: usize) -> String {
 pub struct Get(reqwest::blocking::Client);
 
 impl Get {
-    fn new() -> reqwest::Result<Self> {
-        reqwest::blocking::Client::builder()
-            .https_only(true)
-            .redirect(reqwest::redirect::Policy::none())
-            .referer(false)
-            .user_agent("RustTalk")
-            .timeout(TIMEOUT)
-            .build()
-            .map(Self)
+    fn new() -> Result<Self, String> {
+        crate::route::configure_blocking_reqwest(
+            reqwest::blocking::Client::builder()
+                .https_only(true)
+                .redirect(reqwest::redirect::Policy::none())
+                .referer(false)
+                .user_agent("RustTalk")
+                .timeout(TIMEOUT),
+        )
+        .map_err(|e| e.to_string())?
+        .build()
+        .map(Self)
+        .map_err(|e| e.to_string())
     }
 
     /// The body of `url`, when it passes `safe_url` with `host` and fits in `max` bytes.
@@ -585,14 +589,23 @@ impl Previews {
         }
     }
 
+    /// Clear queued previews and backoffs after a route change so workers rebuild on the
+    /// new route without carrying stale errors.
+    pub fn on_route_changed(&self) {
+        let dropped: VecDeque<Job> = lock(&self.shared.queue).drain(..).collect();
+        for job in &dropped {
+            abandon(&self.shared, job);
+        }
+        lock(&self.shared.backoff).clear();
+    }
+
     fn send(&self, job: Job) {
         self.started.get_or_init(|| {
-            let get = Get::new().ok().map(Arc::new);
             for index in 0..WORKERS {
-                let (shared, get) = (self.shared.clone(), get.clone());
+                let shared = self.shared.clone();
                 let spawned = thread::Builder::new()
                     .name(format!("previews-{index}"))
-                    .spawn(move || work(&shared, get.as_deref()));
+                    .spawn(move || work(&shared));
                 if let Err(error) = spawned {
                     tracing::warn!(%error, "starting link previews failed");
                 }
@@ -684,7 +697,8 @@ fn country() -> Option<String> {
         .then(|| region.to_ascii_uppercase())
 }
 
-fn work(shared: &Shared, get: Option<&Get>) {
+fn work(shared: &Shared) {
+    let mut cached: Option<(u64, Get)> = None;
     loop {
         let job = {
             let mut queue = lock(&shared.queue);
@@ -701,8 +715,13 @@ fn work(shared: &Shared, get: Option<&Get>) {
                     .unwrap_or_else(|poison| poison.into_inner());
             }
         };
-        if let Some(get) = get {
-            run(shared, get, &job);
+        let generation = rusttalk_core::route::generation();
+        if cached.as_ref().is_none_or(|(g, _)| *g != generation) {
+            cached = Get::new().ok().map(|get| (generation, get));
+        }
+        match &cached {
+            Some((_, get)) => run(shared, get, &job),
+            None => abandon(shared, &job),
         }
     }
 }
@@ -1016,6 +1035,7 @@ mod tests {
     }
 
     fn setup() -> (Previews, tempfile::TempDir, Get) {
+        let _route = crate::route::test_lock();
         let data = tempfile::tempdir().unwrap();
         let previews = Previews::new(&egui::Context::default(), data.path());
         (previews, data, Get::new().unwrap())
@@ -1051,6 +1071,7 @@ mod tests {
 
     #[test]
     fn a_finished_preview_wakes_the_window() {
+        let _route = crate::route::test_lock();
         let data = tempfile::tempdir().unwrap();
         let ctx = egui::Context::default();
         let wakes = Arc::new(AtomicUsize::new(0));
@@ -1075,6 +1096,7 @@ mod tests {
 
     #[test]
     fn a_dropped_request_wakes_the_window_but_a_paused_site_does_not() {
+        let _route = crate::route::test_lock();
         let data = tempfile::tempdir().unwrap();
         let ctx = egui::Context::default();
         let wakes = Arc::new(AtomicUsize::new(0));

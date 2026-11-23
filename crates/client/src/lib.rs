@@ -45,6 +45,7 @@ mod pokes;
 mod previews;
 mod profile;
 mod reorder;
+mod route;
 mod screen;
 mod server;
 mod settings;
@@ -206,9 +207,13 @@ fn run(
 
     #[cfg(target_os = "linux")]
     if check_update {
+        route::init_blocking(&config, &service)?;
         return update::check_now(&config);
     }
 
+    // Apply any saved per-app route (or enter Pending for fresh onboarding) BEFORE
+    // any background task, updater check, or server connection can start.
+    let route_init = route::init(&config, &service);
     files::clear_opened();
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     phone::set_service(&service);
@@ -252,6 +257,7 @@ fn run(
             cc,
             keystore,
             start,
+            route_init,
             config,
             window_started,
         )))

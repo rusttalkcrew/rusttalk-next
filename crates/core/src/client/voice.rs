@@ -160,6 +160,7 @@ fn signaling_url(server: &KnownServer) -> Result<reqwest::Url> {
 impl KeyClient<'_> {
     /// Reconcile keys, request a scoped token, and connect with the current epoch.
     pub async fn join_voice(&mut self, channel: &[u8; 32]) -> Result<VoiceRoom> {
+        crate::route::allow_realtime_media("Voice calls")?;
         self.sync().await?;
         let (epoch, key) = self.current_key(scope(channel))?;
         let reply: Token = self

@@ -240,6 +240,7 @@ Optional automatic patch updates (off by default, no backup or rollback):
 - [Protocol](docs/protocol.md)
 - [Crypto](docs/crypto.md)
 - [Privacy](docs/privacy.md)
+- [Per-app routing (SOCKS5, WireGuard, Tor)](docs/routing.md)
 - [Operations](docs/operations.md)
 - [Development](docs/development.md)
 - [Phones and tablets](docs/mobile.md)

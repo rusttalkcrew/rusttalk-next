@@ -175,6 +175,9 @@ async fn call(
     stop: &CancellationToken,
     events: &impl Fn(Event),
 ) -> Result<()> {
+    if rusttalk_core::route::allow_sip().is_err() {
+        return Err(because(t!("route.sip_unavailable")));
+    }
     events(Event::Status(Status::Calling));
     let account = dial.account.clone();
     let lookup = time::timeout(

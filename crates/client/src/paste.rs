@@ -154,11 +154,19 @@ fn web_picture(html: &[u8]) -> Option<Clip> {
 
 /// The picture a web page showed, from where the browser got it (see docs/privacy.md).
 fn download(url: &Url) -> Option<Vec<u8>> {
-    let fetched = (|| -> reqwest::Result<Vec<u8>> {
-        let client = reqwest::blocking::Client::builder()
+    let builder = match crate::route::configure_blocking_reqwest(
+        reqwest::blocking::Client::builder()
             .https_only(true)
-            .timeout(std::time::Duration::from_secs(30))
-            .build()?;
+            .timeout(std::time::Duration::from_secs(30)),
+    ) {
+        Ok(builder) => builder,
+        Err(error) => {
+            tracing::warn!(%error, "pasted web picture blocked by network route");
+            return None;
+        }
+    };
+    let fetched = (|| -> reqwest::Result<Vec<u8>> {
+        let client = builder.build()?;
         let mut bytes = Vec::new();
         let reply = client.get(url.clone()).send()?.error_for_status()?;
         // One byte over the limit tells a too-big file apart.

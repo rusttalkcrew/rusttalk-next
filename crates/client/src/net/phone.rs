@@ -53,6 +53,10 @@ mod desktop {
 
     /// Publish the call's track and start calling. True when the roster changed.
     pub(in crate::net) async fn call(ctx: &Ctx, live: &mut Live, dial: Dial) -> bool {
+        if rusttalk_core::route::allow_sip().is_err() {
+            ended(ctx, dial.generation, t!("route.sip_unavailable"));
+            return false;
+        }
         if live.phone.is_some() {
             ended(ctx, dial.generation, t!("phone.one_at_a_time"));
             return false;
