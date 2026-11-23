@@ -250,6 +250,12 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
                 });
             });
             ui.add_space(6.0);
+            #[cfg(any(target_os = "android", target_os = "ios"))]
+            {
+                let mut settings = home.voice.audio.settings();
+                home.voice.camera.mobile_controls(ui, &mut settings);
+                home.voice.audio.set_settings(settings);
+            }
             let more = home.voice.audio.can_host_terminal();
             let count = 2.0 + f32::from(screen::SUPPORTED) + f32::from(more);
             let width = (ui.available_width() - SPACE_XS * (count - 1.0)) / count;

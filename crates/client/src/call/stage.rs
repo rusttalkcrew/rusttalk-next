@@ -299,11 +299,12 @@ fn person_picture(
 ) -> Option<Picture> {
     let sid = peer.camera.as_ref()?;
     if me {
+        let mirrored = voice.camera.mirrored();
         let texture = voice.camera.self_texture(ctx)?;
         return Some(Picture {
             texture: texture.id(),
             size: texture.size_vec2(),
-            mirrored: true,
+            mirrored,
             cover: true,
         });
     }

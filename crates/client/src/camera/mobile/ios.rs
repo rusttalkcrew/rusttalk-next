@@ -16,7 +16,13 @@ pub(super) fn permission(request: bool) -> i32 {
 pub(super) fn devices() -> Result<i32> {
     Ok(unsafe { rt_camera_devices() })
 }
-pub(super) fn start(front: bool, _width: u32, height: u32, fps: u32) -> Result<()> {
+pub(super) fn start(
+    front: bool,
+    _width: u32,
+    height: u32,
+    fps: u32,
+    _generation: u64,
+) -> Result<()> {
     ensure!(
         unsafe { rt_camera_start(front, height, fps) },
         "camera unavailable"
@@ -42,4 +48,19 @@ extern "C" fn rt_camera_bgra(data: *const u8, w: u32, h: u32, stride: u32) {
     let (y, u, v) = buffer.data_mut();
     argb_to_i420(pixels, stride, y, ys, u, us, v, vs, w as i32, h as i32);
     frame(buffer);
+}
+
+unsafe extern "C" {
+    fn rt_camera_state() -> i32;
+    fn rt_camera_select(front: bool) -> bool;
+    fn rt_camera_torch(on: bool) -> bool;
+}
+pub(super) fn state() -> i32 {
+    unsafe { rt_camera_state() }
+}
+pub(super) fn select(front: bool) -> bool {
+    unsafe { rt_camera_select(front) }
+}
+pub(super) fn torch(on: bool) -> bool {
+    unsafe { rt_camera_torch(on) }
 }

@@ -1544,5 +1544,9 @@ clipboard.select_all = Alles selecteren
 
 call.streaming_viewers = Streamt · {count} kijkers
 call.watch_stream = {name} bekijken · {count} kijkers
+camera.flip = Camera omdraaien
+camera.torch_on = Lamp aan
+camera.torch_off = Lamp uit
+camera.switch_failed = Camera wijzigen niet beschikbaar.
 call.listen = Luisteren
 call.stop_listening = Stoppen met luisteren

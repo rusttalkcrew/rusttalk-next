@@ -1544,5 +1544,9 @@ clipboard.select_all = すべて選択
 
 call.streaming_viewers = 配信中 · {count} 人が視聴中
 call.watch_stream = {name}を視聴 · {count} 人が視聴中
+camera.flip = カメラを切り替え
+camera.torch_on = ライトをオン
+camera.torch_off = ライトをオフ
+camera.switch_failed = カメラを変更できません。
 call.listen = 聴く
 call.stop_listening = 聴くのをやめる

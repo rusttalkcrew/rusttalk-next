@@ -1547,5 +1547,9 @@ clipboard.select_all = Select all
 
 call.streaming_viewers = Streaming · {count} watching
 call.watch_stream = Watch {name} · {count} watching
+camera.flip = Flip camera
+camera.torch_on = Turn light on
+camera.torch_off = Turn light off
+camera.switch_failed = Camera change unavailable.
 call.listen = Listen
 call.stop_listening = Stop listening

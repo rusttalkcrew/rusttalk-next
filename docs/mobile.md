@@ -203,7 +203,7 @@ use yet is allowed to be unused there (`allow(dead_code)` on phones only).
 | Key storage (keyring 4) | Android Keystore wraps the identity in private app storage | Data-protection Keychain, file with password as fallback | Both default to system key storage with password fallback |
 | File picker (rfd) | No backend | No backend | Gated: the buttons that open it are off (`files::PICKER`) |
 | Notifications (notify-rust) | Builds, no notification service | Builds, no notification service | Fail and are logged |
-| Call camera | WebRTC Camera2 capturer, rotated I420 frames | AVFoundation, oriented BGRA frames | Both feed the existing encrypted LiveKit camera track |
+| Call camera | Camera2 session, rotated I420 frames | AVFoundation, oriented BGRA frames | Both feed the existing encrypted LiveKit camera track |
 | Screen share, app and system audio | Not offered (`screen` already says unavailable) | Same | App audio gated to `Unsupported` |
 | Updater | Not used | Not used | Gated: no update target, so no checks and no **Check now** |
 | Global shortcuts (global-hotkey) | Builds, nothing to register | Same | Unused; Shortcuts tab still shows |
@@ -252,9 +252,25 @@ worker releases the session when the leave sound finishes. The IPA declares
 background audio for calls with the screen locked.
 
 Turning on video asks for camera access. The front camera is the default;
-Settings → Video selects the back camera on phones that have one. Turning
-off video, leaving the call or backgrounding the app releases the camera.
+The call panel shows a local preview from the same capture frames, mirrored only
+for the front camera. Flip camera switches front/back without republishing the
+encrypted track; Settings → Video uses the same selection. A failed switch restores
+the previous selection. The rear-camera light is offered only when the active
+device supports it, and displays the native capture state. Switching cameras,
+turning off video, leaving the call or backgrounding the app releases the light.
+Turning off video, leaving the call or backgrounding the app releases the camera.
 After an interruption, turn video on again to resume sharing.
+
+Android lifecycle invalidation is immediate: Activity locks only protect the camera
+reference, and camera commands run on one process-wide worker. JNI callers wait at
+most five seconds; native open and close waits are bounded. A device whose closure
+is unconfirmed keeps its lease, so another capture cannot overlap it. Callback
+handling stays alive to close delayed devices; retrying video after their close
+acknowledgement can recover. Capture generation tags reject old frames even when
+Rust has already started preparing another call. `make android-camera-test` drives
+delayed callback, pause, timeout, rollback and resume cases with a fake backend; the
+Android build runs it too. These tests and APK builds do not verify physical torch
+or camera behavior. Device checks remain pending while Agent device access is off.
 
 Joining a call on iOS is still untested.
 On an iPhone, check the device log for permission, the active category/mode and

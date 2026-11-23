@@ -4,6 +4,7 @@
 # Needs ANDROID_HOME, ANDROID_NDK_HOME, Gradle on PATH and the Rust target:
 # rustup target add aarch64-linux-android
 set -euo pipefail
+make android-camera-test
 out=$1
 case ${MOBILE_BUILD:-test} in
   test)
