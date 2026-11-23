@@ -193,6 +193,9 @@ active member. The
 owner retains access from a banned IP so an IP ban cannot lock them out.
 The ban list returns whether each ban has linked IPs.
 
+An existing member registering a new device records `device_added`. Revocation records
+`device_revoked`. Both identify the device in `target_id`.
+
 Each audit entry has `{id, actor_person_id, action, target_person_id, target_id, at}`.
 A target field is null if the action has no target of that type. Use the
 last returned ID as the next `after` cursor. Omit `after` to start at zero.
@@ -235,13 +238,18 @@ in a state response indicating that the first epoch is still pending.
 | POST `/v1/keys` | `{scope, epoch, device, envelope}` | A reader of the scope. 204. The recipient must also be a current device of a reader |
 | POST `/v1/keys/reject` | `{scope, epoch, sender, envelope}` | A reader of the scope. 204. Deletes a matching envelope addressed to the caller's device |
 | POST `/v1/keys/epochs` | `{scope, epoch, commitment, envelope, excluded?, revocations?}` | A reader of a rotating scope, the owner for the initial space epoch, or either person in a DM at any time. 201. The envelope is addressed to the caller's device |
-| GET `/v1/space` | Empty | Any member. 200, `{name_ct, description_ct, icon_hash}` |
+| GET `/v1/space` | Empty | Any member. 200, `{name_ct, description_ct, icon_hash, system_messages_ct, first_text_channel}` |
 | GET `/v1/space/icon` | Empty | Any member. 200, `{icon_ct}`, or `404 icon_not_found` |
-| PUT `/v1/space` | `{name_ct?, description_ct?, icon_ct?}` | `manage_server`. 204 |
+| PUT `/v1/space` | `{name_ct?, description_ct?, icon_ct?, system_messages_ct?}` | `manage_server`. 204 |
 | GET `/v1/members` | Empty | Any member. 200, `[{person_id, display_name_ct, avatar_hash, bio_ct, role_ids, presence, hide_offline, voice_muted?}]`. `bio_ct` is always present (null without a bio), so clients know the server stores bios. Clients keep members with `hide_offline` out of the member list while their presence is `offline`, but still use their name and picture elsewhere. `voice_muted` is present and true while a moderator mutes them |
 | GET `/v1/members/{person}/avatar` | Empty | Any member. 200, `{avatar_ct}`, or `404 avatar_not_found` |
 | PUT `/v1/me/profile` | `{display_name_ct?, avatar_ct?, bio_ct?}` | Updates the authenticated member's own profile. 204 |
 | POST `/v1/invite-preview` | `{code}` | No bearer. 200, `{space_key_ct, name_ct}`. Missing, expired, spent or unpreviewable invite returns 404 |
+
+`system_messages_ct` seals the raw text channel ID with the space key. Empty plaintext
+disables notices. A null field restores the default, the first text channel by category
+and channel position. `first_text_channel` is null unless the caller can read it.
+An omitted PUT field preserves the choice. Older clients ignore both GET fields.
 
 With `supports_exclusions`, scopes and wrapped keys may carry `excluded`, a
 sorted set of `base64url(person_id).base64url(device_signing_key)` strings. New epochs carry forward the full
@@ -1114,7 +1122,7 @@ session validity before pushing updates.
 | --- | --- |
 | `keys_needed` | `scope`, `epoch`, `device`. Reconcile pending wraps and delivered keys. Completion also wakes the recipient |
 | `rotate_needed` | `scope`. Fetch the current epoch and try to publish its successor |
-| `member_changed` | `person`, optional `device`. Refresh the member and device directory and catalog, and surface fingerprints |
+| `member_changed` | `person`, optional `device`. Refresh the member and device directory and catalog |
 | `presence_changed` | `person_id`, `status`. Sent to members when visible presence changes |
 | `channel_changed` | None. Refresh the catalog, server metadata and server emoji |
 | `voice_changed` | `channel`. Fetch current voice participants. Sent to current channel readers on signed LiveKit join, leave and room-end notices |

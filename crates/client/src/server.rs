@@ -220,8 +220,19 @@ pub fn member_name(dir: &Directory, person: &Id) -> String {
     }
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub enum SystemMessages {
+    #[default]
+    First,
+    None,
+    Channel(Id),
+}
+
 #[derive(Clone, Default)]
 pub struct Directory {
+    pub system_messages: SystemMessages,
+    pub system_messages_supported: bool,
+    pub first_text_channel: Option<Id>,
     pub name: Option<String>,
     pub icon: Option<Picture>,
     /// This person's presence choice here.
@@ -280,6 +291,22 @@ pub struct CustomEmoji {
 }
 
 impl Directory {
+    pub fn text_channels(&self) -> impl Iterator<Item = &Channel> {
+        self.categories
+            .iter()
+            .flat_map(|c| &c.channels)
+            .filter(|c| !c.page && !c.voice)
+    }
+
+    pub fn notice_channel(&self) -> Option<Id> {
+        let id = match self.system_messages {
+            SystemMessages::First => self.first_text_channel?,
+            SystemMessages::None => return None,
+            SystemMessages::Channel(id) => id,
+        };
+        self.text_channels().find(|ch| ch.id == id).map(|ch| ch.id)
+    }
+
     pub fn emoji_by_id(&self, id: &Id) -> Option<&CustomEmoji> {
         self.emoji.iter().find(|e| e.id == *id)
     }
@@ -548,7 +575,7 @@ pub enum Body {
     PollPart(PollPart),
     /// Could not be verified or decrypted (yet).
     Unreadable,
-    /// A member or device change, with fingerprints for the details view.
+    /// A membership change, with a fingerprint for the details view.
     /// `name` is the person's name when it happened, used once they have left.
     Notice {
         name: String,
@@ -599,6 +626,8 @@ pub struct Chat {
     polls: HashMap<Id, PollEvents>,
     /// The poll being written in place of the composer.
     pub poll_editor: Option<crate::home::polls::Editor>,
+    /// The channel view has requested its initial history and live updates.
+    pub opened: bool,
     pub loading: bool,
     pub at_start: bool,
     pub draft: String,

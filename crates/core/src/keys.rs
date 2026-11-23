@@ -395,6 +395,7 @@ pub enum Metadata {
     /// A member's profile bio: a few lines of plain text.
     Bio,
     EmojiPackName,
+    SystemMessages,
 }
 
 impl Metadata {
