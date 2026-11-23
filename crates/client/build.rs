@@ -13,6 +13,17 @@ fn main() {
     ) {
         println!("cargo:rustc-link-arg=-ObjC");
     }
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("ios") {
+        let camera = "src/camera/mobile/ios.m";
+        println!("cargo:rerun-if-changed={camera}");
+        cc::Build::new()
+            .file(camera)
+            .flag("-fobjc-arc")
+            .compile("call_camera");
+        for framework in ["AVFoundation", "CoreMedia", "CoreVideo", "UIKit"] {
+            println!("cargo:rustc-link-lib=framework={framework}");
+        }
+    }
     // Windows release builds run on a Windows host; other hosts skip the icon.
     #[cfg(windows)]
     embed_resource::compile("rusttalk.rc", embed_resource::NONE)

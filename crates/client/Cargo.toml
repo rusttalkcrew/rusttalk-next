@@ -71,6 +71,10 @@ alacritty_terminal = { version = "0.26", default-features = false }
 # How wide a letter is, to limit the combining marks a viewer's terminal takes.
 unicode-width = "0.2"
 
+[build-dependencies]
+# Compiles the iPhone's AVFoundation delegate.
+cc = "1"
+
 [target.'cfg(windows)'.build-dependencies]
 # Compiles rusttalk.rc so Windows shows the app icon on the executable.
 embed-resource = "3"

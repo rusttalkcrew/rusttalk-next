@@ -22,6 +22,7 @@ Unreleased under the new version and date.
 - Phones: tapping a text field that is already open no longer closes and reopens the keyboard
 - iPhone: the keyboard no longer covers what you type, Return works, a tap outside closes the keyboard, and the edges match the theme
 - Android asks for microphone access when you join a voice call.
+- Share your front or back camera in calls on Android and iPhone.
 - Experimental Android test build (APK) and unsigned iOS build (IPA)
 - Android: typing works, so you can sign up, sign in, join a server and chat
 - Enter now confirms the name and unlock screens

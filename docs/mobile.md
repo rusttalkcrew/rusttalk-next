@@ -197,7 +197,7 @@ use yet is allowed to be unused there (`allow(dead_code)` on phones only).
 | Key storage (keyring 4) | Android Keystore wraps the identity in private app storage | Data-protection Keychain, file with password as fallback | Both default to system key storage with password fallback |
 | File picker (rfd) | No backend | No backend | Gated: the buttons that open it are off (`files::PICKER`) |
 | Notifications (notify-rust) | Builds, no notification service | Builds, no notification service | Fail and are logged |
-| Camera (nokhwa) | No backend | No backend | Listing cameras fails, so no camera |
+| Call camera | WebRTC Camera2 capturer, rotated I420 frames | AVFoundation, oriented BGRA frames | Both feed the existing encrypted LiveKit camera track |
 | Screen share, app and system audio | Not offered (`screen` already says unavailable) | Same | App audio gated to `Unsupported` |
 | Updater | Not used | Not used | Gated: no update target, so no checks and no **Check now** |
 | Global shortcuts (global-hotkey) | Builds, nothing to register | Same | Unused; Shortcuts tab still shows |
@@ -240,6 +240,11 @@ On iOS the audio session needs `AVAudioSession` set to play and record for
 voice chat before the call starts, and the background audio mode keeps a
 call going with the screen off. Test microphone and playback on a real
 iPhone in that phase; the simulator's audio says little about a device.
+
+Turning on video asks for camera access. The front camera is the default;
+Settings → Video selects the back camera on phones that have one. Turning
+off video, leaving the call or backgrounding the app releases the camera.
+After an interruption, turn video on again to resume sharing.
 
 Joining a call on iOS is still untested.
 
@@ -318,7 +323,7 @@ Rough effort for one person who knows the code base.
 | 2 | Usable chat on Android. Done: typed text, safe areas and the keyboard, `onDestroy`, recovery words, Android Keystore. Left: phone temp folder (`temp_dir()` is not writable on Android), file picker (Storage Access Framework), local notifications, hide Updates and Shortcuts on phones, `rusttalk://` links, the layout list above | 3 to 4 weeks |
 | 3 | Foreground voice on Android. Left: iOS audio session, Bluetooth headsets and calls with the screen off (foreground service on Android, background audio on iOS) | 2 weeks |
 | 4 | iOS on a device. Done: Keychain, safe area and taps. Left: notifications (reuse `notify/macos.rs`), document picker, status bar colours, background rules | 1 to 2 weeks |
-| 5 | Camera (Camera2, AVFoundation) | 1 week |
+| 5 | Foreground call camera and front/back selection. Left: verify capture and interruptions on a real iPhone | Device verification |
 | 6 | Release: signing keys, store listings or a sideload page, release.yml jobs, store updates | 1 week plus store review |
 | Later | Screen share (MediaProjection; ReplayKit broadcast extension), push notifications | 2 to 4 weeks each |
 
@@ -345,8 +350,8 @@ certificate.
   outbound connection and a privacy decision; it is not planned until then.
   Local notifications while the app runs need neither.
 - **Android permissions:** `INTERNET`, `MODIFY_AUDIO_SETTINGS` for call routing,
-  and `RECORD_AUDIO` requested when joining voice. Planned: `CAMERA`
-  (turning video on), `POST_NOTIFICATIONS` (Android 13+, turning
+  `RECORD_AUDIO` when joining voice, and `CAMERA` when turning on video.
+  Cameras are optional. Planned: `POST_NOTIFICATIONS` (Android 13+, turning
   notifications on), foreground service for calls, `BLUETOOTH_CONNECT` for
   headsets. Never location, contacts or phone state.
 - **iOS:** the bundle states why it uses the microphone and camera; iOS asks
