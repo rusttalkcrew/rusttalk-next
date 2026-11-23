@@ -1,7 +1,9 @@
 //! The bar at the bottom left: your picture, name and status (opening the status
 //! picker), mic and sound buttons while in a call, and Settings.
 
-use eframe::egui::{Align, Color32, Label, Layout, Ui, Vec2};
+use eframe::egui::{
+    Align, Color32, FontSelection, Label, Layout, TextWrapMode, Ui, Vec2, WidgetText,
+};
 use rusttalk_core::presence::{Presence, Status as Choice};
 
 use super::{Directory, Home, Tab, View, face, presence_color};
@@ -110,10 +112,20 @@ fn identity(ui: &mut Ui, home: &Home, status: Choice) -> eframe::egui::Response 
                 ui::speaking_outline(ui, avatar.rect);
             }
             ui::presence_dot(ui, avatar.rect, 5.0, color, c.side);
-            ui.vertical(|ui| {
+            let width = ui.available_width().max(0.0);
+            let [name, status] = [ui::bold(&name), ui::caption(label)].map(|text| {
+                WidgetText::from(text).into_galley(
+                    ui,
+                    Some(TextWrapMode::Truncate),
+                    width,
+                    FontSelection::Default,
+                )
+            });
+            let size = Vec2::new(width, name.size().y + status.size().y);
+            ui.allocate_ui_with_layout(size, Layout::top_down(Align::Min), |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
-                ui.add(Label::new(ui::bold(&name)).truncate());
-                ui.add(Label::new(ui::caption(label)).truncate());
+                ui.add(Label::new(name));
+                ui.add(Label::new(status));
             });
         },
     )
