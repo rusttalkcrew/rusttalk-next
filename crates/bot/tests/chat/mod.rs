@@ -121,14 +121,16 @@ pub(super) async fn scenario(
     b: &mut KeyClient<'_>,
     c: &mut KeyClient<'_>,
     text: Scope,
-    category: [u8; 32],
 ) -> Result<(Scope, [u8; 32])> {
     let [original, b_message] = exchange(a, b, text, [TEXT_A, TEXT_B]).await?;
     let b_person = *b.identity.certificate.person_id();
     let b_id = encode(&b_person);
     let a_person = *a.identity.certificate.person_id();
     let dm = a.create_dm(&b_person).await?;
-    let voice = a.create_channel(&category, "voice", b"Lounge", b"").await?;
+    let category = a.create_category(b"W61 Voice chat").await?;
+    let voice = a
+        .create_channel(&category, "voice", b"W61 Lounge", b"")
+        .await?;
     let ask = rusttalk_core::messages::VoiceRequest::Ask(
         voice.id,
         rusttalk_core::index::now_ms().context("timestamp")? / 1000,
@@ -348,10 +350,6 @@ pub(super) async fn scenario(
     println!("W07 verified two-way text and DMs, paging, edits, replays and audited moderation");
 
     // A voice channel has the same chat as a text channel, under its own channel key.
-    let category = a.create_category(b"W61 Voice chat").await?;
-    let voice = a
-        .create_channel(&category, "voice", b"W61 Lounge", b"")
-        .await?;
     a.sync().await?;
     receive_key(b, voice, 1).await?;
     exchange(a, b, voice, [VOICE_A, VOICE_B]).await?;
