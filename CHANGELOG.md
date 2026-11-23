@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- While you are in a voice call, RustTalk keeps you Online even when another app has the focus.
+
 ## v0.2.1 - 2026-11-23
 
 - Incoming custom emoji now appear as soon as their pictures finish loading, without waiting for another chat message.
