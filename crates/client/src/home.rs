@@ -1302,8 +1302,9 @@ impl Home {
                 channel,
                 items,
                 older,
-                at_start,
+                page,
             } => {
+                let at_start = page.map(|(start, _)| start);
                 let Some(index) = self.index(&server) else {
                     return;
                 };
@@ -1355,7 +1356,8 @@ impl Home {
                     chat.messages = notices;
                 }
                 chat.merge(items, older);
-                if let Some(at_start) = at_start {
+                if let Some((at_start, oldest)) = page {
+                    chat.oldest = oldest;
                     chat.loading = false;
                     chat.at_start |= at_start;
                 }
@@ -4113,6 +4115,57 @@ fn dm_pane(ui: &mut Ui, home: &mut Home, peer: Id) {
     }
 }
 
+fn handle_live_file(
+    ui: &Ui,
+    voice: &mut Voice,
+    files: &mut Files,
+    chat: &Chat,
+    server: Option<&Server>,
+    action: LiveAction,
+) {
+    match action {
+        LiveAction::Save(id, name) => {
+            if !voice.live_files.iter().any(|file| file.id == id)
+                && let Some(msg) = chat
+                    .messages
+                    .iter()
+                    .find(|m| m.live.as_ref().is_some_and(|l| l.0 == id))
+            {
+                voice.live_files.push(LiveFile {
+                    id,
+                    chat: true,
+                    from: Some(msg.person),
+                    name: name.clone(),
+                    size: msg.live.as_ref().map_or(0, |l| l.2),
+                    state: LiveState::Offered,
+                    receivers: Vec::new(),
+                });
+            }
+            if let Some(server) = server {
+                let address = server.address.clone();
+                files.ask(ui.ctx(), Ask::Accept(address, id, name));
+            }
+        }
+        LiveAction::Remove(id, stop) => {
+            if stop && let Some(server) = server {
+                server.send(Command::CancelFile(id));
+            }
+            match voice.live_files.iter_mut().find(|file| file.id == id) {
+                Some(file) => file.state = LiveState::Ended,
+                None => voice.live_files.push(LiveFile {
+                    id,
+                    chat: true,
+                    from: None,
+                    name: String::new(),
+                    size: 0,
+                    state: LiveState::Ended,
+                    receivers: Vec::new(),
+                }),
+            }
+        }
+    }
+}
+
 /// Shows a chat. In a DM, also returns what the person picked on the friend card.
 fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Act> {
     let (title, dm, in_voice, icon) = match at {
@@ -4438,13 +4491,9 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
     {
         match at {
             At::Channel(index, channel) => {
-                let oldest = chat
-                    .messages
-                    .iter()
-                    .find(|msg| !matches!(msg.body, Body::Notice { .. }));
-                if let Some(oldest) = oldest {
+                if let Some(oldest) = chat.oldest {
                     chat.loading = true;
-                    servers[index].send(Command::Older(channel, oldest.id));
+                    servers[index].send(Command::Older(channel, oldest));
                 }
             }
             At::Dm(peer) => {
@@ -4470,47 +4519,15 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
         At::Channel(index, _) => Some(index),
         At::Dm(_) => url.and_then(|url| servers.iter().position(|s| s.address == url)),
     };
-    match live {
-        Some((LiveAction::Save(id, name), url)) => {
-            if !voice.live_files.iter().any(|file| file.id == id)
-                && let Some(msg) = chat
-                    .messages
-                    .iter()
-                    .find(|m| m.live.as_ref().is_some_and(|l| l.0 == id))
-            {
-                voice.live_files.push(LiveFile {
-                    id,
-                    chat: true,
-                    from: Some(msg.person),
-                    name: name.clone(),
-                    size: msg.live.as_ref().map_or(0, |l| l.2),
-                    state: LiveState::Offered,
-                    receivers: Vec::new(),
-                });
-            }
-            if let Some(index) = live_server(url) {
-                let address = servers[index].address.clone();
-                files.ask(ui.ctx(), Ask::Accept(address, id, name));
-            }
-        }
-        Some((LiveAction::Remove(id, stop), url)) => {
-            if stop && let Some(index) = live_server(url) {
-                servers[index].send(Command::CancelFile(id));
-            }
-            match voice.live_files.iter_mut().find(|file| file.id == id) {
-                Some(file) => file.state = LiveState::Ended,
-                None => voice.live_files.push(LiveFile {
-                    id,
-                    chat: true,
-                    from: None,
-                    name: String::new(),
-                    size: 0,
-                    state: LiveState::Ended,
-                    receivers: Vec::new(),
-                }),
-            }
-        }
-        _ => {}
+    if let Some((action, url)) = live {
+        handle_live_file(
+            ui,
+            voice,
+            files,
+            chat,
+            live_server(url).map(|index| &servers[index]),
+            action,
+        );
     }
     match pick {
         Some(Pick::Reply(person, id)) => {
@@ -6476,7 +6493,7 @@ mod tests {
                     channel: PROJECTS,
                     items: vec![],
                     older: false,
-                    at_start: Some(true),
+                    page: Some((true, None)),
                 },
                 0.0,
             );

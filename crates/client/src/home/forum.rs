@@ -27,6 +27,9 @@ mod sort;
 
 use sort::{Order, Period};
 
+/// Reserved encrypted quote hint for text explicitly wrapping a poll.
+const POLL_WRAPPER: Id = [0; 32];
+
 /// Longest post title, in characters.
 const TITLE_CHARS: usize = 100;
 /// The column with a post's vote buttons, at its right.
@@ -62,6 +65,7 @@ struct NewPost {
 /// Which posts show their replies, and the one being answered.
 #[derive(Clone, Default)]
 struct Folds {
+    query: String,
     open: HashSet<Id>,
     answering: Option<Id>,
 }
@@ -127,9 +131,11 @@ fn is_poll(msg: &Msg) -> bool {
 /// The poll a post's text points at: one its author sent without a reply reference.
 fn carried<'a>(by_id: &HashMap<Id, &'a Msg>, msg: &Msg) -> Option<&'a Msg> {
     let poll = by_id.get(&msg.reply_to?)?;
-    (matches!(msg.body, Body::Text(_)) && msg.sticker.is_none())
-        .then_some(*poll)
-        .filter(|poll| poll.person == msg.person && is_poll(poll))
+    (matches!(msg.body, Body::Text(_))
+        && msg.sticker.is_none()
+        && msg.quoted_author == Some(POLL_WRAPPER))
+    .then_some(*poll)
+    .filter(|poll| poll.person == msg.person && is_poll(poll))
 }
 
 /// The poll a forum post carries, deleted along with it.
@@ -198,6 +204,23 @@ fn posts(messages: &[Msg]) -> Vec<Post> {
     posts
 }
 
+/// Match decrypted post titles, bodies and poll questions/options on this device.
+fn matches_search(post: &Post, query: &str) -> bool {
+    std::iter::once(&post.msg)
+        .chain(&post.poll)
+        .any(|msg| match &msg.body {
+            Body::Text(text) => text.to_lowercase().contains(query),
+            Body::Poll(question, poll) => {
+                question.to_lowercase().contains(query)
+                    || poll
+                        .options
+                        .iter()
+                        .any(|option| option.to_lowercase().contains(query))
+            }
+            _ => false,
+        })
+}
+
 /// The reply straight to the post that a message's reply chain goes back to.
 fn branch(by_id: &HashMap<Id, &Msg>, msg: &Msg, post: Id) -> Option<Id> {
     let mut at = msg;
@@ -248,6 +271,7 @@ fn text_draft(channel: Id, text: String, reply_to: Option<(Id, Id)>) -> Option<D
         return None;
     };
     Some(Draft {
+        queued: Default::default(),
         id: *id,
         channel,
         peer: None,
@@ -387,14 +411,14 @@ fn votes(ui: &mut Ui, post: &Post, mine: &[u8]) -> Option<Vec<u8>> {
             }
         };
         let up = look(mine == [0], accent);
-        if ui::icon_button(ui, "▲", t!("forum.up"), up, size).clicked() {
+        if ui::icon_button(ui, "↑", t!("forum.up"), up, size).clicked() {
             picked = Some(polls::toggle(mine, 0, false));
         }
         let score = post.up as i64 - post.down as i64;
         let tip = t!("forum.votes", up = post.up, down = post.down);
         ui.label(ui::bold(score.to_string())).on_hover_text(tip);
         let down = look(mine == [1], ui::colors(ui).danger);
-        if ui::icon_button(ui, "▼", t!("forum.down"), down, size).clicked() {
+        if ui::icon_button(ui, "↓", t!("forum.down"), down, size).clicked() {
             picked = Some(polls::toggle(mine, 1, false));
         }
     });
@@ -415,7 +439,6 @@ pub(super) fn view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat
         "chat-title",
         &title_text,
         in_server.then_some(&mut home.layout),
-        false,
         Some(channel),
     );
     toast_line(ui, &mut home.toast);
@@ -423,7 +446,7 @@ pub(super) fn view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat
         preview_status(ui, &home.voice, out);
     }
     let new_id = UiId::unique(("forum-new", channel));
-    let folds_id = UiId::unique(("forum-folds", channel));
+    let folds_id = UiId::unique(("forum-folds", server.dir.me, &server.address, channel));
     let mut new: NewPost = ui.data(|d| d.get_temp(new_id)).unwrap_or_default();
     let mut folds: Folds = ui.data(|d| d.get_temp(folds_id)).unwrap_or_default();
     let order_id = UiId::unique(("forum-order", channel));
@@ -436,7 +459,7 @@ pub(super) fn view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if order.timed() {
-                let button = ui::secondary(ui, &format!("{} ▾", period.label()));
+                let button = ui::secondary(ui, period.label());
                 ui::menu(&button, |m| {
                     for choice in Period::ALL {
                         if m.item("", choice.label()).clicked() {
@@ -445,7 +468,7 @@ pub(super) fn view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat
                     }
                 });
             }
-            let label = format!("{} {} ▾", order.icon(), order.label());
+            let label = format!("{} {}", order.icon(), order.label());
             let button = ui::secondary(ui, &label).on_hover_text(t!("forum.sort"));
             ui::menu_wide(&button, |m| {
                 for choice in Order::ALL {
@@ -475,12 +498,26 @@ pub(super) fn view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat
     }
     let settings = home.voice.audio.settings();
     let mut asked = None;
-    let mut older = false;
+    let mut live = None;
+    ui.add(
+        ui::field(&mut folds.query)
+            .id(folds_id.with("search"))
+            .hint_text(t!("forum.search")),
+    );
+    let query = folds.query.trim().to_lowercase();
+    let can_page = online && !chat.loading && !chat.at_start && chat.oldest.is_some();
+    let mut older = can_page && !query.is_empty();
     let mut reply = (None, None);
     let mut posts = posts(&chat.messages);
-    for post in &mut posts {
+    for post in posts
+        .iter_mut()
+        .filter(|post| matches!(post.msg.body, Body::Text(_)))
+    {
         let tally = chat.post_votes(&post.msg);
         (post.up, post.down) = (tally.voters[0].len(), tally.voters[1].len());
+    }
+    if !query.is_empty() {
+        posts.retain(|post| matches_search(post, &query));
     }
     sort::sort(&mut posts, order, period, polls::now());
     if let Some(post) = folds.answering
@@ -514,11 +551,22 @@ pub(super) fn view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat
                 sent = new_post(ui, &mut new, dir, channel, online);
                 ui.add_space(ui::SPACE_S);
             }
+            if !query.is_empty() && online && !chat.at_start {
+                ui.label(t!("forum.searching"));
+            }
             if posts.is_empty() {
                 if chat.loading {
                     ui.vertical_centered(|ui| ui.spinner());
                 } else {
-                    empty(ui, &title_text, t!("forum.empty"));
+                    empty(
+                        ui,
+                        &title_text,
+                        if query.is_empty() {
+                            t!("forum.empty")
+                        } else {
+                            t!("forum.no_matches")
+                        },
+                    );
                 }
             }
             for post in &posts {
@@ -547,6 +595,25 @@ pub(super) fn view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat
                                     if !shown.is_empty() {
                                         show_markdown(ui, dir, channel, post.msg.person, shown);
                                     }
+                                    let links = markdown::cached(ui, text)
+                                        .links()
+                                        .map(String::from)
+                                        .collect::<Vec<_>>();
+                                    files::attachments(
+                                        ui,
+                                        &mut home.files,
+                                        (&server.address, &server.commands),
+                                        &post.msg.files,
+                                        &links,
+                                    );
+                                }
+                                if let Some(action) = crate::call::chat_live(
+                                    ui,
+                                    &home.voice.live_files,
+                                    dir,
+                                    &post.msg,
+                                ) {
+                                    live = Some(action);
                                 }
                                 let poll = post.poll.as_ref().unwrap_or(&post.msg);
                                 if let Body::Poll(question, options) = &poll.body {
@@ -560,9 +627,9 @@ pub(super) fn view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat
                                 ui.add_space(ui::SPACE_XS);
                                 ui.horizontal(|ui| {
                                     let fold = if open {
-                                        format!("▾ {}", t!("forum.hide_replies"))
+                                        t!("forum.hide_replies").to_owned()
                                     } else {
-                                        format!("▸ {line}")
+                                        line.clone()
                                     };
                                     if ui::secondary(ui, &fold).clicked() {
                                         asked = Some(Asked::Toggle(id));
@@ -612,6 +679,11 @@ pub(super) fn view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat
                                     };
                                     let at = (&server.address, &server.commands);
                                     files::attachments(ui, &mut home.files, at, &msg.files, &links);
+                                    if let Some(action) =
+                                        crate::call::chat_live(ui, &home.voice.live_files, dir, msg)
+                                    {
+                                        live = Some(action);
+                                    }
                                 })
                             };
                             let picked = if nested.contains(&msg.id) {
@@ -667,20 +739,27 @@ pub(super) fn view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat
                 });
                 ui.add_space(ui::SPACE_XS);
             }
-            if !chat.at_start && !chat.loading && !chat.messages.is_empty() {
+            if can_page && query.is_empty() {
                 older = ui::secondary(ui, t!("forum.older")).clicked();
             }
         });
     drop((embeds, scope));
     let server = &home.servers[index];
+    if let Some(action) = live {
+        super::handle_live_file(
+            ui,
+            &mut home.voice,
+            &mut home.files,
+            chat,
+            Some(server),
+            action,
+        );
+    }
     let address = server.address.clone();
     let mut outgoing = Vec::new();
-    if older
-        && let Some(oldest) =
-            (chat.messages.iter()).find(|m| !matches!(m.body, Body::Notice { .. }))
-    {
+    if older && let Some(oldest) = chat.oldest {
         chat.loading = true;
-        server.send(Command::Older(channel, oldest.id));
+        server.send(Command::Older(channel, oldest));
     }
     match sent {
         // An edit changes only the text; the poll and replies stay with the post.
@@ -694,7 +773,7 @@ pub(super) fn view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat
         // A post with a poll: the poll first, then the text pointing at it.
         Some((text, poll, None)) => {
             let poll = poll.and_then(|(question, part)| poll_draft(channel, question, part));
-            let carrying = poll.as_ref().map(|draft| (me, draft.id));
+            let carrying = poll.as_ref().map(|draft| (POLL_WRAPPER, draft.id));
             outgoing.extend(poll);
             outgoing.extend(text_draft(channel, text, carrying));
         }
@@ -881,11 +960,15 @@ mod tests {
     fn a_post_carries_the_poll_its_author_sent_before_it() {
         let messages = [
             poll(1, 10),
-            msg(2, Some(1), 11, "# With a poll\nVote below"),
+            Msg {
+                quoted_author: Some(POLL_WRAPPER),
+                ..msg(2, Some(1), 11, "# With a poll\nVote below")
+            },
             msg(3, Some(2), 20, "Voted"),
             // A poll on its own is a post of its own.
             poll(4, 30),
-            // Someone else's text pointing at a poll is a reply to that poll.
+            // Even its own author can reply without wrapping the poll.
+            msg(6, Some(4), 38, "Another thought"),
             Msg {
                 person: [2; 32],
                 ..msg(5, Some(4), 40, "Me neither")
@@ -895,9 +978,78 @@ mod tests {
             .iter()
             .map(|p| (p.msg.id[0], p.poll.as_ref().map(|m| m.id[0]), p.replies))
             .collect();
-        assert_eq!(listed, [(4, None, 1), (2, Some(1), 1)]);
+        assert_eq!(listed, [(4, None, 2), (2, Some(1), 1)]);
         let (shown, _) = thread(&messages, [2; 32]);
         assert_eq!(shown.iter().map(|m| m.id[0]).collect::<Vec<_>>(), [3]);
+    }
+
+    #[test]
+    fn search_pages_past_votes_in_both_themes() {
+        use egui_kittest::kittest::Queryable;
+        let channel = [3; 32];
+        for dark in [false, true] {
+            let (mut h, mut commands) = super::super::tests::files_harness(dark);
+            h.ctx
+                .data_mut(|d| d.insert_temp(super::super::files_id(channel), false));
+            let ctx = h.ctx.clone();
+            let home = h.state_mut().as_mut().unwrap();
+            let server = &mut home.servers[0];
+            server.dir.categories[0].channels[0].forum = true;
+            let address = server.address.clone();
+            let votes = (1..=50)
+                .map(|n| Msg {
+                    body: Body::PollPart(PollPart::Vote {
+                        poll: [51; 32],
+                        sent: n.into(),
+                        choices: vec![0],
+                    }),
+                    ..msg(n, None, 1700000000 + i64::from(n), "")
+                })
+                .collect();
+            home.apply(
+                &ctx,
+                crate::net::Update::Messages {
+                    server: address.clone(),
+                    channel,
+                    items: votes,
+                    older: false,
+                    page: Some((false, Some([1; 32]))),
+                },
+                0.0,
+            );
+            assert!(home.servers[0].chats[&channel].messages.is_empty());
+            h.run_steps(2);
+            let server = &h.state().as_ref().unwrap().servers[0];
+            let field = UiId::unique(("forum-folds", server.dir.me, &server.address, channel))
+                .with("search");
+            ctx.memory_mut(|m| m.request_focus(field));
+            h.event(egui::Event::Text("SATURDAY".into()));
+            h.run_steps(2);
+            assert!(std::iter::from_fn(|| commands.try_recv().ok()).any(|command|
+                matches!(command, Command::Older(id, before) if id == channel && before == [1; 32])));
+            h.state_mut().as_mut().unwrap().apply(
+                &ctx,
+                crate::net::Update::Messages {
+                    server: address,
+                    channel,
+                    older: true,
+                    page: Some((true, Some([51; 32]))),
+                    items: vec![
+                        msg(
+                            51,
+                            None,
+                            1700000000,
+                            "# Weekend plans\nBoard games on Saturday afternoon.",
+                        ),
+                        msg(52, None, 1700000001, "# Announcements"),
+                    ],
+                },
+                0.0,
+            );
+            h.run_steps(3);
+            assert!(h.query_by_label("Weekend plans").is_some());
+            assert!(h.query_by_label("Announcements").is_none());
+        }
     }
 
     #[test]

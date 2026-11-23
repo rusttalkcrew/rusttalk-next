@@ -28,7 +28,22 @@ pub async fn open(dir: &Path) -> Result<SqlitePool> {
         .max_connections(4)
         .connect_with(options)
         .await?;
-    sqlx::migrate!().run(&pool).await?;
+    let migrations = sqlx::migrate!();
+    // Preview builds used 32 for forums. Move only that exact applied migration
+    // so SQLx can apply main's 32 and still validate every recorded checksum.
+    let has_ledger: bool =
+        query_scalar("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = '_sqlx_migrations')")
+            .fetch_one(&pool)
+            .await?;
+    if has_ledger {
+        let forum = migrations
+            .iter()
+            .find(|m| m.version == 36)
+            .expect("forum migration");
+        query("UPDATE _sqlx_migrations SET version = 36 WHERE version = 32 AND success AND checksum = ?")
+            .bind(forum.checksum.as_ref()).execute(&pool).await?;
+    }
+    migrations.run(&pool).await?;
     crate::metadata::hash_pictures(&pool).await?;
     Ok(pool)
 }
@@ -233,6 +248,42 @@ mod tests {
         testing::{self, as_person},
         voice,
     };
+
+    #[tokio::test]
+    async fn fresh_main_and_preview_databases_reopen_with_both_features() -> Result<()> {
+        for history in ["fresh", "main", "preview"] {
+            let dir = tempfile::tempdir()?;
+            if history != "fresh" {
+                let options = SqliteConnectOptions::new()
+                    .filename(dir.path().join("rusttalk.sqlite3"))
+                    .create_if_missing(true);
+                let pool = SqlitePool::connect_with(options).await?;
+                let mut old = sqlx::migrate!();
+                let mut steps = Vec::new();
+                for migration in old.iter() {
+                    if migration.version <= 31
+                        || migration.version == if history == "main" { 32 } else { 36 }
+                    {
+                        let mut step = migration.clone();
+                        step.version = step.version.min(32);
+                        steps.push(step);
+                    }
+                }
+                old.migrations = steps.into();
+                old.run(&pool).await?;
+                pool.close().await;
+            }
+            for _ in 0..2 {
+                let pool = open(dir.path()).await?;
+                query("SELECT forum FROM channels").execute(&pool).await?;
+                query("SELECT system_messages_ct FROM server_settings")
+                    .execute(&pool)
+                    .await?;
+                pool.close().await;
+            }
+        }
+        Ok(())
+    }
 
     const PEOPLE: u8 = 12;
 

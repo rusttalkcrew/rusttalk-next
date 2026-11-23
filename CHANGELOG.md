@@ -11,7 +11,7 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
-- Forum channels: posts with folded replies, polls, up and down votes and sorting.
+- Forum channels: searchable posts with folded replies, polls, up and down votes and sorting.
 - Reopen RustTalk offline to see previously loaded server icons, avatars and recent chat messages.
 - Chat fills empty voice channels. Use Join voice to start a call.
 - Choose one channel for joins and leaves, or turn them off. Device changes appear only in the audit log.

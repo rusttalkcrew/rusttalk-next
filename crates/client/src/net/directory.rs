@@ -567,7 +567,7 @@ async fn build(
         categories
             .iter()
             .flat_map(|c| &c.channels)
-            .find(|c| !c.page && !c.voice)
+            .find(|c| !c.page && !c.voice && !c.forum)
             .map(|c| c.id)
     };
     Ok(Directory {

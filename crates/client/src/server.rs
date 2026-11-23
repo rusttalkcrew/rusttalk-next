@@ -304,7 +304,7 @@ impl Directory {
         self.categories
             .iter()
             .flat_map(|c| &c.channels)
-            .filter(|c| !c.page && !c.voice)
+            .filter(|c| !c.page && !c.voice && !c.forum)
     }
 
     pub fn notice_channel(&self) -> Option<Id> {
@@ -442,6 +442,7 @@ pub struct Channel {
     /// Shows its newest message as one Markdown page instead of a chat.
     pub page: bool,
     /// Shows its messages as posts, each with its own replies.
+    #[serde(default)]
     pub forum: bool,
     /// Opus bitrate of a voice channel, in kbps.
     pub audio_kbps: u32,
@@ -647,6 +648,8 @@ pub struct Chat {
     pub opened: bool,
     pub loading: bool,
     pub at_start: bool,
+    /// Oldest wire record, including votes and non-displayable records.
+    pub oldest: Option<Id>,
     pub draft: String,
     pub mentions: crate::home::mentions::DraftMentions,
     /// The message replied to: person and ID.
@@ -677,6 +680,7 @@ impl Chat {
         self.pending_edits.clear();
         self.polls.clear();
         self.at_start = false;
+        self.oldest = None;
     }
 
     pub fn open_draft(&mut self, dir: &Directory, text: &str) {

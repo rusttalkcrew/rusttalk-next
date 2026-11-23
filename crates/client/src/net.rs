@@ -368,8 +368,8 @@ pub enum Update {
         channel: Id,
         items: Vec<Msg>,
         older: bool,
-        /// Set for page loads: whether this was the first page of the channel.
-        at_start: Option<bool>,
+        /// For page loads: whether history is exhausted and the oldest wire ID.
+        page: Option<(bool, Option<Id>)>,
     },
     Deleted(Url, Id, Id),
     /// A deleted DM copy is missing: server, DM channel and message.
@@ -2155,7 +2155,14 @@ async fn page(
             .insert(channel, cached.iter().map(recent::Record::source).collect());
         state.remember(channel, cached, true);
     }
-    send_messages(ctx, url, channel, items, before.is_some(), Some(at_start));
+    send_messages(
+        ctx,
+        url,
+        channel,
+        items,
+        before.is_some(),
+        Some((at_start, records.last().map(|r| r.id))),
+    );
 }
 
 async fn open(
@@ -2275,14 +2282,14 @@ fn send_messages(
     channel: Id,
     items: Vec<Msg>,
     older: bool,
-    at_start: Option<bool>,
+    page: Option<(bool, Option<Id>)>,
 ) {
     ctx.send(Update::Messages {
         server: url.clone(),
         channel,
         items,
         older,
-        at_start,
+        page,
     });
 }
 
