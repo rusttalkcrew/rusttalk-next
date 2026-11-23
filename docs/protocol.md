@@ -168,7 +168,10 @@ as the default first. Changing the default affects future joins.
 
 Kick, ban, role assignment and voice moderation require the actor to outrank the target
 strictly. Granting a role or choosing it as the default also requires the
-actor to outrank that role and hold every permission it grants. The
+actor to outrank that role and hold every permission it grants. On upgrade, members
+whose combined roles could already grant Moderator retain that delegation while
+they still hold its pre-calendar permissions and outrank it. This exception
+applies only to the built-in Moderator and gives no direct event permissions. The
 owner role comes from a singleton ownership record and can only move via
 the transfer endpoint. The prior owner keeps their assigned roles.
 
