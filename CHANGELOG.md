@@ -12,6 +12,7 @@ Unreleased under the new version and date.
 ## Unreleased
 
 - Reopen the last chat picture instantly, even if the connection drops after it loads.
+- Unavailable servers show an exclamation mark in the server sidebar until they reconnect.
 
 ## v0.2.1 - 2026-11-23
 

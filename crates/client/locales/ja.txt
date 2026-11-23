@@ -110,6 +110,7 @@ home.find_servers = サーバーを探す
 home.no_chats = チャットはまだありません。
 home.server_menu = {name}、サーバーメニュー
 home.offline = オフラインです。再試行しています…
+home.server_unavailable = サーバーに接続できません
 home.remove_server = サーバーを削除
 home.name_your_server = サーバーに名前を付ける
 home.create_channel_in = {category} にチャンネルを作成

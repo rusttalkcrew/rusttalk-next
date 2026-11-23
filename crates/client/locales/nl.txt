@@ -110,6 +110,7 @@ home.find_servers = Servers zoeken
 home.no_chats = Nog geen chats.
 home.server_menu = {name}, servermenu
 home.offline = Offline. Opnieuw proberen…
+home.server_unavailable = Server niet bereikbaar
 home.remove_server = Server verwijderen
 home.name_your_server = Geef je server een naam
 home.create_channel_in = Kanaal maken in {category}
