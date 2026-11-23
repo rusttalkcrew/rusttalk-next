@@ -301,6 +301,7 @@ fn row(ui: &mut Ui, dir: &Directory, member: &Member, person: &Person) -> Option
         Look::Ghost,
         Vec2::splat(ui::ICON_BUTTON),
     );
+    let more = crate::home::person::bound_response(&more, person);
     let menu = ui::menu(&more, |m| person.menu(m)).flatten();
     interact(ui, &row, person, false).or(menu)
 }

@@ -152,6 +152,7 @@ pub struct Home {
     pub error: Option<String>,
     pub key_storage: crate::key_storage::Form,
     pub server_settings: Option<admin::Settings>,
+    pub kick: Option<admin::Kick>,
     /// The crop step for a picked profile picture or server icon.
     crop: Option<crate::crop::Crop>,
     /// My account: the default name being edited, and the bio as typed, unsaved.
@@ -399,6 +400,7 @@ impl Home {
             error: None,
             key_storage: Default::default(),
             server_settings: None,
+            kick: None,
             crop: None,
             name_draft: None,
             bio_draft: None,
@@ -2162,6 +2164,7 @@ pub fn show(
     let action = crate::settings::show(ui.ctx(), home, updates, keystore);
     updates.dialog(ui.ctx());
     crop_dialog(ui.ctx(), home);
+    admin::kick_dialog(ui.ctx(), home);
     action
 }
 

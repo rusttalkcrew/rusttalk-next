@@ -72,7 +72,6 @@ pub enum Tab {
 }
 
 enum MemberAction {
-    Kick,
     Ban { network: bool },
     Roles(Vec<String>),
 }
@@ -253,8 +252,23 @@ pub fn member_menu(m: &mut ui::Menu, choice: &mut Option<Moderate>, perms: Perms
     }
 }
 
-/// Show the server settings with a kick, ban or role change ready to confirm.
+/// Ask before kicking, or open settings for a ban or role change.
 pub fn moderate(home: &mut Home, index: usize, person: Id, choice: Moderate) {
+    if matches!(choice, Moderate::Kick) {
+        if home.kick.is_none() {
+            let server = &home.servers[index];
+            if can_kick(home, server, person) {
+                home.kick = Some(Kick {
+                    server: server.known.server_id,
+                    person,
+                    name: server.member_name(&person),
+                    commands: server.commands.clone(),
+                    opened_frame: None,
+                });
+            }
+        }
+        return;
+    }
     if home
         .server_settings
         .as_ref()
@@ -270,6 +284,62 @@ pub fn moderate(home: &mut Home, index: usize, person: Id, choice: Moderate) {
     }
 }
 
+/// Frozen identity and connection: neither a reordered list nor a reconnect may retarget it.
+pub struct Kick {
+    server: Id,
+    person: Id,
+    name: String,
+    commands: tokio::sync::mpsc::UnboundedSender<Command>,
+    // A sizing pass must not arm confirmation in the frame that opened it.
+    opened_frame: Option<u64>,
+}
+
+fn can_kick(home: &Home, server: &Server, person: Id) -> bool {
+    server.status == crate::server::Status::Online
+        && server.dir.perms.kick
+        && server.member(&server.dir.me).is_some()
+        && person != server.dir.me
+        && Person::of(home, server, person).outranked()
+}
+
+pub fn kick_dialog(ctx: &egui::Context, home: &mut Home) {
+    let Some(mut kick) = home.kick.take() else {
+        return;
+    };
+    let Some(server) = home.servers.iter().find(|server| {
+        server.known.server_id == kick.server && server.commands.same_channel(&kick.commands)
+    }) else {
+        return;
+    };
+    if !can_kick(home, server, kick.person) {
+        return;
+    }
+    let frame = ctx.cumulative_frame_nr();
+    let ready = *kick.opened_frame.get_or_insert(frame) < frame;
+    let mut confirm = false;
+    let mut cancel = false;
+    let (_, dismissed) = ui::dialog(
+        ctx,
+        "kick-member",
+        &t!("admin.kick_title", name = kick.name),
+        |ui| {
+            ui.label(t!("admin.kick_help"));
+            ui.horizontal(|ui| {
+                confirm = ui
+                    .add_enabled_ui(ready, |ui| danger(ui, t!("admin.kick")))
+                    .inner
+                    .clicked();
+                cancel = ui::secondary(ui, t!("common.cancel")).clicked();
+            });
+        },
+    );
+    if confirm && !cancel && !dismissed {
+        server.send(Command::Admin(Admin::Kick(kick.person)));
+    } else if !cancel && !dismissed {
+        home.kick = Some(kick);
+    }
+}
+
 fn action(server: &Server, person: &Id, choice: Moderate) -> MemberAction {
     match choice {
         Moderate::Roles => MemberAction::Roles(
@@ -278,7 +348,7 @@ fn action(server: &Server, person: &Id, choice: Moderate) -> MemberAction {
                 .map(|m| m.roles.clone())
                 .unwrap_or_default(),
         ),
-        Moderate::Kick => MemberAction::Kick,
+        Moderate::Kick => unreachable!("Kick has its own confirmation"),
         Moderate::Ban => MemberAction::Ban { network: false },
     }
 }
@@ -989,16 +1059,6 @@ fn members_tab<'a>(
         let mut cancel = false;
         ui::card(ui, |ui| {
             match action {
-                MemberAction::Kick => {
-                    ui.label(ui::bold(t!("admin.kick_title", name = name)));
-                    ui.label(t!("admin.kick_help"));
-                    ui.horizontal(|ui| {
-                        if danger(ui, t!("admin.kick")).clicked() {
-                            request = Some(Admin::Kick(person));
-                        }
-                        cancel = ui::secondary(ui, t!("common.cancel")).clicked();
-                    });
-                }
                 MemberAction::Ban { network } => {
                     ui.label(ui::bold(t!("admin.ban_title", name = name)));
                     ui.label(t!("admin.ban_help"));
