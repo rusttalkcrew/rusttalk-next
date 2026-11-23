@@ -1065,6 +1065,9 @@ crop.zoom = Zoom
 # crates/client/src/camera.rs
 camera.stopped = Je camera is gestopt.
 camera.none = Geen camera gevonden.
+camera.front = Camera aan de voorkant
+camera.back = Camera aan de achterkant
+camera.permission = Geef toestemming voor de camera om video aan te zetten.
 camera.start_failed = Kon je camera niet starten. Gebruikt een andere app hem?
 camera.camera = Camera
 camera.first = Eerste camera

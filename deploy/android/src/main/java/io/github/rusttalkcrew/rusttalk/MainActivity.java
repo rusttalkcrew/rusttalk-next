@@ -29,6 +29,7 @@ public class MainActivity extends GameActivity {
     public static volatile int editorActions;
 
     private static final int MICROPHONE = 1;
+    private static final int CAMERA = 2;
     private volatile boolean voiceReady;
     private volatile int permission;
     private boolean communicationMode;
@@ -127,8 +128,57 @@ public class MainActivity extends GameActivity {
     @Override
     public void onRequestPermissionsResult(int code, String[] names, int[] grants) {
         super.onRequestPermissionsResult(code, names, grants);
+        if (code == CAMERA)
+            cameraGrant = grants.length > 0 && grants[0] == PackageManager.PERMISSION_GRANTED ? 1 : -1;
         if (code == MICROPHONE)
             permission = grants.length > 0 && grants[0] == PackageManager.PERMISSION_GRANTED ? 1 : -1;
+    }
+
+    private volatile int cameraGrant;
+    private boolean resumed;
+    private CallCamera camera;
+
+    public synchronized int cameraPermission(boolean request) {
+        if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)
+            return resumed ? 1 : 0;
+        if (request) {
+            cameraGrant = 0;
+            runOnUiThread(() -> requestPermissions(new String[]{Manifest.permission.CAMERA}, CAMERA));
+        }
+        return cameraGrant == 0 ? 0 : -1;
+    }
+
+    public int cameraDevices() {
+        livekit.org.webrtc.Camera2Enumerator devices = new livekit.org.webrtc.Camera2Enumerator(this);
+        int mask = 0;
+        for (String id : devices.getDeviceNames()) {
+            if (devices.isFrontFacing(id)) mask |= 1;
+            if (devices.isBackFacing(id)) mask |= 2;
+        }
+        return mask;
+    }
+
+    public synchronized boolean startCamera(boolean front, int w, int h, int fps) {
+        if (!resumed || !voiceReady) return false;
+        camera = new CallCamera();
+        return camera.start(getApplicationContext(), front, w, h, fps);
+    }
+
+    public synchronized boolean cameraEnded() { return camera == null || camera.ended; }
+
+    public synchronized void stopCamera() {
+        if (camera != null) camera.close();
+        camera = null;
+    }
+
+    @Override protected void onResume() {
+        super.onResume();
+        synchronized (this) { resumed = true; }
+    }
+
+    @Override protected void onPause() {
+        synchronized (this) { resumed = false; stopCamera(); }
+        super.onPause();
     }
 
     public synchronized void communicationMode(boolean on) {
