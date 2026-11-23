@@ -294,6 +294,12 @@ pub struct Kick {
     opened_frame: Option<u64>,
 }
 
+impl Kick {
+    pub(crate) fn belongs_to(&self, server: &Server) -> bool {
+        self.server == server.known.server_id && self.commands.same_channel(&server.commands)
+    }
+}
+
 fn can_kick(home: &Home, server: &Server, person: Id) -> bool {
     server.status == crate::server::Status::Online
         && server.dir.perms.kick
@@ -306,9 +312,7 @@ pub fn kick_dialog(ctx: &egui::Context, home: &mut Home) {
     let Some(mut kick) = home.kick.take() else {
         return;
     };
-    let Some(server) = home.servers.iter().find(|server| {
-        server.known.server_id == kick.server && server.commands.same_channel(&kick.commands)
-    }) else {
+    let Some(server) = home.servers.iter().find(|server| kick.belongs_to(server)) else {
         return;
     };
     if !can_kick(home, server, kick.person) {

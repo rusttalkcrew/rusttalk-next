@@ -1167,6 +1167,14 @@ impl Home {
                 let Some(index) = self.index(&address) else {
                     return;
                 };
+                if status != Status::Online
+                    && self
+                        .kick
+                        .as_ref()
+                        .is_some_and(|kick| kick.belongs_to(&self.servers[index]))
+                {
+                    self.kick = None;
+                }
                 let joining = matches!(&self.join, Join::Joining(url) if *url == address);
                 match (&status, joining) {
                     (Status::Online, true) => {

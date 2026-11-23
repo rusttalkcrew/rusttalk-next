@@ -571,6 +571,29 @@ mod tests {
     }
 
     #[test]
+    fn kick_confirmation_expires_on_reconnect_between_frames() {
+        let (mut harness, mut sent, mut other) = kick_harness(false);
+        choose_kick(&mut harness, "Ann");
+        let ctx = harness.ctx.clone();
+        let home = harness.state_mut().as_mut().unwrap();
+        for index in [1, 0] {
+            let address = home.servers[index].known.address.clone();
+            for status in [Status::Offline, Status::Online] {
+                home.apply(
+                    &ctx,
+                    crate::net::Update::Status(address.clone(), status),
+                    0.0,
+                );
+            }
+            assert_eq!(home.kick.is_some(), index == 1);
+        }
+        harness.run_steps(4);
+        assert!(harness.query_by_label(t!("admin.kick")).is_none());
+        assert!(drain_kicks(&mut sent).is_empty());
+        assert!(drain_kicks(&mut other).is_empty());
+    }
+
+    #[test]
     fn open_member_menu_cannot_follow_a_reused_row() {
         let (mut harness, mut sent, _) = kick_harness(false);
         harness
