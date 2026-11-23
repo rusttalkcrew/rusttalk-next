@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Reopen the last chat picture instantly, even if the connection drops after it loads.
+
 ## v0.2.1 - 2026-11-23
 
 - Incoming custom emoji now appear as soon as their pictures finish loading, without waiting for another chat message.
