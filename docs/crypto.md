@@ -112,8 +112,16 @@ data-protection Keychain (generic password, service as above, account
 `identity-v1`, `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`, the app's default
 access group: never in iCloud Keychain, and an encrypted backup restores it only
 to the same iPhone) and falls back to the file with password when the Keychain refuses
-a test write. Android offers only the file with password until it uses Android
-Keystore (see [Phones and tablets](mobile.md#privacy-and-permissions)).
+a test write. Android Keystore holds a non-exportable AES-256-GCM key under
+`<service>/identity-v1`. The app prefers StrongBox when available, otherwise it
+uses the regular Android Keystore provider. The provider chooses a fresh 12-byte
+IV for every write. The private, backup-excluded `identity.wrapped` holds the IV,
+ciphertext and 16-byte tag. A disposable alias tests encryption and decryption
+before the app relies on Keystore. The key requires neither user authentication
+nor an unlocked screen, so a lock during background voice cannot prevent a
+key-storage operation. Anyone controlling the running app can use the key.
+Sign-out deletes both the alias and the file. Android removes aliases on
+uninstall. Without the alias, the recovery words are needed.
 
 At start the client looks in both places: the chosen one first, then the other.
 Keys found anywhere are used and `keystore.json` is repaired, so a lost or

@@ -4,7 +4,18 @@ import android.Manifest;
 import android.content.Context;
 import android.content.pm.PackageManager;
 import android.media.AudioManager;
+import android.os.Build;
 import android.os.Bundle;
+import android.security.keystore.KeyGenParameterSpec;
+import android.security.keystore.KeyProperties;
+import android.security.keystore.StrongBoxUnavailableException;
+import java.security.GeneralSecurityException;
+import java.security.KeyStore;
+import java.util.Arrays;
+import javax.crypto.Cipher;
+import javax.crypto.KeyGenerator;
+import javax.crypto.SecretKey;
+import javax.crypto.spec.GCMParameterSpec;
 import android.util.Log;
 import android.view.inputmethod.EditorInfo;
 import com.google.androidgamesdk.GameActivity;
@@ -25,6 +36,74 @@ public class MainActivity extends GameActivity {
     private boolean destroyed;
 
     private static native boolean initializeVoice(Context context);
+
+    private static KeyStore identityStore() throws Exception {
+        KeyStore store = KeyStore.getInstance("AndroidKeyStore");
+        store.load(null);
+        return store;
+    }
+
+    private SecretKey createIdentityKey(String alias) throws GeneralSecurityException {
+        KeyGenParameterSpec.Builder spec = new KeyGenParameterSpec.Builder(alias,
+                KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT)
+                .setKeySize(256).setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                .setUserAuthenticationRequired(false);
+        KeyGenerator generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore");
+        if (Build.VERSION.SDK_INT >= 28 && getPackageManager().hasSystemFeature(
+                PackageManager.FEATURE_STRONGBOX_KEYSTORE)) {
+            try {
+                generator.init(spec.setIsStrongBoxBacked(true).build());
+                return generator.generateKey();
+            } catch (StrongBoxUnavailableException unavailable) {
+                spec.setIsStrongBoxBacked(false);
+            }
+        }
+        generator.init(spec.build());
+        return generator.generateKey();
+    }
+
+    // The provider chooses a fresh 12-byte IV for every encryption. The remaining
+    // bytes are ciphertext followed by the 128-bit GCM authentication tag.
+    public byte[] cryptIdentity(String alias, boolean encrypt, byte[] input) throws Exception {
+        try {
+            SecretKey key = (SecretKey) identityStore().getKey(alias, null);
+            if (key == null) {
+                if (!encrypt) throw new GeneralSecurityException("Missing Android identity key");
+                key = createIdentityKey(alias);
+            }
+            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+            if (!encrypt) {
+                if (input.length < 28) throw new GeneralSecurityException("Truncated wrapped identity");
+                cipher.init(Cipher.DECRYPT_MODE, key, new GCMParameterSpec(128, input, 0, 12));
+                return cipher.doFinal(input, 12, input.length - 12);
+            }
+            cipher.init(Cipher.ENCRYPT_MODE, key);
+            byte[] iv = cipher.getIV();
+            if (iv.length != 12) throw new GeneralSecurityException("Unexpected Keystore IV length");
+            byte[] blob = Arrays.copyOf(iv, iv.length + cipher.getOutputSize(input.length));
+            cipher.doFinal(input, 0, input.length, blob, iv.length);
+            return blob;
+        } finally {
+            if (encrypt) Arrays.fill(input, (byte) 0);
+        }
+    }
+
+    public void probeIdentityKey(String identityAlias) throws Exception {
+        String alias = identityAlias + "/probe";
+        deleteIdentityKey(alias);
+        try {
+            byte[] blob = cryptIdentity(alias, true, new byte[]{42});
+            if (!Arrays.equals(cryptIdentity(alias, false, blob), new byte[]{42}))
+                throw new GeneralSecurityException("Android Keystore probe failed");
+        } finally {
+            deleteIdentityKey(alias);
+        }
+    }
+
+    public void deleteIdentityKey(String alias) throws Exception {
+        identityStore().deleteEntry(alias);
+    }
 
     @Override
     protected void onCreate(Bundle state) {
