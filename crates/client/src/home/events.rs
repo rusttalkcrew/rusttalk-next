@@ -1280,6 +1280,7 @@ mod tests {
                 topic: String::new(),
                 voice: true,
                 page: false,
+                forum: false,
                 audio_kbps: 64,
                 flags: Vec::new(),
             }],

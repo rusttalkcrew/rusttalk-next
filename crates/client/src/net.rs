@@ -274,6 +274,8 @@ pub enum Command {
 /// A message to send, and what goes back to the composer when sending fails.
 #[derive(Clone)]
 pub struct Draft {
+    /// Owned by a forum submission, including its optional poll.
+    pub forum_post: bool,
     /// Random; a DM sends the same ID to every shared server.
     pub id: Id,
     /// Unused for a DM, which this server's DM channel with `peer` gets.
@@ -384,8 +386,8 @@ pub enum Update {
         channel: Id,
         items: Vec<Msg>,
         older: bool,
-        /// Set for page loads: whether this was the first page of the channel.
-        at_start: Option<bool>,
+        /// For page loads: whether history is exhausted and the oldest wire ID.
+        page: Option<(bool, Option<Id>)>,
     },
     Deleted(Url, Id, Id),
     /// A deleted DM copy is missing: server, DM channel and message.
@@ -463,6 +465,7 @@ pub enum Update {
     Synced(Box<Synced>),
     /// Sending this message failed; put it back in the composer.
     Unsent(Url, Draft),
+    ForumSent(Url, Id, Id),
     Failed(String),
 }
 
@@ -1836,7 +1839,7 @@ async fn on_command(
                 .flat_map(|dir| &dir.categories)
                 .flat_map(|category| &category.channels)
                 .any(|known| known.id == channel && known.page);
-            let target = (channel, draft.id, page);
+            let target = (channel, draft.id, page, draft.forum_post);
             let mut sent =
                 files::send(ctx, url, client, state, target, body.clone(), files.clone()).await;
             // The other person re-keyed the DM just now: take the new key and send
@@ -1848,7 +1851,9 @@ async fn on_command(
                     Err(error) => Err(error),
                 };
             }
-            if !matches!(sent, Ok(true)) {
+            if matches!(sent, Ok(true)) && draft.forum_post {
+                ctx.send(Update::ForumSent(url.clone(), channel, draft.id));
+            } else if !matches!(sent, Ok(true)) {
                 ctx.send(Update::Unsent(url.clone(), draft));
             }
             sent?;
@@ -2241,7 +2246,14 @@ async fn page(
             .insert(channel, cached.iter().map(recent::Record::source).collect());
         state.remember(channel, cached, true);
     }
-    send_messages(ctx, url, channel, items, before.is_some(), Some(at_start));
+    send_messages(
+        ctx,
+        url,
+        channel,
+        items,
+        before.is_some(),
+        Some((at_start, records.last().map(|r| r.id))),
+    );
 }
 
 async fn open(
@@ -2368,14 +2380,14 @@ fn send_messages(
     channel: Id,
     items: Vec<Msg>,
     older: bool,
-    at_start: Option<bool>,
+    page: Option<(bool, Option<Id>)>,
 ) {
     ctx.send(Update::Messages {
         server: url.clone(),
         channel,
         items,
         older,
-        at_start,
+        page,
     });
 }
 

@@ -58,6 +58,7 @@ impl Home {
     /// Only on the channel's own server, which the other person needs anyway.
     fn send_request(&self, index: usize, person: Id, id: Id, request: VoiceRequest) {
         self.servers[index].send(Command::Send(Draft {
+            forum_post: false,
             id,
             channel: [0; 32],
             peer: Some(person),
@@ -435,6 +436,7 @@ mod tests {
             topic: String::new(),
             voice,
             page: false,
+            forum: false,
             audio_kbps: 64,
             flags: Vec::new(),
         };
@@ -669,7 +671,7 @@ mod tests {
                 channel: DM,
                 items: vec![message(mine, answer), other_ask, message(ANN, answer)],
                 older: false,
-                at_start: Some(true),
+                page: Some((true, Some([4; 32]))),
             },
             0.0,
         );

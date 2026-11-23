@@ -50,6 +50,7 @@ fn window() -> (Harness<'static, Option<Home>>, UnboundedReceiver<Command>) {
         topic: String::new(),
         voice,
         page: false,
+        forum: false,
         audio_kbps: 64,
         flags: Vec::new(),
     };
@@ -89,6 +90,25 @@ fn window() -> (Harness<'static, Option<Home>>, UnboundedReceiver<Command>) {
 
 fn home<'a>(harness: &'a Harness<'static, Option<Home>>) -> &'a Home {
     harness.state().as_ref().unwrap()
+}
+
+#[test]
+fn channel_hover_cursor_is_consistent_for_members_and_managers() {
+    let (mut harness, _sent) = window();
+    for manage in [false, true] {
+        let server = &mut harness.state_mut().as_mut().unwrap().servers[0];
+        server.dir.perms.manage_channels = manage;
+        server.dir.categories[0].id = Some([3; 32]);
+        harness.run_steps(3);
+        for label in ["#  general", "🔊  Lounge"] {
+            harness.get_by_label(label).hover();
+            harness.run_steps(3);
+            assert_eq!(
+                harness.output().platform_output.cursor_icon,
+                eframe::egui::CursorIcon::PointingHand
+            );
+        }
+    }
 }
 
 #[test]

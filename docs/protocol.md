@@ -381,7 +381,17 @@ stays an ordinary file. Apps that do not know the types show a small file.
 
 ## Channels and categories
 
-All routes require a bearer header. Channel kind is `text`, `voice`, `page`, or `dm`.
+All routes require a bearer header. Channel kind is `text`, `voice`, `page`, `forum`, or `dm`.
+A `forum` channel also works exactly like a text channel on the server, with the
+usual defaults. Clients group its messages: a message without `reply_to` is a post
+whose first line is its title, and a message whose `reply_to` leads back to a post
+is a reply in that post's thread. A post with a poll is sent as the poll, then the
+post's text with `reply_to` set to that poll by the same author and the encrypted `quoted_author` hint set to 32 zero bytes. Ordinary replies (including older, unmarked pairs) stay replies; a poll nobody's text
+carries is a post of its own. Up and down votes on a post are poll votes whose `poll`
+is the post's ID, option 0 up and 1 down, so they change and are taken back like
+any vote. The grouping and the votes are inside the encrypted messages, so the server
+does not know which messages belong together. The 10,000-message limit applies to
+the whole forum.
 A `page` channel works exactly like a text channel on the server (same messages,
 keys and flags); clients show only its newest message, as one Markdown page, and
 saving a change posts the whole page as a new message. A new page channel gives
