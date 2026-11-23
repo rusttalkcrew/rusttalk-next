@@ -395,6 +395,7 @@ pub enum Metadata {
     /// A member's profile bio: a few lines of plain text.
     Bio,
     EmojiPackName,
+    SystemMessages,
 }
 
 impl Metadata {
@@ -476,6 +477,15 @@ pub(crate) fn open(key: &Key, aad: &[u8], bytes: &[u8]) -> Result<Vec<u8>, KeyEr
     XChaCha20Poly1305::new(&(**key).into())
         .decrypt(&XNonce::from(*nonce), Payload { msg, aad })
         .map_err(|_| KeyError::Authentication)
+}
+
+/// Local cache files have a separate authentication domain from network records.
+pub fn seal_cache(key: &Key, scope: &[u8], data: &[u8]) -> Result<Vec<u8>, KeyError> {
+    seal(key, &[b"rusttalk-local-cache-v1", scope].concat(), data)
+}
+
+pub fn open_cache(key: &Key, scope: &[u8], data: &[u8]) -> Result<Vec<u8>, KeyError> {
+    open(key, &[b"rusttalk-local-cache-v1", scope].concat(), data)
 }
 
 pub fn seal_invite(

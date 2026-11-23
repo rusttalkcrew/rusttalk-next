@@ -137,6 +137,32 @@ impl Authority {
     }
 }
 
+/// Preserve delegation of the built-in Moderator for split-role managers from before events.
+/// Hierarchy and every non-calendar permission still follow their current roles.
+async fn can_delegate(
+    db: &mut SqliteConnection,
+    actor: &[u8],
+    auth: &Authority,
+    role: &Role,
+) -> ApiResult<()> {
+    let event_bits = Permission::SuggestEvents as i64
+        | Permission::CreateEvents as i64
+        | Permission::ManageEvents as i64;
+    let mut required = role.permissions;
+    if role.id == "moderator"
+        && required & !auth.permissions & event_bits != 0
+        && query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM legacy_moderator_granters WHERE person_id = ?)",
+        )
+        .bind(actor)
+        .fetch_one(db)
+        .await?
+    {
+        required &= !event_bits;
+    }
+    auth.can_grant(role.rank, required)
+}
+
 pub async fn for_person(db: &mut SqliteConnection, person: &[u8]) -> ApiResult<Vec<Role>> {
     Ok(query_as(
         "SELECT id, kind, rank, permissions, name_ct, display_ct FROM roles WHERE id IN (
@@ -473,7 +499,7 @@ pub async fn set_default(
     auth.require(Permission::ManageRoles)?;
     let id = payload(body)?.role_id;
     let role = by_id(&mut tx, &id).await?;
-    auth.can_grant(role.rank, role.permissions)?;
+    can_delegate(&mut tx, &actor.person, &auth, &role).await?;
     query("UPDATE server_settings SET default_role_id = ? WHERE id = 1")
         .bind(&id)
         .execute(&mut *tx)
@@ -519,7 +545,7 @@ pub async fn assign(
     auth.outrank(&target)?;
     for id in &ids {
         let role = by_id(&mut tx, id).await?;
-        auth.can_grant(role.rank, role.permissions)?;
+        can_delegate(&mut tx, &actor.person, &auth, &role).await?;
     }
     let before = keys::readable_channels(&mut tx, &person).await?;
     query("DELETE FROM member_roles WHERE person_id = ?")

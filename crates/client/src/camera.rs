@@ -10,9 +10,15 @@ use eframe::egui::{
     self, ColorImage, ComboBox, Image, Rect, RichText, TextureHandle, Ui, Vec2, accesskit::Role,
     pos2,
 };
-pub use rusttalk_core::camera::{CameraCapture as Capture, CameraOptions as Options};
+pub use rusttalk_core::camera::CameraOptions as Options;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+use rusttalk_core::camera::{CameraCapture as Capture, list_cameras, start};
+#[cfg(any(target_os = "android", target_os = "ios"))]
+mod mobile;
+#[cfg(any(target_os = "android", target_os = "ios"))]
+use mobile::{Capture, list_cameras, start};
 use rusttalk_core::{
-    camera::{FRAME_RATES, HEIGHTS, list_cameras, start},
+    camera::{FRAME_RATES, HEIGHTS},
     client::voice::NativeVideoSource,
 };
 
@@ -50,6 +56,8 @@ struct Running {
     /// Filled by the starting thread.
     capture: Arc<Mutex<Option<Result<Capture, String>>>>,
     starter: thread::JoinHandle<()>,
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// What the call should do with the camera this frame.
@@ -100,7 +108,22 @@ impl Camera {
         preview: bool,
     ) -> Option<Change> {
         self.on &= in_call;
+        // On phones only an explicit call action starts capture.
+        let preview = preview && !cfg!(any(target_os = "android", target_os = "ios"));
         self.preview = preview;
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        if self.on && self.running.is_none() {
+            let permission = mobile::permission(!self.was_on);
+            self.was_on = true;
+            if permission == 0 {
+                ctx.request_repaint_after(std::time::Duration::from_millis(100));
+                return None;
+            }
+            if permission < 0 {
+                self.problem = Some(t!("camera.permission").into());
+                self.on = false;
+            }
+        }
         // A failure from before (e.g. in the Video tab) must not block turning the camera on.
         let retry =
             self.on && !self.was_on && matches!(self.ready().as_deref(), Some(Some(Err(_))));
@@ -108,8 +131,8 @@ impl Camera {
         let wanted = (self.on || preview).then(|| (settings.camera.clone(), options(settings)));
         if retry || self.running.as_ref().map(|r| &r.config) != wanted.as_ref() {
             self.stop_now();
-            let previous = self.closing.take();
-            self.running = wanted.map(|config| launch(ctx, &self.runtime, config, previous));
+            self.running =
+                wanted.map(|config| launch(ctx, &self.runtime, config, self.closing.take()));
         }
         let mut failed = None;
         if let Some(mut slot) = self.ready() {
@@ -117,6 +140,7 @@ impl Camera {
                 // Reported on the next frame by the arm below.
                 Some(Ok(capture)) if capture.is_finished() => {
                     *slot = Some(Err(t!("camera.stopped").into()));
+                    ctx.request_repaint();
                 }
                 Some(Err(error)) if self.on => failed = Some(error.clone()),
                 Some(Ok(_)) => ctx.request_repaint_after(std::time::Duration::from_millis(33)),
@@ -161,6 +185,10 @@ impl Camera {
         let Some(running) = self.running.take() else {
             return;
         };
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        running
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::Release);
         let taken = lock(&running.capture).take();
         let release = match taken {
             Some(Ok(capture)) => capture.stop(),
@@ -215,6 +243,10 @@ fn launch(
     let ctx = ctx.clone();
     let (name, options) = config.clone();
     let runtime = runtime.clone();
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    let stop = cancelled.clone();
     let starter = thread::spawn(move || {
         // The previous capture may still hold the device.
         if let Some(previous) = previous {
@@ -231,6 +263,9 @@ fn launch(
                 .into_iter()
                 .nth(at)
                 .ok_or_else(|| anyhow::anyhow!("no camera found"))?;
+            #[cfg(any(target_os = "android", target_os = "ios"))]
+            return start(device, options, &stop);
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
             start(device, options)
         });
         *lock(&slot) = Some(started.map_err(|error| {
@@ -248,6 +283,8 @@ fn launch(
         config,
         capture,
         starter,
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        cancelled,
     }
 }
 
@@ -268,11 +305,16 @@ pub fn settings_tab(ui: &mut Ui, camera: &mut Camera, s: &mut Settings) {
     ui::setting_row(ui, t!("camera.camera"), "", |ui| {
         let combo = ComboBox::from_id_salt("camera")
             .width(crate::call::PICKER_WIDTH)
-            .selected_text(s.camera.as_deref().unwrap_or(t!("camera.first")))
+            .selected_text(
+                s.camera
+                    .as_deref()
+                    .map(camera_label)
+                    .unwrap_or_else(|| t!("camera.first").into()),
+            )
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut s.camera, None, t!("camera.first"));
                 for name in found {
-                    ui.selectable_value(&mut s.camera, Some(name.clone()), name);
+                    ui.selectable_value(&mut s.camera, Some(name.clone()), camera_label(&name));
                 }
             });
         combo
@@ -305,6 +347,10 @@ pub fn settings_tab(ui: &mut Ui, camera: &mut Camera, s: &mut Settings) {
             }
         },
     );
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    if !camera.on {
+        return;
+    }
     ui::page_section(ui, t!("camera.preview"));
     let mode = match camera.ready().as_deref() {
         None | Some(None) => {
@@ -333,4 +379,14 @@ pub fn settings_tab(ui: &mut Ui, camera: &mut Camera, s: &mut Settings) {
         ))
         .weak(),
     );
+}
+
+fn camera_label(name: &str) -> String {
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    match name {
+        "front" => return t!("camera.front").into(),
+        "back" => return t!("camera.back").into(),
+        _ => {}
+    }
+    name.to_owned()
 }

@@ -1,6 +1,6 @@
 name: Mobile apps
 
-# Builds a debug Android APK and an unsigned iOS IPA from the client's code, so a pull
+# Builds a test Android APK and an unsigned iOS IPA from the client's code, so a pull
 # request that touches the client proves the phone builds still work (docs/mobile.md).
 # Run it by hand from the Actions tab for test builds of any branch. Not released yet.
 on:
@@ -38,7 +38,7 @@ jobs:
       - run: ANDROID_NDK_HOME="$ANDROID_HOME/ndk/29.0.14206865" deploy/android/build.sh dist
       - uses: actions/upload-artifact@v4
         with:
-          name: android-arm64-debug
+          name: android-arm64-test
           path: dist/*.apk
           if-no-files-found: error
           retention-days: 7

@@ -39,7 +39,7 @@ livekit = "=0.11.0"
 ndarray = "0.17"
 # Opens saved files and their folders in the system's apps.
 open = "5"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls-native-roots"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json"] }
 rusttalk-core = { path = "../core", features = ["client", "voice", "capture"] }
 semver = "1"
 serde = { version = "1", features = ["derive"] }
@@ -70,6 +70,10 @@ portable-pty = "0.9"
 alacritty_terminal = { version = "0.26", default-features = false }
 # How wide a letter is, to limit the combining marks a viewer's terminal takes.
 unicode-width = "0.2"
+
+[build-dependencies]
+# Compiles the iPhone's AVFoundation delegate.
+cc = "1"
 
 [target.'cfg(windows)'.build-dependencies]
 # Compiles rusttalk.rc so Windows shows the app icon on the executable.
@@ -112,14 +116,32 @@ rfd = { version = "0.18", default-features = false, features = ["xdg-portal"] }
 # AccessKit that NativeActivity lacks (see docs/mobile.md).
 eframe = { version = "0.37", features = ["android-game-activity", "glow"] }
 winit = { version = "0.30", default-features = false }
+# Window insets and the activity's state; the version android-activity already uses.
+jni = "0.22"
+# LiveKit's Android initializer takes JNI 0.21 types.
+livekit-jni = { package = "jni", version = "0.21" }
 
 [target.'cfg(target_os = "ios")'.dependencies]
-# keyring's Apple store builds for iOS only with its data-protection Keychain. The
-# app doesn't store keys there yet (docs/mobile.md, Privacy and permissions).
+block2 = "0.6"
+objc2-avf-audio = { version = "0.3", default-features = false, features = ["std", "AVAudioSession", "AVAudioSessionRoute", "AVAudioSessionTypes", "block2"] }
+# The data-protection Keychain for the keys (keystore.rs `IosKeychain`); keyring's
+# `v1` API has no iOS store.
 apple-native-keyring-store = { version = "1", features = ["protected"] }
 # Keeps the settings folder, with the key file, out of iCloud and computer backups.
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSError", "NSString", "NSURL", "NSValue"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSDate", "NSDictionary", "NSEnumerator", "NSNotification", "NSOperation", "block2", "NSError", "NSString", "NSURL", "NSValue"] }
+# The system clipboard (UIPasteboard) and drawing inside the safe area (src/ios.rs);
+# the versions winit, egui-winit and wgpu already use.
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFCGTypes"] }
+objc2-quartz-core = { version = "0.3", default-features = false, features = ["std", "CALayer", "CATransaction"] }
+objc2-ui-kit = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "objc2-quartz-core", "UIApplication", "UIColor", "UIGeometry", "UIKeyboardLayoutGuide", "UILayoutGuide", "UIPasteboard", "UIResponder", "UIScreen", "UITrackingLayoutGuide", "UIView", "UIViewController", "UIWindow"] }
+# The status bar's text colour (src/ios.rs); the version eframe already uses.
+winit = { version = "0.30", default-features = false }
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+# Clearing copied recovery words: read and emptied in one step (src/words.rs). Already
+# built for egui's clipboard.
+arboard = { version = "3.7", default-features = false, features = ["wayland-data-control"] }
 
 [target.'cfg(windows)'.dependencies]
 # Pasting: registered picture formats and copied files, and bitmaps as a last resort.

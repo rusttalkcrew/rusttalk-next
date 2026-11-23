@@ -298,14 +298,7 @@ struct Asked {
 
 pub fn pane(ui: &mut Ui, home: &mut Home, index: usize) {
     let title = t!("events.title");
-    super::pane_title(
-        ui,
-        "events-title",
-        title,
-        Some(&mut home.layout),
-        false,
-        None,
-    );
+    super::pane_title(ui, "events-title", title, Some(&mut home.layout), None);
 
     let now = unix_now();
     let today = local(now).date_naive();
@@ -832,6 +825,12 @@ pub fn reminders(server: &Server, now: i64) -> Vec<(Id, i64, i64, String)> {
     let me = server.dir.me;
     (calendar.events.iter())
         .filter(|event| event.record.approved)
+        .filter(|event| {
+            !event
+                .waiting_answers
+                .iter()
+                .any(|&i| event.record.answers[i].person == me)
+        })
         .filter(|event| !event.answers.iter().any(|(person, _)| *person == me))
         .filter_map(|event| {
             let at = event.record.reminded_at?;
@@ -1299,6 +1298,8 @@ mod tests {
 
         let now = 1_800_000_000;
         let event = Event {
+            waiting_for_key: false,
+            waiting_answers: Vec::new(),
             details: Some(Details {
                 title: "Quiz".into(),
                 start: now - 600,
@@ -1370,9 +1371,25 @@ mod tests {
             assert!(*harness.state());
         }
         server.dir.me = ME;
-        server.dir.calendar.as_mut().unwrap().events[0]
+        let event = &mut server.dir.calendar.as_mut().unwrap().events[0];
+        event
+            .record
             .answers
-            .push((ME, Answer::NotGoing));
+            .push(rusttalk_core::calendar::AnswerRecord {
+                person: ME,
+                device: [8; 32],
+                certificate: String::new(),
+                epoch: 3,
+                envelope: String::new(),
+            });
+        event.waiting_answers.push(0);
+        assert!(
+            reminders(&server, now).is_empty(),
+            "own answer awaits a key"
+        );
+        let event = &mut server.dir.calendar.as_mut().unwrap().events[0];
+        event.waiting_answers.clear();
+        event.answers.push((ME, Answer::NotGoing));
         assert!(
             reminders(&server, now).is_empty(),
             "answered, so no reminder"

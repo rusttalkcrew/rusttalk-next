@@ -14,8 +14,6 @@ pub const CHANNELS_WIDTH: f32 = 240.0;
 pub const CHANNELS_RANGE: RangeInclusive<f32> = 180.0..=360.0;
 pub const MEMBERS_WIDTH: f32 = 220.0;
 pub const MEMBERS_RANGE: RangeInclusive<f32> = 180.0..=320.0;
-/// Narrower windows hide the member list unless it is opened by hand.
-const NARROW_WINDOW: f32 = 900.0;
 /// How far from the edge the resize handle reaches on either side.
 const GRAB: f32 = 3.0;
 /// The call's share of a voice channel's space, and how far the divider can go.
@@ -143,7 +141,8 @@ impl Layout {
     }
 
     pub fn set_window_width(&mut self, window: f32) {
-        let narrow = window < NARROW_WINDOW;
+        // Phones and tablets hide the member list unless it is opened by hand.
+        let narrow = window < ui::DESKTOP_WIDTH;
         if narrow != self.narrow {
             self.peek = false;
         }

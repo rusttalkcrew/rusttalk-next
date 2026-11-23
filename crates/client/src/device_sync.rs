@@ -332,8 +332,11 @@ mod tests {
         assert!(!other.contains_key("emoji_on_hover"));
         other.insert("push_to_talk".into(), json!(true));
         other.insert("input".into(), json!("their mic"));
+        assert!(!other.contains_key("android_terminal_hosting"));
+        other.insert("android_terminal_hosting".into(), json!(true));
         let adopted = adopt(&local, &other);
         assert!(adopted.push_to_talk);
+        assert!(!adopted.android_terminal_hosting);
         assert_eq!(adopted.input.as_deref(), Some("mic"));
         assert_eq!(adopted.camera.as_deref(), Some("webcam"));
 

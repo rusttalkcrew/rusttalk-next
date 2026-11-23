@@ -250,7 +250,8 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
                 });
             });
             ui.add_space(6.0);
-            let count = if screen::SUPPORTED { 4.0 } else { 3.0 };
+            let more = home.voice.audio.can_host_terminal();
+            let count = 2.0 + f32::from(screen::SUPPORTED) + f32::from(more);
             let width = (ui.available_width() - SPACE_XS * (count - 1.0)) / count;
             let size = Vec2::new(width, ICON_BUTTON);
             ui.horizontal(|ui| {
@@ -304,7 +305,9 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
                     }
                 }
                 share = app_button(ui, voice, connected && blocked.is_none(), blocked, size);
-                terminal = more_button(ui, voice.terminals.local.is_some(), connected, size);
+                if more {
+                    terminal = more_button(ui, voice.terminals.local.is_some(), connected, size);
+                }
             });
             if let Some(action) = live_files(ui, &home.voice.live_files, server) {
                 live = Some(action);

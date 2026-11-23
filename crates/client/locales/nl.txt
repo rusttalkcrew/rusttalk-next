@@ -15,6 +15,8 @@ settings.video = Video
 settings.notifications = Meldingen
 settings.shortcuts = Sneltoetsen
 settings.updates_new = Updates (nieuw)
+settings.advanced = Geavanceerd
+settings.terminal_hosting_help = Sta toe dat je de shell van deze app deelt in een gesprek. Uitzetten stopt het delen van je terminal.
 settings.updates = Updates
 settings.group_info = Info
 settings.whats_new = Wat is er nieuw
@@ -195,6 +197,7 @@ home.emoji_picker = Emojikiezer
 home.sticker_picker = Stickers
 home.send = Versturen
 home.message_hint = Bericht aan {channel}
+home.message_hint_short = Bericht
 home.waiting_for_server = Wachten op de server…
 home.no_wide_mentions = In deze chat kun je geen rollen, @everyone of @here noemen.
 home.quote_sticker = {name}: een sticker
@@ -331,6 +334,13 @@ admin.change_roles = Rollen wijzigen
 admin.kick = Verwijderen
 admin.ban = Verbannen
 admin.server = Server
+admin.system_messages = Systeemberichten
+admin.system_help = Toon hier wie er bij komt of vertrekt.
+admin.system_first = Eerste tekstkanaal
+admin.system_none = Geen
+admin.system_missing = Kanaal niet beschikbaar
+admin.system_update = Werk de server bij om dit te wijzigen.
+admin.system_saved = Systeemberichten opgeslagen.
 admin.overview = Overzicht
 admin.server_updates = Serverupdates
 admin.update_waiting = Update {version} wacht op een rustig moment
@@ -411,6 +421,7 @@ audit.voice_moved = {actor} heeft {target} naar een ander spraakkanaal verplaats
 audit.left = {actor} is vertrokken
 audit.member_roles_changed = {actor} heeft de rollen van {target} gewijzigd
 audit.ownership_transferred = {actor} heeft {target} eigenaar gemaakt
+audit.device_id = Apparaat {fingerprint}
 audit.joined = {actor} doet mee
 audit.role_created = {actor} heeft een rol gemaakt
 audit.role_renamed = {actor} heeft een rol hernoemd
@@ -589,9 +600,7 @@ role.moderator = Moderator
 role.member = Lid
 role.new = Nieuwe rol
 server.default_category = Kanalen
-notice.new_device_detail = {id}\nNieuw apparaat {fingerprint} ({device})
 server.default_channel = kanaal
-notice.removed_device_detail = {id}\nApparaat verwijderd {fingerprint} ({device})
 
 # crates/client/src/call.rs
 call.quality_720 = 720p — licht voor trage verbindingen
@@ -896,15 +905,16 @@ welcome.skip = Overslaan
 app.create_account = Account maken
 app.have_account = Ik heb al een account
 app.words_title = Je herstelwoorden
-app.words_text = Schrijf deze 24 woorden in deze volgorde op papier en bewaar ze veilig. Alleen hiermee kom je weer in je account. Je ziet ze maar één keer.
+app.words_text = Schrijf ze in deze volgorde op en bewaar ze veilig. Alleen hiermee kom je weer in je account.
 app.wrote_them = Ik heb ze opgeschreven
+app.copied = Gekopieerd
+app.words_manager = Tip: een wachtwoordmanager is een veilige plek om ze te bewaren.
 app.check_title = Controleer je woorden
 app.check_text = Typ deze woorden uit je lijst.
 app.word_number = Woord {number}
 app.confirm = Bevestigen
-app.start_over = Opnieuw beginnen
 app.restore_title = Aanmelden met je herstelwoorden
-app.restore_text = Typ je 24 herstelwoorden op volgorde, met een spatie ertussen. Deze computer wordt een nieuw apparaat van je account.
+app.restore_text = Typ of plak je 24 woorden op volgorde. Dit apparaat wordt toegevoegd aan je account.
 app.recovery_words = Herstelwoorden
 app.sign_in = Aanmelden
 
@@ -913,6 +923,9 @@ keys.section = Sleutelopslag
 keys.choose_title = Waar moet RustTalk je sleutels bewaren?
 keys.no_keychain = Dit apparaat heeft geen sleutelbos (vaak zo in de Game Mode van de Steam Deck). Hoe moet RustTalk je sleutels bewaren?
 keys.password_only = Op dit apparaat beveiligt RustTalk je sleutels met een wachtwoord. Je typt het bij elke start.
+keys.no_keychain_phone = De sleutelbos is niet beschikbaar, dus beveiligt RustTalk je sleutels met een wachtwoord. Je typt het bij elke start.
+keys.no_android_keystore = Android Keystore is niet beschikbaar. Kies een wachtwoord om je sleutels bij elke start te ontgrendelen.
+keys.android_keystore = Android Keystore
 keys.keychain = Sleutelbos
 keys.keychain_help = De sleutelbos van je systeem bewaart je sleutels.
 keys.file = Beveiligd bestand
@@ -1054,6 +1067,9 @@ crop.zoom = Zoom
 # crates/client/src/camera.rs
 camera.stopped = Je camera is gestopt.
 camera.none = Geen camera gevonden.
+camera.front = Camera aan de voorkant
+camera.back = Camera aan de achterkant
+camera.permission = Geef toestemming voor de camera om video aan te zetten.
 camera.start_failed = Kon je camera niet starten. Gebruikt een andere app hem?
 camera.camera = Camera
 camera.first = Eerste camera
@@ -1124,6 +1140,9 @@ find.server_unreachable = Kan deze server nu niet bereiken. Probeer het later op
 
 # crates/client/src/net/voice.rs
 voice.screen_failed = Kon je scherm niet delen.
+voice.need_mic = Geef toegang tot de microfoon om deel te nemen aan het gesprek.
+voice.audio_reset = De audio van je iPhone is opnieuw gestart. Neem opnieuw deel aan het gesprek.
+voice.unavailable = Spraakoproepen zijn niet beschikbaar op dit apparaat.
 voice.listen_only = Je kunt hier luisteren, maar niet praten.
 voice.disconnected = Spraak verbroken.
 voice.removed = Je bent uit het spraakkanaal gehaald.
@@ -1169,6 +1188,7 @@ startup.message = RustTalk kon niet starten.\n\n{error}\n\n{log}
 
 # Direct messages (#100)
 home.waiting_try_again = Wachten op de server. Probeer het zo opnieuw.
+home.unsent_after_close = Een bericht is misschien niet verstuurd.
 home.dm_read_only = Je deelt geen server meer met {name}. Je kunt je berichten lezen, maar geen nieuwe sturen.
 home.no_shared_server = Geen gedeelde server
 
@@ -1454,3 +1474,9 @@ events.remind_again_at = Je kunt om {time} opnieuw herinneren.
 events.remind_too_soon = Ze zijn minder dan een uur geleden herinnerd.
 events.reminder_title = Herinnering voor een evenement op {server}
 events.reminder_body = Kom je? Laat het even weten.
+
+# crates/client/src/phone_clipboard.rs
+clipboard.paste = Plakken
+clipboard.copy = Kopiëren
+clipboard.cut = Knippen
+clipboard.select_all = Alles selecteren

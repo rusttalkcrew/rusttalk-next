@@ -66,6 +66,45 @@ On first start the app offers two paths:
 - **I already have an account** takes the 24 words and adds this computer as
   a new device (`DeviceIdentity::add_device`).
 
+The first-start screens share one layout (`ui::onboarding`): the logo, a title
+and one line of text in a centred column, a card on wide windows, scrolling
+when it doesn't fit. Every step after the first has Back. Back from the word
+check shows the same words again; going back before them drops them, and
+since nothing is saved before the check, no half-made account is left. The
+words screen has Copy, and the word check and the recovery-words screen have
+Paste, which splits the text on spaces, new lines and commas and drops
+numbering like "1.". Pasted text is wiped once read and never logged
+(`src/words.rs`).
+
+### Responsive UI
+
+The same screens run on phones, tablets and desktops, so they lay out by the
+room they get, never by fixed sizes. The kit (`crates/client/src/ui/`) does
+most of it:
+
+- `ui::Width::of(ctx)` is the window's class: `Phone` below 600 points (one
+  column at a time, see [mobile.md](mobile.md#phone-layout)), `Tablet` below
+  900 (one sidebar at a time), `Desktop` above. `ui::is_phone` is the same test.
+- `ui::dialog` is a centred dialog on wide windows and a full-screen sheet with
+  a top bar (title, ×) on phones; `ui::sheet`, `ui::sheet_bar` and
+  `ui::sheet_page` build the same for other screens. Settings windows show the
+  page list first on phones, then the page with Back.
+- `ui::setting_row` puts its control under the label and help when the row is
+  narrow, or when the control would squeeze the text.
+- `ui::trailing_row` keeps buttons on the right and lets the text beside them
+  wrap. `ui::max_width` limits a column without ever making it wider than the
+  window (`Ui::set_max_width` can), and `ui::fit` narrows popups, menus and
+  toasts on small windows.
+- `ui::TOUCH` is set on Android and iOS: buttons, rows and menu rows are at
+  least 44 points tall there, a tap near a small target still hits it, and no
+  hint mentions Escape or hover. Anything shown only on hover also needs a tap
+  or long press (a long press opens context menus).
+
+The test `main_screens_fit_phone_and_desktop_widths` (`src/home.rs`) draws the
+main screens at 390x844 and 1100x700 and fails when anything reaches past the
+window's edge; add new screens to it. Look at every UI change at 390x844,
+844x390, 820x1180 and 1100x700, in a dark and a light theme.
+
 Later starts load the identity from the keystore and open the main window:
 server rail, channel list, chat pane and member list. Settings has the
 short person fingerprint under Profile > Details, this device's name under
