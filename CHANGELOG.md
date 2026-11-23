@@ -12,6 +12,7 @@ Unreleased under the new version and date.
 ## Unreleased
 
 - Incoming live file offers now have a single Download button.
+- Reopen the last chat picture instantly, even if the connection drops after it loads.
 
 ## v0.2.1 - 2026-11-23
 

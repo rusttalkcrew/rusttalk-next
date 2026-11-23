@@ -461,6 +461,7 @@ impl Home {
         self.server_settings = None;
         let server = self.servers.remove(index);
         self.net.forget(&server.address);
+        self.files.forget_full_pictures(&server.address);
         let mut settings = self.voice.audio.settings();
         settings.hide_offline.left(&server.address);
         settings.left(&server.address);
@@ -1138,6 +1139,7 @@ impl Home {
             }
             Update::Inaccessible(address, ids) => {
                 if let Some(i) = self.index(&address) {
+                    self.files.forget_full_pictures(&address);
                     let server = &mut self.servers[i];
                     for dm in &server.dir.dms {
                         if ids.contains(&dm.channel)
@@ -1155,6 +1157,7 @@ impl Home {
             }
             Update::ResetHistory(address, pages) => {
                 if let Some(i) = self.index(&address) {
+                    self.files.forget_full_pictures(&address);
                     for (channel, _) in &pages {
                         if let Some(peer) = self.dm_peer(i, channel) {
                             if let Some(thread) = self.threads.get_mut(&peer) {
@@ -1231,6 +1234,7 @@ impl Home {
                     }
                 }
                 if matches!(status, Status::Stopped(_)) {
+                    self.files.forget_full_pictures(&address);
                     server.chats.clear();
                     server.names.clear();
                     server.dir = Directory::default();
@@ -1713,7 +1717,9 @@ impl Home {
                     self.chat(index, channel).uploading = what;
                 }
             }
-            Update::Image(id, fetch, frames) => self.files.image(ctx, id, fetch, frames),
+            Update::Image(address, blob, fetch, frames) => {
+                self.files.image(ctx, &address, &blob, fetch, frames)
+            }
             Update::LinkCard(id, card) => self.files.link_card(id, card),
             Update::StickerFile(id, picture) => self.files.sticker_loaded(ctx, id, picture),
             Update::Saved(id, saved) => self.files.saved(id, saved),
@@ -6491,6 +6497,7 @@ mod tests {
     const PROJECTS: Id = [3; 32];
 
     mod emoji;
+    mod image_reload;
     mod streams;
     mod touch;
     mod uploads;
