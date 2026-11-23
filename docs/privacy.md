@@ -10,8 +10,8 @@ tables in SQLite (WAL). IDs and digests are binary unless indicated. The `_ct` s
 | Table | Columns |
 | --- | --- |
 | `members` | `person_id` (root public key), `joined_at` (Unix seconds), nullable `display_name_ct`, nullable `avatar_ct`, nullable `bio_ct` (the profile bio), `presence_status` (current choice: online, away or invisible), `hide_offline` (whether to leave them out of member lists while offline), `voice_muted` (a moderator's server-wide voice mute) |
-| `roles` | `id` (text), `kind` (built-in kind or custom), `rank`, `permissions` (twelve-bit mask), nullable `name_ct` and `display_ct` (opaque ciphertext: the name, and the colour and member-list grouping) |
-| `server_settings` | Singleton `id`, nullable `owner_person_id`, `default_role_id`, nullable `name_ct`, nullable `description_ct`, nullable `icon_ct`, `open_joining` (public flag), `member_cap` (open admission limit), nullable `index_listing_ct` (encrypted public-listing configuration), nullable `max_file_bytes`, `member_storage_bytes`, `server_storage_bytes`, `retention_secs`, `max_stickers` (server limits) |
+| `roles` | `id` (text), `kind` (built-in kind or custom), `rank`, `permissions` (fifteen-bit mask), nullable `name_ct` and `display_ct` (opaque ciphertext: the name, and the colour and member-list grouping) |
+| `server_settings` | Singleton `id`, nullable `owner_person_id`, `default_role_id`, nullable `name_ct`, nullable `description_ct`, nullable `icon_ct`, `open_joining` (public flag), `member_cap` (open admission limit), nullable `index_listing_ct` (encrypted public-listing configuration), nullable `max_file_bytes`, `member_storage_bytes`, `server_storage_bytes`, `retention_secs`, `max_stickers` (server limits), `events_enabled` (whether Events is on) |
 | `member_roles` | `person_id`, `role_id` |
 | `invites` | `id` (opaque text), `code_hash` (SHA-256), `is_owner`, `remaining_uses`, `expires_at`, nullable `space_key_ct` and `name_ct` for preview, nullable `created_by` (person ID of the member who made it) |
 | `challenges` | `nonce` (32 random bytes), `ip` (IPv4 address or IPv6 /64), `expires_at` |
@@ -25,7 +25,9 @@ tables in SQLite (WAL). IDs and digests are binary unless indicated. The `_ct` s
 | `member_devices` | `device_id` (Ed25519 public key), `person_id`, `certificate` (public keys, timestamp, salted name commitment, root signature and format prefix) |
 | `categories` | `id` (text), `position`, `name_ct` |
 | `channels` | `id` (text), `kind` (text, voice or dm), `page` (whether a text channel is shown as one page), nullable `category_id`, `position`, nullable `name_ct` and `topic_ct`, `audio_kbps` (a voice channel's Opus bitrate, 8 to 128, plain because it is a setting rather than user-written content), nullable `dm_first` and `dm_second` (person IDs) |
-| `channel_ids` | `id` (text, including deleted channel IDs to prevent reuse) |
+| `channel_ids` | `id` (text, including event IDs and deleted channel IDs to prevent reuse) |
+| `calendar_events` | `id` (opaque text), `author` and `author_device` (public keys), `certificate` (public device certificate), `approved`, `epoch`, `remove_at` (Unix seconds: the end plus two hours, plain so the server can delete it), `envelope` (signed space-key ciphertext holding title, description, place, start and end), nullable `reminded_at` (Unix seconds) |
+| `calendar_answers` | `event_id`, `person` and `device` (public keys), `certificate` (public device certificate), `epoch`, `envelope` (signed space-key ciphertext of going or not going, always the same size) |
 | `channel_permissions` | `channel_id`, `role_id`, `flags` (four-bit mask) |
 | `key_scopes` | `id` (text), `kind` (space or channel), nullable `channel_id`, `rotate` |
 | `key_epochs` | `scope_id`, `epoch`, `commitment` (key commitment), `excluded` (public signing keys excluded from this epoch) |
@@ -60,6 +62,10 @@ Text, replies, attachment references and edit targets are inside message
 ciphertext. Explicit deletes and the retention cap remove message rows.
 Public sender certificates and audit IDs are retained for history and
 accountability.
+The server knows who made an event or suggestion, whether it was approved,
+and when it ends, who answered and when someone was last reminded. It never learns
+the title, description, place, start or anyone's answer. Events
+are deleted two hours after their end; their IDs stay reserved.
 A DM is copied to every server both people share. Each of those servers
 learns that the two people have a DM, plus the size and time of each copy
 it stores, as it would for a DM on one server. Copies share a random
@@ -500,6 +506,10 @@ is deleted and never used; the normal noise suppression keeps working.
   signaling paths.
   The dev health checks use loopback HTTPS at Caddy and loopback
   HTTP at LiveKit.
+
+Mobile updates are manual. Downloading a release contacts GitHub through
+your browser. On iOS, your sideloading tool handles signing with your Apple
+account. RustTalk does not receive those credentials or check for updates on phones.
 
 Docker image pulls and Cargo dependency downloads happen during setup or build.
 WebRTC builds download the pinned LiveKit prebuilt archive from GitHub

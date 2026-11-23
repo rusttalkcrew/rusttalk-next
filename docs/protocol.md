@@ -145,9 +145,10 @@ file ciphertext, including expired files that cleanup has yet to remove.
 
 A role has `{id, kind, rank, permissions, name_ct}`. A member's permissions
 are the union of their role flags, and their highest rank is used for
-hierarchy. Owner (1000) and Admin (100) have all twelve flags. Moderator (50)
-has `kick`, `ban`, `delete_messages`, `mute_members` and `move_members`. Member (0) has no
-flags and starts as the default. The other flags are `invite`, `manage_roles`,
+hierarchy. Owner (1000) and Admin (100) have all fifteen flags. Moderator (50)
+has `kick`, `ban`, `delete_messages`, `mute_members`, `move_members`, `suggest_events`,
+`create_events` and `manage_events`. Member (0) has `suggest_events`
+and starts as the default. The other flags are `invite`, `manage_roles`,
 `view_audit_log`, `manage_channels`, `manage_server`, `mention_everyone`, and
 `manage_emoji`. Built-in role IDs match their kinds. Custom roles have opaque IDs and ranks
 from 1 to 999, strictly below their creator. They can only receive flags that the creator
@@ -167,8 +168,12 @@ as the default first. Changing the default affects future joins.
 
 Kick, ban, role assignment and voice moderation require the actor to outrank the target
 strictly. Granting a role or choosing it as the default also requires the
-actor to outrank that role and hold every permission it grants. The
-owner role comes from a singleton ownership record and can only move via
+actor to outrank that role and hold every permission it grants. When upgrading from before events,
+a member who could already manage a particular role can keep assigning, renaming,
+editing or deleting it, or setting it as the default. The server checks both the
+original and current rank and permissions. Only the event flags added by the
+migration can be retained, and removing a flag ends its exemption. These grants
+give no direct event permissions. The owner role comes from a singleton ownership record and can only move via
 the transfer endpoint. The prior owner keeps their assigned roles.
 
 Invite uses may be 1–1000, with lifetimes from 1 second to 30 days.
@@ -211,16 +216,16 @@ errors may have an empty body. The API logs a request ID, status and reason.
 
 | Status | Codes |
 | --- | --- |
-| 400 | `invalid_json`, `invalid_encoding`, `invalid_query`, `invalid_forwarded_ip`, `invalid_revocation`, `invalid_invite_limits`, `invalid_role_rank`, `invalid_role_count`, `role_id_required`, `already_owner`, `unexpected_invite`, `invite_name_required`, `invalid_member_cap`, `invalid_certificate`, `invalid_metadata`, `invalid_envelope`, `invalid_channel_flags`, `invalid_audio_kbps`, `invalid_order`, `invalid_dm_peer`, `not_a_voice_channel`, `invalid_message`, `invalid_keep`, `invalid_file_body`, `invalid_file_acceptance`, `invalid_event_query`, `invalid_sync_blob`, `invalid_listing`, `invalid_listing_settings`, `invalid_index_url`, `invalid_index_tls_fingerprint` |
+| 400 | `invalid_json`, `invalid_encoding`, `invalid_query`, `invalid_forwarded_ip`, `invalid_revocation`, `invalid_invite_limits`, `invalid_role_rank`, `invalid_role_count`, `role_id_required`, `already_owner`, `unexpected_invite`, `invite_name_required`, `invalid_member_cap`, `invalid_certificate`, `invalid_metadata`, `invalid_envelope`, `invalid_channel_flags`, `invalid_audio_kbps`, `invalid_order`, `invalid_dm_peer`, `not_a_voice_channel`, `invalid_message`, `invalid_keep`, `invalid_file_body`, `invalid_file_acceptance`, `invalid_event_query`, `invalid_sync_blob`, `invalid_event`, `invalid_answer`, `invalid_event_time`, `invalid_listing`, `invalid_listing_settings`, `invalid_index_url`, `invalid_index_tls_fingerprint` |
 | 401 | `invalid_challenge`, `invalid_certificate`, `invalid_device_signature`, `invalid_session`, `token_expired`, `invalid_livekit_webhook` |
 | 403 | `invite_required`, `invalid_invite`, `person_banned`, `ip_banned`, `device_revoked`, `device_certificate_required`, `permission_denied`, `role_hierarchy`, `cannot_grant_permission`, `built_in_role`, `owner_required`, `open_joining_disabled`, `scope_read_denied`, `recipient_read_denied`, `channel_read_denied`, `channel_write_denied`, `live_file_peer_not_in_room` |
-| 404 | `invite_not_found`, `member_not_found`, `ban_not_found`, `role_not_found`, `category_not_found`, `channel_not_found`, `message_not_found`, `message_device_not_found`, `file_not_found`, `avatar_not_found`, `icon_not_found`, `emoji_not_found`, `pack_not_found` |
+| 404 | `invite_not_found`, `member_not_found`, `ban_not_found`, `role_not_found`, `category_not_found`, `channel_not_found`, `message_not_found`, `message_device_not_found`, `file_not_found`, `avatar_not_found`, `icon_not_found`, `emoji_not_found`, `pack_not_found`, `event_not_found` |
 | 408 | `file_upload_timeout` |
-| 409 | `owner_cannot_leave`, `already_banned`, `no_active_ip`, `role_exists`, `role_in_use`, `role_limit`, `member_cap_reached`, `device_limit`, `device_certificate_changed`, `revocation_limit`, `epoch_changed`, `space_key_unavailable`, `metadata_epoch_changed`, `category_exists`, `category_in_use`, `channel_exists`, `order_changed`, `message_exists`, `file_exists`, `file_shared`, `shared_limit`, `emoji_exists`, `emoji_limit`, `sticker_limit`, `pack_exists`, `pack_limit`, `last_pack` |
+| 409 | `owner_cannot_leave`, `already_banned`, `no_active_ip`, `role_exists`, `role_in_use`, `role_limit`, `member_cap_reached`, `device_limit`, `device_certificate_changed`, `revocation_limit`, `epoch_changed`, `space_key_unavailable`, `metadata_epoch_changed`, `category_exists`, `category_in_use`, `channel_exists`, `order_changed`, `message_exists`, `file_exists`, `file_shared`, `shared_limit`, `emoji_exists`, `emoji_limit`, `sticker_limit`, `pack_exists`, `pack_limit`, `last_pack`, `events_disabled`, `event_exists`, `event_approved`, `event_ended`, `event_limit`, `suggestion_limit`, `remind_too_soon` |
 | 413 | `body_too_large` when generated after reading the body, `file_too_large`, `file_member_quota`, `file_server_quota`, `emoji_too_large` |
 | 415 | `expected_json` |
 | 429 | `challenge_limit`, `invite_preview_limit`, `open_join_limit` |
-| 500 | `database_error`, `database_pool_timeout`, `database_busy`, `clock_error`, `randomness_error`, `invalid_stored_person`, `invalid_stored_certificate`, `invalid_stored_commitment`, `invalid_stored_device`, `invalid_stored_message`, `invalid_stored_sender`, `file_storage_error`, `file_task_failed`, `emoji_storage_error`, `emoji_task_failed`, `file_expiry_overflow`, `listing_settings_encode`, `listing_settings_encrypt`, `listing_settings_decrypt`, `listing_settings_decode`, `livekit_token_failed`, `event_encoding`, `event_timeout`, `socket_io_error` |
+| 500 | `database_error`, `database_pool_timeout`, `database_busy`, `clock_error`, `randomness_error`, `invalid_stored_person`, `invalid_stored_certificate`, `invalid_stored_commitment`, `invalid_stored_device`, `invalid_stored_event`, `invalid_stored_message`, `invalid_stored_sender`, `file_storage_error`, `file_task_failed`, `emoji_storage_error`, `emoji_task_failed`, `file_expiry_overflow`, `listing_settings_encode`, `listing_settings_encrypt`, `listing_settings_decrypt`, `listing_settings_decode`, `livekit_token_failed`, `event_encoding`, `event_timeout`, `socket_io_error` |
 | 502 | `livekit_unreachable`, `livekit_rooms_unavailable`, `livekit_roster_unavailable` |
 | 503 | `file_upload_busy`, `voice_unavailable` |
 
@@ -439,6 +444,32 @@ otherwise lack read access, its highest-ranked assigned role with
 through any assignment or permission change requests a channel rotation.
 Channel names and topics use space keys, while channel keys protect
 the channel's content.
+
+## Server events
+
+Events are optional: an app that gets 404 from `GET /v1/calendar` hides them.
+They are off until someone with `manage_server` turns them on.
+
+| Method and path | Body | Permission and success |
+| --- | --- | --- |
+| GET `/v1/calendar` | Empty | Any member. 200, `{enabled, events}`. Approved events, plus waiting ones for their author and for `manage_events`. Empty while off |
+| PUT `/v1/settings/calendar` | `{enabled}` | `manage_server`. 204 |
+| POST `/v1/calendar` | `{id, epoch, remove_at, envelope}` (body up to 4,840 bytes) | `create_events` (approved at once) or `suggest_events` (waits). 201, the event |
+| POST `/v1/calendar/{id}/approve` | Empty | `manage_events`. 204 |
+| DELETE `/v1/calendar/{id}` | Empty | The author or `manage_events`. 204, also while off |
+| PUT `/v1/calendar/{id}/answer` | `{epoch, envelope}` | Any member, for an approved event that hasn't ended. 204. Replaces their earlier answer |
+| POST `/v1/calendar/{id}/remind` | Empty | The author or `manage_events`, for an approved event that hasn't ended, once an hour. 204, sets `reminded_at` |
+
+An event is `{id, author, author_device, certificate, approved, epoch, remove_at, envelope, answers, reminded_at?}`, each answer `{person, device, certificate, epoch, envelope}`
+(see `docs/crypto.md`, Server events). `id` is a client-generated random 32-byte
+value from the same namespace as channel IDs and is never reused. `epoch` must
+be the current space epoch. `remove_at` is the end plus two hours; the end must
+be in the future and at most 366 days away. A server holds 50 events and a
+person can have 5 suggestions waiting. Due events are left out at once and
+deleted within 30 seconds. Every change sends `channel_changed`, which older
+apps understand; apps that haven't answered show a newer `reminded_at` once as a
+desktop notification. Changes other than a new suggestion, its withdrawal, answers, reminders and
+expiry are audited.
 
 ## Direct messages
 
@@ -1160,7 +1191,7 @@ session validity before pushing updates.
 | `rotate_needed` | `scope`. Fetch the current epoch and try to publish its successor |
 | `member_changed` | `person`, optional `device`. Refresh the member and device directory and catalog |
 | `presence_changed` | `person_id`, `status`. Sent to members when visible presence changes |
-| `channel_changed` | None. Refresh the catalog, server metadata and server emoji |
+| `channel_changed` | None. Refresh the catalog, server metadata, server emoji and server events |
 | `voice_changed` | `channel`. Fetch current voice participants. Sent to current channel readers on signed LiveKit join, leave and room-end notices |
 | `voice_moved` | `devices`, `from`, `to`. A moderator moved these devices' call; join `to`. Sent only to those devices |
 | `dm_created` | `channel`. Refresh the catalog and reconcile keys |

@@ -158,7 +158,7 @@ RustTalk moves fast, so this list is a snapshot. The live plan is in
 
 **🚧 Still open or being built**
 - Phones: Android and iOS build from the same code but are
-  [experimental](docs/mobile.md) test builds; on Android you can sign up, join and chat,
+  [experimental](docs/mobile.md); on Android you can sign up, join and chat,
   but much is still missing ([#282](https://github.com/rusttalkcrew/rusttalk-next/issues/282))
 - Signed installers: macOS ([#233](https://github.com/rusttalkcrew/rusttalk-next/issues/233))
   and Windows still show a warning on first start
@@ -182,6 +182,8 @@ RustTalk moves fast, so this list is a snapshot. The live plan is in
 [![Linux x64](https://img.shields.io/badge/Linux-x64-FCC624?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/rusttalkcrew/rusttalk-next/releases/latest/download/RustTalk-linux-x86_64.AppImage)
 [![Linux ARM64](https://img.shields.io/badge/Linux-ARM64-FCC624?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/rusttalkcrew/rusttalk-next/releases/latest/download/RustTalk-linux-aarch64.AppImage)
 [![macOS](https://img.shields.io/badge/macOS-Apple%20Silicon%20%26%20Intel-000000?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/rusttalkcrew/rusttalk-next/releases/latest/download/RustTalk-macos-universal.dmg)
+
+**Experimental phone downloads:** [Android ARM64 APK](https://github.com/rusttalkcrew/rusttalk-next/releases/latest/download/RustTalk-android-arm64.apk) · [Unsigned iOS IPA](https://github.com/rusttalkcrew/rusttalk-next/releases/latest/download/RustTalk-ios-unsigned.ipa). See [phone installation and updates](docs/mobile.md#install-and-update).
 
 Step-by-step guides: [Windows](docs/install/windows.md),
 [Linux](docs/install/linux.md), [macOS](docs/install/macos.md),

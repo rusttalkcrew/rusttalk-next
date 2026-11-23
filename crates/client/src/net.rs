@@ -49,6 +49,7 @@ use crate::{
 
 mod admin;
 mod backfill;
+mod calendar;
 mod control;
 mod directory;
 mod files;
@@ -58,6 +59,7 @@ pub mod terminal;
 mod voice;
 
 pub use admin::{Admin, AdminUpdate, AuditEntry, Ban, ImportItem, Invite, PublicListing};
+pub use calendar::Change;
 pub use control::{ControlView, Ended};
 pub(crate) use directory::frame_image;
 use directory::{directory, get};
@@ -65,8 +67,8 @@ pub use files::{MAX_FILE, file_name};
 pub use find::{Listed, PAGE_SIZE};
 use voice::{
     Live, Next, Transfer, leave_voice, next_voice, on_voice, room_changed, screen_changed,
-    send_room, share_screen, stop_finished_shares, stop_lost_video, sync_voice_key, voice_command,
-    voice_only, voice_stats,
+    send_room, share_screen, stop_finished_shares, stop_lost_video, voice_command, voice_only,
+    voice_stats,
 };
 
 pub(crate) const PAGE: u32 = 50;
@@ -219,6 +221,8 @@ pub enum Command {
     /// Make an invite link: uses and lifetime in seconds.
     Invite(u32, u32),
     Admin(Admin),
+    /// Suggest, add, approve or delete an event.
+    Calendar(Change),
     JoinVoice(Id),
     LeaveVoice,
     /// Ring the others in the call: we asked someone to join it.
@@ -372,6 +376,8 @@ pub enum Update {
     Compatibility(Url, Compatibility),
     ChannelOrderUnavailable(Url),
     Directory(Url, Box<Directory>),
+    /// How a change to the events went.
+    Calendar(Url, Result<(), String>),
     Messages {
         server: Url,
         channel: Id,
@@ -1076,6 +1082,10 @@ fn refuse(ctx: &Ctx, url: &Url, command: Command) {
                 AdminUpdate::Failed(t!("admin.offline").into()),
             ));
         }
+        Command::Calendar(_) => ctx.send(Update::Calendar(
+            url.clone(),
+            Err(t!("admin.offline").into()),
+        )),
         Command::Send(mut draft) => {
             let _sent = std::mem::take(&mut draft.queued);
             ctx.send(Update::Unsent(url.clone(), draft));
@@ -1246,11 +1256,11 @@ async fn serve(
                 state.revalidate(ctx, url, &records, None);
                 if let Err(error) = client.sync().await {
                     tracing::warn!(%error, "could not rotate after device removal");
-                    sync_voice_key(ctx, client, state);
+                    apply_keys(ctx, url, client, state);
                     continue;
                 }
                 state.revalidate(ctx, url, &records, Some(client));
-                sync_voice_key(ctx, client, state);
+                apply_keys(ctx, url, client, state);
                 save_pins(ctx, url, client, state);
                 for channel in state.loaded.clone() { page(ctx,url,client,state,channel,None).await; }
             }
@@ -1265,11 +1275,11 @@ async fn serve(
                     if let Err(error) = on_event(ctx, url, client, state, event).await {
                         tracing::warn!(error = %format_args!("{error:#}"), "handling a server event failed");
                     }
-                    sync_voice_key(ctx, client, state);
+                    apply_keys(ctx, url, client, state);
                 }
                 Ok(None) => return End::Closed(client.close_reason.clone()),
                 Err(error) => {
-                    sync_voice_key(ctx, client, state);
+                    apply_keys(ctx, url, client, state);
                     tracing::warn!(error = %format_args!("{error:#}"), "event stream failed");
                     return End::Error;
                 }
@@ -1282,8 +1292,12 @@ async fn serve(
             }
             () = rekey_due => {
                 match client.sync().await {
-                    Ok(()) => { sync_voice_key(ctx, client, state); save_pins(ctx, url, client, state);
-                        if let Err(error) = retry_messages(ctx,url,client,state).await {tracing::warn!(%error,"retrying messages after re-key failed");}
+                    Ok(()) => {
+                        apply_keys(ctx, url, client, state);
+                        save_pins(ctx, url, client, state);
+                        if let Err(error) = retry_messages(ctx, url, client, state).await {
+                            tracing::warn!(%error, "retrying messages after re-key failed");
+                        }
                     },
                     Err(error) => {
                         tracing::warn!(error = %format_args!("{error:#}"), "DM key recovery failed");
@@ -1313,6 +1327,22 @@ async fn serve(
                 voice_stats(ctx, url, client, state).await;
             }
         }
+    }
+}
+
+/// Apply any newly verified epoch keys to the call and waiting calendar records.
+fn apply_keys(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &mut State) {
+    voice::sync_voice_key(ctx, client, state);
+    if let Some(dir) = &mut state.last
+        && let Some(calendar) = &mut dir.calendar
+        && calendar::retry(
+            calendar,
+            |epoch| client.key(client.space(), epoch).is_some(),
+            |record| client.open_event(record),
+            |id, record| client.open_answer(id, record),
+        )
+    {
+        ctx.send(Update::Directory(url.clone(), Box::new(dir.clone())));
     }
 }
 
@@ -1492,7 +1522,7 @@ async fn reload_pages(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, state: &
             tracing::warn!(error = %format_args!("{error:#}"), "loading voice presence failed");
         }
     }
-    sync_voice_key(ctx, client, state);
+    apply_keys(ctx, url, client, state);
 }
 
 /// The newest message from someone else in every channel and DM, so what came in
@@ -1983,6 +2013,7 @@ async fn on_command(
             ctx.send(Update::Invite(url.clone(), id, link.to_string()));
         }
         Command::Admin(request) => admin::run(ctx, url, client, state, request).await,
+        Command::Calendar(change) => calendar::change(ctx, url, client, change).await,
         Command::JoinVoice(channel) => voice::start_call(ctx, url, client, state, channel).await?,
         command if voice_only(&command) => {
             if let Some(channel) = voice_command(ctx, url, state, command).await? {

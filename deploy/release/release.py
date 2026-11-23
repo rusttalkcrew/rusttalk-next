@@ -17,7 +17,7 @@ KEY = Path(".dev/release-key.pem")
 PUBLIC = Path(".dev/release-public.pem")
 ED25519_SPKI = bytes.fromhex("302a300506032b6570032100")
 # rusttalk-<version>-<os>-<arch>.<ext>; the updater looks up "<os>-<arch>".
-ARTIFACT = re.compile(r"rusttalk-(?P<version>[0-9.]+)-(?P<platform>(linux|windows)-(x86_64|aarch64)|macos-universal)\.(AppImage|exe|dmg)")
+ARTIFACT = re.compile(r"rusttalk-(?P<version>[0-9.]+)-(?P<platform>(linux|windows)-(x86_64|aarch64)|macos-universal|android-arm64|ios-unsigned)\.(AppImage|exe|dmg|apk|ipa)")
 # One universal macOS app serves both architectures.
 PLATFORMS = {"macos-universal": ("macos-aarch64", "macos-x86_64")}
 

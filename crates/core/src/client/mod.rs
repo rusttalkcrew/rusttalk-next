@@ -1,6 +1,7 @@
 //! Pinned RustTalk connections, in-memory keys, and encrypted chat.
 
 pub mod backfill;
+mod calendar;
 mod chat;
 mod files;
 mod keys;
@@ -15,6 +16,7 @@ pub use crate::keys::Event;
 pub use crate::messages::{
     Attachment, BlobRef, FriendSignal, KeyLink, LiveAttachment, MessageError,
 };
+pub use calendar::EventRefused;
 pub use chat::{
     Catalog, Category, Channel, MAX_POKE_CHARS, MAX_TEXT_CHARS, MessageBody, MessageRecord,
     RoleFlags, SharedFile,

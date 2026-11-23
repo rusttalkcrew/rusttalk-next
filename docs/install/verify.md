@@ -15,8 +15,8 @@ Get your file's checksum:
 - **macOS:** `shasum -a 256 RustTalk-macos-universal.dmg`
 
 `latest.json` lists one checksum per platform: `windows-x86_64`,
-`windows-aarch64`, `linux-x86_64`, `linux-aarch64`, `macos-aarch64` and
-`macos-x86_64`. The two macOS entries are the same file.
+`windows-aarch64`, `linux-x86_64`, `linux-aarch64`, `macos-aarch64`,
+`macos-x86_64`, `android-arm64` and `ios-unsigned`. The two macOS entries are the same file.
 
 If the checksums differ, delete the file and download it again. Still
 different? [Open an issue](https://github.com/rusttalkcrew/rusttalk-next/issues).

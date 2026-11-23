@@ -12,6 +12,12 @@ Unreleased under the new version and date.
 ## Unreleased
 
 - Ask someone to join your voice channel: it rings, and they can join, decline, come later or mute you for 15 minutes
+- Servers can turn on Events: a calendar above the channels to suggest, approve and add events, in real life or in a channel
+- Say whether you are going to an event, see who is still missing, and remind them
+- Event reminders reach unanswered authors and respect “Only when RustTalk isn’t focused” without repeating later
+
+## v0.2.0 - 2026-11-23
+
 - Reopen RustTalk offline to see previously loaded server icons, avatars and recent chat messages.
 - Chat fills empty voice channels. Use Join voice to start a call.
 - Choose one channel for joins and leaves, or turn them off. Device changes appear only in the audit log.
@@ -22,10 +28,10 @@ Unreleased under the new version and date.
 - New look for the first-start screens, with a Back button, Copy for your recovery words and Paste to fill them in
 - Phones: tapping a text field that is already open no longer closes and reopens the keyboard
 - iPhone: the keyboard no longer covers what you type, Return works, a tap outside closes the keyboard, and the edges match the theme
-- iPhone calls ask for microphone access and can continue with the screen locked.
+- iPhone calls request microphone access and support background audio.
 - Android asks for microphone access when you join a voice call.
-- Share your front or back camera in calls on Android and iPhone.
-- Experimental Android test build (APK) and unsigned iOS build (IPA)
+- Phone calls have front and back camera controls.
+- Download the signed Android APK or sign the experimental iOS IPA with your own Apple account.
 - Android: typing works, so you can sign up, sign in, join a server and chat
 - Enter now confirms the name and unlock screens
 - On touch screens, hold to open a menu or tap a message or call tile to show its controls.
