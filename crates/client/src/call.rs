@@ -152,7 +152,7 @@ pub enum LiveState {
     Saved,
     Failed,
     Sending,
-    /// Stopped, cancelled or declined in a chat.
+    /// Stopped or cancelled in a chat.
     Ended,
 }
 
@@ -848,32 +848,22 @@ fn sending(ui: &mut Ui, file: &LiveFile, name: impl Fn(&Id) -> String) -> Option
     stop.then_some(LiveAction::Remove(file.id, true))
 }
 
-/// t!("common.save") and t!("call.decline") for a live file offered to us, or, with the bytes `saved`
-/// so far, its progress and t!("common.cancel"). Used in the call and in chats.
+/// Download an incoming offer, or show progress and Cancel once it starts.
 fn receiving(ui: &mut Ui, id: Id, name: &str, size: u64, saved: Option<u64>) -> Option<LiveAction> {
-    let mut action = None;
     match saved {
-        None => {
-            ui.horizontal(|ui| {
-                let save =
-                    ui.add_enabled_ui(files::PICKER, |ui| ui::primary(ui, t!("common.save")));
-                if save.inner.clicked() {
-                    action = Some(LiveAction::Save(id, name.to_owned()));
-                }
-                if ui::secondary(ui, t!("call.decline")).clicked() {
-                    action = Some(LiveAction::Remove(id, false));
-                }
-            });
-        }
+        None => ui
+            .add_enabled_ui(files::PICKER, |ui| ui::primary(ui, t!("files.download")))
+            .inner
+            .clicked()
+            .then(|| LiveAction::Save(id, name.to_owned())),
         Some(bytes) => {
             let done = bytes as f32 / size.max(1) as f32;
             ui.add(egui::ProgressBar::new(done).show_percentage());
-            if ui::secondary(ui, t!("common.cancel")).clicked() {
-                action = Some(LiveAction::Remove(id, true));
-            }
+            ui::secondary(ui, t!("common.cancel"))
+                .clicked()
+                .then_some(LiveAction::Remove(id, true))
         }
     }
-    action
 }
 
 /// A live file offered in a text channel or DM, inside its message.

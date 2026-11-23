@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Incoming live file offers now have a single Download button.
+
 ## v0.2.1 - 2026-11-23
 
 - Incoming custom emoji now appear as soon as their pictures finish loading, without waiting for another chat message.
