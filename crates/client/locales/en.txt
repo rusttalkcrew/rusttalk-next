@@ -280,6 +280,7 @@ home.kind_forum_help = Posts with their own replies, like a small message board.
 forum.new_post = New post
 forum.title_hint = Title
 forum.body_hint = What do you want to say? (Markdown works)
+forum.retry = Retry post
 forum.post = Post
 forum.empty = No posts yet.
 forum.older = Show older posts

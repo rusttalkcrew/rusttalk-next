@@ -277,6 +277,7 @@ home.kind_forum_help = 投稿ごとに返信が付く、小さな掲示板です
 forum.new_post = 新しい投稿
 forum.title_hint = タイトル
 forum.body_hint = 何を書きますか？（Markdown が使えます）
+forum.retry = 投稿を再送信
 forum.post = 投稿
 forum.empty = まだ投稿はありません。
 forum.older = 古い投稿を表示

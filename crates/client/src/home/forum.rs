@@ -50,7 +50,7 @@ struct Post {
 
 /// What is being typed for a new post, or an edit of one.
 #[derive(Clone, Default)]
-struct NewPost {
+pub(crate) struct NewPost {
     open: bool,
     /// The post being edited.
     editing: Option<Id>,
@@ -60,6 +60,90 @@ struct NewPost {
     preview: bool,
     /// The poll that goes with the post, at most one.
     poll: Option<polls::Editor>,
+}
+
+/// The editor owns both IDs until the server confirms each half. Keep a separate
+/// snapshot so a late failure cannot overwrite the next post being written.
+pub(crate) struct Submission {
+    form: NewPost,
+    text: Draft,
+    poll: Option<Draft>,
+    failed: bool,
+}
+
+impl Submission {
+    fn prepare(form: &NewPost, written: Written, channel: Id, chat: &Chat, me: Id) -> Option<Self> {
+        let (text, poll, edit) = written;
+        let mut poll = match poll {
+            Some((question, part)) => Some(poll_draft(channel, question, part)?),
+            None => None,
+        };
+        let mut text = text_draft(channel, text, poll.as_ref().map(|p| (POLL_WRAPPER, p.id)))?;
+        text.forum_post = true;
+        if let Some(poll) = &mut poll {
+            poll.forum_post = true;
+        }
+        text.edit_of = edit;
+        if let Some(id) = edit {
+            text.revision = chat.next_revision(me, id, polls::now_ms());
+        }
+        Some(Self {
+            form: form.clone(),
+            text,
+            poll,
+            failed: false,
+        })
+    }
+
+    fn next(&self) -> &Draft {
+        self.poll.as_ref().unwrap_or(&self.text)
+    }
+}
+
+/// Called after link preview consent, even when the user has switched channels.
+pub(super) fn dispatch(
+    chat: &mut Chat,
+    commands: &tokio::sync::mpsc::UnboundedSender<Command>,
+    draft: Draft,
+) {
+    if !draft.forum_post {
+        crate::server::Server::send_to(commands, Command::Send(draft));
+        return;
+    }
+    // Access may have been lost while the consent prompt was open.
+    if let Some(post) = chat.submissions.iter_mut().find(|p| p.text.id == draft.id) {
+        post.text = draft;
+        let next = post.next().clone();
+        send_part(chat, commands, next);
+    }
+}
+
+pub(super) fn send_part(
+    chat: &mut Chat,
+    commands: &tokio::sync::mpsc::UnboundedSender<Command>,
+    draft: Draft,
+) {
+    let id = draft.id;
+    if !crate::server::Server::send_to(commands, Command::Send(draft)) {
+        failed(chat, id);
+    }
+}
+
+pub(super) fn failed(chat: &mut Chat, id: Id) {
+    if let Some(post) = chat.submissions.iter_mut().find(|p| p.next().id == id) {
+        post.failed = true;
+    }
+}
+
+pub(super) fn confirmed(chat: &mut Chat, id: Id) -> Option<Draft> {
+    let index = chat.submissions.iter().position(|p| p.next().id == id)?;
+    let post = &mut chat.submissions[index];
+    if post.poll.take().is_some() {
+        post.failed = false;
+        return Some(post.text.clone());
+    }
+    chat.submissions.remove(index);
+    None
 }
 
 /// Which posts show their replies, and the one being answered.
@@ -128,78 +212,110 @@ fn is_poll(msg: &Msg) -> bool {
     msg.reply_to.is_none() && matches!(msg.body, Body::Poll(..))
 }
 
-/// The poll a post's text points at: one its author sent without a reply reference.
-fn carried<'a>(by_id: &HashMap<Id, &'a Msg>, msg: &Msg) -> Option<&'a Msg> {
-    let poll = by_id.get(&msg.reply_to?)?;
-    (matches!(msg.body, Body::Text(_))
+fn marked(msg: &Msg) -> bool {
+    matches!(msg.body, Body::Text(_))
         && msg.sticker.is_none()
-        && msg.quoted_author == Some(POLL_WRAPPER))
-    .then_some(*poll)
-    .filter(|poll| poll.person == msg.person && is_poll(poll))
+        && msg.reply_to.is_some()
+        && msg.quoted_author == Some(POLL_WRAPPER)
 }
 
-/// The poll a forum post carries, deleted along with it.
-pub(super) fn carried_poll(chat: &Chat, msg: &Msg) -> Option<Id> {
-    let by_id: HashMap<Id, &Msg> = chat.messages.iter().map(|msg| (msg.id, msg)).collect();
-    carried(&by_id, msg).map(|poll| poll.id)
+/// Both halves of a verified post resolve to the same root. Ambiguous references
+/// leave the poll independent, including when deleting a wrapper.
+struct Threads<'a> {
+    by_id: HashMap<Id, &'a Msg>,
+    roots: HashMap<Id, Id>,
 }
 
-/// Every post: texts without a reply reference or with a carried poll, and polls on their
-/// own (sent from a reply box, or whose post was deleted).
-fn post_ids(messages: &[Msg], by_id: &HashMap<Id, &Msg>) -> HashSet<Id> {
-    let polls: HashSet<Id> = (messages.iter())
-        .filter_map(|msg| carried(by_id, msg))
-        .map(|poll| poll.id)
-        .collect();
-    (messages.iter())
-        .filter(|msg| match msg.body {
-            Body::Text(_) => {
-                msg.sticker.is_none() && (msg.reply_to.is_none() || carried(by_id, msg).is_some())
+impl<'a> Threads<'a> {
+    fn new(messages: &'a [Msg]) -> Self {
+        let by_id: HashMap<_, _> = messages.iter().map(|m| (m.id, m)).collect();
+        let mut roots = HashMap::new();
+        let mut owners = HashMap::new();
+        for msg in messages {
+            if marked(msg) {
+                roots.insert(msg.id, msg.id);
+                if let Some(poll) = msg.reply_to.and_then(|id| by_id.get(&id))
+                    && is_poll(poll)
+                    && poll.person == msg.person
+                {
+                    owners
+                        .entry(poll.id)
+                        .and_modify(|owner| *owner = None)
+                        .or_insert(Some(msg.id));
+                }
+            } else if is_poll(msg)
+                || (matches!(msg.body, Body::Text(_))
+                    && msg.sticker.is_none()
+                    && msg.reply_to.is_none())
+            {
+                roots.insert(msg.id, msg.id);
             }
-            Body::Poll(..) => is_poll(msg) && !polls.contains(&msg.id),
-            _ => false,
-        })
-        .map(|msg| msg.id)
-        .collect()
-}
-
-/// The post a message belongs to: reply references followed back to a post.
-/// `None` when the chain leads to a message that isn't loaded.
-fn root(by_id: &HashMap<Id, &Msg>, posts: &HashSet<Id>, msg: &Msg) -> Option<Id> {
-    let mut at = msg;
-    for _ in 0..MAX_DEPTH {
-        if posts.contains(&at.id) {
-            return Some(at.id);
         }
-        at = by_id.get(&at.reply_to?)?;
+        for (poll, owner) in owners {
+            if let Some(owner) = owner {
+                roots.insert(poll, owner);
+            }
+        }
+        Self { by_id, roots }
     }
-    None
+
+    fn poll(&self, msg: &Msg) -> Option<&'a Msg> {
+        let id = msg.reply_to?;
+        (self.roots.get(&id) == Some(&msg.id) && id != msg.id).then(|| self.by_id[&id])
+    }
+
+    /// Canonical post and the direct reply that starts this branch.
+    fn branch(&self, msg: &Msg) -> Option<(Id, Id)> {
+        let mut at = msg;
+        for _ in 0..MAX_DEPTH {
+            if self.roots.contains_key(&at.id) {
+                return None;
+            }
+            let parent = at.reply_to?;
+            if let Some(root) = self.roots.get(&parent) {
+                return Some((*root, at.id));
+            }
+            at = self.by_id.get(&parent)?;
+        }
+        None
+    }
 }
 
-/// Every loaded post, the one with the newest activity first.
+pub(super) fn carried_poll(chat: &Chat, msg: &Msg) -> Option<Id> {
+    Threads::new(&chat.messages).poll(msg).map(|poll| poll.id)
+}
+
 fn posts(messages: &[Msg]) -> Vec<Post> {
-    let by_id: HashMap<Id, &Msg> = messages.iter().map(|msg| (msg.id, msg)).collect();
-    let ids = post_ids(messages, &by_id);
-    let mut posts: Vec<Post> = (messages.iter())
-        .filter(|msg| ids.contains(&msg.id))
-        .map(|msg| Post {
-            msg: msg.clone(),
-            poll: carried(&by_id, msg).cloned(),
-            replies: 0,
-            last: msg.at,
-            up: 0,
-            down: 0,
+    let threads = Threads::new(messages);
+    let mut posts: HashMap<_, _> = messages
+        .iter()
+        .filter(|msg| threads.roots.get(&msg.id) == Some(&msg.id))
+        .map(|msg| {
+            (
+                msg.id,
+                Post {
+                    msg: msg.clone(),
+                    poll: threads.poll(msg).cloned(),
+                    replies: 0,
+                    last: msg.at,
+                    up: 0,
+                    down: 0,
+                },
+            )
         })
         .collect();
-    let index: HashMap<Id, usize> = (posts.iter().enumerate())
-        .map(|(at, post)| (post.msg.id, at))
-        .collect();
-    for msg in messages.iter().filter(|msg| !ids.contains(&msg.id)) {
-        if let Some(post) = root(&by_id, &ids, msg).and_then(|id| index.get(&id)) {
-            posts[*post].replies += 1;
-            posts[*post].last = posts[*post].last.max(msg.at);
+    for msg in messages {
+        if let Some((id, _)) = threads.branch(msg)
+            && let Some(post) = posts.get_mut(&id)
+        {
+            post.replies += 1;
+            post.last = post.last.max(msg.at);
         }
     }
+    let mut posts: Vec<_> = messages
+        .iter()
+        .filter_map(|msg| posts.remove(&msg.id))
+        .collect();
     posts.sort_by_key(|post| std::cmp::Reverse(post.last));
     posts
 }
@@ -221,29 +337,18 @@ fn matches_search(post: &Post, query: &str) -> bool {
         })
 }
 
-/// The reply straight to the post that a message's reply chain goes back to.
-fn branch(by_id: &HashMap<Id, &Msg>, msg: &Msg, post: Id) -> Option<Id> {
-    let mut at = msg;
-    for _ in 0..MAX_DEPTH {
-        match at.reply_to? {
-            _ if at.id == post => return None,
-            parent if parent == post => return Some(at.id),
-            parent => at = by_id.get(&parent)?,
-        }
-    }
-    None
-}
-
 /// A post's replies: each reply to the post, oldest first, followed by every answer
 /// further down its chain, which are returned as nested (one step in). A reply to the
 /// post or to the reply it sits under drops its quote, the layout shows it.
 fn thread(messages: &[Msg], post: Id) -> (Vec<Msg>, Vec<Id>) {
-    let by_id: HashMap<Id, &Msg> = messages.iter().map(|msg| (msg.id, msg)).collect();
+    let threads = Threads::new(messages);
     let (mut shown, mut nested) = (Vec::new(), Vec::new());
     let mut branches: HashMap<Id, Vec<&Msg>> = HashMap::new();
     let mut tops = Vec::new();
     for msg in messages {
-        if let Some(top) = branch(&by_id, msg, post) {
+        if let Some((root, top)) = threads.branch(msg)
+            && root == post
+        {
             if top == msg.id {
                 tops.push(top);
             }
@@ -256,7 +361,7 @@ fn thread(messages: &[Msg], post: Id) -> (Vec<Msg>, Vec<Id>) {
             if msg.id != top {
                 nested.push(msg.id);
             }
-            if msg.reply_to == Some(post) || msg.reply_to == Some(top) {
+            if msg.id == top || msg.reply_to == Some(top) {
                 msg.reply_to = None;
             }
             shown.push(msg);
@@ -271,6 +376,7 @@ fn text_draft(channel: Id, text: String, reply_to: Option<(Id, Id)>) -> Option<D
         return None;
     };
     Some(Draft {
+        forum_post: false,
         queued: Default::default(),
         id: *id,
         channel,
@@ -313,7 +419,7 @@ fn new_post(
                 .char_limit(TITLE_CHARS)
                 .desired_width(f32::INFINITY),
         );
-        let body_id = UiId::unique(("forum-body", channel));
+        let body_id = ui.make_persistent_id(("forum-body", channel));
         if editor::toolbar(ui, body_id, &mut new.body, new.preview) {
             new.preview = !new.preview;
         }
@@ -336,6 +442,9 @@ fn new_post(
             && let Some(polls::Action::Cancel) = polls::editor(ui, editor, true)
         {
             new.poll = None;
+        }
+        if !ui.is_enabled() {
+            return;
         }
         let count = text.chars().count();
         ui.add_space(ui::SPACE_XS);
@@ -378,9 +487,6 @@ fn new_post(
             ui.weak(format!("{count} / {MAX_TEXT_CHARS}"));
         });
     });
-    if send.is_some() {
-        *new = NewPost::default();
-    }
     send
 }
 
@@ -432,7 +538,7 @@ pub(super) fn view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat
     let title_text = format!("💬 {name}");
     let can_post = server.can_write(&channel);
     let online = server.status == Status::Online;
-    let to = To::Channel(server.address.clone());
+    let to = To::Channel(server.address.clone(), channel);
     let now = ui.input(|input| input.time);
     pane_title(
         ui,
@@ -445,9 +551,8 @@ pub(super) fn view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat
     if let Some(out) = (home.sending.iter_mut()).find(|o| o.to == to && o.preview.is_some()) {
         preview_status(ui, &home.voice, out);
     }
-    let new_id = UiId::unique(("forum-new", channel));
     let folds_id = UiId::unique(("forum-folds", server.dir.me, &server.address, channel));
-    let mut new: NewPost = ui.data(|d| d.get_temp(new_id)).unwrap_or_default();
+    let mut new = std::mem::take(&mut chat.new_post);
     let mut folds: Folds = ui.data(|d| d.get_temp(folds_id)).unwrap_or_default();
     let order_id = UiId::unique(("forum-order", channel));
     let (mut order, mut period): (Order, Period) =
@@ -481,6 +586,8 @@ pub(super) fn view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat
         });
     });
     let mut sent = None;
+    let mut retry = None;
+    let mut discard = None;
     ui.add_space(ui::SPACE_S);
 
     // A dropped file goes with the reply being written.
@@ -547,6 +654,34 @@ pub(super) fn view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             // The form scrolls with the posts, so its buttons stay reachable.
+            for (i, submission) in chat
+                .submissions
+                .iter_mut()
+                .enumerate()
+                .filter(|(_, p)| p.failed)
+            {
+                ui.push_id(submission.text.id, |ui| {
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled_ui(can_post && online, |ui| {
+                                ui::primary(ui, t!("forum.retry"))
+                            })
+                            .inner
+                            .clicked()
+                        {
+                            submission.failed = false;
+                            retry = Some(submission.next().clone());
+                        }
+                        if ui::secondary(ui, t!("common.cancel")).clicked() {
+                            discard = Some(i);
+                        }
+                    });
+                    // A retry uses the same payload and IDs, including when an ACK was lost.
+                    ui.add_enabled_ui(false, |ui| {
+                        new_post(ui, &mut submission.form, dir, channel, false)
+                    });
+                });
+            }
             if can_post && new.open {
                 sent = new_post(ui, &mut new, dir, channel, online);
                 ui.add_space(ui::SPACE_S);
@@ -761,23 +896,18 @@ pub(super) fn view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat
         chat.loading = true;
         server.send(Command::Older(channel, oldest));
     }
-    match sent {
-        // An edit changes only the text; the poll and replies stay with the post.
-        Some((text, _, Some(post))) => {
-            if let Some(mut draft) = text_draft(channel, text, None) {
-                draft.edit_of = Some(post);
-                draft.revision = chat.next_revision(me, post, polls::now_ms());
-                outgoing.push(draft);
-            }
-        }
-        // A post with a poll: the poll first, then the text pointing at it.
-        Some((text, poll, None)) => {
-            let poll = poll.and_then(|(question, part)| poll_draft(channel, question, part));
-            let carrying = poll.as_ref().map(|draft| (POLL_WRAPPER, draft.id));
-            outgoing.extend(poll);
-            outgoing.extend(text_draft(channel, text, carrying));
-        }
-        None => {}
+    if let Some(i) = discard {
+        chat.submissions.remove(i);
+    }
+    if let Some(draft) = retry {
+        send_part(chat, &server.commands, draft);
+    }
+    if let Some(written) = sent
+        && let Some(post) = Submission::prepare(&new, written, channel, chat, me)
+    {
+        outgoing.push(post.text.clone());
+        chat.submissions.push(post);
+        new = NewPost::default();
     }
     match reply {
         (Some(Command::Send(draft)), _) => outgoing.push(draft),
@@ -867,11 +997,11 @@ pub(super) fn view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat
     // A link gets its preview card, as in the chat; whatever follows waits behind it.
     for draft in outgoing {
         if let Some(draft) = queue_preview(ui, &home.voice, &mut home.sending, &to, draft) {
-            home.servers[index].send(Command::Send(draft));
+            dispatch(chat, &home.servers[index].commands, draft);
         }
     }
+    chat.new_post = new;
     ui.data_mut(|d| {
-        d.insert_temp(new_id, new);
         d.insert_temp(folds_id, folds);
         d.insert_temp(order_id, (order, period));
     });
@@ -981,6 +1111,147 @@ mod tests {
         assert_eq!(listed, [(4, None, 2), (2, Some(1), 1)]);
         let (shown, _) = thread(&messages, [2; 32]);
         assert_eq!(shown.iter().map(|m| m.id[0]).collect::<Vec<_>>(), [3]);
+    }
+
+    #[test]
+    fn missing_or_unverified_poll_never_hides_the_marked_post() {
+        let wrapper = Msg {
+            quoted_author: Some(POLL_WRAPPER),
+            ..msg(2, Some(1), 10, "# Title")
+        };
+        let replies = [msg(3, Some(1), 12, "First"), msg(4, Some(3), 14, "Nested")];
+        let mut messages = vec![wrapper.clone()];
+        assert_eq!(posts(&messages)[0].msg.id, wrapper.id);
+        messages.extend(replies);
+        messages.push(Msg {
+            person: [9; 32],
+            ..poll(1, 8)
+        });
+        assert!(posts(&messages).iter().all(|p| p.poll.is_none()));
+        assert!(thread(&messages, wrapper.id).0.is_empty());
+        let mut chat = Chat::default();
+        chat.messages = messages.clone();
+        assert!(carried_poll(&chat, &wrapper).is_none());
+        messages.pop();
+        messages.push(poll(1, 8));
+        let listed = posts(&messages);
+        assert_eq!(listed.len(), 1);
+        assert_eq!((listed[0].replies, listed[0].last), (2, 14));
+        let (shown, nested) = thread(&messages, wrapper.id);
+        assert_eq!(shown.iter().map(|m| m.id[0]).collect::<Vec<_>>(), [3, 4]);
+        assert!(shown.iter().all(|m| m.reply_to.is_none()));
+        assert_eq!(nested, [[4; 32]]);
+    }
+
+    #[test]
+    fn failed_forum_parts_retry_from_visible_editor_with_original_ids() {
+        use crate::net::Update;
+        use egui_kittest::kittest::Queryable;
+        let channel = [3; 32];
+        for dark in [false, true] {
+            let (mut h, mut commands) = super::super::tests::files_harness(dark);
+            let ctx = h.ctx.clone();
+            ctx.data_mut(|d| d.insert_temp(super::super::files_id(channel), false));
+            h.set_size(egui::vec2(820., 1180.));
+            let server = &mut h.state_mut().as_mut().unwrap().servers[0];
+            server.dir.categories[0].channels[0].forum = true;
+            let address = server.address.clone();
+            let mut editor = polls::Editor::default();
+            editor.question = "Which day?".into();
+            editor.options = vec!["Friday".into(), "Saturday".into()];
+            let chat = server.chats.get_mut(&channel).unwrap();
+            chat.new_post = NewPost {
+                open: true,
+                title: "Dinner".into(),
+                body: "https://example.org/menu".into(),
+                poll: Some(editor),
+                ..Default::default()
+            };
+            h.run_steps(3);
+            h.get_by_label(t!("forum.post")).click_accesskit();
+            h.run_steps(3);
+            let mut next = || {
+                std::iter::from_fn(|| commands.try_recv().ok()).find_map(|cmd| match cmd {
+                    Command::Send(d) => Some(d),
+                    _ => None,
+                })
+            };
+            assert!(next().is_none());
+            let home = h.state_mut().as_mut().unwrap();
+            assert!(
+                home.sending
+                    .front()
+                    .is_some_and(|out| out.to == To::Channel(address.clone(), channel))
+            );
+            home.send_queued(&ctx, 0.);
+            assert!(next().is_none());
+            h.get_by_label(t!("previews.not_now")).click_accesskit();
+            h.run_steps(3);
+            h.state_mut().as_mut().unwrap().send_queued(&ctx, 1.);
+            let poll = next().unwrap();
+            assert!(poll.poll.is_some());
+            assert!(next().is_none());
+            let home = h.state_mut().as_mut().unwrap();
+            let chat = home.servers[0].chats.get_mut(&channel).unwrap();
+            chat.new_post = NewPost {
+                open: true,
+                title: "Next post".into(),
+                ..Default::default()
+            };
+            home.apply(&ctx, Update::Unsent(address.clone(), poll.clone()), 1.);
+            for size in [
+                egui::vec2(390., 844.),
+                egui::vec2(1100., 700.),
+                egui::vec2(820., 1180.),
+            ] {
+                h.set_size(size);
+                h.run_steps(3);
+                assert!(h.query_all_by_value("Dinner").next().is_some());
+                assert!(h.query_all_by_value("Which day?").next().is_some());
+                assert!(
+                    h.query_all_by_value("https://example.org/menu")
+                        .next()
+                        .is_some()
+                );
+            }
+            h.get_by_label(t!("forum.retry")).click_accesskit();
+            h.run_steps(3);
+            assert_eq!(next().unwrap().id, poll.id);
+            let receipt = |id| Update::ForumSent(address.clone(), channel, id);
+            let home = h.state_mut().as_mut().unwrap();
+            home.apply(
+                &ctx,
+                Update::ForumSent(
+                    "https://elsewhere.example/".parse().unwrap(),
+                    channel,
+                    poll.id,
+                ),
+                2.,
+            );
+            home.apply(
+                &ctx,
+                Update::ForumSent(address.clone(), [8; 32], poll.id),
+                2.,
+            );
+            assert!(next().is_none());
+            home.apply(&ctx, receipt(poll.id), 2.);
+            home.apply(&ctx, receipt(poll.id), 2.);
+            let text = next().unwrap();
+            assert_eq!(text.reply_to, Some((POLL_WRAPPER, poll.id)));
+            assert!(next().is_none());
+            home.apply(&ctx, Update::Unsent(address.clone(), text.clone()), 3.);
+            h.run_steps(3);
+            h.get_by_label(t!("forum.retry")).click_accesskit();
+            h.run_steps(3);
+            assert_eq!(next().unwrap().id, text.id);
+            assert!(next().is_none());
+            let home = h.state_mut().as_mut().unwrap();
+            home.apply(&ctx, receipt(text.id), 4.);
+            home.apply(&ctx, Update::Unsent(address.clone(), text), 5.);
+            let chat = &home.servers[0].chats[&channel];
+            assert!(chat.submissions.is_empty() && chat.draft.is_empty());
+            assert_eq!(chat.new_post.title, "Next post");
+        }
     }
 
     #[test]

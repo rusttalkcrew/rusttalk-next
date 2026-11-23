@@ -57,6 +57,7 @@ impl Home {
         };
         for index in targets {
             self.servers[*index].send(Command::Send(Draft {
+                forum_post: false,
                 queued: Default::default(),
                 id: *id,
                 channel: [0; 32],

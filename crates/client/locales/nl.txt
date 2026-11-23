@@ -277,6 +277,7 @@ home.kind_forum_help = Berichten met eigen antwoorden, zoals een klein forum.
 forum.new_post = Nieuw bericht
 forum.title_hint = Titel
 forum.body_hint = Wat wil je zeggen? (Markdown werkt)
+forum.retry = Bericht opnieuw versturen
 forum.post = Plaatsen
 forum.empty = Nog geen berichten.
 forum.older = Oudere berichten tonen

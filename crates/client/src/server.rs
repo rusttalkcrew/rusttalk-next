@@ -173,10 +173,13 @@ impl Server {
         self.dir.members.iter().find(|m| m.person == *person)
     }
 
-    pub fn send(&self, mut command: Command) {
+    pub fn send(&self, command: Command) {
+        Self::send_to(&self.commands, command);
+    }
+
+    pub fn send_to(commands: &UnboundedSender<Command>, mut command: Command) -> bool {
         crate::net::Queued::count(&mut command);
-        // The task only ends after the UI drops this sender or the server stopped for good.
-        let _ = self.commands.send(command);
+        commands.send(command).is_ok()
     }
 
     pub fn channel(&self, id: &Id) -> Option<&Channel> {
@@ -635,6 +638,8 @@ fn rank(edit: &Msg) -> Rank {
 /// One channel's loaded history, oldest first, plus the composer state.
 #[derive(Default)]
 pub struct Chat {
+    pub new_post: crate::home::forum::NewPost,
+    pub submissions: Vec<crate::home::forum::Submission>,
     pub messages: Vec<Msg>,
     /// Originals that show edited text, by person and ID, with the applied edit's rank.
     pub edited: HashMap<(Id, Id), Rank>,

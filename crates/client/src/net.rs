@@ -263,6 +263,8 @@ pub enum Command {
 /// A message to send, and what goes back to the composer when sending fails.
 #[derive(Clone)]
 pub struct Draft {
+    /// Owned by a forum submission, including its optional poll.
+    pub forum_post: bool,
     /// Random; a DM sends the same ID to every shared server.
     pub id: Id,
     /// Unused for a DM, which this server's DM channel with `peer` gets.
@@ -445,6 +447,7 @@ pub enum Update {
     Synced(Box<Synced>),
     /// Sending this message failed; put it back in the composer.
     Unsent(Url, Draft),
+    ForumSent(Url, Id, Id),
     Failed(String),
 }
 
@@ -1753,7 +1756,7 @@ async fn on_command(
                 .flat_map(|dir| &dir.categories)
                 .flat_map(|category| &category.channels)
                 .any(|known| known.id == channel && known.page);
-            let target = (channel, draft.id, page);
+            let target = (channel, draft.id, page, draft.forum_post);
             let mut sent =
                 files::send(ctx, url, client, state, target, body.clone(), files.clone()).await;
             // The other person re-keyed the DM just now: take the new key and send
@@ -1765,7 +1768,9 @@ async fn on_command(
                     Err(error) => Err(error),
                 };
             }
-            if !matches!(sent, Ok(true)) {
+            if matches!(sent, Ok(true)) && draft.forum_post {
+                ctx.send(Update::ForumSent(url.clone(), channel, draft.id));
+            } else if !matches!(sent, Ok(true)) {
                 ctx.send(Update::Unsent(url.clone(), draft));
             }
             sent?;

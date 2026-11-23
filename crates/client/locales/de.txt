@@ -277,6 +277,7 @@ home.kind_forum_help = Beiträge mit eigenen Antworten, wie ein kleines Forum.
 forum.new_post = Neuer Beitrag
 forum.title_hint = Titel
 forum.body_hint = Was möchtest du sagen? (Markdown geht)
+forum.retry = Beitrag erneut senden
 forum.post = Posten
 forum.empty = Noch keine Beiträge.
 forum.older = Ältere Beiträge anzeigen

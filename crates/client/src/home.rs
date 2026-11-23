@@ -92,7 +92,7 @@ struct Embeds<'a> {
 const TOOLBAR_BUTTON: Vec2 = Vec2::new(30.0, 26.0);
 
 pub(crate) mod embed;
-mod forum;
+pub(crate) mod forum;
 mod friends;
 pub mod layout;
 mod markdown;
@@ -997,9 +997,11 @@ impl Home {
             };
             draft.preview = made.map(Arc::new);
             match to {
-                To::Channel(address) => {
+                To::Channel(address, channel) => {
                     if let Some(index) = self.index(&address) {
-                        self.servers[index].send(Command::Send(draft));
+                        let server = &mut self.servers[index];
+                        let chat = server.chats.entry(channel).or_default();
+                        forum::dispatch(chat, &server.commands, draft);
                     }
                 }
                 To::Dm(peer) => {
@@ -1689,7 +1691,23 @@ impl Home {
                     }
                 }
             }
+            Update::ForumSent(address, channel, id) => {
+                if let Some(server) = self.servers.iter_mut().find(|s| s.address == address)
+                    && let Some(chat) = server.chats.get_mut(&channel)
+                    && let Some(next) = forum::confirmed(chat, id)
+                {
+                    forum::send_part(chat, &server.commands, next);
+                }
+            }
             Update::Unsent(address, draft) => {
+                if draft.forum_post {
+                    if let Some(index) = self.index(&address)
+                        && let Some(chat) = self.servers[index].chats.get_mut(&draft.channel)
+                    {
+                        forum::failed(chat, draft.id);
+                    }
+                    return;
+                }
                 // A poke's note doesn't belong in the composer, where it would go out as text.
                 // Nor do votes, or a poll's question.
                 let Some(index) =
@@ -3593,7 +3611,7 @@ fn voice_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
 /// Where a queued message goes: a channel by its server's address, or a DM.
 #[derive(Clone, PartialEq)]
 enum To {
-    Channel(url::Url),
+    Channel(url::Url, Id),
     Dm(Id),
 }
 
@@ -3873,7 +3891,7 @@ fn page_view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat: &mut
     } = home;
     let server = &servers[index];
     let dir = &server.dir;
-    let to = To::Channel(server.address.clone());
+    let to = To::Channel(server.address.clone(), channel);
     let now = ui.input(|input| input.time);
     // Membership notices are not part of the page.
     // A copy, so the editor below can change the chat's staged pictures.
@@ -4051,6 +4069,7 @@ fn page_view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat: &mut
                     keep.extend(card.cloned());
                 }
                 let draft = Draft {
+                    forum_post: false,
                     queued: Default::default(),
                     id: *id,
                     channel,
@@ -4252,7 +4271,7 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
         ..
     } = home;
     let to = match at {
-        At::Channel(index, _) => To::Channel(servers[index].address.clone()),
+        At::Channel(index, channel) => To::Channel(servers[index].address.clone(), channel),
         At::Dm(peer) => To::Dm(peer),
     };
     let dir = named.map_or(&fallback, |index| &servers[index].dir);
@@ -4624,6 +4643,7 @@ fn poll_draft(channel: Id, text: String, part: PollPart) -> Option<Draft> {
         return None;
     };
     Some(Draft {
+        forum_post: false,
         queued: Default::default(),
         id: *id,
         channel,
@@ -5119,6 +5139,7 @@ fn composer(
             return (None, attach);
         };
         let command = Command::Send(Draft {
+            forum_post: false,
             queued: Default::default(),
             id: *message,
             channel,
@@ -5188,6 +5209,7 @@ fn composer(
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_millis() as u64);
     let command = Command::Send(Draft {
+        forum_post: false,
         queued: Default::default(),
         id: *id,
         channel,
