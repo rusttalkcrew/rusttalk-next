@@ -2,6 +2,7 @@
 
 mod control;
 mod live_file;
+pub mod ring;
 mod screen;
 mod stats;
 mod stream_audio;
@@ -179,6 +180,7 @@ impl KeyClient<'_> {
         let control_keys = self.name_keys(channel, control::LABEL);
         let terminal_keys = self.name_keys(channel, terminal::LABEL);
         let terminal_share_keys = self.name_keys(channel, terminal::SHARE_LABEL);
+        let ring_keys = self.name_keys(channel, ring::LABEL);
         let watch_keys = self.name_keys(channel, watch::LABEL);
         let key = media_key(key, &server.server_id, channel, epoch);
         let provider = KeyProvider::with_shared_key(
@@ -230,6 +232,7 @@ impl KeyClient<'_> {
             control_keys,
             terminal_keys,
             terminal_share_keys,
+            ring_keys,
             watch_keys,
             stats: stats::Sampler::default(),
             files: live_file::LiveFiles::default(),
@@ -309,6 +312,8 @@ pub struct VoiceRoom {
     /// Seal terminal messages (current epoch only) and open shares (any held epoch).
     terminal_keys: HashMap<i64, Key>,
     terminal_share_keys: HashMap<i64, Key>,
+    /// Seal the ring for a voice request; only the current epoch's is used.
+    ring_keys: HashMap<i64, Key>,
     watch_keys: HashMap<i64, Key>,
     stats: stats::Sampler,
     files: live_file::LiveFiles,
@@ -361,6 +366,7 @@ impl VoiceRoom {
         self.control_keys = keys.name_keys(&self.channel, control::LABEL);
         self.terminal_keys = keys.name_keys(&self.channel, terminal::LABEL);
         self.terminal_share_keys = keys.name_keys(&self.channel, terminal::SHARE_LABEL);
+        self.ring_keys = keys.name_keys(&self.channel, ring::LABEL);
         self.watch_keys = keys.name_keys(&self.channel, watch::LABEL);
         // Tracks published under the new epoch's names could not be told apart before,
         // and a viewer's watch announcement may only open now.
@@ -421,14 +427,14 @@ impl VoiceRoom {
                     continue;
                 }
                 RoomEvent::Disconnected { .. } => self.files.disconnect(),
-                // Sealed remote control and terminal messages; open them with
-                // `open_control` and `open_terminal`.
+                // Sealed remote control and terminal messages and rings; open them with
+                // `open_control`, `open_terminal` and `open_ring`.
                 RoomEvent::DataReceived {
                     topic: Some(topic),
                     participant: Some(_),
                     ..
-                } if topic == control::TOPIC || topic == terminal::TOPIC => {}
-                // Only the file, control and terminal protocols authenticate their data.
+                } if [control::TOPIC, terminal::TOPIC, ring::TOPIC].contains(&topic.as_str()) => {}
+                // Only the file, control, terminal and ring protocols authenticate their data.
                 RoomEvent::DataReceived { .. }
                 | RoomEvent::ChatMessage { .. }
                 | RoomEvent::TranscriptionReceived { .. }

@@ -53,6 +53,7 @@ mod sticker_files;
 mod terminal;
 mod ui;
 mod update;
+mod voice_requests;
 #[cfg(target_os = "linux")]
 mod wayland_drops;
 mod whats_new;

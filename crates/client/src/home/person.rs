@@ -23,6 +23,8 @@ const OWNER_RANK: i64 = 1000;
 pub enum Pick {
     Message,
     Poke,
+    /// Ask them into the voice channel you are in.
+    AskToJoin,
     Details,
     EditProfile,
     Befriend(Act),
@@ -37,6 +39,8 @@ pub struct Person<'a> {
     pub server: &'a Server,
     pub person: Id,
     pub relation: Relation,
+    /// You are in a voice channel here and they aren't in it.
+    pub can_ask: bool,
     /// Set while you are in a call with them: their volume and local mute.
     pub audio: Option<&'a Audio>,
     /// Their camera is on, and whether you show it; call tiles only.
@@ -63,6 +67,7 @@ impl<'a> Person<'a> {
             server,
             person,
             relation: friends.relation(&person),
+            can_ask: !listening && super::voice_requests::calling(voice, server),
             audio: listening.then_some(&voice.audio),
             video: None,
         }
@@ -153,6 +158,12 @@ impl<'a> Person<'a> {
         if self.relation != Relation::Blocked && m.item("👉", t!("pokes.poke")).clicked() {
             pick = Some(Pick::Poke);
         }
+        if self.relation != Relation::Blocked
+            && self.can_ask
+            && m.item("📞", t!("voice_request.ask")).clicked()
+        {
+            pick = Some(Pick::AskToJoin);
+        }
         pick
     }
 
@@ -220,6 +231,13 @@ impl<'a> Person<'a> {
                 }
             }
         });
+        // On a line of its own: with Message and Poke it doesn't fit the card.
+        if !self.me() && member.is_some() && self.relation != Relation::Blocked && self.can_ask {
+            ui.add_space(ui::SPACE_S);
+            if ui::secondary(ui, t!("voice_request.ask")).clicked() {
+                pick = Some(Pick::AskToJoin);
+            }
+        }
         if pick.is_some() {
             ui.close();
         }
@@ -256,6 +274,7 @@ pub fn apply(home: &mut Home, index: usize, person: Id, pick: Pick, now: f64) {
     match pick {
         Pick::Message => home.open_dm(person, now),
         Pick::Poke => home.dialog = Some(Dialog::Poke(person, String::new())),
+        Pick::AskToJoin => home.ask_to_join(index, person, now),
         Pick::Details => home.dialog = Some(Dialog::Member(index, person)),
         Pick::EditProfile => home.settings = Some(Tab::Profile),
         Pick::Befriend(act) => home.befriend(person, act, now),
@@ -320,6 +339,7 @@ mod tests {
                         server,
                         person: case.person,
                         relation: Relation::None,
+                        can_ask: false,
                         audio: case.in_call.then_some(&home.voice.audio),
                         video: None,
                     };
