@@ -12,6 +12,11 @@ Unreleased under the new version and date.
 ## Unreleased
 
 - Your account picture now follows you to new servers and repairs missing pictures after reconnecting.
+- Rounded-square avatars across the app, a speaking highlight on your bottom-left avatar during voice calls, and subtle hover feedback on sidebar server icons.
+- Incoming live file offers now have a single Download button.
+- Screen shares show simpler controls, preview automatically while focused, and start with system audio selected where supported.
+- Direct messages and mentions play a short chime from RustTalk itself, also when the system keeps notifications quiet; turn it off in Call sounds.
+- In the direct message list, the red badge no longer covers the server names, a server name shows only once, and the unread mark is no longer cut off.
 - While you are in a voice call, RustTalk keeps you Online even when another app has the focus.
 - Reopen the last chat picture instantly, even if the connection drops after it loads.
 - Unavailable servers show an exclamation mark in the server sidebar until they reconnect.

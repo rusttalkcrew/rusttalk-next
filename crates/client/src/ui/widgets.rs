@@ -728,6 +728,24 @@ pub fn dot(ui: &mut Ui, color: Color32) {
     ui.painter().circle_filled(rect.center(), 5.0, color);
 }
 
+/// Corner radius of a rounded-square avatar or server icon of `size` points.
+pub fn avatar_radius(size: f32) -> f32 {
+    size.max(0.0) * 0.25
+}
+
+/// The green rounded-square outline around a speaking person's avatar.
+/// Reaches 3 points past `rect` (1-point gap, 2-point stroke) with concentric corners.
+pub fn speaking_outline(ui: &Ui, rect: Rect) {
+    let offset = 2.0;
+    let radius = avatar_radius(rect.width()) + offset;
+    ui.painter().rect_stroke(
+        rect.expand(offset),
+        radius,
+        Stroke::new(2.0, colors(ui).success),
+        StrokeKind::Middle,
+    );
+}
+
 /// A presence dot on the bottom right of a picture, ringed in `ring` so it stands out.
 pub fn presence_dot(ui: &Ui, picture: Rect, radius: f32, color: Color32, ring: Color32) {
     let center = picture.right_bottom() - Vec2::splat(radius * 0.8);
@@ -1124,8 +1142,16 @@ pub fn theme_card(ui: &mut Ui, theme: &Palette, accent: &Accent, selected: bool)
     painter.rect_filled(rail, round(RADIUS, 0, RADIUS, 0), theme.rail);
     let side = Rect::from_min_size(rail.right_top(), Vec2::new(40.0, preview.height()));
     painter.rect_filled(side, 0, theme.side);
-    painter.circle_filled(rail.center_top() + Vec2::new(0.0, 12.0), 5.0, accent.base);
-    painter.circle_filled(rail.center_top() + Vec2::new(0.0, 26.0), 5.0, theme.main);
+    painter.rect_filled(
+        Rect::from_center_size(rail.center_top() + Vec2::new(0.0, 12.0), Vec2::splat(10.0)),
+        avatar_radius(10.0),
+        accent.base,
+    );
+    painter.rect_filled(
+        Rect::from_center_size(rail.center_top() + Vec2::new(0.0, 26.0), Vec2::splat(10.0)),
+        avatar_radius(10.0),
+        theme.main,
+    );
     let selected_row = Rect::from_min_size(side.min + Vec2::new(4.0, 10.0), Vec2::new(32.0, 8.0));
     painter.rect_filled(selected_row, 2, theme.selected);
     for at in 0..3 {
@@ -1138,7 +1164,11 @@ pub fn theme_card(ui: &mut Ui, theme: &Palette, accent: &Accent, selected: bool)
     let body = side.right_top() + Vec2::new(8.0, 10.0);
     for (at, width) in [52.0, 70.0, 40.0].into_iter().enumerate() {
         let y = 14.0 * at as f32;
-        painter.circle_filled(body + Vec2::new(4.0, y + 3.0), 4.0, theme.muted);
+        painter.rect_filled(
+            Rect::from_center_size(body + Vec2::new(4.0, y + 3.0), Vec2::splat(8.0)),
+            avatar_radius(8.0),
+            theme.muted,
+        );
         let line =
             Rect::from_min_size(body + Vec2::new(12.0, y + 1.0), Vec2::new(width * 0.6, 4.0));
         painter.rect_filled(line, 2, theme.text);
@@ -1260,7 +1290,12 @@ pub fn unread_pill(ui: &Ui, row: Rect, gap: f32) {
         egui::pos2(row.left() - gap, row.center().y),
         Vec2::new(4.0, 8.0),
     );
-    ui.painter().rect_filled(pill, 2.0, colors(ui).strong);
+    // A scroll area clips at the row's left edge; the pill sits just outside it.
+    let mut clip = ui.clip_rect();
+    clip.min.x = clip.min.x.min(pill.left());
+    ui.painter()
+        .with_clip_rect(clip)
+        .rect_filled(pill, 2.0, colors(ui).strong);
 }
 
 /// A red count of mentions centred on `at`, ringed in `ring`, the surface it sits on.

@@ -20,7 +20,7 @@ use crate::{
     camera::{Camera, Change},
     denoise, files,
     home::{
-        Home, Tab, face,
+        Home, Tab,
         person::{self, Person, Pick},
     },
     mic_check::Verdict,
@@ -89,7 +89,6 @@ pub struct Voice {
     pub watching: Option<Watching>,
     /// The newest picture of our own share, while its preview is on.
     preview: Option<TextureHandle>,
-    pub preview_hidden: bool,
     pub camera: Camera,
     /// People whose camera this device chose not to receive.
     pub(crate) hidden: HashSet<Id>,
@@ -152,7 +151,7 @@ pub enum LiveState {
     Saved,
     Failed,
     Sending,
-    /// Stopped, cancelled or declined in a chat.
+    /// Stopped or cancelled in a chat.
     Ended,
 }
 
@@ -215,7 +214,6 @@ impl Voice {
             targets: Arc::new(Mutex::new(Listing::Loading)),
             watching: None,
             preview: None,
-            preview_hidden: false,
             camera: Camera::new(runtime),
             hidden: HashSet::new(),
             cameras: HashMap::new(),
@@ -269,11 +267,17 @@ impl Voice {
         self.cameras.clear();
     }
 
+    pub(crate) fn default_stream_audio(&self) -> Vec<App> {
+        if self.supported {
+            vec![share::system()]
+        } else {
+            Vec::new()
+        }
+    }
+
     pub(crate) fn update_preview(&mut self, ctx: &egui::Context) {
         let active = ctx.input(|i| i.focused && i.viewport().minimized != Some(true));
-        let on = matches!(self.sharing, Sharing::On | Sharing::Changing)
-            && !self.preview_hidden
-            && active;
+        let on = matches!(self.sharing, Sharing::On | Sharing::Changing) && active;
         if self.video.preview.is_on() != on {
             self.video.preview.set(on);
         }
@@ -282,9 +286,8 @@ impl Voice {
         }
     }
 
-    /// Hide the current preview; a new share enables it again.
+    /// Clear the preview when the screen share ends.
     pub fn stop_preview(&mut self) {
-        self.preview_hidden = true;
         self.video.preview.set(false);
         self.preview = None;
     }
@@ -295,11 +298,35 @@ impl Voice {
             .is_some_and(|call| call.server == server.address && call.channel == *channel)
     }
 
-    fn speaking(&self, server: &Server, person: &Id) -> bool {
+    /// Whether this device is actively transmitting voice in its current call.
+    pub(crate) fn local_speaking(&self, servers: &[Server]) -> bool {
+        let Some(call) = &self.call else {
+            return false;
+        };
+        let Some(server) = servers.iter().find(|s| s.address == call.server) else {
+            return false;
+        };
+        self.local_speaking_in(server, &call.channel)
+    }
+
+    fn local_speaking_in(&self, server: &Server, channel: &Id) -> bool {
+        let Some(call) = &self.call else {
+            return false;
+        };
+        call.server == server.address
+            && call.channel == *channel
+            && call.state == CallState::Connected
+            && call.can_talk
+            && !server.voice_muted(&server.dir.me)
+            && !self.audio.channel_mic_paused()
+            && self.audio.talking()
+    }
+
+    fn speaking(&self, server: &Server, channel: &Id, person: &Id) -> bool {
         if *person == server.dir.me {
-            self.audio.talking()
+            self.local_speaking_in(server, channel)
         } else {
-            self.audio.speaking(person)
+            self.in_call(server, channel) && self.audio.speaking(person)
         }
     }
 }
@@ -588,10 +615,8 @@ pub fn room_list(ui: &mut Ui, home: &Home, server: &Server, channel: &Id) -> Opt
         let name = peer.name(server);
         let row = ui.horizontal(|ui| {
             ui.add_space(22.0);
-            let face = face(ui, &server.dir, &peer.person, &name, 22.0, true);
-            if home.voice.speaking(server, &peer.person) {
-                ring(ui, face.rect);
-            }
+            let speaking = home.voice.speaking(server, channel, &peer.person);
+            crate::home::face_speaking(ui, &server.dir, &peer.person, &name, 22.0, true, speaking);
             let status = if peer.person == server.dir.me && home.voice.in_call(server, channel) {
                 VoiceStatus {
                     muted: home.voice.audio.display_muted(),
@@ -778,11 +803,7 @@ fn sound_mark(ui: &mut Ui, glyph: &str, tip: &str) {
 }
 
 fn ring(ui: &Ui, rect: egui::Rect) {
-    ui.painter().circle_stroke(
-        rect.center(),
-        rect.width() / 2.0 + 2.0,
-        Stroke::new(2.0, ui::colors(ui).success),
-    );
+    ui::speaking_outline(ui, rect);
 }
 
 /// Each file offered in the call with what can be done with it.
@@ -848,32 +869,22 @@ fn sending(ui: &mut Ui, file: &LiveFile, name: impl Fn(&Id) -> String) -> Option
     stop.then_some(LiveAction::Remove(file.id, true))
 }
 
-/// t!("common.save") and t!("call.decline") for a live file offered to us, or, with the bytes `saved`
-/// so far, its progress and t!("common.cancel"). Used in the call and in chats.
+/// Download an incoming offer, or show progress and Cancel once it starts.
 fn receiving(ui: &mut Ui, id: Id, name: &str, size: u64, saved: Option<u64>) -> Option<LiveAction> {
-    let mut action = None;
     match saved {
-        None => {
-            ui.horizontal(|ui| {
-                let save =
-                    ui.add_enabled_ui(files::PICKER, |ui| ui::primary(ui, t!("common.save")));
-                if save.inner.clicked() {
-                    action = Some(LiveAction::Save(id, name.to_owned()));
-                }
-                if ui::secondary(ui, t!("call.decline")).clicked() {
-                    action = Some(LiveAction::Remove(id, false));
-                }
-            });
-        }
+        None => ui
+            .add_enabled_ui(files::PICKER, |ui| ui::primary(ui, t!("files.download")))
+            .inner
+            .clicked()
+            .then(|| LiveAction::Save(id, name.to_owned())),
         Some(bytes) => {
             let done = bytes as f32 / size.max(1) as f32;
             ui.add(egui::ProgressBar::new(done).show_percentage());
-            if ui::secondary(ui, t!("common.cancel")).clicked() {
-                action = Some(LiveAction::Remove(id, true));
-            }
+            ui::secondary(ui, t!("common.cancel"))
+                .clicked()
+                .then_some(LiveAction::Remove(id, true))
         }
     }
-    action
 }
 
 /// A live file offered in a text channel or DM, inside its message.
@@ -1049,8 +1060,7 @@ fn shared_sound_in(shares: &mut Vec<App>, stream: &mut Vec<App>, update: Update)
 fn open_screen_dialog(ctx: &egui::Context, voice: &mut Voice) {
     voice.share_screen = Some((screen_options(&voice.audio.settings()), None));
     if !voice.changing_screen {
-        // Apps shared now become the stream's sound, since going live stops them.
-        voice.stream_audio = voice.shares.clone();
+        voice.stream_audio = voice.default_stream_audio();
     }
     fill(ctx, &voice.targets, "screens", screen::targets);
 }

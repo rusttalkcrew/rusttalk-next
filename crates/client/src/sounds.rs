@@ -21,10 +21,11 @@ pub enum Cue {
     Muted,
     Unmuted,
     Ring,
+    Message,
 }
 
 impl Cue {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::YouJoined,
         Self::YouLeft,
         Self::PeerJoined,
@@ -38,6 +39,7 @@ impl Cue {
         Self::Muted,
         Self::Unmuted,
         Self::Ring,
+        Self::Message,
     ];
 
     pub fn label(self) -> &'static str {
@@ -55,6 +57,7 @@ impl Cue {
             Self::Muted => t!("sounds.muted"),
             Self::Unmuted => t!("sounds.unmuted"),
             Self::Ring => t!("sounds.ring"),
+            Self::Message => t!("sounds.message"),
         }
     }
 
@@ -79,6 +82,8 @@ impl Cue {
             Self::Ring => &[
                 783.99, 987.77, 783.99, 987.77, 0.0, 783.99, 987.77, 783.99, 987.77,
             ],
+            // Higher than the call chimes, so a message is not mistaken for one.
+            Self::Message => &[1046.5, 1318.51],
         };
         let volume = volume.clamp(0.0, 1.0);
         notes.iter().flat_map(move |&hz| {
@@ -209,6 +214,19 @@ mod tests {
 
     fn track(id: &str) -> TrackSid {
         TrackSid::try_from(format!("TR_{id}")).unwrap()
+    }
+
+    #[test]
+    fn every_cue_sounds_different() {
+        let sounds: Vec<Vec<i16>> = (Cue::ALL.iter())
+            .map(|cue| cue.samples(48_000, 0.5).collect())
+            .collect();
+        for (index, sound) in sounds.iter().enumerate() {
+            assert!(!sound.is_empty(), "{:?}", Cue::ALL[index]);
+            for other in &sounds[index + 1..] {
+                assert_ne!(sound, other, "{:?}", Cue::ALL[index]);
+            }
+        }
     }
 
     #[test]
