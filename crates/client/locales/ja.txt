@@ -1588,6 +1588,9 @@ phone.cancelled = 通話がキャンセルされました。
 phone.no_sound = 通話はつながりましたが、使える音声がありません。
 phone.failed = 通話できませんでした。
 
+
+call.streaming_viewers = 配信中 · {count} 人が視聴中
+call.watch_stream = {name}を視聴 · {count} 人が視聴中
 camera.flip = カメラを切り替え
 camera.torch_on = ライトをオン
 camera.torch_off = ライトをオフ

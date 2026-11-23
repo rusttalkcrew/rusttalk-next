@@ -793,6 +793,20 @@ also deletes every edit of it that it has opened or sent.
 
 ## Voice
 
+Desktop phone bridges use the encrypted `rusttalk.phone-consent` participant
+attribute. Its plaintext is `{hosted: track_sid_or_null, allowed: [{host,
+session, track}]}`. It is sealed with the channel's video-watch-derived key,
+using the distinct `rusttalk-phone-consent-v1` AAD label, epoch (big-endian i64),
+sender identity, a zero separator, and sender session ID. The wire form is
+`epoch.base64url(ciphertext)`, capped at 60 KiB when read. Hosted tracks must
+exist as shared-audio publications in the announcing session. Consent grants
+only that device session's microphone to that exact external call; neither
+Listen nor Watch grants export. Missing or invalid attributes grant nothing.
+Clients clear consent on withdrawal/reconnect and end hosted calls on reconnect,
+loss of sharing permission, or loss of their publication. Older clients cannot
+grant consent and their sound is never exported by a conforming bridge.
+
+
 These routes require a bearer header and channel `read` access. They apply
 to voice channels only.
 

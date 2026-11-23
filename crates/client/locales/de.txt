@@ -1588,6 +1588,9 @@ phone.cancelled = Der Anruf wurde abgebrochen.
 phone.no_sound = Der Anruf wurde verbunden, aber ohne Ton, den wir nutzen können.
 phone.failed = Der Anruf hat nicht geklappt.
 
+
+call.streaming_viewers = Streamt · {count} schauen zu
+call.watch_stream = {name} ansehen · {count} schauen zu
 camera.flip = Kamera wechseln
 camera.torch_on = Licht einschalten
 camera.torch_off = Licht ausschalten

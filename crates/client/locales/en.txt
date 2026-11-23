@@ -1591,6 +1591,9 @@ phone.cancelled = The call was cancelled.
 phone.no_sound = The call connected, but without sound we can use.
 phone.failed = The call didn't work.
 
+
+call.streaming_viewers = Streaming · {count} watching
+call.watch_stream = Watch {name} · {count} watching
 camera.flip = Flip camera
 camera.torch_on = Turn light on
 camera.torch_off = Turn light off

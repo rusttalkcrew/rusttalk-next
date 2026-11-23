@@ -17,6 +17,7 @@ Unreleased under the new version and date.
 - Forum channels: searchable posts with folded replies, polls, up and down votes and sorting.
 - Close image previews by clicking or tapping the dimmed space around them.
 - Oversized stored uploads show their size and the app limit beside chat or shared files, including voice channels.
+- Screen shares use the sharer’s participant card, show distinct viewer counts, and preview your screen while the window is focused.
 - Mobile calls show your camera preview with front/back switching and a supported rear-camera light.
 - Shared app and screen audio stays silent until you choose Listen; Stop listening ends it immediately.
 - Kicking a member now asks for confirmation by name and keeps the original member and server selected.

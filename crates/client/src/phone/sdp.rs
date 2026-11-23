@@ -94,6 +94,11 @@ pub fn answer(sdp: &str) -> Option<Answer> {
             direction = &line[2..];
         } else if in_audio && let Some(rest) = line.strip_prefix("a=rtpmap:") {
             let (pt, codec) = rest.split_once(' ')?;
+            if (pt == "8" && !codec.eq_ignore_ascii_case("PCMA/8000"))
+                || (pt == "0" && !codec.eq_ignore_ascii_case("PCMU/8000"))
+            {
+                return None;
+            }
             if codec.to_ascii_lowercase().eq("telephone-event/8000") {
                 tones = pt.parse().ok();
             }

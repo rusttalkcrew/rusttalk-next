@@ -1588,6 +1588,9 @@ phone.cancelled = Het gesprek werd geannuleerd.
 phone.no_sound = Het gesprek is verbonden, maar zonder geluid dat we kunnen gebruiken.
 phone.failed = Het gesprek is niet gelukt.
 
+
+call.streaming_viewers = Streamt · {count} kijkers
+call.watch_stream = {name} bekijken · {count} kijkers
 camera.flip = Camera omdraaien
 camera.torch_on = Lamp aan
 camera.torch_off = Lamp uit

@@ -39,6 +39,7 @@ mod desktop {
         pub(in crate::net) sid: TrackSid,
         pub(in crate::net) label: String,
         task: JoinHandle<()>,
+        pub(in crate::net) stop: CancellationToken,
         /// Hangs up when the room is left.
         _stop: DropGuard,
     }
@@ -87,6 +88,7 @@ mod desktop {
             sid: publication.sid(),
             label,
             task,
+            stop: stop.clone(),
             _stop: stop.drop_guard(),
         });
         true
