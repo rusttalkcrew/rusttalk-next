@@ -1,4 +1,4 @@
-//! Calling a phone into the voice room: the button in the call bar, the dialer with
+//! Calling a phone into the voice room: the rows in the call bar's "…" menu, the dialer with
 //! contacts and a keypad, the "End the call?" question before leaving, and the SIP
 //! account page in Settings. Nothing shows until an account is saved. Desktop only.
 
@@ -126,40 +126,25 @@ pub fn leave_or_ask(home: &mut Home, then: Leave) -> bool {
     true
 }
 
-/// The phone button in the call bar; nothing without an account.
-pub fn button(ui: &mut Ui, voice: &mut Voice, enabled: bool, size: Vec2) -> bool {
-    let settings = voice.audio.settings();
-    let phone = &mut voice.phone;
-    if !phone.ready(&settings) {
-        return false;
+/// The phone's rows in the call bar's "…" menu: open the dialer, and hang up during a call.
+pub fn menu_rows(m: &mut ui::Menu, phone: &mut Phone, enabled: bool) {
+    if (enabled || phone.call.is_some()) && m.item(MARK, t!("phone.call_a_phone")).clicked() {
+        phone.open = true;
     }
-    let look = if phone.call.is_some() {
-        Look::On(ui::colors(ui).success)
-    } else {
-        Look::Plain
-    };
-    let button = ui
-        .add_enabled_ui(enabled || phone.call.is_some(), |ui| {
-            ui::icon_button(ui, MARK, t!("phone.call_a_phone"), look, size)
-        })
-        .inner;
-    if button.clicked() {
-        phone.open ^= true;
+    if phone.call.is_some() && m.danger(MARK, t!("phone.hang_up")).clicked() {
+        phone.hang_up();
     }
-    if phone.call.is_some() {
-        ui::context_menu(&button, |m| {
-            if m.danger(MARK, t!("phone.hang_up")).clicked() {
-                phone.hang_up();
-            }
-        });
-    }
-    true
 }
 
-/// Whether the phone button shows, so the call bar can make room for it.
+/// Whether the phone shows in the call bar's "…" menu.
 pub fn shows(voice: &mut Voice) -> bool {
     let settings = voice.audio.settings();
     voice.phone.ready(&settings)
+}
+
+/// A call is running, so the "…" button lights up.
+pub fn calling(voice: &Voice) -> bool {
+    voice.phone.call.is_some()
 }
 
 /// The dialer and the leave question, every frame.
@@ -412,14 +397,15 @@ fn start(home: &mut Home, typed: &str) {
     else {
         return;
     };
-    let name = phone::label(typed, &settings.phone_contacts);
-    let label = format!("{MARK} {name}");
+    let label = format!("{MARK} {}", phone::label(typed, &settings.phone_contacts));
+    // The room sees a hidden number unless it is a contact (see `shared_label`).
+    let shared = phone::shared_label(typed, &settings.phone_contacts);
     let (control, receiver) = unbounded_channel();
     server.send(Command::PhoneCall(Box::new(Dial {
         account: settings.phone.clone(),
         password,
         target,
-        label: label.clone(),
+        label: format!("{MARK} {shared}"),
         control: receiver,
     })));
     phone.call = Some(Active {

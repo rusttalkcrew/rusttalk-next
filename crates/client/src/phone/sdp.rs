@@ -1,9 +1,9 @@
-//! The session description (RFC 4566) of a call: our offer of G.711 and keypad tones,
+//! The session description (RFC 4566) of a call: our offer of G.722, G.711 and keypad tones,
 //! and what the other side answered.
 
 use std::net::{IpAddr, SocketAddr};
 
-use super::g711::Law;
+use super::codec::{Codec, G722};
 
 /// The payload type we offer for keypad tones.
 pub const TONES: u8 = 101;
@@ -16,8 +16,10 @@ pub fn offer(address: IpAddr, port: u16, session: u64) -> String {
         "s=RustTalk".to_owned(),
         format!("c=IN {family} {address}"),
         "t=0 0".to_owned(),
-        // A-law first: the people asking for this are in Europe.
-        format!("m=audio {port} RTP/AVP 8 0 {TONES}"),
+        // Wideband first, for clearer voices; then A-law, as the people asking for
+        // this are in Europe; then µ-law, which every phone service has.
+        format!("m=audio {port} RTP/AVP {G722} 8 0 {TONES}"),
+        format!("a=rtpmap:{G722} G722/8000"),
         "a=rtpmap:8 PCMA/8000".to_owned(),
         "a=rtpmap:0 PCMU/8000".to_owned(),
         format!("a=rtpmap:{TONES} telephone-event/8000"),
@@ -33,12 +35,12 @@ pub fn offer(address: IpAddr, port: u16, session: u64) -> String {
 pub struct Answer {
     /// Where to send our sound.
     pub to: SocketAddr,
-    pub law: Law,
+    pub codec: Codec,
     /// The payload type for keypad tones, if the other side takes them.
     pub tones: Option<u8>,
 }
 
-/// The other side's answer; `None` when it has no G.711 audio for us.
+/// The other side's answer; `None` when it has none of our codecs.
 pub fn answer(sdp: &str) -> Option<Answer> {
     let mut session_address = None;
     let mut media_address = None;
@@ -78,13 +80,14 @@ pub fn answer(sdp: &str) -> Option<Answer> {
     if port == 0 {
         return None;
     }
-    let law = payload_types
+    // The answer lists the codecs in the order the other side prefers them.
+    let codec = payload_types
         .iter()
-        .find_map(|&pt| Law::from_payload_type(pt))?;
+        .find_map(|&pt| Codec::from_payload_type(pt))?;
     let tones = tones.filter(|pt| payload_types.contains(pt));
     Some(Answer {
         to: SocketAddr::new(media_address.or(session_address)?, port),
-        law,
+        codec,
         tones,
     })
 }
@@ -92,6 +95,7 @@ pub fn answer(sdp: &str) -> Option<Answer> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::phone::g711::Law;
 
     #[test]
     fn our_offer_reads_as_an_answer() {
@@ -101,7 +105,7 @@ mod tests {
             answer(&sdp),
             Some(Answer {
                 to: "192.0.2.7:40000".parse().unwrap(),
-                law: Law::A,
+                codec: Codec::G722,
                 tones: Some(TONES),
             })
         );
@@ -115,7 +119,7 @@ mod tests {
                    m=video 0 RTP/AVP 31\r\n";
         let got = answer(sdp).unwrap();
         assert_eq!(got.to, "203.0.113.5:30000".parse().unwrap());
-        assert_eq!(got.law, Law::Mu);
+        assert_eq!(got.codec, Codec::G711(Law::Mu));
         assert_eq!(got.tones, Some(96));
         // Without a media address the session's applies; without tones there are none.
         let sdp = "v=0\nc=IN IP4 198.51.100.1\nm=audio 30000 RTP/AVP 8\n";
@@ -124,7 +128,13 @@ mod tests {
         assert_eq!(got.tones, None);
         // Refused audio, or only codecs we lack.
         assert_eq!(answer("c=IN IP4 198.51.100.1\nm=audio 0 RTP/AVP 8\n"), None);
-        assert_eq!(answer("c=IN IP4 198.51.100.1\nm=audio 5 RTP/AVP 9\n"), None);
+        assert_eq!(
+            answer("c=IN IP4 198.51.100.1\nm=audio 5 RTP/AVP 18\n"),
+            None
+        );
         assert_eq!(answer(""), None);
+        // The other side's order wins: here G.711 before G.722.
+        let got = answer("c=IN IP4 198.51.100.1\nm=audio 5 RTP/AVP 8 9\n").unwrap();
+        assert_eq!(got.codec, Codec::G711(Law::A));
     }
 }

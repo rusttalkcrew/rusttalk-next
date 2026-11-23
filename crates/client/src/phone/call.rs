@@ -35,10 +35,9 @@ use zeroize::Zeroizing;
 
 use super::{
     Account,
-    g711::Law,
-    resample::{Down, RATIO, Up},
-    rtp::{self, PACKET},
-    sdp,
+    codec::Coder,
+    resample::{Down, Up},
+    rtp, sdp,
 };
 use crate::audio::{FRAME, PhoneLine, RATE};
 
@@ -362,7 +361,7 @@ async fn place(
         layer.remove_dialog(&id);
         return Err(because(t!("phone.no_sound")));
     };
-    tracing::info!(law = ?media.law, tones = media.tones.is_some(), "phone call answered");
+    tracing::info!(codec = ?media.codec, tones = media.tones.is_some(), "phone call answered");
     events(Event::Status(Status::Talking));
     let hung_up = talk(
         dial,
@@ -450,9 +449,11 @@ async fn talk(
         u32::from_le_bytes([t0, t1, t2, t3]),
     );
     let mut to = media.to;
-    let mut down = Down::new();
-    let mut up = Up::new();
-    let mut room = vec![0i16; PACKET * RATIO];
+    let mut coder = Coder::new(media.codec);
+    let mut down = Down::new(media.codec.ratio());
+    let mut up = Up::new(media.codec.ratio());
+    // 20 ms of the room, one packet's worth.
+    let mut room = vec![0i16; RATE as usize / 50];
     let mut keys: VecDeque<char> = VecDeque::new();
     let mut tone: Option<(rtp::Tone, u32)> = None;
     let mut gap = 0u8;
@@ -497,10 +498,8 @@ async fn talk(
                     }
                     _ => {
                         gap = gap.saturating_sub(1);
-                        let sound: Vec<u8> = (down.run(&room).into_iter())
-                            .map(|sample| media.law.encode(sample))
-                            .collect();
-                        sender.sound(media.law.payload_type(), &sound)
+                        let sound = coder.encode(&down.run(&room));
+                        sender.sound(media.codec.payload_type(), &sound)
                     }
                 };
                 if let Err(error) = rtp.send_to(&packet, to).await {
@@ -520,13 +519,12 @@ async fn talk(
                 // Behind its own router the server answers from another port: follow it.
                 to = from;
                 let Some(packet) = rtp::parse(&buffer[..len]) else { continue };
-                let Some(law) = Law::from_payload_type(packet.payload_type) else { continue };
                 // A late or repeated packet would only click: its moment has passed.
                 if last.is_some_and(|last| packet.sequence.wrapping_sub(last).cast_signed() <= 0) {
                     continue;
                 }
                 last = Some(packet.sequence);
-                let samples: Vec<i16> = packet.payload.iter().map(|&byte| law.decode(byte)).collect();
+                let Some(samples) = coder.decode(packet.payload_type, packet.payload) else { continue };
                 let wide = up.run(&samples);
                 line.play(&wide);
                 send_frames(source, &wide, &mut warned).await;

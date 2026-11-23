@@ -1,17 +1,16 @@
-//! Between the call's 48 kHz and the phone's 8 kHz: a low-pass filter at the phone
-//! band's edge, then every sixth sample (down), or five zeros after each (up).
+//! Between the call's 48 kHz and the phone's 8 or 16 kHz: a low-pass filter at the
+//! phone band's edge, then every sixth or third sample (down), or zeros between them (up).
 
 use std::{collections::VecDeque, sync::Arc};
 
-/// 48 kHz samples per 8 kHz sample.
-pub const RATIO: usize = 6;
 const TAPS: usize = 96;
-/// Just below 4 kHz, half the phone's rate, so nothing folds back into the band.
-const CUTOFF_HZ: f64 = 3600.0;
+/// Below half the phone's rate, so nothing folds back into the band: 3.6 kHz at
+/// 8 kHz, 7.2 kHz at 16 kHz.
+const CUTOFF: f64 = 0.45;
 
 /// A windowed-sinc low-pass at 48 kHz (Blackman window), summing to 1.
-fn taps() -> Arc<[f32]> {
-    let fc = CUTOFF_HZ / 48_000.0;
+fn taps(ratio: usize) -> Arc<[f32]> {
+    let fc = CUTOFF / ratio as f64;
     let middle = (TAPS - 1) as f64 / 2.0;
     let raw: Vec<f64> = (0..TAPS)
         .map(|n| {
@@ -30,14 +29,17 @@ fn taps() -> Arc<[f32]> {
 }
 
 struct Filter {
+    /// 48 kHz samples per phone sample.
+    ratio: usize,
     taps: Arc<[f32]>,
     history: VecDeque<f32>,
 }
 
 impl Filter {
-    fn new() -> Self {
+    fn new(ratio: usize) -> Self {
         Self {
-            taps: taps(),
+            ratio,
+            taps: taps(ratio),
             history: VecDeque::from(vec![0.0; TAPS]),
         }
     }
@@ -65,18 +67,17 @@ pub struct Down {
 }
 
 impl Down {
-    pub fn new() -> Self {
+    /// `ratio`: 48 kHz samples per phone sample.
+    pub fn new(ratio: usize) -> Self {
         Self {
-            filter: Filter::new(),
+            filter: Filter::new(ratio),
         }
     }
 
-    /// `input.len()` must be a multiple of `RATIO`.
+    /// `input.len()` must be a multiple of the ratio.
     pub fn run(&mut self, input: &[i16]) -> Vec<i16> {
         input
-            .as_chunks::<RATIO>()
-            .0
-            .iter()
+            .chunks_exact(self.filter.ratio)
             .map(|chunk| {
                 for &sample in chunk {
                     self.filter.push(f32::from(sample));
@@ -92,19 +93,21 @@ pub struct Up {
 }
 
 impl Up {
-    pub fn new() -> Self {
+    /// `ratio`: 48 kHz samples per phone sample.
+    pub fn new(ratio: usize) -> Self {
         Self {
-            filter: Filter::new(),
+            filter: Filter::new(ratio),
         }
     }
 
     pub fn run(&mut self, input: &[i16]) -> Vec<i16> {
-        let mut out = Vec::with_capacity(input.len() * RATIO);
+        let ratio = self.filter.ratio;
+        let mut out = Vec::with_capacity(input.len() * ratio);
         for &sample in input {
-            for at in 0..RATIO {
+            for at in 0..ratio {
                 // The zeros take the energy out; scaling the sample puts it back.
                 let value = if at == 0 {
-                    f32::from(sample) * RATIO as f32
+                    f32::from(sample) * ratio as f32
                 } else {
                     0.0
                 };
@@ -133,16 +136,32 @@ mod tests {
 
     #[test]
     fn speech_passes_and_high_sound_is_removed() {
-        let mut down = Down::new();
+        let mut down = Down::new(6);
         let speech = down.run(&tone(1000.0, 48_000.0, 48_000));
         assert_eq!(speech.len(), 8000);
         // Past the filter's start-up, 1 kHz keeps its level (10000 / √2).
         assert!((rms(&speech[200..]) - 7071.0).abs() < 150.0);
-        let mut down = Down::new();
+        let mut down = Down::new(6);
         let high = down.run(&tone(6000.0, 48_000.0, 48_000));
         assert!(rms(&high[200..]) < 100.0, "6 kHz would fold back to 2 kHz");
-        let mut up = Up::new();
+        let mut up = Up::new(6);
         let back = up.run(&tone(1000.0, 8000.0, 8000));
+        assert_eq!(back.len(), 48_000);
+        assert!((rms(&back[1200..]) - 7071.0).abs() < 200.0);
+    }
+
+    #[test]
+    fn wideband_keeps_what_narrowband_cuts() {
+        // 5 kHz is past the phone band but well inside G.722's.
+        let mut down = Down::new(3);
+        let wide = down.run(&tone(5000.0, 48_000.0, 48_000));
+        assert_eq!(wide.len(), 16_000);
+        assert!((rms(&wide[200..]) - 7071.0).abs() < 200.0);
+        let mut down = Down::new(3);
+        let high = down.run(&tone(12_000.0, 48_000.0, 48_000));
+        assert!(rms(&high[200..]) < 100.0, "12 kHz would fold back to 4 kHz");
+        let mut up = Up::new(3);
+        let back = up.run(&tone(5000.0, 16_000.0, 16_000));
         assert_eq!(back.len(), 48_000);
         assert!((rms(&back[1200..]) - 7071.0).abs() < 200.0);
     }

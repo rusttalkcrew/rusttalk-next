@@ -255,7 +255,7 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
             let phone = super::phone::shows(&mut home.voice);
             #[cfg(any(target_os = "android", target_os = "ios"))]
             let phone = false;
-            let count = 2.0 + f32::from(screen::SUPPORTED) + f32::from(more) + f32::from(phone);
+            let count = 2.0 + f32::from(screen::SUPPORTED) + f32::from(more || phone);
             let width = (ui.available_width() - SPACE_XS * (count - 1.0)) / count;
             let size = Vec2::new(width, ICON_BUTTON);
             ui.horizontal(|ui| {
@@ -309,12 +309,9 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
                     }
                 }
                 share = app_button(ui, voice, connected && blocked.is_none(), blocked, size);
-                #[cfg(not(any(target_os = "android", target_os = "ios")))]
-                if phone {
-                    super::phone::button(ui, voice, connected && blocked.is_none(), size);
-                }
-                if more {
-                    terminal = more_button(ui, voice.terminals.local.is_some(), connected, size);
+                if more || phone {
+                    let can_call = phone && connected && blocked.is_none();
+                    terminal = more_button(ui, voice, more, can_call, connected, size);
                 }
             });
             if let Some(action) = live_files(ui, &home.voice.live_files, server) {
@@ -379,15 +376,45 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
 }
 
 /// The "More" button: a menu for the less common shares, so the row stays short. Starts or
-/// stops a terminal share; on Windows it also offers Command Prompt.
-fn more_button(ui: &mut Ui, on: bool, connected: bool, size: Vec2) -> Option<Shell> {
+/// stops a terminal share (on Windows also Command Prompt), and calls a phone when an
+/// account is set up. Lights up while a phone call runs.
+fn more_button(
+    ui: &mut Ui,
+    voice: &mut Voice,
+    terminal: bool,
+    can_call: bool,
+    connected: bool,
+    size: Vec2,
+) -> Option<Shell> {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    let calling = super::phone::calling(voice);
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    let calling = false;
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    let _ = can_call;
+    let look = if calling {
+        Look::On(ui::colors(ui).success)
+    } else {
+        Look::Plain
+    };
+    let on = voice.terminals.local.is_some();
     let button = ui
-        .add_enabled_ui(connected, |ui| {
-            ui::icon_button(ui, "…", t!("call.more"), Look::Plain, size)
+        .add_enabled_ui(connected || calling, |ui| {
+            ui::icon_button(ui, "…", t!("call.more"), look, size)
         })
         .inner;
     let mut picked = None;
     ui::menu_wide(&button, |m| {
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        if can_call || calling {
+            super::phone::menu_rows(m, &mut voice.phone, can_call);
+            if terminal {
+                m.separator();
+            }
+        }
+        if !terminal {
+            return;
+        }
         if on {
             if m.danger("⏹", t!("call.stop_terminal")).clicked() {
                 picked = Some(Shell::Default);
