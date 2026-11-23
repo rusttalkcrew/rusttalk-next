@@ -64,6 +64,8 @@ struct Saved {
     snapshot: Snapshot,
     /// Local edits no server has accepted yet, applied again after each merge.
     pending: Vec<Edit>,
+    #[serde(default)]
+    avatar: Option<([u8; 32], String)>,
     /// Servers whose pin conflict was already shown.
     #[serde(skip)]
     warned: HashSet<Url>,
@@ -75,6 +77,8 @@ pub const DM_DELETED: &str = "dm_deleted";
 
 #[derive(Serialize, Deserialize)]
 pub enum Edit {
+    /// Bootstrap old profiles without replacing a default learned from another device.
+    InitialAvatar(String),
     Join(KnownServer),
     Leave(Url),
     Setting(String, Value),
@@ -90,6 +94,12 @@ pub enum Edit {
 impl Edit {
     pub(crate) fn apply(&self, state: &mut State) {
         match self {
+            Self::InitialAvatar(digest) => {
+                state
+                    .settings
+                    .entry("avatar_digest".into())
+                    .or_insert_with(|| digest.clone().into());
+            }
             // Re-applying an unchanged join must not move the server to the end of the list.
             Self::Join(server) if state.servers.contains(server) => {}
             Self::Join(server) => state.join(server.clone()),
@@ -174,6 +184,73 @@ impl DeviceSync {
 
     pub async fn current_dm_deletes(&self) -> Tombstones {
         dm_deleted(&self.saved.lock().await.snapshot.state.settings)
+    }
+
+    /// Cache only this account's selected image. A digest in encrypted device sync
+    /// avoids putting a 256 KiB image into the 256 KiB settings blob.
+    pub async fn avatar(
+        &self,
+        data: &Path,
+        person: &[u8; 32],
+        candidate: Option<&[u8]>,
+    ) -> Result<Option<Vec<u8>>> {
+        use rusttalk_core::auth::{decode_bytes, encode};
+        use sha2::{Digest, Sha256};
+        let digest = |bytes: &[u8]| encode(&Sha256::digest(bytes));
+        let mut saved = self.saved.lock().await;
+        if let Some(bytes) = candidate {
+            let hash = digest(bytes);
+            if !saved.snapshot.state.settings.contains_key("avatar_digest") {
+                let edit = Edit::InitialAvatar(hash.clone());
+                edit.apply(&mut saved.snapshot.state);
+                saved.pending.push(edit);
+            }
+            if saved
+                .snapshot
+                .state
+                .settings
+                .get("avatar_digest")
+                .and_then(Value::as_str)
+                == Some(&hash)
+            {
+                let encoded = encode(bytes);
+                let cached = (*person, encoded);
+                if saved.avatar.as_ref() != Some(&cached) {
+                    saved.avatar = Some(cached);
+                    save(data, &saved)?;
+                }
+            }
+        }
+        let bytes = saved
+            .avatar
+            .as_ref()
+            .filter(|(owner, _)| owner == person)
+            .map(|(_, bytes)| decode_bytes(bytes))
+            .transpose()?;
+        Ok(bytes.filter(|bytes| {
+            saved
+                .snapshot
+                .state
+                .settings
+                .get("avatar_digest")
+                .and_then(Value::as_str)
+                == Some(digest(bytes).as_str())
+        }))
+    }
+
+    pub async fn select_avatar(&self, data: &Path, person: &[u8; 32], bytes: &[u8]) -> Result<()> {
+        use rusttalk_core::auth::encode;
+        use sha2::{Digest, Sha256};
+        rusttalk_core::client::decode_profile_image(bytes)?;
+        let mut saved = self.saved.lock().await;
+        let edit = Edit::Setting(
+            "avatar_digest".into(),
+            encode(&Sha256::digest(bytes)).into(),
+        );
+        edit.apply(&mut saved.snapshot.state);
+        saved.pending.push(edit);
+        saved.avatar = Some((*person, encode(bytes)));
+        save(data, &saved)
     }
 
     pub fn set_peer(&self, address: &Url, peer: Option<(Api, Session)>) {
@@ -318,6 +395,68 @@ pub fn adopt(settings: &Settings, synced: &BTreeMap<String, Value>) -> Settings 
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn avatar_cache_survives_restart_but_not_newer_selection_or_account_change() -> Result<()>
+    {
+        let data = tempfile::tempdir()?;
+        let other = tempfile::tempdir()?;
+        let sync = DeviceSync::open(data.path())?;
+        assert!(sync.avatar(data.path(), &[1; 32], None).await?.is_none());
+        assert_eq!(
+            sync.avatar(data.path(), &[1; 32], Some(b"synthetic avatar"))
+                .await?,
+            Some(b"synthetic avatar".to_vec())
+        );
+        assert_eq!(
+            DeviceSync::open(data.path())?
+                .avatar(data.path(), &[1; 32], None)
+                .await?,
+            Some(b"synthetic avatar".to_vec())
+        );
+        assert!(sync.avatar(data.path(), &[2; 32], None).await?.is_none());
+        // A server override must not replace the default, nor cross an account boundary.
+        assert_eq!(
+            sync.avatar(data.path(), &[1; 32], Some(b"override"))
+                .await?,
+            Some(b"synthetic avatar".to_vec())
+        );
+        assert!(
+            DeviceSync::open(other.path())?
+                .avatar(other.path(), &[2; 32], None)
+                .await?
+                .is_none()
+        );
+        sync.edit(
+            data.path(),
+            vec![Edit::Setting("avatar_digest".into(), Value::Null)],
+        )
+        .await?;
+        assert!(
+            sync.avatar(data.path(), &[1; 32], Some(b"synthetic avatar"))
+                .await?
+                .is_none()
+        );
+        let mut state = State::default();
+        state
+            .settings
+            .insert("avatar_digest".into(), "newer selection".into());
+        Edit::InitialAvatar("old cached selection".into()).apply(&mut state);
+        assert_eq!(state.settings["avatar_digest"], "newer selection");
+        // Selecting while every server is offline is durable before any upload.
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(8, 8).write_to(&mut png, image::ImageFormat::Png)?;
+        sync.select_avatar(data.path(), &[1; 32], png.get_ref())
+            .await?;
+        assert_eq!(
+            DeviceSync::open(data.path())?
+                .avatar(data.path(), &[1; 32], None)
+                .await?,
+            Some(png.into_inner())
+        );
+
+        Ok(())
+    }
 
     #[test]
     fn devices_stay_local() {

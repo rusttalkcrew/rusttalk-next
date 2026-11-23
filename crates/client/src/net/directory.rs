@@ -216,6 +216,30 @@ pub(super) async fn directory(
         &|id: &Id, hash: Option<&str>| pictures.get(&picture_key(id, hash?)).cloned(),
     )
     .await?;
+    if client.has_space_key() {
+        let person = ctx.identity.certificate.person_id();
+        let candidate = dir
+            .members
+            .iter()
+            .find(|member| &member.person == person)
+            .and_then(|member| member.avatar.as_ref())
+            .map(|picture| picture.bytes.as_slice());
+        ctx.sync.avatar(&ctx.data, person, candidate).await?;
+        let own = members
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|member| member["person_id"].as_str() == Some(encode(person).as_str()));
+        // Absent on older servers: never send a conditional write they would ignore.
+        if own.is_some_and(|member| {
+            member["avatar_initialized"] == false && member["avatar_hash"].is_null()
+        }) {
+            super::sync_devices(ctx, Vec::new()).await?;
+            if let Some(bytes) = ctx.sync.avatar(&ctx.data, person, None).await? {
+                client.publish_default_avatar(&bytes).await?;
+            }
+        }
+    }
     // A DM channel stays with the person it was first listed with. One the server
     // now lists with someone else is not shown, so nothing is sent there.
     dir.dms.retain(|dm| {

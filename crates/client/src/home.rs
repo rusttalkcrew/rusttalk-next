@@ -2551,9 +2551,10 @@ fn crop_dialog(ctx: &egui::Context, home: &mut Home) {
     };
     match crop.target {
         Target::Avatar => {
-            for server in &home.servers {
-                server.send(Command::SetAvatar(bytes.clone()));
-            }
+            home.net.set_avatar(
+                bytes,
+                home.servers.iter().map(|s| s.commands.clone()).collect(),
+            );
         }
         Target::Icon(address) => {
             if let Some(index) = home.index(&address) {
@@ -6644,6 +6645,92 @@ mod tests {
         assert!(!unsent_notice(&mut toast, None, 6.0));
         assert_eq!(toast.as_ref().map(|(text, _)| text), Some(&notice));
         assert!(unsent_notice(&mut toast, Some(notice), 7.0));
+    }
+
+    #[test]
+    fn avatar_render_uses_same_picture_at_roster_and_call_sizes() {
+        for dark in [true, false] {
+            for repaired in [false, true] {
+                let picture = Picture {
+                    key: [91; 32],
+                    frames: std::sync::Arc::new(vec![(
+                        egui::ColorImage::new(
+                            [2, 2],
+                            vec![Color32::RED, Color32::BLUE, Color32::GREEN, Color32::YELLOW],
+                        ),
+                        100,
+                    )]),
+                    bytes: Default::default(),
+                };
+                let dir = Directory {
+                    members: vec![Member {
+                        person: ME,
+                        name: Some("Synthetic member".into()),
+                        devices: Vec::new(),
+                        roles: Vec::new(),
+                        avatar: repaired.then_some(picture),
+                        presence: Presence::Online,
+                        hide_offline: false,
+                        bio: None,
+                        voice_muted: false,
+                    }],
+                    ..Default::default()
+                };
+                let mut harness = egui_kittest::Harness::builder()
+                    .with_size(Vec2::new(360.0, 240.0))
+                    .build_ui_state(
+                        |ui, dir: &mut Option<Directory>| {
+                            let Some(dir) = dir else {
+                                return;
+                            };
+                            ui.label("Member list");
+                            face(ui, dir, &ME, "Synthetic member", 32.0, false);
+                            ui.label("Call tile");
+                            face(ui, dir, &ME, "Synthetic member", 128.0, false);
+                        },
+                        None,
+                    );
+                ui::install(&harness.ctx);
+                harness.ctx.set_theme(if dark {
+                    egui::Theme::Dark
+                } else {
+                    egui::Theme::Light
+                });
+                *harness.state_mut() = Some(dir);
+                harness.run();
+                let images = harness
+                    .output()
+                    .shapes
+                    .iter()
+                    .filter_map(|shape| match &shape.shape {
+                        egui::epaint::Shape::Mesh(mesh)
+                            if mesh.texture_id != egui::TextureId::default() =>
+                        {
+                            Some(mesh.texture_id)
+                        }
+                        egui::epaint::Shape::Rect(rect) => {
+                            rect.brush.as_ref().map(|brush| brush.fill_texture_id)
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                if repaired {
+                    assert_eq!(images.len(), 2);
+                    assert_eq!(images[0], images[1]);
+                } else {
+                    assert!(images.is_empty());
+                }
+                if let Ok(path) = std::env::var("RUSTTALK_AVATAR_TEST_IMAGES") {
+                    let theme = if dark { "dark" } else { "light" };
+                    let state = if repaired { "after" } else { "before" };
+                    harness
+                        .render()
+                        .unwrap()
+                        .save(format!("{path}/{theme}-{state}.png"))
+                        .unwrap();
+                }
+            }
+        }
     }
 
     const ME: Id = [1; 32];

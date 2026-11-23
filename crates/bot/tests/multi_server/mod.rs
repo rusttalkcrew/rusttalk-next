@@ -86,6 +86,81 @@ async fn sticker_across_servers(
     Ok(())
 }
 
+async fn avatar_across_servers(
+    source: &KeyClient<'_>,
+    destination: &KeyClient<'_>,
+    observer: &KeyClient<'_>,
+) -> Result<()> {
+    use rusttalk_core::keys::Metadata;
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+        8,
+        8,
+        image::Rgba([50, 160, 230, 255]),
+    ))
+    .write_to(&mut png, image::ImageFormat::Png)?;
+    let png = png.into_inner();
+    source.set_avatar(&png).await?;
+    let person = source.identity.certificate.person_id();
+    let path = format!("/v1/members/{}/avatar", encode(person));
+    let read = |client: &KeyClient<'_>| client.request(Method::GET, &path).send();
+    let original: Value = read(source).await?.error_for_status()?.json().await?;
+    let bytes = source.decrypt_metadata(
+        Metadata::Avatar,
+        person,
+        original["avatar_ct"].as_str().context("source avatar")?,
+    )?;
+    assert!(destination.publish_default_avatar(&bytes).await?);
+    let received: Value = read(observer).await?.error_for_status()?.json().await?;
+    assert_ne!(original["avatar_ct"], received["avatar_ct"]);
+    assert_eq!(
+        observer.decrypt_metadata(
+            Metadata::Avatar,
+            person,
+            received["avatar_ct"]
+                .as_str()
+                .context("destination avatar")?
+        )?,
+        png
+    );
+    assert!(!destination.publish_default_avatar(&bytes).await?);
+    let unchanged: Value = read(observer).await?.error_for_status()?.json().await?;
+    assert_eq!(received, unchanged);
+    let mut newer = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+        8,
+        8,
+        image::Rgba([230, 60, 90, 255]),
+    ))
+    .write_to(&mut newer, image::ImageFormat::Png)?;
+    destination.set_avatar(newer.get_ref()).await?;
+    assert!(!destination.publish_default_avatar(&bytes).await?);
+    let override_image: Value = read(observer).await?.error_for_status()?.json().await?;
+    assert_eq!(
+        observer.decrypt_metadata(
+            Metadata::Avatar,
+            person,
+            override_image["avatar_ct"]
+                .as_str()
+                .context("newer avatar")?
+        )?,
+        *newer.get_ref()
+    );
+
+    destination
+        .request(Method::PUT, "/v1/me/profile")
+        .json(&json!({"avatar_ct": null}))
+        .send()
+        .await?
+        .error_for_status()?;
+    assert!(!destination.publish_default_avatar(&bytes).await?);
+    assert_eq!(read(observer).await?.status(), StatusCode::NOT_FOUND);
+    println!(
+        "W357 synthetic avatar re-encrypted across isolated servers, independently decrypted, duplicate and cleared publications rejected"
+    );
+    Ok(())
+}
+
 pub async fn exercise(
     first_project: &str,
     project: &str,
@@ -145,6 +220,17 @@ pub async fn exercise(
     .await?;
     let peer_b_token = session(server_b.join_open(&peer).await?, secrets).await?;
     let mut peer_b = KeyClient::connect(&server_b, &peer, &peer_b_token).await?;
+    // Open joining has no invite-wrapped space key. Publication must wait, not
+    // send plaintext or mark the destination initialized before a key arrives.
+    assert!(!peer_b.has_space_key());
+    let mut avatar = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgba8(8, 8).write_to(&mut avatar, image::ImageFormat::Png)?;
+    assert!(
+        peer_b
+            .publish_default_avatar(avatar.get_ref())
+            .await
+            .is_err()
+    );
     let peer_id = encode(peer.certificate.person_id());
     let roster: Vec<Value> = peer_b
         .request(Method::GET, "/v1/members")
@@ -197,6 +283,7 @@ pub async fn exercise(
     )
     .await?;
     println!("W15 same bot identity exchanged encrypted chat on both servers");
+    avatar_across_servers(&peer_a, &peer_b, &owner_b).await?;
     sticker_across_servers(owner_a, &mut owner_b, &mut peer_b, text_b)
         .await
         .context("a sticker of server A sent on server B")?;
@@ -215,6 +302,9 @@ pub async fn exercise(
         KeyClient::connect_with_dms(&server_b, owner_a.identity, &owner_token, Some(owner_pins))
             .await?;
     peer_b = KeyClient::connect_with_dms(&server_b, &peer, &peer_b_token, Some(peer_pins)).await?;
+    assert!(!peer_b.publish_default_avatar(avatar.get_ref()).await?);
+    println!("W357 explicit avatar clear survived API restart and client reconnect");
+
     dm::friends(
         (&mut *owner_a, &mut owner_b),
         (&mut peer_a, &mut peer_b),
