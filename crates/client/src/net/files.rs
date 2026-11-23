@@ -1,7 +1,9 @@
 //! Stored files: upload, download, save, and plain words for what went wrong.
 
 use std::{
+    collections::VecDeque,
     fs,
+    future::Future,
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::Arc,
@@ -18,6 +20,7 @@ use rusttalk_core::{
     messages::fit_file_name,
 };
 use url::Url;
+use zeroize::Zeroizing;
 
 use sha2::Digest as _;
 
@@ -320,34 +323,82 @@ pub(super) async fn sticker_file(ctx: &Ctx, client: &KeyClient<'_>, file: BlobRe
 const FULL_BUDGET: usize = 64 * 1024 * 1024;
 const INLINE_BUDGET: usize = 24 * 1024 * 1024;
 
+/// Keep recent inline originals to decode at full size without downloading twice.
+const ORIGINALS_BUDGET: usize = 8 * crate::files::MIB as usize;
+const ORIGINALS_COUNT: usize = 8;
+type ImageBytes = Arc<Zeroizing<Vec<u8>>>;
+
+#[derive(Default)]
+pub(super) struct ImageOriginals(VecDeque<(BlobRef, ImageBytes)>);
+
+impl ImageOriginals {
+    pub(super) fn clear(&mut self) {
+        self.0.clear();
+    }
+}
+
 /// Download and decode a picture as asked.
-pub(super) async fn image(ctx: &Ctx, client: &KeyClient<'_>, file: BlobRef, fetch: Fetch) {
-    let id = file.id;
-    let frames = async {
-        let bytes = client.download_file(&file, None).await?;
-        // Received pictures are hostile: decode with limits, off the async workers.
-        tokio::task::spawn_blocking(move || {
-            Ok(match fetch {
-                Fetch::Thumbnail => vec![still(decode_thumbnail(&bytes)?)],
-                Fetch::Full => decode_frames(&bytes, None, FULL_BUDGET)?
+pub(super) async fn image(
+    ctx: &Ctx,
+    url: &Url,
+    client: &KeyClient<'_>,
+    originals: &mut ImageOriginals,
+    file: BlobRef,
+    fetch: Fetch,
+) {
+    let frames = image_frames(originals, &file, fetch, client.download_file(&file, None))
+        .await
+        .map_err(|error| {
+            tracing::warn!(error = %format_args!("{error:#}"), "loading a picture failed");
+            gone(&error)
+        });
+    ctx.send(Update::Image(url.clone(), file, fetch, frames));
+}
+
+async fn image_frames(
+    originals: &mut ImageOriginals,
+    file: &BlobRef,
+    fetch: Fetch,
+    download: impl Future<Output = Result<Vec<u8>>>,
+) -> Result<Vec<(egui::ColorImage, u32)>> {
+    let cached = (fetch != Fetch::Thumbnail)
+        .then(|| originals.0.iter().find(|(blob, _)| blob == file))
+        .flatten();
+    let remember = fetch == Fetch::Inline && cached.is_none();
+    let bytes = match cached {
+        Some((_, bytes)) => Arc::clone(bytes),
+        None => Arc::new(Zeroizing::new(download.await?)),
+    };
+    if remember && bytes.len() <= ORIGINALS_BUDGET {
+        originals.0.push_back((file.clone(), Arc::clone(&bytes)));
+        while originals.0.len() > ORIGINALS_COUNT
+            || originals
+                .0
+                .iter()
+                .map(|(_, bytes)| bytes.len())
+                .sum::<usize>()
+                > ORIGINALS_BUDGET
+        {
+            originals.0.pop_front();
+        }
+    }
+    // Received pictures are hostile: decode with limits, off the async workers.
+    tokio::task::spawn_blocking(move || -> Result<_> {
+        Ok(match fetch {
+            Fetch::Thumbnail => vec![still(decode_thumbnail(&bytes)?)],
+            Fetch::Full => decode_frames(&bytes, None, FULL_BUDGET)?
+                .into_iter()
+                .map(frame_image)
+                .collect(),
+            Fetch::Inline => {
+                decode_frames(&bytes, Some(crate::files::THUMBNAIL as u32), INLINE_BUDGET)?
                     .into_iter()
                     .map(frame_image)
-                    .collect(),
-                Fetch::Inline => {
-                    decode_frames(&bytes, Some(crate::files::THUMBNAIL as u32), INLINE_BUDGET)?
-                        .into_iter()
-                        .map(frame_image)
-                        .collect()
-                }
-            })
+                    .collect()
+            }
         })
-        .await?
-    };
-    let frames = frames.await.map_err(|error: anyhow::Error| {
-        tracing::warn!(error = %format_args!("{error:#}"), "loading a picture failed");
-        gone(&error)
-    });
-    ctx.send(Update::Image(id, fetch, frames));
+    })
+    .await?
 }
 
 fn still(image: image::DynamicImage) -> (egui::ColorImage, u32) {
@@ -617,6 +668,68 @@ mod tests {
             .enable_time()
             .build()
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn animated_original_is_downloaded_once_for_inline_and_full() {
+        let mut gif = Vec::new();
+        {
+            let mut encoder = image::codecs::gif::GifEncoder::new(&mut gif);
+            for (color, millis) in [([255, 0, 0, 255], 60), ([0, 255, 0, 255], 120)] {
+                let frame = image::RgbaImage::from_pixel(640, 280, image::Rgba(color));
+                encoder
+                    .encode_frame(image::Frame::from_parts(
+                        frame,
+                        0,
+                        0,
+                        image::Delay::from_numer_denom_ms(millis, 1),
+                    ))
+                    .unwrap();
+            }
+        }
+        let (file, _) = prepare_file("Synthetic.gif", "image/gif", &gif, &[]).unwrap();
+        let downloads = std::cell::Cell::new(0);
+        let download = || async {
+            downloads.set(downloads.get() + 1);
+            Ok(gif.clone())
+        };
+        let mut originals = ImageOriginals::default();
+        let inline = image_frames(&mut originals, &file.file, Fetch::Inline, download())
+            .await
+            .unwrap();
+        assert_eq!(downloads.get(), 1);
+        let full = image_frames(&mut originals, &file.file, Fetch::Full, download())
+            .await
+            .unwrap();
+        assert_eq!(downloads.get(), 1, "the original was already authenticated");
+        assert_eq!(inline.len(), 2);
+        assert_eq!(full.len(), 2);
+        for ((inline, inline_ms), (original, original_ms)) in inline.iter().zip(&full) {
+            assert_eq!(inline.size, [320, 140]);
+            assert_eq!(original.size, [640, 280]);
+            assert_eq!(inline_ms, original_ms);
+        }
+        assert_eq!([full[0].1, full[1].1], [60, 120]);
+        eprintln!(
+            "inline_downloads=1 full_upgrade_downloads=0 inline_decodes=1 full_decodes=1 frames_per_decode=2"
+        );
+
+        let mut other = file.file.clone();
+        other.size += 1;
+        let miss = || async { anyhow::bail!("no download available") };
+        assert!(
+            image_frames(&mut originals, &other, Fetch::Full, miss())
+                .await
+                .is_err(),
+            "matching the ID alone does not authenticate another reference"
+        );
+        originals.clear();
+        assert!(
+            image_frames(&mut originals, &file.file, Fetch::Full, miss())
+                .await
+                .is_err(),
+            "discarded originals require a new fetch"
+        );
     }
 
     #[test]

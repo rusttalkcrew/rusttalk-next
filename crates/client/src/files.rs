@@ -20,7 +20,7 @@ use eframe::egui::{
     self, Align, Frame, Id as UiId, Image, Layout, Margin, Modal, Rect, Response, RichText, Role,
     ScrollArea, Sense, TextureHandle, TextureOptions, Ui, UiBuilder, Vec2, WidgetInfo,
 };
-use rusttalk_core::client::{Attachment, save_json};
+use rusttalk_core::client::{Attachment, BlobRef, save_json};
 use tokio::sync::mpsc::UnboundedSender;
 use url::Url;
 
@@ -62,8 +62,12 @@ pub static TEST_OPEN: Mutex<Option<Opener>> = Mutex::new(None);
 pub type Opener = fn(&Path, bool);
 
 pub struct Files {
-    /// Thumbnails and the viewer's full picture, by blob ID.
+    /// Thumbnails, by blob ID.
     images: HashMap<Id, Picture>,
+    /// The last picture opened, retained after dismissal so it can reopen offline.
+    full: Option<FullPicture>,
+    /// Unfinished requests, including for pictures the viewer moved away from.
+    full_pending: Vec<(Url, BlobRef)>,
     /// Small looping copies of animated files shown in the chat, by file blob ID.
     inline: HashMap<Id, Inline>,
     /// Downloads to disk, by blob ID.
@@ -148,6 +152,18 @@ enum Saving {
     Failed,
 }
 
+struct FullPicture {
+    address: Url,
+    blob: BlobRef,
+    picture: Picture,
+}
+
+impl FullPicture {
+    fn matches(&self, address: &Url, blob: &BlobRef) -> bool {
+        &self.address == address && &self.blob == blob
+    }
+}
+
 /// The picture open in the viewer.
 struct Viewer {
     address: Url,
@@ -200,6 +216,8 @@ impl Files {
             .collect();
         Self {
             images: HashMap::new(),
+            full: None,
+            full_pending: Vec::new(),
             inline: HashMap::new(),
             saves: HashMap::new(),
             paths,
@@ -224,16 +242,29 @@ impl Files {
     pub fn image(
         &mut self,
         ctx: &egui::Context,
-        id: Id,
+        address: &Url,
+        blob: &BlobRef,
         fetch: Fetch,
         frames: Result<Vec<(egui::ColorImage, u32)>, bool>,
     ) {
         let slot = match fetch {
-            Fetch::Inline => self.inline.get_mut(&id).map(|inline| &mut inline.picture),
-            Fetch::Thumbnail | Fetch::Full => self.images.get_mut(&id),
+            Fetch::Inline => self
+                .inline
+                .get_mut(&blob.id)
+                .map(|inline| &mut inline.picture),
+            Fetch::Thumbnail => self.images.get_mut(&blob.id),
+            Fetch::Full => {
+                self.full_pending
+                    .retain(|(source, file)| source != address || file != blob);
+                self.full
+                    .as_mut()
+                    .filter(|full| {
+                        full.matches(address, blob) && matches!(full.picture, Picture::Loading)
+                    })
+                    .map(|full| &mut full.picture)
+            }
         };
         let Some(slot) = slot else {
-            // The viewer closed or the message scrolled away meanwhile.
             return;
         };
         *slot = match frames {
@@ -247,6 +278,62 @@ impl Files {
             Err(true) => Picture::Gone,
             Err(false) => Picture::Failed,
         };
+    }
+
+    fn open_viewer(
+        &mut self,
+        address: &Url,
+        commands: &UnboundedSender<Command>,
+        file: &Attachment,
+    ) {
+        let reuse = self.full.as_ref().is_some_and(|full| {
+            full.matches(address, &file.file)
+                && matches!(full.picture, Picture::Loading | Picture::Ready(_))
+        });
+        if !reuse {
+            let request = (address.clone(), file.file.clone());
+            let picture = if self.full_pending.contains(&request) {
+                Picture::Loading
+            } else if commands
+                .send(Command::Image(file.file.clone(), Fetch::Full))
+                .is_ok()
+            {
+                self.full_pending.push(request);
+                Picture::Loading
+            } else {
+                Picture::Failed
+            };
+            self.full = Some(FullPicture {
+                address: address.clone(),
+                blob: file.file.clone(),
+                picture,
+            });
+        }
+        self.viewer = Some(Viewer {
+            address: address.clone(),
+            file: file.clone(),
+            commands: commands.clone(),
+            zoom: 1.0,
+            turns: 0,
+        });
+    }
+
+    pub fn forget_full_pictures(&mut self, address: &Url) {
+        self.full_pending.retain(|(source, _)| source != address);
+        if self
+            .full
+            .as_ref()
+            .is_some_and(|full| &full.address == address)
+        {
+            self.full = None;
+        }
+        if self
+            .viewer
+            .as_ref()
+            .is_some_and(|view| &view.address == address)
+        {
+            self.viewer = None;
+        }
     }
 
     /// Start loading the playing copy of an animated file once it is on screen, after
@@ -998,10 +1085,7 @@ pub fn attachments(
         }
         let playing = matches!(inline, Some(Picture::Ready(_)));
         if let Some(thumb) = file.thumbnail.as_ref().filter(|_| !playing) {
-            bound_pictures(
-                &mut files.images,
-                files.viewer.as_ref().map(|v| v.file.file.id),
-            );
+            bound_pictures(&mut files.images);
             files.images.entry(thumb.id).or_insert_with(|| {
                 let _ = commands.send(Command::Image(thumb.clone(), Fetch::Thumbnail));
                 Picture::Loading
@@ -1047,15 +1131,7 @@ pub fn attachments(
             }
         }
         if show {
-            files.images.insert(file.file.id, Picture::Loading);
-            let _ = commands.send(Command::Image(file.file.clone(), Fetch::Full));
-            files.viewer = Some(Viewer {
-                address: address.clone(),
-                file: file.clone(),
-                commands: commands.clone(),
-                zoom: 1.0,
-                turns: 0,
-            });
+            files.open_viewer(address, commands, file);
         }
         if retry && let Some(thumb) = &file.thumbnail {
             files.images.remove(&thumb.id);
@@ -1141,10 +1217,7 @@ fn link_card(
     }
     let card = card.clone();
     if let Some(thumb) = &file.thumbnail {
-        bound_pictures(
-            &mut files.images,
-            files.viewer.as_ref().map(|v| v.file.file.id),
-        );
+        bound_pictures(&mut files.images);
         files.images.entry(thumb.id).or_insert_with(|| {
             let _ = commands.send(Command::Image(thumb.clone(), Fetch::Thumbnail));
             Picture::Loading
@@ -1197,12 +1270,10 @@ fn evict(
     out
 }
 
-/// Empty the picture cache once it holds too many, except the viewer's (`open`);
-/// shown ones load again on demand.
-fn bound_pictures(images: &mut HashMap<Id, Picture>, open: Option<Id>) {
+/// Shown thumbnails load again on demand after the cache fills.
+fn bound_pictures(images: &mut HashMap<Id, Picture>) {
     if images.len() > MAX_PICTURES {
-        // Loading entries stay so their pending answers still land.
-        images.retain(|id, picture| Some(*id) == open || matches!(picture, Picture::Loading));
+        images.retain(|_, picture| matches!(picture, Picture::Loading));
     }
 }
 
@@ -1394,7 +1465,7 @@ pub fn viewer(ctx: &egui::Context, files: &mut Files) {
                 ui.add_space(8.0);
                 let room = ui.available_size();
                 let view = files.viewer.as_ref().expect("checked above");
-                match files.images.get(&file.file.id) {
+                match files.full.as_ref().map(|full| &full.picture) {
                     Some(Picture::Ready(anim)) => {
                         let texture = anim.current(ui, true);
                         let size = texture.size_vec2();
@@ -1435,8 +1506,6 @@ pub fn viewer(ctx: &egui::Context, files: &mut Files) {
         files.open_file(&commands, &file);
     }
     if close || modal.should_close() {
-        // The full picture can be large; keep only thumbnails around.
-        files.images.remove(&file.file.id);
         files.viewer = None;
     }
 }
@@ -1464,24 +1533,18 @@ mod tests {
                         egui::ColorImage::filled([400, 200], egui::Color32::GREEN),
                         TextureOptions::LINEAR,
                     );
-                    files.images.insert(
-                        [1; 32],
-                        Picture::Ready(Anim {
-                            frames: vec![texture],
-                            delays: vec![100],
-                        }),
-                    );
-                    files.viewer = Some(Viewer {
-                        address: Url::parse("https://localhost/").unwrap(),
-                        file: Attachment {
-                            file: rusttalk_core::client::BlobRef::for_tests([1; 32]),
-                            name: "Test image".into(),
-                            media_type: "image/png".into(),
-                            thumbnail: None,
-                        },
-                        commands: tokio::sync::mpsc::unbounded_channel().0,
-                        zoom: 1.0,
-                        turns: 0,
+                    let address = Url::parse("https://localhost/").unwrap();
+                    let file = Attachment {
+                        file: BlobRef::for_tests([1; 32]),
+                        name: "Test image".into(),
+                        media_type: "image/png".into(),
+                        thumbnail: None,
+                    };
+                    let (commands, _sent) = tokio::sync::mpsc::unbounded_channel();
+                    files.open_viewer(&address, &commands, &file);
+                    files.full.as_mut().unwrap().picture = Picture::Ready(Anim {
+                        frames: vec![texture],
+                        delays: vec![100],
                     });
                 }
                 viewer(ui.ctx(), files);
@@ -1555,13 +1618,16 @@ mod tests {
                 // This was inside the unrotated image, but is now dimmed.
                 click(&mut harness, egui::pos2(230.0, 320.0), touch);
                 assert!(harness.state().viewer.is_none(), "backdrop dismissal");
-                assert!(!harness.state().images.contains_key(&[1; 32]));
+                assert!(matches!(
+                    harness.state().full.as_ref().unwrap().picture,
+                    Picture::Ready(_)
+                ));
             }
         }
     }
 
     fn painted_image(harness: &Harness<'_, Files>) -> Rect {
-        let Some(Picture::Ready(anim)) = harness.state().images.get(&[1; 32]) else {
+        let Picture::Ready(anim) = &harness.state().full.as_ref().unwrap().picture else {
             panic!("missing image");
         };
         harness
@@ -1652,19 +1718,73 @@ mod tests {
     }
 
     #[test]
+    fn viewer_reuses_only_the_last_full_picture_and_scopes_pending_requests() {
+        let ctx = egui::Context::default();
+        let data = tempfile::tempdir().unwrap();
+        let mut files = Files::new(data.path());
+        let first = Url::parse("https://first.example.org/").unwrap();
+        let second = Url::parse("https://second.example.org/").unwrap();
+        let (commands, mut sent) = tokio::sync::mpsc::unbounded_channel();
+        let file = Attachment {
+            file: BlobRef::for_tests([1; 32]),
+            name: "Picture".into(),
+            media_type: "image/png".into(),
+            thumbnail: None,
+        };
+
+        files.open_viewer(&first, &commands, &file);
+        files.open_viewer(&second, &commands, &file);
+        files.open_viewer(&first, &commands, &file);
+        assert_eq!(std::iter::from_fn(|| sent.try_recv().ok()).count(), 2);
+
+        let frame = || {
+            Ok(vec![(
+                egui::ColorImage::filled([2, 2], egui::Color32::RED),
+                0,
+            )])
+        };
+        files.image(&ctx, &second, &file.file, Fetch::Full, frame());
+        assert_eq!(
+            ctx.tex_manager().read().num_allocated(),
+            1,
+            "only the font texture"
+        );
+        assert!(matches!(
+            files.full.as_ref().unwrap().picture,
+            Picture::Loading
+        ));
+        files.image(&ctx, &first, &file.file, Fetch::Full, frame());
+        assert!(matches!(
+            files.full.as_ref().unwrap().picture,
+            Picture::Ready(_)
+        ));
+        files.open_viewer(&second, &commands, &file);
+        assert!(matches!(
+            sent.try_recv(),
+            Ok(Command::Image(_, Fetch::Full))
+        ));
+        assert_eq!(
+            ctx.tex_manager().read().num_allocated(),
+            1,
+            "previous image released"
+        );
+        files.forget_full_pictures(&second);
+        files.image(&ctx, &second, &file.file, Fetch::Full, frame());
+        assert!(files.full.is_none());
+        assert!(files.viewer.is_none());
+        assert!(files.full_pending.is_empty());
+    }
+
+    #[test]
     fn pictures_and_link_previews_stay_bounded() {
         let mut images: HashMap<Id, Picture> = (0..=MAX_PICTURES as u8)
             .map(|i| ([i; 32], Picture::Failed))
             .collect();
         images.insert([254; 32], Picture::Loading);
-        bound_pictures(&mut images, Some([3; 32]));
+        bound_pictures(&mut images);
         let mut kept: Vec<_> = images.keys().copied().collect();
         kept.sort();
-        assert_eq!(
-            kept,
-            [[3; 32], [254; 32]],
-            "the viewer's and loading ones stay"
-        );
+        assert_eq!(kept, [[254; 32]], "unfinished requests stay");
         let card = || {
             Card::Ready(link_cards::Card {
                 url: "https://example.org/".into(),

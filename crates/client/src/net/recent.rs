@@ -434,6 +434,7 @@ impl State {
             Err(error) => tracing::warn!(%error, "could not read obsolete directory"),
             Ok(None) => {}
         }
+        self.image_originals.clear();
         ctx.send(Update::Inaccessible(url.clone(), ids));
     }
 
@@ -485,6 +486,7 @@ impl State {
         }
         if !pages.is_empty() {
             self.save_history();
+            self.image_originals.clear();
             ctx.send(Update::ResetHistory(url.clone(), pages));
         }
     }
