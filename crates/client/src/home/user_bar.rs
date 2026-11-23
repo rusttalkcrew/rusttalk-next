@@ -12,7 +12,9 @@ use crate::{
 };
 
 const AVATAR_SIZE: f32 = 32.0;
-const BAR_HEIGHT: f32 = 40.0;
+/// The message bar's height, plus the difference between the chat's margin
+/// (`SPACE_M`) and this panel's (`SPACE_S`) on both sides: both centres line up.
+const BAR_HEIGHT: f32 = super::COMPOSER_HEIGHT + 2.0 * (ui::SPACE_M - ui::SPACE_S);
 const BUTTON_SIZE: Vec2 = Vec2::new(30.0, ICON_BUTTON);
 
 /// Label and one-line hint of a status.

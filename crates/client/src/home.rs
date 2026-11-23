@@ -62,7 +62,15 @@ const FIELD_WIDTH: f32 = 280.0;
 /// Show the character count once a message gets this long.
 const COUNT_FROM: usize = 1_800;
 /// The buttons in the message bar.
-const COMPOSER_BUTTON: f32 = 36.0;
+const COMPOSER_BUTTON: f32 = ui::ICON_BUTTON + 4.0;
+/// Above and below a line of text in the message bar, centring it on the buttons
+/// (a line of body text is about 18 points tall).
+const COMPOSER_TEXT_PAD: i8 = ((COMPOSER_BUTTON - 18.0) / 2.0) as i8;
+/// Around the buttons inside the message bar.
+const COMPOSER_PADDING: f32 = ui::SPACE_XS + 2.0;
+/// The message bar's height with one line of text. The user bar in the bottom left
+/// is as tall plus its frame, so both share one centre line.
+pub const COMPOSER_HEIGHT: f32 = COMPOSER_BUTTON + 2.0 * COMPOSER_PADDING;
 const DAY: u32 = 24 * 60 * 60;
 /// Seconds without any input before "Online" turns into "Away" by itself.
 const AWAY_AFTER: f64 = 10.0 * 60.0;
@@ -1835,26 +1843,26 @@ pub fn show(
     let member_server = home.member_server().filter(|_| !list);
     // On phones the member list covers the column, and Back closes it first.
     let members_cover = phone && member_server.is_some() && home.layout.members_shown();
-    if phone && !list {
+    // Back sits in the open pane's header when it has one (`header_back`), else in
+    // a bar of its own; which one is known from the last frame.
+    let back_id = phone_back_id();
+    let last: PhoneBack = ui.data(|data| data.get_temp(back_id)).unwrap_or_default();
+    let wants_back = phone && !list;
+    let in_header = wants_back && !members_cover;
+    ui.data_mut(|data| {
+        data.insert_temp(
+            back_id,
+            PhoneBack {
+                wanted: in_header,
+                ..PhoneBack::default()
+            },
+        );
+    });
+    let mut back = false;
+    if wants_back && !(in_header && last.in_header) {
         Panel::top("phone-back")
             .frame(panel_frame(colors.side))
-            .show(ui, |ui| {
-                if ui::icon_button(
-                    ui,
-                    "⬅",
-                    t!("common.back"),
-                    ui::Look::Ghost,
-                    Vec2::new(ui::ICON_BUTTON.max(36.0), ui::ICON_BUTTON),
-                )
-                .clicked()
-                {
-                    if members_cover {
-                        home.layout.toggle_members();
-                    } else {
-                        home.layout.list = true;
-                    }
-                }
-            });
+            .show(ui, |ui| back = back_button(ui).clicked());
     }
     let mut members = None;
     if let Some(index) = member_server {
@@ -1911,6 +1919,18 @@ pub fn show(
                 }
             });
     }
+    let header: PhoneBack = ui.data(|data| data.get_temp(back_id)).unwrap_or_default();
+    if header.in_header != last.in_header {
+        ui.ctx()
+            .request_discard("Back moved between its bar and the header");
+    }
+    if back || header.clicked {
+        if members_cover {
+            home.layout.toggle_members();
+        } else {
+            home.layout.list = true;
+        }
+    }
     // Resize handles go last so they sit above the panels on both sides of each edge.
     let mut dragging = false;
     if let Some(channels) = channels.filter(|_| !phone) {
@@ -1949,6 +1969,39 @@ pub fn show(
     updates.dialog(ui.ctx());
     crop_dialog(ui.ctx(), home);
     action
+}
+
+/// Back on a phone: in the open pane's header, or in a bar of its own.
+#[derive(Clone, Copy, Default)]
+struct PhoneBack {
+    /// The pane's header should show it this frame.
+    wanted: bool,
+    /// A header showed it.
+    in_header: bool,
+    clicked: bool,
+}
+
+fn phone_back_id() -> UiId {
+    UiId::unique("phone back")
+}
+
+fn back_button(ui: &mut Ui) -> Response {
+    let size = Vec2::new(ui::ICON_BUTTON.max(36.0), ui::ICON_BUTTON);
+    ui::icon_button(ui, "⬅", t!("common.back"), ui::Look::Ghost, size)
+}
+
+/// Phones: Back at the start of a pane's header, so the header and the Back bar
+/// take one row together.
+fn header_back(ui: &mut Ui) {
+    let id = phone_back_id();
+    let Some(mut back) = ui.data(|data| data.get_temp::<PhoneBack>(id)) else {
+        return;
+    };
+    if back.wanted {
+        back.in_header = true;
+        back.clicked |= back_button(ui).clicked();
+        ui.data_mut(|data| data.insert_temp(id, back));
+    }
 }
 
 fn show_compatibility(ui: &mut Ui, home: &mut Home, index: usize) -> bool {
@@ -4044,12 +4097,11 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
         files.paste(ui.ctx(), ask);
     }
     let attach = Panel::bottom("composer")
-        // It floats over the chat: no line above, room around it.
+        // It floats over the chat: no line above, and the pane's margin on the
+        // sides and below it, so its centre lines up with the user bar's.
         .frame(Frame::new().inner_margin(Margin {
-            left: 8,
-            right: 8,
-            top: 4,
-            bottom: 8,
+            top: ui::SPACE_S as i8,
+            ..Margin::ZERO
         }))
         .show_separator_line(false)
         .show(ui, |ui| {
@@ -4534,7 +4586,8 @@ pub fn pane_title(
         .show_separator_line(true)
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(ui::title(title));
+                header_back(ui);
+                // Buttons first, so a long name is cut short instead of pushing them off.
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if let Some(layout) = members {
                         layout::members_button(ui, layout);
@@ -4546,6 +4599,9 @@ pub fn pane_title(
                     if let Some(channel) = files {
                         files_button(ui, channel);
                     }
+                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                        ui.add(Label::new(ui::title(title)).truncate());
+                    });
                 });
             });
         });
@@ -4567,6 +4623,7 @@ fn dm_title(ui: &mut Ui, home: &Home, peer: Id) -> Option<(usize, person::Pick)>
         .show_separator_line(true)
         .show(ui, |ui| {
             ui.horizontal(|ui| {
+                header_back(ui);
                 let Some(index) = index else {
                     ui.label(ui::title(format!("@ {name}")));
                     return;
@@ -4714,7 +4771,7 @@ fn composer(
     let bar = Frame::new()
         .fill(ui::colors(ui).composer)
         .corner_radius(ui::RADIUS_WINDOW)
-        .inner_margin(Margin::same(ui::SPACE_XS as i8 + 2))
+        .inner_margin(Margin::same(COMPOSER_PADDING as i8))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             if !chat.staged.is_empty() {
@@ -5007,8 +5064,11 @@ fn composer_field(
                 };
                 let edit = TextEdit::multiline(&mut chat.draft)
                     .layouter(&mut layouter)
-                    .frame(Frame::NONE.inner_margin(Margin::symmetric(6, 9)))
-                    .hint_text(if online {
+                    .frame(Frame::NONE.inner_margin(Margin::symmetric(6, COMPOSER_TEXT_PAD)))
+                    .hint_text(if online && !fits(ui, hint) {
+                        // A narrow bar would wrap the channel's name over lines.
+                        t!("home.message_hint_short").into()
+                    } else if online {
                         t!("home.message_hint", channel = hint)
                     } else {
                         t!("home.waiting_for_server").into()
@@ -5043,6 +5103,19 @@ fn composer_field(
             .inner
         })
         .inner
+}
+
+/// Whether "Message `channel`" fits the message bar on one line.
+fn fits(ui: &Ui, channel: &str) -> bool {
+    let hint = t!("home.message_hint", channel = channel);
+    let font = emoji::font(ui::TEXT_BODY);
+    let width = ui
+        .painter()
+        .layout_no_wrap(hint, font, Color32::WHITE)
+        .size()
+        .x;
+    // The field's own padding (6 each side) comes off the room.
+    width + 12.0 <= ui.available_width()
 }
 
 fn message_time(ui: &mut Ui, msg: &Msg) {
@@ -6150,6 +6223,19 @@ mod tests {
                 home.find.error = Some(
                     "Couldn't reach the server directory. Check its address in Settings.".into(),
                 );
+                home.find.results = (0..3)
+                    .map(|at| crate::net::Listed {
+                        server: KnownServer {
+                            address: format!("https://s{at}.example.org/").parse().unwrap(),
+                            server_id: [at; 32],
+                            tls_fingerprint: None,
+                        },
+                        name: "RustTalk Official Server with a long name".into(),
+                        description: "A friendly place to talk about anything, with voice channels for games and music.".into(),
+                        members: 9,
+                        open: true,
+                    })
+                    .collect();
             }),
             ("join", |home| home.view = View::Join),
             ("settings", |home| home.settings = Some(Tab::Profile)),
