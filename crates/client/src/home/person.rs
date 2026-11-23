@@ -135,7 +135,7 @@ impl<'a> Person<'a> {
     /// Whether you may moderate them, as the server decides it (`Authority::outrank`):
     /// their highest role ranks strictly below yours and below the owner's, which
     /// nobody outranks. The admin role counts by its rank only.
-    fn outranked(&self) -> bool {
+    pub(crate) fn outranked(&self) -> bool {
         let Some(member) = self.member() else {
             return false;
         };
@@ -263,10 +263,18 @@ fn voice_channel(server: &Server, person: &Id) -> Option<Id> {
 /// The card on a left click on `response` (opening where it was clicked with
 /// `at_click`, for big tiles) and the menu on a right click.
 pub fn interact(ui: &Ui, response: &Response, person: &Person, at_click: bool) -> Option<Pick> {
+    let id = popup_id(response, person);
     let name = person.server.member_name(&person.person);
-    let card = ui::card_popup(ui, response, &name, at_click, |ui| person.card(ui)).flatten();
-    let menu = ui::context_menu(response, |m| person.menu(m)).flatten();
+    let card = ui::card_popup(ui, id, response, &name, at_click, |ui| person.card(ui)).flatten();
+    let menu = ui::context_menu_with_id(response, id, |m| person.menu(m)).flatten();
     card.or(menu)
+}
+
+/// A popup must never inherit a different person when a positional row is reused.
+pub(crate) fn popup_id(response: &Response, person: &Person) -> eframe::egui::Id {
+    response
+        .id
+        .with((person.server.known.server_id, person.person))
 }
 
 /// Do what was picked for `person` on server `index`.
@@ -402,6 +410,308 @@ mod tests {
         harness.get_by_label("target").click_secondary();
         harness.run_steps(4);
         harness
+    }
+
+    const BOB: Id = [8; 32];
+
+    fn kick_harness(
+        settings: bool,
+    ) -> (
+        Harness<'static, Option<Home>>,
+        tokio::sync::mpsc::UnboundedReceiver<Command>,
+        tokio::sync::mpsc::UnboundedReceiver<Command>,
+    ) {
+        let mut fixture = menu(Case {
+            perms: Perms {
+                rank: 500,
+                ..moderator()
+            },
+            person: ANN,
+            in_voice: false,
+            in_call: false,
+            ann_roles: &[],
+        });
+        let mut home = fixture.state_mut().take().unwrap();
+        home.servers[0].dir.members.push(member(BOB, "Bob"));
+        let (commands, sent) = tokio::sync::mpsc::unbounded_channel();
+        home.servers[0].commands = commands;
+        let (commands, other_sent) = tokio::sync::mpsc::unbounded_channel();
+        let mut known = home.servers[0].known.clone();
+        known.server_id = [9; 32];
+        known.address = "https://other.example.org/".parse().unwrap();
+        let mut other = super::super::new_server(known, "Other", commands);
+        other.status = Status::Online;
+        home.servers.push(other);
+        if settings {
+            admin::open(&mut home, 0, admin::Tab::Members);
+        }
+        let mut harness = Harness::builder()
+            .with_size(Vec2::new(900.0, 800.0))
+            .build_ui_state(
+                |ui, home: &mut Option<Home>| {
+                    let Some(home) = home else { return };
+                    if home.server_settings.is_none() {
+                        let server = &home.servers[0];
+                        let mut picked = None;
+                        for member in &server.dir.members {
+                            let row = ui.button(member.display_name());
+                            let target = Person::of(home, server, member.person);
+                            if let Some(pick) = interact(ui, &row, &target, false) {
+                                picked = Some((member.person, pick));
+                            }
+                        }
+                        if let Some((person, pick)) = picked {
+                            apply(home, 0, person, pick, 0.0);
+                        }
+                    }
+                    admin::window(ui.ctx(), home);
+                    admin::kick_dialog(ui.ctx(), home);
+                },
+                None,
+            );
+        ui::install(&harness.ctx);
+        *harness.state_mut() = Some(home);
+        harness.run_steps(4);
+        (harness, sent, other_sent)
+    }
+
+    fn choose_kick(harness: &mut Harness<'static, Option<Home>>, name: &str) {
+        harness
+            .get_by_role_and_label(eframe::egui::accesskit::Role::Button, name)
+            .click_secondary();
+        harness.run_steps(4);
+        harness.get_by_label(t!("admin.kick")).click();
+        harness.run_steps(4);
+    }
+
+    fn drain_kicks(sent: &mut tokio::sync::mpsc::UnboundedReceiver<Command>) -> Vec<Id> {
+        let mut kicks = Vec::new();
+        while let Ok(command) = sent.try_recv() {
+            if let Command::Admin(Admin::Kick(person)) = command {
+                kicks.push(person);
+            }
+        }
+        kicks
+    }
+
+    #[test]
+    fn kick_confirmation_keeps_target_and_sends_once_including_inside_settings() {
+        for settings in [false, true] {
+            let (mut harness, mut sent, mut other) = kick_harness(settings);
+            choose_kick(&mut harness, "Ann");
+            assert!(
+                harness
+                    .query_by_label(&t!("admin.kick_title", name = "Ann"))
+                    .is_some()
+            );
+            assert!(drain_kicks(&mut sent).is_empty());
+            assert_eq!(
+                harness.state().as_ref().unwrap().server_settings.is_some(),
+                settings
+            );
+            harness
+                .get_by_role_and_label(eframe::egui::accesskit::Role::Button, "Bob")
+                .click_secondary();
+            harness.run_steps(4);
+            assert!(
+                harness
+                    .query_by_label(&t!("admin.kick_title", name = "Ann"))
+                    .is_some()
+            );
+            harness.state_mut().as_mut().unwrap().servers[0]
+                .dir
+                .members
+                .reverse();
+            harness.run_steps(4);
+            harness.get_by_label(t!("common.cancel")).click();
+            harness.run_steps(4);
+            assert!(drain_kicks(&mut sent).is_empty());
+
+            choose_kick(&mut harness, "Bob");
+            harness.get_by_label(t!("admin.kick")).click();
+            harness.run_steps(4);
+            assert_eq!(drain_kicks(&mut sent), vec![BOB]);
+            assert!(harness.state().as_ref().unwrap().kick.is_none());
+            harness.run_steps(4);
+            assert!(drain_kicks(&mut sent).is_empty());
+            assert!(drain_kicks(&mut other).is_empty());
+        }
+    }
+
+    #[test]
+    fn kick_confirmation_rechecks_live_authority_and_connection() {
+        for change in 0..7 {
+            let (mut harness, mut sent, mut other) = kick_harness(false);
+            choose_kick(&mut harness, "Ann");
+            let server = &mut harness.state_mut().as_mut().unwrap().servers[0];
+            match change {
+                0 => server.dir.perms.kick = false,
+                1 => server.dir.members.retain(|m| m.person != ANN),
+                2 => server
+                    .dir
+                    .members
+                    .iter_mut()
+                    .find(|m| m.person == ANN)
+                    .unwrap()
+                    .roles
+                    .push("owner".into()),
+                3 => server.status = Status::Offline,
+                4 => server.known.server_id = [99; 32],
+                5 => {
+                    let (commands, _) = tokio::sync::mpsc::unbounded_channel();
+                    server.commands = commands;
+                }
+                _ => server.dir.members.retain(|m| m.person != ME),
+            }
+            harness.run_steps(4);
+            assert!(harness.state().as_ref().unwrap().kick.is_none());
+            assert!(drain_kicks(&mut sent).is_empty());
+            assert!(drain_kicks(&mut other).is_empty());
+        }
+    }
+
+    #[test]
+    fn kick_confirmation_expires_on_reconnect_between_frames() {
+        let (mut harness, mut sent, mut other) = kick_harness(false);
+        choose_kick(&mut harness, "Ann");
+        let ctx = harness.ctx.clone();
+        let home = harness.state_mut().as_mut().unwrap();
+        for index in [1, 0] {
+            let address = home.servers[index].known.address.clone();
+            for status in [Status::Offline, Status::Online] {
+                home.apply(
+                    &ctx,
+                    crate::net::Update::Status(address.clone(), status),
+                    0.0,
+                );
+            }
+            assert_eq!(home.kick.is_some(), index == 1);
+        }
+        harness.run_steps(4);
+        assert!(harness.query_by_label(t!("admin.kick")).is_none());
+        assert!(drain_kicks(&mut sent).is_empty());
+        assert!(drain_kicks(&mut other).is_empty());
+    }
+
+    #[test]
+    fn open_member_menu_cannot_follow_a_reused_row() {
+        let (mut harness, mut sent, _) = kick_harness(false);
+        harness
+            .get_by_role_and_label(eframe::egui::accesskit::Role::Button, "Ann")
+            .click_secondary();
+        harness.run_steps(4);
+        harness.state_mut().as_mut().unwrap().servers[0]
+            .dir
+            .members
+            .reverse();
+        harness.run_steps(4);
+        // A positional widget can disappear when reordered; it may close, never retarget.
+        if let Some(kick) = harness.query_by_label(t!("admin.kick")) {
+            kick.click();
+            harness.run_steps(4);
+            assert!(
+                harness
+                    .query_by_label(&t!("admin.kick_title", name = "Ann"))
+                    .is_some()
+            );
+        }
+        assert!(drain_kicks(&mut sent).is_empty());
+    }
+
+    #[test]
+    fn member_menu_reopening_selects_only_the_new_person() {
+        let (mut harness, mut sent, _) = kick_harness(false);
+        harness
+            .get_by_role_and_label(eframe::egui::accesskit::Role::Button, "Ann")
+            .click_secondary();
+        harness.run_steps(4);
+        harness
+            .get_by_role_and_label(eframe::egui::accesskit::Role::Button, "Bob")
+            .click_secondary();
+        harness.run_steps(4);
+        // Outside right-click closes the old menu; reopen if necessary.
+        if harness.query_by_label(t!("admin.kick")).is_none() {
+            harness
+                .get_by_role_and_label(eframe::egui::accesskit::Role::Button, "Bob")
+                .click_secondary();
+            harness.run_steps(4);
+        }
+        harness.get_by_label(t!("admin.kick")).click();
+        harness.run_steps(4);
+        assert!(
+            harness
+                .query_by_label(&t!("admin.kick_title", name = "Bob"))
+                .is_some()
+        );
+        harness.get_by_label(t!("common.cancel")).click();
+        harness.run_steps(4);
+        assert!(drain_kicks(&mut sent).is_empty());
+    }
+
+    #[test]
+    fn kick_confirmation_keeps_origin_after_server_switch_and_repeat_clicks() {
+        let (mut harness, mut sent, mut other) = kick_harness(false);
+        choose_kick(&mut harness, "Ann");
+        let home = harness.state_mut().as_mut().unwrap();
+        // A second action cannot replace a question already on screen.
+        admin::moderate(home, 0, BOB, Moderate::Kick);
+        home.servers.swap(0, 1);
+        harness.run_steps(4);
+        harness.get_by_label(t!("admin.kick")).click();
+        harness.get_by_label(t!("admin.kick")).click();
+        harness.run_steps(4);
+        assert_eq!(drain_kicks(&mut sent), vec![ANN]);
+        assert!(drain_kicks(&mut other).is_empty());
+    }
+
+    #[test]
+    fn member_settings_actions_also_open_the_dedicated_confirmation() {
+        let (mut harness, mut sent, _) = kick_harness(true);
+        harness
+            .get_by_label(&t!("admin.member_actions", name = "Ann"))
+            .click();
+        harness.run_steps(4);
+        harness.get_by_label(t!("admin.kick")).click();
+        harness.run_steps(4);
+        assert!(
+            harness
+                .query_by_label(&t!("admin.kick_title", name = "Ann"))
+                .is_some()
+        );
+        assert!(drain_kicks(&mut sent).is_empty());
+        harness.get_by_label(t!("admin.kick")).click();
+        harness.run_steps(4);
+        assert_eq!(drain_kicks(&mut sent), vec![ANN]);
+        assert!(harness.state().as_ref().unwrap().server_settings.is_some());
+    }
+
+    #[test]
+    fn kick_confirmation_dark_and_light() {
+        for dark in [true, false] {
+            let (mut harness, mut sent, _) = kick_harness(true);
+            harness.ctx.set_theme(if dark {
+                eframe::egui::Theme::Dark
+            } else {
+                eframe::egui::Theme::Light
+            });
+            harness.run_steps(4);
+            choose_kick(&mut harness, "Ann");
+            assert!(
+                harness
+                    .query_by_label(&t!("admin.kick_title", name = "Ann"))
+                    .is_some()
+            );
+            if let Ok(dir) = std::env::var("RUSTTALK_TEST_SCREENSHOTS") {
+                std::fs::create_dir_all(&dir).unwrap();
+                let theme = if dark { "dark" } else { "light" };
+                harness
+                    .render()
+                    .unwrap()
+                    .save(format!("{dir}/kick-{theme}.png"))
+                    .unwrap();
+            }
+            assert!(drain_kicks(&mut sent).is_empty());
+        }
     }
 
     fn shown(harness: &Harness<'static, Option<Home>>, label: &str) -> bool {

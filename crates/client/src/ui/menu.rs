@@ -383,7 +383,15 @@ fn show<R>(popup: Popup, width: f32, add: impl FnOnce(&mut Menu) -> R) -> Option
 
 /// A menu that opens under `anchor` when it is clicked.
 pub fn menu<R>(anchor: &Response, add: impl FnOnce(&mut Menu) -> R) -> Option<R> {
-    show(Popup::menu(anchor).gap(4.0), MENU_WIDTH, add)
+    menu_with_id(anchor, Popup::default_response_id(anchor), add)
+}
+
+pub fn menu_with_id<R>(
+    anchor: &Response,
+    id: egui::Id,
+    add: impl FnOnce(&mut Menu) -> R,
+) -> Option<R> {
+    show(Popup::menu(anchor).id(id).gap(4.0), MENU_WIDTH, add)
 }
 
 /// A wider `menu`, for rows with a line of help.
@@ -409,8 +417,16 @@ pub fn menu_above<R>(anchor: &Response, add: impl FnOnce(&mut Menu) -> R) -> Opt
 
 /// Open at the pointer on a right click or a stationary long press.
 pub fn context_menu<R>(anchor: &Response, add: impl FnOnce(&mut Menu) -> R) -> Option<R> {
+    context_menu_with_id(anchor, Popup::default_response_id(anchor), add)
+}
+
+pub fn context_menu_with_id<R>(
+    anchor: &Response,
+    id: egui::Id,
+    add: impl FnOnce(&mut Menu) -> R,
+) -> Option<R> {
     let ctx = &anchor.ctx;
-    let mut popup = Popup::context_menu(anchor);
+    let mut popup = Popup::context_menu(anchor).id(id);
     // A selectable label or link can own the hold inside a row. Nested menus
     // (e.g. a saved file inside a message) get first choice as children draw first.
     if anchor.enabled()
