@@ -1542,5 +1542,9 @@ clipboard.copy = Kopieren
 clipboard.cut = Ausschneiden
 clipboard.select_all = Alles auswählen
 
+camera.flip = Kamera wechseln
+camera.torch_on = Licht einschalten
+camera.torch_off = Licht ausschalten
+camera.switch_failed = Kamerawechsel nicht verfügbar.
 call.listen = Anhören
 call.stop_listening = Nicht mehr zuhören

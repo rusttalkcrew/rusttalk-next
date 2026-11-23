@@ -408,7 +408,7 @@ pub fn frame(ctx: &egui::Context, home: &mut Home) {
     }
     let recording = home.hotkeys.recording();
     let voice = &mut home.voice;
-    let settings = voice.audio.settings();
+    let mut settings = voice.audio.settings();
     let key = Key::from_name(&settings.key);
     // While another app is in front, the global shortcut (see `hotkeys`) talks instead.
     let down = settings.push_to_talk
@@ -452,7 +452,12 @@ pub fn frame(ctx: &egui::Context, home: &mut Home) {
         .as_ref()
         .is_some_and(|call| call.can_share_video);
     let preview = home.settings == Some(Tab::Video);
-    let change = home.voice.camera.update(ctx, &settings, can_video, preview);
+    let change = home
+        .voice
+        .camera
+        .update(ctx, &mut settings, can_video, preview);
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    home.voice.audio.set_settings(settings.clone());
     if let Some(text) = home.voice.camera.problem.take() {
         home.toast = Some((text, ctx.input(|input| input.time) + 6.0));
     }

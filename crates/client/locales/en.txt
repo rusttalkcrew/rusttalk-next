@@ -1545,5 +1545,9 @@ clipboard.copy = Copy
 clipboard.cut = Cut
 clipboard.select_all = Select all
 
+camera.flip = Flip camera
+camera.torch_on = Turn light on
+camera.torch_off = Turn light off
+camera.switch_failed = Camera change unavailable.
 call.listen = Listen
 call.stop_listening = Stop listening
