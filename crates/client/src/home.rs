@@ -153,6 +153,7 @@ pub struct Home {
     pub error: Option<String>,
     pub key_storage: crate::key_storage::Form,
     pub server_settings: Option<admin::Settings>,
+    pub kick: Option<admin::Kick>,
     /// The crop step for a picked profile picture or server icon.
     crop: Option<crate::crop::Crop>,
     /// My account: the default name being edited, and the bio as typed, unsaved.
@@ -400,6 +401,7 @@ impl Home {
             error: None,
             key_storage: Default::default(),
             server_settings: None,
+            kick: None,
             crop: None,
             name_draft: None,
             bio_draft: None,
@@ -1168,6 +1170,14 @@ impl Home {
                 let Some(index) = self.index(&address) else {
                     return;
                 };
+                if status != Status::Online
+                    && self
+                        .kick
+                        .as_ref()
+                        .is_some_and(|kick| kick.belongs_to(&self.servers[index]))
+                {
+                    self.kick = None;
+                }
                 let joining = matches!(&self.join, Join::Joining(url) if *url == address);
                 match (&status, joining) {
                     (Status::Online, true) => {
@@ -2183,6 +2193,7 @@ pub fn show(
     let action = crate::settings::show(ui.ctx(), home, updates, keystore);
     updates.dialog(ui.ctx());
     crop_dialog(ui.ctx(), home);
+    admin::kick_dialog(ui.ctx(), home);
     action
 }
 
@@ -4931,7 +4942,14 @@ fn dm_title(ui: &mut Ui, home: &Home, peer: Id) -> Option<(usize, person::Pick)>
                     let size = Vec2::splat(ui::ICON_BUTTON);
                     let button =
                         ui::icon_button(ui, "👤", t!("person.profile"), ui::Look::Plain, size);
-                    let card = ui::card_popup(ui, &button, &name, false, |ui| target.card(ui));
+                    let card = ui::card_popup(
+                        ui,
+                        person::popup_id(&button, &target),
+                        &button,
+                        &name,
+                        false,
+                        |ui| target.card(ui),
+                    );
                     pick = pick.take().or(card.flatten());
                 });
             });

@@ -627,12 +627,13 @@ pub fn popup<R>(anchor: &Response, add: impl FnOnce(&mut Ui) -> R) -> Option<R> 
 /// clicked instead, so on a big tile it covers that tile rather than its neighbour.
 pub fn card_popup<R>(
     ui: &Ui,
+    id: Id,
     anchor: &Response,
     label: &str,
     at_click: bool,
     add: impl FnOnce(&mut Ui) -> R,
 ) -> Option<R> {
-    let id = anchor.id.with("card");
+    let id = id.with("card");
     let spot = id.with("spot");
     if at_click
         && anchor.clicked()

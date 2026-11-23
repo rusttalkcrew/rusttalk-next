@@ -15,7 +15,7 @@ Unreleased under the new version and date.
 - Forum channels: searchable posts with folded replies, polls, up and down votes and sorting.
 - Oversized stored uploads show their size and the app limit beside chat or shared files, including voice channels.
 - Mobile calls show your camera preview with front/back switching and a supported rear-camera light.
-
+- Kicking a member now asks for confirmation by name and keeps the original member and server selected.
 - Ask someone to join your voice channel: it rings, and they can join, decline, come later or mute you for 15 minutes
 - Servers can turn on Events: a calendar above the channels to suggest, approve and add events, in real life or in a channel
 - Say whether you are going to an event, see who is still missing, and remind them
