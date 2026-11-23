@@ -12,8 +12,8 @@ use rusttalk_core::{client::MAX_TEXT_CHARS, messages::PollPart};
 
 use super::{
     Dialog, Embeds, Home, Pick, To, View, add_picture, allow_previews, composer, composer_id,
-    empty, follow_invite, markdown, mentions, message, pane_title, picker, poll_draft, polls,
-    preview_status, queue_preview, time, toast_line,
+    empty, follow_invite, markdown, mentions, message, pane_title, person, picker, poll_draft,
+    polls, preview_status, queue_preview, time, toast_line,
 };
 use crate::{
     files::{self, Ask},
@@ -711,11 +711,14 @@ pub(super) fn view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat
                 let line = t!(
                     "forum.post_line",
                     count = post.replies,
-                    name = server.member_name(&post.msg.person),
                     time = time(post.last)
                 );
                 let names = |person: &Id| server.member_name(person);
-                let card = ui.scope_builder(UiBuilder::new().sense(Sense::click()), |ui| {
+                let mut author = None;
+                let builder = UiBuilder::new()
+                    .scope_id(ui.make_persistent_id((channel, post.msg.person, id)))
+                    .sense(Sense::click());
+                let card = ui.scope_builder(builder, |ui| {
                     ui::card(ui, |ui| {
                         ui.set_width(ui.available_width());
                         // A poll on its own takes votes on its options instead.
@@ -761,7 +764,28 @@ pub(super) fn view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat
                                     }
                                 }
                                 ui.add_space(ui::SPACE_XS);
-                                ui.horizontal(|ui| {
+                                ui.horizontal_wrapped(|ui| {
+                                    let name = server.member_name(&post.msg.person);
+                                    if server.member(&post.msg.person).is_some() {
+                                        let target = person::Person::with(
+                                            &home.friends,
+                                            &home.voice,
+                                            server,
+                                            post.msg.person,
+                                        );
+                                        let button = person::profile_name(ui, &name);
+                                        if let Some(pick) =
+                                            person::profile(ui, &button, &target, false)
+                                        {
+                                            asked = Some(Asked::Pick(
+                                                id,
+                                                Pick::Profile(index, target.person, pick),
+                                            ));
+                                        }
+                                        author = Some(button);
+                                    } else {
+                                        ui.label(ui::bold(&name));
+                                    }
                                     let fold = if open {
                                         t!("forum.hide_replies").to_owned()
                                     } else {
@@ -805,22 +829,52 @@ pub(super) fn view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat
                                     && nested.contains(&prev.id) == nested.contains(&msg.id)
                             });
                             let mut show = |ui: &mut Ui| {
-                                message(ui, chat, msg, start, dir, &embeds, channel, |ui| {
-                                    let links: Vec<String> = match &msg.body {
-                                        Body::Text(text) => markdown::cached(ui, text)
-                                            .links()
-                                            .map(String::from)
-                                            .collect(),
-                                        _ => Vec::new(),
-                                    };
-                                    let at = (&server.address, &server.commands);
-                                    files::attachments(ui, &mut home.files, at, &msg.files, &links);
-                                    if let Some(action) =
-                                        crate::call::chat_live(ui, &home.voice.live_files, dir, msg)
-                                    {
-                                        live = Some(action);
-                                    }
-                                })
+                                let profile = server.member(&msg.person).map(|_| {
+                                    (
+                                        index,
+                                        person::Person::with(
+                                            &home.friends,
+                                            &home.voice,
+                                            server,
+                                            msg.person,
+                                        ),
+                                    )
+                                });
+                                message(
+                                    ui,
+                                    chat,
+                                    msg,
+                                    start,
+                                    dir,
+                                    &embeds,
+                                    channel,
+                                    profile,
+                                    |ui| {
+                                        let links: Vec<String> = match &msg.body {
+                                            Body::Text(text) => markdown::cached(ui, text)
+                                                .links()
+                                                .map(String::from)
+                                                .collect(),
+                                            _ => Vec::new(),
+                                        };
+                                        let at = (&server.address, &server.commands);
+                                        files::attachments(
+                                            ui,
+                                            &mut home.files,
+                                            at,
+                                            &msg.files,
+                                            &links,
+                                        );
+                                        if let Some(action) = crate::call::chat_live(
+                                            ui,
+                                            &home.voice.live_files,
+                                            dir,
+                                            msg,
+                                        ) {
+                                            live = Some(action);
+                                        }
+                                    },
+                                )
                             };
                             let picked = if nested.contains(&msg.id) {
                                 ui.indent(("nested", msg.id), show).inner
@@ -862,7 +916,8 @@ pub(super) fn view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat
                 }
                 let mine = post.msg.person == me;
                 let deletable = mine || dir.perms.delete_messages;
-                ui::context_menu(&card, |m| {
+                let menu = author.map_or_else(|| card.clone(), |button| card.union(button));
+                ui::context_menu(&menu, |m| {
                     if let Body::Text(text) = &post.msg.body
                         && mine
                         && m.item("✏", t!("forum.edit_post")).clicked()
@@ -988,6 +1043,9 @@ pub(super) fn view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat
         }
         Some(Asked::Pick(_, Pick::Previews(id, allow))) => {
             allow_previews(&home.voice, &mut home.previews, id, allow);
+        }
+        Some(Asked::Pick(_, Pick::Profile(index, author, pick))) => {
+            person::apply(home, index, author, pick, now);
         }
         Some(Asked::Pick(_, Pick::Invite(text))) => {
             let joining = (&mut home.join, &mut home.invite, &home.net);
