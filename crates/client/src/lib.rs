@@ -36,6 +36,8 @@ mod net;
 mod notify;
 mod official;
 mod paste;
+#[cfg(any(target_os = "android", target_os = "ios", test))]
+mod phone_clipboard;
 mod pokes;
 mod previews;
 mod profile;

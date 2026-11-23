@@ -267,8 +267,11 @@ impl Widget for Field<'_> {
 
 /// Phones: the on-screen keyboard works on the text around the cursor (to delete
 /// and correct it), so the focused field shares it (`android::share_field`); a
-/// `secret` field shares only its cursor and length.
+/// `secret` field shares only its cursor and length. Phones also get a long-press
+/// menu to paste, copy and cut (`phone_clipboard`).
 pub fn share_with_keyboard(output: &egui::text_edit::TextEditOutput, secret: bool) {
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    crate::phone_clipboard::menu(output, secret);
     #[cfg(any(target_os = "android", test))]
     if output.response.response.has_focus() {
         let response = &output.response.response;

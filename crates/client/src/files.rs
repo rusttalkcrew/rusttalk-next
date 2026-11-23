@@ -427,7 +427,7 @@ impl Files {
                 Some(paths) => {
                     let _ = pastes.send((ask, paths));
                 }
-                None => ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaste),
+                None => crate::paste::request_text(&ctx),
             }
             ctx.request_repaint();
         });

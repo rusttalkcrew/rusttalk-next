@@ -124,6 +124,8 @@ apple-native-keyring-store = { version = "1", features = ["protected"] }
 # Keeps the settings folder, with the key file, out of iCloud and computer backups.
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSError", "NSString", "NSURL", "NSValue"] }
+# The system clipboard (UIPasteboard); the version winit already uses.
+objc2-ui-kit = { version = "0.3", default-features = false, features = ["std", "UIPasteboard"] }
 
 [target.'cfg(windows)'.dependencies]
 # Pasting: registered picture formats and copied files, and bitmaps as a last resort.

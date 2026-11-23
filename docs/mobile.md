@@ -48,6 +48,14 @@ messages and reading them again after a restart.
   each into one Enter for the field that had focus when it came. The key shows
   Done. Newlines are text, also a lone one from Enter on a hardware
   keyboard or a paste, so nothing is sent by accident.
+- **Clipboard** (`src/phone_clipboard.rs`): egui-winit's clipboard is only a
+  string inside the app on phones, so copies go to Android's `ClipboardManager`
+  (on the Java thread) or iOS's `UIPasteboard` instead, and pastes come from
+  there. Pressing and holding a text field opens Paste, Copy, Cut and Select
+  all; Copy and Cut only with a selection, and never in password or
+  recovery-word fields. A paste moves the field's cursor, which starts the
+  keyboard's buffer over with the pasted text. While the menu is open, picking
+  a row keeps the field focused, so the keyboard stays up.
 - **Long text**: GameTextInput copies at most 64 KiB but reports the full
   length, and android-activity's reader for winit trusts that length. A Java
   `LengthFilter` keeps the keyboard's buffer under 21,845 UTF-16 units, which
@@ -130,7 +138,7 @@ use yet is allowed to be unused there (`allow(dead_code)` on phones only).
 | Updater | Not used | Not used | Gated: no update target, so no checks and no **Check now** |
 | Global shortcuts (global-hotkey) | Builds, nothing to register | Same | Unused; Shortcuts tab still shows |
 | Remote control | Not offered | Not offered | Unchanged (only Linux and macOS offer it) |
-| Clipboard | Text through egui only | Same | Picture and file paste gated off |
+| Clipboard | Text through `ClipboardManager` on the Java thread | Text through `UIPasteboard` | Press and hold a field: Paste, Copy, Cut, Select all (`src/phone_clipboard.rs`); picture and file paste gated off |
 | Deep links (`rusttalk://`) | Not registered | Not registered | Not started (desktop has none either) |
 | Settings folder | `AndroidApp::internal_data_path()`, no backup or transfer | Application Support, excluded from backups | Done |
 

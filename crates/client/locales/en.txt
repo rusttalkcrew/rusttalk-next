@@ -1373,3 +1373,9 @@ terminal.take_back = Take it back
 terminal.denied = {name} didn't let you type.
 terminal.taken_back = {name} stopped you typing.
 terminal.paste_too_long = That paste is too long to type in someone else's terminal.
+
+# crates/client/src/phone_clipboard.rs
+clipboard.paste = Paste
+clipboard.copy = Copy
+clipboard.cut = Cut
+clipboard.select_all = Select all
