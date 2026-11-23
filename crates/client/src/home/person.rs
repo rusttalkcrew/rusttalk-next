@@ -2,7 +2,7 @@
 //! click shows their profile card and a right click the one menu with everything
 //! that can be done with them there, so they behave the same everywhere.
 
-use eframe::egui::{Label, Response, Ui};
+use eframe::egui::{CursorIcon, Label, Response, Role, Sense, Ui, WidgetInfo};
 use rusttalk_core::presence::Presence;
 
 use super::{Dialog, Home, Tab, member_face};
@@ -265,11 +265,52 @@ fn voice_channel(server: &Server, person: &Id) -> Option<Id> {
 /// The card on a left click on `response` (opening where it was clicked with
 /// `at_click`, for big tiles) and the menu on a right click.
 pub fn interact(ui: &Ui, response: &Response, person: &Person, at_click: bool) -> Option<Pick> {
-    let id = popup_id(response, person);
-    let name = person.server.member_name(&person.person);
-    let card = ui::card_popup(ui, id, response, &name, at_click, |ui| person.card(ui)).flatten();
-    let menu = ui::context_menu_with_id(response, id, |m| person.menu(m)).flatten();
+    let card = profile(ui, response, person, at_click);
+    let menu = ui::context_menu_with_id(response, popup_id(response, person), |m| person.menu(m))
+        .flatten();
     card.or(menu)
+}
+
+/// The shared profile card without a person context menu, for rows with their own menu.
+pub(super) fn profile(
+    ui: &Ui,
+    response: &Response,
+    person: &Person,
+    at_click: bool,
+) -> Option<Pick> {
+    let name = person.server.member_name(&person.person);
+    ui::card_popup(
+        ui,
+        popup_id(response, person),
+        response,
+        &name,
+        at_click,
+        |ui| person.card(ui),
+    )
+    .flatten()
+}
+
+pub(super) fn profile_trigger(ui: &Ui, response: Response, name: &str) -> Response {
+    response.widget_info(|| WidgetInfo::labeled(Role::Button, ui.is_enabled(), name));
+    ui::focus_ring(ui, &response, ui::RADIUS_S);
+    response.on_hover_cursor(CursorIcon::PointingHand)
+}
+
+pub(super) fn profile_name(ui: &mut Ui, name: &str) -> Response {
+    let response = ui.add(
+        Label::new(ui::bold(name))
+            .truncate()
+            .selectable(false)
+            .sense(Sense::click()),
+    );
+    if response.hovered() {
+        ui.painter().hline(
+            response.rect.x_range(),
+            response.rect.bottom(),
+            (1.0, ui::colors(ui).text),
+        );
+    }
+    profile_trigger(ui, response, name)
 }
 
 /// A popup must never inherit a different person when a positional row is reused.

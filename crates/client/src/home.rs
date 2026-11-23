@@ -4534,6 +4534,7 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
     };
     let Home {
         servers,
+        friends,
         threads,
         toast,
         dialog,
@@ -4675,8 +4676,8 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
     // The server a message's files and live offer come from.
     let holder = |msg: &Msg| {
         let copy =
-            (msg.replicas.first()).and_then(|url| servers.iter().find(|s| s.address == *url));
-        copy.or(named.map(|index| &servers[index]))
+            (msg.replicas.first()).and_then(|url| servers.iter().position(|s| s.address == *url));
+        copy.or(named)
     };
     let before_offset = chat.scroll_to.unwrap_or(chat.scroll_offset);
     let mut area = ScrollArea::vertical()
@@ -4721,7 +4722,8 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
                     && msg.reply_to.is_none()
             });
             // The displayed copy carries this server's emoji and sticker IDs.
-            let (message_dir, message_channel) = match (at, holder(msg)) {
+            let held_on = holder(msg);
+            let (message_dir, message_channel) = match (at, held_on.map(|i| &servers[i])) {
                 (At::Dm(peer), Some(server)) => server
                     .dir
                     .dms
@@ -4730,6 +4732,16 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
                     .map_or((dir, key), |dm| (&server.dir, dm.channel)),
                 _ => (dir, key),
             };
+            let profile = held_on
+                .into_iter()
+                .chain(named)
+                .find(|i| servers[*i].member(&msg.person).is_some())
+                .map(|i| {
+                    (
+                        i,
+                        person::Person::with(friends, voice, &servers[i], msg.person),
+                    )
+                });
             let shown = message(
                 ui,
                 chat,
@@ -4738,8 +4750,9 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
                 message_dir,
                 &embeds,
                 message_channel,
+                profile,
                 |ui| {
-                    if let Some(server) = holder(msg) {
+                    if let Some(server) = held_on.map(|i| &servers[i]) {
                         // A link preview must be about one of the message's own links.
                         let links: Vec<String> = match &msg.body {
                             Body::Text(text) => markdown::cached(ui, text)
@@ -4872,6 +4885,7 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
         Some(Pick::Invite(text)) => {
             follow_invite(servers, view, (joining, invite_text, net), text);
         }
+        Some(Pick::Profile(index, author, pick)) => person::apply(home, index, author, pick, now),
         None => {}
     }
     act
@@ -5154,6 +5168,7 @@ enum Pick {
     Delete(Id),
     /// Join with, or open the server of, an invite link shown as a card.
     Invite(String),
+    Profile(usize, Id, person::Pick),
     /// Allow (or not) link previews from a site, by its ID.
     Previews(&'static str, bool),
     /// A vote or a poll's end to send.
@@ -5643,6 +5658,7 @@ fn message(
     dir: &Directory,
     embeds: &Embeds,
     channel: Id,
+    profile: Option<(usize, person::Person<'_>)>,
     attachments: impl FnOnce(&mut Ui),
 ) -> Option<Pick> {
     let names = |person: &Id| member_name(dir, person);
@@ -5708,10 +5724,15 @@ fn message(
     let builder = UiBuilder::new()
         .scope_id(ui.make_persistent_id((channel, msg.person, msg.id)))
         .sense(Sense::CLICK);
+    let mut trigger = None;
     let row = ui.scope_builder(builder, |ui| {
         ui.horizontal_top(|ui| {
             if start {
-                face(ui, dir, &msg.person, &name, MESSAGE_AVATAR, false);
+                let avatar = face(ui, dir, &msg.person, &name, MESSAGE_AVATAR, false);
+                if profile.is_some() {
+                    let button = avatar.interact(Sense::click());
+                    trigger = Some(person::profile_trigger(ui, button, &name));
+                }
             } else {
                 ui.add_space(MESSAGE_AVATAR + ui.spacing().item_spacing.x);
             }
@@ -5751,7 +5772,11 @@ fn message(
                 if start || msg.backfilled {
                     ui.horizontal(|ui| {
                         if start {
-                            ui.label(ui::bold(&name));
+                            if let Some(avatar) = trigger.take() {
+                                trigger = Some(avatar.union(person::profile_name(ui, &name)));
+                            } else {
+                                ui.label(ui::bold(&name));
+                            }
                         }
                         message_time(ui, msg);
                     });
@@ -5837,6 +5862,11 @@ fn message(
     let can_delete =
         authored || (dir.perms.delete_messages && !dir.dms.iter().any(|dm| dm.channel == channel));
     let mut pick = invite;
+    if let (Some(trigger), Some((index, profile))) = (&trigger, profile)
+        && let Some(action) = person::profile(ui, trigger, &profile, false)
+    {
+        pick = Some(Pick::Profile(index, msg.person, action));
+    }
     // Emoji and stickers of other servers in the message, for people who may add them.
     let in_dm = dir.dms.iter().any(|dm| dm.channel == channel);
     let addable: Vec<(Kind, String, Id)> = if dir.perms.manage_emoji && !in_dm {
@@ -5849,7 +5879,8 @@ fn message(
     } else {
         Vec::new()
     };
-    ui::context_menu(&row.response, |m| {
+    let menu = trigger.map_or_else(|| row.response.clone(), |button| row.response.union(button));
+    ui::context_menu(&menu, |m| {
         if can_reply && m.item("↩", t!("common.reply")).clicked() {
             pick = Some(Pick::Reply(msg.person, msg.id));
         }
