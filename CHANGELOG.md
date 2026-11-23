@@ -12,6 +12,7 @@ Unreleased under the new version and date.
 ## Unreleased
 
 - Reopen RustTalk offline to see previously loaded server icons, avatars and recent chat messages.
+- Chat fills empty voice channels. Use Join voice to start a call.
 - Choose one channel for joins and leaves, or turn them off. Device changes appear only in the audit log.
 - Android can keep your account keys on this phone without asking for a password at every start.
 - Find servers and join public servers on iPhone and Android.
