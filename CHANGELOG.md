@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Retry a failed forum post with its title, body and poll. Replies stay visible when a poll and its post arrive separately.
+- Forum channels: searchable posts with folded replies, polls, up and down votes and sorting.
 - Oversized stored uploads show their size and the app limit beside chat or shared files, including voice channels.
 - Ask someone to join your voice channel: it rings, and they can join, decline, come later or mute you for 15 minutes
 - Servers can turn on Events: a calendar above the channels to suggest, approve and add events, in real life or in a channel

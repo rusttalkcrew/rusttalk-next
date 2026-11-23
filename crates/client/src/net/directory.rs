@@ -444,6 +444,7 @@ async fn build(
             .unwrap_or_default(),
             voice: channel.kind == "voice",
             page: channel.kind == "page",
+            forum: channel.kind == "forum",
             audio_kbps: channel.audio_kbps.unwrap_or(DEFAULT_AUDIO_KBPS),
             flags: (channel.flags.iter())
                 .map(|entry| (entry.role_id.clone(), entry.flags))
@@ -570,7 +571,7 @@ async fn build(
         categories
             .iter()
             .flat_map(|c| &c.channels)
-            .find(|c| !c.page && !c.voice)
+            .find(|c| !c.page && !c.voice && !c.forum)
             .map(|c| c.id)
     };
     Ok(Directory {
