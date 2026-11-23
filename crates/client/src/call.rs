@@ -180,6 +180,7 @@ pub enum Sharing {
 /// The screen this device receives; one at a time.
 pub struct Watching {
     pub sid: String,
+    missing_since: Option<Instant>,
     texture: Option<TextureHandle>,
 }
 
@@ -190,7 +191,30 @@ enum Calibration {
     Done(String),
 }
 
+impl Watching {
+    fn expired(&mut self, shared: bool, now: Instant) -> bool {
+        if shared {
+            self.missing_since = None;
+            false
+        } else {
+            now.saturating_duration_since(*self.missing_since.get_or_insert(now))
+                >= Duration::from_secs(180)
+        }
+    }
+}
+
 impl Voice {
+    pub fn replace_video(&mut self, old: &str, new: &str) {
+        if let Some(watching) = &mut self.watching
+            && watching.sid == old
+        {
+            watching.sid = new.to_owned();
+            watching.texture = None;
+            watching.missing_since = None;
+        }
+        self.stage.replace_video(old, new);
+    }
+
     pub fn new(audio: Audio, video: Video, runtime: tokio::runtime::Handle) -> Self {
         Self {
             audio,
@@ -495,7 +519,7 @@ pub fn frame(ctx: &egui::Context, home: &mut Home) {
     }
     remote::frame(home, ctx.input(|input| input.time));
     terminal::frame(home, ctx.input(|input| input.time));
-    // Stop watching a screen once it is no longer shared.
+    // Keep watch intent through a bounded outage while the owner republishes.
     if let Some(watching) = &home.voice.watching {
         let shared = call_server(home)
             .zip(home.voice.call.as_ref())
@@ -505,7 +529,8 @@ pub fn frame(ctx: &egui::Context, home: &mut Home) {
                     .iter()
                     .any(|peer| peer.screens.iter().any(|s| s.sid == watching.sid))
             });
-        if !shared {
+        let watching = home.voice.watching.as_mut().expect("checked above");
+        if watching.expired(shared, Instant::now()) {
             stop_watching(home);
         }
     }
@@ -567,6 +592,7 @@ fn watch(home: &mut Home, screen: &Screen) {
         server.send(Command::Watch(screen.sid.clone(), true));
         home.voice.watching = Some(Watching {
             sid: screen.sid.clone(),
+            missing_since: None,
             texture: None,
         });
     }
@@ -1621,6 +1647,21 @@ mod tests {
             }
         }
         assert!(screen_qualities().into_iter().any(|q| q.0 == Some(1440)));
+    }
+
+    #[test]
+    fn watching_survives_missing_publication_but_expires() {
+        let now = Instant::now();
+        let mut watch = Watching {
+            sid: "old".into(),
+            texture: None,
+            missing_since: None,
+        };
+        assert!(!watch.expired(false, now));
+        assert!(!watch.expired(false, now + Duration::from_secs(179)));
+        assert!(!watch.expired(true, now + Duration::from_secs(180)));
+        assert!(!watch.expired(false, now + Duration::from_secs(181)));
+        assert!(watch.expired(false, now + Duration::from_secs(361)));
     }
 
     #[test]

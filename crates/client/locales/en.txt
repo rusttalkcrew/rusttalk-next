@@ -1610,3 +1610,6 @@ phone.withdraw = Stop sharing my microphone
 
 phone.withdrawing = Stopping sharing… Microphone paused while the phone confirms.
 phone.withdraw_failed = Could not confirm stop. Microphone stays paused; retrying.
+
+voice.recovery_failed = Couldn't reconnect. Join the call to try again.
+voice.recovery_denied = Couldn't rejoin this call. Your access has changed.

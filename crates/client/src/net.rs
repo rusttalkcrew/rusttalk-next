@@ -425,6 +425,8 @@ pub enum Update {
     Call(Url, Id, Option<CallState>),
     /// Whether this device may talk in the call, as LiveKit currently grants it.
     CanTalk(Url, Id, bool),
+    /// A watched device republished video with a new transport track ID.
+    VideoReplaced(Url, Id, String, String),
     /// A moderator moved this person's call from one voice channel to another.
     VoiceMoved(Url, Id, Id),
     /// This device may not share its screen or camera in the call.
@@ -956,6 +958,7 @@ async fn run(
                                     "banned" => t!("net.banned"),
                                     _ => t!("net.device_revoked"),
                                 };
+                                voice::close(&ctx, &mut state);
                                 state.store().remove();
                                 ctx.send(Update::Status(url, Status::Stopped(text.into())));
                                 return;
@@ -975,6 +978,7 @@ async fn run(
                 }
             }
             Err(Failure::Stop(text)) => {
+                voice::close(&ctx, &mut state);
                 state.store().remove();
                 ctx.send(Update::Status(url, Status::Stopped(text)));
                 return;
@@ -1053,11 +1057,6 @@ async fn offline<T>(
                 if revoked(ctx,url,state,&records) { return None; }
                 state.revalidate(ctx, url, &records, None);
             }
-            done = &mut until => return Some(done),
-            next = next_voice(&mut state.voice) => voice_next(ctx, url, None, state, next).await,
-            _ = finished.tick(), if state.voice.is_some() => {
-                stop_finished_shares(ctx, url, None, state).await;
-            }
             command = commands.recv() => match command? {
                 command if voice_only(&command) => {
                     if let Some(queued) = queued.as_deref_mut() {
@@ -1071,11 +1070,31 @@ async fn offline<T>(
                         }
                     }
                 }
+                command @ Command::JoinVoice(_) => {
+                    if let Some(channel) = voice::close(ctx, state) {
+                        ctx.send(Update::Call(url.clone(), channel, None));
+                    }
+                    match queued.as_deref_mut() {
+                        Some(queued) => queued.push_back(command),
+                        None => refuse(ctx, url, command),
+                    }
+                }
                 command => match queued.as_deref_mut() {
                     Some(queued) => queued.push_back(command),
                     None => refuse(ctx, url, command),
                 },
             },
+            done = &mut until => return Some(done),
+            next = next_voice(&mut state.voice) => voice_next(ctx, url, None, state, next).await,
+            _ = finished.tick(), if state.voice.is_some() => {
+                stop_finished_shares(ctx, url, None, state).await;
+                if state.voice.as_ref().and_then(|live| live.recovery)
+                    .is_some_and(|(due, _)| std::time::Instant::now().saturating_duration_since(due) >= Duration::from_secs(180))
+                    && let Some(channel) = voice::close(ctx, state) {
+                    ctx.send(Update::Call(url.clone(), channel, None));
+                    ctx.send(Update::Failed(t!("voice.recovery_failed").into()));
+                }
+            }
         }
     }
 }
@@ -1280,6 +1299,7 @@ async fn serve(
         tracing::warn!(error = %format_args!("{error:#}"), "loading server state failed");
         return End::Error;
     }
+    apply_keys(ctx, url, client, state);
     voice::name_audio(ctx, client, state);
     // What was asked while connecting.
     for command in std::mem::take(queued) {
@@ -1375,6 +1395,11 @@ async fn serve(
             }
             next = next_voice(&mut state.voice) => voice_next(ctx, url, Some(client), state, next).await,
             _ = stats.tick(), if state.voice.is_some() => {
+                recover_voice(ctx, url, client, state, commands, removals, queued).await;
+                if state.voice.as_ref().is_some_and(|live| live.transport_closed) {
+                    stop_finished_shares(ctx, url, Some(client), state).await;
+                    continue;
+                }
                 voice::sync_voice_status(ctx, state).await;
                 if let Some(live) = &mut state.voice {
                     voice::sync_video_watches(live).await;
@@ -1384,6 +1409,232 @@ async fn serve(
                 voice_stats(ctx, url, client, state).await;
             }
         }
+    }
+}
+
+/// Fresh authorization replaces a media connection that exhausted SDK recovery.
+async fn recover_voice(
+    ctx: &Ctx,
+    url: &Url,
+    client: &mut KeyClient<'_>,
+    state: &mut State,
+    commands: &mut UnboundedReceiver<Command>,
+    removals: &mut tokio::sync::watch::Receiver<()>,
+    queued: &mut VecDeque<Command>,
+) {
+    let Some(live) = &mut state.voice else {
+        return;
+    };
+    let Some((due, attempt)) = live.recovery else {
+        return;
+    };
+    if due > std::time::Instant::now() {
+        return;
+    }
+    let channel = live.channel;
+    // Close the old SDK worker before minting a replacement identity's token.
+    live.transport_closed = true;
+    control::leave(live);
+    ctx.audio.stop_listening();
+    ctx.audio.end_phone();
+    live.phone_consents.clear();
+    live.phone_announcement = None;
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        live.phone = None;
+    }
+    ctx.audio.clear_voice_tracks();
+    for sid in &live.watched {
+        ctx.video.remove_track(sid);
+    }
+    let closed = {
+        let closing = tokio::time::timeout(Duration::from_secs(5), live.room.disconnect());
+        tokio::pin!(closing);
+        tokio::select! {
+            biased;
+            command = commands.recv() => Err(command),
+            result = &mut closing => Ok(result),
+        }
+    };
+    let closed = match closed {
+        Ok(result) => result,
+        Err(command) => {
+            match command {
+                Some(command) => run_command(ctx, url, client, state, command).await,
+                None => {
+                    voice::close(ctx, state);
+                }
+            }
+            return;
+        }
+    };
+    if !matches!(closed, Ok(Ok(()))) {
+        tracing::warn!("old media transport is still closing or failed");
+        if closed.is_err()
+            && let Some(delay) = voice::recovery_delay(attempt)
+        {
+            if let Some(live) = &mut state.voice {
+                live.recovery = Some((std::time::Instant::now() + delay, attempt + 1));
+            }
+        } else {
+            voice::close(ctx, state);
+            ctx.send(Update::Call(url.clone(), channel, None));
+            ctx.send(Update::Failed(t!("voice.recovery_failed").into()));
+        }
+        return;
+    }
+    if let Some(live) = &mut state.voice {
+        live.phone_withdrawals = Default::default();
+        live.phone_acknowledgements.clear();
+        live.guest = Default::default();
+        live.control = Default::default();
+        live.terminal = None;
+        live.viewing = None;
+        ctx.send(Update::Control(live.control.clone()));
+    }
+    ctx.audio.pause_phone_withdrawal(false);
+    let joined = offline(
+        ctx,
+        url,
+        state,
+        commands,
+        removals,
+        tokio::time::timeout(Duration::from_secs(15), async {
+            client.reconnect().await?;
+            client.join_voice(&channel).await
+        }),
+        Some(queued),
+    )
+    .await;
+    if joined.is_none() {
+        voice::close(ctx, state);
+        ctx.send(Update::Call(url.clone(), channel, None));
+        return;
+    }
+    let (api, session) = client.sync_peer();
+    ctx.sync.set_peer(url, Some((api.clone(), session.clone())));
+    // An explicit leave or switch received during authorization wins.
+    let wanted = state
+        .voice
+        .as_ref()
+        .is_some_and(|live| live.channel == channel)
+        && !queued
+            .iter()
+            .any(|command| matches!(command, Command::JoinVoice(_)));
+    let result = match joined {
+        Some(Ok(result)) => result,
+        _ => Err(anyhow::anyhow!("voice recovery timed out")),
+    };
+    if !wanted {
+        if let Ok(room) = result {
+            voice::leave_room(room).await;
+        }
+        for command in std::mem::take(queued) {
+            run_command(ctx, url, client, state, command).await;
+        }
+        return;
+    }
+    let result = match result {
+        Ok(room) => {
+            let live = state.voice.as_mut().expect("checked above");
+            let old = std::mem::replace(&mut live.room, room);
+            drop(old);
+            let restored = {
+                let restoring = tokio::time::timeout(
+                    Duration::from_secs(15),
+                    voice::restore_media(ctx, url, live),
+                );
+                tokio::pin!(restoring);
+                tokio::select! {
+                    biased;
+                    _ = removals.changed() => Err(None),
+                    command = commands.recv() => Err(command),
+                    result = &mut restoring => Ok(result),
+                }
+            };
+            match restored {
+                Ok(Ok(result)) => result,
+                Ok(Err(_)) => Err(anyhow::anyhow!("restoring media timed out")),
+                Err(command) => {
+                    if let Some(live) = &mut state.voice {
+                        live.transport_closed = true;
+                        live.recovery = Some((std::time::Instant::now(), attempt));
+                        let _ =
+                            tokio::time::timeout(Duration::from_secs(5), live.room.disconnect())
+                                .await;
+                    }
+                    match command {
+                        Some(command) => run_command(ctx, url, client, state, command).await,
+                        None => {
+                            voice::close(ctx, state);
+                        }
+                    }
+                    return;
+                }
+            }
+        }
+        Err(error) => Err(error),
+    };
+    match result {
+        Ok(()) => {
+            // Replacing the event socket can miss notices; reload authoritative state.
+            if let Err(error) = resume(ctx, url, client, state).await {
+                tracing::warn!(%error, "reloading state after media recovery failed");
+            }
+            apply_keys(ctx, url, client, state);
+            voice::sync_voice_status(ctx, state).await;
+            if let Some(live) = &state.voice {
+                ctx.send(Update::CanTalk(
+                    url.clone(),
+                    channel,
+                    live.room.can_publish() && live.room.has_microphone(),
+                ));
+                if !live.room.can_use_camera() {
+                    ctx.send(Update::NoVideo(url.clone(), channel));
+                }
+                if !live.room.can_share_audio() {
+                    ctx.send(Update::SharedAudioStopped(url.clone(), channel));
+                }
+            }
+            ctx.send(Update::Call(
+                url.clone(),
+                channel,
+                Some(crate::server::CallState::Connected),
+            ));
+            if let Err(error) = voice::room_changed(ctx, url, client, state, channel).await {
+                tracing::warn!(%error, "refreshing recovered call roster failed");
+                voice::send_room(ctx, url, client, state, channel);
+            }
+        }
+        Err(error) => {
+            tracing::warn!(%error, attempt, "recovering voice failed");
+            let denied = error
+                .downcast_ref::<reqwest::Error>()
+                .and_then(reqwest::Error::status)
+                .is_some_and(|status| matches!(status.as_u16(), 401 | 403 | 404));
+            if denied || voice::recovery_delay(attempt).is_none() {
+                voice::close(ctx, state);
+                ctx.send(Update::Call(url.clone(), channel, None));
+                ctx.send(Update::Failed(
+                    if denied {
+                        t!("voice.recovery_denied")
+                    } else {
+                        t!("voice.recovery_failed")
+                    }
+                    .into(),
+                ));
+            } else if let Some(live) = &mut state.voice {
+                live.recovery = Some((
+                    std::time::Instant::now()
+                        + voice::recovery_delay(attempt).expect("checked above"),
+                    attempt + 1,
+                ));
+                live.transport_closed = true;
+            }
+        }
+    }
+    for command in std::mem::take(queued) {
+        run_command(ctx, url, client, state, command).await;
     }
 }
 
@@ -1489,7 +1740,14 @@ async fn voice_next(
                     voice::roster(ctx, url, client, state, channel);
                 }
                 stop_lost_video(ctx, url, client, state, None).await;
-            } else if let Some(RoomEvent::LocalTrackUnpublished { publication, .. }) = &event {
+            } else if let Some(RoomEvent::LocalTrackUnpublished { publication, .. }) = &event
+                && state
+                    .voice
+                    .as_ref()
+                    .is_some_and(|live| live.recovery.is_none())
+            {
+                // SDK restart unpublishes before republishing. The capture is still wanted;
+                // explicit stops and permission changes have their own paths above.
                 stop_lost_video(ctx, url, client, state, Some(publication.sid())).await;
             }
             on_voice(ctx, url, client, state, event).await;

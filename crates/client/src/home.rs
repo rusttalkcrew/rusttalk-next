@@ -1559,6 +1559,16 @@ impl Home {
                     None => self.voice.end_call(),
                 }
             }
+            Update::VideoReplaced(address, channel, old, new) => {
+                if self
+                    .voice
+                    .call
+                    .as_ref()
+                    .is_some_and(|call| call.server == address && call.channel == channel)
+                {
+                    self.voice.replace_video(&old, &new);
+                }
+            }
             Update::CanTalk(address, channel, can_talk) => {
                 if let Some(call) = &mut self.voice.call
                     && call.server == address

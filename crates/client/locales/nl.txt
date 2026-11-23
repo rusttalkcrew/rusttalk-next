@@ -1607,3 +1607,6 @@ phone.withdraw = Stop met delen van mijn microfoon
 
 phone.withdrawing = Delen stoppen… Microfoon gepauzeerd tot de telefoon bevestigt.
 phone.withdraw_failed = Stoppen niet bevestigd. Microfoon blijft gepauzeerd; opnieuw proberen.
+
+voice.recovery_failed = Opnieuw verbinden is mislukt. Neem opnieuw deel aan het gesprek.
+voice.recovery_denied = Je kunt niet opnieuw deelnemen aan dit gesprek. Je toegang is gewijzigd.

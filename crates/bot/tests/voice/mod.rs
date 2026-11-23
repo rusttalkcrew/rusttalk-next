@@ -2,6 +2,7 @@ mod camera;
 mod consent;
 mod live_file;
 mod moderation;
+mod restart;
 mod ring;
 mod screen;
 mod terminal;
@@ -436,7 +437,8 @@ pub async fn exercise(
     // LiveKit already closed B's session.
     let _ = room_b.leave().await;
     tokio::try_join!(room_a.leave(), listener.leave())?;
-    roster(a, &voice.id, 0).await
+    roster(a, &voice.id, 0).await?;
+    Box::pin(restart::exercise(project, a, &mut c, &mut d)).await
 }
 
 /// Switch `a` from one voice channel to another the way the app does (leave in the
