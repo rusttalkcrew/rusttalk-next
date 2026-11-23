@@ -92,6 +92,25 @@ fn home<'a>(harness: &'a Harness<'static, Option<Home>>) -> &'a Home {
 }
 
 #[test]
+fn channel_hover_cursor_is_consistent_for_members_and_managers() {
+    let (mut harness, _sent) = window();
+    for manage in [false, true] {
+        let server = &mut harness.state_mut().as_mut().unwrap().servers[0];
+        server.dir.perms.manage_channels = manage;
+        server.dir.categories[0].id = Some([3; 32]);
+        harness.run_steps(3);
+        for label in ["#  general", "🔊  Lounge"] {
+            harness.get_by_label(label).hover();
+            harness.run_steps(3);
+            assert_eq!(
+                harness.output().platform_output.cursor_icon,
+                eframe::egui::CursorIcon::PointingHand
+            );
+        }
+    }
+}
+
+#[test]
 fn clicking_a_voice_channel_opens_its_chat_without_joining() {
     let (mut harness, mut sent) = window();
     harness.get_by_label("🔊  Lounge").click();
