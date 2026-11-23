@@ -6,7 +6,7 @@ use egui_kittest::{Harness, kittest::Queryable};
 fn stream_cards_keep_people_opt_in_and_preview_follows_focus() {
     for dark in [true, false] {
         for (width, height) in [(390.0, 844.0), (820.0, 1180.0), (1100.0, 700.0)] {
-            let (mut fixture, _sent) = files_harness(dark);
+            let (mut fixture, mut sent) = files_harness(dark);
             let mut home = fixture.state_mut().take().unwrap();
             home.voice.call = Some(Call {
                 server: home.servers[0].address.clone(),
@@ -16,13 +16,13 @@ fn stream_cards_keep_people_opt_in_and_preview_follows_focus() {
                 can_talk: true,
                 can_share_video: true,
             });
-            let peer = |person, local, count| Peer {
+            let peer = |person, local: bool, count| Peer {
                 person,
                 connecting: false,
                 unknown: false,
                 status: Default::default(),
                 apps: vec![],
-                camera: None,
+                camera: (!local).then(|| "ann-camera".into()),
                 terminal: None,
                 screens: vec![Screen {
                     sid: if local { "local" } else { "remote" }.into(),
@@ -40,7 +40,7 @@ fn stream_cards_keep_people_opt_in_and_preview_follows_focus() {
                 .with_size(Vec2::new(width, height))
                 .build_ui_state(
                     |ui, home| {
-                        home.voice.update_preview(ui.ctx());
+                        call::frame(ui.ctx(), home);
                         call::stage(ui, home, 0, PROJECTS);
                     },
                     home,
@@ -90,12 +90,26 @@ fn stream_cards_keep_people_opt_in_and_preview_follows_focus() {
             h.get_by_label("Watch Ann").click();
             h.run_steps(3);
             assert_eq!(h.state().voice.watching.as_ref().unwrap().sid, "remote");
-            h.state_mut().servers[0].voice.get_mut(&PROJECTS).unwrap()[1]
-                .screens
-                .clear();
+            let mut camera_changes = || {
+                std::iter::from_fn(|| sent.try_recv().ok())
+                    .filter_map(|command| match command {
+                        Command::Watch(sid, enabled) if sid == "ann-camera" => Some(enabled),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            };
+            assert!(camera_changes().is_empty());
+            let screens = std::mem::take(
+                &mut h.state_mut().servers[0].voice.get_mut(&PROJECTS).unwrap()[1].screens,
+            );
+
             h.run_steps(2);
             assert!(h.query_by_label("Streaming · 1 watching").is_none());
             assert!(h.query_by_label("Ann").is_some());
+            assert_eq!(camera_changes(), [true]);
+            h.state_mut().servers[0].voice.get_mut(&PROJECTS).unwrap()[1].screens = screens;
+            h.run_steps(3);
+            assert_eq!(camera_changes(), [false]);
         }
     }
 }

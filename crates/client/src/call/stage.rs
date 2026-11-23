@@ -380,9 +380,6 @@ fn entries<'p>(
         let speaking = voice.speaking(server, &peer.person);
         let camera = joined && peer.camera.is_some();
         let video = camera && (me || !voice.hidden.contains(&peer.person));
-        let picture = camera
-            .then(|| person_picture(ctx, voice, peer, me))
-            .flatten();
         let sharing = if me {
             voice.terminals.local.is_some()
         } else {
@@ -423,7 +420,12 @@ fn entries<'p>(
                     watched,
                 )
             }
-            _ => (Tile::Person(peer.person), picture, video, false),
+            _ => {
+                let picture = video
+                    .then(|| person_picture(ctx, voice, peer, me))
+                    .flatten();
+                (Tile::Person(peer.person), picture, video, false)
+            }
         };
         people.push(Entry {
             tile,
