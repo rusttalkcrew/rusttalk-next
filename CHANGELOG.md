@@ -13,12 +13,12 @@ Unreleased under the new version and date.
 
 - Retry a failed forum post with its title, body and poll. Replies stay visible when a poll and its post arrive separately.
 - Forum channels: searchable posts with folded replies, polls, up and down votes and sorting.
-
-## v0.2.0 - 2026-11-23
-
 - Servers can turn on Events: a calendar above the channels to suggest, approve and add events, in real life or in a channel
 - Say whether you are going to an event, see who is still missing, and remind them
 - Event reminders reach unanswered authors and respect “Only when RustTalk isn’t focused” without repeating later
+
+## v0.2.0 - 2026-11-23
+
 - Reopen RustTalk offline to see previously loaded server icons, avatars and recent chat messages.
 - Chat fills empty voice channels. Use Join voice to start a call.
 - Choose one channel for joins and leaves, or turn them off. Device changes appear only in the audit log.
