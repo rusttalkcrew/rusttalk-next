@@ -794,18 +794,35 @@ also deletes every edit of it that it has opened or sent.
 ## Voice
 
 Desktop phone bridges use the encrypted `rusttalk.phone-consent` participant
-attribute. Its plaintext is `{hosted: track_sid_or_null, allowed: [{host,
-session, track}]}`. It is sealed with the channel's video-watch-derived key,
-using the distinct `rusttalk-phone-consent-v1` AAD label, epoch (big-endian i64),
-sender identity, a zero separator, and sender session ID. The wire form is
-`epoch.base64url(ciphertext)`, capped at 60 KiB when read. Hosted tracks must
-exist as shared-audio publications in the announcing session. Consent grants
-only that device session's microphone to that exact external call; neither
-Listen nor Watch grants export. Missing or invalid attributes grant nothing.
-Clients clear consent on withdrawal/reconnect and end hosted calls on reconnect,
-loss of sharing permission, or loss of their publication. Older clients cannot
-grant consent and their sound is never exported by a conforming bridge.
+attribute. Its plaintext is `{revision, hosted: track_sid_or_null, allowed:
+[{host, session, track}], withdrawn: [{host, session, track}]}`. Positive
+revisions increase for each publication attempt within a room and are sealed
+along with grants and withdrawals. The channel's video-watch-derived key is
+used with the distinct `rusttalk-phone-consent-v2` AAD label, epoch (big-endian
+i64), sender identity, a zero separator, and sender session ID. The wire form
+is `epoch.base64url(ciphertext)`, capped at 60 KiB when read. Receivers retain
+the highest authenticated revision and its state per device/session for the
+room's lifetime, across signaling reconnects and key refresh. Lower revisions,
+conflicting equal revisions, invalid ciphertext and v1/legacy states grant
+nothing. Hosted tracks must exist as shared-audio publications in that session.
+Consent grants only that device session's microphone to that exact call;
+neither Listen nor Watch grants export.
 
+Withdrawal immediately pauses channel microphone PCM, independently of the
+person's mute/deafen/PTT settings. Publishing withdrawal is not an acknowledgement.
+The bridge filters its mixer and clears queued withdrawn audio from a single
+consent snapshot before publishing `rusttalk.phone-withdrawal-ack`. Its sealed
+plaintext is a list of `{member, session, revision, call}` using the separate
+`rusttalk-phone-withdrawal-ack-v2` AAD label and the bridge's identity/session.
+The sender resumes only after an acknowledgement for its device/session, call
+and withdrawal revision (or newer), or the matching bridge publication/session
+has ended while the room is connected. Failed signaling keeps the microphone
+paused and shows pending/failure; retries do not bypass the interlock. Leaving
+the room clears the interlock. A directly dialed local phone call still respects
+normal microphone controls and is independent of this channel transmission pause.
+Clients withdraw consent on reconnect and end hosted calls on reconnect,
+loss of sharing permission, or loss of publication. Older clients cannot grant
+consent and their sound is never exported by a conforming bridge.
 
 These routes require a bearer header and channel `read` access. They apply
 to voice channels only.

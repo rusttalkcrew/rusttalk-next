@@ -353,6 +353,8 @@ struct Shared {
     start: Instant,
     /// What a phone call bridged into the room hears (see `PhoneLine`).
     phone: Mutex<Option<PhoneTap>>,
+    phone_withdrawal: AtomicBool,
+    phone_withdrawal_requests: std::sync::atomic::AtomicUsize,
 }
 
 /// The mixer key of a bridged phone call's sound, kept out of what the phone hears.
@@ -542,6 +544,8 @@ impl Audio {
             source: NativeAudioSource::new(off, RATE, 1, 0),
             start: Instant::now(),
             phone: Mutex::default(),
+            phone_withdrawal: AtomicBool::new(false),
+            phone_withdrawal_requests: std::sync::atomic::AtomicUsize::new(0),
         });
         let (control, commands) = mpsc::channel();
         let (mic, frames) = mpsc::sync_channel(MIC_QUEUE);
@@ -667,6 +671,11 @@ impl Audio {
 
     /// Drop the old room's audio before queuing its leave cue.
     pub fn end_voice(&self, cue: Option<Cue>) {
+        self.shared().voice.store(false, Relaxed);
+        self.pause_phone_withdrawal(false);
+        self.shared()
+            .phone_withdrawal_requests
+            .store(0, std::sync::atomic::Ordering::SeqCst);
         {
             let mut mixer = lock(&self.shared().mixer);
             mixer.tracks.clear();
@@ -678,7 +687,6 @@ impl Audio {
         if let Some(cue) = cue {
             self.play_cue(cue);
         }
-        self.shared().voice.store(false, Relaxed);
         #[cfg(target_os = "ios")]
         lock(&self.shared().ios_session).take();
         self.refresh();
@@ -954,6 +962,27 @@ impl Audio {
 
     pub fn remove_track(&self, sid: &str) {
         lock(&self.shared().mixer).tracks.remove(sid);
+    }
+
+    pub fn request_phone_withdrawal(&self) {
+        self.shared()
+            .phone_withdrawal_requests
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn accept_phone_withdrawal_request(&self) {
+        let _ = self.shared().phone_withdrawal_requests.try_update(
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+            |n| Some(n.saturating_sub(1)),
+        );
+    }
+
+    /// A privacy interlock, independent of the person's mute/deafen/PTT choices.
+    pub fn pause_phone_withdrawal(&self, pause: bool) {
+        self.shared()
+            .phone_withdrawal
+            .store(pause, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub fn end_phone(&self) {
@@ -1834,12 +1863,28 @@ fn process(shared: &Shared, frames: &Receiver<Mic>) {
                 frame.fill(0);
             }
             if shared.voice.load(Relaxed) {
-                send(&shared.source, &frame);
+                let outgoing = channel_microphone(shared, &frame);
+                send(&shared.source, &outgoing);
                 if let Some(tap) = lock(&shared.phone).as_mut() {
                     PhoneTap::push(&mut tap.mic, frame);
                 }
             }
         }
+    }
+}
+
+fn channel_microphone(shared: &Shared, frame: &[i16; FRAME]) -> [i16; FRAME] {
+    if shared
+        .phone_withdrawal
+        .load(std::sync::atomic::Ordering::SeqCst)
+        || shared
+            .phone_withdrawal_requests
+            .load(std::sync::atomic::Ordering::SeqCst)
+            > 0
+    {
+        [0; FRAME]
+    } else {
+        *frame
     }
 }
 
@@ -2291,6 +2336,31 @@ mod tests {
         assert!(quarter.iter().all(|&s| s == 2000));
 
         assert!(mix_tracks(&mut mixer, true, None).iter().all(|&s| s == 0));
+    }
+
+    #[test]
+    fn withdrawal_interlock_stops_pcm_before_signaling_without_changing_user_mute() {
+        let data = tempfile::tempdir().unwrap();
+        let audio = Audio::new(data.path()).unwrap();
+        let speech = [1200; FRAME];
+        let initially_muted = audio.muted();
+        assert_eq!(channel_microphone(audio.shared(), &speech), speech);
+        audio.request_phone_withdrawal();
+        // An already-running network refresh must not undo a queued UI request.
+        audio.pause_phone_withdrawal(false);
+        assert_eq!(channel_microphone(audio.shared(), &speech), [0; FRAME]);
+        audio.pause_phone_withdrawal(true);
+        audio.accept_phone_withdrawal_request();
+        assert_eq!(channel_microphone(audio.shared(), &speech), [0; FRAME]);
+        // Failed publication or missing bridge acknowledgement leaves this interlock set.
+        assert_eq!(audio.muted(), initially_muted);
+        audio.pause_phone_withdrawal(false);
+        assert_eq!(channel_microphone(audio.shared(), &speech), speech);
+        // The gate never invents sound when mute, deafen or PTT already supplied silence.
+        assert_eq!(channel_microphone(audio.shared(), &[0; FRAME]), [0; FRAME]);
+        audio.request_phone_withdrawal();
+        audio.end_voice(None);
+        assert_eq!(channel_microphone(audio.shared(), &speech), speech);
     }
 
     #[test]

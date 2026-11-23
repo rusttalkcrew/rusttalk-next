@@ -1602,3 +1602,6 @@ phone.external_notice = Externes Telefongespräch
 phone.external_help = Dein Mikrofon bleibt privat, bis du zustimmst. Telefonaudio ist nicht Ende-zu-Ende-verschlüsselt. Zuhören spielt das Gespräch nur hier ab.
 phone.allow = Mein Mikrofon mit diesem Anruf teilen
 phone.withdraw = Mein Mikrofon nicht mehr teilen
+
+phone.withdrawing = Freigabe wird beendet… Mikrofon bis zur Bestätigung pausiert.
+phone.withdraw_failed = Beenden nicht bestätigt. Mikrofon bleibt pausiert; erneuter Versuch.

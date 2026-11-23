@@ -55,7 +55,11 @@ pub use panel::{Link, call_bar};
 pub use stage::{Stage, full_view, stage};
 
 pub struct Voice {
-    pub external_phones: Vec<(rusttalk_core::client::voice::phone::Call, String, bool)>,
+    pub external_phones: Vec<(
+        rusttalk_core::client::voice::phone::Call,
+        String,
+        crate::phone::ConsentStatus,
+    )>,
     pub audio: Audio,
     pub call: Option<Call>,
     #[cfg(any(target_os = "android", target_os = "ios"))]

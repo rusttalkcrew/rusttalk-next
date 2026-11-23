@@ -62,7 +62,7 @@ pub(super) async fn exercise(
         .await?
         .sid();
     silent(listener).await?;
-    sender.announce_phone(Some(&first), &[]).await?;
+    sender.announce_phone(Some(&first), &[], &[]).await?;
     let call = sender.local_phone_call(&first);
     wait_phone(|| listener.external_phone_calls().contains(&call)).await?;
     ensure!(
@@ -76,13 +76,33 @@ pub(super) async fn exercise(
         "Listen granted phone export"
     );
     listener
-        .announce_phone(None, std::slice::from_ref(&call))
+        .announce_phone(None, std::slice::from_ref(&call), &[])
         .await?;
     wait_phone(|| !sender.phone_microphones(&call).is_empty()).await?;
-    listener.announce_phone(None, &[]).await?;
+    let revision = listener
+        .announce_phone(None, &[], std::slice::from_ref(&call))
+        .await?;
+    ensure!(
+        !listener.phone_withdrawal_acknowledged(&call, revision),
+        "publication alone acknowledged withdrawal"
+    );
     wait_phone(|| sender.phone_microphones(&call).is_empty()).await?;
+    let (microphones, acknowledgements) = sender.phone_bridge_state(&call);
+    ensure!(
+        microphones.is_empty(),
+        "withdrawal ack before microphone exclusion"
+    );
+    ensure!(!acknowledgements.is_empty(), "no withdrawal to acknowledge");
+    sender
+        .acknowledge_phone_withdrawals(&acknowledgements)
+        .await?;
+    wait_phone(|| listener.phone_withdrawal_acknowledged(&call, revision)).await?;
+    ensure!(
+        !listener.phone_withdrawal_acknowledged(&call, revision + 1),
+        "stale bridge ack accepted"
+    );
     listener.set_listening(&first, false)?;
-    sender.announce_phone(None, &[]).await?;
+    sender.announce_phone(None, &[], &[]).await?;
     wait_phone(|| listener.external_phone_calls().is_empty()).await?;
     println!(
         "Phone consent: default silence; Listen does not grant export; explicit permission and withdrawal bound to current call"

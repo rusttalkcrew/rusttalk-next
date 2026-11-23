@@ -373,7 +373,11 @@ pub enum Update {
     ExternalPhones(
         Url,
         Id,
-        Vec<(rusttalk_core::client::voice::phone::Call, String, bool)>,
+        Vec<(
+            rusttalk_core::client::voice::phone::Call,
+            String,
+            crate::phone::ConsentStatus,
+        )>,
     ),
     RetryDmBackfill,
     VoiceDestination(Url, Id, bool),
@@ -434,7 +438,7 @@ pub enum Update {
     AppStopped(String),
     /// How the phone call is going.
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    Phone(crate::phone::call::Event),
+    Phone(u64, crate::phone::call::Event),
     SharedAudioStopped(Url, Id),
     /// What the screen share's sound is now, after a change or a failure.
     StreamAudio(Vec<App>),

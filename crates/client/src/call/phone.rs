@@ -52,6 +52,7 @@ enum Tab {
 }
 
 pub struct Active {
+    generation: u64,
     label: String,
     status: Status,
     /// When it was answered, for the timer.
@@ -98,7 +99,14 @@ impl Phone {
 }
 
 /// How the call is going, from the network side.
-pub fn update(phone: &mut Phone, event: Event) {
+pub fn update(phone: &mut Phone, generation: u64, event: Event) {
+    if !phone
+        .call
+        .as_ref()
+        .is_some_and(|call| call.generation == generation)
+    {
+        return;
+    }
     match event {
         Event::Status(status) => {
             if let Some(call) = &mut phone.call {
@@ -415,7 +423,9 @@ fn start(home: &mut Home, typed: &str) {
     let name = phone::label(typed, &settings.phone_contacts);
     let label = format!("{MARK} {name}");
     let (control, receiver) = unbounded_channel();
+    let generation = phone::call::next_generation();
     server.send(Command::PhoneCall(Box::new(Dial {
+        generation,
         account: settings.phone.clone(),
         password,
         target,
@@ -423,6 +433,7 @@ fn start(home: &mut Home, typed: &str) {
         control: receiver,
     })));
     phone.call = Some(Active {
+        generation,
         label,
         status: Status::Calling,
         since: None,
@@ -584,6 +595,36 @@ mod tests {
     }
 
     #[test]
+    fn events_from_old_calls_cannot_end_or_reopen_a_new_call() {
+        let (control, _received) = unbounded_channel();
+        let a = phone::call::next_generation();
+        let b = phone::call::next_generation();
+        let mut phone = Phone {
+            call: Some(Active {
+                generation: b,
+                label: "B".into(),
+                status: Status::Calling,
+                since: None,
+                control,
+            }),
+            ..Default::default()
+        };
+        update(&mut phone, a, Event::Status(Status::Talking));
+        update(&mut phone, a, Event::Ended(Some("late failure".into())));
+        update(&mut phone, a, Event::Ended(None));
+        assert_eq!(phone.call.as_ref().unwrap().generation, b);
+        assert_eq!(phone.call.as_ref().unwrap().status, Status::Calling);
+        assert!(!phone.open);
+        assert!(phone.error.is_none());
+        update(&mut phone, b, Event::Status(Status::Talking));
+        assert_eq!(phone.call.as_ref().unwrap().status, Status::Talking);
+        phone.hang_up();
+        update(&mut phone, b, Event::Ended(Some("late failure".into())));
+        assert!(!phone.open);
+        assert!(phone.error.is_none());
+    }
+
+    #[test]
     fn contacts_and_the_keypad_dial() {
         let settings = Settings {
             phone_contacts: vec![
@@ -623,6 +664,7 @@ mod tests {
         let (control, mut received) = unbounded_channel();
         let phone = Phone {
             call: Some(Active {
+                generation: phone::call::next_generation(),
                 label: "📞 Anna".into(),
                 status: Status::Talking,
                 since: Some(Instant::now()),

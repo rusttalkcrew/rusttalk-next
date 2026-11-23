@@ -1678,7 +1678,9 @@ impl Home {
                 call::shared_sound(&mut self.voice, update);
             }
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
-            Update::Phone(event) => call::phone::update(&mut self.voice.phone, event),
+            Update::Phone(generation, event) => {
+                call::phone::update(&mut self.voice.phone, generation, event)
+            }
             Update::Sharing(on) => {
                 // A late result after Stop or leaving doesn't turn the chip back on.
                 if self.voice.sharing != call::Sharing::Off || !on {

@@ -50,7 +50,13 @@ const REGISTER_SECS: u32 = 3600;
 /// Packets after a tone before the next one, so two equal keys stay two.
 const TONE_GAP: u8 = 2;
 
+pub fn next_generation() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 pub struct Dial {
+    pub generation: u64,
     pub account: Account,
     pub password: Zeroizing<String>,
     /// The SIP address to call (see `phone::target`).
@@ -394,22 +400,34 @@ async fn place(
     Ok(())
 }
 
-/// Requests from the provider: those of our call go to it, others are turned down.
+/// Handle only transactions we support; generic dialog.handle emits application
+/// events and waits for their answer, which would deadlock this media/control loop.
 async fn respond(layer: &DialogLayer, mut tx: Transaction) {
-    if let Some(mut dialog) = layer.match_dialog(&tx) {
-        if let Err(error) = dialog.handle(&mut tx).await {
-            let _ = error;
-            tracing::debug!("handling a SIP request failed");
+    if tx.original.method == Method::Ack {
+        return;
+    }
+    if tx.original.method == Method::Bye
+        && let Some(mut dialog) = layer.match_dialog(&tx)
+    {
+        if !matches!(
+            time::timeout(Duration::from_millis(200), dialog.handle(&mut tx)).await,
+            Ok(Ok(()))
+        ) {
+            tracing::debug!("handling SIP BYE failed or timed out");
         }
         return;
     }
     let status = match tx.original.method {
         Method::Options => StatusCode::OK,
-        // Calls to us are not taken (yet).
-        Method::Invite => StatusCode::BusyHere,
-        _ => StatusCode::CallTransactionDoesNotExist,
+        Method::Invite | Method::Update => StatusCode::NotAcceptableHere,
+        _ => StatusCode::MethodNotAllowed,
     };
-    let _ = tx.reply(status).await;
+    if !matches!(
+        time::timeout(Duration::from_millis(200), tx.reply(status)).await,
+        Ok(Ok(()))
+    ) {
+        tracing::debug!("answering a SIP request failed or timed out");
+    }
 }
 
 /// The source the call's sound is published from: mono 48 kHz like the frames
@@ -621,7 +639,37 @@ mod tests {
         lines.join("\r\n")
     }
 
-    async fn fake_call(late_answer: bool) {
+    fn in_dialog_request(
+        invitation: &str,
+        provider: SocketAddr,
+        method: &str,
+        sequence: u32,
+    ) -> String {
+        let header = |name: &str| {
+            invitation
+                .lines()
+                .find_map(|line| {
+                    let (key, value) = line.split_once(':')?;
+                    key.eq_ignore_ascii_case(name)
+                        .then(|| value.trim().to_owned())
+                })
+                .unwrap()
+        };
+        let contact = header("Contact");
+        let target = contact
+            .split('<')
+            .nth(1)
+            .and_then(|s| s.split('>').next())
+            .unwrap();
+        format!(
+            "{method} {target} SIP/2.0\r\nVia: SIP/2.0/UDP {provider};branch=z9hG4bK-test-{sequence}\r\nFrom: {};tag=fake\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: {sequence} {method}\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n",
+            header("To"),
+            header("From"),
+            header("Call-ID")
+        )
+    }
+
+    async fn fake_call(late_answer: bool, exercise_requests: bool) {
         let sip = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let provider = sip.local_addr().unwrap();
         let media = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -638,11 +686,58 @@ mod tests {
             let mut got_cancel = false;
             let mut got_bye = false;
             let mut got_register = false;
+            let mut got_options = false;
+            let mut got_update = false;
             loop {
                 let (len, peer) = sip.recv_from(&mut buffer).await.unwrap();
                 let request = String::from_utf8_lossy(&buffer[..len]).to_string();
                 let method = request.split_whitespace().next().unwrap();
                 if method == "ACK" {
+                    if exercise_requests {
+                        let mut sound = [0; 1500];
+                        let (len, _) =
+                            time::timeout(Duration::from_secs(1), media.recv_from(&mut sound))
+                                .await
+                                .unwrap()
+                                .unwrap();
+                        assert!(rtp::parse(&sound[..len]).is_some());
+                        sip.send_to(
+                            in_dialog_request(&invitation, provider, "OPTIONS", 45).as_bytes(),
+                            peer,
+                        )
+                        .await
+                        .unwrap();
+                    }
+                    continue;
+                }
+                if method == "SIP/2.0" {
+                    if request.lines().any(|line| line.contains("45 OPTIONS")) {
+                        assert!(request.starts_with("SIP/2.0 200"));
+                        got_options = true;
+                        // The media loop must still carry RTP after handling the transaction.
+                        let mut sound = [0; 1500];
+                        while media.try_recv_from(&mut sound).is_ok() {}
+                        time::timeout(Duration::from_millis(300), media.recv_from(&mut sound))
+                            .await
+                            .unwrap()
+                            .unwrap();
+                        sip.send_to(
+                            in_dialog_request(&invitation, provider, "UPDATE", 46).as_bytes(),
+                            peer,
+                        )
+                        .await
+                        .unwrap();
+                    } else if request.lines().any(|line| line.contains("46 UPDATE")) {
+                        assert!(request.starts_with("SIP/2.0 488"));
+                        got_update = true;
+                        sip.send_to(
+                            in_dialog_request(&invitation, provider, "OPTIONS", 47).as_bytes(),
+                            peer,
+                        )
+                        .await
+                        .unwrap();
+                        cancel.cancel();
+                    }
                     continue;
                 }
                 let mut code = "200 OK";
@@ -674,6 +769,19 @@ mod tests {
                     }
                     "BYE" => {
                         got_bye = true;
+                        if exercise_requests {
+                            let mut sound = [0; 1500];
+                            while media.try_recv_from(&mut sound).is_ok() {}
+                            assert!(
+                                time::timeout(
+                                    Duration::from_millis(100),
+                                    media.recv_from(&mut sound)
+                                )
+                                .await
+                                .is_err(),
+                                "RTP continued after hangup"
+                            );
+                        }
                     }
                     _ => panic!("unexpected fake-provider method"),
                 }
@@ -691,12 +799,16 @@ mod tests {
             }
             assert!(got_register && got_bye);
             assert_eq!(got_cancel, late_answer);
+            if exercise_requests {
+                assert!(got_options && got_update);
+            }
         };
         let data = tempfile::tempdir().unwrap();
         let audio = Audio::new(data.path()).unwrap();
         let line = audio.phone_line(([1; 32], Some("test".into())));
         let (_control, receive) = unbounded_channel();
         let mut dial = Dial {
+            generation: next_generation(),
             account: Account {
                 server: provider.to_string(),
                 user: "test".into(),
@@ -709,7 +821,7 @@ mod tests {
         };
         let source = source();
         let events = |event| {
-            if matches!(event, Event::Status(Status::Talking))
+            if !exercise_requests && matches!(event, Event::Status(Status::Talking))
                 || late_answer && matches!(event, Event::Status(Status::Ringing))
             {
                 cancel.cancel();
@@ -724,13 +836,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn options_and_unsupported_update_do_not_stall_media_or_immediate_hangup() {
+        fake_call(false, true).await;
+    }
+
+    #[tokio::test]
     async fn room_stop_sends_bye_on_nondefault_provider_port() {
-        fake_call(false).await;
+        fake_call(false, false).await;
     }
 
     #[tokio::test]
     async fn cancelled_invite_cleans_up_a_late_answer() {
-        fake_call(true).await;
+        fake_call(true, false).await;
     }
 
     #[tokio::test]
@@ -742,6 +859,7 @@ mod tests {
         let line = audio.phone_line(([1; 32], Some("test".into())));
         let (_control, receive) = unbounded_channel();
         let mut dial = Dial {
+            generation: next_generation(),
             account: Account {
                 server: address.to_string(),
                 user: "test".into(),

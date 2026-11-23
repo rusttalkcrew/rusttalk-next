@@ -1602,3 +1602,6 @@ phone.external_notice = 外部の電話通話
 phone.external_help = 許可するまでマイク音声は共有されません。電話音声はエンドツーエンドで暗号化されません。「聴く」は通話をここで再生するだけです。
 phone.allow = この通話にマイク音声を共有
 phone.withdraw = マイク音声の共有を停止
+
+phone.withdrawing = 共有を停止中…電話側の確認までマイクを一時停止しています。
+phone.withdraw_failed = 停止を確認できません。マイクを一時停止したまま再試行します。

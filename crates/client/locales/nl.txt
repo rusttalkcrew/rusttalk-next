@@ -1602,3 +1602,6 @@ phone.external_notice = Extern telefoongesprek
 phone.external_help = Je microfoon blijft privé totdat je toestemming geeft. Telefoonaudio is niet end-to-end versleuteld. Luisteren speelt het gesprek alleen hier af.
 phone.allow = Deel mijn microfoon met dit gesprek
 phone.withdraw = Stop met delen van mijn microfoon
+
+phone.withdrawing = Delen stoppen… Microfoon gepauzeerd tot de telefoon bevestigt.
+phone.withdraw_failed = Stoppen niet bevestigd. Microfoon blijft gepauzeerd; opnieuw proberen.

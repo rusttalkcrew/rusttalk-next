@@ -236,6 +236,7 @@ impl KeyClient<'_> {
             terminal_share_keys,
             ring_keys,
             watch_keys,
+            phone_consent: Default::default(),
             stats: stats::Sampler::default(),
             files: live_file::LiveFiles::default(),
             grants,
@@ -318,6 +319,7 @@ pub struct VoiceRoom {
     /// Seal the ring for a voice request; only the current epoch's is used.
     ring_keys: HashMap<i64, Key>,
     watch_keys: HashMap<i64, Key>,
+    phone_consent: phone::Consent,
     stats: stats::Sampler,
     files: live_file::LiveFiles,
     /// Keeps who may receive our tracks up to date; see `stream_audio`.

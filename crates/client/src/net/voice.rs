@@ -47,7 +47,10 @@ pub(super) struct Live {
     pub(super) phone_announcement: Option<(
         Option<TrackSid>,
         Vec<rusttalk_core::client::voice::phone::Call>,
+        Vec<rusttalk_core::client::voice::phone::Call>,
     )>,
+    pub(super) phone_withdrawals: phone::Withdrawals,
+    pub(super) phone_acknowledgements: Vec<rusttalk_core::client::voice::phone::Acknowledgement>,
     /// Apps this device shares, each with its own track.
     shares: Vec<Share>,
     /// The phone call bridged in, shown like a shared app.
@@ -194,6 +197,11 @@ pub(super) async fn voice_command(
     }
     let changed = match command {
         Command::PhoneConsent(call, on) => {
+            if !on {
+                ctx.audio.pause_phone_withdrawal(true);
+                live.phone_withdrawals.start(call.clone());
+                ctx.audio.accept_phone_withdrawal_request();
+            }
             live.phone_consents.retain(|old| old != &call);
             if on && live.room.external_phone_calls().contains(&call) {
                 live.phone_consents.push(call);
@@ -1140,7 +1148,10 @@ pub(super) async fn on_voice(
         }
         RoomEvent::Reconnecting => {
             if let Some(live) = &mut state.voice {
-                live.phone_consents.clear();
+                for call in live.phone_consents.drain(..) {
+                    ctx.audio.pause_phone_withdrawal(true);
+                    live.phone_withdrawals.start(call);
+                }
                 live.phone_announcement = None;
                 #[cfg(not(any(target_os = "android", target_os = "ios")))]
                 if let Some(phone) = &live.phone {
@@ -1162,7 +1173,10 @@ pub(super) async fn on_voice(
             ctx.audio.stop_listening();
             tracing::info!("voice reconnected");
             if let Some(live) = &mut state.voice {
-                live.phone_consents.clear();
+                for call in live.phone_consents.drain(..) {
+                    ctx.audio.pause_phone_withdrawal(true);
+                    live.phone_withdrawals.start(call);
+                }
                 live.phone_announcement = None;
                 live.deafened = None;
                 live.announced_watches = None;
@@ -1569,6 +1583,8 @@ pub(super) async fn start_call(
         phone: None,
         phone_consents: Vec::new(),
         phone_announcement: None,
+        phone_withdrawals: Default::default(),
+        phone_acknowledgements: Vec::new(),
         pending: Vec::new(),
         stream_audio: Vec::new(),
         apps: HashMap::new(),

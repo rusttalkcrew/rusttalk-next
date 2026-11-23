@@ -498,7 +498,13 @@ is deleted and never used; the normal noise suppression keeps working.
   volume or deafens; the caller's microphone obeys mute, deafen and push-to-talk.
   Phone sound is published as encrypted shared audio; members press Listen to
   hear it. Call notices and consent are encrypted participant attributes bound
-  to the sender and session. Losing permission or reconnecting ends the phone
+  to the sender and session, with authenticated increasing revisions preventing
+  replay of withdrawn grants. Stopping sharing immediately pauses the channel
+  microphone until the bridge confirms exclusion (or the call ends); a failed
+  confirmation keeps it paused with a visible notice. This brief pause also
+  affects other listeners in the channel, without changing mute or push-to-talk.
+  A directly dialed local phone call is independent of this transmission pause.
+  Losing permission or reconnecting ends the phone
   call. Media accepts only the negotiated UDP endpoint and G.711 payload; hold,
   one-way audio and non-RTP/AVP SDP are rejected. The RustTalk
   server never sees the number or the sound. The account (server, username, caller

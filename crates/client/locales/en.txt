@@ -1605,3 +1605,6 @@ phone.external_notice = External phone call
 phone.external_help = Your microphone stays private unless you allow it. Phone audio is not end-to-end encrypted. Listen only plays the call here.
 phone.allow = Share my microphone with this call
 phone.withdraw = Stop sharing my microphone
+
+phone.withdrawing = Stopping sharing… Microphone paused while the phone confirms.
+phone.withdraw_failed = Could not confirm stop. Microphone stays paused; retrying.
