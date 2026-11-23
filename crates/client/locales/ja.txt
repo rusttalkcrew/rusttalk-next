@@ -1370,3 +1370,9 @@ terminal.take_back = 取り戻す
 terminal.denied = {name} は入力を許可しませんでした。
 terminal.taken_back = {name} が入力を取り消しました。
 terminal.paste_too_long = 他の人のターミナルに貼り付けるには長すぎます。
+
+# crates/client/src/phone_clipboard.rs
+clipboard.paste = 貼り付け
+clipboard.copy = コピー
+clipboard.cut = 切り取り
+clipboard.select_all = すべて選択

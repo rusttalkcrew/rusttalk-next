@@ -251,6 +251,9 @@ impl Field<'_> {
 
 impl Widget for Field<'_> {
     fn ui(self, ui: &mut Ui) -> Response {
+        if self.private {
+            keep_private(ui.ctx());
+        }
         let output = self.edit.show(ui);
         share_with_keyboard(&output, self.private || self.password);
         let response = output.response.response;
@@ -267,8 +270,11 @@ impl Widget for Field<'_> {
 
 /// Phones: the on-screen keyboard works on the text around the cursor (to delete
 /// and correct it), so the focused field shares it (`android::share_field`); a
-/// `secret` field shares only its cursor and length.
+/// `secret` field shares only its cursor and length. Phones also get a long-press
+/// menu to paste, copy and cut (`phone_clipboard`).
 pub fn share_with_keyboard(output: &egui::text_edit::TextEditOutput, secret: bool) {
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    crate::phone_clipboard::menu(output, secret);
     #[cfg(any(target_os = "android", test))]
     if output.response.response.has_focus() {
         let response = &output.response.response;
@@ -286,6 +292,23 @@ pub fn share_with_keyboard(output: &egui::text_edit::TextEditOutput, secret: boo
 
 fn private_id(field: egui::Id) -> egui::Id {
     field.with("private field")
+}
+
+/// Never copy or cut out of a focused private field (egui only protects password
+/// fields): its text would reach the system clipboard, also from a phone.
+fn keep_private(ctx: &egui::Context) {
+    let Some(focused) = ctx.memory(|memory| memory.focused()) else {
+        return;
+    };
+    // Marked last frame (the id is only known after showing the field).
+    let marked = ctx.data(|data| data.get_temp::<u64>(private_id(focused)));
+    if marked.is_some_and(|pass| pass + 1 >= ctx.cumulative_pass_nr()) {
+        ctx.input_mut(|input| {
+            input
+                .events
+                .retain(|event| !matches!(event, egui::Event::Copy | egui::Event::Cut));
+        });
+    }
 }
 
 /// Whether the field was marked [`Field::private`].

@@ -448,6 +448,8 @@ impl eframe::App for App<'_> {
         crate::paste::keys(ctx, raw_input);
         #[cfg(target_os = "android")]
         crate::android::input(ctx, raw_input);
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        crate::phone_clipboard::input(ctx, raw_input);
         #[cfg(target_os = "linux")]
         crate::wayland_drops::input(raw_input);
     }
@@ -468,6 +470,8 @@ impl eframe::App for App<'_> {
         crate::android::frame(ui, |ui| self.screens(ui));
         #[cfg(not(target_os = "android"))]
         self.screens(ui);
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        crate::phone_clipboard::frame_end(ui.ctx());
     }
 }
 

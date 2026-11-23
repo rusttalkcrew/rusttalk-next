@@ -12,7 +12,7 @@ use std::{
 };
 
 use base64::Engine;
-use eframe::egui::{self, Event, Id, Key, RawInput, ViewportCommand};
+use eframe::egui::{self, Event, Id, Key, RawInput};
 use url::Url;
 
 use crate::net::MAX_FILE;
@@ -250,8 +250,17 @@ pub fn wanted(ctx: &egui::Context) -> bool {
 /// A paste nobody took this frame is a text paste, as the window would have done.
 pub fn text(ctx: &egui::Context) {
     if wanted(ctx) {
-        ctx.send_viewport_cmd(ViewportCommand::RequestPaste);
+        request_text(ctx);
     }
+}
+
+/// Paste the clipboard's text into the focused field.
+pub fn request_text(ctx: &egui::Context) {
+    // The window's own paste reads only a clipboard inside the app on phones.
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    crate::phone_clipboard::paste_focused(ctx);
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaste);
 }
 
 #[cfg(target_os = "linux")]

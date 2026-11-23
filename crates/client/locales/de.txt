@@ -1370,3 +1370,9 @@ terminal.take_back = Zurücknehmen
 terminal.denied = {name} hat das Tippen nicht erlaubt.
 terminal.taken_back = {name} hat dir das Tippen wieder genommen.
 terminal.paste_too_long = Das ist zu lang, um es in ein fremdes Terminal einzufügen.
+
+# crates/client/src/phone_clipboard.rs
+clipboard.paste = Einfügen
+clipboard.copy = Kopieren
+clipboard.cut = Ausschneiden
+clipboard.select_all = Alles auswählen

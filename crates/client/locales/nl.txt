@@ -1370,3 +1370,9 @@ terminal.take_back = Terugnemen
 terminal.denied = {name} liet je niet typen.
 terminal.taken_back = {name} heeft het typen teruggenomen.
 terminal.paste_too_long = Dat is te lang om in de terminal van iemand anders te plakken.
+
+# crates/client/src/phone_clipboard.rs
+clipboard.paste = Plakken
+clipboard.copy = Kopiëren
+clipboard.cut = Knippen
+clipboard.select_all = Alles selecteren

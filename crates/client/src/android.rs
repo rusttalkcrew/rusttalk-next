@@ -838,7 +838,12 @@ mod activity {
         }
     }
 
-    fn java<T>(
+    /// The activity, for Java calls elsewhere (`phone_clipboard`).
+    pub fn app() -> Option<&'static AndroidApp> {
+        APP.get()
+    }
+
+    pub fn java<T>(
         app: &AndroidApp,
         f: impl FnOnce(&mut jni::Env, &JObject) -> jni::errors::Result<T>,
     ) -> jni::errors::Result<T> {
