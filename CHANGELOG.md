@@ -11,6 +11,7 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Channels only some roles can see show a lock, and their permissions are easier to set.
 - Voice channels can have a member limit; the channel list shows how full they are, like 3/5.
 - The stream badge shows a compact viewer count and leaves the video stats visible.
 - Choose Direct, SOCKS5, app-only WireGuard, or Tor during onboarding and in Settings → Network on desktop and mobile, with fail-closed routing and secure credential storage.

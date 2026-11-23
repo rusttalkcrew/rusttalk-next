@@ -236,8 +236,8 @@ enum Join {
 const AUDIO_KBPS: std::ops::RangeInclusive<u32> = 8..=128;
 /// Voice channel member limits a manager can pick; 0 is no limit.
 const MEMBER_LIMIT: std::ops::RangeInclusive<u32> = 0..=99;
-/// The least height of an Edit channel tab: General of a voice channel.
-const CHANNEL_TAB_HEIGHT: f32 = 308.0;
+/// The height of both Edit channel tabs; the list of roles scrolls inside it.
+const CHANNEL_TAB_HEIGHT: f32 = 350.0;
 
 enum Dialog {
     ServerName(usize, String),
@@ -2997,7 +2997,11 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
                 let selected = server.open == Some(channel.id);
                 let button = list.row(ui, item, block, |ui| {
                     let icon = channel_icon(channel);
-                    let label = format!("{icon}  {}", channel.name);
+                    let locked = limited(server, channel);
+                    let mut label = format!("{icon}  {}", channel.name);
+                    if locked {
+                        label = format!("{label}, {}", t!("home.channel_limited"));
+                    }
                     // Voice rows keep room for the Join button.
                     let limited = channel.voice && channel.member_limit > 0;
                     let trailing = match (channel.voice, limited) {
@@ -3005,10 +3009,13 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
                         (true, false) => call::JOIN_SLOT,
                         _ => 0.0,
                     };
+                    let mark = locked.then_some("🔒");
                     let row = ui
                         .add_enabled_ui(online || !channel.voice, |ui| {
                             let (name, role) = (&channel.name, Role::Button);
-                            ui::nav_row_trailing(ui, icon, name, selected, role, &label, trailing)
+                            ui::nav_row_marked(
+                                ui, icon, name, selected, role, &label, trailing, mark,
+                            )
                         })
                         .inner;
                     let chats = [(&server.address, channel.id)];
@@ -3178,6 +3185,12 @@ fn category_name(kind: ChannelKind) -> &'static str {
         ChannelKind::Voice => t!("home.voice_channels"),
         ChannelKind::Text | ChannelKind::Page | ChannelKind::Forum => t!("home.text_channels"),
     }
+}
+
+/// Only some roles can see this channel: the role everyone gets can't read it.
+fn limited(server: &Server, channel: &Channel) -> bool {
+    let everyone = &server.dir.default_role;
+    !everyone.is_empty() && admin::channel_role_flags(channel, everyone) & 1 == 0
 }
 
 /// The glyph before a channel's name.
@@ -6460,7 +6473,9 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
                     }
                     entered = name_entered || submitted(ui, &field);
                 }
-                ChannelTab::Permissions => admin::channel_flags(ui, data, channel, flags),
+                ChannelTab::Permissions => {
+                    admin::channel_flags(ui, data, channel, flags, CHANNEL_TAB_HEIGHT);
+                }
             }
             // The same height on both tabs, so the centred dialog doesn't jump on a switch.
             ui.add_space((CHANNEL_TAB_HEIGHT - (ui.cursor().top() - top)).max(0.0));
@@ -7272,7 +7287,7 @@ mod tests {
     /// Edit channel holds General and Permissions; Save sends only what changed.
     #[test]
     fn edit_channel_saves_permissions_with_the_same_save() {
-        use egui_kittest::kittest::{Queryable, by};
+        use egui_kittest::kittest::Queryable;
         let (mut harness, mut sent) = files_harness(true);
         while sent.try_recv().is_ok() {}
         let mut harness = {
@@ -7310,11 +7325,7 @@ mod tests {
         harness.run_steps(4);
         assert!(harness.query_by_label("Delete channel").is_none());
         // Member may read and write; taking Write away waits for Save.
-        let write = harness
-            .query_all(by().role(egui::accesskit::Role::CheckBox))
-            .nth(1)
-            .unwrap();
-        write.click_accesskit();
+        harness.get_by_label("✏ Write").click_accesskit();
         harness.run_steps(4);
         assert!(sent.try_recv().is_err(), "a permission saved before Save");
         harness.get_by_label("Save").click_accesskit();
