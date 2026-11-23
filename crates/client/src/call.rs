@@ -89,7 +89,6 @@ pub struct Voice {
     pub watching: Option<Watching>,
     /// The newest picture of our own share, while its preview is on.
     preview: Option<TextureHandle>,
-    pub preview_hidden: bool,
     pub camera: Camera,
     /// People whose camera this device chose not to receive.
     pub(crate) hidden: HashSet<Id>,
@@ -215,7 +214,6 @@ impl Voice {
             targets: Arc::new(Mutex::new(Listing::Loading)),
             watching: None,
             preview: None,
-            preview_hidden: false,
             camera: Camera::new(runtime),
             hidden: HashSet::new(),
             cameras: HashMap::new(),
@@ -269,11 +267,17 @@ impl Voice {
         self.cameras.clear();
     }
 
+    pub(crate) fn default_stream_audio(&self) -> Vec<App> {
+        if self.supported {
+            vec![share::system()]
+        } else {
+            Vec::new()
+        }
+    }
+
     pub(crate) fn update_preview(&mut self, ctx: &egui::Context) {
         let active = ctx.input(|i| i.focused && i.viewport().minimized != Some(true));
-        let on = matches!(self.sharing, Sharing::On | Sharing::Changing)
-            && !self.preview_hidden
-            && active;
+        let on = matches!(self.sharing, Sharing::On | Sharing::Changing) && active;
         if self.video.preview.is_on() != on {
             self.video.preview.set(on);
         }
@@ -282,9 +286,8 @@ impl Voice {
         }
     }
 
-    /// Hide the current preview; a new share enables it again.
+    /// Clear the preview when the screen share ends.
     pub fn stop_preview(&mut self) {
-        self.preview_hidden = true;
         self.video.preview.set(false);
         self.preview = None;
     }
@@ -1039,8 +1042,7 @@ fn shared_sound_in(shares: &mut Vec<App>, stream: &mut Vec<App>, update: Update)
 fn open_screen_dialog(ctx: &egui::Context, voice: &mut Voice) {
     voice.share_screen = Some((screen_options(&voice.audio.settings()), None));
     if !voice.changing_screen {
-        // Apps shared now become the stream's sound, since going live stops them.
-        voice.stream_audio = voice.shares.clone();
+        voice.stream_audio = voice.default_stream_audio();
     }
     fill(ctx, &voice.targets, "screens", screen::targets);
 }

@@ -801,13 +801,14 @@ impl Audio {
 
     /// Queue a chime in the speaker mixer only. Echo cancellation gets the same
     /// reference it gets for remote audio, including any sound from the speakers.
-    pub fn play_cue(&self, cue: Cue) {
+    /// Returns whether the chime was queued.
+    pub fn play_cue(&self, cue: Cue) -> bool {
         let settings = lock(&self.shared().settings);
         let prefs = &settings.call_sounds;
         // Deafened people only hear the chimes about deafening itself.
         let silenced = self.deafened() && !matches!(cue, Cue::Deafened | Cue::Undeafened);
         if !prefs.enabled || prefs.volume <= 0.0 || silenced || prefs.disabled.contains(&cue) {
-            return;
+            return false;
         }
         let mut mixer = lock(&self.shared().mixer);
         let now = Instant::now();
@@ -815,18 +816,31 @@ impl Audio {
             mixer.cues.clear();
         }
         // Keep cues timely if several people join at once or the output stalls.
-        if mixer.cues.len() < RATE as usize / 2 {
-            mixer.cues.extend(cue.samples(RATE, prefs.volume));
-            // A ring is longer, and may first have to open the speakers.
-            let secs = if cue == Cue::Ring { 2 } else { 1 };
-            mixer.cue_until = Some(now + Duration::from_secs(secs));
+        if mixer.cues.len() >= RATE as usize / 2 {
+            return false;
         }
+        mixer.cues.extend(cue.samples(RATE, prefs.volume));
+        // A ring is longer, and these two may first have to open the speakers.
+        let secs = if matches!(cue, Cue::Ring | Cue::Message) {
+            2
+        } else {
+            1
+        };
+        mixer.cue_until = Some(now + Duration::from_secs(secs));
+        true
     }
 
     /// Ring for a voice request, also outside a call: that opens the speakers for it.
     pub fn ring(&self) {
         self.play_cue(Cue::Ring);
         self.refresh();
+    }
+
+    /// Chime for a new message, also outside a call. False when the sound settings keep it quiet.
+    pub fn message(&self) -> bool {
+        let played = self.play_cue(Cue::Message);
+        self.refresh();
+        played
     }
 
     /// The last microphone level in dBFS.

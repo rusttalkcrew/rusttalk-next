@@ -154,14 +154,11 @@ fn screen_tip(sharing: Sharing) -> &'static str {
 
 /// What a button on the "now sharing" card does.
 enum Stop {
-    Screen,
     /// Pick another screen to share.
     Change,
     App(String),
     /// The screen share's sound changed to these.
     Sound(Vec<App>),
-    /// Show or hide the preview of our own screen.
-    Preview,
 }
 
 /// The voice panel, while in a voice room.
@@ -254,16 +251,8 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
     let mut live = None;
     let mut leave_now = false;
     let mut share = Vec::new();
-    let mut stop_screen = matches!(stopped, Some(Stop::Screen));
+    let mut stop_screen = false;
     let mut change_screen = matches!(stopped, Some(Stop::Change));
-    if matches!(stopped, Some(Stop::Preview)) {
-        if !home.voice.preview_hidden {
-            home.voice.stop_preview();
-        } else {
-            home.voice.preview_hidden = false;
-            home.voice.update_preview(ui.ctx());
-        }
-    }
     let mut voice_settings = false;
     let mut terminal = None;
     Frame::new()
@@ -895,7 +884,7 @@ fn empty(ui: &mut Ui, text: &str) {
 }
 
 /// t!("call.now_sharing") above the panel while this device shares its screen or app audio,
-/// each with a stop button.
+/// with controls for each active share.
 /// `blocked` says why the stream's sound can't be picked now, if it can't.
 fn sharing_card(ui: &mut Ui, voice: &Voice, blocked: Option<&str>) -> Option<Stop> {
     let shown = voice.sharing != Sharing::Off || !voice.shares.is_empty();
@@ -907,47 +896,35 @@ fn sharing_card(ui: &mut Ui, voice: &Voice, blocked: Option<&str>) -> Option<Sto
             Sharing::Starting => Some(t!("call.starting_screen").to_owned()),
             Sharing::Changing | Sharing::On => Some(t!("call.your_screen").to_owned()),
         };
-        let rows = screen
-            .map(|text| {
-                (
-                    "🖥",
-                    text,
-                    t!("call.stop_sharing_screen").to_owned(),
-                    Stop::Screen,
-                )
-            })
-            .into_iter()
-            .chain(voice.shares.iter().map(|app| {
-                let tip = t!("call.stop_sharing_app", app = app.name);
-                ("🎵", app.name.clone(), tip, Stop::App(app.id.clone()))
-            }));
-        for (icon, text, tip, which) in rows {
-            // The screen's other buttons get a row of their own, so its name stays
-            // readable in a narrow panel.
-            let tools = matches!(which, Stop::Screen) && voice.sharing != Sharing::Starting;
+        if let Some(text) = screen {
             ui::right_row(ui, STOP_SIZE.y, |ui| {
-                if ui::icon_button(ui, "⏹", &tip, Look::Plain, STOP_SIZE).clicked() {
-                    stop = Some(which);
+                if voice.sharing != Sharing::Starting {
+                    stop = screen_tools(ui, voice, blocked);
                 }
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                     ui::dot(ui, ui::colors(ui).success);
-                    ui.add(Label::new(format!("{icon}  {text}")).truncate());
+                    ui.add(Label::new(format!("🖥  {text}")).truncate());
                 });
             });
-            if tools {
-                ui::right_row(ui, STOP_SIZE.y, |ui| {
-                    stop = screen_tools(ui, voice, blocked).or(stop.take());
+        }
+        for app in &voice.shares {
+            ui::right_row(ui, STOP_SIZE.y, |ui| {
+                let tip = t!("call.stop_sharing_app", app = app.name);
+                if ui::icon_button(ui, "⏹", &tip, Look::Plain, STOP_SIZE).clicked() {
+                    stop = Some(Stop::App(app.id.clone()));
+                }
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    ui::dot(ui, ui::colors(ui).success);
+                    ui.add(Label::new(format!("🎵  {}", app.name)).truncate());
                 });
-            }
+            });
         }
     });
     ui.add_space(4.0);
     stop
 }
 
-/// The screen share's buttons on the "now sharing" card: its sound, the preview and
-/// changing what is shared, laid out right to left. `blocked` says why the sound can't be
-/// picked now, if it can't.
+/// The screen share's sound and source controls, laid out right to left.
 fn screen_tools(ui: &mut Ui, voice: &Voice, blocked: Option<&str>) -> Option<Stop> {
     let mut stop = None;
     let (glyph, look) = if voice.stream_audio.is_empty() {
@@ -978,14 +955,6 @@ fn screen_tools(ui: &mut Ui, voice: &Voice, blocked: Option<&str>) -> Option<Sto
     }
     if refresh {
         fill(ui.ctx(), &voice.apps, "apps", share::list);
-    }
-    let look = if !voice.preview_hidden {
-        Look::On(ui::accent(ui).base)
-    } else {
-        Look::Plain
-    };
-    if ui::icon_button(ui, "👁", t!("call.preview"), look, STOP_SIZE).clicked() {
-        stop = Some(Stop::Preview);
     }
     let picking = voice.sharing == Sharing::Changing;
     let change = ui.add_enabled_ui(!picking, |ui| {

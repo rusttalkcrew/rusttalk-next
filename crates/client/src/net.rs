@@ -870,8 +870,9 @@ async fn run(
     // Commands that came while connecting, for when it is done. Not in `State`: some
     // hold Windows handles, and `State` is borrowed across awaits so must stay `Sync`.
     let mut queued = VecDeque::new();
+    // Once an attempt fails or the session drops, stay Offline until recovery.
+    ctx.send(Update::Status(url.clone(), Status::Connecting));
     loop {
-        ctx.send(Update::Status(url.clone(), Status::Connecting));
         let connecting = {
             let (ctx, server, api, admission) = (&ctx, &server, &mut api, &mut admission);
             async move {
