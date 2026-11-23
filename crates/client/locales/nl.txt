@@ -913,6 +913,7 @@ keys.section = Sleutelopslag
 keys.choose_title = Waar moet RustTalk je sleutels bewaren?
 keys.no_keychain = Dit apparaat heeft geen sleutelbos (vaak zo in de Game Mode van de Steam Deck). Hoe moet RustTalk je sleutels bewaren?
 keys.password_only = Op dit apparaat beveiligt RustTalk je sleutels met een wachtwoord. Je typt het bij elke start.
+keys.no_keychain_phone = De sleutelbos is niet beschikbaar, dus beveiligt RustTalk je sleutels met een wachtwoord. Je typt het bij elke start.
 keys.keychain = Sleutelbos
 keys.keychain_help = De sleutelbos van je systeem bewaart je sleutels.
 keys.file = Beveiligd bestand

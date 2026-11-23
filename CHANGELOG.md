@@ -16,6 +16,8 @@ Unreleased under the new version and date.
 - Android: typing works, so you can sign up, sign in, join a server and chat
 - Enter now confirms the name and unlock screens
 - Phones: press and hold a text field to paste, copy, cut or select all, using the phone's clipboard
+- iPhone: taps land where you touch, and the app stays clear of the notch and home bar
+- iPhone: your keys are kept in the Keychain, so there's no password to type
 
 ## v0.1.11 - 2026-11-22
 

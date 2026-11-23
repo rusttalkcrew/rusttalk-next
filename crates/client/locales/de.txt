@@ -913,6 +913,7 @@ keys.section = Schlüsselspeicher
 keys.choose_title = Wo soll RustTalk deine Schlüssel aufbewahren?
 keys.no_keychain = Dieses Gerät hat keinen Schlüsselbund (üblich im Spielmodus des Steam Deck). Wie soll RustTalk deine Schlüssel aufbewahren?
 keys.password_only = Auf diesem Gerät schützt RustTalk deine Schlüssel mit einem Passwort. Du gibst es bei jedem Start ein.
+keys.no_keychain_phone = Der Schlüsselbund ist nicht verfügbar, darum schützt RustTalk deine Schlüssel mit einem Passwort. Du gibst es bei jedem Start ein.
 keys.keychain = Schlüsselbund
 keys.keychain_help = Der Schlüsselbund deines Systems bewahrt deine Schlüssel auf.
 keys.file = Geschützte Datei

@@ -27,6 +27,8 @@ mod files;
 mod friends;
 mod home;
 mod hotkeys;
+#[cfg(target_os = "ios")]
+mod ios;
 mod key_storage;
 mod keystore;
 mod link_cards;
