@@ -4517,6 +4517,7 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
             (msg.replicas.first()).and_then(|url| servers.iter().find(|s| s.address == *url));
         copy.or(named.map(|index| &servers[index]))
     };
+    let before_offset = chat.scroll_to.unwrap_or(chat.scroll_offset);
     let mut area = ScrollArea::vertical()
         .id_salt(("chat", key))
         .stick_to_bottom(true)
@@ -4605,6 +4606,13 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
         }
     });
     let content = output.content_size.y;
+    let offset = output.state.clamped_offset().y;
+    // `stick_to_bottom` updates the offset at the end of the pass without requesting
+    // another frame; repaint once so newly scrolled-in messages and their emoji load.
+    if (offset - before_offset).abs() > 0.5 {
+        ui.ctx().request_repaint();
+    }
+    chat.scroll_offset = offset;
     // Only page once the layout has settled; the first frame always starts at the top.
     let settled = chat.content_height == content;
     if let Some(before) = chat.keep_scroll {
@@ -6482,6 +6490,7 @@ mod tests {
     const ANN: Id = [7; 32];
     const PROJECTS: Id = [3; 32];
 
+    mod emoji;
     mod streams;
     mod touch;
     mod uploads;

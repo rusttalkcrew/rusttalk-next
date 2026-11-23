@@ -1081,7 +1081,18 @@ fn sticker_file(
     };
     let id = file.file.id;
     let area = Rect::from_min_size(ui.cursor().min, Vec2::splat(crate::home::STICKER_SIZE));
-    if sticker_files::state(ui.ctx(), &id).is_none() && ui.is_rect_visible(area) {
+    let visible = match kind {
+        // Inline emoji render in the message text already laid out above this cursor;
+        // on the last message of a scrolled chat, `ui.cursor().min.y` sits past the
+        // clip rect by `item_spacing.y`.
+        sticker_files::Kind::Emoji if ui.min_rect().height() > 0.0 => ui.min_rect(),
+        _ => {
+            let mut rect = area;
+            rect.min.y -= ui.spacing().item_spacing.y;
+            rect
+        }
+    };
+    if sticker_files::state(ui.ctx(), &id).is_none() && ui.is_rect_visible(visible) {
         sticker_files::set(ui.ctx(), &id, sticker_files::State::Loading);
         let _ = commands.send(Command::StickerFile(file.file.clone(), kind));
     }

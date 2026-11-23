@@ -11,6 +11,7 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Incoming custom emoji now appear as soon as their pictures finish loading, without waiting for another chat message.
 - Backgrounding Android during a camera switch no longer waits for the camera or reopens it after pause.
 
 - Retry a failed forum post with its title, body and poll. Replies stay visible when a poll and its post arrive separately.
