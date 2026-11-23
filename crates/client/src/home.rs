@@ -3527,26 +3527,50 @@ fn time(at: i64) -> String {
     }
 }
 
-/// A voice channel: the call on top and its chat below. Issue #63 replaces this
-/// fixed split with a draggable one and layout choices; only this function changes.
+/// A voice channel shares its chat pane with the stage only while someone is in voice.
 fn voice_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
-    let title = home.servers[index]
+    let server = &home.servers[index];
+    let occupied = home.voice.in_call(server, &channel)
+        || server
+            .voice
+            .get(&channel)
+            .is_some_and(|peers| !peers.is_empty());
+    let title = server
         .chat_title(&channel)
         .map(|(name, _)| name)
         .unwrap_or_default();
-    pane_title(
+    let mut join = false;
+    pane_title_with(
         ui,
         "room-title",
         &format!("🔊 {title}"),
-        Some(&mut home.layout),
-        true,
         Some(channel),
+        |ui| {
+            layout::members_button(ui, &mut home.layout);
+            ui.add_space(ui::SPACE_S);
+            if occupied {
+                layout::split_buttons(ui, &mut home.layout.split);
+            } else {
+                join = ui
+                    .add_enabled_ui(server.status == Status::Online, |ui| {
+                        ui::primary(ui, t!("call.join_voice")).clicked()
+                    })
+                    .inner;
+            }
+        },
     );
+    if join {
+        call::join(home, index, channel);
+    }
     // Problems from the call and the voice panel show here; the chat has its own line.
     toast_line(ui, &mut home.toast);
     ui.add_space(ui::SPACE_S);
     let area = ui.available_rect_before_wrap();
-    let (stage, divider, chat) = layout::split(area, &home.layout.split);
+    let (stage, divider, chat) = if occupied {
+        layout::split(area, &home.layout.split)
+    } else {
+        (None, None, Some(area))
+    };
     if let Some(rect) = stage {
         let mut ui = ui.new_child(UiBuilder::new().max_rect(rect));
         call::stage(&mut ui, home, index, channel);
@@ -3735,7 +3759,7 @@ fn files_view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat: &mu
             .map_or_else(String::new, |c| format!("{} {}", channel_icon(c), c.name));
         let in_server = matches!(home.view, View::Server(_));
         let layout = in_server.then_some(&mut home.layout);
-        pane_title(ui, "chat-title", &title, layout, false, Some(channel));
+        pane_title(ui, "chat-title", &title, layout, Some(channel));
         toast_line(ui, &mut home.toast);
     }
     let server = &home.servers[index];
@@ -3829,7 +3853,6 @@ fn page_view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat: &mut
         "chat-title",
         &title,
         in_server.then_some(&mut home.layout),
-        false,
         Some(channel),
     );
     toast_line(ui, &mut home.toast);
@@ -4185,14 +4208,7 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
             At::Channel(_, channel) => Some(channel),
             At::Dm(_) => None,
         };
-        pane_title(
-            ui,
-            "chat-title",
-            &title,
-            in_server.then_some(layout),
-            false,
-            files,
-        );
+        pane_title(ui, "chat-title", &title, in_server.then_some(layout), files);
     }
     let act = friends::dm_card(ui, relation, request, &name);
     let (hovered, dropped) = ui.input(|input| {
@@ -4696,8 +4712,21 @@ pub fn pane_title(
     id: &'static str,
     title: &str,
     members: Option<&mut layout::Layout>,
-    split: bool,
     files: Option<Id>,
+) {
+    pane_title_with(ui, id, title, files, |ui| {
+        if let Some(layout) = members {
+            layout::members_button(ui, layout);
+        }
+    });
+}
+
+fn pane_title_with(
+    ui: &mut Ui,
+    id: &'static str,
+    title: &str,
+    files: Option<Id>,
+    controls: impl FnOnce(&mut Ui),
 ) {
     Panel::top(id)
         .frame(Frame::new().inner_margin(Margin {
@@ -4712,13 +4741,7 @@ pub fn pane_title(
                 header_back(ui);
                 // Buttons first, so a long name is cut short instead of pushing them off.
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if let Some(layout) = members {
-                        layout::members_button(ui, layout);
-                        if split {
-                            ui.add_space(ui::SPACE_S);
-                            layout::split_buttons(ui, &mut layout.split);
-                        }
-                    }
+                    controls(ui);
                     if let Some(channel) = files {
                         files_button(ui, channel);
                     }
