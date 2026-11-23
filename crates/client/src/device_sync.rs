@@ -186,6 +186,11 @@ impl DeviceSync {
         dm_deleted(&self.saved.lock().await.snapshot.state.settings)
     }
 
+    /// Whether local edits are still waiting to be published to peers.
+    pub async fn has_pending(&self) -> bool {
+        !self.saved.lock().await.pending.is_empty()
+    }
+
     /// Cache only this account's selected image. A digest in encrypted device sync
     /// avoids putting a 256 KiB image into the 256 KiB settings blob.
     pub async fn avatar(
@@ -200,10 +205,12 @@ impl DeviceSync {
         let mut saved = self.saved.lock().await;
         if let Some(bytes) = candidate {
             let hash = digest(bytes);
+            let mut dirty = false;
             if !saved.snapshot.state.settings.contains_key("avatar_digest") {
                 let edit = Edit::InitialAvatar(hash.clone());
                 edit.apply(&mut saved.snapshot.state);
                 saved.pending.push(edit);
+                dirty = true;
             }
             if saved
                 .snapshot
@@ -217,16 +224,24 @@ impl DeviceSync {
                 let cached = (*person, encoded);
                 if saved.avatar.as_ref() != Some(&cached) {
                     saved.avatar = Some(cached);
-                    save(data, &saved)?;
+                    dirty = true;
                 }
+            }
+            if dirty {
+                save(data, &saved)?;
             }
         }
         let bytes = saved
             .avatar
             .as_ref()
             .filter(|(owner, _)| owner == person)
-            .map(|(_, bytes)| decode_bytes(bytes))
-            .transpose()?;
+            .and_then(|(_, bytes)| match decode_bytes(bytes) {
+                Ok(bytes) => Some(bytes),
+                Err(error) => {
+                    tracing::warn!(%error, "ignoring unreadable cached account picture");
+                    None
+                }
+            });
         Ok(bytes.filter(|bytes| {
             saved
                 .snapshot
@@ -298,8 +313,18 @@ impl DeviceSync {
         let mut conflicts = Vec::new();
         // A version conflict means another device published in between: load and merge again.
         for _ in 0..3 {
-            let (snapshots, failures) = sync::load_all(&peers, key).await;
-            log("load", &failures);
+            let (snapshots, load_failures) = sync::load_all(&peers, key).await;
+            log("load", &load_failures);
+            let loaded = snapshots.len();
+            let peers_agree = snapshots.first().is_some_and(|first| {
+                snapshots
+                    .iter()
+                    .skip(1)
+                    .all(|snap| snap.version == first.version && snap.state == first.state)
+            });
+            let first_meta = snapshots
+                .first()
+                .map(|first| (first.version, first.state.clone()));
             let mut deletes = dm_deleted(&saved.snapshot.state.settings);
             let verified = records
                 .relay(
@@ -327,18 +352,42 @@ impl DeviceSync {
             }
             keep_deletes(&mut saved.snapshot.state, &deletes);
             saved.snapshot.state.revocations = verified;
-            let version = saved.snapshot.version;
-            let failures = sync::push_all(&peers, key, &mut saved.snapshot).await?;
-            if saved.snapshot.version > version {
-                saved.pending.clear();
-            }
-            save(data, &saved)?;
-            log("save", &failures);
-            if !failures
-                .iter()
-                .any(|(_, error)| error.is::<VersionConflict>())
-            {
-                break;
+            let first_matches_local = first_meta.is_some_and(|(version, state)| {
+                version == saved.snapshot.version && state == saved.snapshot.state
+            });
+            match push_action(
+                peers.len(),
+                load_failures.len(),
+                loaded,
+                peers_agree,
+                first_matches_local,
+                saved.snapshot.version,
+                !saved.pending.is_empty(),
+            ) {
+                PushAction::UpToDate => {
+                    saved.pending.clear();
+                    save(data, &saved)?;
+                    break;
+                }
+                PushAction::Skip => {
+                    save(data, &saved)?;
+                    break;
+                }
+                PushAction::Push => {
+                    let version = saved.snapshot.version;
+                    let failures = sync::push_all(&peers, key, &mut saved.snapshot).await?;
+                    if saved.snapshot.version > version {
+                        saved.pending.clear();
+                    }
+                    save(data, &saved)?;
+                    log("save", &failures);
+                    if !failures
+                        .iter()
+                        .any(|(_, error)| error.is::<VersionConflict>())
+                    {
+                        break;
+                    }
+                }
             }
         }
         let state = &saved.snapshot.state;
@@ -350,6 +399,42 @@ impl DeviceSync {
         });
         Ok(())
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum PushAction {
+    /// Every reachable peer already holds this exact snapshot and version.
+    UpToDate,
+    /// No reachable peer and no pending edits, or no connected peers.
+    Skip,
+    /// Seal and push a new version to peers.
+    Push,
+}
+
+fn push_action(
+    peers: usize,
+    load_failures: usize,
+    loaded: usize,
+    peers_agree: bool,
+    first_matches_local: bool,
+    local_version: i64,
+    has_pending: bool,
+) -> PushAction {
+    if peers == 0 {
+        return PushAction::Skip;
+    }
+    let reachable = peers.saturating_sub(load_failures);
+    if reachable == 0 {
+        return if has_pending {
+            PushAction::Push
+        } else {
+            PushAction::Skip
+        };
+    }
+    if loaded == reachable && peers_agree && first_matches_local && local_version > 0 {
+        return PushAction::UpToDate;
+    }
+    PushAction::Push
 }
 
 fn save(data: &Path, saved: &Saved) -> Result<()> {
@@ -456,6 +541,87 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn avatar_cache_persists_initial_edit_and_ignores_corrupt_base64() -> Result<()> {
+        use rusttalk_core::auth::encode;
+        let data = tempfile::tempdir()?;
+        let person = [3; 32];
+        let image = b"synthetic avatar";
+
+        // Seed sync.json with matching cached bytes but no avatar_digest yet.
+        let seeded = Saved {
+            avatar: Some((person, encode(image))),
+            ..Saved::default()
+        };
+        save(data.path(), &seeded)?;
+
+        let sync = DeviceSync::open(data.path())?;
+        assert!(!sync.has_pending().await);
+        assert_eq!(
+            sync.avatar(data.path(), &person, Some(image)).await?,
+            Some(image.to_vec())
+        );
+
+        // InitialAvatar must survive reload even though saved.avatar itself did not change.
+        let reopened = DeviceSync::open(data.path())?;
+        assert!(reopened.has_pending().await);
+        assert_eq!(
+            reopened.avatar(data.path(), &person, None).await?,
+            Some(image.to_vec())
+        );
+
+        // Corrupt base64 in saved.avatar must be treated as a cache miss, not an error,
+        // and a later valid candidate should repair it.
+        let mut corrupt: Saved = crate::load_json(&data.path().join("sync.json"))?;
+        corrupt.avatar = Some((person, "!!!not-base64!!!".into()));
+        save(data.path(), &corrupt)?;
+        let recovered = DeviceSync::open(data.path())?;
+        assert_eq!(recovered.avatar(data.path(), &person, None).await?, None);
+        assert_eq!(
+            recovered.avatar(data.path(), &person, Some(image)).await?,
+            Some(image.to_vec())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn push_action_skips_version_bump_when_peers_are_up_to_date() {
+        assert_eq!(
+            push_action(2, 0, 2, true, true, 5, false),
+            PushAction::UpToDate
+        );
+        assert_eq!(
+            push_action(2, 0, 2, true, true, 5, true),
+            PushAction::UpToDate
+        );
+        assert_eq!(
+            push_action(2, 1, 1, true, true, 5, false),
+            PushAction::UpToDate
+        );
+        assert_eq!(push_action(2, 0, 1, true, true, 5, false), PushAction::Push);
+        assert_eq!(
+            push_action(2, 0, 2, false, true, 5, false),
+            PushAction::Push
+        );
+        assert_eq!(
+            push_action(2, 0, 2, true, false, 5, false),
+            PushAction::Push
+        );
+        assert_eq!(push_action(1, 0, 1, true, true, 0, false), PushAction::Push);
+        assert_eq!(
+            push_action(0, 0, 0, false, false, 0, true),
+            PushAction::Skip
+        );
+        assert_eq!(
+            push_action(1, 1, 0, false, false, 5, false),
+            PushAction::Skip
+        );
+        assert_eq!(
+            push_action(1, 1, 0, false, false, 5, true),
+            PushAction::Push
+        );
     }
 
     #[test]

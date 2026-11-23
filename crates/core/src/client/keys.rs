@@ -169,6 +169,22 @@ impl<'a> KeyClient<'a> {
         self.session.expires_at
     }
 
+    /// Reauthenticate and replace the event socket after a service restart.
+    /// Keep trusted DM pins; a transport failure must not reset their trust boundary.
+    pub async fn reconnect(&mut self) -> Result<()> {
+        let session: Session = self
+            .server
+            .sign_in(self.identity, None)
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        let pins = (!self.pins_lost).then(|| self.dms.clone());
+        let next = Self::connect_with_dms(self.server, self.identity, &session, pins).await?;
+        *self = next;
+        Ok(())
+    }
+
     /// Rotate the bearer token on the current session, keeping the event stream open.
     pub async fn refresh(&mut self) -> Result<()> {
         self.session = self.server.refresh(&self.session).await?;

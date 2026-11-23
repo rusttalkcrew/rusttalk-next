@@ -11,6 +11,10 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- The stream badge shows a compact viewer count and leaves the video stats visible.
+- Open a profile from a message author’s name or picture.
+- A temporary error syncing your account picture no longer disconnects the server.
+- The bottom-left account picture now lines up with your name and status.
 - Your account picture now follows you to new servers and repairs missing pictures after reconnecting.
 - Rounded-square avatars across the app, a speaking highlight on your bottom-left avatar during voice calls, and subtle hover feedback on sidebar server icons.
 - Incoming live file offers now have a single Download button.
@@ -20,6 +24,7 @@ Unreleased under the new version and date.
 - While you are in a voice call, RustTalk keeps you Online even when another app has the focus.
 - Reopen the last chat picture instantly, even if the connection drops after it loads.
 - Unavailable servers show an exclamation mark in the server sidebar until they reconnect.
+- Recover voice calls and watched video after a server restart, keeping mute settings and asking again before shared audio plays.
 
 ## v0.2.1 - 2026-11-23
 

@@ -385,8 +385,16 @@ fn canonical_local_speaking_state_covers_voice_modes_and_call_transitions() {
 
 #[test]
 fn bottom_left_avatar_lights_up_on_speaking_transitions_in_both_themes() {
-    for dark in [true, false] {
-        let mut h = demo_window(Vec2::new(1100.0, 700.0), dark);
+    let sizes = [
+        Vec2::new(390.0, 844.0),
+        Vec2::new(820.0, 1180.0),
+        Vec2::new(1100.0, 700.0),
+    ];
+    for (dark, size) in [true, false]
+        .into_iter()
+        .flat_map(|dark| sizes.map(|size| (dark, size)))
+    {
+        let mut h = demo_window(size, dark);
         let account_label = t!("status.button", name = "Alex", status = t!("status.online"));
         let account_rect = h
             .get_by_role_and_label(egui::Role::Button, &account_label)
@@ -445,6 +453,26 @@ fn bottom_left_avatar_lights_up_on_speaking_transitions_in_both_themes() {
             ring_idx < dot_idx,
             "presence dot must paint on top of speaking outline (dark={dark})"
         );
+
+        let Shape::Rect(ring) = &h.output().shapes[ring_idx].shape else {
+            unreachable!("speaking outline is a rectangle");
+        };
+        let text_rect = |line| {
+            h.output()
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    Shape::Text(text)
+                        if text.galley.text() == line && account_rect.contains(text.pos) =>
+                    {
+                        Some(Rect::from_min_size(text.pos, text.galley.size()))
+                    }
+                    _ => None,
+                })
+                .expect("account label must be painted")
+        };
+        let text = text_rect("Alex").union(text_rect(t!("status.online")));
+        assert!((text.center().y - ring.rect.center().y).abs() <= 1.0);
 
         // Muting extinguishes the speaking outline back to silent state.
         home_mut(&mut h).voice.audio.set_muted(true);
@@ -594,6 +622,141 @@ fn touch_tap_on_server_icon_navigates_without_stuck_hover_and_fits_phone_tablet_
             );
         }
     }
+}
+
+#[test]
+fn message_author_name_and_picture_open_the_same_profile() {
+    for dark in [true, false] {
+        for size in [
+            Vec2::new(390.0, 844.0),
+            Vec2::new(820.0, 1180.0),
+            Vec2::new(1100.0, 700.0),
+        ] {
+            let mut h = demo_window(size, dark);
+            home_mut(&mut h).layout.list = false;
+            h.run_steps(4);
+            let authors = |h: &Harness<'static, Option<Screen>>| {
+                let mut hits = h
+                    .query_all_by_role_and_label(egui::Role::Button, "Ann")
+                    .map(|n| n.rect())
+                    .filter(|rect| rect.width() <= MESSAGE_AVATAR + 1.0)
+                    .collect::<Vec<_>>();
+                hits.sort_by(|a, b| a.left().total_cmp(&b.left()));
+                hits
+            };
+            let [avatar, name] = authors(&h).try_into().expect("chat avatar and author name");
+            let capture = |h: &mut Harness<'static, Option<Screen>>, phase| {
+                if size.x != 820.0
+                    && let Some(dir) = std::env::var_os("RUSTTALK_MESSAGE_PROFILE_SCREENSHOTS")
+                {
+                    let dir = PathBuf::from(dir).join(phase);
+                    std::fs::create_dir_all(&dir).unwrap();
+                    let theme = if dark { "dark" } else { "light" };
+                    h.render()
+                        .unwrap()
+                        .save(dir.join(format!("profile-{}-{theme}.png", size.x)))
+                        .unwrap();
+                }
+            };
+            capture(&mut h, "before");
+            h.hover_at(name.center());
+            h.run_steps(3);
+            assert_eq!(
+                h.output().platform_output.cursor_icon,
+                egui::CursorIcon::PointingHand
+            );
+            let name_button = h
+                .query_all_by_role_and_label(egui::Role::Button, "Ann")
+                .find(|n| n.rect() == name)
+                .unwrap();
+            name_button.focus();
+            h.run_steps(3);
+            h.key_press(Key::Enter);
+            h.run_steps(3);
+            h.get_by_label(t!("pokes.poke"));
+
+            capture(&mut h, "after");
+
+            h.key_press(Key::Escape);
+            h.run_steps(3);
+            assert!(h.query_by_label(t!("pokes.poke")).is_none());
+            let button = h
+                .query_all_by_role_and_label(egui::Role::Button, "Ann")
+                .find(|n| n.rect() == avatar)
+                .unwrap();
+            button.click_secondary();
+            h.run_steps(3);
+            h.get_by_label(t!("common.reply"));
+            assert!(h.query_by_label(t!("pokes.poke")).is_none());
+
+            h.key_press(Key::Escape);
+            h.run_steps(3);
+            h.query_all_by_role_and_label(egui::Role::Button, "Ann")
+                .find(|n| n.rect() == avatar)
+                .unwrap()
+                .click();
+            h.run_steps(3);
+            h.get_by_label(t!("pokes.poke"));
+        }
+    }
+}
+
+#[test]
+fn dm_and_forum_author_buttons_open_profile_actions() {
+    let size = Vec2::new(1100.0, 700.0);
+    let mut dm = demo_window(size, true);
+    let home = home_mut(&mut dm);
+    let server = &mut home.servers[0];
+    server.dir.dms.push(crate::server::Dm {
+        channel: [6; 32],
+        peer: ANN,
+    });
+    let mut message = server.chats[&GENERAL].messages[1].clone();
+    message.replicas.push(server.address.clone());
+    home.threads
+        .entry(ANN)
+        .or_default()
+        .chat
+        .messages
+        .push(message);
+    home.view = View::Direct(Some(ANN));
+    dm.run_steps(4);
+    dm.query_all_by_role_and_label(egui::Role::Button, "Ann")
+        .find(|button| button.rect().width() == MESSAGE_AVATAR)
+        .expect("DM author avatar")
+        .click();
+    dm.run_steps(3);
+    dm.get_by_label(t!("pokes.poke"));
+
+    let mut forum = demo_window(size, true);
+    let home = home_mut(&mut forum);
+    let server = &mut home.servers[0];
+    server.dir.categories[0].channels[0].forum = true;
+    let messages = &mut server.chats.get_mut(&GENERAL).unwrap().messages;
+    messages[0].person = ANN;
+    messages[1].person = server.dir.me;
+    messages[1].reply_to = Some(messages[0].id);
+    forum.run_steps(4);
+    forum
+        .query_all_by_role_and_label(egui::Role::Button, "Ann")
+        .find(|button| button.rect().width() < MESSAGE_AVATAR)
+        .expect("forum post author")
+        .click();
+    forum.run_steps(3);
+    forum.get_by_label(t!("pokes.poke"));
+    forum.key_press(Key::Escape);
+    forum.run_steps(3);
+    forum.get_by_label_contains("1 reply").click();
+    forum.run_steps(3);
+    forum
+        .query_all_by_role_and_label(egui::Role::Button, "Alex")
+        .find(|button| button.rect().width() == MESSAGE_AVATAR)
+        .expect("forum reply avatar")
+        .click();
+    forum.run_steps(3);
+    forum.get_by_label(t!("settings.edit_profile")).click();
+    forum.run_steps(3);
+    assert!(matches!(home_mut(&mut forum).settings, Some(Tab::Profile)));
 }
 
 #[test]

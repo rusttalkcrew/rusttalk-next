@@ -323,8 +323,8 @@ forum.list = List
 forum.numbered = Numbered list
 forum.quote = Quote
 forum.preview = Preview
-forum.post_line.one = {count} reply · {name} · {time}
-forum.post_line.other = {count} replies · {name} · {time}
+forum.post_line.one = {count} reply · {time}
+forum.post_line.other = {count} replies · {time}
 home.new_category = New category
 home.category = Category
 home.new_category_name = New category name
@@ -1614,3 +1614,6 @@ phone.always_share_help = When someone calls a phone into your voice channel, th
 
 phone.withdrawing = Stopping sharing… Microphone paused while the phone confirms.
 phone.withdraw_failed = Could not confirm stop. Microphone stays paused; retrying.
+
+voice.recovery_failed = Couldn't reconnect. Join the call to try again.
+voice.recovery_denied = Couldn't rejoin this call. Your access has changed.

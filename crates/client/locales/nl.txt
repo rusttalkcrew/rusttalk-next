@@ -320,8 +320,8 @@ forum.list = Lijst
 forum.numbered = Genummerde lijst
 forum.quote = Citaat
 forum.preview = Voorbeeld
-forum.post_line.one = {count} antwoord · {name} · {time}
-forum.post_line.other = {count} antwoorden · {name} · {time}
+forum.post_line.one = {count} antwoord · {time}
+forum.post_line.other = {count} antwoorden · {time}
 home.new_category = Nieuwe categorie
 home.category = Categorie
 home.new_category_name = Naam nieuwe categorie
@@ -1611,3 +1611,6 @@ phone.always_share_help = Als iemand een telefoon in je spraakkanaal belt, hoort
 
 phone.withdrawing = Delen stoppen… Microfoon gepauzeerd tot de telefoon bevestigt.
 phone.withdraw_failed = Stoppen niet bevestigd. Microfoon blijft gepauzeerd; opnieuw proberen.
+
+voice.recovery_failed = Opnieuw verbinden is mislukt. Neem opnieuw deel aan het gesprek.
+voice.recovery_denied = Je kunt niet opnieuw deelnemen aan dit gesprek. Je toegang is gewijzigd.

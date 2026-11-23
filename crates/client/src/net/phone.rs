@@ -161,6 +161,9 @@ impl Withdrawals {
 
 /// Refresh external-call notices and the exact microphone tracks allowed to leave the room.
 pub(super) async fn sync(ctx: &Ctx, url: &url::Url, live: &mut Live) {
+    if live.transport_closed {
+        return;
+    }
     use crate::phone::ConsentStatus;
     let mut calls = live.room.external_phone_calls();
     for call in &live.phone_consents {

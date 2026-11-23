@@ -320,8 +320,8 @@ forum.list = リスト
 forum.numbered = 番号付きリスト
 forum.quote = 引用
 forum.preview = プレビュー
-forum.post_line.one = 返信 {count} 件 · {name} · {time}
-forum.post_line.other = 返信 {count} 件 · {name} · {time}
+forum.post_line.one = 返信 {count} 件 · {time}
+forum.post_line.other = 返信 {count} 件 · {time}
 home.new_category = 新しいカテゴリー
 home.category = カテゴリー
 home.new_category_name = 新しいカテゴリーの名前
@@ -1611,3 +1611,6 @@ phone.always_share_help = 誰かがボイスチャンネルに電話をつない
 
 phone.withdrawing = 共有を停止中…電話側の確認までマイクを一時停止しています。
 phone.withdraw_failed = 停止を確認できません。マイクを一時停止したまま再試行します。
+
+voice.recovery_failed = 再接続できませんでした。通話に参加し直してください。
+voice.recovery_denied = この通話に再参加できませんでした。アクセス権が変更されています。

@@ -320,8 +320,8 @@ forum.list = Liste
 forum.numbered = Nummerierte Liste
 forum.quote = Zitat
 forum.preview = Vorschau
-forum.post_line.one = {count} Antwort · {name} · {time}
-forum.post_line.other = {count} Antworten · {name} · {time}
+forum.post_line.one = {count} Antwort · {time}
+forum.post_line.other = {count} Antworten · {time}
 home.new_category = Neue Kategorie
 home.category = Kategorie
 home.new_category_name = Name der neuen Kategorie
@@ -1611,3 +1611,6 @@ phone.always_share_help = Wenn jemand ein Telefon in deinen Sprachkanal holt, h�
 
 phone.withdrawing = Freigabe wird beendet… Mikrofon bis zur Bestätigung pausiert.
 phone.withdraw_failed = Beenden nicht bestätigt. Mikrofon bleibt pausiert; erneuter Versuch.
+
+voice.recovery_failed = Die Verbindung konnte nicht wiederhergestellt werden. Tritt dem Anruf erneut bei.
+voice.recovery_denied = Du kannst diesem Anruf nicht erneut beitreten. Dein Zugriff hat sich geändert.

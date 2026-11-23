@@ -739,6 +739,9 @@ async fn docker_membership() -> Result<()> {
     ))
     .await?;
 
+    // Restart recovery deliberately replaces this device's API session.
+    let owner = owner_keys.sync_peer().1.clone();
+    secrets.push(owner.token.clone());
     let (_, link) = invite(&mut owner_keys, &mut secrets).await?;
     let first_invite = link.code;
     let member_bot = Server::connect(

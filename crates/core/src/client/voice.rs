@@ -217,6 +217,7 @@ impl KeyClient<'_> {
         }));
         let grants_task = tokio::spawn(grants.clone().run(room.subscribe()));
         let voice = VoiceRoom {
+            closing: None,
             changes,
             revocations: self.revocations.clone(),
             blocked,
@@ -296,6 +297,8 @@ fn install_key(provider: &KeyProvider, key: &Key, epoch: i64) -> Result<()> {
 
 /// A joined voice channel. Use the API events to reconcile keys alongside room events.
 pub struct VoiceRoom {
+    // Keep cleanup alive if a caller times out; a retry must await the same worker.
+    closing: Option<tokio::task::JoinHandle<Result<(), livekit::RoomError>>>,
     revocations: super::revocations::Revocations,
     changes: tokio::sync::watch::Receiver<()>,
     blocked: std::collections::HashSet<String>,
@@ -798,11 +801,36 @@ impl VoiceRoom {
         Ok(())
     }
 
+    /// Close this transport before replacing it; retained captures can feed the new room.
+    pub async fn disconnect(&mut self) -> Result<()> {
+        self._grants_task.0.abort();
+        // Stop sending before cleanup can wait on a dead signaling connection.
+        for publication in self
+            .room
+            .local_participant()
+            .track_publications()
+            .into_values()
+        {
+            if let Some(track) = publication.track() {
+                track.mute();
+            }
+        }
+        self.files.disconnect();
+        if self.closing.is_none() {
+            let room = self.room.clone();
+            self.closing = Some(tokio::spawn(async move { room.close().await }));
+        }
+        let result = self.closing.as_mut().expect("started above").await;
+        self.closing = None;
+        match result? {
+            Ok(()) | Err(livekit::RoomError::AlreadyClosed) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     /// Disconnect from LiveKit and release media tracks.
     pub async fn leave(mut self) -> Result<()> {
-        self.files.disconnect();
-        self.room.close().await?;
-        Ok(())
+        self.disconnect().await
     }
 }
 
