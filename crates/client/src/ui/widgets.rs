@@ -1260,7 +1260,12 @@ pub fn unread_pill(ui: &Ui, row: Rect, gap: f32) {
         egui::pos2(row.left() - gap, row.center().y),
         Vec2::new(4.0, 8.0),
     );
-    ui.painter().rect_filled(pill, 2.0, colors(ui).strong);
+    // A scroll area clips at the row's left edge; the pill sits just outside it.
+    let mut clip = ui.clip_rect();
+    clip.min.x = clip.min.x.min(pill.left());
+    ui.painter()
+        .with_clip_rect(clip)
+        .rect_filled(pill, 2.0, colors(ui).strong);
 }
 
 /// A red count of mentions centred on `at`, ringed in `ring`, the surface it sits on.
