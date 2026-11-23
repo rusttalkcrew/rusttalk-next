@@ -3650,8 +3650,10 @@ fn voice_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
     if join {
         call::join(home, index, channel);
     }
-    // Problems from the call and the voice panel show here; the chat has its own line.
-    toast_line(ui, &mut home.toast);
+    // When chat is visible, show feedback beside its composer or shared files.
+    if occupied && home.layout.split.chat_hidden {
+        toast_line(ui, &mut home.toast);
+    }
     ui.add_space(ui::SPACE_S);
     let area = ui.available_rect_before_wrap();
     let (stage, divider, chat) = if occupied {
@@ -3848,8 +3850,8 @@ fn files_view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat: &mu
         let in_server = matches!(home.view, View::Server(_));
         let layout = in_server.then_some(&mut home.layout);
         pane_title(ui, "chat-title", &title, layout, Some(channel));
-        toast_line(ui, &mut home.toast);
     }
+    toast_line(ui, &mut home.toast);
     let server = &home.servers[index];
     let online = server.status == Status::Online;
     let can_upload = online && server.can_write(&channel) && files::PICKER;
@@ -4332,10 +4334,7 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
         }))
         .show_separator_line(false)
         .show(ui, |ui| {
-            // The call above already shows problems in a voice channel.
-            if !in_voice {
-                toast_line(ui, toast);
-            }
+            toast_line(ui, toast);
             if read_only {
                 ui.weak(t!("home.dm_read_only", name = name));
                 return None;
@@ -4947,8 +4946,14 @@ pub fn toast_line(ui: &mut Ui, toast: &mut Option<(String, f64)>) {
             .data_mut(|data| data.insert_temp(drawn_toast_id(), Some(text.clone())));
         let mut close = false;
         ui.horizontal(|ui| {
-            ui.colored_label(ui::colors(ui).danger_text, text.as_str());
-            close = ui::small_close(ui, t!("common.dismiss")).clicked();
+            ui.with_layout(Layout::right_to_left(Align::TOP), |ui| {
+                close = ui::small_close(ui, t!("common.dismiss")).clicked();
+                ui.with_layout(Layout::left_to_right(Align::TOP), |ui| {
+                    ui.add(
+                        Label::new(RichText::new(text).color(ui::colors(ui).danger_text)).wrap(),
+                    );
+                });
+            });
         });
         if close {
             *toast = None;
@@ -6371,6 +6376,7 @@ mod tests {
     const PROJECTS: Id = [3; 32];
 
     mod touch;
+    mod uploads;
 
     /// A server with a text channel this person can write in, showing its files: one
     /// from Ann and one of their own. Also returns the commands the view sends.

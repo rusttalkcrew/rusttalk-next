@@ -64,7 +64,7 @@ pub(super) async fn send(
         if let Err(error) = uploaded {
             tracing::warn!(error = %format_args!("{error:#}"), "uploading a file failed");
             discard(client, &body.attachments[kept..]).await;
-            ctx.send(Update::Failed(upload_problem(&error).into()));
+            ctx.send(Update::Failed(upload_problem(&error)));
             return Ok(false);
         }
     }
@@ -87,7 +87,7 @@ pub(super) async fn send(
                 tracing::warn!(error = %format_args!("{error:#}"), "uploading an emoji file failed");
                 discard(client, &body.attachments[kept..]).await;
                 at_most(CLEANUP, discard(client, &leftover)).await;
-                ctx.send(Update::Failed(upload_problem(&error).into()));
+                ctx.send(Update::Failed(upload_problem(&error)));
                 return Ok(false);
             }
         }
@@ -379,11 +379,16 @@ async fn upload(
 /// A file to upload, refusing one bigger than the server's blob limit.
 async fn read(path: PathBuf) -> Result<Vec<u8>> {
     tokio::task::spawn_blocking(move || {
+        let file = fs::File::open(&path)?;
+        let size = file.metadata()?.len();
+        if size > MAX_FILE {
+            return Err(StoredFileTooLarge(size, file_name(&path)).into());
+        }
         let mut bytes = Vec::new();
-        fs::File::open(&path)?
-            .take(MAX_FILE + 1)
-            .read_to_end(&mut bytes)?;
-        anyhow::ensure!(bytes.len() as u64 <= MAX_FILE, "file too large");
+        file.take(MAX_FILE + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > MAX_FILE {
+            return Err(StoredFileTooLarge(bytes.len() as u64, file_name(&path)).into());
+        }
         Ok(bytes)
     })
     .await?
@@ -437,7 +442,7 @@ pub(super) async fn share(
         };
         if let Err(error) = shared.await {
             tracing::warn!(error = %format_args!("{error:#}"), "sharing a file failed");
-            ctx.send(Update::Failed(upload_problem(&error).into()));
+            ctx.send(Update::Failed(upload_problem(&error)));
             break;
         }
     }
@@ -523,9 +528,23 @@ fn code(error: Option<&anyhow::Error>) -> Option<&str> {
         .map(|r| r.code.as_str())
 }
 
-fn upload_problem(error: &anyhow::Error) -> &'static str {
+#[derive(Debug)]
+struct StoredFileTooLarge(u64, String);
+
+impl std::fmt::Display for StoredFileTooLarge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "stored file exceeds client limit ({} bytes)", self.0)
+    }
+}
+
+impl std::error::Error for StoredFileTooLarge {}
+
+fn upload_problem(error: &anyhow::Error) -> String {
+    if let Some(StoredFileTooLarge(size, name)) = error.downcast_ref::<StoredFileTooLarge>() {
+        return crate::files::too_big(name, *size);
+    }
     if error.downcast_ref::<MessageError>() == Some(&MessageError::ServerUpdateRequired) {
-        return t!("net.rotation_update");
+        return t!("net.rotation_update").into();
     }
     match (status(error), code(Some(error))) {
         (_, Some("shared_limit")) => t!("files.err_shared_limit"),
@@ -541,6 +560,7 @@ fn upload_problem(error: &anyhow::Error) -> &'static str {
         (Some(StatusCode::FORBIDDEN), _) => t!("files.err_forbidden"),
         _ => t!("files.err_failed"),
     }
+    .into()
 }
 
 /// Write next to the target first, so a failed download leaves no partial file.
@@ -640,6 +660,34 @@ mod tests {
         assert!(preview_file(&made(later, long)).is_none());
     }
 
+    #[tokio::test]
+    async fn stored_file_size_failure_names_size_and_client_limit() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        file.as_file().set_len(177 * crate::files::MIB).unwrap();
+        let error = read(file.path().to_owned()).await.unwrap_err();
+        assert_eq!(
+            upload_problem(&error),
+            crate::files::too_big(&file_name(file.path()), 177 * crate::files::MIB)
+        );
+        file.as_file().set_len(MAX_FILE).unwrap();
+        assert_eq!(
+            read(file.path().to_owned()).await.unwrap().len() as u64,
+            MAX_FILE
+        );
+        file.as_file().set_len(MAX_FILE + 1).unwrap();
+        assert!(
+            read(file.path().to_owned())
+                .await
+                .unwrap_err()
+                .is::<StoredFileTooLarge>()
+        );
+        std::fs::write(file.path(), b"synthetic control").unwrap();
+        assert_eq!(
+            read(file.path().to_owned()).await.unwrap(),
+            b"synthetic control"
+        );
+    }
+
     #[test]
     fn upload_problems_name_the_limit_that_was_hit() {
         let rejected = |status, code: &str| {
@@ -651,7 +699,7 @@ mod tests {
         let full = StatusCode::PAYLOAD_TOO_LARGE;
         assert_eq!(
             upload_problem(&rejected(full, "file_too_large")),
-            "File too large."
+            "This file exceeds this server's upload limit."
         );
         assert_eq!(
             upload_problem(&rejected(full, "file_member_quota")),
