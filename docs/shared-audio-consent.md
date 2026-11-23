@@ -38,9 +38,9 @@ added. Name decryption after a key update never grants consent.
 This is receiver-side consent, not a new cryptographic access boundary. Older
 receivers may still auto-play standalone app audio. Existing publisher-side
 restrictions for screen sound remain intact. Older senders using RustTalk's
-ScreenshareAudio labels work with the new controls. Audio falsely labeled as a
-microphone cannot be distinguished from conversation and retains microphone
-behavior. New receivers require Listen even for older screen sound.
+ScreenshareAudio labels work with the new controls. Non-ScreenshareAudio sources retain legacy automatic subscription, including
+Unknown sources and microphones. A sender that mislabels shared content with
+one of those sources bypasses this receiver-side distinction. New receivers require Listen even for older screen sound.
 
 The screen/audio association in the existing protocol is participant-wide, not
 an authenticated screen-publication ID. Therefore Watch is never itself consent.
