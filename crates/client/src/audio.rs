@@ -159,6 +159,8 @@ pub struct Settings {
     pub mix: crate::call::mixer::Mix,
     /// The warning before sharing a terminal was accepted once. This device only.
     pub terminal_warned: bool,
+    /// This Android device may host a terminal in a call. Never synced.
+    pub android_terminal_hosting: bool,
     /// The app version whose "What's new" was shown last, so it opens once per update.
     /// This device only.
     pub whats_new_seen: String,
@@ -239,6 +241,7 @@ impl Default for Settings {
             hotkeys: Default::default(),
             mix: Default::default(),
             terminal_warned: false,
+            android_terminal_hosting: false,
             whats_new_seen: String::new(),
             display_name: String::new(),
             bio: String::new(),
@@ -476,6 +479,12 @@ impl Audio {
     /// The source that voice publishes as the microphone track.
     pub fn source(&self) -> NativeAudioSource {
         self.shared().source.clone()
+    }
+
+    pub fn can_host_terminal(&self) -> bool {
+        cfg!(any(target_os = "linux", target_os = "macos", windows))
+            || (cfg!(target_os = "android")
+                && lock(&self.shared().settings).android_terminal_hosting)
     }
 
     pub fn settings(&self) -> Settings {
