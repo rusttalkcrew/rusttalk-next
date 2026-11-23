@@ -1545,7 +1545,7 @@ clipboard.select_all = Alles auswählen
 # Telefonate in einen Sprachkanal (SIP)
 phone.settings = Telefon
 phone.account = Telefonkonto (SIP)
-phone.account_help = Trag ein SIP-Konto deines Telefonanbieters ein, um Telefonnummern in einen Sprachkanal anzurufen. Alle im Kanal hören das Gespräch. Dein Passwort bleibt im Schlüsselbund dieses Computers.
+phone.account_help = Trag ein SIP-Konto deines Telefonanbieters ein, um Telefonnummern in einen Sprachkanal anzurufen. Mitglieder können dem Gespräch zuhören. Dein Passwort bleibt im Schlüsselbund dieses Computers.
 phone.server = Server
 phone.server_help = Zum Beispiel sip.anbieter.de oder sip.anbieter.de:5060
 phone.user = Benutzername
@@ -1570,7 +1570,7 @@ phone.add_contact = Kontakt hinzufügen
 phone.edit_contact = Bearbeiten
 phone.remove_contact = Entfernen
 phone.contact_name = Name
-phone.not_encrypted = Telefonate laufen über deinen Telefonanbieter und sind nicht Ende-zu-Ende-verschlüsselt.
+phone.not_encrypted = Telefonate laufen über deinen Telefonanbieter und sind nicht Ende-zu-Ende-verschlüsselt. Beim Anrufen wird dein Mikrofon mit dem Telefonanbieter geteilt. Andere Mitglieder müssen der Freigabe ihres Mikrofons separat zustimmen.
 phone.leave_title = Du telefonierst gerade
 phone.leave_help = Wenn du den Kanal verlässt, endet das Telefonat für alle.
 phone.leave_and_hang_up = Auflegen und verlassen
@@ -1587,3 +1587,21 @@ phone.declined = Der Anruf wurde abgelehnt.
 phone.cancelled = Der Anruf wurde abgebrochen.
 phone.no_sound = Der Anruf wurde verbunden, aber ohne Ton, den wir nutzen können.
 phone.failed = Der Anruf hat nicht geklappt.
+
+
+call.streaming_viewers = Streamt · {count} schauen zu
+call.watch_stream = {name} ansehen · {count} schauen zu
+camera.flip = Kamera wechseln
+camera.torch_on = Licht einschalten
+camera.torch_off = Licht ausschalten
+camera.switch_failed = Kamerawechsel nicht verfügbar.
+call.listen = Anhören
+call.stop_listening = Nicht mehr zuhören
+
+phone.external_notice = Externes Telefongespräch
+phone.external_help = Dein Mikrofon bleibt privat, bis du zustimmst. Telefonaudio ist nicht Ende-zu-Ende-verschlüsselt. Zuhören spielt das Gespräch nur hier ab.
+phone.allow = Mein Mikrofon mit diesem Anruf teilen
+phone.withdraw = Mein Mikrofon nicht mehr teilen
+
+phone.withdrawing = Freigabe wird beendet… Mikrofon bis zur Bestätigung pausiert.
+phone.withdraw_failed = Beenden nicht bestätigt. Mikrofon bleibt pausiert; erneuter Versuch.

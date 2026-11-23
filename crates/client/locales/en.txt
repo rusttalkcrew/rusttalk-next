@@ -1548,7 +1548,7 @@ clipboard.select_all = Select all
 # Phone calls into a voice room (SIP)
 phone.settings = Phone
 phone.account = Phone account (SIP)
-phone.account_help = Add a SIP account from your phone provider to call phone numbers into a voice channel. Everyone in the channel hears the call. Your password stays in this computer's keychain.
+phone.account_help = Add a SIP account from your phone provider to call phone numbers into a voice channel. Members can listen to the call. Your password stays in this computer's keychain.
 phone.server = Server
 phone.server_help = For example sip.provider.com, or sip.provider.com:5060
 phone.user = Username
@@ -1573,7 +1573,7 @@ phone.add_contact = Add contact
 phone.edit_contact = Edit
 phone.remove_contact = Remove
 phone.contact_name = Name
-phone.not_encrypted = Phone calls go through your phone provider and are not end-to-end encrypted.
+phone.not_encrypted = Phone calls go through your phone provider and are not end-to-end encrypted. Calling shares your microphone with the phone provider. Other members must separately agree to share theirs.
 phone.leave_title = You're on a phone call
 phone.leave_help = Leaving the channel ends the phone call for everyone.
 phone.leave_and_hang_up = Hang up and leave
@@ -1590,3 +1590,21 @@ phone.declined = The call was declined.
 phone.cancelled = The call was cancelled.
 phone.no_sound = The call connected, but without sound we can use.
 phone.failed = The call didn't work.
+
+
+call.streaming_viewers = Streaming · {count} watching
+call.watch_stream = Watch {name} · {count} watching
+camera.flip = Flip camera
+camera.torch_on = Turn light on
+camera.torch_off = Turn light off
+camera.switch_failed = Camera change unavailable.
+call.listen = Listen
+call.stop_listening = Stop listening
+
+phone.external_notice = External phone call
+phone.external_help = Your microphone stays private unless you allow it. Phone audio is not end-to-end encrypted. Listen only plays the call here.
+phone.allow = Share my microphone with this call
+phone.withdraw = Stop sharing my microphone
+
+phone.withdrawing = Stopping sharing… Microphone paused while the phone confirms.
+phone.withdraw_failed = Could not confirm stop. Microphone stays paused; retrying.

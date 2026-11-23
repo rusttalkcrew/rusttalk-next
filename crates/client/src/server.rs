@@ -71,6 +71,9 @@ pub struct Peer {
 
 #[derive(Clone, PartialEq)]
 pub struct Screen {
+    pub viewers: usize,
+    /// Captured on this device, rather than another device of the same person.
+    pub local: bool,
     /// The track, to watch it.
     pub sid: String,
     pub name: String,

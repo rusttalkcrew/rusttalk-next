@@ -140,7 +140,25 @@ impl Mix {
 }
 
 /// The mixer for `person` in a menu: their voice when `voice`, then each app they share.
-pub fn show(m: &mut ui::Menu, audio: &Audio, person: Id, voice: bool, apps: &[(TrackSid, String)]) {
+pub fn show(
+    m: &mut ui::Menu,
+    audio: &Audio,
+    person: Id,
+    voice: bool,
+    apps: &[(TrackSid, String)],
+    mut listen: impl FnMut(String, bool),
+) {
+    for (sid, name) in apps {
+        let on = audio.is_listening(sid.as_str());
+        let label = if on {
+            t!("call.stop_listening")
+        } else {
+            t!("call.listen")
+        };
+        if m.item("🎵", &format!("{label}: {name}")).clicked() {
+            listen(sid.to_string(), !on);
+        }
+    }
     let mut names: Vec<&str> = Vec::new();
     for (_, app) in apps {
         if !names.contains(&app.as_str()) {

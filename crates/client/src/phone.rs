@@ -26,6 +26,15 @@ mod secret;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub use secret::{forget_password, password, save_password, set_service};
 
+/// Whether microphone export has been granted, or is still being safely withdrawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConsentStatus {
+    Off,
+    On,
+    Withdrawing,
+    Failed,
+}
+
 /// The SIP account calls go out from. The password is kept apart (see `secret`).
 /// This device only, never synced.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

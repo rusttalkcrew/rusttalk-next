@@ -24,10 +24,20 @@ int rt_camera_devices(void) { return (device(YES) ? 1 : 0) | (device(NO) ? 2 : 0
 
 @interface RTCallCamera : NSObject <AVCaptureVideoDataOutputSampleBufferDelegate>
 @property(strong) AVCaptureSession *session;
+@property(strong) AVCaptureDeviceInput *input;
 @property(strong) AVCaptureVideoDataOutput *output;
 @property(strong) dispatch_queue_t frames;
 @property(atomic) BOOL ended;
+@property(atomic) AVCaptureVideoOrientation orientation;
+@property uint32_t fps;
 @end
+
+static void lightOff(AVCaptureDevice *camera) {
+    if (camera.hasTorch && [camera lockForConfiguration:NULL]) {
+        camera.torchMode = AVCaptureTorchModeOff;
+        [camera unlockForConfiguration];
+    }
+}
 
 @implementation RTCallCamera
 - (void)interrupted:(NSNotification *)note {
@@ -35,14 +45,22 @@ int rt_camera_devices(void) { return (device(YES) ? 1 : 0) | (device(NO) ? 2 : 0
     AVCaptureSession *session = self.session;
     // An interrupted session would otherwise resume automatically.
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        @synchronized (session) { [session stopRunning]; }
+        @synchronized (session) { lightOff(self.input.device); [session stopRunning]; }
     });
 }
 - (void)orient:(NSNotification *)note {
     UIInterfaceOrientation orientation = UIApplication.sharedApplication.statusBarOrientation;
+    if (orientation != UIInterfaceOrientationUnknown) self.orientation = (AVCaptureVideoOrientation)orientation;
+    @synchronized (self.session) { [self configureOrientation]; }
+}
+- (void)configureOrientation {
     AVCaptureConnection *video = [self.output connectionWithMediaType:AVMediaTypeVideo];
-    if (orientation != UIInterfaceOrientationUnknown && video.isVideoOrientationSupported)
-        video.videoOrientation = (AVCaptureVideoOrientation)orientation;
+    if (video.isVideoMirroringSupported) {
+        video.automaticallyAdjustsVideoMirroring = NO;
+        video.videoMirrored = NO;
+    }
+    if (self.orientation && video.isVideoOrientationSupported)
+        video.videoOrientation = self.orientation;
 }
 - (void)captureOutput:(AVCaptureOutput *)output didOutputSampleBuffer:(CMSampleBufferRef)sample
        fromConnection:(AVCaptureConnection *)connection {
@@ -68,6 +86,9 @@ bool rt_camera_start(bool front, uint32_t height, uint32_t fps) {
         AVCaptureSession *s = c.session = [AVCaptureSession new];
         if (!input || ![s canAddInput:input]) return false;
         [s addInput:input];
+        c.input = input;
+        c.fps = fps;
+        lightOff(camera);
         AVCaptureSessionPreset preset = height >= 1080 ? AVCaptureSessionPreset1920x1080 :
             height >= 720 ? AVCaptureSessionPreset1280x720 : AVCaptureSessionPreset640x480;
         if ([s canSetSessionPreset:preset]) s.sessionPreset = preset;
@@ -111,9 +132,66 @@ void rt_camera_stop(void) {
         c.ended = YES;
         if (!c) return;
         [NSNotificationCenter.defaultCenter removeObserver:c];
-        @synchronized (c.session) { [c.session stopRunning]; }
+        @synchronized (c.session) { lightOff(c.input.device); [c.session stopRunning]; }
         [c.output setSampleBufferDelegate:nil queue:NULL];
         dispatch_sync(c.frames, ^{});
         current = nil;
+    }
+}
+
+int rt_camera_state(void) {
+    RTCallCamera *c = current;
+    @synchronized (c.session) {
+        if (!c || c.ended || !c.session.running) return 0;
+        AVCaptureDevice *d = c.input.device;
+        BOOL front = d.position == AVCaptureDevicePositionFront;
+        BOOL torch = !front && d.hasTorch && d.isTorchAvailable &&
+            [d isTorchModeSupported:AVCaptureTorchModeOn];
+        return (front ? 1 : 2) | (torch ? 4 : 0) | (d.isTorchActive ? 8 : 0);
+    }
+}
+bool rt_camera_torch(bool on) {
+    RTCallCamera *c = current;
+    @synchronized (c.session) {
+        if (!(rt_camera_state() & 4)) return false;
+        AVCaptureDevice *d = c.input.device;
+        if (![d lockForConfiguration:NULL]) return false;
+        BOOL ok = YES;
+        if (on) ok = [d setTorchModeOnWithLevel:AVCaptureMaxAvailableTorchLevel error:NULL];
+        else d.torchMode = AVCaptureTorchModeOff;
+        [d unlockForConfiguration];
+        return ok;
+    }
+}
+bool rt_camera_select(bool front) {
+    RTCallCamera *c = current;
+    @synchronized (c.session) {
+        if (!c || c.ended || !c.session.running) return false;
+        AVCaptureDevice *d = device(front);
+        AVCaptureDeviceInput *next = d ? [AVCaptureDeviceInput deviceInputWithDevice:d error:NULL] : nil;
+        if (!next) return false;
+        AVCaptureDeviceInput *old = c.input;
+        lightOff(old.device);
+        [c.session beginConfiguration];
+        [c.session removeInput:old];
+        BOOL ok = [c.session canAddInput:next];
+        if (ok) {
+            [c.session addInput:next];
+            c.input = next;
+            lightOff(d);
+        } else [c.session addInput:old];
+        [c.session commitConfiguration];
+        [c configureOrientation];
+        AVCaptureDevice *active = c.input.device;
+        for (AVFrameRateRange *range in active.activeFormat.videoSupportedFrameRateRanges) {
+            if (range.minFrameRate <= c.fps && c.fps <= range.maxFrameRate && [active lockForConfiguration:NULL]) {
+                active.activeVideoMinFrameDuration = CMTimeMake(1, c.fps);
+                active.activeVideoMaxFrameDuration = CMTimeMake(1, c.fps);
+                [active unlockForConfiguration];
+                break;
+            }
+        }
+        dispatch_sync(c.frames, ^{});
+        return ok;
     }
 }

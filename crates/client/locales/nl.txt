@@ -1545,7 +1545,7 @@ clipboard.select_all = Alles selecteren
 # Telefoongesprekken in een spraakkanaal (SIP)
 phone.settings = Telefoon
 phone.account = Telefoonaccount (SIP)
-phone.account_help = Voeg een SIP-account van je telefoonprovider toe om telefoonnummers in een spraakkanaal te bellen. Iedereen in het kanaal hoort het gesprek. Je wachtwoord blijft in de sleutelhanger van deze computer.
+phone.account_help = Voeg een SIP-account van je telefoonprovider toe om telefoonnummers in een spraakkanaal te bellen. Leden kunnen naar het gesprek luisteren. Je wachtwoord blijft in de sleutelhanger van deze computer.
 phone.server = Server
 phone.server_help = Bijvoorbeeld sip.provider.nl of sip.provider.nl:5060
 phone.user = Gebruikersnaam
@@ -1570,7 +1570,7 @@ phone.add_contact = Contact toevoegen
 phone.edit_contact = Bewerken
 phone.remove_contact = Verwijderen
 phone.contact_name = Naam
-phone.not_encrypted = Telefoongesprekken gaan via je telefoonprovider en zijn niet end-to-end versleuteld.
+phone.not_encrypted = Telefoongesprekken gaan via je telefoonprovider en zijn niet end-to-end versleuteld. Bellen deelt je microfoon met de telefoonprovider. Andere leden moeten apart toestemming geven om hun microfoon te delen.
 phone.leave_title = Je bent aan het bellen
 phone.leave_help = Als je het kanaal verlaat, eindigt het telefoongesprek voor iedereen.
 phone.leave_and_hang_up = Ophangen en verlaten
@@ -1587,3 +1587,21 @@ phone.declined = Het gesprek werd geweigerd.
 phone.cancelled = Het gesprek werd geannuleerd.
 phone.no_sound = Het gesprek is verbonden, maar zonder geluid dat we kunnen gebruiken.
 phone.failed = Het gesprek is niet gelukt.
+
+
+call.streaming_viewers = Streamt · {count} kijkers
+call.watch_stream = {name} bekijken · {count} kijkers
+camera.flip = Camera omdraaien
+camera.torch_on = Lamp aan
+camera.torch_off = Lamp uit
+camera.switch_failed = Camera wijzigen niet beschikbaar.
+call.listen = Luisteren
+call.stop_listening = Stoppen met luisteren
+
+phone.external_notice = Extern telefoongesprek
+phone.external_help = Je microfoon blijft privé totdat je toestemming geeft. Telefoonaudio is niet end-to-end versleuteld. Luisteren speelt het gesprek alleen hier af.
+phone.allow = Deel mijn microfoon met dit gesprek
+phone.withdraw = Stop met delen van mijn microfoon
+
+phone.withdrawing = Delen stoppen… Microfoon gepauzeerd tot de telefoon bevestigt.
+phone.withdraw_failed = Stoppen niet bevestigd. Microfoon blijft gepauzeerd; opnieuw proberen.

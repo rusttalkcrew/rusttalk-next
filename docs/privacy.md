@@ -488,10 +488,26 @@ is deleted and never used; the normal noise suppression keeps working.
   G.711 over RTP. **This is not end-to-end encrypted**: the provider, and
   anyone on the network path, can hear the call, and sees the number, the
   account and the IP address. The dialer says so. While the call runs, the
-  caller's app mixes the voice channel (and their microphone) into the call and
-  publishes the phone's sound to the channel as one of their shared apps,
-  sealed with the channel's media key like any other. The RustTalk server
-  never sees the number or the sound. The account (server, username, caller
+  caller's app shares their own microphone and only the microphones of members
+  who explicitly choose “Share my microphone with this call”. Each member sees
+  an external-call warning before choosing. This permission is separate from
+  Listen, bound to the call publication and device session, and withdrawn when
+  stopped, disconnected, or the call ends. Newcomers and older clients that cannot
+  consent are silent to the phone. Other shared tracks are never exported.
+  Consenting voices retain full volume even if the caller lowers their local
+  volume or deafens; the caller's microphone obeys mute, deafen and push-to-talk.
+  Phone sound is published as encrypted shared audio; members press Listen to
+  hear it. Call notices and consent are encrypted participant attributes bound
+  to the sender and session, with authenticated increasing revisions preventing
+  replay of withdrawn grants. Stopping sharing immediately pauses the channel
+  microphone until the bridge confirms exclusion (or the call ends); a failed
+  confirmation keeps it paused with a visible notice. This brief pause also
+  affects other listeners in the channel, without changing mute or push-to-talk.
+  A directly dialed local phone call is independent of this transmission pause.
+  Losing permission or reconnecting ends the phone
+  call. Media accepts only the negotiated UDP endpoint and G.711 payload; hold,
+  one-way audio and non-RTP/AVP SDP are rejected. The RustTalk
+  server never sees the number or the sound. The account (server, username, caller
   name) and the contacts are kept in `voice.json` on this device only and are
   never synced; the password is kept in the OS keychain (or only in memory
   until the app closes, without one). Logs never name the number, account or

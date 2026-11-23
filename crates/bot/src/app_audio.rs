@@ -72,6 +72,22 @@ pub async fn share(room: &VoiceRoom) -> Result<AppTones> {
 
 /// Check two distinct encrypted app tracks that each decode at their own pitch.
 pub async fn hear(room: &mut VoiceRoom, peer: Option<&ParticipantIdentity>) -> Result<()> {
+    loop {
+        let shares: Vec<_> = room
+            .shared_audio()
+            .into_iter()
+            .filter(|(id, _, _)| peer.is_none_or(|peer| peer == id))
+            .collect();
+        if shares.len() >= 2 {
+            for (_, sid, _) in shares {
+                room.set_listening(&sid, true)?;
+            }
+            break;
+        }
+        room.next_event()
+            .await
+            .context("waiting for shared audio offers")?;
+    }
     let mut tracks = loop {
         let tracks: Vec<_> = room
             .remote_audio_tracks()

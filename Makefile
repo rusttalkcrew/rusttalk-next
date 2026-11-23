@@ -103,6 +103,13 @@ test: ## Run unit and integration tests
 	cargo test $(CARGO_SCOPE) --locked
 	PATH="$(OPENSSL_PATH)$$PATH" python3 -m unittest discover -s deploy/updater
 
+.PHONY: android-camera-test
+android-camera-test: ## Run deterministic Android camera lifecycle tests (JDK, no device)
+	@set -eu; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; \
+		javac -d "$$work" deploy/android/src/main/java/io/github/rusttalkcrew/rusttalk/CameraLifecycle.java \
+			deploy/android/tests/CameraLifecycleTest.java; \
+		java -ea -cp "$$work" io.github.rusttalkcrew.rusttalk.CameraLifecycleTest
+
 e2e: ## Run the two-stack membership, keys, chat, stored files, voice, app audio, screen, camera, live file, device sync and index scenarios
 	@printf '\033[1;34m==> Two-stack membership, keys, chat, stored files, voice, app audio, screen, camera, live file, device sync and index\033[0m\n'
 	$(if $(and $(PIPEWIRE_HELPER),$(findstring media,$(E2E_FEATURES))),cargo build --locked $(PIPEWIRE_HELPER))

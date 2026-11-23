@@ -11,15 +11,22 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Backgrounding Android during a camera switch no longer waits for the camera or reopens it after pause.
+
 - Retry a failed forum post with its title, body and poll. Replies stay visible when a poll and its post arrive separately.
 - Forum channels: searchable posts with folded replies, polls, up and down votes and sorting.
+- Close image previews by clicking or tapping the dimmed space around them.
 - Oversized stored uploads show their size and the app limit beside chat or shared files, including voice channels.
+- Screen shares use the sharer’s participant card, show distinct viewer counts, and preview your screen while the window is focused.
+- Mobile calls show your camera preview with front/back switching and a supported rear-camera light.
+- Shared app and screen audio stays silent until you choose Listen; Stop listening ends it immediately.
+- Kicking a member now asks for confirmation by name and keeps the original member and server selected.
 - Ask someone to join your voice channel: it rings, and they can join, decline, come later or mute you for 15 minutes
 - Servers can turn on Events: a calendar above the channels to suggest, approve and add events, in real life or in a channel
 - Say whether you are going to an event, see who is still missing, and remind them
 - Event reminders reach unanswered authors and respect “Only when RustTalk isn’t focused” without repeating later
 - Channel names show the pointing-hand cursor when hovered, including for channel managers.
-- Call a phone number into your voice channel with your own SIP account (desktop): contacts, a keypad, and everyone hears the call
+- Call a phone number into your voice channel with your own SIP account (desktop): contacts, a keypad, Listen, and separate microphone permission with confirmed withdrawal
 
 ## v0.2.0 - 2026-11-23
 

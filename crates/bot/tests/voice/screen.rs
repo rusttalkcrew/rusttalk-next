@@ -56,6 +56,7 @@ pub(super) async fn exercise(
         // Watching is announced, as the app does once the video arrives; only then does
         // the publisher allow the sound.
         b.set_video_watches(std::slice::from_ref(&sid)).await?;
+        super::consent::listen(b, &sound).await?;
         tokio::time::timeout(hang_guard(), stream_sound(b, true))
             .await
             .context("stream sound arriving with the watched share")??;

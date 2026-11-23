@@ -353,6 +353,8 @@ struct Shared {
     start: Instant,
     /// What a phone call bridged into the room hears (see `PhoneLine`).
     phone: Mutex<Option<PhoneTap>>,
+    phone_withdrawal: AtomicBool,
+    phone_withdrawal_requests: std::sync::atomic::AtomicUsize,
 }
 
 /// The mixer key of a bridged phone call's sound, kept out of what the phone hears.
@@ -363,6 +365,7 @@ const PHONE_LAG: usize = RATE as usize / 5;
 /// The room's voices and this microphone, at 48 kHz, waiting for the phone.
 #[derive(Default)]
 struct PhoneTap {
+    allowed: std::collections::HashSet<String>,
     room: VecDeque<i16>,
     mic: VecDeque<i16>,
 }
@@ -436,6 +439,7 @@ pub type StreamId = (Id, Option<String>);
 
 #[derive(Default)]
 struct Mixer {
+    listening: std::collections::HashSet<String>,
     tracks: HashMap<String, Track>,
     serial: u64,
     cues: VecDeque<i16>,
@@ -540,6 +544,8 @@ impl Audio {
             source: NativeAudioSource::new(off, RATE, 1, 0),
             start: Instant::now(),
             phone: Mutex::default(),
+            phone_withdrawal: AtomicBool::new(false),
+            phone_withdrawal_requests: std::sync::atomic::AtomicUsize::new(0),
         });
         let (control, commands) = mpsc::channel();
         let (mic, frames) = mpsc::sync_channel(MIC_QUEUE);
@@ -665,16 +671,22 @@ impl Audio {
 
     /// Drop the old room's audio before queuing its leave cue.
     pub fn end_voice(&self, cue: Option<Cue>) {
+        self.shared().voice.store(false, Relaxed);
+        self.pause_phone_withdrawal(false);
+        self.shared()
+            .phone_withdrawal_requests
+            .store(0, std::sync::atomic::Ordering::SeqCst);
         {
             let mut mixer = lock(&self.shared().mixer);
             mixer.tracks.clear();
+            *lock(&self.shared().phone) = None;
+            mixer.listening.clear();
             mixer.cues.clear();
             mixer.cue_until = None;
         }
         if let Some(cue) = cue {
             self.play_cue(cue);
         }
-        self.shared().voice.store(false, Relaxed);
         #[cfg(target_os = "ios")]
         lock(&self.shared().ios_session).take();
         self.refresh();
@@ -876,6 +888,9 @@ impl Audio {
             // Settings before the mixer, as everywhere, so a new mix can't slip between.
             let settings = lock(&self.shared().settings);
             let mut mixer = lock(&self.shared().mixer);
+            if stream.1.is_some() && !mixer.listening.contains(&sid) {
+                return;
+            }
             mixer.serial += 1;
             let serial = mixer.serial;
             // Replaces an older reader of the same track, which then stops.
@@ -922,8 +937,67 @@ impl Audio {
         });
     }
 
+    pub fn stop_listening(&self) {
+        let mut mixer = lock(&self.shared().mixer);
+        mixer.listening.clear();
+        // The local phone bridge is explicitly started by dialing, not remote Listen consent.
+        mixer
+            .tracks
+            .retain(|sid, track| sid == PHONE_TRACK || track.stream.1.is_none());
+    }
+
+    pub fn is_listening(&self, sid: &str) -> bool {
+        lock(&self.shared().mixer).listening.contains(sid)
+    }
+
+    pub fn set_listening(&self, sid: &str, on: bool) {
+        let mut mixer = lock(&self.shared().mixer);
+        if on {
+            mixer.listening.insert(sid.to_owned());
+        } else {
+            mixer.listening.remove(sid);
+            mixer.tracks.remove(sid);
+        }
+    }
+
     pub fn remove_track(&self, sid: &str) {
         lock(&self.shared().mixer).tracks.remove(sid);
+    }
+
+    pub fn request_phone_withdrawal(&self) {
+        self.shared()
+            .phone_withdrawal_requests
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn accept_phone_withdrawal_request(&self) {
+        let _ = self.shared().phone_withdrawal_requests.try_update(
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+            |n| Some(n.saturating_sub(1)),
+        );
+    }
+
+    /// A privacy interlock, independent of the person's mute/deafen/PTT choices.
+    pub fn pause_phone_withdrawal(&self, pause: bool) {
+        self.shared()
+            .phone_withdrawal
+            .store(pause, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn end_phone(&self) {
+        lock(&self.shared().mixer).tracks.remove(PHONE_TRACK);
+        *lock(&self.shared().phone) = None;
+    }
+
+    pub fn phone_consent(&self, allowed: Vec<String>) {
+        if let Some(tap) = lock(&self.shared().phone).as_mut() {
+            let allowed = allowed.into_iter().collect();
+            if tap.allowed != allowed {
+                tap.allowed = allowed;
+                tap.room.clear();
+            }
+        }
     }
 
     /// Bridge a phone call into this call; it plays as `stream`, at its volume.
@@ -1449,6 +1523,7 @@ fn mix(shared: &Shared, play_cues: bool) -> [i16; FRAME] {
 /// room even when this person turned someone down or deafened.
 fn mix_tracks(mixer: &mut Mixer, deafened: bool, phone: Option<&mut PhoneTap>) -> [i16; FRAME] {
     let mut sum = [0f32; FRAME];
+    let allowed = phone.as_ref().map(|tap| &tap.allowed);
     let mut room = phone.is_some().then_some([0f32; FRAME]);
     let Mixer {
         tracks,
@@ -1464,7 +1539,9 @@ fn mix_tracks(mixer: &mut Mixer, deafened: bool, phone: Option<&mut PhoneTap>) -
     }
     for (sid, track) in tracks.iter_mut() {
         let gain = if deafened { 0.0 } else { track.gain };
-        let mut room = room.as_mut().filter(|_| sid != PHONE_TRACK);
+        let mut room = room.as_mut().filter(|_| {
+            track.stream.1.is_none() && allowed.is_some_and(|allowed| allowed.contains(sid))
+        });
         track.primed |= track.queue.len() >= PRIME;
         if !track.primed {
             continue;
@@ -1786,12 +1863,28 @@ fn process(shared: &Shared, frames: &Receiver<Mic>) {
                 frame.fill(0);
             }
             if shared.voice.load(Relaxed) {
-                send(&shared.source, &frame);
+                let outgoing = channel_microphone(shared, &frame);
+                send(&shared.source, &outgoing);
                 if let Some(tap) = lock(&shared.phone).as_mut() {
                     PhoneTap::push(&mut tap.mic, frame);
                 }
             }
         }
+    }
+}
+
+fn channel_microphone(shared: &Shared, frame: &[i16; FRAME]) -> [i16; FRAME] {
+    if shared
+        .phone_withdrawal
+        .load(std::sync::atomic::Ordering::SeqCst)
+        || shared
+            .phone_withdrawal_requests
+            .load(std::sync::atomic::Ordering::SeqCst)
+            > 0
+    {
+        [0; FRAME]
+    } else {
+        *frame
     }
 }
 
@@ -2147,6 +2240,54 @@ mod tests {
     }
 
     #[test]
+    fn shared_playback_requires_consent_and_stop_discards_buffered_samples() {
+        let data = tempfile::tempdir().unwrap();
+        let audio = Audio::new(data.path()).unwrap();
+        let source = NativeAudioSource::new(AudioSourceOptions::default(), RATE, 1, 0);
+        let track = livekit::prelude::LocalAudioTrack::create_audio_track(
+            "synthetic",
+            livekit::webrtc::audio_source::RtcAudioSource::Native(source),
+        );
+        let shared = ([1; 32], Some("Music".to_owned()));
+        audio.add_track("TR_app".into(), shared.clone(), track.rtc_track());
+        assert!(lock(&audio.shared().mixer).tracks.is_empty());
+        audio.set_listening("TR_app", true);
+        audio.add_track("TR_app".into(), shared, track.rtc_track());
+        audio.add_track("TR_mic".into(), ([1; 32], None), track.rtc_track());
+        {
+            let mut mixer = lock(&audio.shared().mixer);
+            for t in mixer.tracks.values_mut() {
+                t.queue.extend(std::iter::repeat_n(1000, PRIME * 2));
+            }
+            assert!(mix_tracks(&mut mixer, false, None).iter().any(|&v| v != 0));
+        }
+        audio.set_listening("TR_app", false);
+        let mut mixer = lock(&audio.shared().mixer);
+        assert!(!mixer.tracks.contains_key("TR_app"));
+        assert!(
+            mix_tracks(&mut mixer, false, None).iter().any(|&v| v != 0),
+            "microphone continues"
+        );
+        assert!(
+            mix_tracks(&mut mixer, true, None).iter().all(|&v| v == 0),
+            "deafen still applies"
+        );
+        drop(mixer);
+        let line = audio.phone_line(([1; 32], Some("Phone".to_owned())));
+        audio.stop_listening();
+        assert!(lock(&audio.shared().mixer).tracks.contains_key("TR_mic"));
+        assert!(lock(&audio.shared().mixer).tracks.contains_key(PHONE_TRACK));
+        drop(line);
+        assert!(lock(&audio.shared().phone).is_none());
+        let line = audio.phone_line(([1; 32], Some("Phone".to_owned())));
+        audio.end_voice(None);
+        assert!(lock(&audio.shared().phone).is_none());
+        let mut samples = [1; FRAME];
+        line.take(&mut samples);
+        assert!(samples.iter().all(|&sample| sample == 0));
+    }
+
+    #[test]
     fn mixer_consumes_cues_and_still_plays_them_while_deafened() {
         let samples: VecDeque<_> = Cue::YouJoined.samples(RATE, 0.5).collect();
         let mut mixer = Mixer {
@@ -2198,6 +2339,58 @@ mod tests {
     }
 
     #[test]
+    fn withdrawal_interlock_stops_pcm_before_signaling_without_changing_user_mute() {
+        let data = tempfile::tempdir().unwrap();
+        let audio = Audio::new(data.path()).unwrap();
+        let speech = [1200; FRAME];
+        let initially_muted = audio.muted();
+        assert_eq!(channel_microphone(audio.shared(), &speech), speech);
+        audio.request_phone_withdrawal();
+        // An already-running network refresh must not undo a queued UI request.
+        audio.pause_phone_withdrawal(false);
+        assert_eq!(channel_microphone(audio.shared(), &speech), [0; FRAME]);
+        audio.pause_phone_withdrawal(true);
+        audio.accept_phone_withdrawal_request();
+        assert_eq!(channel_microphone(audio.shared(), &speech), [0; FRAME]);
+        // Failed publication or missing bridge acknowledgement leaves this interlock set.
+        assert_eq!(audio.muted(), initially_muted);
+        audio.pause_phone_withdrawal(false);
+        assert_eq!(channel_microphone(audio.shared(), &speech), speech);
+        // The gate never invents sound when mute, deafen or PTT already supplied silence.
+        assert_eq!(channel_microphone(audio.shared(), &[0; FRAME]), [0; FRAME]);
+        audio.request_phone_withdrawal();
+        audio.end_voice(None);
+        assert_eq!(channel_microphone(audio.shared(), &speech), speech);
+    }
+
+    #[test]
+    fn phone_export_needs_consent_and_excludes_shared_audio() {
+        let track = |app| Track {
+            serial: 0,
+            gain: 1.0,
+            stream: ([1; 32], app),
+            queue: VecDeque::from(vec![1000; PRIME * 4]),
+            primed: false,
+            loud: 0,
+        };
+        let mut mixer = Mixer::default();
+        mixer.tracks.insert("voice".into(), track(None));
+        mixer.tracks.insert("newcomer".into(), track(None));
+        mixer
+            .tracks
+            .insert("app".into(), track(Some("music".into())));
+        let mut tap = PhoneTap::default();
+        mix_tracks(&mut mixer, false, Some(&mut tap));
+        assert!(tap.room.drain(..).all(|sample| sample == 0));
+        tap.allowed.extend(["voice".into(), "app".into()]);
+        mix_tracks(&mut mixer, true, Some(&mut tap));
+        assert!(tap.room.drain(..).all(|sample| sample == 1000));
+        tap.allowed.clear();
+        mix_tracks(&mut mixer, false, Some(&mut tap));
+        assert!(tap.room.drain(..).all(|sample| sample == 0));
+    }
+
+    #[test]
     fn a_phone_hears_the_room_but_not_itself() {
         let track = |gain, sample| Track {
             serial: 0,
@@ -2212,6 +2405,7 @@ mod tests {
         mixer.tracks.insert("voice".into(), track(0.25, 4000));
         mixer.tracks.insert(PHONE_TRACK.into(), track(1.0, 1000));
         let mut tap = PhoneTap::default();
+        tap.allowed.insert("voice".into());
         let speakers = mix_tracks(&mut mixer, false, Some(&mut tap));
         assert!(
             speakers.iter().all(|&s| s == 2000),

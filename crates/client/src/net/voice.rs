@@ -43,6 +43,14 @@ pub(super) struct Live {
     pub(super) channel: Id,
     /// The last acknowledged deafen state, so failures can be retried.
     deafened: Option<bool>,
+    pub(super) phone_consents: Vec<rusttalk_core::client::voice::phone::Call>,
+    pub(super) phone_announcement: Option<(
+        Option<TrackSid>,
+        Vec<rusttalk_core::client::voice::phone::Call>,
+        Vec<rusttalk_core::client::voice::phone::Call>,
+    )>,
+    pub(super) phone_withdrawals: phone::Withdrawals,
+    pub(super) phone_acknowledgements: Vec<rusttalk_core::client::voice::phone::Acknowledgement>,
     /// Apps this device shares, each with its own track.
     shares: Vec<Share>,
     /// The phone call bridged in, shown like a shared app.
@@ -136,6 +144,8 @@ pub(super) fn voice_only(command: &Command) -> bool {
             | Command::StreamAudio(_)
             | Command::ChangeScreen(..)
             | Command::Watch(..)
+            | Command::Listen(..)
+            | Command::PhoneConsent(..)
             | Command::StopCamera
             | Command::CancelFile(_)
     ) || control::is_control(command)
@@ -186,6 +196,19 @@ pub(super) async fn voice_command(
         return Ok(changed.then_some(live.channel));
     }
     let changed = match command {
+        Command::PhoneConsent(call, on) => {
+            if !on {
+                ctx.audio.pause_phone_withdrawal(true);
+                live.phone_withdrawals.start(call.clone());
+                ctx.audio.accept_phone_withdrawal_request();
+            }
+            live.phone_consents.retain(|old| old != &call);
+            if on && live.room.external_phone_calls().contains(&call) {
+                live.phone_consents.push(call);
+            }
+            phone::sync(ctx, url, live).await;
+            false
+        }
         Command::StopApp(id) => {
             live.pending
                 .retain(|start| start.stream || start.app.id != id);
@@ -216,10 +239,18 @@ pub(super) async fn voice_command(
             change_screen(ctx, live, target, remote_control);
             false
         }
+        Command::Listen(sid, on) => {
+            live.room.set_listening(
+                &TrackSid::try_from(sid.clone()).map_err(anyhow::Error::msg)?,
+                on,
+            )?;
+            ctx.audio.set_listening(&sid, on);
+            true
+        }
         Command::Watch(sid, on) => {
             watch(ctx, live, sid, on)?;
             sync_video_watches(live).await;
-            false
+            true
         }
         Command::StopCamera => {
             let sid = live.camera.clone();
@@ -428,6 +459,13 @@ pub(super) fn watch(ctx: &Ctx, live: &mut Live, sid: String, on: bool) -> Result
         return Ok(());
     };
     live.room.set_subscribed(&video.sid, on)?;
+    if !on {
+        for (identity, audio, _) in live.room.shared_audio() {
+            if identity == video.participant && !live.room.is_listening(&audio) {
+                ctx.audio.set_listening(audio.as_str(), false);
+            }
+        }
+    }
     // Already subscribed: no new event will come.
     if let (true, Some(track)) = (on, video.track) {
         ctx.video.add_track(sid, track.rtc_track());
@@ -806,6 +844,13 @@ pub(super) fn send_room(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &St
     );
 }
 
+fn screen_viewers(watches: &HashSet<(Id, String)>, sharer: &Id, sid: &str) -> usize {
+    watches
+        .iter()
+        .filter(|(person, track)| person != sharer && track == sid)
+        .count()
+}
+
 /// Send the people in `channel` to the window, `ids` naming the call's participants.
 fn send_roster(ctx: &Ctx, url: &Url, ids: &HashMap<String, Id>, state: &State, channel: Id) {
     let me = *ctx.identity.certificate.person_id();
@@ -833,6 +878,7 @@ fn send_roster(ctx: &Ctx, url: &Url, ids: &HashMap<String, Id>, state: &State, c
             let mut screens: HashMap<Id, Vec<Screen>> = HashMap::new();
             let mut cameras: HashMap<Id, String> = HashMap::new();
             let mut terminals: HashMap<Id, String> = HashMap::new();
+            let mut watches: HashSet<(Id, String)> = HashSet::new();
             let mut sounds = Snapshot {
                 camera: live.camera.clone(),
                 screen: live.screen.as_ref().map(|(sid, ..)| sid.clone()),
@@ -857,6 +903,12 @@ fn send_roster(ctx: &Ctx, url: &Url, ids: &HashMap<String, Id>, state: &State, c
                         sounds.people.insert(*person);
                     }
                     if voice == VoiceState::Connected {
+                        watches.extend(
+                            live.room
+                                .video_watches(&participant)
+                                .into_iter()
+                                .map(|sid| (*person, sid.to_string())),
+                        );
                         if *person != me && (sounds.camera.is_some() || sounds.screen.is_some()) {
                             sounds.viewers.extend(
                                 live.room
@@ -879,15 +931,11 @@ fn send_roster(ctx: &Ctx, url: &Url, ids: &HashMap<String, Id>, state: &State, c
                             })
                             .or_insert(status);
                     }
-                    apps.entry(*person).or_default().extend(
-                        participant
-                            .track_publications()
-                            .into_keys()
-                            .filter_map(|sid| {
-                                let name = live.apps.get(&sid)?.clone();
-                                Some((sid, name))
-                            }),
-                    );
+                }
+            }
+            for (identity, sid, name) in live.room.shared_audio() {
+                if let Some(person) = ids.get(identity.as_str()) {
+                    apps.entry(*person).or_default().push((sid, name));
                 }
             }
             for names in apps.values_mut() {
@@ -909,6 +957,8 @@ fn send_roster(ctx: &Ctx, url: &Url, ids: &HashMap<String, Id>, state: &State, c
                     TrackSource::Screenshare => screens.entry(*person).or_default().push(Screen {
                         sid: video.sid.to_string(),
                         name: video.name,
+                        viewers: 0,
+                        local: false,
                     }),
                     // One per person: a second device's camera shows after the first stops.
                     TrackSource::Camera => {
@@ -924,13 +974,27 @@ fn send_roster(ctx: &Ctx, url: &Url, ids: &HashMap<String, Id>, state: &State, c
                 terminals.insert(me, live.room.identity().to_string());
             }
             if let Some((sid, ..)) = &live.screen {
-                screens.insert(
-                    me,
-                    vec![Screen {
-                        sid: sid.to_string(),
-                        name: t!("call.your_screen").into(),
-                    }],
+                screens.entry(me).or_default().push(Screen {
+                    sid: sid.to_string(),
+                    name: t!("call.your_screen").into(),
+                    viewers: 0,
+                    local: true,
+                });
+            }
+            // Include this device only after an actual video subscription was announced.
+            if live.room.connection_state() == ConnectionState::Connected {
+                watches.extend(
+                    live.announced_watches
+                        .iter()
+                        .flatten()
+                        .map(|sid| (me, sid.to_string())),
                 );
+            }
+            for (sharer, streams) in &mut screens {
+                streams.sort_by(|a, b| a.sid.cmp(&b.sid));
+                for stream in streams {
+                    stream.viewers = screen_viewers(&watches, sharer, &stream.sid);
+                }
             }
             people.extend(live_people.keys().copied());
             people.push(me);
@@ -1008,6 +1072,19 @@ pub(super) async fn on_voice(
         roster(ctx, url, client, state, channel);
         return;
     };
+    if let Some(live) = &state.voice {
+        for (_, sid, _) in live.room.shared_audio() {
+            if !live.room.is_listening(&sid) {
+                ctx.audio.set_listening(sid.as_str(), false);
+            }
+        }
+        let allowed = live.room.remote_audio_tracks();
+        for sid in live.apps.keys() {
+            if !allowed.iter().any(|(_, active, _)| active == sid) {
+                ctx.audio.remove_track(sid.as_str());
+            }
+        }
+    }
     match event {
         RoomEvent::TrackSubscribed {
             track: RemoteTrack::Audio(track),
@@ -1070,6 +1147,21 @@ pub(super) async fn on_voice(
             ctx.video.remove_track(track.sid().as_str());
         }
         RoomEvent::Reconnecting => {
+            if let Some(live) = &mut state.voice {
+                for call in live.phone_consents.drain(..) {
+                    ctx.audio.pause_phone_withdrawal(true);
+                    live.phone_withdrawals.start(call);
+                }
+                live.phone_announcement = None;
+                #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                if let Some(phone) = &live.phone {
+                    // Keep the publication until bounded SIP cleanup finishes, so the
+                    // usual completion path can unpublish it after reconnecting.
+                    phone.stop.cancel();
+                }
+                ctx.audio.end_phone();
+            }
+            ctx.audio.stop_listening();
             tracing::info!("voice reconnecting");
             ctx.send(Update::Call(
                 url.clone(),
@@ -1078,8 +1170,14 @@ pub(super) async fn on_voice(
             ));
         }
         RoomEvent::Reconnected => {
+            ctx.audio.stop_listening();
             tracing::info!("voice reconnected");
             if let Some(live) = &mut state.voice {
+                for call in live.phone_consents.drain(..) {
+                    ctx.audio.pause_phone_withdrawal(true);
+                    live.phone_withdrawals.start(call);
+                }
+                live.phone_announcement = None;
                 live.deafened = None;
                 live.announced_watches = None;
                 sync_video_watches(live).await;
@@ -1112,6 +1210,8 @@ pub(super) async fn on_voice(
             }
         }
         RoomEvent::TrackUnpublished { publication, .. } => {
+            ctx.audio.set_listening(publication.sid().as_str(), false);
+            ctx.audio.remove_track(publication.sid().as_str());
             if let Some(live) = &mut state.voice {
                 control::unpublished(ctx, live, publication.sid().as_str());
             }
@@ -1122,6 +1222,12 @@ pub(super) async fn on_voice(
             ..
         } => {
             if let Some(live) = &mut state.voice {
+                #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                if let Some(phone) = &mut live.phone
+                    && phone.sid == previous_sid
+                {
+                    phone.sid = publication.sid();
+                }
                 if live.camera.as_ref() == Some(&previous_sid) {
                     live.camera = Some(publication.sid());
                 }
@@ -1141,6 +1247,9 @@ pub(super) async fn on_voice(
         | RoomEvent::ConnectionStateChanged(_) => {}
         _ => return,
     }
+    if let Some(live) = &mut state.voice {
+        phone::sync(ctx, url, live).await;
+    }
     roster(ctx, url, client, state, channel);
 }
 
@@ -1159,6 +1268,16 @@ pub(super) async fn stop_lost_video(
     let (camera, screen) = (live.room.can_use_camera(), live.room.can_share_screen());
     let gone = |sid: &TrackSid, allowed: bool| !allowed || unpublished.as_ref() == Some(sid);
     let mut changed = false;
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    if live
+        .phone
+        .as_ref()
+        .is_some_and(|phone| gone(&phone.sid, live.room.can_share_audio()))
+    {
+        live.phone = None;
+        ctx.audio.end_phone();
+        changed = true;
+    }
     if live.camera.as_ref().is_some_and(|sid| gone(sid, camera)) {
         stop_camera(live).await;
         ctx.send(Update::CameraStopped);
@@ -1198,6 +1317,7 @@ pub(super) async fn stop_finished_shares(
         .partition(|share| share.capture.is_finished());
     live.shares = kept;
     let phone_ended = phone::stop_ended(ctx, live).await;
+    phone::sync(ctx, url, live).await;
     if live.host.controller().is_some()
         && live
             .screen
@@ -1461,6 +1581,10 @@ pub(super) async fn start_call(
         shares: Vec::new(),
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         phone: None,
+        phone_consents: Vec::new(),
+        phone_announcement: None,
+        phone_withdrawals: Default::default(),
+        phone_acknowledgements: Vec::new(),
         pending: Vec::new(),
         stream_audio: Vec::new(),
         apps: HashMap::new(),
@@ -1517,6 +1641,10 @@ impl Live {
         }
         self.shares.clear();
         self.stream_audio.clear();
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        {
+            self.phone = None;
+        }
     }
 }
 
@@ -1668,6 +1796,25 @@ pub(super) fn live_file_accepted(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn screen_counts_people_per_track_and_excludes_the_sharer() {
+        let mut watches = HashSet::from([
+            ([1; 32], "screen-a".into()),
+            ([2; 32], "screen-a".into()),
+            ([2; 32], "screen-a".into()),
+            ([3; 32], "screen-a".into()),
+            ([2; 32], "screen-b".into()),
+            ([4; 32], "camera".into()),
+        ]);
+        assert_eq!(screen_viewers(&watches, &[1; 32], "screen-a"), 2);
+        assert_eq!(screen_viewers(&watches, &[3; 32], "screen-b"), 1);
+        assert_eq!(screen_viewers(&watches, &[2; 32], "screen-b"), 0);
+        watches.retain(|(person, _)| *person != [3; 32]);
+        assert_eq!(screen_viewers(&watches, &[1; 32], "screen-a"), 1);
+        watches.clear();
+        assert_eq!(screen_viewers(&watches, &[1; 32], "screen-a"), 0);
+    }
+
     use rusttalk_core::client::voice::VoiceRoster;
 
     use super::*;
