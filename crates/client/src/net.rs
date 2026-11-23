@@ -53,6 +53,7 @@ mod control;
 mod directory;
 mod files;
 mod find;
+mod recent;
 pub mod terminal;
 mod voice;
 
@@ -68,7 +69,7 @@ use voice::{
     voice_only, voice_stats,
 };
 
-const PAGE: u32 = 50;
+pub(crate) const PAGE: u32 = 50;
 
 /// What to make of a downloaded picture.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -356,6 +357,9 @@ pub enum Update {
     /// A server picked from the directory, checked; errors show in the directory.
     Listed(Result<Box<Preview>, String>),
     Status(Url, Status),
+    Cached(Url, Box<Directory>, Vec<(Id, Vec<Msg>)>),
+    Inaccessible(Url, HashSet<Id>),
+    ResetHistory(Url, Vec<(Id, Vec<Msg>)>),
     Compatibility(Url, Compatibility),
     ChannelOrderUnavailable(Url),
     Directory(Url, Box<Directory>),
@@ -445,6 +449,7 @@ pub enum Update {
 }
 
 pub struct Net {
+    stores: std::cell::RefCell<HashMap<Url, Arc<recent::Store>>>,
     completed_dm_copies: Arc<tokio::sync::Mutex<backfill::Completed>>,
     runtime: Option<Runtime>,
     ctx: Ctx,
@@ -487,6 +492,7 @@ impl Net {
         let (updates, receiver) = mpsc::channel();
         let sync = Arc::new(DeviceSync::open(&data)?);
         Ok(Self {
+            stores: Default::default(),
             runtime: Some(runtime),
             completed_dm_copies: Default::default(),
             ctx: Ctx {
@@ -563,8 +569,19 @@ impl Net {
     ) -> UnboundedSender<Command> {
         let (commands, receiver) = unbounded_channel();
         let ctx = self.ctx.clone();
-        self.spawn(run(ctx, server, admission, display_name, receiver));
+        self.forget(&server.address);
+        let store = Arc::new(recent::Store::new(&ctx.data, &ctx.identity, &server));
+        self.stores
+            .borrow_mut()
+            .insert(server.address.clone(), store.clone());
+        self.spawn(run(ctx, server, admission, display_name, receiver, store));
         commands
+    }
+
+    pub fn forget(&self, url: &Url) {
+        if let Some(store) = self.stores.borrow_mut().remove(url) {
+            store.remove();
+        }
     }
 
     pub fn remove_device(&self, record: &rusttalk_core::identity::Revocation) -> Result<()> {
@@ -725,6 +742,10 @@ fn pin_changed(error: &anyhow::Error) -> bool {
 
 #[derive(Default)]
 struct State {
+    cache: Option<Arc<recent::Store>>,
+    history: recent::History,
+    /// Provenance for loaded history, including older pages outside the startup cache.
+    sources: HashMap<Id, HashSet<recent::Source>>,
     dm_backfill: bool,
     /// Channels the UI has opened, which get live messages.
     loaded: HashSet<Id>,
@@ -777,9 +798,11 @@ async fn run(
     mut admission: Option<Admission>,
     display_name: Option<String>,
     mut commands: UnboundedReceiver<Command>,
+    store: Arc<recent::Store>,
 ) {
     let url = server.address.clone();
     let mut state = State {
+        cache: Some(store),
         display_name,
         server_id: server.server_id,
         rooms: HashMap::new(),
@@ -788,6 +811,14 @@ async fn run(
     };
     let records = rusttalk_core::client::revocations::Revocations::in_profile(&ctx.data);
     let mut removals = records.changes();
+    if revoked(&ctx, &url, &state, &records) {
+        return;
+    }
+    if admission.is_none()
+        && let Err(error) = state.restore(&ctx, &url, &records)
+    {
+        tracing::warn!(%error, "could not restore recent server view");
+    }
     let mut delay = 1;
     // Verified once, then reused: each verification spends one of the server's rate-limited challenges.
     let mut api = None;
@@ -819,6 +850,7 @@ async fn run(
             &url,
             &mut state,
             &mut commands,
+            &mut removals,
             connecting,
             Some(&mut queued),
         )
@@ -836,7 +868,6 @@ async fn run(
                         delay = 1;
                         state.order_unavailable = false;
                         tracing::info!(server = %fingerprint(&server.server_id), "connected to server");
-                        ctx.send(Update::Status(url.clone(), Status::Online));
                         let end = serve(
                             &ctx,
                             &url,
@@ -860,6 +891,7 @@ async fn run(
                                     "banned" => t!("net.banned"),
                                     _ => t!("net.device_revoked"),
                                 };
+                                state.store().remove();
                                 ctx.send(Update::Status(url, Status::Stopped(text.into())));
                                 return;
                             }
@@ -878,6 +910,7 @@ async fn run(
                 }
             }
             Err(Failure::Stop(text)) => {
+                state.store().remove();
                 ctx.send(Update::Status(url, Status::Stopped(text)));
                 return;
             }
@@ -887,16 +920,48 @@ async fn run(
         for command in std::mem::take(&mut queued) {
             refuse(&ctx, &url, command);
         }
+        if revoked(&ctx, &url, &state, &records) {
+            return;
+        }
         ctx.send(Update::Status(url.clone(), Status::Offline));
         let wait = tokio::time::sleep(Duration::from_secs(delay));
-        if offline(&ctx, &url, &mut state, &mut commands, wait, None)
-            .await
-            .is_none()
+        if offline(
+            &ctx,
+            &url,
+            &mut state,
+            &mut commands,
+            &mut removals,
+            wait,
+            None,
+        )
+        .await
+        .is_none()
         {
             return;
         }
         delay = (delay * 2).min(30);
     }
+}
+
+fn revoked(
+    ctx: &Ctx,
+    url: &Url,
+    state: &State,
+    records: &rusttalk_core::client::revocations::Revocations,
+) -> bool {
+    let cert = &ctx.identity.certificate;
+    if records
+        .check(cert.person_id(), cert.signing_key().as_bytes())
+        .is_ok()
+    {
+        return false;
+    }
+    state.store().remove();
+    ctx.send(Update::Status(
+        url.clone(),
+        Status::Stopped(t!("net.device_revoked").into()),
+    ));
+    true
 }
 
 /// Wait for `until` without the API connection. The voice room outlives it, so the call
@@ -908,6 +973,7 @@ async fn offline<T>(
     url: &Url,
     state: &mut State,
     commands: &mut UnboundedReceiver<Command>,
+    removals: &mut tokio::sync::watch::Receiver<()>,
     until: impl Future<Output = T>,
     mut queued: Option<&mut VecDeque<Command>>,
 ) -> Option<T> {
@@ -916,6 +982,12 @@ async fn offline<T>(
     let mut finished = tokio::time::interval(Duration::from_secs(2));
     loop {
         tokio::select! {
+            biased;
+            _ = removals.changed() => {
+                let records = rusttalk_core::client::revocations::Revocations::in_profile(&ctx.data);
+                if revoked(ctx,url,state,&records) { return None; }
+                state.revalidate(ctx, url, &records, None);
+            }
             done = &mut until => return Some(done),
             next = next_voice(&mut state.voice) => voice_next(ctx, url, None, state, next).await,
             _ = finished.tick(), if state.voice.is_some() => {
@@ -1152,14 +1224,20 @@ async fn serve(
             }
         };
         tokio::select! {
+            biased;
             _ = removals.changed() => {
+                let records = rusttalk_core::client::revocations::Revocations::in_profile(&ctx.data);
+                if revoked(ctx,url,state,&records) { return End::Quit; }
+                state.revalidate(ctx, url, &records, None);
                 if let Err(error) = client.sync().await {
                     tracing::warn!(%error, "could not rotate after device removal");
                     sync_voice_key(ctx, client, state);
                     continue;
                 }
+                state.revalidate(ctx, url, &records, Some(client));
                 sync_voice_key(ctx, client, state);
                 save_pins(ctx, url, client, state);
+                for channel in state.loaded.clone() { page(ctx,url,client,state,channel,None).await; }
             }
             event = client.next_update() => match event {
                 Ok(Some(Pushed::Presence(PresenceEvent::PresenceChanged { person_id, status }))) => {
@@ -1341,15 +1419,42 @@ fn move_applies(
 
 /// Reload what the UI shows after (re)connecting, since events may have been missed.
 async fn resume(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, state: &mut State) -> Result<()> {
-    // Sync first, beside the rest: on a device restored from the words this first server
-    // brings back the others, which must not wait for (or be skipped by a failure in) the
-    // directory, history and voice loads below. Also after each token refresh, which picks
-    // up changes from other devices twice a day.
+    // Apply synced deletes and device removals before presenting this session.
     let (api, session) = client.sync_peer();
     ctx.sync.set_peer(url, Some((api.clone(), session.clone())));
-    let sync_ctx = ctx.clone();
-    tokio::spawn(async move { sync(&sync_ctx, Vec::new()).await });
-    directory(ctx, url, client, state).await?;
+    let records = rusttalk_core::client::revocations::Revocations::in_profile(&ctx.data);
+    let mut changes = records.changes();
+    loop {
+        if revoked(ctx, url, state, &records) {
+            anyhow::bail!("device revoked");
+        }
+        state.revalidate(ctx, url, &records, Some(client));
+        // A removal learned from another server (or device sync itself) takes
+        // effect even while the directory request is stalled.
+        let barrier = changes.clone();
+        tokio::select! {
+            biased;
+            _ = changes.changed() => continue,
+            result = async {
+                sync_devices(ctx, Vec::new()).await?;
+                client.sync().await?;
+                state.revalidate(ctx, url, &records, Some(client));
+                directory(ctx, url, client, state).await?;
+                if !barrier.has_changed()? {
+                    reload_pages(ctx, url, client, state).await;
+                }
+                Ok::<_, anyhow::Error>(())
+            } => {
+                result?;
+                if !changes.has_changed()? { return Ok(()); }
+                changes.borrow_and_update();
+            }
+        }
+    }
+}
+
+async fn reload_pages(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, state: &mut State) {
+    ctx.send(Update::Status(url.clone(), Status::Online));
     for channel in state.loaded.clone() {
         page(ctx, url, client, state, channel, None).await;
     }
@@ -1369,7 +1474,6 @@ async fn resume(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, state: &mut St
         }
     }
     sync_voice_key(ctx, client, state);
-    Ok(())
 }
 
 /// The newest message from someone else in every channel and DM, so what came in
@@ -1414,8 +1518,13 @@ async fn latest(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, state: &State)
 
 /// Merge with this person's other devices and show the result.
 async fn sync(ctx: &Ctx, edits: Vec<Edit>) {
-    let result = ctx
-        .sync
+    if let Err(error) = sync_devices(ctx, edits).await {
+        tracing::error!(error = %format_args!("{error:#}"), "device sync failed");
+    }
+}
+
+async fn sync_devices(ctx: &Ctx, edits: Vec<Edit>) -> Result<()> {
+    ctx.sync
         .run(&ctx.data, &ctx.identity, edits, |synced| {
             for address in &synced.conflicts {
                 let server = address.host_str().unwrap_or(t!("net.a_server"));
@@ -1423,10 +1532,7 @@ async fn sync(ctx: &Ctx, edits: Vec<Edit>) {
             }
             ctx.send(Update::Synced(Box::new(synced)));
         })
-        .await;
-    if let Err(error) = result {
-        tracing::error!(error = %format_args!("{error:#}"), "device sync failed");
-    }
+        .await
 }
 
 async fn on_event(
@@ -1436,6 +1542,16 @@ async fn on_event(
     state: &mut State,
     event: Event,
 ) -> Result<()> {
+    if matches!(
+        event,
+        Event::KeysNeeded(_)
+            | Event::MemberChanged { .. }
+            | Event::ChannelChanged
+            | Event::RotateNeeded { .. }
+    ) {
+        let records = rusttalk_core::client::revocations::Revocations::in_profile(&ctx.data);
+        state.revalidate(ctx, url, &records, Some(client));
+    }
     if client.take_own_revocations_changed() {
         sync(ctx, Vec::new()).await;
     }
@@ -1444,7 +1560,11 @@ async fn on_event(
             let (channel, id) = (decode(&channel)?, decode(&id)?);
             let record = client.message(&channel, &id).await?;
             if state.loaded.contains(&channel) {
-                let Some(msg) = open(client, state, &channel, &record).await else {
+                let (msg, cached) = open(client, state, &channel, &record).await?;
+                if let Some(record) = cached {
+                    state.remember(channel, vec![record], false);
+                }
+                let Some(msg) = msg else {
                     return Ok(());
                 };
                 ctx.send(Update::Arrived(url.clone(), channel, msg.clone()));
@@ -1485,11 +1605,8 @@ async fn on_event(
             }
         }
         Event::MessageDeleted { channel, id } => {
-            ctx.send(Update::Deleted(
-                url.clone(),
-                decode(&channel)?,
-                decode(&id)?,
-            ));
+            let (channel, id) = (decode(&channel)?, decode(&id)?);
+            state.deleted(ctx, url, channel, id);
         }
         Event::Resync => resume(ctx, url, client, state).await?,
         Event::MemberChanged { .. } | Event::ChannelChanged | Event::DmCreated { .. } => {
@@ -1503,13 +1620,24 @@ async fn on_event(
                 directory(ctx, url, client, state).await?;
             }
             for (channel, ids) in std::mem::take(&mut state.waiting) {
+                if !state
+                    .last
+                    .as_ref()
+                    .is_some_and(|dir| recent::visible(dir, &channel))
+                {
+                    continue;
+                }
                 let mut items = Vec::new();
                 for id in ids {
                     // The message may have been deleted meanwhile.
                     let Ok(record) = client.message(&channel, &id).await else {
                         continue;
                     };
-                    items.extend(open(client, state, &channel, &record).await);
+                    let (msg, cached) = open(client, state, &channel, &record).await?;
+                    if let Some(record) = cached {
+                        state.remember(channel, vec![record], false);
+                    }
+                    items.extend(msg);
                 }
                 send_messages(ctx, url, channel, items, false, None);
             }
@@ -1626,13 +1754,14 @@ async fn on_command(
                 .flat_map(|category| &category.channels)
                 .any(|known| known.id == channel && known.page);
             let target = (channel, draft.id, page);
-            let mut sent = files::send(ctx, url, client, target, body.clone(), files.clone()).await;
+            let mut sent =
+                files::send(ctx, url, client, state, target, body.clone(), files.clone()).await;
             // The other person re-keyed the DM just now: take the new key and send
             // once more, whatever this was (text, sticker, file or friend message).
             if draft.peer.is_some() && sent.as_ref().is_err_and(files::conflict) {
                 // A failed key sync still puts the draft back below.
                 sent = match client.sync().await {
-                    Ok(()) => files::send(ctx, url, client, target, body, files).await,
+                    Ok(()) => files::send(ctx, url, client, state, target, body, files).await,
                     Err(error) => Err(error),
                 };
             }
@@ -1650,7 +1779,7 @@ async fn on_command(
             }
         }
         Command::Delete(channel, id, sender, blobs) => {
-            files::delete(ctx, url, client, (channel, id, sender), blobs).await?;
+            files::delete(ctx, url, client, state, (channel, id, sender), blobs).await?;
         }
         Command::Image(file, fetch) => files::image(ctx, client, file, fetch).await,
         Command::LinkCard(file) => files::link_card(ctx, client, file).await,
@@ -1955,6 +2084,28 @@ fn save_pins(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, state: &mut State
     }
 }
 
+fn page_failed(
+    ctx: &Ctx,
+    url: &Url,
+    state: &mut State,
+    channel: Id,
+    before: Option<Id>,
+    error: &anyhow::Error,
+) {
+    tracing::warn!(error = %format_args!("{error:#}"), "loading messages failed");
+    // A channel stays loading: reconnecting reloads opened channels, and paging
+    // stays paused until then. A DM keeps paging its other copies.
+    let status = error
+        .downcast_ref::<reqwest::Error>()
+        .and_then(reqwest::Error::status);
+    let missing = status == Some(StatusCode::NOT_FOUND);
+    if status == Some(StatusCode::FORBIDDEN) || (missing && before.is_none()) {
+        state.discard_channels(ctx, url, [channel].into());
+    }
+    ctx.send(Update::PageFailed(url.clone(), channel, missing));
+    ctx.send(Update::Failed(t!("net.messages_failed").into()));
+}
+
 /// Load one page, newest first on the wire, and send it oldest first.
 async fn page(
     ctx: &Ctx,
@@ -1964,23 +2115,45 @@ async fn page(
     channel: Id,
     before: Option<Id>,
 ) {
+    if !state
+        .last
+        .as_ref()
+        .is_some_and(|dir| recent::visible(dir, &channel))
+    {
+        return;
+    }
+    let revocations = rusttalk_core::client::revocations::Revocations::in_profile(&ctx.data);
+    let changes = revocations.changes();
     let records = match client.message_page(&channel, before.as_ref(), PAGE).await {
         Ok(records) => records,
         Err(error) => {
-            tracing::warn!(error = %format_args!("{error:#}"), "loading messages failed");
-            // A channel stays loading: reconnecting reloads opened channels, and paging
-            // stays paused until then. A DM keeps paging its other copies.
-            let missing = (error.downcast_ref::<reqwest::Error>()).and_then(reqwest::Error::status)
-                == Some(StatusCode::NOT_FOUND);
-            ctx.send(Update::PageFailed(url.clone(), channel, missing));
-            ctx.send(Update::Failed(t!("net.messages_failed").into()));
+            page_failed(ctx, url, state, channel, before, &error);
             return;
         }
     };
     let at_start = records.len() < PAGE as usize;
     let mut items = Vec::with_capacity(records.len());
+    let mut cached = Vec::new();
     for record in records.iter().rev() {
-        items.extend(open(client, state, &channel, record).await);
+        let (msg, recent) = match open(client, state, &channel, record).await {
+            Ok(opened) => opened,
+            Err(error) => {
+                page_failed(ctx, url, state, channel, before, &error);
+                return;
+            }
+        };
+        items.extend(msg);
+        cached.extend(recent);
+    }
+    if changes.has_changed().unwrap_or(true) {
+        state.revalidate(ctx, url, &revocations, Some(client));
+        return;
+    }
+    if before.is_none() {
+        state
+            .sources
+            .insert(channel, cached.iter().map(recent::Record::source).collect());
+        state.remember(channel, cached, true);
     }
     send_messages(ctx, url, channel, items, before.is_some(), Some(at_start));
 }
@@ -1990,25 +2163,62 @@ async fn open(
     state: &mut State,
     channel: &Id,
     record: &MessageRecord,
-) -> Option<Msg> {
-    match client.open_message(channel, record).await {
+) -> Result<(Option<Msg>, Option<recent::Record>)> {
+    // The core client can return a previously opened body. Recheck its epoch
+    // against the current session even on that path.
+    let scope = rusttalk_core::keys::Scope {
+        kind: rusttalk_core::keys::Kind::Channel,
+        id: *channel,
+    };
+    let body = match client.key(scope, record.epoch) {
+        Some(_) => client.open_message(channel, record).await,
+        None => Err(MessageError::MissingKey.into()),
+    };
+    Ok(match body {
         // Key work only (the client noted it); not a message to show.
-        Ok(body) if body.key_link.is_some() => None,
+        Ok(body) if body.key_link.is_some() => (None, None),
         Ok(body) => {
+            state.sources.entry(*channel).or_default().insert((
+                record.person,
+                record.sender_device,
+                Some(record.epoch),
+            ));
             if let Some(file) = &body.live {
                 let transfer = state.transfers.entry(file.id);
                 transfer.or_insert(Transfer::chat(*channel)).offer = Some(record.clone());
             }
-            Some(to_msg(record, &body))
+            (
+                Some(to_msg(record, &body)),
+                recent::Record::new(record, &body),
+            )
         }
         Err(error) => {
+            if verification_incomplete(&error) {
+                return Err(error);
+            }
             if error.downcast_ref::<MessageError>() == Some(&MessageError::MissingKey) {
                 state.waiting.entry(*channel).or_default().insert(record.id);
             }
             tracing::warn!(error = %format_args!("{error:#}"), "message could not be opened");
-            Some(unreadable(record))
+            (Some(unreadable(record)), None)
         }
-    }
+    })
+}
+
+/// A failed fetch of verification data (such as an edit's original) leaves
+/// the page incomplete. Only a definitive response can disqualify the record.
+fn verification_incomplete(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<reqwest::Error>().is_some_and(|e| {
+        e.status().is_none_or(|s| {
+            s.is_server_error()
+                || matches!(
+                    s,
+                    StatusCode::TOO_MANY_REQUESTS
+                        | StatusCode::REQUEST_TIMEOUT
+                        | StatusCode::UNAUTHORIZED
+                )
+        })
+    })
 }
 
 fn unreadable(record: &MessageRecord) -> Msg {
@@ -2030,11 +2240,15 @@ fn unreadable(record: &MessageRecord) -> Msg {
 }
 
 fn to_msg(record: &MessageRecord, body: &MessageBody) -> Msg {
+    display_message(record.id, record.person, record.at, record.backfilled, body)
+}
+
+fn display_message(id: Id, person: Id, at: i64, backfilled: bool, body: &MessageBody) -> Msg {
     Msg {
-        backfilled: record.backfilled,
-        id: record.id,
-        person: record.person,
-        at: record.at,
+        id,
+        person,
+        at,
+        backfilled,
         reply_to: body.reply_to,
         quoted_author: body.quoted_author,
         edit_of: body.edit_of,

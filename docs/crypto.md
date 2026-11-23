@@ -202,6 +202,13 @@ envelope. A channel creator creates channel epoch 1 and uploads its
 self-addressed envelope with channel creation. The identity sync key is used
 exclusively for device sync.
 
+The local recent-view cache derives a separate 32-byte key from the device
+agreement secret using HKDF-SHA256 with info `rusttalk local cache v1`. Files
+use XChaCha20-Poly1305 with a fresh random nonce. Associated data binds the
+cache domain, person, device, pinned server and file type. Only verified
+message bodies enter this cache. Opening it requires the unlocked device
+identity and honors the profile’s signed device removals.
+
 The epoch creator stores a 32-byte commitment with the epoch. It computes
 HMAC-SHA256 keyed by the epoch key over these bytes.
 

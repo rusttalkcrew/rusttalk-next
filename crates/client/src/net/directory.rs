@@ -175,6 +175,26 @@ pub(super) async fn directory(
     state: &mut State,
 ) -> Result<()> {
     let catalog = client.catalog().await?;
+    if let Some(before) = &state.last {
+        let readable: HashMap<_, _> = catalog.channels.iter().map(|c| (c.id, c)).collect();
+        let channels = before
+            .categories
+            .iter()
+            .flat_map(|c| &c.channels)
+            .filter(|c| readable.get(&c.id).is_none_or(|new| new.kind == "dm"))
+            .map(|c| c.id);
+        let dms = before
+            .dms
+            .iter()
+            .filter(|dm| {
+                readable.get(&dm.channel).is_none_or(|new| {
+                    new.kind != "dm"
+                        || new.peer.as_deref().and_then(|p| decode(p).ok()) != Some(dm.peer)
+                })
+            })
+            .map(|dm| dm.channel);
+        state.discard_channels(ctx, url, channels.chain(dms).collect());
+    }
     let joined_kbps = state.voice.as_ref().and_then(|live| {
         let channel = catalog.channels.iter().find(|c| c.id == live.channel)?;
         channel.audio_kbps
@@ -261,6 +281,8 @@ pub(super) async fn directory(
             .flat_map(|category| &category.channels)
             .any(|channel| channel.id == *joined)
     });
+    state.prune_history(&dir);
+    super::recent::Listing::save(state, &dir, &members, &space);
     state.last = Some(dir.clone());
     state.named = client.has_space_key();
     ctx.send(Update::Directory(url.clone(), Box::new(dir)));
@@ -578,7 +600,7 @@ fn received_bio(bio: Option<String>) -> Option<String> {
 
 /// The cache key of a member's avatar or the server icon: its owner and ciphertext hash.
 /// The owner is part of the key so one member cannot reuse another's picture.
-fn picture_key(owner: &Id, hash: &str) -> [u8; 32] {
+pub(super) fn picture_key(owner: &Id, hash: &str) -> [u8; 32] {
     Sha256::new()
         .chain_update(owner)
         .chain_update(hash.as_bytes())
@@ -680,7 +702,7 @@ pub(crate) fn frame_image(frame: image::Frame) -> (ColorImage, u32) {
 }
 
 /// Decode a profile picture, server icon, emoji or sticker.
-fn picture(bytes: &[u8]) -> Option<Picture> {
+pub(super) fn picture(bytes: &[u8]) -> Option<Picture> {
     let key: [u8; 32] = Sha256::digest(bytes).into();
     let frames = match decode_profile_image(bytes) {
         Ok(frames) => frames,

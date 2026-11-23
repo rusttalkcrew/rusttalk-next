@@ -291,6 +291,15 @@ pub struct CustomEmoji {
 }
 
 impl Directory {
+    pub fn discard_channels(&mut self, ids: &std::collections::HashSet<Id>) {
+        self.dms.retain(|dm| !ids.contains(&dm.channel));
+        for category in &mut self.categories {
+            category
+                .channels
+                .retain(|channel| !ids.contains(&channel.id));
+        }
+    }
+
     pub fn text_channels(&self) -> impl Iterator<Item = &Channel> {
         self.categories
             .iter()
@@ -411,14 +420,14 @@ impl ChannelKind {
 }
 
 /// Channels without a category go in a category without an ID or name.
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Category {
     pub id: Option<Id>,
     pub name: String,
     pub channels: Vec<Channel>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Channel {
     pub id: Id,
     pub name: String,
@@ -531,7 +540,7 @@ pub struct Device {
     pub fingerprint: String,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Dm {
     pub channel: Id,
     pub peer: Id,
@@ -654,6 +663,14 @@ pub struct Chat {
 }
 
 impl Chat {
+    pub fn clear_history(&mut self) {
+        self.messages.clear();
+        self.edited.clear();
+        self.pending_edits.clear();
+        self.polls.clear();
+        self.at_start = false;
+    }
+
     pub fn open_draft(&mut self, dir: &Directory, text: &str) {
         (self.draft, self.mentions) = crate::home::mentions::DraftMentions::open(dir, text);
     }

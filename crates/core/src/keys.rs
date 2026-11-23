@@ -479,6 +479,15 @@ pub(crate) fn open(key: &Key, aad: &[u8], bytes: &[u8]) -> Result<Vec<u8>, KeyEr
         .map_err(|_| KeyError::Authentication)
 }
 
+/// Local cache files have a separate authentication domain from network records.
+pub fn seal_cache(key: &Key, scope: &[u8], data: &[u8]) -> Result<Vec<u8>, KeyError> {
+    seal(key, &[b"rusttalk-local-cache-v1", scope].concat(), data)
+}
+
+pub fn open_cache(key: &Key, scope: &[u8], data: &[u8]) -> Result<Vec<u8>, KeyError> {
+    open(key, &[b"rusttalk-local-cache-v1", scope].concat(), data)
+}
+
 pub fn seal_invite(
     server: &[u8; 32],
     epoch: i64,

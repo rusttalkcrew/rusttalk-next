@@ -271,10 +271,17 @@ the copy sensitive (Android hides it from the clipboard preview and keyboard
 suggestions; iOS keeps it off Universal Clipboard and lets it expire after two
 minutes), and desktops clear the clipboard after two minutes if it still holds
 the words and the app is still running.
+After the device keys are unlocked, the app can show its last server directory,
+icons, avatars and recent messages without contacting the server. These local
+files are authenticated and encrypted with a key derived from the unlocked device identity and bound to
+the device and pinned server. The app checks locally known device revocations
+before opening messages. Changes made while the device is offline become
+visible when it reconnects. Removing a server clears its files.
+
 "Sign out of this device" deletes the keychain entry, `identity.key`, leftover
 temporary key files and the profile's `sync.json`, `servers.json`,
 `saved.json`, `notify.json`, `pokes.json`, `dm_deleted.json`, `dm_pins/`,
-recent and favourite emoji, cached link previews and both local logs. This
+the encrypted recent-view cache, recent and favourite emoji, cached link previews and both local logs. This
 clears the previous person's fingerprint, DM history markers, server records
 and preview consent. Hardware, local sound and window preferences in
 `voice.json`, the downloaded noise removal model and updater settings stay on
