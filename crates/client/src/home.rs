@@ -2289,7 +2289,7 @@ fn empty(ui: &mut Ui, title: &str, hint: &str) {
 }
 
 /// A round server button that turns into a rounded square when hovered or open.
-fn rail_button(ui: &mut Ui, text: &str, label: &str, selected: bool) -> Response {
+fn rail_button(ui: &mut Ui, text: &str, selected: bool) -> Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(RAIL_BUTTON), Sense::click());
     let c = ui::colors(ui);
     let accent = ui::accent(ui);
@@ -2310,17 +2310,46 @@ fn rail_button(ui: &mut Ui, text: &str, label: &str, selected: bool) -> Response
         glyph,
     );
     ui::focus_ring(ui, &response, radius as u8);
-    response.widget_info(|| WidgetInfo::labeled(Role::Button, true, label));
-    response
-        .on_hover_text(label)
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+fn rail_label(button: Response, name: &str, unavailable: bool) -> Response {
+    button.widget_info(|| WidgetInfo::labeled(Role::Button, true, name));
+    if !unavailable {
+        return button.on_hover_text(name);
+    }
+    let status = t!("home.server_unavailable");
+    button
+        .ctx
+        .accesskit_node_builder(button.id, |node| node.set_description(status));
+    let (has_touch, touching) = button
+        .ctx
+        .input(|i| (i.has_touch_screen(), i.any_touches()));
+    if !touching {
+        let mut tooltip = if button.has_focus() && !has_touch && !ui::menu_open(&button) {
+            egui::Tooltip::for_widget(&button)
+        } else {
+            egui::Tooltip::for_enabled(&button)
+        };
+        tooltip.popup = tooltip.popup.align(egui::RectAlign::RIGHT_START);
+        tooltip.show(|ui| {
+            ui.set_max_width(ui.spacing().tooltip_width);
+            ui.label(name);
+            ui.weak(status);
+        });
+    }
+    button
 }
 
 fn server_rail(ui: &mut Ui, home: &mut Home) {
     ui.vertical_centered(|ui| {
         ui.add_space(4.0);
         let dms = matches!(home.view, View::Direct(_));
-        let button = rail_button(ui, "💬", t!("home.direct_messages"), dms);
+        let button = rail_label(
+            rail_button(ui, "💬", dms),
+            t!("home.direct_messages"),
+            false,
+        );
         rail_marks(ui, &button, dms, home.dm_marks());
         if button.clicked() {
             home.view = View::Direct(None);
@@ -2336,13 +2365,17 @@ fn server_rail(ui: &mut Ui, home: &mut Home) {
                         ui.allocate_exact_size(Vec2::splat(RAIL_BUTTON), Sense::click());
                     let radius = if selected { 16.0 } else { 24.0 };
                     paint_hovered(ui, rect, icon, radius);
-                    let button = button.on_hover_text(server.name());
-                    let name = server.name().to_owned();
-                    button.widget_info(|| WidgetInfo::labeled(Role::Button, true, &name));
+                    ui::focus_ring(ui, &button, radius as u8);
                     button
                 }
-                None => rail_button(ui, &initials(server.name()), server.name(), selected),
+                None => rail_button(ui, &initials(server.name()), selected),
             };
+            let unavailable = matches!(server.status, Status::Offline | Status::Stopped(_));
+            if unavailable {
+                let at = button.rect.right_top() + Vec2::new(-8.0, 8.0);
+                ui::unavailable_badge(ui, at, ui::colors(ui).rail);
+            }
+            let button = rail_label(button, server.name(), unavailable);
             rail_marks(ui, &button, selected, marks);
             if button.clicked() {
                 home.view = View::Server(index);
@@ -2350,7 +2383,7 @@ fn server_rail(ui: &mut Ui, home: &mut Home) {
             ui::context_menu(&button, |m| server_menu(m, home, index));
         }
         let adding = matches!(home.view, View::Join | View::Find);
-        let plus = rail_button(ui, "+", t!("home.add_server"), adding);
+        let plus = rail_label(rail_button(ui, "+", adding), t!("home.add_server"), false);
         ui::menu(&plus, |m| {
             if m.item("🔗", t!("home.join_with_invite")).clicked() {
                 home.view = View::Join;
@@ -6498,6 +6531,7 @@ mod tests {
 
     mod emoji;
     mod image_reload;
+    mod rail;
     mod streams;
     mod touch;
     mod uploads;

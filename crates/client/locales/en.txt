@@ -113,6 +113,7 @@ home.find_servers = Find servers
 home.no_chats = No chats yet.
 home.server_menu = {name}, server menu
 home.offline = Offline. Trying again…
+home.server_unavailable = Server unavailable
 home.remove_server = Remove server
 home.name_your_server = Name your server
 home.create_channel_in = Create channel in {category}
