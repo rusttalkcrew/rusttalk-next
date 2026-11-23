@@ -1,4 +1,4 @@
-//! The call stage in a voice channel: a tile per person and per shared screen, focus,
+//! The call stage in a voice channel: a tile per person and shared terminal, focus,
 //! minimized bubbles, t!("call.show_only_video"), presentation mode and full screen.
 
 use std::ops::RangeInclusive;
@@ -268,6 +268,9 @@ fn screen_picture(ctx: &egui::Context, voice: &mut Voice, sid: &str) -> Option<P
 /// Our own share's newest picture, from the capture. Its copies don't ask for a
 /// repaint, so the window looks again at their rate.
 fn preview_picture(ctx: &egui::Context, voice: &mut Voice) -> Option<Picture> {
+    if !voice.video.preview.is_on() {
+        return None;
+    }
     ctx.request_repaint_after(std::time::Duration::from_millis(1000 / 15));
     if let Some(image) = voice.video.take_preview() {
         upload(ctx, &mut voice.preview, "preview", image);
@@ -283,7 +286,7 @@ fn preview_picture(ctx: &egui::Context, voice: &mut Voice) -> Option<Picture> {
 
 /// Whether our screen's preview is on the stage.
 fn previewing(voice: &Voice) -> bool {
-    matches!(voice.sharing, Sharing::On | Sharing::Changing) && voice.video.preview.is_on()
+    matches!(voice.sharing, Sharing::On | Sharing::Changing) && !voice.preview_hidden
 }
 
 /// A person's camera picture: the self view for us, else their track, which this
@@ -322,6 +325,7 @@ struct Entry<'p> {
     video: bool,
     /// A screen that is received now.
     watched: bool,
+    camera_visible: bool,
     speaking: bool,
 }
 
@@ -334,6 +338,7 @@ enum Act {
     Watch(Screen),
     StopWatching,
     HidePreview,
+    ShowPreview,
     ToggleFps,
     ToggleNerdStats,
     /// Picked on someone's card or in their menu.
@@ -351,7 +356,15 @@ enum Act {
     PasteRefused,
 }
 
-/// The tiles in this room: shared screens first, then people.
+fn selected_screen<'a>(peer: &'a Peer, watched: Option<&str>) -> Option<&'a Screen> {
+    peer.screens
+        .iter()
+        .find(|s| Some(s.sid.as_str()) == watched)
+        .or_else(|| peer.screens.iter().find(|s| s.local))
+        .or_else(|| peer.screens.first())
+}
+
+/// One card per person; terminals retain their separate interactive surface.
 fn entries<'p>(
     ctx: &egui::Context,
     voice: &mut Voice,
@@ -370,19 +383,6 @@ fn entries<'p>(
         let picture = camera
             .then(|| person_picture(ctx, voice, peer, me))
             .flatten();
-        // Our own screen isn't received; its preview comes straight from the capture.
-        if joined && me && previewing(voice) {
-            screens.push(Entry {
-                tile: Tile::Preview,
-                peer,
-                name: t!("call.your_screen_preview").to_owned(),
-                me,
-                picture: preview_picture(ctx, voice),
-                video: true,
-                watched: false,
-                speaking: false,
-            });
-        }
         let sharing = if me {
             voice.terminals.local.is_some()
         } else {
@@ -402,32 +402,38 @@ fn entries<'p>(
                 picture: None,
                 video: true,
                 watched,
+                camera_visible: video,
                 speaking: false,
             });
         }
-        if joined && !me {
-            for screen in &peer.screens {
-                let watched = voice.watching.as_ref().is_some_and(|w| w.sid == screen.sid);
-                screens.push(Entry {
-                    tile: Tile::Screen(screen.sid.clone()),
-                    peer,
-                    name: t!("call.someones_screen", name = name),
-                    me,
-                    picture: screen_picture(ctx, voice, &screen.sid),
-                    video: true,
-                    watched,
-                    speaking: false,
-                });
+        let screen = joined
+            .then(|| selected_screen(peer, voice.watching.as_ref().map(|w| w.sid.as_str())))
+            .flatten();
+        let camera_visible = video;
+        let (tile, picture, video, watched) = match screen {
+            Some(screen) if screen.local && previewing(voice) => {
+                (Tile::Preview, preview_picture(ctx, voice), true, false)
             }
-        }
+            Some(screen) if !screen.local => {
+                let watched = voice.watching.as_ref().is_some_and(|w| w.sid == screen.sid);
+                (
+                    Tile::Screen(screen.sid.clone()),
+                    screen_picture(ctx, voice, &screen.sid),
+                    true,
+                    watched,
+                )
+            }
+            _ => (Tile::Person(peer.person), picture, video, false),
+        };
         people.push(Entry {
-            tile: Tile::Person(peer.person),
+            tile,
             peer,
             name,
             me,
             picture,
             video,
-            watched: false,
+            watched,
+            camera_visible,
             speaking,
         });
     }
@@ -837,8 +843,13 @@ fn tile(
             video: (others && entry.peer.camera.is_some()).then_some(entry.video),
         };
         // In the strip a click focuses the tile, so only the menu is there.
-        let picked = if reveal || (state.spotlight && !state.big) {
-            ui::context_menu(&response, |m| target.menu(m)).flatten()
+        let picked = if !entry.peer.screens.is_empty() || reveal || (state.spotlight && !state.big)
+        {
+            ui::context_menu(&response, |m| {
+                screen_choices(m, entry, acts);
+                target.menu(m)
+            })
+            .flatten()
         } else {
             person::interact(ui, &response, &target, true)
         };
@@ -849,13 +860,13 @@ fn tile(
     // A terminal has no video to measure, and its own tile takes the pointer.
     if matches!(entry.tile, Tile::Screen(_) | Tile::Preview) && !controlling {
         // The sharer's own menu sits inside, for someone else's screen.
-        let sharer = (!entry.me && state.joined && !entry.peer.unknown).then_some(Person {
+        let sharer = (state.joined && !entry.peer.unknown).then_some(Person {
             server,
             person,
             relation: state.relation,
             can_ask: false,
-            audio: Some(audio),
-            video: None,
+            audio: (!entry.me).then_some(audio),
+            video: (!entry.me && entry.peer.camera.is_some()).then_some(entry.camera_visible),
         });
         let menu = ui::context_menu(&response, |m| {
             screen_menu(m, entry, state, audio, sharer.as_ref(), overlay, acts)
@@ -897,6 +908,27 @@ fn tile(
     tools(ui, rect, entry, state, audio, acts, tapped);
 }
 
+fn screen_choices(m: &mut ui::Menu, entry: &Entry, acts: &mut Vec<Act>) {
+    for screen in &entry.peer.screens {
+        if m.item(
+            "🖥",
+            &t!(
+                "call.watch_stream",
+                name = screen.name,
+                count = screen.viewers
+            ),
+        )
+        .clicked()
+        {
+            acts.push(if screen.local {
+                Act::ShowPreview
+            } else {
+                Act::Watch(screen.clone())
+            });
+        }
+    }
+}
+
 /// The right-click menu of a screen tile; the same actions as its hover buttons, its
 /// stream sound and the overlays. Returns what was picked in the sharer's submenu.
 fn screen_menu(
@@ -909,6 +941,7 @@ fn screen_menu(
     acts: &mut Vec<Act>,
 ) -> Option<Pick> {
     let mut picked = None;
+    screen_choices(m, entry, acts);
     if let Some(sharer) = sharer {
         picked = m
             .submenu("👤", &entry.peer.name(sharer.server), |m| sharer.menu(m))
@@ -1018,7 +1051,7 @@ fn avatar_spot(rect: Rect) -> Rect {
 fn name_tag(ui: &mut Ui, rect: Rect, entry: &Entry, audio: &crate::audio::Audio) {
     let c = ui::colors(ui);
     let person = entry.peer.person;
-    let is_person = matches!(entry.tile, Tile::Person(_));
+    let is_person = !matches!(entry.tile, Tile::Terminal(_));
     let status = match () {
         _ if !is_person => VoiceStatus::default(),
         _ if entry.me => VoiceStatus {
@@ -1037,7 +1070,9 @@ fn name_tag(ui: &mut Ui, rect: Rect, entry: &Entry, audio: &crate::audio::Audio)
     };
     let pad = vec2(8.0, 3.0);
     // Beside the picture on a low tile without video, else at the bottom left.
-    let beside = (is_person && entry.picture.is_none() && rect.height() < COMPACT)
+    let beside = (matches!(entry.tile, Tile::Person(_))
+        && entry.picture.is_none()
+        && rect.height() < COMPACT)
         .then(|| avatar_spot(rect).right() + GAP)
         .filter(|left| rect.right() - GAP - left - 2.0 * pad.x - badges_width >= ui::TEXT_SMALL);
     let left = beside.unwrap_or(rect.left() + GAP);
@@ -1089,15 +1124,31 @@ fn name_tag(ui: &mut Ui, rect: Rect, entry: &Entry, audio: &crate::audio::Audio)
             .on_hover_text(tip);
         response.widget_info(|| WidgetInfo::labeled(Role::Image, true, tip));
     }
+    let stream = match &entry.tile {
+        Tile::Screen(sid) => entry.peer.screens.iter().find(|s| s.sid == *sid),
+        Tile::Preview => entry.peer.screens.iter().find(|s| s.local),
+        _ => selected_screen(entry.peer, None),
+    };
     let live = is_person && (!entry.peer.screens.is_empty() || entry.peer.terminal.is_some());
-    if live && rect.height() > 2.0 * height + GAP {
-        let galley = ui.painter().layout_no_wrap(
-            t!("call.live_badge").into(),
+    if live && rect.height() > height + 2.0 * GAP {
+        let label = stream
+            .map(|s| t!("call.streaming_viewers", count = s.viewers))
+            .unwrap_or_else(|| t!("call.live_badge").into());
+        let mut job = LayoutJob::simple_singleline(
+            label.clone(),
             FontId::new(ui::TEXT_CAPTION - 1.0, ui::bold_family()),
             ui::ON_FILL,
         );
+        job.wrap = TextWrapping::truncate_at_width((rect.width() - 2.0 * GAP - 10.0).max(1.0));
+        let galley = ui.painter().layout_job(job);
         let spot =
             Rect::from_min_size(rect.min + Vec2::splat(GAP), galley.size() + vec2(10.0, 2.0));
+        ui.interact(
+            spot,
+            UiId::unique(("stream status", &entry.tile)),
+            Sense::hover(),
+        )
+        .widget_info(|| WidgetInfo::labeled(Role::Label, true, &label));
         ui.painter().rect_filled(spot, ui::RADIUS_S, c.danger);
         ui.painter()
             .galley(spot.min + vec2(5.0, 1.0), galley, ui::ON_FILL);
@@ -1264,6 +1315,11 @@ fn apply(home: &mut Home, index: usize, now: f64, acts: Vec<Act>) {
                 stop_watching(home);
             }
             Act::HidePreview => home.voice.stop_preview(),
+            Act::ShowPreview => {
+                stage.stop_watching();
+                stop_watching(home);
+                home.voice.preview_hidden = false;
+            }
             Act::ToggleFps => home.layout.split.show_fps ^= true,
             Act::ToggleNerdStats => home.layout.split.nerd_stats ^= true,
             Act::Person(person, picked) => person::apply(home, index, person, picked, now),
@@ -1478,6 +1534,39 @@ mod tests {
                 .iter()
                 .all(|b| !a.shrink(0.01).intersects(b.shrink(0.01)))
         })
+    }
+
+    #[test]
+    fn multiple_devices_choose_watched_then_local_then_stable_remote() {
+        let mut peer = Peer {
+            person: [1; 32],
+            connecting: false,
+            unknown: false,
+            status: VoiceStatus::default(),
+            apps: vec![],
+            camera: None,
+            terminal: None,
+            screens: vec![
+                Screen {
+                    sid: "a".into(),
+                    name: "A".into(),
+                    viewers: 2,
+                    local: false,
+                },
+                Screen {
+                    sid: "b".into(),
+                    name: "B".into(),
+                    viewers: 0,
+                    local: true,
+                },
+            ],
+        };
+        assert_eq!(selected_screen(&peer, None).unwrap().sid, "b");
+        assert_eq!(selected_screen(&peer, Some("a")).unwrap().sid, "a");
+        peer.screens.pop();
+        assert_eq!(selected_screen(&peer, Some("b")).unwrap().sid, "a");
+        peer.screens.clear();
+        assert!(selected_screen(&peer, None).is_none());
     }
 
     #[test]

@@ -356,6 +356,7 @@ pub struct Preview(Arc<PreviewState>);
 struct PreviewState {
     on: AtomicBool,
     started: AtomicBool,
+    generation: AtomicU64,
     /// A frame for the worker to shrink, and when the capture last handed one over.
     raw: Mutex<(Option<Arc<I420Buffer>>, Option<StdInstant>)>,
     wake: Condvar,
@@ -379,6 +380,7 @@ impl Preview {
         }
         if !on {
             if let Ok(mut raw) = self.0.raw.lock() {
+                self.0.generation.fetch_add(1, Relaxed);
                 *raw = (None, None);
             }
             if let Ok(mut small) = self.0.small.lock() {
@@ -428,7 +430,7 @@ fn shrink_frames(state: Weak<PreviewState>) {
         let Some(state) = state.upgrade() else {
             return;
         };
-        let frame = {
+        let (frame, generation) = {
             let Ok(raw) = state.raw.lock() else {
                 return;
             };
@@ -439,7 +441,7 @@ fn shrink_frames(state: Weak<PreviewState>) {
             else {
                 return;
             };
-            raw.0.take()
+            (raw.0.take(), state.generation.load(Relaxed))
         };
         let Some(frame) = frame else {
             continue;
@@ -449,8 +451,9 @@ fn shrink_frames(state: Weak<PreviewState>) {
         let mut frame =
             Arc::try_unwrap(frame).unwrap_or_else(|frame| (&*frame as &dyn VideoBuffer).to_i420());
         let small = shrink(&mut frame);
-        if state.on.load(Relaxed)
-            && let Ok(mut slot) = state.small.lock()
+        if let Ok(mut slot) = state.small.lock()
+            && state.on.load(Relaxed)
+            && state.generation.load(Relaxed) == generation
         {
             *slot = Some(small);
             state.waiting.store(true, Relaxed);
@@ -773,6 +776,49 @@ mod tests {
 
     fn handed_over(preview: &Preview) -> Option<StdInstant> {
         preview.0.raw.lock().unwrap().1
+    }
+
+    #[tokio::test]
+    async fn preview_pause_does_not_interrupt_outgoing_video() {
+        use futures_util::StreamExt;
+        use livekit::{
+            prelude::LocalVideoTrack,
+            webrtc::{video_source::RtcVideoSource, video_stream::native::NativeVideoStream},
+        };
+
+        let source = NativeVideoSource::new(
+            VideoResolution {
+                width: 640,
+                height: 360,
+            },
+            true,
+        );
+        let track =
+            LocalVideoTrack::create_video_track("screen", RtcVideoSource::Native(source.clone()));
+        let mut outgoing = NativeVideoStream::new(track.rtc_track());
+        let preview = Preview::default();
+        for (index, on) in [true, false, false, true].into_iter().enumerate() {
+            preview.set(on);
+            let buffer = i420(640, 360);
+            let frame = VideoFrame {
+                rotation: VideoRotation::VideoRotation0,
+                timestamp_us: (index as i64 + 1) * 100_000,
+                frame_metadata: None,
+                buffer: Shared(buffer.clone()),
+            };
+            source.capture_frame(&frame);
+            preview.offer(&buffer, StdInstant::now());
+            let sent = timeout(Duration::from_secs(5), outgoing.next())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(sent.buffer.width(), 640);
+            if on {
+                assert!(next_copy(&preview).is_some());
+            } else {
+                assert!(preview.take().is_none());
+            }
+        }
     }
 
     #[test]

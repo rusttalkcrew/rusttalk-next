@@ -209,7 +209,7 @@ pub(super) async fn voice_command(
         Command::Watch(sid, on) => {
             watch(ctx, live, sid, on)?;
             sync_video_watches(live).await;
-            false
+            true
         }
         Command::StopCamera => {
             let sid = live.camera.clone();
@@ -796,6 +796,13 @@ pub(super) fn send_room(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &St
     );
 }
 
+fn screen_viewers(watches: &HashSet<(Id, String)>, sharer: &Id, sid: &str) -> usize {
+    watches
+        .iter()
+        .filter(|(person, track)| person != sharer && track == sid)
+        .count()
+}
+
 /// Send the people in `channel` to the window, `ids` naming the call's participants.
 fn send_roster(ctx: &Ctx, url: &Url, ids: &HashMap<String, Id>, state: &State, channel: Id) {
     let me = *ctx.identity.certificate.person_id();
@@ -823,6 +830,7 @@ fn send_roster(ctx: &Ctx, url: &Url, ids: &HashMap<String, Id>, state: &State, c
             let mut screens: HashMap<Id, Vec<Screen>> = HashMap::new();
             let mut cameras: HashMap<Id, String> = HashMap::new();
             let mut terminals: HashMap<Id, String> = HashMap::new();
+            let mut watches: HashSet<(Id, String)> = HashSet::new();
             let mut sounds = Snapshot {
                 camera: live.camera.clone(),
                 screen: live.screen.as_ref().map(|(sid, ..)| sid.clone()),
@@ -847,6 +855,12 @@ fn send_roster(ctx: &Ctx, url: &Url, ids: &HashMap<String, Id>, state: &State, c
                         sounds.people.insert(*person);
                     }
                     if voice == VoiceState::Connected {
+                        watches.extend(
+                            live.room
+                                .video_watches(&participant)
+                                .into_iter()
+                                .map(|sid| (*person, sid.to_string())),
+                        );
                         if *person != me && (sounds.camera.is_some() || sounds.screen.is_some()) {
                             sounds.viewers.extend(
                                 live.room
@@ -898,6 +912,8 @@ fn send_roster(ctx: &Ctx, url: &Url, ids: &HashMap<String, Id>, state: &State, c
                     TrackSource::Screenshare => screens.entry(*person).or_default().push(Screen {
                         sid: video.sid.to_string(),
                         name: video.name,
+                        viewers: 0,
+                        local: false,
                     }),
                     // One per person: a second device's camera shows after the first stops.
                     TrackSource::Camera => {
@@ -913,13 +929,27 @@ fn send_roster(ctx: &Ctx, url: &Url, ids: &HashMap<String, Id>, state: &State, c
                 terminals.insert(me, live.room.identity().to_string());
             }
             if let Some((sid, ..)) = &live.screen {
-                screens.insert(
-                    me,
-                    vec![Screen {
-                        sid: sid.to_string(),
-                        name: t!("call.your_screen").into(),
-                    }],
+                screens.entry(me).or_default().push(Screen {
+                    sid: sid.to_string(),
+                    name: t!("call.your_screen").into(),
+                    viewers: 0,
+                    local: true,
+                });
+            }
+            // Include this device only after an actual video subscription was announced.
+            if live.room.connection_state() == ConnectionState::Connected {
+                watches.extend(
+                    live.announced_watches
+                        .iter()
+                        .flatten()
+                        .map(|sid| (me, sid.to_string())),
                 );
+            }
+            for (sharer, streams) in &mut screens {
+                streams.sort_by(|a, b| a.sid.cmp(&b.sid));
+                for stream in streams {
+                    stream.viewers = screen_viewers(&watches, sharer, &stream.sid);
+                }
             }
             people.extend(live_people.keys().copied());
             people.push(me);
@@ -1654,6 +1684,25 @@ pub(super) fn live_file_accepted(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn screen_counts_people_per_track_and_excludes_the_sharer() {
+        let mut watches = HashSet::from([
+            ([1; 32], "screen-a".into()),
+            ([2; 32], "screen-a".into()),
+            ([2; 32], "screen-a".into()),
+            ([3; 32], "screen-a".into()),
+            ([2; 32], "screen-b".into()),
+            ([4; 32], "camera".into()),
+        ]);
+        assert_eq!(screen_viewers(&watches, &[1; 32], "screen-a"), 2);
+        assert_eq!(screen_viewers(&watches, &[3; 32], "screen-b"), 1);
+        assert_eq!(screen_viewers(&watches, &[2; 32], "screen-b"), 0);
+        watches.retain(|(person, _)| *person != [3; 32]);
+        assert_eq!(screen_viewers(&watches, &[1; 32], "screen-a"), 1);
+        watches.clear();
+        assert_eq!(screen_viewers(&watches, &[1; 32], "screen-a"), 0);
+    }
+
     use rusttalk_core::client::voice::VoiceRoster;
 
     use super::*;

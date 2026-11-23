@@ -82,6 +82,7 @@ pub struct Voice {
     pub watching: Option<Watching>,
     /// The newest picture of our own share, while its preview is on.
     preview: Option<TextureHandle>,
+    pub preview_hidden: bool,
     pub camera: Camera,
     /// People whose camera this device chose not to receive.
     pub(crate) hidden: HashSet<Id>,
@@ -204,6 +205,7 @@ impl Voice {
             targets: Arc::new(Mutex::new(Listing::Loading)),
             watching: None,
             preview: None,
+            preview_hidden: false,
             camera: Camera::new(runtime),
             hidden: HashSet::new(),
             cameras: HashMap::new(),
@@ -251,8 +253,22 @@ impl Voice {
         self.cameras.clear();
     }
 
-    /// Our screen share ended or the preview was hidden: the next share starts without one.
+    pub(crate) fn update_preview(&mut self, ctx: &egui::Context) {
+        let active = ctx.input(|i| i.focused && i.viewport().minimized != Some(true));
+        let on = matches!(self.sharing, Sharing::On | Sharing::Changing)
+            && !self.preview_hidden
+            && active;
+        if self.video.preview.is_on() != on {
+            self.video.preview.set(on);
+        }
+        if !on {
+            self.preview = None;
+        }
+    }
+
+    /// Hide the current preview; a new share enables it again.
     pub fn stop_preview(&mut self) {
+        self.preview_hidden = true;
         self.video.preview.set(false);
         self.preview = None;
     }
@@ -406,6 +422,7 @@ pub fn frame(ctx: &egui::Context, home: &mut Home) {
             }
         }
     }
+    home.voice.update_preview(ctx);
     let recording = home.hotkeys.recording();
     let voice = &mut home.voice;
     let settings = voice.audio.settings();

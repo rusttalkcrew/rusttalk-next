@@ -1495,3 +1495,6 @@ clipboard.paste = Paste
 clipboard.copy = Copy
 clipboard.cut = Cut
 clipboard.select_all = Select all
+
+call.streaming_viewers = Streaming · {count} watching
+call.watch_stream = Watch {name} · {count} watching

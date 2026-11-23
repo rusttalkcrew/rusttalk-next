@@ -1492,3 +1492,6 @@ clipboard.paste = Einfügen
 clipboard.copy = Kopieren
 clipboard.cut = Ausschneiden
 clipboard.select_all = Alles auswählen
+
+call.streaming_viewers = Streamt · {count} schauen zu
+call.watch_stream = {name} ansehen · {count} schauen zu

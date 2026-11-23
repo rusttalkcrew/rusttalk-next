@@ -218,11 +218,11 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
     let mut stop_screen = matches!(stopped, Some(Stop::Screen));
     let mut change_screen = matches!(stopped, Some(Stop::Change));
     if matches!(stopped, Some(Stop::Preview)) {
-        let preview = &home.voice.video.preview;
-        if preview.is_on() {
+        if !home.voice.preview_hidden {
             home.voice.stop_preview();
         } else {
-            preview.set(true);
+            home.voice.preview_hidden = false;
+            home.voice.update_preview(ui.ctx());
         }
     }
     let mut voice_settings = false;
@@ -922,7 +922,7 @@ fn screen_tools(ui: &mut Ui, voice: &Voice, blocked: Option<&str>) -> Option<Sto
     if refresh {
         fill(ui.ctx(), &voice.apps, "apps", share::list);
     }
-    let look = if voice.video.preview.is_on() {
+    let look = if !voice.preview_hidden {
         Look::On(ui::accent(ui).base)
     } else {
         Look::Plain
