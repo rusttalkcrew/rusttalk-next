@@ -21,6 +21,8 @@ public class MainActivity extends GameActivity {
     private volatile boolean voiceReady;
     private volatile int permission;
     private boolean communicationMode;
+    // A join finishing after onDestroy must not leave other apps in call routing.
+    private boolean destroyed;
 
     private static native boolean initializeVoice(Context context);
 
@@ -51,7 +53,7 @@ public class MainActivity extends GameActivity {
     }
 
     public synchronized void communicationMode(boolean on) {
-        if (communicationMode == on) return;
+        if (communicationMode == on || (on && destroyed)) return;
         AudioManager audio = getSystemService(AudioManager.class);
         // MODE_NORMAL releases this app's mode request and restores system routing.
         audio.setMode(on ? AudioManager.MODE_IN_COMMUNICATION : AudioManager.MODE_NORMAL);
@@ -60,7 +62,10 @@ public class MainActivity extends GameActivity {
 
     @Override
     protected void onDestroy() {
-        communicationMode(false);
+        synchronized (this) {
+            destroyed = true;
+            communicationMode(false);
+        }
         super.onDestroy();
     }
 
