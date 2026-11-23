@@ -1541,3 +1541,8 @@ clipboard.paste = 貼り付け
 clipboard.copy = コピー
 clipboard.cut = 切り取り
 clipboard.select_all = すべて選択
+
+camera.flip = カメラを切り替え
+camera.torch_on = ライトをオン
+camera.torch_off = ライトをオフ
+camera.switch_failed = カメラを変更できません。

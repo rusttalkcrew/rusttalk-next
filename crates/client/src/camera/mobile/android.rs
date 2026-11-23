@@ -98,3 +98,35 @@ extern "system" fn Java_io_github_rusttalkcrew_rusttalk_CallCamera_frame(
     v.copy_from_slice(&chroma[u.len()..u.len() + v.len()]);
     frame(buffer);
 }
+
+pub(super) fn state() -> i32 {
+    activity(|env, a| {
+        env.call_method(a, jni_str!("cameraState"), jni_sig!("()I"), &[])?
+            .i()
+    })
+    .unwrap_or(0)
+}
+pub(super) fn select(front: bool) -> bool {
+    activity(|env, a| {
+        env.call_method(
+            a,
+            jni_str!("selectCamera"),
+            jni_sig!("(Z)Z"),
+            &[JValue::Bool(front)],
+        )?
+        .z()
+    })
+    .unwrap_or(false)
+}
+pub(super) fn torch(on: bool) -> bool {
+    activity(|env, a| {
+        env.call_method(
+            a,
+            jni_str!("cameraTorch"),
+            jni_sig!("(Z)Z"),
+            &[JValue::Bool(on)],
+        )?
+        .z()
+    })
+    .unwrap_or(false)
+}

@@ -161,7 +161,15 @@ public class MainActivity extends GameActivity {
     public synchronized boolean startCamera(boolean front, int w, int h, int fps) {
         if (!resumed || !voiceReady) return false;
         camera = new CallCamera();
-        return camera.start(getApplicationContext(), front, w, h, fps);
+        return camera.start(this, front, w, h, fps);
+    }
+
+    public synchronized int cameraState() { return camera == null ? 0 : camera.state(); }
+    public synchronized boolean selectCamera(boolean front) {
+        return resumed && camera != null && camera.select(front);
+    }
+    public synchronized boolean cameraTorch(boolean on) {
+        return resumed && camera != null && camera.torch(on);
     }
 
     public synchronized boolean cameraEnded() { return camera == null || camera.ended; }

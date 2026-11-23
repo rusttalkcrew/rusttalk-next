@@ -152,4 +152,4 @@ windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Security"
 
 [dev-dependencies]
 # Drives the window off-screen, to click rows and buttons in tests.
-egui_kittest = "0.37"
+egui_kittest = { version = "0.37", features = ["wgpu"] }

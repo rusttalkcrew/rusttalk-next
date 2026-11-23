@@ -203,7 +203,7 @@ use yet is allowed to be unused there (`allow(dead_code)` on phones only).
 | Key storage (keyring 4) | Android Keystore wraps the identity in private app storage | Data-protection Keychain, file with password as fallback | Both default to system key storage with password fallback |
 | File picker (rfd) | No backend | No backend | Gated: the buttons that open it are off (`files::PICKER`) |
 | Notifications (notify-rust) | Builds, no notification service | Builds, no notification service | Fail and are logged |
-| Call camera | WebRTC Camera2 capturer, rotated I420 frames | AVFoundation, oriented BGRA frames | Both feed the existing encrypted LiveKit camera track |
+| Call camera | Camera2 session, rotated I420 frames | AVFoundation, oriented BGRA frames | Both feed the existing encrypted LiveKit camera track |
 | Screen share, app and system audio | Not offered (`screen` already says unavailable) | Same | App audio gated to `Unsupported` |
 | Updater | Not used | Not used | Gated: no update target, so no checks and no **Check now** |
 | Global shortcuts (global-hotkey) | Builds, nothing to register | Same | Unused; Shortcuts tab still shows |
@@ -252,8 +252,13 @@ worker releases the session when the leave sound finishes. The IPA declares
 background audio for calls with the screen locked.
 
 Turning on video asks for camera access. The front camera is the default;
-Settings → Video selects the back camera on phones that have one. Turning
-off video, leaving the call or backgrounding the app releases the camera.
+The call panel shows a local preview from the same capture frames, mirrored only
+for the front camera. Flip camera switches front/back without republishing the
+encrypted track; Settings → Video uses the same selection. A failed switch restores
+the previous selection. The rear-camera light is offered only when the active
+device supports it, and displays the native capture state. Switching cameras,
+turning off video, leaving the call or backgrounding the app releases the light.
+Turning off video, leaving the call or backgrounding the app releases the camera.
 After an interruption, turn video on again to resume sharing.
 
 Joining a call on iOS is still untested.

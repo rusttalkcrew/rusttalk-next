@@ -13,7 +13,7 @@ use eframe::egui::{
 pub use rusttalk_core::camera::CameraOptions as Options;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use rusttalk_core::camera::{CameraCapture as Capture, list_cameras, start};
-#[cfg(any(target_os = "android", target_os = "ios"))]
+#[cfg(any(target_os = "android", target_os = "ios", test))]
 mod mobile;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 use mobile::{Capture, list_cameras, start};
@@ -103,7 +103,7 @@ impl Camera {
     pub fn update(
         &mut self,
         ctx: &egui::Context,
-        settings: &Settings,
+        settings: &mut Settings,
         in_call: bool,
         preview: bool,
     ) -> Option<Change> {
@@ -128,6 +128,35 @@ impl Camera {
         let retry =
             self.on && !self.was_on && matches!(self.ready().as_deref(), Some(Some(Err(_))));
         self.was_on = self.on;
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        if self.on {
+            if let Some(running) = &mut self.running {
+                if let Some(Ok(capture)) = lock(&running.capture).as_mut() {
+                    if !capture.busy()
+                        && running.config.0 == settings.camera
+                        && self.published != Some(running.serial)
+                    {
+                        settings.camera = Some(capture.name().into());
+                        running.config.0 = settings.camera.clone();
+                    }
+                    if let Some(ok) = capture.poll() {
+                        if !ok {
+                            self.problem = Some(t!("camera.switch_failed").into());
+                        }
+                        settings.camera = Some(capture.name().into());
+                        running.config.0 = settings.camera.clone();
+                        self.texture = None;
+                    }
+                    if capture.busy() {
+                        settings.camera = running.config.0.clone();
+                    }
+                    if !capture.busy() && running.config.0 != settings.camera {
+                        capture.select(settings.camera.as_deref());
+                        running.config.0 = settings.camera.clone();
+                    }
+                }
+            }
+        }
         let wanted = (self.on || preview).then(|| (settings.camera.clone(), options(settings)));
         if retry || self.running.as_ref().map(|r| &r.config) != wanted.as_ref() {
             self.stop_now();
@@ -207,12 +236,49 @@ impl Camera {
 
     /// The mirrored self view, if the camera is running.
     pub fn self_view(&mut self, ui: &Ui, width: f32) -> Option<Image<'static>> {
+        let mirrored = self.mirrored();
         let texture = self.self_texture(ui.ctx())?;
         let size = texture.size_vec2();
         Some(
             Image::new((texture.id(), Vec2::new(width, width * size.y / size.x)))
-                .uv(Rect::from_min_max(pos2(1.0, 0.0), pos2(0.0, 1.0))),
+                .uv(preview_uv(mirrored)),
         )
+    }
+
+    pub fn mirrored(&self) -> bool {
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        return matches!(self.ready().as_deref(), Some(Some(Ok(capture))) if capture.name() == "front");
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        true
+    }
+
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    pub fn mobile_controls(&mut self, ui: &mut Ui, settings: &mut Settings) {
+        if !self.on {
+            return;
+        }
+        if let Some(image) = self.self_view(ui, ui.available_width().min(240.0)) {
+            ui.add(image.max_height(135.0))
+                .widget_info(|| egui::WidgetInfo::labeled(Role::Image, true, t!("camera.preview")));
+        }
+        if let Some(mut slot) = self.ready() {
+            if let Some(Ok(capture)) = slot.as_mut() {
+                let (flip, torch) = controls(ui, capture.multiple, capture.torch(), capture.busy());
+                if flip {
+                    settings.camera = Some(
+                        if capture.name() == "front" {
+                            "back"
+                        } else {
+                            "front"
+                        }
+                        .into(),
+                    );
+                }
+                if let Some(on) = torch {
+                    capture.set_torch(on);
+                }
+            }
+        }
     }
 
     /// The newest self view picture, not yet mirrored, if the camera is running.
@@ -389,4 +455,162 @@ fn camera_label(name: &str) -> String {
         _ => {}
     }
     name.to_owned()
+}
+
+fn preview_uv(mirrored: bool) -> Rect {
+    if mirrored {
+        Rect::from_min_max(pos2(1.0, 0.0), pos2(0.0, 1.0))
+    } else {
+        Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))
+    }
+}
+
+#[cfg(any(target_os = "android", target_os = "ios", test))]
+fn controls(ui: &mut Ui, multiple: bool, torch: Option<bool>, busy: bool) -> (bool, Option<bool>) {
+    let mut flip = false;
+    let mut light = None;
+    ui.add_enabled_ui(!busy, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            if multiple {
+                flip = ui::secondary(ui, t!("camera.flip")).clicked();
+            }
+            if let Some(on) = torch
+                && ui::secondary(
+                    ui,
+                    if on {
+                        t!("camera.torch_off")
+                    } else {
+                        t!("camera.torch_on")
+                    },
+                )
+                .clicked()
+            {
+                light = Some(!on);
+            }
+        });
+    });
+    (flip, light)
+}
+
+#[cfg(any(target_os = "android", target_os = "ios", test))]
+fn mobile_state(flags: i32) -> (&'static str, Option<bool>) {
+    let front = flags & 1 != 0;
+    let rear = flags & 2 != 0 && !front;
+    (
+        if front { "front" } else { "back" },
+        (rear && flags & 4 != 0).then_some(flags & 8 != 0),
+    )
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::*;
+    #[test]
+    fn controls_follow_capabilities_and_disable_during_changes() {
+        use egui_kittest::{Harness, kittest::Queryable};
+        type State = (bool, Option<bool>, bool, (bool, Option<bool>));
+        for dark in [true, false] {
+            for (width, height) in [(390.0, 844.0), (820.0, 1180.0), (1100.0, 700.0)] {
+                let mut h = Harness::builder()
+                    .with_context_setup(crate::ui::install)
+                    .with_size(Vec2::new(width, height))
+                    .build_ui_state(
+                        |ui, state: &mut State| {
+                            ui.label(t!("camera.preview"));
+                            let id = egui::Id::unique(("synthetic camera", ui.visuals().dark_mode));
+                            let texture = ui
+                                .ctx()
+                                .data_mut(|d| d.get_temp::<TextureHandle>(id))
+                                .unwrap_or_else(|| {
+                                    let mut pixels =
+                                        ColorImage::filled([160, 90], ui.visuals().panel_fill);
+                                    for y in 0..90 {
+                                        for x in 0..80 {
+                                            pixels[(x, y)] = ui.visuals().selection.bg_fill;
+                                        }
+                                    }
+                                    let texture = ui.ctx().load_texture(
+                                        "synthetic camera",
+                                        pixels,
+                                        Default::default(),
+                                    );
+                                    ui.ctx().data_mut(|d| d.insert_temp(id, texture.clone()));
+                                    texture
+                                });
+                            ui.add(
+                                Image::new((texture.id(), Vec2::new(240.0, 135.0)))
+                                    .uv(preview_uv(true)),
+                            );
+                            state.3 = controls(ui, state.0, state.1, state.2);
+                        },
+                        (true, Some(false), false, (false, None)),
+                    );
+                crate::ui::apply(
+                    &h.ctx,
+                    crate::ui::Appearance {
+                        mode: if dark {
+                            crate::ui::Mode::Dark
+                        } else {
+                            crate::ui::Mode::Light
+                        },
+                        ..Default::default()
+                    },
+                );
+                h.run_steps(3);
+                if let Ok(dir) = std::env::var("RUSTTALK_CAMERA_SCREENSHOTS") {
+                    std::fs::create_dir_all(&dir).unwrap();
+                    let theme = if dark { "dark" } else { "light" };
+                    h.render()
+                        .unwrap()
+                        .save(format!("{dir}/camera-{theme}-{width}.png"))
+                        .unwrap();
+                }
+                let flip = h.get_by_label(t!("camera.flip"));
+                assert!(flip.rect().right() <= width);
+                flip.click();
+                h.run_steps(1);
+                assert!(h.state().3.0);
+                h.get_by_label(t!("camera.torch_on")).click();
+                h.run_steps(1);
+                assert_eq!(h.state().3.1, Some(true));
+                h.state_mut().1 = Some(true);
+                h.run_steps(2);
+                h.get_by_label(t!("camera.torch_off")).click();
+                h.run_steps(1);
+                assert_eq!(h.state().3.1, Some(false));
+                h.state_mut().2 = true;
+                h.run_steps(2);
+                h.get_by_label(t!("camera.flip")).click();
+                h.run_steps(1);
+                assert_eq!(h.state().3, (false, None));
+                h.state_mut().0 = false;
+                h.state_mut().1 = None;
+                h.run_steps(2);
+                assert!(h.query_by_label(t!("camera.flip")).is_none());
+                assert!(h.query_by_label(t!("camera.torch_off")).is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn torch_requires_an_active_supported_rear_camera() {
+        assert_eq!(mobile_state(0).1, None);
+        assert_eq!(mobile_state(1 | 4 | 8), ("front", None));
+        assert_eq!(mobile_state(2), ("back", None));
+        assert_eq!(mobile_state(2 | 4), ("back", Some(false)));
+        assert_eq!(mobile_state(2 | 4 | 8), ("back", Some(true)));
+        assert_eq!(mobile_state(4 | 8).1, None);
+    }
+
+    #[test]
+    fn mirror_only_changes_horizontal_coordinates() {
+        for mirrored in [false, true] {
+            let uv = preview_uv(mirrored);
+            assert_eq!((uv.min.y, uv.max.y), (0.0, 1.0));
+            assert_eq!(
+                (uv.min.x, uv.max.x),
+                if mirrored { (1.0, 0.0) } else { (0.0, 1.0) }
+            );
+        }
+    }
 }

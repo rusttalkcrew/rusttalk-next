@@ -1541,3 +1541,8 @@ clipboard.paste = Plakken
 clipboard.copy = Kopiëren
 clipboard.cut = Knippen
 clipboard.select_all = Alles selecteren
+
+camera.flip = Camera omdraaien
+camera.torch_on = Lamp aan
+camera.torch_off = Lamp uit
+camera.switch_failed = Camera wijzigen niet beschikbaar.
