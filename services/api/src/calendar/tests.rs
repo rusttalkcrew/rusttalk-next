@@ -427,7 +427,11 @@ async fn the_author_or_a_manager_reminds_at_most_once_an_hour() -> anyhow::Resul
     server.approve(MOD, 11).await?;
 
     assert_eq!(code(server.remind(OTHER, 10).await), "permission_denied");
-    server.remind(MEMBER, 11).await?;
+    let (author, manager) = tokio::join!(server.remind(MEMBER, 11), server.remind(MOD, 11));
+    match (author, manager) {
+        (Ok(_), rejected) | (rejected, Ok(_)) => assert_eq!(code(rejected), "remind_too_soon"),
+        (Err(_), Err(_)) => panic!("one concurrent reminder should succeed"),
+    }
     assert!(server.record(OTHER, 11).await.reminded_at.is_some());
     assert_eq!(code(server.remind(MOD, 11).await), "remind_too_soon");
     query("UPDATE calendar_events SET reminded_at = reminded_at - ? WHERE id = ?")

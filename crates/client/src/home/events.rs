@@ -824,14 +824,14 @@ fn answers(ui: &mut Ui, server: &Server, event: &Event, now: i64, asked: &mut As
     }
 }
 
-/// The reminders this person hasn't answered yet: event, when it was sent, and the text.
-pub fn reminders(server: &Server, now: i64) -> Vec<(Id, i64, String)> {
+/// Reminders for unanswered events: event ID, reminder timestamp, removal time and popup text.
+pub fn reminders(server: &Server, now: i64) -> Vec<(Id, i64, i64, String)> {
     let Some(calendar) = &server.dir.calendar else {
         return Vec::new();
     };
     let me = server.dir.me;
     (calendar.events.iter())
-        .filter(|event| event.record.approved && event.record.author != me)
+        .filter(|event| event.record.approved)
         .filter(|event| !event.answers.iter().any(|(person, _)| *person == me))
         .filter_map(|event| {
             let at = event.record.reminded_at?;
@@ -842,7 +842,7 @@ pub fn reminders(server: &Server, now: i64) -> Vec<(Id, i64, String)> {
                 when_text(details),
                 t!("events.reminder_body")
             );
-            Some((event.record.id, at, body))
+            Some((event.record.id, at, event.record.remove_at, body))
         })
         .collect()
 }
@@ -1338,7 +1338,41 @@ mod tests {
         });
         assert_eq!(reminders(&server, now).len(), 1, "I haven't answered");
         let events = &mut server.dir.calendar.as_mut().unwrap().events;
-        events[0].answers.push((ME, Answer::NotGoing));
+        events[0].record.author = ME;
+        assert_eq!(reminders(&server, now).len(), 1, "unanswered author");
+        assert!(
+            reminders(&server, now + 3600).is_empty(),
+            "reconnected at event end"
+        );
+        // A manager can use the dialog to remind the unanswered author.
+        server.dir.me = ANN;
+        server.dir.perms.manage_events = true;
+        let id = server.dir.calendar.as_ref().unwrap().events[0].record.id;
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            use egui_kittest::kittest::Queryable;
+            let mut open = Some(id);
+            let mut harness = egui_kittest::Harness::builder()
+                .with_context_setup(move |ctx| {
+                    ui::install(ctx);
+                    ctx.set_theme(theme);
+                })
+                .build_ui_state(
+                    |ui, sent: &mut bool| {
+                        let change =
+                            people_dialog(ui.ctx(), &server, &mut open, now + REMIND_EVERY - 60);
+                        *sent |= matches!(change, Some(Change::Remind(target)) if target == id);
+                    },
+                    false,
+                );
+            harness.run_steps(4);
+            harness.get_by_label(t!("events.remind")).click();
+            harness.run_steps(2);
+            assert!(*harness.state());
+        }
+        server.dir.me = ME;
+        server.dir.calendar.as_mut().unwrap().events[0]
+            .answers
+            .push((ME, Answer::NotGoing));
         assert!(
             reminders(&server, now).is_empty(),
             "answered, so no reminder"

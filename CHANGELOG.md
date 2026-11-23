@@ -14,6 +14,7 @@ Unreleased under the new version and date.
 - Experimental Android test build (APK) and unsigned iOS build (IPA); typing on Android does not work yet
 - Servers can turn on Events: a calendar above the channels to suggest, approve and add events, in real life or in a channel
 - Say whether you are going to an event, see who is still missing, and remind them
+- Event reminders reach unanswered authors and respect “Only when RustTalk isn’t focused” without repeating later
 
 ## v0.1.11 - 2026-11-22
 
