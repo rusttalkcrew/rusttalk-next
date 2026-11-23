@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub mod call;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
+mod codec;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 mod g711;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 mod resample;
@@ -115,17 +117,34 @@ pub fn target(typed: &str, account: &Account) -> Option<String> {
     Some(format!("sip:{user}@{}", account.host()))
 }
 
-/// The name a call shows under the caller: the contact's name, else the number.
-pub fn label(typed: &str, contacts: &[Contact]) -> String {
+/// The contact's name for what was typed, if it is a contact with a name.
+fn contact_name(typed: &str, contacts: &[Contact]) -> Option<String> {
     let typed = typed.trim();
     let same = |contact: &&Contact| {
         contact.number.trim() == typed
             || clean_number(&contact.number).is_some_and(|n| Some(n) == clean_number(typed))
     };
-    match contacts.iter().find(same) {
-        Some(contact) if !contact.name.trim().is_empty() => contact.name.trim().to_owned(),
-        _ => typed.to_owned(),
-    }
+    let name = contacts.iter().find(same)?.name.trim();
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
+/// The name the caller sees for their call: the contact's name, else the number.
+pub fn label(typed: &str, contacts: &[Contact]) -> String {
+    contact_name(typed, contacts).unwrap_or_else(|| typed.trim().to_owned())
+}
+
+/// The name everyone in the room sees under the caller: the contact's name, else the
+/// number with all but its last two characters hidden, so a phone number someone
+/// typed is not readable by the whole channel.
+pub fn shared_label(typed: &str, contacts: &[Contact]) -> String {
+    contact_name(typed, contacts).unwrap_or_else(|| {
+        let typed = typed.trim();
+        let address = typed.strip_prefix("sip:").unwrap_or(typed);
+        let user = address.split('@').next().unwrap_or_default();
+        let shown: Vec<char> = user.chars().filter(char::is_ascii_alphanumeric).collect();
+        let tail: String = shown[shown.len().saturating_sub(2)..].iter().collect();
+        format!("••••{tail}")
+    })
 }
 
 #[cfg(test)]
@@ -188,6 +207,11 @@ mod tests {
         }];
         assert_eq!(label("0301234", &contacts), "Anna");
         assert_eq!(label("0309999", &contacts), "0309999");
+        // The room only sees a contact's name, never a typed number or address.
+        assert_eq!(shared_label("030 1234", &contacts), "Anna");
+        assert_eq!(shared_label("+49 30 999-87", &contacts), "••••87");
+        assert_eq!(shared_label("sip:bob@other.net", &contacts), "••••ob");
+        assert_eq!(shared_label("7", &contacts), "••••7");
         assert!(!account(" ").filled());
         assert!(account("sip.example.com").filled());
     }

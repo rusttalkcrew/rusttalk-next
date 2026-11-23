@@ -177,6 +177,9 @@ pub struct Settings {
     pub phone: crate::phone::Account,
     /// People to call by phone. This device only, never synced.
     pub phone_contacts: Vec<crate::phone::Contact>,
+    /// Share my microphone with phone calls others bring into my voice channel,
+    /// without asking each time. Off by default. This device only, never synced.
+    pub phone_always_share: bool,
 }
 
 impl Settings {
@@ -254,6 +257,7 @@ impl Default for Settings {
             profile_pending: Default::default(),
             phone: Default::default(),
             phone_contacts: Vec::new(),
+            phone_always_share: false,
         }
     }
 }

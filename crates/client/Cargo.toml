@@ -108,6 +108,9 @@ objc2-user-notifications = { version = "0.3", default-features = false, features
 
 # Desktop-only: phones have none of these, or need their own (see docs/mobile.md).
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+# Phone calls: G.722 wideband sound (src/phone/codec.rs). MIT, pure Rust; without the
+# default Opus and G.729 (C code) features.
+audio-codec = { version = "0.4.14", default-features = false, features = ["std"] }
 eframe = { version = "0.37", features = ["default"] }
 rfd = { version = "0.18", default-features = false, features = ["xdg-portal"] }
 # Phone calls into a voice room (src/phone): SIP signalling over UDP. MIT. No TLS,

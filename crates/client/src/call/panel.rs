@@ -161,8 +161,20 @@ enum Stop {
     Sound(Vec<App>),
 }
 
-/// The voice panel, while in a voice room.
-fn external_phone_notice(ui: &mut Ui, label: &str, status: crate::phone::ConsentStatus) -> bool {
+/// What the person picked on the notice for someone else's phone call.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PhonePick {
+    /// Share the microphone with this call, or stop sharing it.
+    Toggle,
+    /// Share it, and with every later phone call too (Settings → Privacy turns it off).
+    Always,
+}
+
+fn external_phone_notice(
+    ui: &mut Ui,
+    label: &str,
+    status: crate::phone::ConsentStatus,
+) -> Option<PhonePick> {
     ui.label(format!("{}: {label}", t!("phone.external_notice")));
     ui.label(t!("phone.external_help"));
     use crate::phone::ConsentStatus;
@@ -171,16 +183,25 @@ fn external_phone_notice(ui: &mut Ui, label: &str, status: crate::phone::Consent
         ConsentStatus::Off => t!("phone.allow"),
         ConsentStatus::Withdrawing => {
             ui.label(t!("phone.withdrawing"));
-            return false;
+            return None;
         }
         ConsentStatus::Failed => {
             ui.label(t!("phone.withdraw_failed"));
-            return false;
+            return None;
         }
     };
-    ui::primary(ui, text).clicked()
+    let mut pick = None;
+    // One under the other: the side panel is too narrow for both in a row.
+    if ui::primary(ui, text).clicked() {
+        pick = Some(PhonePick::Toggle);
+    }
+    if status == ConsentStatus::Off && ui::secondary(ui, t!("phone.always_allow")).clicked() {
+        pick = Some(PhonePick::Always);
+    }
+    pick
 }
 
+/// The voice panel, while in a voice room.
 pub fn call_bar(ui: &mut Ui, home: &mut Home) {
     if home.voice.call.is_none() {
         return;
@@ -188,9 +209,14 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
     let mut withdrawing = Vec::new();
     for (call, label, allowed) in &home.voice.external_phones {
         ui.push_id(&call.track, |ui| {
-            if external_phone_notice(ui, label, *allowed)
+            if let Some(pick) = external_phone_notice(ui, label, *allowed)
                 && let Some(server) = super::call_server(home)
             {
+                if pick == PhonePick::Always {
+                    let mut settings = home.voice.audio.settings();
+                    settings.phone_always_share = true;
+                    home.voice.audio.set_settings(settings);
+                }
                 let on = *allowed == crate::phone::ConsentStatus::Off;
                 if !on {
                     home.voice.audio.request_phone_withdrawal();
@@ -289,7 +315,7 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
             let phone = super::phone::shows(&mut home.voice);
             #[cfg(any(target_os = "android", target_os = "ios"))]
             let phone = false;
-            let count = 2.0 + f32::from(screen::SUPPORTED) + f32::from(more) + f32::from(phone);
+            let count = 2.0 + f32::from(screen::SUPPORTED) + f32::from(more || phone);
             let width = (ui.available_width() - SPACE_XS * (count - 1.0)) / count;
             let size = Vec2::new(width, ICON_BUTTON);
             ui.horizontal(|ui| {
@@ -343,12 +369,9 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
                     }
                 }
                 share = app_button(ui, voice, connected && blocked.is_none(), blocked, size);
-                #[cfg(not(any(target_os = "android", target_os = "ios")))]
-                if phone {
-                    super::phone::button(ui, voice, connected && blocked.is_none(), size);
-                }
-                if more {
-                    terminal = more_button(ui, voice.terminals.local.is_some(), connected, size);
+                if more || phone {
+                    let can_call = phone && connected && blocked.is_none();
+                    terminal = more_button(ui, voice, more, can_call, connected, size);
                 }
             });
             if let Some(action) = live_files(ui, &home.voice.live_files, server) {
@@ -413,15 +436,45 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
 }
 
 /// The "More" button: a menu for the less common shares, so the row stays short. Starts or
-/// stops a terminal share; on Windows it also offers Command Prompt.
-fn more_button(ui: &mut Ui, on: bool, connected: bool, size: Vec2) -> Option<Shell> {
+/// stops a terminal share (on Windows also Command Prompt), and calls a phone when an
+/// account is set up. Lights up while a phone call runs.
+fn more_button(
+    ui: &mut Ui,
+    voice: &mut Voice,
+    terminal: bool,
+    can_call: bool,
+    connected: bool,
+    size: Vec2,
+) -> Option<Shell> {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    let calling = super::phone::calling(voice);
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    let calling = false;
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    let _ = can_call;
+    let look = if calling {
+        Look::On(ui::colors(ui).success)
+    } else {
+        Look::Plain
+    };
+    let on = voice.terminals.local.is_some();
     let button = ui
-        .add_enabled_ui(connected, |ui| {
-            ui::icon_button(ui, "…", t!("call.more"), Look::Plain, size)
+        .add_enabled_ui(connected || calling, |ui| {
+            ui::icon_button(ui, "…", t!("call.more"), look, size)
         })
         .inner;
     let mut picked = None;
     ui::menu_wide(&button, |m| {
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        if can_call || calling {
+            super::phone::menu_rows(m, &mut voice.phone, can_call);
+            if terminal {
+                m.separator();
+            }
+        }
+        if !terminal {
+            return;
+        }
         if on {
             if m.danger("⏹", t!("call.stop_terminal")).clicked() {
                 picked = Some(Shell::Default);
@@ -1108,14 +1161,13 @@ mod phone_consent_tests {
             };
             use crate::phone::ConsentStatus;
             let mut harness = builder.build_ui_state(
-                |ui, status| {
-                    if external_phone_notice(ui, "Phone", *status) {
-                        *status = if *status == ConsentStatus::Off {
-                            ConsentStatus::On
-                        } else {
-                            ConsentStatus::Off
-                        };
+                |ui, status| match external_phone_notice(ui, "Phone", *status) {
+                    Some(PhonePick::Toggle) if *status == ConsentStatus::Off => {
+                        *status = ConsentStatus::On;
                     }
+                    Some(PhonePick::Toggle) => *status = ConsentStatus::Off,
+                    Some(PhonePick::Always) => *status = ConsentStatus::On,
+                    None => {}
                 },
                 ConsentStatus::Off,
             );
@@ -1132,9 +1184,14 @@ mod phone_consent_tests {
             harness.get_by_label(t!("phone.allow")).click();
             harness.run_steps(2);
             assert_eq!(*harness.state(), ConsentStatus::On);
+            // Once shared, there is nothing left to always allow.
+            assert!(harness.query_by_label(t!("phone.always_allow")).is_none());
             harness.get_by_label(t!("phone.withdraw")).click();
             harness.run_steps(2);
             assert_eq!(*harness.state(), ConsentStatus::Off);
+            harness.get_by_label(t!("phone.always_allow")).click();
+            harness.run_steps(2);
+            assert_eq!(*harness.state(), ConsentStatus::On);
             for (status, key, suffix) in [
                 (
                     ConsentStatus::Withdrawing,

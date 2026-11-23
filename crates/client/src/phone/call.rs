@@ -35,9 +35,9 @@ use zeroize::Zeroizing;
 
 use super::{
     Account,
-    resample::{Down, RATIO, Up},
-    rtp::{self, PACKET},
-    sdp,
+    codec::Coder,
+    resample::{Down, Up},
+    rtp, sdp,
 };
 use crate::audio::{FRAME, PhoneLine, RATE};
 
@@ -379,7 +379,7 @@ async fn place(
         layer.remove_dialog(&id);
         return Err(because(t!("phone.no_sound")));
     };
-    tracing::info!(law = ?media.law, tones = media.tones.is_some(), "phone call answered");
+    tracing::info!(codec = ?media.codec, tones = media.tones.is_some(), "phone call answered");
     events(Event::Status(Status::Talking));
     let hung_up = talk(
         dial,
@@ -480,9 +480,11 @@ async fn talk(
         u32::from_le_bytes([t0, t1, t2, t3]),
     );
     let to = media.to;
-    let mut down = Down::new();
-    let mut up = Up::new();
-    let mut room = vec![0i16; PACKET * RATIO];
+    let mut coder = Coder::new(media.codec);
+    let mut down = Down::new(media.codec.ratio());
+    let mut up = Up::new(media.codec.ratio());
+    // 20 ms of the room, one packet's worth.
+    let mut room = vec![0i16; RATE as usize / 50];
     let mut keys: VecDeque<char> = VecDeque::new();
     let mut tone: Option<(rtp::Tone, u32)> = None;
     let mut gap = 0u8;
@@ -528,10 +530,8 @@ async fn talk(
                     }
                     _ => {
                         gap = gap.saturating_sub(1);
-                        let sound: Vec<u8> = (down.run(&room).into_iter())
-                            .map(|sample| media.law.encode(sample))
-                            .collect();
-                        sender.sound(media.law.payload_type(), &sound)
+                        let sound = coder.encode(&down.run(&room));
+                        sender.sound(media.codec.payload_type(), &sound)
                     }
                 };
                 if let Err(error) = rtp.send_to(&packet, to).await {
@@ -549,13 +549,12 @@ async fn talk(
                     continue;
                 }
                 let Some(packet) = media_packet(media, from, &buffer[..len]) else { continue };
-                let law = media.law;
                 // A late or repeated packet would only click: its moment has passed.
                 if last.is_some_and(|last| packet.sequence.wrapping_sub(last).cast_signed() <= 0) {
                     continue;
                 }
                 last = Some(packet.sequence);
-                let samples: Vec<i16> = packet.payload.iter().map(|&byte| law.decode(byte)).collect();
+                let Some(samples) = coder.decode(packet.payload_type, packet.payload) else { continue };
                 let wide = up.run(&samples);
                 line.play(&wide);
                 send_frames(source, &wide, &mut warned).await;
@@ -573,7 +572,7 @@ fn media_packet<'a>(
         return None;
     }
     let packet = rtp::parse(data)?;
-    (packet.payload_type == media.law.payload_type() && !packet.payload.is_empty())
+    (packet.payload_type == media.codec.payload_type() && !packet.payload.is_empty())
         .then_some(packet)
 }
 
@@ -603,11 +602,11 @@ mod tests {
     fn media_rejects_wrong_endpoint_codec_and_malformed_packets() {
         let media = sdp::answer(&sdp::offer("127.0.0.1".parse().unwrap(), 12000, 1)).unwrap();
         let mut sender = rtp::Sender::new(1, 1, 1);
-        let valid = sender.sound(8, &[0; 160]);
+        let valid = sender.sound(super::super::codec::G722, &[0; 160]);
         assert!(media_packet(&media, media.to, &valid).is_some());
         assert!(media_packet(&media, "127.0.0.1:12001".parse().unwrap(), &valid).is_none());
         assert!(media_packet(&media, "127.0.0.2:12000".parse().unwrap(), &valid).is_none());
-        assert!(media_packet(&media, media.to, &sender.sound(0, &[0; 160])).is_none());
+        assert!(media_packet(&media, media.to, &sender.sound(8, &[0; 160])).is_none());
         assert!(media_packet(&media, media.to, b"invalid").is_none());
         assert_eq!(media.to, "127.0.0.1:12000".parse().unwrap());
     }

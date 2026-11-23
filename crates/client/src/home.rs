@@ -1694,6 +1694,20 @@ impl Home {
                     .as_ref()
                     .is_some_and(|call| call.server == address && call.channel == channel)
                 {
+                    // "Always allow": share with each call once, when it first shows up,
+                    // so stopping by hand during a call sticks.
+                    if self.voice.audio.settings().phone_always_share
+                        && let Some(server) = self.servers.iter().find(|s| s.address == address)
+                    {
+                        let old = &self.voice.external_phones;
+                        for (call, _, status) in &calls {
+                            if *status == crate::phone::ConsentStatus::Off
+                                && !old.iter().any(|(known, ..)| known == call)
+                            {
+                                server.send(Command::PhoneConsent(call.clone(), true));
+                            }
+                        }
+                    }
                     self.voice.external_phones = calls;
                 }
             }
@@ -3622,6 +3636,13 @@ pub fn privacy_tab(ui: &mut Ui, home: &mut Home, keystore: &mut crate::keystore:
     {
         settings.create_link_previews = Some(create);
     }
+    ui::page_section(ui, t!("phone.privacy_section"));
+    ui::toggle_row(
+        ui,
+        &mut settings.phone_always_share,
+        t!("phone.always_share"),
+        t!("phone.always_share_help"),
+    );
     ui::page_section(ui, t!("home.server_directory"));
     ui::banner(ui, "privacy-directory", t!("home.directory_help"));
     ui::setting_row(
