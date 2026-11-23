@@ -191,14 +191,13 @@ fn external_phone_notice(
         }
     };
     let mut pick = None;
-    ui.horizontal_wrapped(|ui| {
-        if ui::primary(ui, text).clicked() {
-            pick = Some(PhonePick::Toggle);
-        }
-        if status == ConsentStatus::Off && ui::secondary(ui, t!("phone.always_allow")).clicked() {
-            pick = Some(PhonePick::Always);
-        }
-    });
+    // One under the other: the side panel is too narrow for both in a row.
+    if ui::primary(ui, text).clicked() {
+        pick = Some(PhonePick::Toggle);
+    }
+    if status == ConsentStatus::Off && ui::secondary(ui, t!("phone.always_allow")).clicked() {
+        pick = Some(PhonePick::Always);
+    }
     pick
 }
 
