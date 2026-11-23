@@ -1697,9 +1697,6 @@ impl Home {
                 // A late result after Stop or leaving doesn't turn the chip back on.
                 if self.voice.sharing != call::Sharing::Off || !on {
                     self.voice.sharing = if on {
-                        if self.voice.sharing != call::Sharing::Changing {
-                            self.voice.preview_hidden = false;
-                        }
                         call::Sharing::On
                     } else {
                         self.voice.stop_preview();
