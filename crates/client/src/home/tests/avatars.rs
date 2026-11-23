@@ -385,8 +385,16 @@ fn canonical_local_speaking_state_covers_voice_modes_and_call_transitions() {
 
 #[test]
 fn bottom_left_avatar_lights_up_on_speaking_transitions_in_both_themes() {
-    for dark in [true, false] {
-        let mut h = demo_window(Vec2::new(1100.0, 700.0), dark);
+    let sizes = [
+        Vec2::new(390.0, 844.0),
+        Vec2::new(820.0, 1180.0),
+        Vec2::new(1100.0, 700.0),
+    ];
+    for (dark, size) in [true, false]
+        .into_iter()
+        .flat_map(|dark| sizes.map(|size| (dark, size)))
+    {
+        let mut h = demo_window(size, dark);
         let account_label = t!("status.button", name = "Alex", status = t!("status.online"));
         let account_rect = h
             .get_by_role_and_label(egui::Role::Button, &account_label)
@@ -445,6 +453,26 @@ fn bottom_left_avatar_lights_up_on_speaking_transitions_in_both_themes() {
             ring_idx < dot_idx,
             "presence dot must paint on top of speaking outline (dark={dark})"
         );
+
+        let Shape::Rect(ring) = &h.output().shapes[ring_idx].shape else {
+            unreachable!("speaking outline is a rectangle");
+        };
+        let text_rect = |line| {
+            h.output()
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    Shape::Text(text)
+                        if text.galley.text() == line && account_rect.contains(text.pos) =>
+                    {
+                        Some(Rect::from_min_size(text.pos, text.galley.size()))
+                    }
+                    _ => None,
+                })
+                .expect("account label must be painted")
+        };
+        let text = text_rect("Alex").union(text_rect(t!("status.online")));
+        assert!((text.center().y - ring.rect.center().y).abs() <= 1.0);
 
         // Muting extinguishes the speaking outline back to silent state.
         home_mut(&mut h).voice.audio.set_muted(true);
