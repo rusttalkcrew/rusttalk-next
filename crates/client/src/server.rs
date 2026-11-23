@@ -276,6 +276,7 @@ pub struct Calendar {
 
 #[derive(Clone)]
 pub struct Event {
+    pub waiting_for_key: bool,
     /// `None` when this device could not read or verify it.
     pub details: Option<rusttalk_core::calendar::Details>,
     pub record: rusttalk_core::calendar::EventRecord,
