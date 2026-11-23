@@ -291,14 +291,7 @@ struct Asked {
 
 pub fn pane(ui: &mut Ui, home: &mut Home, index: usize) {
     let title = t!("events.title");
-    super::pane_title(
-        ui,
-        "events-title",
-        title,
-        Some(&mut home.layout),
-        false,
-        None,
-    );
+    super::pane_title(ui, "events-title", title, Some(&mut home.layout), None);
 
     let now = unix_now();
     let today = local(now).date_naive();

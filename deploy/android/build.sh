@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build a debug APK of the RustTalk client for 64-bit ARM phones.
+# Build a test APK of the RustTalk client for 64-bit ARM phones.
 # Usage: deploy/android/build.sh <out-dir>
 # Needs ANDROID_HOME, ANDROID_NDK_HOME, Gradle on PATH and the Rust target:
 # rustup target add aarch64-linux-android
@@ -17,7 +17,13 @@ export CXX_aarch64_linux_android=$bin/aarch64-linux-android$api-clang++
 export AR_aarch64_linux_android=$bin/llvm-ar
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$CC_aarch64_linux_android
 # GameActivity loads a shared library; the crate's library builds as an rlib otherwise.
-cargo rustc --locked -p rusttalk-client --lib --crate-type cdylib --target aarch64-linux-android
+# Match the jar to the exact WebRTC archive Cargo linked, including custom builds.
+webrtc_lib=$(cargo rustc --message-format=json-render-diagnostics --locked -p rusttalk-client --lib --crate-type cdylib --target aarch64-linux-android -- \
+  -C 'link-arg=-Wl,--undefined-glob=Java_livekit_*' \
+  -C "link-arg=-Wl,--version-script=$PWD/deploy/android/webrtc.exports" |
+  jq -r 'select(.reason == "build-script-executed" and (.package_id | contains("#webrtc-sys@"))) |
+         .linked_paths[] | select(endswith("/lib")) | sub("^native="; "")')
+test -f "$webrtc_lib/../libwebrtc.jar"
 
 target=${CARGO_TARGET_DIR:-target}
 shell=deploy/android
@@ -28,7 +34,8 @@ mkdir -p "$shell/build/rust/jniLibs/arm64-v8a" "$shell/build/rust/res/mipmap" "$
 "$bin/llvm-strip" --strip-debug -o "$shell/build/rust/jniLibs/arm64-v8a/librusttalk_client.so" \
   "$target/aarch64-linux-android/debug/librusttalk_client.so"
 cp crates/client/assets/rusttalk.png "$shell/build/rust/res/mipmap/ic_launcher.png"
+cp "$webrtc_lib/../libwebrtc.jar" "$shell/build/rust/"
 cp LICENSE NOTICE "$shell/build/rust/assets/"
 version=$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "rusttalk-client") | .version')
-gradle --project-dir "$shell" --no-daemon -PrusttalkVersion="$version" assembleDebug
-cp "$shell/build/outputs/apk/debug/rusttalk-debug.apk" "$out/rusttalk-$version-android-arm64-debug.apk"
+gradle --project-dir "$shell" --no-daemon -PrusttalkVersion="$version" assembleRelease
+cp "$shell/build/outputs/apk/release/rusttalk-release.apk" "$out/rusttalk-$version-android-arm64-test.apk"

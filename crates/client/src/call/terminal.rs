@@ -98,6 +98,9 @@ pub fn toggle(ctx: &egui::Context, home: &mut Home, shell: Shell) {
 }
 
 fn start(ctx: &egui::Context, home: &mut Home, shell: Shell) {
+    if !home.voice.audio.can_host_terminal() {
+        return;
+    }
     let Some(server) = call_server(home) else {
         return;
     };
@@ -117,6 +120,7 @@ fn start(ctx: &egui::Context, home: &mut Home, shell: Shell) {
 
 /// Stop sharing our terminal, ending its shell.
 pub fn stop(home: &mut Home) {
+    home.voice.terminals.confirm = None;
     // Asking and typing end with the share.
     home.voice.terminals.guests = Guests::default();
     home.voice.terminals.prompt = None;

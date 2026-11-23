@@ -353,6 +353,7 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
         let (changed, close) = panel::window(
             ctx,
             "server-settings",
+            t!("home.server_settings"),
             &groups,
             &mut tab,
             settings,
@@ -367,7 +368,10 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
                         let picked = overview_tab(ui, server, settings);
                         icon = picked.icon;
                         rename = picked.rename;
-                        picked.events.map(Admin::Events)
+                        picked
+                            .events
+                            .map(Admin::Events)
+                            .or_else(|| picked.system_messages.map(Admin::SystemMessages))
                     }
                     Tab::Members => {
                         let target = |person| Person::with(friends, voice, server, person);
@@ -493,6 +497,7 @@ fn message(ui: &mut Ui, settings: &Settings) {
 
 /// What was asked for in Overview.
 struct Overview {
+    system_messages: Option<crate::server::SystemMessages>,
     /// t!("admin.change_icon") was clicked.
     icon: bool,
     /// The new server name to save.
@@ -504,13 +509,19 @@ struct Overview {
 /// The server icon and name, for people who may manage the server.
 fn overview_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Overview {
     let mut picked = Overview {
+        system_messages: None,
         icon: false,
         rename: None,
         events: None,
     };
     let saved = server.dir.name.clone().unwrap_or_default();
     ui::page_section(ui, t!("admin.server"));
-    ui.horizontal_top(|ui| {
+    let layout = if ui.available_width() < 220.0 {
+        egui::Layout::top_down(egui::Align::Min)
+    } else {
+        egui::Layout::left_to_right(egui::Align::Min)
+    };
+    ui.with_layout(layout, |ui| {
         ui.vertical(|ui| {
             server_icon(ui, server, ICON_SIZE);
             picked.icon = ui
@@ -551,10 +562,69 @@ fn overview_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Overvi
             picked.events = Some(on);
         }
     }
+    ui.add_space(ui::SPACE_L);
+    picked.system_messages = system_messages_row(ui, &server.dir);
     if server.dir.perms.owner {
         update_notice(ui, &settings.updates);
     }
     picked
+}
+
+fn system_messages_row(
+    ui: &mut Ui,
+    dir: &crate::server::Directory,
+) -> Option<crate::server::SystemMessages> {
+    use crate::server::SystemMessages;
+    let label = t!("admin.system_messages");
+    let help = if dir.system_messages_supported {
+        t!("admin.system_help")
+    } else {
+        t!("admin.system_update")
+    };
+    let mut choice = dir.system_messages;
+    let title = match choice {
+        SystemMessages::First => t!("admin.system_first"),
+        SystemMessages::None => t!("admin.system_none"),
+        SystemMessages::Channel(id) => dir
+            .text_channels()
+            .find(|c| c.id == id)
+            .map_or(t!("admin.system_missing"), |c| c.name.as_str()),
+    };
+    let narrow = ui.available_width() < 220.0;
+    let width = if narrow {
+        ui.available_width()
+    } else {
+        (ui.available_width() * 0.5).min(180.0)
+    };
+    let mut select = |ui: &mut Ui| {
+        ui.add_enabled_ui(dir.system_messages_supported, |ui| {
+            let combo = ComboBox::from_id_salt("system messages")
+                .width(width)
+                .truncate()
+                .selected_text(title)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut choice,
+                        SystemMessages::First,
+                        t!("admin.system_first"),
+                    );
+                    ui.selectable_value(&mut choice, SystemMessages::None, t!("admin.system_none"));
+                    for ch in dir.text_channels() {
+                        ui.selectable_value(&mut choice, SystemMessages::Channel(ch.id), &ch.name);
+                    }
+                });
+            combo.response.widget_info(|| {
+                egui::WidgetInfo::labeled(Role::ComboBox, dir.system_messages_supported, label)
+            });
+        });
+    };
+    if narrow {
+        ui::setting_row(ui, label, help, |_| {});
+        select(ui);
+    } else {
+        ui::setting_row(ui, label, help, select);
+    }
+    (choice != dir.system_messages).then_some(choice)
 }
 
 fn update_notice(ui: &mut Ui, updates: &ServerUpdates) {
@@ -1085,6 +1155,14 @@ fn audit_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Option<Ad
     for entry in settings.audit.iter().take(settings.audit_shown) {
         ui.horizontal_wrapped(|ui| {
             ui.label(sentence(server, entry));
+            if matches!(entry.action.as_str(), "device_added" | "device_revoked")
+                && let Some(id) = entry.target_id
+            {
+                ui.weak(t!(
+                    "audit.device_id",
+                    fingerprint = rusttalk_core::identity::fingerprint(&id)
+                ));
+            }
             ui.weak(date(entry.at));
         });
     }
@@ -1118,6 +1196,8 @@ fn sentence(server: &Server, entry: &AuditEntry) -> String {
             actor = actor,
             target = target
         ),
+        "device_added" => t!("notice.added_device", name = actor),
+        "device_revoked" => t!("notice.removed_device", name = actor),
         "joined" => t!("audit.joined", actor = actor),
         "role_created" => t!("audit.role_created", actor = actor),
         "role_renamed" => t!("audit.role_renamed", actor = actor),

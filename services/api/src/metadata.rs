@@ -83,19 +83,34 @@ pub async fn hash_pictures(db: &SqlitePool) -> anyhow::Result<()> {
 
 #[derive(Serialize)]
 pub struct Space {
+    system_messages_ct: Option<String>,
+    first_text_channel: Option<String>,
     name_ct: Option<String>,
     description_ct: Option<String>,
     icon_hash: Option<String>,
 }
 
 pub async fn space(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Space>> {
-    let (mut tx, _) = authenticate_read(&app, &headers).await?;
-    let (name, description, icon_hash): (Ciphertext, Ciphertext, Option<String>) =
-        query_as("SELECT name_ct, description_ct, icon_hash FROM server_settings WHERE id = 1")
+    let (mut tx, actor) = authenticate_read(&app, &headers).await?;
+    let (name, description, icon_hash, system_messages): (Ciphertext, Ciphertext, Option<String>, Ciphertext) =
+        query_as("SELECT name_ct, description_ct, icon_hash, system_messages_ct FROM server_settings WHERE id = 1")
             .fetch_one(&mut *tx)
             .await?;
+    // Pick once across the server, then check access so a private first channel
+    // neither leaks its ID nor redirects notices into another channel.
+    let first_text_channel = query_scalar(
+        "SELECT channel_id FROM channel_readers WHERE person_id = ? AND channel_id = (
+            SELECT c.id FROM channels c JOIN categories g ON c.category_id = g.id
+            WHERE c.kind = 'text' AND NOT c.page ORDER BY g.position, g.id, c.position, c.id LIMIT 1
+        )",
+    )
+    .bind(actor.person.as_slice())
+    .fetch_optional(&mut *tx)
+    .await?;
     tx.commit().await?;
     Ok(Json(Space {
+        first_text_channel,
+        system_messages_ct: encoded(system_messages),
         name_ct: encoded(name),
         description_ct: encoded(description),
         icon_hash,
@@ -139,6 +154,8 @@ fn patch_field<'de, D: Deserializer<'de>>(input: D) -> Result<Option<Option<Stri
 #[derive(Deserialize)]
 pub struct SpacePatch {
     #[serde(default, deserialize_with = "patch_field")]
+    system_messages_ct: Option<Option<String>>,
+    #[serde(default, deserialize_with = "patch_field")]
     name_ct: Option<Option<String>>,
     #[serde(default, deserialize_with = "patch_field")]
     description_ct: Option<Option<String>>,
@@ -152,6 +169,7 @@ pub async fn update_space(
     body: Result<Json<SpacePatch>, JsonRejection>,
 ) -> ApiResult<StatusCode> {
     let SpacePatch {
+        system_messages_ct,
         name_ct,
         description_ct,
         icon_ct,
@@ -164,12 +182,19 @@ pub async fn update_space(
     let icon = optional(Metadata::ServerIcon, epoch, icon_ct.clone().flatten())?;
     sqlx::query(
         "UPDATE server_settings SET
+            system_messages_ct = CASE WHEN ? THEN ? ELSE system_messages_ct END,
             name_ct = CASE WHEN ? THEN ? ELSE name_ct END,
             description_ct = CASE WHEN ? THEN ? ELSE description_ct END,
             icon_ct = CASE WHEN ? THEN ? ELSE icon_ct END,
             icon_hash = CASE WHEN ? THEN ? ELSE icon_hash END
          WHERE id = 1",
     )
+    .bind(system_messages_ct.is_some())
+    .bind(optional(
+        Metadata::SystemMessages,
+        epoch,
+        system_messages_ct.flatten(),
+    )?)
     .bind(name_ct.is_some())
     .bind(optional(Metadata::ServerName, epoch, name_ct.flatten())?)
     .bind(description_ct.is_some())
@@ -323,6 +348,62 @@ mod tests {
             .unwrap();
         assert_eq!(hash, Some(picture_hash(&[9; 64])));
         assert_eq!(hash.unwrap().len(), 22);
+    }
+
+    #[tokio::test]
+    async fn system_messages_respect_permissions_order_and_partial_updates() -> anyhow::Result<()> {
+        use crate::testing::{app, as_person};
+        let dir = tempfile::tempdir()?;
+        let app = app(dir.path(), 2).await?;
+        query("INSERT INTO categories (id, position, name_ct) VALUES ('g', 0, x'00')")
+            .execute(&app.db)
+            .await?;
+        for (id, position, page) in [("page", 0, true), ("first", 1, false), ("next", 2, false)] {
+            query("INSERT INTO channels (id, category_id, position, kind, page, name_ct) VALUES (?, 'g', ?, 'text', ?, x'00')")
+                .bind(id).bind(position).bind(page).execute(&app.db).await?;
+        }
+        query("INSERT INTO member_roles (person_id, role_id) VALUES (?, 'member')")
+            .bind(crate::testing::person(2))
+            .execute(&app.db)
+            .await?;
+        query("INSERT INTO channel_permissions (channel_id, role_id, flags) VALUES ('next', 'member', 1)")
+            .execute(&app.db).await?;
+        let read = |who| space(State(app.clone()), as_person(who));
+        assert_eq!(
+            read(1).await?.0.first_text_channel.as_deref(),
+            Some("first")
+        );
+        assert!(read(2).await?.0.first_text_channel.is_none());
+        let server = keys::space(&app).id;
+        let mut conn = app.db.acquire().await?;
+        keys::init_space(&mut conn, &server).await?;
+        query("INSERT INTO key_epochs (scope_id, epoch, commitment) VALUES (?, 1, zeroblob(32))")
+            .bind(encode(&server))
+            .execute(&mut *conn)
+            .await?;
+        drop(conn);
+        let write = |who, body| {
+            update_space(
+                State(app.clone()),
+                as_person(who),
+                Ok(Json(serde_json::from_value(body).unwrap())),
+            )
+        };
+        let key = rusttalk_core::keys::random_key()?;
+        for choice in [&[1; 32][..], &[]] {
+            let ct = encode(&Metadata::SystemMessages.seal(&server, &server, 1, &key, choice)?);
+            let patch = json!({"system_messages_ct": ct});
+            assert_eq!(
+                write(2, patch.clone()).await.unwrap_err().status,
+                StatusCode::FORBIDDEN
+            );
+            write(1, patch).await?;
+            write(1, json!({"description_ct": null})).await?;
+            assert_eq!(read(2).await?.0.system_messages_ct, Some(ct));
+        }
+        write(1, json!({"system_messages_ct": null})).await?;
+        assert!(read(1).await?.0.system_messages_ct.is_none());
+        Ok(())
     }
 
     #[tokio::test]

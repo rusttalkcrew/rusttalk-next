@@ -21,7 +21,7 @@ use url::Url;
 
 use sha2::Digest as _;
 
-use super::{Ctx, Fetch, Update, directory::frame_image, send_messages, to_msg};
+use super::{Ctx, Fetch, State, Update, directory::frame_image};
 use crate::{
     link_cards::{Card, FILE_NAME, MAX_CARD_BYTES, MEDIA_TYPE, Made},
     server::Id,
@@ -37,6 +37,7 @@ pub(super) async fn send(
     ctx: &Ctx,
     url: &Url,
     client: &mut KeyClient<'_>,
+    state: &mut State,
     (channel, id, page): (Id, Id, bool),
     mut body: MessageBody,
     (files, preview, inline): (Vec<PathBuf>, Option<Arc<Made>>, Vec<Inline>),
@@ -103,7 +104,8 @@ pub(super) async fn send(
             return Err(error);
         }
     };
-    send_messages(ctx, url, channel, vec![to_msg(&record, &body)], false, None);
+    let posted_body = client.open_message(&channel, &record).await?;
+    state.sent(ctx, url, channel, &record, &posted_body);
     at_most(CLEANUP, discard(client, &leftover)).await;
     Ok(true)
 }
@@ -222,13 +224,14 @@ pub(super) async fn delete(
     ctx: &Ctx,
     url: &Url,
     client: &KeyClient<'_>,
+    state: &mut State,
     (channel, id, sender): (Id, Id, Id),
     files: Vec<Id>,
 ) -> Result<()> {
     match client.delete_message(&channel, &id).await {
         // Already gone there counts as deleted, so a DM delete can finish.
         Err(error) if !gone(&error) => return Err(error),
-        _ => ctx.send(Update::Deleted(url.clone(), channel, id)),
+        _ => state.deleted(ctx, url, channel, id),
     }
     for file in files {
         if let Err(error) = client.delete_message_file(&file, &sender).await

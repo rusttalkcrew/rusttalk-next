@@ -342,30 +342,37 @@ pub fn tab(
     }
 
     let top = ui.cursor().top();
-    ui.horizontal_top(|ui| {
-        ui.allocate_ui_with_layout(
-            Vec2::new(LIST_WIDTH, 0.0),
-            Layout::top_down(egui::Align::Min),
-            |ui| {
-                ui.set_width(LIST_WIDTH);
-                role_list(ui, dir, page, message, &mut requests);
-            },
-        );
-        ui.add_space(ui::SPACE_M);
-        let x = ui.cursor().left();
+    if ui.available_width() < 2.0 * LIST_WIDTH + ui::SPACE_XL {
+        // Too narrow for two columns: the list, then the role under it.
+        role_list(ui, dir, page, message, &mut requests);
         ui.add_space(ui::SPACE_L);
-        let editor = ui.allocate_ui_with_layout(
-            Vec2::new(ui.available_width(), 0.0),
-            Layout::top_down(egui::Align::Min),
-            |ui| {
-                ui.set_width(ui.available_width());
-                editor(ui, server, page);
-            },
-        );
-        let bottom = editor.response.rect.bottom().max(ui.min_rect().bottom());
-        ui.painter()
-            .vline(x, top..=bottom, Stroke::new(1.0, ui::colors(ui).border));
-    });
+        editor(ui, server, page);
+    } else {
+        ui.horizontal_top(|ui| {
+            ui.allocate_ui_with_layout(
+                Vec2::new(LIST_WIDTH, 0.0),
+                Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.set_width(LIST_WIDTH);
+                    role_list(ui, dir, page, message, &mut requests);
+                },
+            );
+            ui.add_space(ui::SPACE_M);
+            let x = ui.cursor().left();
+            ui.add_space(ui::SPACE_L);
+            let editor = ui.allocate_ui_with_layout(
+                Vec2::new(ui.available_width(), 0.0),
+                Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.set_width(ui.available_width());
+                    editor(ui, server, page);
+                },
+            );
+            let bottom = editor.response.rect.bottom().max(ui.min_rect().bottom());
+            ui.painter()
+                .vline(x, top..=bottom, Stroke::new(1.0, ui::colors(ui).border));
+        });
+    }
 
     if page.dirty(dir) {
         ui.add_space(ui::UNSAVED_BAR + ui::SPACE_S);

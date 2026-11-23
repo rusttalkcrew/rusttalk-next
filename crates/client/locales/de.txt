@@ -15,6 +15,8 @@ settings.video = Video
 settings.notifications = Benachrichtigungen
 settings.shortcuts = Tastenkürzel
 settings.updates_new = Updates (neu)
+settings.advanced = Erweitert
+settings.terminal_hosting_help = Erlaube das Teilen der App-Shell in einem Anruf. Beim Ausschalten endet deine Terminalfreigabe.
 settings.updates = Updates
 settings.group_info = Info
 settings.whats_new = Was ist neu
@@ -195,6 +197,7 @@ home.emoji_picker = Emoji-Auswahl
 home.sticker_picker = Sticker
 home.send = Senden
 home.message_hint = Nachricht an {channel}
+home.message_hint_short = Nachricht
 home.waiting_for_server = Warte auf den Server…
 home.no_wide_mentions = In diesem Chat kannst du keine Rollen, @everyone oder @here erwähnen.
 home.quote_sticker = {name}: ein Sticker
@@ -331,6 +334,13 @@ admin.change_roles = Rollen ändern
 admin.kick = Rauswerfen
 admin.ban = Sperren
 admin.server = Server
+admin.system_messages = Systemnachrichten
+admin.system_help = Beitritte und Austritte hier anzeigen.
+admin.system_first = Erster Textkanal
+admin.system_none = Keine
+admin.system_missing = Kanal nicht verfügbar
+admin.system_update = Aktualisiere den Server, um dies zu ändern.
+admin.system_saved = Systemnachrichten gespeichert.
 admin.overview = Übersicht
 admin.server_updates = Server-Updates
 admin.update_waiting = Update {version} wartet auf einen ruhigen Zeitpunkt
@@ -411,6 +421,7 @@ audit.voice_moved = {actor} hat {target} in einen anderen Sprachkanal verschoben
 audit.left = {actor} ist gegangen
 audit.member_roles_changed = {actor} hat die Rollen von {target} geändert
 audit.ownership_transferred = {actor} hat {target} zum Besitzer gemacht
+audit.device_id = Gerät {fingerprint}
 audit.joined = {actor} ist beigetreten
 audit.role_created = {actor} hat eine Rolle erstellt
 audit.role_renamed = {actor} hat eine Rolle umbenannt
@@ -589,9 +600,7 @@ role.moderator = Moderator
 role.member = Mitglied
 role.new = Neue Rolle
 server.default_category = Kanäle
-notice.new_device_detail = {id}\nNeues Gerät {fingerprint} ({device})
 server.default_channel = Kanal
-notice.removed_device_detail = {id}\nEntferntes Gerät {fingerprint} ({device})
 
 # crates/client/src/call.rs
 call.quality_720 = 720p — schont langsame Verbindungen
@@ -896,15 +905,16 @@ welcome.skip = Überspringen
 app.create_account = Konto erstellen
 app.have_account = Ich habe schon ein Konto
 app.words_title = Deine Wiederherstellungswörter
-app.words_text = Schreibe diese 24 Wörter in dieser Reihenfolge auf Papier und bewahre sie sicher auf. Nur mit ihnen kommst du wieder in dein Konto. Du siehst sie nur einmal.
+app.words_text = Schreibe sie in dieser Reihenfolge auf und bewahre sie sicher auf. Nur mit ihnen kommst du wieder in dein Konto.
 app.wrote_them = Ich habe sie aufgeschrieben
+app.copied = Kopiert
+app.words_manager = Tipp: Ein Passwortmanager ist ein sicherer Ort dafür.
 app.check_title = Wörter prüfen
 app.check_text = Tippe diese Wörter aus deiner Liste ein.
 app.word_number = Wort {number}
 app.confirm = Bestätigen
-app.start_over = Neu beginnen
 app.restore_title = Mit Wiederherstellungswörtern anmelden
-app.restore_text = Tippe deine 24 Wiederherstellungswörter der Reihe nach ein, mit einem Leerzeichen dazwischen. Dieser Computer wird ein neues Gerät deines Kontos.
+app.restore_text = Tippe oder füge deine 24 Wörter der Reihe nach ein. Dieses Gerät kommt zu deinem Konto dazu.
 app.recovery_words = Wiederherstellungswörter
 app.sign_in = Anmelden
 
@@ -913,6 +923,9 @@ keys.section = Schlüsselspeicher
 keys.choose_title = Wo soll RustTalk deine Schlüssel aufbewahren?
 keys.no_keychain = Dieses Gerät hat keinen Schlüsselbund (üblich im Spielmodus des Steam Deck). Wie soll RustTalk deine Schlüssel aufbewahren?
 keys.password_only = Auf diesem Gerät schützt RustTalk deine Schlüssel mit einem Passwort. Du gibst es bei jedem Start ein.
+keys.no_keychain_phone = Der Schlüsselbund ist nicht verfügbar, darum schützt RustTalk deine Schlüssel mit einem Passwort. Du gibst es bei jedem Start ein.
+keys.no_android_keystore = Android Keystore ist nicht verfügbar. Wähle ein Passwort, um deine Schlüssel bei jedem Start zu entsperren.
+keys.android_keystore = Android Keystore
 keys.keychain = Schlüsselbund
 keys.keychain_help = Der Schlüsselbund deines Systems bewahrt deine Schlüssel auf.
 keys.file = Geschützte Datei
@@ -1054,6 +1067,9 @@ crop.zoom = Zoom
 # crates/client/src/camera.rs
 camera.stopped = Deine Kamera wurde gestoppt.
 camera.none = Keine Kamera gefunden.
+camera.front = Frontkamera
+camera.back = Rückkamera
+camera.permission = Erlaube den Kamerazugriff, um Video einzuschalten.
 camera.start_failed = Deine Kamera konnte nicht starten. Nutzt eine andere App sie gerade?
 camera.camera = Kamera
 camera.first = Erste Kamera
@@ -1124,6 +1140,9 @@ find.server_unreachable = Dieser Server ist gerade nicht erreichbar. Versuche es
 
 # crates/client/src/net/voice.rs
 voice.screen_failed = Dein Bildschirm konnte nicht geteilt werden.
+voice.need_mic = Erlaube den Mikrofonzugriff, um am Anruf teilzunehmen.
+voice.audio_reset = Die Audiofunktion deines iPhones wurde neu gestartet. Tritt dem Anruf erneut bei.
+voice.unavailable = Sprachanrufe sind auf diesem Gerät nicht verfügbar.
 voice.listen_only = Hier kannst du zuhören, aber nicht sprechen.
 voice.disconnected = Sprachverbindung getrennt.
 voice.removed = Du wurdest aus dem Sprachkanal entfernt.
@@ -1169,6 +1188,7 @@ startup.message = RustTalk konnte nicht starten.\n\n{error}\n\n{log}
 
 # Direct messages (#100)
 home.waiting_try_again = Warte auf den Server. Versuche es gleich noch einmal.
+home.unsent_after_close = Eine Nachricht wurde vielleicht nicht gesendet.
 home.dm_read_only = Du teilst keinen Server mehr mit {name}. Du kannst deine Nachrichten lesen, aber keine neuen senden.
 home.no_shared_server = Kein gemeinsamer Server
 
@@ -1442,3 +1462,9 @@ events.open_channel = Channel öffnen
 events.channel_hidden = In einem Channel, den du nicht siehst
 events.need_address = Gib eine Adresse oder einen Treffpunkt an.
 events.need_channel = Wähle einen Channel aus.
+
+# crates/client/src/phone_clipboard.rs
+clipboard.paste = Einfügen
+clipboard.copy = Kopieren
+clipboard.cut = Ausschneiden
+clipboard.select_all = Alles auswählen

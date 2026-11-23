@@ -968,6 +968,7 @@ async fn docker_membership() -> Result<()> {
         "member_kicked",
         "member_banned",
         "member_unbanned",
+        "device_added",
         "device_revoked",
         "member_roles_changed",
         "ownership_transferred",

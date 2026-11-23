@@ -53,6 +53,15 @@ pub struct DeviceIdentity {
 }
 
 impl DeviceIdentity {
+    /// A local encryption key available only after unlocking this device.
+    pub fn cache_key(&self) -> Zeroizing<[u8; 32]> {
+        let mut key = Zeroizing::new([0; 32]);
+        Hkdf::<Sha256>::new(None, self.agreement_key.as_bytes())
+            .expand(b"rusttalk local cache v1", key.as_mut())
+            .expect("32-byte HKDF output");
+        key
+    }
+
     pub fn create(name: &str) -> Result<(Zeroizing<String>, Self), IdentityError> {
         let mut entropy = Zeroizing::new([0; 32]);
         random_bytes(entropy.as_mut())?;

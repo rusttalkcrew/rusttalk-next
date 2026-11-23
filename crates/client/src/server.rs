@@ -176,7 +176,8 @@ impl Server {
         self.dir.members.iter().find(|m| m.person == *person)
     }
 
-    pub fn send(&self, command: Command) {
+    pub fn send(&self, mut command: Command) {
+        crate::net::Queued::count(&mut command);
         // The task only ends after the UI drops this sender or the server stopped for good.
         let _ = self.commands.send(command);
     }
@@ -222,8 +223,19 @@ pub fn member_name(dir: &Directory, person: &Id) -> String {
     }
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub enum SystemMessages {
+    #[default]
+    First,
+    None,
+    Channel(Id),
+}
+
 #[derive(Clone, Default)]
 pub struct Directory {
+    pub system_messages: SystemMessages,
+    pub system_messages_supported: bool,
+    pub first_text_channel: Option<Id>,
     pub name: Option<String>,
     pub icon: Option<Picture>,
     /// This person's presence choice here.
@@ -298,6 +310,31 @@ pub struct CustomEmoji {
 }
 
 impl Directory {
+    pub fn discard_channels(&mut self, ids: &std::collections::HashSet<Id>) {
+        self.dms.retain(|dm| !ids.contains(&dm.channel));
+        for category in &mut self.categories {
+            category
+                .channels
+                .retain(|channel| !ids.contains(&channel.id));
+        }
+    }
+
+    pub fn text_channels(&self) -> impl Iterator<Item = &Channel> {
+        self.categories
+            .iter()
+            .flat_map(|c| &c.channels)
+            .filter(|c| !c.page && !c.voice)
+    }
+
+    pub fn notice_channel(&self) -> Option<Id> {
+        let id = match self.system_messages {
+            SystemMessages::First => self.first_text_channel?,
+            SystemMessages::None => return None,
+            SystemMessages::Channel(id) => id,
+        };
+        self.text_channels().find(|ch| ch.id == id).map(|ch| ch.id)
+    }
+
     pub fn emoji_by_id(&self, id: &Id) -> Option<&CustomEmoji> {
         self.emoji.iter().find(|e| e.id == *id)
     }
@@ -408,14 +445,14 @@ impl ChannelKind {
 }
 
 /// Channels without a category go in a category without an ID or name.
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Category {
     pub id: Option<Id>,
     pub name: String,
     pub channels: Vec<Channel>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Channel {
     pub id: Id,
     pub name: String,
@@ -528,7 +565,7 @@ pub struct Device {
     pub fingerprint: String,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Dm {
     pub channel: Id,
     pub peer: Id,
@@ -572,7 +609,7 @@ pub enum Body {
     PollPart(PollPart),
     /// Could not be verified or decrypted (yet).
     Unreadable,
-    /// A member or device change, with fingerprints for the details view.
+    /// A membership change, with a fingerprint for the details view.
     /// `name` is the person's name when it happened, used once they have left.
     Notice {
         name: String,
@@ -623,6 +660,8 @@ pub struct Chat {
     polls: HashMap<Id, PollEvents>,
     /// The poll being written in place of the composer.
     pub poll_editor: Option<crate::home::polls::Editor>,
+    /// The channel view has requested its initial history and live updates.
+    pub opened: bool,
     pub loading: bool,
     pub at_start: bool,
     pub draft: String,
@@ -649,6 +688,14 @@ pub struct Chat {
 }
 
 impl Chat {
+    pub fn clear_history(&mut self) {
+        self.messages.clear();
+        self.edited.clear();
+        self.pending_edits.clear();
+        self.polls.clear();
+        self.at_start = false;
+    }
+
     pub fn open_draft(&mut self, dir: &Directory, text: &str) {
         (self.draft, self.mentions) = crate::home::mentions::DraftMentions::open(dir, text);
     }

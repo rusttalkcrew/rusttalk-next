@@ -55,6 +55,8 @@ pub use stage::{Stage, full_view, stage};
 pub struct Voice {
     pub audio: Audio,
     pub call: Option<Call>,
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    pending_join: Option<(url::Url, Id, bool)>,
     pub sounds: sounds::Detector,
     /// Ping history and packet loss for the connection popup.
     pub link: Link,
@@ -181,6 +183,8 @@ impl Voice {
         Self {
             audio,
             call: None,
+            #[cfg(any(target_os = "android", target_os = "ios"))]
+            pending_join: None,
             sounds: sounds::Detector::default(),
             link: Link::default(),
             shares: Vec::new(),
@@ -216,6 +220,8 @@ impl Voice {
 
     /// The call ended or was left: stop sending audio and forget its shares and video.
     pub fn end_call(&mut self) {
+        #[cfg(target_os = "android")]
+        crate::android::communication_mode(false);
         self.call = None;
         self.audio.end_voice(self.sounds.end());
         self.link = Link::default();
@@ -268,7 +274,25 @@ pub fn join(home: &mut Home, index: usize, channel: Id) {
     if home.voice.in_call(&home.servers[index], &channel) {
         return;
     }
-    leave(home);
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        let request = home
+            .voice
+            .pending_join
+            .as_ref()
+            .is_none_or(|pending| pending.2);
+        home.voice.pending_join = Some((home.servers[index].address.clone(), channel, request));
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        leave(home);
+        connect(home, index, channel);
+    }
+}
+
+fn connect(home: &mut Home, index: usize, channel: Id) {
+    #[cfg(target_os = "android")]
+    crate::android::communication_mode(true);
     let server = &home.servers[index];
     server.send(Command::JoinVoice(channel));
     home.voice.call = Some(Call {
@@ -294,6 +318,51 @@ pub fn leave(home: &mut Home) {
 
 /// Once per frame: push-to-talk, the settings meter, and repaints for live indicators.
 pub fn frame(ctx: &egui::Context, home: &mut Home) {
+    #[cfg(target_os = "ios")]
+    if home.voice.call.is_some() && crate::ios::voice::needs_rejoin() {
+        leave(home);
+        home.toast = Some((t!("voice.audio_reset").into(), ctx.input(|i| i.time) + 6.0));
+    }
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    if let Some((address, channel, request)) = home.voice.pending_join.take() {
+        #[cfg(target_os = "android")]
+        use crate::android::voice_permission;
+        #[cfg(target_os = "ios")]
+        use crate::ios::voice::voice_permission;
+        match voice_permission(request) {
+            0 => {
+                home.voice.pending_join = Some((address, channel, false));
+                ctx.request_repaint_after(Duration::from_millis(100));
+            }
+            1 => {
+                if let Some(index) = home
+                    .servers
+                    .iter()
+                    .position(|s| s.address == address && s.is_voice(&channel))
+                {
+                    leave(home);
+                    #[cfg(target_os = "ios")]
+                    {
+                        if let Err(error) = home.voice.audio.prepare_ios_voice() {
+                            tracing::warn!(%error, "iOS voice session failed");
+                            home.toast =
+                                Some((t!("voice.unavailable").into(), ctx.input(|i| i.time) + 6.0));
+                            return;
+                        }
+                    }
+                    connect(home, index, channel);
+                }
+            }
+            result => {
+                let message = if result == -1 {
+                    t!("voice.need_mic")
+                } else {
+                    t!("voice.unavailable")
+                };
+                home.toast = Some((message.into(), ctx.input(|i| i.time) + 6.0));
+            }
+        }
+    }
     let recording = home.hotkeys.recording();
     let voice = &mut home.voice;
     let settings = voice.audio.settings();
@@ -441,7 +510,7 @@ pub fn room_list(ui: &mut Ui, home: &Home, server: &Server, channel: &Id) -> Opt
             }
             let status = if peer.person == server.dir.me && home.voice.in_call(server, channel) {
                 VoiceStatus {
-                    muted: home.voice.audio.muted(),
+                    muted: home.voice.audio.display_muted(),
                     deafened: home.voice.audio.deafened(),
                 }
             } else {
@@ -734,7 +803,7 @@ pub fn chat_live(
     let fresh = chrono::Utc::now().timestamp() - msg.at < OFFER_SECONDS;
     let mut action = None;
     files::attachment_frame(ui).show(ui, |ui| {
-        ui.set_max_width(360.0);
+        ui::max_width(ui, 360.0);
         ui.horizontal(|ui| {
             ui.label(RichText::new("📡").size(ui::TEXT_ICON_LARGE))
                 .on_hover_text(t!("call.direct_chat"));
@@ -1108,7 +1177,7 @@ pub fn settings_tab(ui: &mut Ui, voice: &mut Voice) {
         key_picker(ui, voice, &mut s);
     } else {
         // As wide as the meter, so the handle sits on the line.
-        ui.spacing_mut().slider_width = METER_WIDTH;
+        ui.spacing_mut().slider_width = meter_width(ui);
         if s.auto_threshold {
             // Shows the live automatic level; turning automatic off keeps the person's own.
             let mut live = audio.auto_threshold();
@@ -1286,11 +1355,16 @@ fn device_picker(
     });
 }
 
+/// The meter's width: `METER_WIDTH`, or the page's on a phone.
+fn meter_width(ui: &Ui) -> f32 {
+    METER_WIDTH.min(ui.available_width())
+}
+
 /// The live input level, with the voice activation line.
 fn meter(ui: &mut Ui, audio: &Audio, s: &Settings) {
     let fraction = |db: f32| ((db - FLOOR) / (CEILING - FLOOR)).clamp(0.0, 1.0);
     let level = audio.level();
-    let width = METER_WIDTH;
+    let width = meter_width(ui);
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 10.0), Sense::hover());
     let painter = ui.painter();
     let c = ui::colors(ui);

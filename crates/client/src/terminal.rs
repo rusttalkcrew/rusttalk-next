@@ -455,6 +455,8 @@ fn commands(shell: Shell) -> Vec<CommandBuilder> {
             Shell::Cmd => vec!["cmd.exe".into()],
             Shell::Default => vec!["pwsh.exe".into(), "powershell.exe".into()],
         }
+    } else if cfg!(target_os = "android") {
+        vec!["/system/bin/sh".into()]
     } else {
         let own = std::env::var_os("SHELL").filter(|shell| !shell.is_empty());
         own.into_iter().chain(["/bin/sh".into()]).collect()
@@ -463,6 +465,13 @@ fn commands(shell: Shell) -> Vec<CommandBuilder> {
         .into_iter()
         .map(|program| {
             let mut command = CommandBuilder::new(program);
+            #[cfg(target_os = "android")]
+            if let Some(home) = crate::android::app().and_then(|app| app.internal_data_path()) {
+                command.cwd(&home);
+                command.env("HOME", home);
+                command.env("SHELL", "/system/bin/sh");
+            }
+            #[cfg(not(target_os = "android"))]
             if let Ok(home) = etcetera::home_dir() {
                 command.cwd(home);
             }

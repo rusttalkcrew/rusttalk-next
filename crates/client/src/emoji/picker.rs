@@ -32,8 +32,23 @@ const HEADER: f32 = 28.0;
 const RAIL: f32 = 44.0;
 const BODY: f32 = 300.0;
 const PADDING: f32 = 12.0;
-/// The rail, the grid and room for its scroll bar.
-const WIDTH: f32 = RAIL + COLUMNS as f32 * CELL + 2.0 * PADDING + 4.0;
+
+/// The rail, a grid `columns` wide and room for its scroll bar.
+fn width(columns: usize) -> f32 {
+    RAIL + columns as f32 * CELL + 2.0 * PADDING + 4.0
+}
+
+/// Emoji columns that fit the window: all of them, or fewer on a phone.
+fn columns(ctx: &egui::Context) -> usize {
+    let room = ui::fit(ctx, width(COLUMNS)) - width(0);
+    ((room / CELL).floor() as usize).clamp(5, COLUMNS)
+}
+
+/// Sticker columns in the same width as the emoji.
+fn sticker_columns(ctx: &egui::Context) -> usize {
+    let room = width(columns(ctx)) - 2.0 * PADDING - 4.0;
+    ((room / STICKER_CELL).floor() as usize).clamp(2, STICKER_COLUMNS)
+}
 
 /// The picker's tabs, each opened by its own composer button.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -346,7 +361,7 @@ impl Picker {
         let was_open = self.open;
         let mut open = self.open;
         let picked = ui::panel_popup(ui, egui::Id::unique("picker"), anchor, &mut open, |ui| {
-            ui.set_width(WIDTH);
+            ui.set_width(width(columns(ui.ctx())));
             self.panel(ui, scope)
         })
         .flatten();
@@ -409,7 +424,7 @@ impl Picker {
         line(ui, ui.cursor().top());
         let picked = ui
             .allocate_ui_with_layout(
-                Vec2::new(WIDTH, BODY),
+                Vec2::new(width(columns(ui.ctx())), BODY),
                 Layout::left_to_right(Align::Min),
                 |ui| {
                     ui.set_height(BODY);
@@ -466,7 +481,8 @@ impl Picker {
         let mut total = 0.0;
         for group in &groups {
             tops.push(total);
-            total += group.section.header() + group.items.len().div_ceil(COLUMNS) as f32 * CELL;
+            total += group.section.header()
+                + group.items.len().div_ceil(columns(ui.ctx())) as f32 * CELL;
         }
         let mut area = ScrollArea::vertical()
             .id_salt(("picker-grid", searching))
@@ -481,18 +497,18 @@ impl Picker {
         ui.add_space(ui::SPACE_XS);
         area.show_viewport(ui, |ui, viewport| {
             let origin = ui.max_rect().min;
-            ui.set_width(COLUMNS as f32 * CELL);
+            ui.set_width(columns(ui.ctx()) as f32 * CELL);
             ui.set_height(total);
             for (group, top) in groups.iter().zip(&tops) {
                 let header = group.section.header();
-                let rows = group.items.len().div_ceil(COLUMNS);
+                let rows = group.items.len().div_ceil(columns(ui.ctx()));
                 if top + header + rows as f32 * CELL < viewport.min.y || *top > viewport.max.y {
                     continue;
                 }
                 if header > 0.0 {
                     let rect = Rect::from_min_size(
                         origin + Vec2::new(4.0, *top),
-                        Vec2::new(COLUMNS as f32 * CELL, header),
+                        Vec2::new(columns(ui.ctx()) as f32 * CELL, header),
                     );
                     ui.painter().text(
                         rect.left_center(),
@@ -508,14 +524,19 @@ impl Picker {
                 for row in first..last {
                     let rect = Rect::from_min_size(
                         origin + Vec2::new(0.0, top + header + row as f32 * CELL),
-                        Vec2::new(COLUMNS as f32 * CELL, CELL),
+                        Vec2::new(columns(ui.ctx()) as f32 * CELL, CELL),
                     );
                     let builder = UiBuilder::new()
                         .max_rect(rect)
                         .id_salt((group.section, row))
                         .layout(Layout::left_to_right(Align::Center));
                     ui.scope_builder(builder, |ui| {
-                        for item in group.items.iter().skip(row * COLUMNS).take(COLUMNS) {
+                        for item in group
+                            .items
+                            .iter()
+                            .skip(row * columns(ui.ctx()))
+                            .take(columns(ui.ctx()))
+                        {
                             let (response, hover, choice) = match *item {
                                 Item::Unicode(sequence, label) => (
                                     tile(ui, sequence, label),
@@ -626,7 +647,8 @@ impl Picker {
         let mut total = 0.0;
         for pack in &packs {
             tops.push(total);
-            total += HEADER + pack.items.len().div_ceil(STICKER_COLUMNS) as f32 * STICKER_CELL;
+            total +=
+                HEADER + pack.items.len().div_ceil(sticker_columns(ui.ctx())) as f32 * STICKER_CELL;
         }
         let mut picked = None;
         ui.vertical(|ui| {
@@ -636,17 +658,17 @@ impl Picker {
                 .auto_shrink(false)
                 .show_viewport(ui, |ui, viewport| {
                     let origin = ui.max_rect().min;
-                    ui.set_width(STICKER_COLUMNS as f32 * STICKER_CELL);
+                    ui.set_width(sticker_columns(ui.ctx()) as f32 * STICKER_CELL);
                     ui.set_height(total);
                     for (pack, top) in packs.iter().zip(&tops) {
-                        let rows = pack.items.len().div_ceil(STICKER_COLUMNS);
+                        let rows = pack.items.len().div_ceil(sticker_columns(ui.ctx()));
                         let height = HEADER + rows as f32 * STICKER_CELL;
                         if top + height < viewport.min.y || *top > viewport.max.y {
                             continue;
                         }
                         let rect = Rect::from_min_size(
                             origin + Vec2::new(4.0, *top),
-                            Vec2::new(STICKER_COLUMNS as f32 * STICKER_CELL, HEADER),
+                            Vec2::new(sticker_columns(ui.ctx()) as f32 * STICKER_CELL, HEADER),
                         );
                         ui.painter().text(
                             rect.left_center(),
@@ -665,7 +687,10 @@ impl Picker {
                         for row in first..last {
                             let rect = Rect::from_min_size(
                                 origin + Vec2::new(0.0, top + HEADER + row as f32 * STICKER_CELL),
-                                Vec2::new(STICKER_COLUMNS as f32 * STICKER_CELL, STICKER_CELL),
+                                Vec2::new(
+                                    sticker_columns(ui.ctx()) as f32 * STICKER_CELL,
+                                    STICKER_CELL,
+                                ),
                             );
                             let builder = UiBuilder::new()
                                 .max_rect(rect)
@@ -673,8 +698,8 @@ impl Picker {
                                 .layout(Layout::left_to_right(Align::Center));
                             ui.scope_builder(builder, |ui| {
                                 ui.spacing_mut().item_spacing.x = 0.0;
-                                let cells = pack.items.iter().skip(row * STICKER_COLUMNS);
-                                for item in cells.take(STICKER_COLUMNS) {
+                                let cells = pack.items.iter().skip(row * sticker_columns(ui.ctx()));
+                                for item in cells.take(sticker_columns(ui.ctx())) {
                                     let response = picture_tile(ui, item, STICKER_CELL);
                                     if response.hovered() {
                                         self.hover = Some(Hover::Custom(item.id));
@@ -693,7 +718,8 @@ impl Picker {
 
     /// The hovered emoji large with its `:shortcode:`, or a tip.
     fn bar(&self, ui: &mut Ui, scope: &Scope) {
-        let (rect, _) = ui.allocate_exact_size(Vec2::new(WIDTH, 48.0), Sense::hover());
+        let (rect, _) =
+            ui.allocate_exact_size(Vec2::new(width(columns(ui.ctx())), 48.0), Sense::hover());
         let mut ui = ui.new_child(
             UiBuilder::new()
                 .max_rect(rect.shrink2(Vec2::new(PADDING, 6.0)))

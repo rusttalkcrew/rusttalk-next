@@ -38,6 +38,7 @@ impl Home {
         let server = self.servers[*first].name().to_owned();
         for index in &targets {
             self.servers[*index].send(Command::Send(Draft {
+                queued: Default::default(),
                 id: *id,
                 channel: [0; 32],
                 peer: Some(person),
@@ -188,9 +189,7 @@ pub fn dialog(ui: &mut Ui, note: &mut String, close: &mut bool) -> Option<String
             .char_limit(MAX_POKE_CHARS)
             .desired_width(f32::INFINITY),
     );
-    if ui.memory(|memory| memory.focused().is_none()) {
-        field.request_focus();
-    }
+    ui::focus_when_none(ui, &field);
     let mut send = field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
     ui::footer(ui, |ui| {
         send |= ui::primary(ui, t!("pokes.poke")).clicked();
@@ -202,7 +201,7 @@ pub fn dialog(ui: &mut Ui, note: &mut String, close: &mut bool) -> Option<String
 /// The Pokes page: received and sent, newest first.
 pub fn view(ui: &mut Ui, home: &mut Home) {
     let now = ui.input(|input| input.time);
-    pane_title(ui, "pokes-title", t!("pokes.title"), None, false, None);
+    pane_title(ui, "pokes-title", t!("pokes.title"), None, None);
     super::toast_line(ui, &mut home.toast);
     if home.focused {
         home.pokes.mark_read();

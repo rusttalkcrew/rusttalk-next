@@ -21,6 +21,7 @@ pub enum Admin {
         audit: bool,
         bans: bool,
     },
+    SystemMessages(crate::server::SystemMessages),
     Kick(Id),
     /// Mute (`true`) or unmute someone in every voice channel.
     VoiceMute(Id, bool),
@@ -135,6 +136,7 @@ pub struct Invite {
 }
 
 pub struct AuditEntry {
+    pub target_id: Option<Id>,
     pub actor: Id,
     pub action: String,
     pub target: Option<Id>,
@@ -230,6 +232,9 @@ pub(super) async fn run(
             }
             return;
         }
+        Admin::SystemMessages(choice) => save_system_messages(client, choice)
+            .await
+            .map(|()| t!("admin.system_saved")),
         Admin::Kick(person) => call(
             client,
             Method::DELETE,
@@ -581,6 +586,7 @@ async fn audit_log(
                 actor,
                 action: row["action"].as_str().unwrap_or_default().to_owned(),
                 target: person("target_person_id"),
+                target_id: person("target_id"),
                 at: row["at"].as_i64().unwrap_or_else(now),
             });
         }
@@ -742,6 +748,29 @@ async fn add_emoji(
                 t!("admin.done_emoji")
             }
         })
+}
+
+pub(super) async fn save_system_messages(
+    client: &KeyClient<'_>,
+    choice: crate::server::SystemMessages,
+) -> Result<(), String> {
+    use crate::server::SystemMessages;
+    let clear = match &choice {
+        SystemMessages::First => None,
+        SystemMessages::None => Some([].as_slice()),
+        SystemMessages::Channel(id) => Some(id.as_slice()),
+    };
+    let ct = clear
+        .map(|bytes| client.encrypt_metadata(Metadata::SystemMessages, &client.space().id, bytes))
+        .transpose()
+        .map_err(|e| failed(&e))?;
+    call(
+        client,
+        Method::PUT,
+        "/v1/space",
+        Some(json!({"system_messages_ct": ct})),
+    )
+    .await
 }
 
 fn emoji_ct(
