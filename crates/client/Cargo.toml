@@ -114,6 +114,8 @@ eframe = { version = "0.37", features = ["android-game-activity", "glow"] }
 winit = { version = "0.30", default-features = false }
 # Window insets and the activity's state; the version android-activity already uses.
 jni = "0.22"
+# LiveKit's Android initializer takes JNI 0.21 types.
+livekit-jni = { package = "jni", version = "0.21" }
 
 [target.'cfg(target_os = "ios")'.dependencies]
 # keyring's Apple store builds for iOS only with its data-protection Keychain. The

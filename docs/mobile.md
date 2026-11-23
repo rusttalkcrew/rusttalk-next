@@ -5,7 +5,17 @@ RustTalk for Android and iOS is the desktop client, built from the same code:
 client is a library with a small `main.rs`, so Android can load it as
 `librusttalk_client.so`; iOS runs the normal binary inside an app bundle.
 
-This page is the plan (issue #282) and the state after phase 2.
+This page is the plan (issue #282) and the state after phase 3.
+
+## State after phase 3
+
+Android can join foreground voice calls. Joining asks for microphone access;
+permission continues the pending join, and denial leaves the person out of
+the call with a short message. Calls use the same encrypted microphone and
+playback paths as desktop. On the headless Android 15 emulator, denial showed
+the microphone message; granting permission joined the call with a desktop
+peer. Both published GCM-encrypted audio tracks, and leaving restored normal
+audio mode. Host audio was disabled; audible playback still needs a device.
 
 ## State after phase 2
 
@@ -110,8 +120,8 @@ use yet is allowed to be unused there (`allow(dead_code)` on phones only).
 | --- | --- | --- | --- |
 | Window, input, drawing (eframe 0.37) | GameActivity through android-activity 0.6; drawn with glow (OpenGL ES) | winit's UIKit backend, wgpu on Metal | Builds. Android runs. |
 | Text input | GameActivity's text buffer, read each frame (`src/android.rs`) | winit IME | Android works (phase 2) |
-| Voice and video (LiveKit, webrtc-sys) | Builds and links (prebuilt WebRTC for Android) | Prebuilt WebRTC for iOS; CI builds it | Untested at runtime; see Voice |
-| Audio (cpal 0.18) | AAudio (`libaaudio.so`, Android 8.0+) | Core Audio | Builds; needs mic permission and audio session |
+| Voice and video (LiveKit, webrtc-sys) | Builds and links (prebuilt WebRTC for Android) | Prebuilt WebRTC for iOS; CI builds it | Android foreground voice in phase 3; see Voice |
+| Audio (cpal 0.18) | AAudio (`libaaudio.so`, Android 8.0+) | Core Audio | Android uses communication mode during calls; iOS needs its audio session |
 | Key storage (keyring 4) | No Android store | The data-protection Keychain store builds, not used yet | File with password only (see Privacy and permissions) |
 | File picker (rfd) | No backend | No backend | Gated: the buttons that open it are off (`files::PICKER`) |
 | Notifications (notify-rust) | Builds, no notification service | Builds, no notification service | Fail and are logged |
@@ -143,26 +153,23 @@ the same activity instead of restarting the process.
 
 ### Voice
 
-WebRTC's Android code calls into Java. Before a call works on Android:
+After GameActivity loads the Rust library, `MainActivity.onCreate` passes the
+application context to `initialize_android_context` through a native method.
+The Java thread can find WebRTC's classes. A false return disables joining
+voice and logs the failure. Gradle includes the jar from the same archive that
+Cargo linked. R8 keeps the WebRTC classes and JNI Zero's native initializer.
+The native library exports WebRTC's Java callbacks alongside GameActivity's.
 
-1. `livekit::webrtc::android::initialize_android_context` runs on a thread
-   that Java called into, through a native method the app's Java side calls
-   (for example from the activity's `onCreate`). On the `android_main` thread
-   it fails at `FindClass("livekit/org/webrtc/ContextUtils")`: native threads
-   have no app class loader. Keep GameActivity's own JNI registration as it
-   is; add the method next to it, not a `JNI_OnLoad` that replaces it.
-2. Check the boolean it returns, and log and turn voice off when it is false.
-3. `libwebrtc.jar`, which `webrtc-sys` copies next to the build, goes into the
-   APK through Gradle.
-4. The app asks for the microphone (`RECORD_AUDIO`) when a person first joins
-   a voice channel, and sets Android's communication audio mode.
+Android requests `RECORD_AUDIO` at join. After permission is granted the app
+sets `MODE_IN_COMMUNICATION` before opening the microphone and releases the
+mode when the call ends. Bluetooth routing and background calls are still open.
 
 On iOS the audio session needs `AVAudioSession` set to play and record for
 voice chat before the call starts, and the background audio mode keeps a
 call going with the screen off. Test microphone and playback on a real
 iPhone in that phase; the simulator's audio says little about a device.
 
-Until then joining a call on a phone is expected to fail.
+Joining a call on iOS is still untested.
 
 ## Build tools
 
@@ -179,7 +186,7 @@ cargo-ndk automates), builds the client library as a `cdylib` with
 - **Gradle** is needed anyway: GameActivity ships as an AAR, and later phases
   need Java or Kotlin glue (notifications, Android Keystore, the file picker,
   `libwebrtc.jar`). Its only Java so far is `MainActivity`, a GameActivity that
-  counts the keyboard's action key.
+  handles the keyboard's action key, microphone permission and call audio mode.
 
 cargo-ndk can replace the few lines of environment in `build.sh` when more
 ABIs (32-bit ARM, x86_64) are added.
@@ -239,7 +246,7 @@ Rough effort for one person who knows the code base.
 | Phase | What | Effort |
 | --- | --- | --- |
 | 2 | Usable chat on Android. Done: typed text, safe areas and the keyboard, `onDestroy`, recovery words. Left: phone temp folder (`temp_dir()` is not writable on Android), system TLS roots for non-pinned hosts (check, then rustls-platform-verifier), file picker (Storage Access Framework), local notifications, Android Keystore for the keys, hide Updates and Shortcuts on phones, `rusttalk://` links, the layout list above | 3 to 4 weeks |
-| 3 | Voice on Android and iOS: WebRTC init, `libwebrtc.jar`, mic permission, audio session and Bluetooth headsets, calls with the screen off (foreground service on Android, background audio on iOS) | 2 weeks |
+| 3 | Foreground voice on Android. Left: iOS audio session, Bluetooth headsets and calls with the screen off (foreground service on Android, background audio on iOS) | 2 weeks |
 | 4 | iOS on a device: Keychain, notifications (reuse `notify/macos.rs`), document picker, safe areas, background rules | 1 to 2 weeks |
 | 5 | Camera (Camera2, AVFoundation) | 1 week |
 | 6 | Release: signing keys, store listings or a sideload page, release.yml jobs, store updates | 1 week plus store review |
@@ -258,8 +265,8 @@ Rough effort for one person who knows the code base.
   Messaging or Apple Push and a relay that knows device tokens. That is a new
   outbound connection and a privacy decision; it is not planned until then.
   Local notifications while the app runs need neither.
-- **Android permissions:** phase 1 asks for `INTERNET` only. Later, each
-  asked for when first needed: `RECORD_AUDIO` (joining voice), `CAMERA`
+- **Android permissions:** `INTERNET`, `MODIFY_AUDIO_SETTINGS` for call routing,
+  and `RECORD_AUDIO` requested when joining voice. Planned: `CAMERA`
   (turning video on), `POST_NOTIFICATIONS` (Android 13+, turning
   notifications on), foreground service for calls, `BLUETOOTH_CONNECT` for
   headsets. Never location, contacts or phone state.

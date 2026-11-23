@@ -9,3 +9,8 @@
 -keep class io.github.rusttalkcrew.rusttalk.** { *; }
 # Only the logging goes; names stay readable in crash reports.
 -dontobfuscate
+# WebRTC looks these up from C++ through JNI.
+-keep class livekit.org.webrtc.** { *; }
+-keep class livekit.org.jni_zero.** { *; }
+# Generated JNI glue the jar doesn't ship; only an unused class-loader setter names it.
+-dontwarn livekit.org.jni_zero.JniZeroJni

@@ -1127,6 +1127,8 @@ find.server_unreachable = Can't reach this server right now. Try again later.
 
 # crates/client/src/net/voice.rs
 voice.screen_failed = Couldn't share your screen.
+voice.need_mic = Allow microphone access to join the call.
+voice.unavailable = Voice calls are unavailable on this device.
 voice.listen_only = You can listen here, but not talk.
 voice.disconnected = Voice disconnected.
 voice.removed = You were removed from the voice channel.
