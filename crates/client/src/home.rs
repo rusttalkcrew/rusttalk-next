@@ -152,6 +152,8 @@ pub struct Home {
     pub remove_device: Option<crate::settings::RemoveDevice>,
     pub error: Option<String>,
     pub key_storage: crate::key_storage::Form,
+    pub route_editor: crate::route::RouteEditor,
+    pub route_generation: u64,
     pub server_settings: Option<admin::Settings>,
     pub kick: Option<admin::Kick>,
     /// The crop step for a picked profile picture or server icon.
@@ -306,6 +308,7 @@ pub enum Tab {
     Shortcuts,
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     Phone,
+    Network,
     #[cfg(target_os = "android")]
     Advanced,
     Updates,
@@ -319,6 +322,13 @@ impl Home {
         call::leave(self);
         self.net.stop_for_sign_out();
         self.voice.audio.stop_saving();
+    }
+
+    /// Close active calls and refresh clients after switching the per-app network route.
+    pub fn on_route_changed(&mut self, updates: &mut crate::update::Updater) {
+        call::leave(self);
+        self.previews.on_route_changed();
+        updates.on_route_changed();
     }
 
     pub fn new(identity: DeviceIdentity, ctx: &egui::Context, data: PathBuf) -> Result<Self> {
@@ -402,6 +412,8 @@ impl Home {
             remove_device: None,
             error: None,
             key_storage: Default::default(),
+            route_editor: Default::default(),
+            route_generation: rusttalk_core::route::generation(),
             server_settings: None,
             kick: None,
             crop: None,
@@ -2078,6 +2090,14 @@ pub fn show(
     if home.toast.as_ref().is_some_and(|(_, until)| *until < now) {
         home.toast = None;
     }
+    // Always poll route apply work and watch generation changes even when Settings -> Network
+    // is closed, so calls/previews/updater react immediately to route switches or expiry.
+    let route_applied = home.route_editor.poll(ui.ctx());
+    let current_route_gen = rusttalk_core::route::generation();
+    if route_applied || home.route_generation != current_route_gen {
+        home.route_generation = current_route_gen;
+        home.on_route_changed(updates);
+    }
     let colors = ui::colors(ui);
     // Above everything, full screen too: who controls this screen, and the prompt.
     call::remote::sharer(ui, home);
@@ -2088,6 +2108,11 @@ pub fn show(
             .show(ui, |ui| call::full_view(ui, home));
         call::frame(ui.ctx(), home);
         return None;
+    }
+    // Not in unit tests: route tests change the process-wide route state in parallel, and
+    // the banner would shift the layout other tests have already measured.
+    if !cfg!(test) && crate::route::status_banner(ui) {
+        home.settings = Some(Tab::Network);
     }
     // Joining or leaving a call counts: a restart must never cut one off.
     updates.banner(ui, home.voice.call.is_some());

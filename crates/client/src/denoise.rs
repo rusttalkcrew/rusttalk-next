@@ -43,13 +43,14 @@ fn check(bytes: &[u8], size: u64, sha256: &str) -> Result<()> {
 
 /// Downloads and verifies the model, then moves it into place; `progress` gets the bytes so far.
 pub async fn download(file: &Path, mut progress: impl FnMut(u64)) -> Result<()> {
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        // GitHub redirects to its raw content host; the pinned hash covers every byte.
-        .https_only(true)
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(300))
-        .build()?;
+    let client = rusttalk_core::route::configure_reqwest(
+        reqwest::Client::builder()
+            // GitHub redirects to its raw content host; the pinned hash covers every byte.
+            .https_only(true)
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(300)),
+    )?
+    .build()?;
     let mut response = client
         .get(URL)
         .send()

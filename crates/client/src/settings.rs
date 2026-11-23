@@ -473,6 +473,9 @@ pub fn show(
     if home.settings != Some(Tab::Privacy) {
         crate::key_storage::leave(ctx, &mut home.key_storage);
     }
+    if home.settings != Some(Tab::Network) {
+        crate::route::forget(ctx);
+    }
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     if home.settings != Some(Tab::Phone) {
         call::phone::leave_settings(&mut home.voice);
@@ -497,6 +500,7 @@ pub fn show(
                 page(Tab::Shortcuts, "⌨", t!("settings.shortcuts")),
                 #[cfg(not(any(target_os = "android", target_os = "ios")))]
                 page(Tab::Phone, "📞", t!("phone.settings")),
+                page(Tab::Network, "🌐", t!("settings.network")),
                 page(Tab::Notifications, "🔔", t!("settings.notifications")),
                 #[cfg(target_os = "android")]
                 page(Tab::Advanced, "⚙", t!("settings.advanced")),
@@ -550,6 +554,12 @@ pub fn show(
                 Tab::Shortcuts => crate::hotkeys::settings_page(ui, home),
                 #[cfg(not(any(target_os = "android", target_os = "ios")))]
                 Tab::Phone => call::phone::settings_page(ui, &mut home.voice),
+                Tab::Network => {
+                    if crate::route::settings_page(ui, &mut home.route_editor) {
+                        home.route_generation = rusttalk_core::route::generation();
+                        home.on_route_changed(updates);
+                    }
+                }
                 Tab::Privacy => privacy_tab(ui, home, keystore),
                 Tab::Devices => devices_page(ui, home),
                 #[cfg(target_os = "android")]

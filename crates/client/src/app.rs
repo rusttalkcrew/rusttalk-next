@@ -30,6 +30,10 @@ pub struct App<'a> {
     window_started: &'a Cell<bool>,
     /// The key storage choice came first, so Back on the welcome screen returns to it.
     chose_storage: bool,
+    /// The network route step came first during onboarding, so Back returns to it.
+    chose_network: bool,
+    /// Where onboarding continues after the first-start network route step.
+    after_network: Option<Start>,
     /// The recovery words were asked for from here: Back returns to it.
     recover: Option<Recover>,
 }
@@ -43,6 +47,7 @@ enum Recover {
 
 enum Screen {
     Problem(String),
+    Network(Box<crate::route::RouteEditor>),
     Welcome,
     Words {
         words: Zeroizing<String>,
@@ -81,6 +86,7 @@ enum Screen {
 }
 
 pub enum Action {
+    NetworkDone,
     Create,
     Restore,
     /// The step before this one.
@@ -100,6 +106,7 @@ impl<'a> App<'a> {
         cc: &eframe::CreationContext,
         keystore: Keystore,
         start: Start,
+        route_init: crate::route::InitState,
         data: PathBuf,
         window_started: &'a Cell<bool>,
     ) -> Self {
@@ -107,6 +114,8 @@ impl<'a> App<'a> {
         #[cfg(target_os = "linux")]
         crate::wayland_drops::install(cc);
         let updates = crate::update::Updater::new(&data);
+        let chose_storage = matches!(start, Start::Choose);
+        let chose_network = route_init == crate::route::InitState::Onboarding;
         let mut app = Self {
             keystore,
             screen: Screen::Welcome,
@@ -114,11 +123,23 @@ impl<'a> App<'a> {
             data,
             updates,
             window_started,
-            chose_storage: matches!(start, Start::Choose),
+            chose_storage,
+            chose_network,
+            after_network: None,
             recover: None,
         };
-        app.screen = match start {
-            Start::Ready(Some(identity)) => app.home(*identity),
+        if chose_network {
+            app.after_network = Some(start);
+            app.screen = Screen::Network(Box::default());
+        } else {
+            app.screen = app.start_screen(start);
+        }
+        app
+    }
+
+    fn start_screen(&self, start: Start) -> Screen {
+        match start {
+            Start::Ready(Some(identity)) => self.home(*identity),
             Start::Ready(None) => Screen::Welcome,
             Start::Choose => Screen::Storage {
                 password: None,
@@ -133,8 +154,7 @@ impl<'a> App<'a> {
                 busy: None,
             },
             Start::Missing { keychain } => Screen::Missing { keychain },
-        };
-        app
+        }
     }
 
     fn home(&self, identity: DeviceIdentity) -> Screen {
@@ -206,10 +226,24 @@ impl<'a> App<'a> {
         forget_words(&self.ctx);
         let screen = std::mem::replace(&mut self.screen, Screen::Welcome);
         self.screen = match (action, screen) {
+            (Action::NetworkDone, Screen::Network(_)) => {
+                crate::route::forget(&self.ctx);
+                match self.after_network.take() {
+                    Some(start) => self.start_screen(start),
+                    None if self.chose_storage => Screen::Storage {
+                        password: None,
+                        error: None,
+                        restore: false,
+                        busy: None,
+                    },
+                    None => Screen::Welcome,
+                }
+            }
             (Action::Back, screen) => {
                 // Leaving a password screen: forget what egui kept of the fields.
                 key_storage::forget(&self.ctx);
-                back(screen, self.chose_storage, self.recover)
+                crate::route::forget(&self.ctx);
+                back(screen, self.chose_storage, self.chose_network, self.recover)
             }
             (Action::Create, _) => match DeviceIdentity::create(DEVICE_NAME) {
                 Ok((words, identity)) => Screen::Words { words, identity },
@@ -471,7 +505,12 @@ fn save(keystore: &mut Keystore, identity: &DeviceIdentity) -> Option<String> {
 /// recovery words succeed, so going back leaves no half-made account: the words of
 /// a new account stay the same back to their own screen, and are dropped (wiped)
 /// before it.
-fn back(screen: Screen, chose_storage: bool, recover: Option<Recover>) -> Screen {
+fn back(
+    screen: Screen,
+    chose_storage: bool,
+    chose_network: bool,
+    recover: Option<Recover>,
+) -> Screen {
     let storage = |restore| Screen::Storage {
         password: None,
         error: None,
@@ -480,6 +519,12 @@ fn back(screen: Screen, chose_storage: bool, recover: Option<Recover>) -> Screen
     };
     match screen {
         Screen::Welcome if chose_storage => storage(false),
+        Screen::Welcome if chose_network => Screen::Network(Box::default()),
+        Screen::Storage {
+            restore: false,
+            busy: None,
+            ..
+        } if chose_network => Screen::Network(Box::default()),
         Screen::Words { .. } => Screen::Welcome,
         Screen::Confirm {
             words, identity, ..
@@ -554,9 +599,14 @@ impl eframe::App for App<'_> {
 
 impl App<'_> {
     fn screens(&mut self, ui: &mut Ui) {
-        self.updates.poll(ui.ctx());
+        // Never make automatic update requests before onboarding chooses a route or
+        // while the selected route is connecting/blocked.
+        if rusttalk_core::route::is_active() {
+            self.updates.poll(ui.ctx());
+        }
         self.poll();
         let chose_storage = self.chose_storage;
+        let chose_network = self.chose_network;
         let action = match &mut self.screen {
             Screen::Problem(details) => step(ui, "problem", false, |ui| {
                 ui::step_title(ui, t!("app.problem_title"), t!("app.problem_help"));
@@ -564,7 +614,10 @@ impl App<'_> {
                     .show(ui, |ui| ui.label(details.as_str()));
                 None
             }),
-            Screen::Welcome => step(ui, "welcome", chose_storage, welcome),
+            Screen::Network(editor) => step(ui, "network", false, |ui| {
+                crate::route::onboarding(ui, editor).then_some(Action::NetworkDone)
+            }),
+            Screen::Welcome => step(ui, "welcome", chose_storage || chose_network, welcome),
             Screen::Words { words, .. } => step(ui, "words", true, |ui| show_words(ui, words)),
             Screen::Confirm {
                 check,
@@ -583,7 +636,7 @@ impl App<'_> {
                 busy,
                 restore,
             } => {
-                let back = *restore && busy.is_none();
+                let back = (*restore || chose_network) && busy.is_none();
                 let busy = busy.is_some();
                 let keychain = self.keystore.keychain_works();
                 step(ui, "storage", back, |ui| {
@@ -918,38 +971,45 @@ mod tests {
             error: None,
         };
         // From the word check, the same words again.
-        let screen = back(check, false, None);
+        let screen = back(check, false, false, None);
         let Screen::Words { words, .. } = &screen else {
             panic!("back to the words");
         };
         assert_eq!(**words, shown);
         // Before them, the words (never saved) are dropped.
-        assert!(matches!(back(screen, false, None), Screen::Welcome));
+        assert!(matches!(back(screen, false, false, None), Screen::Welcome));
 
         let restore = || Screen::Restore {
             words: key_storage::secret_input(),
             error: None,
         };
-        assert!(matches!(back(restore(), true, None), Screen::Welcome));
         assert!(matches!(
-            back(Screen::Welcome, true, None),
+            back(restore(), true, false, None),
+            Screen::Welcome
+        ));
+        assert!(matches!(
+            back(Screen::Welcome, true, false, None),
             Screen::Storage { restore: false, .. }
         ));
         assert!(matches!(
-            back(Screen::Welcome, false, None),
+            back(Screen::Welcome, false, false, None),
             Screen::Welcome
+        ));
+        assert!(matches!(
+            back(Screen::Welcome, false, true, None),
+            Screen::Network(_)
         ));
         // Asked for from the missing-keys screen: back through the storage choice.
         let missing = Some(Recover::Missing { keychain: true });
-        let storage = back(restore(), false, missing);
+        let storage = back(restore(), false, false, missing);
         assert!(matches!(storage, Screen::Storage { restore: true, .. }));
         assert!(matches!(
-            back(storage, false, missing),
+            back(storage, false, false, missing),
             Screen::Missing { keychain: true }
         ));
-        let storage = back(restore(), false, Some(Recover::Unlock));
+        let storage = back(restore(), false, false, Some(Recover::Unlock));
         assert!(matches!(
-            back(storage, false, Some(Recover::Unlock)),
+            back(storage, false, false, Some(Recover::Unlock)),
             Screen::Unlock { .. }
         ));
     }
@@ -973,6 +1033,9 @@ mod tests {
         let device = [
             "identity.lock",
             "servers.lock",
+            "route.json",
+            "route.secret",
+            "route.wrapped",
             "updates.json",
             "deepfilternet3.tar.gz",
             "rusttalk-update.exe",

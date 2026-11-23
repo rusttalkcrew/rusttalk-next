@@ -16,9 +16,15 @@ use livekit_net::{
 use livekit_protocol::{SignalResponse, signal_response};
 use prost::Message as _;
 use rustls::ClientConfig;
-use tokio::{net::TcpStream, sync::Mutex};
+#[cfg(not(feature = "client"))]
+use tokio::net::TcpStream;
+use tokio::sync::Mutex;
+#[cfg(feature = "client")]
+use tokio_tungstenite::client_async_tls_with_config;
+#[cfg(not(feature = "client"))]
+use tokio_tungstenite::connect_async_tls_with_config;
 use tokio_tungstenite::{
-    Connector, MaybeTlsStream, WebSocketStream, connect_async_tls_with_config,
+    Connector, MaybeTlsStream, WebSocketStream,
     tungstenite::{Error as WsError, Message, client::IntoClientRequest},
 };
 use url::Url;
@@ -48,7 +54,6 @@ pub fn register(
     // No pin means a domain server with a public certificate: use the configured trust roots,
     // like the HTTPS API and the event socket do.
     let tls = pin.map(pinned_config).transpose()?;
-    let http = build_https_client(tls.clone())?;
     if origins.is_empty() {
         if livekit_net::has_ws_client() || livekit_net::has_http_client() {
             return Err("the LiveKit transport has already been registered".into());
@@ -61,7 +66,6 @@ pub fn register(
         LiveKitPin {
             pin,
             tls: tls.map(Arc::new),
-            http,
         },
     );
     Ok(())
@@ -83,7 +87,6 @@ struct PinnedTransport {
 struct LiveKitPin {
     pin: Option<Fingerprint>,
     tls: Option<Arc<ClientConfig>>,
-    http: reqwest::Client,
 }
 
 impl PinnedTransport {
@@ -123,17 +126,45 @@ impl WsClient for PinnedTransport {
             let value = header.value.parse().map_err(connection_error)?;
             request.headers_mut().insert(name, value);
         }
-        let connect =
-            connect_async_tls_with_config(request, None, false, pin.tls.map(Connector::Rustls));
-        let (socket, _) = tokio::time::timeout(Duration::from_millis(timeout_ms), connect)
+        let limit = Duration::from_millis(timeout_ms);
+        #[cfg(feature = "client")]
+        let connect = {
+            let host = url
+                .host_str()
+                .ok_or_else(|| TransportError::Other("missing LiveKit host".into()))?
+                .to_owned();
+            let port = url
+                .port_or_known_default()
+                .ok_or_else(|| TransportError::Other("missing LiveKit port".into()))?;
+            let connector = pin.tls.map(Connector::Rustls);
+            async move {
+                let stream = crate::route::connect_tcp(&host, port, limit)
+                    .await
+                    .map_err(connection_error)?;
+                client_async_tls_with_config(request, stream, None, connector)
+                    .await
+                    .map_err(|error| match error {
+                        WsError::Http(response) => TransportError::Http {
+                            status: response.status().as_u16(),
+                        },
+                        _ => connection_error(error),
+                    })
+            }
+        };
+        #[cfg(not(feature = "client"))]
+        let connect = async move {
+            connect_async_tls_with_config(request, None, false, pin.tls.map(Connector::Rustls))
+                .await
+                .map_err(|error| match error {
+                    WsError::Http(response) => TransportError::Http {
+                        status: response.status().as_u16(),
+                    },
+                    _ => connection_error(error),
+                })
+        };
+        let (socket, _) = tokio::time::timeout(limit, connect)
             .await
-            .map_err(|_| TransportError::Timeout)?
-            .map_err(|error| match error {
-                WsError::Http(response) => TransportError::Http {
-                    status: response.status().as_u16(),
-                },
-                _ => connection_error(error),
-            })?;
+            .map_err(|_| TransportError::Timeout)??;
         let (writer, reader) = socket.split();
         Ok(WsConnectResult {
             connection: Arc::new(Connection {
@@ -154,9 +185,15 @@ impl HttpClient for PinnedTransport {
         body: Option<Vec<u8>>,
     ) -> Result<HttpResponse, TransportError> {
         let (url, pin) = self.lookup(&url, "https")?;
+        let tls = pin
+            .pin
+            .map(pinned_config)
+            .transpose()
+            .map_err(connection_error)?;
+        let http = build_https_client(tls).map_err(connection_error)?;
         let mut request = match method {
-            HttpMethod::Get => pin.http.get(url),
-            HttpMethod::Post => pin.http.post(url),
+            HttpMethod::Get => http.get(url),
+            HttpMethod::Post => http.post(url),
         };
         for header in headers {
             request = request.header(header.name, header.value);
@@ -177,6 +214,9 @@ impl HttpClient for PinnedTransport {
     }
 }
 
+#[cfg(feature = "client")]
+type Socket = WebSocketStream<MaybeTlsStream<crate::route::RouteStream>>;
+#[cfg(not(feature = "client"))]
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 struct Connection {

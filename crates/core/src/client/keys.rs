@@ -25,8 +25,7 @@ use tokio_tungstenite::tungstenite::Message;
 use super::{MessageBody, Server, chat::Opened};
 use crate::messages::KeyLink;
 
-type EventStream =
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+type EventStream = pinned_tls::Socket;
 
 type HistoricalDevice = ([u8; 32], [u8; 32], [u8; 32]);
 /// A verified epoch key, its envelope, the person who wrapped it, its commitment,
@@ -1595,7 +1594,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let socket = tokio::net::TcpStream::connect(listener.local_addr()?).await?;
         let events = EventStream::from_raw_socket(
-            tokio_tungstenite::MaybeTlsStream::Plain(socket),
+            tokio_tungstenite::MaybeTlsStream::Plain(crate::route::RouteStream::Direct(socket)),
             tokio_tungstenite::tungstenite::protocol::Role::Client,
             None,
         )
