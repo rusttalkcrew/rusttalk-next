@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Screen shares show simpler controls, preview automatically while focused, and start with system audio selected where supported.
+
 ## v0.2.1 - 2026-11-23
 
 - Incoming custom emoji now appear as soon as their pictures finish loading, without waiting for another chat message.

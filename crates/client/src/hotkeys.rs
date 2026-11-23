@@ -530,7 +530,7 @@ fn find_window(home: &mut Home) {
     home.hotkeys.window = Some(receive);
 }
 
-/// Share the window found, with the last share's quality and stream sound, or switch
+/// Share the window found, with the last share's quality and default stream sound, or switch
 /// to it when already sharing.
 fn share(home: &mut Home, found: anyhow::Result<Option<screen::Target>>) {
     let target = match found {
@@ -559,7 +559,7 @@ fn share(home: &mut Home, found: anyhow::Result<Option<screen::Target>>) {
         let sound = if server.voice_muted(&server.dir.me) {
             Vec::new()
         } else {
-            home.voice.stream_audio.clone()
+            home.voice.default_stream_audio()
         };
         let options = call::screen_options(&home.voice.audio.settings());
         server.send(Command::ShareScreen(target, options, sound));
