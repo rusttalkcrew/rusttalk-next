@@ -11,6 +11,7 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- While you are in a voice call, RustTalk keeps you Online even when another app has the focus.
 - Reopen the last chat picture instantly, even if the connection drops after it loads.
 - Unavailable servers show an exclamation mark in the server sidebar until they reconnect.
 

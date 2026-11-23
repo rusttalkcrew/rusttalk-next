@@ -430,9 +430,11 @@ impl Home {
         }
     }
 
-    /// Turn "Online" into "Away" after a while without input, and back once used again.
+    /// Turn "Online" into "Away" after a while without input or call, and back once used again.
     fn track_activity(&mut self, ui: &Ui) {
-        let (now, active) = ui.input(|input| (input.time, !input.events.is_empty()));
+        let (now, input) = ui.input(|input| (input.time, !input.events.is_empty()));
+        // In a call people talk while another app has the focus, so the call counts as activity.
+        let active = input || self.voice.call.is_some();
         if active {
             self.active_at = now;
             if self.auto_away {
