@@ -1,6 +1,7 @@
 mod camera;
 mod live_file;
 mod moderation;
+mod ring;
 mod screen;
 mod terminal;
 
@@ -172,6 +173,7 @@ pub async fn exercise(
         tokio::try_join!(a.join_voice(&voice.id), b.join_voice(&voice.id))?;
     live_file::exercise(project, a, &mut b, &c, &mut room_a, &mut room_b, voice).await?;
     terminal::exercise(&mut room_a, &mut room_b).await?;
+    ring::exercise(&mut room_a, &mut room_b).await?;
     let mut listener = c.join_voice(&voice.id).await?;
     assert_eq!(
         (

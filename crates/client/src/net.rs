@@ -153,6 +153,10 @@ pub fn unsent_note(data: &Path) -> Option<PathBuf> {
 pub enum Command {
     /// Load the newest page and follow live messages.
     Open(Id),
+    CheckVoiceDestination {
+        request: Id,
+        channel: Id,
+    },
     Backfill(backfill::Request),
     /// Load the page before a message: channel, oldest loaded message.
     Older(Id, Id),
@@ -221,6 +225,8 @@ pub enum Command {
     Calendar(Change),
     JoinVoice(Id),
     LeaveVoice,
+    /// Ring the others in the call: we asked someone to join it.
+    Ring,
     SyncVoiceStatus,
     ShareApp(App),
     /// Stop sharing an app, by its ID.
@@ -295,6 +301,8 @@ pub struct Draft {
     /// A poll (`text` is its question), a vote or a poll's end, sent with nothing else.
     // Boxed: a poll is rare and would make every command larger.
     pub poll: Option<Box<PollPart>>,
+    /// A request to join a voice channel or its answer, sent with nothing else.
+    pub voice_request: Option<rusttalk_core::messages::VoiceRequest>,
     /// A link preview made while sending, uploaded as a hidden file (see `link_cards`).
     pub preview: Option<std::sync::Arc<crate::link_cards::Made>>,
     /// Emoji and stickers of other servers, uploaded as small files (see `sticker_files`).
@@ -357,6 +365,7 @@ impl Compatibility {
 
 pub enum Update {
     RetryDmBackfill,
+    VoiceDestination(Url, Id, bool),
     Preview(Result<Box<Preview>, String>),
     /// A page of directory results, by page number.
     Found(u32, Result<Vec<Listed>, String>),
@@ -408,6 +417,8 @@ pub enum Update {
     /// Everyone in one voice channel.
     Room(Url, Id, Vec<Peer>, Option<crate::sounds::Snapshot>),
     CallVideoStopped(Url, Id, livekit::prelude::TrackSid),
+    /// This person rang the call in this channel: they asked someone to join it.
+    CallRang(Url, Id, Id),
     /// Sharing this app on its own stopped or never started.
     AppStopped(String),
     SharedAudioStopped(Url, Id),
@@ -759,7 +770,8 @@ struct State {
     /// Channels the UI has opened, which get live messages.
     loaded: HashSet<Id>,
     /// Records that waited for a channel key, retried after key work.
-    waiting: HashMap<Id, HashSet<Id>>,
+    // True when this record arrived live, so only those asks may ring after key recovery.
+    waiting: HashMap<Id, HashMap<Id, bool>>,
     last: Option<Directory>,
     order_unavailable: bool,
     /// Whether `last` was built with the space key.
@@ -1047,6 +1059,9 @@ fn refuse(ctx: &Ctx, url: &Url, command: Command) {
     match command {
         // The status and hiding are sent again once connected, when they differ.
         // So is a pending bio.
+        Command::CheckVoiceDestination { request, .. } => {
+            ctx.send(Update::VoiceDestination(url.clone(), request, false))
+        }
         Command::SetStatus(_)
         | Command::SetHideOffline(_)
         | Command::SetBio(_)
@@ -1280,7 +1295,13 @@ async fn serve(
             }
             () = rekey_due => {
                 match client.sync().await {
-                    Ok(()) => { apply_keys(ctx, url, client, state); save_pins(ctx, url, client, state); },
+                    Ok(()) => {
+                        apply_keys(ctx, url, client, state);
+                        save_pins(ctx, url, client, state);
+                        if let Err(error) = retry_messages(ctx, url, client, state).await {
+                            tracing::warn!(%error, "retrying messages after re-key failed");
+                        }
+                    },
                     Err(error) => {
                         tracing::warn!(error = %format_args!("{error:#}"), "DM key recovery failed");
                         // Wait before the next try, so a fast failure can't spin.
@@ -1362,7 +1383,9 @@ async fn voice_next(
             topic,
             ..
         })) => {
-            if topic.as_deref() == Some(rusttalk_core::client::voice::terminal::TOPIC) {
+            if topic.as_deref() == Some(rusttalk_core::client::voice::ring::TOPIC) {
+                voice::ring_received(ctx, url, client, state, &participant, &payload);
+            } else if topic.as_deref() == Some(rusttalk_core::client::voice::terminal::TOPIC) {
                 voice::terminal_received(ctx, client, state, &participant, &payload).await;
             } else {
                 voice::control_received(ctx, client, state, &participant, &payload).await;
@@ -1530,8 +1553,9 @@ async fn latest(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, state: &State)
                 if let Some(peer) = peer
                     && (record.backfilled
                         || record.person != peer
-                        || !(client.open_message(&channel, record).await)
-                            .is_ok_and(|body| body.key_link.is_none() && !body.poke))
+                        || !(client.open_message(&channel, record).await).is_ok_and(|body| {
+                            body.key_link.is_none() && !body.poke && body.voice_request.is_none()
+                        }))
                 {
                     continue;
                 }
@@ -1589,7 +1613,7 @@ async fn on_event(
             let (channel, id) = (decode(&channel)?, decode(&id)?);
             let record = client.message(&channel, &id).await?;
             if state.loaded.contains(&channel) {
-                let (msg, cached) = open(client, state, &channel, &record).await?;
+                let (msg, cached) = open(client, state, &channel, &record, true).await?;
                 if let Some(record) = cached {
                     state.remember(channel, vec![record], false);
                 }
@@ -1603,6 +1627,9 @@ async fn on_event(
             // Not opened: decrypt only for the unread mark and notification, keeping no state.
             let body = client.open_message(&channel, &record).await;
             if let Err(error) = &body {
+                if error.downcast_ref::<MessageError>() == Some(&MessageError::MissingKey) {
+                    state.waiting.entry(channel).or_default().insert(id, true);
+                }
                 tracing::warn!(error = %format_args!("{error:#}"), "message could not be opened");
             }
             let msg = match &body {
@@ -1648,28 +1675,7 @@ async fn on_event(
             if !state.named && client.has_space_key() {
                 directory(ctx, url, client, state).await?;
             }
-            for (channel, ids) in std::mem::take(&mut state.waiting) {
-                if !state
-                    .last
-                    .as_ref()
-                    .is_some_and(|dir| recent::visible(dir, &channel))
-                {
-                    continue;
-                }
-                let mut items = Vec::new();
-                for id in ids {
-                    // The message may have been deleted meanwhile.
-                    let Ok(record) = client.message(&channel, &id).await else {
-                        continue;
-                    };
-                    let (msg, cached) = open(client, state, &channel, &record).await?;
-                    if let Some(record) = cached {
-                        state.remember(channel, vec![record], false);
-                    }
-                    items.extend(msg);
-                }
-                send_messages(ctx, url, channel, items, false, None);
-            }
+            retry_messages(ctx, url, client, state).await?;
             set_display_name(ctx, url, client, state).await;
         }
         Event::VoiceChanged { channel } => {
@@ -1691,6 +1697,43 @@ async fn on_event(
     Ok(())
 }
 
+async fn retry_messages(
+    ctx: &Ctx,
+    url: &Url,
+    client: &mut KeyClient<'_>,
+    state: &mut State,
+) -> Result<()> {
+    for (channel, ids) in std::mem::take(&mut state.waiting) {
+        if !state
+            .last
+            .as_ref()
+            .is_some_and(|dir| recent::visible(dir, &channel))
+        {
+            continue;
+        }
+        let mut items = Vec::new();
+        for (id, live) in ids {
+            // The message may have been deleted meanwhile.
+            let Ok(record) = client.message(&channel, &id).await else {
+                continue;
+            };
+            let (msg, cached) = open(client, state, &channel, &record, live).await?;
+            if let Some(record) = cached {
+                state.remember(channel, vec![record], false);
+            }
+            if live
+                && let Some(msg) = &msg
+                && matches!(msg.body, Body::VoiceRequest(_))
+            {
+                ctx.send(Update::Arrived(url.clone(), channel, msg.clone()));
+            }
+            items.extend(msg);
+        }
+        send_messages(ctx, url, channel, items, false, None);
+    }
+    Ok(())
+}
+
 async fn on_command(
     ctx: &Ctx,
     url: &Url,
@@ -1699,6 +1742,15 @@ async fn on_command(
     command: Command,
 ) -> Result<()> {
     match command {
+        Command::CheckVoiceDestination { request, channel } => {
+            let result = client.voice_participants(&channel).await;
+            ctx.send(Update::VoiceDestination(
+                url.clone(),
+                request,
+                result.is_ok(),
+            ));
+            result?;
+        }
         Command::Open(channel) => {
             state.loaded.insert(channel);
             page(ctx, url, client, state, channel, None).await;
@@ -1756,6 +1808,7 @@ async fn on_command(
                 key_link: None,
                 poke: draft.poke,
                 poll: draft.poll.as_deref().cloned(),
+                voice_request: draft.voice_request,
             };
             if draft.peer.is_some()
                 && let Some(dir) = &state.last
@@ -1980,6 +2033,7 @@ async fn on_command(
             voice::share_camera(ctx, url, client, state, source, options).await?;
         }
         Command::LeaveVoice
+        | Command::Ring
         | Command::SyncVoiceStatus
         | Command::StopApp(_)
         | Command::StopScreen
@@ -2167,7 +2221,7 @@ async fn page(
     let mut items = Vec::with_capacity(records.len());
     let mut cached = Vec::new();
     for record in records.iter().rev() {
-        let (msg, recent) = match open(client, state, &channel, record).await {
+        let (msg, recent) = match open(client, state, &channel, record, false).await {
             Ok(opened) => opened,
             Err(error) => {
                 page_failed(ctx, url, state, channel, before, &error);
@@ -2202,6 +2256,7 @@ async fn open(
     state: &mut State,
     channel: &Id,
     record: &MessageRecord,
+    live: bool,
 ) -> Result<(Option<Msg>, Option<recent::Record>)> {
     // The core client can return a previously opened body. Recheck its epoch
     // against the current session even on that path.
@@ -2236,7 +2291,12 @@ async fn open(
                 return Err(error);
             }
             if error.downcast_ref::<MessageError>() == Some(&MessageError::MissingKey) {
-                state.waiting.entry(*channel).or_default().insert(record.id);
+                *state
+                    .waiting
+                    .entry(*channel)
+                    .or_default()
+                    .entry(record.id)
+                    .or_default() |= live;
             }
             tracing::warn!(error = %format_args!("{error:#}"), "message could not be opened");
             (Some(unreadable(record)), None)
@@ -2294,10 +2354,11 @@ fn display_message(id: Id, person: Id, at: i64, backfilled: bool, body: &Message
         body: match body.friend {
             Some(signal) => Body::Friend(signal, body.friend_sent),
             None if body.poke => Body::Poke(body.text.clone()),
-            None => match &body.poll {
-                Some(PollPart::Open(poll)) => Body::Poll(body.text.clone(), poll.clone()),
-                Some(part) => Body::PollPart(part.clone()),
-                None => Body::Text(body.text.clone()),
+            None => match (&body.poll, body.voice_request) {
+                (Some(PollPart::Open(poll)), _) => Body::Poll(body.text.clone(), poll.clone()),
+                (Some(part), _) => Body::PollPart(part.clone()),
+                (None, Some(request)) => Body::VoiceRequest(request),
+                (None, None) => Body::Text(body.text.clone()),
             },
         },
         files: body.attachments.clone(),

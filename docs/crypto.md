@@ -385,7 +385,7 @@ Formats 2 and 3 (the envelope's first byte) have this plaintext, in order.
 | Field | Encoding | Maximum bytes |
 | --- | --- | --- |
 | Flags | Bit 0 reply-to, bit 1 edit-of, bit 2 live offer, bit 3 sticker, bit 4 friend message, bit 5 key link, bit 6 poke. In v3 only, bit 7 quoted author | 1 |
-| Kind | v3 only: 0 for an ordinary message, or a poll part (1 poll, 2 vote, 3 end) followed by its fields, below. Other kinds are rejected | 1 + 4,030 |
+| Kind | v3 only: 0 for an ordinary message, or a poll part (1 poll, 2 vote, 3 end) or voice request (4) followed by its fields, below. Other kinds are rejected | 1 + 4,030 |
 | Text | Two-byte big-endian UTF-8 length, then text of at most 2,000 Unicode scalar values | 2 + 8,000 |
 | Reply ID | 32 bytes, present with bit 0 | 32 |
 | Quoted author | Raw 32-byte person ID, present with bit 7. Requires bit 0 and forbids bit 1 | 32 |
@@ -419,6 +419,14 @@ milliseconds, and a one-byte count of 0–10 option indexes, each one byte below
 10, strictly ascending. An end has empty text; its field is the poll's message
 ID. Format 2 can't carry a poll part.
 Apps before this format show any of these as a message they can't open.
+
+A voice request (kind 4) has no flags, empty text and no stored files (46
+bytes of plaintext for an ask, 38 for an answer). Its fields are an action byte and 32 bytes: action 0 asks
+someone to join and holds the voice channel's ID followed by signed 64-bit
+big-endian Unix seconds when the sender asked; 1 (joining), 2 (declined)
+and 3 (coming later) answer and hold the request's message ID. Readers reject
+other actions, and format 2 can't carry one (see
+[Protocol](protocol.md#voice-requests)).
 Nothing may follow the last field. The largest plaintext is 10,645 bytes
 and the largest envelope is 10,752 bytes. Every length is checked against
 its field maximum before reading. Readers reject version 1 envelopes.

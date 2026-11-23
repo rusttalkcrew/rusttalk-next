@@ -443,6 +443,7 @@ pub fn stage(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
     ui.painter().rect_filled(rect, ui::RADIUS, c.rail);
     let server = &home.servers[index];
     let joined = home.voice.in_call(server, &channel);
+    let calling = crate::home::voice_requests::calling(&home.voice, server);
     let peers = server.voice.get(&channel).cloned().unwrap_or_default();
     let ctx = ui.ctx().clone();
     let voice = &mut home.voice;
@@ -601,6 +602,7 @@ pub fn stage(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
         };
         let state = TileState {
             relation: home.friends.relation(&entry.peer.person),
+            can_ask: calling && !joined,
             joined,
             big: is_big,
             spotlight: big.is_some(),
@@ -690,6 +692,8 @@ fn animate(ctx: &egui::Context, tile: &Tile, target: Rect, stage: Rect) -> Rect 
 #[derive(Clone, Copy)]
 struct TileState {
     relation: Relation,
+    /// This device is in a call in another channel here, and can ask them over.
+    can_ask: bool,
     joined: bool,
     /// The focused or presented tile.
     big: bool,
@@ -828,6 +832,7 @@ fn tile(
             server,
             person,
             relation: state.relation,
+            can_ask: state.can_ask,
             audio: others.then_some(audio),
             video: (others && entry.peer.camera.is_some()).then_some(entry.video),
         };
@@ -848,6 +853,7 @@ fn tile(
             server,
             person,
             relation: state.relation,
+            can_ask: false,
             audio: Some(audio),
             video: None,
         });

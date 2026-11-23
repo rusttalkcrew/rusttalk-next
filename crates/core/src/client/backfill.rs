@@ -87,8 +87,12 @@ impl KeyClient<'_> {
             return Ok(None);
         }
         let body = self.open_message(channel, &record).await?;
-        // Epoch links and ephemeral transfer offers belong to the source channel.
-        if body.key_link.is_some() || body.live.is_some() || !body.attachments.is_empty() {
+        // Epoch links, voice invitations and ephemeral transfer offers belong to the source channel.
+        if body.key_link.is_some()
+            || body.voice_request.is_some()
+            || body.live.is_some()
+            || !body.attachments.is_empty()
+        {
             return Ok(None);
         }
         Ok(Some(DmHistoryItem {

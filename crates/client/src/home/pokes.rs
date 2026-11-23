@@ -53,6 +53,7 @@ impl Home {
                 friend: None,
                 poke: true,
                 poll: None,
+                voice_request: None,
                 preview: None,
                 inline: Vec::new(),
             }));

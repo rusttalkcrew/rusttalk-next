@@ -620,6 +620,8 @@ pub enum Body {
     Friend(rusttalk_core::client::FriendSignal, u64),
     /// A poke and its note; listed under Pokes, not shown in the chat.
     Poke(String),
+    /// A request to join a voice channel or its answer; rings, not shown in the chat.
+    VoiceRequest(rusttalk_core::messages::VoiceRequest),
     /// A poll and its question, shown as a card.
     Poll(String, Poll),
     /// A vote or a poll's end; counted on the poll's card, not shown in the chat.

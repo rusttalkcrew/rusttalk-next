@@ -376,6 +376,7 @@ fn text_draft(channel: Id, text: String, reply_to: Option<(Id, Id)>) -> Option<D
         return None;
     };
     Some(Draft {
+        voice_request: None,
         forum_post: false,
         queued: Default::default(),
         id: *id,

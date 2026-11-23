@@ -131,10 +131,39 @@ pub(super) async fn scenario(
     let b_id = encode(&b_person);
     let a_person = *a.identity.certificate.person_id();
     let dm = a.create_dm(&b_person).await?;
+    let category = a.create_category(b"W61 Voice chat").await?;
+    let voice = a
+        .create_channel(&category, "voice", b"W61 Lounge", b"")
+        .await?;
+    let ask = rusttalk_core::messages::VoiceRequest::Ask(
+        voice.id,
+        rusttalk_core::index::now_ms().context("timestamp")? / 1000,
+    );
+    let signal = |request| MessageBody {
+        voice_request: Some(request),
+        ..Default::default()
+    };
+    let first = a.send_message(&dm.id, &signal(ask)).await?;
     receive_key(b, dm, 1).await?;
+    let delivered = b.message(&dm.id, &first.id).await?;
+    assert_eq!(
+        b.open_message(&dm.id, &delivered).await?.voice_request,
+        Some(ask)
+    );
     // B asking for the same DM gets A's, pins it and re-keys it for the two of them.
     assert_eq!(b.create_dm(&a_person).await?, dm);
     pin_dm_as_peer(b, a, dm).await?;
+    let answer = rusttalk_core::messages::VoiceRequest::Answer(
+        first.id,
+        rusttalk_core::messages::VoiceAnswer::Later,
+    );
+    let reply = b.send_message(&dm.id, &signal(answer)).await?;
+    let delivered = a.message(&dm.id, &reply.id).await?;
+    assert_eq!(
+        a.open_message(&dm.id, &delivered).await?.voice_request,
+        Some(answer)
+    );
+    println!("W294 first-ever DM delivered the encrypted invitation and its matching answer");
     let [dm_message, _] = exchange(a, b, dm, [DM_A, DM_B]).await?;
     for (client, peer) in [(&*a, b_person), (&*b, a_person)] {
         let direct = client
@@ -325,10 +354,6 @@ pub(super) async fn scenario(
     println!("W07 verified two-way text and DMs, paging, edits, replays and audited moderation");
 
     // A voice channel has the same chat as a text channel, under its own channel key.
-    let category = a.create_category(b"W61 Voice chat").await?;
-    let voice = a
-        .create_channel(&category, "voice", b"W61 Lounge", b"")
-        .await?;
     a.sync().await?;
     receive_key(b, voice, 1).await?;
     exchange(a, b, voice, [VOICE_A, VOICE_B]).await?;
