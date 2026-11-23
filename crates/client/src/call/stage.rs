@@ -935,8 +935,8 @@ fn tile(
         let sharer = entry.peer.name(server);
         remote_tag(ui, rect, entry, on, response.has_focus(), &sharer);
     }
-    overlay.paint(ui, rect);
-    name_tag(ui, rect, entry, audio);
+    let badge = name_tag(ui, rect, entry, audio);
+    overlay.paint(ui, rect, badge);
     tools(ui, rect, entry, state, audio, acts, tapped);
 }
 
@@ -1079,7 +1079,7 @@ fn avatar_spot(rect: Rect) -> Rect {
 }
 
 /// The name at the bottom left on a dark tag, with mute and deafen badges and LIVE.
-fn name_tag(ui: &mut Ui, rect: Rect, entry: &Entry, audio: &crate::audio::Audio) {
+fn name_tag(ui: &mut Ui, rect: Rect, entry: &Entry, audio: &crate::audio::Audio) -> Option<Rect> {
     let c = ui::colors(ui);
     let person = entry.peer.person;
     let is_person = !matches!(entry.tile, Tile::Terminal(_));
@@ -1109,7 +1109,7 @@ fn name_tag(ui: &mut Ui, rect: Rect, entry: &Entry, audio: &crate::audio::Audio)
     let left = beside.unwrap_or(rect.left() + GAP);
     let room = rect.right() - GAP - left - 2.0 * pad.x - badges_width;
     if room < 0.0 {
-        return;
+        return None;
     }
     let mut job =
         LayoutJob::simple_singleline(text, FontId::proportional(ui::TEXT_SMALL), ui::OVERLAY_TEXT);
@@ -1161,29 +1161,45 @@ fn name_tag(ui: &mut Ui, rect: Rect, entry: &Entry, audio: &crate::audio::Audio)
         _ => selected_screen(entry.peer, None),
     };
     let live = is_person && (!entry.peer.screens.is_empty() || entry.peer.terminal.is_some());
-    if live && rect.height() > height + 2.0 * GAP {
-        let label = stream
-            .map(|s| t!("call.streaming_viewers", count = s.viewers))
-            .unwrap_or_else(|| t!("call.live_badge").into());
+    (live && rect.height() > height + 2.0 * GAP)
+        .then(|| stream_badge(ui, rect, &entry.tile, stream.map(|s| s.viewers)))
+}
+
+/// A compact watcher count, with the full streaming label on hover and for screen readers.
+fn stream_badge(ui: &Ui, tile: Rect, entry: &Tile, viewers: Option<usize>) -> Rect {
+    let label = viewers
+        .map(|count| t!("call.streaming_viewers", count = count))
+        .unwrap_or_else(|| t!("call.live_badge").into());
+    let at = tile.min + Vec2::splat(GAP);
+    let pad = vec2(5.0, 1.0);
+    let layout = |text| {
         let mut job = LayoutJob::simple_singleline(
-            label.clone(),
-            FontId::new(ui::TEXT_CAPTION - 1.0, ui::bold_family()),
+            text,
+            FontId::new(ui::TEXT_CAPTION - 1.0, crate::emoji::family(true)),
             ui::ON_FILL,
         );
-        job.wrap = TextWrapping::truncate_at_width((rect.width() - 2.0 * GAP - 10.0).max(1.0));
-        let galley = ui.painter().layout_job(job);
-        let spot =
-            Rect::from_min_size(rect.min + Vec2::splat(GAP), galley.size() + vec2(10.0, 2.0));
-        ui.interact(
-            spot,
-            UiId::unique(("stream status", &entry.tile)),
-            Sense::hover(),
-        )
-        .widget_info(|| WidgetInfo::labeled(Role::Label, true, &label));
-        ui.painter().rect_filled(spot, ui::RADIUS_S, c.danger);
-        ui.painter()
-            .galley(spot.min + vec2(5.0, 1.0), galley, ui::ON_FILL);
+        job.wrap = TextWrapping::truncate_at_width((tile.width() - 2.0 * (GAP + pad.x)).max(1.0));
+        ui.painter().layout_job(job)
+    };
+    let id = UiId::unique(("stream status", entry));
+    let mut galley = layout(viewers.map_or_else(|| label.clone(), |count| format!("👁 {count}")));
+    let compact = Rect::from_min_size(at, galley.size() + 2.0 * pad);
+    // The detail remains open while the pointer moves across the expanded badge.
+    let hover = ui.ctx().read_response(id).map_or(compact, |last| {
+        Rect::from_min_size(at, last.rect.size())
+            .union(compact)
+            .intersect(tile)
+    });
+    if viewers.is_some() && ui.rect_contains_pointer(hover) {
+        galley = layout(label.clone());
     }
+    let spot = Rect::from_min_size(at, galley.size() + 2.0 * pad);
+    ui.interact(spot, id, Sense::hover())
+        .widget_info(|| WidgetInfo::labeled(Role::Label, true, &label));
+    ui.painter()
+        .rect_filled(spot, ui::RADIUS_S, ui::colors(ui).danger);
+    ui.painter().galley(spot.min + pad, galley, ui::ON_FILL);
+    spot
 }
 
 /// The hover buttons at the top right of a tile: focus, minimize, full screen,
@@ -1513,7 +1529,7 @@ pub fn full_view(ui: &mut Ui, home: &mut Home) {
             // Whole, not cropped, now that it has the room.
             picture.cover = false;
             paint_picture(ui, rect, picture);
-            overlay.paint(ui, rect);
+            overlay.paint(ui, rect, None);
             if controlling {
                 let (inputs, stop) =
                     voice
