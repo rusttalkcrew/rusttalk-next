@@ -54,6 +54,7 @@ mod control;
 mod directory;
 mod files;
 mod find;
+mod phone;
 mod recent;
 pub mod terminal;
 mod voice;
@@ -231,6 +232,9 @@ pub enum Command {
     ShareApp(App),
     /// Stop sharing an app, by its ID.
     StopApp(String),
+    /// Call a phone and bridge it into the voice room, as an app of ours.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    PhoneCall(Box<crate::phone::call::Dial>),
     /// Share a screen or window, or open the system picker (Linux), with the sound of
     /// these apps (or all system audio) as part of the stream.
     ShareScreen(screen::Target, screen::Options, Vec<App>),
@@ -242,6 +246,7 @@ pub enum Command {
     /// Start or stop receiving a screen or camera, by track.
     Watch(String, bool),
     Listen(String, bool),
+    PhoneConsent(rusttalk_core::client::voice::phone::Call, bool),
     /// Publish a running camera, replacing an earlier one.
     ShareCamera(NativeVideoSource, CameraOptions),
     StopCamera,
@@ -365,6 +370,15 @@ impl Compatibility {
 }
 
 pub enum Update {
+    ExternalPhones(
+        Url,
+        Id,
+        Vec<(
+            rusttalk_core::client::voice::phone::Call,
+            String,
+            crate::phone::ConsentStatus,
+        )>,
+    ),
     RetryDmBackfill,
     VoiceDestination(Url, Id, bool),
     Preview(Result<Box<Preview>, String>),
@@ -422,6 +436,9 @@ pub enum Update {
     CallRang(Url, Id, Id),
     /// Sharing this app on its own stopped or never started.
     AppStopped(String),
+    /// How the phone call is going.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    Phone(u64, crate::phone::call::Event),
     SharedAudioStopped(Url, Id),
     /// What the screen share's sound is now, after a change or a failure.
     StreamAudio(Vec<App>),
@@ -1413,6 +1430,7 @@ async fn voice_next(
                     .await;
                 if denied {
                     live.stop_audio_captures();
+                    ctx.audio.end_phone();
                     ctx.send(Update::SharedAudioStopped(url.clone(), live.channel));
                 }
                 if let Err(error) = live
@@ -2045,6 +2063,7 @@ async fn on_command(
         | Command::ChangeScreen(..)
         | Command::Watch(..)
         | Command::Listen(..)
+        | Command::PhoneConsent(..)
         | Command::StopCamera
         | Command::CancelFile(_)
         | Command::RequestControl(_)
@@ -2060,6 +2079,8 @@ async fn on_command(
         | Command::AskToType
         | Command::StopTyping
         | Command::TypeInTerminal(_) => unreachable!("handled by voice_command"),
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        Command::PhoneCall(_) => unreachable!("handled by voice_command"),
     }
     Ok(())
 }

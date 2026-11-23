@@ -46,6 +46,8 @@ const OFFER_SECONDS: i64 = 10 * 60;
 pub mod mixer;
 mod overlay;
 mod panel;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub mod phone;
 pub mod remote;
 mod stage;
 pub mod terminal;
@@ -53,6 +55,11 @@ pub use panel::{Link, call_bar};
 pub use stage::{Stage, full_view, stage};
 
 pub struct Voice {
+    pub external_phones: Vec<(
+        rusttalk_core::client::voice::phone::Call,
+        String,
+        crate::phone::ConsentStatus,
+    )>,
     pub audio: Audio,
     pub call: Option<Call>,
     #[cfg(any(target_os = "android", target_os = "ios"))]
@@ -100,6 +107,9 @@ pub struct Voice {
     pub terminals: terminal::Terminals,
     /// A hint about the microphone, once per call, until answered.
     pub mic_hint: Option<Verdict>,
+    /// A phone call into the room, and the dialer.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    pub phone: phone::Phone,
     highlight: Option<Highlight>,
 }
 
@@ -215,6 +225,9 @@ impl Voice {
             control: remote::Control::default(),
             terminals: terminal::Terminals::default(),
             mic_hint: None,
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            phone: phone::Phone::default(),
+            external_phones: Vec::new(),
             highlight: None,
         }
     }
@@ -230,6 +243,7 @@ impl Voice {
         crate::android::communication_mode(false);
         self.call = None;
         self.audio.end_voice(self.sounds.end());
+        self.external_phones.clear();
         self.link = Link::default();
         self.shares.clear();
         self.clear_screens();
@@ -239,6 +253,8 @@ impl Voice {
         self.terminals = terminal::Terminals::default();
         self.mic_hint = None;
         let _ = self.audio.take_trouble();
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        self.phone.end();
     }
 
     /// Forget this call's video and files: our screen and camera, and what we watch.
@@ -310,6 +326,9 @@ pub fn join(home: &mut Home, index: usize, channel: Id) {
     }
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
+        if phone::leave_or_ask(home, phone::Leave::Join(index, channel)) {
+            return;
+        }
         leave(home);
         connect(home, index, channel);
     }

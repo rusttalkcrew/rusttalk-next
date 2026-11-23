@@ -473,6 +473,10 @@ pub fn show(
     if home.settings != Some(Tab::Privacy) {
         crate::key_storage::leave(ctx, &mut home.key_storage);
     }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    if home.settings != Some(Tab::Phone) {
+        call::phone::leave_settings(&mut home.voice);
+    }
     let mut tab = home.settings?;
     let page = |id, icon, label| Page { id, icon, label };
     let groups = [
@@ -491,6 +495,8 @@ pub fn show(
                 page(Tab::Voice, "🎤", t!("settings.voice")),
                 page(Tab::Video, "🎥", t!("settings.video")),
                 page(Tab::Shortcuts, "⌨", t!("settings.shortcuts")),
+                #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                page(Tab::Phone, "📞", t!("phone.settings")),
                 page(Tab::Notifications, "🔔", t!("settings.notifications")),
                 #[cfg(target_os = "android")]
                 page(Tab::Advanced, "⚙", t!("settings.advanced")),
@@ -542,6 +548,8 @@ pub fn show(
                 }
                 Tab::Notifications => notifications_page(ui, home),
                 Tab::Shortcuts => crate::hotkeys::settings_page(ui, home),
+                #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                Tab::Phone => call::phone::settings_page(ui, &mut home.voice),
                 Tab::Privacy => privacy_tab(ui, home, keystore),
                 Tab::Devices => devices_page(ui, home),
                 #[cfg(target_os = "android")]

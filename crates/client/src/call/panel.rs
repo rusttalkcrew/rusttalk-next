@@ -165,9 +165,48 @@ enum Stop {
 }
 
 /// The voice panel, while in a voice room.
+fn external_phone_notice(ui: &mut Ui, label: &str, status: crate::phone::ConsentStatus) -> bool {
+    ui.label(format!("{}: {label}", t!("phone.external_notice")));
+    ui.label(t!("phone.external_help"));
+    use crate::phone::ConsentStatus;
+    let text = match status {
+        ConsentStatus::On => t!("phone.withdraw"),
+        ConsentStatus::Off => t!("phone.allow"),
+        ConsentStatus::Withdrawing => {
+            ui.label(t!("phone.withdrawing"));
+            return false;
+        }
+        ConsentStatus::Failed => {
+            ui.label(t!("phone.withdraw_failed"));
+            return false;
+        }
+    };
+    ui::primary(ui, text).clicked()
+}
+
 pub fn call_bar(ui: &mut Ui, home: &mut Home) {
     if home.voice.call.is_none() {
         return;
+    }
+    let mut withdrawing = Vec::new();
+    for (call, label, allowed) in &home.voice.external_phones {
+        ui.push_id(&call.track, |ui| {
+            if external_phone_notice(ui, label, *allowed)
+                && let Some(server) = super::call_server(home)
+            {
+                let on = *allowed == crate::phone::ConsentStatus::Off;
+                if !on {
+                    home.voice.audio.request_phone_withdrawal();
+                    withdrawing.push(call.clone());
+                }
+                server.send(Command::PhoneConsent(call.clone(), on));
+            }
+        });
+    }
+    for (call, _, status) in &mut home.voice.external_phones {
+        if withdrawing.contains(call) {
+            *status = crate::phone::ConsentStatus::Withdrawing;
+        }
     }
     mic_hint_card(ui, home);
     let Some(call) = &home.voice.call else {
@@ -257,7 +296,11 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
                 home.voice.audio.set_settings(settings);
             }
             let more = home.voice.audio.can_host_terminal();
-            let count = 2.0 + f32::from(screen::SUPPORTED) + f32::from(more);
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            let phone = super::phone::shows(&mut home.voice);
+            #[cfg(any(target_os = "android", target_os = "ios"))]
+            let phone = false;
+            let count = 2.0 + f32::from(screen::SUPPORTED) + f32::from(more) + f32::from(phone);
             let width = (ui.available_width() - SPACE_XS * (count - 1.0)) / count;
             let size = Vec2::new(width, ICON_BUTTON);
             ui.horizontal(|ui| {
@@ -311,6 +354,10 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
                     }
                 }
                 share = app_button(ui, voice, connected && blocked.is_none(), blocked, size);
+                #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                if phone {
+                    super::phone::button(ui, voice, connected && blocked.is_none(), size);
+                }
                 if more {
                     terminal = more_button(ui, voice.terminals.local.is_some(), connected, size);
                 }
@@ -366,6 +413,10 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
     }
     if voice_settings {
         home.settings = Some(Tab::Voice);
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    if leave_now && super::phone::leave_or_ask(home, super::phone::Leave::Leave) {
+        return;
     }
     if leave_now {
         leave(home);
@@ -1049,5 +1100,96 @@ mod tests {
         assert_eq!(screen_tip(Sharing::Starting), "Stop sharing");
         assert_eq!(screen_tip(Sharing::Changing), "Stop sharing");
         assert_eq!(screen_tip(Sharing::On), "Stop sharing");
+    }
+}
+
+#[cfg(test)]
+mod phone_consent_tests {
+    use super::*;
+    use egui_kittest::{Harness, kittest::Queryable};
+
+    #[test]
+    fn external_phone_notice_requires_a_separate_action_in_both_themes() {
+        for (name, dark) in [("dark", true), ("light", false)] {
+            let builder = Harness::builder()
+                .with_theme(if dark {
+                    egui::Theme::Dark
+                } else {
+                    egui::Theme::Light
+                })
+                .with_size(egui::vec2(380.0, 220.0))
+                .with_context_setup(move |ctx| {
+                    ui::install(ctx);
+                    ui::apply(
+                        ctx,
+                        ui::Appearance {
+                            mode: if dark {
+                                ui::Mode::Dark
+                            } else {
+                                ui::Mode::Light
+                            },
+                            ..Default::default()
+                        },
+                    );
+                });
+            let builder = if std::env::var_os("RUSTTALK_PHONE_SCREENSHOTS").is_some() {
+                builder.wgpu()
+            } else {
+                builder
+            };
+            use crate::phone::ConsentStatus;
+            let mut harness = builder.build_ui_state(
+                |ui, status| {
+                    if external_phone_notice(ui, "Phone", *status) {
+                        *status = if *status == ConsentStatus::Off {
+                            ConsentStatus::On
+                        } else {
+                            ConsentStatus::Off
+                        };
+                    }
+                },
+                ConsentStatus::Off,
+            );
+            harness.run_steps(3);
+            assert_eq!(*harness.state(), ConsentStatus::Off);
+            harness.get_by_label(t!("phone.external_help"));
+            if let Ok(dir) = std::env::var("RUSTTALK_PHONE_SCREENSHOTS") {
+                harness
+                    .render()
+                    .unwrap()
+                    .save(std::path::Path::new(&dir).join(format!("phone-consent-{name}.png")))
+                    .unwrap();
+            }
+            harness.get_by_label(t!("phone.allow")).click();
+            harness.run_steps(2);
+            assert_eq!(*harness.state(), ConsentStatus::On);
+            harness.get_by_label(t!("phone.withdraw")).click();
+            harness.run_steps(2);
+            assert_eq!(*harness.state(), ConsentStatus::Off);
+            for (status, key, suffix) in [
+                (
+                    ConsentStatus::Withdrawing,
+                    t!("phone.withdrawing"),
+                    "pending",
+                ),
+                (ConsentStatus::Failed, t!("phone.withdraw_failed"), "failed"),
+            ] {
+                *harness.state_mut() = status;
+                harness.run_steps(3);
+                harness.get_by_label(key);
+                assert!(harness.query_by_label(t!("phone.allow")).is_none());
+                assert!(harness.query_by_label(t!("phone.withdraw")).is_none());
+                if let Ok(dir) = std::env::var("RUSTTALK_PHONE_SCREENSHOTS") {
+                    harness
+                        .render()
+                        .unwrap()
+                        .save(
+                            std::path::Path::new(&dir)
+                                .join(format!("phone-consent-{suffix}-{name}.png")),
+                        )
+                        .unwrap();
+                }
+            }
+        }
     }
 }

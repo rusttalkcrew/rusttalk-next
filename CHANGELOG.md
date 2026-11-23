@@ -26,6 +26,7 @@ Unreleased under the new version and date.
 - Say whether you are going to an event, see who is still missing, and remind them
 - Event reminders reach unanswered authors and respect “Only when RustTalk isn’t focused” without repeating later
 - Channel names show the pointing-hand cursor when hovered, including for channel managers.
+- Call a phone number into your voice channel with your own SIP account (desktop): contacts, a keypad, Listen, and separate microphone permission with confirmed withdrawal
 
 ## v0.2.0 - 2026-11-23
 

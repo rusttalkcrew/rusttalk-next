@@ -304,6 +304,8 @@ pub enum Tab {
     Devices,
     Notifications,
     Shortcuts,
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    Phone,
     #[cfg(target_os = "android")]
     Advanced,
     Updates,
@@ -1651,6 +1653,16 @@ impl Home {
                     }
                 }
             }
+            Update::ExternalPhones(address, channel, calls) => {
+                if self
+                    .voice
+                    .call
+                    .as_ref()
+                    .is_some_and(|call| call.server == address && call.channel == channel)
+                {
+                    self.voice.external_phones = calls;
+                }
+            }
             Update::SharedAudioStopped(address, channel) => {
                 if self
                     .voice
@@ -1664,6 +1676,10 @@ impl Home {
             }
             update @ (Update::AppStopped(_) | Update::StreamAudio(_)) => {
                 call::shared_sound(&mut self.voice, update);
+            }
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            Update::Phone(generation, event) => {
+                call::phone::update(&mut self.voice.phone, generation, event)
             }
             Update::Sharing(on) => {
                 // A late result after Stop or leaving doesn't turn the chip back on.
@@ -2191,6 +2207,8 @@ pub fn show(
     admin::window(ui.ctx(), home);
     files::viewer(ui.ctx(), &mut home.files);
     call::screen_dialog(ui.ctx(), home);
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    call::phone::windows(ui.ctx(), home);
     call::terminal::dialog(ui.ctx(), home);
     call::frame(ui.ctx(), home);
     let action = crate::settings::show(ui.ctx(), home, updates, keystore);

@@ -480,6 +480,38 @@ is deleted and never used; the normal noise suppression keeps working.
   `d375b2d` from `github.com`, which redirects to `raw.githubusercontent.com`
   (HTTPS only). GitHub sees your IP address and timing. The request carries no
   account, device or server identifiers and no audio.
+- **Phone calls (opt-in, desktop):** Nothing happens until the person saves a
+  SIP account in Settings → Phone. Calling a number from a voice channel then
+  connects to that account's SIP server only (SIP over UDP, no TLS): the
+  client signs in with the account, calls, and signs out after the call. The
+  call's sound goes to and comes from the media server the provider names, as
+  G.711 over RTP. **This is not end-to-end encrypted**: the provider, and
+  anyone on the network path, can hear the call, and sees the number, the
+  account and the IP address. The dialer says so. While the call runs, the
+  caller's app shares their own microphone and only the microphones of members
+  who explicitly choose “Share my microphone with this call”. Each member sees
+  an external-call warning before choosing. This permission is separate from
+  Listen, bound to the call publication and device session, and withdrawn when
+  stopped, disconnected, or the call ends. Newcomers and older clients that cannot
+  consent are silent to the phone. Other shared tracks are never exported.
+  Consenting voices retain full volume even if the caller lowers their local
+  volume or deafens; the caller's microphone obeys mute, deafen and push-to-talk.
+  Phone sound is published as encrypted shared audio; members press Listen to
+  hear it. Call notices and consent are encrypted participant attributes bound
+  to the sender and session, with authenticated increasing revisions preventing
+  replay of withdrawn grants. Stopping sharing immediately pauses the channel
+  microphone until the bridge confirms exclusion (or the call ends); a failed
+  confirmation keeps it paused with a visible notice. This brief pause also
+  affects other listeners in the channel, without changing mute or push-to-talk.
+  A directly dialed local phone call is independent of this transmission pause.
+  Losing permission or reconnecting ends the phone
+  call. Media accepts only the negotiated UDP endpoint and G.711 payload; hold,
+  one-way audio and non-RTP/AVP SDP are rejected. The RustTalk
+  server never sees the number or the sound. The account (server, username, caller
+  name) and the contacts are kept in `voice.json` on this device only and are
+  never synced; the password is kept in the OS keychain (or only in memory
+  until the app closes, without one). Logs never name the number, account or
+  password.
 - **API:** Queries LiveKit RoomService on 7880/TCP using the internal
   Docker hostname `livekit`. When the owner enables public listing and
   saves an index URL, the API posts a signed listing to that HTTPS URL at

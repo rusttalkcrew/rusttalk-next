@@ -38,6 +38,7 @@ mod net;
 mod notify;
 mod official;
 mod paste;
+mod phone;
 #[cfg(any(target_os = "android", target_os = "ios", test))]
 mod phone_clipboard;
 mod pokes;
@@ -209,6 +210,8 @@ fn run(
     }
 
     files::clear_opened();
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    phone::set_service(&service);
     let (keystore, start) = keystore::Keystore::open(&config, &service)?;
     match &start {
         keystore::Start::Ready(Some(identity)) => tracing::info!(

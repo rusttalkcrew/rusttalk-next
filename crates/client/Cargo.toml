@@ -49,7 +49,7 @@ serde_json = "1"
 sha2 = "0.10"
 tar = { version = "0.4", default-features = false }
 tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 unicode-segmentation = "1"
@@ -110,6 +110,10 @@ objc2-user-notifications = { version = "0.3", default-features = false, features
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 eframe = { version = "0.37", features = ["default"] }
 rfd = { version = "0.18", default-features = false, features = ["xdg-portal"] }
+# Phone calls into a voice room (src/phone): SIP signalling over UDP. MIT. No TLS,
+# WebSocket or SRV lookup, so it adds no second rustls setup or DNS resolver.
+rsipstack = { version = "0.8.8", default-features = false, features = ["platform-tokio"] }
+tokio-util = "0.7"
 
 [target.'cfg(target_os = "android")'.dependencies]
 # Android starts the app through GameActivity: it has the on-screen keyboard and
