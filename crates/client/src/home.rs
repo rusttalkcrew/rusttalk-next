@@ -919,6 +919,8 @@ impl Home {
         let rule = prefs.effective(&server.address, &channel, dm, notify::unix_now());
         let viewing = self.viewing().contains(&(index, channel));
         let mention = !(viewing && self.focused) && notify::counts(rule, arrival);
+        // Our own chime is heard even when the system keeps its notifications quiet.
+        let chimed = mention && prefs.sound && self.voice.audio.message();
         if notify::should_notify(prefs, rule, arrival, self.focused, viewing) {
             let sender = server.member_name(&msg.person);
             let title = match server.channel(&channel) {
@@ -940,7 +942,11 @@ impl Home {
                 _ => t!("notify.new_message").into(),
             };
             let target = (server.address.clone(), channel);
-            self.notify.show(ctx, &title, &body, target);
+            if chimed {
+                self.notify.show_silent(ctx, &title, &body, target);
+            } else {
+                self.notify.show(ctx, &title, &body, target);
+            }
         }
         let address = self.servers[index].address.clone();
         self.notify.arrived(&address, channel, msg.at, mention);
