@@ -168,11 +168,12 @@ as the default first. Changing the default affects future joins.
 
 Kick, ban, role assignment and voice moderation require the actor to outrank the target
 strictly. Granting a role or choosing it as the default also requires the
-actor to outrank that role and hold every permission it grants. On upgrade, members
-whose combined roles could already grant Moderator retain that delegation while
-they still hold its pre-calendar permissions and outrank it. This exception
-applies only to the built-in Moderator and gives no direct event permissions. The
-owner role comes from a singleton ownership record and can only move via
+actor to outrank that role and hold every permission it grants. When upgrading from before events,
+a member who could already manage a particular role can keep assigning, renaming,
+editing or deleting it, or setting it as the default. The server checks both the
+original and current rank and permissions. Only the event flags added by the
+migration can be retained, and removing a flag ends its exemption. These grants
+give no direct event permissions. The owner role comes from a singleton ownership record and can only move via
 the transfer endpoint. The prior owner keeps their assigned roles.
 
 Invite uses may be 1–1000, with lifetimes from 1 second to 30 days.
