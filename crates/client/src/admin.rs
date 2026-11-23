@@ -509,7 +509,6 @@ fn overview_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Overvi
     };
     let saved = server.dir.name.clone().unwrap_or_default();
     ui::page_section(ui, t!("admin.server"));
-    picked.system_messages = system_messages_row(ui, &server.dir);
     let layout = if ui.available_width() < 220.0 {
         egui::Layout::top_down(egui::Align::Min)
     } else {
@@ -549,6 +548,8 @@ fn overview_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Overvi
             }
         });
     });
+    ui.add_space(ui::SPACE_L);
+    picked.system_messages = system_messages_row(ui, &server.dir);
     if server.dir.perms.owner {
         update_notice(ui, &settings.updates);
     }

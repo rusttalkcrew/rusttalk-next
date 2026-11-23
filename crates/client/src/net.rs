@@ -1701,11 +1701,23 @@ async fn on_command(
             directory(ctx, url, client, state).await?;
         }
         Command::DeleteChannel(id) => {
+            // The setting is encrypted, so only a client can tell that its channel is gone:
+            // put notices back in the first text channel instead of hiding them for good.
+            let was_notices = state.last.as_ref().is_some_and(|dir| {
+                dir.perms.manage_server
+                    && dir.system_messages == crate::server::SystemMessages::Channel(id)
+            });
             client
                 .request(Method::DELETE, &format!("/v1/channels/{}", encode(&id)))
                 .send()
                 .await?
                 .error_for_status()?;
+            if was_notices
+                && let Err(error) =
+                    admin::save_system_messages(client, crate::server::SystemMessages::First).await
+            {
+                tracing::warn!(%error, "moving system messages off a deleted channel failed");
+            }
             directory(ctx, url, client, state).await?;
         }
         Command::DeleteCategory(id) => {

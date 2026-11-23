@@ -742,7 +742,7 @@ async fn add_emoji(
         })
 }
 
-async fn save_system_messages(
+pub(super) async fn save_system_messages(
     client: &KeyClient<'_>,
     choice: crate::server::SystemMessages,
 ) -> Result<(), String> {
