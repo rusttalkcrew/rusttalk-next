@@ -1544,3 +1544,5 @@ clipboard.select_all = すべて選択
 
 call.streaming_viewers = 配信中 · {count} 人が視聴中
 call.watch_stream = {name}を視聴 · {count} 人が視聴中
+call.listen = 聴く
+call.stop_listening = 聴くのをやめる

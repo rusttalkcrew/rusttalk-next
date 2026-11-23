@@ -644,7 +644,9 @@ pub fn room_list(ui: &mut Ui, home: &Home, server: &Server, channel: &Id) -> Opt
                 let row = row.response.interact(Sense::click());
                 let apps = std::slice::from_ref(shared);
                 ui::context_menu(&row, |m| {
-                    mixer::show(m, &home.voice.audio, peer.person, false, apps);
+                    mixer::show(m, &home.voice.audio, peer.person, false, apps, |sid, on| {
+                        server.send(Command::Listen(sid, on))
+                    });
                 });
             }
         }

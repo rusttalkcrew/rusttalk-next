@@ -1544,3 +1544,5 @@ clipboard.select_all = Alles auswählen
 
 call.streaming_viewers = Streamt · {count} schauen zu
 call.watch_stream = {name} ansehen · {count} schauen zu
+call.listen = Anhören
+call.stop_listening = Nicht mehr zuhören

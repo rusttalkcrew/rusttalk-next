@@ -1547,3 +1547,5 @@ clipboard.select_all = Select all
 
 call.streaming_viewers = Streaming · {count} watching
 call.watch_stream = Watch {name} · {count} watching
+call.listen = Listen
+call.stop_listening = Stop listening

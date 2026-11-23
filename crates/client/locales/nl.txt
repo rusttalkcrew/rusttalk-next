@@ -1544,3 +1544,5 @@ clipboard.select_all = Alles selecteren
 
 call.streaming_viewers = Streamt · {count} kijkers
 call.watch_stream = {name} bekijken · {count} kijkers
+call.listen = Luisteren
+call.stop_listening = Stoppen met luisteren
