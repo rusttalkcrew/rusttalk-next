@@ -161,8 +161,20 @@ enum Stop {
     Sound(Vec<App>),
 }
 
-/// The voice panel, while in a voice room.
-fn external_phone_notice(ui: &mut Ui, label: &str, status: crate::phone::ConsentStatus) -> bool {
+/// What the person picked on the notice for someone else's phone call.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PhonePick {
+    /// Share the microphone with this call, or stop sharing it.
+    Toggle,
+    /// Share it, and with every later phone call too (Settings → Privacy turns it off).
+    Always,
+}
+
+fn external_phone_notice(
+    ui: &mut Ui,
+    label: &str,
+    status: crate::phone::ConsentStatus,
+) -> Option<PhonePick> {
     ui.label(format!("{}: {label}", t!("phone.external_notice")));
     ui.label(t!("phone.external_help"));
     use crate::phone::ConsentStatus;
@@ -171,16 +183,26 @@ fn external_phone_notice(ui: &mut Ui, label: &str, status: crate::phone::Consent
         ConsentStatus::Off => t!("phone.allow"),
         ConsentStatus::Withdrawing => {
             ui.label(t!("phone.withdrawing"));
-            return false;
+            return None;
         }
         ConsentStatus::Failed => {
             ui.label(t!("phone.withdraw_failed"));
-            return false;
+            return None;
         }
     };
-    ui::primary(ui, text).clicked()
+    let mut pick = None;
+    ui.horizontal_wrapped(|ui| {
+        if ui::primary(ui, text).clicked() {
+            pick = Some(PhonePick::Toggle);
+        }
+        if status == ConsentStatus::Off && ui::secondary(ui, t!("phone.always_allow")).clicked() {
+            pick = Some(PhonePick::Always);
+        }
+    });
+    pick
 }
 
+/// The voice panel, while in a voice room.
 pub fn call_bar(ui: &mut Ui, home: &mut Home) {
     if home.voice.call.is_none() {
         return;
@@ -188,9 +210,14 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
     let mut withdrawing = Vec::new();
     for (call, label, allowed) in &home.voice.external_phones {
         ui.push_id(&call.track, |ui| {
-            if external_phone_notice(ui, label, *allowed)
+            if let Some(pick) = external_phone_notice(ui, label, *allowed)
                 && let Some(server) = super::call_server(home)
             {
+                if pick == PhonePick::Always {
+                    let mut settings = home.voice.audio.settings();
+                    settings.phone_always_share = true;
+                    home.voice.audio.set_settings(settings);
+                }
                 let on = *allowed == crate::phone::ConsentStatus::Off;
                 if !on {
                     home.voice.audio.request_phone_withdrawal();
@@ -1135,14 +1162,13 @@ mod phone_consent_tests {
             };
             use crate::phone::ConsentStatus;
             let mut harness = builder.build_ui_state(
-                |ui, status| {
-                    if external_phone_notice(ui, "Phone", *status) {
-                        *status = if *status == ConsentStatus::Off {
-                            ConsentStatus::On
-                        } else {
-                            ConsentStatus::Off
-                        };
+                |ui, status| match external_phone_notice(ui, "Phone", *status) {
+                    Some(PhonePick::Toggle) if *status == ConsentStatus::Off => {
+                        *status = ConsentStatus::On;
                     }
+                    Some(PhonePick::Toggle) => *status = ConsentStatus::Off,
+                    Some(PhonePick::Always) => *status = ConsentStatus::On,
+                    None => {}
                 },
                 ConsentStatus::Off,
             );
@@ -1159,9 +1185,14 @@ mod phone_consent_tests {
             harness.get_by_label(t!("phone.allow")).click();
             harness.run_steps(2);
             assert_eq!(*harness.state(), ConsentStatus::On);
+            // Once shared, there is nothing left to always allow.
+            assert!(harness.query_by_label(t!("phone.always_allow")).is_none());
             harness.get_by_label(t!("phone.withdraw")).click();
             harness.run_steps(2);
             assert_eq!(*harness.state(), ConsentStatus::Off);
+            harness.get_by_label(t!("phone.always_allow")).click();
+            harness.run_steps(2);
+            assert_eq!(*harness.state(), ConsentStatus::On);
             for (status, key, suffix) in [
                 (
                     ConsentStatus::Withdrawing,

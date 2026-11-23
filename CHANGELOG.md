@@ -41,6 +41,9 @@ Unreleased under the new version and date.
 - Desktop: call a phone number into your voice channel with your own SIP account, contacts and a keypad. Phone calls use unencrypted SIP/RTP; the provider and network path can hear them.
 - Listen to phone audio separately from sharing your microphone with the phone. The caller shares their own microphone; other members must consent; stopping sharing pauses the channel microphone until exclusion is confirmed or the call ends.
 - Phone calls end on reconnect or lost permission; hold and one-way audio are not supported.
+- Phone calls sound clearer with HD voice (G.722) when your provider supports it, and fall back to normal phone quality otherwise.
+- "Always allow" shares your microphone with every phone call without asking; turn it off again in Settings > Privacy.
+- Others in the channel see a phone number you typed only as its last two digits; contacts show their name.
 
 ## v0.2.0 - 2026-11-23
 
