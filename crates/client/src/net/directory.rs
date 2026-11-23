@@ -216,30 +216,6 @@ pub(super) async fn directory(
         &|id: &Id, hash: Option<&str>| pictures.get(&picture_key(id, hash?)).cloned(),
     )
     .await?;
-    if client.has_space_key() {
-        let person = ctx.identity.certificate.person_id();
-        let candidate = dir
-            .members
-            .iter()
-            .find(|member| &member.person == person)
-            .and_then(|member| member.avatar.as_ref())
-            .map(|picture| picture.bytes.as_slice());
-        ctx.sync.avatar(&ctx.data, person, candidate).await?;
-        let own = members
-            .as_array()
-            .into_iter()
-            .flatten()
-            .find(|member| member["person_id"].as_str() == Some(encode(person).as_str()));
-        // Absent on older servers: never send a conditional write they would ignore.
-        if own.is_some_and(|member| {
-            member["avatar_initialized"] == false && member["avatar_hash"].is_null()
-        }) {
-            super::sync_devices(ctx, Vec::new()).await?;
-            if let Some(bytes) = ctx.sync.avatar(&ctx.data, person, None).await? {
-                client.publish_default_avatar(&bytes).await?;
-            }
-        }
-    }
     // A DM channel stays with the person it was first listed with. One the server
     // now lists with someone else is not shown, so nothing is sent there.
     dir.dms.retain(|dm| {
@@ -308,6 +284,8 @@ pub(super) async fn directory(
     });
     state.prune_history(&dir);
     super::recent::Listing::save(state, &dir, &members, &space);
+    state.avatar_uninitialized =
+        own_avatar_uninitialized(&members, ctx.identity.certificate.person_id());
     state.last = Some(dir.clone());
     state.named = client.has_space_key();
     ctx.send(Update::Directory(url.clone(), Box::new(dir)));
@@ -315,7 +293,22 @@ pub(super) async fn directory(
         leave_voice(ctx, url, client, state);
         ctx.send(Update::Call(url.clone(), channel, None));
     }
+    super::cache_own_avatar(ctx, client, state).await;
     Ok(())
+}
+
+/// True only when the server explicitly advertises an uninitialized, empty own avatar.
+/// Older servers omit `avatar_initialized`, so this returns false there.
+pub(super) fn own_avatar_uninitialized(members: &Value, person: &Id) -> bool {
+    let person = encode(person);
+    members
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|member| member["person_id"].as_str() == Some(person.as_str()))
+        .is_some_and(|member| {
+            member["avatar_initialized"] == false && member["avatar_hash"].is_null()
+        })
 }
 
 /// The server's emoji and stickers, or none on servers from before them.
@@ -884,5 +877,44 @@ mod tests {
             .map(|(person, action, _)| (person[0], action))
             .collect();
         assert_eq!(lines, [(4, "joined"), (3, "left")]);
+    }
+
+    #[test]
+    fn own_avatar_uninitialized_matches_only_unset_new_server_rows() {
+        let me = [1; 32];
+        let other = [2; 32];
+        let me_id = encode(&me);
+        let other_id = encode(&other);
+
+        // New server, never set or cleared: eligible for default-avatar repair.
+        let unset = json!([
+            { "person_id": me_id, "avatar_initialized": false, "avatar_hash": null }
+        ]);
+        assert!(own_avatar_uninitialized(&unset, &me));
+
+        // Explicitly cleared on a new server: never re-upload.
+        let cleared = json!([
+            { "person_id": me_id, "avatar_initialized": true, "avatar_hash": null }
+        ]);
+        assert!(!own_avatar_uninitialized(&cleared, &me));
+
+        // Already has a picture: never re-upload.
+        let present = json!([
+            { "person_id": me_id, "avatar_initialized": true, "avatar_hash": "hash" }
+        ]);
+        assert!(!own_avatar_uninitialized(&present, &me));
+
+        // Older server omits avatar_initialized: never send conditional writes or poll.
+        let legacy = json!([
+            { "person_id": me_id, "avatar_hash": null }
+        ]);
+        assert!(!own_avatar_uninitialized(&legacy, &me));
+
+        // Only this account's own row counts.
+        let other_unset = json!([
+            { "person_id": other_id, "avatar_initialized": false, "avatar_hash": null },
+            { "person_id": me_id, "avatar_initialized": true, "avatar_hash": null }
+        ]);
+        assert!(!own_avatar_uninitialized(&other_unset, &me));
     }
 }
