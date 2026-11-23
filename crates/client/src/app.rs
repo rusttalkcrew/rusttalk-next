@@ -445,6 +445,8 @@ fn problem(what: &str, error: &IdentityError) -> Screen {
 
 impl eframe::App for App<'_> {
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        #[cfg(target_os = "ios")]
+        crate::ios::input(ctx, raw_input);
         crate::paste::keys(ctx, raw_input);
         #[cfg(target_os = "android")]
         crate::android::input(ctx, raw_input);
@@ -466,6 +468,8 @@ impl eframe::App for App<'_> {
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        #[cfg(target_os = "ios")]
+        crate::ios::accessibility(ui.ctx());
         #[cfg(target_os = "android")]
         crate::android::frame(ui, |ui| self.screens(ui));
         #[cfg(not(target_os = "android"))]
@@ -503,8 +507,9 @@ impl App<'_> {
                 ..
             } => {
                 let busy = busy.is_some();
+                let keychain = self.keystore.keychain_works();
                 card(ui, |ui| {
-                    key_storage::choose(ui, password, error, busy).map(Action::Choose)
+                    key_storage::choose(ui, password, error, busy, keychain).map(Action::Choose)
                 })
             }
             Screen::Unlock {

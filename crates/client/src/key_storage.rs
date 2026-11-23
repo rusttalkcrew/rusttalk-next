@@ -11,7 +11,7 @@ use zeroize::Zeroizing;
 
 use crate::{
     app::submitted,
-    keystore::{Job, Keystore, Kind, PASSWORD_ONLY, Sealer, WrongPassword},
+    keystore::{Job, Keystore, Kind, RULES, Rules, Sealer, WrongPassword},
     ui::{self, error_text, primary_large, secondary_large},
 };
 
@@ -96,23 +96,31 @@ pub enum Picked {
     Password(Zeroizing<String>),
 }
 
-/// First start without a keychain. Returns the choice once it's complete.
+/// First start without a keychain. Returns the choice once it's complete. Phones
+/// offer only the password file here.
 pub fn choose(
     ui: &mut Ui,
     password: &mut Option<NewPassword>,
     error: &mut Option<String>,
     busy: bool,
+    keychain: bool,
 ) -> Option<Picked> {
     ui.heading(t!("keys.choose_title"));
-    if PASSWORD_ONLY {
-        ui.label(t!("keys.password_only"));
+    if RULES.phone() {
+        // iOS lands here when the Keychain refused a test write (an app signed
+        // without a team), so it says why.
+        ui.label(if RULES == Rules::KeychainOrPassword && !keychain {
+            t!("keys.no_keychain_phone")
+        } else {
+            t!("keys.password_only")
+        });
         password.get_or_insert_with(NewPassword::default);
     } else {
         ui.label(t!("keys.no_keychain"));
     }
     ui.add_space(ui::SPACE_L);
     ui.add_enabled_ui(!busy, |ui| {
-        if !PASSWORD_ONLY {
+        if !RULES.phone() {
             if primary_large(ui, t!("keys.file")).clicked() {
                 return Some(Picked::File);
             }
@@ -209,7 +217,8 @@ pub fn unlock(
 
 /// This profile's keys aren't found. True for "use recovery words".
 pub fn missing(ui: &mut Ui, keychain: bool) -> bool {
-    if keychain {
+    // The desktop-keychain help is about Steam Deck Desktop Mode, not phones.
+    if keychain && !RULES.phone() {
         ui.heading(t!("keys.gone_title"));
         ui.label(t!("keys.gone_text"));
     } else {
@@ -262,12 +271,12 @@ pub fn settings(
             t!("keys.password_file_help"),
         ),
     ];
-    // Phones offer only the password file; there it changes the password.
-    let choices = if PASSWORD_ONLY {
-        &choices[2..]
-    } else {
-        &choices[..]
-    };
+    // Phones never offer the protected file; Android offers only the password file,
+    // where this changes the password.
+    let choices: Vec<_> = choices
+        .into_iter()
+        .filter(|(kind, ..)| RULES.allows(*kind))
+        .collect();
     if let Some(job) = form.busy.take_if(|job| job.done()) {
         let result = job
             .join()
@@ -279,7 +288,7 @@ pub fn settings(
     let busy = form.busy.is_some();
     ui::page_section(ui, t!("keys.section"));
     ui.add_enabled_ui(!busy, |ui| {
-        let changed = ui::segmented(ui, &mut pick, choices);
+        let changed = ui::segmented(ui, &mut pick, &choices);
         if changed {
             *form = Form {
                 pick: Some(pick),

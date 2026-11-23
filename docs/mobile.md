@@ -5,7 +5,43 @@ RustTalk for Android and iOS is the desktop client, built from the same code:
 client is a library with a small `main.rs`, so Android can load it as
 `librusttalk_client.so`; iOS runs the normal binary inside an app bundle.
 
-This page is the plan (issue #282) and the state after phase 3.
+This page is the plan (issue #282) and the state after phase 3, with the first
+iPhone fixes from phase 4.
+
+## iPhone (phase 4, started)
+
+The unsigned IPA, signed and installed with xtool, starts on a real iPhone.
+
+- **Safe area and taps** (`src/ios.rs`). winit 0.30 reports the window without
+  the notch and home indicator as its size (`inner_size`), and egui-wgpu sizes
+  the Metal drawable from that, while the Metal layer, touches and egui's screen
+  (`outer_size`) cover the whole screen. The layer stretched the smaller drawable
+  over the screen, so things showed further down than where taps landed. Each
+  frame the app moves the Metal layer onto the safe area, where the drawable
+  fits it exactly, gives egui that area as its screen and moves touches into it.
+  VoiceOver gets the same shift through the AccessKit root node's transform
+  (accesskit_ios places nodes and hit-tests in the whole-screen view). The
+  status bar and home indicator areas stay black. Once per run the log
+  records the window, safe area, drawable size and scales (`iOS window`).
+- **Keys in the Keychain** (`keystore.rs`, `IosKeychain`). A new account's keys
+  go to the data-protection Keychain, readable only while the phone is unlocked
+  and never in iCloud Keychain (`WhenUnlockedThisDeviceOnly`). An encrypted
+  backup can hold the item, but it restores only to this same iPhone, never to
+  another one. (`WhenPasscodeSetThisDeviceOnly` would also keep it out of
+  backups, but iOS deletes such items when the passcode is turned off, losing
+  the keys without a word.) The item lives in the app's default access
+  group, which comes from the signing team; a build signed without one can't
+  write there. The app writes and removes a test item once per run first: when
+  that fails it says the Keychain isn't available and asks for a password, as on
+  Android. Keys already in a password file keep opening with it, and Settings >
+  Privacy > Key storage moves them to the Keychain and back (the desktop switch).
+  The protected file without a password is never offered. Signing the app again
+  with another Apple account (another team) hides the Keychain item: the app
+  then shows the missing-keys screen, and the recovery words bring the account
+  back. Keychain items outlive the app, so a fresh install (no `keystore.json`,
+  no account or key files) first deletes a RustTalk item an earlier install
+  left, and starts with sign-up or the recovery words like a new phone; a
+  damaged `keystore.json` is not a fresh install and keeps its keys.
 
 ## State after phase 3
 
@@ -130,7 +166,7 @@ use yet is allowed to be unused there (`allow(dead_code)` on phones only).
 | Text input | GameActivity's text buffer, read each frame (`src/android.rs`) | winit IME | Android works (phase 2) |
 | Voice and video (LiveKit, webrtc-sys) | Builds and links (prebuilt WebRTC for Android) | Prebuilt WebRTC for iOS; CI builds it | Android foreground voice in phase 3; see Voice |
 | Audio (cpal 0.18) | AAudio (`libaaudio.so`, Android 8.0+) | Core Audio | Android uses communication mode during calls; iOS needs its audio session |
-| Key storage (keyring 4) | No Android store | The data-protection Keychain store builds, not used yet | File with password only (see Privacy and permissions) |
+| Key storage (keyring 4) | No Android store: file with password only | Data-protection Keychain, file with password as fallback | Android: password only. iOS: Keychain (phase 4) |
 | File picker (rfd) | No backend | No backend | Gated: the buttons that open it are off (`files::PICKER`) |
 | Notifications (notify-rust) | Builds, no notification service | Builds, no notification service | Fail and are logged |
 | Camera (nokhwa) | No backend | No backend | Listing cameras fails, so no camera |
@@ -255,7 +291,7 @@ Rough effort for one person who knows the code base.
 | --- | --- | --- |
 | 2 | Usable chat on Android. Done: typed text, safe areas and the keyboard, `onDestroy`, recovery words. Left: phone temp folder (`temp_dir()` is not writable on Android), system TLS roots for non-pinned hosts (check, then rustls-platform-verifier), file picker (Storage Access Framework), local notifications, Android Keystore for the keys, hide Updates and Shortcuts on phones, `rusttalk://` links, the layout list above | 3 to 4 weeks |
 | 3 | Foreground voice on Android. Left: iOS audio session, Bluetooth headsets and calls with the screen off (foreground service on Android, background audio on iOS) | 2 weeks |
-| 4 | iOS on a device: Keychain, notifications (reuse `notify/macos.rs`), document picker, safe areas, background rules | 1 to 2 weeks |
+| 4 | iOS on a device. Done: Keychain, safe area and taps. Left: notifications (reuse `notify/macos.rs`), document picker, status bar colours, background rules | 1 to 2 weeks |
 | 5 | Camera (Camera2, AVFoundation) | 1 week |
 | 6 | Release: signing keys, store listings or a sideload page, release.yml jobs, store updates | 1 week plus store review |
 | Later | Screen share (MediaProjection; ReplayKit broadcast extension), push notifications | 2 to 4 weeks each |
@@ -286,14 +322,14 @@ Rough effort for one person who knows the code base.
   folder is Application Support, marked excluded from backups
   (`NSURLIsExcludedFromBackupKey`) before the key storage opens, so nothing
   goes to iCloud or a computer.
-- **Keys:** phones offer only "File with password" (`keystore::PASSWORD_ONLY`,
-  see [Crypto](crypto.md#local-identity)) until phase 2 uses Android Keystore
-  and phase 4 the iOS Keychain. The iOS build already includes keyring's
-  data-protection Keychain store (`apple-native-keyring-store`, `protected`),
-  which can keep an item with `when-unlocked-this-device-only` access: never
-  in a backup or on another device. Using it needs a small keystore backend
-  of our own (keyring's `v1` API has no iOS store) and a test on a signed
-  device, so it waits for phase 4. A key file found without a password, or a
+- **Keys** (`keystore::RULES`, see [Crypto](crypto.md#local-identity)):
+  Android offers only "File with password" until it uses Android Keystore. iOS
+  keeps keys in the data-protection Keychain with `when-unlocked-this-device-only`
+  access (never in iCloud Keychain; a backup restores it only to the same
+  iPhone), through a small
+  backend of our own on keyring's `apple-native-keyring-store` (keyring's `v1`
+  API has no iOS store), and falls back to "File with password" when the
+  Keychain can't be written (see iPhone above). A key file found without a password, or a
   profile recorded as the plain file, first asks for a password; existing keys
   are then locked with it in one atomic replace before the account opens, and
   no plain key file is ever written. A key file is never refused or

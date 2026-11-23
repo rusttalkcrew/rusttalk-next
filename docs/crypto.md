@@ -107,8 +107,13 @@ profile's keys and is still to be removed):
   held in memory, and the password fields' egui state is removed once a screen
   is done with them.
 
-Phone builds offer only the file with password, until they use the phone's own
-key store (see [Phones and tablets](mobile.md#privacy-and-permissions)).
+Phones never use the protected file. iOS keeps the same bytes in the
+data-protection Keychain (generic password, service as above, account
+`identity-v1`, `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`, the app's default
+access group: never in iCloud Keychain, and an encrypted backup restores it only
+to the same iPhone) and falls back to the file with password when the Keychain refuses
+a test write. Android offers only the file with password until it uses Android
+Keystore (see [Phones and tablets](mobile.md#privacy-and-permissions)).
 
 At start the client looks in both places: the chosen one first, then the other.
 Keys found anywhere are used and `keystore.json` is repaired, so a lost or

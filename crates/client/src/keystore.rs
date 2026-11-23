@@ -48,10 +48,40 @@ const MEMORY_KIB: RangeInclusive<u32> = 8 * 1024..=1024 * 1024;
 const PASSES: RangeInclusive<u32> = 1..=10;
 const LANES: RangeInclusive<u32> = 1..=4;
 
-/// Phones keep keys only in the file with a password until RustTalk uses the device's
-/// own key store: app data can reach backups, and test builds are debuggable
+/// Where this device may keep keys. Phones never keep them in a file without a
+/// password: app data can reach backups, and test builds are debuggable
 /// (docs/mobile.md).
-pub const PASSWORD_ONLY: bool = cfg!(any(target_os = "android", target_os = "ios"));
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rules {
+    /// The keychain, the protected file or the password file.
+    Desktop,
+    /// iOS: the Keychain, or the password file when the Keychain can't be used.
+    KeychainOrPassword,
+    /// Android: only the password file, until RustTalk uses Android Keystore.
+    PasswordOnly,
+}
+
+pub const RULES: Rules = if cfg!(target_os = "android") {
+    Rules::PasswordOnly
+} else if cfg!(target_os = "ios") {
+    Rules::KeychainOrPassword
+} else {
+    Rules::Desktop
+};
+
+impl Rules {
+    pub fn phone(self) -> bool {
+        self != Rules::Desktop
+    }
+
+    pub fn allows(self, kind: Kind) -> bool {
+        match self {
+            Rules::Desktop => true,
+            Rules::KeychainOrPassword => kind != Kind::File,
+            Rules::PasswordOnly => kind == Kind::Password,
+        }
+    }
+}
 
 /// Where the keys live.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -188,6 +218,74 @@ impl Keychain for OsKeychain {
         match self.entry()?.delete_credential() {
             Ok(()) | Err(Error::NoEntry) => Ok(()),
             Err(error) => Err(error).context("remove identity from OS keychain"),
+        }
+    }
+}
+
+/// iOS: the data-protection Keychain, which keyring's `v1` API doesn't offer. Items
+/// are readable only while the phone is unlocked and never go to iCloud Keychain; an
+/// encrypted backup can hold them, but they restore only to this same iPhone
+/// (`kSecAttrAccessibleWhenUnlockedThisDeviceOnly`). Not `WhenPasscodeSet`: iOS
+/// deletes those when the passcode is removed, silently losing the keys. They live
+/// in the app's default access group, which comes from the signing team.
+#[cfg(target_os = "ios")]
+struct IosKeychain(String);
+
+#[cfg(target_os = "ios")]
+impl IosKeychain {
+    fn entry(&self, name: &str) -> Result<keyring::Entry> {
+        use apple_native_keyring_store::protected::{AccessPolicy, Cred};
+        let inner = Cred::build(
+            &self.0,
+            name,
+            AccessPolicy::WhenUnlockedThisDeviceOnly,
+            None,
+            false,
+        )
+        .context("open Keychain entry")?;
+        Ok(keyring::Entry { inner })
+    }
+}
+
+#[cfg(target_os = "ios")]
+impl Keychain for IosKeychain {
+    /// Writes and removes a test item once per run: an app signed without a team
+    /// (so without an access group) may fail only on writes, and that must show
+    /// before a new account counts on the Keychain.
+    fn available(&self) -> Result<()> {
+        static PROBE: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+        PROBE
+            .get_or_init(|| {
+                let probe = self.entry("probe").map_err(|error| format!("{error:#}"))?;
+                probe
+                    .inner
+                    .set_secret(b"probe")
+                    .and_then(|()| probe.inner.delete_credential())
+                    .map_err(|error| error.to_string())
+            })
+            .clone()
+            .map_err(|error| anyhow!("open Keychain: {error}"))
+    }
+
+    fn get(&self) -> Result<Option<Zeroizing<Vec<u8>>>> {
+        match self.entry("identity-v1")?.inner.get_secret() {
+            Ok(secret) => Ok(Some(Zeroizing::new(secret))),
+            Err(Error::NoEntry) => Ok(None),
+            Err(error) => Err(error).context("read identity from Keychain"),
+        }
+    }
+
+    fn set(&self, secret: &[u8]) -> Result<()> {
+        self.available()?;
+        (self.entry("identity-v1")?.inner)
+            .set_secret(secret)
+            .context("save identity to Keychain")
+    }
+
+    fn delete(&self) -> Result<()> {
+        match self.entry("identity-v1")?.inner.delete_credential() {
+            Ok(()) | Err(Error::NoEntry) => Ok(()),
+            Err(error) => Err(error).context("remove identity from Keychain"),
         }
     }
 }
@@ -334,8 +432,8 @@ pub struct Keystore {
     /// Set once the password file is unlocked or a password is chosen.
     sealer: Option<Sealer>,
     cost: Cost,
-    /// `PASSWORD_ONLY`, a field so tests can check the phone rules on any system.
-    password_only: bool,
+    /// `RULES`, a field so tests can check the phone rules on any system.
+    rules: Rules,
     /// Phones: keys found without a password, kept until one is chosen and they are
     /// locked with it (see `choose`).
     unprotected: Option<Zeroizing<Vec<u8>>>,
@@ -349,19 +447,18 @@ pub struct Keystore {
 impl Keystore {
     /// Lock the profile and find out what to show first.
     pub fn open(config: &Path, service: &str) -> Result<(Self, Start)> {
-        Self::open_with(
-            config,
-            Box::new(OsKeychain(service.to_owned())),
-            COST,
-            PASSWORD_ONLY,
-        )
+        #[cfg(target_os = "ios")]
+        let keychain = Box::new(IosKeychain(service.to_owned()));
+        #[cfg(not(target_os = "ios"))]
+        let keychain = Box::new(OsKeychain(service.to_owned()));
+        Self::open_with(config, keychain, COST, RULES)
     }
 
     fn open_with(
         dir: &Path,
         keychain: Box<dyn Keychain>,
         cost: Cost,
-        password_only: bool,
+        rules: Rules,
     ) -> Result<(Self, Start)> {
         let lock = OpenOptions::new()
             .read(true)
@@ -372,6 +469,7 @@ impl Keystore {
             .context("open identity lock")?;
         lock.try_lock()
             .context("RustTalk is already open with this profile")?;
+        let fresh = !dir.join(STATE_FILE).exists();
         // A damaged keystore.json is rebuilt from what is found.
         let state =
             crate::load_json::<Option<State>>(&dir.join(STATE_FILE)).unwrap_or_else(|error| {
@@ -387,13 +485,30 @@ impl Keystore {
             state: state.unwrap_or_default(),
             sealer: None,
             cost,
-            password_only,
+            rules,
             unprotected: None,
             #[cfg(test)]
             fail_state: Default::default(),
             _lock: lock,
         };
         store.state.keys_saved |= had_account;
+        // iOS keeps Keychain items when the app is deleted. A fresh install (no
+        // keystore.json, no account files, no key file) starts over like a new phone
+        // instead of silently taking the old, maybe removed, device's keys. A damaged
+        // keystore.json is not fresh: its keys are still found below.
+        if rules == Rules::KeychainOrPassword
+            && fresh
+            && !had_account
+            && !dir.join(KEY_FILE).exists()
+            && matches!(store.keychain.get(), Ok(Some(_)))
+        {
+            match store.keychain.delete() {
+                Ok(()) => tracing::info!("removed keys an earlier install left in the Keychain"),
+                Err(error) => {
+                    tracing::warn!(error = %format_args!("{error:#}"), "removing keys an earlier install left failed");
+                }
+            }
+        }
         store.remove_temp_files();
         store.retry_cleanup();
         let start = store.reconcile()?;
@@ -402,6 +517,11 @@ impl Keystore {
 
     pub fn kind(&self) -> Option<Kind> {
         self.state.storage
+    }
+
+    /// Whether the keychain can take keys now (iOS checks once per run).
+    pub fn keychain_works(&self) -> bool {
+        self.keychain.available().is_ok()
     }
 
     /// Use whichever place has keys, preferring the chosen one, and repair the record.
@@ -448,7 +568,7 @@ impl Keystore {
             }
             (Some(file), _) if file.starts_with(SEALED) => (Kind::Password, Start::Unlock),
             // Phones never open keys without a password: ask for one first.
-            (Some(file), _) if self.password_only => {
+            (Some(file), _) if self.rules.phone() => {
                 let secret = Zeroizing::new(plain(&file)?.to_vec());
                 load(&secret)?;
                 tracing::warn!("key file has no password; asking for one before opening");
@@ -489,10 +609,18 @@ impl Keystore {
             );
             return Start::Missing { keychain: gone };
         }
-        // Phones: a new account gets a password first, whatever was chosen before.
-        if self.password_only {
-            self.state.storage = None;
-            return Start::Choose;
+        match self.rules {
+            // Android: a new account gets a password first, whatever was chosen before.
+            Rules::PasswordOnly => {
+                self.state.storage = None;
+                return Start::Choose;
+            }
+            // iOS: a new account goes to the Keychain whenever it works, else it gets a
+            // password first.
+            Rules::KeychainOrPassword => {
+                self.state.storage = self.state.storage.filter(|kind| *kind == Kind::Keychain);
+            }
+            Rules::Desktop => {}
         }
         match (self.state.storage, keychain) {
             // Signed out: a new account goes to the same file.
@@ -622,7 +750,7 @@ impl Keystore {
         self.remove_temp_files();
         // Phones: no keys stay behind, set-aside ones included. They go first, so a
         // failure leaves the profile signed in and sign-out can be tried again.
-        if self.password_only {
+        if self.rules.phone() {
             for entry in fs::read_dir(&self.dir).context("list profile folder")? {
                 let entry = entry.context("list profile folder")?;
                 if entry.file_name().to_string_lossy().starts_with(REPLACED) {
@@ -718,8 +846,8 @@ impl Keystore {
 
     fn usable(&self, kind: Kind, sealer: Option<&Sealer>) -> Result<()> {
         ensure!(
-            !self.password_only || kind == Kind::Password,
-            "this device keeps keys only in a file with a password"
+            self.rules.allows(kind),
+            "this device doesn't keep keys there"
         );
         match kind {
             Kind::Keychain => self.keychain.available(),
@@ -836,12 +964,12 @@ impl Keystore {
         sealer: Option<&Sealer>,
         secret: &[u8],
     ) -> Result<(), WriteError> {
-        if self.password_only && kind != Kind::Password {
+        if !self.rules.allows(kind) {
             return Err(WriteError::Before(anyhow!(
-                "this device keeps keys only in a file with a password"
+                "this device doesn't keep keys there"
             )));
         }
-        if self.password_only && kind != Kind::Keychain {
+        if self.rules.phone() && kind != Kind::Keychain {
             self.set_aside_other_keys(sealer, secret)
                 .map_err(WriteError::Before)?;
         }
@@ -1032,7 +1160,7 @@ pub(crate) fn without_keychain(dir: &Path) -> Keystore {
             Ok(())
         }
     }
-    Keystore::open_with(dir, Box::new(Unreachable), COST, false)
+    Keystore::open_with(dir, Box::new(Unreachable), COST, Rules::Desktop)
         .expect("open test keystore")
         .0
 }
@@ -1097,21 +1225,21 @@ mod tests {
     }
 
     fn open(dir: &Path, keychain: &Mock) -> (Keystore, Start) {
-        open_as(dir, keychain, false)
+        open_as(dir, keychain, Rules::Desktop)
     }
 
     /// Opened with the phone rules: keys only in the file with a password.
     fn open_phone(dir: &Path) -> (Keystore, Start) {
-        open_as(dir, &down(), true)
+        open_as(dir, &down(), Rules::PasswordOnly)
     }
 
-    fn open_as(dir: &Path, keychain: &Mock, password_only: bool) -> (Keystore, Start) {
+    fn open_as(dir: &Path, keychain: &Mock, rules: Rules) -> (Keystore, Start) {
         // The lock file is closed on exec, but a child that another test thread is
         // spawning right now holds a copy of the descriptor until its exec finishes, and
         // the flock outlives our close until then. Wait that out instead of racing it.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
-            match Keystore::open_with(dir, Box::new(keychain.clone()), CHEAP, password_only) {
+            match Keystore::open_with(dir, Box::new(keychain.clone()), CHEAP, rules) {
                 Ok(opened) => return opened,
                 Err(error) => assert!(std::time::Instant::now() < deadline, "{error:#}"),
             }
@@ -1419,6 +1547,87 @@ mod tests {
         );
     }
 
+    fn open_ios(dir: &Path, keychain: &Mock) -> (Keystore, Start) {
+        open_as(dir, keychain, Rules::KeychainOrPassword)
+    }
+
+    #[test]
+    fn an_iphone_keeps_new_keys_in_the_keychain_and_never_in_a_plain_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let keychain = Mock::default();
+        let (mut store, start) = open_ios(dir.path(), &keychain);
+        assert!(ready(start).is_none());
+        assert_eq!(store.kind(), Some(Kind::Keychain));
+        let me = identity();
+        store.save(&me).unwrap();
+        assert!(keychain.has_keys() && !key_file(dir.path()));
+        assert!(store.switch(&me, Kind::File, None).is_err());
+        assert!(!key_file(dir.path()));
+        // To the password file and back, as on desktops.
+        let key = sealer(&store, "hunter2");
+        store.switch(&me, Kind::Password, key).unwrap();
+        assert!(!keychain.has_keys());
+        drop(store);
+        let (mut store, start) = open_ios(dir.path(), &keychain);
+        assert!(matches!(start, Start::Unlock));
+        let opened = unlock(&mut store, "hunter2").unwrap();
+        store.switch(&opened, Kind::Keychain, None).unwrap();
+        assert!(keychain.has_keys() && !key_file(dir.path()));
+        drop(store);
+        assert!(same(
+            &ready(open_ios(dir.path(), &keychain).1).unwrap(),
+            &me
+        ));
+    }
+
+    #[test]
+    fn a_fresh_iphone_install_drops_keys_an_earlier_install_left() {
+        let dir = tempfile::tempdir().unwrap();
+        let keychain = Mock::default();
+        let (mut store, _) = open_ios(dir.path(), &keychain);
+        let me = identity();
+        store.save(&me).unwrap();
+        drop(store);
+        // keystore.json damaged: the keys are still found.
+        fs::write(dir.path().join(STATE_FILE), "{broken").unwrap();
+        assert!(same(
+            &ready(open_ios(dir.path(), &keychain).1).unwrap(),
+            &me
+        ));
+        // App deleted and installed again: an empty folder, the Keychain item left.
+        let fresh = tempfile::tempdir().unwrap();
+        let (store, start) = open_ios(fresh.path(), &keychain);
+        assert!(ready(start).is_none());
+        assert_eq!(store.kind(), Some(Kind::Keychain));
+        assert!(!keychain.has_keys());
+    }
+
+    #[test]
+    fn an_iphone_without_a_usable_keychain_falls_back_to_a_password() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, start) = open_ios(dir.path(), &down());
+        assert!(matches!(start, Start::Choose));
+        assert!(store.choose(Kind::File, None).is_err());
+        assert!(store.choose(Kind::Keychain, None).is_err());
+        let key = sealer(&store, "hunter2");
+        store.choose(Kind::Password, key).unwrap();
+        let me = identity();
+        store.save(&me).unwrap();
+        drop(store);
+        // A password file keeps opening with its password once the Keychain works.
+        let keychain = Mock::default();
+        let (mut store, start) = open_ios(dir.path(), &keychain);
+        assert!(matches!(start, Start::Unlock));
+        assert!(same(&unlock(&mut store, "hunter2").unwrap(), &me));
+        assert!(!keychain.has_keys());
+        // Signed out, the next account goes to the Keychain.
+        store.delete().unwrap();
+        drop(store);
+        let (store, start) = open_ios(dir.path(), &keychain);
+        assert!(ready(start).is_none());
+        assert_eq!(store.kind(), Some(Kind::Keychain));
+    }
+
     #[test]
     fn password_file_round_trips_and_rejects_wrong_passwords_and_tampering() {
         let dir = tempfile::tempdir().unwrap();
@@ -1517,7 +1726,7 @@ mod tests {
             ..CHEAP
         };
         let (mut store, _) =
-            Keystore::open_with(dir.path(), Box::new(down()), stronger, false).unwrap();
+            Keystore::open_with(dir.path(), Box::new(down()), stronger, Rules::Desktop).unwrap();
         assert!(same(&unlock(&mut store, "pw").unwrap(), &me));
         let file = fs::read(dir.path().join(KEY_FILE)).unwrap();
         assert_eq!(header_cost(file[..HEADER].try_into().unwrap()), stronger);
@@ -1690,12 +1899,13 @@ mod tests {
         }
         let dir = tempfile::tempdir().unwrap();
         let me = file_profile(dir.path(), &down());
-        let (_, start) = Keystore::open_with(dir.path(), Box::new(Locked), CHEAP, false).unwrap();
+        let (_, start) =
+            Keystore::open_with(dir.path(), Box::new(Locked), CHEAP, Rules::Desktop).unwrap();
         assert!(same(&ready(start).unwrap(), &me));
         // Even with keystore.json gone or damaged.
         fs::write(dir.path().join(STATE_FILE), "{broken").unwrap();
         let (store, start) =
-            Keystore::open_with(dir.path(), Box::new(Locked), CHEAP, false).unwrap();
+            Keystore::open_with(dir.path(), Box::new(Locked), CHEAP, Rules::Desktop).unwrap();
         assert!(same(&ready(start).unwrap(), &me));
         assert_eq!(store.kind(), Some(Kind::File));
         drop(store);
@@ -1704,7 +1914,8 @@ mod tests {
         let (mut store, _) = open(dir.path(), &Mock::default());
         store.save(&identity()).unwrap();
         drop(store);
-        let (_, start) = Keystore::open_with(dir.path(), Box::new(Locked), CHEAP, false).unwrap();
+        let (_, start) =
+            Keystore::open_with(dir.path(), Box::new(Locked), CHEAP, Rules::Desktop).unwrap();
         assert!(matches!(start, Start::Missing { keychain: true }));
     }
 
