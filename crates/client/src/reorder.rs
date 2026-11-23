@@ -392,7 +392,10 @@ impl List {
         }
         let handle = handle
             .interact(Sense::click_and_drag())
-            .on_hover_cursor(CursorIcon::Grab);
+            .on_hover_cursor(match item {
+                Item::Channel(_) => CursorIcon::PointingHand,
+                Item::Category(_) => CursorIcon::Grab,
+            });
         self.handles.push((item, handle.clone()));
         handle
     }

@@ -10,6 +10,9 @@ Unreleased under the new version and date.
 -->
 
 ## Unreleased
+
+- Channel names show the pointing-hand cursor when hovered, including for channel managers.
+
 ## v0.2.0 - 2026-11-23
 
 - Reopen RustTalk offline to see previously loaded server icons, avatars and recent chat messages.
