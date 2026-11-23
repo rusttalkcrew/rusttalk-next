@@ -10,7 +10,9 @@ use ed25519_dalek::SigningKey;
 use rusttalk_core::identity::random_bytes;
 use sha2::{Digest, Sha256};
 use sqlx::{
-    Sqlite, SqliteConnection, SqlitePool, Transaction, query, query_scalar,
+    Sqlite, SqliteConnection, SqlitePool, Transaction,
+    migrate::Migrate,
+    query, query_scalar,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
 };
 use zeroize::Zeroizing;
@@ -28,22 +30,33 @@ pub async fn open(dir: &Path) -> Result<SqlitePool> {
         .max_connections(4)
         .connect_with(options)
         .await?;
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    tx.ensure_migrations_table().await?;
+    query("CREATE TEMP TABLE upgrading_to_calendar AS SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM _sqlx_migrations WHERE version = 34)")
+        .execute(&mut *tx).await?;
     let migrations = sqlx::migrate!();
-    // Preview builds used 32 for forums. Move only that exact applied migration
-    // so SQLx can apply main's 32 and still validate every recorded checksum.
-    let has_ledger: bool =
-        query_scalar("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = '_sqlx_migrations')")
-            .fetch_one(&pool)
-            .await?;
-    if has_ledger {
-        let forum = migrations
-            .iter()
-            .find(|m| m.version == 36)
-            .expect("forum migration");
-        query("UPDATE _sqlx_migrations SET version = 36 WHERE version = 32 AND success AND checksum = ?")
-            .bind(forum.checksum.as_ref()).execute(&pool).await?;
-    }
-    migrations.run(&pool).await?;
+    // Forum previews used 32, now occupied by system messages. Match only that checksum.
+    let forum = migrations
+        .iter()
+        .find(|m| m.version == 36)
+        .expect("forum migration");
+    query(
+        "UPDATE _sqlx_migrations SET version = 36 WHERE version = 32 AND success AND checksum = ?",
+    )
+    .bind(forum.checksum.as_ref())
+    .execute(&mut *tx)
+    .await?;
+    // Only this exact preview migration moved. SQLx still validates every other checksum.
+    let preview = sha2::Sha384::digest(include_bytes!("../preview/0035_calendar_delegation.sql"));
+    query("DELETE FROM _sqlx_migrations WHERE version = 35 AND success AND checksum = ?")
+        .bind(&preview[..])
+        .execute(&mut *tx)
+        .await?;
+    migrations.run(&mut *tx).await?;
+    query("DROP TABLE IF EXISTS temp.upgrading_to_calendar")
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
     crate::metadata::hash_pictures(&pool).await?;
     Ok(pool)
 }
@@ -200,12 +213,12 @@ pub fn log_closed(sessions: Vec<i64>, at: i64, reason: &'static str) {
     }
 }
 
-pub async fn expire_records(pool: SqlitePool) {
+pub async fn expire_records(app: crate::App) {
     let mut interval = tokio::time::interval(Duration::from_secs(30));
     loop {
         interval.tick().await;
         let result = async {
-            let mut tx = write(&pool).await?;
+            let mut tx = write(&app.db).await?;
             let at = now()?;
             let sessions =
                 query_scalar("DELETE FROM sessions WHERE expires_at <= ? RETURNING expires_at")
@@ -223,6 +236,9 @@ pub async fn expire_records(pool: SqlitePool) {
         .await;
         if let Err(error) = result {
             tracing::error!(reason = error.code, "record expiry failed");
+        }
+        if let Err(error) = crate::calendar::expire(&app).await {
+            tracing::error!(reason = error.code, "event expiry failed");
         }
     }
 }
@@ -251,7 +267,15 @@ mod tests {
 
     #[tokio::test]
     async fn fresh_main_and_preview_databases_reopen_with_both_features() -> Result<()> {
-        for history in ["fresh", "main", "preview"] {
+        for history in [
+            "fresh",
+            "main",
+            "forum_preview",
+            "forum",
+            "calendar_preview",
+            "calendar",
+            "both_previews",
+        ] {
             let dir = tempfile::tempdir()?;
             if history != "fresh" {
                 let options = SqliteConnectOptions::new()
@@ -261,21 +285,104 @@ mod tests {
                 let mut old = sqlx::migrate!();
                 let mut steps = Vec::new();
                 for migration in old.iter() {
-                    if migration.version <= 31
-                        || migration.version == if history == "main" { 32 } else { 36 }
-                    {
+                    let include = migration.version <= 31
+                        || match history {
+                            "main" => migration.version == 32,
+                            "forum_preview" | "both_previews" => migration.version == 36,
+                            "forum" => matches!(migration.version, 32 | 36),
+                            "calendar_preview" => matches!(migration.version, 32 | 34),
+                            "calendar" => migration.version != 36,
+                            _ => false,
+                        }
+                        || (history == "both_previews" && migration.version == 34);
+                    if include {
                         let mut step = migration.clone();
-                        step.version = step.version.min(32);
+                        if matches!(history, "forum_preview" | "both_previews")
+                            && step.version == 36
+                        {
+                            step.version = 32;
+                        }
                         steps.push(step);
                     }
                 }
+                if matches!(history, "calendar_preview" | "both_previews") {
+                    steps.push(sqlx::migrate::Migration::new(
+                        35,
+                        "calendar delegation".into(),
+                        sqlx::migrate::MigrationType::Simple,
+                        include_str!("../preview/0035_calendar_delegation.sql").into(),
+                        false,
+                    ));
+                }
+                steps.sort_by_key(|m| m.version);
                 old.migrations = steps.into();
                 old.run(&pool).await?;
+                if matches!(history, "forum_preview" | "forum" | "both_previews") {
+                    query("INSERT INTO categories (id, position, name_ct) VALUES ('category', 0, X'03')").execute(&pool).await?;
+                    query("INSERT INTO channels (id, kind, category_id, position, name_ct, forum) VALUES ('forum', 'text', 'category', 0, X'0102', 1)")
+                        .execute(&pool).await?;
+                }
+                if history == "both_previews" {
+                    query("UPDATE _sqlx_migrations SET checksum = X'00' WHERE version = 35")
+                        .execute(&pool)
+                        .await?;
+                    assert!(open(dir.path()).await.is_err());
+                    let moved: bool = query_scalar(
+                        "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version = 36)",
+                    )
+                    .fetch_one(&pool)
+                    .await?;
+                    assert!(
+                        !moved,
+                        "failed calendar upgrade must roll back forum renumbering"
+                    );
+                    let calendar = old.iter().find(|m| m.version == 35).unwrap();
+                    query("UPDATE _sqlx_migrations SET checksum = ? WHERE version = 35")
+                        .bind(calendar.checksum.as_ref())
+                        .execute(&pool)
+                        .await?;
+                }
+                if matches!(history, "forum_preview" | "both_previews") {
+                    query("UPDATE _sqlx_migrations SET checksum = X'00' WHERE version = 32")
+                        .execute(&pool)
+                        .await?;
+                    assert!(open(dir.path()).await.is_err());
+                    let checksum: Vec<u8> =
+                        query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = 32")
+                            .fetch_one(&pool)
+                            .await?;
+                    assert_eq!(checksum, [0]);
+                    let forum = old.iter().find(|m| m.version == 32).unwrap();
+                    query("UPDATE _sqlx_migrations SET checksum = ? WHERE version = 32")
+                        .bind(forum.checksum.as_ref())
+                        .execute(&pool)
+                        .await?;
+                }
                 pool.close().await;
             }
             for _ in 0..2 {
                 let pool = open(dir.path()).await?;
                 query("SELECT forum FROM channels").execute(&pool).await?;
+                if matches!(history, "forum_preview" | "forum" | "both_previews") {
+                    let channel: (bool, Vec<u8>) =
+                        sqlx::query_as("SELECT forum, name_ct FROM channels WHERE id = 'forum'")
+                            .fetch_one(&pool)
+                            .await?;
+                    assert_eq!(channel, (true, vec![1, 2]));
+                }
+                query("SELECT reminded_at FROM calendar_events")
+                    .execute(&pool)
+                    .await?;
+                query("SELECT envelope FROM calendar_answers")
+                    .execute(&pool)
+                    .await?;
+                query("SELECT retained FROM calendar_role_grants")
+                    .execute(&pool)
+                    .await?;
+                let count: i64 = query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
+                    .fetch_one(&pool)
+                    .await?;
+                assert_eq!(count as usize, sqlx::migrate!().iter().count(), "{history}");
                 query("SELECT system_messages_ct FROM server_settings")
                     .execute(&pool)
                     .await?;

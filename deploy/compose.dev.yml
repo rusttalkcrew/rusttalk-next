@@ -1,5 +1,8 @@
 services:
   api:
+    depends_on:
+      livekit:
+        condition: service_healthy
     build:
       context: ..
       dockerfile: services/api/Dockerfile

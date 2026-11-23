@@ -6,7 +6,12 @@ set -euo pipefail
 out=$1
 # Matches MinimumOSVersion in the bundle's Info.plist.
 export IPHONEOS_DEPLOYMENT_TARGET=16.0
-cargo build --locked -p rusttalk-client --target aarch64-apple-ios
+case ${MOBILE_BUILD:-test} in
+  test) profile=dev; bindir=debug ;;
+  release) profile=release; bindir=release ;;
+  *) echo "Unknown MOBILE_BUILD" >&2; exit 1 ;;
+esac
+cargo build --profile "$profile" --locked -p rusttalk-client --target aarch64-apple-ios
 target=${CARGO_TARGET_DIR:-target}
 version=$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "rusttalk-client") | .version')
 
@@ -14,7 +19,7 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 app=$work/Payload/RustTalk.app
 mkdir -p "$app" "$out"
-cp "$target/aarch64-apple-ios/debug/rusttalk-client" "$app/"
+cp "$target/aarch64-apple-ios/$bindir/rusttalk-client" "$app/"
 sed -e "s/@VERSION@/$version/g" -e "s/@MINIMUM@/$IPHONEOS_DEPLOYMENT_TARGET/g" \
   deploy/ios/Info.plist > "$app/Info.plist"
 plutil -lint "$app/Info.plist"

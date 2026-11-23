@@ -41,6 +41,9 @@ pub struct Server {
     pub chats: HashMap<Id, Chat>,
     /// The channel shown when this server is picked.
     pub open: Option<Id>,
+    /// The Events page shows while no channel is open.
+    pub events_open: bool,
+    pub events: crate::home::events::View,
     /// Who is in each voice channel.
     pub voice: HashMap<Id, Vec<Peer>>,
     /// Every member name seen this session, for people who have left (bans, audit log).
@@ -263,6 +266,27 @@ pub struct Directory {
     /// Emoji and sticker packs in display order, and how many the server allows.
     pub packs: Vec<EmojiPack>,
     pub packs_max: usize,
+    /// `None` on servers from before events.
+    pub calendar: Option<Calendar>,
+}
+
+/// The server's events, as far as this person may see them.
+#[derive(Clone, Default)]
+pub struct Calendar {
+    pub enabled: bool,
+    pub events: Vec<Event>,
+}
+
+#[derive(Clone)]
+pub struct Event {
+    pub waiting_for_key: bool,
+    /// Indices into this snapshot’s answer records that need a historical space key.
+    pub waiting_answers: Vec<usize>,
+    /// `None` when this device could not read or verify it.
+    pub details: Option<rusttalk_core::calendar::Details>,
+    pub record: rusttalk_core::calendar::EventRecord,
+    /// Who answered what; answers this device can't verify are left out.
+    pub answers: Vec<(Id, rusttalk_core::calendar::Answer)>,
 }
 
 /// A named group of emoji and stickers.
@@ -341,6 +365,12 @@ pub struct Perms {
     pub mute_members: bool,
     /// Remove people from a voice channel or move them to another.
     pub move_members: bool,
+    /// Suggest events, which show once approved.
+    pub suggest_events: bool,
+    /// Add events without approval.
+    pub create_events: bool,
+    /// Approve, decline and cancel anyone's events.
+    pub manage_events: bool,
     /// This person's highest role rank; they can only manage people and roles below it.
     pub rank: i64,
 }

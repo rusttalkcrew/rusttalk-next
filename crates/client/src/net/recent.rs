@@ -451,6 +451,12 @@ impl State {
         client: Option<&KeyClient<'_>>,
     ) {
         use rusttalk_core::keys::{Kind, Scope};
+        if let Some(dir) = &mut self.last
+            && let Some(calendar) = &mut dir.calendar
+            && super::calendar::revalidate(calendar, revoked)
+        {
+            ctx.send(Update::Directory(url.clone(), Box::new(dir.clone())));
+        }
         let mut pages = Vec::new();
         for (id, sources) in &mut self.sources {
             let scope = Scope {

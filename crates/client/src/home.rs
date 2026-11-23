@@ -92,6 +92,7 @@ struct Embeds<'a> {
 const TOOLBAR_BUTTON: Vec2 = Vec2::new(30.0, 26.0);
 
 pub(crate) mod embed;
+pub(crate) mod events;
 pub(crate) mod forum;
 mod friends;
 pub mod layout;
@@ -809,6 +810,37 @@ impl Home {
             server.open = Some(channel);
             self.view = View::Server(index);
             self.layout.list = false;
+        } else if (server.dir.calendar.iter())
+            .any(|c| c.events.iter().any(|e| e.record.id == channel))
+        {
+            // A reminder: its ID is the event's.
+            server.open = None;
+            server.events_open = true;
+            self.view = View::Server(index);
+            self.layout.list = false;
+        }
+    }
+
+    /// Notify once about each new reminder to answer an event, unless the server is muted.
+    fn remind(&mut self, ctx: &egui::Context, index: usize) {
+        let server = &self.servers[index];
+        let now = notify::unix_now();
+        self.notify.expire_reminders(now);
+        let prefs = self.notify.prefs();
+        let rule = prefs.server(&server.address);
+        if !prefs.desktop || rule.muted(now) || rule.level == Some(notify::Level::Nothing) {
+            return;
+        }
+        let due = events::reminders(server, now);
+        let address = server.address.clone();
+        for (id, at, remove_at, body) in due {
+            if self
+                .notify
+                .new_reminder(&address, &id, at, remove_at, self.focused)
+            {
+                let title = t!("events.reminder_title", server = self.servers[index].name());
+                self.notify.show(ctx, &title, &body, (address.clone(), id));
+            }
         }
     }
 
@@ -1275,6 +1307,7 @@ impl Home {
                             .any(|c| &c.id == id)
                     });
                     server.dir = *dir;
+                    self.remind(ctx, index);
                     self.profile_loaded(index);
                     if changed
                         && muted
@@ -1283,6 +1316,11 @@ impl Home {
                         self.toast = Some((t!("call.server_muted").into(), now + 6.0));
                     }
                     self.load_dms(index);
+                }
+            }
+            Update::Calendar(address, result) => {
+                if let Some(index) = self.index(&address) {
+                    self.servers[index].events.changed(result);
                 }
             }
             Update::Left(address) => {
@@ -2046,6 +2084,11 @@ pub fn show(
                             voice_pane(ui, home, index, channel)
                         }
                         Some(channel) => chat_pane(ui, home, index, channel),
+                        None if home.servers[index].events_open
+                            && events::enabled(&home.servers[index]) =>
+                        {
+                            events::pane(ui, home, index)
+                        }
                         None => {
                             let server = &home.servers[index];
                             let hint = match &server.status {
@@ -2631,6 +2674,11 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
     let categories = &server.dir.categories;
     let can_manage = perms.manage_channels && online;
     let can_move = can_manage && !server.order_unavailable && reorder::order(categories).is_some();
+    let mut show_events = false;
+    if events::enabled(server) {
+        let selected = server.open.is_none() && server.events_open;
+        show_events = events::nav_row(ui, server, selected);
+    }
     // On phones, drag scrolls the list; the hold menu still offers every move.
     let can_drag = can_move && !ui::TOUCH;
     let area = ScrollArea::vertical().animated(false);
@@ -2761,6 +2809,12 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
     }
     if category_dialog.is_some() {
         home.dialog = category_dialog;
+    }
+    if show_events {
+        let server = &mut home.servers[index];
+        server.open = None;
+        server.events_open = true;
+        home.layout.list = false;
     }
     if let Some(channel) = pick {
         home.servers[index].open = Some(channel);
@@ -3503,6 +3557,8 @@ pub(crate) fn new_server(
         dir: Directory::default(),
         chats: HashMap::new(),
         open: None,
+        events_open: false,
+        events: events::View::default(),
         voice: HashMap::new(),
         names: HashMap::new(),
         commands,

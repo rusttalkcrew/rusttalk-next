@@ -487,6 +487,8 @@ mod tests {
             dir: Directory::default(),
             chats: Default::default(),
             open: None,
+            events_open: false,
+            events: Default::default(),
             voice: Default::default(),
             names: Default::default(),
             commands,
