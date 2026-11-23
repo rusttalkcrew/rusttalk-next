@@ -98,12 +98,17 @@ fn identity(ui: &mut Ui, home: &Home, status: Choice) -> eframe::egui::Response 
     let c = ui::colors(ui);
     let color = status_color(c, status);
     let (label, _) = status_text(status);
+    let speaking = home.voice.local_speaking(&home.servers);
     ui::row_button(
         ui,
         BAR_HEIGHT,
         &t!("status.button", name = name, status = label),
         |ui| {
+            ui.spacing_mut().item_spacing.x = ui::SPACE_S;
             let avatar = face(ui, dir, me, &name, AVATAR_SIZE, false);
+            if speaking {
+                ui::speaking_outline(ui, avatar.rect);
+            }
             ui::presence_dot(ui, avatar.rect, 5.0, color, c.side);
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
