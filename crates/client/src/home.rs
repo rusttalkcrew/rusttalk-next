@@ -2424,15 +2424,23 @@ fn rail_marks(ui: &Ui, button: &Response, selected: bool, (unread, mentions): (b
 /// The same on a channel or DM row, unless that chat is muted.
 /// A DM row counts its copy on every server.
 fn chat_marks(ui: &Ui, home: &Home, chats: &[(&url::Url, Id)], dm: bool, row: Rect) {
+    paint_marks(ui, row, chat_counts(home, chats, dm));
+}
+
+/// Whether the chats are unread and their mentions, leaving out muted ones.
+fn chat_counts(home: &Home, chats: &[(&url::Url, Id)], dm: bool) -> (bool, u32) {
     let (prefs, now) = (home.notify.prefs(), notify::unix_now());
     let chats =
         (chats.iter()).filter(|(server, channel)| !prefs.effective(server, channel, dm, now).muted);
-    let (unread, mentions) = chats.fold((false, 0), |(unread, mentions), (server, channel)| {
+    chats.fold((false, 0), |(unread, mentions), (server, channel)| {
         (
             unread || home.notify.unread(server, channel),
             mentions + home.notify.mentions(server, channel),
         )
-    });
+    })
+}
+
+fn paint_marks(ui: &Ui, row: Rect, (unread, mentions): (bool, u32)) {
     if unread {
         ui::unread_pill(ui, row, 4.0);
     }
@@ -2650,9 +2658,14 @@ fn dm_row(ui: &mut Ui, home: &mut Home, peer: &Id, request: bool) {
     let selected = home.view == View::Direct(Some(*peer));
     let name = home.peer_name(peer);
     let dir = home.dm_server(peer).map_or(&none, |i| &home.servers[i].dir);
-    let shared: Vec<&str> = (home.shared(peer).into_iter())
-        .map(|i| home.servers[i].name())
-        .collect();
+    // A server saved twice, or two with one name, reads as one.
+    let mut shared: Vec<&str> = Vec::new();
+    for index in home.shared(peer) {
+        let server = home.servers[index].name();
+        if !shared.contains(&server) {
+            shared.push(server);
+        }
+    }
     let caption = if shared.is_empty() {
         t!("home.no_shared_server").to_owned()
     } else {
@@ -2663,21 +2676,27 @@ fn dm_row(ui: &mut Ui, home: &mut Home, peer: &Id, request: bool) {
         ui.painter()
             .rect_filled(rect, ui::RADIUS_ROW, ui::colors(ui).selected);
     }
+    let marks = if request {
+        (false, 0)
+    } else {
+        let replicas = home.replicas(peer);
+        let chats: Vec<_> = (replicas.iter())
+            .map(|(index, channel)| (&home.servers[*index].address, *channel))
+            .collect();
+        chat_counts(home, &chats, true)
+    };
     let row = ui::row_button(ui, 44.0, &name, |ui| {
         face(ui, dir, peer, &name, 30.0, true);
+        // The text ends before the mention badge instead of running under it.
+        let badge = if marks.1 > 0 { 24.0 } else { 0.0 };
         ui.vertical(|ui| {
+            ui.set_max_width(ui.available_width() - badge);
             ui.spacing_mut().item_spacing.y = 0.0;
             ui.add(Label::new(ui::bold(&name)).truncate());
             ui.add(Label::new(ui::caption(&caption)).truncate());
         });
     });
-    if !request {
-        let replicas = home.replicas(peer);
-        let chats: Vec<_> = (replicas.iter())
-            .map(|(index, channel)| (&home.servers[*index].address, *channel))
-            .collect();
-        chat_marks(ui, home, &chats, true, row.rect);
-    }
+    paint_marks(ui, row.rect, marks);
     if row.clicked() {
         home.view = View::Direct(Some(*peer));
         home.layout.list = false;
