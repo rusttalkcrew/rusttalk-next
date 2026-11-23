@@ -448,6 +448,7 @@ impl Home {
         self.dialog = None;
         self.server_settings = None;
         let server = self.servers.remove(index);
+        self.net.forget(&server.address);
         let mut settings = self.voice.audio.settings();
         settings.hide_offline.left(&server.address);
         settings.left(&server.address);
@@ -1040,6 +1041,37 @@ impl Home {
                     Err(error) => self.find.error = Some(error),
                 }
             }
+            Update::Cached(address, dir, pages) => {
+                if let Some(i) = self.index(&address) {
+                    let server = &mut self.servers[i];
+                    server.dir = *dir;
+                    for (channel, items) in pages {
+                        if server.dir.dms.iter().any(|dm| dm.channel == channel) {
+                            server.cached.insert(channel, items);
+                        } else {
+                            let chat = server.chats.entry(channel).or_default();
+                            chat.clear_history();
+                            chat.merge(items, false);
+
+                            if !chat.messages.is_empty() && !server.is_voice(&channel) {
+                                server.open = Some(channel);
+                            }
+                        }
+                    }
+                }
+            }
+            Update::ResetHistory(address) => {
+                if let Some(i) = self.index(&address) {
+                    self.servers[i].cached.clear();
+                    for chat in self.servers[i].chats.values_mut() {
+                        chat.clear_history();
+                    }
+                    for thread in self.threads.values_mut() {
+                        thread.forget(&address);
+                    }
+                    self.load_dms(i);
+                }
+            }
             Update::Status(address, status) => {
                 let Some(index) = self.index(&address) else {
                     return;
@@ -1092,6 +1124,15 @@ impl Home {
                         for channel in thread.unanswered(&address) {
                             server.send(Command::Open(channel));
                         }
+                    }
+                }
+                if matches!(status, Status::Stopped(_)) {
+                    server.cached.clear();
+                    server.chats.clear();
+                    server.names.clear();
+                    server.dir = Directory::default();
+                    for thread in self.threads.values_mut() {
+                        thread.forget(&address);
                     }
                 }
                 server.status = status;
@@ -1169,6 +1210,23 @@ impl Home {
                         chat.messages
                             .retain(|msg| !matches!(msg.body, Body::Notice { .. }));
                     }
+                    for old in &server.dir.dms {
+                        if !dir
+                            .dms
+                            .iter()
+                            .any(|dm| dm.peer == old.peer && dm.channel == old.channel)
+                            && let Some(thread) = self.threads.get_mut(&old.peer)
+                        {
+                            thread.forget(&address);
+                        }
+                    }
+                    server.cached.clear();
+                    server.chats.retain(|id, _| {
+                        dir.categories
+                            .iter()
+                            .flat_map(|c| &c.channels)
+                            .any(|c| &c.id == id)
+                    });
                     server.dir = *dir;
                     self.profile_loaded(index);
                     if changed
@@ -3364,6 +3422,7 @@ pub(crate) fn new_server(
         order_unavailable: false,
         dir: Directory::default(),
         chats: HashMap::new(),
+        cached: HashMap::new(),
         open: None,
         voice: HashMap::new(),
         names: HashMap::new(),
@@ -3560,7 +3619,7 @@ fn chat_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
     let server = &mut home.servers[index];
     let mut chat = server.chats.remove(&channel).unwrap_or_default();
     // A membership notice can arrive before anyone has opened this channel.
-    if !chat.opened {
+    if !chat.opened && server.status == Status::Online {
         chat.opened = true;
         server.send(Command::Open(channel));
         chat.loading = true;
@@ -3962,6 +4021,27 @@ fn dm_pane(ui: &mut Ui, home: &mut Home, peer: Id) {
     if let Some((index, pick)) = dm_title(ui, home, peer) {
         person::apply(home, index, peer, pick, ui.input(|input| input.time));
     }
+    let mut preview = Thread::default();
+    let pair = dm::Pair {
+        me: *home.identity.certificate.person_id(),
+        peer,
+        deleted: &home.dm_deleted,
+    };
+    for (index, channel) in home.replicas(&peer) {
+        let server = &home.servers[index];
+        if let Some(items) = server.cached.get(&channel) {
+            preview.add(&server.address, channel, items.clone(), false, None, &pair);
+        }
+    }
+    if !preview.chat.messages.is_empty()
+        && home
+            .threads
+            .get(&peer)
+            .is_none_or(|t| t.chat.messages.is_empty())
+    {
+        chat_view(ui, home, At::Dm(peer), &mut preview.chat);
+        return;
+    }
     let mut chat = std::mem::take(&mut home.threads.entry(peer).or_default().chat);
     let act = chat_view(ui, home, At::Dm(peer), &mut chat);
     let thread = home.threads.entry(peer).or_default();
@@ -4297,6 +4377,7 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
     chat.content_height = content;
     // A DM asks each copy on its own, so one slow server doesn't hold up the others.
     if settled
+        && online
         && output.state.clamped_offset().y < 4.0
         && (!chat.loading || matches!(at, At::Dm(_)))
         && !chat.at_start
@@ -4819,7 +4900,7 @@ fn composer(
                 });
                 // Room for the buttons right of the box: emoji, sticker and send.
                 let right = 3.0 * (COMPOSER_BUTTON + 2.0);
-                let size = Vec2::new(ui.available_width() - right, 0.0);
+                let size = Vec2::new((ui.available_width() - right).max(0.0), 0.0);
                 let field = ui
                     .allocate_ui_with_layout(size, Layout::top_down(Align::Min), |ui| {
                         composer_field(ui, chat, dir, online, channel, hint, wide, emoji_picker)

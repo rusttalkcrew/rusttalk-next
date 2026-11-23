@@ -422,6 +422,7 @@ fn forget_profile(data: &std::path::Path, settings: crate::audio::Settings) {
         remove(name, fs::remove_file(data.join(name)));
     }
     remove("revocations", fs::remove_dir_all(data.join("revocations")));
+    remove("recent", fs::remove_dir_all(data.join("recent")));
     remove("dm_pins", fs::remove_dir_all(data.join("dm_pins")));
     crate::previews::forget(data);
 
@@ -980,6 +981,7 @@ mod tests {
             fs::write(dir.join(file), b"original").unwrap();
         }
         for file in [
+            "recent/server/messages",
             "dm_pins/server.json",
             "previews/card.json",
             "previews/card.img",
@@ -997,7 +999,7 @@ mod tests {
         };
         rusttalk_core::client::save_json(dir, &dir.join("voice.json"), &voice).unwrap();
         forget_profile(dir, voice);
-        for file in account.into_iter().chain(["dm_pins", "previews"]) {
+        for file in account.into_iter().chain(["recent", "dm_pins", "previews"]) {
             assert!(!dir.join(file).exists(), "{file} survived sign-out");
         }
         for file in device {

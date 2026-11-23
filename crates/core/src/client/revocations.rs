@@ -93,7 +93,7 @@ impl Revocations {
         self.0.join("scopes").join(filename(server))
     }
 
-    pub(super) fn check(&self, person: &PersonId, device: &[u8; 32]) -> Result<()> {
+    pub fn check(&self, person: &PersonId, device: &[u8; 32]) -> Result<()> {
         let file = self.0.join(filename(person)).join(filename(device));
         ensure!(!file.try_exists()?, "device revoked");
         Ok(())

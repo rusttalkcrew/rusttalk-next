@@ -309,8 +309,18 @@ impl Thread {
         self.refresh();
     }
 
-    /// The server is gone: stop paging there. Its messages stay readable here.
+    /// Drop copies belonging to a removed server or an obsolete session.
     pub fn forget(&mut self, server: &Url) {
+        let ids: Vec<_> = self
+            .chat
+            .messages
+            .iter()
+            .filter(|m| m.replicas.contains(server))
+            .map(|m| m.id)
+            .collect();
+        for id in ids {
+            self.remove(server, &id);
+        }
         self.pages.retain(|(at, _), _| at != server);
         self.refresh();
     }
@@ -846,6 +856,6 @@ mod tests {
         );
         thread.forget(&a);
         assert!(thread.chat.at_start && thread.unanswered(&a).is_empty());
-        assert_eq!(texts(&thread), ["4", "5", "6", "7", "8"]);
+        assert_eq!(texts(&thread), ["6"]);
     }
 }

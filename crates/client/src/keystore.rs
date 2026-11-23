@@ -1094,7 +1094,7 @@ fn temp_prefix(name: &str) -> String {
 /// the old file or the new one (and maybe a temporary file, removed at the next
 /// start). The temporary file is created 0600 on Unix; on Windows the profile folder
 /// in the per-user AppData already admits only this user.
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let dir = path.parent().context("key folder")?;
     let name = path.file_name().context("key file name")?.to_string_lossy();
     let mut file = tempfile::Builder::new()

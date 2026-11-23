@@ -39,6 +39,7 @@ pub struct Server {
     pub order_unavailable: bool,
     pub dir: Directory,
     pub chats: HashMap<Id, Chat>,
+    pub cached: HashMap<Id, Vec<Msg>>,
     /// The channel shown when this server is picked.
     pub open: Option<Id>,
     /// Who is in each voice channel.
@@ -411,14 +412,14 @@ impl ChannelKind {
 }
 
 /// Channels without a category go in a category without an ID or name.
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Category {
     pub id: Option<Id>,
     pub name: String,
     pub channels: Vec<Channel>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Channel {
     pub id: Id,
     pub name: String,
@@ -531,7 +532,7 @@ pub struct Device {
     pub fingerprint: String,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Dm {
     pub channel: Id,
     pub peer: Id,
@@ -654,6 +655,14 @@ pub struct Chat {
 }
 
 impl Chat {
+    pub fn clear_history(&mut self) {
+        self.messages.clear();
+        self.edited.clear();
+        self.pending_edits.clear();
+        self.polls.clear();
+        self.at_start = false;
+    }
+
     pub fn open_draft(&mut self, dir: &Directory, text: &str) {
         (self.draft, self.mentions) = crate::home::mentions::DraftMentions::open(dir, text);
     }

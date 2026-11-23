@@ -261,6 +261,8 @@ pub(super) async fn directory(
             .flat_map(|category| &category.channels)
             .any(|channel| channel.id == *joined)
     });
+    state.prune_history(&dir);
+    super::recent::Listing::save(state, &dir, &members, &space);
     state.last = Some(dir.clone());
     state.named = client.has_space_key();
     ctx.send(Update::Directory(url.clone(), Box::new(dir)));
@@ -578,7 +580,7 @@ fn received_bio(bio: Option<String>) -> Option<String> {
 
 /// The cache key of a member's avatar or the server icon: its owner and ciphertext hash.
 /// The owner is part of the key so one member cannot reuse another's picture.
-fn picture_key(owner: &Id, hash: &str) -> [u8; 32] {
+pub(super) fn picture_key(owner: &Id, hash: &str) -> [u8; 32] {
     Sha256::new()
         .chain_update(owner)
         .chain_update(hash.as_bytes())
@@ -680,7 +682,7 @@ pub(crate) fn frame_image(frame: image::Frame) -> (ColorImage, u32) {
 }
 
 /// Decode a profile picture, server icon, emoji or sticker.
-fn picture(bytes: &[u8]) -> Option<Picture> {
+pub(super) fn picture(bytes: &[u8]) -> Option<Picture> {
     let key: [u8; 32] = Sha256::digest(bytes).into();
     let frames = match decode_profile_image(bytes) {
         Ok(frames) => frames,
