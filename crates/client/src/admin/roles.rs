@@ -187,8 +187,8 @@ fn member_rank(dir: &Directory, member: &Member) -> i64 {
 type Permission = (&'static str, &'static str, &'static str, bool);
 
 /// The permissions in groups, with the group titles.
-fn groups() -> [(&'static str, Vec<Permission>); 4] {
-    [
+fn groups(events: bool) -> Vec<(&'static str, Vec<Permission>)> {
+    let mut groups = vec![
         (
             t!("admin.group_general"),
             vec![
@@ -266,7 +266,34 @@ fn groups() -> [(&'static str, Vec<Permission>); 4] {
                 ),
             ],
         ),
-    ]
+    ];
+    // Older servers refuse permissions they don't know.
+    if events {
+        groups.push((
+            t!("events.title"),
+            vec![
+                (
+                    "suggest_events",
+                    t!("perm.suggest_events"),
+                    t!("perm.suggest_events_help"),
+                    false,
+                ),
+                (
+                    "create_events",
+                    t!("perm.create_events"),
+                    t!("perm.create_events_help"),
+                    false,
+                ),
+                (
+                    "manage_events",
+                    t!("perm.manage_events"),
+                    t!("perm.manage_events_help"),
+                    false,
+                ),
+            ],
+        ));
+    }
+    groups
 }
 
 /// Whether you hold a permission yourself; only those can be given or taken away.
@@ -709,7 +736,7 @@ fn permissions_tab(ui: &mut Ui, dir: &Directory, role: &Role, page: &mut RolesPa
     let chosen = page
         .permissions
         .get_or_insert_with(|| role.permissions.clone());
-    for (at, (group, permissions)) in groups().into_iter().enumerate() {
+    for (at, (group, permissions)) in groups(dir.calendar.is_some()).into_iter().enumerate() {
         if at > 0 {
             ui.add_space(ui::SPACE_S);
         }

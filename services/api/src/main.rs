@@ -1,4 +1,5 @@
 mod auth;
+mod calendar;
 mod channels;
 mod dms;
 mod emoji;
@@ -259,12 +260,32 @@ async fn run() -> Result<()> {
 }
 
 async fn serve(app: App) -> io::Result<()> {
-    let expiry = tokio::spawn(store::expire_records(app.db.clone()));
+    let expiry = tokio::spawn(store::expire_records(app.clone()));
     // Apply mutes and access changes that a restart or LiveKit outage left unapplied.
     voice::start_enforcer(&app);
     let publisher = tokio::spawn(index::refresh(app.clone(), app.listing_changed.subscribe()));
     let file_expiry = tokio::spawn(files::expire(app.clone()));
-    let app = Router::new()
+    let app = routes(app)
+        .layer(middleware::from_fn(finish_changes))
+        .layer(middleware::from_fn(log_request))
+        .layer(PropagateRequestIdLayer::x_request_id())
+        .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
+        .layer(middleware::map_request(|mut request: Request| async {
+            request.headers_mut().remove("x-request-id");
+            request
+        }));
+
+    let listener = TcpListener::bind("0.0.0.0:8080").await?;
+    tracing::info!("API listening on port 8080");
+    let result = axum::serve(listener, app).await;
+    expiry.abort();
+    publisher.abort();
+    file_expiry.abort();
+    result
+}
+
+fn routes(app: App) -> Router {
+    Router::new()
         .route("/v1/health", get(|| async { "ok\n" }))
         .route("/v1/server-info", get(members::server_info))
         .route("/v1/settings/updates", get(updates::status))
@@ -295,6 +316,9 @@ async fn serve(app: App) -> io::Result<()> {
         .route("/v1/member-devices", get(keys::devices))
         .route("/v1/invite-preview", post(members::preview))
         .route("/v1/catalog", get(channels::catalog))
+        .route("/v1/calendar/{id}", delete(calendar::remove))
+        .route("/v1/calendar/{id}/approve", post(calendar::approve))
+        .route("/v1/settings/calendar", put(calendar::set_enabled))
         .route("/v1/voice/{id}/token", post(voice::token))
         .route("/v1/voice/{id}/participants", get(voice::participants))
         .route(
@@ -381,6 +405,13 @@ async fn serve(app: App) -> io::Result<()> {
         )
         .merge(
             Router::new()
+                .route("/v1/calendar", get(calendar::list).post(calendar::create))
+                .layer(RequestBodyLimitLayer::new(
+                    rusttalk_core::calendar::BODY_LIMIT,
+                )),
+        )
+        .merge(
+            Router::new()
                 .route("/v1/channels/order", put(channels::reorder))
                 .layer(RequestBodyLimitLayer::new(channels::ORDER_BODY_LIMIT)),
         )
@@ -411,22 +442,6 @@ async fn serve(app: App) -> io::Result<()> {
                 .layer(RequestBodyLimitLayer::new(messages::BODY_LIMIT)),
         )
         .with_state(app)
-        .layer(middleware::from_fn(finish_changes))
-        .layer(middleware::from_fn(log_request))
-        .layer(PropagateRequestIdLayer::x_request_id())
-        .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
-        .layer(middleware::map_request(|mut request: Request| async {
-            request.headers_mut().remove("x-request-id");
-            request
-        }));
-
-    let listener = TcpListener::bind("0.0.0.0:8080").await?;
-    tracing::info!("API listening on port 8080");
-    let result = axum::serve(listener, app).await;
-    expiry.abort();
-    publisher.abort();
-    file_expiry.abort();
-    result
 }
 
 /// Changes running at once. Each keeps running after its client leaves, so this bounds what
