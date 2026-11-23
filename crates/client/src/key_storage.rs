@@ -56,14 +56,14 @@ impl Default for NewPassword {
 }
 
 impl NewPassword {
-    /// The fields; true when Enter was pressed in the last one.
-    fn show(&mut self, ui: &mut Ui) -> bool {
+    /// The fields, `width` wide; true when Enter was pressed in the last one.
+    fn show(&mut self, ui: &mut Ui, width: f32) -> bool {
         let label = ui.label(t!("keys.password"));
         ui.add(
             ui::field(&mut *self.password)
                 .id(field_id("new"))
                 .password()
-                .desired_width(FIELD_WIDTH),
+                .desired_width(width),
         )
         .labelled_by(label.id);
         let label = ui.label(t!("keys.repeat_password"));
@@ -72,7 +72,7 @@ impl NewPassword {
                 ui::field(&mut *self.repeat)
                     .id(field_id("repeat"))
                     .password()
-                    .desired_width(FIELD_WIDTH),
+                    .desired_width(width),
             )
             .labelled_by(label.id);
         submitted(ui, &repeat)
@@ -105,20 +105,19 @@ pub fn choose(
     busy: bool,
     keychain: bool,
 ) -> Option<Picked> {
-    ui.heading(t!("keys.choose_title"));
     if RULES.phone() {
-        ui.label(if !keychain && cfg!(target_os = "android") {
+        let text = if !keychain && cfg!(target_os = "android") {
             t!("keys.no_android_keystore")
         } else if !keychain {
             t!("keys.no_keychain_phone")
         } else {
             t!("keys.password_only")
-        });
+        };
+        ui::step_title(ui, t!("keys.choose_title"), text);
         password.get_or_insert_with(NewPassword::default);
     } else {
-        ui.label(t!("keys.no_keychain"));
+        ui::step_title(ui, t!("keys.choose_title"), t!("keys.no_keychain"));
     }
-    ui.add_space(ui::SPACE_L);
     ui.add_enabled_ui(!busy, |ui| {
         if !RULES.phone() {
             if primary_large(ui, t!("keys.file")).clicked() {
@@ -133,18 +132,11 @@ pub fn choose(
         }
         let fields = password.as_mut()?;
         ui.add_space(ui::SPACE_L);
-        let entered = fields.show(ui);
+        let entered = fields.show(ui, f32::INFINITY);
         error_text(ui, error.as_deref());
         ui.add_space(ui::SPACE_S);
-        let pressed = ui
-            .horizontal(|ui| {
-                let pressed = primary_large(ui, t!("keys.continue")).clicked();
-                if busy {
-                    ui.spinner();
-                }
-                pressed
-            })
-            .inner;
+        let pressed = primary_large(ui, t!("keys.continue")).clicked();
+        working(ui, busy);
         if !(pressed || entered) {
             return None;
         }
@@ -157,6 +149,13 @@ pub fn choose(
         }
     })
     .inner
+}
+
+/// A spinner under the button while the password work runs.
+fn working(ui: &mut Ui, busy: bool) {
+    if busy {
+        ui.vertical_centered(|ui| ui.spinner());
+    }
 }
 
 pub enum Unlock {
@@ -172,9 +171,7 @@ pub fn unlock(
     tries: u32,
     busy: bool,
 ) -> Option<Unlock> {
-    ui.heading(t!("keys.unlock_title"));
-    ui.label(t!("keys.unlock_text"));
-    ui.add_space(ui::SPACE_M);
+    ui::step_title(ui, t!("keys.unlock_title"), t!("keys.unlock_text"));
     ui.add_enabled_ui(!busy, |ui| {
         let label = ui.label(t!("keys.password"));
         let field = ui
@@ -182,24 +179,17 @@ pub fn unlock(
                 ui::field(&mut **password)
                     .id(field_id("unlock"))
                     .password()
-                    .desired_width(FIELD_WIDTH),
+                    .desired_width(f32::INFINITY),
             )
             .labelled_by(label.id);
         let entered = submitted(ui, &field);
-        if !busy && ui.memory(|memory| memory.focused().is_none()) {
-            field.request_focus();
+        if !busy {
+            ui::focus_when_none(ui, &field);
         }
         error_text(ui, error);
         ui.add_space(ui::SPACE_S);
-        let pressed = ui
-            .horizontal(|ui| {
-                let pressed = primary_large(ui, t!("keys.unlock")).clicked();
-                if busy {
-                    ui.spinner();
-                }
-                pressed
-            })
-            .inner;
+        let pressed = primary_large(ui, t!("keys.unlock")).clicked();
+        working(ui, busy);
         if pressed || entered {
             return Some(Unlock::Try);
         }
@@ -219,13 +209,10 @@ pub fn unlock(
 pub fn missing(ui: &mut Ui, keychain: bool) -> bool {
     // The desktop-keychain help is about Steam Deck Desktop Mode, not phones.
     if keychain && !RULES.phone() {
-        ui.heading(t!("keys.gone_title"));
-        ui.label(t!("keys.gone_text"));
+        ui::step_title(ui, t!("keys.gone_title"), t!("keys.gone_text"));
     } else {
-        ui.heading(t!("keys.missing_title"));
-        ui.label(t!("keys.missing_text"));
+        ui::step_title(ui, t!("keys.missing_title"), t!("keys.missing_text"));
     }
-    ui.add_space(ui::SPACE_L);
     secondary_large(ui, t!("keys.use_words")).clicked()
 }
 
@@ -301,7 +288,7 @@ pub fn settings(
         }
         ui.add_space(ui::SPACE_S);
         let needs_password = pick == Kind::Password;
-        let entered = needs_password && form.password.show(ui);
+        let entered = needs_password && form.password.show(ui, FIELD_WIDTH);
         let label = match (current == Some(pick), needs_password) {
             (true, false) => None,
             (true, true) => Some(t!("keys.change_password")),
@@ -396,7 +383,7 @@ mod tests {
                 |ui, state: &mut Option<(Zeroizing<String>, NewPassword)>| {
                     if let Some((password, new)) = state {
                         unlock(ui, password, None, 0, false);
-                        new.show(ui);
+                        new.show(ui, FIELD_WIDTH);
                     }
                 },
                 None,

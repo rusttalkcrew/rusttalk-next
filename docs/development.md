@@ -66,6 +66,16 @@ On first start the app offers two paths:
 - **I already have an account** takes the 24 words and adds this computer as
   a new device (`DeviceIdentity::add_device`).
 
+The first-start screens share one layout (`ui::onboarding`): the logo, a title
+and one line of text in a centred column, a card on wide windows, scrolling
+when it doesn't fit. Every step after the first has Back. Back from the word
+check shows the same words again; going back before them drops them, and
+since nothing is saved before the check, no half-made account is left. The
+words screen has Copy, and the word check and the recovery-words screen have
+Paste, which splits the text on spaces, new lines and commas and drops
+numbering like "1.". Pasted text is wiped once read and never logged
+(`src/words.rs`).
+
 Later starts load the identity from the keystore and open the main window:
 server rail, channel list, chat pane and member list. Settings has the
 short person fingerprint under Profile > Details, this device's name under

@@ -130,8 +130,10 @@ fn button(ui: &mut Ui, text: &str, kind: Kind, size: Vec2, text_size: f32) -> Re
                 state.fg_stroke.color = ON_FILL;
             }
         }
+        // Growing space on both sides centres the text in a button stretched wide.
+        let text = RichText::new(text).family(bold_family()).size(text_size);
         ui.add(
-            Button::new(RichText::new(text).family(bold_family()).size(text_size))
+            Button::new((egui::Atom::grow(), text, egui::Atom::grow()))
                 .min_size(size)
                 .corner_radius(RADIUS),
         )
@@ -254,7 +256,16 @@ impl Widget for Field<'_> {
         if self.private {
             keep_private(ui.ctx());
         }
-        let output = self.edit.show(ui);
+        let mut output = self.edit.show(ui);
+        if self.private || self.password {
+            // egui's undo history keeps copies of the text, which Ctrl+Z would
+            // bring back after the field was emptied or its screen left.
+            output.state.clear_undoer();
+            output
+                .state
+                .clone()
+                .store(ui.ctx(), output.response.response.id);
+        }
         share_with_keyboard(&output, self.private || self.password);
         let response = output.response.response;
         if self.private {
@@ -315,6 +326,17 @@ fn keep_private(ctx: &egui::Context) {
 #[cfg(target_os = "android")]
 pub fn is_private(ctx: &egui::Context, field: egui::Id) -> bool {
     ctx.data(|data| data.get_temp(private_id(field))) == Some(ctx.cumulative_pass_nr())
+}
+
+/// Give `field` focus while nothing has it, so typing can start at once. Not on
+/// phones: focus there opens the keyboard, and taking it back at once would keep
+/// a tap outside the field from ever closing the keyboard.
+pub fn focus_when_none(ui: &Ui, field: &Response) {
+    if !cfg!(any(target_os = "android", target_os = "ios"))
+        && ui.memory(|memory| memory.focused().is_none())
+    {
+        field.request_focus();
+    }
 }
 
 /// The accent outline of a focused text field.

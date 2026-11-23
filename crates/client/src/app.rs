@@ -1,7 +1,7 @@
 use std::{cell::Cell, path::PathBuf};
 
 use eframe::egui::{
-    self, CentralPanel, CollapsingHeader, Grid, Key, Response, ScrollArea, Ui, Vec2,
+    self, Align, CollapsingHeader, Grid, Id, Key, Layout, Margin, Response, Ui, Vec2,
 };
 use rusttalk_core::identity::{DeviceIdentity, IdentityError, WordConfirmation};
 use zeroize::Zeroizing;
@@ -11,10 +11,14 @@ use crate::{
     key_storage::{self, NewPassword, Picked, Unlock},
     keystore::{Chosen, Job, Keystore, Kind, Sealer, Start, Unlocked},
     ui::{self, error_text, primary_large as primary, secondary_large as secondary},
+    words,
 };
 
 const DEVICE_NAME: &str = "Desktop";
-const CARD_WIDTH: f32 = 560.0;
+/// The recovery words in a list.
+const WORD_COUNT: usize = 24;
+/// How long "Copied" shows after copying the words.
+const COPIED_SECONDS: f64 = 3.0;
 
 pub struct App<'a> {
     keystore: Keystore,
@@ -24,6 +28,17 @@ pub struct App<'a> {
     data: PathBuf,
     updates: crate::update::Updater,
     window_started: &'a Cell<bool>,
+    /// The key storage choice came first, so Back on the welcome screen returns to it.
+    chose_storage: bool,
+    /// The recovery words were asked for from here: Back returns to it.
+    recover: Option<Recover>,
+}
+
+/// Where "use recovery words" was pressed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Recover {
+    Unlock,
+    Missing { keychain: bool },
 }
 
 enum Screen {
@@ -68,7 +83,8 @@ enum Screen {
 pub enum Action {
     Create,
     Restore,
-    StartOver,
+    /// The step before this one.
+    Back,
     Continue,
     SignOut,
     Choose(Picked),
@@ -98,6 +114,8 @@ impl<'a> App<'a> {
             data,
             updates,
             window_started,
+            chose_storage: matches!(start, Start::Choose),
+            recover: None,
         };
         app.screen = match start {
             Start::Ready(Some(identity)) => app.home(*identity),
@@ -184,9 +202,15 @@ impl<'a> App<'a> {
     }
 
     fn apply(&mut self, action: Action) {
+        // Whatever comes next, egui keeps nothing of the recovery-word fields.
+        forget_words(&self.ctx);
         let screen = std::mem::replace(&mut self.screen, Screen::Welcome);
         self.screen = match (action, screen) {
-            (Action::StartOver, _) => Screen::Welcome,
+            (Action::Back, screen) => {
+                // Leaving a password screen: forget what egui kept of the fields.
+                key_storage::forget(&self.ctx);
+                back(screen, self.chose_storage, self.recover)
+            }
             (Action::Create, _) => match DeviceIdentity::create(DEVICE_NAME) {
                 Ok((words, identity)) => Screen::Words { words, identity },
                 Err(error) => problem("create account", &error),
@@ -263,7 +287,11 @@ impl<'a> App<'a> {
                 };
                 Screen::Restore { words, error }
             }
-            (Action::UseWords, _) => {
+            (Action::UseWords, screen) => {
+                self.recover = match screen {
+                    Screen::Missing { keychain } => Some(Recover::Missing { keychain }),
+                    _ => Some(Recover::Unlock),
+                };
                 key_storage::forget(&self.ctx);
                 Screen::Storage {
                     password: None,
@@ -438,6 +466,42 @@ fn save(keystore: &mut Keystore, identity: &DeviceIdentity) -> Option<String> {
     Some(t!("app.save_failed").into())
 }
 
+/// The step before `screen`. Nothing is saved before the word check or the
+/// recovery words succeed, so going back leaves no half-made account: the words of
+/// a new account stay the same back to their own screen, and are dropped (wiped)
+/// before it.
+fn back(screen: Screen, chose_storage: bool, recover: Option<Recover>) -> Screen {
+    let storage = |restore| Screen::Storage {
+        password: None,
+        error: None,
+        restore,
+        busy: None,
+    };
+    match screen {
+        Screen::Welcome if chose_storage => storage(false),
+        Screen::Words { .. } => Screen::Welcome,
+        Screen::Confirm {
+            words, identity, ..
+        } => Screen::Words { words, identity },
+        Screen::Restore { .. } if recover.is_some() => storage(true),
+        Screen::Restore { .. } => Screen::Welcome,
+        Screen::Storage {
+            restore: true,
+            busy: None,
+            ..
+        } => match recover {
+            Some(Recover::Missing { keychain }) => Screen::Missing { keychain },
+            _ => Screen::Unlock {
+                password: key_storage::secret_input(),
+                error: None,
+                tries: 0,
+                busy: None,
+            },
+        },
+        screen => screen,
+    }
+}
+
 fn problem(what: &str, error: &IdentityError) -> Screen {
     tracing::error!(%error, "{what} failed");
     Screen::Problem(format!("{what}: {error}"))
@@ -467,15 +531,23 @@ impl eframe::App for App<'_> {
         }
     }
 
-    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
         #[cfg(target_os = "ios")]
         crate::ios::accessibility(ui.ctx());
         #[cfg(target_os = "android")]
         crate::android::frame(ui, |ui| self.screens(ui));
-        #[cfg(not(target_os = "android"))]
+        #[cfg(target_os = "ios")]
+        crate::ios::frame(ui, frame.winit_window().map(|window| &**window), |ui| {
+            self.screens(ui)
+        });
+        #[cfg(not(target_os = "ios"))]
+        let _ = frame;
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
         self.screens(ui);
         #[cfg(any(target_os = "android", target_os = "ios"))]
         crate::phone_clipboard::frame_end(ui.ctx());
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        crate::words::frame(ui.ctx());
     }
 }
 
@@ -483,32 +555,37 @@ impl App<'_> {
     fn screens(&mut self, ui: &mut Ui) {
         self.updates.poll(ui.ctx());
         self.poll();
+        let chose_storage = self.chose_storage;
         let action = match &mut self.screen {
-            Screen::Problem(details) => card(ui, |ui| {
-                ui.heading(t!("app.problem_title"));
-                ui.label(t!("app.problem_help"));
+            Screen::Problem(details) => step(ui, "problem", false, |ui| {
+                ui::step_title(ui, t!("app.problem_title"), t!("app.problem_help"));
                 CollapsingHeader::new(t!("common.details"))
                     .show(ui, |ui| ui.label(details.as_str()));
                 None
             }),
-            Screen::Welcome => card(ui, welcome),
-            Screen::Words { words, .. } => card(ui, |ui| show_words(ui, words)),
+            Screen::Welcome => step(ui, "welcome", chose_storage, welcome),
+            Screen::Words { words, .. } => step(ui, "words", true, |ui| show_words(ui, words)),
             Screen::Confirm {
                 check,
                 answers,
                 error,
                 ..
-            } => card(ui, |ui| confirm(ui, check, answers, error.as_deref())),
-            Screen::Restore { words, error } => card(ui, |ui| restore(ui, words, error.as_deref())),
+            } => step(ui, "check", true, |ui| {
+                confirm(ui, check, answers, error.as_deref())
+            }),
+            Screen::Restore { words, error } => step(ui, "restore", true, |ui| {
+                restore(ui, words, error.as_deref())
+            }),
             Screen::Storage {
                 password,
                 error,
                 busy,
-                ..
+                restore,
             } => {
+                let back = *restore && busy.is_none();
                 let busy = busy.is_some();
                 let keychain = self.keystore.keychain_works();
-                card(ui, |ui| {
+                step(ui, "storage", back, |ui| {
                     key_storage::choose(ui, password, error, busy, keychain).map(Action::Choose)
                 })
             }
@@ -519,7 +596,7 @@ impl App<'_> {
                 busy,
             } => {
                 let busy = busy.is_some();
-                card(ui, |ui| {
+                step(ui, "unlock", false, |ui| {
                     key_storage::unlock(ui, password, error.as_deref(), *tries, busy).map(
                         |unlock| match unlock {
                             Unlock::Try => Action::Unlock,
@@ -530,7 +607,7 @@ impl App<'_> {
             }
             Screen::Missing { keychain } => {
                 let keychain = *keychain;
-                card(ui, |ui| {
+                step(ui, "missing", false, |ui| {
                     key_storage::missing(ui, keychain).then_some(Action::UseWords)
                 })
             }
@@ -545,27 +622,15 @@ impl App<'_> {
     }
 }
 
-/// A centered column for the sign-up screens.
-fn card(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> Option<Action>) -> Option<Action> {
-    CentralPanel::default()
-        .show(ui, |ui| {
-            ScrollArea::vertical()
-                .show(ui, |ui| {
-                    let width = CARD_WIDTH.min(ui.available_width());
-                    ui.horizontal(|ui| {
-                        ui.add_space((ui.available_width() - width) / 2.0);
-                        ui.vertical(|ui| {
-                            ui.set_width(width);
-                            ui.add_space(48.0);
-                            add(ui)
-                        })
-                        .inner
-                    })
-                    .inner
-                })
-                .inner
-        })
-        .inner
+/// A first-start step in the shared layout, with Back when `back`.
+fn step(
+    ui: &mut Ui,
+    id: &str,
+    back: bool,
+    add: impl FnOnce(&mut Ui) -> Option<Action>,
+) -> Option<Action> {
+    let (pressed, action) = ui::onboarding(ui, id, back.then(|| t!("common.back")), add);
+    if pressed { Some(Action::Back) } else { action }
 }
 
 /// Plain Enter in a single-line field. Screens that focus a field when nothing has
@@ -576,9 +641,7 @@ pub fn submitted(ui: &Ui, field: &Response) -> bool {
 }
 
 fn welcome(ui: &mut Ui) -> Option<Action> {
-    ui.heading(t!("app.welcome"));
-    ui.label(t!("app.welcome_text"));
-    ui.add_space(24.0);
+    ui::step_title(ui, t!("app.welcome"), t!("app.welcome_text"));
     if primary(ui, t!("app.create_account")).clicked() {
         return Some(Action::Create);
     }
@@ -587,31 +650,105 @@ fn welcome(ui: &mut Ui) -> Option<Action> {
         .then_some(Action::Restore)
 }
 
+/// When the words were last copied.
+fn copied_id() -> Id {
+    Id::unique("recovery words copied")
+}
+
 fn show_words(ui: &mut Ui, words: &str) -> Option<Action> {
-    ui.heading(t!("app.words_title"));
-    ui.label(t!("app.words_text"));
-    ui.add_space(12.0);
+    ui::step_title(ui, t!("app.words_title"), t!("app.words_text"));
     // Four columns don't fit a phone.
+    let gap = ui::SPACE_S;
+    let width = ui.available_width();
     let columns = if ui::is_phone(ui.ctx()) { 2 } else { 4 };
+    let cell = (width - gap * (columns - 1) as f32) / columns as f32;
     Grid::new("recovery-words")
         .num_columns(columns)
-        .spacing(Vec2::new(10.0, 10.0))
+        .spacing(Vec2::splat(gap))
         .show(ui, |ui| {
             for (index, word) in words.split_whitespace().enumerate() {
-                ui::card_frame(ui).show(ui, |ui| {
-                    ui.set_width(110.0);
-                    ui.label(ui::caption(format!("{}", index + 1)));
-                    ui.label(ui::bold(word).size(16.0));
-                });
+                ui::card_frame(ui)
+                    .inner_margin(Margin::symmetric(10, 6))
+                    .show(ui, |ui| {
+                        ui.set_width(cell - 20.0);
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = ui::SPACE_XS;
+                            // The number in a fixed column, centred on the word's line.
+                            let height = ui.text_style_height(&egui::TextStyle::Body);
+                            let (rect, _) = ui
+                                .allocate_exact_size(Vec2::new(16.0, height), egui::Sense::hover());
+                            ui.painter().text(
+                                rect.left_center(),
+                                egui::Align2::LEFT_CENTER,
+                                format!("{}", index + 1),
+                                egui::FontId::proportional(ui::TEXT_CAPTION),
+                                ui::colors(ui).muted,
+                            );
+                            ui.label(ui::bold(word).size(ui::TEXT_BODY));
+                        });
+                    });
                 if index % columns == columns - 1 {
                     ui.end_row();
                 }
             }
         });
-    ui.add_space(16.0);
+    ui.add_space(ui::SPACE_M);
+    let now = ui.input(|input| input.time);
+    let copied = ui
+        .data(|data| data.get_temp::<f64>(copied_id()))
+        .is_some_and(|at| now - at < COPIED_SECONDS);
+    ui.horizontal(|ui| {
+        // The button says it worked for a moment; a password manager is the tip.
+        let label = if copied {
+            t!("app.copied")
+        } else {
+            t!("clipboard.copy")
+        };
+        if ui::secondary(ui, label).clicked() {
+            words::copy(ui.ctx(), words);
+            ui.data_mut(|data| data.insert_temp(copied_id(), now));
+            ui.ctx().request_repaint_after_secs(COPIED_SECONDS as f32);
+        }
+    });
+    ui.label(ui::caption(t!("app.words_manager")));
+    ui.add_space(ui::SPACE_L);
     primary(ui, t!("app.wrote_them"))
         .clicked()
         .then_some(Action::Continue)
+}
+
+/// A field's label with a Paste button at the other end; true when it was pressed.
+fn label_with_paste(ui: &mut Ui, label: &str) -> (Response, bool) {
+    ui.horizontal(|ui| {
+        ui.set_min_height(ui::CONTROL_HEIGHT);
+        let label = ui.label(label);
+        let pasted = ui
+            .with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui::secondary(ui, t!("clipboard.paste")).clicked()
+            })
+            .inner;
+        (label, pasted)
+    })
+    .inner
+}
+
+fn word_field_id(slot: usize) -> Id {
+    Id::unique(("word check", slot))
+}
+
+fn restore_field_id() -> Id {
+    Id::unique("recovery words field")
+}
+
+/// Remove what egui keeps of the recovery-word fields (cursor and text layout),
+/// as `key_storage::forget` does for passwords.
+fn forget_words(ctx: &egui::Context) {
+    let ids = (0..3).map(word_field_id).chain([restore_field_id()]);
+    ctx.data_mut(|data| {
+        for id in ids {
+            data.remove::<egui::text_edit::TextEditState>(id);
+        }
+    });
 }
 
 fn confirm(
@@ -620,54 +757,76 @@ fn confirm(
     answers: &mut [Zeroizing<String>; 3],
     error: Option<&str>,
 ) -> Option<Action> {
-    ui.heading(t!("app.check_title"));
-    ui.label(t!("app.check_text"));
-    ui.add_space(12.0);
+    ui::step_title(ui, t!("app.check_title"), t!("app.check_text"));
+    let indices = check.indices();
+    // The field last typed in: a paste of a few words starts there.
+    let last_id = Id::unique("word check last field");
+    let focused = (0..answers.len()).find(|&slot| ui.memory(|m| m.has_focus(word_field_id(slot))));
+    if let Some(slot) = focused {
+        ui.data_mut(|data| data.insert_temp(last_id, slot));
+    }
+    if let Some(pasted) = words::pasted(ui) {
+        let start = ui
+            .data(|data| data.get_temp::<usize>(last_id))
+            .or_else(|| answers.iter().position(|answer| answer.is_empty()))
+            .unwrap_or(0);
+        words::fill(answers, &indices, &pasted, start);
+    }
     let mut done = false;
-    for (slot, (answer, index)) in answers.iter_mut().zip(check.indices()).enumerate() {
-        let label = ui.label(t!("app.word_number", number = index + 1));
+    for (slot, (answer, index)) in answers.iter_mut().zip(indices).enumerate() {
+        let text = t!("app.word_number", number = index + 1);
+        let label = if slot == 0 {
+            let (label, paste) = label_with_paste(ui, &text);
+            if paste {
+                words::request_paste(ui.ctx());
+            }
+            label
+        } else {
+            ui.label(text)
+        };
         let field = ui
-            .add(ui::field(&mut **answer).desired_width(260.0).private())
+            .add(
+                ui::field(&mut **answer)
+                    .id(word_field_id(slot))
+                    .desired_width(f32::INFINITY)
+                    .private(),
+            )
             .labelled_by(label.id);
         done |= submitted(ui, &field);
-        if slot == 0 && ui.memory(|memory| memory.focused().is_none()) {
-            field.request_focus();
+        if slot == 0 {
+            ui::focus_when_none(ui, &field);
         }
+        ui.add_space(ui::SPACE_XS);
     }
     error_text(ui, error);
-    ui.add_space(12.0);
-    if primary(ui, t!("app.confirm")).clicked() || done {
-        return Some(Action::Continue);
-    }
-    secondary(ui, t!("app.start_over"))
-        .clicked()
-        .then_some(Action::StartOver)
+    ui.add_space(ui::SPACE_M);
+    (primary(ui, t!("app.confirm")).clicked() || done).then_some(Action::Continue)
 }
 
 fn restore(ui: &mut Ui, words: &mut Zeroizing<String>, error: Option<&str>) -> Option<Action> {
-    ui.heading(t!("app.restore_title"));
-    ui.label(t!("app.restore_text"));
-    ui.add_space(12.0);
-    let label = ui.label(t!("app.recovery_words"));
+    ui::step_title(ui, t!("app.restore_title"), t!("app.restore_text"));
+    if let Some(pasted) = words::pasted(ui) {
+        words::append(words, &pasted, WORD_COUNT);
+    }
+    let (label, paste) = label_with_paste(ui, t!("app.recovery_words"));
+    if paste {
+        words::request_paste(ui.ctx());
+    }
     let field = ui
         .add(
             ui::text_area(&mut **words)
+                .id(restore_field_id())
                 .desired_rows(4)
                 .desired_width(f32::INFINITY)
                 .private(),
         )
         .labelled_by(label.id);
-    if ui.memory(|memory| memory.focused().is_none()) {
-        field.request_focus();
-    }
+    ui::focus_when_none(ui, &field);
     error_text(ui, error);
-    ui.add_space(12.0);
-    if primary(ui, t!("app.sign_in")).clicked() {
-        return Some(Action::Continue);
-    }
-    secondary(ui, t!("common.back"))
+    ui.add_space(ui::SPACE_M);
+    primary(ui, t!("app.sign_in"))
         .clicked()
-        .then_some(Action::StartOver)
+        .then_some(Action::Continue)
 }
 
 #[cfg(test)]
@@ -710,6 +869,88 @@ mod tests {
         );
         assert_eq!(at, (6, 6));
         assert_eq!(&sent(&bridge)[..], b"\0");
+    }
+
+    #[test]
+    fn typed_recovery_words_leave_no_undo_history_or_state() {
+        use egui::text_edit::TextEditState;
+        let ctx = egui::Context::default();
+        let mut words = key_storage::secret_input();
+        for (time, text) in [(0.0, ""), (0.1, "apple"), (5.0, " banana"), (10.0, "")] {
+            let events = if text.is_empty() {
+                Vec::new()
+            } else {
+                vec![egui::Event::Text(text.into())]
+            };
+            let raw = egui::RawInput {
+                time: Some(time),
+                events,
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(raw, |ui| {
+                restore(ui, &mut words, None);
+            });
+            output.textures_delta.clear();
+        }
+        assert_eq!(*words, "apple banana");
+        let state = TextEditState::load(&ctx, restore_field_id()).expect("field state");
+        // Ctrl+Z would have nothing to bring back.
+        assert!(
+            !state
+                .undoer()
+                .has_undo(&(Default::default(), String::new()))
+        );
+        // Leaving the screen (Back, or on to the next one) forgets the field.
+        forget_words(&ctx);
+        assert!(TextEditState::load(&ctx, restore_field_id()).is_none());
+    }
+
+    #[test]
+    fn back_keeps_the_words_and_leaves_no_account_behind() {
+        let (words, identity) = DeviceIdentity::create(DEVICE_NAME).unwrap();
+        let shown = words.to_string();
+        let check = Screen::Confirm {
+            words,
+            identity,
+            check: WordConfirmation::random().unwrap(),
+            answers: std::array::from_fn(|_| key_storage::secret_input()),
+            error: None,
+        };
+        // From the word check, the same words again.
+        let screen = back(check, false, None);
+        let Screen::Words { words, .. } = &screen else {
+            panic!("back to the words");
+        };
+        assert_eq!(**words, shown);
+        // Before them, the words (never saved) are dropped.
+        assert!(matches!(back(screen, false, None), Screen::Welcome));
+
+        let restore = || Screen::Restore {
+            words: key_storage::secret_input(),
+            error: None,
+        };
+        assert!(matches!(back(restore(), true, None), Screen::Welcome));
+        assert!(matches!(
+            back(Screen::Welcome, true, None),
+            Screen::Storage { restore: false, .. }
+        ));
+        assert!(matches!(
+            back(Screen::Welcome, false, None),
+            Screen::Welcome
+        ));
+        // Asked for from the missing-keys screen: back through the storage choice.
+        let missing = Some(Recover::Missing { keychain: true });
+        let storage = back(restore(), false, missing);
+        assert!(matches!(storage, Screen::Storage { restore: true, .. }));
+        assert!(matches!(
+            back(storage, false, missing),
+            Screen::Missing { keychain: true }
+        ));
+        let storage = back(restore(), false, Some(Recover::Unlock));
+        assert!(matches!(
+            back(storage, false, Some(Recover::Unlock)),
+            Screen::Unlock { .. }
+        ));
     }
 
     #[test]

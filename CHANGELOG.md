@@ -13,6 +13,9 @@ Unreleased under the new version and date.
 
 - Android can keep your account keys on this phone without asking for a password at every start.
 - Find servers and join public servers on iPhone and Android.
+- New look for the first-start screens, with a Back button, Copy for your recovery words and Paste to fill them in
+- Phones: tapping a text field that is already open no longer closes and reopens the keyboard
+- iPhone: the keyboard no longer covers what you type, Return works, a tap outside closes the keyboard, and the edges match the theme
 - Android asks for microphone access when you join a voice call.
 - Experimental Android test build (APK) and unsigned iOS build (IPA)
 - Android: typing works, so you can sign up, sign in, join a server and chat
