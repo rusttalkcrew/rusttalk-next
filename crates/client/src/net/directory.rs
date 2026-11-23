@@ -385,6 +385,7 @@ async fn build(
                     "suggest_events" => perms.suggest_events = true,
                     "create_events" => perms.create_events = true,
                     "manage_events" => perms.manage_events = true,
+                    "start_focus" => perms.start_focus = true,
                     _ => {}
                 }
             }
@@ -468,6 +469,7 @@ async fn build(
             forum: channel.kind == "forum",
             audio_kbps: channel.audio_kbps.unwrap_or(DEFAULT_AUDIO_KBPS),
             member_limit: channel.member_limit.unwrap_or(0),
+            focus_until: channel.focus_until,
             flags: (channel.flags.iter())
                 .map(|entry| (entry.role_id.clone(), entry.flags))
                 .collect(),
@@ -791,6 +793,7 @@ mod tests {
             peer: None,
             audio_kbps: None,
             member_limit: None,
+            focus_until: None,
             flags: Vec::new(),
         };
         let encrypt =

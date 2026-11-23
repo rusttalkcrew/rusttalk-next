@@ -358,6 +358,7 @@ fn routes(app: App) -> Router {
             "/v1/channels/{id}/permissions/{role}",
             put(channels::permissions),
         )
+        .route("/v1/channels/{id}/focus", put(channels::focus))
         .route(
             "/v1/categories",
             get(channels::list_categories).post(channels::create_category),

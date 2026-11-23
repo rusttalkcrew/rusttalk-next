@@ -381,8 +381,19 @@ impl Voice {
     }
 }
 
-/// Join a voice channel, leaving any other room first, and show it.
+/// Join a voice channel, leaving any other room first, and show it. A channel in focus
+/// mode shows its notice first.
 pub fn join(home: &mut Home, index: usize, channel: Id) {
+    if !home.voice.in_call(&home.servers[index], &channel)
+        && crate::home::focus::ask_first(home, index, channel)
+    {
+        return;
+    }
+    join_now(home, index, channel);
+}
+
+/// `join` without the focus mode notice, once it was accepted.
+pub fn join_now(home: &mut Home, index: usize, channel: Id) {
     cancel_invitation_join(home);
     home.servers[index].open = Some(channel);
     if home.voice.in_call(&home.servers[index], &channel) {

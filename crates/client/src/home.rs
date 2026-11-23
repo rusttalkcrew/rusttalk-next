@@ -93,6 +93,7 @@ const TOOLBAR_BUTTON: Vec2 = Vec2::new(30.0, 26.0);
 
 pub(crate) mod embed;
 pub(crate) mod events;
+pub(crate) mod focus;
 pub(crate) mod forum;
 mod friends;
 pub mod layout;
@@ -133,6 +134,7 @@ pub struct Home {
     join: Join,
     find: Find,
     dialog: Option<Dialog>,
+    focus: Option<focus::Dialog>,
     pub toast: Option<(String, f64)>,
     /// Android: the note that messages were left unsent, pending until its own
     /// notice was drawn (other toasts don't count).
@@ -402,6 +404,7 @@ impl Home {
                 ..Find::default()
             },
             dialog: None,
+            focus: None,
             toast: None,
             #[cfg(target_os = "android")]
             unsent,
@@ -2278,6 +2281,7 @@ pub fn show(
         home.layout.save(&home.voice.audio);
     }
     dialogs(ui.ctx(), home);
+    focus::dialog(ui.ctx(), home);
     if !voice_requests::popup(ui.ctx(), home) {
         pokes::popup(ui.ctx(), home);
     }
@@ -2928,6 +2932,8 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
     let mut channel_edit = None;
     let mut category_dialog = None;
     let mut rule_change = None;
+    let mut focus_pick = None;
+    let now = notify::unix_now();
     let categories = &server.dir.categories;
     let can_manage = perms.manage_channels && online;
     let can_move = can_manage && !server.order_unavailable && reorder::order(categories).is_some();
@@ -3002,13 +3008,19 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
                     if locked {
                         label = format!("{label}, {}", t!("home.channel_limited"));
                     }
-                    // Voice rows keep room for the Join button.
+                    let focus = channel.focus(now).is_some_and(|until| {
+                        // Redraw when it ends, so the badge goes.
+                        let left = std::time::Duration::from_secs((until - now) as u64);
+                        ui.ctx().request_repaint_after(left);
+                        true
+                    });
+                    // Leave room for the Join button, member count and Focus badge.
                     let limited = channel.voice && channel.member_limit > 0;
                     let trailing = match (channel.voice, limited) {
                         (true, true) => call::JOIN_SLOT + call::COUNT_SLOT,
                         (true, false) => call::JOIN_SLOT,
                         _ => 0.0,
-                    };
+                    } + if focus { focus::badge_room(ui) } else { 0.0 };
                     let row = ui
                         .add_enabled_ui(online || !channel.voice, |ui| {
                             let (name, role) = (&channel.name, Role::Button);
@@ -3017,8 +3029,11 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
                             )
                         })
                         .inner;
-                    let chats = [(&server.address, channel.id)];
                     let lock = if locked { ui::NAV_LOCK_WIDTH } else { 0.0 };
+                    if focus {
+                        focus::badge(ui, row.rect, &channel.name, selected, trailing + lock);
+                    }
+                    let chats = [(&server.address, channel.id)];
                     let marks = row.rect.with_max_x(row.rect.right() - trailing - lock);
                     chat_marks(ui, home, &chats, false, marks);
                     if limited {
@@ -3046,6 +3061,12 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
                     let rule = home.notify.prefs().channel(&channel.id);
                     if let Some(rule) = notify::rule_menu(m, &rule, true, notify::unix_now()) {
                         rule_change = Some((channel.id, rule));
+                    }
+                    if perms.start_focus && online {
+                        m.separator();
+                        if let Some(start) = focus::menu(m, channel) {
+                            focus_pick = Some((channel.id, start));
+                        }
                     }
                     if can_manage {
                         m.separator();
@@ -3078,6 +3099,11 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
     }
     if let Some((id, edit)) = channel_edit {
         home.edit_channel(index, id, edit);
+    }
+    match focus_pick {
+        Some((id, true)) => home.focus = Some(focus::Dialog::start(index, id)),
+        Some((id, false)) => home.servers[index].send(Command::SetFocus(id, 0)),
+        None => {}
     }
     if category_dialog.is_some() {
         home.dialog = category_dialog;
@@ -3953,6 +3979,7 @@ fn voice_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
             }
         },
     );
+    focus::banner(ui, home.servers[index].channel(&channel));
     if join {
         call::join(home, index, channel);
     }
@@ -4251,6 +4278,7 @@ fn page_view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat: &mut
         in_server.then_some(&mut home.layout),
         Some(channel),
     );
+    focus::banner(ui, home.servers[index].channel(&channel));
     toast_line(ui, &mut home.toast);
     let Home {
         servers,
@@ -4658,6 +4686,9 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
             At::Dm(_) => None,
         };
         pane_title(ui, "chat-title", &title, in_server.then_some(layout), files);
+        if let At::Channel(index, channel) = at {
+            focus::banner(ui, servers[index].channel(&channel));
+        }
     }
     let act = friends::dm_card(ui, relation, request, &name);
     let (hovered, dropped) = ui.input(|input| {
@@ -6951,6 +6982,7 @@ mod tests {
                 forum: false,
                 audio_kbps: 0,
                 member_limit: 0,
+                focus_until: None,
                 flags: vec![("member".into(), 3)],
             }],
         }];

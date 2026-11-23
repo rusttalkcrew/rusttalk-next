@@ -204,6 +204,8 @@ pub enum Command {
     RenameCategory(Id, String),
     DeleteChannel(Id),
     DeleteCategory(Id),
+    /// Turn focus mode on for this many seconds from now; 0 turns it off.
+    SetFocus(Id, i64),
     /// Save a new order: categories, each with its channels, as this person sees them.
     Reorder(Vec<(Id, Vec<Id>)>),
     SetServerName(String),
@@ -2560,6 +2562,14 @@ async fn on_command(
             if let Some(dir) = &state.last {
                 ctx.send(Update::Directory(url.clone(), Box::new(dir.clone())));
             }
+        }
+        Command::SetFocus(id, seconds) => {
+            client
+                .request(Method::PUT, &format!("/v1/channels/{}/focus", encode(&id)))
+                .json(&serde_json::json!({ "seconds": seconds }))
+                .send()
+                .await?
+                .error_for_status()?;
         }
         Command::SetServerName(name) => {
             client.set_server_name(name.as_bytes()).await?;

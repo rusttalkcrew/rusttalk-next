@@ -1275,6 +1275,8 @@ fn sentence(server: &Server, entry: &AuditEntry) -> String {
         "category_updated" => t!("audit.category_updated", actor = actor),
         "category_deleted" => t!("audit.category_deleted", actor = actor),
         "channels_reordered" => t!("audit.channels_reordered", actor = actor),
+        "focus_started" => t!("audit.focus_started", actor = actor),
+        "focus_ended" => t!("audit.focus_ended", actor = actor),
         "events_enabled" => t!("audit.events_enabled", actor = actor),
         "events_disabled" => t!("audit.events_disabled", actor = actor),
         "event_created" => t!("audit.event_created", actor = actor),

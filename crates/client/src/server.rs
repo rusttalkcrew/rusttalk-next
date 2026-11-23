@@ -375,6 +375,8 @@ pub struct Perms {
     pub create_events: bool,
     /// Approve, decline and cancel anyone's events.
     pub manage_events: bool,
+    /// Put a channel into focus mode for a while.
+    pub start_focus: bool,
     /// This person's highest role rank; they can only manage people and roles below it.
     pub rank: i64,
 }
@@ -486,8 +488,18 @@ pub struct Channel {
     /// Most people in a voice channel, 0 for no limit.
     #[serde(default)]
     pub member_limit: u32,
+    /// While focus mode is on: when it ends, in unix seconds.
+    #[serde(default)]
+    pub focus_until: Option<i64>,
     /// Per role: read (1), write (2), speak (4) and video (8).
     pub flags: Vec<(String, u8)>,
+}
+
+impl Channel {
+    /// When focus mode ends, if it is on at `now` (unix seconds).
+    pub fn focus(&self, now: i64) -> Option<i64> {
+        self.focus_until.filter(|until| *until > now)
+    }
 }
 
 #[derive(Clone)]

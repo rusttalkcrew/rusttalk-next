@@ -187,7 +187,7 @@ impl Form {
 }
 
 /// `20`, `20:15` or `2015`.
-fn parse_time(text: &str) -> Option<NaiveTime> {
+pub(super) fn parse_time(text: &str) -> Option<NaiveTime> {
     let text = text.trim();
     let (hours, minutes) = match text.split_once(':') {
         Some((hours, minutes)) if minutes.len() == 2 => (hours, minutes),
@@ -1283,6 +1283,7 @@ mod tests {
                 forum: false,
                 audio_kbps: 64,
                 member_limit: 0,
+                focus_until: None,
                 flags: Vec::new(),
             }],
         }];

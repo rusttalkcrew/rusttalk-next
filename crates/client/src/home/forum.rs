@@ -548,6 +548,7 @@ pub(super) fn view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat
         in_server.then_some(&mut home.layout),
         Some(channel),
     );
+    super::focus::banner(ui, home.servers[index].channel(&channel));
     toast_line(ui, &mut home.toast);
     if let Some(out) = (home.sending.iter_mut()).find(|o| o.to == to && o.preview.is_some()) {
         preview_status(ui, &home.voice, out);
