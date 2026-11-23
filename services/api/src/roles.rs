@@ -35,9 +35,15 @@ pub enum Permission {
     MuteMembers = 1024,
     /// Remove people from a voice channel or move them to another.
     MoveMembers = 2048,
+    /// Suggest events, which show once someone approves them.
+    SuggestEvents = 4096,
+    /// Add events without approval.
+    CreateEvents = 8192,
+    /// Approve, decline and cancel anyone's events.
+    ManageEvents = 16384,
 }
 
-const PERMISSIONS: [Permission; 12] = [
+const PERMISSIONS: [Permission; 15] = [
     Permission::Invite,
     Permission::Kick,
     Permission::Ban,
@@ -50,6 +56,9 @@ const PERMISSIONS: [Permission; 12] = [
     Permission::ManageEmoji,
     Permission::MuteMembers,
     Permission::MoveMembers,
+    Permission::SuggestEvents,
+    Permission::CreateEvents,
+    Permission::ManageEvents,
 ];
 
 #[derive(FromRow)]
@@ -94,8 +103,12 @@ pub struct Authority {
 }
 
 impl Authority {
+    pub fn has(&self, flag: Permission) -> bool {
+        self.permissions & flag as i64 != 0
+    }
+
     pub fn require(&self, flag: Permission) -> ApiResult<()> {
-        if self.permissions & flag as i64 == 0 {
+        if !self.has(flag) {
             return Err(ApiError::forbidden("permission_denied"));
         }
         Ok(())
@@ -122,6 +135,32 @@ impl Authority {
         }
         Ok(())
     }
+}
+
+/// Only the missing permissions added by the migration can be retained.
+async fn retained_permissions(
+    db: &mut SqliteConnection,
+    actor: &[u8],
+    auth: &Authority,
+    role: &Role,
+) -> ApiResult<i64> {
+    let retained = if role.permissions & !auth.permissions == 0 {
+        0
+    } else {
+        query_scalar::<_, i64>(
+            "SELECT retained FROM calendar_role_grants WHERE person_id = ? AND role_id = ?
+             AND old_rank < ? AND (old_permissions & ~?) = 0",
+        )
+        .bind(actor)
+        .bind(&role.id)
+        .bind(auth.rank)
+        .bind(auth.permissions)
+        .fetch_optional(db)
+        .await?
+        .unwrap_or(0)
+    };
+    auth.can_grant(role.rank, role.permissions & !retained)?;
+    Ok(retained & role.permissions)
 }
 
 pub async fn for_person(db: &mut SqliteConnection, person: &[u8]) -> ApiResult<Vec<Role>> {
@@ -308,7 +347,7 @@ pub async fn rename(
     let role = by_id(&mut tx, &id).await?;
     // Built-in roles follow the same hierarchy. Only the owner renames the Owner role.
     if auth.rank != OWNER_RANK || role.rank != OWNER_RANK {
-        auth.can_grant(role.rank, role.permissions)?;
+        retained_permissions(&mut tx, &actor.person, &auth, &role).await?;
     }
     let RoleName {
         name_ct,
@@ -372,11 +411,10 @@ pub async fn edit(
     let auth = authority(&mut tx, &actor.person).await?;
     auth.require(Permission::ManageRoles)?;
     let role = by_id(&mut tx, &id).await?;
-    // The same checks as deleting the role and making it again: the actor must outrank it,
-    // hold what it grants now, and hold everything it will grant.
-    auth.can_grant(role.rank, role.permissions)?;
+    // Keep migrated permissions in place. Adding any other permission needs it directly.
+    let retained = retained_permissions(&mut tx, &actor.person, &auth, &role).await?;
     let rank = rank.unwrap_or(role.rank);
-    auth.can_grant(rank, permissions)?;
+    auth.can_grant(rank, permissions & !retained)?;
     if role.kind != "custom" {
         return Err(ApiError::forbidden("built_in_role"));
     }
@@ -418,7 +456,7 @@ pub async fn delete(
     let auth = authority(&mut tx, &actor.person).await?;
     auth.require(Permission::ManageRoles)?;
     let role = by_id(&mut tx, &id).await?;
-    auth.can_grant(role.rank, role.permissions)?;
+    retained_permissions(&mut tx, &actor.person, &auth, &role).await?;
     if role.kind != "custom" {
         return Err(ApiError::forbidden("built_in_role"));
     }
@@ -460,7 +498,7 @@ pub async fn set_default(
     auth.require(Permission::ManageRoles)?;
     let id = payload(body)?.role_id;
     let role = by_id(&mut tx, &id).await?;
-    auth.can_grant(role.rank, role.permissions)?;
+    retained_permissions(&mut tx, &actor.person, &auth, &role).await?;
     query("UPDATE server_settings SET default_role_id = ? WHERE id = 1")
         .bind(&id)
         .execute(&mut *tx)
@@ -506,7 +544,7 @@ pub async fn assign(
     auth.outrank(&target)?;
     for id in &ids {
         let role = by_id(&mut tx, id).await?;
-        auth.can_grant(role.rank, role.permissions)?;
+        retained_permissions(&mut tx, &actor.person, &auth, &role).await?;
     }
     let before = keys::readable_channels(&mut tx, &person).await?;
     query("DELETE FROM member_roles WHERE person_id = ?")

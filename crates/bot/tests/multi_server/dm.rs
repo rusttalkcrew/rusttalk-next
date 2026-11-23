@@ -8,6 +8,7 @@ use rusttalk_core::{
     auth::encode,
     client::{FriendSignal, KeyClient, MessageBody, Server},
     keys::{self, Scope},
+    messages::{VoiceAnswer, VoiceRequest},
 };
 use serde_json::json;
 
@@ -19,6 +20,8 @@ const DOWN: &str = "W70 Spinel DM while server B is down";
 const BACK: &str = "W70 Zircon DM after server B came back";
 const LEFT: &str = "W70 Topaz DM after leaving server B";
 const POKE: &str = "W112 Opal poke";
+/// A channel ID that is readable, to look for in what the servers stored.
+const ASKED: &str = "W294 Jasper room asked to join!!";
 
 /// One person's two clients, on server A and server B.
 pub type Pair<'a, 'b, 'c> = (&'a mut KeyClient<'b>, &'a mut KeyClient<'c>);
@@ -279,6 +282,38 @@ pub async fn friends(
     newest_poke(peer.0, dms[0], id).await?;
     newest_poke(peer.1, dms[1], id).await?;
     println!("W112 a poke arrived on both servers as an encrypted DM message");
+    // A voice request and its answer stay on the channel's server.
+    let ask = VoiceRequest::Ask(
+        ASKED.as_bytes().try_into()?,
+        rusttalk_core::index::now_ms().unwrap() / 1000,
+    );
+    let request = *keys::random_key()?;
+    let message = |voice_request| MessageBody {
+        voice_request: Some(voice_request),
+        ..Default::default()
+    };
+    (owner.0.post_message(&dms[0].id, request, &message(ask))).await?;
+    newest_voice_request(peer.0, dms[0], ask).await?;
+    let answer = VoiceRequest::Answer(request, VoiceAnswer::Later);
+    let id = *keys::random_key()?;
+    (peer.0.post_message(&dms[0].id, id, &message(answer))).await?;
+    newest_voice_request(owner.0, dms[0], answer).await?;
+    println!("W294 a voice request and its answer arrived as encrypted DM messages");
+    Ok(())
+}
+
+/// The newest message in a DM is this voice request or answer.
+async fn newest_voice_request(
+    client: &mut KeyClient<'_>,
+    dm: Scope,
+    expected: VoiceRequest,
+) -> Result<()> {
+    let page = client.message_page(&dm.id, None, 1).await?;
+    let body = client.open_message(&dm.id, &page[0]).await?;
+    ensure!(
+        body.voice_request == Some(expected),
+        "the voice request did not arrive as one"
+    );
     Ok(())
 }
 
@@ -337,7 +372,7 @@ pub async fn after_leaving(
         let raw = compose_bytes(project, &["exec", "-T", "api", "sh", "-ec", dump])?;
         let logs = compose_bytes(project, &["logs", "--no-color"])?;
         for bytes in [raw, logs] {
-            for text in [BOTH, REPLY, DOWN, BACK, LEFT, POKE] {
+            for text in [BOTH, REPLY, DOWN, BACK, LEFT, POKE, ASKED] {
                 let encoded = encode(text.as_bytes());
                 for needle in [text.as_bytes(), encoded.as_bytes()] {
                     ensure!(
