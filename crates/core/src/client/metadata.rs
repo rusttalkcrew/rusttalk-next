@@ -30,6 +30,27 @@ impl KeyClient<'_> {
         Ok(())
     }
 
+    /// Fill a never-set avatar atomically. Call only when the roster advertises
+    /// `avatar_initialized`: older servers ignore conditional profile fields.
+    pub async fn publish_default_avatar(&self, bytes: &[u8]) -> Result<bool> {
+        decode_profile_image(bytes)?;
+        let avatar_ct = self.encrypt_metadata(
+            Metadata::Avatar,
+            self.identity.certificate.person_id(),
+            bytes,
+        )?;
+        let reply = self
+            .request(Method::PUT, "/v1/me/profile")
+            .json(&json!({ "avatar_ct": avatar_ct, "avatar_if_unset": true }))
+            .send()
+            .await?;
+        if reply.status() == reqwest::StatusCode::PRECONDITION_FAILED {
+            return Ok(false);
+        }
+        reply.error_for_status()?;
+        Ok(true)
+    }
+
     /// Validate, encrypt and replace the server icon.
     pub async fn set_server_icon(&self, bytes: &[u8]) -> Result<()> {
         decode_profile_image(bytes)?;

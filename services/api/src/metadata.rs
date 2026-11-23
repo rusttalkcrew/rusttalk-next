@@ -216,6 +216,8 @@ pub async fn update_space(
 
 #[derive(Deserialize)]
 pub struct Profile {
+    #[serde(default)]
+    avatar_if_unset: bool,
     #[serde(default, deserialize_with = "patch_field")]
     display_name_ct: Option<Option<String>>,
     #[serde(default, deserialize_with = "patch_field")]
@@ -230,6 +232,7 @@ pub async fn update_profile(
     body: Result<Json<Profile>, JsonRejection>,
 ) -> ApiResult<StatusCode> {
     let Profile {
+        avatar_if_unset,
         display_name_ct,
         avatar_ct,
         bio_ct,
@@ -237,13 +240,14 @@ pub async fn update_profile(
     let (mut tx, actor) = authenticate(&app, &headers).await?;
     let epoch = keys::space_epoch(&mut tx, &app).await?;
     let avatar = optional(Metadata::Avatar, epoch, avatar_ct.clone().flatten())?;
-    sqlx::query(
+    let updated = sqlx::query(
         "UPDATE members SET
             display_name_ct = CASE WHEN ? THEN ? ELSE display_name_ct END,
             avatar_ct = CASE WHEN ? THEN ? ELSE avatar_ct END,
             avatar_hash = CASE WHEN ? THEN ? ELSE avatar_hash END,
+            avatar_initialized = CASE WHEN ? THEN 1 ELSE avatar_initialized END,
             bio_ct = CASE WHEN ? THEN ? ELSE bio_ct END
-         WHERE person_id = ?",
+         WHERE person_id = ? AND (NOT ? OR (avatar_initialized = 0 AND avatar_ct IS NULL))",
     )
     .bind(display_name_ct.is_some())
     .bind(optional(
@@ -255,12 +259,17 @@ pub async fn update_profile(
     .bind(avatar.as_deref())
     .bind(avatar_ct.is_some())
     .bind(avatar.as_deref().map(picture_hash))
+    .bind(avatar_ct.is_some())
     .bind(bio_ct.is_some())
     .bind(optional(Metadata::Bio, epoch, bio_ct.flatten())?)
     .bind(actor.person.as_slice())
+    .bind(avatar_if_unset)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
+    if updated.rows_affected() == 0 {
+        return Ok(StatusCode::PRECONDITION_FAILED);
+    }
     keys::changed(&app, &actor.person, None);
     Ok(StatusCode::NO_CONTENT)
 }
@@ -271,6 +280,7 @@ pub struct Member {
     presence: Presence,
     display_name_ct: Option<String>,
     avatar_hash: Option<String>,
+    avatar_initialized: bool,
     /// Always present (null without a bio), so clients can tell this server stores bios.
     bio_ct: Option<String>,
     role_ids: Vec<String>,
@@ -282,12 +292,20 @@ pub struct Member {
 }
 
 /// Person, display name, avatar hash, bio, `hide_offline` and `voice_muted`.
-type MemberRow = (Vec<u8>, Ciphertext, Option<String>, Ciphertext, bool, bool);
+type MemberRow = (
+    Vec<u8>,
+    Ciphertext,
+    Option<String>,
+    Ciphertext,
+    bool,
+    bool,
+    bool,
+);
 
 pub async fn members(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Vec<Member>>> {
     let (mut tx, _) = authenticate_read(&app, &headers).await?;
     let rows: Vec<MemberRow> = query_as(
-        "SELECT person_id, display_name_ct, avatar_hash, bio_ct, hide_offline, voice_muted
+        "SELECT person_id, display_name_ct, avatar_hash, bio_ct, hide_offline, voice_muted, avatar_initialized
          FROM members
          ORDER BY person_id",
     )
@@ -309,13 +327,22 @@ pub async fn members(State(app): State<App>, headers: HeaderMap) -> ApiResult<Js
     Ok(Json(
         rows.into_iter()
             .map(
-                |(person, display_name, avatar_hash, bio, hide_offline, voice_muted)| {
+                |(
+                    person,
+                    display_name,
+                    avatar_hash,
+                    bio,
+                    hide_offline,
+                    voice_muted,
+                    avatar_initialized,
+                )| {
                     let person_id = encode(&person);
                     Member {
                         presence: presence.get(&person_id).copied().unwrap_or_default(),
                         person_id,
                         display_name_ct: encoded(display_name),
                         avatar_hash,
+                        avatar_initialized,
                         bio_ct: encoded(bio),
                         role_ids: roles.remove(&person).unwrap_or_default(),
                         hide_offline,
@@ -330,6 +357,57 @@ pub async fn members(State(app): State<App>, headers: HeaderMap) -> ApiResult<Js
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn default_avatar_is_atomic_preserves_clears_and_other_members() -> anyhow::Result<()> {
+        use crate::testing::{app, as_person, person};
+        let dir = tempfile::tempdir()?;
+        let app = app(dir.path(), 2).await?;
+        let server = keys::space(&app).id;
+        let mut conn = app.db.acquire().await?;
+        keys::init_space(&mut conn, &server).await?;
+        query("INSERT INTO key_epochs (scope_id, epoch, commitment) VALUES (?, 1, zeroblob(32))")
+            .bind(encode(&server))
+            .execute(&mut *conn)
+            .await?;
+        drop(conn);
+        let key = rusttalk_core::keys::random_key()?;
+        let ct =
+            encode(&Metadata::Avatar.seal(&server, &person(2), 1, &key, b"synthetic image")?);
+        let write = |body| {
+            update_profile(
+                State(app.clone()),
+                as_person(2),
+                Ok(Json(serde_json::from_value(body).unwrap())),
+            )
+        };
+        let fill = json!({"avatar_ct": ct, "avatar_if_unset": true});
+        assert_eq!(write(fill.clone()).await?, StatusCode::NO_CONTENT);
+        assert_eq!(write(fill.clone()).await?, StatusCode::PRECONDITION_FAILED);
+        write(json!({"avatar_ct": null})).await?;
+        assert_eq!(write(fill).await?, StatusCode::PRECONDITION_FAILED);
+        let roster = members(State(app.clone()), as_person(1)).await?.0;
+        let cleared = roster
+            .iter()
+            .find(|m| m.person_id == encode(&person(2)))
+            .unwrap();
+        assert!(cleared.avatar_initialized && cleared.avatar_hash.is_none());
+        assert!(
+            !roster
+                .iter()
+                .find(|m| m.person_id == encode(&person(1)))
+                .unwrap()
+                .avatar_initialized
+        );
+        write(json!({"avatar_ct": ct})).await?;
+        assert_eq!(
+            avatar(State(app), as_person(1), Path(encode(&person(2))))
+                .await?
+                .0["avatar_ct"],
+            ct
+        );
+        Ok(())
+    }
 
     #[tokio::test]
     async fn pictures_stored_before_hashes_get_one_at_startup() {

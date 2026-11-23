@@ -640,6 +640,25 @@ impl Net {
         self.spawn(async move { sync(&ctx, edits).await });
     }
 
+    pub fn set_avatar(&self, bytes: Vec<u8>, servers: Vec<UnboundedSender<Command>>) {
+        let ctx = self.ctx.clone();
+        self.spawn(async move {
+            if let Err(error) = ctx
+                .sync
+                .select_avatar(&ctx.data, ctx.identity.certificate.person_id(), &bytes)
+                .await
+            {
+                tracing::warn!(%error, "saving account picture failed");
+                ctx.send(Update::Failed(t!("net.picture_failed").into()));
+                return;
+            }
+            sync(&ctx, Vec::new()).await;
+            for server in servers {
+                let _ = server.send(Command::SetAvatar(bytes.clone()));
+            }
+        });
+    }
+
     /// Leave a server on all devices. Its connection stays until the leave is published there.
     pub fn leave(&self, address: Url, commands: UnboundedSender<Command>) {
         let ctx = self.ctx.clone();
@@ -1267,6 +1286,7 @@ async fn serve(
         run_command(ctx, url, client, state, command).await;
     }
     let mut stats = tokio::time::interval(Duration::from_secs(2));
+    let mut avatar_retry = tokio::time::interval(Duration::from_secs(30));
     loop {
         // Refresh ten minutes before the 12-hour token expires.
         let refresh = Duration::from_secs((client.expires_at() - 600 - now()).max(0) as u64);
@@ -1344,6 +1364,13 @@ async fn serve(
                 tracing::info!("session refreshed");
                 if let Err(error) = resume(ctx, url, client, state).await {
                     tracing::warn!(error = %format_args!("{error:#}"), "reloading after refresh failed");
+                }
+            }
+            _ = avatar_retry.tick() => {
+                let missing = state.last.as_ref().is_some_and(|dir| dir.members.iter()
+                    .any(|m| &m.person == ctx.identity.certificate.person_id() && m.avatar.is_none()));
+                if missing && let Err(error) = directory(ctx, url, client, state).await {
+                    tracing::warn!(%error, "retrying account picture failed");
                 }
             }
             next = next_voice(&mut state.voice) => voice_next(ctx, url, Some(client), state, next).await,
@@ -1696,6 +1723,12 @@ async fn on_event(
             state.deleted(ctx, url, channel, id);
         }
         Event::Resync => resume(ctx, url, client, state).await?,
+        Event::MemberChanged { ref person, .. }
+            if person == &encode(ctx.identity.certificate.person_id()) =>
+        {
+            sync_devices(ctx, Vec::new()).await?;
+            directory(ctx, url, client, state).await?;
+        }
         Event::MemberChanged { .. } | Event::ChannelChanged | Event::DmCreated { .. } => {
             directory(ctx, url, client, state).await?;
         }
@@ -2019,6 +2052,16 @@ async fn on_command(
         }
         Command::SetBio(_) => {}
         Command::SetAvatar(bytes) => {
+            sync_devices(ctx, Vec::new()).await?;
+            if ctx
+                .sync
+                .avatar(&ctx.data, ctx.identity.certificate.person_id(), None)
+                .await?
+                .as_deref()
+                != Some(bytes.as_slice())
+            {
+                return Ok(());
+            }
             if let Err(error) = client.set_avatar(&bytes).await {
                 tracing::warn!(error = %format_args!("{error:#}"), "setting picture failed");
                 ctx.send(Update::Failed(t!("net.picture_failed").into()));

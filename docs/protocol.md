@@ -246,9 +246,9 @@ in a state response indicating that the first epoch is still pending.
 | GET `/v1/space` | Empty | Any member. 200, `{name_ct, description_ct, icon_hash, system_messages_ct, first_text_channel}` |
 | GET `/v1/space/icon` | Empty | Any member. 200, `{icon_ct}`, or `404 icon_not_found` |
 | PUT `/v1/space` | `{name_ct?, description_ct?, icon_ct?, system_messages_ct?}` | `manage_server`. 204 |
-| GET `/v1/members` | Empty | Any member. 200, `[{person_id, display_name_ct, avatar_hash, bio_ct, role_ids, presence, hide_offline, voice_muted?}]`. `bio_ct` is always present (null without a bio), so clients know the server stores bios. Clients keep members with `hide_offline` out of the member list while their presence is `offline`, but still use their name and picture elsewhere. `voice_muted` is present and true while a moderator mutes them |
+| GET `/v1/members` | Empty | Any member. 200, `[{person_id, display_name_ct, avatar_hash, avatar_initialized, bio_ct, role_ids, presence, hide_offline, voice_muted?}]`. `bio_ct` is always present (null without a bio), so clients know the server stores bios. Clients keep members with `hide_offline` out of the member list while their presence is `offline`, but still use their name and picture elsewhere. `voice_muted` is present and true while a moderator mutes them |
 | GET `/v1/members/{person}/avatar` | Empty | Any member. 200, `{avatar_ct}`, or `404 avatar_not_found` |
-| PUT `/v1/me/profile` | `{display_name_ct?, avatar_ct?, bio_ct?}` | Updates the authenticated member's own profile. 204 |
+| PUT `/v1/me/profile` | `{display_name_ct?, avatar_ct?, bio_ct?, avatar_if_unset?}` | Updates the authenticated member's own profile. 204; conditional avatar publication returns 412 if already set or cleared |
 | POST `/v1/invite-preview` | `{code}` | No bearer. 200, `{space_key_ct, name_ct}`. Missing, expired, spent or unpreviewable invite returns 404 |
 
 `system_messages_ct` seals the raw text channel ID with the space key. Empty plaintext
@@ -289,6 +289,24 @@ See [Crypto](crypto.md) for the binary envelope and metadata formats.
 Space and profile PUTs update the supplied fields. Omitted fields keep their
 values and explicit null clears a field. Metadata writes require the current
 space epoch.
+`avatar_if_unset: true` makes the entire update conditional on the avatar never
+having been set or cleared. The check and write are atomic. Clients use this only
+when `/v1/members` includes `avatar_initialized`, since older servers ignore unknown
+fields. Every explicit avatar write, including null, marks it initialized. Existing
+non-null pictures are marked initialized by migration; historical nulls cannot be
+distinguished from never-set pictures because older versions kept no tombstone.
+
+The desktop caches the selected default picture in its account's local sync state.
+Only its digest goes into encrypted device sync, keeping full-size images out of
+the settings blob. A fresh device obtains the matching image from a joined server;
+until that source is reachable and decryptable it waits. Old accounts bootstrap
+from their first successfully decrypted own picture without replacing a synced
+selection. Repair fills only uninitialized memberships, after keys and device sync
+are available, and never replaces an existing server picture. Missing destinations
+retry every 30 seconds and after reconnect/key delivery. Explicit selection still
+updates joined servers. A queued selection is discarded if device sync has since
+selected a different default.
+
 During space rotation, the API returns `409 space_key_unavailable`.
 A ciphertext from a different epoch returns `409 metadata_epoch_changed`.
 Server names, descriptions, channel names and topics, category names,
