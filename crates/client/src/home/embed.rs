@@ -12,7 +12,7 @@ const BANNER_HEIGHT: f32 = 220.0;
 
 pub enum Image<'a> {
     Picture(&'a Picture),
-    /// A letter or symbol in a circle, when there is no picture.
+    /// A letter or symbol in a rounded square, when there is no picture.
     Glyph(String),
     /// A banner across the top, such as a game's header picture. Owned by its
     /// preview, so it is freed with it.
@@ -64,7 +64,7 @@ impl Embed<'_> {
                         ui.add(
                             eframe::egui::Image::new(*texture)
                                 .fit_to_exact_size(Vec2::splat(IMAGE))
-                                .corner_radius(IMAGE / 2.0),
+                                .corner_radius(ui::avatar_radius(IMAGE)),
                         );
                     }
                     let icon = match &self.image {
@@ -74,12 +74,12 @@ impl Embed<'_> {
                     };
                     if let Some(icon) = icon {
                         let (rect, _) = ui.allocate_exact_size(Vec2::splat(IMAGE), Sense::hover());
+                        let radius = ui::avatar_radius(IMAGE);
                         match icon {
-                            Ok(picture) => paint_hovered(ui, rect, picture, IMAGE / 2.0),
+                            Ok(picture) => paint_hovered(ui, rect, picture, radius),
                             Err(glyph) => {
                                 let c = ui::colors(ui);
-                                ui.painter()
-                                    .circle_filled(rect.center(), IMAGE / 2.0, c.main);
+                                ui.painter().rect_filled(rect, radius, c.main);
                                 ui.painter().text(
                                     rect.center(),
                                     Align2::CENTER_CENTER,

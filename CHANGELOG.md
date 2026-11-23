@@ -11,8 +11,20 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
-- Backgrounding Android during a camera switch no longer waits for the camera or reopens it after pause.
+- Your account picture now follows you to new servers and repairs missing pictures after reconnecting.
+- Rounded-square avatars across the app, a speaking highlight on your bottom-left avatar during voice calls, and subtle hover feedback on sidebar server icons.
+- Incoming live file offers now have a single Download button.
+- Screen shares show simpler controls, preview automatically while focused, and start with system audio selected where supported.
+- Direct messages and mentions play a short chime from RustTalk itself, also when the system keeps notifications quiet; turn it off in Call sounds.
+- In the direct message list, the red badge no longer covers the server names, a server name shows only once, and the unread mark is no longer cut off.
+- While you are in a voice call, RustTalk keeps you Online even when another app has the focus.
+- Reopen the last chat picture instantly, even if the connection drops after it loads.
+- Unavailable servers show an exclamation mark in the server sidebar until they reconnect.
 
+## v0.2.1 - 2026-11-23
+
+- Incoming custom emoji now appear as soon as their pictures finish loading, without waiting for another chat message.
+- Backgrounding Android during a camera switch no longer waits for the camera or reopens it after pause.
 - Retry a failed forum post with its title, body and poll. Replies stay visible when a poll and its post arrive separately.
 - Forum channels: searchable posts with folded replies, polls, up and down votes and sorting.
 - Close image previews by clicking or tapping the dimmed space around them.
@@ -26,7 +38,9 @@ Unreleased under the new version and date.
 - Say whether you are going to an event, see who is still missing, and remind them
 - Event reminders reach unanswered authors and respect “Only when RustTalk isn’t focused” without repeating later
 - Channel names show the pointing-hand cursor when hovered, including for channel managers.
-- Call a phone number into your voice channel with your own SIP account (desktop): contacts, a keypad, Listen, and separate microphone permission with confirmed withdrawal
+- Desktop: call a phone number into your voice channel with your own SIP account, contacts and a keypad. Phone calls use unencrypted SIP/RTP; the provider and network path can hear them.
+- Listen to phone audio separately from sharing your microphone with the phone. The caller shares their own microphone; other members must consent; stopping sharing pauses the channel microphone until exclusion is confirmed or the call ends.
+- Phone calls end on reconnect or lost permission; hold and one-way audio are not supported.
 
 ## v0.2.0 - 2026-11-23
 

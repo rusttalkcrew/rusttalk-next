@@ -145,6 +145,7 @@ pub struct TrackStats {
 
 #[derive(Clone, PartialEq)]
 pub enum Status {
+    /// The first connection attempt has not finished.
     Connecting,
     Online,
     /// Retrying in the background.
@@ -706,9 +707,10 @@ pub struct Chat {
     pub shared: Option<Vec<rusttalk_core::client::SharedFile>>,
     /// Whether the shared files were asked for since the files view opened.
     pub shared_asked: bool,
-    /// Content height last frame, and before older messages were added,
-    /// so the view stays in place when a page is added above it.
+    /// Content height and vertical scroll offset last frame, and height before older
+    /// messages were added, so the view stays in place when a page is added above it.
     pub content_height: f32,
+    pub scroll_offset: f32,
     pub keep_scroll: Option<f32>,
     pub scroll_to: Option<f32>,
 }

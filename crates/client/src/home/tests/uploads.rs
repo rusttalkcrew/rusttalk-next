@@ -1,5 +1,8 @@
 use super::*;
-use egui_kittest::kittest::Queryable;
+use egui_kittest::{
+    Harness,
+    kittest::{NodeT, Queryable},
+};
 use std::{path::PathBuf, sync::Mutex};
 
 #[derive(Debug)]
@@ -21,9 +24,11 @@ impl Drop for ResetPicker {
 }
 
 static PICKED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+static PICKER_TEST: Mutex<()> = Mutex::new(());
 
 #[test]
 fn oversized_stored_picker_feedback() {
+    let _picker = PICKER_TEST.lock().unwrap();
     let _reset = ResetPicker;
     let data = tempfile::tempdir().unwrap();
     let large = data.path().join("sample.apk");
@@ -214,6 +219,227 @@ fn oversized_stored_picker_feedback() {
                     }
                     assert!(offered, "177 MB remains eligible for live transfer");
                     assert!(h.state().as_ref().unwrap().0.toast.is_none());
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn live_offers_wait_for_download_in_every_layout() {
+    let _picker = PICKER_TEST.lock().unwrap();
+    let _reset = ResetPicker;
+    let data = tempfile::tempdir().unwrap();
+    let path = data.path().join("sample.txt");
+    *PICKED.lock().unwrap() = vec![path.clone()];
+    *files::TEST_ANSWER.lock().unwrap() = Some(|name| {
+        assert_eq!(name, Some("sample.txt"));
+        PICKED.lock().unwrap().clone()
+    });
+    let transfer = [9; 32];
+    for dark in [true, false] {
+        for size in [
+            Vec2::new(390., 844.),
+            Vec2::new(820., 1180.),
+            Vec2::new(1100., 700.),
+        ] {
+            for scene in ["chat", "dm", "forum-post", "forum-reply", "call"] {
+                let (mut fixture, mut sent) = files_harness(dark);
+                let mut home = fixture.state_mut().take().unwrap();
+                let server = &mut home.servers[0];
+                let address = server.address.clone();
+                home.view = View::Server(0);
+                server.open = Some(PROJECTS);
+                home.layout.list = scene == "call";
+                home.find.opened = false;
+                let mut prefs = home.notify.prefs().clone();
+                prefs.desktop = false;
+                home.notify.set_prefs(prefs);
+                let mut settings = home.voice.audio.settings();
+                settings.language = "en".into();
+                settings.set_appearance(ui::Appearance {
+                    mode: if dark {
+                        ui::Mode::Dark
+                    } else {
+                        ui::Mode::Light
+                    },
+                    ..Default::default()
+                });
+                home.voice.audio.set_settings(settings);
+                let message = Msg {
+                    id: [10; 32],
+                    person: ANN,
+                    at: chrono::Utc::now().timestamp(),
+                    body: Body::Text("A live file".into()),
+                    backfilled: false,
+                    reply_to: None,
+                    quoted_author: None,
+                    edit_of: None,
+                    files: vec![],
+                    live: Some((transfer, "sample.txt".into(), 100)),
+                    sticker: None,
+                    replicas: vec![],
+                    copy_files: vec![],
+                };
+                match scene {
+                    "call" => {
+                        server.dir.categories[0].channels[0].voice = true;
+                        home.voice.call = Some(crate::server::Call {
+                            server: address,
+                            channel: PROJECTS,
+                            state: crate::server::CallState::Connected,
+                            stats: Default::default(),
+                            can_talk: true,
+                            can_share_video: true,
+                        });
+                        home.apply(
+                            &fixture.ctx,
+                            Update::LiveOffer(crate::net::LiveOffer {
+                                id: transfer,
+                                from: Some(ANN),
+                                name: "sample.txt".into(),
+                                size: 100,
+                                chat: false,
+                            }),
+                            0.0,
+                        );
+                    }
+                    "dm" => {
+                        home.view = View::Direct(Some(ANN));
+                        server.dir.dms.push(crate::server::Dm {
+                            channel: PROJECTS,
+                            peer: ANN,
+                        });
+                        home.threads
+                            .entry(ANN)
+                            .or_default()
+                            .chat
+                            .messages
+                            .push(Msg {
+                                replicas: vec![address],
+                                ..message
+                            });
+                    }
+                    _ => {
+                        server.dir.categories[0].channels[0].forum = scene.starts_with("forum");
+                        let chat = server.chats.get_mut(&PROJECTS).unwrap();
+                        if scene == "forum-reply" {
+                            let post = [11; 32];
+                            chat.messages.push(Msg {
+                                id: post,
+                                live: None,
+                                ..message.clone()
+                            });
+                            chat.messages.push(Msg {
+                                reply_to: Some(post),
+                                ..message
+                            });
+                        } else {
+                            chat.messages.push(message);
+                        }
+                    }
+                }
+                let mut h = Harness::builder()
+                    .with_context_setup(ui::install)
+                    .with_size(size)
+                    .build_ui_state(
+                        |ui, (home, updates, keys): &mut Screen| {
+                            show(ui, home, updates, keys);
+                        },
+                        (
+                            home,
+                            crate::update::Updater::new(data.path()),
+                            crate::keystore::without_keychain(data.path()),
+                        ),
+                    );
+                h.run_steps(4);
+                if scene == "forum-reply" {
+                    h.get_by_label_contains("1 reply").click_accesskit();
+                    h.run_steps(3);
+                }
+                if let Ok(dir) = std::env::var("RUSTTALK_LIVE_OFFER_SCREENSHOTS") {
+                    let theme = if dark { "dark" } else { "light" };
+                    h.render()
+                        .unwrap()
+                        .save(format!("{dir}/{scene}-{}-{theme}.png", size.x))
+                        .unwrap();
+                }
+                let download = h.get_by_role_and_label(egui::Role::Button, "Download");
+                assert!(
+                    egui::Rect::from_min_size(egui::Pos2::ZERO, size)
+                        .contains_rect(download.rect())
+                );
+                for label in ["Save", "Decline", "Cancel", "Stop sending"] {
+                    assert!(
+                        h.query_by_role_and_label(egui::Role::Button, label)
+                            .is_none()
+                    );
+                }
+                let transfer_commands =
+                    |sent: &mut tokio::sync::mpsc::UnboundedReceiver<Command>| {
+                        std::iter::from_fn(|| sent.try_recv().ok())
+                            .filter(|command| {
+                                matches!(command, Command::AcceptFile(..) | Command::CancelFile(_))
+                            })
+                            .collect::<Vec<_>>()
+                    };
+                assert!(transfer_commands(&mut sent).is_empty());
+                download.click();
+                let mut accepted = false;
+                for _ in 0..100 {
+                    h.run_steps(1);
+                    let commands = transfer_commands(&mut sent);
+                    if !commands.is_empty() {
+                        assert!(
+                            matches!(commands.as_slice(), [Command::AcceptFile(id, dest)] if *id == transfer && *dest == path)
+                        );
+                        accepted = true;
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                assert!(accepted, "{scene} at {size:?} did not accept the file");
+                let ctx = h.ctx.clone();
+                h.state_mut().0.apply(
+                    &ctx,
+                    Update::LiveProgress(
+                        transfer,
+                        LiveFileEvent::Progress {
+                            bytes: 50,
+                            total: 100,
+                        },
+                    ),
+                    0.0,
+                );
+                h.run_steps(3);
+                assert!(h.query_by_label("Download").is_none());
+                assert!(
+                    h.query_all_by_role(egui::Role::ProgressIndicator)
+                        .any(|node| { node.accesskit_node().numeric_value() == Some(50.0) })
+                );
+                let cancel = h.get_by_role_and_label(egui::Role::Button, "Cancel");
+                if dark {
+                    cancel.click();
+                    h.run_steps(3);
+                    assert!(
+                        matches!(transfer_commands(&mut sent).as_slice(), [Command::CancelFile(id)] if *id == transfer)
+                    );
+                } else {
+                    h.state_mut().0.apply(
+                        &ctx,
+                        Update::LiveProgress(transfer, LiveFileEvent::Done),
+                        0.0,
+                    );
+                    h.run_steps(3);
+                    if scene == "call" {
+                        h.get_by_label("Saved sample.txt");
+                        h.get_by_label("Dismiss").click();
+                        h.run_steps(3);
+                        assert!(h.query_by_label("Saved sample.txt").is_none());
+                    } else {
+                        h.get_by_label("Saved");
+                    }
+                    assert!(transfer_commands(&mut sent).is_empty());
                 }
             }
         }

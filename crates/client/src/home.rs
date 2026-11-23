@@ -430,9 +430,11 @@ impl Home {
         }
     }
 
-    /// Turn "Online" into "Away" after a while without input, and back once used again.
+    /// Turn "Online" into "Away" after a while without input or call, and back once used again.
     fn track_activity(&mut self, ui: &Ui) {
-        let (now, active) = ui.input(|input| (input.time, !input.events.is_empty()));
+        let (now, input) = ui.input(|input| (input.time, !input.events.is_empty()));
+        // In a call people talk while another app has the focus, so the call counts as activity.
+        let active = input || self.voice.call.is_some();
         if active {
             self.active_at = now;
             if self.auto_away {
@@ -461,6 +463,7 @@ impl Home {
         self.server_settings = None;
         let server = self.servers.remove(index);
         self.net.forget(&server.address);
+        self.files.forget_full_pictures(&server.address);
         let mut settings = self.voice.audio.settings();
         settings.hide_offline.left(&server.address);
         settings.left(&server.address);
@@ -916,6 +919,8 @@ impl Home {
         let rule = prefs.effective(&server.address, &channel, dm, notify::unix_now());
         let viewing = self.viewing().contains(&(index, channel));
         let mention = !(viewing && self.focused) && notify::counts(rule, arrival);
+        // Our own chime is heard even when the system keeps its notifications quiet.
+        let chimed = mention && prefs.sound && self.voice.audio.message();
         if notify::should_notify(prefs, rule, arrival, self.focused, viewing) {
             let sender = server.member_name(&msg.person);
             let title = match server.channel(&channel) {
@@ -937,7 +942,11 @@ impl Home {
                 _ => t!("notify.new_message").into(),
             };
             let target = (server.address.clone(), channel);
-            self.notify.show(ctx, &title, &body, target);
+            if chimed {
+                self.notify.show_silent(ctx, &title, &body, target);
+            } else {
+                self.notify.show(ctx, &title, &body, target);
+            }
         }
         let address = self.servers[index].address.clone();
         self.notify.arrived(&address, channel, msg.at, mention);
@@ -1138,6 +1147,7 @@ impl Home {
             }
             Update::Inaccessible(address, ids) => {
                 if let Some(i) = self.index(&address) {
+                    self.files.forget_full_pictures(&address);
                     let server = &mut self.servers[i];
                     for dm in &server.dir.dms {
                         if ids.contains(&dm.channel)
@@ -1155,6 +1165,7 @@ impl Home {
             }
             Update::ResetHistory(address, pages) => {
                 if let Some(i) = self.index(&address) {
+                    self.files.forget_full_pictures(&address);
                     for (channel, _) in &pages {
                         if let Some(peer) = self.dm_peer(i, channel) {
                             if let Some(thread) = self.threads.get_mut(&peer) {
@@ -1231,6 +1242,7 @@ impl Home {
                     }
                 }
                 if matches!(status, Status::Stopped(_)) {
+                    self.files.forget_full_pictures(&address);
                     server.chats.clear();
                     server.names.clear();
                     server.dir = Directory::default();
@@ -1685,9 +1697,6 @@ impl Home {
                 // A late result after Stop or leaving doesn't turn the chip back on.
                 if self.voice.sharing != call::Sharing::Off || !on {
                     self.voice.sharing = if on {
-                        if self.voice.sharing != call::Sharing::Changing {
-                            self.voice.preview_hidden = false;
-                        }
                         call::Sharing::On
                     } else {
                         self.voice.stop_preview();
@@ -1713,7 +1722,9 @@ impl Home {
                     self.chat(index, channel).uploading = what;
                 }
             }
-            Update::Image(id, fetch, frames) => self.files.image(ctx, id, fetch, frames),
+            Update::Image(address, blob, fetch, frames) => {
+                self.files.image(ctx, &address, &blob, fetch, frames)
+            }
             Update::LinkCard(id, card) => self.files.link_card(id, card),
             Update::StickerFile(id, picture) => self.files.sticker_loaded(ctx, id, picture),
             Update::Saved(id, saved) => self.files.saved(id, saved),
@@ -2282,20 +2293,72 @@ fn empty(ui: &mut Ui, title: &str, hint: &str) {
     });
 }
 
-/// A round server button that turns into a rounded square when hovered or open.
-fn rail_button(ui: &mut Ui, text: &str, label: &str, selected: bool) -> Response {
+/// Corner radius of a sidebar rail avatar: rounded square at rest, subtly
+/// tightened on hover or selection while keeping the same hit target.
+fn rail_radius(active: f32) -> f32 {
+    ui::avatar_radius(RAIL_BUTTON) - active * 2.0
+}
+
+/// Subtle outer border on a hovered or selected rail icon, without shifting layout.
+fn paint_rail_outline(
+    ui: &Ui,
+    rect: Rect,
+    radius: f32,
+    hover: f32,
+    selected: f32,
+    is_picture: bool,
+) {
+    let c = ui::colors(ui);
+    let accent = ui::accent(ui);
+    let hover_color = c
+        .muted
+        .lerp_to_gamma(c.strong, 0.35)
+        .gamma_multiply(0.75 * hover);
+    let border = if is_picture {
+        let hover_target = if c.dark { accent.tint } else { accent.strong };
+        let picked = accent.base.lerp_to_gamma(hover_target, 0.35 * hover);
+        hover_color.lerp_to_gamma(picked, selected)
+    } else {
+        hover_color.gamma_multiply(1.0 - selected)
+    };
+    if border.a() > 0 {
+        let width = if is_picture {
+            1.5 + 0.5 * selected
+        } else {
+            1.5
+        };
+        ui.painter().rect_stroke(
+            rect.expand(1.5),
+            radius + 1.5,
+            Stroke::new(width, border),
+            StrokeKind::Middle,
+        );
+    }
+}
+
+/// A rounded-square rail button (server initials, DMs or "+") with subtle hover and selection states.
+fn rail_button(ui: &mut Ui, text: &str, selected: bool) -> Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(RAIL_BUTTON), Sense::click());
     let c = ui::colors(ui);
     let accent = ui::accent(ui);
     let hover = ui.ctx().animate_bool_with_time(
         response.id.with("hover"),
-        response.hovered() || selected,
+        response.hovered(),
         ui::HOVER_SECONDS,
     );
-    let radius = RAIL_BUTTON / 2.0 - hover * (RAIL_BUTTON / 2.0 - 16.0);
-    let fill = c.main.lerp_to_gamma(accent.base, hover);
-    let glyph = c.text.lerp_to_gamma(ui::ON_FILL, hover);
+    let selected_t =
+        ui.ctx()
+            .animate_bool_with_time(response.id.with("selected"), selected, ui::STATE_SECONDS);
+    let radius = rail_radius(hover.max(selected_t));
+    let idle = c.main.lerp_to_gamma(accent.base, 0.16 * hover);
+    let picked = accent.base.lerp_to_gamma(ui::ON_FILL, 0.10 * hover);
+    let fill = idle.lerp_to_gamma(picked, selected_t);
+    let glyph = c
+        .text
+        .lerp_to_gamma(c.strong, hover)
+        .lerp_to_gamma(ui::ON_FILL, selected_t);
     ui.painter().rect_filled(rect, radius, fill);
+    paint_rail_outline(ui, rect, radius, hover, selected_t, false);
     ui.painter().text(
         rect.center(),
         Align2::CENTER_CENTER,
@@ -2304,17 +2367,69 @@ fn rail_button(ui: &mut Ui, text: &str, label: &str, selected: bool) -> Response
         glyph,
     );
     ui::focus_ring(ui, &response, radius as u8);
-    response.widget_info(|| WidgetInfo::labeled(Role::Button, true, label));
-    response
-        .on_hover_text(label)
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+fn rail_label(button: Response, name: &str, unavailable: bool) -> Response {
+    button.widget_info(|| WidgetInfo::labeled(Role::Button, true, name));
+    if !unavailable {
+        return button.on_hover_text(name);
+    }
+    let status = t!("home.server_unavailable");
+    button
+        .ctx
+        .accesskit_node_builder(button.id, |node| node.set_description(status));
+    let (has_touch, touching) = button
+        .ctx
+        .input(|i| (i.has_touch_screen(), i.any_touches()));
+    if !touching {
+        let mut tooltip = if button.has_focus() && !has_touch && !ui::menu_open(&button) {
+            egui::Tooltip::for_widget(&button)
+        } else {
+            egui::Tooltip::for_enabled(&button)
+        };
+        tooltip.popup = tooltip.popup.align(egui::RectAlign::RIGHT_START);
+        tooltip.show(|ui| {
+            ui.set_max_width(ui.spacing().tooltip_width);
+            ui.label(name);
+            ui.weak(status);
+        });
+    }
+    button
+}
+
+/// A rounded-square server picture in the sidebar rail, with subtle hover and selection feedback.
+fn rail_icon(ui: &mut Ui, icon: &Picture, selected: bool) -> Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(RAIL_BUTTON), Sense::click());
+    let c = ui::colors(ui);
+    let hover = ui.ctx().animate_bool_with_time(
+        response.id.with("hover"),
+        response.hovered(),
+        ui::HOVER_SECONDS,
+    );
+    let selected_t =
+        ui.ctx()
+            .animate_bool_with_time(response.id.with("selected"), selected, ui::STATE_SECONDS);
+    let radius = rail_radius(hover.max(selected_t));
+    paint_hovered(ui, rect, icon, radius);
+    if hover > 0.0 {
+        ui.painter()
+            .rect_filled(rect, radius, c.strong.gamma_multiply(0.08 * hover));
+    }
+    paint_rail_outline(ui, rect, radius, hover, selected_t, true);
+    ui::focus_ring(ui, &response, radius as u8);
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 fn server_rail(ui: &mut Ui, home: &mut Home) {
     ui.vertical_centered(|ui| {
         ui.add_space(4.0);
         let dms = matches!(home.view, View::Direct(_));
-        let button = rail_button(ui, "💬", t!("home.direct_messages"), dms);
+        let button = rail_label(
+            rail_button(ui, "💬", dms),
+            t!("home.direct_messages"),
+            false,
+        );
         rail_marks(ui, &button, dms, home.dm_marks());
         if button.clicked() {
             home.view = View::Direct(None);
@@ -2325,18 +2440,15 @@ fn server_rail(ui: &mut Ui, home: &mut Home) {
             let server = &home.servers[index];
             let selected = home.view == View::Server(index);
             let button = match &server.dir.icon {
-                Some(icon) => {
-                    let (rect, button) =
-                        ui.allocate_exact_size(Vec2::splat(RAIL_BUTTON), Sense::click());
-                    let radius = if selected { 16.0 } else { 24.0 };
-                    paint_hovered(ui, rect, icon, radius);
-                    let button = button.on_hover_text(server.name());
-                    let name = server.name().to_owned();
-                    button.widget_info(|| WidgetInfo::labeled(Role::Button, true, &name));
-                    button
-                }
-                None => rail_button(ui, &initials(server.name()), server.name(), selected),
+                Some(icon) => rail_icon(ui, icon, selected),
+                None => rail_button(ui, &initials(server.name()), selected),
             };
+            let unavailable = matches!(server.status, Status::Offline | Status::Stopped(_));
+            if unavailable {
+                let at = button.rect.right_top() + Vec2::new(-8.0, 8.0);
+                ui::unavailable_badge(ui, at, ui::colors(ui).rail);
+            }
+            let button = rail_label(button, server.name(), unavailable);
             rail_marks(ui, &button, selected, marks);
             if button.clicked() {
                 home.view = View::Server(index);
@@ -2344,7 +2456,7 @@ fn server_rail(ui: &mut Ui, home: &mut Home) {
             ui::context_menu(&button, |m| server_menu(m, home, index));
         }
         let adding = matches!(home.view, View::Join | View::Find);
-        let plus = rail_button(ui, "+", t!("home.add_server"), adding);
+        let plus = rail_label(rail_button(ui, "+", adding), t!("home.add_server"), false);
         ui::menu(&plus, |m| {
             if m.item("🔗", t!("home.join_with_invite")).clicked() {
                 home.view = View::Join;
@@ -2377,15 +2489,23 @@ fn rail_marks(ui: &Ui, button: &Response, selected: bool, (unread, mentions): (b
 /// The same on a channel or DM row, unless that chat is muted.
 /// A DM row counts its copy on every server.
 fn chat_marks(ui: &Ui, home: &Home, chats: &[(&url::Url, Id)], dm: bool, row: Rect) {
+    paint_marks(ui, row, chat_counts(home, chats, dm));
+}
+
+/// Whether the chats are unread and their mentions, leaving out muted ones.
+fn chat_counts(home: &Home, chats: &[(&url::Url, Id)], dm: bool) -> (bool, u32) {
     let (prefs, now) = (home.notify.prefs(), notify::unix_now());
     let chats =
         (chats.iter()).filter(|(server, channel)| !prefs.effective(server, channel, dm, now).muted);
-    let (unread, mentions) = chats.fold((false, 0), |(unread, mentions), (server, channel)| {
+    chats.fold((false, 0), |(unread, mentions), (server, channel)| {
         (
             unread || home.notify.unread(server, channel),
             mentions + home.notify.mentions(server, channel),
         )
-    });
+    })
+}
+
+fn paint_marks(ui: &Ui, row: Rect, (unread, mentions): (bool, u32)) {
     if unread {
         ui::unread_pill(ui, row, 4.0);
     }
@@ -2431,9 +2551,10 @@ fn crop_dialog(ctx: &egui::Context, home: &mut Home) {
     };
     match crop.target {
         Target::Avatar => {
-            for server in &home.servers {
-                server.send(Command::SetAvatar(bytes.clone()));
-            }
+            home.net.set_avatar(
+                bytes,
+                home.servers.iter().map(|s| s.commands.clone()).collect(),
+            );
         }
         Target::Icon(address) => {
             if let Some(index) = home.index(&address) {
@@ -2603,9 +2724,14 @@ fn dm_row(ui: &mut Ui, home: &mut Home, peer: &Id, request: bool) {
     let selected = home.view == View::Direct(Some(*peer));
     let name = home.peer_name(peer);
     let dir = home.dm_server(peer).map_or(&none, |i| &home.servers[i].dir);
-    let shared: Vec<&str> = (home.shared(peer).into_iter())
-        .map(|i| home.servers[i].name())
-        .collect();
+    // A server saved twice, or two with one name, reads as one.
+    let mut shared: Vec<&str> = Vec::new();
+    for index in home.shared(peer) {
+        let server = home.servers[index].name();
+        if !shared.contains(&server) {
+            shared.push(server);
+        }
+    }
     let caption = if shared.is_empty() {
         t!("home.no_shared_server").to_owned()
     } else {
@@ -2616,21 +2742,27 @@ fn dm_row(ui: &mut Ui, home: &mut Home, peer: &Id, request: bool) {
         ui.painter()
             .rect_filled(rect, ui::RADIUS_ROW, ui::colors(ui).selected);
     }
+    let marks = if request {
+        (false, 0)
+    } else {
+        let replicas = home.replicas(peer);
+        let chats: Vec<_> = (replicas.iter())
+            .map(|(index, channel)| (&home.servers[*index].address, *channel))
+            .collect();
+        chat_counts(home, &chats, true)
+    };
     let row = ui::row_button(ui, 44.0, &name, |ui| {
         face(ui, dir, peer, &name, 30.0, true);
+        // The text ends before the mention badge instead of running under it.
+        let badge = if marks.1 > 0 { 24.0 } else { 0.0 };
         ui.vertical(|ui| {
+            ui.set_max_width(ui.available_width() - badge);
             ui.spacing_mut().item_spacing.y = 0.0;
             ui.add(Label::new(ui::bold(&name)).truncate());
             ui.add(Label::new(ui::caption(&caption)).truncate());
         });
     });
-    if !request {
-        let replicas = home.replicas(peer);
-        let chats: Vec<_> = (replicas.iter())
-            .map(|(index, channel)| (&home.servers[*index].address, *channel))
-            .collect();
-        chat_marks(ui, home, &chats, true, row.rect);
-    }
+    paint_marks(ui, row.rect, marks);
     if row.clicked() {
         home.view = View::Direct(Some(*peer));
         home.layout.list = false;
@@ -2997,7 +3129,8 @@ pub fn avatar(ui: &mut Ui, person: &Id, name: &str, size: f32) -> Response {
 fn paint_avatar(ui: &Ui, rect: Rect, person: &Id, name: &str) {
     let size = rect.width();
     let color: Color32 = Hsva::new(f32::from(person[0]) / 255.0, 0.45, 0.6, 1.0).into();
-    ui.painter().circle_filled(rect.center(), size / 2.0, color);
+    ui.painter()
+        .rect_filled(rect, ui::avatar_radius(size), color);
     ui.painter().text(
         rect.center(),
         Align2::CENTER_CENTER,
@@ -3012,7 +3145,7 @@ fn avatar_atom(member: &Member, name: &str) -> egui::Atom<'static> {
     if let Some(picture) = &member.avatar {
         let picture = picture.clone();
         return egui::Atom::paint(Vec2::splat(size), move |ui, args| {
-            paint_hovered(ui, args.rect, &picture, size / 2.0);
+            paint_hovered(ui, args.rect, &picture, ui::avatar_radius(size));
         });
     }
     let person = member.person;
@@ -3032,8 +3165,21 @@ pub fn face(
     size: f32,
     dot: bool,
 ) -> Response {
+    face_speaking(ui, dir, person, name, size, dot, false)
+}
+
+/// `face` with an optional speaking outline painted beneath any presence dot.
+pub fn face_speaking(
+    ui: &mut Ui,
+    dir: &Directory,
+    person: &Id,
+    name: &str,
+    size: f32,
+    dot: bool,
+    speaking: bool,
+) -> Response {
     let member = dir.members.iter().find(|m| m.person == *person);
-    member_face(ui, member, person, name, size, dot)
+    member_face_speaking(ui, member, person, name, size, dot, speaking)
 }
 
 /// `face` for a member already looked up (`None` when not a member).
@@ -3045,14 +3191,29 @@ fn member_face(
     size: f32,
     dot: bool,
 ) -> Response {
+    member_face_speaking(ui, member, person, name, size, dot, false)
+}
+
+fn member_face_speaking(
+    ui: &mut Ui,
+    member: Option<&Member>,
+    person: &Id,
+    name: &str,
+    size: f32,
+    dot: bool,
+    speaking: bool,
+) -> Response {
     let response = match member.and_then(|m| m.avatar.as_ref()) {
         Some(picture) => {
             let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
-            paint_hovered(ui, rect, picture, size / 2.0);
+            paint_hovered(ui, rect, picture, ui::avatar_radius(size));
             response
         }
         None => avatar(ui, person, name, size),
     };
+    if speaking {
+        ui::speaking_outline(ui, response.rect);
+    }
     if dot {
         let c = ui::colors(ui);
         let color = presence_color(c, member.map_or(Presence::Offline, |m| m.presence));
@@ -4517,6 +4678,7 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
             (msg.replicas.first()).and_then(|url| servers.iter().find(|s| s.address == *url));
         copy.or(named.map(|index| &servers[index]))
     };
+    let before_offset = chat.scroll_to.unwrap_or(chat.scroll_offset);
     let mut area = ScrollArea::vertical()
         .id_salt(("chat", key))
         .stick_to_bottom(true)
@@ -4605,6 +4767,13 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
         }
     });
     let content = output.content_size.y;
+    let offset = output.state.clamped_offset().y;
+    // `stick_to_bottom` updates the offset at the end of the pass without requesting
+    // another frame; repaint once so newly scrolled-in messages and their emoji load.
+    if (offset - before_offset).abs() > 0.5 {
+        ui.ctx().request_repaint();
+    }
+    chat.scroll_offset = offset;
     // Only page once the layout has settled; the first frame always starts at the top.
     let settled = chat.content_height == content;
     if let Some(before) = chat.keep_scroll {
@@ -6478,10 +6647,100 @@ mod tests {
         assert!(unsent_notice(&mut toast, Some(notice), 7.0));
     }
 
+    #[test]
+    fn avatar_render_uses_same_picture_at_roster_and_call_sizes() {
+        for dark in [true, false] {
+            for repaired in [false, true] {
+                let picture = Picture {
+                    key: [91; 32],
+                    frames: std::sync::Arc::new(vec![(
+                        egui::ColorImage::new(
+                            [2, 2],
+                            vec![Color32::RED, Color32::BLUE, Color32::GREEN, Color32::YELLOW],
+                        ),
+                        100,
+                    )]),
+                    bytes: Default::default(),
+                };
+                let dir = Directory {
+                    members: vec![Member {
+                        person: ME,
+                        name: Some("Synthetic member".into()),
+                        devices: Vec::new(),
+                        roles: Vec::new(),
+                        avatar: repaired.then_some(picture),
+                        presence: Presence::Online,
+                        hide_offline: false,
+                        bio: None,
+                        voice_muted: false,
+                    }],
+                    ..Default::default()
+                };
+                let mut harness = egui_kittest::Harness::builder()
+                    .with_size(Vec2::new(360.0, 240.0))
+                    .build_ui_state(
+                        |ui, dir: &mut Option<Directory>| {
+                            let Some(dir) = dir else {
+                                return;
+                            };
+                            ui.label("Member list");
+                            face(ui, dir, &ME, "Synthetic member", 32.0, false);
+                            ui.label("Call tile");
+                            face(ui, dir, &ME, "Synthetic member", 128.0, false);
+                        },
+                        None,
+                    );
+                ui::install(&harness.ctx);
+                harness.ctx.set_theme(if dark {
+                    egui::Theme::Dark
+                } else {
+                    egui::Theme::Light
+                });
+                *harness.state_mut() = Some(dir);
+                harness.run();
+                let images = harness
+                    .output()
+                    .shapes
+                    .iter()
+                    .filter_map(|shape| match &shape.shape {
+                        egui::epaint::Shape::Mesh(mesh)
+                            if mesh.texture_id != egui::TextureId::default() =>
+                        {
+                            Some(mesh.texture_id)
+                        }
+                        egui::epaint::Shape::Rect(rect) => {
+                            rect.brush.as_ref().map(|brush| brush.fill_texture_id)
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                if repaired {
+                    assert_eq!(images.len(), 2);
+                    assert_eq!(images[0], images[1]);
+                } else {
+                    assert!(images.is_empty());
+                }
+                if let Ok(path) = std::env::var("RUSTTALK_AVATAR_TEST_IMAGES") {
+                    let theme = if dark { "dark" } else { "light" };
+                    let state = if repaired { "after" } else { "before" };
+                    harness
+                        .render()
+                        .unwrap()
+                        .save(format!("{path}/{theme}-{state}.png"))
+                        .unwrap();
+                }
+            }
+        }
+    }
+
     const ME: Id = [1; 32];
     const ANN: Id = [7; 32];
     const PROJECTS: Id = [3; 32];
 
+    mod avatars;
+    mod emoji;
+    mod image_reload;
+    mod rail;
     mod streams;
     mod touch;
     mod uploads;

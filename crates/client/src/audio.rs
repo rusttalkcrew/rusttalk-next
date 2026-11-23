@@ -334,7 +334,7 @@ struct Shared {
     auto_threshold: AtomicU32,
     /// The microphone problem noticed in this call, until the UI takes it (`trouble`).
     trouble: AtomicU8,
-    /// When this person last sent sound, in ms since `start`.
+    /// When this person last sent sound, in ms since `start` + 1 (`0` = never/cleared).
     talked: AtomicU64,
     /// Device latencies for the echo canceller, in ms.
     input_delay: AtomicU32,
@@ -664,6 +664,7 @@ impl Audio {
 
     /// Joined a voice room.
     pub fn start_voice(&self) {
+        self.clear_talking();
         self.shared().ai_session.fetch_add(1, Relaxed);
         self.shared().voice.store(true, Relaxed);
         self.refresh();
@@ -671,6 +672,7 @@ impl Audio {
 
     /// Drop the old room's audio before queuing its leave cue.
     pub fn end_voice(&self, cue: Option<Cue>) {
+        self.clear_talking();
         self.shared().voice.store(false, Relaxed);
         self.pause_phone_withdrawal(false);
         self.shared()
@@ -747,11 +749,27 @@ impl Audio {
     }
 
     pub fn set_key_down(&self, down: bool) {
-        self.shared().key_down.store(down, Relaxed);
+        let shared = self.shared();
+        let was_down = shared.key_down.swap(down, Relaxed);
+        if was_down
+            && !down
+            && !shared.hotkey_down.load(Relaxed)
+            && lock(&shared.settings).push_to_talk
+        {
+            shared.talked.store(0, Relaxed);
+        }
     }
 
     pub fn set_hotkey_down(&self, down: bool) {
-        self.shared().hotkey_down.store(down, Relaxed);
+        let shared = self.shared();
+        let was_down = shared.hotkey_down.swap(down, Relaxed);
+        if was_down
+            && !down
+            && !shared.key_down.load(Relaxed)
+            && lock(&shared.settings).push_to_talk
+        {
+            shared.talked.store(0, Relaxed);
+        }
     }
 
     pub fn muted(&self) -> bool {
@@ -777,6 +795,9 @@ impl Audio {
     /// Plays the matching chime once per change. Not while deafened: deafening already
     /// mutes, and its own chime covers that.
     pub fn set_muted(&self, on: bool) {
+        if on {
+            self.clear_talking();
+        }
         if self.shared().muted.swap(on, Relaxed) != on && !self.deafened() {
             self.play_cue(if on { Cue::Muted } else { Cue::Unmuted });
         }
@@ -788,6 +809,9 @@ impl Audio {
 
     /// Plays the matching chime once per change, even when deafening.
     pub fn set_deafened(&self, on: bool) {
+        if on {
+            self.clear_talking();
+        }
         if self.shared().deafened.swap(on, Relaxed) == on {
             return;
         }
@@ -801,13 +825,14 @@ impl Audio {
 
     /// Queue a chime in the speaker mixer only. Echo cancellation gets the same
     /// reference it gets for remote audio, including any sound from the speakers.
-    pub fn play_cue(&self, cue: Cue) {
+    /// Returns whether the chime was queued.
+    pub fn play_cue(&self, cue: Cue) -> bool {
         let settings = lock(&self.shared().settings);
         let prefs = &settings.call_sounds;
         // Deafened people only hear the chimes about deafening itself.
         let silenced = self.deafened() && !matches!(cue, Cue::Deafened | Cue::Undeafened);
         if !prefs.enabled || prefs.volume <= 0.0 || silenced || prefs.disabled.contains(&cue) {
-            return;
+            return false;
         }
         let mut mixer = lock(&self.shared().mixer);
         let now = Instant::now();
@@ -815,18 +840,31 @@ impl Audio {
             mixer.cues.clear();
         }
         // Keep cues timely if several people join at once or the output stalls.
-        if mixer.cues.len() < RATE as usize / 2 {
-            mixer.cues.extend(cue.samples(RATE, prefs.volume));
-            // A ring is longer, and may first have to open the speakers.
-            let secs = if cue == Cue::Ring { 2 } else { 1 };
-            mixer.cue_until = Some(now + Duration::from_secs(secs));
+        if mixer.cues.len() >= RATE as usize / 2 {
+            return false;
         }
+        mixer.cues.extend(cue.samples(RATE, prefs.volume));
+        // A ring is longer, and these two may first have to open the speakers.
+        let secs = if matches!(cue, Cue::Ring | Cue::Message) {
+            2
+        } else {
+            1
+        };
+        mixer.cue_until = Some(now + Duration::from_secs(secs));
+        true
     }
 
     /// Ring for a voice request, also outside a call: that opens the speakers for it.
     pub fn ring(&self) {
         self.play_cue(Cue::Ring);
         self.refresh();
+    }
+
+    /// Chime for a new message, also outside a call. False when the sound settings keep it quiet.
+    pub fn message(&self) -> bool {
+        let played = self.play_cue(Cue::Message);
+        self.refresh();
+        played
     }
 
     /// The last microphone level in dBFS.
@@ -848,9 +886,46 @@ impl Audio {
         }
     }
 
+    fn clear_talking(&self) {
+        self.shared().talked.store(0, Relaxed);
+    }
+
+    /// Whether the channel microphone is paused while withdrawing from a phone bridge.
+    pub fn channel_mic_paused(&self) -> bool {
+        let shared = self.shared();
+        shared
+            .phone_withdrawal
+            .load(std::sync::atomic::Ordering::SeqCst)
+            || shared
+                .phone_withdrawal_requests
+                .load(std::sync::atomic::Ordering::SeqCst)
+                > 0
+    }
+
     /// This person is sending sound right now.
     pub fn talking(&self) -> bool {
-        self.shared().now() < self.shared().talked.load(Relaxed) + SPEAKING_MS
+        let shared = self.shared();
+        if self.display_muted() || self.deafened() {
+            return false;
+        }
+        if lock(&shared.settings).push_to_talk
+            && !shared.key_down.load(Relaxed)
+            && !shared.hotkey_down.load(Relaxed)
+        {
+            return false;
+        }
+        let last = shared.talked.load(Relaxed);
+        last != 0 && shared.now().saturating_sub(last - 1) < SPEAKING_MS
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_talked_for_test(&self, speaking: bool) {
+        let value = if speaking {
+            self.shared().now().saturating_add(1)
+        } else {
+            0
+        };
+        self.shared().talked.store(value, Relaxed);
     }
 
     /// This person's voice is loud right now; shared apps don't count.
@@ -1852,7 +1927,7 @@ fn process(shared: &Shared, frames: &Receiver<Mic>) {
                     voiced
                 };
             if open && db > SILENT_DB {
-                shared.talked.store(shared.now(), Relaxed);
+                shared.talked.store(shared.now().saturating_add(1), Relaxed);
             }
             if auto_gain {
                 gain.apply(&mut frame, db, threshold);
@@ -2359,8 +2434,66 @@ mod tests {
         // The gate never invents sound when mute, deafen or PTT already supplied silence.
         assert_eq!(channel_microphone(audio.shared(), &[0; FRAME]), [0; FRAME]);
         audio.request_phone_withdrawal();
+        assert!(audio.channel_mic_paused());
         audio.end_voice(None);
+        assert!(!audio.channel_mic_paused());
         assert_eq!(channel_microphone(audio.shared(), &speech), speech);
+    }
+
+    #[test]
+    fn talking_respects_startup_mute_deafen_ptt_and_call_end() {
+        let data = tempfile::tempdir().unwrap();
+        let audio = Audio::new(data.path()).unwrap();
+        let mut settings = audio.settings();
+        settings.call_sounds.enabled = false;
+        audio.set_settings(settings.clone());
+
+        // Never falsely lit right after start before any sound arrives.
+        assert!(!audio.talking());
+
+        // Voice activation: recent transmitted speech lights up.
+        audio.set_talked_for_test(true);
+        assert!(audio.talking());
+
+        // Muting clears talking immediately.
+        audio.set_muted(true);
+        assert!(!audio.talking());
+        audio.set_talked_for_test(true);
+        assert!(!audio.talking());
+        audio.set_muted(false);
+        audio.set_talked_for_test(true);
+        assert!(audio.talking());
+
+        // Deafening clears talking immediately.
+        audio.set_deafened(true);
+        assert!(!audio.talking());
+        audio.set_talked_for_test(true);
+        assert!(!audio.talking());
+        audio.set_deafened(false);
+
+        // Push-to-talk requires key_down or hotkey_down in addition to speech.
+        settings.push_to_talk = true;
+        audio.set_settings(settings);
+        audio.set_talked_for_test(true);
+        assert!(!audio.talking());
+        audio.set_key_down(true);
+        assert!(audio.talking());
+        audio.set_key_down(false);
+        assert!(!audio.talking());
+        // Re-pressing PTT silently after release must not briefly flash speaking.
+        audio.set_hotkey_down(true);
+        assert!(!audio.talking());
+        audio.set_talked_for_test(true);
+        assert!(audio.talking());
+        audio.set_hotkey_down(false);
+        assert!(!audio.talking());
+
+        // Ending voice clears any lingering speech timestamp.
+        audio.set_hotkey_down(true);
+        audio.set_talked_for_test(true);
+        assert!(audio.talking());
+        audio.end_voice(None);
+        assert!(!audio.talking());
     }
 
     #[test]

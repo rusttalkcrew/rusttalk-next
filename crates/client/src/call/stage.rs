@@ -286,7 +286,7 @@ fn preview_picture(ctx: &egui::Context, voice: &mut Voice) -> Option<Picture> {
 
 /// Whether our screen's preview is on the stage.
 fn previewing(voice: &Voice) -> bool {
-    matches!(voice.sharing, Sharing::On | Sharing::Changing) && !voice.preview_hidden
+    matches!(voice.sharing, Sharing::On | Sharing::Changing)
 }
 
 /// A person's camera picture: the self view for us, else their track, which this
@@ -339,7 +339,6 @@ enum Act {
     Full(Tile),
     Watch(Screen),
     StopWatching,
-    HidePreview,
     ShowPreview,
     ToggleFps,
     ToggleNerdStats,
@@ -371,6 +370,7 @@ fn entries<'p>(
     ctx: &egui::Context,
     voice: &mut Voice,
     server: &Server,
+    channel: &Id,
     peers: &'p [Peer],
     joined: bool,
 ) -> Vec<Entry<'p>> {
@@ -379,7 +379,7 @@ fn entries<'p>(
     for peer in peers {
         let name = peer.name(server);
         let me = peer.person == server.dir.me;
-        let speaking = voice.speaking(server, &peer.person);
+        let speaking = voice.speaking(server, channel, &peer.person);
         let camera = joined && peer.camera.is_some();
         let video = camera && (me || !voice.hidden.contains(&peer.person));
         let sharing = if me {
@@ -458,7 +458,7 @@ pub fn stage(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
     let ctx = ui.ctx().clone();
     let voice = &mut home.voice;
     let video_only = &mut home.layout.split.video_only;
-    let all = entries(&ctx, voice, server, &peers, joined);
+    let all = entries(&ctx, voice, server, &channel, &peers, joined);
     let stage = &mut voice.stage;
     stage
         .minimized
@@ -973,9 +973,6 @@ fn screen_menu(
             Row::StopWatching if m.danger("⏹", t!("call.stop_watching")).clicked() => {
                 acts.push(Act::StopWatching);
             }
-            Row::HidePreview if m.danger("⏹", t!("call.hide_preview")).clicked() => {
-                acts.push(Act::HidePreview);
-            }
             Row::Volume => {
                 m.separator();
                 // The sharer's apps, whose sound arrives with the screen.
@@ -1190,8 +1187,7 @@ fn tools(
     let sound = is_person || (!terminal && !entry.peer.apps.is_empty());
     let volume = sound && !entry.me && !entry.peer.unknown && state.joined;
     let full = entry.picture.is_some() || terminal && (entry.me || entry.watched);
-    let preview = entry.tile == Tile::Preview;
-    let stop = entry.watched || preview;
+    let stop = entry.watched;
     // You need to see a screen to control it.
     let remote = !is_person && !entry.me && state.joined && entry.watched && full;
     // In order of importance; the first ones win on a small tile.
@@ -1285,9 +1281,7 @@ fn tools(
         let open = ui::menu_open(&button);
         ui.data_mut(|data| data.insert_temp(menu_id, open));
     }
-    let (tip, act) = if preview {
-        (t!("call.hide_preview"), Act::HidePreview)
-    } else if terminal {
+    let (tip, act) = if terminal {
         (t!("call.stop_watching"), Act::StopWatchingTerminal)
     } else {
         (t!("call.stop_watching"), Act::StopWatching)
@@ -1323,11 +1317,9 @@ fn apply(home: &mut Home, index: usize, now: f64, acts: Vec<Act>) {
                 stage.stop_watching();
                 stop_watching(home);
             }
-            Act::HidePreview => home.voice.stop_preview(),
             Act::ShowPreview => {
                 stage.stop_watching();
                 stop_watching(home);
-                home.voice.preview_hidden = false;
             }
             Act::ToggleFps => home.layout.split.show_fps ^= true,
             Act::ToggleNerdStats => home.layout.split.nerd_stats ^= true,

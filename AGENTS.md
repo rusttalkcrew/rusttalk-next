@@ -130,13 +130,23 @@ Two people must never build the same thing. Before you write any code:
   visible change? Say why.
 - **Changelog.** Every user-visible change adds one short line under
   `## Unreleased` in `CHANGELOG.md`, in the same pull request (plain words, what
-  changes for people, no PR numbers). The release step moves Unreleased under the
-  new version with its date, and the website roadmap's Shipped timeline
-  (`rusttalkcrew/website`, `roadmap.html`) is updated from `CHANGELOG.md` at every
-  release. The app shows the same file as "What's new", so keep its format.
+  changes for people, no PR numbers). The app reads this file for "What's new",
+  so keep its format.
 - Commits end with a `Co-Authored-By:` line naming the AI model that helped.
 - Keep the branch up to date with `main` by rebasing, and resolve conflicts
   so that everyone's changes survive.
+
+### Every release
+
+1. Before tagging, move the changes shipping in this release from
+   `## Unreleased` in `CHANGELOG.md` into a section with the new version and
+   release date. Use that section for the GitHub release notes.
+2. Update the **Shipped** timeline in `rusttalkcrew/website` (`roadmap.html`)
+   from that changelog section. Include the website PR in the release PR so
+   both updates can be tracked together.
+3. Before marking the release complete, verify the published roadmap and
+   release notes match the changelog's version, date, and shipped changes.
+   Apply this checklist to patch releases too.
 
 ## 4. Legal
 

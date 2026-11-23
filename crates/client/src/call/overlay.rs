@@ -23,7 +23,6 @@ pub enum Row {
     Unfocus,
     FullScreen,
     StopWatching,
-    HidePreview,
     /// The volume of the stream's sound.
     Volume,
     ShowFps,
@@ -38,8 +37,7 @@ pub fn rows(tile: &Tile, focused: bool, picture: bool, watched: bool, sound: boo
     }
     match tile {
         Tile::Screen(_) if watched => rows.push(Row::StopWatching),
-        Tile::Preview => rows.push(Row::HidePreview),
-        Tile::Screen(_) | Tile::Person(_) | Tile::Terminal(_) => {}
+        Tile::Screen(_) | Tile::Preview | Tile::Person(_) | Tile::Terminal(_) => {}
     }
     if sound && watched {
         rows.push(Row::Volume);
@@ -364,7 +362,7 @@ mod tests {
         );
         assert_eq!(
             rows(&Tile::Preview, false, true, false, false),
-            [Focus, FullScreen, HidePreview, ShowFps, NerdStats]
+            [Focus, FullScreen, ShowFps, NerdStats]
         );
     }
 

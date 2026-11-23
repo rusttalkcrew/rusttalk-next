@@ -724,15 +724,16 @@ fn update_notice(ui: &mut Ui, updates: &ServerUpdates) {
 
 /// The server's icon, or its initials on a rounded square.
 fn server_icon(ui: &mut Ui, server: &Server, size: f32) {
+    let radius = ui::avatar_radius(size);
     match &server.dir.icon {
         Some(icon) => {
             let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(size), egui::Sense::hover());
-            crate::home::paint_hovered(ui, rect, icon, size / 4.0);
+            crate::home::paint_hovered(ui, rect, icon, radius);
         }
         None => {
             let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(size), egui::Sense::hover());
             let painter = ui.painter();
-            painter.rect_filled(rect, size / 4.0, ui::accent(ui).base);
+            painter.rect_filled(rect, radius, ui::accent(ui).base);
             painter.text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
