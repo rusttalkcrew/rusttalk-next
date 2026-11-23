@@ -1542,6 +1542,8 @@ clipboard.copy = コピー
 clipboard.cut = 切り取り
 clipboard.select_all = すべて選択
 
+call.streaming_viewers = 配信中 · {count} 人が視聴中
+call.watch_stream = {name}を視聴 · {count} 人が視聴中
 camera.flip = カメラを切り替え
 camera.torch_on = ライトをオン
 camera.torch_off = ライトをオフ
