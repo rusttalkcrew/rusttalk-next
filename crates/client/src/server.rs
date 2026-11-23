@@ -179,10 +179,13 @@ impl Server {
         self.dir.members.iter().find(|m| m.person == *person)
     }
 
-    pub fn send(&self, mut command: Command) {
+    pub fn send(&self, command: Command) {
+        Self::send_to(&self.commands, command);
+    }
+
+    pub fn send_to(commands: &UnboundedSender<Command>, mut command: Command) -> bool {
         crate::net::Queued::count(&mut command);
-        // The task only ends after the UI drops this sender or the server stopped for good.
-        let _ = self.commands.send(command);
+        commands.send(command).is_ok()
     }
 
     pub fn channel(&self, id: &Id) -> Option<&Channel> {
@@ -331,7 +334,7 @@ impl Directory {
         self.categories
             .iter()
             .flat_map(|c| &c.channels)
-            .filter(|c| !c.page && !c.voice)
+            .filter(|c| !c.page && !c.voice && !c.forum)
     }
 
     pub fn notice_channel(&self) -> Option<Id> {
@@ -431,6 +434,7 @@ pub enum ChannelKind {
     Text,
     Voice,
     Page,
+    Forum,
 }
 
 impl ChannelKind {
@@ -440,14 +444,19 @@ impl ChannelKind {
             Self::Text => "text",
             Self::Voice => "voice",
             Self::Page => "page",
+            Self::Forum => "forum",
         }
     }
 
     pub fn of(channel: &Channel) -> Self {
-        match (channel.voice, channel.page) {
-            (true, _) => Self::Voice,
-            (_, true) => Self::Page,
-            _ => Self::Text,
+        if channel.voice {
+            Self::Voice
+        } else if channel.page {
+            Self::Page
+        } else if channel.forum {
+            Self::Forum
+        } else {
+            Self::Text
         }
     }
 }
@@ -468,6 +477,9 @@ pub struct Channel {
     pub voice: bool,
     /// Shows its newest message as one Markdown page instead of a chat.
     pub page: bool,
+    /// Shows its messages as posts, each with its own replies.
+    #[serde(default)]
+    pub forum: bool,
     /// Opus bitrate of a voice channel, in kbps.
     pub audio_kbps: u32,
     /// Per role: read (1), write (2), speak (4) and video (8).
@@ -661,6 +673,8 @@ fn rank(edit: &Msg) -> Rank {
 /// One channel's loaded history, oldest first, plus the composer state.
 #[derive(Default)]
 pub struct Chat {
+    pub new_post: crate::home::forum::NewPost,
+    pub submissions: Vec<crate::home::forum::Submission>,
     pub messages: Vec<Msg>,
     /// Originals that show edited text, by person and ID, with the applied edit's rank.
     pub edited: HashMap<(Id, Id), Rank>,
@@ -674,6 +688,8 @@ pub struct Chat {
     pub opened: bool,
     pub loading: bool,
     pub at_start: bool,
+    /// Oldest wire record, including votes and non-displayable records.
+    pub oldest: Option<Id>,
     pub draft: String,
     pub mentions: crate::home::mentions::DraftMentions,
     /// The message replied to: person and ID.
@@ -704,6 +720,7 @@ impl Chat {
         self.pending_edits.clear();
         self.polls.clear();
         self.at_start = false;
+        self.oldest = None;
     }
 
     pub fn open_draft(&mut self, dir: &Directory, text: &str) {
@@ -854,6 +871,20 @@ impl Chat {
             ballots,
             ends,
         ))
+    }
+
+    /// The up (option 0) and down (option 1) votes on a forum post. They are sent as
+    /// votes on the post itself, so they can be changed or taken back like poll votes,
+    /// and apps without forums leave them out.
+    pub fn post_votes(&self, msg: &Msg) -> Tally {
+        let both = rusttalk_core::messages::Poll {
+            options: vec![String::new(), String::new()],
+            multiple: false,
+            ends_at: 0,
+        };
+        let events = self.polls.get(&msg.id);
+        let ballots = events.map_or(&[][..], |events| &events.ballots);
+        rusttalk_core::messages::tally(&both, &msg.person, ballots, &[])
     }
 
     /// A verified sender wins over the reply's display hint. For colliding IDs,

@@ -101,7 +101,7 @@ pub async fn space(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json
     let first_text_channel = query_scalar(
         "SELECT channel_id FROM channel_readers WHERE person_id = ? AND channel_id = (
             SELECT c.id FROM channels c JOIN categories g ON c.category_id = g.id
-            WHERE c.kind = 'text' AND NOT c.page ORDER BY g.position, g.id, c.position, c.id LIMIT 1
+            WHERE c.kind = 'text' AND NOT c.page AND NOT c.forum ORDER BY g.position, g.id, c.position, c.id LIMIT 1
         )",
     )
     .bind(actor.person.as_slice())

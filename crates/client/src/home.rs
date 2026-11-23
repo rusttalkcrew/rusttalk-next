@@ -93,6 +93,7 @@ const TOOLBAR_BUTTON: Vec2 = Vec2::new(30.0, 26.0);
 
 pub(crate) mod embed;
 pub(crate) mod events;
+pub(crate) mod forum;
 mod friends;
 pub mod layout;
 mod markdown;
@@ -152,6 +153,7 @@ pub struct Home {
     pub error: Option<String>,
     pub key_storage: crate::key_storage::Form,
     pub server_settings: Option<admin::Settings>,
+    pub kick: Option<admin::Kick>,
     /// The crop step for a picked profile picture or server icon.
     crop: Option<crate::crop::Crop>,
     /// My account: the default name being edited, and the bio as typed, unsaved.
@@ -399,6 +401,7 @@ impl Home {
             error: None,
             key_storage: Default::default(),
             server_settings: None,
+            kick: None,
             crop: None,
             name_draft: None,
             bio_draft: None,
@@ -1039,9 +1042,11 @@ impl Home {
             };
             draft.preview = made.map(Arc::new);
             match to {
-                To::Channel(address) => {
+                To::Channel(address, channel) => {
                     if let Some(index) = self.index(&address) {
-                        self.servers[index].send(Command::Send(draft));
+                        let server = &mut self.servers[index];
+                        let chat = server.chats.entry(channel).or_default();
+                        forum::dispatch(chat, &server.commands, draft);
                     }
                 }
                 To::Dm(peer) => {
@@ -1165,6 +1170,14 @@ impl Home {
                 let Some(index) = self.index(&address) else {
                     return;
                 };
+                if status != Status::Online
+                    && self
+                        .kick
+                        .as_ref()
+                        .is_some_and(|kick| kick.belongs_to(&self.servers[index]))
+                {
+                    self.kick = None;
+                }
                 let joining = matches!(&self.join, Join::Joining(url) if *url == address);
                 match (&status, joining) {
                     (Status::Online, true) => {
@@ -1350,8 +1363,9 @@ impl Home {
                 channel,
                 items,
                 older,
-                at_start,
+                page,
             } => {
+                let at_start = page.map(|(start, _)| start);
                 let Some(index) = self.index(&server) else {
                     return;
                 };
@@ -1409,7 +1423,8 @@ impl Home {
                     chat.messages = notices;
                 }
                 chat.merge(items, older);
-                if let Some(at_start) = at_start {
+                if let Some((at_start, oldest)) = page {
+                    chat.oldest = oldest;
                     chat.loading = false;
                     chat.at_start |= at_start;
                 }
@@ -1748,7 +1763,23 @@ impl Home {
                     }
                 }
             }
+            Update::ForumSent(address, channel, id) => {
+                if let Some(server) = self.servers.iter_mut().find(|s| s.address == address)
+                    && let Some(chat) = server.chats.get_mut(&channel)
+                    && let Some(next) = forum::confirmed(chat, id)
+                {
+                    forum::send_part(chat, &server.commands, next);
+                }
+            }
             Update::Unsent(address, draft) => {
+                if draft.forum_post {
+                    if let Some(index) = self.index(&address)
+                        && let Some(chat) = self.servers[index].chats.get_mut(&draft.channel)
+                    {
+                        forum::failed(chat, draft.id);
+                    }
+                    return;
+                }
                 if draft.voice_request.is_some() {
                     self.requests.outgoing.retain(|sent| sent.id != draft.id);
                     return;
@@ -2165,6 +2196,7 @@ pub fn show(
     let action = crate::settings::show(ui.ctx(), home, updates, keystore);
     updates.dialog(ui.ctx());
     crop_dialog(ui.ctx(), home);
+    admin::kick_dialog(ui.ctx(), home);
     action
 }
 
@@ -2920,7 +2952,7 @@ fn default_category(server: &Server, kind: ChannelKind) -> Option<Id> {
 fn category_name(kind: ChannelKind) -> &'static str {
     match kind {
         ChannelKind::Voice => t!("home.voice_channels"),
-        ChannelKind::Text | ChannelKind::Page => t!("home.text_channels"),
+        ChannelKind::Text | ChannelKind::Page | ChannelKind::Forum => t!("home.text_channels"),
     }
 }
 
@@ -2934,6 +2966,7 @@ fn kind_icon(kind: ChannelKind) -> &'static str {
         ChannelKind::Text => "#",
         ChannelKind::Voice => "🔊",
         ChannelKind::Page => "📄",
+        ChannelKind::Forum => "💬",
     }
 }
 
@@ -3677,7 +3710,7 @@ fn voice_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
 /// Where a queued message goes: a channel by its server's address, or a DM.
 #[derive(Clone, PartialEq)]
 enum To {
-    Channel(url::Url),
+    Channel(url::Url, Id),
     Dm(Id),
 }
 
@@ -3795,16 +3828,16 @@ fn chat_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
     }
     if files_shown(ui.ctx(), channel) {
         files_view(ui, home, index, channel, &mut chat);
-    } else if home.servers[index]
-        .channel(&channel)
-        .is_some_and(|c| c.page)
-    {
+    } else {
         // Reopening the files loads them again, with what others added meanwhile.
         chat.shared_asked = false;
-        page_view(ui, home, index, channel, &mut chat);
-    } else {
-        chat.shared_asked = false;
-        chat_view(ui, home, At::Channel(index, channel), &mut chat);
+        match home.servers[index].channel(&channel).map(ChannelKind::of) {
+            Some(ChannelKind::Page) => page_view(ui, home, index, channel, &mut chat),
+            Some(ChannelKind::Forum) => forum::view(ui, home, index, channel, &mut chat),
+            _ => {
+                chat_view(ui, home, At::Channel(index, channel), &mut chat);
+            }
+        }
     }
     home.servers[index].chats.insert(channel, chat);
 }
@@ -3957,7 +3990,7 @@ fn page_view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat: &mut
     } = home;
     let server = &servers[index];
     let dir = &server.dir;
-    let to = To::Channel(server.address.clone());
+    let to = To::Channel(server.address.clone(), channel);
     let now = ui.input(|input| input.time);
     // Membership notices are not part of the page.
     // A copy, so the editor below can change the chat's staged pictures.
@@ -4135,6 +4168,7 @@ fn page_view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat: &mut
                     keep.extend(card.cloned());
                 }
                 let draft = Draft {
+                    forum_post: false,
                     queued: Default::default(),
                     id: *id,
                     channel,
@@ -4200,24 +4234,74 @@ fn dm_pane(ui: &mut Ui, home: &mut Home, peer: Id) {
     }
 }
 
+fn handle_live_file(
+    ui: &Ui,
+    voice: &mut Voice,
+    files: &mut Files,
+    chat: &Chat,
+    server: Option<&Server>,
+    action: LiveAction,
+) {
+    match action {
+        LiveAction::Save(id, name) => {
+            if !voice.live_files.iter().any(|file| file.id == id)
+                && let Some(msg) = chat
+                    .messages
+                    .iter()
+                    .find(|m| m.live.as_ref().is_some_and(|l| l.0 == id))
+            {
+                voice.live_files.push(LiveFile {
+                    id,
+                    chat: true,
+                    from: Some(msg.person),
+                    name: name.clone(),
+                    size: msg.live.as_ref().map_or(0, |l| l.2),
+                    state: LiveState::Offered,
+                    receivers: Vec::new(),
+                });
+            }
+            if let Some(server) = server {
+                let address = server.address.clone();
+                files.ask(ui.ctx(), Ask::Accept(address, id, name));
+            }
+        }
+        LiveAction::Remove(id, stop) => {
+            if stop && let Some(server) = server {
+                server.send(Command::CancelFile(id));
+            }
+            match voice.live_files.iter_mut().find(|file| file.id == id) {
+                Some(file) => file.state = LiveState::Ended,
+                None => voice.live_files.push(LiveFile {
+                    id,
+                    chat: true,
+                    from: None,
+                    name: String::new(),
+                    size: 0,
+                    state: LiveState::Ended,
+                    receivers: Vec::new(),
+                }),
+            }
+        }
+    }
+}
+
 /// Shows a chat. In a DM, also returns what the person picked on the friend card.
 fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Act> {
-    let (title, dm, in_voice) = match at {
+    let (title, dm, in_voice, icon) = match at {
         At::Channel(index, channel) => {
             let server = &home.servers[index];
             let (title, dm) = server.chat_title(&channel).unwrap_or_default();
-            (title, dm, server.is_voice(&channel))
+            let icon = server.channel(&channel).map_or("#", channel_icon);
+            (title, dm, server.is_voice(&channel), icon)
         }
-        At::Dm(peer) => (home.peer_name(&peer), true, false),
+        At::Dm(peer) => (home.peer_name(&peer), true, false, "@"),
     };
     let name = title.clone();
     // A voice channel's chat sits under its call, which already shows the title.
     let title = if dm {
         format!("@ {title}")
-    } else if in_voice {
-        format!("🔊 {title}")
     } else {
-        format!("# {title}")
+        format!("{icon} {title}")
     };
     // The server for names and pictures, the servers a message goes to, and the
     // channel for live files.
@@ -4287,7 +4371,7 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
         ..
     } = home;
     let to = match at {
-        At::Channel(index, _) => To::Channel(servers[index].address.clone()),
+        At::Channel(index, channel) => To::Channel(servers[index].address.clone(), channel),
         At::Dm(peer) => To::Dm(peer),
     };
     let dir = named.map_or(&fallback, |index| &servers[index].dir);
@@ -4526,13 +4610,9 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
     {
         match at {
             At::Channel(index, channel) => {
-                let oldest = chat
-                    .messages
-                    .iter()
-                    .find(|msg| !matches!(msg.body, Body::Notice { .. }));
-                if let Some(oldest) = oldest {
+                if let Some(oldest) = chat.oldest {
                     chat.loading = true;
-                    servers[index].send(Command::Older(channel, oldest.id));
+                    servers[index].send(Command::Older(channel, oldest));
                 }
             }
             At::Dm(peer) => {
@@ -4558,47 +4638,15 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
         At::Channel(index, _) => Some(index),
         At::Dm(_) => url.and_then(|url| servers.iter().position(|s| s.address == url)),
     };
-    match live {
-        Some((LiveAction::Save(id, name), url)) => {
-            if !voice.live_files.iter().any(|file| file.id == id)
-                && let Some(msg) = chat
-                    .messages
-                    .iter()
-                    .find(|m| m.live.as_ref().is_some_and(|l| l.0 == id))
-            {
-                voice.live_files.push(LiveFile {
-                    id,
-                    chat: true,
-                    from: Some(msg.person),
-                    name: name.clone(),
-                    size: msg.live.as_ref().map_or(0, |l| l.2),
-                    state: LiveState::Offered,
-                    receivers: Vec::new(),
-                });
-            }
-            if let Some(index) = live_server(url) {
-                let address = servers[index].address.clone();
-                files.ask(ui.ctx(), Ask::Accept(address, id, name));
-            }
-        }
-        Some((LiveAction::Remove(id, stop), url)) => {
-            if stop && let Some(index) = live_server(url) {
-                servers[index].send(Command::CancelFile(id));
-            }
-            match voice.live_files.iter_mut().find(|file| file.id == id) {
-                Some(file) => file.state = LiveState::Ended,
-                None => voice.live_files.push(LiveFile {
-                    id,
-                    chat: true,
-                    from: None,
-                    name: String::new(),
-                    size: 0,
-                    state: LiveState::Ended,
-                    receivers: Vec::new(),
-                }),
-            }
-        }
-        _ => {}
+    if let Some((action, url)) = live {
+        handle_live_file(
+            ui,
+            voice,
+            files,
+            chat,
+            live_server(url).map(|index| &servers[index]),
+            action,
+        );
     }
     match pick {
         Some(Pick::Reply(person, id)) => {
@@ -4630,44 +4678,62 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
         }
         Some(Pick::AddPicture(name, kind, bytes)) => {
             if let At::Channel(index, _) = at {
-                let taken: Vec<String> = (servers[index].dir.emoji.iter())
-                    .filter(|e| e.sticker == kind.sticker())
-                    .map(|e| e.name.clone())
-                    .collect();
-                servers[index].send(Command::Admin(Admin::AddEmoji {
-                    name: crate::emoji_zip::unique(&name, &taken),
-                    sticker: kind.sticker(),
-                    bytes: bytes.to_vec(),
-                    pack: None,
-                }));
+                add_picture(&servers[index], name, kind, &bytes);
             }
         }
-        Some(Pick::Previews(id, allow)) => {
-            let mut settings = voice.audio.settings();
-            settings.link_previews.insert(id.into(), allow);
-            voice.audio.set_settings(settings);
-            previews.allow(id, allow);
-        }
+        Some(Pick::Previews(id, allow)) => allow_previews(voice, previews, id, allow),
         Some(Pick::Invite(text)) => {
-            if let Ok(link) = InviteLink::parse(&text) {
-                match servers.iter().position(|s| s.known == link.server) {
-                    Some(index) => *view = View::Server(index),
-                    None => {
-                        *view = View::Join;
-                        // The click is the consent to contact the server, as Continue is on the
-                        // join page; its preview still asks for a name and confirmation.
-                        if !matches!(joining, Join::Checking | Join::Joining(_)) {
-                            *invite_text = text;
-                            net.preview(link, true);
-                            *joining = Join::Checking;
-                        }
-                    }
-                }
-            }
+            follow_invite(servers, view, (joining, invite_text, net), text);
         }
         None => {}
     }
     act
+}
+
+/// Add another server's emoji or sticker to this one, under a name not yet taken.
+fn add_picture(server: &Server, name: String, kind: Kind, bytes: &[u8]) {
+    let taken: Vec<String> = (server.dir.emoji.iter())
+        .filter(|e| e.sticker == kind.sticker())
+        .map(|e| e.name.clone())
+        .collect();
+    server.send(Command::Admin(Admin::AddEmoji {
+        name: crate::emoji_zip::unique(&name, &taken),
+        sticker: kind.sticker(),
+        bytes: bytes.to_vec(),
+        pack: None,
+    }));
+}
+
+fn allow_previews(voice: &Voice, previews: &mut Previews, id: &'static str, allow: bool) {
+    let mut settings = voice.audio.settings();
+    settings.link_previews.insert(id.into(), allow);
+    voice.audio.set_settings(settings);
+    previews.allow(id, allow);
+}
+
+/// An invite link clicked in a message: its server, or the join page for it.
+fn follow_invite(
+    servers: &[Server],
+    view: &mut View,
+    (joining, invite_text, net): (&mut Join, &mut String, &Net),
+    text: String,
+) {
+    let Ok(link) = InviteLink::parse(&text) else {
+        return;
+    };
+    match servers.iter().position(|s| s.known == link.server) {
+        Some(index) => *view = View::Server(index),
+        None => {
+            *view = View::Join;
+            // The click is the consent to contact the server, as Continue is on the
+            // join page; its preview still asks for a name and confirmation.
+            if !matches!(joining, Join::Checking | Join::Joining(_)) {
+                *invite_text = text;
+                net.preview(link, true);
+                *joining = Join::Checking;
+            }
+        }
+    }
 }
 
 /// A poll, vote or poll end to send; `None` without randomness for its ID.
@@ -4677,6 +4743,7 @@ fn poll_draft(channel: Id, text: String, part: PollPart) -> Option<Draft> {
         return None;
     };
     Some(Draft {
+        forum_post: false,
         queued: Default::default(),
         id: *id,
         channel,
@@ -4878,7 +4945,14 @@ fn dm_title(ui: &mut Ui, home: &Home, peer: Id) -> Option<(usize, person::Pick)>
                     let size = Vec2::splat(ui::ICON_BUTTON);
                     let button =
                         ui::icon_button(ui, "👤", t!("person.profile"), ui::Look::Plain, size);
-                    let card = ui::card_popup(ui, &button, &name, false, |ui| target.card(ui));
+                    let card = ui::card_popup(
+                        ui,
+                        person::popup_id(&button, &target),
+                        &button,
+                        &name,
+                        false,
+                        |ui| target.card(ui),
+                    );
                     pick = pick.take().or(card.flatten());
                 });
             });
@@ -4967,7 +5041,7 @@ fn composer(
     (toast, now): (&mut Option<(String, f64)>, f64),
 ) -> (Option<Command>, Option<bool>) {
     if let Some(editor) = &mut chat.poll_editor {
-        match polls::editor(ui, editor) {
+        match polls::editor(ui, editor, false) {
             Some(polls::Action::Cancel) => chat.poll_editor = None,
             Some(polls::Action::Post) if online => {
                 let (question, part) = editor.poll(polls::now());
@@ -5179,6 +5253,7 @@ fn composer(
             return (None, attach);
         };
         let command = Command::Send(Draft {
+            forum_post: false,
             queued: Default::default(),
             id: *message,
             channel,
@@ -5249,6 +5324,7 @@ fn composer(
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_millis() as u64);
     let command = Command::Send(Draft {
+        forum_post: false,
         queued: Default::default(),
         id: *id,
         channel,
@@ -5499,7 +5575,9 @@ fn message(
                     }
                     Body::Poll(question, poll) => {
                         let tally = chat.tally(msg).unwrap_or_default();
-                        if let Some(choices) = polls::card(ui, question, poll, &tally, &me, names) {
+                        if let Some(choices) =
+                            polls::card(ui, question, poll, &tally, &me, names, None)
+                        {
                             invite = Some(Pick::Poll(PollPart::Vote {
                                 poll: msg.id,
                                 sent: polls::now_ms(),
@@ -5945,9 +6023,19 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
                     ChannelKind::Page,
                     format!("{} {}", kind_icon(ChannelKind::Page), t!("home.kind_page")),
                 );
+                ui.selectable_value(
+                    kind,
+                    ChannelKind::Forum,
+                    format!("💬 {}", t!("home.kind_forum")),
+                );
             });
-            if *kind == ChannelKind::Page {
-                ui.weak(t!("home.kind_page_help"));
+            let help = match kind {
+                ChannelKind::Page => Some(t!("home.kind_page_help")),
+                ChannelKind::Forum => Some(t!("home.kind_forum_help")),
+                _ => None,
+            };
+            if let Some(help) = help {
+                ui.weak(help);
             }
             let data = &home.servers[*server];
             // Switching kind moves a default pick along, but keeps one the person made.
@@ -6230,6 +6318,14 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
                     let msg = chat.and_then(|chat| chat.messages.iter().find(|msg| msg.id == *id));
                     let files = chat.map_or_else(Vec::new, |chat| own_files(&chat.messages, id));
                     let sender = msg.map_or([0; 32], |msg| msg.person);
+                    // A forum post goes together with the poll it carries.
+                    let server = &home.servers[*index];
+                    if (server.channel(channel)).is_some_and(|c| c.forum)
+                        && let Some(chat) = server.chats.get(channel)
+                        && let Some(poll) = msg.and_then(|msg| forum::carried_poll(chat, msg))
+                    {
+                        server.send(Command::Delete(*channel, poll, sender, Vec::new()));
+                    }
                     command = Some((*index, Command::Delete(*channel, *id, sender, files)));
                 }
                 close |= ui::secondary(ui, t!("common.cancel")).clicked();
@@ -6429,6 +6525,7 @@ mod tests {
                 topic: String::new(),
                 voice: false,
                 page: false,
+                forum: false,
                 audio_kbps: 0,
                 flags: vec![("member".into(), 3)],
             }],
@@ -6536,7 +6633,7 @@ mod tests {
                     channel: PROJECTS,
                     items: vec![],
                     older: false,
-                    at_start: Some(true),
+                    page: Some((true, None)),
                 },
                 0.0,
             );

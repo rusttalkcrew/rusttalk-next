@@ -38,7 +38,7 @@ pub(super) async fn send(
     url: &Url,
     client: &mut KeyClient<'_>,
     state: &mut State,
-    (channel, id, page): (Id, Id, bool),
+    (channel, id, page, forum_post): (Id, Id, bool, bool),
     mut body: MessageBody,
     (files, preview, inline): (Vec<PathBuf>, Option<Arc<Made>>, Vec<Inline>),
 ) -> Result<bool> {
@@ -96,15 +96,46 @@ pub(super) async fn send(
         true => client.post_page(&channel, id, &body).await,
         false => client.post_message(&channel, id, &body).await,
     };
-    let record = match posted {
-        Ok(record) => record,
+    let (record, posted_body) = match posted {
+        Ok(record) => {
+            let opened = client.open_message(&channel, &record).await?;
+            (record, opened)
+        }
+        Err(error) if forum_post => {
+            // A lost response can hide a successful commit. Verify the original
+            // ID on this device before treating a retry as delivered.
+            let record = match client.message(&channel, &id).await {
+                Ok(record)
+                    if record.person == *ctx.identity.certificate.person_id()
+                        && record.sender_device
+                            == ctx.identity.certificate.signing_key().to_bytes() =>
+                {
+                    record
+                }
+                result => {
+                    // When offline we cannot tell whether the record references
+                    // the preview. Let unreferenced uploads expire in that case.
+                    if result.is_err_and(|e| gone(&e)) {
+                        leftover.extend(body.attachments.drain(kept..));
+                    }
+                    at_most(CLEANUP, discard(client, &leftover)).await;
+                    return Err(error);
+                }
+            };
+            let opened = client.open_message(&channel, &record).await?;
+            leftover.extend(
+                body.attachments
+                    .drain(kept..)
+                    .filter(|a| !opened.attachments.contains(a)),
+            );
+            (record, opened)
+        }
         Err(error) => {
             discard(client, &body.attachments[kept..]).await;
             at_most(CLEANUP, discard(client, &leftover)).await;
             return Err(error);
         }
     };
-    let posted_body = client.open_message(&channel, &record).await?;
     state.sent(ctx, url, channel, &record, &posted_body);
     at_most(CLEANUP, discard(client, &leftover)).await;
     Ok(true)

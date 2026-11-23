@@ -594,6 +594,7 @@ mod tests {
                     topic: String::new(),
                     voice: false,
                     page: false,
+                    forum: true,
                     audio_kbps: 0,
                     flags: vec![],
                 }],
@@ -604,7 +605,15 @@ mod tests {
             ],
             ..Default::default()
         };
+        let mut legacy = serde_json::to_value(&listing)?;
+        legacy["categories"][0]["channels"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("forum");
+        store.write("directory", &legacy);
+        assert!(!store.read::<Listing>("directory")?.unwrap().categories[0].channels[0].forum);
         store.write("directory", &listing);
+        assert!(store.read::<Listing>("directory")?.unwrap().categories[0].channels[0].forum);
         let mut history = History::default();
         let records = [9, 10]
             .into_iter()
