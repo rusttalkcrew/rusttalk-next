@@ -11,9 +11,10 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+## v0.2.1 - 2026-11-23
+
 - Incoming custom emoji now appear as soon as their pictures finish loading, without waiting for another chat message.
 - Backgrounding Android during a camera switch no longer waits for the camera or reopens it after pause.
-
 - Retry a failed forum post with its title, body and poll. Replies stay visible when a poll and its post arrive separately.
 - Forum channels: searchable posts with folded replies, polls, up and down votes and sorting.
 - Close image previews by clicking or tapping the dimmed space around them.
@@ -27,7 +28,9 @@ Unreleased under the new version and date.
 - Say whether you are going to an event, see who is still missing, and remind them
 - Event reminders reach unanswered authors and respect “Only when RustTalk isn’t focused” without repeating later
 - Channel names show the pointing-hand cursor when hovered, including for channel managers.
-- Call a phone number into your voice channel with your own SIP account (desktop): contacts, a keypad, Listen, and separate microphone permission with confirmed withdrawal
+- Desktop: call a phone number into your voice channel with your own SIP account, contacts and a keypad. Phone calls use unencrypted SIP/RTP; the provider and network path can hear them.
+- Listen to phone audio separately from sharing your microphone with the phone. The caller shares their own microphone; other members must consent; stopping sharing pauses the channel microphone until exclusion is confirmed or the call ends.
+- Phone calls end on reconnect or lost permission; hold and one-way audio are not supported.
 
 ## v0.2.0 - 2026-11-23
 

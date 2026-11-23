@@ -6528,7 +6528,7 @@ dependencies = [
 
 [[package]]
 name = "rusttalk-api"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -6553,7 +6553,7 @@ dependencies = [
 
 [[package]]
 name = "rusttalk-bot"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -6574,7 +6574,7 @@ dependencies = [
 
 [[package]]
 name = "rusttalk-client"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -6655,7 +6655,7 @@ dependencies = [
 
 [[package]]
 name = "rusttalk-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6714,7 +6714,7 @@ dependencies = [
 
 [[package]]
 name = "rusttalk-index"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -6731,7 +6731,7 @@ dependencies = [
 
 [[package]]
 name = "rusttalk-pipewire"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "ashpd",
