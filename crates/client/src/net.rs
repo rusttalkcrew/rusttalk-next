@@ -198,6 +198,8 @@ pub enum Command {
         topic: Option<String>,
         /// Voice channels only.
         audio_kbps: Option<u32>,
+        /// Voice channels only: 0 lifts the limit.
+        member_limit: Option<u32>,
     },
     RenameCategory(Id, String),
     DeleteChannel(Id),
@@ -1790,9 +1792,11 @@ async fn run_command(
 ) {
     if let Err(error) = on_command(ctx, url, client, state, command).await {
         tracing::warn!(error = %format_args!("{error:#}"), "server request failed");
+        let full = error.is::<rusttalk_core::client::voice::ChannelFull>();
         let text = match error.downcast_ref::<MessageError>() {
             Some(MessageError::ServerUpdateRequired) => t!("net.rotation_update"),
             Some(MessageError::TextLimit) => t!("net.text_limit"),
+            _ if full => t!("call.channel_full"),
             _ => t!("admin.failed"),
         };
         ctx.send(Update::Failed(text.into()));
@@ -2357,8 +2361,10 @@ async fn on_command(
             name,
             topic,
             audio_kbps,
+            member_limit,
         } => {
-            directory::rename_channel(client, &id, &name, topic.as_deref(), audio_kbps).await?;
+            let topic = topic.as_deref();
+            directory::rename_channel(client, &id, &name, topic, audio_kbps, member_limit).await?;
             directory(ctx, url, client, state).await?;
         }
         Command::RenameCategory(id, name) => {

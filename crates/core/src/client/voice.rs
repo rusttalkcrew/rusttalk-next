@@ -142,6 +142,16 @@ struct Token {
 /// The bitrate for channels and servers that set none.
 pub const DEFAULT_AUDIO_KBPS: u32 = 64;
 
+/// The server refused a join because the voice channel reached its member limit.
+#[derive(Debug, thiserror::Error)]
+#[error("voice channel is full")]
+pub struct ChannelFull;
+
+#[derive(Deserialize)]
+struct Problem {
+    error: String,
+}
+
 fn scope(id: &[u8; 32]) -> Scope {
     Scope {
         kind: Kind::Channel,
@@ -162,16 +172,25 @@ impl KeyClient<'_> {
     pub async fn join_voice(&mut self, channel: &[u8; 32]) -> Result<VoiceRoom> {
         self.sync().await?;
         let (epoch, key) = self.current_key(scope(channel))?;
-        let reply: Token = self
+        let response = self
             .request(
                 Method::POST,
                 &format!("/v1/voice/{}/token", encode(channel)),
             )
             .send()
-            .await?
-            .error_for_status()?
-            .json()
             .await?;
+        // Other refusals stay a reqwest error, so call recovery still sees their status.
+        if let Some(error) = response.error_for_status_ref().err() {
+            let full = response.status() == reqwest::StatusCode::FORBIDDEN
+                && (response.json::<Problem>().await)
+                    .is_ok_and(|problem| problem.error == "voice_channel_full");
+            return Err(if full {
+                ChannelFull.into()
+            } else {
+                error.into()
+            });
+        }
+        let reply: Token = response.json().await?;
 
         let server = self.server.known_server();
         let url = signaling_url(server)?;

@@ -483,6 +483,9 @@ pub struct Channel {
     pub forum: bool,
     /// Opus bitrate of a voice channel, in kbps.
     pub audio_kbps: u32,
+    /// Most people in a voice channel, 0 for no limit.
+    #[serde(default)]
+    pub member_limit: u32,
     /// Per role: read (1), write (2), speak (4) and video (8).
     pub flags: Vec<(String, u8)>,
 }

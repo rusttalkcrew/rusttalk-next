@@ -28,6 +28,7 @@ use rusttalk_core::{
         voice::{ParticipantIdentity, RoomEvent, TrackSource, VoiceRoom, VoiceRoster, VoiceStatus},
     },
     identity::DeviceIdentity,
+    keys::Metadata,
 };
 use serde_json::json;
 use tokio::{task::JoinSet, time::timeout};
@@ -76,6 +77,47 @@ async fn wait_for_microphone(
     })
     .await
     .context("waiting for remote microphone state")?
+}
+
+/// With A, B and C in the call: a full channel refuses D, while C keeps their own
+/// place and the owner gets in past the limit.
+async fn member_limit(
+    a: &KeyClient<'_>,
+    d: &KeyClient<'_>,
+    c: &KeyClient<'_>,
+    category: &[u8; 32],
+    voice: &[u8; 32],
+) -> Result<()> {
+    let name_ct = a.encrypt_metadata(Metadata::ChannelName, voice, b"Duplex")?;
+    let set = |most: u32| {
+        a.request(Method::PUT, &format!("/v1/channels/{}", encode(voice)))
+            .json(&json!({ "category_id": encode(category), "position": 0,
+                           "name_ct": name_ct, "member_limit": most }))
+            .send()
+    };
+    let token = |client: &KeyClient<'_>| {
+        client
+            .request(Method::POST, &format!("/v1/voice/{}/token", encode(voice)))
+            .send()
+    };
+    rejected(
+        set(100).await?,
+        StatusCode::BAD_REQUEST,
+        "invalid_member_limit",
+    )
+    .await?;
+    set(3).await?.error_for_status()?;
+    let catalog = a.catalog().await?;
+    let limit = catalog.channels.iter().find(|c| &c.id == voice);
+    assert_eq!(limit.and_then(|c| c.member_limit), Some(3));
+    rejected(token(d).await?, StatusCode::FORBIDDEN, "voice_channel_full").await?;
+    token(c).await?.error_for_status()?;
+    set(1).await?.error_for_status()?;
+    token(a).await?.error_for_status()?;
+    set(0).await?.error_for_status()?;
+    token(d).await?.error_for_status()?;
+    println!("W08 a full voice channel refused a newcomer but not its own people or the owner");
+    Ok(())
 }
 
 pub async fn exercise(
@@ -242,6 +284,7 @@ pub async fn exercise(
         for peer in [a.identity, &b_device, &c_device] {
             assert!(people.contains(peer.certificate.person_id()));
         }
+        member_limit(a, &d, &c, &category, &voice.id).await?;
 
         room_a.simulate_signal_reconnect().await?;
         timeout(hang_guard(), async {

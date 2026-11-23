@@ -640,6 +640,23 @@ fn stop_watching(home: &mut Home) {
 
 /// Room the Join button takes at a voice row's right edge, so the name is cut short first.
 pub const JOIN_SLOT: f32 = 30.0;
+/// Room for "3/5" before the Join button, on voice rows with a member limit.
+pub const COUNT_SLOT: f32 = 34.0;
+
+/// How full a voice channel with a member limit is, like "3/5", just before the Join slot.
+pub fn member_count(ui: &mut Ui, server: &Server, channel: &Id, limit: u32, row: &Response) {
+    let people = server.voice.get(channel).map_or(0, Vec::len);
+    let right = row.rect.right() - JOIN_SLOT;
+    let slot = Rect::from_x_y_ranges(right - COUNT_SLOT..=right, row.rect.y_range());
+    let mut at = ui.new_child(
+        UiBuilder::new()
+            .max_rect(slot)
+            .layout(Layout::right_to_left(Align::Center)),
+    );
+    let text = t!("call.member_count", people = people, limit = limit);
+    at.add(Label::new(ui::caption(text)).selectable(false))
+        .on_hover_text(t!("call.member_count_tip", people = people, limit = limit));
+}
 
 /// The Join button on a voice channel's row: shown while the row is hovered or open,
 /// hidden when this is the call you are in (the call bar has Leave). True when clicked.

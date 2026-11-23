@@ -11,6 +11,7 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Voice channels can have a member limit; the channel list shows how full they are, like 3/5.
 - The stream badge shows a compact viewer count and leaves the video stats visible.
 - Open a profile from a message author’s name or picture.
 - A temporary error syncing your account picture no longer disconnects the server.

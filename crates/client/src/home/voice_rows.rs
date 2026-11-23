@@ -52,6 +52,7 @@ fn window() -> (Harness<'static, Option<Home>>, UnboundedReceiver<Command>) {
         page: false,
         forum: false,
         audio_kbps: 64,
+        member_limit: 0,
         flags: Vec::new(),
     };
     server.dir.categories = vec![Category {
@@ -168,4 +169,19 @@ fn clicking_someone_in_voice_shows_their_card_and_right_click_their_menu() {
         .click_secondary();
     harness.run_steps(4);
     assert!(harness.query_by_label("Details").is_some());
+}
+
+#[test]
+fn a_voice_channel_with_a_member_limit_shows_how_full_it_is() {
+    let (mut harness, _sent) = window();
+    assert!(harness.query_by_label("1/5").is_none());
+    let server = &mut harness.state_mut().as_mut().unwrap().servers[0];
+    server.dir.categories[0].channels[1].member_limit = 5;
+    harness.run_steps(3);
+    assert!(harness.query_by_label("1/5").is_some());
+    // The count leaves room for the Join button.
+    harness.get_by_label("🔊  Lounge").hover();
+    harness.run_steps(3);
+    assert!(harness.query_by_label("1/5").is_some());
+    assert!(harness.query_by_label("Join voice").is_some());
 }
