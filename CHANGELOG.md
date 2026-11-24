@@ -30,6 +30,7 @@ Unreleased under the new version and date.
 - Servers with animated avatars, icons or emoji open faster and use less memory: their animations load the first time they play.
 - Servers come online faster after starting or reconnecting, and clicks, messages and call joins no longer wait for pictures and unread marks to load.
 - Your chat messages show up right away while they are sent; one that fails stays in the chat with Try again.
+- Others see you come online sooner when the server is busy.
 
 ## v0.3.0 - 2026-11-24
 
