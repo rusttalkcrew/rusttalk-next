@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- On phones, mute, sound, camera and leave buttons now sit at the bottom of the call view, and the call opens without the chat (tap the chat button to show it).
+
 ## v0.4.0 - 2026-11-24
 
 - Changing your name, picture or bio no longer pauses chat and voice on every server while your devices sync.

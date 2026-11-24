@@ -4028,7 +4028,8 @@ fn time(at: i64) -> String {
 /// A voice channel shares its chat pane with the stage only while someone is in voice.
 fn voice_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
     let server = &home.servers[index];
-    let occupied = home.voice.in_call(server, &channel)
+    let joined = home.voice.in_call(server, &channel);
+    let occupied = joined
         || server
             .voice
             .get(&channel)
@@ -4038,6 +4039,7 @@ fn voice_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
         .map(|(name, _)| name)
         .unwrap_or_default();
     let mut join = false;
+    let mut split = home.layout.call_split();
     pane_title_with(
         ui,
         "room-title",
@@ -4047,7 +4049,7 @@ fn voice_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
             layout::members_button(ui, &mut home.layout);
             ui.add_space(ui::SPACE_S);
             if occupied {
-                layout::split_buttons(ui, &mut home.layout.split);
+                layout::split_buttons(ui, &mut split);
             } else {
                 join = ui
                     .add_enabled_ui(server.status == Status::Online, |ui| {
@@ -4057,18 +4059,28 @@ fn voice_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
             }
         },
     );
+    home.layout.set_call_split(split);
     focus::banner(ui, home.servers[index].channel(&channel));
     if join {
         call::join(home, index, channel);
     }
     // When chat is visible, show feedback beside its composer or shared files.
-    if occupied && home.layout.split.chat_hidden {
+    if occupied && split.chat_hidden {
         toast_line(ui, &mut home.toast);
     }
     ui.add_space(ui::SPACE_S);
-    let area = ui.available_rect_before_wrap();
+    let mut area = ui.available_rect_before_wrap();
+    // Phones hide the sidebar and its voice panel here, so the call's controls come
+    // along at the bottom.
+    if joined && home.layout.phone {
+        let top = area.bottom() - ui::TOUCH_TARGET;
+        let bar = Rect::from_min_max(egui::pos2(area.left(), top), area.max);
+        area.max.y = top - ui::SPACE_S;
+        let mut ui = ui.new_child(UiBuilder::new().max_rect(bar));
+        call::phone_controls(&mut ui, home);
+    }
     let (stage, divider, chat) = if occupied {
-        layout::split(area, &home.layout.split)
+        layout::split(area, &split)
     } else {
         (None, None, Some(area))
     };
@@ -7143,6 +7155,7 @@ mod tests {
     const PROJECTS: Id = [3; 32];
 
     mod avatars;
+    mod call_controls;
     mod emoji;
     mod image_reload;
     mod long_chat;

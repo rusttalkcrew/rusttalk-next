@@ -62,6 +62,13 @@ impl Split {
     }
 }
 
+/// Which of the call and its chat is hidden.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Panes {
+    chat_hidden: bool,
+    stage_hidden: bool,
+}
+
 /// A stored split, or the default when it is missing or broken.
 pub fn ratio(stored: f32) -> f32 {
     if stored.is_finite() {
@@ -113,6 +120,9 @@ pub struct Layout {
     pub phone: bool,
     /// The voice channel split; `split_dragging` while its divider is held.
     pub split: Split,
+    /// Phones keep their own choice of hidden pane in the call view, never saved: the
+    /// chat starts hidden so the call and its controls get the small screen.
+    phone_panes: Panes,
     pub split_dragging: bool,
     /// What the settings file holds, so it is written only after a change.
     saved: Saved,
@@ -135,6 +145,10 @@ impl Layout {
             list: true,
             phone: false,
             split: saved.split,
+            phone_panes: Panes {
+                chat_hidden: true,
+                stage_hidden: false,
+            },
             split_dragging: false,
             saved,
         }
@@ -147,6 +161,36 @@ impl Layout {
             self.peek = false;
         }
         self.narrow = narrow;
+    }
+
+    /// The split the call view uses: on phones with their own hidden pane.
+    pub fn call_split(&self) -> Split {
+        if !self.phone {
+            return self.split;
+        }
+        Split {
+            chat_hidden: self.phone_panes.chat_hidden,
+            stage_hidden: self.phone_panes.stage_hidden,
+            ..self.split
+        }
+    }
+
+    /// Keep a change made to `call_split`; on phones the hidden pane stays apart from
+    /// the saved one.
+    pub fn set_call_split(&mut self, split: Split) {
+        if !self.phone {
+            self.split = split;
+            return;
+        }
+        self.phone_panes = Panes {
+            chat_hidden: split.chat_hidden,
+            stage_hidden: split.stage_hidden,
+        };
+        self.split = Split {
+            chat_hidden: self.split.chat_hidden,
+            stage_hidden: self.split.stage_hidden,
+            ..split
+        };
     }
 
     pub fn members_shown(&self) -> bool {

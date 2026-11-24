@@ -16,7 +16,7 @@ use super::{
 };
 use crate::{
     files::Ask,
-    home::{Home, Tab},
+    home::{Home, Tab, user_bar},
     mic_check::Verdict,
     net::Command,
     server::{CallState, Id, Server, Stats},
@@ -201,6 +201,85 @@ fn external_phone_notice(
     pick
 }
 
+/// What the call lets this person do right now, for the call's buttons.
+struct Can {
+    connected: bool,
+    share_video: bool,
+    /// Why talking (and so sharing sound) is off, if it is.
+    blocked: Option<&'static str>,
+}
+
+impl Can {
+    fn of(home: &Home) -> Option<Self> {
+        let call = home.voice.call.as_ref()?;
+        let server = home.servers.iter().find(|s| s.address == call.server);
+        // A moderator's mute also takes shared app audio.
+        let blocked = if server.is_some_and(|server| server.voice_muted(&server.dir.me)) {
+            Some(t!("call.server_muted"))
+        } else if !call.can_talk {
+            Some(t!("call.no_talk_here"))
+        } else {
+            None
+        };
+        Some(Self {
+            connected: call.state == CallState::Connected,
+            share_video: call.can_share_video,
+            blocked,
+        })
+    }
+}
+
+/// What the call's buttons asked for this frame; `apply` carries it out once the
+/// buttons no longer borrow the call.
+#[derive(Default)]
+struct Picked {
+    leave: bool,
+    share: Vec<(App, bool)>,
+    stopped: Option<Stop>,
+    stop_screen: bool,
+    change_screen: bool,
+    terminal: Option<Shell>,
+    live: Option<LiveAction>,
+    voice_settings: bool,
+}
+
+/// Which optional buttons the share row has on this device.
+struct Extras {
+    screen: bool,
+    app_audio: bool,
+    terminal: bool,
+    phone: bool,
+}
+
+impl Extras {
+    fn of(voice: &mut Voice, app_audio: bool) -> Self {
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        let phone = super::phone::shows(voice);
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        let phone = false;
+        Self {
+            screen: screen::SUPPORTED,
+            app_audio,
+            terminal: voice.audio.can_host_terminal(),
+            phone,
+        }
+    }
+
+    fn count(&self) -> usize {
+        // The camera, plus whatever else this device can share.
+        1 + usize::from(self.screen)
+            + usize::from(self.app_audio)
+            + usize::from(self.terminal || self.phone)
+    }
+}
+
+/// `count` buttons sharing the row's width evenly, `height` tall.
+fn even(ui: &Ui, count: usize, height: f32) -> Vec2 {
+    let count = count as f32;
+    let width = (ui.available_width() - SPACE_XS * (count - 1.0)) / count;
+    Vec2::new(width, height)
+}
+
 /// The voice panel, while in a voice room.
 pub fn call_bar(ui: &mut Ui, home: &mut Home) {
     if home.voice.call.is_none() {
@@ -232,6 +311,9 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
         }
     }
     mic_hint_card(ui, home);
+    let Some(can) = Can::of(home) else {
+        return;
+    };
     let Some(call) = &home.voice.call else {
         return;
     };
@@ -248,39 +330,17 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
         CallState::Connected => (t!("call.voice_connected"), c.success),
         CallState::Reconnecting => (t!("call.reconnecting"), c.warning),
     };
-    let connected = call.state == CallState::Connected;
-    let can_talk = call.can_talk;
-    // A moderator's mute also takes shared app audio.
-    let blocked = if server.is_some_and(|server| server.voice_muted(&server.dir.me)) {
-        Some(t!("call.server_muted"))
-    } else if !can_talk {
-        Some(t!("call.no_talk_here"))
-    } else {
-        None
-    };
-    let can_share_video = call.can_share_video;
     let stats = call.stats.clone();
     let channel = call.channel;
-    let quality = if connected {
+    let quality = if can.connected {
         quality(stats.ping_ms, home.voice.link.loss)
     } else {
         Quality::Unknown
     };
-    let stopped = sharing_card(ui, &home.voice, blocked);
-    if let Some(Stop::Sound(apps)) = &stopped
-        && let Some(server) = (home.voice.call.as_ref())
-            .and_then(|call| home.servers.iter().find(|s| s.address == call.server))
-    {
-        home.voice.stream_audio = apps.clone();
-        server.send(Command::StreamAudio(apps.clone()));
-    }
-    let mut live = None;
-    let mut leave_now = false;
-    let mut share = Vec::new();
-    let mut stop_screen = false;
-    let mut change_screen = matches!(stopped, Some(Stop::Change));
-    let mut voice_settings = false;
-    let mut terminal = None;
+    let mut picked = Picked {
+        stopped: sharing_card(ui, &home.voice, can.blocked),
+        ..Picked::default()
+    };
     Frame::new()
         .fill(c.field)
         .corner_radius(RADIUS)
@@ -288,12 +348,11 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui::right_row(ui, ICON_BUTTON, |ui| {
-                let hang = ui::icon_button(ui, "📞", t!("call.leave"), Look::Danger, SIGNAL_SIZE);
-                leave_now = hang.clicked();
+                picked.leave = leave_button(ui, SIGNAL_SIZE).clicked();
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                     let signal = signal_button(ui, quality);
                     ui::popup(&signal, |ui| {
-                        voice_settings =
+                        picked.voice_settings =
                             connection(ui, &stats, &home.voice.link, quality, server, &channel);
                     });
                     ui.vertical(|ui| {
@@ -310,80 +369,131 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
                 home.voice.camera.mobile_controls(ui, &mut settings);
                 home.voice.audio.set_settings(settings);
             }
-            let more = home.voice.audio.can_host_terminal();
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
-            let phone = super::phone::shows(&mut home.voice);
-            #[cfg(any(target_os = "android", target_os = "ios"))]
-            let phone = false;
-            let count = 2.0 + f32::from(screen::SUPPORTED) + f32::from(more || phone);
-            let width = (ui.available_width() - SPACE_XS * (count - 1.0)) / count;
-            let size = Vec2::new(width, ICON_BUTTON);
+            let extras = Extras::of(&mut home.voice, true);
+            let size = even(ui, extras.count(), ICON_BUTTON);
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = SPACE_XS;
-                let voice = &mut home.voice;
-                let camera = &mut voice.camera;
-                let look = if camera.on {
-                    Look::On(c.success)
-                } else {
-                    Look::Plain
-                };
-                let button = ui
-                    .add_enabled_ui(connected && can_share_video, |ui| {
-                        ui::icon_button(ui, "📷", camera_tip(camera.on), look, size)
-                    })
-                    .inner;
-                if !can_share_video {
-                    button.on_disabled_hover_text(t!("call.no_video_here"));
-                } else if button.clicked() {
-                    camera.on ^= true;
+                share_buttons(ui, &mut home.voice, &can, &extras, size, &mut picked);
+            });
+            picked.live = live_files(ui, &home.voice.live_files, server);
+        });
+    apply(ui, home, picked);
+}
+
+/// The call's controls along the bottom of the call view on phones, where the sidebar
+/// and its voice panel are hidden: mic, sound, the share buttons and hang up, sized
+/// for a finger.
+pub fn phone_controls(ui: &mut Ui, home: &mut Home) {
+    let Some(can) = Can::of(home) else {
+        return;
+    };
+    let mut picked = Picked::default();
+    // Without app audio support the button could only say so; leave room for the rest.
+    let app_audio = home.voice.supported;
+    let extras = Extras::of(&mut home.voice, app_audio);
+    // Mic, sound and hang up around the share buttons.
+    let size = even(ui, 3 + extras.count(), ui::TOUCH_TARGET);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = SPACE_XS;
+        user_bar::mic_button(ui, home, size);
+        user_bar::deafen_button(ui, home, size);
+        share_buttons(ui, &mut home.voice, &can, &extras, size, &mut picked);
+        picked.leave = leave_button(ui, size).clicked();
+    });
+    apply(ui, home, picked);
+}
+
+fn leave_button(ui: &mut Ui, size: Vec2) -> Response {
+    ui::icon_button(ui, "📞", t!("call.leave"), Look::Danger, size)
+}
+
+/// Camera on or off. Returned so a caller can hang more choices off it.
+fn camera_button(ui: &mut Ui, voice: &mut Voice, can: &Can, size: Vec2) -> Response {
+    let camera = &mut voice.camera;
+    let look = if camera.on {
+        Look::On(ui::colors(ui).success)
+    } else {
+        Look::Plain
+    };
+    let button = ui
+        .add_enabled_ui(can.connected && can.share_video, |ui| {
+            ui::icon_button(ui, "📷", camera_tip(camera.on), look, size)
+        })
+        .inner;
+    if !can.share_video {
+        return button.on_disabled_hover_text(t!("call.no_video_here"));
+    }
+    if button.clicked() {
+        camera.on ^= true;
+    }
+    button
+}
+
+/// Camera, screen, app audio and "More", as far as `extras` has them.
+fn share_buttons(
+    ui: &mut Ui,
+    voice: &mut Voice,
+    can: &Can,
+    extras: &Extras,
+    size: Vec2,
+    picked: &mut Picked,
+) {
+    camera_button(ui, voice, can, size);
+    if extras.screen {
+        let look = if voice.sharing == Sharing::Off {
+            Look::Plain
+        } else {
+            Look::On(ui::colors(ui).success)
+        };
+        let button = ui
+            .add_enabled_ui(can.connected && can.share_video, |ui| {
+                ui::icon_button(ui, "🖥", screen_tip(voice.sharing), look, size)
+            })
+            .inner;
+        if voice.sharing == Sharing::On {
+            ui::context_menu(&button, |m| {
+                if m.item("🖥", t!("call.change_my_share")).clicked() {
+                    picked.change_screen = true;
                 }
-                if screen::SUPPORTED {
-                    let look = if voice.sharing == Sharing::Off {
-                        Look::Plain
-                    } else {
-                        Look::On(c.success)
-                    };
-                    let button = ui
-                        .add_enabled_ui(connected && can_share_video, |ui| {
-                            ui::icon_button(ui, "🖥", screen_tip(voice.sharing), look, size)
-                        })
-                        .inner;
-                    if voice.sharing == Sharing::On {
-                        ui::context_menu(&button, |m| {
-                            if m.item("🖥", t!("call.change_my_share")).clicked() {
-                                change_screen = true;
-                            }
-                            if m.danger("⏹", t!("call.stop_sharing")).clicked() {
-                                stop_screen = true;
-                            }
-                        });
-                    }
-                    if !can_share_video {
-                        button.on_disabled_hover_text(t!("call.no_screen_here"));
-                    } else if button.clicked() {
-                        if voice.sharing == Sharing::Off {
-                            open_screen_dialog(ui.ctx(), voice);
-                        } else {
-                            stop_screen = true;
-                        }
-                    }
-                }
-                share = app_button(ui, voice, connected && blocked.is_none(), blocked, size);
-                if more || phone {
-                    let can_call = phone && connected && blocked.is_none();
-                    terminal = more_button(ui, voice, more, can_call, connected, size);
+                if m.danger("⏹", t!("call.stop_sharing")).clicked() {
+                    picked.stop_screen = true;
                 }
             });
-            if let Some(action) = live_files(ui, &home.voice.live_files, server) {
-                live = Some(action);
+        }
+        if !can.share_video {
+            button.on_disabled_hover_text(t!("call.no_screen_here"));
+        } else if button.clicked() {
+            if voice.sharing == Sharing::Off {
+                open_screen_dialog(ui.ctx(), voice);
+            } else {
+                picked.stop_screen = true;
             }
-        });
+        }
+    }
+    let talk = can.connected && can.blocked.is_none();
+    if extras.app_audio {
+        picked.share = app_button(ui, voice, talk, can.blocked, size);
+    }
+    if extras.terminal || extras.phone {
+        let can_call = extras.phone && talk;
+        picked.terminal = more_button(ui, voice, extras.terminal, can_call, can.connected, size);
+    }
+}
+
+/// Carry out what the call's buttons asked for.
+fn apply(ui: &Ui, home: &mut Home, picked: Picked) {
     let server = home
         .voice
         .call
         .as_ref()
         .and_then(|call| home.servers.iter().find(|s| s.address == call.server));
-    for (app, on) in share {
+    if let Some(Stop::Sound(apps)) = &picked.stopped
+        && let Some(server) = server
+    {
+        home.voice.stream_audio = apps.clone();
+        server.send(Command::StreamAudio(apps.clone()));
+    }
+    for (app, on) in picked.share {
         let Some(server) = server else { break };
         if on {
             home.voice.shares.push(app.clone());
@@ -393,21 +503,22 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
             server.send(Command::StopApp(app.id.clone()));
         }
     }
-    if let (Some(server), Some(Stop::App(id))) = (server, stopped) {
+    let change_screen = picked.change_screen || matches!(picked.stopped, Some(Stop::Change));
+    if let (Some(server), Some(Stop::App(id))) = (server, picked.stopped) {
         home.voice.shares.retain(|shared| shared.id != id);
         server.send(Command::StopApp(id));
     }
     if let (Some(server), true) = (server, change_screen) {
         change_screen_now(ui.ctx(), &mut home.voice, server);
     }
-    if let (Some(server), true) = (server, stop_screen) {
+    if let (Some(server), true) = (server, picked.stop_screen) {
         home.voice.sharing = Sharing::Off;
         home.voice.stop_preview();
         server.send(Command::StopScreen);
     }
     if let Some(server) = server {
         let address = server.address.clone();
-        match live {
+        match picked.live {
             Some(LiveAction::Save(id, name)) => {
                 home.files.ask(ui.ctx(), Ask::Accept(address, id, name))
             }
@@ -420,17 +531,17 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
             None => {}
         }
     }
-    if let Some(shell) = terminal {
+    if let Some(shell) = picked.terminal {
         super::terminal::toggle(ui.ctx(), home, shell);
     }
-    if voice_settings {
+    if picked.voice_settings {
         home.settings = Some(Tab::Voice);
     }
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    if leave_now && super::phone::leave_or_ask(home, super::phone::Leave::Leave) {
+    if picked.leave && super::phone::leave_or_ask(home, super::phone::Leave::Leave) {
         return;
     }
-    if leave_now {
+    if picked.leave {
         leave(home);
     }
 }
