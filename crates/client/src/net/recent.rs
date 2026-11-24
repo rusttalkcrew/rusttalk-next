@@ -922,17 +922,31 @@ mod tests {
             let history: History = store.read("messages")?.unwrap_or_default();
             Ok(history.0.iter().map(|p| p.records.len()).sum())
         };
+        // The write runs in `spawn_blocking`, so wait for it (up to 5 s) instead of
+        // guessing how long it takes on a busy machine.
+        async fn until(done: impl Fn() -> bool) {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !done() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "history write timed out"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .build()?;
         runtime.block_on(async {
             // A burst of live messages becomes one write, after the debounce.
+            let start = std::time::Instant::now();
             for n in 0..5 {
                 store.history().put([1; 32], None, vec![record(n)?], false);
                 store.save_history();
             }
             assert_eq!(writes(), 0);
-            tokio::time::sleep(DEBOUNCE + Duration::from_millis(500)).await;
+            until(|| writes() != 0).await;
+            assert!(start.elapsed() >= DEBOUNCE);
             assert_eq!((writes(), saved(&store)?), (1, 5));
 
             // Shutdown flushes what is still waiting, and the timer then has nothing left.
@@ -942,9 +956,11 @@ mod tests {
             assert_eq!((writes(), saved(&store)?), (2, 6));
             assert!(!store.flush());
 
-            // Saving the same history again does not rewrite the file.
+            // Saving the same history again does not rewrite the file: once the
+            // debounce task has flushed and ended, the count is unchanged.
             store.save_history();
-            tokio::time::sleep(DEBOUNCE * 2 + Duration::from_millis(500)).await;
+            until(|| !store.saving.load(Ordering::SeqCst)).await;
+            assert!(!store.dirty.load(Ordering::SeqCst));
             assert_eq!(writes(), 2);
             Ok::<_, anyhow::Error>(())
         })?;

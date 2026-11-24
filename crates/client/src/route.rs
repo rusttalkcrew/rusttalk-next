@@ -1663,7 +1663,7 @@ mod tests {
         let mut editor = RouteEditor::default();
         let ctx = egui::Context::default();
         editor.start_apply(&ctx, bg_cfg.clone(), RouteSecrets::default());
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + Duration::from_secs(10);
         let saved_path = persist_dir.path().join(FILE);
         while !saved_path.exists() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
@@ -1671,8 +1671,11 @@ mod tests {
         let persisted = load_config(&saved_path).expect("route.json saved by background worker");
         assert_eq!(persisted.kind, RouteKind::Socks5);
         assert_eq!(persisted.socks5.port, proxy_addr.port());
-        // Wait for apply job to finish before resetting global state.
-        while editor.job.is_some() && Instant::now() < deadline {
+        // Wait for apply job to finish before resetting global state: a job still
+        // running after `reset()` would switch the route away from Direct under the
+        // next test that takes the route lock.
+        while editor.job.is_some() {
+            assert!(Instant::now() < deadline, "route apply job did not finish");
             let _ = editor.poll(&ctx);
             std::thread::sleep(Duration::from_millis(10));
         }
