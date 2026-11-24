@@ -280,12 +280,7 @@ enum Recheck {
 
 /// Queue a client notice and report what it can change: nothing, sessions, or access and keys.
 /// `actor` and `device` are this socket's signed-in person and encoded device.
-fn queue(
-    notices: &mut Vec<Arc<Notice>>,
-    change: Change,
-    actor: &Actor,
-    device: &str,
-) -> Recheck {
+fn queue(notices: &mut Vec<Arc<Notice>>, change: Change, actor: &Actor, device: &str) -> Recheck {
     match change {
         Change::Session(person) if person == actor.person => Recheck::Session,
         Change::Session(_) => Recheck::None,
@@ -481,8 +476,7 @@ mod tests {
     fn sign_ins_recheck_only_sessions() {
         let mut notices = Vec::new();
         let actor = test_actor();
-        let queue =
-            |notices: &mut Vec<Arc<Notice>>, change, device: &str| {
+        let queue = |notices: &mut Vec<Arc<Notice>>, change, device: &str| {
             queue(notices, change, &actor, device)
         };
         assert!(queue(&mut notices, Change::Session([1; 32]), "d") == Recheck::Session);

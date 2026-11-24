@@ -627,7 +627,7 @@ mod tests {
         .bind(B)
         .execute(&mut *tx)
         .await?;
-        // What migration 0041 does for channels that already hold messages.
+        // What migration 0042 does for channels that already hold messages.
         query("UPDATE channels SET message_count = (SELECT COUNT(*) FROM messages WHERE channel_id = channels.id)")
             .execute(&mut *tx)
             .await?;
