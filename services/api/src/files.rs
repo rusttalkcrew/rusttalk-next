@@ -582,18 +582,29 @@ impl Files {
             .map_err(disk_error)
     }
 
-    async fn remove(&self, db: &mut SqliteConnection, id: &str) -> ApiResult<()> {
+    /// Deletes a file's ciphertext without syncing the folder; true if it was there.
+    async fn unlink(&self, id: &str) -> ApiResult<bool> {
         match fs::remove_file(self.dir.join(id)).await {
-            Ok(()) => self.sync_dir().await?,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => (),
-            Err(error) => return Err(disk_error(error)),
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(disk_error(error)),
         }
-        query("DELETE FROM files WHERE id = ?")
-            .bind(id)
-            .execute(db)
-            .await?;
-        Ok(())
     }
+
+    async fn remove(&self, db: &mut SqliteConnection, id: &str) -> ApiResult<()> {
+        if self.unlink(id).await? {
+            self.sync_dir().await?;
+        }
+        forget(db, id).await
+    }
+}
+
+async fn forget(db: &mut SqliteConnection, id: &str) -> ApiResult<()> {
+    query("DELETE FROM files WHERE id = ?")
+        .bind(id)
+        .execute(db)
+        .await?;
+    Ok(())
 }
 
 pub async fn expire(app: App) {
@@ -623,9 +634,26 @@ pub(crate) async fn expire_batch(app: &App) -> ApiResult<()> {
     .bind(i64::MAX)
     .fetch_all(&mut *tx)
     .await?;
-    let mut removed = Vec::new();
+    // Delete the batch from disk and sync the folder once before any row goes, so a row stays
+    // until its file is durably gone. A file that cannot be deleted keeps its row for the next
+    // sweep; a failed sync keeps every row of the batch.
+    let mut gone = Vec::new();
+    let mut unlinked = false;
     for (id, size) in rows {
-        match app.files.remove(&mut tx, &id).await {
+        match app.files.unlink(&id).await {
+            Ok(was_there) => {
+                unlinked |= was_there;
+                gone.push((id, size));
+            }
+            Err(error) => tracing::error!(reason = error.code, "file expiry failed"),
+        }
+    }
+    if unlinked {
+        app.files.sync_dir().await?;
+    }
+    let mut removed = Vec::new();
+    for (id, size) in gone {
+        match forget(&mut tx, &id).await {
             Ok(()) => removed.push((id, size)),
             Err(error) => tracing::error!(reason = error.code, "file expiry failed"),
         }
@@ -705,6 +733,43 @@ mod tests {
         let Json(after) = file_settings::get(State(app.clone()), as_person(2)).await?;
         assert_eq!(after.used_bytes, 0);
         assert_eq!(send(2, 5, 16).await?.0, StatusCode::CREATED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_sweep_removes_a_batch_and_keeps_rows_whose_files_stay() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let app = app(dir.path(), 2).await?;
+        let channel = encode(&[3; 32]);
+        query("INSERT INTO channels (id, kind, position, dm_first, dm_second) VALUES (?, 'dm', 0, ?, ?)")
+            .bind(&channel)
+            .bind(person(1))
+            .bind(person(2))
+            .execute(&app.db)
+            .await?;
+        let ids: Vec<String> = (0..10).map(|i| format!("expired-{i}")).collect();
+        for id in &ids {
+            query("INSERT INTO files (id, channel_id, uploader, size, created_at, expires_at) VALUES (?, ?, ?, 16, 100, 200)")
+                .bind(id)
+                .bind(&channel)
+                .bind(person(1))
+                .execute(&app.db)
+                .await?;
+        }
+        // One file is already missing; another cannot be deleted (a folder sits in its place).
+        for id in &ids[1..9] {
+            fs::write(app.files.dir.join(id), [0; 16]).await?;
+        }
+        fs::create_dir(app.files.dir.join(&ids[9])).await?;
+
+        expire_batch(&app).await?;
+        let left: Vec<String> = query_scalar("SELECT id FROM files")
+            .fetch_all(&app.db)
+            .await?;
+        assert_eq!(left, [ids[9].clone()]);
+        for id in &ids[..9] {
+            assert!(!app.files.dir.join(id).exists());
+        }
         Ok(())
     }
 
