@@ -21,6 +21,7 @@ Unreleased under the new version and date.
 - New chat messages show up faster, with less work for the server.
 - Servers keep up better when many people are online, so fewer full reloads after busy moments.
 - Connecting to a server is a little faster: two repeated requests are gone.
+- After a server restart or a Wi-Fi hiccup, RustTalk reconnects within about 10 seconds instead of up to 30.
 
 ## v0.3.0 - 2026-11-24
 
