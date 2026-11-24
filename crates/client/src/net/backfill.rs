@@ -28,7 +28,7 @@ pub enum Request {
     Needs(Id, Id, Id, Reply<bool>),
     Page(Id, Id, Option<Id>, Reply<Inventory>),
     Read(Id, Id, Id, Reply<Option<DmHistoryItem>>),
-    Restore(Id, Id, Box<DmHistoryItem>, Reply<()>),
+    Restore(Id, Box<DmHistoryItem>, Reply<()>),
 }
 
 impl Request {
@@ -83,12 +83,8 @@ impl Request {
             Self::Read(channel, peer, id, reply) => {
                 let _ = reply.send(client.read_dm_copy(&channel, peer, id).await);
             }
-            Self::Restore(channel, id, mut item, reply) => {
+            Self::Restore(channel, mut item, reply) => {
                 let result = async {
-                    let deleted = ctx.sync.current_dm_deletes().await;
-                    if skipped(&deleted, id, item.body.edit_of) {
-                        return Ok(());
-                    }
                     anyhow::ensure!(
                         state.dm_backfill,
                         "destination does not support DM backfill"
@@ -172,6 +168,7 @@ impl Progress {
 
 async fn repair(
     me: Id,
+    sync: &DeviceSync,
     route: Route,
     deleted: &crate::dm::Tombstones,
     completed: &mut Completed,
@@ -249,9 +246,12 @@ async fn repair(
                 && let Some(item) =
                     ask(&source, |reply| Request::Read(channel, peer, id, reply)).await?
                 && !skipped(deleted, id, item.body.edit_of)
+                // Deletes learned since the scan started. Read here, not in the server's
+                // task, which must not wait for a device sync in progress.
+                && !skipped(&sync.current_dm_deletes().await, id, item.body.edit_of)
             {
                 ask(&target, |reply| {
-                    Request::Restore(destination, id, Box::new(item), reply)
+                    Request::Restore(destination, Box::new(item), reply)
                 })
                 .await?;
             }
@@ -294,13 +294,14 @@ impl Net {
         let me = *self.ctx.identity.certificate.person_id();
         let deleted = deleted.clone();
         let completed = self.completed_dm_copies.clone();
+        let sync = self.ctx.sync.clone();
         self.runtime
             .as_ref()
             .expect("network runtime")
             .spawn(async move {
                 let mut completed = completed.lock().await;
                 for route in routes {
-                    if let Err(error) = repair(me, route, &deleted, &mut completed).await {
+                    if let Err(error) = repair(me, &sync, route, &deleted, &mut completed).await {
                         tracing::info!(%error, "DM history scan deferred");
                     }
                 }
@@ -373,9 +374,11 @@ mod tests {
             }
         };
         let mut completed = Completed::default();
+        let data = tempfile::tempdir().unwrap();
+        let sync = DeviceSync::open(data.path()).unwrap();
         let scans = async {
             for _ in 0..2 {
-                repair(me, route(), &Default::default(), &mut completed)
+                repair(me, &sync, route(), &Default::default(), &mut completed)
                     .await
                     .unwrap();
             }

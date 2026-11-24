@@ -458,7 +458,7 @@ async fn rebuild(
         leave_voice(ctx, url, client, state);
         ctx.send(Update::Call(url.clone(), channel, None));
     }
-    super::cache_own_avatar(ctx, client, state).await;
+    super::cache_own_avatar(ctx, client, state);
     Ok(())
 }
 

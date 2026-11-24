@@ -198,6 +198,12 @@ impl DeviceSync {
         dm_deleted(&self.saved.lock().await.snapshot.state.settings)
     }
 
+    /// Hold the state as a run in progress does, for tests of what must not wait on one.
+    #[cfg(test)]
+    pub(crate) async fn hold(&self) -> impl Sized + '_ {
+        self.saved.lock().await
+    }
+
     /// Whether local edits are still waiting to be published to peers.
     pub async fn has_pending(&self) -> bool {
         !self.saved.lock().await.pending.is_empty()
