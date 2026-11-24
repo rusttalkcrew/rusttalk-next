@@ -176,8 +176,14 @@ struct NeedRow {
     device_id: Vec<u8>,
 }
 
+/// Key envelopes the actor's scopes still lack, in no particular order: sorting in SQL made
+/// SQLite scan every scope's epochs, including everyone's DMs.
 pub async fn pending(db: &mut SqliteConnection, actor: &Actor) -> ApiResult<Vec<KeyNeed>> {
-    let rows: Vec<NeedRow> = query_as(
+    needs(pending_rows(db, actor).await?)
+}
+
+async fn pending_rows(db: &mut SqliteConnection, actor: &Actor) -> ApiResult<Vec<NeedRow>> {
+    Ok(query_as(
         "SELECT e.scope_id, k.kind, e.epoch, d.device_id
          FROM scope_readers a JOIN key_scopes k ON a.scope_id = k.id
          JOIN key_epochs e ON a.scope_id = e.scope_id
@@ -189,9 +195,11 @@ pub async fn pending(db: &mut SqliteConnection, actor: &Actor) -> ApiResult<Vec<
                  AND x.recipient_device = d.device_id AND x.sender_person = a.person_id)
            AND NOT EXISTS (SELECT 1 FROM key_envelopes v
                JOIN member_devices s ON s.device_id = v.sender_device
-               WHERE v.scope_id = e.scope_id AND v.epoch = e.epoch AND v.recipient_device = d.device_id)
-         ORDER BY e.scope_id, e.epoch, d.device_id",
-    ).bind(actor.person.as_slice()).fetch_all(db).await?;
+               WHERE v.scope_id = e.scope_id AND v.epoch = e.epoch AND v.recipient_device = d.device_id)",
+    ).bind(actor.person.as_slice()).fetch_all(db).await?)
+}
+
+fn needs(rows: Vec<NeedRow>) -> ApiResult<Vec<KeyNeed>> {
     rows.into_iter()
         .map(|row| {
             Ok(KeyNeed {
@@ -266,7 +274,15 @@ pub async fn state(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json
             .collect(),
         scopes: scopes(&mut tx, &actor).await?,
         envelopes,
-        pending: pending(&mut tx, &actor).await?,
+        pending: {
+            // Older apps got these ordered by scope, epoch and device. SQLite compares the TEXT
+            // scope ID and the BLOB device ID bytewise, as Rust's String and Vec<u8> do.
+            let mut rows = pending_rows(&mut tx, &actor).await?;
+            rows.sort_unstable_by(|a, b| {
+                (&a.scope_id, a.epoch, &a.device_id).cmp(&(&b.scope_id, b.epoch, &b.device_id))
+            });
+            needs(rows)?
+        },
     };
     tx.commit().await?;
     Ok(Json(state))
@@ -884,5 +900,65 @@ mod tests {
             .await
             .unwrap();
         assert!(register_device(&mut tx, &extra.certificate).await.unwrap());
+    }
+
+    /// `GET /v1/keys` lists pending envelopes in the order the SQL `ORDER BY` used to give.
+    #[tokio::test]
+    async fn get_keys_lists_pending_in_scope_epoch_device_order() -> anyhow::Result<()> {
+        use crate::testing::{app, as_person, person};
+        let dir = tempfile::tempdir()?;
+        let app = app(dir.path(), 3).await?;
+        // Encoded IDs sort differently from their bytes, and all rows go in out of order.
+        let dm = encode(&[0x41; 32]);
+        query("INSERT INTO channels (id, kind, position, dm_first, dm_second) VALUES (?, 'dm', 0, ?, ?)")
+            .bind(&dm).bind(person(1)).bind(person(2)).execute(&app.db).await?;
+        query("INSERT INTO key_scopes (id, kind, channel_id) VALUES (?, 'channel', ?)")
+            .bind(&dm)
+            .bind(&dm)
+            .execute(&app.db)
+            .await?;
+        for id in [[0xf0; 32], [0x10; 32], [0x9a; 32]] {
+            query("INSERT INTO key_scopes (id, kind) VALUES (?, 'space')")
+                .bind(encode(&id))
+                .execute(&app.db)
+                .await?;
+        }
+        for (scope, epoch) in [
+            ([0x9a; 32], 2),
+            ([0x41; 32], 3),
+            ([0x10; 32], 1),
+            ([0xf0; 32], 1),
+            ([0x9a; 32], 1),
+            ([0x41; 32], 1),
+        ] {
+            query(
+                "INSERT INTO key_epochs (scope_id, epoch, commitment) VALUES (?, ?, zeroblob(32))",
+            )
+            .bind(encode(&scope))
+            .bind(epoch)
+            .execute(&app.db)
+            .await?;
+        }
+        for (device, owner) in [(0xc0, 2), (0x07, 1), (0x80, 3), (0x33, 2), (0xfe, 1)] {
+            query("INSERT INTO member_devices (device_id, person_id, certificate) VALUES (?, ?, x'00')")
+                .bind(vec![device; 32]).bind(person(owner)).execute(&app.db).await?;
+        }
+        let old: Vec<NeedRow> = query_as(
+            "SELECT e.scope_id, k.kind, e.epoch, d.device_id
+             FROM scope_readers a JOIN key_scopes k ON a.scope_id = k.id
+             JOIN key_epochs e ON a.scope_id = e.scope_id
+             JOIN scope_readers r ON a.scope_id = r.scope_id
+             JOIN member_devices d ON r.person_id = d.person_id
+             WHERE a.person_id = ? ORDER BY e.scope_id, e.epoch, d.device_id",
+        )
+        .bind(person(1))
+        .fetch_all(&app.db)
+        .await?;
+        let expected = needs(old)?;
+        // 4 space epochs x all 5 devices, plus 2 DM epochs x the 4 devices of persons 1 and 2.
+        assert_eq!(expected.len(), 4 * 5 + 2 * 4);
+        let Json(state) = state(State(app), as_person(1)).await?;
+        assert_eq!(state.pending, expected);
+        Ok(())
     }
 }
