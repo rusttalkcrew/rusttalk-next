@@ -79,9 +79,9 @@ pub(super) async fn wait_event(
             Ok(status.is_success() != deleted)
         },
         |update| match update {
-            Update::Event(Event::MessageCreated { channel: c, id: m }) => {
-                !deleted && *c == channel && *m == id
-            }
+            Update::Event(Event::MessageCreated {
+                channel: c, id: m, ..
+            }) => !deleted && *c == channel && *m == id,
             Update::Event(Event::MessageDeleted { channel: c, id: m }) => {
                 deleted && *c == channel && *m == id
             }

@@ -64,6 +64,12 @@ impl Opened {
     }
 }
 
+/// Accept a server record only under the ID it was asked for or announced with.
+fn named(record: MessageRecord, id: &[u8; 32]) -> Result<MessageRecord> {
+    ensure!(record.id == *id, MessageError::Encoding);
+    Ok(record)
+}
+
 fn digest(record: &MessageRecord) -> [u8; 32] {
     Sha256::new()
         .chain_update(record.epoch.to_be_bytes())
@@ -232,8 +238,21 @@ impl KeyClient<'_> {
             .error_for_status()?
             .json()
             .await?;
-        ensure!(record.id == *id, MessageError::Encoding);
-        Ok(record)
+        named(record, id)
+    }
+
+    /// The record a `MessageCreated` event names: the one it carried, or else fetched.
+    /// Either way it is opened and checked like any other record.
+    pub async fn created(
+        &self,
+        channel: &[u8; 32],
+        id: &[u8; 32],
+        inline: Option<Box<MessageRecord>>,
+    ) -> Result<MessageRecord> {
+        match inline {
+            Some(record) => named(*record, id),
+            None => self.message(channel, id).await,
+        }
     }
 
     /// Encrypt, sign and post a message in the current channel epoch.

@@ -157,6 +157,10 @@ pub enum Event {
     MessageCreated {
         channel: String,
         id: String,
+        /// The new record itself, so readers need not fetch it. Missing from older servers
+        /// and when it would not fit older clients' 4 KiB frame limit.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        record: Option<Box<crate::messages::MessageRecord>>,
     },
     MessageDeleted {
         channel: String,

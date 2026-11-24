@@ -99,11 +99,18 @@ pub(super) async fn exercise(
             if let Event::MessageCreated {
                 channel: id,
                 id: message,
+                record: inline,
             } = event
                 && id == channel
                 && message == encode(&record.id)
             {
-                return b.message(&voice.id, &record.id).await;
+                // A small record comes inline and matches the stored one.
+                let stored = b.message(&voice.id, &record.id).await?;
+                ensure!(
+                    inline.is_some_and(|inline| inline.envelope == stored.envelope),
+                    "the offer's event did not carry its record"
+                );
+                return Ok(stored);
             }
         }
         bail!("event channel closed before live file offer");

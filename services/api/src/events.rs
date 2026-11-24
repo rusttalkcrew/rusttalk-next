@@ -11,6 +11,7 @@ use axum::{
 use rusttalk_core::{
     auth::encode,
     keys::{Event, KeyNeed, Kind, Scope},
+    messages::MessageRecord,
     presence::Update,
 };
 use sqlx::{SqliteConnection, query_scalar};
@@ -44,6 +45,25 @@ pub async fn upgrade(
         .max_message_size(4096)
         .max_frame_size(4096)
         .on_upgrade(move |socket| serve(app, socket, actor, changes).instrument(span)))
+}
+
+/// Largest event that carries an inline record. Clients up to v0.3.0 drop the socket on
+/// frames over 4,096 bytes; the margin covers the frame header.
+const MAX_INLINE_EVENT_BYTES: usize = 3_800;
+
+/// A new message's event, carrying its record when it is small enough for every client.
+pub fn message_created(channel: String, id: String, record: &MessageRecord) -> Event {
+    let mut event = Event::MessageCreated {
+        channel,
+        id,
+        record: Some(Box::new(record.clone())),
+    };
+    if !serde_json::to_vec(&event).is_ok_and(|json| json.len() <= MAX_INLINE_EVENT_BYTES)
+        && let Event::MessageCreated { record, .. } = &mut event
+    {
+        *record = None;
+    }
+    event
 }
 
 async fn serve(
@@ -326,6 +346,7 @@ mod tests {
         let message = Event::MessageCreated {
             channel: "c".into(),
             id: "m".into(),
+            record: None,
         };
         assert!(queue(&mut notices, Change::Update(Update::Event(message))) == Recheck::None);
         let member = Event::MemberChanged {
@@ -341,5 +362,29 @@ mod tests {
         );
         // Only client updates are forwarded.
         assert_eq!(notices.len(), 3);
+    }
+
+    #[test]
+    fn only_records_that_fit_old_clients_go_inline() {
+        let record = |envelope: usize| MessageRecord {
+            backfilled: false,
+            id: [1; 32],
+            epoch: 1,
+            person: [2; 32],
+            sender_device: [3; 32],
+            at: 0,
+            size: envelope,
+            envelope: "e".repeat(envelope),
+        };
+        let inline = |envelope| match message_created("c".into(), "m".into(), &record(envelope)) {
+            Event::MessageCreated { record, .. } => record.map(|r| r.envelope.len()),
+            _ => unreachable!(),
+        };
+        assert_eq!(inline(1_000), Some(1_000));
+        // A record that would not fit is left out; readers fetch it as before.
+        let big = message_created("c".into(), "m".into(), &record(4_000));
+        assert!(matches!(big, Event::MessageCreated { record: None, .. }));
+        let json = serde_json::to_string(&Update::Event(big)).unwrap();
+        assert_eq!(json, r#"{"type":"message_created","channel":"c","id":"m"}"#);
     }
 }

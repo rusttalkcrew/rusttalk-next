@@ -204,20 +204,18 @@ pub async fn create(
             id,
         });
     }
-    app.notify(Event::MessageCreated { channel, id });
-    Ok((
-        StatusCode::CREATED,
-        Json(MessageRecord {
-            backfilled: backfill_at.is_some(),
-            id: message_id,
-            epoch,
-            person: actor.person,
-            sender_device: device,
-            at,
-            size,
-            envelope,
-        }),
-    ))
+    let record = MessageRecord {
+        backfilled: backfill_at.is_some(),
+        id: message_id,
+        epoch,
+        person: actor.person,
+        sender_device: device,
+        at,
+        size,
+        envelope,
+    };
+    app.notify(crate::events::message_created(channel, id, &record));
+    Ok((StatusCode::CREATED, Json(record)))
 }
 
 /// Check a signed envelope made for `purpose` under `message_id` by this device in the channel's current

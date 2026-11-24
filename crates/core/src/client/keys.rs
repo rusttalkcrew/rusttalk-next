@@ -1644,6 +1644,94 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn an_inline_record_is_checked_like_a_fetched_one() -> Result<()> {
+        use crate::messages::{MessageContext, MessageRecord};
+        let profile = tempfile::tempdir()?;
+        let server = Server::for_test(2, profile.path());
+        let (_, identity) = DeviceIdentity::create("sender")?;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let socket = tokio::net::TcpStream::connect(listener.local_addr()?).await?;
+        let events = EventStream::from_raw_socket(
+            tokio_tungstenite::MaybeTlsStream::Plain(crate::route::RouteStream::Direct(socket)),
+            tokio_tungstenite::tungstenite::protocol::Role::Client,
+            None,
+        )
+        .await;
+        let session = Session {
+            token: String::new(),
+            expires_at: 0,
+        };
+        let mut client = KeyClient::from_stream(&server, &identity, &session, None, events)?;
+        let channel = [9; 32];
+        let scope = Scope {
+            kind: Kind::Channel,
+            id: channel,
+        };
+        let (key, epoch) = (keys::random_key()?, 1);
+        let server_id = server.known_server().server_id;
+        let wrap = EnvelopeContext::new(server_id, scope, epoch, &key);
+        client.keys.insert(
+            (scope, epoch),
+            HeldKey {
+                key: key.clone(),
+                envelope: encode(&wrap.wrap(&key, &identity.certificate, &identity)?),
+                sender: *identity.certificate.person_id(),
+                commitment: wrap.commitment,
+                excluded: Excluded::new(),
+                pair_bound: false,
+            },
+        );
+        // The sender's certificate is known, so opening needs no request.
+        let sender_device = identity.certificate.signing_key().to_bytes();
+        let (person, id) = (*identity.certificate.person_id(), [5; 32]);
+        client
+            .devices
+            .insert(encode(&sender_device), identity.certificate.clone());
+        let body = MessageBody {
+            text: "hello".into(),
+            ..Default::default()
+        };
+        let context = MessageContext {
+            server_id,
+            channel_id: channel,
+            epoch,
+            id,
+            sender_device,
+            person,
+        };
+        let sealed = context.seal(&key, &identity, &body)?;
+        let record = MessageRecord {
+            backfilled: false,
+            id,
+            epoch,
+            person,
+            sender_device,
+            at: 0,
+            size: sealed.len(),
+            envelope: encode(&sealed),
+        };
+
+        // A record under another ID than the event announced is refused.
+        let other = Some(Box::new(record.clone()));
+        assert!(client.created(&channel, &[6; 32], other).await.is_err());
+        // Tampered ciphertext fails the same signature check as a fetched record.
+        let mut flipped = sealed.clone();
+        *flipped.last_mut().unwrap() ^= 1;
+        let tampered = Box::new(MessageRecord {
+            envelope: encode(&flipped),
+            ..record.clone()
+        });
+        let inline = client.created(&channel, &id, Some(tampered)).await?;
+        assert!(client.open_message(&channel, &inline).await.is_err());
+        // The genuine record still opens: the tampered one left nothing cached.
+        let inline = client
+            .created(&channel, &id, Some(Box::new(record)))
+            .await?;
+        assert_eq!(client.open_message(&channel, &inline).await?.text, "hello");
+        Ok(())
+    }
+
     #[test]
     fn recovery_waits_once_for_a_missing_key_then_starts_fresh() {
         assert_eq!(backoff(1), Duration::from_secs(15));

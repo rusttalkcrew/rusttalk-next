@@ -85,9 +85,10 @@ pub(crate) async fn events_socket(
     let port = url
         .port_or_known_default()
         .ok_or("event origin has no port")?;
+    // Room for a full chat record inline, so a later server can stop leaving out larger ones.
     let limits = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
-        .max_message_size(Some(4096))
-        .max_frame_size(Some(4096));
+        .max_message_size(Some(16_384))
+        .max_frame_size(Some(16_384));
     let timeout = Duration::from_secs(10);
     let stream = crate::route::connect_tcp(&host, port, timeout).await?;
     let (socket, _) = tokio::time::timeout(
