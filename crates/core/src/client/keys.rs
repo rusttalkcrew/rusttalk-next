@@ -7,7 +7,7 @@ use std::{
 
 use crate::{
     auth::{InviteLink, Session, decode, decode_bytes, encode},
-    identity::{DeviceCertificate, DeviceIdentity, PersonId, fingerprint},
+    identity::{DeviceCertificate, DeviceIdentity, IdentityError, PersonId, fingerprint},
     keys::{
         self, EnvelopeContext, Event, Excluded, Key, KeyState, Kind, MemberDevice, Metadata, Scope,
         ScopeState,
@@ -74,6 +74,9 @@ pub struct KeyClient<'a> {
     pub(super) links: HashMap<[u8; 32], Vec<(i64, KeyLink)>>,
     pub(super) devices: HashMap<String, DeviceCertificate>,
     pub(super) historical_devices: HashMap<HistoricalDevice, DeviceCertificate>,
+    /// Certificates whose signature this session already checked, keyed by the person
+    /// they are listed for and their exact bytes. Holds only the server's latest list.
+    verified: HashMap<(PersonId, Vec<u8>), DeviceCertificate>,
     rotations: rotation::Rotations,
     rotation_save_pending: bool,
     former_devices: HashSet<(PersonId, [u8; 32])>,
@@ -145,6 +148,7 @@ impl<'a> KeyClient<'a> {
             links: HashMap::new(),
             devices: HashMap::new(),
             historical_devices: HashMap::new(),
+            verified: HashMap::new(),
             rotations: if create_protected_epochs {
                 rotation::Rotations::load(
                     &revocations.rotation_file(&server.known_server().server_id),
@@ -1084,12 +1088,26 @@ impl<'a> KeyClient<'a> {
             .error_for_status()?
             .json()
             .await?;
+        self.apply_devices(listed, DeviceCertificate::verify_public)
+    }
+
+    /// Replace the member devices with `listed`, checking only certificates this
+    /// session hasn't verified for that same person with the same bytes. Revocations
+    /// aren't cached: `devices()` and `device()` check them on every use.
+    fn apply_devices(
+        &mut self,
+        listed: Vec<MemberDevice>,
+        mut verify: impl FnMut(PersonId, &[u8]) -> Result<DeviceCertificate, IdentityError>,
+    ) -> Result<()> {
+        let mut verified = HashMap::new();
         let mut devices = HashMap::new();
         for device in listed {
-            let certificate = DeviceCertificate::verify_public(
-                decode(&device.person)?,
-                &decode_bytes(&device.certificate)?,
-            )?;
+            let key = (decode(&device.person)?, decode_bytes(&device.certificate)?);
+            let certificate = match self.verified.get(&key) {
+                Some(certificate) => certificate.clone(),
+                None => verify(key.0, &key.1)?,
+            };
+            verified.insert(key, certificate.clone());
             let id = encode(certificate.signing_key().as_bytes());
             if !self.devices.contains_key(&id) {
                 tracing::info!(
@@ -1120,6 +1138,7 @@ impl<'a> KeyClient<'a> {
             }
         }
         self.devices = devices;
+        self.verified = verified;
         Ok(())
     }
 
@@ -1641,6 +1660,137 @@ mod tests {
         );
         assert!(client.changes.has_changed()?);
         assert_eq!(client.current_key(scope)?, (epoch, &key));
+        Ok(())
+    }
+
+    async fn test_client<'a>(
+        server: &'a Server,
+        identity: &'a DeviceIdentity,
+    ) -> Result<KeyClient<'a>> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let socket = tokio::net::TcpStream::connect(listener.local_addr()?).await?;
+        let events = EventStream::from_raw_socket(
+            tokio_tungstenite::MaybeTlsStream::Plain(crate::route::RouteStream::Direct(socket)),
+            tokio_tungstenite::tungstenite::protocol::Role::Client,
+            None,
+        )
+        .await;
+        let session = Session {
+            token: String::new(),
+            expires_at: 0,
+        };
+        KeyClient::from_stream(server, identity, &session, None, events)
+    }
+
+    fn listed(person: &PersonId, certificate: &[u8]) -> MemberDevice {
+        MemberDevice {
+            person: encode(person),
+            certificate: encode(certificate),
+        }
+    }
+
+    /// Verify like the real sync, counting each signature check.
+    fn counting(
+        calls: &std::cell::Cell<u32>,
+    ) -> impl FnMut(PersonId, &[u8]) -> Result<DeviceCertificate, IdentityError> + '_ {
+        |person, bytes| {
+            calls.set(calls.get() + 1);
+            DeviceCertificate::verify_public(person, bytes)
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unchanged_device_certificate_is_verified_once() -> Result<()> {
+        let profile = tempfile::tempdir()?;
+        let server = Server::for_test(2, profile.path());
+        let (words, identity) = DeviceIdentity::create("reader")?;
+        let sibling = DeviceIdentity::add_device(&words, "sibling")?;
+        let mut client = test_client(&server, &identity).await?;
+        let person = *identity.certificate.person_id();
+        let mine = || listed(&person, identity.certificate.public_bytes().unwrap());
+        let theirs = || listed(&person, sibling.certificate.public_bytes().unwrap());
+        let calls = std::cell::Cell::new(0);
+
+        client.apply_devices(vec![mine(), theirs()], counting(&calls))?;
+        client.apply_devices(vec![mine(), theirs()], counting(&calls))?;
+        assert_eq!(calls.get(), 2);
+        assert_eq!(client.devices().count(), 2);
+
+        // A device the server stops listing leaves the cache, so it is checked again.
+        client.apply_devices(vec![mine()], counting(&calls))?;
+        assert_eq!(client.verified.len(), 1);
+        client.apply_devices(vec![mine(), theirs()], counting(&calls))?;
+        assert_eq!(calls.get(), 3);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_changed_device_certificate_is_verified_again() -> Result<()> {
+        let profile = tempfile::tempdir()?;
+        let server = Server::for_test(2, profile.path());
+        let (words, identity) = DeviceIdentity::create("reader")?;
+        let sibling = DeviceIdentity::add_device(&words, "sibling")?;
+        let (_, stranger) = DeviceIdentity::create("stranger")?;
+        let mut client = test_client(&server, &identity).await?;
+        let person = *identity.certificate.person_id();
+        let bytes = sibling.certificate.public_bytes()?.to_vec();
+        let calls = std::cell::Cell::new(0);
+        client.apply_devices(vec![listed(&person, &bytes)], counting(&calls))?;
+        let id = encode(sibling.certificate.signing_key().as_bytes());
+        assert!(client.device(&id).is_some());
+
+        // Same device key, one bit of its creation time flipped: the signature fails.
+        let mut tampered = bytes.clone();
+        let created_at = tampered.len() - 64 - 32 - 1;
+        tampered[created_at] ^= 1;
+        assert!(
+            client
+                .apply_devices(vec![listed(&person, &tampered)], counting(&calls))
+                .is_err()
+        );
+        assert_eq!(calls.get(), 2);
+
+        // The same bytes claimed for another person are checked, and rejected, too.
+        let other = *stranger.certificate.person_id();
+        assert!(
+            client
+                .apply_devices(vec![listed(&other, &bytes)], counting(&calls))
+                .is_err()
+        );
+        assert_eq!(calls.get(), 3);
+        // A rejected list changes nothing.
+        assert_eq!(client.device(&id).map(|c| *c.person_id()), Some(person));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_revoked_device_is_dropped_even_when_its_certificate_is_cached() -> Result<()> {
+        let profile = tempfile::tempdir()?;
+        let server = Server::for_test(2, profile.path());
+        let (words, identity) = DeviceIdentity::create("reader")?;
+        let sibling = DeviceIdentity::add_device(&words, "removed")?;
+        let mut client = test_client(&server, &identity).await?;
+        let person = *identity.certificate.person_id();
+        let theirs = || listed(&person, sibling.certificate.public_bytes().unwrap());
+        let calls = std::cell::Cell::new(0);
+        client.apply_devices(vec![theirs()], counting(&calls))?;
+        let id = encode(sibling.certificate.signing_key().as_bytes());
+        assert!(client.device(&id).is_some());
+
+        let removal = crate::identity::revoke_device(
+            &words,
+            &person,
+            sibling.certificate.signing_key().to_bytes(),
+        )?;
+        assert!(
+            client
+                .revocations
+                .observe(&person, &encode(&removal.to_bytes()))?
+        );
+        client.apply_devices(vec![theirs()], counting(&calls))?;
+        assert_eq!(calls.get(), 1);
+        assert!(client.device(&id).is_none());
+        assert_eq!(client.devices().count(), 0);
         Ok(())
     }
 
