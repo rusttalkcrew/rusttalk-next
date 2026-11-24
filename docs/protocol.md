@@ -50,7 +50,8 @@ challenge (32 bytes) || server_id (32 bytes) || "rusttalk-auth-v1" (16 ASCII byt
 
 Domain strings have no trailing terminator. Signatures are 64 bytes. The
 certificate uses the public W06 format described in [Crypto](crypto.md). Use a fresh
-challenge per attempt. The server consumes a recognized challenge before
+challenge per attempt. A client may sign the challenge it verified while connecting
+instead of fetching another, but only once and only within 30 seconds of requesting it. The server consumes a recognized challenge before
 verifying the device proof, and rejects challenges after 60 seconds. At most
 256 challenges are outstanding across the server.
 

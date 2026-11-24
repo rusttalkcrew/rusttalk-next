@@ -4,7 +4,7 @@ use std::{
     io::{self, Write},
     path::Path,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant, SystemTime},
 };
 
 use crate::{
@@ -21,6 +21,39 @@ use url::Url;
 
 type RevokedDevice = (crate::identity::PersonId, [u8; 32]);
 
+/// Reuse connect-time replies only well inside the server's 60 second challenge lifetime.
+const SPARE_LIFETIME: Duration = Duration::from_secs(30);
+
+/// When a spare reply was requested. The monotonic clock stops while some systems sleep,
+/// so the wall clock must agree that the reply is still fresh.
+#[derive(Clone, Copy)]
+struct Fetched {
+    monotonic: Instant,
+    wall: SystemTime,
+}
+
+impl Fetched {
+    fn now() -> Self {
+        Self {
+            monotonic: Instant::now(),
+            wall: SystemTime::now(),
+        }
+    }
+
+    fn fresh(self) -> bool {
+        self.monotonic.elapsed() < SPARE_LIFETIME
+            && self.wall.elapsed().is_ok_and(|age| age < SPARE_LIFETIME)
+    }
+}
+
+/// Replies already read while connecting, so the first sign-in after connecting needs no
+/// repeat round trips. Each is taken at most once, shared by every clone, and dropped when stale.
+#[derive(Default)]
+struct Spare {
+    challenge: Option<([u8; 32], Fetched)>,
+    info: Option<(ServerInfo, Fetched)>,
+}
+
 /// A verified RustTalk HTTPS origin and its pinned transport.
 #[derive(Clone)]
 pub struct Server {
@@ -28,6 +61,7 @@ pub struct Server {
     pub protocol: u32,
     pub(super) revocations: Option<super::revocations::Revocations>,
     known_revocations: Arc<Mutex<HashSet<RevokedDevice>>>,
+    spare: Arc<Mutex<Spare>>,
     http: Client,
     server: KnownServer,
 }
@@ -39,6 +73,7 @@ impl Server {
             protocol,
             revocations: Some(super::revocations::Revocations::in_profile(profile)),
             known_revocations: Default::default(),
+            spare: Default::default(),
             http: Client::new(),
             server: KnownServer {
                 address: "https://localhost/".parse().unwrap(),
@@ -66,21 +101,38 @@ impl Server {
         let trusted = known.as_ref().or(expected);
 
         let http = pinned_tls::https_client(tls_fingerprint).map_err(anyhow::Error::from_boxed)?;
-        let observed = verified_server(&http, address, tls_fingerprint, trusted).await?;
+        let fetched = Fetched::now();
+        // Server info is public, so read it alongside the proof and use it only once verified.
+        let (verified, info) = tokio::join!(
+            verified_server(&http, address.clone(), tls_fingerprint, trusted),
+            server_info(&http, &address)
+        );
+        let (observed, challenge) = verified?;
         save_pin(data, &pins, &observed)?;
-        let mut server = Self {
+        let mut spare = Spare {
+            challenge: Some((challenge, fetched)),
+            info: None,
+        };
+        let protocol = match info {
+            Ok(info) => {
+                let protocol = info.protocol.unwrap_or(1);
+                spare.info = Some((info, fetched));
+                protocol
+            }
+            Err(error) if pinned_tls::is_pin_mismatch(error.as_ref()) => return Err(error),
+            Err(_) => {
+                tracing::warn!("server protocol unavailable, using protocol 1");
+                1
+            }
+        };
+        Ok(Self {
             http,
             server: observed,
             known_revocations: Default::default(),
+            spare: Arc::new(Mutex::new(spare)),
             revocations: Some(super::revocations::Revocations::in_profile(data)),
-            protocol: 1,
-        };
-        match server.info().await {
-            Ok(info) => server.protocol = info.protocol.unwrap_or(1),
-            Err(error) if pinned_tls::is_pin_mismatch(error.as_ref()) => return Err(error),
-            Err(_) => tracing::warn!("server protocol unavailable, using protocol 1"),
-        }
-        Ok(server)
+            protocol,
+        })
     }
 
     /// Verify a server proof against `trusted` pins without saving them or sending device credentials.
@@ -91,12 +143,17 @@ impl Server {
     ) -> Result<Self> {
         validate_origin(&address)?;
         let http = pinned_tls::https_client(tls_fingerprint).map_err(anyhow::Error::from_boxed)?;
-        let server = verified_server(&http, address, tls_fingerprint, trusted).await?;
+        let fetched = Fetched::now();
+        let (server, challenge) = verified_server(&http, address, tls_fingerprint, trusted).await?;
         Ok(Self {
             http,
             server,
             revocations: None,
             known_revocations: Default::default(),
+            spare: Arc::new(Mutex::new(Spare {
+                challenge: Some((challenge, fetched)),
+                info: None,
+            })),
             protocol: 1,
         })
     }
@@ -124,14 +181,22 @@ impl Server {
     }
 
     /// Read public admission and version information through the verified server connection.
+    /// A call soon after [`Server::connect`] returns the reply read while connecting.
     pub async fn info(&self) -> Result<ServerInfo> {
-        Ok(self
-            .request(reqwest::Method::GET, "/v1/server-info")
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?)
+        let spare = self.spare.lock().expect("spare replies").info.take();
+        if let Some((info, fetched)) = spare
+            && fetched.fresh()
+        {
+            return Ok(info);
+        }
+        server_info(&self.http, &self.server.address).await
+    }
+
+    /// The challenge verified while connecting, at most once and only while still fresh.
+    /// Taking it before signing means a failed or retried sign-in never signs it again.
+    fn spare_challenge(&self) -> Option<[u8; 32]> {
+        let (challenge, fetched) = self.spare.lock().expect("spare replies").challenge.take()?;
+        fetched.fresh().then_some(challenge)
     }
 
     /// Verify a fresh server challenge and submit a device proof with an optional invite.
@@ -155,8 +220,12 @@ impl Server {
         invite: Option<&InviteCode>,
         path: &str,
     ) -> Result<Response> {
-        let proof = challenge(&self.http, &self.server.address).await?;
-        let challenge = proof.verify(&self.server.server_id)?;
+        let challenge = match self.spare_challenge() {
+            Some(challenge) => challenge,
+            None => challenge(&self.http, &self.server.address)
+                .await?
+                .verify(&self.server.server_id)?,
+        };
         let request = SignIn::signed(identity, &challenge, &self.server.server_id, invite)?;
         self.request(reqwest::Method::POST, path)
             .json(&request)
@@ -229,7 +298,7 @@ async fn verified_server(
     address: Url,
     tls_fingerprint: Option<Fingerprint>,
     trusted: Option<&KnownServer>,
-) -> Result<KnownServer> {
+) -> Result<(KnownServer, [u8; 32])> {
     let proof = challenge(http, &address).await?;
     let observed = KnownServer {
         address,
@@ -237,8 +306,19 @@ async fn verified_server(
         tls_fingerprint,
     };
     check_pin(trusted, &observed)?;
-    proof.verify(&observed.server_id)?;
-    Ok(observed)
+    let challenge = proof.verify(&observed.server_id)?;
+    Ok((observed, challenge))
+}
+
+async fn server_info(client: &Client, address: &Url) -> Result<ServerInfo> {
+    Ok(client
+        .get(format!("{address}v1/server-info"))
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?)
 }
 
 async fn challenge(client: &Client, address: &Url) -> Result<Challenge> {
@@ -295,4 +375,112 @@ fn save_pin(data: &Path, pins: &Path, observed: &KnownServer) -> Result<()> {
         tracing::info!(fingerprint = %fingerprint(&observed.server_id), "server pinned");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const AGO: Duration = SPARE_LIFETIME;
+
+    /// A server with nothing listening, so any request it makes fails.
+    fn with_spare(spare: Spare) -> Server {
+        let mut server = Server::for_test(1, Path::new("unused"));
+        server.server.address = "https://127.0.0.1:9/".parse().unwrap();
+        *server.spare.lock().unwrap() = spare;
+        server
+    }
+
+    fn challenge_at(fetched: Fetched) -> Server {
+        with_spare(Spare {
+            challenge: Some(([7; 32], fetched)),
+            info: None,
+        })
+    }
+
+    fn info() -> ServerInfo {
+        ServerInfo {
+            dm_backfill: true,
+            open_joining: false,
+            version: None,
+            protocol: Some(3),
+        }
+    }
+
+    #[test]
+    fn a_connect_challenge_is_signed_at_most_once() {
+        let server = challenge_at(Fetched::now());
+        let clone = server.clone();
+        assert_eq!(server.spare_challenge(), Some([7; 32]));
+        assert_eq!(clone.spare_challenge(), None);
+        assert_eq!(server.spare_challenge(), None);
+    }
+
+    #[test]
+    fn a_stale_connect_challenge_is_dropped() {
+        let server = challenge_at(Fetched {
+            monotonic: Instant::now().checked_sub(AGO).expect("monotonic clock"),
+            wall: SystemTime::now(),
+        });
+        assert_eq!(server.spare_challenge(), None);
+        assert!(server.spare.lock().unwrap().challenge.is_none());
+    }
+
+    #[test]
+    fn a_challenge_kept_across_sleep_is_dropped() {
+        // The monotonic clock may not advance while the computer sleeps; the wall clock does.
+        let server = challenge_at(Fetched {
+            monotonic: Instant::now(),
+            wall: SystemTime::now() - AGO,
+        });
+        assert_eq!(server.spare_challenge(), None);
+    }
+
+    #[test]
+    fn a_challenge_from_the_future_is_dropped() {
+        // A wall clock turned back cannot prove the challenge is fresh.
+        let server = challenge_at(Fetched {
+            monotonic: Instant::now(),
+            wall: SystemTime::now() + AGO,
+        });
+        assert_eq!(server.spare_challenge(), None);
+    }
+
+    #[tokio::test]
+    async fn a_failed_sign_in_never_signs_the_connect_challenge_again() {
+        let (_, identity) = DeviceIdentity::create("test").unwrap();
+        let server = challenge_at(Fetched::now());
+        assert!(server.sign_in(&identity, None).await.is_err());
+        assert!(server.spare.lock().unwrap().challenge.is_none());
+        // The retry has to ask the server for a new challenge, which fails here.
+        let retry = server.sign_in(&identity, None).await.unwrap_err();
+        assert!(format!("{retry:#}").contains("request server proof"));
+    }
+
+    #[tokio::test]
+    async fn the_first_info_reuses_the_connect_reply() {
+        let server = with_spare(Spare {
+            challenge: None,
+            info: Some((info(), Fetched::now())),
+        });
+        let info = server.info().await.unwrap();
+        assert_eq!((info.protocol, info.dm_backfill), (Some(3), true));
+        assert!(server.spare.lock().unwrap().info.is_none());
+        assert!(server.info().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn stale_info_is_read_again() {
+        let server = with_spare(Spare {
+            challenge: None,
+            info: Some((
+                info(),
+                Fetched {
+                    monotonic: Instant::now(),
+                    wall: SystemTime::now() - AGO,
+                },
+            )),
+        });
+        assert!(server.info().await.is_err());
+    }
 }

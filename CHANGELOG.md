@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Connecting to a server is a little faster: two repeated requests are gone.
+
 ## v0.3.0 - 2026-11-24
 
 - Put a voice channel into focus mode for up to 24 hours: it gets a Focus badge, a countdown banner and a short notice before anyone joins.
