@@ -77,7 +77,8 @@ const CHANGE_BACKLOG: usize = 1024;
 /// What event sockets hear: an update for clients, or a server-side change to recheck.
 #[derive(Clone)]
 enum Change {
-    Update(rusttalk_core::presence::Update),
+    /// Shared, so each update is cloned and encoded once however many sockets listen.
+    Update(Arc<events::Notice>),
     /// This person's sessions were replaced or refreshed, so their sockets recheck their own
     /// session.
     Session(rusttalk_core::identity::PersonId),
@@ -89,7 +90,7 @@ impl App {
     fn notify(&self, event: Event) {
         let _ = self
             .changes
-            .send(Change::Update(rusttalk_core::presence::Update::Event(
+            .send(Change::update(rusttalk_core::presence::Update::Event(
                 event,
             )));
     }
@@ -597,9 +598,9 @@ mod tests {
 
         timeout(Duration::from_secs(30), async {
             loop {
-                if let Change::Update(rusttalk_core::presence::Update::Event(
-                    Event::MemberChanged { .. },
-                )) = changes.recv().await?
+                if let Change::Update(notice) = changes.recv().await?
+                    && let rusttalk_core::presence::Update::Event(Event::MemberChanged { .. }) =
+                        notice.update
                 {
                     return anyhow::Ok(());
                 }

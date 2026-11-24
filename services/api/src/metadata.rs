@@ -414,17 +414,18 @@ mod tests {
         let mut changes = app.changes.subscribe();
         assert_eq!(write(fill.clone()).await?, StatusCode::NO_CONTENT);
         // Peers get the new profile inline, so they need no reload.
-        let Ok(crate::Change::Update(rusttalk_core::presence::Update::Event(
-            Event::MemberChanged {
-                person: changed,
-                profile: Some(profile),
-                ..
-            },
-        ))) = changes.try_recv()
+        let Ok(crate::Change::Update(notice)) = changes.try_recv() else {
+            panic!("expected a profile notice");
+        };
+        let rusttalk_core::presence::Update::Event(Event::MemberChanged {
+            person: changed,
+            profile: Some(profile),
+            ..
+        }) = &notice.update
         else {
             panic!("expected a profile notice");
         };
-        assert_eq!(changed, encode(&person(2)));
+        assert_eq!(*changed, encode(&person(2)));
         assert!(profile.avatar_initialized && profile.avatar_hash.is_some());
         assert_eq!(write(fill.clone()).await?, StatusCode::PRECONDITION_FAILED);
         write(json!({"avatar_ct": null})).await?;

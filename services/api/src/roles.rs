@@ -731,7 +731,7 @@ mod tests {
         assert_eq!(audited, 1);
         assert!(matches!(
             events.try_recv(),
-            Ok(Change::Update(Update::Event(Event::ChannelChanged { .. })))
+            Ok(Change::Update(notice)) if matches!(notice.update, Update::Event(Event::ChannelChanged { .. }))
         ));
         Ok(())
     }

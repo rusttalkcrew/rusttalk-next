@@ -945,7 +945,7 @@ mod tests {
         assert_eq!(audited, 1);
         assert!(matches!(
             events.try_recv(),
-            Ok(Change::Update(Update::Event(Event::ChannelChanged { .. })))
+            Ok(Change::Update(notice)) if matches!(notice.update, Update::Event(Event::ChannelChanged { .. }))
         ));
         Ok(())
     }
@@ -1158,7 +1158,7 @@ mod tests {
         assert!((end - store::now()? - FOCUS_SECONDS).abs() <= 5);
         assert!(matches!(
             events.try_recv(),
-            Ok(Change::Update(Update::Event(Event::ChannelChanged { .. })))
+            Ok(Change::Update(notice)) if matches!(notice.update, Update::Event(Event::ChannelChanged { .. }))
         ));
         // Once the end has passed, the catalog no longer shows it.
         query("UPDATE channels SET focus_until = ? WHERE id = ?")
