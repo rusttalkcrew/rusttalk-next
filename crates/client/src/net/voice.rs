@@ -3,6 +3,7 @@
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
+    sync::Arc,
     time::Duration,
 };
 
@@ -969,7 +970,9 @@ pub(super) async fn control_received(
 ) {
     let from = from.identity();
     let person = client.and_then(|client| {
-        identities(client, &state.server_id)
+        state
+            .identities
+            .get(client, &state.server_id)
             .get(from.as_str())
             .copied()
     });
@@ -1000,13 +1003,11 @@ pub(super) fn ring_received(
     if live.rang.is_some_and(|at| at.elapsed() < APART) {
         return;
     }
-    let person = match client {
-        Some(client) => identities(client, &state.server_id)
-            .get(from.as_str())
-            .copied(),
-        None => state.identities.get(from.as_str()).copied(),
+    let ids = match client {
+        Some(client) => state.identities.get(client, &state.server_id),
+        None => state.identities.last(),
     };
-    let Some(person) = person else {
+    let Some(person) = ids.get(from.as_str()).copied() else {
         tracing::info!("dropped a ring from an unknown device");
         return;
     };
@@ -1024,7 +1025,9 @@ pub(super) async fn terminal_received(
 ) {
     let from = from.identity();
     let person = client.and_then(|client| {
-        identities(client, &state.server_id)
+        state
+            .identities
+            .get(client, &state.server_id)
             .get(from.as_str())
             .copied()
     });
@@ -1042,7 +1045,7 @@ pub(super) fn name_audio(ctx: &Ctx, client: &KeyClient<'_>, state: &mut State) {
     if live.nameless.is_empty() {
         return;
     }
-    let ids = identities(client, &state.server_id);
+    let ids = state.identities.get(client, &state.server_id);
     live.nameless
         .retain(|sid, identity| match ids.get(identity.as_str()) {
             Some(person) => {
@@ -1053,8 +1056,45 @@ pub(super) fn name_audio(ctx: &Ctx, client: &KeyClient<'_>, state: &mut State) {
         });
 }
 
+/// Who each voice participant (LiveKit identity) is. Hashing every device key is too much
+/// for each voice event and stats tick, so the map is only rebuilt when `devices()` changes.
+/// Kept after disconnecting, so the call's people still show while the API is down.
+#[derive(Default)]
+pub(super) struct Identities(std::sync::Mutex<(u64, Arc<HashMap<String, Id>>)>);
+
+impl Identities {
+    /// The names for `client`'s current device list.
+    pub(super) fn get(&self, client: &KeyClient<'_>, server: &Id) -> Arc<HashMap<String, Id>> {
+        self.get_or_build(client.devices_generation(), || identities(client, server))
+    }
+
+    /// As last built, while the API connection is down.
+    pub(super) fn last(&self) -> Arc<HashMap<String, Id>> {
+        self.lock().1.clone()
+    }
+
+    /// Generations start at 1, so the empty default is always rebuilt.
+    fn get_or_build(
+        &self,
+        generation: u64,
+        build: impl FnOnce() -> HashMap<String, Id>,
+    ) -> Arc<HashMap<String, Id>> {
+        let mut cache = self.lock();
+        if cache.0 != generation {
+            *cache = (generation, Arc::new(build()));
+        }
+        cache.1.clone()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, (u64, Arc<HashMap<String, Id>>)> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
 /// LiveKit identity of every known device, to find the person behind a voice participant.
-pub(super) fn identities(client: &KeyClient<'_>, server: &Id) -> HashMap<String, Id> {
+fn identities(client: &KeyClient<'_>, server: &Id) -> HashMap<String, Id> {
     client
         .devices()
         .map(|device| {
@@ -1083,7 +1123,7 @@ pub(super) fn send_room(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &St
     send_roster(
         ctx,
         url,
-        &identities(client, &state.server_id),
+        &state.identities.get(client, &state.server_id),
         state,
         channel,
     );
@@ -1291,7 +1331,7 @@ pub(super) fn roster(
 ) {
     match client {
         Some(client) => send_room(ctx, url, client, state, channel),
-        None => send_roster(ctx, url, &state.identities, state, channel),
+        None => send_roster(ctx, url, &state.identities.last(), state, channel),
     }
 }
 
@@ -1348,8 +1388,10 @@ pub(super) async fn on_voice(
             participant,
             ..
         } => {
-            let ids = client.map(|client| identities(client, &state.server_id));
-            let ids = ids.as_ref().unwrap_or(&state.identities);
+            let ids = match client {
+                Some(client) => state.identities.get(client, &state.server_id),
+                None => state.identities.last(),
+            };
             let person = ids.get(participant.identity().as_str()).copied();
             if person.is_none() {
                 tracing::warn!("voice track from a device this client doesn't know yet");
@@ -1667,7 +1709,7 @@ pub(super) async fn voice_stats(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, st
             return;
         }
     };
-    let ids = identities(client, &state.server_id);
+    let ids = state.identities.get(client, &state.server_id);
     let me = *ctx.identity.certificate.person_id();
     let screens: HashMap<TrackSid, String> = live
         .screen
@@ -2255,6 +2297,30 @@ mod tests {
     use rusttalk_core::client::voice::VoiceRoster;
 
     use super::*;
+
+    #[test]
+    fn identities_are_reused_until_the_device_list_changes() {
+        let cache = Identities::default();
+        let me = ("me".to_string(), [1; 32]);
+        let sibling = ("sibling".to_string(), [2; 32]);
+        let built = std::cell::Cell::new(0);
+        let build = |devices: &[(String, Id)]| {
+            built.set(built.get() + 1);
+            devices.iter().cloned().collect::<HashMap<_, _>>()
+        };
+        let first = cache.get_or_build(1, || build(std::slice::from_ref(&me)));
+        let again = cache.get_or_build(1, || build(std::slice::from_ref(&me)));
+        assert!(Arc::ptr_eq(&first, &again), "nothing changed: same map");
+        assert_eq!(built.get(), 1);
+
+        let added = cache.get_or_build(2, || build(&[me.clone(), sibling.clone()]));
+        assert_eq!(built.get(), 2, "device added: rebuilt");
+        assert_eq!(added.get("sibling"), Some(&[2; 32]));
+
+        let revoked = cache.get_or_build(3, || build(std::slice::from_ref(&me)));
+        assert!(!revoked.contains_key("sibling"), "revoked device is gone");
+        assert!(Arc::ptr_eq(&revoked, &cache.last()));
+    }
 
     #[test]
     fn leaving_drops_us_from_the_old_channel_until_the_server_says_otherwise() {

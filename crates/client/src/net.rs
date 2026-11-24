@@ -847,7 +847,7 @@ struct State {
     pins_lost: bool,
     /// Who each voice participant (LiveKit identity) is, as last known from the API: the
     /// call's people and their videos still show while the API connection is down.
-    identities: HashMap<String, Id>,
+    identities: voice::Identities,
     /// DMs the server relabelled, already warned about.
     relabelled: HashSet<Id>,
     /// The voice room LiveKit last removed this device from, and when: a move notice for
@@ -1020,7 +1020,7 @@ async fn run(
                             expected_generation,
                         )
                         .await;
-                        state.identities = voice::identities(&client, &state.server_id);
+                        state.identities.get(&client, &state.server_id);
                         ctx.sync.set_peer(&url, None);
                         match end {
                             End::Quit => return,
