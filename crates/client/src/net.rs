@@ -1023,6 +1023,11 @@ async fn run(
                         )
                         .await;
                         state.identities = voice::identities(&client, &state.server_id);
+                        // Transfers stop with the connection (a new route must not inherit
+                        // them) and are asked again, in order, once it is back.
+                        for command in state.jobs.stop().into_iter().rev() {
+                            queued.push_front(command);
+                        }
                         ctx.sync.set_peer(&url, None);
                         match end {
                             End::Quit => return,
@@ -1525,7 +1530,7 @@ async fn serve(
                 repair_default_avatar(ctx, url, client, state).await;
             }
             next = next_voice(&mut state.voice) => voice_next(ctx, url, Some(client), state, next).await,
-            Some(done) = state.jobs.next(), if state.jobs.busy() => uploaded(ctx, url, client, state, done).await,
+            Some(done) = state.jobs.next(&mut state.image_originals), if state.jobs.busy() => uploaded(ctx, url, client, state, done).await,
             _ = stats.tick(), if state.voice.is_some() => {
                 if !recover_voice(ctx, url, client, state, commands, removals, queued).await {
                     return End::Quit;
@@ -1938,41 +1943,40 @@ async fn uploaded(
     url: &Url,
     client: &mut KeyClient<'_>,
     state: &mut State,
-    (lane, done): (Id, Option<files::Uploaded>),
+    done: files::Finished,
 ) {
-    if let Some(files::Uploaded {
+    let files::Finished {
         draft,
-        sent: _sent,
         target,
-        body,
-        leftover,
-    }) = done
-    {
-        match leftover {
-            Some(leftover) => {
-                let dm = draft.peer.is_some();
-                let kept = draft.keep.len();
-                let result = send(
-                    ctx,
-                    url,
-                    client,
-                    state,
-                    draft,
-                    target,
-                    dm,
-                    body,
-                    (kept, leftover),
-                );
-                if let Err(error) = result.await {
-                    failed(ctx, error);
-                }
+        upload,
+        waiting,
+        _sent,
+    } = done;
+    match upload {
+        Some((body, Some(leftover))) => {
+            let (dm, kept) = (draft.peer.is_some(), draft.keep.len());
+            let sent = send(
+                ctx,
+                url,
+                client,
+                state,
+                draft,
+                target,
+                dm,
+                body,
+                (kept, leftover),
+            );
+            if let Err(error) = sent.await {
+                failed(ctx, error);
             }
-            None => ctx.send(Update::Unsent(url.clone(), draft)),
+        }
+        // The upload already said what went wrong.
+        Some((_, None)) => ctx.send(Update::Unsent(url.clone(), draft)),
+        None => {
+            ctx.send(Update::Unsent(url.clone(), draft));
+            ctx.send(Update::Failed(t!("admin.failed").into()));
         }
     }
-    let Some((_, waiting)) = state.jobs.uploading.remove(&lane) else {
-        return;
-    };
     for draft in waiting {
         run_command(ctx, url, client, state, Command::Send(draft)).await;
     }
@@ -2412,12 +2416,11 @@ async fn on_command(
         Command::Older(channel, before) => {
             page(ctx, url, client, state, channel, Some(before)).await;
         }
-        Command::Send(mut draft) => {
-            if let Some((_, waiting)) = state.jobs.uploading.get_mut(&files::lane(&draft)) {
-                // Sent after a message whose files are still uploading: it waits for it.
-                waiting.push_back(draft);
+        Command::Send(draft) => {
+            // Sent after a message whose files are still uploading: it waits for it.
+            let Some(mut draft) = state.jobs.wait(draft) else {
                 return Ok(());
-            }
+            };
             let sent = std::mem::take(&mut draft.queued);
             let channel = match draft.peer {
                 Some(peer) => dm_channel(ctx, url, client, state, peer).await,
@@ -2512,18 +2515,11 @@ async fn on_command(
                 draft.inline.clone(),
             );
             let (ctx, url, blobs) = (ctx.clone(), url.clone(), client.file_client());
-            let lane = files::lane(&draft);
-            state.jobs.upload(lane, async move {
+            state.jobs.upload(draft, sent, target, async move {
                 let mut body = body;
                 let leftover =
                     files::upload_all(&ctx, &url, &blobs, channel, &mut body, uploads).await;
-                files::Uploaded {
-                    draft,
-                    sent,
-                    target,
-                    body,
-                    leftover,
-                }
+                (body, leftover)
             });
         }
         Command::CheckGone(channel, id) => {
@@ -2538,24 +2534,36 @@ async fn on_command(
             files::delete(ctx, url, client, state, (channel, id, sender), blobs).await?;
         }
         Command::Image(file, fetch) => {
+            let again = Command::Image(file.clone(), fetch);
             let (ctx, url, blobs) = (ctx.clone(), url.clone(), client.file_client());
-            let originals = state.image_originals.clone();
-            (state.jobs).download(async move {
-                files::image(&ctx, &url, &blobs, &originals, file, fetch).await;
+            let cached = state.image_originals.lookup(&file, fetch);
+            (state.jobs).download(again, async move {
+                files::image(&ctx, &url, &blobs, cached, file, fetch).await
             });
         }
         Command::LinkCard(file) => {
+            let again = Command::LinkCard(file.clone());
             let (ctx, blobs) = (ctx.clone(), client.file_client());
-            (state.jobs).download(async move { files::link_card(&ctx, &blobs, file).await });
+            (state.jobs).download(again, async move {
+                files::link_card(&ctx, &blobs, file).await;
+                None
+            });
         }
         Command::StickerFile(file, kind) => {
+            let again = Command::StickerFile(file.clone(), kind);
             let (ctx, blobs) = (ctx.clone(), client.file_client());
-            (state.jobs)
-                .download(async move { files::sticker_file(&ctx, &blobs, file, kind).await });
+            (state.jobs).download(again, async move {
+                files::sticker_file(&ctx, &blobs, file, kind).await;
+                None
+            });
         }
         Command::Save(file, path) => {
+            let again = Command::Save(file.clone(), path.clone());
             let (ctx, blobs) = (ctx.clone(), client.file_client());
-            (state.jobs).download(async move { files::save(&ctx, &blobs, file, path).await });
+            (state.jobs).download(again, async move {
+                files::save(&ctx, &blobs, file, path).await;
+                None
+            });
         }
         Command::SharedFiles(channel) => files::shared(ctx, url, client, channel).await,
         Command::ShareFiles(channel, paths) => files::share(ctx, url, client, channel, paths).await,
