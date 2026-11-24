@@ -19,6 +19,10 @@ use zeroize::Zeroizing;
 
 use crate::{ApiError, ApiResult};
 
+/// WAL readers never block each other, so event sockets rechecking access after a busy moment
+/// do not queue behind a few connections. Writes still take turns through `WRITER`.
+const MAX_CONNECTIONS: u32 = 16;
+
 pub async fn open(dir: &Path) -> Result<SqlitePool> {
     let options = SqliteConnectOptions::new()
         .filename(dir.join("rusttalk.sqlite3"))
@@ -27,7 +31,7 @@ pub async fn open(dir: &Path) -> Result<SqlitePool> {
         .journal_mode(SqliteJournalMode::Wal)
         .busy_timeout(Duration::from_secs(5));
     let pool = SqlitePoolOptions::new()
-        .max_connections(4)
+        .max_connections(MAX_CONNECTIONS)
         .connect_with(options)
         .await?;
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
@@ -264,6 +268,22 @@ mod tests {
         testing::{self, as_person},
         voice,
     };
+
+    #[tokio::test]
+    async fn readers_share_the_pool_while_a_write_is_open() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let pool = open(dir.path()).await?;
+        let _write = write(&pool).await?;
+        let mut readers = Vec::new();
+        for _ in 1..MAX_CONNECTIONS {
+            let mut tx = tokio::time::timeout(Duration::from_secs(5), pool.begin()).await??;
+            query_scalar::<_, i64>("SELECT COUNT(*) FROM members")
+                .fetch_one(&mut *tx)
+                .await?;
+            readers.push(tx);
+        }
+        Ok(())
+    }
 
     #[tokio::test]
     async fn fresh_main_and_preview_databases_reopen_with_both_features() -> Result<()> {

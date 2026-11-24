@@ -19,6 +19,7 @@ Unreleased under the new version and date.
 - Pictures, link previews and big files load and upload in the background, so chat, status and voice keep up meanwhile.
 - Joining or leaving a voice channel updates everyone's channel list faster, with less load on the server.
 - New chat messages show up faster, with less work for the server.
+- Servers keep up better when many people are online, so fewer full reloads after busy moments.
 
 ## v0.3.0 - 2026-11-24
 

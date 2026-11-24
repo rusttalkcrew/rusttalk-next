@@ -70,6 +70,10 @@ struct App {
     session_ttl: i64,
 }
 
+/// Events a socket may fall behind before it must resync. A slot frees once every socket has
+/// read it, so the cost is only held for sockets that are actually behind.
+const CHANGE_BACKLOG: usize = 1024;
+
 /// What event sockets hear: an update for clients, or a server-side change to recheck.
 #[derive(Clone)]
 enum Change {
@@ -231,7 +235,7 @@ async fn run() -> Result<()> {
                 emoji,
                 db,
                 key: Arc::new(key),
-                changes: broadcast::channel(128).0,
+                changes: broadcast::channel(CHANGE_BACKLOG).0,
                 presence: Arc::default(),
                 listing_changed: watch::channel(()).0,
                 voice: voice::LiveKit::from_env()?.map(Arc::new),
