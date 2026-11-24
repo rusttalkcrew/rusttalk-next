@@ -41,6 +41,7 @@ Unreleased under the new version and date.
 - Big servers answer key and membership checks faster: the server now keeps its database statistics up to date.
 - Adding big files to a channel's shared files no longer freezes that server: new messages keep arriving and calls keep going while they upload.
 - Member lists on big servers scroll smoothly.
+- Long chats scroll smoothly: only the messages near what you are reading are drawn.
 
 ## v0.3.0 - 2026-11-24
 

@@ -102,6 +102,7 @@ pub mod mentions;
 pub mod person;
 mod pokes;
 pub mod polls;
+pub(crate) mod rows;
 pub(crate) mod user_bar;
 pub mod voice_requests;
 #[cfg(test)]
@@ -4878,14 +4879,50 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
             (msg.replicas.first()).and_then(|url| servers.iter().position(|s| s.address == *url));
         copy.or(named)
     };
-    let before_offset = chat.scroll_to.unwrap_or(chat.scroll_offset);
+    // Only the rows near the view are laid out (#461): first which messages show and
+    // whether each starts a group, then their heights as far as known.
+    let mut shown: Vec<(usize, bool)> = Vec::new();
+    let mut last: Option<&Msg> = None;
+    for (at, msg) in chat.messages.iter().enumerate() {
+        if matches!(msg.body, Body::Friend(signal, _) if !friends::shown(signal))
+            || matches!(
+                msg.body,
+                Body::Poke(_) | Body::PollPart(_) | Body::VoiceRequest(_)
+            )
+        {
+            continue;
+        }
+        let start = !last.is_some_and(|prev| {
+            prev.person == msg.person
+                && prev.backfilled == msg.backfilled
+                && !matches!(prev.body, Body::Notice { .. } | Body::Friend(..))
+                && msg.at - prev.at < 300
+                && msg.reply_to.is_none()
+        });
+        shown.push((at, start));
+        last = Some(msg);
+    }
+    let mut after = last.map(|msg| (msg.person, matches!(msg.body, Body::Notice { .. })));
+    let keys: Vec<rows::Key> = (shown.iter())
+        .map(|&(at, start)| (chat.messages[at].person, chat.messages[at].id, start))
+        .collect();
+    let mut rows = std::mem::take(&mut chat.rows);
+    // The view stays in place as rows are measured or arrive (see `rows`).
+    let (heights, keep) = rows.plan(&keys, chat.scroll_offset);
+    let scroll_to = chat.scroll_to.take();
+    let before_offset = scroll_to.or(keep).unwrap_or(chat.scroll_offset);
     let mut area = ScrollArea::vertical()
         .id_salt(("chat", key))
         .stick_to_bottom(true)
         .auto_shrink(false);
-    if let Some(offset) = chat.scroll_to.take() {
+    // An offset past last frame's end (older rows were added above) would count as
+    // pulled past the edge and spring back.
+    let rubber_band = ui.spacing().scroll.kinetic.rubber_band;
+    if let Some(offset) = keep {
         area = area.vertical_scroll_offset(offset);
+        ui.spacing_mut().scroll.kinetic.rubber_band = false;
     }
+    chat.index_ids();
     let settings = voice.audio.settings();
     let embeds = Embeds {
         servers,
@@ -4895,8 +4932,18 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
     let mut pick = None;
     let mut live = None;
     let mut resend = None;
-    let output = area.show(ui, |ui| {
+    let mut tops = Vec::with_capacity(keys.len());
+    let (mut changed, mut drawn, mut laid_at, mut end) = (false, 0, 0.0, 0.0);
+    let output = area.show_viewport(ui, |ui, viewport| {
         ui.set_width(ui.available_width());
+        laid_at = viewport.min.y;
+        // Scrolled there, as by hand, so it no longer follows the newest message.
+        if let Some(to) = scroll_to {
+            let delta = Vec2::new(0.0, viewport.min.y - to);
+            ui.scroll_with_delta_animation(delta, egui::style::ScrollAnimation::none());
+        }
+        let origin = ui.max_rect().top();
+        let y = |ui: &Ui| ui.cursor().top() - origin;
         if chat.at_start {
             ui.add_space(ui::SPACE_M);
             ui.label(ui::heading(t!("home.chat_start", channel = title)));
@@ -4904,23 +4951,19 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
         } else if chat.loading {
             ui.vertical_centered(|ui| ui.spinner());
         }
-        let mut last: Option<&Msg> = None;
-        for msg in &chat.messages {
-            if matches!(msg.body, Body::Friend(signal, _) if !friends::shown(signal))
-                || matches!(
-                    msg.body,
-                    Body::Poke(_) | Body::PollPart(_) | Body::VoiceRequest(_)
-                )
-            {
+        changed |= (y(ui) - rows.header).abs() > 0.5;
+        rows.header = y(ui);
+        // Half a view above and below is laid out too, so rows are measured before
+        // they scroll in.
+        let near = viewport.expand2(Vec2::new(0.0, viewport.height() / 2.0));
+        for (i, &(row, start)) in shown.iter().enumerate() {
+            let top = y(ui);
+            tops.push(top);
+            if top + heights[i] < near.top() || top > near.bottom() {
+                ui.add_space(heights[i]);
                 continue;
             }
-            let start = !last.is_some_and(|prev| {
-                prev.person == msg.person
-                    && prev.backfilled == msg.backfilled
-                    && !matches!(prev.body, Body::Notice { .. } | Body::Friend(..))
-                    && msg.at - prev.at < 300
-                    && msg.reply_to.is_none()
-            });
+            let msg = &chat.messages[row];
             // The displayed copy carries this server's emoji and sticker IDs.
             let held_on = holder(msg);
             let (message_dir, message_channel) = match (at, held_on.map(|i| &servers[i])) {
@@ -4976,9 +5019,10 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
             if let Some(chosen) = shown {
                 pick = Some(chosen);
             }
-            last = Some(msg);
+            drawn += 1;
+            changed |= rows.measured(keys[i], heights[i], y(ui) - top);
         }
-        let mut after = last.map(|msg| (msg.person, matches!(msg.body, Body::Notice { .. })));
+        end = y(ui);
         for out in &chat.outbox {
             let start = after != Some((out.person, false));
             after = Some((out.person, false));
@@ -4987,6 +5031,26 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
             }
         }
     });
+    ui.spacing_mut().scroll.kinetic.rubber_band = rubber_band;
+    let content = output.content_size.y;
+    let offset = output.state.clamped_offset().y;
+    rows.drawn = drawn;
+    rows.settle(rows::Frame {
+        keys: &keys,
+        tops: &tops,
+        end,
+        content,
+        view: output.inner_rect.height(),
+        offset,
+        moved: offset - laid_at,
+        changed,
+    });
+    chat.rows = rows;
+    // A row's height changed: lay it out again before showing it, so nothing jumps.
+    if changed {
+        ui.ctx().request_discard("chat row heights");
+        ui.ctx().request_repaint();
+    }
     let retry = resend.and_then(|(id, retry)| match retry {
         true => chat.retry(&id),
         false => {
@@ -5002,8 +5066,6 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
             At::Dm(peer) => send_dm(servers, &targets, chat, toast, now, (me, peer), draft),
         }
     }
-    let content = output.content_size.y;
-    let offset = output.state.clamped_offset().y;
     // `stick_to_bottom` updates the offset at the end of the pass without requesting
     // another frame; repaint once so newly scrolled-in messages and their emoji load.
     if (offset - before_offset).abs() > 0.5 {
@@ -5011,16 +5073,12 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
     }
     chat.scroll_offset = offset;
     // Only page once the layout has settled; the first frame always starts at the top.
+    // The rows' anchor keeps the view in place as a page is added above it.
     let settled = chat.content_height == content;
-    if let Some(before) = chat.keep_scroll {
-        if content > before {
-            chat.keep_scroll = None;
-            chat.scroll_to = Some(output.state.clamped_offset().y + content - before);
-            ui.ctx().request_repaint();
-        } else if settled {
-            // The page added nothing new (a DM copy of what was loaded): page on.
-            chat.keep_scroll = None;
-        }
+    if let Some(before) = chat.keep_scroll
+        && (content > before || settled)
+    {
+        chat.keep_scroll = None;
     }
     chat.content_height = content;
     // A DM asks each copy on its own, so one slow server doesn't hold up the others.
@@ -5971,10 +6029,7 @@ fn message(
     } = &msg.body
     {
         // Show today's name, or the name they had if they left.
-        let name = dir
-            .members
-            .iter()
-            .find(|member| member.person == msg.person)
+        let name = (dir.members.get(&msg.person))
             .and_then(|member| member.name.as_deref())
             .unwrap_or(name);
         ui.add_space(4.0);
@@ -6008,11 +6063,7 @@ fn message(
         return None;
     }
     let mention = mentions::Message::cached(ui, msg, dir, channel);
-    let my_roles = dir
-        .members
-        .iter()
-        .find(|member| member.person == me)
-        .map_or(&[][..], |member| member.roles.as_slice());
+    let my_roles = (dir.members.get(&me)).map_or(&[][..], |member| member.roles.as_slice());
     let pinged = mentions::mentions_me(&mention, &me, my_roles);
     let background = ui.painter().add(Shape::Noop);
     let name = names(&msg.person);
@@ -7094,6 +7145,7 @@ mod tests {
     mod avatars;
     mod emoji;
     mod image_reload;
+    mod long_chat;
     mod member_list;
     mod outbox;
     mod rail;

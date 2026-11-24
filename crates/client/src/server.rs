@@ -922,15 +922,22 @@ pub struct Chat {
     /// Whether the shared files were asked for since the files view opened.
     pub shared_asked: bool,
     /// Content height and vertical scroll offset last frame, and height before older
-    /// messages were added, so the view stays in place when a page is added above it.
+    /// messages were added, so paging waits until that page is laid out.
     pub content_height: f32,
     pub scroll_offset: f32,
     pub keep_scroll: Option<f32>,
+    /// A scroll offset to go to next frame, as if scrolled there by hand.
     pub scroll_to: Option<f32>,
+    /// Row heights and the row in view, so only rows near the view are laid out.
+    pub rows: crate::home::rows::Rows,
+    /// Where each ID is in `messages`, for reply quotes; rebuilt after changes.
+    by_id: HashMap<Id, Vec<usize>>,
+    by_id_len: Option<usize>,
 }
 
 impl Chat {
     pub fn clear_history(&mut self) {
+        self.by_id_len = None;
         self.messages.clear();
         self.edited.clear();
         self.pending_edits.clear();
@@ -1002,10 +1009,19 @@ impl Chat {
             && self.messages.last().is_none_or(|last| last.at <= msg.at)
             && !(self.messages.iter().rev()).any(|old| old.id == msg.id && old.person == msg.person)
         {
+            // At the end, the index stays right with one more entry.
+            if self.by_id_len == Some(self.messages.len()) {
+                self.by_id
+                    .entry(msg.id)
+                    .or_default()
+                    .push(self.messages.len());
+                self.by_id_len = Some(self.messages.len() + 1);
+            }
             self.messages.extend(items);
             self.settle(Vec::new());
             return;
         }
+        self.by_id_len = None;
         self.merge_all(items, older);
     }
 
@@ -1105,6 +1121,9 @@ impl Chat {
             !(messages.iter()).any(|msg| msg.id == out.draft.id && msg.person == out.person)
         });
         // A retried edit replaces its "couldn't be opened" placeholder.
+        if !edits.is_empty() {
+            self.by_id_len = None;
+        }
         self.messages.retain(|msg| {
             msg.body != Body::Unreadable
                 || !(edits.iter()).any(|edit| edit.id == msg.id && edit.person == msg.person)
@@ -1177,22 +1196,41 @@ impl Chat {
     /// A verified sender wins over the reply's display hint. For colliding IDs,
     /// only the named person's verified message can supply a snippet.
     pub fn quoted(&self, id: &Id, author: Option<Id>) -> Option<&Msg> {
-        let mut found = self.messages.iter().filter(|msg| msg.id == *id);
+        let found: Vec<&Msg> = if self.by_id_len == Some(self.messages.len()) {
+            (self.by_id.get(id).into_iter().flatten())
+                .filter_map(|at| self.messages.get(*at))
+                .filter(|msg| msg.id == *id)
+                .collect()
+        } else {
+            self.messages.iter().filter(|msg| msg.id == *id).collect()
+        };
         if let Some(person) = author
-            && let Some(named) = found
-                .clone()
-                .find(|msg| msg.person == person && matches!(msg.body, Body::Text(_)))
+            && let Some(named) =
+                (found.iter()).find(|msg| msg.person == person && matches!(msg.body, Body::Text(_)))
         {
             return Some(named);
         }
-        let first = found.next()?;
-        (matches!(first.body, Body::Text(_)) && found.all(|msg| msg.person == first.person))
+        let first = found.first()?;
+        (matches!(first.body, Body::Text(_)) && found.iter().all(|msg| msg.person == first.person))
             .then_some(first)
+    }
+
+    /// Index the messages by ID for `quoted`, if they changed since the last time.
+    pub fn index_ids(&mut self) {
+        if self.by_id_len == Some(self.messages.len()) {
+            return;
+        }
+        self.by_id.clear();
+        for (at, msg) in self.messages.iter().enumerate() {
+            self.by_id.entry(msg.id).or_default().push(at);
+        }
+        self.by_id_len = Some(self.messages.len());
     }
 
     /// Drop a deleted record. Edits of a deleted original stay hidden.
     // shortcut: deleting an edit record keeps its text on the original, until a reload.
     pub fn remove(&mut self, id: &Id) {
+        self.by_id_len = None;
         self.messages.retain(|msg| msg.id != *id);
         self.pending_edits.retain(|(_, original), _| original != id);
         self.edited.retain(|(_, original), _| original != id);
@@ -1201,6 +1239,7 @@ impl Chat {
     /// Drop one person's record, leaving another person's under the same ID.
     pub fn remove_one(&mut self, person: &Id, id: &Id) {
         let key = (*person, *id);
+        self.by_id_len = None;
         self.messages
             .retain(|msg| msg.id != *id || msg.person != *person);
         self.pending_edits.remove(&key);
@@ -1563,6 +1602,44 @@ mod tests {
         chat.remove_one(&[8; 32], &[1; 32]);
         assert_eq!(texts(&chat), ["mine2"]);
         assert!(chat.edited.contains_key(&([9; 32], [1; 32])));
+    }
+
+    /// The ID index for quotes answers like a scan, however the list changed since.
+    #[test]
+    fn quotes_found_by_index_match_a_scan_after_every_change() {
+        let mut chat = Chat::default();
+        let check = |chat: &mut Chat| {
+            chat.index_ids();
+            for id in 0..=60 {
+                let indexed = chat.quoted(&[id; 32], None).map(|m| (m.id, m.at));
+                let scanned = (chat.messages.iter()).find(|m| m.id == [id; 32]);
+                assert_eq!(indexed, scanned.map(|m| (m.id, m.at)), "message {id}");
+            }
+        };
+        chat.merge(
+            (30..40).map(|i| msg(i, i64::from(i), "x", None)).collect(),
+            false,
+        );
+        check(&mut chat);
+        // Live messages one by one keep the index without a rebuild.
+        for i in 40..45 {
+            chat.merge(vec![msg(i, i64::from(i), "x", None)], false);
+            assert!(chat.by_id_len.is_some());
+            check(&mut chat);
+        }
+        // An older page shifts every position.
+        chat.merge(
+            (1..30).map(|i| msg(i, i64::from(i), "x", None)).collect(),
+            true,
+        );
+        check(&mut chat);
+        chat.remove(&[5; 32]);
+        check(&mut chat);
+        // Changed by hand: the length differs, so it scans until indexed again.
+        chat.messages.retain(|m| m.id != [6; 32]);
+        assert!(chat.quoted(&[6; 32], None).is_none());
+        assert!(chat.quoted(&[7; 32], None).is_some());
+        check(&mut chat);
     }
 
     #[test]
