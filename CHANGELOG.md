@@ -11,6 +11,7 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Voice calls use less CPU and battery: the app no longer redraws ten times a second for the whole call, only when someone starts or stops speaking.
 - Servers stay responsive when someone joins: sharing chat keys no longer slows down everyone else's connection.
 - After sleep or a network hiccup, servers reconnect within about 30 seconds instead of silently missing new messages.
 - Channels with edited messages load faster.

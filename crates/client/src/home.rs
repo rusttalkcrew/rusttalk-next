@@ -344,6 +344,7 @@ impl Home {
         let unsent = crate::net::unsent_note(&data_dir);
         let fresh = !data.join("voice.json").exists();
         let audio = Audio::new(&data)?;
+        audio.set_repaint(ctx.clone());
         // After an update, open "What's new" once; a first start has nothing new yet.
         let version = env!("CARGO_PKG_VERSION");
         let mut saved = audio.settings();

@@ -477,6 +477,20 @@ pub fn leave(home: &mut Home) {
     }
 }
 
+/// When the call needs its next frame without input or network news. The audio thread
+/// wakes the UI when someone starts speaking; this turns the ring off on time, keeps the
+/// settings meter live while it can be seen, and catches slow timeouts once a second.
+fn tick(
+    in_call: bool,
+    testing: bool,
+    focused: bool,
+    speaking_ends: Option<Duration>,
+) -> Option<Duration> {
+    let meter = (testing && focused).then_some(Duration::from_millis(100));
+    let fallback = (in_call || testing).then_some(Duration::from_secs(1));
+    [meter, speaking_ends, fallback].into_iter().flatten().min()
+}
+
 /// Once per frame: push-to-talk, the settings meter, and repaints for live indicators.
 pub fn frame(ctx: &egui::Context, home: &mut Home) {
     #[cfg(target_os = "ios")]
@@ -551,8 +565,10 @@ pub fn frame(ctx: &egui::Context, home: &mut Home) {
     if !testing && voice.highlight.as_ref().is_some_and(|h| h.since.is_some()) {
         voice.highlight = None;
     }
-    if testing || voice.call.is_some() {
-        ctx.request_repaint_after(Duration::from_millis(100));
+    let focused = ctx.input(|input| input.focused);
+    let speaking_ends = voice.audio.speaking_ends();
+    if let Some(after) = tick(voice.call.is_some(), testing, focused, speaking_ends) {
+        ctx.request_repaint_after(after);
     }
     remote::frame(home, ctx.input(|input| input.time));
     terminal::frame(home, ctx.input(|input| input.time));
@@ -1653,6 +1669,22 @@ fn calibrate(ui: &mut Ui, voice: &mut Voice, s: &mut Settings) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn call_tick_is_slow_unless_something_live_shows() {
+        let ms = Duration::from_millis;
+        // Out of a call with settings closed: no tick at all.
+        assert_eq!(tick(false, false, true, None), None);
+        // A quiet call: only the slow fallback, focused or not.
+        assert_eq!(tick(true, false, true, None), Some(ms(1000)));
+        assert_eq!(tick(true, false, false, None), Some(ms(1000)));
+        // Someone speaks: draw again when their ring may turn off.
+        assert_eq!(tick(true, false, false, Some(ms(240))), Some(ms(240)));
+        // The settings meter is live only while the window has focus.
+        assert_eq!(tick(true, true, true, None), Some(ms(100)));
+        assert_eq!(tick(false, true, false, None), Some(ms(1000)));
+        assert_eq!(tick(true, true, true, Some(ms(40))), Some(ms(40)));
+    }
 
     #[test]
     fn going_live_moves_shared_apps_into_the_stream() {
