@@ -1,4 +1,9 @@
-use std::{env, net::IpAddr, time::Duration};
+use std::{
+    env,
+    net::IpAddr,
+    sync::{Mutex, PoisonError},
+    time::Duration,
+};
 
 use anyhow::{Context, ensure};
 
@@ -23,6 +28,10 @@ use crate::{
 const PUBLIC_LIMIT: i64 = 256;
 // Several friends behind one home router reconnect at once after a restart.
 const PUBLIC_LIMIT_PER_IP: i64 = 32;
+const CHALLENGE_LIMIT: usize = 4096;
+// About 30 devices behind one router, each with an old client that also fetches an unused
+// challenge when it connects.
+const CHALLENGE_LIMIT_PER_IP: usize = 64;
 const SESSIONS_PER_PERSON: i64 = 16;
 use rusttalk_core::identity::REVOCATIONS_PER_PERSON;
 const CHALLENGE_TTL: i64 = 60;
@@ -43,35 +52,60 @@ pub fn session_ttl() -> anyhow::Result<i64> {
     Ok(SESSION_TTL)
 }
 
-pub async fn challenge(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Challenge>> {
-    let ip = client_ip(&headers)?;
-    let mut tx = write(&app.db).await?;
-    let at = now()?;
-    let ip = check_public_limit(&mut tx, &ip, at, PublicLimit::Challenge).await?;
-    let challenge = random::<32>()?;
-    query("INSERT INTO challenges (nonce, ip, expires_at) VALUES (?, ?, ?)")
-        .bind(challenge.as_slice())
-        .bind(&ip)
-        .bind(at + CHALLENGE_TTL)
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
-    Ok(Json(Challenge::signed(&challenge, &app.key)))
+/// Outstanding sign-in challenges. They are single-use and live 60 seconds, so they stay in
+/// memory: issuing and consuming one takes no writer turn, and a restart only makes a sign-in
+/// in progress fetch a new one.
+static CHALLENGES: Mutex<Challenges> = Mutex::new(Challenges(Vec::new()));
+
+/// Each challenge with the rate-limit key of the IP that fetched it and its expiry, oldest first.
+struct Challenges(Vec<([u8; 32], String, i64)>);
+
+impl Challenges {
+    fn issue(&mut self, nonce: [u8; 32], ip: String, at: i64) -> ApiResult<()> {
+        self.0.retain(|(_, _, expires_at)| *expires_at > at);
+        let mut from_ip = self
+            .0
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, key, _))| *key == ip);
+        // An IP at its share gives up its oldest challenge, which a reconnect loop or an old
+        // client's connect check left unused, so nobody else behind that router is locked out.
+        if let Some((oldest, _)) = from_ip.next()
+            && from_ip.count() + 1 >= CHALLENGE_LIMIT_PER_IP
+        {
+            self.0.remove(oldest);
+        } else if self.0.len() >= CHALLENGE_LIMIT {
+            return Err(ApiError::new(
+                StatusCode::TOO_MANY_REQUESTS,
+                "challenge_limit",
+            ));
+        }
+        self.0.push((nonce, ip, at + CHALLENGE_TTL));
+        Ok(())
+    }
+
+    /// Removes the challenge, so it is accepted at most once, and only before it expires.
+    fn take(&mut self, nonce: &[u8; 32], at: i64) -> ApiResult<()> {
+        let invalid = || ApiError::unauthorized("invalid_challenge");
+        let index = self.0.iter().position(|(stored, _, _)| stored == nonce);
+        let (_, _, expires_at) = self.0.remove(index.ok_or_else(invalid)?);
+        if expires_at <= at {
+            return Err(invalid());
+        }
+        Ok(())
+    }
 }
 
-async fn consume_challenge(db: &SqlitePool, challenge: &[u8; 32]) -> ApiResult<()> {
-    let mut tx = write(db).await?;
-    // Read the clock after the writer queue, so a challenge that expired while waiting is refused.
-    let result = query("DELETE FROM challenges WHERE nonce = ? AND expires_at > ?")
-        .bind(challenge.as_slice())
-        .bind(now()?)
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
-    if result.rows_affected() == 0 {
-        return Err(ApiError::unauthorized("invalid_challenge"));
-    }
-    Ok(())
+fn challenges() -> std::sync::MutexGuard<'static, Challenges> {
+    // Neither method can panic halfway, so the list is consistent even after a poisoning panic.
+    CHALLENGES.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+pub async fn challenge(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Challenge>> {
+    let ip = limit_key(&client_ip(&headers)?);
+    let challenge = random::<32>()?;
+    challenges().issue(challenge, ip, now()?)?;
+    Ok(Json(Challenge::signed(&challenge, &app.key)))
 }
 
 pub async fn sign_in(
@@ -109,8 +143,8 @@ async fn sign_in_device(
     }
     let ip = client_ip(headers)?;
     let challenge = decode(&request.challenge)?;
-    // Commit consumption even if subsequent checks reject the sign-in.
-    consume_challenge(&app.db, &challenge).await?;
+    // Consume the challenge even if subsequent checks reject the sign-in.
+    challenges().take(&challenge, now()?)?;
     let server_id = app.key.verifying_key().to_bytes();
     let cert = verify_device(&request, &challenge, &server_id)?;
     let person = cert.person_id().as_slice();
@@ -161,7 +195,7 @@ async fn sign_in_device(
     if added || !member {
         keys::changed(app, person, Some(device));
     } else {
-        app.signal(Change::Session);
+        app.signal(Change::Session(*cert.person_id()));
     }
     Ok(Json(session))
 }
@@ -220,7 +254,6 @@ pub fn limit_key(ip: &str) -> String {
 }
 
 pub enum PublicLimit {
-    Challenge,
     InvitePreview,
     OpenJoin,
 }
@@ -232,12 +265,6 @@ pub async fn check_public_limit(
     limit: PublicLimit,
 ) -> ApiResult<String> {
     let (table, code, max_total, max_per_ip) = match limit {
-        PublicLimit::Challenge => (
-            "challenges",
-            "challenge_limit",
-            PUBLIC_LIMIT,
-            PUBLIC_LIMIT_PER_IP,
-        ),
         PublicLimit::InvitePreview => (
             "invite_previews",
             "invite_preview_limit",
@@ -566,7 +593,7 @@ pub async fn refresh(State(app): State<App>, headers: HeaderMap) -> ApiResult<Js
         .await?;
     tx.commit().await?;
     tracing::info!(reason = "refreshed", "session token rotated");
-    app.signal(Change::Session);
+    app.signal(Change::Session(actor.person));
     Ok(Json(Session {
         token: encode(&token),
         expires_at,
@@ -676,42 +703,42 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn one_ip_cannot_take_every_challenge() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = crate::store::open(dir.path()).await.unwrap();
-        let app = crate::App {
-            emoji: crate::emoji::Emoji::open(dir.path(), &db)
-                .await
-                .unwrap()
-                .into(),
-            files: crate::files::Files::open(dir.path(), &db)
-                .await
-                .unwrap()
-                .into(),
-            db,
-            key: std::sync::Arc::new(ed25519_dalek::SigningKey::from_bytes(&[7; 32])),
-            changes: tokio::sync::broadcast::channel(128).0,
-            presence: Default::default(),
-            voice: None,
-            session_ttl: SESSION_TTL,
-            listing_changed: tokio::sync::watch::channel(()).0,
+    #[test]
+    fn one_ip_cannot_take_every_challenge() {
+        let mut issued = Challenges(Vec::new());
+        let at = 1_000;
+        let nonce = |ip: usize, n: usize| {
+            let mut nonce = [0; 32];
+            nonce[..8].copy_from_slice(&(ip as u32).to_le_bytes().repeat(2));
+            nonce[8..16].copy_from_slice(&n.to_le_bytes());
+            nonce
         };
-        let from = |ip: &str| {
-            let mut headers = HeaderMap::new();
-            headers.insert("x-forwarded-for", ip.parse().unwrap());
-            headers
-        };
-        for _ in 0..PUBLIC_LIMIT_PER_IP {
-            assert!(
-                challenge(State(app.clone()), from("2001:db8:1:2::1"))
-                    .await
-                    .is_ok()
-            );
+        let key = |ip: usize| format!("192.0.2.{ip}");
+        // One router past its share keeps working and only loses its own oldest challenge.
+        for n in 0..=CHALLENGE_LIMIT_PER_IP {
+            issued.issue(nonce(0, n), key(0), at).unwrap();
         }
-        let refused = challenge(State(app.clone()), from("2001:db8:1:2::2")).await;
-        assert_eq!(refused.err().unwrap().code, "challenge_limit");
-        assert!(challenge(State(app), from("2001:db8:1:3::1")).await.is_ok());
+        assert_eq!(issued.0.len(), CHALLENGE_LIMIT_PER_IP);
+        assert_eq!(
+            issued.take(&nonce(0, 0), at).unwrap_err().code,
+            "invalid_challenge"
+        );
+        assert!(issued.take(&nonce(0, 1), at).is_ok());
+        // Many addresses together hit the server-wide limit until their challenges expire.
+        for ip in 1..CHALLENGE_LIMIT / CHALLENGE_LIMIT_PER_IP {
+            for n in 0..CHALLENGE_LIMIT_PER_IP {
+                issued.issue(nonce(ip, n), key(ip), at).unwrap();
+            }
+        }
+        issued.issue(nonce(0, 999), key(0), at).unwrap();
+        let refused = issued.issue(nonce(999, 0), key(999), at + CHALLENGE_TTL - 1);
+        assert_eq!(refused.unwrap_err().code, "challenge_limit");
+        assert!(
+            issued
+                .issue(nonce(999, 0), key(999), at + CHALLENGE_TTL)
+                .is_ok()
+        );
+        assert_eq!(issued.0.len(), 1);
         assert_eq!(limit_key("2001:db8:1:2:3:4:5:6"), "2001:db8:1:2::");
         assert_eq!(limit_key("192.0.2.1"), "192.0.2.1");
     }
@@ -812,53 +839,29 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn challenges_are_single_use_and_expire() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = crate::store::open(dir.path()).await.unwrap();
-        let at = now().unwrap();
-        for (nonce, expires_at) in [([1u8; 32], at + 60), ([2u8; 32], at)] {
-            query("INSERT INTO challenges (nonce, expires_at) VALUES (?, ?)")
-                .bind(nonce.as_slice())
-                .bind(expires_at)
-                .execute(&db)
-                .await
-                .unwrap();
-        }
-        let nonce = [1; 32];
-        let (first, second) = tokio::join!(
-            consume_challenge(&db, &nonce),
-            consume_challenge(&db, &nonce)
-        );
-        assert_ne!(first.is_ok(), second.is_ok());
+    #[test]
+    fn challenges_are_single_use_and_expire() {
+        let mut issued = Challenges(Vec::new());
+        let at = 1_000;
+        issued.issue([1; 32], "192.0.2.1".into(), at).unwrap();
+        issued.issue([2; 32], "192.0.2.1".into(), at).unwrap();
+        issued.issue([3; 32], "192.0.2.1".into(), at).unwrap();
+        assert!(issued.take(&[1; 32], at + CHALLENGE_TTL - 1).is_ok());
         assert_eq!(
-            consume_challenge(&db, &[2; 32]).await.unwrap_err().code,
+            issued.take(&[1; 32], at).unwrap_err().code,
             "invalid_challenge"
         );
-    }
-
-    #[tokio::test]
-    async fn a_challenge_that_expires_while_queued_is_refused() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = crate::store::open(dir.path()).await.unwrap();
-        query("INSERT INTO challenges (nonce, expires_at) VALUES (?, ?)")
-            .bind([3u8; 32].as_slice())
-            .bind(now().unwrap() + 1)
-            .execute(&db)
-            .await
-            .unwrap();
-        // Another write holds the writer turn until the challenge has expired.
-        let busy = write(&db).await.unwrap();
-        let consume = tokio::spawn({
-            let db = db.clone();
-            async move { consume_challenge(&db, &[3; 32]).await }
-        });
-        tokio::time::sleep(Duration::from_millis(2100)).await;
-        drop(busy);
+        // A late sign-in uses up its expired challenge too.
         assert_eq!(
-            consume.await.unwrap().unwrap_err().code,
+            issued.take(&[2; 32], at + CHALLENGE_TTL).unwrap_err().code,
             "invalid_challenge"
         );
+        assert!(issued.take(&[2; 32], at).is_err());
+        assert_eq!(
+            issued.take(&[4; 32], at).unwrap_err().code,
+            "invalid_challenge"
+        );
+        assert!(issued.take(&[3; 32], at).is_ok());
     }
 
     #[tokio::test]

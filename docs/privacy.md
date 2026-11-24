@@ -6,6 +6,8 @@ No telemetry, analytics, crash reporting or tracking.
 
 The API stores its Ed25519 signing seed in `server.key` and the following
 tables in SQLite (WAL). IDs and digests are binary unless indicated. The `_ct` suffix denotes encrypted binary data.
+Sign-in challenges (32 random bytes, the IPv4 address or IPv6 /64 that fetched them, and
+their expiry) are kept only in memory for at most 60 seconds.
 
 | Table | Columns |
 | --- | --- |
@@ -14,7 +16,6 @@ tables in SQLite (WAL). IDs and digests are binary unless indicated. The `_ct` s
 | `server_settings` | Singleton `id`, nullable `owner_person_id`, `default_role_id`, nullable `name_ct`, nullable `description_ct`, nullable `icon_ct`, `open_joining` (public flag), `member_cap` (open admission limit), nullable `index_listing_ct` (encrypted public-listing configuration), nullable `max_file_bytes`, `member_storage_bytes`, `server_storage_bytes`, `retention_secs`, `max_stickers` (server limits), `events_enabled` (whether Events is on) |
 | `member_roles` | `person_id`, `role_id` |
 | `invites` | `id` (opaque text), `code_hash` (SHA-256), `is_owner`, `remaining_uses`, `expires_at`, nullable `space_key_ct` and `name_ct` for preview, nullable `created_by` (person ID of the member who made it) |
-| `challenges` | `nonce` (32 random bytes), `ip` (IPv4 address or IPv6 /64), `expires_at` |
 | `sessions` | `token_hash` (SHA-256), `person_id`, `device_id` (Ed25519 public key), `ip` (canonical source IP at issuance), `expires_at` |
 | `revocations` | `person_id`, `device_id`, `record` (W04 signature, device public key and revocation timestamp) |
 | `bans` | `person_id`, `banned_at` (Unix seconds) |
