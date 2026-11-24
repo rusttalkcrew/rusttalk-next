@@ -2,7 +2,9 @@ name: Mobile apps
 
 # Builds a test Android APK and an unsigned iOS IPA from the client's code, so a pull
 # request that touches the client proves the phone builds still work (docs/mobile.md).
-# Run it by hand from the Actions tab for test builds of any branch.
+# Hosted Mac runners are scarce (#479), so pull requests build only Android here; iOS
+# runs from ios.yml (iOS changes, nightly). Run it by hand from the Actions tab for
+# test builds of any branch.
 on:
   pull_request:
     paths:
@@ -20,19 +22,24 @@ on:
       release:
         type: boolean
         default: false
+      ios-only:
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
   group: mobile-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ !inputs.release }}
+  # A newer push replaces a pull request's run; release and manual runs finish.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   MOBILE_BUILD: ${{ inputs.release && 'release' || 'test' }}
 
 jobs:
   android:
+    if: ${{ !inputs.ios-only }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -52,6 +59,7 @@ jobs:
           retention-days: 7
 
   ios:
+    if: ${{ github.event_name != 'pull_request' || inputs.ios-only }}
     runs-on: macos-latest
     timeout-minutes: 60
     steps:

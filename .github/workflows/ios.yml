@@ -1,0 +1,27 @@
+name: iOS app
+
+# Builds the unsigned iOS IPA (mobile.yml) only for iOS changes, nightly and by hand:
+# hosted Mac runners are scarce and runs that wait for one get replaced (#479).
+on:
+  pull_request:
+    paths:
+      - deploy/ios/**
+      - crates/client/src/ios.rs
+      - crates/client/src/ios/**
+      - crates/client/src/camera/mobile/ios.*
+      - crates/client/Cargo.toml
+      - rust-toolchain.toml
+      - .github/workflows/ios.yml
+      - .github/workflows/mobile.yml
+  schedule:
+    - cron: '47 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ios:
+    uses: ./.github/workflows/mobile.yml
+    with:
+      ios-only: true
