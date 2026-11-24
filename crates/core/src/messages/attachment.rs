@@ -5,7 +5,7 @@ use super::{MAX_FILE_NAME as MAX_NAME, MAX_MEDIA_TYPE as MAX_TYPE, MessageError,
 const BLOB_BYTES: usize = 32 + 32 + 4 + 4;
 const _: () = assert!(super::MAX_ATTACHMENT_BYTES == 2 * BLOB_BYTES + 3 + MAX_NAME + MAX_TYPE);
 pub(crate) const TAG_BYTES: usize = 16;
-#[cfg(feature = "client")]
+#[cfg(any(feature = "client", test))]
 pub(crate) const CHUNK_BYTES: u32 = 64 * 1024;
 pub(crate) const MAX_CIPHERTEXT: usize = 32 * 1024 * 1024;
 pub(crate) const MAX_THUMBNAIL_BYTES: usize = 512 * 1024;

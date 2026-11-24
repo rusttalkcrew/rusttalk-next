@@ -229,6 +229,8 @@ const _: () = assert!(MIN_PLAINTEXT + MAX_POLL_QUESTION * 4 + poll::MAX_BYTES <=
 #[cfg(any(feature = "client", test))]
 mod attachment;
 #[cfg(any(feature = "client", test))]
+pub(crate) use attachment::CHUNK_BYTES;
+#[cfg(any(feature = "client", test))]
 pub use attachment::{Attachment, BlobRef};
 #[cfg(feature = "client")]
-pub(crate) use attachment::{CHUNK_BYTES, MAX_CIPHERTEXT, MAX_THUMBNAIL_BYTES, TAG_BYTES};
+pub(crate) use attachment::{MAX_CIPHERTEXT, MAX_THUMBNAIL_BYTES, TAG_BYTES};
