@@ -77,11 +77,7 @@ impl Mention<'_> {
 
     fn label(self, dir: &Directory) -> String {
         let name = match self {
-            Self::Person(id) => dir
-                .members
-                .iter()
-                .find(|member| member.person == id)
-                .and_then(|member| member.name.as_deref()),
+            Self::Person(id) => (dir.members.get(&id)).and_then(|member| member.name.as_deref()),
             Self::Role(id) => dir
                 .roles
                 .iter()
@@ -99,16 +95,12 @@ impl Mention<'_> {
 
 pub fn can_mention_everyone(dir: &Directory, channel: Id, person: Id) -> bool {
     !dir.dms.iter().any(|dm| dm.channel == channel)
-        && dir
-            .members
-            .iter()
-            .find(|member| member.person == person)
-            .is_some_and(|member| {
-                dir.roles.iter().any(|role| {
-                    member.roles.contains(&role.id)
-                        && role.permissions.iter().any(|p| p == MENTION_EVERYONE)
-                })
+        && (dir.members.get(&person)).is_some_and(|member| {
+            dir.roles.iter().any(|role| {
+                member.roles.contains(&role.id)
+                    && role.permissions.iter().any(|p| p == MENTION_EVERYONE)
             })
+        })
 }
 
 pub(super) fn allowed_to_send(doc: &Document, wide: bool) -> bool {
