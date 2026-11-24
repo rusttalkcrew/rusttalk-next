@@ -640,8 +640,23 @@ async fn docker_keys(
     Ok(())
 }
 
-#[tokio::test]
-async fn docker_membership() -> Result<()> {
+#[test]
+fn docker_membership() -> Result<()> {
+    // The whole scenario is one deep async chain; with every step added, a debug build
+    // needs more than the 2 MiB test thread stack while LiveKit joins.
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?
+                .block_on(membership())
+        })?
+        .join()
+        .expect("e2e thread panicked")
+}
+
+async fn membership() -> Result<()> {
     let Ok(project) = env::var("RUSTTALK_E2E_PROJECT") else {
         return Ok(());
     };
