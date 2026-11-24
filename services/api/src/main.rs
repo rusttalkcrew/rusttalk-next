@@ -78,8 +78,9 @@ const CHANGE_BACKLOG: usize = 1024;
 #[derive(Clone)]
 enum Change {
     Update(rusttalk_core::presence::Update),
-    /// Sessions were replaced, so each socket rechecks only its own session.
-    Session,
+    /// This person's sessions were replaced or refreshed, so their sockets recheck their own
+    /// session.
+    Session(rusttalk_core::identity::PersonId),
     /// A new key epoch or a reopened wrap, so each socket recomputes pending wraps and scopes.
     Keys,
 }

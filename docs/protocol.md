@@ -53,7 +53,8 @@ certificate uses the public W06 format described in [Crypto](crypto.md). Use a f
 challenge per attempt. A client may sign the challenge it verified while connecting
 instead of fetching another, but only once and only within 30 seconds of requesting it. The server consumes a recognized challenge before
 verifying the device proof, and rejects challenges after 60 seconds. At most
-256 challenges are outstanding across the server.
+4096 challenges are outstanding across the server and 64 per IPv4 address or
+IPv6 /64; a new challenge past an address's share replaces that address's oldest.
 
 Members sign in with their device proof. For a new member, supply the invite
 code as the optional `invite` field. Invite redemption, membership and session

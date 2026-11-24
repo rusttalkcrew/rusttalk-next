@@ -108,7 +108,7 @@ async fn stream(
         for _ in 0..=app.changes.len() {
             use broadcast::error::TryRecvError;
             match changes.try_recv() {
-                Ok(change) => recheck = recheck.max(queue(&mut notices, change, &device)),
+                Ok(change) => recheck = recheck.max(queue(&mut notices, change, actor, &device)),
                 Err(TryRecvError::Lagged(_)) => lagged = true,
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Closed) => return Ok("server_closed"),
@@ -239,7 +239,7 @@ async fn stream(
                 },
                 update = changes.recv() => {
                     match update {
-                        Ok(change) => recheck = recheck.max(queue(&mut notices, change, &device)),
+                        Ok(change) => recheck = recheck.max(queue(&mut notices, change, actor, &device)),
                         Err(broadcast::error::RecvError::Lagged(_)) => lagged = true,
                         Err(broadcast::error::RecvError::Closed) => return Ok("server_closed"),
                     }
@@ -259,10 +259,11 @@ enum Recheck {
 }
 
 /// Queue a client notice and report what it can change: nothing, sessions, or access and keys.
-/// `device` is this socket's device.
-fn queue(notices: &mut Vec<Update>, change: Change, device: &str) -> Recheck {
+/// `actor` and `device` are this socket's signed-in person and encoded device.
+fn queue(notices: &mut Vec<Update>, change: Change, actor: &Actor, device: &str) -> Recheck {
     match change {
-        Change::Session => Recheck::Session,
+        Change::Session(person) if person == actor.person => Recheck::Session,
+        Change::Session(_) => Recheck::None,
         Change::Keys => Recheck::Access,
         Change::Update(update) => {
             let recheck = match &update {
@@ -343,10 +344,26 @@ async fn session(
 mod tests {
     use super::*;
 
+    fn test_actor() -> Actor {
+        Actor {
+            person: [1; 32],
+            device: vec![2; 32],
+            ip: String::new(),
+            at: 0,
+            session_id: Vec::new(),
+            expires_at: 0,
+        }
+    }
+
     #[test]
     fn sign_ins_recheck_only_sessions() {
         let mut notices = Vec::new();
-        assert!(queue(&mut notices, Change::Session, "d") == Recheck::Session);
+        let actor = test_actor();
+        let queue =
+            |notices: &mut Vec<Update>, change, device: &str| queue(notices, change, &actor, device);
+        assert!(queue(&mut notices, Change::Session([1; 32]), "d") == Recheck::Session);
+        // Another person's sign-in does not wake this socket.
+        assert!(queue(&mut notices, Change::Session([3; 32]), "d") == Recheck::None);
         assert!(queue(&mut notices, Change::Keys, "d") == Recheck::Access);
         let message = Event::MessageCreated {
             channel: "c".into(),
@@ -383,8 +400,9 @@ mod tests {
                 device: device.into(),
             })))
         };
-        assert!(queue(&mut notices, need("other"), "d") == Recheck::None);
-        assert!(queue(&mut notices, need("d"), "d") == Recheck::Access);
+        let actor = test_actor();
+        assert!(queue(&mut notices, need("other"), &actor, "d") == Recheck::None);
+        assert!(queue(&mut notices, need("d"), &actor, "d") == Recheck::Access);
         assert_eq!(notices.len(), 2);
     }
 
