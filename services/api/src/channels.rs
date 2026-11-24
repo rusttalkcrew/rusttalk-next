@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use axum::{
     Json,
     extract::{Path, State, rejection::JsonRejection},
@@ -188,14 +190,22 @@ async fn channels(db: &mut SqliteConnection, person: Option<&[u8]>) -> ApiResult
     .bind(person)
     .fetch_all(&mut *db)
     .await?;
+    // One query for every channel's flags instead of one per channel (DMs never have rows).
+    let permissions: Vec<(String, String, u8)> = query_as(
+        "SELECT channel_id, role_id, flags FROM channel_permissions ORDER BY channel_id, role_id",
+    )
+    .fetch_all(&mut *db)
+    .await?;
+    let mut by_channel = HashMap::<_, Vec<_>>::new();
+    for (channel, role_id, flags) in permissions {
+        by_channel
+            .entry(channel)
+            .or_default()
+            .push(RoleFlags { role_id, flags });
+    }
     let mut channels = Vec::with_capacity(rows.len());
     for row in rows {
-        let flags = query_as(
-            "SELECT role_id, flags FROM channel_permissions WHERE channel_id = ? ORDER BY role_id",
-        )
-        .bind(&row.id)
-        .fetch_all(&mut *db)
-        .await?;
+        let flags = by_channel.remove(&row.id).unwrap_or_default();
         let audio_kbps = (row.kind == "voice").then_some(row.audio_kbps);
         let member_limit =
             (row.kind == "voice" && row.member_limit > 0).then_some(row.member_limit);
@@ -1155,6 +1165,83 @@ mod tests {
         .fetch_one(&app.db)
         .await?;
         assert_eq!(audited, 3);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn catalog_lists_each_channels_flags_by_role_and_none_for_dms() -> anyhow::Result<()> {
+        use crate::testing::{app, as_person, person};
+        let dir = tempfile::tempdir()?;
+        let app = app(dir.path(), 2).await?;
+        query("INSERT INTO member_roles (person_id, role_id) VALUES (?, 'member')")
+            .bind(person(2))
+            .execute(&app.db)
+            .await?;
+        query("INSERT INTO categories (id, position, name_ct) VALUES (?, 0, x'00')")
+            .bind(id(10))
+            .execute(&app.db)
+            .await?;
+        // Channels 20..=23 in reverse position order; 23 has no rows. Rows go in unsorted.
+        for (channel, kind) in [(20_u8, "text"), (21, "voice"), (22, "text"), (23, "text")] {
+            query("INSERT INTO channels (id, kind, category_id, position, name_ct) VALUES (?, ?, ?, ?, x'00')")
+                .bind(id(channel))
+                .bind(kind)
+                .bind(id(10))
+                .bind(30 - i64::from(channel))
+                .execute(&app.db)
+                .await?;
+        }
+        for (channel, role, flags) in [
+            (22_u8, "moderator", 3_u8),
+            (20, "owner", 15),
+            (22, "member", 1),
+            (21, "member", 13),
+            (22, "admin", 15),
+            (20, "member", 3),
+            (21, "admin", 5),
+            (22, "owner", 7),
+        ] {
+            query("INSERT INTO channel_permissions (channel_id, role_id, flags) VALUES (?, ?, ?)")
+                .bind(id(channel))
+                .bind(role)
+                .bind(flags)
+                .execute(&app.db)
+                .await?;
+        }
+        query("INSERT INTO channels (id, kind, position, dm_first, dm_second) VALUES ('dm', 'dm', 0, ?, ?)")
+            .bind(person(1)).bind(person(2)).execute(&app.db).await?;
+
+        // Each channel's flags as JSON, in catalog order (position, then id), roles sorted.
+        let entry = |channel: String, flags: &[(&str, u8)]| {
+            let flags: Vec<_> = flags
+                .iter()
+                .map(|(role, flags)| serde_json::json!({ "role_id": role, "flags": flags }))
+                .collect();
+            serde_json::json!([channel, flags])
+        };
+        let readable = [
+            entry("dm".into(), &[]),
+            entry(
+                id(22),
+                &[("admin", 15), ("member", 1), ("moderator", 3), ("owner", 7)],
+            ),
+            entry(id(21), &[("admin", 5), ("member", 13)]),
+            entry(id(20), &[("member", 3), ("owner", 15)]),
+        ];
+        // The owner reads every channel, so also 23 (no rows); the member reads 20..=22 and the DM.
+        let mut owner = readable.to_vec();
+        owner.insert(1, entry(id(23), &[]));
+        for (who, expected) in [(1_u8, owner), (2, readable.to_vec())] {
+            let Json(catalog) = catalog(State(app.clone()), as_person(who)).await?;
+            let listed = serde_json::to_value(&catalog)?;
+            let shown: Vec<_> = listed["channels"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| serde_json::json!([c["id"], c["flags"]]))
+                .collect();
+            assert_eq!(shown, expected, "person {who}");
+        }
         Ok(())
     }
 }
