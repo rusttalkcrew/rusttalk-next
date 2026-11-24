@@ -1023,6 +1023,16 @@ async fn run(
                         )
                         .await;
                         state.identities = voice::identities(&client, &state.server_id);
+                        // A join needs the API connection to finish, so it ends with it.
+                        if let Some(mut joining) = state.joining.take() {
+                            ctx.send(Update::Call(url.clone(), joining.channel, None));
+                            // Shares need telling they failed; the rest only mattered in the call.
+                            for command in std::mem::take(&mut joining.deferred) {
+                                if !voice_only(&command) {
+                                    refuse(&ctx, &url, command);
+                                }
+                            }
+                        }
                         ctx.sync.set_peer(&url, None);
                         match end {
                             End::Quit => return,
@@ -1526,11 +1536,11 @@ async fn serve(
             }
             next = next_voice(&mut state.voice) => voice_next(ctx, url, Some(client), state, next).await,
             joined = voice::next_join(&mut state.joining) => {
-                let Some(joining) = state.joining.take() else { continue };
+                let Some(mut joining) = state.joining.take() else { continue };
                 if let Err(error) = voice::finish_call(ctx, url, client, state, joining.channel, joined).await {
                     report(ctx, error);
                 }
-                for command in joining.deferred {
+                for command in std::mem::take(&mut joining.deferred) {
                     run_command(ctx, url, client, state, command).await;
                 }
             }

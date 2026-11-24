@@ -710,6 +710,17 @@ pub(super) struct Joining {
     pub(super) deferred: Vec<Command>,
 }
 
+impl Drop for Joining {
+    /// Dropped between the join finishing and `serve` taking its room: leave that room too.
+    fn drop(&mut self) {
+        if let Ok(Ok(room)) = self.room.try_recv()
+            && let Ok(runtime) = tokio::runtime::Handle::try_current()
+        {
+            runtime.spawn(leave_room(room));
+        }
+    }
+}
+
 /// Connect and publish the microphone when allowed to talk.
 fn spawn_join(ctx: &Ctx, pending: PendingVoice, channel: Id) -> Joining {
     let (done, room) = tokio::sync::oneshot::channel();

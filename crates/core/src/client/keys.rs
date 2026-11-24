@@ -1193,6 +1193,8 @@ impl<'a> KeyClient<'a> {
     #[cfg(feature = "voice")]
     fn key_fresh(&self, scope: Scope) -> bool {
         !self.stale
+            // A device removal not synced yet; `current_key` only checks this on newer servers.
+            && !self.changes.has_changed().unwrap_or(true)
             && self.current_key(scope).is_ok()
             && self
                 .next_rekey()
@@ -1737,6 +1739,14 @@ mod tests {
         client.rotation_retry = Some(std::time::Instant::now());
         assert!(!client.key_fresh(scope), "lost rotation race due a retry");
         client.rotation_retry = None;
+        assert!(client.key_fresh(scope));
+
+        // Another connection learned of a device removal.
+        let (removed, changes) = tokio::sync::watch::channel(());
+        client.changes = changes;
+        removed.send_replace(());
+        assert!(!client.key_fresh(scope), "device removal not synced yet");
+        client.changes.borrow_and_update();
         assert!(client.key_fresh(scope));
         Ok(())
     }
