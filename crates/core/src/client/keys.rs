@@ -1180,7 +1180,16 @@ impl<'a> KeyClient<'a> {
         while !self.closed
             && let Some(Some(frame)) = self.events.next().now_or_never()
         {
-            self.receive(frame?)?;
+            // A broken event stream is for the event loop to reconnect; joining goes on
+            // over HTTP as before, but key events may be lost, so sync.
+            if let Err(error) = frame
+                .map_err(anyhow::Error::from)
+                .and_then(|frame| self.receive(frame))
+            {
+                tracing::warn!(error = %format_args!("{error:#}"), "event stream failed while joining voice");
+                self.closed = true;
+                self.stale = true;
+            }
         }
         if !self.key_fresh(scope) {
             self.sync().await?;
