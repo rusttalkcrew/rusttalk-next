@@ -328,6 +328,7 @@ impl Home {
         call::leave(self);
         self.net.stop_for_sign_out();
         self.voice.audio.stop_saving();
+        self.notify.stop_saving();
     }
 
     /// Close active calls and refresh clients after switching the per-app network route.
@@ -1955,8 +1956,9 @@ pub fn show(
     home.layout
         .set_window_width(ui.available_width() - RAIL_WIDTH);
     if home.focused && !focused {
-        // Stepping away: read marks reach the other devices.
+        // Stepping away: read marks reach the other devices and the disk.
         home.publish_settings();
+        home.notify.save_soon();
     }
     home.focused = focused;
     while let Ok(update) = home.net.updates.try_recv() {

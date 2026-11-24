@@ -7,7 +7,12 @@
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     path::{Path, PathBuf},
-    sync::mpsc::{Receiver, Sender, channel},
+    sync::{
+        Arc, Condvar, Mutex, MutexGuard, PoisonError,
+        mpsc::{Receiver, Sender, channel},
+    },
+    thread::JoinHandle,
+    time::{Duration, Instant},
 };
 
 use rusttalk_core::{auth::encode, client::save_json};
@@ -354,7 +359,7 @@ fn read_key(server: &Url, channel: &Id) -> String {
     format!("{server} {}", encode(channel))
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 enum Reminder {
     Seen { at: i64, remove_at: i64 },
@@ -380,7 +385,7 @@ impl Reminder {
 }
 
 /// `notify.json`.
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 struct Saved {
     prefs: Prefs,
@@ -394,10 +399,162 @@ struct Saved {
     reminded: BTreeMap<String, Reminder>,
 }
 
+/// How long read marks wait before they're written, so a busy channel doesn't write
+/// `notify.json` (and wait for the disk) once per message.
+const SAVE_DELAY: Duration = Duration::from_secs(3);
+
+/// What the writer thread has to do.
+#[derive(Default)]
+struct Slot {
+    /// The newest copy not written yet; a newer one replaces it.
+    latest: Option<Saved>,
+    /// Write `latest` now instead of after the delay.
+    urgent: bool,
+    /// Write what is left and end.
+    stop: bool,
+    /// A write is in progress.
+    busy: bool,
+    #[cfg(test)]
+    writes: usize,
+}
+
+/// Writes `notify.json` off the UI thread, one write at a time, newest copy wins.
+struct Writer {
+    shared: Arc<(Mutex<Slot>, Condvar)>,
+    thread: Option<JoinHandle<()>>,
+    delay: Duration,
+}
+
+impl Writer {
+    fn new(delay: Duration) -> Self {
+        Self {
+            shared: Arc::default(),
+            thread: None,
+            delay,
+        }
+    }
+
+    fn slot(&self) -> MutexGuard<'_, Slot> {
+        self.shared.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn save(&mut self, data: &Path, path: &Path, saved: &Saved, urgent: bool) {
+        if self.slot().stop {
+            return;
+        }
+        if self.thread.is_none() {
+            let (shared, dir, file, delay) = (
+                self.shared.clone(),
+                data.to_owned(),
+                path.to_owned(),
+                self.delay,
+            );
+            let spawned = std::thread::Builder::new()
+                .name("notify-save".into())
+                .spawn(move || write_loop(&shared, &dir, &file, delay));
+            match spawned {
+                Ok(thread) => self.thread = Some(thread),
+                Err(error) => {
+                    tracing::warn!(%error, "starting the notification settings writer failed");
+                    write(data, path, saved);
+                    return;
+                }
+            }
+        }
+        let mut slot = self.slot();
+        slot.latest = Some(saved.clone());
+        slot.urgent |= urgent;
+        drop(slot);
+        self.shared.1.notify_all();
+    }
+
+    /// Write anything waiting without the delay, in the background.
+    fn soon(&self) {
+        let mut slot = self.slot();
+        if slot.latest.is_some() {
+            slot.urgent = true;
+            drop(slot);
+            self.shared.1.notify_all();
+        }
+    }
+
+    /// Write anything waiting now, and return once it's on disk.
+    #[cfg(test)]
+    fn flush(&self) {
+        let mut slot = self.slot();
+        slot.urgent |= slot.latest.is_some();
+        self.shared.1.notify_all();
+        while self.thread.is_some() && (slot.latest.is_some() || slot.busy) {
+            slot = (self.shared.1.wait(slot)).unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    /// End the thread, first writing what is waiting unless `discard`.
+    fn stop(&mut self, discard: bool) {
+        let mut slot = self.slot();
+        if discard {
+            slot.latest = None;
+        }
+        slot.stop = true;
+        drop(slot);
+        self.shared.1.notify_all();
+        if let Some(thread) = self.thread.take()
+            && thread.join().is_err()
+        {
+            tracing::warn!("the notification settings writer panicked");
+        }
+    }
+}
+
+fn write_loop(shared: &(Mutex<Slot>, Condvar), data: &Path, path: &Path, delay: Duration) {
+    let (lock, wake) = shared;
+    let mut slot = lock.lock().unwrap_or_else(PoisonError::into_inner);
+    loop {
+        while slot.latest.is_none() && !slot.stop {
+            slot = wake.wait(slot).unwrap_or_else(PoisonError::into_inner);
+        }
+        // Wait out the delay from the first change, taking newer copies meanwhile.
+        let due = Instant::now() + delay;
+        while slot.latest.is_some() && !slot.urgent && !slot.stop {
+            let left = due.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            slot = (wake.wait_timeout(slot, left))
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+        let Some(saved) = slot.latest.take() else {
+            if slot.stop {
+                return;
+            }
+            continue;
+        };
+        slot.urgent = false;
+        slot.busy = true;
+        drop(slot);
+        write(data, path, &saved);
+        slot = lock.lock().unwrap_or_else(PoisonError::into_inner);
+        slot.busy = false;
+        #[cfg(test)]
+        {
+            slot.writes += 1;
+        }
+        wake.notify_all();
+    }
+}
+
+fn write(data: &Path, path: &Path, saved: &Saved) {
+    if let Err(error) = save_json(data, path, saved) {
+        tracing::warn!(error = %format_args!("{error:#}"), "saving notification settings failed");
+    }
+}
+
 pub struct Notify {
     path: PathBuf,
     data: PathBuf,
     saved: Saved,
+    writer: Writer,
     /// By server and channel: another server can list a channel under the ID of a
     /// DM here, and its messages must not mark the DM.
     pub activity: HashMap<(Url, Id), Activity>,
@@ -428,6 +585,7 @@ impl Notify {
             path,
             data: data.to_owned(),
             saved,
+            writer: Writer::new(SAVE_DELAY),
             activity: HashMap::new(),
             clicks: channel(),
             failed: false,
@@ -447,10 +605,30 @@ impl Notify {
         }
     }
 
-    fn save(&self) {
-        if let Err(error) = save_json(&self.data, &self.path, &self.saved) {
-            tracing::warn!(error = %format_args!("{error:#}"), "saving notification settings failed");
-        }
+    /// Write choices and reminder marks right away, in the background.
+    fn save(&mut self) {
+        (self.writer).save(&self.data, &self.path, &self.saved, true);
+    }
+
+    /// Write read marks after a short delay, together with any that follow.
+    fn save_later(&mut self) {
+        (self.writer).save(&self.data, &self.path, &self.saved, false);
+    }
+
+    /// The window lost focus: write waiting read marks now, in the background.
+    pub fn save_soon(&self) {
+        self.writer.soon();
+    }
+
+    /// Write anything waiting and return once it's on disk.
+    #[cfg(test)]
+    fn flush(&self) {
+        self.writer.flush();
+    }
+
+    /// Signing out: drop what is waiting and never write again.
+    pub fn stop_saving(&mut self) {
+        self.writer.stop(true);
     }
 
     fn read_until(&self, server: &Url, channel: &Id) -> i64 {
@@ -489,7 +667,7 @@ impl Notify {
         let latest = activity.latest;
         if latest > self.read_until(server, channel) {
             self.saved.read.insert(read_key(server, channel), latest);
-            self.save();
+            self.save_later();
         }
     }
 
@@ -637,6 +815,13 @@ impl Notify {
             Ok(_) => self.failed = failed,
             Err(error) => tracing::warn!(%error, "starting the notification thread failed"),
         }
+    }
+}
+
+impl Drop for Notify {
+    /// Quitting or closing the account: nothing waiting is lost.
+    fn drop(&mut self) {
+        self.writer.stop(false);
     }
 }
 
@@ -906,6 +1091,7 @@ mod tests {
             assert!(notify.new_reminder(&url(), &[id; 32], NOW, NOW + 10, false));
         }
         assert!(notify.new_reminder(&other, &event, NOW, NOW + 10, false));
+        notify.flush();
         let mut notify = Notify::open(dir.path(), NOW + 9);
         for id in 0..=200 {
             assert!(!notify.new_reminder(&url(), &[id; 32], NOW, NOW + 10, false));
@@ -914,6 +1100,7 @@ mod tests {
         notify.expire_reminders(NOW + 10);
         assert_eq!(notify.saved.reminded.len(), 1);
         assert!(!notify.new_reminder(&other, &event, NOW, NOW + 20, false));
+        notify.flush();
         assert!(Notify::open(dir.path(), NOW + 20).saved.reminded.is_empty());
     }
 
@@ -930,9 +1117,11 @@ mod tests {
         assert!(notify.prefs().unfocused_only);
         assert!(!notify.new_reminder(&url(), &event, NOW, NOW + 50, false));
         assert!(!notify.new_reminder(&url(), &event, NOW + 1, NOW + 50, true));
+        notify.flush();
         let mut notify = Notify::open(dir.path(), NOW + 2);
         assert!(!notify.new_reminder(&url(), &event, NOW + 1, NOW + 50, false));
         assert!(notify.new_reminder(&url(), &event, NOW + 2, NOW + 50, false));
+        notify.flush();
         assert!(Notify::open(dir.path(), NOW + 50).saved.reminded.is_empty());
     }
 
@@ -960,6 +1149,7 @@ mod tests {
         assert_eq!(notify.mentions(&url(), &channel), 0);
 
         // The read mark survives a restart.
+        notify.flush();
         let mut again = Notify::open(dir.path(), NOW + 100);
         again.arrived(&url(), channel, NOW + 7, false);
         assert!(!again.unread(&url(), &channel));
@@ -1000,6 +1190,7 @@ mod tests {
         let read = [3; 32];
         laptop.arrived(&url(), read, NOW + 50, false);
         laptop.mark_read(&url(), &read);
+        laptop.flush();
         assert!(Notify::open(one.path(), NOW).prefs() == &prefs);
 
         // The desktop read further in one channel and less in another.
@@ -1027,6 +1218,102 @@ mod tests {
         let mut bad = synced.clone();
         bad.insert(PREFS_KEY.into(), serde_json::json!("loud"));
         desktop.adopt(&bad);
+        desktop.flush();
         assert!(Notify::open(two.path(), NOW).prefs() == &prefs);
+    }
+
+    fn writes(notify: &Notify) -> usize {
+        notify.writer.slot().writes
+    }
+
+    /// Notify that waits `delay` before writing read marks.
+    fn reading(dir: &Path, delay: Duration) -> Notify {
+        let mut notify = Notify::open(dir, NOW);
+        notify.writer.delay = delay;
+        notify
+    }
+
+    fn read_marks_on_disk(dir: &Path) -> BTreeMap<String, i64> {
+        let saved: Saved = crate::load_json::<Option<Saved>>(&dir.join("notify.json"))
+            .unwrap()
+            .unwrap_or_default();
+        saved.read
+    }
+
+    #[test]
+    fn a_burst_of_read_marks_is_written_once_after_the_delay() {
+        let dir = tempfile::tempdir().unwrap();
+        let delay = Duration::from_millis(300);
+        let mut notify = reading(dir.path(), delay);
+        let channel = [2; 32];
+        let started = Instant::now();
+        for at in 1..=100 {
+            notify.arrived(&url(), channel, NOW + at, false);
+            notify.mark_read(&url(), &channel);
+        }
+        assert_eq!(writes(&notify), 0, "nothing is written during the burst");
+        assert!(!dir.path().join("notify.json").exists());
+        while writes(&notify) == 0 {
+            assert!(started.elapsed() < Duration::from_secs(10), "never written");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(started.elapsed() >= delay);
+        std::thread::sleep(delay * 2);
+        assert_eq!(writes(&notify), 1, "one write for the whole burst");
+        let key = read_key(&url(), &channel);
+        assert_eq!(read_marks_on_disk(dir.path())[&key], NOW + 100);
+    }
+
+    #[test]
+    fn flushing_writes_waiting_read_marks_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut notify = reading(dir.path(), Duration::from_secs(3600));
+        let channel = [2; 32];
+        notify.arrived(&url(), channel, NOW + 5, false);
+        notify.mark_read(&url(), &channel);
+        assert_eq!(writes(&notify), 0);
+        notify.flush();
+        assert_eq!(writes(&notify), 1);
+        let key = read_key(&url(), &channel);
+        assert_eq!(read_marks_on_disk(dir.path())[&key], NOW + 5);
+        // Nothing waiting: flushing again doesn't write.
+        notify.flush();
+        assert_eq!(writes(&notify), 1);
+
+        // Losing focus writes without the delay too, in the background.
+        notify.arrived(&url(), channel, NOW + 6, false);
+        notify.mark_read(&url(), &channel);
+        notify.save_soon();
+        let started = Instant::now();
+        while writes(&notify) < 2 {
+            assert!(started.elapsed() < Duration::from_secs(10), "never written");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(read_marks_on_disk(dir.path())[&key], NOW + 6);
+    }
+
+    #[test]
+    fn closing_keeps_waiting_read_marks_and_signing_out_drops_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let channel = [2; 32];
+        let key = read_key(&url(), &channel);
+        let mut notify = reading(dir.path(), Duration::from_secs(3600));
+        notify.arrived(&url(), channel, NOW + 5, false);
+        notify.mark_read(&url(), &channel);
+        drop(notify);
+        assert_eq!(read_marks_on_disk(dir.path())[&key], NOW + 5);
+
+        let mut notify = reading(dir.path(), Duration::from_secs(3600));
+        notify.arrived(&url(), channel, NOW + 9, false);
+        notify.mark_read(&url(), &channel);
+        notify.stop_saving();
+        std::fs::remove_file(dir.path().join("notify.json")).unwrap();
+        notify.arrived(&url(), channel, NOW + 10, false);
+        notify.mark_read(&url(), &channel);
+        drop(notify);
+        assert!(
+            !dir.path().join("notify.json").exists(),
+            "nothing after sign out"
+        );
     }
 }

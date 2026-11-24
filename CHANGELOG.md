@@ -35,6 +35,7 @@ Unreleased under the new version and date.
 - During a voice call, a dropped server connection is now noticed and reconnected within about 30 seconds, so chat and status keep arriving.
 - Picture-heavy channels no longer download the same thumbnails over and over; pictures on screen stay loaded and only load once they scroll into view.
 - Pictures, files and messages still uploading or downloading when the connection drops or the network changes are tried again once it is back, instead of failing as offline.
+- Reading a busy channel no longer stutters: read marks are saved every few seconds in the background instead of after every new message.
 
 ## v0.3.0 - 2026-11-24
 
