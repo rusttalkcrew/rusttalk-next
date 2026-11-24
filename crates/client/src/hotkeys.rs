@@ -273,6 +273,8 @@ impl Route {
     fn deliver(&self, action: Action, pressed: bool) {
         if action == Action::PushToTalk {
             self.audio.set_hotkey_down(pressed);
+            // The own ring follows the key; the call has no constant tick.
+            self.ctx.request_repaint();
         } else if pressed {
             let _ = self.actions.send(action);
             self.ctx.request_repaint();

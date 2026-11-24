@@ -14,7 +14,7 @@ use std::{
     path::{Path, PathBuf},
     pin::pin,
     sync::{
-        Arc, Mutex, MutexGuard,
+        Arc, Mutex, MutexGuard, OnceLock,
         atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering::Relaxed},
         mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender},
     },
@@ -359,6 +359,8 @@ struct Shared {
     phone: Mutex<Option<PhoneTap>>,
     phone_withdrawal: AtomicBool,
     phone_withdrawal_requests: std::sync::atomic::AtomicUsize,
+    /// Asked to draw again when someone starts speaking, so calls need no constant tick.
+    repaint: OnceLock<egui::Context>,
 }
 
 /// The mixer key of a bridged phone call's sound, kept out of what the phone hears.
@@ -405,7 +407,13 @@ impl PhoneLine {
             track.queue.drain(..extra);
         }
         if level_db(samples) > SILENT_DB {
-            track.loud = self.shared.now();
+            let now = self.shared.now();
+            let started = now >= track.loud + SPEAKING_MS;
+            track.loud = now;
+            drop(mixer);
+            if started {
+                self.shared.wake();
+            }
         }
     }
 
@@ -487,6 +495,13 @@ impl Shared {
     fn settings(&self) -> Settings {
         lock(&self.settings).clone()
     }
+
+    /// Draw again soon: a speaking ring turned on or there is news for the call.
+    fn wake(&self) {
+        if let Some(ctx) = self.repaint.get() {
+            ctx.request_repaint();
+        }
+    }
 }
 
 impl Audio {
@@ -550,6 +565,7 @@ impl Audio {
             phone: Mutex::default(),
             phone_withdrawal: AtomicBool::new(false),
             phone_withdrawal_requests: std::sync::atomic::AtomicUsize::new(0),
+            repaint: OnceLock::new(),
         });
         let (control, commands) = mpsc::channel();
         let (mic, frames) = mpsc::sync_channel(MIC_QUEUE);
@@ -932,6 +948,29 @@ impl Audio {
         self.shared().talked.store(value, Relaxed);
     }
 
+    /// How long until a speaking ring that is on now may turn off, the soonest first;
+    /// `None` while nobody speaks. The UI redraws then instead of on a fixed tick.
+    pub fn speaking_ends(&self) -> Option<Duration> {
+        let shared = self.shared();
+        let now = shared.now();
+        let talked = shared.talked.load(Relaxed);
+        let mine = (talked != 0).then(|| talked - 1 + SPEAKING_MS);
+        let mixer = lock(&shared.mixer);
+        let theirs = (mixer.tracks.values())
+            .filter(|track| track.stream.1.is_none())
+            .map(|track| track.loud + SPEAKING_MS);
+        mine.into_iter()
+            .chain(theirs)
+            .filter(|&end| end > now)
+            .min()
+            .map(|end| Duration::from_millis(end - now))
+    }
+
+    /// Who to ask for a frame when someone starts speaking (see `speaking_ends`).
+    pub fn set_repaint(&self, ctx: egui::Context) {
+        let _ = self.shared().repaint.set(ctx);
+    }
+
     /// This person's voice is loud right now; shared apps don't count.
     pub fn speaking(&self, person: &Id) -> bool {
         let now = self.shared().now();
@@ -1005,8 +1044,13 @@ impl Audio {
                     let extra = track.queue.len() - PRIME;
                     track.queue.drain(..extra);
                 }
+                let started = loud && now >= track.loud + SPEAKING_MS;
                 if loud {
                     track.loud = now;
+                }
+                drop(mixer);
+                if started {
+                    shared.wake();
                 }
             }
             let mut mixer = lock(&shared.mixer);
@@ -1927,6 +1971,7 @@ fn process(shared: &Shared, frames: &Receiver<Mic>) {
                 if let Some(verdict) = check.push(frame) {
                     let code = if verdict == Verdict::Noisy { 1 } else { 2 };
                     shared.trouble.store(code, Relaxed);
+                    shared.wake();
                 }
             }
             let voiced = gate.update(db, threshold);
@@ -1938,7 +1983,11 @@ fn process(shared: &Shared, frames: &Receiver<Mic>) {
                     voiced
                 };
             if open && db > SILENT_DB {
-                shared.talked.store(shared.now().saturating_add(1), Relaxed);
+                let now = shared.now();
+                let last = shared.talked.swap(now.saturating_add(1), Relaxed);
+                if last == 0 || now.saturating_sub(last - 1) >= SPEAKING_MS {
+                    shared.wake();
+                }
             }
             if auto_gain {
                 gain.apply(&mut frame, db, threshold);
@@ -2482,6 +2531,18 @@ mod tests {
         audio.end_voice(None);
         assert!(!audio.channel_mic_paused());
         assert_eq!(channel_microphone(audio.shared(), &speech), speech);
+    }
+
+    #[test]
+    fn speaking_ends_counts_down_only_while_someone_speaks() {
+        let data = tempfile::tempdir().unwrap();
+        let audio = Audio::new(data.path()).unwrap();
+        assert_eq!(audio.speaking_ends(), None);
+        audio.set_talked_for_test(true);
+        let left = audio.speaking_ends().expect("own voice just now");
+        assert!(left <= Duration::from_millis(SPEAKING_MS) && !left.is_zero());
+        audio.set_talked_for_test(false);
+        assert_eq!(audio.speaking_ends(), None);
     }
 
     #[test]
