@@ -502,25 +502,23 @@ pub async fn require_owner(db: &mut SqliteConnection, person: &PersonId) -> ApiR
     Ok(())
 }
 
-/// Authenticate a request that may write, inside a write transaction.
+/// Authenticate a request that may write, inside a write transaction. A refused request writes
+/// nothing: its transaction rolls back, and the expiry sweep removes expired sessions.
 pub async fn authenticate(app: &App, headers: &HeaderMap) -> ApiResult<(WriteTx, Actor)> {
     let (token_hash, ip) = credentials(headers)?;
-    // Refuse unknown or expired sessions from a snapshot first, so they never queue for the
-    // writer turn; the check is repeated inside the write transaction.
-    drop(authenticate_read(app, headers).await?);
-    let mut tx = write(&app.db).await?;
-    match actor(&mut tx, &token_hash, ip).await? {
-        Ok(actor) => Ok((tx, actor)),
-        Err(expires_at) => {
-            query("DELETE FROM sessions WHERE token_hash = ?")
-                .bind(token_hash.as_slice())
-                .execute(&mut *tx)
-                .await?;
-            tx.commit().await?;
-            log_closed(vec![expires_at], now()?, "token_expired");
-            Err(ApiError::unauthorized("token_expired"))
+    let mut tx = match crate::store::try_write(&app.db).await? {
+        Some(tx) => tx,
+        None => {
+            // The writer is busy: refuse unknown or expired sessions from a snapshot first, so
+            // they never queue for the writer turn.
+            drop(authenticate_read(app, headers).await?);
+            write(&app.db).await?
         }
-    }
+    };
+    let actor = actor(&mut tx, &token_hash, ip)
+        .await?
+        .map_err(|_| ApiError::unauthorized("token_expired"))?;
+    Ok((tx, actor))
 }
 
 /// Authenticate a read-only request. Its deferred transaction reads a snapshot and never waits
@@ -890,5 +888,100 @@ mod tests {
         );
         assert!(check_revoked(&mut conn, person, &[7; 32]).await.is_ok());
         assert!(check_revoked(&mut conn, &[8; 32], device).await.is_ok());
+    }
+
+    /// Person 2's session has expired and person 3 signs in from an IP banned with person 4.
+    async fn refusal_app(dir: &std::path::Path) -> App {
+        let app = crate::testing::app(dir, 4).await.unwrap();
+        for sql in [
+            "UPDATE sessions SET expires_at = 1 WHERE device_id = x'02'",
+            "INSERT INTO bans (person_id) SELECT person_id FROM sessions WHERE device_id = x'04'",
+            "INSERT INTO ban_ips (person_id, ip) SELECT person_id, '192.0.2.9' FROM bans",
+        ] {
+            query(sql).execute(&app.db).await.unwrap();
+        }
+        app
+    }
+
+    fn refused_requests() -> Vec<(HeaderMap, StatusCode, &'static str)> {
+        let mut banned = crate::testing::as_person(3);
+        banned.insert("x-forwarded-for", "192.0.2.9".parse().unwrap());
+        let mut no_token = crate::testing::as_person(1);
+        no_token.remove(AUTHORIZATION);
+        vec![
+            (no_token, StatusCode::UNAUTHORIZED, "invalid_session"),
+            (
+                crate::testing::as_person(9),
+                StatusCode::UNAUTHORIZED,
+                "invalid_session",
+            ),
+            (
+                crate::testing::as_person(2),
+                StatusCode::UNAUTHORIZED,
+                "token_expired",
+            ),
+            (banned, StatusCode::FORBIDDEN, "ip_banned"),
+        ]
+    }
+
+    /// Refused requests leave every session, the expired one included, in place.
+    async fn assert_sessions_untouched(app: &App) {
+        let rows: Vec<(Vec<u8>, i64)> =
+            query_as("SELECT device_id, expires_at FROM sessions ORDER BY device_id")
+                .fetch_all(&app.db)
+                .await
+                .unwrap();
+        let expected = (1u8..=4)
+            .map(|byte| (vec![byte], if byte == 2 { 1 } else { i64::MAX }))
+            .collect::<Vec<_>>();
+        assert_eq!(rows, expected);
+    }
+
+    #[tokio::test]
+    async fn authenticate_without_a_queue_refuses_and_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = refusal_app(dir.path()).await;
+        for (headers, status, code) in refused_requests() {
+            let refused = authenticate(&app, &headers).await.err().unwrap();
+            assert_eq!((refused.status, refused.code), (status, code));
+        }
+        let (tx, actor) = authenticate(&app, &crate::testing::as_person(3))
+            .await
+            .unwrap();
+        assert_eq!(actor.device, vec![3]);
+        drop(tx);
+        assert_sessions_untouched(&app).await;
+    }
+
+    #[tokio::test]
+    async fn authenticate_behind_a_busy_writer_refuses_without_queuing() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = refusal_app(dir.path()).await;
+        let busy = write(&app.db).await.unwrap();
+        for (headers, status, code) in refused_requests() {
+            let refused =
+                tokio::time::timeout(Duration::from_secs(5), authenticate(&app, &headers))
+                    .await
+                    .expect("refused before the writer turn")
+                    .err()
+                    .unwrap();
+            assert_eq!((refused.status, refused.code), (status, code));
+        }
+        let signed_in = tokio::spawn({
+            let app = app.clone();
+            async move {
+                let (tx, actor) = authenticate(&app, &crate::testing::as_person(3)).await?;
+                drop(tx);
+                ApiResult::Ok(actor.device)
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !signed_in.is_finished(),
+            "a good token queues for the writer"
+        );
+        drop(busy);
+        assert_eq!(signed_in.await.unwrap().unwrap(), vec![3]);
+        assert_sessions_untouched(&app).await;
     }
 }
