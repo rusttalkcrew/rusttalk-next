@@ -1724,6 +1724,6 @@ focus.ends_in = Der Fokus-Modus endet in {time}.
 focus.join = Trotzdem beitreten
 focus.join_wait = Trotzdem beitreten ({seconds})
 perm.start_focus = Fokus-Modus starten
-perm.start_focus_help = Einen Kanal bis zu 24 Stunden in den Fokus-Modus versetzen.
+perm.start_focus_help = Einen Sprachkanal bis zu 24 Stunden in den Fokus-Modus versetzen.
 audit.focus_started = {actor} hat in einem Kanal den Fokus-Modus gestartet
 audit.focus_ended = {actor} hat in einem Kanal den Fokus-Modus beendet

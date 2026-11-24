@@ -11,7 +11,7 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
-- Put a channel into focus mode for up to 24 hours: it gets a Focus badge, a countdown banner and a short notice before anyone joins.
+- Put a voice channel into focus mode for up to 24 hours: it gets a Focus badge, a countdown banner and a short notice before anyone joins.
 - Channels only some roles can see show a lock, and their permissions are easier to set.
 - Voice channels can have a member limit; the channel list shows how full they are, like 3/5.
 - The stream badge shows a compact viewer count and leaves the video stats visible.

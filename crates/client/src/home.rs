@@ -3062,7 +3062,7 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
                     if let Some(rule) = notify::rule_menu(m, &rule, true, notify::unix_now()) {
                         rule_change = Some((channel.id, rule));
                     }
-                    if perms.start_focus && online {
+                    if perms.start_focus && online && channel.voice {
                         m.separator();
                         if let Some(start) = focus::menu(m, channel) {
                             focus_pick = Some((channel.id, start));
@@ -4278,7 +4278,6 @@ fn page_view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat: &mut
         in_server.then_some(&mut home.layout),
         Some(channel),
     );
-    focus::banner(ui, home.servers[index].channel(&channel));
     toast_line(ui, &mut home.toast);
     let Home {
         servers,
@@ -4686,9 +4685,6 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
             At::Dm(_) => None,
         };
         pane_title(ui, "chat-title", &title, in_server.then_some(layout), files);
-        if let At::Channel(index, channel) = at {
-            focus::banner(ui, servers[index].channel(&channel));
-        }
     }
     let act = friends::dm_card(ui, relation, request, &name);
     let (hovered, dropped) = ui.input(|input| {

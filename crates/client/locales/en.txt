@@ -1727,6 +1727,6 @@ focus.ends_in = Focus mode ends in {time}.
 focus.join = Join anyway
 focus.join_wait = Join anyway ({seconds})
 perm.start_focus = Start focus mode
-perm.start_focus_help = Put a channel into focus mode for up to 24 hours.
+perm.start_focus_help = Put a voice channel into focus mode for up to 24 hours.
 audit.focus_started = {actor} started focus mode in a channel
 audit.focus_ended = {actor} ended focus mode in a channel

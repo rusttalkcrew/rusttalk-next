@@ -496,9 +496,9 @@ pub struct Channel {
 }
 
 impl Channel {
-    /// When focus mode ends, if it is on at `now` (unix seconds).
+    /// When focus mode ends, if it is on at `now` (unix seconds). Only voice channels have it.
     pub fn focus(&self, now: i64) -> Option<i64> {
-        self.focus_until.filter(|until| *until > now)
+        self.focus_until.filter(|until| self.voice && *until > now)
     }
 }
 

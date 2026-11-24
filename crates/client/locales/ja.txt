@@ -1724,6 +1724,6 @@ focus.ends_in = 集中モードはあと {time} で終わります。
 focus.join = それでも参加
 focus.join_wait = それでも参加 ({seconds})
 perm.start_focus = 集中モードを開始
-perm.start_focus_help = チャンネルを最大24時間、集中モードにできます。
+perm.start_focus_help = ボイスチャンネルを最大24時間、集中モードにできます。
 audit.focus_started = {actor} がチャンネルで集中モードを開始しました
 audit.focus_ended = {actor} がチャンネルの集中モードを終了しました

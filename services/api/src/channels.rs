@@ -534,7 +534,7 @@ pub async fn focus(
         .require(Permission::StartFocus)?;
     let until = (seconds > 0).then_some(actor.at + seconds);
     let changed = query(
-        "UPDATE channels SET focus_until = ? WHERE id = ? AND kind <> 'dm' AND EXISTS
+        "UPDATE channels SET focus_until = ? WHERE id = ? AND kind = 'voice' AND EXISTS
              (SELECT 1 FROM channel_readers r WHERE r.channel_id = channels.id AND r.person_id = ?)",
     )
     .bind(until)
@@ -544,7 +544,19 @@ pub async fn focus(
     .await?
     .rows_affected();
     if changed == 0 {
-        return Err(ApiError::not_found("channel_not_found"));
+        // Only voice channels have focus mode; others they can read get a clear refusal.
+        let readable: bool = query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM channel_readers WHERE channel_id = ? AND person_id = ?)",
+        )
+        .bind(&id)
+        .bind(actor.person.as_slice())
+        .fetch_one(&mut *tx)
+        .await?;
+        return Err(if readable {
+            ApiError::bad_request("not_a_voice_channel")
+        } else {
+            ApiError::not_found("channel_not_found")
+        });
     }
     let action = if until.is_some() {
         "focus_started"
@@ -1072,17 +1084,15 @@ mod tests {
             .bind(id(10))
             .execute(&app.db)
             .await?;
-        // Members read channel 20 but not 21.
-        for channel in [20_u8, 21] {
-            query("INSERT INTO channels (id, kind, category_id, position, name_ct) VALUES (?, 'voice', ?, 0, x'00')")
-                .bind(id(channel)).bind(id(10)).execute(&app.db).await?;
+        // Members read voice channel 20 and text channel 22, but not voice channel 21.
+        for (channel, kind) in [(20_u8, "voice"), (21, "voice"), (22, "text")] {
+            query("INSERT INTO channels (id, kind, category_id, position, name_ct) VALUES (?, ?, ?, 0, x'00')")
+                .bind(id(channel)).bind(kind).bind(id(10)).execute(&app.db).await?;
         }
-        query(
-            "INSERT INTO channel_permissions (channel_id, role_id, flags) VALUES (?, 'member', 15)",
-        )
-        .bind(id(20))
-        .execute(&app.db)
-        .await?;
+        for channel in [20_u8, 22] {
+            query("INSERT INTO channel_permissions (channel_id, role_id, flags) VALUES (?, 'member', 15)")
+                .bind(id(channel)).execute(&app.db).await?;
+        }
         let as_person = |person: u8| {
             let mut headers = HeaderMap::new();
             let token = format!("Bearer {}", encode(&[person; 32]));
@@ -1113,6 +1123,7 @@ mod tests {
 
         assert_eq!(refused(set(2, 20, 600).await), "permission_denied");
         assert_eq!(refused(set(1, 21, 600).await), "channel_not_found");
+        assert_eq!(refused(set(1, 22, 600).await), "not_a_voice_channel");
         for seconds in [-1, FOCUS_SECONDS + 1] {
             assert_eq!(refused(set(1, 20, seconds).await), "invalid_focus_time");
         }

@@ -1724,6 +1724,6 @@ focus.ends_in = De focusmodus eindigt over {time}.
 focus.join = Toch deelnemen
 focus.join_wait = Toch deelnemen ({seconds})
 perm.start_focus = Focusmodus starten
-perm.start_focus_help = Een kanaal tot 24 uur in focusmodus zetten.
+perm.start_focus_help = Een spraakkanaal tot 24 uur in focusmodus zetten.
 audit.focus_started = {actor} heeft de focusmodus in een kanaal gestart
 audit.focus_ended = {actor} heeft de focusmodus in een kanaal beëindigd
