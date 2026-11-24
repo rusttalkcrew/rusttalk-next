@@ -285,6 +285,8 @@ fn queue(notices: &mut Vec<Arc<Notice>>, change: Change, actor: &Actor, device: 
         Change::Session(person) if person == actor.person => Recheck::Session,
         Change::Session(_) => Recheck::None,
         Change::Keys => Recheck::Access,
+        Change::Access(people) if people.contains(&actor.person) => Recheck::Access,
+        Change::Access(_) => Recheck::None,
         Change::Update(update) => {
             let recheck = match &update.update {
                 Update::Presence(_)
@@ -293,7 +295,9 @@ fn queue(notices: &mut Vec<Arc<Notice>>, change: Change, actor: &Actor, device: 
                     | Event::MessageDeleted { .. }
                     | Event::VoiceChanged { .. }
                     | Event::VoiceMoved { .. }
-                    | Event::LiveFileAccepted { .. },
+                    | Event::LiveFileAccepted { .. }
+                    // Its two people recheck through the `Access` change sent just before it.
+                    | Event::DmCreated { .. },
                 ) => Recheck::None,
                 // A wrap changes only its recipient's keys; a rejection also signals `Keys`.
                 Update::Event(Event::KeysNeeded(need)) if need.device != device => Recheck::None,
@@ -517,6 +521,36 @@ mod tests {
         assert!(queue(&mut notices, Change::update(Update::Event(profile)), "d") == Recheck::None);
         // Only client updates are forwarded.
         assert_eq!(notices.len(), 5);
+    }
+
+    #[test]
+    fn dm_changes_recheck_only_its_two_people() {
+        let mut notices = Vec::new();
+        let socket = |person| Actor {
+            person,
+            ..test_actor()
+        };
+        let dm = || Change::Access([[1; 32], [5; 32]]);
+        // Either person, on any of their devices.
+        for (person, device) in [([1; 32], "d"), ([1; 32], "e"), ([5; 32], "d")] {
+            assert!(queue(&mut notices, dm(), &socket(person), device) == Recheck::Access);
+        }
+        assert!(queue(&mut notices, dm(), &socket([3; 32]), "d") == Recheck::None);
+        // A new DM's notice wakes nobody; its two people recheck through the change above.
+        let created = || {
+            Change::update(Update::Event(Event::DmCreated {
+                channel: "c".into(),
+            }))
+        };
+        for person in [[1; 32], [3; 32]] {
+            assert!(queue(&mut notices, created(), &socket(person), "d") == Recheck::None);
+        }
+        // A channel's epoch still rechecks everyone.
+        for person in [[1; 32], [3; 32]] {
+            assert!(queue(&mut notices, Change::Keys, &socket(person), "d") == Recheck::Access);
+        }
+        // The notice is still queued, so sockets that can read the DM get it.
+        assert_eq!(notices.len(), 2);
     }
 
     #[test]
