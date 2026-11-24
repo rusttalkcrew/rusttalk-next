@@ -15,11 +15,7 @@ fn picture(key: u8, rgba: [u8; 4]) -> Picture {
         .unwrap();
     let bytes = bytes.into_inner();
     let image = ColorImage::from_rgba_unmultiplied([32, 32], &[rgba; 32 * 32].concat());
-    Picture {
-        key: [key; 32],
-        frames: Arc::new(vec![(image, 0)]),
-        bytes: Arc::new(bytes),
-    }
+    Picture::new([key; 32], vec![(image, 0)], Arc::new(bytes))
 }
 
 fn msg(id: u8, person: Id, at: i64, text: impl Into<String>, files: Vec<Attachment>) -> Msg {

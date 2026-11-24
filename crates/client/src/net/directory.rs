@@ -11,7 +11,7 @@ use futures_util::future::join_all;
 use reqwest::{Method, StatusCode};
 use rusttalk_core::{
     auth::{decode, encode},
-    client::{Catalog, Channel as WireChannel, KeyClient, decode_profile_image},
+    client::{Catalog, Channel as WireChannel, KeyClient, decode_profile_first_frame},
     identity::fingerprint,
     keys::{MemberProfile, Metadata, Part},
     presence::{Presence, Status},
@@ -900,21 +900,21 @@ pub(crate) fn frame_image(frame: image::Frame) -> (ColorImage, u32) {
     (ColorImage::from_rgba_unmultiplied(size, image.as_raw()), ms)
 }
 
-/// Decode a profile picture, server icon, emoji or sticker.
+/// Decode a profile picture, server icon, emoji or sticker. Of a GIF only the first frame
+/// is decoded here; the rest wait until it plays, as most never do.
 pub(super) fn picture(bytes: &[u8]) -> Option<Picture> {
     let key: [u8; 32] = Sha256::digest(bytes).into();
-    let frames = match decode_profile_image(bytes) {
-        Ok(frames) => frames,
+    let first = match decode_profile_first_frame(bytes) {
+        Ok(first) => frame_image(first),
         Err(error) => {
             tracing::warn!(error = %format_args!("{error:#}"), "picture could not be decoded");
             return None;
         }
     };
-    let frames: Vec<_> = frames.into_iter().map(frame_image).collect();
-    Some(Picture {
-        key,
-        frames: frames.into(),
-        bytes: Arc::new(bytes.to_vec()),
+    let bytes = Arc::new(bytes.to_vec());
+    Some(match image::guess_format(&bytes) {
+        Ok(image::ImageFormat::Gif) => Picture::lazy(key, first, bytes),
+        _ => Picture::new(key, vec![first], bytes),
     })
 }
 
@@ -1149,5 +1149,60 @@ mod tests {
             { "person_id": me_id, "avatar_initialized": true, "avatar_hash": null }
         ]);
         assert!(!own_avatar_uninitialized(&other_unset, &me));
+    }
+
+    fn gif(frames: u8) -> Vec<u8> {
+        use image::{Delay, Frame, Rgba, RgbaImage, codecs::gif::GifEncoder};
+        let mut bytes = Vec::new();
+        let mut encoder = GifEncoder::new(&mut bytes);
+        (encoder.encode_frames((0..frames).map(|index| {
+            let image = RgbaImage::from_pixel(4, 4, Rgba([index * 40, 30, 60, 255]));
+            Frame::from_parts(image, 0, 0, Delay::from_numer_denom_ms(50, 1))
+        })))
+        .unwrap();
+        drop(encoder);
+        bytes
+    }
+
+    #[test]
+    fn animated_picture_loads_one_frame_and_decodes_the_rest_once_on_play() {
+        let loaded = picture(&gif(3)).unwrap();
+        assert_eq!(loaded.decoded().count(), 1);
+        // Every clone and every play before the decode ends shares one decode.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let copy = loaded.clone();
+        for shown in [&loaded, &copy, &loaded] {
+            let tx = tx.clone();
+            if let Some(rest) = shown.rest(move || tx.send(()).unwrap()) {
+                assert_eq!(rest.len(), 2);
+            }
+        }
+        drop(tx);
+        rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        assert!(rx.recv().is_err(), "the frames were decoded more than once");
+        let rest = copy.rest(|| panic!("decoded again")).unwrap();
+        assert_eq!(rest.len(), 2);
+        assert_eq!(
+            rest[1].0.pixels[0],
+            eframe::egui::Color32::from_rgb(80, 30, 60)
+        );
+        assert_eq!(loaded.decoded().count(), 3);
+    }
+
+    #[test]
+    fn still_picture_has_no_frames_to_decode() {
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::RgbaImage::from_pixel(4, 4, image::Rgba([1, 2, 3, 255]))
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let still = picture(png.get_ref()).unwrap();
+        assert_eq!(still.first.0.size, [4, 4]);
+        assert!(
+            still
+                .rest(|| panic!("nothing to decode"))
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(still.decoded().count(), 1);
     }
 }

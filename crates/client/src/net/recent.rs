@@ -318,19 +318,11 @@ impl Listing {
             if let (Some(hash), Some(image)) = (hash, image)
                 && photos.len() < 32
                 && image.bytes.len() <= budget
-                && image
-                    .frames
-                    .iter()
-                    .map(|(frame, _)| frame.pixels.len())
-                    .sum::<usize>()
-                    <= pixel_budget
+                // Loading decodes only the first frame of an animated picture.
+                && image.first.0.pixels.len() <= pixel_budget
             {
                 budget -= image.bytes.len();
-                pixel_budget -= image
-                    .frames
-                    .iter()
-                    .map(|(frame, _)| frame.pixels.len())
-                    .sum::<usize>();
+                pixel_budget -= image.first.0.pixels.len();
                 photos.push((
                     owner,
                     directory::picture_key(&owner, hash),

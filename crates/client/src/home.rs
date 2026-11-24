@@ -2706,23 +2706,31 @@ fn frame_when(ui: &Ui, picture: &Picture, play: bool) -> TextureHandle {
     let first_id = UiId::unique(("picture", picture.key));
     let first = ui.data(|data| data.get_temp::<TextureHandle>(first_id));
     let first = first.unwrap_or_else(|| {
-        let made = load(&picture.frames[0].0);
+        let made = load(&picture.first.0);
         ui.data_mut(|data| data.insert_temp(first_id, made.clone()));
         made
     });
-    if !play || picture.frames.len() < 2 {
+    if !play {
+        return first;
+    }
+    // The first frame shows while the others decode in the background.
+    let repaint = ui.ctx().clone();
+    let Some(rest) = picture.rest(move || repaint.request_repaint()) else {
+        return first;
+    };
+    if rest.is_empty() {
         return first;
     }
     let all_id = UiId::unique(("picture frames", picture.key));
     let all = ui.data(|data| data.get_temp::<Arc<Vec<TextureHandle>>>(all_id));
     let all = all.unwrap_or_else(|| {
-        let rest = picture.frames.iter().skip(1).map(|(image, _)| load(image));
+        let rest = rest.iter().map(|(image, _)| load(image));
         let made: Arc<Vec<_>> = Arc::new(std::iter::once(first.clone()).chain(rest).collect());
         ui.data_mut(|data| data.insert_temp(all_id, made.clone()));
         made
     });
     let now = (ui.input(|input| input.time) * 1000.0) as u64;
-    let delays = picture.frames.iter().map(|(_, ms)| *ms);
+    let delays = std::iter::once(picture.first.1).chain(rest.iter().map(|(_, ms)| *ms));
     match frame_at(delays, now) {
         Some((at, left)) => {
             ui.ctx().request_repaint_after(Duration::from_millis(left));
@@ -6824,17 +6832,17 @@ mod tests {
     fn avatar_render_uses_same_picture_at_roster_and_call_sizes() {
         for dark in [true, false] {
             for repaired in [false, true] {
-                let picture = Picture {
-                    key: [91; 32],
-                    frames: std::sync::Arc::new(vec![(
+                let picture = Picture::new(
+                    [91; 32],
+                    vec![(
                         egui::ColorImage::new(
                             [2, 2],
                             vec![Color32::RED, Color32::BLUE, Color32::GREEN, Color32::YELLOW],
                         ),
                         100,
-                    )]),
-                    bytes: Default::default(),
-                };
+                    )],
+                    Default::default(),
+                );
                 let dir = Directory {
                     members: vec![Member {
                         person: ME,

@@ -30,11 +30,7 @@ fn sample_picture(key: u8, primary: [u8; 4], accent: [u8; 4]) -> Picture {
     let mut bytes = Cursor::new(Vec::new());
     img.write_to(&mut bytes, ImageFormat::Png).unwrap();
     let image = ColorImage::from_rgba_unmultiplied([64, 64], img.as_raw());
-    Picture {
-        key: [key; 32],
-        frames: Arc::new(vec![(image, 0)]),
-        bytes: Arc::new(bytes.into_inner()),
-    }
+    Picture::new([key; 32], vec![(image, 0)], Arc::new(bytes.into_inner()))
 }
 
 fn channel(id: Id, name: &str, voice: bool) -> Channel {

@@ -4,7 +4,10 @@
 use std::{
     collections::{BTreeMap, HashMap},
     path::PathBuf,
-    sync::Arc,
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use eframe::egui::{Color32, ColorImage};
@@ -23,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 use url::Url;
 
-use crate::net::{Command, Compatibility};
+use crate::net::{Command, Compatibility, frame_image};
 
 pub type Id = [u8; 32];
 
@@ -584,14 +587,86 @@ impl HideOffline {
     }
 }
 
-/// A decoded profile picture or server icon: each frame and how long it shows, in ms.
+/// A decoded profile picture, server icon, emoji or sticker: each frame and how long it
+/// shows, in ms. An animated GIF loads with only its first frame; the others are decoded
+/// once, on a background thread, the first time it plays (see `Picture::rest`).
 #[derive(Clone)]
 pub struct Picture {
     /// A hash of the image file, to keep its textures.
     pub key: [u8; 32],
-    pub frames: Arc<Vec<(ColorImage, u32)>>,
+    pub first: Arc<(ColorImage, u32)>,
+    /// The frames after the first, shared by every clone.
+    rest: Arc<Rest>,
     /// The image file as received, so an emoji or sticker can be sent to another server.
     pub bytes: Arc<Vec<u8>>,
+}
+
+#[derive(Default)]
+struct Rest {
+    started: AtomicBool,
+    frames: OnceLock<Vec<(ColorImage, u32)>>,
+}
+
+impl Picture {
+    /// A picture with all its frames decoded already.
+    pub fn new(key: [u8; 32], mut frames: Vec<(ColorImage, u32)>, bytes: Arc<Vec<u8>>) -> Self {
+        let first = frames.remove(0);
+        let rest = Rest::default();
+        let _ = rest.frames.set(frames);
+        rest.started.store(true, Ordering::Relaxed);
+        Self {
+            key,
+            first: Arc::new(first),
+            rest: Arc::new(rest),
+            bytes,
+        }
+    }
+
+    /// An animated GIF of which only `first` is decoded; `rest` decodes the others.
+    pub fn lazy(key: [u8; 32], first: (ColorImage, u32), bytes: Arc<Vec<u8>>) -> Self {
+        Self {
+            key,
+            first: Arc::new(first),
+            rest: Arc::default(),
+            bytes,
+        }
+    }
+
+    /// The frames after the first, or `None` while they are decoded. The first call
+    /// starts decoding them on a background thread, which calls `done` when they are
+    /// ready; later calls only wait for that one decode. A file that fails to decode
+    /// in full stays on its first frame.
+    pub fn rest(&self, done: impl FnOnce() + Send + 'static) -> Option<&[(ColorImage, u32)]> {
+        if let Some(frames) = self.rest.frames.get() {
+            return Some(frames);
+        }
+        if !self.rest.started.swap(true, Ordering::AcqRel) {
+            let (rest, bytes) = (self.rest.clone(), self.bytes.clone());
+            let spawned = std::thread::Builder::new()
+                .name("picture frames".into())
+                .spawn(move || {
+                    let frames = match rusttalk_core::client::decode_profile_image(&bytes) {
+                        Ok(frames) => frames.into_iter().skip(1).map(frame_image).collect(),
+                        Err(error) => {
+                            tracing::warn!(error = %format_args!("{error:#}"), "animated picture could not be decoded");
+                            Vec::new()
+                        }
+                    };
+                    let _ = rest.frames.set(frames);
+                    done();
+                });
+            if let Err(error) = spawned {
+                tracing::warn!(%error, "could not start decoding an animated picture");
+                let _ = self.rest.frames.set(Vec::new());
+            }
+        }
+        None
+    }
+
+    /// The frames decoded so far: the first, and the rest once they are.
+    pub fn decoded(&self) -> impl Iterator<Item = &(ColorImage, u32)> {
+        std::iter::once(&*self.first).chain(self.rest.frames.get().into_iter().flatten())
+    }
 }
 
 #[derive(Clone)]

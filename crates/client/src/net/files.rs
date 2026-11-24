@@ -540,11 +540,11 @@ pub(super) async fn sticker_file(ctx: &Ctx, client: &FileClient, file: BlobRef, 
         let bytes = client.download_file(&file, None).await?;
         tokio::task::spawn_blocking(move || {
             let frames = crate::sticker_files::decode(&bytes, kind)?;
-            Ok(crate::server::Picture {
-                key: sha2::Sha256::digest(&bytes).into(),
-                frames: Arc::new(frames.into_iter().map(frame_image).collect()),
-                bytes: Arc::new(bytes),
-            })
+            Ok(crate::server::Picture::new(
+                sha2::Sha256::digest(&bytes).into(),
+                frames.into_iter().map(frame_image).collect(),
+                Arc::new(bytes),
+            ))
         })
         .await?
     };

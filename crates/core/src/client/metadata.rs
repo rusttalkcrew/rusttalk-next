@@ -66,6 +66,16 @@ impl KeyClient<'_> {
 
 /// Decode a PNG, JPEG or animated GIF into RGBA frames with their frame delays.
 pub fn decode_profile_image(bytes: &[u8]) -> Result<Vec<Frame>> {
+    decode_profile_frames(bytes, usize::MAX)
+}
+
+/// The first frame of `decode_profile_image`, with the same checks on the file. Apps
+/// show only this until an animated picture plays.
+pub fn decode_profile_first_frame(bytes: &[u8]) -> Result<Frame> {
+    Ok(decode_profile_frames(bytes, 1)?.remove(0))
+}
+
+fn decode_profile_frames(bytes: &[u8], take: usize) -> Result<Vec<Frame>> {
     ensure!(
         bytes.len() <= IMAGE_PLAINTEXT,
         "encoded image must fit in 256 KiB once encrypted"
@@ -91,7 +101,7 @@ pub fn decode_profile_image(bytes: &[u8]) -> Result<Vec<Frame>> {
     ensure!(width > 0 && height > 0, "GIF has an empty canvas");
     let limit = MAX_FRAMES.min(MAX_DECODED / (4 * width as usize * height as usize));
     let mut frames = Vec::new();
-    for frame in decoder.into_frames() {
+    for frame in decoder.into_frames().take(take) {
         ensure!(
             frames.len() < limit,
             "GIF frame or decoded memory limit exceeded"
@@ -144,6 +154,8 @@ mod tests {
         assert_eq!(frames[0].buffer().dimensions(), (2, 3));
         assert_eq!(frames[1].buffer().get_pixel(0, 0).0, [1, 30, 60, 255]);
         assert_eq!(frames[1].delay(), Delay::from_numer_denom_ms(40, 1));
+        let first = decode_profile_first_frame(&gif(2, 3, 2)?)?;
+        assert_eq!(first.buffer(), frames[0].buffer());
         Ok(())
     }
 }
