@@ -33,6 +33,7 @@ Unreleased under the new version and date.
 - Your chat messages show up right away while they are sent; one that fails stays in the chat with Try again.
 - Others see you come online sooner when the server is busy.
 - During a voice call, a dropped server connection is now noticed and reconnected within about 30 seconds, so chat and status keep arriving.
+- Picture-heavy channels no longer download the same thumbnails over and over; pictures on screen stay loaded and only load once they scroll into view.
 
 ## v0.3.0 - 2026-11-24
 
