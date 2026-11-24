@@ -39,6 +39,7 @@ Unreleased under the new version and date.
 - Reading a busy channel no longer stutters: read marks are saved every few seconds in the background instead of after every new message.
 - Voice calls use less CPU and battery: the app no longer redraws ten times a second for the whole call, only when someone starts or stops speaking.
 - Big servers answer key and membership checks faster: the server now keeps its database statistics up to date.
+- Adding big files to a channel's shared files no longer freezes that server: new messages keep arriving and calls keep going while they upload.
 
 ## v0.3.0 - 2026-11-24
 
