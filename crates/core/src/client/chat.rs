@@ -97,6 +97,9 @@ pub struct Channel {
     /// Voice channels only: the Opus bitrate in kbps.
     #[serde(default)]
     pub audio_kbps: Option<u32>,
+    /// Voice channels only: the most people in the call; missing means no limit.
+    #[serde(default)]
+    pub member_limit: Option<u32>,
     pub flags: Vec<RoleFlags>,
 }
 

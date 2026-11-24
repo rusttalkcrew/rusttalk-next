@@ -598,6 +598,7 @@ mod tests {
                     page: false,
                     forum: true,
                     audio_kbps: 0,
+                    member_limit: 0,
                     flags: vec![],
                 }],
             }],

@@ -10,9 +10,9 @@ use std::{
 use anyhow::Result;
 use chrono::{DateTime, Local};
 use eframe::egui::{
-    self, Align, Align2, CentralPanel, CollapsingHeader, Color32, ColorImage, FontId, Frame,
-    Id as UiId, Key, KeyboardShortcut, Label, LayerId, Layout, Margin, Modifiers, Order, Panel,
-    Rect, Response, RichText, Role, ScrollArea, Sense, Shape, Stroke, StrokeKind, TextEdit,
+    self, Align, Align2, CentralPanel, CollapsingHeader, Color32, ColorImage, DragValue, FontId,
+    Frame, Id as UiId, Key, KeyboardShortcut, Label, LayerId, Layout, Margin, Modifiers, Order,
+    Panel, Rect, Response, RichText, Role, ScrollArea, Sense, Shape, Stroke, StrokeKind, TextEdit,
     TextureHandle, TextureOptions, Ui, UiBuilder, Vec2, WidgetInfo, ecolor::Hsva,
 };
 use rusttalk_core::{
@@ -234,8 +234,10 @@ enum Join {
 
 /// Voice channel bitrates a manager can pick, in kbps.
 const AUDIO_KBPS: std::ops::RangeInclusive<u32> = 8..=128;
+/// Voice channel member limits a manager can pick; 0 is no limit.
+const MEMBER_LIMIT: std::ops::RangeInclusive<u32> = 0..=99;
 /// The least height of an Edit channel tab: General of a voice channel.
-const CHANNEL_TAB_HEIGHT: f32 = 188.0;
+const CHANNEL_TAB_HEIGHT: f32 = 308.0;
 
 enum Dialog {
     ServerName(usize, String),
@@ -257,6 +259,8 @@ enum Dialog {
         topic_changed: bool,
         /// Voice channels only: the bitrate in kbps, and whether it was moved.
         audio: Option<(u32, bool)>,
+        /// Voice channels only: the member limit (0 for none), and whether it was changed.
+        limit: Option<(u32, bool)>,
         /// Role flags changed on the Permissions tab, sent with Save.
         flags: Vec<(String, u8)>,
     },
@@ -1027,6 +1031,7 @@ impl Home {
                     topic: channel.topic.clone(),
                     topic_changed: false,
                     audio: channel.voice.then_some((channel.audio_kbps, false)),
+                    limit: channel.voice.then_some((channel.member_limit, false)),
                     flags: Vec::new(),
                 },
                 ChannelEdit::Delete => {
@@ -2994,7 +2999,12 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
                     let icon = channel_icon(channel);
                     let label = format!("{icon}  {}", channel.name);
                     // Voice rows keep room for the Join button.
-                    let trailing = if channel.voice { call::JOIN_SLOT } else { 0.0 };
+                    let limited = channel.voice && channel.member_limit > 0;
+                    let trailing = match (channel.voice, limited) {
+                        (true, true) => call::JOIN_SLOT + call::COUNT_SLOT,
+                        (true, false) => call::JOIN_SLOT,
+                        _ => 0.0,
+                    };
                     let row = ui
                         .add_enabled_ui(online || !channel.voice, |ui| {
                             let (name, role) = (&channel.name, Role::Button);
@@ -3004,6 +3014,9 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
                     let chats = [(&server.address, channel.id)];
                     let marks = row.rect.with_max_x(row.rect.right() - trailing);
                     chat_marks(ui, home, &chats, false, marks);
+                    if limited {
+                        call::member_count(ui, server, &channel.id, channel.member_limit, &row);
+                    }
                     if channel.voice {
                         if call::join_button(ui, home, server, &channel.id, &row, selected) {
                             talk = Some(channel.id);
@@ -6379,6 +6392,7 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
             topic,
             topic_changed,
             audio,
+            limit,
             flags,
         } => {
             let data = &home.servers[*server];
@@ -6429,6 +6443,21 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
                         });
                         *changed |= slider.changed();
                     }
+                    if let Some((most, changed)) = limit {
+                        let title = t!("home.member_limit");
+                        let spin = ui::setting_row(ui, title, t!("home.member_limit_help"), |ui| {
+                            let spin =
+                                ui.add(DragValue::new(most).range(MEMBER_LIMIT).custom_formatter(
+                                    |value, _| match value as u32 {
+                                        0 => t!("home.no_limit").into(),
+                                        value => value.to_string(),
+                                    },
+                                ));
+                            spin.widget_info(|| WidgetInfo::labeled(Role::SpinButton, true, title));
+                            spin
+                        });
+                        *changed |= spin.changed();
+                    }
                     entered = name_entered || submitted(ui, &field);
                 }
                 ChannelTab::Permissions => admin::channel_flags(ui, data, channel, flags),
@@ -6450,7 +6479,9 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
             if save && !name.trim().is_empty() {
                 // Only what changed, so saving permissions doesn't log a rename too.
                 let audio_kbps = audio.and_then(|(kbps, changed)| changed.then_some(kbps));
-                if name.trim() != channel.name || *topic_changed || audio_kbps.is_some() {
+                let member_limit = limit.and_then(|(most, changed)| changed.then_some(most));
+                let voice_changed = audio_kbps.is_some() || member_limit.is_some();
+                if name.trim() != channel.name || *topic_changed || voice_changed {
                     command = Some((
                         *server,
                         Command::RenameChannel {
@@ -6458,6 +6489,7 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
                             name: name.trim().to_owned(),
                             topic: topic_changed.then(|| topic.trim().to_owned()),
                             audio_kbps,
+                            member_limit,
                         },
                     ));
                 }
@@ -6903,6 +6935,7 @@ mod tests {
                 page: false,
                 forum: false,
                 audio_kbps: 0,
+                member_limit: 0,
                 flags: vec![("member".into(), 3)],
             }],
         }];

@@ -404,6 +404,7 @@ mod tests {
             topic_ct: None,
             peer: None,
             audio_kbps: None,
+            member_limit: None,
             flags: vec![crate::client::RoleFlags {
                 role_id: "friends".into(),
                 flags: 1,

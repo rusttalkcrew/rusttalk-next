@@ -38,10 +38,15 @@ pub struct ChannelFields {
     /// Voice channels only; left as it is when missing, so older clients keep working.
     #[serde(default)]
     audio_kbps: Option<i64>,
+    /// Voice channels only: the most people in the call, 0 for none. Kept when missing.
+    #[serde(default)]
+    member_limit: Option<i64>,
 }
 
 /// Voice bitrate limits in kbps, enforced here and again by the table.
 const AUDIO_KBPS: std::ops::RangeInclusive<i64> = 8..=128;
+/// Voice member limits, 0 for none, enforced here and again by the table.
+const MEMBER_LIMIT: std::ops::RangeInclusive<i64> = 0..=99;
 
 #[derive(Deserialize)]
 pub struct NewChannel {
@@ -63,6 +68,7 @@ struct ChannelRow {
     topic_ct: Option<Vec<u8>>,
     peer: Option<Vec<u8>>,
     audio_kbps: i64,
+    member_limit: i64,
 }
 
 #[derive(Serialize)]
@@ -77,6 +83,8 @@ pub struct Channel {
     peer: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     audio_kbps: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    member_limit: Option<i64>,
     flags: Vec<RoleFlags>,
 }
 
@@ -164,7 +172,7 @@ async fn channels(db: &mut SqliteConnection, person: Option<&[u8]>) -> ApiResult
     let rows: Vec<ChannelRow> = query_as(
         "SELECT id, CASE WHEN page THEN 'page' WHEN forum THEN 'forum' ELSE kind END AS kind, category_id, position, name_ct, topic_ct,
                 CASE WHEN dm_first = ? THEN dm_second ELSE dm_first END AS peer,
-                audio_kbps
+                audio_kbps, member_limit
          FROM channels c
          WHERE (? IS NULL AND kind <> 'dm') OR EXISTS
              (SELECT 1 FROM channel_readers r WHERE r.channel_id = c.id AND r.person_id = ?)
@@ -184,6 +192,8 @@ async fn channels(db: &mut SqliteConnection, person: Option<&[u8]>) -> ApiResult
         .fetch_all(&mut *db)
         .await?;
         let audio_kbps = (row.kind == "voice").then_some(row.audio_kbps);
+        let member_limit =
+            (row.kind == "voice" && row.member_limit > 0).then_some(row.member_limit);
         channels.push(Channel {
             id: row.id,
             kind: row.kind,
@@ -193,6 +203,7 @@ async fn channels(db: &mut SqliteConnection, person: Option<&[u8]>) -> ApiResult
             peer: metadata::encoded(row.peer),
             topic_ct: metadata::encoded(row.topic_ct),
             audio_kbps,
+            member_limit,
             flags,
         });
     }
@@ -370,6 +381,20 @@ pub async fn update_channel(
         }
         let voice = query("UPDATE channels SET audio_kbps = ? WHERE id = ? AND kind = 'voice'")
             .bind(kbps)
+            .bind(&id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        if voice == 0 {
+            return Err(ApiError::bad_request("not_a_voice_channel"));
+        }
+    }
+    if let Some(limit) = fields.member_limit {
+        if !MEMBER_LIMIT.contains(&limit) {
+            return Err(ApiError::bad_request("invalid_member_limit"));
+        }
+        let voice = query("UPDATE channels SET member_limit = ? WHERE id = ? AND kind = 'voice'")
+            .bind(limit)
             .bind(&id)
             .execute(&mut *tx)
             .await?
@@ -894,6 +919,7 @@ mod tests {
                 name_ct: String::new(),
                 topic_ct: None,
                 audio_kbps: value,
+                member_limit: None,
             }))
         };
         let stored = || async {

@@ -79,6 +79,7 @@ pub(super) async fn rename_channel(
     name: &str,
     topic: Option<&str>,
     audio_kbps: Option<u32>,
+    member_limit: Option<u32>,
 ) -> Result<()> {
     // The update also replaces category and position. Read them just before saving.
     let catalog = client.catalog().await?;
@@ -102,6 +103,9 @@ pub(super) async fn rename_channel(
     })?;
     if let Some(kbps) = audio_kbps {
         body["audio_kbps"] = kbps.into();
+    }
+    if let Some(limit) = member_limit {
+        body["member_limit"] = limit.into();
     }
     client
         .request(Method::PUT, &format!("/v1/channels/{}", encode(id)))
@@ -463,6 +467,7 @@ async fn build(
             page: channel.kind == "page",
             forum: channel.kind == "forum",
             audio_kbps: channel.audio_kbps.unwrap_or(DEFAULT_AUDIO_KBPS),
+            member_limit: channel.member_limit.unwrap_or(0),
             flags: (channel.flags.iter())
                 .map(|entry| (entry.role_id.clone(), entry.flags))
                 .collect(),
@@ -785,6 +790,7 @@ mod tests {
             topic_ct: None,
             peer: None,
             audio_kbps: None,
+            member_limit: None,
             flags: Vec::new(),
         };
         let encrypt =

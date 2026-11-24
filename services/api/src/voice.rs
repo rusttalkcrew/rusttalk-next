@@ -27,7 +27,12 @@ use serde_json::json;
 use sqlx::{SqliteConnection, query_as, query_scalar};
 use zeroize::Zeroizing;
 
-use crate::{ApiError, ApiResult, App, auth::authenticate_read, channels, messages, payload};
+use crate::{
+    ApiError, ApiResult, App,
+    auth::authenticate_read,
+    channels, messages, payload,
+    roles::{self, Permission},
+};
 
 mod enforcer;
 pub mod moderation;
@@ -263,8 +268,31 @@ pub async fn token(
     let sources = publish_sources(&mut tx, &channel, &actor.person).await?;
     let can_publish_data =
         channels::has_flag(&mut tx, &channel, &actor.person, channels::WRITE).await?;
+    let (audio_kbps, member_limit): (i64, i64) =
+        query_as("SELECT audio_kbps, member_limit FROM channels WHERE id = ?")
+            .bind(&channel)
+            .fetch_one(&mut *tx)
+            .await?;
+    // Channel managers may raise the limit anyway, so they also get into a full channel.
+    let capped = member_limit > 0
+        && !roles::authority(&mut tx, &actor.person)
+            .await?
+            .has(Permission::ManageChannels);
+    let readers = if capped {
+        reader_identities(&app, &mut tx, &channel).await?
+    } else {
+        HashMap::new()
+    };
+    tx.commit().await?;
+    let livekit = configured(&app)?;
+    if capped {
+        let active = livekit.active(&channel).await?;
+        if others(&active, &readers, &actor.person) >= member_limit as usize {
+            return Err(ApiError::forbidden("voice_channel_full"));
+        }
+    }
     let identity = voice_identity(app.key.verifying_key().as_bytes(), &actor.device);
-    let token = configured(&app)?.sign(
+    let token = livekit.sign(
         &identity,
         VideoGrants {
             room: channel.clone(),
@@ -281,12 +309,24 @@ pub async fn token(
         },
         Duration::from_secs(600),
     )?;
-    let audio_kbps = query_scalar("SELECT audio_kbps FROM channels WHERE id = ?")
-        .bind(&channel)
-        .fetch_optional(&mut *tx)
-        .await?;
-    tx.commit().await?;
-    Ok(Json(Token { token, audio_kbps }))
+    Ok(Json(Token {
+        token,
+        audio_kbps: Some(audio_kbps),
+    }))
+}
+
+/// How many people besides `person` are in the call. A rejoin or second device of
+/// `person` takes no extra place; an identity no reader owns counts on its own.
+fn others(active: &Active, readers: &HashMap<String, Vec<u8>>, person: &[u8]) -> usize {
+    active
+        .iter()
+        .filter_map(|identity| match readers.get(identity) {
+            Some(owner) if owner == person => None,
+            Some(owner) => Some(owner.as_slice()),
+            None => Some(identity.as_bytes()),
+        })
+        .collect::<BTreeSet<_>>()
+        .len()
 }
 
 pub async fn data_token(
@@ -695,6 +735,23 @@ mod tests {
         let claims = verifier.verify(&data.token)?;
         assert!(!claims.video.can_update_own_metadata());
         Ok(())
+    }
+
+    #[test]
+    fn a_full_channel_counts_people_not_devices() {
+        let readers = HashMap::from([
+            ("ann-phone".to_owned(), vec![1]),
+            ("ann-laptop".to_owned(), vec![1]),
+            ("bob".to_owned(), vec![2]),
+        ]);
+        let active: Active = ["ann-phone", "ann-laptop", "bob", "stranger"]
+            .map(String::from)
+            .into();
+        // Ann's two devices are one person; the unknown identity takes its own place.
+        assert_eq!(others(&active, &readers, &[3]), 3);
+        // Ann rejoining or adding a device takes no extra place.
+        assert_eq!(others(&active, &readers, &[1]), 2);
+        assert_eq!(others(&Active::new(), &readers, &[3]), 0);
     }
 
     #[test]
