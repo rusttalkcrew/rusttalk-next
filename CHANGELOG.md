@@ -20,6 +20,7 @@ Unreleased under the new version and date.
 - Joining or leaving a voice channel updates everyone's channel list faster, with less load on the server.
 - New chat messages show up faster, with less work for the server.
 - Servers keep up better when many people are online, so fewer full reloads after busy moments.
+- Connecting to a server is a little faster: two repeated requests are gone.
 
 ## v0.3.0 - 2026-11-24
 
