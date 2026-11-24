@@ -76,31 +76,78 @@ enum Done {
     /// A picture's original to keep, when it should be.
     Fetched(Option<Original>),
     Uploaded(Box<Upload>),
+    /// A file for a channel's shared files, uploaded but not shared yet.
+    Stored(Result<Attachment>),
 }
 
 /// The message body with its uploaded files, and what to remove after sending; `None`
 /// when an upload failed (removed again, and the failure shown).
 pub(super) type Upload = (MessageBody, Option<Vec<Attachment>>);
 
+/// Asked for while its lane was busy: it goes once the lane is free. Not a `Command`,
+/// for the same reason as `Download`.
+pub(super) enum Waiting {
+    Send(Box<Draft>),
+    Share(Id, Vec<PathBuf>),
+}
+
+impl From<Waiting> for Command {
+    fn from(waiting: Waiting) -> Self {
+        match waiting {
+            Waiting::Send(draft) => Command::Send(*draft),
+            Waiting::Share(channel, paths) => Command::ShareFiles(channel, paths),
+        }
+    }
+}
+
 struct Lane {
     task: task::Id,
-    draft: Draft,
-    target: Target,
-    /// Counts the message as sending until it is done with.
-    sent: Queued,
-    /// Sent after this one: they wait, so they can't arrive before it.
-    waiting: VecDeque<Draft>,
+    work: Work,
+    /// Asked for after this one: they wait, so they can't arrive (or show their
+    /// progress) before it.
+    waiting: VecDeque<Waiting>,
+}
+
+/// What a lane's task is uploading.
+enum Work {
+    Message {
+        draft: Box<Draft>,
+        target: Target,
+        /// Counts the message as sending until it is done with.
+        sent: Queued,
+    },
+    /// Files for a channel's shared files, one at a time: `path` now, then `rest`.
+    Share {
+        path: PathBuf,
+        rest: VecDeque<PathBuf>,
+    },
+}
+
+/// A lane's upload finished, or failed to.
+pub(super) enum Finished {
+    Message(Box<Message>),
+    Share(Box<Stored>),
 }
 
 /// A message whose files finished uploading, or failed to.
-pub(super) struct Finished {
+pub(super) struct Message {
     pub draft: Draft,
     pub target: Target,
     /// `None` when the upload task itself stopped (a bug): nothing was sent.
     pub upload: Option<Upload>,
-    /// Messages to send now, in the order they were sent.
-    pub waiting: VecDeque<Draft>,
+    /// To run now, in the order they were asked for.
+    pub waiting: VecDeque<Waiting>,
     pub _sent: Queued,
+}
+
+/// A file for a channel's shared files, uploaded or not; sharing it is up to the loop.
+pub(super) struct Stored {
+    pub channel: Id,
+    /// `None` when the upload task itself stopped (a bug).
+    pub file: Option<Result<Attachment>>,
+    /// The files still to share after this one.
+    pub rest: VecDeque<PathBuf>,
+    pub waiting: VecDeque<Waiting>,
 }
 
 impl Default for Jobs {
@@ -129,15 +176,27 @@ impl Jobs {
         self.fetching.insert(task.id(), again);
     }
 
-    /// The draft back when it can go now; kept to go after the message uploading
-    /// ahead of it in its lane otherwise.
+    /// The draft back when it can go now; kept to go after the upload ahead of it in
+    /// its lane otherwise.
     pub(super) fn wait(&mut self, draft: Draft) -> Option<Draft> {
         match self.lanes.get_mut(&lane(&draft)) {
             Some(busy) => {
-                busy.waiting.push_back(draft);
+                busy.waiting.push_back(Waiting::Send(Box::new(draft)));
                 None
             }
             None => Some(draft),
+        }
+    }
+
+    /// The files back when they can be shared now; kept to go after the upload ahead
+    /// of them in the channel otherwise.
+    pub(super) fn wait_share(&mut self, channel: Id, paths: Vec<PathBuf>) -> Option<Vec<PathBuf>> {
+        match self.lanes.get_mut(&channel) {
+            Some(busy) => {
+                busy.waiting.push_back(Waiting::Share(channel, paths));
+                None
+            }
+            None => Some(paths),
         }
     }
 
@@ -153,14 +212,41 @@ impl Jobs {
         let task = self
             .tasks
             .spawn(async move { Done::Uploaded(Box::new(work.await)) });
-        let lane = Lane {
-            task: task.id(),
-            draft,
+        let lane = self::lane(&draft);
+        let work = Work::Message {
+            draft: Box::new(draft),
             target,
             sent,
-            waiting: VecDeque::new(),
         };
-        self.lanes.insert(self::lane(&lane.draft), lane);
+        self.lanes.insert(
+            lane,
+            Lane {
+                task: task.id(),
+                work,
+                waiting: VecDeque::new(),
+            },
+        );
+    }
+
+    /// Upload `path` for the channel's shared files, with `rest` and `waiting` to go
+    /// after it; `next` hands it back to share. It takes the channel's lane, as a
+    /// message's files do: both show their progress in the same place.
+    pub(super) fn store(
+        &mut self,
+        channel: Id,
+        (path, rest): (PathBuf, VecDeque<PathBuf>),
+        waiting: VecDeque<Waiting>,
+        work: impl Future<Output = Result<Attachment>> + Send + 'static,
+    ) {
+        let task = self.tasks.spawn(async move { Done::Stored(work.await) });
+        self.lanes.insert(
+            channel,
+            Lane {
+                task: task.id(),
+                work: Work::Share { path, rest },
+                waiting,
+            },
+        );
     }
 
     pub(super) fn busy(&self) -> bool {
@@ -186,44 +272,56 @@ impl Jobs {
         let lane = (self.lanes.iter())
             .find(|(_, lane)| lane.task == task)
             .map(|(lane, _)| *lane)?;
-        let Lane {
-            draft,
-            target,
-            sent,
-            waiting,
-            ..
-        } = self.lanes.remove(&lane)?;
-        let upload = match done {
-            Some(Done::Uploaded(upload)) => Some(*upload),
-            _ => None,
-        };
-        Some(Finished {
-            draft,
-            target,
-            upload,
-            waiting,
-            _sent: sent,
+        let Lane { work, waiting, .. } = self.lanes.remove(&lane)?;
+        Some(match work {
+            Work::Message {
+                draft,
+                target,
+                sent,
+            } => Finished::Message(Box::new(Message {
+                draft: *draft,
+                target,
+                upload: match done {
+                    Some(Done::Uploaded(upload)) => Some(*upload),
+                    _ => None,
+                },
+                waiting,
+                _sent: sent,
+            })),
+            Work::Share { rest, .. } => Finished::Share(Box::new(Stored {
+                channel: lane,
+                file: match done {
+                    Some(Done::Stored(file)) => Some(file),
+                    _ => None,
+                },
+                rest,
+                waiting,
+            })),
         })
     }
 
-    /// Stop every transfer, with the commands to ask for them again: each message
-    /// still uploading first, then the ones that waited for it.
+    /// Stop every transfer, with the commands to ask for them again: each upload still
+    /// running first, then the ones that waited for it.
     pub(super) fn stop(&mut self) -> Vec<Command> {
         // Dropping the old set aborts its tasks.
         let Self {
             fetching, lanes, ..
         } = std::mem::take(self);
         let mut again: Vec<Command> = fetching.into_values().map(Command::from).collect();
-        for Lane {
-            mut draft,
-            sent,
-            waiting,
-            ..
-        } in lanes.into_values()
-        {
-            draft.queued = sent;
-            again.push(Command::Send(draft));
-            again.extend(waiting.into_iter().map(Command::Send));
+        for (lane, Lane { work, waiting, .. }) in lanes {
+            again.push(match work {
+                Work::Message {
+                    mut draft, sent, ..
+                } => {
+                    draft.queued = sent;
+                    Command::Send(*draft)
+                }
+                // The file uploading now is shared from the start again, then the rest.
+                Work::Share { path, rest } => {
+                    Command::ShareFiles(lane, std::iter::once(path).chain(rest).collect())
+                }
+            });
+            again.extend(waiting.into_iter().map(Command::from));
         }
         again
     }
@@ -758,48 +856,98 @@ pub(super) async fn shared(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, cha
 
 /// Upload files into a channel's shared files one at a time, then load the list again.
 /// They go without thumbnails: a thumbnail would expire while its file stays.
+/// Each file is read, encrypted and uploaded in a task of its own (see `Jobs::store`),
+/// so this server's chat and voice go on meanwhile; `stored` shares it, on the loop.
+/// Returns what waited for the channel, to run now, once nothing is left to share.
 pub(super) async fn share(
     ctx: &Ctx,
     url: &Url,
     client: &mut KeyClient<'_>,
+    jobs: &mut Jobs,
     channel: Id,
-    paths: Vec<PathBuf>,
-) {
-    for path in paths {
-        let name = file_name(&path);
-        let shown: Progress = {
-            let (ctx, url, name) = (ctx.clone(), url.clone(), name.clone());
-            Arc::new(move |done: u64, total: u64| {
-                let what = Some((name.clone(), done as f32 / total.max(1) as f32));
-                ctx.send(Update::Uploading(url.clone(), channel, what));
-            })
-        };
-        shown(0, 1);
-        let shared = async {
-            let bytes = read(path.clone()).await?;
-            let (file, _) = prepare_file(&name, media_type(&path), &bytes, &[])?;
-            client
-                .upload_prepared(&channel, &file, &bytes, None, Some(shown))
-                .await?;
-            let mut shared = client.share_file(&channel, &file).await;
-            // The channel just got a new key: take it and try once more.
-            if code(shared.as_ref().err()) == Some("epoch_changed") && client.sync().await.is_ok() {
-                shared = client.share_file(&channel, &file).await;
-            }
-            if let Err(error) = shared {
-                discard(&client.file_client(), std::slice::from_ref(&file)).await;
-                return Err(error);
-            }
-            Ok(())
-        };
-        if let Err(error) = shared.await {
+    (mut paths, waiting): (VecDeque<PathBuf>, VecDeque<Waiting>),
+) -> VecDeque<Waiting> {
+    let Some(path) = paths.pop_front() else {
+        ctx.send(Update::Uploading(url.clone(), channel, None));
+        shared(ctx, url, client, channel).await;
+        return waiting;
+    };
+    let work = {
+        let (ctx, url, blobs, path) =
+            (ctx.clone(), url.clone(), client.file_client(), path.clone());
+        async move { store(&ctx, &url, &blobs, channel, path).await }
+    };
+    jobs.store(channel, (path, paths), waiting, work);
+    VecDeque::new()
+}
+
+/// Read, encrypt and upload one file for the shared files, showing how far it got.
+async fn store(
+    ctx: &Ctx,
+    url: &Url,
+    client: &FileClient,
+    channel: Id,
+    path: PathBuf,
+) -> Result<Attachment> {
+    let name = file_name(&path);
+    let shown: Progress = {
+        let (ctx, url, name) = (ctx.clone(), url.clone(), name.clone());
+        Arc::new(move |done: u64, total: u64| {
+            let what = Some((name.clone(), done as f32 / total.max(1) as f32));
+            ctx.send(Update::Uploading(url.clone(), channel, what));
+        })
+    };
+    shown(0, 1);
+    let bytes = read(path.clone()).await?;
+    let (file, _) = prepare_file(&name, media_type(&path), &bytes, &[])?;
+    client
+        .upload_prepared(&channel, &file, &bytes, None, Some(shown))
+        .await?;
+    Ok(file)
+}
+
+/// A file for the shared files finished uploading: share it, then go on with the next
+/// one. After a failure, shown here, the rest isn't shared. Returns what `share` does.
+pub(super) async fn stored(
+    ctx: &Ctx,
+    url: &Url,
+    client: &mut KeyClient<'_>,
+    jobs: &mut Jobs,
+    Stored {
+        channel,
+        file,
+        rest,
+        waiting,
+    }: Stored,
+) -> VecDeque<Waiting> {
+    let shared = match file {
+        Some(Ok(file)) => share_stored(client, channel, &file).await,
+        Some(Err(error)) => Err(error),
+        None => Err(anyhow::anyhow!("the upload task stopped")),
+    };
+    let rest = match shared {
+        Ok(()) => rest,
+        Err(error) => {
             tracing::warn!(error = %format_args!("{error:#}"), "sharing a file failed");
             ctx.send(Update::Failed(upload_problem(&error)));
-            break;
+            VecDeque::new()
         }
+    };
+    share(ctx, url, client, jobs, channel, (rest, waiting)).await
+}
+
+/// Add an uploaded file to the channel's shared files, or remove it again.
+async fn share_stored(client: &mut KeyClient<'_>, channel: Id, file: &Attachment) -> Result<()> {
+    let mut shared = client.share_file(&channel, file).await;
+    // The channel just got a new key: take it and try once more.
+    if code(shared.as_ref().err()) == Some("epoch_changed") && client.sync().await.is_ok() {
+        shared = client.share_file(&channel, file).await;
     }
-    ctx.send(Update::Uploading(url.clone(), channel, None));
-    shared(ctx, url, client, channel).await;
+    if let Err(error) = shared {
+        discard(&client.file_client(), std::slice::from_ref(file)).await;
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// Remove a shared file, then load the list again.
@@ -999,9 +1147,119 @@ mod tests {
         (commands.iter())
             .map(|command| match command {
                 Command::Send(draft) => draft.text.as_str(),
+                // Shares are named by their first file.
+                Command::ShareFiles(_, paths) => paths[0].to_str().unwrap(),
                 _ => "download",
             })
             .collect()
+    }
+
+    fn message(finished: Finished) -> Message {
+        match finished {
+            Finished::Message(message) => *message,
+            Finished::Share(_) => panic!("a share came back"),
+        }
+    }
+
+    fn waiting(waiting: VecDeque<Waiting>) -> Vec<Command> {
+        waiting.into_iter().map(Command::from).collect()
+    }
+
+    fn paths(names: &[&str]) -> Vec<PathBuf> {
+        names.iter().map(PathBuf::from).collect()
+    }
+
+    /// What's stored in `Jobs` lives in `State`, borrowed across the loop's awaits: it
+    /// must stay `Send` and `Sync`, on Windows too (no handles in it).
+    #[test]
+    fn jobs_can_be_shared_between_threads() {
+        fn shareable<T: Send + Sync>() {}
+        shareable::<Jobs>();
+    }
+
+    /// A message sent while files are being shared to its channel waits for them, so
+    /// it doesn't take over their progress; a share waits for a message's files too.
+    #[tokio::test]
+    async fn a_share_and_chat_uploads_in_one_channel_go_in_order() {
+        let mut jobs = Jobs::default();
+        let mut originals = ImageOriginals::default();
+        let (done, stored) = tokio::sync::oneshot::channel::<()>();
+        let file = prepared().unwrap().0;
+        let start = (PathBuf::from("a"), paths(&["b"]).into());
+        jobs.store([4; 32], start, VecDeque::new(), {
+            let file = file.clone();
+            async move {
+                stored.await.unwrap();
+                Ok(file)
+            }
+        });
+        assert!(
+            jobs.wait(draft(4, "after")).is_none(),
+            "the share goes first"
+        );
+        let later = jobs.wait_share([4; 32], paths(&["c"]));
+        assert!(later.is_none(), "so does a share asked for before");
+        assert!(jobs.wait(draft(4, "last")).is_none());
+        assert!(jobs.wait(draft(5, "elsewhere")).is_some());
+        assert_eq!(jobs.wait_share([6; 32], paths(&["x"])), Some(paths(&["x"])));
+        done.send(()).unwrap();
+        let Some(Finished::Share(stored)) = jobs.next(&mut originals).await else {
+            panic!("the share is back");
+        };
+        assert_eq!(stored.channel, [4; 32]);
+        assert!(stored.file.unwrap().unwrap() == file, "the stored file");
+        assert_eq!(stored.rest, paths(&["b"]), "the next file to share");
+        let after = waiting(stored.waiting);
+        assert_eq!(texts(&after), ["after", "c", "last"]);
+        assert!(!jobs.busy());
+
+        // A message's files go first the other way round as well.
+        let picture = draft(4, "picture");
+        let (done, uploaded) = tokio::sync::oneshot::channel::<()>();
+        jobs.upload(
+            picture.clone(),
+            Queued::default(),
+            target(&picture),
+            async {
+                uploaded.await.unwrap();
+                (MessageBody::default(), Some(Vec::new()))
+            },
+        );
+        assert!(jobs.wait_share([4; 32], paths(&["d"])).is_none());
+        done.send(()).unwrap();
+        let finished = message(jobs.next(&mut originals).await.unwrap());
+        assert_eq!(texts(&waiting(finished.waiting)), ["d"]);
+    }
+
+    /// A share stopped by a dropped connection comes back as one to ask for again,
+    /// from the file it was uploading, with what waited for it after.
+    #[tokio::test]
+    async fn stopping_hands_back_a_share_from_its_current_file() {
+        let mut jobs = Jobs::default();
+        let start = (PathBuf::from("b"), paths(&["c", "d"]).into());
+        jobs.store([8; 32], start, VecDeque::new(), std::future::pending());
+        assert!(jobs.wait(draft(8, "after")).is_none());
+        let again = jobs.stop();
+        assert_eq!(texts(&again), ["b", "after"]);
+        let Some(Command::ShareFiles(channel, files)) = again.into_iter().next() else {
+            panic!("a share to ask for again");
+        };
+        assert_eq!((channel, files), ([8; 32], paths(&["b", "c", "d"])));
+        assert!(!jobs.busy(), "the task is gone");
+    }
+
+    #[tokio::test]
+    async fn a_stopped_share_task_still_frees_its_channel() {
+        let mut jobs = Jobs::default();
+        let start = (PathBuf::from("a"), VecDeque::new());
+        jobs.store([9; 32], start, VecDeque::new(), async {
+            panic!("synthetic upload failure")
+        });
+        let Some(Finished::Share(stored)) = jobs.next(&mut ImageOriginals::default()).await else {
+            panic!("the share is back");
+        };
+        assert!(stored.file.is_none());
+        assert!(jobs.wait_share([9; 32], paths(&["b"])).is_some());
     }
 
     /// Text, picture, text in one channel: the second text waits for the picture.
@@ -1029,11 +1287,15 @@ mod tests {
         let other = jobs.wait(draft(2, "elsewhere"));
         assert_eq!(other.map(|d| d.text).as_deref(), Some("elsewhere"));
         done.send(()).unwrap();
-        let finished = jobs.next(&mut originals).await.expect("the upload is back");
+        let finished = message(jobs.next(&mut originals).await.expect("the upload is back"));
         assert_eq!(finished.draft.text, "picture");
         assert!(finished.upload.is_some());
-        let waiting: Vec<_> = finished.waiting.iter().map(|d| d.text.as_str()).collect();
-        assert_eq!(waiting, ["after", "later"], "in the order they were sent");
+        let waiting = waiting(finished.waiting);
+        assert_eq!(
+            texts(&waiting),
+            ["after", "later"],
+            "in the order they were sent"
+        );
         assert!(
             jobs.wait(draft(1, "now")).is_some(),
             "the channel is free again"
@@ -1052,8 +1314,9 @@ mod tests {
             async { panic!("synthetic upload failure") },
         );
         assert!(jobs.wait(draft(7, "after")).is_none());
-        let finished =
-            (jobs.next(&mut ImageOriginals::default()).await).expect("the lane comes back");
+        let finished = message(
+            (jobs.next(&mut ImageOriginals::default()).await).expect("the lane comes back"),
+        );
         assert_eq!(finished.draft.text, "picture");
         assert!(finished.upload.is_none());
         assert_eq!(finished.waiting.len(), 1);

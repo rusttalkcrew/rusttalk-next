@@ -1361,6 +1361,11 @@ fn refuse(ctx: &Ctx, url: &Url, command: Command) {
             ctx.send(Update::SharedFiles(url.clone(), channel, Vec::new()));
             ctx.send(Update::Failed(t!("admin.offline").into()));
         }
+        // A share the connection stopped may still show its progress.
+        Command::ShareFiles(channel, _) => {
+            ctx.send(Update::Uploading(url.clone(), channel, None));
+            ctx.send(Update::Failed(t!("admin.offline").into()));
+        }
         Command::AcceptFile(id, _) => {
             let reason = t!("admin.offline").into();
             ctx.send(Update::LiveProgress(id, LiveFileEvent::Failed { reason }));
@@ -2051,7 +2056,8 @@ async fn send(
     sent.map(|_| ())
 }
 
-/// A message's files finished uploading: send it, then the ones that waited for it.
+/// A message's files, or a file to share, finished uploading: send or share it, then
+/// run what waited for it.
 async fn uploaded(
     ctx: &Ctx,
     url: &Url,
@@ -2059,13 +2065,22 @@ async fn uploaded(
     state: &mut State,
     done: files::Finished,
 ) {
-    let files::Finished {
+    let files::Message {
         draft,
         target,
         upload,
         waiting,
         _sent,
-    } = done;
+    } = match done {
+        files::Finished::Message(message) => *message,
+        files::Finished::Share(stored) => {
+            let waiting = files::stored(ctx, url, client, &mut state.jobs, *stored).await;
+            for next in waiting {
+                run_command(ctx, url, client, state, next.into()).await;
+            }
+            return;
+        }
+    };
     match upload {
         Some((body, Some(leftover))) => {
             let (dm, kept) = (draft.peer.is_some(), draft.keep.len());
@@ -2091,8 +2106,8 @@ async fn uploaded(
             ctx.send(Update::Failed(t!("admin.failed").into()));
         }
     }
-    for draft in waiting {
-        run_command(ctx, url, client, state, Command::Send(draft)).await;
+    for next in waiting {
+        run_command(ctx, url, client, state, next.into()).await;
     }
 }
 
@@ -2765,7 +2780,15 @@ async fn on_command(
             });
         }
         Command::SharedFiles(channel) => files::shared(ctx, url, client, channel).await,
-        Command::ShareFiles(channel, paths) => files::share(ctx, url, client, channel, paths).await,
+        Command::ShareFiles(channel, paths) => {
+            // After a message or share whose files are still uploading here: it waits.
+            let Some(paths) = state.jobs.wait_share(channel, paths) else {
+                return Ok(());
+            };
+            // Nothing waits for it yet, so nothing comes back to run.
+            let start = (paths.into(), VecDeque::new());
+            files::share(ctx, url, client, &mut state.jobs, channel, start).await;
+        }
         Command::Unshare(channel, id, uploader) => {
             files::unshare(ctx, url, client, (channel, id, uploader)).await;
         }

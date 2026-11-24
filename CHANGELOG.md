@@ -11,6 +11,7 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Adding big files to a channel's shared files no longer freezes that server: new messages keep arriving and calls keep going while they upload.
 - Servers stay responsive when someone joins: sharing chat keys no longer slows down everyone else's connection.
 - After sleep or a network hiccup, servers reconnect within about 30 seconds instead of silently missing new messages.
 - Channels with edited messages load faster.
