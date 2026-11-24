@@ -227,6 +227,7 @@ fn oversized_stored_picker_feedback() {
 
 #[test]
 fn live_offers_wait_for_download_in_every_layout() {
+    let _route = crate::route::test_lock();
     let _picker = PICKER_TEST.lock().unwrap();
     let _reset = ResetPicker;
     let data = tempfile::tempdir().unwrap();

@@ -9,9 +9,7 @@ mod members;
 mod roles;
 
 use chrono::{DateTime, Local};
-use eframe::egui::{
-    self, CollapsingHeader, ComboBox, DragValue, Grid, RichText, Ui, accesskit::Role,
-};
+use eframe::egui::{self, CollapsingHeader, ComboBox, DragValue, RichText, Ui, accesskit::Role};
 
 use rusttalk_core::{
     auth::{ServerUpdateOutcome, ServerUpdates, decode},
@@ -1423,57 +1421,133 @@ fn check_listing(listing: &mut PublicListing) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Read, write, speak and video per role, for the Edit channel dialog. Changes wait in
-/// `pending` (role and flags) until the dialog is saved.
+/// Role names line up so the toggles after them form columns.
+const ROLE_NAME_WIDTH: f32 = 104.0;
+const CHIP_HEIGHT: f32 = 26.0;
+
+/// Who sees a channel and what each role may do there, for the Edit channel dialog.
+/// Changes wait in `pending` (role and flags) until the dialog is saved.
 pub(crate) fn channel_flags(
     ui: &mut Ui,
     server: &Server,
     channel: &Channel,
     pending: &mut Vec<(String, u8)>,
+    height: f32,
 ) {
-    ui.label(t!("admin.who_can_use_channel"));
-    let columns: &[(u8, &str)] = if channel.voice {
+    let top = ui.cursor().top();
+    let flags_of = |pending: &Vec<(String, u8)>, role: &str| {
+        pending
+            .iter()
+            .find(|(id, _)| id == role)
+            .map_or_else(|| channel_role_flags(channel, role), |(_, flags)| *flags)
+    };
+    let set = |pending: &mut Vec<(String, u8)>, role: &str, flags: u8| {
+        pending.retain(|(id, _)| id != role);
+        pending.push((role.to_owned(), flags));
+    };
+    // (bit, glyph, label): what the channel's kind offers.
+    let columns: &[(u8, &str, &str)] = if channel.voice {
         &[
-            (1, t!("admin.flag_read")),
-            (2, t!("admin.flag_write")),
-            (4, t!("admin.flag_speak")),
-            (8, t!("admin.flag_video")),
+            (1, "👁", t!("admin.flag_read")),
+            (2, "✏", t!("admin.flag_write")),
+            (4, "🎤", t!("admin.flag_speak")),
+            (8, "📷", t!("admin.flag_video")),
         ]
     } else if channel.page {
         // Writing in a page channel is changing the page.
-        &[(1, t!("admin.flag_read")), (2, t!("admin.flag_edit"))]
+        &[
+            (1, "👁", t!("admin.flag_read")),
+            (2, "✏", t!("admin.flag_edit")),
+        ]
     } else {
-        &[(1, t!("admin.flag_read")), (2, t!("admin.flag_write"))]
+        &[
+            (1, "👁", t!("admin.flag_read")),
+            (2, "✏", t!("admin.flag_write")),
+        ]
     };
-    Grid::new("channel-flags").striped(true).show(ui, |ui| {
-        ui.label("");
-        for (_, label) in columns {
-            ui.label(ui::bold(*label));
-        }
-        ui.end_row();
-        for role in &server.dir.roles {
-            let flags = pending
-                .iter()
-                .find(|(id, _)| *id == role.id)
-                .map(|(_, flags)| *flags)
-                .unwrap_or_else(|| channel_role_flags(channel, &role.id));
-            ui.label(&role.name);
-            for (bit, _) in columns {
-                let mut on = flags & bit != 0;
-                if ui::checkbox(ui, &mut on, "").changed() {
-                    // Everything else needs Read; taking Read away takes the rest too.
-                    let flags = match (on, *bit) {
-                        (false, 1) => 0,
-                        (true, bit) => flags | bit | 1,
-                        (false, bit) => flags & !bit,
-                    };
-                    pending.retain(|(id, _)| *id != role.id);
-                    pending.push((role.id.clone(), flags));
-                }
+    // The default role is everyone, so whether it can read is whether the channel is open.
+    let everyone = &server.dir.default_role;
+    let mut open = flags_of(pending, everyone) & 1 != 0;
+    let was_open = open;
+    ui.label(ui::bold(t!("admin.who_can_see_channel")));
+    ui.add_space(ui::SPACE_XS);
+    let choices = [
+        (
+            true,
+            t!("admin.channel_everyone"),
+            t!("admin.channel_everyone_hint"),
+        ),
+        (
+            false,
+            t!("admin.channel_some_roles"),
+            t!("admin.channel_some_roles_hint"),
+        ),
+    ];
+    if ui::segmented(ui, &mut open, &choices) && open != was_open {
+        // Opening gives everyone what a new channel gives them; closing takes it all.
+        let flags = match open {
+            false => 0,
+            true if channel.page => 1,
+            true => columns.iter().fold(0, |all, (bit, ..)| all | bit),
+        };
+        set(pending, everyone, flags);
+    }
+    ui.add_space(ui::SPACE_M);
+    ui::caption_label(ui, t!("admin.what_roles_can_do"));
+    ui.add_space(ui::SPACE_XS);
+    let room = (height - (ui.cursor().top() - top)).max(120.0);
+    egui::ScrollArea::vertical()
+        .max_height(room)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            for role in &server.dir.roles {
+                let flags = flags_of(pending, &role.id);
+                ui::card_frame(ui)
+                    .inner_margin(egui::Margin::symmetric(10, 6))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing.x = ui::SPACE_XS;
+                            ui.spacing_mut().button_padding = egui::vec2(7.0, 2.0);
+                            let size = egui::vec2(ROLE_NAME_WIDTH, CHIP_HEIGHT);
+                            let centred = egui::Layout::left_to_right(egui::Align::Center);
+                            ui.allocate_ui_with_layout(size, centred, |ui| {
+                                ui.set_min_size(size);
+                                ui::color_dot(ui, role.color);
+                                // A role that can't see the channel is greyed out.
+                                let mut name = ui::bold(&role.name);
+                                name = match role.color {
+                                    _ if flags & 1 == 0 => name.color(ui::colors(ui).muted),
+                                    Some(color) => name.color(color),
+                                    None => name,
+                                };
+                                ui.add(egui::Label::new(name).truncate());
+                            });
+                            for (bit, glyph, label) in columns {
+                                let on = flags & bit != 0;
+                                let text =
+                                    RichText::new(format!("{glyph} {label}")).size(ui::TEXT_SMALL);
+                                let chip =
+                                    ui::choice_button(ui, on, text, egui::vec2(0.0, CHIP_HEIGHT))
+                                        .on_hover_text(format!("{} · {label}", role.name));
+                                if chip.clicked() {
+                                    // Everything else needs Read; taking Read away takes the rest too.
+                                    let flags = match (on, *bit) {
+                                        (true, 1) => 0,
+                                        (false, bit) => flags | bit | 1,
+                                        (true, bit) => flags & !bit,
+                                    };
+                                    set(pending, &role.id, flags);
+                                }
+                            }
+                        });
+                        if flags & 1 == 0 {
+                            ui.label(ui::caption(t!("admin.role_cannot_see")));
+                        }
+                    });
+                ui.add_space(ui::SPACE_XS);
             }
-            ui.end_row();
-        }
-    });
+        });
 }
 
 /// What a role may do in a channel, as saved on the server.
