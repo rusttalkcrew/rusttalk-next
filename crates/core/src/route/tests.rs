@@ -41,7 +41,8 @@ use super::*;
 use crate::pinned_tls::{self, fingerprint, is_pin_mismatch};
 
 /// Serialize tests that mutate the process-global route controller.
-static TEST_LOCK: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(|| tokio::sync::Mutex::new(()));
+pub(crate) static TEST_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(()));
 
 fn reset_direct() {
     let _ = apply(RouteConfig::default(), RouteSecrets::default());

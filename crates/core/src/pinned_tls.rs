@@ -61,7 +61,7 @@ pub fn is_pin_mismatch(error: &(dyn std::error::Error + 'static)) -> bool {
 pub fn https_client(
     pin: Option<Fingerprint>,
 ) -> Result<reqwest::Client, Box<dyn std::error::Error + Send + Sync>> {
-    build_https_client(pin.map(pinned_config).transpose()?)
+    build_https_client(pin.map(pinned_https_config).transpose()?)
 }
 
 /// Connect to the event stream using the same trust decision as the HTTPS API.
@@ -97,6 +97,15 @@ pub(crate) async fn events_socket(
     )
     .await??;
     Ok(socket)
+}
+
+/// reqwest only sets ALPN on TLS it builds itself, so offer HTTP/2 here. The event
+/// WebSocket keeps `pinned_config` without ALPN: its upgrade needs HTTP/1.1.
+#[cfg(feature = "https-client")]
+fn pinned_https_config(pin: Fingerprint) -> Result<ClientConfig, rustls::Error> {
+    let mut config = pinned_config(pin)?;
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    Ok(config)
 }
 
 fn pinned_config(pin: Fingerprint) -> Result<ClientConfig, rustls::Error> {
@@ -239,5 +248,87 @@ mod tests {
 
         let unrelated = std::io::Error::other("connection refused");
         assert!(!is_pin_mismatch(&unrelated));
+    }
+
+    /// The negotiated ALPN and the client's first bytes, or `None` if the handshake failed.
+    #[cfg(feature = "client")]
+    type Seen = Option<(Option<Vec<u8>>, [u8; 24])>;
+
+    /// Accept one TLS connection offering HTTP/2 and HTTP/1.1, then stop listening.
+    #[cfg(feature = "client")]
+    fn serve_once(
+        cert: &rcgen::CertifiedKey<rcgen::KeyPair>,
+    ) -> (u16, std::thread::JoinHandle<Seen>) {
+        use std::io::Read;
+
+        let mut config =
+            rustls::ServerConfig::builder_with_provider(Arc::new(ring::default_provider()))
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_no_client_auth()
+                .with_single_cert(
+                    vec![cert.cert.der().clone()],
+                    rustls::pki_types::PrivateKeyDer::Pkcs8(
+                        cert.signing_key.serialize_der().into(),
+                    ),
+                )
+                .unwrap();
+        config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            drop(listener);
+            let connection = rustls::ServerConnection::new(Arc::new(config)).unwrap();
+            let mut stream = rustls::StreamOwned::new(connection, socket);
+            let mut start = [0; 24];
+            stream.read_exact(&mut start).ok()?;
+            Some((stream.conn.alpn_protocol().map(<[u8]>::to_vec), start))
+        });
+        (port, server)
+    }
+
+    /// Offering HTTP/2 changes neither trust nor the event stream: the pinned API client
+    /// speaks HTTP/2 when the server offers it, a wrong pin still fails, and the event
+    /// WebSocket offers no ALPN, so its upgrade stays on HTTP/1.1.
+    #[cfg(feature = "client")]
+    #[tokio::test]
+    async fn api_requests_use_http2_but_the_event_socket_stays_on_http1() {
+        let _route = crate::route::tests::TEST_LOCK.lock().await;
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let pin = fingerprint(cert.cert.der().as_ref());
+
+        // The test servers never answer, so every request below fails after its first bytes.
+        let (port, server) = serve_once(&cert);
+        let _ = https_client(Some(pin))
+            .unwrap()
+            .get(format!("https://127.0.0.1:{port}/v1/health"))
+            .send()
+            .await;
+        let (alpn, start) = server.join().unwrap().unwrap();
+        assert_eq!(alpn.as_deref(), Some(&b"h2"[..]));
+        assert_eq!(&start, b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
+
+        let (port, server) = serve_once(&cert);
+        let other = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let error = https_client(Some(fingerprint(other.cert.der().as_ref())))
+            .unwrap()
+            .get(format!("https://127.0.0.1:{port}/v1/health"))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(is_pin_mismatch(&error), "{error:?}");
+        assert!(server.join().unwrap().is_none());
+
+        let (port, server) = serve_once(&cert);
+        let known = crate::auth::KnownServer {
+            address: format!("https://127.0.0.1:{port}/").parse().unwrap(),
+            server_id: [0; 32],
+            tls_fingerprint: Some(pin),
+        };
+        let _ = events_socket(&known, "token").await;
+        let (alpn, start) = server.join().unwrap().unwrap();
+        assert_eq!(alpn, None);
+        assert!(start.starts_with(b"GET /v1/events HTTP/1.1"));
     }
 }

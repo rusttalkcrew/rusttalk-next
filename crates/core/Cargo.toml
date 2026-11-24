@@ -81,7 +81,7 @@ windows-capture = { version = "=2.0.1", optional = true }
 windows = { version = "0.62.2", features = ["Wdk_System_SystemServices", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_System_Com", "Win32_System_Threading", "Win32_System_SystemInformation", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"], optional = true }
 
 [features]
-https-client = ["dep:reqwest", "dep:rustls"]
+https-client = ["dep:reqwest", "dep:rustls", "reqwest/http2"]
 client = ["dep:anyhow", "dep:boringtun", "dep:image", "dep:futures-util", "https-client", "reqwest/json", "reqwest/socks", "reqwest/stream", "dep:serde_json", "dep:smoltcp", "dep:tempfile", "dep:tokio", "tokio/io-util", "tokio/macros", "tokio/rt", "dep:tokio-tungstenite", "dep:tracing"]
 livekit-tls = ["dep:async-trait", "dep:futures-util", "dep:livekit-net", "dep:livekit-protocol", "dep:prost", "dep:reqwest", "dep:rustls", "dep:tokio", "dep:tokio-tungstenite"]
 capture = ["dep:anyhow", "dep:serde_json", "dep:tracing", "dep:wasapi", "dep:windows", "dep:block2", "dep:dispatch2", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-core-audio", "dep:objc2-core-audio-types", "dep:objc2-core-foundation", "dep:objc2-foundation"]
