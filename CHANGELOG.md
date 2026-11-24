@@ -15,6 +15,7 @@ Unreleased under the new version and date.
 - After sleep or a network hiccup, servers reconnect within about 30 seconds instead of silently missing new messages.
 - Channels with edited messages load faster.
 - Reconnecting to many servers at once is faster: syncing with your other devices no longer holds each server up.
+- Joining a voice channel is faster, and chat, Leave and switching channels keep working while it connects.
 
 ## v0.3.0 - 2026-11-24
 

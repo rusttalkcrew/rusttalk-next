@@ -1177,6 +1177,45 @@ impl<'a> KeyClient<'a> {
         }
     }
 
+    /// Sync only when the scope's key may be out of date: missing, pending rotation or
+    /// removal, behind a key event already received, or due a retry. Saves the round trips
+    /// and wrap pause of a full sync when joining a call with the current key.
+    #[cfg(feature = "voice")]
+    pub(super) async fn sync_unless_fresh(&mut self, scope: Scope) -> Result<()> {
+        // Key events already received but not yet returned count too.
+        while !self.closed
+            && let Some(Some(frame)) = self.events.next().now_or_never()
+        {
+            // A broken event stream is for the event loop to reconnect; joining goes on
+            // over HTTP as before, but key events may be lost, so sync.
+            if let Err(error) = frame
+                .map_err(anyhow::Error::from)
+                .and_then(|frame| self.receive(frame))
+            {
+                tracing::warn!(error = %format_args!("{error:#}"), "event stream failed while joining voice");
+                self.closed = true;
+                self.stale = true;
+            }
+        }
+        if !self.key_fresh(scope) {
+            self.sync().await?;
+            // The queued events stay queued; this sync already covered them.
+            self.stale = false;
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "voice")]
+    fn key_fresh(&self, scope: Scope) -> bool {
+        !self.stale
+            // A device removal not synced yet; `current_key` only checks this on newer servers.
+            && !self.changes.has_changed().unwrap_or(true)
+            && self.current_key(scope).is_ok()
+            && self
+                .next_rekey()
+                .is_none_or(|due| due > std::time::Instant::now())
+    }
+
     fn receive(&mut self, frame: Message) -> Result<()> {
         match frame {
             Message::Text(text) => {
@@ -1702,6 +1741,83 @@ mod tests {
         );
         assert!(client.changes.has_changed()?);
         assert_eq!(client.current_key(scope)?, (epoch, &key));
+        Ok(())
+    }
+
+    #[cfg(feature = "voice")]
+    #[tokio::test]
+    async fn joining_voice_syncs_only_when_the_key_may_be_out_of_date() -> Result<()> {
+        let profile = tempfile::tempdir()?;
+        let server = Server::for_test(3, profile.path());
+        let (_, identity) = DeviceIdentity::create("reader")?;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let socket = tokio::net::TcpStream::connect(listener.local_addr()?).await?;
+        let events = EventStream::from_raw_socket(
+            tokio_tungstenite::MaybeTlsStream::Plain(crate::route::RouteStream::Direct(socket)),
+            tokio_tungstenite::tungstenite::protocol::Role::Client,
+            None,
+        )
+        .await;
+        let session = Session {
+            token: String::new(),
+            expires_at: 0,
+        };
+        let mut client = KeyClient::from_stream(&server, &identity, &session, None, events)?;
+        let scope = Scope {
+            kind: Kind::Channel,
+            id: [5; 32],
+        };
+        assert!(!client.key_fresh(scope), "no key yet");
+
+        let (key, epoch) = (keys::random_key()?, 2);
+        let context = EnvelopeContext::new(server.known_server().server_id, scope, epoch, &key);
+        client.keys.insert(
+            (scope, epoch),
+            HeldKey {
+                key: key.clone(),
+                envelope: encode(&context.wrap(&key, &identity.certificate, &identity)?),
+                sender: *identity.certificate.person_id(),
+                commitment: context.commitment,
+                excluded: Excluded::new(),
+                pair_bound: false,
+            },
+        );
+        client.scopes.push(ScopeState {
+            scope,
+            epoch,
+            rotate: false,
+            excluded: Excluded::new(),
+        });
+        client.checked_removals = true;
+        assert!(client.key_fresh(scope));
+
+        // Chat and presence don't touch keys; a key event does.
+        let chat = Update::Event(Event::VoiceChanged {
+            channel: encode(&[5; 32]),
+        });
+        client.receive(Message::Text(serde_json::to_string(&chat)?.into()))?;
+        assert!(client.key_fresh(scope));
+        let rotate = Update::Event(Event::RotateNeeded { scope });
+        client.receive(Message::Text(serde_json::to_string(&rotate)?.into()))?;
+        assert!(!client.key_fresh(scope), "key event not synced yet");
+        client.stale = false;
+
+        client.scopes[0].rotate = true;
+        assert!(!client.key_fresh(scope), "rotation pending");
+        client.scopes[0].rotate = false;
+
+        client.rotation_retry = Some(std::time::Instant::now());
+        assert!(!client.key_fresh(scope), "lost rotation race due a retry");
+        client.rotation_retry = None;
+        assert!(client.key_fresh(scope));
+
+        // Another connection learned of a device removal.
+        let (removed, changes) = tokio::sync::watch::channel(());
+        client.changes = changes;
+        removed.send_replace(());
+        assert!(!client.key_fresh(scope), "device removal not synced yet");
+        client.changes.borrow_and_update();
+        assert!(client.key_fresh(scope));
         Ok(())
     }
 

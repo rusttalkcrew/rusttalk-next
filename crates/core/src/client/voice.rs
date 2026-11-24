@@ -167,12 +167,101 @@ fn signaling_url(server: &KnownServer) -> Result<reqwest::Url> {
     Ok(url)
 }
 
+/// A voice token and keys, ready to connect without borrowing the `KeyClient`, so the
+/// caller can connect off its event loop and drop the join if it is cancelled.
+pub struct PendingVoice {
+    url: reqwest::Url,
+    token: String,
+    server: KnownServer,
+    channel: [u8; 32],
+    audio_kbps: u32,
+    epoch: i64,
+    key: Key,
+    revocations: super::revocations::Revocations,
+    name_keys: HashMap<i64, Key>,
+    screen_names: HashMap<i64, Key>,
+    stream_names: HashMap<i64, Key>,
+    control_keys: HashMap<i64, Key>,
+    terminal_keys: HashMap<i64, Key>,
+    terminal_share_keys: HashMap<i64, Key>,
+    ring_keys: HashMap<i64, Key>,
+    watch_keys: HashMap<i64, Key>,
+}
+
+impl PendingVoice {
+    /// Connect to LiveKit and build the encrypted `VoiceRoom`.
+    pub async fn connect(self) -> Result<VoiceRoom> {
+        let provider = KeyProvider::with_shared_key(
+            KeyProviderOptions {
+                ratchet_window_size: 0,
+                ..Default::default()
+            },
+            self.key.to_vec(),
+        );
+        install_key(&provider, &self.key, self.epoch)?;
+        let mut options = RoomOptions::default();
+        options.encryption = Some(E2eeOptions {
+            key_provider: provider.clone(),
+            encryption_type: EncryptionType::Gcm,
+        });
+        options.join_retries = 0;
+        options.auto_subscribe = false;
+        options.data_stream =
+            RoomDataStreamOptions::default().with_max_payload_byte_length(live_file::RECEIVE_CAP);
+        let (room, events) = Room::connect(self.url.as_str(), &self.token, options)
+            .await
+            .context("connect to pinned LiveKit room")?;
+        let changes = self.revocations.changes();
+        let blocked = self.revocations.voice_identities(&self.server.server_id)?;
+        let room = Arc::new(room);
+        let grants = Arc::new(stream_audio::Reconciler::new(stream_audio::RoomGrants {
+            room: room.clone(),
+            keys: std::sync::Mutex::new(stream_audio::GrantKeys {
+                stream_names: self.stream_names.clone(),
+                watch_keys: self.watch_keys.clone(),
+            }),
+            sound: Default::default(),
+        }));
+        let grants_task = tokio::spawn(grants.clone().run(room.subscribe()));
+        let voice = VoiceRoom {
+            closing: None,
+            changes,
+            revocations: self.revocations,
+            blocked,
+            listening: HashMap::new(),
+            room,
+            events,
+            server: self.server,
+            channel: self.channel,
+            audio_kbps: self.audio_kbps,
+            epoch: self.epoch,
+            provider,
+            name_keys: self.name_keys,
+            screen_names: self.screen_names,
+            stream_names: self.stream_names,
+            control_keys: self.control_keys,
+            terminal_keys: self.terminal_keys,
+            terminal_share_keys: self.terminal_share_keys,
+            ring_keys: self.ring_keys,
+            watch_keys: self.watch_keys,
+            phone_consent: Default::default(),
+            stats: stats::Sampler::default(),
+            files: live_file::LiveFiles::default(),
+            grants,
+            _grants_task: stream_audio::AbortOnDrop(grants_task),
+        };
+        voice.reconcile_audio();
+        Ok(voice)
+    }
+}
+
 impl KeyClient<'_> {
-    /// Reconcile keys, request a scoped token, and connect with the current epoch.
-    pub async fn join_voice(&mut self, channel: &[u8; 32]) -> Result<VoiceRoom> {
+    /// Ensure a fresh channel key, request a scoped token, and package everything needed to connect.
+    pub async fn prepare_voice(&mut self, channel: &[u8; 32]) -> Result<PendingVoice> {
         crate::route::allow_realtime_media("Voice calls")?;
-        self.sync().await?;
+        self.sync_unless_fresh(scope(channel)).await?;
         let (epoch, key) = self.current_key(scope(channel))?;
+        let key = key.clone();
         let response = self
             .request(
                 Method::POST,
@@ -195,76 +284,30 @@ impl KeyClient<'_> {
 
         let server = self.server.known_server();
         let url = signaling_url(server)?;
-        let name_keys = self.name_keys(channel, track_name::APP_AUDIO);
-        let screen_names = self.name_keys(channel, track_name::SCREEN);
-        let stream_names = self.name_keys(channel, track_name::STREAM_AUDIO);
-        let control_keys = self.name_keys(channel, control::LABEL);
-        let terminal_keys = self.name_keys(channel, terminal::LABEL);
-        let terminal_share_keys = self.name_keys(channel, terminal::SHARE_LABEL);
-        let ring_keys = self.name_keys(channel, ring::LABEL);
-        let watch_keys = self.name_keys(channel, watch::LABEL);
-        let key = media_key(key, &server.server_id, channel, epoch);
-        let provider = KeyProvider::with_shared_key(
-            KeyProviderOptions {
-                ratchet_window_size: 0,
-                ..Default::default()
-            },
-            key.to_vec(),
-        );
-        install_key(&provider, &key, epoch)?;
-        let mut options = RoomOptions::default();
-        options.encryption = Some(E2eeOptions {
-            key_provider: provider.clone(),
-            encryption_type: EncryptionType::Gcm,
-        });
-        options.join_retries = 0;
-        options.auto_subscribe = false;
-        options.data_stream =
-            RoomDataStreamOptions::default().with_max_payload_byte_length(live_file::RECEIVE_CAP);
-        let (room, events) = Room::connect(url.as_str(), &reply.token, options)
-            .await
-            .context("connect to pinned LiveKit room")?;
-        let changes = self.revocations.changes();
-        let blocked = self.revocations.voice_identities(&server.server_id)?;
-        let room = Arc::new(room);
-        let grants = Arc::new(stream_audio::Reconciler::new(stream_audio::RoomGrants {
-            room: room.clone(),
-            keys: std::sync::Mutex::new(stream_audio::GrantKeys {
-                stream_names: stream_names.clone(),
-                watch_keys: watch_keys.clone(),
-            }),
-            sound: Default::default(),
-        }));
-        let grants_task = tokio::spawn(grants.clone().run(room.subscribe()));
-        let voice = VoiceRoom {
-            closing: None,
-            changes,
-            revocations: self.revocations.clone(),
-            blocked,
-            listening: HashMap::new(),
-            room,
-            events,
+        let key = media_key(&key, &server.server_id, channel, epoch);
+        Ok(PendingVoice {
+            url,
+            token: reply.token,
             server: server.clone(),
             channel: *channel,
             audio_kbps: reply.audio_kbps.unwrap_or(DEFAULT_AUDIO_KBPS),
             epoch,
-            provider,
-            name_keys,
-            screen_names,
-            stream_names,
-            control_keys,
-            terminal_keys,
-            terminal_share_keys,
-            ring_keys,
-            watch_keys,
-            phone_consent: Default::default(),
-            stats: stats::Sampler::default(),
-            files: live_file::LiveFiles::default(),
-            grants,
-            _grants_task: stream_audio::AbortOnDrop(grants_task),
-        };
-        voice.reconcile_audio();
-        Ok(voice)
+            key,
+            revocations: self.revocations.clone(),
+            name_keys: self.name_keys(channel, track_name::APP_AUDIO),
+            screen_names: self.name_keys(channel, track_name::SCREEN),
+            stream_names: self.name_keys(channel, track_name::STREAM_AUDIO),
+            control_keys: self.name_keys(channel, control::LABEL),
+            terminal_keys: self.name_keys(channel, terminal::LABEL),
+            terminal_share_keys: self.name_keys(channel, terminal::SHARE_LABEL),
+            ring_keys: self.name_keys(channel, ring::LABEL),
+            watch_keys: self.name_keys(channel, watch::LABEL),
+        })
+    }
+
+    /// Reconcile keys if needed, request a scoped token, and connect with the current epoch.
+    pub async fn join_voice(&mut self, channel: &[u8; 32]) -> Result<VoiceRoom> {
+        self.prepare_voice(channel).await?.connect().await
     }
 
     // Name keys for every held epoch, so app names published before a rotation still decrypt.

@@ -834,6 +834,8 @@ struct State {
     /// Who the server says is in each voice channel.
     rooms: HashMap<Id, VoiceRoster>,
     voice: Option<Live>,
+    /// A voice join still connecting.
+    joining: Option<voice::Joining>,
     /// Live files in the call and in chats, by transfer ID.
     transfers: HashMap<Id, Transfer>,
     /// Live files in text channels and DMs, by channel: our offers, and accepting others'.
@@ -1021,6 +1023,16 @@ async fn run(
                         )
                         .await;
                         state.identities = voice::identities(&client, &state.server_id);
+                        // A join needs the API connection to finish, so it ends with it.
+                        if let Some(mut joining) = state.joining.take() {
+                            ctx.send(Update::Call(url.clone(), joining.channel, None));
+                            // Shares need telling they failed; the rest only mattered in the call.
+                            for command in joining.take_deferred() {
+                                if !voice_only(&command) {
+                                    refuse(&ctx, &url, command);
+                                }
+                            }
+                        }
                         ctx.sync.set_peer(&url, None);
                         match end {
                             End::Quit => return,
@@ -1523,6 +1535,15 @@ async fn serve(
                 repair_default_avatar(ctx, url, client, state).await;
             }
             next = next_voice(&mut state.voice) => voice_next(ctx, url, Some(client), state, next).await,
+            joined = voice::next_join(&mut state.joining) => {
+                let Some(mut joining) = state.joining.take() else { continue };
+                if let Err(error) = voice::finish_call(ctx, url, client, state, joining.channel, joined).await {
+                    report(ctx, error);
+                }
+                for command in joining.take_deferred() {
+                    run_command(ctx, url, client, state, command).await;
+                }
+            }
             _ = stats.tick(), if state.voice.is_some() => {
                 if !recover_voice(ctx, url, client, state, commands, removals, queued).await {
                     return End::Quit;
@@ -1914,17 +1935,27 @@ async fn run_command(
     state: &mut State,
     command: Command,
 ) {
-    if let Err(error) = on_command(ctx, url, client, state, command).await {
-        tracing::warn!(error = %format_args!("{error:#}"), "server request failed");
-        let full = error.is::<rusttalk_core::client::voice::ChannelFull>();
-        let text = match error.downcast_ref::<MessageError>() {
-            Some(MessageError::ServerUpdateRequired) => t!("net.rotation_update"),
-            Some(MessageError::TextLimit) => t!("net.text_limit"),
-            _ if full => t!("call.channel_full"),
-            _ => t!("admin.failed"),
-        };
-        ctx.send(Update::Failed(text.into()));
+    if let Some(joining) = &mut state.joining
+        && voice::waits_for_call(&command)
+    {
+        joining.defer(command);
+        return;
     }
+    if let Err(error) = on_command(ctx, url, client, state, command).await {
+        report(ctx, error);
+    }
+}
+
+fn report(ctx: &Ctx, error: anyhow::Error) {
+    tracing::warn!(error = %format_args!("{error:#}"), "server request failed");
+    let full = error.is::<rusttalk_core::client::voice::ChannelFull>();
+    let text = match error.downcast_ref::<MessageError>() {
+        Some(MessageError::ServerUpdateRequired) => t!("net.rotation_update"),
+        Some(MessageError::TextLimit) => t!("net.text_limit"),
+        _ if full => t!("call.channel_full"),
+        _ => t!("admin.failed"),
+    };
+    ctx.send(Update::Failed(text.into()));
 }
 
 /// A voice room event or finished screen pick. Without `client` the API connection is
