@@ -16,6 +16,7 @@ Unreleased under the new version and date.
 - Channels with edited messages load faster.
 - Reconnecting to many servers at once is faster: syncing with your other devices no longer holds each server up.
 - Joining a voice channel is faster, and chat, Leave and switching channels keep working while it connects.
+- Pictures, link previews and big files load and upload in the background, so chat, status and voice keep up meanwhile.
 
 ## v0.3.0 - 2026-11-24
 

@@ -843,6 +843,8 @@ struct State {
     /// Decoded pictures in the last directory, by hash.
     pictures: HashMap<[u8; 32], Picture>,
     image_originals: files::ImageOriginals,
+    /// Uploads and downloads of stored files, off this server's loop.
+    jobs: files::Jobs,
     /// The DM pins `dm_pins` last saved, to save again when they change.
     pins_saved: HashMap<Id, DmPin>,
     /// `dm_pins` couldn't be read: it is left as it is, and DMs here stay blocked.
@@ -1032,6 +1034,11 @@ async fn run(
                                     refuse(&ctx, &url, command);
                                 }
                             }
+                        }
+                        // Transfers stop with the connection (a new route must not inherit
+                        // them) and are asked again, in order, once it is back.
+                        for command in state.jobs.stop().into_iter().rev() {
+                            queued.push_front(command);
                         }
                         ctx.sync.set_peer(&url, None);
                         match end {
@@ -1544,6 +1551,7 @@ async fn serve(
                     run_command(ctx, url, client, state, command).await;
                 }
             }
+            Some(done) = state.jobs.next(&mut state.image_originals), if state.jobs.busy() => uploaded(ctx, url, client, state, done).await,
             _ = stats.tick(), if state.voice.is_some() => {
                 if !recover_voice(ctx, url, client, state, commands, removals, queued).await {
                     return End::Quit;
@@ -1925,6 +1933,73 @@ fn apply_keys(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &mut State) {
         )
     {
         ctx.send(Update::Directory(url.clone(), Box::new(dir.clone())));
+    }
+}
+
+/// Send a message; it goes back to the composer when it didn't go.
+#[allow(clippy::too_many_arguments)]
+async fn send(
+    ctx: &Ctx,
+    url: &Url,
+    client: &mut KeyClient<'_>,
+    state: &mut State,
+    draft: Draft,
+    target: files::Target,
+    dm: bool,
+    body: MessageBody,
+    leftover: (usize, Vec<rusttalk_core::client::Attachment>),
+) -> Result<()> {
+    let sent = files::post(ctx, url, client, state, target, dm, body, leftover).await;
+    if matches!(sent, Ok(true)) && draft.forum_post {
+        ctx.send(Update::ForumSent(url.clone(), target.0, draft.id));
+    } else if !matches!(sent, Ok(true)) {
+        ctx.send(Update::Unsent(url.clone(), draft));
+    }
+    sent.map(|_| ())
+}
+
+/// A message's files finished uploading: send it, then the ones that waited for it.
+async fn uploaded(
+    ctx: &Ctx,
+    url: &Url,
+    client: &mut KeyClient<'_>,
+    state: &mut State,
+    done: files::Finished,
+) {
+    let files::Finished {
+        draft,
+        target,
+        upload,
+        waiting,
+        _sent,
+    } = done;
+    match upload {
+        Some((body, Some(leftover))) => {
+            let (dm, kept) = (draft.peer.is_some(), draft.keep.len());
+            let sent = send(
+                ctx,
+                url,
+                client,
+                state,
+                draft,
+                target,
+                dm,
+                body,
+                (kept, leftover),
+            );
+            if let Err(error) = sent.await {
+                report(ctx, error);
+            }
+        }
+        // The upload already said what went wrong.
+        Some((_, None)) => ctx.send(Update::Unsent(url.clone(), draft)),
+        None => {
+            ctx.send(Update::Unsent(url.clone(), draft));
+            ctx.send(Update::Failed(t!("admin.failed").into()));
+        }
+    }
+    for draft in waiting {
+        run_command(ctx, url, client, state, Command::Send(draft)).await;
     }
 }
 
@@ -2381,8 +2456,12 @@ async fn on_command(
         Command::Older(channel, before) => {
             page(ctx, url, client, state, channel, Some(before)).await;
         }
-        Command::Send(mut draft) => {
-            let _sent = std::mem::take(&mut draft.queued);
+        Command::Send(draft) => {
+            // Sent after a message whose files are still uploading: it waits for it.
+            let Some(mut draft) = state.jobs.wait(draft) else {
+                return Ok(());
+            };
+            let sent = std::mem::take(&mut draft.queued);
             let channel = match draft.peer {
                 Some(peer) => dm_channel(ctx, url, client, state, peer).await,
                 None => Ok(draft.channel),
@@ -2448,34 +2527,40 @@ async fn on_command(
                     &kept,
                 );
             }
-            let files = (
-                draft.files.clone(),
-                draft.preview.clone(),
-                draft.inline.clone(),
-            );
             // A page version names its stored files, so the server keeps them (see `post_page`).
             let page = (state.last.iter())
                 .flat_map(|dir| &dir.categories)
                 .flat_map(|category| &category.channels)
                 .any(|known| known.id == channel && known.page);
             let target = (channel, draft.id, page, draft.forum_post);
-            let mut sent =
-                files::send(ctx, url, client, state, target, body.clone(), files.clone()).await;
-            // The other person re-keyed the DM just now: take the new key and send
-            // once more, whatever this was (text, sticker, file or friend message).
-            if draft.peer.is_some() && sent.as_ref().is_err_and(files::conflict) {
-                // A failed key sync still puts the draft back below.
-                sent = match client.sync().await {
-                    Ok(()) => files::send(ctx, url, client, state, target, body, files).await,
-                    Err(error) => Err(error),
-                };
+            let kept = body.attachments.len();
+            if draft.files.is_empty() && draft.preview.is_none() && draft.inline.is_empty() {
+                let dm = draft.peer.is_some();
+                return send(
+                    ctx,
+                    url,
+                    client,
+                    state,
+                    draft,
+                    target,
+                    dm,
+                    body,
+                    (kept, Vec::new()),
+                )
+                .await;
             }
-            if matches!(sent, Ok(true)) && draft.forum_post {
-                ctx.send(Update::ForumSent(url.clone(), channel, draft.id));
-            } else if !matches!(sent, Ok(true)) {
-                ctx.send(Update::Unsent(url.clone(), draft));
-            }
-            sent?;
+            let uploads = (
+                draft.files.clone(),
+                draft.preview.clone(),
+                draft.inline.clone(),
+            );
+            let (ctx, url, blobs) = (ctx.clone(), url.clone(), client.file_client());
+            state.jobs.upload(draft, sent, target, async move {
+                let mut body = body;
+                let leftover =
+                    files::upload_all(&ctx, &url, &blobs, channel, &mut body, uploads).await;
+                (body, leftover)
+            });
         }
         Command::CheckGone(channel, id) => {
             // The server's word that it deleted it isn't enough; it must be missing.
@@ -2489,11 +2574,37 @@ async fn on_command(
             files::delete(ctx, url, client, state, (channel, id, sender), blobs).await?;
         }
         Command::Image(file, fetch) => {
-            files::image(ctx, url, client, &mut state.image_originals, file, fetch).await
+            let again = files::Download::Image(file.clone(), fetch);
+            let (ctx, url, blobs) = (ctx.clone(), url.clone(), client.file_client());
+            let cached = state.image_originals.lookup(&file, fetch);
+            (state.jobs).download(again, async move {
+                files::image(&ctx, &url, &blobs, cached, file, fetch).await
+            });
         }
-        Command::LinkCard(file) => files::link_card(ctx, client, file).await,
-        Command::StickerFile(file, kind) => files::sticker_file(ctx, client, file, kind).await,
-        Command::Save(file, path) => files::save(ctx, client, file, path).await,
+        Command::LinkCard(file) => {
+            let again = files::Download::LinkCard(file.clone());
+            let (ctx, blobs) = (ctx.clone(), client.file_client());
+            (state.jobs).download(again, async move {
+                files::link_card(&ctx, &blobs, file).await;
+                None
+            });
+        }
+        Command::StickerFile(file, kind) => {
+            let again = files::Download::StickerFile(file.clone(), kind);
+            let (ctx, blobs) = (ctx.clone(), client.file_client());
+            (state.jobs).download(again, async move {
+                files::sticker_file(&ctx, &blobs, file, kind).await;
+                None
+            });
+        }
+        Command::Save(file, path) => {
+            let again = files::Download::Save(file.clone(), path.clone());
+            let (ctx, blobs) = (ctx.clone(), client.file_client());
+            (state.jobs).download(again, async move {
+                files::save(&ctx, &blobs, file, path).await;
+                None
+            });
+        }
         Command::SharedFiles(channel) => files::shared(ctx, url, client, channel).await,
         Command::ShareFiles(channel, paths) => files::share(ctx, url, client, channel, paths).await,
         Command::Unshare(channel, id, uploader) => {
