@@ -129,8 +129,11 @@ pub(crate) async fn release_from(
     device: Option<&[u8]>,
 ) -> ApiResult<()> {
     let channels: Vec<String> = query_scalar(
-        "DELETE FROM page_files WHERE message_id IN (SELECT id FROM messages
-             WHERE sender_person = ? AND (? IS NULL OR sender_device = ?))
+        // Walks the small page_files table and looks each version up by id, so the
+        // messages table is never scanned while holding the writer.
+        "DELETE FROM page_files WHERE EXISTS (SELECT 1 FROM messages m
+             WHERE m.id = page_files.message_id AND m.sender_person = ?
+                 AND (? IS NULL OR m.sender_device = ?))
          RETURNING channel_id",
     )
     .bind(person)
@@ -321,6 +324,79 @@ mod tests {
         release_from(&app, &mut tx, &person(1), None).await?;
         tx.commit().await?;
         assert_ne!(expiry(&app, &id).await?, Some(i64::MAX));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn releasing_drops_only_that_persons_or_devices_versions() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let app = app(dir.path(), 2).await?;
+        sqlx::raw_sql(
+            "INSERT INTO categories VALUES ('category', 0, X'00');
+             INSERT INTO channels (id, kind, category_id, position, name_ct)
+                 VALUES ('p', 'text', 'category', 0, X'00');
+             UPDATE channels SET page = TRUE WHERE id = 'p';
+             INSERT INTO key_scopes (id, kind, channel_id) SELECT id, 'channel', id FROM channels;
+             INSERT INTO key_epochs (scope_id, epoch, commitment) SELECT id, 1, zeroblob(32) FROM key_scopes;",
+        )
+        .execute(&app.db)
+        .await?;
+        // Person 1 saved v1 from device 1 and v2 from device 2; person 2 saved v3 (newest).
+        let versions = [("v1", 1u8, 1u8), ("v2", 2, 1), ("v3", 3, 2)];
+        let mut tx = crate::store::write(&app.db).await?;
+        for (n, (version, device, editor)) in versions.into_iter().enumerate() {
+            query("INSERT INTO message_senders VALUES (?, ?, X'03')")
+                .bind(vec![device])
+                .bind(person(editor))
+                .execute(&mut *tx)
+                .await?;
+            let file = encode(&[n as u8 + 1; 32]);
+            query(
+                "INSERT INTO files (id, channel_id, uploader, size, created_at, expires_at)
+                 VALUES (?, 'p', ?, 16, 100, 4000000000)",
+            )
+            .bind(&file)
+            .bind(person(editor))
+            .execute(&mut *tx)
+            .await?;
+            query(
+                "INSERT INTO messages (id, channel_id, epoch, sender_device, sender_person, at, size, envelope)
+                 VALUES (?, 'p', 1, ?, ?, 0, 111, zeroblob(111))",
+            )
+            .bind(version)
+            .bind(vec![device])
+            .bind(person(editor))
+            .execute(&mut *tx)
+            .await?;
+            record(&mut tx, "p", version, &[file]).await?;
+        }
+        refresh(&app, &mut tx, "p").await?;
+        tx.commit().await?;
+        let kept = async || -> Result<Vec<String>> {
+            Ok(
+                query_scalar("SELECT message_id FROM page_files ORDER BY message_id")
+                    .fetch_all(&app.db)
+                    .await?,
+            )
+        };
+        let release = async |editor: u8, device: Option<u8>| -> Result<()> {
+            let device = device.map(|byte| vec![byte]);
+            let mut tx = crate::store::write(&app.db).await?;
+            release_from(&app, &mut tx, &person(editor), device.as_deref()).await?;
+            tx.commit().await?;
+            Ok(())
+        };
+        assert_eq!(kept().await?, ["v1", "v2", "v3"]);
+        // A device person 1 does not have, or another person's device, releases nothing.
+        release(1, Some(3)).await?;
+        assert_eq!(kept().await?, ["v1", "v2", "v3"]);
+        // Revoking device 1 releases only what that device saved.
+        release(1, Some(1)).await?;
+        assert_eq!(kept().await?, ["v2", "v3"]);
+        // Leaving releases the rest of person 1's versions, never person 2's.
+        release(1, None).await?;
+        assert_eq!(kept().await?, ["v3"]);
+        assert_eq!(expiry(&app, &encode(&[3; 32])).await?, Some(i64::MAX));
         Ok(())
     }
 }
