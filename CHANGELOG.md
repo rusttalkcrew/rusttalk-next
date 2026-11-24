@@ -28,6 +28,7 @@ Unreleased under the new version and date.
 - Loading many things from a server at once is faster: requests now share one HTTP/2 connection.
 - Avatars, server icons and custom emoji are kept in an encrypted cache, so they show right away after a restart instead of downloading again.
 - Servers with animated avatars, icons or emoji open faster and use less memory: their animations load the first time they play.
+- Servers come online faster after starting or reconnecting, and clicks, messages and call joins no longer wait for pictures and unread marks to load.
 
 ## v0.3.0 - 2026-11-24
 

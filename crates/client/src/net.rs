@@ -15,6 +15,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use eframe::egui;
+use futures_util::{StreamExt, stream};
 use livekit::prelude::Participant;
 use reqwest::{Method, StatusCode};
 use rusttalk_core::{
@@ -847,6 +848,11 @@ struct State {
     chat_files: HashMap<Id, DataLiveFiles>,
     /// Decoded pictures in the last directory, by hash.
     pictures: HashMap<[u8; 32], Picture>,
+    /// The last directory still needs its pictures step: fetching the missing ones and
+    /// pruning the disk cache to what it lists.
+    pictures_pending: bool,
+    /// Loading left for when the serve loop is idle.
+    warmup: VecDeque<Warmup>,
     image_originals: files::ImageOriginals,
     /// Uploads and downloads of stored files, off this server's loop.
     jobs: files::Jobs,
@@ -862,6 +868,30 @@ struct State {
     /// The voice room LiveKit last removed this device from, and when: a move notice for
     /// it may arrive just after.
     removed_from: Option<(Id, std::time::Instant)>,
+}
+
+/// At most this many requests to one server at a time while loading, so a slow reply
+/// doesn't hold up the rest and a big server isn't flooded.
+const PARALLEL: usize = 8;
+
+/// Run `requests` at most [`PARALLEL`] at a time, results in the order they finish.
+// The futures are built before streaming them: a stream mapping with a borrowing closure
+// trips rustc's higher-ranked `Send` check for the spawned server task.
+async fn bounded<F: Future>(requests: Vec<F>) -> Vec<F::Output> {
+    stream::iter(requests)
+        .buffer_unordered(PARALLEL)
+        .collect()
+        .await
+}
+
+/// Loading after (re)connecting that waits until no command or event is ready, so a click,
+/// send or call join isn't queued behind it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Warmup {
+    /// Who is in each voice channel.
+    Rooms,
+    /// What came in while away, for unread marks.
+    Latest,
 }
 
 enum Failure {
@@ -1480,7 +1510,7 @@ async fn serve(
             tracing::info!("network route changed during resume; closing server session");
             return End::RouteChanged;
         }
-        res = resume(ctx, url, client, state) => res,
+        res = resume(ctx, url, client, state, true) => res,
     };
     if let Err(error) = resumed {
         tracing::warn!(error = %format_args!("{error:#}"), "loading server state failed");
@@ -1585,7 +1615,7 @@ async fn serve(
                     return End::Error;
                 }
                 tracing::info!("session refreshed");
-                if let Err(error) = resume(ctx, url, client, state).await {
+                if let Err(error) = resume(ctx, url, client, state, false).await {
                     tracing::warn!(error = %format_args!("{error:#}"), "reloading after refresh failed");
                 }
             }
@@ -1618,6 +1648,18 @@ async fn serve(
                 stop_finished_shares(ctx, url, Some(client), state).await;
                 voice::name_audio(ctx, client, state);
                 voice_stats(ctx, url, client, state).await;
+            }
+            // Last, so anything else that is ready goes first.
+            () = std::future::ready(()), if !state.warmup.is_empty() || state.pictures_pending => {
+                match state.warmup.pop_front() {
+                    Some(Warmup::Rooms) => rooms(ctx, url, client, state).await,
+                    Some(Warmup::Latest) => latest(ctx, url, client, state).await,
+                    None => {
+                        if let Err(error) = directory::fill_pictures(ctx, url, client, state).await {
+                            tracing::warn!(error = %format_args!("{error:#}"), "loading pictures failed");
+                        }
+                    }
+                }
             }
         }
     }
@@ -1903,7 +1945,7 @@ async fn recover_voice(
     match result {
         Ok(()) => {
             // Replacing the event socket can miss notices; reload authoritative state.
-            if let Err(error) = resume(ctx, url, client, state).await {
+            if let Err(error) = resume(ctx, url, client, state, false).await {
                 tracing::warn!(%error, "reloading state after media recovery failed");
             }
             apply_keys(ctx, url, client, state);
@@ -2195,7 +2237,14 @@ fn move_applies(
 }
 
 /// Reload what the UI shows after (re)connecting, since events may have been missed.
-async fn resume(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, state: &mut State) -> Result<()> {
+/// `synced` says the client's keys were just synced while connecting.
+async fn resume(
+    ctx: &Ctx,
+    url: &Url,
+    client: &mut KeyClient<'_>,
+    state: &mut State,
+    mut synced: bool,
+) -> Result<()> {
     let (api, session) = client.sync_peer();
     ctx.sync.set_peer(url, Some((api.clone(), session.clone())));
     // Off this server's startup path: a slow peer must not stall it. Removals the run
@@ -2213,13 +2262,18 @@ async fn resume(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, state: &mut St
         // A removal learned from another server (or device sync itself) takes
         // effect even while the directory request is stalled.
         let barrier = changes.clone();
+        // A removal device sync learns restarts this loop, which then syncs the keys again,
+        // so the keys need no second sync right after connecting.
+        let fresh = std::mem::take(&mut synced);
         tokio::select! {
             biased;
             _ = changes.changed() => continue,
             result = async {
-                client.sync().await?;
+                if !fresh {
+                    client.sync().await?;
+                }
                 // A revocation this server holds must reach the others even when the
-                // device sync above was skipped.
+                // device sync above was skipped, also one the sync while connecting found.
                 if client.take_own_revocations_changed() {
                     sync_later(ctx);
                 }
@@ -2246,21 +2300,35 @@ async fn reload_pages(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, state: &
     set_display_name(ctx, client, state).await;
     publish_selected_avatar(ctx, client, state).await;
     repair_default_avatar(ctx, client, state).await;
-    latest(ctx, url, client, state).await;
-    let voice: Vec<Id> = state
-        .last
-        .iter()
+    apply_keys(ctx, url, client, state);
+    state.warmup = VecDeque::from([Warmup::Rooms, Warmup::Latest]);
+}
+
+/// Who is in every voice channel.
+async fn rooms(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &mut State) {
+    let voice = (state.last.iter())
         .flat_map(|dir| &dir.categories)
         .flat_map(|category| &category.channels)
         .filter(|channel| channel.voice)
         .map(|channel| channel.id)
-        .collect();
-    for channel in voice {
-        if let Err(error) = room_changed(ctx, url, client, state, channel).await {
-            tracing::warn!(error = %format_args!("{error:#}"), "loading voice presence failed");
+        .collect::<Vec<_>>();
+    let rosters = bounded(
+        (voice.into_iter())
+            .map(|channel| async move { (channel, client.voice_participants(&channel).await) })
+            .collect(),
+    )
+    .await;
+    for (channel, roster) in rosters {
+        match roster {
+            Ok(people) => {
+                state.rooms.insert(channel, people);
+                voice::send_room(ctx, url, client, state, channel);
+            }
+            Err(error) => {
+                tracing::warn!(error = %format_args!("{error:#}"), "loading voice presence failed");
+            }
         }
     }
-    apply_keys(ctx, url, client, state);
 }
 
 /// The newest message from someone else in every channel and DM, so what came in
@@ -2278,9 +2346,18 @@ async fn latest(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, state: &State)
         .map(|channel| (channel.id, None))
         .chain(dir.dms.iter().map(|dm| (dm.channel, Some(dm.peer))));
     let me = *client.identity.certificate.person_id();
+    let shared = &*client;
+    let pages = bounded(
+        channels
+            .map(|(channel, peer)| async move {
+                (channel, peer, shared.message_page(&channel, None, 1).await)
+            })
+            .collect(),
+    )
+    .await;
     let mut found = Vec::new();
-    for (channel, peer) in channels {
-        match client.message_page(&channel, None, 1).await {
+    for (channel, peer, page) in pages {
+        match page {
             Ok(records) => {
                 let Some(record) = records.first().filter(|record| record.person != me) else {
                     continue;
@@ -2410,7 +2487,7 @@ async fn on_event(
             let (channel, id) = (decode(&channel)?, decode(&id)?);
             state.deleted(ctx, url, channel, id);
         }
-        Event::Resync => resume(ctx, url, client, state).await?,
+        Event::Resync => resume(ctx, url, client, state, false).await?,
         Event::MemberChanged {
             ref person,
             profile: Some(ref profile),

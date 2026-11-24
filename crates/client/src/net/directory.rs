@@ -7,7 +7,6 @@ use std::{
 
 use anyhow::{Context, Result};
 use eframe::egui::ColorImage;
-use futures_util::future::join_all;
 use reqwest::{Method, StatusCode};
 use rusttalk_core::{
     auth::{decode, encode},
@@ -193,13 +192,21 @@ pub(super) async fn directory(
     client: &mut KeyClient<'_>,
     state: &mut State,
 ) -> Result<()> {
-    let mut catalog = client.catalog().await?;
+    // The parts don't depend on each other, so they cost one round trip instead of seven.
+    let shared = &*client;
+    let (catalog, members, me, roles, space, emoji, calendar) = tokio::join!(
+        shared.catalog(),
+        get(shared, "/v1/members"),
+        get(shared, "/v1/me"),
+        get(shared, "/v1/roles"),
+        get(shared, "/v1/space"),
+        emoji_list(shared),
+        super::calendar::load(shared),
+    );
+    let mut catalog = catalog?;
     discard_unreadable(ctx, url, state, &catalog);
-    let members = get(client, "/v1/members").await?;
-    let me = get(client, "/v1/me").await?;
-    let roles = get(client, "/v1/roles").await?;
-    let space = get(client, "/v1/space").await?;
-    let emoji = emoji_list(client).await?;
+    let (members, me, roles) = (members?, me?, roles?);
+    let (space, emoji, calendar) = (space?, emoji?, calendar?);
     if manages_channels(&me, &roles) {
         catalog.categories = managed_categories(client).await?;
     }
@@ -211,7 +218,6 @@ pub(super) async fn directory(
         space,
         emoji,
     };
-    let calendar = super::calendar::load(client).await?;
     rebuild(ctx, url, client, state, sources, calendar).await
 }
 
@@ -359,8 +365,10 @@ async fn rebuild(
         let channel = catalog.channels.iter().find(|c| c.id == live.channel)?;
         channel.audio_kbps
     });
-    let store = state.cache.clone().expect("started server");
-    let pictures = pictures(client, members, space, emoji, &state.pictures, store).await?;
+    // Shown with the pictures already decoded; the serve loop loads the rest when idle,
+    // from the disk cache or the server.
+    let (pictures, _, _) =
+        known_pictures(client.space().id, members, space, emoji, &state.pictures)?;
     let mut dir = build(
         client,
         catalog,
@@ -391,6 +399,7 @@ async fn rebuild(
     dir.calendar = calendar;
     super::save_pins(ctx, url, client, state);
     state.pictures = pictures;
+    state.pictures_pending = true;
     if let Some(before) = &state.last
         && let Some(channel) = dir.notice_channel()
     {
@@ -786,17 +795,27 @@ pub(super) fn picture_key(owner: &Id, hash: &str) -> [u8; 32] {
         .into()
 }
 
-/// The pictures in this directory load. Only pictures whose hash is new are fetched and
-/// decoded, the rest come from the last load or the encrypted disk cache. Pictures that
-/// fail are tried again next load.
-async fn pictures(
-    client: &KeyClient<'_>,
+/// Decoded pictures by [`picture_key`].
+type Pictures = HashMap<[u8; 32], Picture>;
+
+/// A picture a directory shows that isn't decoded yet.
+struct Missing {
+    kind: Metadata,
+    id: Id,
+    key: [u8; 32],
+    path: String,
+    field: &'static str,
+}
+
+/// The pictures these sources show: those already decoded in `last`, those to load, and
+/// the keys of all of them, which the disk cache keeps.
+fn known_pictures(
+    space_id: Id,
     members: &Value,
     space: &Value,
     emoji: &Value,
     last: &HashMap<[u8; 32], Picture>,
-    store: Arc<Store>,
-) -> Result<HashMap<[u8; 32], Picture>> {
+) -> Result<(Pictures, Vec<Missing>, HashSet<[u8; 32]>)> {
     let mut wanted = Vec::new();
     for row in members.as_array().into_iter().flatten() {
         if let (Some(id), Some(hash)) = (row["person_id"].as_str(), row["avatar_hash"].as_str()) {
@@ -806,13 +825,7 @@ async fn pictures(
     }
     if let Some(hash) = space["icon_hash"].as_str() {
         let path = "/v1/space/icon".to_owned();
-        wanted.push((
-            Metadata::ServerIcon,
-            client.space().id,
-            hash,
-            path,
-            "icon_ct",
-        ));
+        wanted.push((Metadata::ServerIcon, space_id, hash, path, "icon_ct"));
     }
     for row in emoji["items"].as_array().into_iter().flatten() {
         if let (Some(id), Some(hash)) = (row["id"].as_str(), row["image_hash"].as_str()) {
@@ -836,58 +849,115 @@ async fn pictures(
             Some(known) => {
                 pictures.insert(key, known.clone());
             }
-            None => missing.push((kind, id, key, path, field)),
+            None => missing.push(Missing {
+                kind,
+                id,
+                key,
+                path,
+                field,
+            }),
         }
     }
+    Ok((pictures, missing, keys))
+}
+
+/// Load pictures from the encrypted disk cache, or else fetch and decode them, at most
+/// [`super::PARALLEL`] at a time so a slow one doesn't hold up the rest. New ones are
+/// cached, and the cache drops what isn't in `keys`. Those that fail are left out and
+/// tried again next load.
+async fn fetch_pictures(
+    client: &KeyClient<'_>,
+    mut missing: Vec<Missing>,
+    store: Arc<Store>,
+    keys: HashSet<[u8; 32]>,
+) -> Result<Pictures> {
     // Disk reads and decoding block, so they run off the two network workers.
     let disk = store.clone();
-    let (cached, missing) = tokio::task::spawn_blocking(move || {
-        let mut cached = Vec::new();
-        missing.retain(|(_, _, key, _, _)| {
-            let found = disk.picture(key).and_then(|bytes| picture(&bytes));
-            found.map(|found| cached.push((*key, found))).is_none()
+    let (mut pictures, missing) = tokio::task::spawn_blocking(move || {
+        let mut cached = HashMap::new();
+        missing.retain(|m| {
+            let found = disk.picture(&m.key).and_then(|bytes| picture(&bytes));
+            found.map(|found| cached.insert(m.key, found)).is_none()
         });
         (cached, missing)
     })
     .await?;
-    pictures.extend(cached);
+    let replies = super::bounded(
+        (missing.into_iter())
+            .map(|picture| async move {
+                let reply = get(client, &picture.path).await;
+                (picture, reply)
+            })
+            .collect(),
+    )
+    .await;
     let mut fetched = Vec::new();
-    for batch in missing.chunks(8) {
-        let replies = join_all(batch.iter().map(|(_, _, _, path, _)| get(client, path))).await;
-        for ((kind, id, key, _, field), reply) in batch.iter().zip(replies) {
-            match reply {
-                Ok(reply) => {
-                    let Some(ct) = reply[*field].as_str() else {
-                        continue;
-                    };
-                    match client.decrypt_metadata(*kind, id, ct) {
-                        Ok(bytes) => fetched.push((*key, bytes)),
-                        Err(error) => {
-                            tracing::warn!(error = %format_args!("{error:#}"), "picture could not be decrypted");
-                        }
-                    }
+    for (picture, reply) in replies {
+        match reply {
+            Ok(reply) => {
+                if let Some(ct) = reply[picture.field].as_str() {
+                    fetched.push((picture, ct.to_owned()));
                 }
-                Err(error) => {
-                    tracing::warn!(error = %format_args!("{error:#}"), "picture could not be fetched");
-                }
+            }
+            Err(error) => {
+                tracing::warn!(error = %format_args!("{error:#}"), "picture could not be fetched");
             }
         }
     }
-    let decoded = tokio::task::spawn_blocking(move || {
-        let decoded: Vec<_> = fetched
-            .into_iter()
-            .filter_map(|(key, bytes)| Some((key, picture(&bytes)?)))
-            .collect();
-        let new: Vec<_> = decoded
-            .iter()
-            .map(|(key, p)| (*key, p.bytes.clone()))
-            .collect();
-        store.save_pictures(&new, &keys);
-        decoded
-    })
-    .await?;
-    pictures.extend(decoded);
+    let mut new = Vec::new();
+    // Decrypted and decoded here, off the UI.
+    tokio::task::block_in_place(|| {
+        for (missing, ct) in fetched {
+            let bytes = match client.decrypt_metadata(missing.kind, &missing.id, &ct) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    tracing::warn!(error = %format_args!("{error:#}"), "picture could not be decrypted");
+                    continue;
+                }
+            };
+            if let Some(picture) = picture(&bytes) {
+                new.push((missing.key, picture.bytes.clone()));
+                pictures.insert(missing.key, picture);
+            }
+        }
+    });
+    tokio::task::spawn_blocking(move || store.save_pictures(&new, &keys)).await?;
     Ok(pictures)
+}
+
+/// Load the pictures the last directory went without, then show it again with them. Only
+/// tried once per load: what fails waits for the next one. Also runs with none missing,
+/// so the disk cache drops pictures the directory no longer lists.
+pub(super) async fn fill_pictures(
+    ctx: &Ctx,
+    url: &Url,
+    client: &mut KeyClient<'_>,
+    state: &mut State,
+) -> Result<()> {
+    state.pictures_pending = false;
+    let Some(sources) = &state.raw else {
+        return Ok(());
+    };
+    let (_, missing, keys) = known_pictures(
+        client.space().id,
+        &sources.members,
+        &sources.space,
+        &sources.emoji,
+        &state.pictures,
+    )?;
+    let store = state.cache.clone().expect("started server");
+    let fetched = fetch_pictures(client, missing, store, keys).await?;
+    if fetched.is_empty() {
+        return Ok(());
+    }
+    state.pictures.extend(fetched);
+    let Some(sources) = state.raw.take() else {
+        return Ok(());
+    };
+    let calendar = state.last.as_ref().and_then(|dir| dir.calendar.clone());
+    rebuild(ctx, url, client, state, sources, calendar).await?;
+    state.pictures_pending = false;
+    Ok(())
 }
 
 /// A decoded frame as an image and how long it shows, in ms.
@@ -943,6 +1013,57 @@ fn changes(before: &Directory, after: &Directory) -> Vec<(Id, &'static str, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_new_pictures_are_left_to_fetch() -> Result<()> {
+        let (a, b, emoji_id) = (encode(&[1; 32]), encode(&[2; 32]), encode(&[3; 32]));
+        let members = json!([
+            {"person_id": a, "avatar_hash": "known"},
+            {"person_id": b, "avatar_hash": "new"},
+            {"person_id": encode(&[4; 32]), "avatar_hash": null},
+        ]);
+        let space = json!({"icon_hash": "icon"});
+        let emoji = json!({"items": [{"id": emoji_id, "image_hash": "smile"}]});
+        let known = picture(include_bytes!("../../assets/rusttalk.png")).context("decodes")?;
+        let last = HashMap::from([
+            (picture_key(&[1; 32], "known"), known.clone()),
+            // Not shown anymore, so dropped.
+            (picture_key(&[2; 32], "old"), known),
+        ]);
+        let (pictures, missing, keys) = known_pictures([9; 32], &members, &space, &emoji, &last)?;
+        assert_eq!(
+            pictures.keys().collect::<Vec<_>>(),
+            [&picture_key(&[1; 32], "known")]
+        );
+        let missing: Vec<_> = (missing.iter())
+            .map(|m| (m.key, m.path.as_str(), m.field))
+            .collect();
+        assert_eq!(
+            missing,
+            [
+                (
+                    picture_key(&[2; 32], "new"),
+                    format!("/v1/members/{b}/avatar").as_str(),
+                    "avatar_ct"
+                ),
+                (picture_key(&[9; 32], "icon"), "/v1/space/icon", "icon_ct"),
+                (
+                    picture_key(&[3; 32], "smile"),
+                    format!("/v1/emoji/{emoji_id}/image").as_str(),
+                    "image_ct"
+                ),
+            ]
+        );
+        // The disk cache keeps every picture shown, decoded or not, and only those.
+        let shown = [
+            picture_key(&[1; 32], "known"),
+            picture_key(&[2; 32], "new"),
+            picture_key(&[9; 32], "icon"),
+            picture_key(&[3; 32], "smile"),
+        ];
+        assert_eq!(keys, HashSet::from(shown));
+        Ok(())
+    }
 
     #[test]
     fn a_profile_notice_updates_only_that_member() {
