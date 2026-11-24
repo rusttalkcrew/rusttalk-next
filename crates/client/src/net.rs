@@ -1027,7 +1027,7 @@ async fn run(
                         if let Some(mut joining) = state.joining.take() {
                             ctx.send(Update::Call(url.clone(), joining.channel, None));
                             // Shares need telling they failed; the rest only mattered in the call.
-                            for command in std::mem::take(&mut joining.deferred) {
+                            for command in joining.take_deferred() {
                                 if !voice_only(&command) {
                                     refuse(&ctx, &url, command);
                                 }
@@ -1540,7 +1540,7 @@ async fn serve(
                 if let Err(error) = voice::finish_call(ctx, url, client, state, joining.channel, joined).await {
                     report(ctx, error);
                 }
-                for command in std::mem::take(&mut joining.deferred) {
+                for command in joining.take_deferred() {
                     run_command(ctx, url, client, state, command).await;
                 }
             }
@@ -1938,7 +1938,7 @@ async fn run_command(
     if let Some(joining) = &mut state.joining
         && voice::waits_for_call(&command)
     {
-        joining.deferred.push(command);
+        joining.defer(command);
         return;
     }
     if let Err(error) = on_command(ctx, url, client, state, command).await {

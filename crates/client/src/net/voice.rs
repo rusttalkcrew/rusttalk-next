@@ -707,7 +707,28 @@ pub(super) struct Joining {
     pub(super) channel: Id,
     room: tokio::sync::oneshot::Receiver<Result<VoiceRoom>>,
     /// Call commands sent while connecting, run once the join ends, as before.
-    pub(super) deferred: Vec<Command>,
+    /// In a mutex only so `State` stays `Sync` (a screen target is not) and the
+    /// server task stays `Send`; it is only ever reached through `&mut`.
+    deferred: std::sync::Mutex<Vec<Command>>,
+}
+
+impl Joining {
+    /// Hold a call command until the join ends.
+    pub(super) fn defer(&mut self, command: Command) {
+        self.deferred
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(command);
+    }
+
+    /// The call commands held so far.
+    pub(super) fn take_deferred(&mut self) -> Vec<Command> {
+        std::mem::take(
+            self.deferred
+                .get_mut()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
 }
 
 impl Drop for Joining {
@@ -746,7 +767,7 @@ fn spawn_join(ctx: &Ctx, pending: PendingVoice, channel: Id) -> Joining {
     Joining {
         channel,
         room,
-        deferred: Vec::new(),
+        deferred: Default::default(),
     }
 }
 
@@ -2224,7 +2245,7 @@ mod tests {
         let mut joining = Some(Joining {
             channel: [1; 32],
             room,
-            deferred: Vec::new(),
+            deferred: Default::default(),
         });
         drop(done);
         assert!(next_join(&mut joining).await.is_err());
