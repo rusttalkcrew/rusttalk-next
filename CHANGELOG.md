@@ -11,6 +11,7 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- During a voice call, a dropped server connection is now noticed and reconnected within about 30 seconds, so chat and status keep arriving.
 - Servers stay responsive when someone joins: sharing chat keys no longer slows down everyone else's connection.
 - After sleep or a network hiccup, servers reconnect within about 30 seconds instead of silently missing new messages.
 - Channels with edited messages load faster.
