@@ -1,6 +1,13 @@
 //! Read-only startup view. Only verified, opened records enter local history.
 //! Live directories and first pages replace it after authentication.
-use std::{fs, io::Read, sync::Mutex};
+use std::{
+    fs,
+    io::Read,
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use super::*;
 use crate::server::{Category, Dm, Member};
@@ -16,6 +23,8 @@ use zeroize::Zeroizing;
 const LIMIT: usize = 16 * 1024 * 1024;
 const CHANNELS: usize = 12;
 const SERVERS: usize = 8;
+/// Live messages reach the screen first; their history is written at most this often.
+const DEBOUNCE: Duration = Duration::from_secs(1);
 // The profile lock excludes other app processes. Serialize competing workers' evictions.
 static FILES: Mutex<()> = Mutex::new(());
 
@@ -25,6 +34,18 @@ pub(super) struct Store {
     scope: Id,
     key: Key,
     active: Mutex<bool>,
+    /// Recent messages. The network worker edits them, `save_history` writes them later.
+    history: Mutex<History>,
+    /// The history changed since it was last written.
+    dirty: AtomicBool,
+    /// A task is waiting to write the history.
+    saving: AtomicBool,
+    /// Keeps history writes in order, so an older copy never replaces a newer one.
+    flushing: Mutex<()>,
+    /// A hash of what each file last held, to skip rewriting it unchanged.
+    written: Mutex<HashMap<String, Id>>,
+    #[cfg(test)]
+    writes: std::sync::atomic::AtomicUsize,
 }
 
 impl Store {
@@ -40,7 +61,61 @@ impl Store {
             scope,
             key: identity.cache_key(),
             active: Mutex::new(true),
+            history: Mutex::default(),
+            dirty: AtomicBool::new(false),
+            saving: AtomicBool::new(false),
+            flushing: Mutex::new(()),
+            written: Mutex::default(),
+            #[cfg(test)]
+            writes: Default::default(),
         }
+    }
+
+    pub fn history(&self) -> std::sync::MutexGuard<'_, History> {
+        self.history.lock().unwrap()
+    }
+
+    /// Write the history after `DEBOUNCE`, off the network worker. Without a runtime
+    /// (tests, shutdown) it is written now.
+    pub fn save_history(self: &Arc<Self>) {
+        self.dirty.store(true, Ordering::SeqCst);
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            self.flush();
+            return;
+        };
+        if self.saving.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let store = self.clone();
+        runtime.spawn(async move {
+            loop {
+                tokio::time::sleep(DEBOUNCE).await;
+                let flushing = store.clone();
+                if tokio::task::spawn_blocking(move || flushing.flush())
+                    .await
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+                store.saving.store(false, Ordering::SeqCst);
+                // A save that came after the last flush saw this task and left the write to it.
+                if !store.dirty.load(Ordering::SeqCst) || store.saving.swap(true, Ordering::SeqCst)
+                {
+                    return;
+                }
+            }
+        });
+    }
+
+    /// Write the history now if it changed. Returns whether it had changed.
+    pub fn flush(&self) -> bool {
+        let _order = self.flushing.lock().unwrap();
+        if !self.dirty.swap(false, Ordering::SeqCst) {
+            return false;
+        }
+        let plain = serde_json::to_vec(&*self.history());
+        self.put("messages", plain);
+        true
     }
 
     fn aad(&self, name: &str) -> Vec<u8> {
@@ -64,14 +139,25 @@ impl Store {
     }
 
     pub fn write(&self, name: &str, value: &impl Serialize) {
+        self.put(name, serde_json::to_vec(value));
+    }
+
+    fn put(&self, name: &str, plain: serde_json::Result<Vec<u8>>) {
         let active = self.active.lock().unwrap();
         if !*active {
             return;
         }
         let path = self.dir.join(name);
+        let mut written = self.written.lock().unwrap();
         let write = || -> Result<()> {
-            let plain = Zeroizing::new(serde_json::to_vec(value)?);
+            let plain = Zeroizing::new(plain?);
             anyhow::ensure!(plain.len() + 40 <= LIMIT, "recent cache too large");
+            let hash: Id = Sha256::digest(&*plain).into();
+            // Another server's eviction may have removed the file since.
+            if written.get(name) == Some(&hash) && path.try_exists()? {
+                return Ok(());
+            }
+            written.remove(name);
             let bytes = seal_cache(&self.key, &self.aad(name), &plain)?;
             let _files = FILES.lock().unwrap();
             if !self.dir.try_exists()? {
@@ -97,9 +183,14 @@ impl Store {
                     fs::remove_file(entry.path())?;
                 }
             }
-            crate::keystore::write_atomic(&path, &bytes)
+            crate::keystore::write_atomic(&path, &bytes)?;
+            #[cfg(test)]
+            self.writes.fetch_add(1, Ordering::SeqCst);
+            written.insert(name.to_owned(), hash);
+            Ok(())
         };
         if let Err(error) = write() {
+            written.remove(name);
             tracing::warn!(%error, "could not replace recent cache");
             // Never fall back to the previous version after a deletion or permission change.
             if let Err(error) = fs::remove_file(path)
@@ -379,7 +470,7 @@ impl State {
     }
 
     pub fn deleted(&mut self, ctx: &Ctx, url: &Url, channel: Id, id: Id) {
-        self.history.delete(channel, id);
+        self.store().history().delete(channel, id);
         if let Some(ids) = self.waiting.get_mut(&channel) {
             ids.remove(&id);
         }
@@ -396,7 +487,7 @@ impl State {
             .iter()
             .find(|dm| dm.channel == channel)
             .map(|d| d.peer);
-        self.history.put(channel, peer, records, replace);
+        self.store().history().put(channel, peer, records, replace);
         self.save_history();
     }
 
@@ -405,7 +496,7 @@ impl State {
     }
 
     pub fn save_history(&self) {
-        self.store().write("messages", &self.history);
+        self.cache.as_ref().expect("started server").save_history();
     }
 
     // A successful catalog or access denial is authoritative even if a later request times out.
@@ -413,7 +504,10 @@ impl State {
         if ids.is_empty() {
             return;
         }
-        self.history.0.retain(|page| !ids.contains(&page.channel));
+        self.store()
+            .history()
+            .0
+            .retain(|page| !ids.contains(&page.channel));
         self.save_history();
         self.loaded.retain(|id| !ids.contains(id));
         self.waiting.retain(|id, _| !ids.contains(id));
@@ -439,7 +533,7 @@ impl State {
     }
 
     pub fn prune_history(&mut self, dir: &Directory) {
-        self.history.0.retain(|page| page.visible(dir));
+        self.store().history().0.retain(|page| page.visible(dir));
         self.loaded.retain(|id| visible(dir, id));
         self.save_history();
     }
@@ -478,7 +572,8 @@ impl State {
                 continue;
             }
             let mut items = Vec::new();
-            if let Some(page) = self.history.0.iter_mut().find(|p| p.channel == *id) {
+            let store = self.cache.as_ref().expect("started server");
+            if let Some(page) = store.history().0.iter_mut().find(|p| p.channel == *id) {
                 page.records.retain(|r| sources.contains(&r.source()));
                 items.extend(page.records.iter().filter_map(|r| r.message(revoked)));
             }
@@ -498,17 +593,18 @@ impl State {
         let mut dir = listing.unpack(self, load_pins(&ctx.data, &self.server_id));
         dir.me = *ctx.identity.certificate.person_id();
         dir.my_name_hidden = true; // Only live profile data may trigger a profile update.
-        self.history = self
-            .store()
+        let store = self.cache.clone().expect("started server");
+        let mut history = store.history();
+        *history = store
             .read("messages")
             .unwrap_or_else(|error| {
                 tracing::warn!(%error, "could not restore recent messages");
                 None
             })
             .unwrap_or_default();
-        self.history.0.retain(|page| page.visible(&dir));
+        history.0.retain(|page| page.visible(&dir));
         let mut pages = Vec::new();
-        for page in &self.history.0 {
+        for page in &history.0 {
             self.loaded.insert(page.channel);
             self.sources.insert(
                 page.channel,
@@ -721,6 +817,74 @@ mod tests {
                 page_failed(&net.ctx, &known.address, &mut state, channel, None, &error);
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn history_writes_are_debounced_and_unchanged_files_skipped() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let (_, device) = DeviceIdentity::create("Debounce test")?;
+        let known = KnownServer {
+            address: "https://127.0.0.1:1/".parse()?,
+            server_id: [1; 32],
+            tls_fingerprint: None,
+        };
+        let store = Arc::new(Store::new(root.path(), &device, &known));
+        let writes = || store.writes.load(Ordering::SeqCst);
+        let record = |n: u8| -> Result<Record> {
+            Ok(Record {
+                id: [n; 32],
+                person: *device.certificate.person_id(),
+                epoch: Some(1),
+                device: device.certificate.signing_key().to_bytes(),
+                at: n.into(),
+                backfilled: false,
+                edit_of: None,
+                body: encode(&MessageBody::default().cache_bytes()?),
+            })
+        };
+        let saved = |store: &Store| -> Result<usize> {
+            let history: History = store.read("messages")?.unwrap_or_default();
+            Ok(history.0.iter().map(|p| p.records.len()).sum())
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()?;
+        runtime.block_on(async {
+            // A burst of live messages becomes one write, after the debounce.
+            for n in 0..5 {
+                store.history().put([1; 32], None, vec![record(n)?], false);
+                store.save_history();
+            }
+            assert_eq!(writes(), 0);
+            tokio::time::sleep(DEBOUNCE + Duration::from_millis(500)).await;
+            assert_eq!((writes(), saved(&store)?), (1, 5));
+
+            // Shutdown flushes what is still waiting, and the timer then has nothing left.
+            store.history().put([1; 32], None, vec![record(5)?], false);
+            store.save_history();
+            assert!(store.flush());
+            assert_eq!((writes(), saved(&store)?), (2, 6));
+            assert!(!store.flush());
+
+            // Saving the same history again does not rewrite the file.
+            store.save_history();
+            tokio::time::sleep(DEBOUNCE * 2 + Duration::from_millis(500)).await;
+            assert_eq!(writes(), 2);
+            Ok::<_, anyhow::Error>(())
+        })?;
+
+        // An unchanged directory listing is not rewritten; a changed one is.
+        let mut listing = Listing {
+            name: Some("Workshop".into()),
+            ..Default::default()
+        };
+        store.write("directory", &listing);
+        store.write("directory", &listing);
+        assert_eq!(writes(), 3);
+        listing.name = Some("Garage".into());
+        store.write("directory", &listing);
+        assert_eq!(writes(), 4);
         Ok(())
     }
 

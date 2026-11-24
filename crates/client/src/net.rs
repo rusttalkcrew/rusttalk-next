@@ -701,6 +701,10 @@ impl Drop for Net {
         if let Some(runtime) = self.runtime.take() {
             runtime.shutdown_background();
         }
+        // History waits up to a second before it is written; keep what arrived last.
+        for store in self.stores.get_mut().values() {
+            store.flush();
+        }
     }
 }
 
@@ -811,7 +815,6 @@ fn pin_changed(error: &anyhow::Error) -> bool {
 #[derive(Default)]
 struct State {
     cache: Option<Arc<recent::Store>>,
-    history: recent::History,
     /// Provenance for loaded history, including older pages outside the startup cache.
     sources: HashMap<Id, HashSet<recent::Source>>,
     dm_backfill: bool,
