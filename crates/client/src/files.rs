@@ -46,8 +46,11 @@ const INLINE_MAX: u64 = 8 * MIB;
 const MAX_INLINE: usize = 8;
 /// An animation unseen this long (seconds) may be dropped when others need the room.
 const INLINE_IDLE: f64 = 1.0;
-/// Pictures kept before the cache is emptied; shown ones load again on demand.
+/// Thumbnails and link previews kept; the ones unseen longest go first and load again
+/// when shown.
 const MAX_PICTURES: usize = 200;
+/// Thumbnails dropped at once when the cache is full, so it is trimmed rarely.
+const PICTURES_SLACK: usize = MAX_PICTURES / 4;
 /// Decoded bytes all received emoji and sticker files may hold together.
 const STICKER_BUDGET: usize = 256 * 1024 * 1024;
 
@@ -63,7 +66,7 @@ pub type Opener = fn(&Path, bool);
 
 pub struct Files {
     /// Thumbnails, by blob ID.
-    images: HashMap<Id, Picture>,
+    images: HashMap<Id, Inline>,
     /// The last picture opened, retained after dismissal so it can reopen offline.
     full: Option<FullPicture>,
     /// Unfinished requests, including for pictures the viewer moved away from.
@@ -130,6 +133,7 @@ impl Anim {
     }
 }
 
+/// A picture loaded for the chat: a playing animation or a thumbnail.
 struct Inline {
     picture: Picture,
     /// When it was last visible, in egui time.
@@ -252,7 +256,10 @@ impl Files {
                 .inline
                 .get_mut(&blob.id)
                 .map(|inline| &mut inline.picture),
-            Fetch::Thumbnail => self.images.get_mut(&blob.id),
+            Fetch::Thumbnail => self
+                .images
+                .get_mut(&blob.id)
+                .map(|thumb| &mut thumb.picture),
             Fetch::Full => {
                 self.full_pending
                     .retain(|(source, file)| source != address || file != blob);
@@ -1084,17 +1091,18 @@ pub fn attachments(
             _ => {}
         }
         let playing = matches!(inline, Some(Picture::Ready(_)));
-        if let Some(thumb) = file.thumbnail.as_ref().filter(|_| !playing) {
-            bound_pictures(&mut files.images);
-            files.images.entry(thumb.id).or_insert_with(|| {
-                let _ = commands.send(Command::Image(thumb.clone(), Fetch::Thumbnail));
-                Picture::Loading
-            });
+        if let Some(thumb) = file.thumbnail.as_ref().filter(|_| !playing)
+            && ui.is_rect_visible(Rect::from_min_size(ui.cursor().min, Vec2::splat(THUMBNAIL)))
+        {
+            let now = ui.input(|input| input.time);
+            want_thumbnail(&mut files.images, now, commands, thumb);
         }
         let picture = if playing {
             inline
         } else {
-            (file.thumbnail.as_ref()).and_then(|thumb| files.images.get(&thumb.id))
+            (file.thumbnail.as_ref())
+                .and_then(|thumb| files.images.get(&thumb.id))
+                .map(|thumb| &thumb.picture)
         };
         let (mut show, mut retry) = (false, false);
         match picture {
@@ -1216,15 +1224,17 @@ fn link_card(
         return;
     }
     let card = card.clone();
-    if let Some(thumb) = &file.thumbnail {
-        bound_pictures(&mut files.images);
-        files.images.entry(thumb.id).or_insert_with(|| {
-            let _ = commands.send(Command::Image(thumb.clone(), Fetch::Thumbnail));
-            Picture::Loading
-        });
+    if let Some(thumb) = &file.thumbnail
+        && ui.is_rect_visible(area)
+    {
+        let now = ui.input(|input| input.time);
+        want_thumbnail(&mut files.images, now, commands, thumb);
     }
     let picture = (file.thumbnail.as_ref()).and_then(|thumb| match files.images.get(&thumb.id) {
-        Some(Picture::Ready(anim)) => anim.frames.first(),
+        Some(Inline {
+            picture: Picture::Ready(anim),
+            ..
+        }) => anim.frames.first(),
         _ => None,
     });
     // The address's host always shows, so a card can't pass for another site.
@@ -1270,10 +1280,42 @@ fn evict(
     out
 }
 
-/// Shown thumbnails load again on demand after the cache fills.
-fn bound_pictures(images: &mut HashMap<Id, Picture>) {
-    if images.len() > MAX_PICTURES {
-        images.retain(|_, picture| matches!(picture, Picture::Loading));
+/// Start loading a thumbnail whose spot is on screen at `now` (egui time) and mark it
+/// seen; when the cache is full, the thumbnails unseen longest make room first.
+fn want_thumbnail(
+    images: &mut HashMap<Id, Inline>,
+    now: f64,
+    commands: &UnboundedSender<Command>,
+    thumb: &BlobRef,
+) {
+    if !images.contains_key(&thumb.id) {
+        bound_pictures(images, now);
+    }
+    let entry = images.entry(thumb.id).or_insert_with(|| {
+        let _ = commands.send(Command::Image(thumb.clone(), Fetch::Thumbnail));
+        Inline {
+            picture: Picture::Loading,
+            seen: now,
+        }
+    });
+    entry.seen = now;
+}
+
+/// Make room for one more thumbnail once `MAX_PICTURES` are kept: drop the ones unseen
+/// longest, `PICTURES_SLACK` at a time so this runs rarely. Ones seen at `now` (this
+/// frame) always stay, so a thumbnail on screen is never dropped and asked for again.
+fn bound_pictures(images: &mut HashMap<Id, Inline>, now: f64) {
+    if images.len() < MAX_PICTURES {
+        return;
+    }
+    let mut old: Vec<(f64, Id)> = (images.iter())
+        .filter(|(_, thumb)| thumb.seen < now)
+        .map(|(id, thumb)| (thumb.seen, *id))
+        .collect();
+    old.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+    let extra = images.len() + 1 + PICTURES_SLACK - MAX_PICTURES;
+    for (_, id) in old.into_iter().take(extra) {
+        images.remove(&id);
     }
 }
 
@@ -1775,16 +1817,88 @@ mod tests {
         assert!(files.full_pending.is_empty());
     }
 
+    fn thumb_id(n: usize) -> Id {
+        let mut id = [0; 32];
+        id[..8].copy_from_slice(&(n as u64).to_le_bytes());
+        id
+    }
+
     #[test]
-    fn pictures_and_link_previews_stay_bounded() {
-        let mut images: HashMap<Id, Picture> = (0..=MAX_PICTURES as u8)
-            .map(|i| ([i; 32], Picture::Failed))
+    fn thumbnails_unseen_longest_go_first_and_visible_ones_stay() {
+        // 250 thumbnails: 220 last seen at times 0..220, 30 on screen now.
+        let now = 1000.0;
+        let mut images: HashMap<Id, Inline> = (0..250)
+            .map(|n| {
+                let seen = if n >= 220 { now } else { n as f64 };
+                let picture = if n % 2 == 0 {
+                    Picture::Failed
+                } else {
+                    Picture::Loading
+                };
+                (thumb_id(n), Inline { picture, seen })
+            })
             .collect();
-        images.insert([254; 32], Picture::Loading);
-        bound_pictures(&mut images);
-        let mut kept: Vec<_> = images.keys().copied().collect();
-        kept.sort();
-        assert_eq!(kept, [[254; 32]], "unfinished requests stay");
+        bound_pictures(&mut images, now);
+        assert_eq!(images.len(), MAX_PICTURES - PICTURES_SLACK - 1);
+        assert!(
+            (220..250).all(|n| images.contains_key(&thumb_id(n))),
+            "visible stay"
+        );
+        let dropped = 250 - images.len();
+        assert!(
+            (0..dropped).all(|n| !images.contains_key(&thumb_id(n))),
+            "oldest go"
+        );
+        assert!(
+            (dropped..250).all(|n| images.contains_key(&thumb_id(n))),
+            "newer stay"
+        );
+        // Under the bound nothing goes.
+        let before = images.len();
+        bound_pictures(&mut images, now + 1.0);
+        assert_eq!(images.len(), before);
+    }
+
+    #[test]
+    fn a_full_cache_never_reloads_visible_thumbnails() {
+        let ctx = egui::Context::default();
+        let data = tempfile::tempdir().unwrap();
+        let mut files = Files::new(data.path());
+        let address = Url::parse("https://localhost/").unwrap();
+        let (commands, mut sent) = tokio::sync::mpsc::unbounded_channel();
+        let blob = |n| BlobRef::for_tests(thumb_id(n));
+        let frame = || {
+            Ok(vec![(
+                egui::ColorImage::filled([2, 2], egui::Color32::RED),
+                0,
+            )])
+        };
+        // Scroll through 600 thumbnails, 30 on screen per frame, each loading as it
+        // is first shown; then hold still for a few frames.
+        let mut requested = 0;
+        for step in 0..600 {
+            let now = step as f64;
+            let shown = step.min(570)..step.min(570) + 30;
+            for n in shown.clone() {
+                want_thumbnail(&mut files.images, now, &commands, &blob(n));
+            }
+            while let Ok(Command::Image(thumb, Fetch::Thumbnail)) = sent.try_recv() {
+                requested += 1;
+                files.image(&ctx, &address, &thumb, Fetch::Thumbnail, frame());
+            }
+            assert!(files.images.len() <= MAX_PICTURES, "bounded");
+            for n in shown {
+                assert!(
+                    matches!(files.images[&thumb_id(n)].picture, Picture::Ready(_)),
+                    "thumbnail {n} on screen stays loaded"
+                );
+            }
+        }
+        assert_eq!(requested, 600, "each thumbnail downloaded once");
+    }
+
+    #[test]
+    fn link_previews_stay_bounded() {
         let card = || {
             Card::Ready(link_cards::Card {
                 url: "https://example.org/".into(),
