@@ -293,14 +293,14 @@ fn historical_time(requested: i64, now: i64) -> i64 {
     requested.clamp(0, now)
 }
 
+/// Read the count `prune` and `uncount` keep, so a backfill burst never walks the channel's index.
 async fn history_full(db: &mut SqliteConnection, channel: &str) -> ApiResult<bool> {
-    Ok(
-        query_scalar("SELECT EXISTS(SELECT 1 FROM messages WHERE channel_id = ? LIMIT 1 OFFSET ?)")
-            .bind(channel)
-            .bind(RETAIN - 1)
-            .fetch_one(db)
-            .await?,
-    )
+    let full: Option<bool> = query_scalar("SELECT message_count >= ? FROM channels WHERE id = ?")
+        .bind(RETAIN)
+        .bind(channel)
+        .fetch_optional(db)
+        .await?;
+    Ok(full.unwrap_or(false))
 }
 
 /// Count the message just inserted and drop the channel's oldest beyond `RETAIN`. The count lets
@@ -552,6 +552,11 @@ mod tests {
              INSERT INTO messages (id, channel_id, epoch, sender_device, sender_person, at, size, envelope)
              SELECT CAST(i AS TEXT), ?, 1, X'01', X'02', 0, 111, zeroblob(111) FROM n")
              .bind(RETAIN).bind(&dm).execute(&app.db).await?;
+        query("UPDATE channels SET message_count = ? WHERE id = ?")
+            .bind(RETAIN)
+            .bind(&dm)
+            .execute(&app.db)
+            .await?;
         // Only a page version keeps files, and only from people who may write there.
         let kept = vec![encode(&[5; 32])];
         for (by, channel, backfill_at, keep, code) in [
@@ -576,6 +581,110 @@ mod tests {
             .await;
             assert_eq!(result.err().expect("must reject the post").code, code);
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn backfill_stops_at_the_retention_limit_like_the_offset_query() -> anyhow::Result<()> {
+        use crate::testing::{app, as_person, person};
+        use ed25519_dalek::{Signer, SigningKey};
+        let dir = tempfile::tempdir()?;
+        let app = app(dir.path(), 2).await?;
+        let dm = encode(&[4; 32]);
+        let signer = SigningKey::from_bytes(&[8; 32]);
+        let device = signer.verifying_key().to_bytes();
+        query("UPDATE sessions SET device_id = ? WHERE person_id = ?")
+            .bind(device.as_slice())
+            .bind(person(1))
+            .execute(&app.db)
+            .await?;
+        query("INSERT INTO member_devices VALUES (?, ?, X'00')")
+            .bind(device.as_slice())
+            .bind(person(1))
+            .execute(&app.db)
+            .await?;
+        query("INSERT INTO channels (id, kind, position, dm_first, dm_second) VALUES (?, 'dm', 0, ?, ?)")
+            .bind(&dm).bind(person(1)).bind(person(2)).execute(&app.db).await?;
+        query("INSERT INTO key_scopes (id, kind, channel_id) VALUES (?, 'channel', ?)")
+            .bind(&dm)
+            .bind(&dm)
+            .execute(&app.db)
+            .await?;
+        query("INSERT INTO key_epochs (scope_id, epoch, commitment) VALUES (?, 1, zeroblob(32))")
+            .bind(&dm)
+            .execute(&app.db)
+            .await?;
+        query("INSERT INTO message_senders VALUES (X'01', X'02', X'03')")
+            .execute(&app.db)
+            .await?;
+        query("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < ?)
+             INSERT INTO messages (id, channel_id, epoch, sender_device, sender_person, at, size, envelope)
+             SELECT CAST(i AS TEXT), ?, 1, X'01', X'02', 0, 111, zeroblob(111) FROM n")
+             .bind(RETAIN - 1).bind(&dm).execute(&app.db).await?;
+        // What migration 0042 does for channels that already hold messages.
+        query("UPDATE channels SET message_count = (SELECT COUNT(*) FROM messages WHERE channel_id = channels.id)")
+            .execute(&app.db)
+            .await?;
+
+        // The smallest valid envelope, signed over the context `verify_signed` rebuilds.
+        let backfill = |byte: u8| {
+            let id = [byte; 32];
+            let mut sealed = vec![3];
+            sealed.extend([0; 24]);
+            sealed.extend(20u16.to_be_bytes());
+            sealed.extend([0; 20]);
+            let signed = [
+                b"rusttalk-message-v1".as_slice(),
+                &keys::space(&app).id,
+                &[4; 32],
+                &1i64.to_be_bytes(),
+                &id,
+                &device,
+                &[1; 32],
+                &sealed,
+            ]
+            .concat();
+            sealed.extend(signer.sign(&signed).to_bytes());
+            let post = NewMessage {
+                id: encode(&id),
+                epoch: 1,
+                envelope: encode(&sealed),
+                backfill_at: Some(1),
+                keep: vec![],
+            };
+            create(
+                State(app.clone()),
+                as_person(1),
+                Path(dm.clone()),
+                Ok(Json(post)),
+            )
+        };
+        let full = || async {
+            let mut db = app.db.acquire().await?;
+            let old: bool = query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM messages WHERE channel_id = ? LIMIT 1 OFFSET ?)",
+            )
+            .bind(&dm)
+            .bind(RETAIN - 1)
+            .fetch_one(&mut *db)
+            .await?;
+            assert_eq!(history_full(&mut db, &dm).await?, old);
+            anyhow::Ok(old)
+        };
+
+        assert!(!full().await?);
+        let (status, Json(record)) = backfill(9).await?;
+        assert_eq!(status, StatusCode::CREATED);
+        assert!(record.backfilled);
+        assert!(full().await?);
+        let refused = backfill(10)
+            .await
+            .err()
+            .expect("a full DM refuses backfill");
+        assert_eq!(
+            (refused.status, refused.code),
+            (StatusCode::CONFLICT, "history_full")
+        );
         Ok(())
     }
 
