@@ -64,8 +64,31 @@ pub async fn open(dir: &Path) -> Result<SqlitePool> {
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
+    // 0x10000 checks every table, not only those this connection used, so a fresh or upgraded
+    // database gets statistics at startup.
+    optimize(&pool, "PRAGMA optimize = 0x10002").await;
     crate::metadata::hash_pictures(&pool).await?;
     Ok(pool)
+}
+
+/// Without table statistics SQLite plans the reader views poorly, e.g. scanning every key epoch.
+/// `optimize` analyzes only tables whose statistics are missing or stale, and `analysis_limit`
+/// bounds each scan, so the writer turn it takes to write `sqlite_stat1` is held only briefly.
+/// A failure only costs query speed, so it is logged and never stops the server.
+pub async fn optimize(pool: &SqlitePool, pragma: &'static str) {
+    let result = async {
+        let _turn = WRITER.lock().await;
+        let mut db = pool.acquire().await?;
+        query("PRAGMA analysis_limit = 400")
+            .execute(&mut *db)
+            .await?;
+        query(pragma).execute(&mut *db).await?;
+        Ok::<_, sqlx::Error>(())
+    }
+    .await;
+    if let Err(error) = result {
+        tracing::error!(reason = %error, "database optimize failed");
+    }
 }
 
 pub fn server_key(dir: &Path) -> Result<(SigningKey, bool)> {
@@ -233,8 +256,14 @@ pub fn log_closed(sessions: Vec<i64>, at: i64, reason: &'static str) {
 
 pub async fn expire_records(app: crate::App) {
     let mut interval = tokio::time::interval(Duration::from_secs(30));
+    let mut ticks = 0u32;
     loop {
         interval.tick().await;
+        // Hourly, as SQLite recommends for long-lived connections.
+        ticks = (ticks + 1) % 120;
+        if ticks == 0 {
+            optimize(&app.db, "PRAGMA optimize").await;
+        }
         let result = async {
             let mut tx = write(&app.db).await?;
             let at = now()?;
@@ -296,6 +325,17 @@ mod tests {
                 .await?;
             readers.push(tx);
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn open_gathers_table_statistics() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let pool = open(dir.path()).await?;
+        let tables: i64 = query_scalar("SELECT COUNT(DISTINCT tbl) FROM sqlite_stat1")
+            .fetch_one(&pool)
+            .await?;
+        assert!(tables > 0);
         Ok(())
     }
 
