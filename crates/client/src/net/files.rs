@@ -1,7 +1,7 @@
 //! Stored files: upload, download, save, and plain words for what went wrong.
 
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     fs,
     future::Future,
     io::{Read, Write},
@@ -14,17 +14,21 @@ use eframe::egui;
 use reqwest::StatusCode;
 use rusttalk_core::{
     client::{
-        Attachment, BlobRef, KeyClient, MessageBody, MessageError, Progress, UploadRejected,
-        decode_frames, decode_thumbnail,
+        Attachment, BlobRef, FileClient, KeyClient, MessageBody, MessageError, Progress,
+        UploadRejected, decode_frames, decode_thumbnail,
     },
     messages::fit_file_name,
+};
+use tokio::{
+    sync::Semaphore,
+    task::{self, JoinSet},
 };
 use url::Url;
 use zeroize::Zeroizing;
 
 use sha2::Digest as _;
 
-use super::{Ctx, Fetch, State, Update, directory::frame_image};
+use super::{Ctx, Draft, Fetch, Queued, State, Update, directory::frame_image};
 use crate::{
     link_cards::{Card, FILE_NAME, MAX_CARD_BYTES, MEDIA_TYPE, Made},
     server::Id,
@@ -33,26 +37,112 @@ use crate::{
 use rusttalk_core::client::prepare_file;
 use std::time::Instant;
 
-/// Upload the files, then send the message with them; `false` when an upload failed.
+/// At most this many downloads run at once per server; the others wait their turn.
+const DOWNLOADS: usize = 4;
+
+/// File transfers running in tasks of their own, so this server's chat, presence and
+/// voice go on meanwhile. Dropped with the server's `State`, which stops them.
+pub(super) struct Jobs {
+    tasks: JoinSet<Option<Uploaded>>,
+    downloads: Arc<Semaphore>,
+    /// Messages with files uploading, by `lane`, with the ones sent after them there:
+    /// those wait, so they can't arrive before it.
+    pub(super) uploading: HashMap<Id, (task::Id, VecDeque<Draft>)>,
+}
+
+impl Default for Jobs {
+    fn default() -> Self {
+        Self {
+            tasks: JoinSet::new(),
+            downloads: Arc::new(Semaphore::new(DOWNLOADS)),
+            uploading: HashMap::new(),
+        }
+    }
+}
+
+impl Jobs {
+    /// Run a download once there is room for it.
+    pub(super) fn download(&mut self, work: impl Future<Output = ()> + Send + 'static) {
+        let downloads = self.downloads.clone();
+        self.tasks.spawn(async move {
+            let _turn = downloads.acquire_owned().await;
+            work.await;
+            None
+        });
+    }
+
+    /// Upload a message's files; `next` hands it back to send. Uploads take no turn
+    /// from downloads: one per lane at most, and a message never waits behind them.
+    pub(super) fn upload(
+        &mut self,
+        lane: Id,
+        work: impl Future<Output = Uploaded> + Send + 'static,
+    ) {
+        let task = self.tasks.spawn(async move { Some(work.await) }).id();
+        self.uploading.insert(lane, (task, VecDeque::new()));
+    }
+
+    pub(super) fn busy(&self) -> bool {
+        !self.tasks.is_empty()
+    }
+
+    /// The next finished transfer: an upload's message to send, with its lane.
+    pub(super) async fn next(&mut self) -> Option<(Id, Option<Uploaded>)> {
+        match self.tasks.join_next().await? {
+            Ok(None) => None,
+            Ok(Some(uploaded)) => Some((lane(&uploaded.draft), Some(uploaded))),
+            Err(error) => {
+                tracing::error!(%error, "a file transfer stopped");
+                let lane = self
+                    .uploading
+                    .iter()
+                    .find(|(_, (task, _))| *task == error.id())
+                    .map(|(lane, _)| *lane)?;
+                Some((lane, None))
+            }
+        }
+    }
+}
+
+/// Messages in the same channel, or to the same person, go out in the order sent.
+pub(super) fn lane(draft: &Draft) -> Id {
+    draft.peer.unwrap_or(draft.channel)
+}
+
+/// A message whose files were uploaded, ready to send.
+pub(super) struct Uploaded {
+    pub draft: Draft,
+    pub sent: Queued,
+    pub target: Target,
+    pub body: MessageBody,
+    /// `None` when an upload failed: it was removed again and the failure shown.
+    pub leftover: Option<Vec<Attachment>>,
+}
+
+/// Channel, message ID, whether it is a page, whether it is a forum post.
+pub(super) type Target = (Id, Id, bool, bool);
+
+/// Files to upload with a message: picked files, a link preview, other servers' emoji.
+pub(super) type Uploads = (Vec<PathBuf>, Option<Arc<Made>>, Vec<Inline>);
+
+/// Upload the files into `body`; with what to remove after sending (a preview that
+/// didn't make it), or `None` when an upload failed.
 /// A link preview that fails to upload is left out, without failing the message.
 /// Files already in `body` are kept ones (see `Draft::keep`): never removed here.
-pub(super) async fn send(
+pub(super) async fn upload_all(
     ctx: &Ctx,
     url: &Url,
-    client: &mut KeyClient<'_>,
-    state: &mut State,
-    (channel, id, page, forum_post): (Id, Id, bool, bool),
-    mut body: MessageBody,
-    (files, preview, inline): (Vec<PathBuf>, Option<Arc<Made>>, Vec<Inline>),
-) -> Result<bool> {
+    client: &FileClient,
+    channel: Id,
+    body: &mut MessageBody,
+    (files, preview, inline): Uploads,
+) -> Option<Vec<Attachment>> {
     let kept = body.attachments.len();
     if let Some(first) = files.first() {
         let label = match files.len() {
             1 => file_name(first),
             count => t!("files.count", count = count),
         };
-        // shortcut: uploads run inside this server's loop, so its events wait until they
-        // finish (at most 4 × 32 MiB); give them their own task if that gets noticed.
         let count = files.len() as f32;
         let shown = {
             let (ctx, url) = (ctx.clone(), url.clone());
@@ -68,7 +158,7 @@ pub(super) async fn send(
             tracing::warn!(error = %format_args!("{error:#}"), "uploading a file failed");
             discard(client, &body.attachments[kept..]).await;
             ctx.send(Update::Failed(upload_problem(&error)));
-            return Ok(false);
+            return None;
         }
     }
     // A preview that didn't make it is removed only after the message went out.
@@ -91,14 +181,35 @@ pub(super) async fn send(
                 discard(client, &body.attachments[kept..]).await;
                 at_most(CLEANUP, discard(client, &leftover)).await;
                 ctx.send(Update::Failed(upload_problem(&error)));
-                return Ok(false);
+                return None;
             }
         }
     }
-    let posted = match page {
-        true => client.post_page(&channel, id, &body).await,
-        false => client.post_message(&channel, id, &body).await,
-    };
+    Some(leftover)
+}
+
+/// Send the message with its uploaded files (those after the `kept` ones); `false`
+/// when it didn't go. A DM the other person re-keyed just now is sent once more.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn post(
+    ctx: &Ctx,
+    url: &Url,
+    client: &mut KeyClient<'_>,
+    state: &mut State,
+    (channel, id, page, forum_post): Target,
+    dm: bool,
+    mut body: MessageBody,
+    (kept, mut leftover): (usize, Vec<Attachment>),
+) -> Result<bool> {
+    let mut posted = post_once(client, &channel, id, page, &body).await;
+    // The other person re-keyed the DM just now: take the new key and send once more,
+    // whatever this was (text, sticker, file or friend message).
+    if dm && posted.as_ref().is_err_and(conflict) {
+        posted = match client.sync().await {
+            Ok(()) => post_once(client, &channel, id, page, &body).await,
+            Err(error) => Err(error),
+        };
+    }
     let (record, posted_body) = match posted {
         Ok(record) => {
             let opened = client.open_message(&channel, &record).await?;
@@ -121,7 +232,7 @@ pub(super) async fn send(
                     if result.is_err_and(|e| gone(&e)) {
                         leftover.extend(body.attachments.drain(kept..));
                     }
-                    at_most(CLEANUP, discard(client, &leftover)).await;
+                    at_most(CLEANUP, discard(&client.file_client(), &leftover)).await;
                     return Err(error);
                 }
             };
@@ -134,22 +245,32 @@ pub(super) async fn send(
             (record, opened)
         }
         Err(error) => {
-            discard(client, &body.attachments[kept..]).await;
-            at_most(CLEANUP, discard(client, &leftover)).await;
+            let files = client.file_client();
+            discard(&files, &body.attachments[kept..]).await;
+            at_most(CLEANUP, discard(&files, &leftover)).await;
             return Err(error);
         }
     };
     state.sent(ctx, url, channel, &record, &posted_body);
-    at_most(CLEANUP, discard(client, &leftover)).await;
+    at_most(CLEANUP, discard(&client.file_client(), &leftover)).await;
     Ok(true)
 }
 
-/// Upload another server's emoji or sticker as a small file (no thumbnail) on this one.
-async fn upload_inline(
-    client: &KeyClient<'_>,
+async fn post_once(
+    client: &mut KeyClient<'_>,
     channel: &Id,
-    picture: &Inline,
-) -> Result<Attachment> {
+    id: Id,
+    page: bool,
+    body: &MessageBody,
+) -> Result<rusttalk_core::client::MessageRecord> {
+    match page {
+        true => client.post_page(channel, id, body).await,
+        false => client.post_message(channel, id, body).await,
+    }
+}
+
+/// Upload another server's emoji or sticker as a small file (no thumbnail) on this one.
+async fn upload_inline(client: &FileClient, channel: &Id, picture: &Inline) -> Result<Attachment> {
     let (attachment, _) = prepare_file(
         &picture.file_name(),
         picture.kind.media_type(),
@@ -175,7 +296,7 @@ async fn at_most(limit: std::time::Duration, work: impl Future<Output = ()>) {
 /// Upload a link preview within what is left of its time. Otherwise the message goes
 /// without it; the error holds the prepared file (when there was one) to remove,
 /// since part of it, or all of it with a lost answer, may be stored.
-async fn upload_preview(client: &KeyClient<'_>, channel: &Id, made: Arc<Made>) -> Preview {
+async fn upload_preview(client: &FileClient, channel: &Id, made: Arc<Made>) -> Preview {
     let Some(json) = preview_file(&made) else {
         return Preview::Left(None);
     };
@@ -278,7 +399,7 @@ pub(super) async fn delete(
 }
 
 /// Download and read a link preview file, refusing anything too big to be one.
-pub(super) async fn link_card(ctx: &Ctx, client: &KeyClient<'_>, file: BlobRef) {
+pub(super) async fn link_card(ctx: &Ctx, client: &FileClient, file: BlobRef) {
     let id = file.id;
     let card = async {
         anyhow::ensure!(file.size <= MAX_CARD_BYTES, "link preview too big");
@@ -294,7 +415,7 @@ pub(super) async fn link_card(ctx: &Ctx, client: &KeyClient<'_>, file: BlobRef) 
 
 /// Download another server's emoji or sticker file, refuse anything an app could not have
 /// made, and decode it.
-pub(super) async fn sticker_file(ctx: &Ctx, client: &KeyClient<'_>, file: BlobRef, kind: Kind) {
+pub(super) async fn sticker_file(ctx: &Ctx, client: &FileClient, file: BlobRef, kind: Kind) {
     let id = file.id;
     let picture = async {
         anyhow::ensure!(
@@ -328,12 +449,36 @@ const ORIGINALS_BUDGET: usize = 8 * crate::files::MIB as usize;
 const ORIGINALS_COUNT: usize = 8;
 type ImageBytes = Arc<Zeroizing<Vec<u8>>>;
 
-#[derive(Default)]
-pub(super) struct ImageOriginals(VecDeque<(BlobRef, ImageBytes)>);
+/// Shared by the downloads of one server, which run at the same time.
+#[derive(Clone, Default)]
+pub(super) struct ImageOriginals(Arc<std::sync::Mutex<VecDeque<(BlobRef, ImageBytes)>>>);
 
 impl ImageOriginals {
     pub(super) fn clear(&mut self) {
-        self.0.clear();
+        self.list().clear();
+    }
+
+    fn list(&self) -> std::sync::MutexGuard<'_, VecDeque<(BlobRef, ImageBytes)>> {
+        // The list stays whole even if a holder panicked: each change is one push or pop.
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn find(&self, file: &BlobRef) -> Option<ImageBytes> {
+        (self.list().iter())
+            .find(|(blob, _)| blob == file)
+            .map(|(_, bytes)| Arc::clone(bytes))
+    }
+
+    fn remember(&self, file: &BlobRef, bytes: &ImageBytes) {
+        let mut list = self.list();
+        list.push_back((file.clone(), Arc::clone(bytes)));
+        while list.len() > ORIGINALS_COUNT
+            || list.iter().map(|(_, bytes)| bytes.len()).sum::<usize>() > ORIGINALS_BUDGET
+        {
+            list.pop_front();
+        }
     }
 }
 
@@ -341,8 +486,8 @@ impl ImageOriginals {
 pub(super) async fn image(
     ctx: &Ctx,
     url: &Url,
-    client: &KeyClient<'_>,
-    originals: &mut ImageOriginals,
+    client: &FileClient,
+    originals: &ImageOriginals,
     file: BlobRef,
     fetch: Fetch,
 ) {
@@ -356,31 +501,21 @@ pub(super) async fn image(
 }
 
 async fn image_frames(
-    originals: &mut ImageOriginals,
+    originals: &ImageOriginals,
     file: &BlobRef,
     fetch: Fetch,
     download: impl Future<Output = Result<Vec<u8>>>,
 ) -> Result<Vec<(egui::ColorImage, u32)>> {
     let cached = (fetch != Fetch::Thumbnail)
-        .then(|| originals.0.iter().find(|(blob, _)| blob == file))
+        .then(|| originals.find(file))
         .flatten();
     let remember = fetch == Fetch::Inline && cached.is_none();
     let bytes = match cached {
-        Some((_, bytes)) => Arc::clone(bytes),
+        Some(bytes) => bytes,
         None => Arc::new(Zeroizing::new(download.await?)),
     };
     if remember && bytes.len() <= ORIGINALS_BUDGET {
-        originals.0.push_back((file.clone(), Arc::clone(&bytes)));
-        while originals.0.len() > ORIGINALS_COUNT
-            || originals
-                .0
-                .iter()
-                .map(|(_, bytes)| bytes.len())
-                .sum::<usize>()
-                > ORIGINALS_BUDGET
-        {
-            originals.0.pop_front();
-        }
+        originals.remember(file, &bytes);
     }
     // Received pictures are hostile: decode with limits, off the async workers.
     tokio::task::spawn_blocking(move || -> Result<_> {
@@ -411,7 +546,7 @@ fn still(image: image::DynamicImage) -> (egui::ColorImage, u32) {
 }
 
 /// Download a file and save it here.
-pub(super) async fn save(ctx: &Ctx, client: &KeyClient<'_>, file: BlobRef, path: PathBuf) {
+pub(super) async fn save(ctx: &Ctx, client: &FileClient, file: BlobRef, path: PathBuf) {
     let id = file.id;
     let saved = async {
         let shown = ctx.clone();
@@ -435,7 +570,7 @@ const _: () = assert!(MAX_FILE + MAX_FILE.div_ceil(64 * 1024) * 16 <= 32 * 1024 
 
 /// Encrypt and upload each file, adding it to `out` so a failure can remove the earlier ones.
 async fn upload(
-    client: &KeyClient<'_>,
+    client: &FileClient,
     channel: &Id,
     files: Vec<PathBuf>,
     out: &mut Vec<Attachment>,
@@ -517,7 +652,7 @@ pub(super) async fn share(
                 shared = client.share_file(&channel, &file).await;
             }
             if let Err(error) = shared {
-                discard(client, std::slice::from_ref(&file)).await;
+                discard(&client.file_client(), std::slice::from_ref(&file)).await;
                 return Err(error);
             }
             Ok(())
@@ -549,7 +684,7 @@ pub(super) async fn unshare(
 }
 
 /// Remove uploaded files that will not be sent after all.
-async fn discard(client: &KeyClient<'_>, files: &[Attachment]) {
+async fn discard(client: &FileClient, files: &[Attachment]) {
     for file in files {
         for blob in std::iter::once(&file.file).chain(&file.thumbnail) {
             if let Err(error) = client.delete_file(&blob.id).await {
@@ -671,6 +806,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn downloads_run_a_few_at_a_time_off_the_loop() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let (running, most) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let mut jobs = Jobs::default();
+        for _ in 0..DOWNLOADS * 3 {
+            let (running, most) = (running.clone(), most.clone());
+            jobs.download(async move {
+                let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+                most.fetch_max(now, Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                running.fetch_sub(1, Ordering::SeqCst);
+            });
+        }
+        while jobs.busy() {
+            assert!(jobs.next().await.is_none(), "a download hands nothing back");
+        }
+        assert_eq!(most.load(Ordering::SeqCst), DOWNLOADS);
+    }
+
+    #[tokio::test]
+    async fn a_failed_upload_still_frees_its_lane() {
+        let mut jobs = Jobs::default();
+        let lane = [7; 32];
+        jobs.upload(lane, async { panic!("synthetic upload failure") });
+        let (freed, uploaded) = jobs.next().await.expect("the lane comes back");
+        assert_eq!(freed, lane);
+        assert!(uploaded.is_none());
+        assert!(!jobs.busy());
+    }
+
+    #[tokio::test]
     async fn animated_original_is_downloaded_once_for_inline_and_full() {
         let mut gif = Vec::new();
         {
@@ -694,11 +860,11 @@ mod tests {
             Ok(gif.clone())
         };
         let mut originals = ImageOriginals::default();
-        let inline = image_frames(&mut originals, &file.file, Fetch::Inline, download())
+        let inline = image_frames(&originals, &file.file, Fetch::Inline, download())
             .await
             .unwrap();
         assert_eq!(downloads.get(), 1);
-        let full = image_frames(&mut originals, &file.file, Fetch::Full, download())
+        let full = image_frames(&originals, &file.file, Fetch::Full, download())
             .await
             .unwrap();
         assert_eq!(downloads.get(), 1, "the original was already authenticated");
@@ -718,14 +884,14 @@ mod tests {
         other.size += 1;
         let miss = || async { anyhow::bail!("no download available") };
         assert!(
-            image_frames(&mut originals, &other, Fetch::Full, miss())
+            image_frames(&originals, &other, Fetch::Full, miss())
                 .await
                 .is_err(),
             "matching the ID alone does not authenticate another reference"
         );
         originals.clear();
         assert!(
-            image_frames(&mut originals, &file.file, Fetch::Full, miss())
+            image_frames(&originals, &file.file, Fetch::Full, miss())
                 .await
                 .is_err(),
             "discarded originals require a new fetch"

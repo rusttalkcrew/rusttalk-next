@@ -28,7 +28,7 @@ use crate::{
     messages::{Attachment, BlobRef, CHUNK_BYTES, MAX_CIPHERTEXT, MAX_THUMBNAIL_BYTES, TAG_BYTES},
 };
 
-use super::KeyClient;
+use super::{KeyClient, Server};
 
 /// A transfer fails when no bytes move for this long, so slow links still finish.
 const TRANSFER_IDLE: Duration = Duration::from_secs(30);
@@ -49,7 +49,23 @@ pub struct UploadRejected {
 }
 const THUMBNAIL_EDGE: u32 = 320;
 
-impl KeyClient<'_> {
+/// The server and session a file transfer needs, owned, so a transfer can run in a task
+/// of its own while the event loop goes on.
+#[derive(Clone)]
+pub struct FileClient {
+    server: Server,
+    token: String,
+}
+
+impl FileClient {
+    pub(super) fn new(server: Server, token: String) -> Self {
+        Self { server, token }
+    }
+
+    fn request(&self, method: Method, path: &str) -> reqwest::RequestBuilder {
+        self.server.request(method, path).bearer_auth(&self.token)
+    }
+
     /// Encrypt and upload a file and, for PNG/JPEG, an independently encrypted PNG thumbnail.
     /// `progress` follows the file itself, not its small thumbnail.
     pub async fn upload_file(
@@ -191,6 +207,47 @@ impl KeyClient<'_> {
             .await?
             .error_for_status()?;
         Ok(())
+    }
+}
+
+/// The same transfers on the event loop's own client.
+impl KeyClient<'_> {
+    pub async fn upload_file(
+        &self,
+        channel: &[u8; 32],
+        name: &str,
+        media_type: &str,
+        bytes: &[u8],
+        progress: Option<Progress>,
+    ) -> Result<Attachment> {
+        (self.file_client())
+            .upload_file(channel, name, media_type, bytes, progress)
+            .await
+    }
+
+    pub async fn upload_prepared(
+        &self,
+        channel: &[u8; 32],
+        attachment: &Attachment,
+        bytes: &[u8],
+        thumbnail: Option<&[u8]>,
+        progress: Option<Progress>,
+    ) -> Result<()> {
+        (self.file_client())
+            .upload_prepared(channel, attachment, bytes, thumbnail, progress)
+            .await
+    }
+
+    pub async fn download_file(
+        &self,
+        reference: &BlobRef,
+        progress: Option<Progress>,
+    ) -> Result<Vec<u8>> {
+        self.file_client().download_file(reference, progress).await
+    }
+
+    pub async fn delete_file(&self, id: &[u8; 32]) -> Result<()> {
+        self.file_client().delete_file(id).await
     }
 
     /// Remove a file attached to a deleted message. `uploader` is the message's sender; a

@@ -197,6 +197,11 @@ impl<'a> KeyClient<'a> {
             .bearer_auth(&self.session.token)
     }
 
+    /// An owned handle for file transfers that run in their own task.
+    pub fn file_client(&self) -> super::FileClient {
+        super::FileClient::new(self.server.clone(), self.session.token.clone())
+    }
+
     /// Borrow this pinned server and its current session for device sync.
     pub fn sync_peer(&self) -> super::sync::Peer<'_> {
         (self.server, &self.session)

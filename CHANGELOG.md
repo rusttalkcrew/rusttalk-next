@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Pictures, link previews and big files load and upload in the background, so chat, status and voice keep up meanwhile.
+
 ## v0.3.0 - 2026-11-24
 
 - Put a voice channel into focus mode for up to 24 hours: it gets a Focus badge, a countdown banner and a short notice before anyone joins.
