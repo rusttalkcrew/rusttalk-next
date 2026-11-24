@@ -4,7 +4,6 @@ use std::{collections::HashMap, sync::Arc};
 
 use anyhow::{Context, Result};
 use eframe::egui::ColorImage;
-use futures_util::future::join_all;
 use reqwest::{Method, StatusCode};
 use rusttalk_core::{
     auth::{decode, encode},
@@ -190,13 +189,21 @@ pub(super) async fn directory(
     client: &mut KeyClient<'_>,
     state: &mut State,
 ) -> Result<()> {
-    let mut catalog = client.catalog().await?;
+    // The parts don't depend on each other, so they cost one round trip instead of seven.
+    let shared = &*client;
+    let (catalog, members, me, roles, space, emoji, calendar) = tokio::join!(
+        shared.catalog(),
+        get(shared, "/v1/members"),
+        get(shared, "/v1/me"),
+        get(shared, "/v1/roles"),
+        get(shared, "/v1/space"),
+        emoji_list(shared),
+        super::calendar::load(shared),
+    );
+    let mut catalog = catalog?;
     discard_unreadable(ctx, url, state, &catalog);
-    let members = get(client, "/v1/members").await?;
-    let me = get(client, "/v1/me").await?;
-    let roles = get(client, "/v1/roles").await?;
-    let space = get(client, "/v1/space").await?;
-    let emoji = emoji_list(client).await?;
+    let (members, me, roles) = (members?, me?, roles?);
+    let (space, emoji, calendar) = (space?, emoji?, calendar?);
     if manages_channels(&me, &roles) {
         catalog.categories = managed_categories(client).await?;
     }
@@ -208,7 +215,6 @@ pub(super) async fn directory(
         space,
         emoji,
     };
-    let calendar = super::calendar::load(client).await?;
     rebuild(ctx, url, client, state, sources, calendar).await
 }
 
@@ -356,7 +362,9 @@ async fn rebuild(
         let channel = catalog.channels.iter().find(|c| c.id == live.channel)?;
         channel.audio_kbps
     });
-    let pictures = pictures(client, members, space, emoji, &state.pictures).await?;
+    // Shown with the pictures already decoded; the serve loop fetches the rest when idle.
+    let (pictures, missing) =
+        known_pictures(client.space().id, members, space, emoji, &state.pictures)?;
     let mut dir = build(
         client,
         catalog,
@@ -387,6 +395,7 @@ async fn rebuild(
     dir.calendar = calendar;
     super::save_pins(ctx, url, client, state);
     state.pictures = pictures;
+    state.pictures_missing = !missing.is_empty();
     if let Some(before) = &state.last
         && let Some(channel) = dir.notice_channel()
     {
@@ -782,15 +791,26 @@ pub(super) fn picture_key(owner: &Id, hash: &str) -> [u8; 32] {
         .into()
 }
 
-/// The pictures in this directory load. Only pictures whose hash is new are fetched and
-/// decoded, the rest come from the last load. Pictures that fail are tried again next load.
-async fn pictures(
-    client: &KeyClient<'_>,
+/// Decoded pictures by [`picture_key`].
+type Pictures = HashMap<[u8; 32], Picture>;
+
+/// A picture a directory shows that isn't decoded yet.
+struct Missing {
+    kind: Metadata,
+    id: Id,
+    key: [u8; 32],
+    path: String,
+    field: &'static str,
+}
+
+/// The pictures these sources show: those already decoded in `last`, and those to fetch.
+fn known_pictures(
+    space_id: Id,
     members: &Value,
     space: &Value,
     emoji: &Value,
     last: &HashMap<[u8; 32], Picture>,
-) -> Result<HashMap<[u8; 32], Picture>> {
+) -> Result<(Pictures, Vec<Missing>)> {
     let mut wanted = Vec::new();
     for row in members.as_array().into_iter().flatten() {
         if let (Some(id), Some(hash)) = (row["person_id"].as_str(), row["avatar_hash"].as_str()) {
@@ -800,13 +820,7 @@ async fn pictures(
     }
     if let Some(hash) = space["icon_hash"].as_str() {
         let path = "/v1/space/icon".to_owned();
-        wanted.push((
-            Metadata::ServerIcon,
-            client.space().id,
-            hash,
-            path,
-            "icon_ct",
-        ));
+        wanted.push((Metadata::ServerIcon, space_id, hash, path, "icon_ct"));
     }
     for row in emoji["items"].as_array().into_iter().flatten() {
         if let (Some(id), Some(hash)) = (row["id"].as_str(), row["image_hash"].as_str()) {
@@ -828,29 +842,48 @@ async fn pictures(
             Some(known) => {
                 pictures.insert(key, known.clone());
             }
-            None => missing.push((kind, id, key, path, field)),
+            None => missing.push(Missing {
+                kind,
+                id,
+                key,
+                path,
+                field,
+            }),
         }
     }
+    Ok((pictures, missing))
+}
+
+/// Fetch and decode pictures, at most [`super::PARALLEL`] at a time so a slow one doesn't
+/// hold up the rest. Those that fail are left out and tried again next load.
+async fn fetch_pictures(client: &KeyClient<'_>, missing: Vec<Missing>) -> Pictures {
+    let replies = super::bounded(
+        (missing.into_iter())
+            .map(|picture| async move {
+                let reply = get(client, &picture.path).await;
+                (picture, reply)
+            })
+            .collect(),
+    )
+    .await;
     let mut fetched = Vec::new();
-    for batch in missing.chunks(8) {
-        let replies = join_all(batch.iter().map(|(_, _, _, path, _)| get(client, path))).await;
-        for ((kind, id, key, _, field), reply) in batch.iter().zip(replies) {
-            match reply {
-                Ok(reply) => {
-                    if let Some(ct) = reply[*field].as_str() {
-                        fetched.push((*kind, *id, *key, ct.to_owned()));
-                    }
+    for (picture, reply) in replies {
+        match reply {
+            Ok(reply) => {
+                if let Some(ct) = reply[picture.field].as_str() {
+                    fetched.push((picture, ct.to_owned()));
                 }
-                Err(error) => {
-                    tracing::warn!(error = %format_args!("{error:#}"), "picture could not be fetched");
-                }
+            }
+            Err(error) => {
+                tracing::warn!(error = %format_args!("{error:#}"), "picture could not be fetched");
             }
         }
     }
+    let mut pictures = HashMap::new();
     // Decrypted and decoded here, off the UI.
     tokio::task::block_in_place(|| {
-        for (kind, id, key, ct) in fetched {
-            let bytes = match client.decrypt_metadata(kind, &id, &ct) {
+        for (missing, ct) in fetched {
+            let bytes = match client.decrypt_metadata(missing.kind, &missing.id, &ct) {
                 Ok(bytes) => bytes,
                 Err(error) => {
                     tracing::warn!(error = %format_args!("{error:#}"), "picture could not be decrypted");
@@ -858,11 +891,44 @@ async fn pictures(
                 }
             };
             if let Some(picture) = picture(&bytes) {
-                pictures.insert(key, picture);
+                pictures.insert(missing.key, picture);
             }
         }
     });
-    Ok(pictures)
+    pictures
+}
+
+/// Fetch the pictures the last directory went without, then show it again with them. Only
+/// tried once per load: what fails waits for the next one.
+pub(super) async fn fill_pictures(
+    ctx: &Ctx,
+    url: &Url,
+    client: &mut KeyClient<'_>,
+    state: &mut State,
+) -> Result<()> {
+    state.pictures_missing = false;
+    let Some(sources) = &state.raw else {
+        return Ok(());
+    };
+    let (_, missing) = known_pictures(
+        client.space().id,
+        &sources.members,
+        &sources.space,
+        &sources.emoji,
+        &state.pictures,
+    )?;
+    let fetched = fetch_pictures(client, missing).await;
+    if fetched.is_empty() {
+        return Ok(());
+    }
+    state.pictures.extend(fetched);
+    let Some(sources) = state.raw.take() else {
+        return Ok(());
+    };
+    let calendar = state.last.as_ref().and_then(|dir| dir.calendar.clone());
+    rebuild(ctx, url, client, state, sources, calendar).await?;
+    state.pictures_missing = false;
+    Ok(())
 }
 
 /// A decoded frame as an image and how long it shows, in ms.
@@ -918,6 +984,49 @@ fn changes(before: &Directory, after: &Directory) -> Vec<(Id, &'static str, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_new_pictures_are_left_to_fetch() -> Result<()> {
+        let (a, b, emoji_id) = (encode(&[1; 32]), encode(&[2; 32]), encode(&[3; 32]));
+        let members = json!([
+            {"person_id": a, "avatar_hash": "known"},
+            {"person_id": b, "avatar_hash": "new"},
+            {"person_id": encode(&[4; 32]), "avatar_hash": null},
+        ]);
+        let space = json!({"icon_hash": "icon"});
+        let emoji = json!({"items": [{"id": emoji_id, "image_hash": "smile"}]});
+        let known = picture(include_bytes!("../../assets/rusttalk.png")).context("decodes")?;
+        let last = HashMap::from([
+            (picture_key(&[1; 32], "known"), known.clone()),
+            // Not shown anymore, so dropped.
+            (picture_key(&[2; 32], "old"), known),
+        ]);
+        let (pictures, missing) = known_pictures([9; 32], &members, &space, &emoji, &last)?;
+        assert_eq!(
+            pictures.keys().collect::<Vec<_>>(),
+            [&picture_key(&[1; 32], "known")]
+        );
+        let missing: Vec<_> = (missing.iter())
+            .map(|m| (m.key, m.path.as_str(), m.field))
+            .collect();
+        assert_eq!(
+            missing,
+            [
+                (
+                    picture_key(&[2; 32], "new"),
+                    format!("/v1/members/{b}/avatar").as_str(),
+                    "avatar_ct"
+                ),
+                (picture_key(&[9; 32], "icon"), "/v1/space/icon", "icon_ct"),
+                (
+                    picture_key(&[3; 32], "smile"),
+                    format!("/v1/emoji/{emoji_id}/image").as_str(),
+                    "image_ct"
+                ),
+            ]
+        );
+        Ok(())
+    }
 
     #[test]
     fn a_profile_notice_updates_only_that_member() {

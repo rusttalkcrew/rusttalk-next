@@ -12,6 +12,7 @@ Unreleased under the new version and date.
 ## Unreleased
 
 - Changing your name, picture or bio, or editing channels, emoji and events, no longer makes everyone's app reload the whole server.
+- Servers come online faster after starting or reconnecting, and clicks, messages and call joins no longer wait for pictures and unread marks to load.
 
 ## v0.3.0 - 2026-11-24
 
