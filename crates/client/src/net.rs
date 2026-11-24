@@ -57,6 +57,7 @@ mod files;
 mod find;
 mod phone;
 mod recent;
+mod retry;
 pub mod terminal;
 mod voice;
 
@@ -941,6 +942,8 @@ async fn run(
     // Commands that came while connecting, for when it is done. Not in `State`: some
     // hold Windows handles, and `State` is borrowed across awaits so must stay `Sync`.
     let mut queued = VecDeque::new();
+    // Transfers the last connection stopped, asked again on the next one.
+    let mut retries = retry::Retries::default();
     // Once an attempt fails or the session drops, stay Offline until recovery.
     ctx.send(Update::Status(url.clone(), Status::Connecting));
     loop {
@@ -982,6 +985,7 @@ async fn run(
             Done(T),
         }
         let expected_generation = route_snap.generation;
+        retries.requeue(&mut queued);
         let connecting = {
             let (ctx, server, api, admission, route_rx) =
                 (&ctx, &server, &mut api, &mut admission, &mut route_rx);
@@ -1037,6 +1041,7 @@ async fn run(
             ConnectStep::Done(connected) => connected,
         };
         let mut route_changed = false;
+        let mut stopped = Vec::new();
         match connected {
             Ok((connected, pins, dm_backfill)) => {
                 state.dm_backfill = dm_backfill;
@@ -1072,9 +1077,7 @@ async fn run(
                         }
                         // Transfers stop with the connection (a new route must not inherit
                         // them) and are asked again, in order, once it is back.
-                        for command in state.jobs.stop().into_iter().rev() {
-                            queued.push_front(command);
-                        }
+                        stopped = state.jobs.stop();
                         ctx.sync.set_peer(&url, None);
                         match end {
                             End::Quit => return,
@@ -1123,7 +1126,10 @@ async fn run(
             }
             Err(Failure::Retry) => {}
         }
-        // What was asked while connecting can't be done now.
+        // What was asked while connecting can't be done now, nor transfers tried too often.
+        for command in retries.ended(stopped, &mut queued) {
+            refuse(&ctx, &url, command);
+        }
         for command in std::mem::take(&mut queued) {
             refuse(&ctx, &url, command);
         }
