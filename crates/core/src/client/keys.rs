@@ -16,7 +16,7 @@ use crate::{
     presence::{Status, Update},
 };
 use anyhow::{Context, Result, ensure};
-use futures_util::{FutureExt, StreamExt};
+use futures_util::{FutureExt, Sink, SinkExt, Stream, StreamExt};
 use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
 use reqwest::{Method, RequestBuilder, Response, StatusCode};
 use serde_json::{Value, json};
@@ -26,6 +26,12 @@ use super::{MessageBody, Server, chat::Opened};
 use crate::messages::KeyLink;
 
 type EventStream = pinned_tls::Socket;
+
+/// A quiet event socket is pinged after this long; no frame within `PONG_WAIT` after the
+/// ping means the link went half-open (sleep, NAT timeout), so the stream ends with an error
+/// and the caller reconnects and resumes.
+const PING_AFTER: Duration = Duration::from_secs(20);
+const PONG_WAIT: Duration = Duration::from_secs(10);
 
 type HistoricalDevice = ([u8; 32], [u8; 32], [u8; 32]);
 /// A verified epoch key, its envelope, the person who wrapped it, its commitment,
@@ -1158,10 +1164,10 @@ impl<'a> KeyClient<'a> {
             if self.closed {
                 return Ok(None);
             }
-            let Some(frame) = self.events.next().await else {
+            let Some(frame) = next_frame(&mut self.events).await? else {
                 return Ok(None);
             };
-            self.receive(frame?)?;
+            self.receive(frame)?;
             // A join queues one notice per missing envelope; one sync covers the whole burst.
             while !self.closed
                 && let Some(Some(frame)) = self.events.next().now_or_never()
@@ -1580,10 +1586,65 @@ pub async fn invite_name(server: &Server, link: &InviteLink) -> Result<Option<Ve
         .transpose()
 }
 
+/// The next frame, pinging the server when the socket has been quiet for `PING_AFTER`.
+/// Servers answer pings on their own (tungstenite queues the pong), so older ones need no change.
+async fn next_frame<S>(events: &mut S) -> Result<Option<Message>>
+where
+    S: Stream<Item = tokio_tungstenite::tungstenite::Result<Message>>
+        + Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
+        + Unpin,
+{
+    if let Ok(frame) = tokio::time::timeout(PING_AFTER, events.next()).await {
+        return Ok(frame.transpose()?);
+    }
+    let answer = async {
+        events.send(Message::Ping(Default::default())).await?;
+        anyhow::Ok(events.next().await.transpose()?)
+    };
+    tokio::time::timeout(PONG_WAIT, answer)
+        .await
+        .context("event stream stopped answering pings")?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::identity::DeviceIdentity;
+    use tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};
+
+    async fn socket_pair() -> (
+        WebSocketStream<tokio::io::DuplexStream>,
+        WebSocketStream<tokio::io::DuplexStream>,
+    ) {
+        let (client, server) = tokio::io::duplex(4096);
+        (
+            WebSocketStream::from_raw_socket(client, Role::Client, None).await,
+            WebSocketStream::from_raw_socket(server, Role::Server, None).await,
+        )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_quiet_socket_is_pinged_and_the_answer_keeps_it_open() {
+        let (mut client, mut server) = socket_pair().await;
+        // Reading is enough for the server to answer pings, as axum does.
+        tokio::spawn(async move { while server.next().await.is_some() {} });
+        let started = tokio::time::Instant::now();
+        let frame = next_frame(&mut client).await.unwrap();
+        assert!(matches!(frame, Some(Message::Pong(_))), "{frame:?}");
+        assert!(started.elapsed() >= PING_AFTER);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_half_open_socket_fails_after_the_ping_goes_unanswered() {
+        let (mut client, _server) = socket_pair().await;
+        let started = tokio::time::Instant::now();
+        let error = next_frame(&mut client).await.unwrap_err();
+        assert!(
+            format!("{error:#}").contains("stopped answering"),
+            "{error:#}"
+        );
+        assert!(started.elapsed() >= PING_AFTER + PONG_WAIT);
+    }
 
     #[tokio::test]
     async fn protocol_two_keeps_the_current_key_after_learning_a_removal() -> Result<()> {
