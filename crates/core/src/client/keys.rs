@@ -2,6 +2,7 @@ mod rotation;
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
 
@@ -34,6 +35,21 @@ const PING_AFTER: Duration = Duration::from_secs(20);
 const PONG_WAIT: Duration = Duration::from_secs(10);
 
 type HistoricalDevice = ([u8; 32], [u8; 32], [u8; 32]);
+
+/// One counter for every client's device list and for learned removals, so a value from
+/// `KeyClient::devices_generation` never repeats, even across reconnects.
+static DEVICES_CHANGED: AtomicU64 = AtomicU64::new(0);
+/// The counter's value when this process last learned a device removal.
+static REVOKED_AT: AtomicU64 = AtomicU64::new(0);
+
+fn next_devices_generation() -> u64 {
+    DEVICES_CHANGED.fetch_add(1, Ordering::Relaxed) + 1
+}
+
+/// A removal was saved: `devices()` now leaves that device out on every connection.
+pub(super) fn device_revoked() {
+    REVOKED_AT.fetch_max(next_devices_generation(), Ordering::Release);
+}
 /// A verified epoch key, its envelope, the person who wrapped it, its commitment,
 /// and whether that commitment names the pinned pair (a DM key made for them).
 struct HeldKey {
@@ -79,6 +95,8 @@ pub struct KeyClient<'a> {
     /// each was sent in, and the link.
     pub(super) links: HashMap<[u8; 32], Vec<(i64, KeyLink)>>,
     pub(super) devices: HashMap<String, DeviceCertificate>,
+    /// Changes whenever `devices` does, for `devices_generation`.
+    devices_generation: u64,
     pub(super) historical_devices: HashMap<HistoricalDevice, DeviceCertificate>,
     rotations: rotation::Rotations,
     rotation_save_pending: bool,
@@ -150,6 +168,7 @@ impl<'a> KeyClient<'a> {
             rekey_failures: 0,
             links: HashMap::new(),
             devices: HashMap::new(),
+            devices_generation: next_devices_generation(),
             historical_devices: HashMap::new(),
             rotations: if create_protected_epochs {
                 rotation::Rotations::load(
@@ -761,6 +780,13 @@ impl<'a> KeyClient<'a> {
             .filter(|cert| self.revocations.allows(cert))
     }
 
+    /// Changes whenever `devices()` may have: the list was synced with a different
+    /// result, or a device removal was learned. Lets callers cache what they derive from it.
+    pub fn devices_generation(&self) -> u64 {
+        self.devices_generation
+            .max(REVOKED_AT.load(Ordering::Acquire))
+    }
+
     pub(super) fn device(&self, id: &str) -> Option<&DeviceCertificate> {
         self.devices
             .get(id)
@@ -1130,8 +1156,20 @@ impl<'a> KeyClient<'a> {
                 );
             }
         }
-        self.devices = devices;
+        self.replace_devices(devices);
         Ok(())
+    }
+
+    fn replace_devices(&mut self, devices: HashMap<String, DeviceCertificate>) {
+        let same_person = |(id, certificate): (&String, &DeviceCertificate)| {
+            self.devices
+                .get(id)
+                .is_some_and(|known| known.person_id() == certificate.person_id())
+        };
+        if devices.len() != self.devices.len() || !devices.iter().all(same_person) {
+            self.devices_generation = next_devices_generation();
+        }
+        self.devices = devices;
     }
 
     /// Await the next event and reconcile key work when needed.
@@ -1862,6 +1900,60 @@ mod tests {
         assert!(!client.key_fresh(scope), "device removal not synced yet");
         client.changes.borrow_and_update();
         assert!(client.key_fresh(scope));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn devices_generation_changes_only_with_the_device_list() -> Result<()> {
+        let profile = tempfile::tempdir()?;
+        let server = Server::for_test(3, profile.path());
+        let (words, identity) = DeviceIdentity::create("reader")?;
+        let sibling = DeviceIdentity::add_device(&words, "sibling")?;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let socket = tokio::net::TcpStream::connect(listener.local_addr()?).await?;
+        let events = EventStream::from_raw_socket(
+            tokio_tungstenite::MaybeTlsStream::Plain(crate::route::RouteStream::Direct(socket)),
+            tokio_tungstenite::tungstenite::protocol::Role::Client,
+            None,
+        )
+        .await;
+        let session = Session {
+            token: String::new(),
+            expires_at: 0,
+        };
+        let mut client = KeyClient::from_stream(&server, &identity, &session, None, events)?;
+        let listed = |certificates: &[&DeviceCertificate]| {
+            certificates
+                .iter()
+                .map(|c| (encode(c.signing_key().as_bytes()), (*c).clone()))
+                .collect::<HashMap<_, _>>()
+        };
+        let mine = listed(&[&identity.certificate]);
+        client.replace_devices(mine.clone());
+        let start = client.devices_generation();
+        client.replace_devices(mine);
+        assert_eq!(client.devices_generation(), start, "same list");
+
+        let both = listed(&[&identity.certificate, &sibling.certificate]);
+        client.replace_devices(both.clone());
+        let added = client.devices_generation();
+        assert_ne!(added, start, "device added");
+        client.replace_devices(both);
+        assert_eq!(client.devices_generation(), added);
+
+        let owner = identity.certificate.person_id();
+        let removal = crate::identity::revoke_device(
+            &words,
+            owner,
+            sibling.certificate.signing_key().to_bytes(),
+        )?;
+        assert!(
+            client
+                .revocations
+                .observe(owner, &encode(&removal.to_bytes()))?
+        );
+        assert_ne!(client.devices_generation(), added, "device removed");
+        assert_eq!(client.devices().count(), 1);
         Ok(())
     }
 

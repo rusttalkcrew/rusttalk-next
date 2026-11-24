@@ -162,6 +162,7 @@ impl Revocations {
             "device revocation owner limit reached"
         );
         super::save_json(&dir, &file, &encode(&record.to_bytes()))?;
+        super::keys::device_revoked();
         self.1.send_replace(());
         #[cfg(unix)]
         for path in [&dir, &self.0, self.0.parent().expect("profile directory")] {
