@@ -832,7 +832,10 @@ pub fn nav_row_trailing(
     nav_row_marked(ui, icon, label, selected, role, accessible, trailing, None)
 }
 
-/// `nav_row_trailing` with a small muted glyph right after the label, like the lock
+/// Room `nav_row_marked` keeps at the right for its mark.
+pub const NAV_MARK_WIDTH: f32 = 24.0;
+
+/// `nav_row_trailing` with a small glyph at the right end, like the lock
 /// of a channel only some roles can see.
 #[allow(clippy::too_many_arguments)]
 pub fn nav_row_marked(
@@ -845,8 +848,6 @@ pub fn nav_row_marked(
     trailing: f32,
     mark: Option<&str>,
 ) -> Response {
-    // Room for the mark, so a long name is cut short before it.
-    const MARK_WIDTH: f32 = 22.0;
     let (rect, response) = ui.allocate_exact_size(
         Vec2::new(ui.available_width().max(0.0), super::ROW_HEIGHT),
         Sense::click(),
@@ -884,21 +885,27 @@ pub fn nav_row_marked(
         label.to_owned(),
         label_font,
         text,
-        (rect.width() - 44.0 - trailing - mark.map_or(0.0, |_| MARK_WIDTH)).max(0.0),
+        (rect.width() - 44.0 - trailing - mark.map_or(0.0, |_| NAV_MARK_WIDTH)).max(0.0),
     );
     job.wrap.max_rows = 1;
     job.wrap.break_anywhere = true;
     let galley = painter.layout_job(job);
     let at = egui::pos2(rect.left() + 34.0, rect.center().y - galley.size().y / 2.0);
-    let end = at.x + galley.size().x;
     painter.with_clip_rect(rect).galley(at, galley, text);
     if let Some(mark) = mark {
+        // At the very end, moving over only while the button in `trailing` shows (hovered
+        // or open), so marks line up down the list.
+        let shift = if selected || ui.rect_contains_pointer(rect) {
+            trailing
+        } else {
+            0.0
+        };
         painter.text(
-            egui::pos2(end + 5.0, rect.center().y),
-            Align2::LEFT_CENTER,
+            egui::pos2(rect.right() - shift - 8.0, rect.center().y),
+            Align2::RIGHT_CENTER,
             mark,
             FontId::proportional(TEXT_ICON),
-            c.muted,
+            text,
         );
     }
     response.widget_info(|| WidgetInfo::selected(role, enabled, selected, accessible));

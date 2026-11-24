@@ -3019,7 +3019,8 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
                         })
                         .inner;
                     let chats = [(&server.address, channel.id)];
-                    let marks = row.rect.with_max_x(row.rect.right() - trailing);
+                    let lock = if locked { ui::NAV_MARK_WIDTH } else { 0.0 };
+                    let marks = row.rect.with_max_x(row.rect.right() - trailing - lock);
                     chat_marks(ui, home, &chats, false, marks);
                     if limited {
                         call::member_count(ui, server, &channel.id, channel.member_limit, &row);
