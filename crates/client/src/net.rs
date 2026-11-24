@@ -26,7 +26,7 @@ use rusttalk_core::{
     camera::CameraOptions,
     client::{
         BlobRef, DmPin, Event, FriendSignal, KeyClient, MessageBody, MessageError, MessageRecord,
-        Server as Api, invite_name,
+        Server as Api, Step, invite_name,
         voice::{DataLiveFiles, LiveFileEvent, NativeVideoSource, RoomEvent, VoiceRoster},
     },
     identity::{DeviceIdentity, fingerprint},
@@ -1566,15 +1566,24 @@ async fn serve(
                 save_pins(ctx, url, client, state);
                 for channel in state.loaded.clone() { page(ctx,url,client,state,channel,None).await; }
             }
-            event = client.next_update() => match event {
-                Ok(Some(Pushed::Presence(PresenceEvent::PresenceChanged { person_id, status }))) => {
+            // `next_step`, not `next_update`: other arms win every 2 s in a call, and the
+            // key sync it asks for runs here, where that can't cancel it.
+            event = client.next_step() => match event {
+                Ok(Some(Step::Sync)) => {
+                    if let Err(error) = client.sync_queued().await {
+                        apply_keys(ctx, url, client, state);
+                        tracing::warn!(error = %format_args!("{error:#}"), "key sync for new events failed");
+                        return End::Error;
+                    }
+                }
+                Ok(Some(Step::Update(Pushed::Presence(PresenceEvent::PresenceChanged { person_id, status })))) => {
                     directory::presence_changed(state, &person_id, status);
                     match decode(&person_id) {
                         Ok(person) => ctx.send(Update::Presence(url.clone(), person, status)),
                         Err(error) => tracing::warn!(%error, "presence for a bad person ID"),
                     }
                 }
-                Ok(Some(Pushed::Event(event))) => {
+                Ok(Some(Step::Update(Pushed::Event(event)))) => {
                     if let Err(error) = on_event(ctx, url, client, state, event).await {
                         tracing::warn!(error = %format_args!("{error:#}"), "handling a server event failed");
                     }

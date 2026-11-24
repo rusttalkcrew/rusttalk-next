@@ -34,6 +34,39 @@ type EventStream = pinned_tls::Socket;
 const PING_AFTER: Duration = Duration::from_secs(20);
 const PONG_WAIT: Duration = Duration::from_secs(10);
 
+/// When the event socket last carried a frame, and the ping sent since. Kept on the client
+/// rather than in the read future: `serve` drops and recreates that future whenever another
+/// `select!` arm wins (every 2 s in a call), which must not push these deadlines back.
+struct Keepalive {
+    last_frame: tokio::time::Instant,
+    /// When the ping became due and went out; the answer is due `PONG_WAIT` later.
+    ping_sent: Option<tokio::time::Instant>,
+    /// The ping frame is in the socket's write buffer, so a recreated future only flushes it.
+    ping_queued: bool,
+}
+
+impl Keepalive {
+    fn new() -> Self {
+        Self {
+            last_frame: tokio::time::Instant::now(),
+            ping_sent: None,
+            ping_queued: false,
+        }
+    }
+
+    /// Any frame proves the link is alive, as a pong does.
+    fn heard(&mut self) {
+        *self = Self::new();
+    }
+}
+
+/// What `next_step` found: an update to hand out, or queued events that need a key sync first.
+pub enum Step {
+    Update(Update),
+    /// Call `sync_queued`, then ask again.
+    Sync,
+}
+
 type HistoricalDevice = ([u8; 32], [u8; 32], [u8; 32]);
 
 /// One counter for every client's device list and for learned removals, so a value from
@@ -78,6 +111,7 @@ pub struct KeyClient<'a> {
     own_revocations_changed: bool,
     session: Session,
     events: EventStream,
+    keepalive: Keepalive,
     /// Each verified key with its envelope, the person whose device wrapped it, and
     /// its epoch commitment.
     keys: HashMap<(Scope, i64), HeldKey>,
@@ -164,6 +198,7 @@ impl<'a> KeyClient<'a> {
             own_revocations_changed: false,
             session: session.clone(),
             events,
+            keepalive: Keepalive::new(),
             keys: HashMap::new(),
             pins_lost: dms.is_none(),
             dms: dms.unwrap_or_default(),
@@ -1204,29 +1239,29 @@ impl<'a> KeyClient<'a> {
     /// Await the next API event, including presence changes.
     pub async fn next_update(&mut self) -> Result<Option<Update>> {
         loop {
+            match self.next_step().await? {
+                Some(Step::Update(update)) => return Ok(Some(update)),
+                Some(Step::Sync) => self.sync_queued().await?,
+                None => return Ok(None),
+            }
+        }
+    }
+
+    /// Like `next_update`, but returns `Step::Sync` instead of syncing, so it is cancel-safe:
+    /// a `select!` may drop it at any await without losing a frame or restarting a sync.
+    pub async fn next_step(&mut self) -> Result<Option<Step>> {
+        loop {
             if self.stale && !self.queued.is_empty() {
-                match self.sync().await {
-                    Ok(()) => self.stale = false,
-                    // A queued notice can precede removal of this session. Wait for the close frame.
-                    Err(error)
-                        if error
-                            .downcast_ref::<reqwest::Error>()
-                            .and_then(reqwest::Error::status)
-                            == Some(StatusCode::UNAUTHORIZED) =>
-                    {
-                        self.queued.clear();
-                        self.stale = false;
-                    }
-                    Err(error) => return Err(error),
-                }
+                return Ok(Some(Step::Sync));
             }
             if let Some(event) = self.queued.pop_front() {
-                return Ok(Some(event));
+                return Ok(Some(Step::Update(event)));
             }
             if self.closed {
                 return Ok(None);
             }
-            let Some(frame) = next_frame(&mut self.events).await? else {
+            // The only await: a frame is either returned whole or left in the stream.
+            let Some(frame) = next_frame(&mut self.events, &mut self.keepalive).await? else {
                 return Ok(None);
             };
             self.receive(frame)?;
@@ -1234,9 +1269,29 @@ impl<'a> KeyClient<'a> {
             while !self.closed
                 && let Some(Some(frame)) = self.events.next().now_or_never()
             {
+                self.keepalive.heard();
                 self.receive(frame?)?;
             }
         }
+    }
+
+    /// The key sync that queued events wait for after `next_step` returned `Step::Sync`.
+    pub async fn sync_queued(&mut self) -> Result<()> {
+        match self.sync().await {
+            Ok(()) => self.stale = false,
+            // A queued notice can precede removal of this session. Wait for the close frame.
+            Err(error)
+                if error
+                    .downcast_ref::<reqwest::Error>()
+                    .and_then(reqwest::Error::status)
+                    == Some(StatusCode::UNAUTHORIZED) =>
+            {
+                self.queued.clear();
+                self.stale = false;
+            }
+            Err(error) => return Err(error),
+        }
+        Ok(())
     }
 
     /// Sync only when the scope's key may be out of date: missing, pending rotation or
@@ -1248,6 +1303,7 @@ impl<'a> KeyClient<'a> {
         while !self.closed
             && let Some(Some(frame)) = self.events.next().now_or_never()
         {
+            self.keepalive.heard();
             // A broken event stream is for the event loop to reconnect; joining goes on
             // over HTTP as before, but key events may be lost, so sync.
             if let Err(error) = frame
@@ -1689,22 +1745,42 @@ pub async fn invite_name(server: &Server, link: &InviteLink) -> Result<Option<Ve
 
 /// The next frame, pinging the server when the socket has been quiet for `PING_AFTER`.
 /// Servers answer pings on their own (tungstenite queues the pong), so older ones need no change.
-async fn next_frame<S>(events: &mut S) -> Result<Option<Message>>
+/// Cancel-safe: the deadlines live in `alive`, so dropping and recreating this future keeps them.
+async fn next_frame<S>(events: &mut S, alive: &mut Keepalive) -> Result<Option<Message>>
 where
     S: Stream<Item = tokio_tungstenite::tungstenite::Result<Message>>
         + Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
         + Unpin,
 {
-    if let Ok(frame) = tokio::time::timeout(PING_AFTER, events.next()).await {
-        return Ok(frame.transpose()?);
-    }
-    let answer = async {
-        events.send(Message::Ping(Default::default())).await?;
-        anyhow::Ok(events.next().await.transpose()?)
+    let pong_by = match alive.ping_sent {
+        Some(sent) => sent + PONG_WAIT,
+        None => {
+            let ping_at = alive.last_frame + PING_AFTER;
+            if let Ok(frame) = tokio::time::timeout_at(ping_at, events.next()).await {
+                alive.heard();
+                return Ok(frame.transpose()?);
+            }
+            // From now, not from `ping_at`: after sleep or a busy loop the server still gets
+            // the full wait to answer.
+            let now = tokio::time::Instant::now();
+            alive.ping_sent = Some(now);
+            now + PONG_WAIT
+        }
     };
-    tokio::time::timeout(PONG_WAIT, answer)
+    let answer = async {
+        if !alive.ping_queued {
+            // `feed` queues the frame in one poll or not at all, so a cancel can't lose half.
+            events.feed(Message::Ping(Default::default())).await?;
+            alive.ping_queued = true;
+        }
+        events.flush().await?;
+        anyhow::Ok(events.next().await)
+    };
+    let frame = tokio::time::timeout_at(pong_by, answer)
         .await
-        .context("event stream stopped answering pings")?
+        .context("event stream stopped answering pings")??;
+    alive.heard();
+    Ok(frame.transpose()?)
 }
 
 #[cfg(test)]
@@ -1730,21 +1806,106 @@ mod tests {
         // Reading is enough for the server to answer pings, as axum does.
         tokio::spawn(async move { while server.next().await.is_some() {} });
         let started = tokio::time::Instant::now();
-        let frame = next_frame(&mut client).await.unwrap();
+        let mut alive = Keepalive::new();
+        let frame = next_frame(&mut client, &mut alive).await.unwrap();
         assert!(matches!(frame, Some(Message::Pong(_))), "{frame:?}");
         assert!(started.elapsed() >= PING_AFTER);
+        assert!(alive.ping_sent.is_none());
     }
 
     #[tokio::test(start_paused = true)]
     async fn a_half_open_socket_fails_after_the_ping_goes_unanswered() {
         let (mut client, _server) = socket_pair().await;
         let started = tokio::time::Instant::now();
-        let error = next_frame(&mut client).await.unwrap_err();
+        let error = next_frame(&mut client, &mut Keepalive::new())
+            .await
+            .unwrap_err();
         assert!(
             format!("{error:#}").contains("stopped answering"),
             "{error:#}"
         );
         assert!(started.elapsed() >= PING_AFTER + PONG_WAIT);
+    }
+
+    /// Reads with the future dropped and recreated every 2 s, as `serve`'s `select!` does
+    /// during a call, until one read finishes.
+    async fn read_through_ticks(
+        client: &mut WebSocketStream<tokio::io::DuplexStream>,
+        alive: &mut Keepalive,
+    ) -> Result<Option<Message>> {
+        let started = tokio::time::Instant::now();
+        loop {
+            if let Ok(frame) =
+                tokio::time::timeout(Duration::from_secs(2), next_frame(client, alive)).await
+            {
+                return frame;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(120),
+                "never finished"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_ping_goes_out_on_time_although_the_read_is_recreated_every_tick() {
+        let (mut client, mut server) = socket_pair().await;
+        let (pinged, mut ping) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Some(Ok(frame)) = server.next().await {
+                if matches!(frame, Message::Ping(_)) {
+                    let _ = pinged.send(tokio::time::Instant::now());
+                }
+            }
+        });
+        let started = tokio::time::Instant::now();
+        let mut alive = Keepalive::new();
+        let frame = read_through_ticks(&mut client, &mut alive).await.unwrap();
+        assert!(matches!(frame, Some(Message::Pong(_))), "{frame:?}");
+        let sent = ping.recv().await.unwrap() - started;
+        assert!(
+            (PING_AFTER..PING_AFTER + Duration::from_secs(1)).contains(&sent),
+            "{sent:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_missing_pong_closes_although_the_read_is_recreated_every_tick() {
+        let (mut client, _server) = socket_pair().await;
+        let started = tokio::time::Instant::now();
+        let error = read_through_ticks(&mut client, &mut Keepalive::new())
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("stopped answering"),
+            "{error:#}"
+        );
+        let waited = started.elapsed();
+        assert!(
+            (PING_AFTER + PONG_WAIT..PING_AFTER + PONG_WAIT + Duration::from_secs(1))
+                .contains(&waited),
+            "{waited:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn any_frame_moves_the_ping_deadline() {
+        let (mut client, mut server) = socket_pair().await;
+        let mut alive = Keepalive::new();
+        let started = tokio::time::Instant::now();
+        // A dropped read 15 s in keeps the deadline; a frame then restarts it.
+        assert!(
+            tokio::time::timeout(Duration::from_secs(15), next_frame(&mut client, &mut alive))
+                .await
+                .is_err()
+        );
+        server.send(Message::Text("{}".into())).await.unwrap();
+        let frame = next_frame(&mut client, &mut alive).await.unwrap();
+        assert!(matches!(frame, Some(Message::Text(_))), "{frame:?}");
+        tokio::spawn(async move { while server.next().await.is_some() {} });
+        let frame = read_through_ticks(&mut client, &mut alive).await.unwrap();
+        assert!(matches!(frame, Some(Message::Pong(_))), "{frame:?}");
+        assert!(started.elapsed() >= Duration::from_secs(15) + PING_AFTER);
     }
 
     #[tokio::test]
