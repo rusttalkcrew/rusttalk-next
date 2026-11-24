@@ -2039,9 +2039,13 @@ fn move_applies(
 
 /// Reload what the UI shows after (re)connecting, since events may have been missed.
 async fn resume(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, state: &mut State) -> Result<()> {
-    // Apply synced deletes and device removals before presenting this session.
     let (api, session) = client.sync_peer();
     ctx.sync.set_peer(url, Some((api.clone(), session.clone())));
+    // Off this server's startup path: a slow peer must not stall it. Removals the run
+    // learns still reach every server through `removals` and the `changes` loop below.
+    if !ctx.sync.is_current(url) {
+        sync_later(ctx);
+    }
     let records = rusttalk_core::client::revocations::Revocations::in_profile(&ctx.data);
     let mut changes = records.changes();
     loop {
@@ -2056,8 +2060,12 @@ async fn resume(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, state: &mut St
             biased;
             _ = changes.changed() => continue,
             result = async {
-                sync_devices(ctx, Vec::new()).await?;
                 client.sync().await?;
+                // A revocation this server holds must reach the others even when the
+                // device sync above was skipped.
+                if client.take_own_revocations_changed() {
+                    sync_later(ctx);
+                }
                 state.revalidate(ctx, url, &records, Some(client));
                 directory(ctx, url, client, state).await?;
                 if !barrier.has_changed()? {
@@ -2144,6 +2152,12 @@ async fn sync(ctx: &Ctx, edits: Vec<Edit>) {
     if let Err(error) = sync_devices(ctx, edits).await {
         tracing::error!(error = %format_args!("{error:#}"), "device sync failed");
     }
+}
+
+/// `sync` without waiting for it; concurrent requests coalesce in `DeviceSync::run`.
+fn sync_later(ctx: &Ctx) {
+    let ctx = ctx.clone();
+    tokio::spawn(async move { sync(&ctx, Vec::new()).await });
 }
 
 async fn sync_devices(ctx: &Ctx, edits: Vec<Edit>) -> Result<()> {
@@ -2238,7 +2252,7 @@ async fn on_event(
         Event::MemberChanged { ref person, .. }
             if person == &encode(ctx.identity.certificate.person_id()) =>
         {
-            sync(ctx, Vec::new()).await;
+            sync_later(ctx);
             directory(ctx, url, client, state).await?;
         }
         Event::MemberChanged { .. } | Event::ChannelChanged | Event::DmCreated { .. } => {
@@ -3014,7 +3028,7 @@ async fn cache_own_avatar(ctx: &Ctx, client: &KeyClient<'_>, state: &State) {
         return;
     }
     if candidate.is_some() && ctx.sync.has_pending().await {
-        sync(ctx, Vec::new()).await;
+        sync_later(ctx);
     }
 }
 

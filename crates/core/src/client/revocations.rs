@@ -9,7 +9,7 @@ use std::{
     sync::{Arc, LazyLock, Mutex, Weak},
 };
 
-use super::sync::{Peer, Snapshot};
+use super::sync::{Failures, Peer, Snapshot};
 use crate::{
     auth::{decode_bytes, encode},
     identity::{DeviceCertificate, PersonId, REVOCATIONS_PER_PERSON, Revocation},
@@ -196,12 +196,12 @@ impl Revocations {
 
     /// Merge this owner's records from every encrypted snapshot; publish new, verified records
     /// to each available server and return only verified records for the next encrypted blob.
-    pub async fn relay<'a>(
+    pub async fn relay<'a, 'p>(
         &self,
         person: &PersonId,
         snapshots: impl IntoIterator<Item = &'a Snapshot>,
-        peers: &[Peer<'_>],
-    ) -> Result<BTreeSet<String>> {
+        peers: &[Peer<'p>],
+    ) -> Result<(BTreeSet<String>, Failures<'p>)> {
         for snapshot in snapshots {
             ensure!(
                 snapshot.state.revocations.len() <= MAX_PER_REPLY,
@@ -212,15 +212,18 @@ impl Revocations {
             }
         }
         let mut verified = BTreeSet::new();
+        // A server that missed a record must be retried, or a revoked device keeps access there.
+        let mut failures: Failures<'p> = Vec::new();
         for record in self.records(person)? {
-            for (server, session) in peers {
+            for &(server, session) in peers {
                 if let Err(error) = server.publish_revocation(session, &record).await {
                     tracing::warn!(%error, "publishing device revocation failed");
+                    failures.push((server, error));
                 }
             }
             verified.insert(encode(&record.to_bytes()));
         }
-        Ok(verified)
+        Ok((verified, failures))
     }
 
     #[cfg(feature = "voice")]
@@ -330,6 +333,31 @@ mod tests {
         assert!(records.remember(&record).is_err());
         assert_eq!(count_keys(&folder).unwrap(), REVOCATIONS_PER_PERSON);
         assert!(records.check(person, &[0; 32]).is_err());
+    }
+
+    #[tokio::test]
+    async fn relay_reports_a_server_that_missed_a_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let (words, owner) = DeviceIdentity::create("owner").unwrap();
+        let sibling = DeviceIdentity::add_device(&words, "sibling").unwrap();
+        let person = owner.certificate.person_id();
+        let records = Revocations::in_profile(dir.path());
+        let record =
+            revoke_device(&words, person, sibling.certificate.signing_key().to_bytes()).unwrap();
+        records.remember(&record).unwrap();
+        // Nothing serves this address, so publishing fails.
+        let server = super::super::Server::for_test(2, dir.path());
+        let session = crate::auth::Session {
+            token: "test".into(),
+            expires_at: i64::MAX,
+        };
+        let (verified, failures) = records
+            .relay(person, [], &[(&server, &session)])
+            .await
+            .unwrap();
+        assert_eq!(verified, [encode(&record.to_bytes())].into());
+        assert_eq!(failures.len(), 1);
+        assert!(std::ptr::eq(failures[0].0, &server));
     }
 
     #[test]

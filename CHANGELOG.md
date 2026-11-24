@@ -14,6 +14,7 @@ Unreleased under the new version and date.
 - Servers stay responsive when someone joins: sharing chat keys no longer slows down everyone else's connection.
 - After sleep or a network hiccup, servers reconnect within about 30 seconds instead of silently missing new messages.
 - Channels with edited messages load faster.
+- Reconnecting to many servers at once is faster: syncing with your other devices no longer holds each server up.
 
 ## v0.3.0 - 2026-11-24
 

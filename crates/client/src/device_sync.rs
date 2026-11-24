@@ -4,7 +4,10 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     path::Path,
-    sync::{Mutex, PoisonError},
+    sync::{
+        Mutex, PoisonError,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use anyhow::{Context, Result};
@@ -56,6 +59,12 @@ pub struct DeviceSync {
     saved: tokio::sync::Mutex<Saved>,
     /// Connected servers with their current sessions.
     peers: Mutex<HashMap<Url, (Api, Session)>>,
+    /// Peers loaded by a finished run since their session last changed.
+    fresh: Mutex<HashSet<Url>>,
+    /// Coalescing: callers take a ticket; a run that finishes covers every ticket
+    /// taken before it started, so queued callers return at once.
+    requested: AtomicU64,
+    finished: AtomicU64,
 }
 
 /// `sync.json`: the last merged snapshot, so one reachable server can't roll this profile back.
@@ -164,6 +173,9 @@ impl DeviceSync {
         Ok(Self {
             saved: tokio::sync::Mutex::new(saved),
             peers: Mutex::default(),
+            fresh: Mutex::default(),
+            requested: AtomicU64::new(0),
+            finished: AtomicU64::new(0),
         })
     }
 
@@ -268,12 +280,30 @@ impl DeviceSync {
         save(data, &saved)
     }
 
+    /// A new or changed session (a reconnect) needs a run before `is_current` again.
     pub fn set_peer(&self, address: &Url, peer: Option<(Api, Session)>) {
-        let mut peers = self.peers.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut peers = lock(&self.peers);
+        let same = match &peer {
+            Some((_, session)) => peers
+                .get(address)
+                .is_some_and(|(_, old)| old.token == session.token),
+            None => false,
+        };
+        if !same {
+            lock(&self.fresh).remove(address);
+        }
         match peer {
             Some(peer) => peers.insert(address.clone(), peer),
             None => peers.remove(address),
         };
+    }
+
+    /// Whether a run already loaded from this session and no local edit waits:
+    /// another run would change nothing.
+    /// Never waits: a run in progress (holding the state) counts as not current.
+    pub fn is_current(&self, address: &Url) -> bool {
+        lock(&self.fresh).contains(address)
+            && (self.saved.try_lock()).is_ok_and(|saved| saved.pending.is_empty())
     }
 
     /// Record local edits; the next `run` publishes them.
@@ -298,15 +328,22 @@ impl DeviceSync {
         if !edits.is_empty() {
             self.edit(data, edits).await?;
         }
+        // Taken after the edits and peers are recorded, so a run starting later includes them.
+        let ticket = self.requested.fetch_add(1, Ordering::SeqCst) + 1;
         let mut saved = self.saved.lock().await;
-        let peers: Vec<_> = self
-            .peers
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .values()
-            .cloned()
+        if self.finished.load(Ordering::SeqCst) >= ticket {
+            // A run that started after this request finished and already showed its result.
+            return Ok(());
+        }
+        let covers = self.requested.load(Ordering::SeqCst);
+        let connected: Vec<(Url, Api, Session)> = lock(&self.peers)
+            .iter()
+            .map(|(address, (api, session))| (address.clone(), api.clone(), session.clone()))
             .collect();
-        let peers: Vec<sync::Peer> = peers.iter().map(|(api, session)| (api, session)).collect();
+        let peers: Vec<sync::Peer> = (connected.iter())
+            .map(|(_, api, session)| (api, session))
+            .collect();
+        let mut failed = Vec::new();
         let key = &identity.sync_key;
         let person = identity.certificate.person_id();
         let records = Revocations::in_profile(data);
@@ -315,6 +352,7 @@ impl DeviceSync {
         for _ in 0..3 {
             let (snapshots, load_failures) = sync::load_all(&peers, key).await;
             log("load", &load_failures);
+            failed.extend(unreached(&connected, &load_failures));
             let loaded = snapshots.len();
             let peers_agree = snapshots.first().is_some_and(|first| {
                 snapshots
@@ -326,13 +364,14 @@ impl DeviceSync {
                 .first()
                 .map(|first| (first.version, first.state.clone()));
             let mut deletes = dm_deleted(&saved.snapshot.state.settings);
-            let verified = records
+            let (verified, relay_failures) = records
                 .relay(
                     person,
                     std::iter::once(&saved.snapshot).chain(&snapshots),
                     &peers,
                 )
                 .await?;
+            failed.extend(unreached(&connected, &relay_failures));
             for snapshot in &snapshots {
                 deletes.merge(&dm_deleted(&snapshot.state.settings));
             }
@@ -381,12 +420,30 @@ impl DeviceSync {
                     }
                     save(data, &saved)?;
                     log("save", &failures);
+                    failed.extend(unreached(&connected, &failures));
                     if !failures
                         .iter()
                         .any(|(_, error)| error.is::<VersionConflict>())
                     {
                         break;
                     }
+                }
+            }
+        }
+        self.finished.fetch_max(covers, Ordering::SeqCst);
+        {
+            let current = lock(&self.peers);
+            let mut fresh = lock(&self.fresh);
+            for (address, _, session) in &connected {
+                // A session replaced meanwhile was not loaded by this run.
+                let same =
+                    (current.get(address)).is_some_and(|(_, now)| now.token == session.token);
+                if failed.contains(&address) {
+                    // Was fresh from an earlier run, but missed this one (maybe a revocation):
+                    // the next resume must retry it.
+                    fresh.remove(address);
+                } else if same {
+                    fresh.insert(address.clone());
                 }
             }
         }
@@ -435,6 +492,18 @@ fn push_action(
         return PushAction::UpToDate;
     }
     PushAction::Push
+}
+
+/// Addresses of the connected peers that failed a step, so they are not marked fresh.
+fn unreached<'a>(connected: &'a [(Url, Api, Session)], failures: &Failures) -> Vec<&'a Url> {
+    (connected.iter())
+        .filter(|(_, api, _)| (failures.iter()).any(|(server, _)| std::ptr::eq(*server, api)))
+        .map(|(address, ..)| address)
+        .collect()
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 fn save(data: &Path, saved: &Saved) -> Result<()> {
@@ -583,6 +652,41 @@ mod tests {
             recovered.avatar(data.path(), &person, Some(image)).await?,
             Some(image.to_vec())
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn queued_runs_coalesce_into_one() -> Result<()> {
+        use std::sync::{Arc, atomic::AtomicUsize};
+        let data = tempfile::tempdir()?;
+        let sync = Arc::new(DeviceSync::open(data.path())?);
+        let identity = Arc::new(rusttalk_core::identity::DeviceIdentity::create("Test")?.1);
+        let shown = Arc::new(AtomicUsize::new(0));
+        let run = || {
+            let (sync, identity, shown) = (sync.clone(), identity.clone(), shown.clone());
+            let data = data.path().to_owned();
+            tokio::spawn(async move {
+                (sync.run(&data, &identity, Vec::new(), |_| {
+                    shown.fetch_add(1, Ordering::SeqCst);
+                }))
+                .await
+            })
+        };
+        // A slow run in progress: three requests queue behind it.
+        let busy = sync.saved.lock().await;
+        let queued: Vec<_> = (0..3).map(|_| run()).collect();
+        while sync.requested.load(Ordering::SeqCst) < 3 {
+            tokio::task::yield_now().await;
+        }
+        assert!(!sync.is_current(&"https://10.0.0.1/".parse()?));
+        drop(busy);
+        for task in queued {
+            task.await??;
+        }
+        assert_eq!(shown.load(Ordering::SeqCst), 1);
+        // A later request still runs: it may carry new edits or peers.
+        run().await??;
+        assert_eq!(shown.load(Ordering::SeqCst), 2);
         Ok(())
     }
 
