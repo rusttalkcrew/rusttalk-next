@@ -352,12 +352,7 @@ impl DeviceSync {
         for _ in 0..3 {
             let (snapshots, load_failures) = sync::load_all(&peers, key).await;
             log("load", &load_failures);
-            failed = (connected.iter())
-                .filter(|(_, api, _)| {
-                    (load_failures.iter()).any(|(server, _)| std::ptr::eq(*server, api))
-                })
-                .map(|(address, ..)| address)
-                .collect();
+            failed.extend(unreached(&connected, &load_failures));
             let loaded = snapshots.len();
             let peers_agree = snapshots.first().is_some_and(|first| {
                 snapshots
@@ -369,13 +364,14 @@ impl DeviceSync {
                 .first()
                 .map(|first| (first.version, first.state.clone()));
             let mut deletes = dm_deleted(&saved.snapshot.state.settings);
-            let verified = records
+            let (verified, relay_failures) = records
                 .relay(
                     person,
                     std::iter::once(&saved.snapshot).chain(&snapshots),
                     &peers,
                 )
                 .await?;
+            failed.extend(unreached(&connected, &relay_failures));
             for snapshot in &snapshots {
                 deletes.merge(&dm_deleted(&snapshot.state.settings));
             }
@@ -424,6 +420,7 @@ impl DeviceSync {
                     }
                     save(data, &saved)?;
                     log("save", &failures);
+                    failed.extend(unreached(&connected, &failures));
                     if !failures
                         .iter()
                         .any(|(_, error)| error.is::<VersionConflict>())
@@ -441,7 +438,11 @@ impl DeviceSync {
                 // A session replaced meanwhile was not loaded by this run.
                 let same =
                     (current.get(address)).is_some_and(|(_, now)| now.token == session.token);
-                if same && !failed.contains(&address) {
+                if failed.contains(&address) {
+                    // Was fresh from an earlier run, but missed this one (maybe a revocation):
+                    // the next resume must retry it.
+                    fresh.remove(address);
+                } else if same {
                     fresh.insert(address.clone());
                 }
             }
@@ -491,6 +492,14 @@ fn push_action(
         return PushAction::UpToDate;
     }
     PushAction::Push
+}
+
+/// Addresses of the connected peers that failed a step, so they are not marked fresh.
+fn unreached<'a>(connected: &'a [(Url, Api, Session)], failures: &Failures) -> Vec<&'a Url> {
+    (connected.iter())
+        .filter(|(_, api, _)| (failures.iter()).any(|(server, _)| std::ptr::eq(*server, api)))
+        .map(|(address, ..)| address)
+        .collect()
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {

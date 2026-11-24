@@ -2061,6 +2061,11 @@ async fn resume(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, state: &mut St
             _ = changes.changed() => continue,
             result = async {
                 client.sync().await?;
+                // A revocation this server holds must reach the others even when the
+                // device sync above was skipped.
+                if client.take_own_revocations_changed() {
+                    sync_later(ctx);
+                }
                 state.revalidate(ctx, url, &records, Some(client));
                 directory(ctx, url, client, state).await?;
                 if !barrier.has_changed()? {

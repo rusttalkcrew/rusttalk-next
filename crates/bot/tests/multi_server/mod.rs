@@ -499,7 +499,7 @@ pub async fn exercise(
     let (snapshots, failures) = sync::load_all(&source, &peer.sync_key).await;
     assert!(failures.is_empty());
     let relay = Revocations::in_profile(&pins.join("restored-owner"));
-    let kept = relay
+    let (kept, failures) = relay
         .relay(
             peer.certificate.person_id(),
             &snapshots,
@@ -507,6 +507,7 @@ pub async fn exercise(
         )
         .await?;
     assert_eq!(kept, [signed.clone()].into());
+    assert!(failures.is_empty());
     let after: rusttalk_core::keys::KeyState = peer_b
         .request(Method::GET, "/v1/keys")
         .send()
