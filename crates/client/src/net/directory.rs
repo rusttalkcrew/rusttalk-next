@@ -1,6 +1,9 @@
 //! The server's names, channels, members and permissions, decrypted for the UI.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use anyhow::{Context, Result};
 use eframe::egui::ColorImage;
@@ -18,7 +21,7 @@ use url::Url;
 
 use rusttalk_core::client::voice::DEFAULT_AUDIO_KBPS;
 
-use super::{Ctx, State, Update, leave_voice, now};
+use super::{Ctx, State, Update, leave_voice, now, recent::Store};
 use crate::server::{
     Body, Category, Channel, CustomEmoji, Device, Directory, Dm, EmojiPack, Id, Member, Msg, Perms,
     Picture, Role, SystemMessages, member_name, parse_role_display,
@@ -208,7 +211,8 @@ pub(super) async fn directory(
     let roles = get(client, "/v1/roles").await?;
     let space = get(client, "/v1/space").await?;
     let emoji = emoji_list(client).await?;
-    let pictures = pictures(client, &members, &space, &emoji, &state.pictures).await?;
+    let store = state.cache.clone().expect("started server");
+    let pictures = pictures(client, &members, &space, &emoji, &state.pictures, store).await?;
     let mut dir = build(
         client,
         catalog,
@@ -639,13 +643,15 @@ pub(super) fn picture_key(owner: &Id, hash: &str) -> [u8; 32] {
 }
 
 /// The pictures in this directory load. Only pictures whose hash is new are fetched and
-/// decoded, the rest come from the last load. Pictures that fail are tried again next load.
+/// decoded, the rest come from the last load or the encrypted disk cache. Pictures that
+/// fail are tried again next load.
 async fn pictures(
     client: &KeyClient<'_>,
     members: &Value,
     space: &Value,
     emoji: &Value,
     last: &HashMap<[u8; 32], Picture>,
+    store: Arc<Store>,
 ) -> Result<HashMap<[u8; 32], Picture>> {
     let mut wanted = Vec::new();
     for row in members.as_array().into_iter().flatten() {
@@ -678,8 +684,10 @@ async fn pictures(
     }
     let mut pictures = HashMap::new();
     let mut missing = Vec::new();
+    let mut keys = HashSet::new();
     for (kind, id, hash, path, field) in wanted {
         let key = picture_key(&id, hash);
+        keys.insert(key);
         match last.get(&key) {
             Some(known) => {
                 pictures.insert(key, known.clone());
@@ -687,14 +695,32 @@ async fn pictures(
             None => missing.push((kind, id, key, path, field)),
         }
     }
+    // Disk reads and decoding block, so they run off the two network workers.
+    let disk = store.clone();
+    let (cached, missing) = tokio::task::spawn_blocking(move || {
+        let mut cached = Vec::new();
+        missing.retain(|(_, _, key, _, _)| {
+            let found = disk.picture(key).and_then(|bytes| picture(&bytes));
+            found.map(|found| cached.push((*key, found))).is_none()
+        });
+        (cached, missing)
+    })
+    .await?;
+    pictures.extend(cached);
     let mut fetched = Vec::new();
     for batch in missing.chunks(8) {
         let replies = join_all(batch.iter().map(|(_, _, _, path, _)| get(client, path))).await;
         for ((kind, id, key, _, field), reply) in batch.iter().zip(replies) {
             match reply {
                 Ok(reply) => {
-                    if let Some(ct) = reply[*field].as_str() {
-                        fetched.push((*kind, *id, *key, ct.to_owned()));
+                    let Some(ct) = reply[*field].as_str() else {
+                        continue;
+                    };
+                    match client.decrypt_metadata(*kind, id, ct) {
+                        Ok(bytes) => fetched.push((*key, bytes)),
+                        Err(error) => {
+                            tracing::warn!(error = %format_args!("{error:#}"), "picture could not be decrypted");
+                        }
                     }
                 }
                 Err(error) => {
@@ -703,21 +729,20 @@ async fn pictures(
             }
         }
     }
-    // Decrypted and decoded here, off the UI.
-    tokio::task::block_in_place(|| {
-        for (kind, id, key, ct) in fetched {
-            let bytes = match client.decrypt_metadata(kind, &id, &ct) {
-                Ok(bytes) => bytes,
-                Err(error) => {
-                    tracing::warn!(error = %format_args!("{error:#}"), "picture could not be decrypted");
-                    continue;
-                }
-            };
-            if let Some(picture) = picture(&bytes) {
-                pictures.insert(key, picture);
-            }
-        }
-    });
+    let decoded = tokio::task::spawn_blocking(move || {
+        let decoded: Vec<_> = fetched
+            .into_iter()
+            .filter_map(|(key, bytes)| Some((key, picture(&bytes)?)))
+            .collect();
+        let new: Vec<_> = decoded
+            .iter()
+            .map(|(key, p)| (*key, p.bytes.clone()))
+            .collect();
+        store.save_pictures(&new, &keys);
+        decoded
+    })
+    .await?;
+    pictures.extend(decoded);
     Ok(pictures)
 }
 

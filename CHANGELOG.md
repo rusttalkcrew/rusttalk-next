@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Avatars, server icons and custom emoji are kept in an encrypted cache, so they show right away after a restart instead of downloading again.
+
 ## v0.3.0 - 2026-11-24
 
 - Put a voice channel into focus mode for up to 24 hours: it gets a Focus badge, a countdown banner and a short notice before anyone joins.

@@ -285,7 +285,9 @@ suggestions; iOS keeps it off Universal Clipboard and lets it expire after two
 minutes), and desktops clear the clipboard after two minutes if it still holds
 the words and the app is still running.
 After the device keys are unlocked, the app can show its last server directory,
-icons, avatars and recent messages without contacting the server. These local
+icons, avatars and recent messages without contacting the server. Avatars, server
+icons and custom emoji are also kept (up to 32 MiB per server) so a restart only
+downloads pictures that changed; a changed or removed picture is deleted from disk. These local
 files are authenticated and encrypted with a key derived from the unlocked device identity and bound to
 the device and pinned server. The app checks locally known device revocations
 before opening messages. Changes made while the device is offline become

@@ -16,6 +16,10 @@ use zeroize::Zeroizing;
 const LIMIT: usize = 16 * 1024 * 1024;
 const CHANNELS: usize = 12;
 const SERVERS: usize = 8;
+// Avatars, server icons and custom emoji of one server, sealed like the other files.
+const PICTURE: &str = "picture-";
+const PICTURE_BYTES: u64 = 32 * 1024 * 1024;
+const PICTURE_FILES: usize = 1024;
 // The profile lock excludes other app processes. Serialize competing workers' evictions.
 static FILES: Mutex<()> = Mutex::new(());
 
@@ -48,6 +52,13 @@ impl Store {
     }
 
     fn read<T: DeserializeOwned>(&self, name: &str) -> Result<Option<T>> {
+        let Some(plain) = self.read_bytes(name)? else {
+            return Ok(None);
+        };
+        Ok(Some(serde_json::from_slice(&plain)?))
+    }
+
+    fn read_bytes(&self, name: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
         let active = self.active.lock().unwrap();
         if !*active {
             return Ok(None);
@@ -59,8 +70,39 @@ impl Store {
         let mut bytes = Vec::new();
         file.take((LIMIT + 1) as u64).read_to_end(&mut bytes)?;
         anyhow::ensure!(bytes.len() <= LIMIT, "recent cache too large");
-        let plain = Zeroizing::new(open_cache(&self.key, &self.aad(name), &bytes)?);
-        Ok(Some(serde_json::from_slice(&plain)?))
+        Ok(Some(Zeroizing::new(open_cache(
+            &self.key,
+            &self.aad(name),
+            &bytes,
+        )?)))
+    }
+
+    /// Callers hold `FILES`.
+    fn prepare(&self) -> Result<()> {
+        if !self.dir.try_exists()? {
+            let root = self.dir.parent().expect("cache root");
+            fs::create_dir_all(root)?;
+            let mut dirs = Vec::new();
+            for entry in fs::read_dir(root)? {
+                let entry = entry?;
+                if entry.file_type()?.is_dir() {
+                    dirs.push((entry.metadata()?.modified()?, entry.path()));
+                }
+            }
+            dirs.sort_unstable();
+            for (_, dir) in dirs.iter().take(dirs.len().saturating_sub(SERVERS - 1)) {
+                fs::remove_dir_all(dir)?;
+            }
+            fs::create_dir(&self.dir)?;
+        }
+        // A process killed before the atomic rename can leave its sealed temporary file.
+        for entry in fs::read_dir(&self.dir)? {
+            let entry = entry?;
+            if entry.file_name().to_string_lossy().starts_with('.') {
+                fs::remove_file(entry.path())?;
+            }
+        }
+        Ok(())
     }
 
     pub fn write(&self, name: &str, value: &impl Serialize) {
@@ -74,29 +116,7 @@ impl Store {
             anyhow::ensure!(plain.len() + 40 <= LIMIT, "recent cache too large");
             let bytes = seal_cache(&self.key, &self.aad(name), &plain)?;
             let _files = FILES.lock().unwrap();
-            if !self.dir.try_exists()? {
-                let root = self.dir.parent().expect("cache root");
-                fs::create_dir_all(root)?;
-                let mut dirs = Vec::new();
-                for entry in fs::read_dir(root)? {
-                    let entry = entry?;
-                    if entry.file_type()?.is_dir() {
-                        dirs.push((entry.metadata()?.modified()?, entry.path()));
-                    }
-                }
-                dirs.sort_unstable();
-                for (_, dir) in dirs.iter().take(dirs.len().saturating_sub(SERVERS - 1)) {
-                    fs::remove_dir_all(dir)?;
-                }
-                fs::create_dir(&self.dir)?;
-            }
-            // A process killed before the atomic rename can leave its sealed temporary file.
-            for entry in fs::read_dir(&self.dir)? {
-                let entry = entry?;
-                if entry.file_name().to_string_lossy().starts_with('.') {
-                    fs::remove_file(entry.path())?;
-                }
-            }
+            self.prepare()?;
             crate::keystore::write_atomic(&path, &bytes)
         };
         if let Err(error) = write() {
@@ -108,6 +128,65 @@ impl Store {
                 tracing::error!(%error, "could not discard obsolete cache");
             }
         }
+    }
+
+    /// The original image file of a picture saved under its `picture_key`.
+    pub fn picture(&self, key: &[u8; 32]) -> Option<Zeroizing<Vec<u8>>> {
+        self.read_bytes(&picture_name(key)).unwrap_or_else(|error| {
+            tracing::warn!(%error, "could not read cached picture");
+            None
+        })
+    }
+
+    /// Save new pictures, then drop every picture not in `wanted` (so a changed avatar,
+    /// icon or emoji leaves nothing behind) and the oldest ones beyond the limits.
+    pub fn save_pictures(&self, new: &[([u8; 32], Arc<Vec<u8>>)], wanted: &HashSet<[u8; 32]>) {
+        let active = self.active.lock().unwrap();
+        if !*active {
+            return;
+        }
+        let save = || -> Result<()> {
+            let _files = FILES.lock().unwrap();
+            self.prepare()?;
+            for (key, bytes) in new {
+                let name = picture_name(key);
+                let sealed = seal_cache(&self.key, &self.aad(&name), bytes)?;
+                crate::keystore::write_atomic(&self.dir.join(name), &sealed)?;
+            }
+            self.prune_pictures(wanted, PICTURE_BYTES, PICTURE_FILES)
+        };
+        if let Err(error) = save() {
+            tracing::warn!(%error, "could not update picture cache");
+        }
+    }
+
+    fn prune_pictures(&self, wanted: &HashSet<[u8; 32]>, bytes: u64, files: usize) -> Result<()> {
+        let mut kept = Vec::new();
+        for entry in fs::read_dir(&self.dir)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let Some(key) = name.to_str().and_then(|n| n.strip_prefix(PICTURE)) else {
+                continue;
+            };
+            let known = <[u8; 32]>::try_from(hex::decode(key).unwrap_or_default())
+                .is_ok_and(|key| wanted.contains(&key));
+            if known {
+                let meta = entry.metadata()?;
+                kept.push((meta.modified()?, meta.len(), entry.path()));
+            } else {
+                fs::remove_file(entry.path())?;
+            }
+        }
+        // Newest first: keep them while they fit.
+        kept.sort_unstable_by_key(|k| std::cmp::Reverse(k.0));
+        let mut total = 0;
+        for (n, (_, len, path)) in kept.into_iter().enumerate() {
+            total += len;
+            if n >= files || total > bytes {
+                fs::remove_file(path)?;
+            }
+        }
+        Ok(())
     }
 
     pub fn remove(&self) {
@@ -123,6 +202,10 @@ impl Store {
             tracing::error!(%error, "could not clear recent cache");
         }
     }
+}
+
+fn picture_name(key: &[u8; 32]) -> String {
+    format!("{PICTURE}{}", hex::encode(key))
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -785,6 +868,63 @@ mod tests {
         assert!(history.0.iter().all(|p| p.channel != channel));
         store.remove();
         store.write("messages", &history);
+        assert!(!store.dir.exists());
+    }
+
+    #[test]
+    fn pictures_are_sealed_replaced_bounded_and_removable() {
+        let root = tempfile::tempdir().unwrap();
+        let (_, device) = DeviceIdentity::create("Picture cache test").unwrap();
+        let known = KnownServer {
+            address: "https://127.0.0.1:1/".parse().unwrap(),
+            server_id: [1; 32],
+            tls_fingerprint: None,
+        };
+        let store = Store::new(root.path(), &device, &known);
+        let png = Arc::new(include_bytes!("../../assets/rusttalk.png").to_vec());
+        let owner = [2; 32];
+        let old = directory::picture_key(&owner, "first");
+        let new = directory::picture_key(&owner, "second");
+        assert_ne!(old, new);
+        assert!(store.picture(&old).is_none());
+        store.save_pictures(&[(old, png.clone())], &HashSet::from([old]));
+        assert_eq!(store.picture(&old).unwrap().as_slice(), png.as_slice());
+        assert!(store.picture(&new).is_none());
+        let sealed = fs::read(store.dir.join(picture_name(&old))).unwrap();
+        let middle = &png[png.len() / 2..][..16];
+        for part in [&png[..16], middle] {
+            assert!(!sealed.windows(16).any(|w| w == part));
+        }
+        // A file renamed to another key does not open.
+        fs::copy(
+            store.dir.join(picture_name(&old)),
+            store.dir.join(picture_name(&new)),
+        )
+        .unwrap();
+        assert!(store.picture(&new).is_none());
+        // A changed picture replaces the old one on disk.
+        store.save_pictures(&[(new, png.clone())], &HashSet::from([new]));
+        assert!(store.picture(&old).is_none());
+        assert!(!store.dir.join(picture_name(&old)).exists());
+        assert_eq!(store.picture(&new).unwrap().as_slice(), png.as_slice());
+        // Beyond the limits the oldest pictures go first.
+        let keys: Vec<_> = (0..4u8).map(|n| [n; 32]).collect();
+        for key in &keys {
+            store.save_pictures(&[(*key, png.clone())], &keys.iter().copied().collect());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let wanted = keys.iter().copied().collect();
+        store.prune_pictures(&wanted, u64::MAX, 3).unwrap();
+        assert!(store.picture(&keys[0]).is_none());
+        assert!(store.picture(&keys[1]).is_some());
+        let one = fs::metadata(store.dir.join(picture_name(&keys[3])))
+            .unwrap()
+            .len();
+        store.prune_pictures(&wanted, one, usize::MAX).unwrap();
+        assert!(store.picture(&keys[2]).is_none() && store.picture(&keys[3]).is_some());
+        store.remove();
+        assert!(!store.dir.exists());
+        store.save_pictures(&[(new, png)], &HashSet::from([new]));
         assert!(!store.dir.exists());
     }
 }
