@@ -17,6 +17,8 @@ enum Key {
     LinkCard([u8; 32]),
     StickerFile([u8; 32], Kind),
     Save([u8; 32], PathBuf),
+    /// A channel drive share, by the files it still has to upload.
+    Share(Id, Vec<PathBuf>),
 }
 
 fn key(command: &Command) -> Option<Key> {
@@ -26,6 +28,7 @@ fn key(command: &Command) -> Option<Key> {
         Command::LinkCard(file) => Key::LinkCard(file.id),
         Command::StickerFile(file, kind) => Key::StickerFile(file.id, *kind),
         Command::Save(file, path) => Key::Save(file.id, path.clone()),
+        Command::ShareFiles(channel, paths) => Key::Share(*channel, paths.clone()),
         _ => return None,
     })
 }
@@ -175,5 +178,34 @@ mod tests {
         assert_eq!(ids(retries.ended(Vec::new(), &mut queued)), [2]);
         retries.requeue(&mut queued);
         assert_eq!(ids(queued.drain(..)), [1]);
+    }
+
+    #[test]
+    fn a_stopped_share_is_retried_then_refused_after_its_tries() {
+        let share = || {
+            Command::ShareFiles(
+                [7; 32],
+                vec![PathBuf::from("a.bin"), PathBuf::from("b.bin")],
+            )
+        };
+        let mut retries = Retries::default();
+        let mut queued = VecDeque::new();
+        // Each connection takes the requeued share, then stops it again.
+        let attempt = |retries: &mut Retries, queued: &mut VecDeque<Command>| {
+            retries.requeue(queued);
+            queued.clear();
+            retries.ended(vec![share()], queued)
+        };
+        for _ in 0..RETRIES {
+            assert!(
+                attempt(&mut retries, &mut queued).is_empty(),
+                "kept for the next connection"
+            );
+        }
+        let refused = attempt(&mut retries, &mut queued);
+        assert!(
+            matches!(refused.as_slice(), [Command::ShareFiles(..)]),
+            "given up once"
+        );
     }
 }
