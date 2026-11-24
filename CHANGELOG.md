@@ -11,6 +11,7 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Member lists on big servers scroll smoothly.
 - Servers stay responsive when someone joins: sharing chat keys no longer slows down everyone else's connection.
 - After sleep or a network hiccup, servers reconnect within about 30 seconds instead of silently missing new messages.
 - Channels with edited messages load faster.
