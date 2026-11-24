@@ -26,6 +26,7 @@ Unreleased under the new version and date.
 - Many devices behind one home router can sign in to a server at once, and reconnects no longer hit the sign-in limit.
 - Changing your name, picture or bio, or editing channels, emoji and events, no longer makes everyone's app reload the whole server.
 - Loading many things from a server at once is faster: requests now share one HTTP/2 connection.
+- Avatars, server icons and custom emoji are kept in an encrypted cache, so they show right away after a restart instead of downloading again.
 
 ## v0.3.0 - 2026-11-24
 
