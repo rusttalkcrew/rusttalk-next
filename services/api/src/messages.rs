@@ -303,17 +303,39 @@ async fn history_full(db: &mut SqliteConnection, channel: &str) -> ApiResult<boo
     )
 }
 
+/// Count the message just inserted and drop the channel's oldest beyond `RETAIN`. The count lets
+/// a full channel trim from its oldest end instead of walking past its newest 10,000 rows.
 async fn prune(db: &mut SqliteConnection, channel: &str) -> ApiResult<Vec<String>> {
-    Ok(query_scalar(
+    let count: i64 = query_scalar(
+        "UPDATE channels SET message_count = message_count + 1 WHERE id = ? RETURNING message_count",
+    )
+    .bind(channel)
+    .fetch_one(&mut *db)
+    .await?;
+    if count <= RETAIN {
+        return Ok(Vec::new());
+    }
+    let dropped: Vec<String> = query_scalar(
         "DELETE FROM messages WHERE channel_id = ? AND sequence <= (
-             SELECT sequence FROM messages WHERE channel_id = ? ORDER BY sequence DESC LIMIT 1 OFFSET ?
+             SELECT sequence FROM messages WHERE channel_id = ? ORDER BY sequence LIMIT 1 OFFSET ?
          ) RETURNING id",
     )
     .bind(channel)
     .bind(channel)
-    .bind(RETAIN)
-    .fetch_all(db)
-    .await?)
+    .bind(count - RETAIN - 1)
+    .fetch_all(&mut *db)
+    .await?;
+    uncount(db, channel, dropped.len() as u64).await?;
+    Ok(dropped)
+}
+
+async fn uncount(db: &mut SqliteConnection, channel: &str, removed: u64) -> ApiResult<()> {
+    query("UPDATE channels SET message_count = message_count - ? WHERE id = ?")
+        .bind(removed as i64)
+        .bind(channel)
+        .execute(db)
+        .await?;
+    Ok(())
 }
 
 async fn sequence(db: &mut SqliteConnection, channel: &str, id: &str) -> ApiResult<i64> {
@@ -374,11 +396,17 @@ pub async fn get(
 ) -> ApiResult<Json<MessageRecord>> {
     let (mut tx, actor) = authenticate_read(&app, &headers).await?;
     chat_kind(&mut tx, &actor, &channel).await?;
-    let through = sequence(&mut tx, &channel, &id).await?;
-    let record = records(&mut tx, &channel, through, 1)
-        .await?
-        .pop()
-        .ok_or(ApiError::not_found("message_not_found"))?;
+    decode::<32>(&id)?;
+    let row: Row = query_as(
+        "SELECT backfilled, id, epoch, sender_person, sender_device, at, size, envelope
+         FROM messages WHERE channel_id = ? AND id = ?",
+    )
+    .bind(&channel)
+    .bind(&id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or(ApiError::not_found("message_not_found"))?;
+    let record = MessageRecord::try_from(row)?;
     tx.commit().await?;
     Ok(Json(record))
 }
@@ -432,11 +460,13 @@ pub async fn delete(
             .await?
             .require(Permission::DeleteMessages)?;
     }
-    query("DELETE FROM messages WHERE channel_id = ? AND id = ?")
+    let removed = query("DELETE FROM messages WHERE channel_id = ? AND id = ?")
         .bind(&channel)
         .bind(&id)
         .execute(&mut *tx)
-        .await?;
+        .await?
+        .rows_affected();
+    uncount(&mut tx, &channel, removed).await?;
     let audit_id = audit(
         &mut tx,
         &actor.person,
@@ -549,43 +579,175 @@ mod tests {
         Ok(())
     }
 
+    /// Two readable text channels with valid IDs, so handlers accept them.
+    const A: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const B: &str = "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE";
+
+    async fn two_channels(db: &mut SqliteConnection) -> anyhow::Result<()> {
+        query("INSERT INTO categories VALUES ('category', 0, X'00')")
+            .execute(&mut *db)
+            .await?;
+        query(
+            "INSERT INTO channels (id, kind, category_id, position, name_ct)
+                 VALUES (?, 'text', 'category', 0, X'00'), (?, 'text', 'category', 0, X'00')",
+        )
+        .bind(A)
+        .bind(B)
+        .execute(&mut *db)
+        .await?;
+        sqlx::raw_sql(
+            "INSERT INTO channel_permissions SELECT id, 'owner', 3 FROM channels;
+             INSERT INTO key_scopes (id, kind, channel_id) SELECT id, 'channel', id FROM channels;
+             INSERT INTO key_epochs (scope_id, epoch, commitment) SELECT id, 1, zeroblob(32) FROM key_scopes;",
+        )
+        .execute(db)
+        .await?;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn retention_drops_the_oldest_record_in_one_channel() -> anyhow::Result<()> {
+        use crate::testing::{app, as_person};
         let dir = tempfile::tempdir()?;
-        let pool = crate::store::open(dir.path()).await?;
-        let mut tx = crate::store::write(&pool).await?;
+        let app = app(dir.path(), 1).await?;
+        let mut tx = crate::store::write(&app.db).await?;
+        two_channels(&mut tx).await?;
         // Seed opaque rows directly so the test exercises the database cap without 10,001 signatures.
-        sqlx::raw_sql(
-            "INSERT INTO categories VALUES ('category', 0, X'00');
-             INSERT INTO channels (id, kind, category_id, position, name_ct)
-                 VALUES ('a', 'text', 'category', 0, X'00'), ('b', 'text', 'category', 0, X'00');
-             INSERT INTO key_scopes (id, kind, channel_id)
-                 SELECT id, 'channel', id FROM channels;
-             INSERT INTO key_epochs (scope_id, epoch, commitment) SELECT id, 1, zeroblob(32) FROM key_scopes;
-             INSERT INTO message_senders VALUES (X'01', X'02', X'03');",
-        )
-        .execute(&mut *tx)
-        .await?;
-        let limit = RETAIN + 1;
+        query("INSERT INTO message_senders VALUES (X'01', X'02', X'03')")
+            .execute(&mut *tx)
+            .await?;
         query(
             "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < ?)
              INSERT INTO messages (id, channel_id, epoch, sender_device, sender_person, at, size, envelope)
-                 SELECT CAST(i AS TEXT), 'a', 1, X'01', X'02', 0, 111, zeroblob(111) FROM n
-                 UNION ALL SELECT 'other', 'b', 1, X'01', X'02', 0, 111, zeroblob(111)",
+                 SELECT CAST(i AS TEXT), ?, 1, X'01', X'02', 0, 111, zeroblob(111) FROM n
+                 UNION ALL SELECT 'other', ?, 1, X'01', X'02', 0, 111, zeroblob(111)",
         )
-        .bind(limit)
+        .bind(RETAIN - 1)
+        .bind(A)
+        .bind(B)
         .execute(&mut *tx)
         .await?;
-        assert!(history_full(&mut tx, "a").await?);
-        assert!(!history_full(&mut tx, "b").await?);
-        assert_eq!(prune(&mut tx, "a").await?, ["1"]);
-        let counts: Vec<(String, i64)> = query_as(
-            "SELECT channel_id, COUNT(*) FROM messages GROUP BY channel_id ORDER BY channel_id",
-        )
-        .fetch_all(&mut *tx)
-        .await?;
-        assert_eq!(counts, [("a".into(), RETAIN), ("b".into(), 1)]);
-        assert!(prune(&mut tx, "a").await?.is_empty());
+        // What migration 0041 does for channels that already hold messages.
+        query("UPDATE channels SET message_count = (SELECT COUNT(*) FROM messages WHERE channel_id = channels.id)")
+            .execute(&mut *tx)
+            .await?;
+
+        // Post as `create` does, and check the trim against the previous whole-channel query.
+        async fn post(tx: &mut SqliteConnection, id: &str) -> anyhow::Result<Vec<String>> {
+            query(
+                "INSERT INTO messages (id, channel_id, epoch, sender_device, sender_person, at, size, envelope)
+                 VALUES (?, ?, 1, X'01', X'02', 0, 111, zeroblob(111))",
+            )
+            .bind(id)
+            .bind(A)
+            .execute(&mut *tx)
+            .await?;
+            let before: Vec<String> = query_scalar(
+                "SELECT id FROM messages WHERE channel_id = ? AND sequence <= (
+                     SELECT sequence FROM messages WHERE channel_id = ? ORDER BY sequence DESC LIMIT 1 OFFSET ?
+                 ) ORDER BY sequence",
+            )
+            .bind(A)
+            .bind(A)
+            .bind(RETAIN)
+            .fetch_all(&mut *tx)
+            .await?;
+            let dropped = prune(tx, A).await?;
+            assert_eq!(dropped, before);
+            Ok(dropped)
+        }
+        async fn kept(tx: &mut SqliteConnection) -> anyhow::Result<Vec<(String, i64, i64)>> {
+            Ok(query_as(
+                "SELECT c.id, c.message_count, (SELECT COUNT(*) FROM messages m WHERE m.channel_id = c.id)
+                 FROM channels c ORDER BY c.id",
+            )
+            .fetch_all(tx)
+            .await?)
+        }
+
+        assert!(!history_full(&mut tx, A).await?);
+        let newest = encode(&[1; 32]);
+        assert!(post(&mut tx, &newest).await?.is_empty());
+        assert!(history_full(&mut tx, A).await?);
+        assert!(!history_full(&mut tx, B).await?);
+        assert_eq!(post(&mut tx, "10001").await?, ["1"]);
+        assert_eq!(post(&mut tx, "10002").await?, ["2"]);
+        assert_eq!(
+            kept(&mut tx).await?,
+            [(A.into(), RETAIN, RETAIN), (B.into(), 1, 1)]
+        );
+        tx.commit().await?;
+
+        // A deleted message frees one place, so the next post keeps everything.
+        let status = delete(State(app.clone()), as_person(1), Path((A.into(), newest))).await?;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let mut tx = crate::store::write(&app.db).await?;
+        assert_eq!(kept(&mut tx).await?[0], (A.into(), RETAIN - 1, RETAIN - 1));
+        assert!(post(&mut tx, "10003").await?.is_empty());
+        assert_eq!(post(&mut tx, "10004").await?, ["3"]);
+        assert_eq!(kept(&mut tx).await?[0], (A.into(), RETAIN, RETAIN));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_returns_what_the_two_query_lookup_returned() -> anyhow::Result<()> {
+        use crate::testing::{app, as_person, person};
+        let dir = tempfile::tempdir()?;
+        let app = app(dir.path(), 1).await?;
+        two_channels(&mut *app.db.acquire().await?).await?;
+        query("INSERT INTO message_senders VALUES (?, ?, X'03')")
+            .bind([2; 32].as_slice())
+            .bind(person(1))
+            .execute(&app.db)
+            .await?;
+        let ids: Vec<String> = (1..=3).map(|n| encode(&[n; 32])).collect();
+        let channels = [A, A, B];
+        for (n, (id, channel)) in ids.iter().zip(channels).enumerate() {
+            query(
+                "INSERT INTO messages (id, channel_id, epoch, sender_device, sender_person, at, size, envelope, backfilled)
+                 VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(id)
+            .bind(channel)
+            .bind([2; 32].as_slice())
+            .bind(person(1))
+            .bind(n as i64 + 5)
+            .bind(111 + n as i64)
+            .bind(vec![n as u8; 111 + n])
+            .bind(n == 1)
+            .execute(&app.db)
+            .await?;
+        }
+        let fetch = |channel: &str, id: &str| {
+            get(
+                State(app.clone()),
+                as_person(1),
+                Path((channel.to_string(), id.to_string())),
+            )
+        };
+        for (id, channel) in ids.iter().zip(channels) {
+            let Json(record) = fetch(channel, id).await?;
+            let mut db = app.db.acquire().await?;
+            let through = sequence(&mut db, channel, id).await?;
+            let old = records(&mut db, channel, through, 1).await?;
+            assert_eq!(
+                serde_json::to_value(&record)?,
+                serde_json::to_value(&old[0])?
+            );
+        }
+        // Another channel's message, an unknown one and a malformed ID fail as before.
+        let unknown = encode(&[9; 32]);
+        for (id, code) in [
+            (&ids[2], "message_not_found"),
+            (&unknown, "message_not_found"),
+            (&"short".to_string(), "invalid_encoding"),
+        ] {
+            let code_now = fetch(A, id).await.err().map(|e| e.code);
+            let mut db = app.db.acquire().await?;
+            let code_before = sequence(&mut db, A, id).await.err().map(|e| e.code);
+            assert_eq!(code_now, code_before);
+            assert_eq!(code_now, Some(code));
+        }
         Ok(())
     }
 
