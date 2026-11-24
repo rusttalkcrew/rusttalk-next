@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+## v0.4.0 - 2026-11-24
+
 - Changing your name, picture or bio no longer pauses chat and voice on every server while your devices sync.
 - Servers stay responsive when someone joins: sharing chat keys no longer slows down everyone else's connection.
 - After sleep or a network hiccup, servers reconnect within about 30 seconds instead of silently missing new messages.
