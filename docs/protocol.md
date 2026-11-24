@@ -1243,8 +1243,9 @@ bigger than 2 MiB loses history first, then its colours.
 
 Open one `GET /v1/events` WebSocket per connection with the bearer
 Authorization header. Use a query-less URL. The server sends JSON text
-frames. It sends the outstanding key work at connection time and checks
-session validity before pushing updates.
+frames, each up to 4,096 bytes so far; apps accept up to 16 KiB. It sends the
+outstanding key work at connection time and checks session validity before
+pushing updates.
 
 | Type | Other fields |
 | --- | --- |
@@ -1256,7 +1257,7 @@ session validity before pushing updates.
 | `voice_changed` | `channel`, optional `people` and `unknown` as from GET `/v1/voice/{channel}/participants`. Without them (older servers, or a roster too big for one frame), fetch current voice participants. Sent to current channel readers on signed LiveKit join, leave and room-end notices |
 | `voice_moved` | `devices`, `from`, `to`. A moderator moved these devices' call; join `to`. Sent only to those devices |
 | `dm_created` | `channel`. Refresh the catalog and reconcile keys |
-| `message_created` | `channel`, `id`. Fetch the ciphertext record |
+| `message_created` | `channel`, `id`, optional `record` (the ciphertext record, left out when the event would exceed 3,800 bytes). Verify and open `record` like a fetched one; without it, fetch the record |
 | `message_deleted` | `channel`, `id`. Remove the record and hide edits that reference it |
 | `live_file_accepted` | `channel`, accepting `device`, signed `acceptance` object, optional `data` (true for data-room acceptances). Sent only to the offering device while it has channel read access |
 | `resync` | None. The socket fell behind. Fetch current state, including keys, catalog, member presence and devices, and visible message history |

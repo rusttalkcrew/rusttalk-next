@@ -2299,9 +2299,13 @@ async fn on_event(
         sync(ctx, Vec::new()).await;
     }
     match event {
-        Event::MessageCreated { channel, id } => {
+        Event::MessageCreated {
+            channel,
+            id,
+            record,
+        } => {
             let (channel, id) = (decode(&channel)?, decode(&id)?);
-            let record = client.message(&channel, &id).await?;
+            let record = client.created(&channel, &id, record).await?;
             if state.loaded.contains(&channel) {
                 let (msg, cached) = open(client, state, &channel, &record, true).await?;
                 if let Some(record) = cached {

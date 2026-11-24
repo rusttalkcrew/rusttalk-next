@@ -252,3 +252,42 @@ fn voice_notices_parse_with_and_without_a_roster() {
     };
     assert_eq!(serde_json::to_string(&bare).unwrap(), old);
 }
+
+#[test]
+fn message_created_events_with_and_without_a_record_parse() {
+    // From servers up to v0.3.0, and for records too large to send inline.
+    let old: Event =
+        serde_json::from_str(r#"{"type":"message_created","channel":"c","id":"m"}"#).unwrap();
+    assert!(matches!(old, Event::MessageCreated { record: None, .. }));
+    let record = crate::messages::MessageRecord {
+        backfilled: false,
+        id: [1; 32],
+        epoch: 2,
+        person: [3; 32],
+        sender_device: [4; 32],
+        at: 5,
+        size: 6,
+        envelope: "sealed".into(),
+    };
+    let json = serde_json::to_string(&Event::MessageCreated {
+        channel: "c".into(),
+        id: "m".into(),
+        record: Some(Box::new(record)),
+    })
+    .unwrap();
+    let Event::MessageCreated {
+        record: Some(back), ..
+    } = serde_json::from_str(&json).unwrap()
+    else {
+        panic!("record lost: {json}");
+    };
+    assert!(back.id == [1; 32] && back.envelope == "sealed");
+    // Clients up to v0.3.0 know only `channel` and `id` and skip the rest.
+    #[derive(serde::Deserialize)]
+    #[serde(tag = "type", rename_all = "snake_case")]
+    enum Old {
+        MessageCreated { channel: String, id: String },
+    }
+    let Old::MessageCreated { channel, id } = serde_json::from_str(&json).unwrap();
+    assert!(channel == "c" && id == "m");
+}
