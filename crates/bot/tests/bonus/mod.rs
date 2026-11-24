@@ -7,7 +7,7 @@ use rusttalk_core::{
     auth::{Session, encode},
     client::{KeyClient, Server, decode_profile_image},
     identity::DeviceIdentity,
-    keys::Metadata,
+    keys::{Event, Metadata},
     presence::{Presence, PresenceEvent, Status, Update},
 };
 use serde_json::{Value, json};
@@ -222,11 +222,32 @@ pub async fn icons(a: &KeyClient<'_>, b: &KeyClient<'_>) -> Result<()> {
 
 /// B sets the name and bio their client publishes to every server (#201); A, on the
 /// same server, decrypts both from the member directory, which holds only ciphertext.
-pub async fn profile(a: &KeyClient<'_>, b: &KeyClient<'_>) -> Result<()> {
+pub async fn profile(a: &mut KeyClient<'_>, b: &KeyClient<'_>) -> Result<()> {
     let person_id = b.identity.certificate.person_id();
     let person = encode(person_id);
     let bio = "Hi :wave: 👋\nhttps://example.org";
+    drain(a).await?;
     b.set_display_name(b"Bea").await?;
+    // The notice carries the new profile, so peers update B without reloading anything.
+    let mut inline = None;
+    super::wait::notice(a, "the profile notice", |update| {
+        if let Update::Event(Event::MemberChanged {
+            person: changed,
+            profile: Some(profile),
+            ..
+        }) = update
+            && *changed == person
+        {
+            inline = profile.display_name_ct.clone();
+        }
+        inline.is_some()
+    })
+    .await?;
+    let inline = inline.context("missing inline name")?;
+    assert_eq!(
+        a.decrypt_metadata(Metadata::DisplayName, person_id, &inline)?,
+        b"Bea"
+    );
     b.set_bio(bio).await?;
     let row = member(a, &person).await?;
     let open = |kind, field: &str| -> Result<Vec<u8>> {
@@ -241,7 +262,9 @@ pub async fn profile(a: &KeyClient<'_>, b: &KeyClient<'_>) -> Result<()> {
     assert_eq!(open(Metadata::Bio, "bio_ct")?, bio.as_bytes());
     b.set_bio("").await?;
     assert_eq!(member(a, &person).await?["bio_ct"], Value::Null);
-    println!("B4b a peer decrypted another member's name and bio, and saw the bio cleared");
+    println!(
+        "B4b a peer decrypted another member's name from the inline notice and the directory, and saw the bio cleared"
+    );
     Ok(())
 }
 
@@ -403,7 +426,9 @@ pub async fn emoji(a: &mut KeyClient<'_>, b: &KeyClient<'_>) -> Result<()> {
     super::wait::notice(a, "the emoji change event", |update| {
         matches!(
             update,
-            Update::Event(rusttalk_core::keys::Event::ChannelChanged)
+            Update::Event(rusttalk_core::keys::Event::ChannelChanged {
+                part: Some(rusttalk_core::keys::Part::Emoji)
+            })
         )
     })
     .await?;

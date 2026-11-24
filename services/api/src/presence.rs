@@ -231,9 +231,10 @@ pub async fn set_hide_offline(
         .bind(actor.person.as_slice())
         .execute(&mut *tx)
         .await?;
+    let profile = crate::metadata::profile(&mut tx, &actor.person).await?;
     tx.commit().await?;
-    // Others refetch the directory, which carries the flag.
-    crate::keys::changed(&app, &actor.person, None);
+    // Others update this member, whose profile carries the flag.
+    crate::keys::profile_changed(&app, &actor.person, profile);
     Ok(StatusCode::NO_CONTENT)
 }
 

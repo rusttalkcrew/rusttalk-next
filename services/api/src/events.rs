@@ -277,6 +277,8 @@ fn queue(notices: &mut Vec<Update>, change: Change, actor: &Actor, device: &str)
                 ) => Recheck::None,
                 // A wrap changes only its recipient's keys; a rejection also signals `Keys`.
                 Update::Event(Event::KeysNeeded(need)) if need.device != device => Recheck::None,
+                // Profile and listing edits change no keys or access.
+                Update::Event(event) if event.keeps_access() => Recheck::None,
                 Update::Event(_) => Recheck::Access,
             };
             notices.push(update);
@@ -343,6 +345,7 @@ async fn session(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusttalk_core::keys::{MemberProfile, Part};
 
     fn test_actor() -> Actor {
         Actor {
@@ -374,17 +377,27 @@ mod tests {
         let member = Event::MemberChanged {
             person: "p".into(),
             device: None,
+            profile: None,
         };
         assert!(queue(&mut notices, Change::Update(Update::Event(member)), "d") == Recheck::Access);
-        assert!(
-            queue(
-                &mut notices,
-                Change::Update(Update::Event(Event::ChannelChanged)),
-                "d"
-            ) == Recheck::Access
-        );
+        let channels = |part| Change::Update(Update::Event(Event::ChannelChanged { part }));
+        assert!(queue(&mut notices, channels(None), "d") == Recheck::Access);
+        assert!(queue(&mut notices, channels(Some(Part::Emoji)), "d") == Recheck::None);
+        let profile = Event::MemberChanged {
+            person: "p".into(),
+            device: None,
+            profile: Some(Box::new(MemberProfile {
+                display_name_ct: Some("ct".into()),
+                avatar_hash: None,
+                bio_ct: None,
+                hide_offline: false,
+                avatar_initialized: true,
+                voice_muted: false,
+            })),
+        };
+        assert!(queue(&mut notices, Change::Update(Update::Event(profile)), "d") == Recheck::None);
         // Only client updates are forwarded.
-        assert_eq!(notices.len(), 3);
+        assert_eq!(notices.len(), 5);
     }
 
     #[test]

@@ -5,7 +5,7 @@ use axum::{
 };
 use rusttalk_core::{
     auth::{decode, encode},
-    keys::{Event, Kind, Metadata, Scope},
+    keys::{Event, Kind, Metadata, Part, Scope},
 };
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, SqliteConnection, query, query_as, query_scalar};
@@ -367,7 +367,7 @@ pub async fn create_channel(
     )
     .await?;
     tx.commit().await?;
-    app.notify(Event::ChannelChanged);
+    app.notify(Event::ChannelChanged { part: None });
     Ok(StatusCode::CREATED)
 }
 
@@ -443,7 +443,9 @@ pub async fn update_channel(
     )
     .await?;
     tx.commit().await?;
-    app.notify(Event::ChannelChanged);
+    app.notify(Event::ChannelChanged {
+        part: Some(Part::Channels),
+    });
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -503,7 +505,7 @@ pub async fn permissions(
     .await?;
     tx.commit().await?;
     crate::voice::enforce(&app, Some(id));
-    app.notify(Event::ChannelChanged);
+    app.notify(Event::ChannelChanged { part: None });
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -565,7 +567,9 @@ pub async fn focus(
     };
     audit(&mut tx, &actor.person, action, None, Some(&id), actor.at).await?;
     tx.commit().await?;
-    app.notify(Event::ChannelChanged);
+    app.notify(Event::ChannelChanged {
+        part: Some(Part::Channels),
+    });
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -611,7 +615,7 @@ pub async fn delete_channel(
     .await?;
     tx.commit().await?;
     crate::voice::close_rooms(&app, id, kind == "voice");
-    app.notify(Event::ChannelChanged);
+    app.notify(Event::ChannelChanged { part: None });
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -652,7 +656,9 @@ pub async fn create_category(
     )
     .await?;
     tx.commit().await?;
-    app.notify(Event::ChannelChanged);
+    app.notify(Event::ChannelChanged {
+        part: Some(Part::Channels),
+    });
     Ok(StatusCode::CREATED)
 }
 
@@ -687,7 +693,9 @@ pub async fn update_category(
     )
     .await?;
     tx.commit().await?;
-    app.notify(Event::ChannelChanged);
+    app.notify(Event::ChannelChanged {
+        part: Some(Part::Channels),
+    });
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -720,7 +728,9 @@ pub async fn delete_category(
     )
     .await?;
     tx.commit().await?;
-    app.notify(Event::ChannelChanged);
+    app.notify(Event::ChannelChanged {
+        part: Some(Part::Channels),
+    });
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -800,7 +810,9 @@ pub async fn reorder(
     )
     .await?;
     tx.commit().await?;
-    app.notify(Event::ChannelChanged);
+    app.notify(Event::ChannelChanged {
+        part: Some(Part::Channels),
+    });
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -923,7 +935,7 @@ mod tests {
         assert_eq!(audited, 1);
         assert!(matches!(
             events.try_recv(),
-            Ok(Change::Update(Update::Event(Event::ChannelChanged)))
+            Ok(Change::Update(Update::Event(Event::ChannelChanged { .. })))
         ));
         Ok(())
     }
@@ -1136,7 +1148,7 @@ mod tests {
         assert!((end - store::now()? - FOCUS_SECONDS).abs() <= 5);
         assert!(matches!(
             events.try_recv(),
-            Ok(Change::Update(Update::Event(Event::ChannelChanged)))
+            Ok(Change::Update(Update::Event(Event::ChannelChanged { .. })))
         ));
         // Once the end has passed, the catalog no longer shows it.
         query("UPDATE channels SET focus_until = ? WHERE id = ?")

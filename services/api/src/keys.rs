@@ -7,8 +7,8 @@ use rusttalk_core::{
     auth::{decode, decode_bytes, encode},
     identity::DeviceCertificate,
     keys::{
-        EnvelopeContext, Event, Excluded, KeyNeed, KeyState, Kind, MemberDevice, Scope, ScopeState,
-        WrappedKey,
+        EnvelopeContext, Event, Excluded, KeyNeed, KeyState, Kind, MAX_INLINE_EVENT_BYTES,
+        MemberDevice, MemberProfile, Scope, ScopeState, WrappedKey,
     },
 };
 use serde::Deserialize;
@@ -723,13 +723,55 @@ pub fn changed(app: &App, person: &[u8], device: Option<&[u8]>) {
     app.notify(Event::MemberChanged {
         person: encode(person),
         device: device.map(encode),
+        profile: None,
     });
+}
+
+/// Tell clients only this member's profile changed, so they update that member without
+/// reloading keys or the directory. Without a profile it is a plain member change.
+pub fn profile_changed(app: &App, person: &[u8], profile: Option<MemberProfile>) {
+    app.notify(profile_event(person, profile));
+}
+
+fn profile_event(person: &[u8], profile: Option<MemberProfile>) -> Event {
+    let event = Event::MemberChanged {
+        person: encode(person),
+        device: None,
+        profile: profile.map(Box::new),
+    };
+    // A notice too big for older apps' event frames goes without the profile.
+    match serde_json::to_vec(&event) {
+        Ok(bytes) if bytes.len() <= MAX_INLINE_EVENT_BYTES => event,
+        _ => Event::MemberChanged {
+            person: encode(person),
+            device: None,
+            profile: None,
+        },
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use rusttalk_core::identity::DeviceIdentity;
+
+    #[test]
+    fn a_profile_too_big_for_older_apps_is_left_out() {
+        let profile = |len: usize| MemberProfile {
+            display_name_ct: Some("a".repeat(len)),
+            avatar_hash: None,
+            bio_ct: None,
+            hide_offline: false,
+            avatar_initialized: true,
+            voice_muted: false,
+        };
+        let inline = |event: Event| match event {
+            Event::MemberChanged { profile, .. } => profile.is_some(),
+            _ => unreachable!(),
+        };
+        assert!(inline(profile_event(&[1; 32], Some(profile(1500)))));
+        assert!(!inline(profile_event(&[1; 32], Some(profile(4000)))));
+    }
 
     #[test]
     fn a_dm_can_be_rekeyed_by_its_people_but_a_channel_only_when_flagged() {

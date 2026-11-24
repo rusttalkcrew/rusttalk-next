@@ -1253,9 +1253,9 @@ pushing updates.
 | --- | --- |
 | `keys_needed` | `scope`, `epoch`, `device`. Reconcile pending wraps and delivered keys. Completion also wakes the recipient |
 | `rotate_needed` | `scope`. Fetch the current epoch and try to publish its successor |
-| `member_changed` | `person`, optional `device`. Refresh the member and device directory and catalog |
+| `member_changed` | `person`, optional `device`, optional `profile`. Refresh the member and device directory and catalog. With `profile` (`display_name_ct`, `avatar_hash`, `bio_ct`, `hide_offline`, `avatar_initialized`, `voice_muted`, as `GET /v1/members` lists them) only that member's profile changed: update that member, no key or directory reload needed. Left out when the notice would exceed 3,800 bytes |
 | `presence_changed` | `person_id`, `status`. Sent to members when visible presence changes |
-| `channel_changed` | None. Refresh the catalog, server metadata, server emoji and server events |
+| `channel_changed` | Optional `part`. Refresh the catalog, server metadata, server emoji and server events. With `part`, only that changed, and no keys or access: `channels` (the catalog: channel and category names, topics, order, settings, focus mode), `space` (`GET /v1/space`), `emoji` or `calendar`. Treat an unknown `part` like none |
 | `voice_changed` | `channel`, optional `people` and `unknown` as from GET `/v1/voice/{channel}/participants`. Without them (older servers, or a roster too big for one frame), fetch current voice participants. Sent to current channel readers on signed LiveKit join, leave and room-end notices |
 | `voice_moved` | `devices`, `from`, `to`. A moderator moved these devices' call; join `to`. Sent only to those devices |
 | `dm_created` | `channel`. Refresh the catalog and reconcile keys |

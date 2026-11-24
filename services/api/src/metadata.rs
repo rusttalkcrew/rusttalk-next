@@ -7,13 +7,13 @@ use axum::{
 };
 use rusttalk_core::{
     auth::{decode_bytes, encode},
-    keys::{Event, Metadata},
+    keys::{Event, MemberProfile, Metadata, Part},
     presence::Presence,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use sqlx::{SqlitePool, query, query_as, query_scalar};
+use sqlx::{SqliteConnection, SqlitePool, query, query_as, query_scalar};
 
 use crate::{
     ApiError, ApiResult, App,
@@ -210,7 +210,9 @@ pub async fn update_space(
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
-    app.notify(Event::ChannelChanged);
+    app.notify(Event::ChannelChanged {
+        part: Some(Part::Space),
+    });
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -266,12 +268,39 @@ pub async fn update_profile(
     .bind(avatar_if_unset)
     .execute(&mut *tx)
     .await?;
-    tx.commit().await?;
     if updated.rows_affected() == 0 {
         return Ok(StatusCode::PRECONDITION_FAILED);
     }
-    keys::changed(&app, &actor.person, None);
+    let profile = profile(&mut tx, &actor.person).await?;
+    tx.commit().await?;
+    keys::profile_changed(&app, &actor.person, profile);
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// A member's profile as the member list shows it, for a `member_changed` notice.
+pub(crate) async fn profile(
+    db: &mut SqliteConnection,
+    person: &[u8],
+) -> ApiResult<Option<MemberProfile>> {
+    let row: Option<(Ciphertext, Option<String>, Ciphertext, bool, bool, bool)> = query_as(
+        "SELECT display_name_ct, avatar_hash, bio_ct, hide_offline, avatar_initialized, voice_muted
+         FROM members WHERE person_id = ?",
+    )
+    .bind(person)
+    .fetch_optional(db)
+    .await?;
+    Ok(row.map(
+        |(display_name, avatar_hash, bio, hide_offline, avatar_initialized, voice_muted)| {
+            MemberProfile {
+                display_name_ct: encoded(display_name),
+                avatar_hash,
+                bio_ct: encoded(bio),
+                hide_offline,
+                avatar_initialized,
+                voice_muted,
+            }
+        },
+    ))
 }
 
 #[derive(Serialize)]
@@ -382,7 +411,21 @@ mod tests {
             )
         };
         let fill = json!({"avatar_ct": ct, "avatar_if_unset": true});
+        let mut changes = app.changes.subscribe();
         assert_eq!(write(fill.clone()).await?, StatusCode::NO_CONTENT);
+        // Peers get the new profile inline, so they need no reload.
+        let Ok(crate::Change::Update(rusttalk_core::presence::Update::Event(
+            Event::MemberChanged {
+                person: changed,
+                profile: Some(profile),
+                ..
+            },
+        ))) = changes.try_recv()
+        else {
+            panic!("expected a profile notice");
+        };
+        assert_eq!(changed, encode(&person(2)));
+        assert!(profile.avatar_initialized && profile.avatar_hash.is_some());
         assert_eq!(write(fill.clone()).await?, StatusCode::PRECONDITION_FAILED);
         write(json!({"avatar_ct": null})).await?;
         assert_eq!(write(fill).await?, StatusCode::PRECONDITION_FAILED);

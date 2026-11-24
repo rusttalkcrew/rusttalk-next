@@ -1225,7 +1225,7 @@ impl<'a> KeyClient<'a> {
         match frame {
             Message::Text(text) => {
                 let update = serde_json::from_str(&text)?;
-                if let Update::Event(Event::MemberChanged { person, device }) = &update {
+                if let Update::Event(Event::MemberChanged { person, device, .. }) = &update {
                     let person = fingerprint(&decode(person)?);
                     let device = device
                         .as_deref()
@@ -1236,7 +1236,7 @@ impl<'a> KeyClient<'a> {
                     tracing::info!(%person, device, "member changed");
                 }
                 self.stale |= !matches!(
-                    update,
+                    &update,
                     Update::Presence(_)
                         | Update::Event(
                             Event::MessageCreated { .. }
@@ -1244,7 +1244,7 @@ impl<'a> KeyClient<'a> {
                                 | Event::VoiceChanged { .. }
                                 | Event::LiveFileAccepted { .. }
                         )
-                );
+                ) && !matches!(&update, Update::Event(event) if event.keeps_access());
                 self.queued.push_back(update);
             }
             Message::Close(frame) => {
@@ -1688,6 +1688,45 @@ mod tests {
             "{error:#}"
         );
         assert!(started.elapsed() >= PING_AFTER + PONG_WAIT);
+    }
+
+    #[tokio::test]
+    async fn profile_and_listing_notices_skip_the_key_sync() -> Result<()> {
+        let profile = tempfile::tempdir()?;
+        let server = Server::for_test(2, profile.path());
+        let (_, identity) = DeviceIdentity::create("reader")?;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let socket = tokio::net::TcpStream::connect(listener.local_addr()?).await?;
+        let events = EventStream::from_raw_socket(
+            tokio_tungstenite::MaybeTlsStream::Plain(crate::route::RouteStream::Direct(socket)),
+            tokio_tungstenite::tungstenite::protocol::Role::Client,
+            None,
+        )
+        .await;
+        let session = Session {
+            token: String::new(),
+            expires_at: 0,
+        };
+        let mut client = KeyClient::from_stream(&server, &identity, &session, None, events)?;
+        let person = encode(&[1; 32]);
+        let light = [
+            json!({"type": "member_changed", "person": person, "device": null, "profile": {
+                "display_name_ct": "ct", "avatar_hash": null, "bio_ct": null,
+                "hide_offline": false, "avatar_initialized": true, "voice_muted": false}}),
+            json!({"type": "channel_changed", "part": "channels"}),
+        ];
+        for notice in light {
+            client.receive(Message::Text(notice.to_string().into()))?;
+            assert!(!client.stale, "{notice}");
+        }
+        client.receive(Message::Text(
+            json!({"type": "member_changed", "person": person, "device": null})
+                .to_string()
+                .into(),
+        ))?;
+        assert!(client.stale);
+        assert_eq!(client.queued.len(), 3);
+        Ok(())
     }
 
     #[tokio::test]
