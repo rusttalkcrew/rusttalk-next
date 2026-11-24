@@ -406,10 +406,13 @@ mod tests {
             Event::MemberChanged {
                 person: "p".into(),
                 device: Some("d".into()),
+                profile: None,
             },
-            Event::ChannelChanged,
+            Event::ChannelChanged { part: None },
             Event::VoiceChanged {
                 channel: "c".into(),
+                people: None,
+                unknown: None,
             },
             Event::VoiceMoved {
                 devices: vec!["d".into()],
@@ -422,6 +425,7 @@ mod tests {
             Event::MessageCreated {
                 channel: "c".into(),
                 id: "m".into(),
+                record: None,
             },
             Event::MessageDeleted {
                 channel: "c".into(),
@@ -447,7 +451,7 @@ mod tests {
                 Event::KeysNeeded(_)
                 | Event::RotateNeeded { .. }
                 | Event::MemberChanged { .. }
-                | Event::ChannelChanged
+                | Event::ChannelChanged { .. }
                 | Event::VoiceChanged { .. }
                 | Event::VoiceMoved { .. }
                 | Event::DmCreated { .. }
@@ -602,13 +606,12 @@ mod tests {
         let mut seen = Vec::new();
         timeout(Duration::from_secs(30), async {
             while seen.last() != Some(&Presence::Offline) {
-                if let Change::Update(Update::Presence(PresenceEvent::PresenceChanged {
-                    person_id,
-                    status,
-                })) = changes.recv().await?
-                    && person_id == person
+                if let Change::Update(notice) = changes.recv().await?
+                    && let Update::Presence(PresenceEvent::PresenceChanged { person_id, status }) =
+                        &notice.update
+                    && *person_id == person
                 {
-                    seen.push(status);
+                    seen.push(*status);
                 }
             }
             anyhow::Ok(())

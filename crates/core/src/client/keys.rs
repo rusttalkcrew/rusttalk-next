@@ -1895,6 +1895,8 @@ mod tests {
         // Chat and presence don't touch keys; a key event does.
         let chat = Update::Event(Event::VoiceChanged {
             channel: encode(&[5; 32]),
+            people: None,
+            unknown: None,
         });
         client.receive(Message::Text(serde_json::to_string(&chat)?.into()))?;
         assert!(client.key_fresh(scope));
