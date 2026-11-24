@@ -761,12 +761,43 @@ fn rank(edit: &Msg) -> Rank {
     }
 }
 
+/// One of my messages on its way: shown right away, until the server's record of it
+/// (with the same ID) arrives, or marked failed so it can be sent again.
+pub struct Outgoing {
+    pub person: Id,
+    pub draft: crate::net::Draft,
+    pub failed: bool,
+}
+
+impl Outgoing {
+    /// How it shows until it is sent: as a message of mine, without a server time.
+    pub fn msg(&self) -> Msg {
+        Msg {
+            backfilled: false,
+            id: self.draft.id,
+            person: self.person,
+            at: 0,
+            reply_to: self.draft.reply_to.map(|(_, id)| id),
+            quoted_author: self.draft.reply_to.map(|(person, _)| person),
+            edit_of: None,
+            body: Body::Text(self.draft.text.clone()),
+            files: Vec::new(),
+            live: None,
+            sticker: self.draft.sticker,
+            replicas: Vec::new(),
+            copy_files: Vec::new(),
+        }
+    }
+}
+
 /// One channel's loaded history, oldest first, plus the composer state.
 #[derive(Default)]
 pub struct Chat {
     pub new_post: crate::home::forum::NewPost,
     pub submissions: Vec<crate::home::forum::Submission>,
     pub messages: Vec<Msg>,
+    /// My messages shown before the server confirmed them, oldest first.
+    pub outbox: Vec<Outgoing>,
     /// Originals that show edited text, by person and ID, with the applied edit's rank.
     pub edited: HashMap<(Id, Id), Rank>,
     /// Edits whose original is not loaded yet, by person and original ID.
@@ -813,6 +844,48 @@ impl Chat {
         self.polls.clear();
         self.at_start = false;
         self.oldest = None;
+    }
+
+    /// Show a new message of mine at once. Edits, polls, pokes, friend and voice
+    /// requests and forum posts have their own ways of showing they're on the way.
+    pub fn outgoing(&mut self, person: Id, draft: &crate::net::Draft) {
+        let plain = draft.edit_of.is_none()
+            && !draft.forum_post
+            && !draft.poke
+            && draft.poll.is_none()
+            && draft.friend.is_none()
+            && draft.voice_request.is_none();
+        if plain && !self.outbox.iter().any(|out| out.draft.id == draft.id) {
+            self.outbox.push(Outgoing {
+                person,
+                draft: draft.clone(),
+                failed: false,
+            });
+        }
+    }
+
+    /// Sending failed: mark it, keeping what was made for it (a link preview) for a
+    /// retry. Returns the draft when it wasn't shown here.
+    pub fn unsent(&mut self, draft: crate::net::Draft) -> Option<crate::net::Draft> {
+        let Some(out) = (self.outbox.iter_mut()).find(|out| out.draft.id == draft.id) else {
+            return Some(draft);
+        };
+        out.failed = true;
+        out.draft = draft;
+        None
+    }
+
+    /// The same message again, with the same ID, so it can't arrive twice.
+    pub fn retry(&mut self, id: &Id) -> Option<crate::net::Draft> {
+        let out = (self.outbox.iter_mut()).find(|out| out.draft.id == *id && out.failed)?;
+        out.failed = false;
+        Some(out.draft.clone())
+    }
+
+    /// Give up on a failed message.
+    pub fn discard(&mut self, id: &Id) -> Option<crate::net::Draft> {
+        let at = (self.outbox.iter()).position(|out| out.draft.id == *id && out.failed)?;
+        Some(self.outbox.remove(at).draft)
     }
 
     pub fn open_draft(&mut self, dir: &Directory, text: &str) {
@@ -909,6 +982,12 @@ impl Chat {
         }
         // Stable, so records from the same second keep the server's order.
         self.messages.sort_by_key(|msg| msg.at);
+        // The server's record replaces the one shown while sending, whether it came
+        // with the send's answer or as a live event first.
+        let messages = &self.messages;
+        self.outbox.retain(|out| {
+            !(messages.iter()).any(|msg| msg.id == out.draft.id && msg.person == out.person)
+        });
         // A retried edit replaces its "couldn't be opened" placeholder.
         self.messages.retain(|msg| {
             msg.body != Body::Unreadable
@@ -1144,6 +1223,100 @@ mod tests {
                 _ => "?",
             })
             .collect()
+    }
+
+    fn draft(id: u8, text: &str) -> crate::net::Draft {
+        crate::net::Draft {
+            forum_post: false,
+            id: [id; 32],
+            channel: [7; 32],
+            peer: None,
+            text: text.into(),
+            reply_to: None,
+            edit_of: None,
+            revision: 0,
+            files: Vec::new(),
+            keep: Vec::new(),
+            sticker: None,
+            friend: None,
+            poke: false,
+            poll: None,
+            voice_request: None,
+            preview: None,
+            inline: Vec::new(),
+            queued: Default::default(),
+        }
+    }
+
+    fn outbox(chat: &Chat) -> Vec<(u8, bool)> {
+        (chat.outbox.iter())
+            .map(|out| (out.draft.id[0], out.failed))
+            .collect()
+    }
+
+    #[test]
+    fn sent_message_replaces_its_pending_copy_once_in_either_order() {
+        // The send's answer and the live event both carry the record, in either order.
+        for older in [false, true] {
+            let mut chat = Chat::default();
+            chat.outgoing([9; 32], &draft(1, "hi"));
+            chat.outgoing([9; 32], &draft(2, "there"));
+            assert_eq!(outbox(&chat), [(1, false), (2, false)]);
+            let confirmed = msg(1, 10, "hi", None);
+            chat.merge(vec![confirmed.clone()], false);
+            assert_eq!(outbox(&chat), [(2, false)]);
+            // The second copy of the same record changes nothing.
+            chat.merge(vec![confirmed], older);
+            assert_eq!(texts(&chat), ["hi"]);
+            assert_eq!(outbox(&chat), [(2, false)]);
+        }
+    }
+
+    #[test]
+    fn someone_elses_record_with_my_id_does_not_confirm_mine() {
+        let mut chat = Chat::default();
+        chat.outgoing([8; 32], &draft(1, "mine"));
+        chat.merge(vec![msg(1, 10, "theirs", None)], false);
+        assert_eq!(outbox(&chat), [(1, false)]);
+    }
+
+    #[test]
+    fn failed_message_can_be_retried_or_discarded() {
+        let mut chat = Chat::default();
+        chat.outgoing([9; 32], &draft(1, "a"));
+        chat.outgoing([9; 32], &draft(2, "b"));
+        // Shown twice by mistake: still one entry.
+        chat.outgoing([9; 32], &draft(1, "a"));
+        assert!(
+            chat.retry(&[1; 32]).is_none(),
+            "only failed ones are retried"
+        );
+        assert!(chat.unsent(draft(1, "a")).is_none());
+        assert!(chat.unsent(draft(2, "b")).is_none());
+        assert_eq!(outbox(&chat), [(1, true), (2, true)]);
+        // Not shown here (an edit, say): handed back for the composer.
+        assert!(chat.unsent(draft(3, "c")).is_some());
+        let again = chat.retry(&[1; 32]).expect("failed");
+        assert_eq!((again.id, again.text.as_str()), ([1; 32], "a"));
+        assert_eq!(outbox(&chat), [(1, false), (2, true)]);
+        assert!(chat.discard(&[2; 32]).is_some());
+        assert_eq!(outbox(&chat), [(1, false)]);
+        // The retry went through.
+        chat.merge(vec![msg(1, 10, "a", None)], false);
+        assert!(chat.outbox.is_empty());
+    }
+
+    #[test]
+    fn only_plain_new_messages_show_while_sending() {
+        let mut chat = Chat::default();
+        let mut edit = draft(1, "fixed");
+        edit.edit_of = Some([5; 32]);
+        let mut poke = draft(2, "hey");
+        poke.poke = true;
+        for skipped in [edit, poke] {
+            chat.outgoing([9; 32], &skipped);
+        }
+        assert!(chat.outbox.is_empty());
     }
 
     #[test]

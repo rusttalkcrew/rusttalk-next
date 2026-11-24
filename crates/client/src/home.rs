@@ -1880,6 +1880,10 @@ impl Home {
                     Some(peer) => &mut self.threads.entry(peer).or_default().chat,
                     None => server.chats.entry(draft.channel).or_default(),
                 };
+                // Shown in the chat while sending: it stays there, marked failed.
+                let Some(draft) = chat.unsent(draft) else {
+                    return;
+                };
                 // Only when nothing new was typed or picked meanwhile, and no other
                 // server got this DM.
                 let sent = (chat.messages.iter()).any(|msg| msg.id == draft.id && msg.person == me);
@@ -4768,9 +4772,10 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
                 (toast, now),
             );
             // A new message with a link to some other site waits for its preview; any
-            // message sent meanwhile waits behind it.
+            // message sent meanwhile waits behind it. Both show at once, as sending.
             let command = match command {
                 Some(Command::Send(draft)) => {
+                    chat.outgoing(me, &draft);
                     queue_preview(ui, voice, sending, &to, draft).map(Command::Send)
                 }
                 other => other,
@@ -4824,6 +4829,7 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
     };
     let mut pick = None;
     let mut live = None;
+    let mut resend = None;
     let output = area.show(ui, |ui| {
         ui.set_width(ui.available_width());
         if chat.at_start {
@@ -4907,7 +4913,30 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
             }
             last = Some(msg);
         }
+        let mut after = last.map(|msg| (msg.person, matches!(msg.body, Body::Notice { .. })));
+        for out in &chat.outbox {
+            let start = after != Some((out.person, false));
+            after = Some((out.person, false));
+            if let Some(retry) = outgoing(ui, chat, out, start, dir, key, online) {
+                resend = Some((out.draft.id, retry));
+            }
+        }
     });
+    let retry = resend.and_then(|(id, retry)| match retry {
+        true => chat.retry(&id),
+        false => {
+            for path in chat.discard(&id).iter().flat_map(|draft| &draft.files) {
+                files::discard(path);
+            }
+            None
+        }
+    });
+    if let Some(draft) = retry {
+        match at {
+            At::Channel(index, _) => servers[index].send(Command::Send(draft)),
+            At::Dm(peer) => send_dm(servers, &targets, chat, toast, now, (me, peer), draft),
+        }
+    }
     let content = output.content_size.y;
     let offset = output.state.clamped_offset().y;
     // `stick_to_bottom` updates the offset at the end of the pass without requesting
@@ -5126,9 +5155,11 @@ fn send_dm(
     if !sent && draft.poll.is_some() {
         *toast = Some((t!("home.waiting_try_again").into(), now + 6.0));
     } else if !sent {
-        chat.draft = draft.text;
-        chat.reply_to = draft.reply_to;
-        chat.editing = draft.edit_of;
+        if let Some(draft) = chat.unsent(draft) {
+            chat.draft = draft.text;
+            chat.reply_to = draft.reply_to;
+            chat.editing = draft.edit_of;
+        }
         *toast = Some((t!("home.waiting_try_again").into(), now + 6.0));
     }
 }
@@ -5776,6 +5807,82 @@ fn message_time(ui: &mut Ui, msg: &Msg) {
     if msg.backfilled {
         ui.label(ui::caption(t!("home.restored")));
     }
+}
+
+/// One of my messages on its way: dimmed while sending; when that failed, said so
+/// with Try again and Delete. Returns `true` to send it again, `false` to delete it.
+fn outgoing(
+    ui: &mut Ui,
+    chat: &Chat,
+    out: &crate::server::Outgoing,
+    start: bool,
+    dir: &Directory,
+    channel: Id,
+    online: bool,
+) -> Option<bool> {
+    let msg = out.msg();
+    let name = member_name(dir, &msg.person);
+    let mut action = None;
+    if start {
+        ui.add_space(10.0);
+    }
+    ui.push_id(("outgoing", msg.id), |ui| {
+        ui.horizontal_top(|ui| {
+            if start {
+                face(ui, dir, &msg.person, &name, MESSAGE_AVATAR, false);
+            } else {
+                ui.add_space(MESSAGE_AVATAR + ui.spacing().item_spacing.x);
+            }
+            ui.add_space(4.0);
+            ui.vertical(|ui| {
+                ui.set_width(ui.available_width());
+                if start {
+                    ui.label(ui::bold(&name));
+                }
+                ui.scope(|ui| {
+                    if !out.failed {
+                        ui.multiply_opacity(0.6);
+                    }
+                    if let Some(reply) = msg.reply_to
+                        && let Some(quoted) = chat.quoted(&reply, msg.quoted_author)
+                    {
+                        let line = format!("↪ {}", member_name(dir, &quoted.person));
+                        ui.label(emoji::text(line).size(ui::TEXT_CAPTION).weak());
+                    }
+                    match (&msg.body, msg.sticker) {
+                        (Body::Text(name), Some(id)) => sticker(ui, dir, Some(&id), name),
+                        (Body::Text(text), None) if !text.is_empty() => {
+                            let mention = mentions::Message::cached(ui, &msg, dir, channel);
+                            mention.doc.show(ui, dir, &mention, false, false);
+                        }
+                        _ => {}
+                    }
+                    for path in &out.draft.files {
+                        ui.label(ui::caption(crate::net::file_name(path)));
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    if !out.failed {
+                        ui.label(ui::caption(t!("home.sending")));
+                        return;
+                    }
+                    let failed = RichText::new(t!("home.not_sent"))
+                        .size(ui::TEXT_CAPTION)
+                        .color(ui::colors(ui).danger_text);
+                    ui.label(failed);
+                    let again =
+                        ui.add_enabled_ui(online, |ui| ui::secondary(ui, t!("common.try_again")));
+                    if again.inner.clicked() {
+                        action = Some(true);
+                    }
+                    if ui::secondary(ui, t!("common.delete")).clicked() {
+                        action = Some(false);
+                    }
+                });
+            });
+        });
+    });
+    action
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6921,6 +7028,7 @@ mod tests {
     mod avatars;
     mod emoji;
     mod image_reload;
+    mod outbox;
     mod rail;
     mod streams;
     mod touch;
