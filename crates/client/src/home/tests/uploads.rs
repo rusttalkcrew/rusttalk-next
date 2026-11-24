@@ -129,7 +129,9 @@ fn oversized_stored_picker_feedback() {
                 Ask::Attach(home.servers[0].address.clone(), PROJECTS)
             };
             home.files.ask(&ctx, ask);
-            for _ in 0..100 {
+            // The picker answers on another thread: wait for it by time, not a loop count.
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while std::time::Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(5));
                 h.run_steps(1);
                 if shared {
@@ -203,7 +205,9 @@ fn oversized_stored_picker_feedback() {
                     home.files
                         .ask(&ctx, Ask::Live(home.servers[0].address.clone(), PROJECTS));
                     let mut offered = false;
-                    for _ in 0..100 {
+                    // The picker answers on another thread: wait for it by time, not a loop count.
+                    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                    while std::time::Instant::now() < deadline {
                         std::thread::sleep(Duration::from_millis(5));
                         h.run_steps(1);
                         while let Ok(command) = sent.try_recv() {
@@ -387,7 +391,9 @@ fn live_offers_wait_for_download_in_every_layout() {
                 assert!(transfer_commands(&mut sent).is_empty());
                 download.click();
                 let mut accepted = false;
-                for _ in 0..100 {
+                // The picker answers on another thread: wait for it by time, not a loop count.
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                while std::time::Instant::now() < deadline {
                     h.run_steps(1);
                     let commands = transfer_commands(&mut sent);
                     if !commands.is_empty() {

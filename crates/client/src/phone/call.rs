@@ -671,7 +671,15 @@ mod tests {
         )
     }
 
+    // `call()` refuses SIP unless the process-wide route is Direct, and route tests
+    // change it; hold the route lock for the whole call. Each test runs on its own
+    // runtime thread, so the blocking guard across awaits cannot stall anyone else.
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "serializes the global route state"
+    )]
     async fn fake_call(late_answer: bool, exercise_requests: bool) {
+        let _route = crate::route::test_lock();
         let sip = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let provider = sip.local_addr().unwrap();
         let media = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -853,7 +861,12 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "serializes the global route state"
+    )]
     async fn registration_is_cancellable_without_a_provider_reply() {
+        let _route = crate::route::test_lock();
         let provider = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let address = provider.local_addr().unwrap();
         let data = tempfile::tempdir().unwrap();

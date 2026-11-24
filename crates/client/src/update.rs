@@ -1430,16 +1430,25 @@ mod tests {
         }
     }
 
-    /// Polls until the background job has answered.
+    /// Polls until the background job has answered, for at most 10 seconds.
     fn settle(updater: &mut Updater, ctx: &egui::Context) {
-        for _ in 0..200 {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
             updater.poll(ctx);
             if !matches!(updater.state, State::Working(..)) {
                 return;
             }
+            assert!(Instant::now() < deadline, "update job did not finish");
             std::thread::sleep(Duration::from_millis(10));
         }
-        panic!("update job did not finish");
+    }
+
+    /// A local address nothing listens on, so a request fails at once without DNS.
+    fn closed_port_url() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        format!("http://127.0.0.1:{port}/")
     }
 
     #[test]
@@ -1529,7 +1538,7 @@ mod tests {
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             inode: (0, 0),
         });
-        ready.settings.url = "http://invalid.test/".into();
+        ready.settings.url = closed_port_url();
         ready.poll(&ctx);
         assert!(ready.next_check.is_some());
         assert!(matches!(ready.state, State::Working(..)));

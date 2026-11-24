@@ -207,12 +207,17 @@ struct MockSocks5 {
     addr: SocketAddr,
     observed: Arc<StdMutex<Vec<ObservedConnect>>>,
     stop: Option<oneshot::Sender<()>>,
+    task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl MockSocks5 {
-    fn shutdown(&mut self) {
+    /// Stop accepting and wait until the listener is closed.
+    async fn shutdown(&mut self) {
         if let Some(tx) = self.stop.take() {
             let _ = tx.send(());
+        }
+        if let Some(task) = self.task.take() {
+            let _ = task.await;
         }
     }
 }
@@ -229,9 +234,10 @@ async fn start_mock_socks5(
     let observed_task = observed.clone();
     let domain_map = Arc::new(domain_map);
     let (stop_tx, mut stop_rx) = oneshot::channel();
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         loop {
             tokio::select! {
+                biased;
                 _ = &mut stop_rx => break,
                 accepted = listener.accept() => {
                     let Ok((mut client, _)) = accepted else { break };
@@ -326,6 +332,7 @@ async fn start_mock_socks5(
         addr,
         observed,
         stop: Some(stop_tx),
+        task: Some(task),
     }
 }
 
@@ -548,8 +555,7 @@ async fn socks5h_routes_https_ws_remote_dns_pins_and_blocks_on_failure_without_d
 
     // 7. Stop proxy mid-session -> traffic fails cleanly with ZERO direct fallback to target!
     let hits_before = target.hits.load(Ordering::SeqCst);
-    proxy.shutdown();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    proxy.shutdown().await;
     let direct_addr_url = format!("https://127.0.0.1:{}/", target.addr.port());
     assert!(client.get(&direct_addr_url).send().await.is_err());
     assert_eq!(
