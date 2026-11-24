@@ -47,9 +47,29 @@ pub(super) struct Jobs {
     tasks: JoinSet<Done>,
     downloads: Arc<Semaphore>,
     /// Downloads running or waiting their turn, to ask again after a reconnect.
-    fetching: HashMap<task::Id, Command>,
+    fetching: HashMap<task::Id, Download>,
     /// Messages with files uploading, by `lane`, with the ones sent after them.
     lanes: HashMap<Id, Lane>,
+}
+
+/// A download to ask for again. Not a `Command`: some commands (a screen to share)
+/// can't be shared between threads on Windows, and `State` is borrowed across awaits.
+pub(super) enum Download {
+    Image(BlobRef, Fetch),
+    LinkCard(BlobRef),
+    StickerFile(BlobRef, Kind),
+    Save(BlobRef, PathBuf),
+}
+
+impl From<Download> for Command {
+    fn from(download: Download) -> Self {
+        match download {
+            Download::Image(file, fetch) => Command::Image(file, fetch),
+            Download::LinkCard(file) => Command::LinkCard(file),
+            Download::StickerFile(file, kind) => Command::StickerFile(file, kind),
+            Download::Save(file, path) => Command::Save(file, path),
+        }
+    }
 }
 
 enum Done {
@@ -98,7 +118,7 @@ impl Jobs {
     /// Run a download once there is room for it; `again` asks for it once more.
     pub(super) fn download(
         &mut self,
-        again: Command,
+        again: Download,
         work: impl Future<Output = Option<Original>> + Send + 'static,
     ) {
         let downloads = self.downloads.clone();
@@ -193,7 +213,7 @@ impl Jobs {
         let Self {
             fetching, lanes, ..
         } = std::mem::take(self);
-        let mut again: Vec<_> = fetching.into_values().collect();
+        let mut again: Vec<Command> = fetching.into_values().map(Command::from).collect();
         for Lane {
             mut draft,
             sent,
@@ -927,7 +947,7 @@ mod tests {
         let mut jobs = Jobs::default();
         for _ in 0..DOWNLOADS * 3 {
             let (running, most) = (running.clone(), most.clone());
-            let again = Command::LinkCard(BlobRef::for_tests([1; 32]));
+            let again = Download::LinkCard(BlobRef::for_tests([1; 32]));
             jobs.download(again, async move {
                 let now = running.fetch_add(1, Ordering::SeqCst) + 1;
                 most.fetch_max(now, Ordering::SeqCst);
@@ -1053,7 +1073,7 @@ mod tests {
         );
         assert!(jobs.wait(draft(3, "after")).is_none());
         assert!(jobs.wait(draft(3, "later")).is_none());
-        let again = Command::Save(BlobRef::for_tests([2; 32]), PathBuf::from("x"));
+        let again = Download::Save(BlobRef::for_tests([2; 32]), PathBuf::from("x"));
         jobs.download(again, std::future::pending());
         let again = jobs.stop();
         assert_eq!(texts(&again), ["download", "picture", "after", "later"]);

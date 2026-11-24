@@ -2534,7 +2534,7 @@ async fn on_command(
             files::delete(ctx, url, client, state, (channel, id, sender), blobs).await?;
         }
         Command::Image(file, fetch) => {
-            let again = Command::Image(file.clone(), fetch);
+            let again = files::Download::Image(file.clone(), fetch);
             let (ctx, url, blobs) = (ctx.clone(), url.clone(), client.file_client());
             let cached = state.image_originals.lookup(&file, fetch);
             (state.jobs).download(again, async move {
@@ -2542,7 +2542,7 @@ async fn on_command(
             });
         }
         Command::LinkCard(file) => {
-            let again = Command::LinkCard(file.clone());
+            let again = files::Download::LinkCard(file.clone());
             let (ctx, blobs) = (ctx.clone(), client.file_client());
             (state.jobs).download(again, async move {
                 files::link_card(&ctx, &blobs, file).await;
@@ -2550,7 +2550,7 @@ async fn on_command(
             });
         }
         Command::StickerFile(file, kind) => {
-            let again = Command::StickerFile(file.clone(), kind);
+            let again = files::Download::StickerFile(file.clone(), kind);
             let (ctx, blobs) = (ctx.clone(), client.file_client());
             (state.jobs).download(again, async move {
                 files::sticker_file(&ctx, &blobs, file, kind).await;
@@ -2558,7 +2558,7 @@ async fn on_command(
             });
         }
         Command::Save(file, path) => {
-            let again = Command::Save(file.clone(), path.clone());
+            let again = files::Download::Save(file.clone(), path.clone());
             let (ctx, blobs) = (ctx.clone(), client.file_client());
             (state.jobs).download(again, async move {
                 files::save(&ctx, &blobs, file, path).await;
