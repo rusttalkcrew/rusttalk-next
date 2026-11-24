@@ -126,6 +126,27 @@ pub struct VoiceRoster {
     pub unknown: usize,
 }
 
+impl VoiceRoster {
+    /// The roster a `VoiceChanged` notice carries, or `None` from servers that send none,
+    /// in which case ask `voice_participants`.
+    pub fn from_notice(people: Option<&[String]>, unknown: Option<usize>) -> Result<Option<Self>> {
+        people
+            .zip(unknown)
+            .map(|(people, unknown)| Self::decode(people, unknown))
+            .transpose()
+    }
+
+    fn decode(people: &[String], unknown: usize) -> Result<Self> {
+        Ok(Self {
+            people: people
+                .iter()
+                .map(|id| decode(id))
+                .collect::<Result<_, _>>()?,
+            unknown,
+        })
+    }
+}
+
 #[derive(Deserialize)]
 struct Roster {
     people: Vec<String>,
@@ -333,14 +354,7 @@ impl KeyClient<'_> {
             .error_for_status()?
             .json()
             .await?;
-        Ok(VoiceRoster {
-            people: roster
-                .people
-                .iter()
-                .map(|id| decode(id))
-                .collect::<Result<_, _>>()?,
-            unknown: roster.unknown,
-        })
+        VoiceRoster::decode(&roster.people, roster.unknown)
     }
 }
 
@@ -900,6 +914,28 @@ impl VoiceRoom {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_notice_without_a_roster_falls_back_to_asking() -> Result<()> {
+        // Older servers send only the channel; the client then asks for the roster.
+        assert_eq!(VoiceRoster::from_notice(None, None)?, None);
+        assert_eq!(VoiceRoster::from_notice(None, Some(1))?, None);
+        let people = [encode(&[7; 32])];
+        assert_eq!(VoiceRoster::from_notice(Some(&people), None)?, None);
+        assert_eq!(
+            VoiceRoster::from_notice(Some(&people), Some(2))?,
+            Some(VoiceRoster {
+                people: vec![[7; 32]],
+                unknown: 2,
+            })
+        );
+        assert_eq!(
+            VoiceRoster::from_notice(Some(&[]), Some(0))?,
+            Some(VoiceRoster::default())
+        );
+        assert!(VoiceRoster::from_notice(Some(&["not an id".into()]), Some(0)).is_err());
+        Ok(())
+    }
 
     #[test]
     fn microphone_grant_follows_the_publish_flag_and_source_list() {

@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeSet, HashMap},
     env,
+    future::Future,
     sync::Mutex,
     time::{Duration, Instant},
 };
@@ -25,6 +26,7 @@ use rusttalk_core::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::{SqliteConnection, query_as, query_scalar};
+use tokio::sync::watch;
 use zeroize::Zeroizing;
 
 use crate::{
@@ -42,9 +44,14 @@ pub use enforcer::{enforce, enforce_person, start as start_enforcer};
 const DEV_SECRET: &str = "dev-only-livekit-secret-do-not-deploy";
 const DATA_PREFIX: &str = "file-";
 const ROSTER_TTL: Duration = Duration::from_secs(1);
+/// Clients close their event socket on frames over 4 KiB, so a bigger roster is left out;
+/// the margin keeps a notice safe whatever else that frame limit counts.
+const MAX_EVENT_BYTES: usize = 3800;
 
 /// LiveKit identities active in a room.
 type Active = BTreeSet<String>;
+/// A roster fetch in progress; `None` until it ends, then its answer or error code.
+type Fetching = watch::Receiver<Option<Result<Active, &'static str>>>;
 
 #[derive(PartialEq)]
 enum Outcome {
@@ -60,8 +67,29 @@ pub struct LiveKit {
     /// Active identities per room and when they were asked for; `None` marks a room
     /// LiveKit reported a change in at that time, so older answers are not used again.
     rosters: Mutex<HashMap<String, (Instant, Option<Active>)>>,
+    /// One roster fetch per room at a time; concurrent askers wait for its answer.
+    fetching: Mutex<HashMap<String, Fetching>>,
     /// Access checks waiting for the enforcement worker.
     queue: enforcer::Queue,
+}
+
+/// Removes a finished or dropped fetch, unless a change already replaced it.
+struct Done<'a> {
+    fetching: &'a Mutex<HashMap<String, Fetching>>,
+    room: &'a str,
+    answer: Fetching,
+}
+
+impl Drop for Done<'_> {
+    fn drop(&mut self) {
+        let mut fetching = self.fetching.lock().expect("roster fetches");
+        if fetching
+            .get(self.room)
+            .is_some_and(|answer| answer.same_channel(&self.answer))
+        {
+            fetching.remove(self.room);
+        }
+    }
 }
 
 impl LiveKit {
@@ -90,6 +118,7 @@ impl LiveKit {
                 .timeout(Duration::from_secs(3))
                 .build()?,
             rosters: Mutex::default(),
+            fetching: Mutex::default(),
             queue: Default::default(),
         }))
     }
@@ -159,22 +188,73 @@ impl LiveKit {
         }
     }
 
-    async fn active(&self, room: &str) -> ApiResult<BTreeSet<String>> {
-        if let Some((at, Some(active))) = self.rosters.lock().expect("roster cache").get(room)
-            && at.elapsed() < ROSTER_TTL
-        {
-            return Ok(active.clone());
+    async fn active(&self, room: &str) -> ApiResult<Active> {
+        self.active_with(room, || async {
+            Ok(self
+                .list(room)
+                .await?
+                .into_iter()
+                .filter(|participant| participant.state == "ACTIVE")
+                .map(|participant| participant.identity)
+                .collect())
+        })
+        .await
+    }
+
+    /// The cached roster, or one `fetch` shared by everyone asking for `room` meanwhile,
+    /// so a join or leave that every client reacts to costs LiveKit one call.
+    async fn active_with<F, Fut>(&self, room: &str, mut fetch: F) -> ApiResult<Active>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = ApiResult<Active>>,
+    {
+        loop {
+            let (mut answer, lead) = {
+                // Always `rosters` before `fetching`, as in `changed`.
+                let rosters = self.rosters.lock().expect("roster cache");
+                if let Some((at, Some(active))) = rosters.get(room)
+                    && at.elapsed() < ROSTER_TTL
+                {
+                    return Ok(active.clone());
+                }
+                let mut fetching = self.fetching.lock().expect("roster fetches");
+                match fetching.get(room) {
+                    Some(answer) => (answer.clone(), None),
+                    None => {
+                        let (lead, answer) = watch::channel(None);
+                        fetching.insert(room.into(), answer.clone());
+                        (answer, Some(lead))
+                    }
+                }
+            };
+            let Some(lead) = lead else {
+                // A dropped leader closes the channel without an answer; then ask again.
+                let result = answer
+                    .wait_for(Option::is_some)
+                    .await
+                    .ok()
+                    .and_then(|r| r.clone());
+                match result {
+                    Some(result) => {
+                        return result.map_err(|code| ApiError::new(StatusCode::BAD_GATEWAY, code));
+                    }
+                    None => continue,
+                }
+            };
+            // Ends this fetch even if the caller is dropped, so waiters ask again.
+            let _done = Done {
+                fetching: &self.fetching,
+                room,
+                answer,
+            };
+            let asked = Instant::now();
+            let result = fetch().await;
+            if let Ok(active) = &result {
+                self.remember(room, asked, active.clone());
+            }
+            lead.send_replace(Some(result.as_ref().cloned().map_err(|error| error.code)));
+            return result;
         }
-        let asked = Instant::now();
-        let active: BTreeSet<_> = self
-            .list(room)
-            .await?
-            .into_iter()
-            .filter(|participant| participant.state == "ACTIVE")
-            .map(|participant| participant.identity)
-            .collect();
-        self.remember(room, asked, active.clone());
-        Ok(active)
     }
 
     /// Cache a roster LiveKit gave for a request sent at `asked`.
@@ -193,6 +273,8 @@ impl LiveKit {
     fn changed(&self, room: &str) {
         let mut rosters = self.rosters.lock().expect("roster cache");
         rosters.insert(room.into(), (Instant::now(), None));
+        // A fetch sent before the change must not answer askers who come after it.
+        self.fetching.lock().expect("roster fetches").remove(room);
     }
 
     async fn try_moderate(
@@ -444,19 +526,76 @@ pub async fn participants(
     require_voice_read(&mut tx, &channel, &actor.person).await?;
     let readers = reader_identities(&app, &mut tx, &channel).await?;
     tx.commit().await?;
+    Ok(Json(presence(&active, &readers)))
+}
+
+/// Who of `active` the channel's readers are, by person.
+fn presence(active: &Active, readers: &HashMap<String, Vec<u8>>) -> Presence {
     let mut presence = Presence {
         people: BTreeSet::new(),
         unknown: 0,
     };
     for identity in active {
-        match readers.get(&identity) {
+        match readers.get(identity) {
             Some(person) => {
                 presence.people.insert(encode(person));
             }
             None => presence.unknown += 1,
         }
     }
-    Ok(Json(presence))
+    presence
+}
+
+/// Tell the channel's readers its roster changed, with the new roster when it is known
+/// to be from after the change, so they need not each ask LiveKit again.
+async fn announce(app: &App, livekit: &LiveKit, channel: String) {
+    let readers = async {
+        livekit.active(&channel).await?;
+        let mut db = app.db.acquire().await?;
+        reader_identities(app, &mut db, &channel).await
+    }
+    .await;
+    // Under the roster lock, so a later change is never announced before this one.
+    let rosters = livekit.rosters.lock().expect("roster cache");
+    let roster = match readers {
+        Err(error) => {
+            tracing::warn!(reason = error.code, "could not include the voice roster");
+            None
+        }
+        // No fresh roster means another change came in meanwhile; clients then ask.
+        Ok(readers) => match rosters.get(&channel) {
+            Some((at, Some(active))) if at.elapsed() < ROSTER_TTL => {
+                Some(presence(active, &readers))
+            }
+            _ => None,
+        },
+    };
+    app.notify(voice_changed(channel, roster));
+    drop(rosters);
+}
+
+/// The notice for a changed voice channel, with `roster` if it fits in one frame:
+/// clients close their socket on a larger one, so they ask for a big roster instead.
+fn voice_changed(channel: String, roster: Option<Presence>) -> Event {
+    let (people, unknown) = roster
+        .map(|found| (found.people.into_iter().collect(), found.unknown))
+        .unzip();
+    let full = Event::VoiceChanged {
+        channel: channel.clone(),
+        people,
+        unknown,
+    };
+    let fits = serde_json::to_vec(&rusttalk_core::presence::Update::Event(full.clone()))
+        .is_ok_and(|json| json.len() <= MAX_EVENT_BYTES);
+    if fits {
+        full
+    } else {
+        Event::VoiceChanged {
+            channel,
+            people: None,
+            unknown: None,
+        }
+    }
 }
 
 /// End the LiveKit room of a deleted voice channel, which `enforce` no longer visits.
@@ -493,12 +632,14 @@ enum Action {
     Update(ParticipantPermission),
 }
 
-/// What a participant may do now, from the database as it is at this moment.
+/// What a participant may do now, from the database as it is at this moment
+/// and `readers` from `reader_identities` for this check.
 async fn decide(
     app: &App,
     channel: &str,
     data: bool,
     participant: &Participant,
+    readers: &HashMap<String, Vec<u8>>,
 ) -> ApiResult<Action> {
     let mut db = app.db.acquire().await?;
     let device = if data {
@@ -506,7 +647,6 @@ async fn decide(
     } else {
         &participant.identity
     };
-    let readers = reader_identities(app, &mut db, channel).await?;
     let Some(person) = readers.get(device) else {
         return Ok(Action::Remove);
     };
@@ -663,7 +803,13 @@ pub async fn webhook(
         }
         if !data {
             livekit.changed(&room.name);
-            app.notify(Event::VoiceChanged { channel: room.name });
+            // Not tied to this request, which LiveKit may drop before the notice goes out.
+            let app = app.clone();
+            tokio::spawn(async move {
+                if let Some(livekit) = app.voice.clone() {
+                    announce(&app, &livekit, room.name).await;
+                }
+            });
         }
     }
     Ok(StatusCode::NO_CONTENT)
@@ -694,6 +840,7 @@ mod tests {
                 webhook: WebhookReceiver::new(TokenVerifier::with_api_key(api_key, api_secret)),
                 http: reqwest::Client::new(),
                 rosters: Mutex::default(),
+                fetching: Mutex::default(),
                 queue: Default::default(),
             })),
             session_ttl: 3600,
@@ -765,15 +912,7 @@ mod tests {
 
     #[test]
     fn a_reported_join_or_leave_drops_older_rosters() {
-        let secret = "test-secret-with-at-least-32-characters";
-        let livekit = LiveKit {
-            api_key: "test-key".into(),
-            api_secret: Zeroizing::new(secret.into()),
-            webhook: WebhookReceiver::new(TokenVerifier::with_api_key("test-key", secret)),
-            http: reqwest::Client::new(),
-            rosters: Mutex::default(),
-            queue: Default::default(),
-        };
+        let livekit = livekit();
         let cached = |livekit: &LiveKit| {
             let rosters = livekit.rosters.lock().unwrap();
             rosters.get("room").and_then(|(_, active)| active.clone())
@@ -794,5 +933,147 @@ mod tests {
             BTreeSet::new(),
         );
         assert_eq!(cached(&livekit), Some(BTreeSet::new()));
+    }
+
+    fn livekit() -> LiveKit {
+        let secret = "test-secret-with-at-least-32-characters";
+        LiveKit {
+            api_key: "test-key".into(),
+            api_secret: Zeroizing::new(secret.into()),
+            webhook: WebhookReceiver::new(TokenVerifier::with_api_key("test-key", secret)),
+            http: reqwest::Client::new(),
+            rosters: Mutex::default(),
+            fetching: Mutex::default(),
+            queue: Default::default(),
+        }
+    }
+
+    /// Starts a fetch for "room" that waits for `release`, and waits until it is running.
+    async fn held_fetch(
+        livekit: &Arc<LiveKit>,
+        calls: &Arc<std::sync::atomic::AtomicUsize>,
+        result: ApiResult<Active>,
+    ) -> (
+        tokio::task::JoinHandle<ApiResult<Active>>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (release, released) = tokio::sync::oneshot::channel();
+        let (started, running) = tokio::sync::oneshot::channel();
+        let mut once = Some((started, released, result));
+        let (livekit, calls) = (livekit.clone(), calls.clone());
+        let leader = tokio::spawn(async move {
+            livekit
+                .active_with("room", || {
+                    calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let (started, released, result) = once.take().expect("one fetch");
+                    async move {
+                        let _ = started.send(());
+                        let _ = released.await;
+                        result
+                    }
+                })
+                .await
+        });
+        running.await.expect("fetch started");
+        (leader, release)
+    }
+
+    /// Asks for "room" with a fetch that answers `bob` at once.
+    fn ask(
+        livekit: &Arc<LiveKit>,
+        calls: &Arc<std::sync::atomic::AtomicUsize>,
+    ) -> tokio::task::JoinHandle<ApiResult<Active>> {
+        let (livekit, calls) = (livekit.clone(), calls.clone());
+        tokio::spawn(async move {
+            livekit
+                .active_with("room", || {
+                    calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    async { Ok(BTreeSet::from(["bob".to_owned()])) }
+                })
+                .await
+        })
+    }
+
+    #[tokio::test]
+    async fn a_join_storm_asks_livekit_once() -> anyhow::Result<()> {
+        use std::sync::atomic::Ordering::SeqCst;
+        let (livekit, calls) = (Arc::new(livekit()), Arc::default());
+        let alice = BTreeSet::from(["alice".to_owned()]);
+        let (leader, release) = held_fetch(&livekit, &calls, Ok(alice.clone())).await;
+        let waiters: Vec<_> = (0..5).map(|_| ask(&livekit, &calls)).collect();
+        tokio::task::yield_now().await;
+        release.send(()).ok();
+        assert_eq!(leader.await?.unwrap(), alice);
+        for waiter in waiters {
+            assert_eq!(waiter.await?.unwrap(), alice);
+        }
+        assert_eq!(calls.load(SeqCst), 1);
+
+        // After a reported change, nobody gets the answer from before it.
+        livekit.changed("room");
+        let (leader, release) = held_fetch(&livekit, &calls, Ok(alice.clone())).await;
+        livekit.changed("room");
+        let after = ask(&livekit, &calls).await?.unwrap();
+        assert_eq!(after, BTreeSet::from(["bob".to_owned()]));
+        release.send(()).ok();
+        assert_eq!(leader.await?.unwrap(), alice);
+        // The late answer is not cached over the newer one.
+        assert_eq!(ask(&livekit, &calls).await?.unwrap(), after);
+        assert_eq!(calls.load(SeqCst), 3);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn waiters_get_a_failed_fetch_and_outlive_a_dropped_one() -> anyhow::Result<()> {
+        use std::sync::atomic::Ordering::SeqCst;
+        let (livekit, calls) = (Arc::new(livekit()), Arc::default());
+        let down = || ApiError::new(StatusCode::BAD_GATEWAY, "livekit_roster_unavailable");
+        let (leader, release) = held_fetch(&livekit, &calls, Err(down())).await;
+        let waiter = ask(&livekit, &calls);
+        tokio::task::yield_now().await;
+        release.send(()).ok();
+        assert_eq!(
+            leader.await?.unwrap_err().code,
+            "livekit_roster_unavailable"
+        );
+        assert_eq!(
+            waiter.await?.unwrap_err().code,
+            "livekit_roster_unavailable"
+        );
+        assert_eq!(calls.load(SeqCst), 1);
+
+        // A leader whose request is dropped mid-fetch hands over instead of hanging waiters.
+        let (leader, _release) = held_fetch(&livekit, &calls, Err(down())).await;
+        let waiter = ask(&livekit, &calls);
+        tokio::task::yield_now().await;
+        leader.abort();
+        let answer = tokio::time::timeout(Duration::from_secs(5), waiter).await??;
+        assert_eq!(answer.unwrap(), BTreeSet::from(["bob".to_owned()]));
+        assert_eq!(calls.load(SeqCst), 3);
+        Ok(())
+    }
+
+    #[test]
+    fn a_roster_too_big_for_one_frame_is_left_out() {
+        let roster = |count: usize| Presence {
+            people: (0..count).map(|i| encode(&[i as u8; 32])).collect(),
+            unknown: 1,
+        };
+        let inline = |event: Event| match event {
+            Event::VoiceChanged {
+                people, unknown, ..
+            } => people.map(|people| people.len()).zip(unknown),
+            _ => None,
+        };
+        let channel = encode(&[9; 32]);
+        assert_eq!(
+            inline(voice_changed(channel.clone(), Some(roster(3)))),
+            Some((3, 1))
+        );
+        assert_eq!(
+            inline(voice_changed(channel.clone(), Some(roster(200)))),
+            None
+        );
+        assert_eq!(inline(voice_changed(channel, None)), None);
     }
 }

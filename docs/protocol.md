@@ -1253,7 +1253,7 @@ session validity before pushing updates.
 | `member_changed` | `person`, optional `device`. Refresh the member and device directory and catalog |
 | `presence_changed` | `person_id`, `status`. Sent to members when visible presence changes |
 | `channel_changed` | None. Refresh the catalog, server metadata, server emoji and server events |
-| `voice_changed` | `channel`. Fetch current voice participants. Sent to current channel readers on signed LiveKit join, leave and room-end notices |
+| `voice_changed` | `channel`, optional `people` and `unknown` as from GET `/v1/voice/{channel}/participants`. Without them (older servers, or a roster too big for one frame), fetch current voice participants. Sent to current channel readers on signed LiveKit join, leave and room-end notices |
 | `voice_moved` | `devices`, `from`, `to`. A moderator moved these devices' call; join `to`. Sent only to those devices |
 | `dm_created` | `channel`. Refresh the catalog and reconcile keys |
 | `message_created` | `channel`, `id`. Fetch the ciphertext record |

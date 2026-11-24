@@ -142,8 +142,14 @@ pub enum Event {
         device: Option<String>,
     },
     ChannelChanged,
+    /// Someone joined or left a voice channel. Newer servers include who is in it now,
+    /// as `GET /v1/voice/{channel}/participants` would; without it, ask that.
     VoiceChanged {
         channel: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        people: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        unknown: Option<usize>,
     },
     /// A moderator moved these devices from one voice channel to another. Sent only to them.
     VoiceMoved {

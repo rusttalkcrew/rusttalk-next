@@ -2376,8 +2376,20 @@ async fn on_event(
             publish_selected_avatar(ctx, url, client, state).await;
             repair_default_avatar(ctx, url, client, state).await;
         }
-        Event::VoiceChanged { channel } => {
-            room_changed(ctx, url, client, state, decode(&channel)?).await?;
+        Event::VoiceChanged {
+            channel,
+            people,
+            unknown,
+        } => {
+            let channel = decode(&channel)?;
+            // Newer servers send the roster along; older ones are asked for it.
+            match VoiceRoster::from_notice(people.as_deref(), unknown)? {
+                Some(roster) => {
+                    state.rooms.insert(channel, roster);
+                    voice::send_room(ctx, url, client, state, channel);
+                }
+                None => room_changed(ctx, url, client, state, channel).await?,
+            }
         }
         Event::VoiceMoved { from, to, .. } => {
             let (from, to) = (decode(&from)?, decode(&to)?);
