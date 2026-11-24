@@ -26,34 +26,63 @@ const OPENED_PER_CHANNEL: usize = 10_000;
 #[derive(Default)]
 pub(super) struct Opened {
     order: VecDeque<[u8; 32]>,
-    bodies: HashMap<[u8; 32], ([u8; 32], MessageBody)>,
+    bodies: HashMap<[u8; 32], Seen>,
     edits: HashMap<[u8; 32], Vec<[u8; 32]>>,
+}
+
+/// One opened record: its digest, sender (kept so edits of it can be checked offline) and body.
+struct Seen {
+    digest: [u8; 32],
+    person: PersonId,
+    sender_device: [u8; 32],
+    body: MessageBody,
 }
 
 impl Opened {
     /// Return the cached body for the same record, or reject a different record under a seen ID.
     fn get(&self, record: &MessageRecord) -> Result<Option<MessageBody>, MessageError> {
         match self.bodies.get(&record.id) {
-            Some((seen, body)) if *seen == digest(record) => Ok(Some(body.clone())),
+            Some(seen) if seen.digest == digest(record) => Ok(Some(seen.body.clone())),
             Some(_) => Err(MessageError::Replay),
             None => Ok(None),
         }
+    }
+
+    /// Check an edit against an original opened before, or `None` when it must be fetched.
+    /// Returns the original's sender so the caller can re-check it for revocation.
+    fn check_edit(
+        &self,
+        author: &PersonId,
+        original: &[u8; 32],
+    ) -> Option<Result<(PersonId, [u8; 32]), MessageError>> {
+        let seen = self.bodies.get(original)?;
+        Some(
+            authorize_edit(author, &seen.person, &seen.body)
+                .map(|()| (seen.person, seen.sender_device)),
+        )
     }
 
     fn insert(&mut self, record: &MessageRecord, body: &MessageBody) {
         if self.bodies.contains_key(&record.id) {
             return;
         }
-        self.bodies
-            .insert(record.id, (digest(record), body.clone()));
+        self.bodies.insert(
+            record.id,
+            Seen {
+                digest: digest(record),
+                person: record.person,
+                sender_device: record.sender_device,
+                body: body.clone(),
+            },
+        );
         self.order.push_back(record.id);
         if let Some(original) = body.edit_of {
             self.edits.entry(original).or_default().push(record.id);
         }
         if self.order.len() > OPENED_PER_CHANNEL
             && let Some(old) = self.order.pop_front()
-            && let Some((_, body)) = self.bodies.remove(&old)
-            && let Some(original) = body.edit_of
+            && let Some(seen) = self.bodies.remove(&old)
+            && let Some(original) = seen.body.edit_of
             && let Some(ids) = self.edits.get_mut(&original)
         {
             ids.retain(|id| *id != old);
@@ -580,6 +609,16 @@ impl KeyClient<'_> {
         original: &[u8; 32],
     ) -> Result<()> {
         ensure!(id != original, MessageError::EditAuthor);
+        // An original opened before skips the round trip; its sender is re-checked for revocation like a fresh fetch.
+        if let Some(checked) = self
+            .opened
+            .get(channel)
+            .and_then(|opened| opened.check_edit(author, original))
+        {
+            let (person, device) = checked?;
+            self.revocations.check(&person, &device)?;
+            return Ok(());
+        }
         let record = self.message(channel, original).await?;
         let body = self
             .decrypt_record(channel, &record, Purpose::Message)
@@ -750,6 +789,35 @@ mod tests {
             opened.insert(&filler, &MessageBody::default());
         }
         assert!(opened.edits.is_empty() && opened.bodies.len() == OPENED_PER_CHANNEL);
+    }
+
+    #[test]
+    fn checks_edits_against_a_cached_original_and_rejects_forgeries() {
+        let mut opened = Opened::default();
+        let original = record(1, "original");
+        assert!(opened.check_edit(&original.person, &original.id).is_none());
+        opened.insert(&original, &MessageBody::default());
+        assert_eq!(
+            opened.check_edit(&original.person, &original.id),
+            Some(Ok((original.person, original.sender_device)))
+        );
+        // Someone else editing it, or editing an edit, is still refused from the cache.
+        assert_eq!(
+            opened.check_edit(&[9; 32], &original.id),
+            Some(Err(MessageError::EditAuthor))
+        );
+        let edit = record(4, "edit");
+        opened.insert(
+            &edit,
+            &MessageBody {
+                edit_of: Some(original.id),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            opened.check_edit(&edit.person, &edit.id),
+            Some(Err(MessageError::EditAuthor))
+        );
     }
 
     #[test]
