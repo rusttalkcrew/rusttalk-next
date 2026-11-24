@@ -22,11 +22,11 @@ fn server_rail_marks_only_unavailable_servers() {
         let address = known.address.clone();
         let mut camp = new_server(known, "Camp", home.servers[0].commands.clone());
         camp.dir = home.servers[0].dir.clone();
-        camp.dir.icon = Some(Picture {
-            key: [4; 32],
-            frames: vec![(ColorImage::filled([16, 16], ui::ACCENTS[0].base), 0)].into(),
-            bytes: Default::default(),
-        });
+        camp.dir.icon = Some(Picture::new(
+            [4; 32],
+            vec![(ColorImage::filled([16, 16], ui::ACCENTS[0].base), 0)],
+            Default::default(),
+        ));
         home.servers.push(camp);
         home.notify
             .arrived(&address, PROJECTS, notify::unix_now() + 1, true);

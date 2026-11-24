@@ -140,7 +140,8 @@ pub fn decode(bytes: &[u8], kind: Kind) -> Result<Vec<Frame>> {
 
 /// What a loaded picture holds in memory, to keep the total within a budget.
 pub fn decoded_bytes(picture: &Picture) -> usize {
-    (picture.frames.iter())
+    picture
+        .decoded()
         .map(|(image, _)| image.pixels.len() * 4)
         .sum()
 }
@@ -304,23 +305,21 @@ mod tests {
         assert_eq!(decode(&gif(128, 100), Kind::Emoji).unwrap().len(), 100);
         assert_eq!(decode(&gif(320, 20), Kind::Sticker).unwrap().len(), 20);
         let frames = decode(&gif(128, 100), Kind::Emoji).unwrap();
-        let held = decoded_bytes(&Picture {
-            key: [0; 32],
-            frames: std::sync::Arc::new(
-                frames
-                    .into_iter()
-                    .map(|f| {
-                        let image = f.into_buffer();
-                        let size = [image.width() as usize, image.height() as usize];
-                        (
-                            egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw()),
-                            40,
-                        )
-                    })
-                    .collect(),
-            ),
-            bytes: std::sync::Arc::new(Vec::new()),
-        });
+        let held = decoded_bytes(&Picture::new(
+            [0; 32],
+            frames
+                .into_iter()
+                .map(|f| {
+                    let image = f.into_buffer();
+                    let size = [image.width() as usize, image.height() as usize];
+                    (
+                        egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw()),
+                        40,
+                    )
+                })
+                .collect(),
+            std::sync::Arc::new(Vec::new()),
+        ));
         assert!(held <= decoded_budget(Kind::Emoji));
     }
 

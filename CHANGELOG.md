@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Servers with animated avatars, icons or emoji open faster and use less memory: their animations load the first time they play.
+
 ## v0.3.0 - 2026-11-24
 
 - Put a voice channel into focus mode for up to 24 hours: it gets a Focus badge, a countdown banner and a short notice before anyone joins.

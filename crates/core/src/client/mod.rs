@@ -26,5 +26,5 @@ pub use files::{
     prepare_file,
 };
 pub use keys::{DmPin, KeyClient, invite_name};
-pub use metadata::decode_profile_image;
+pub use metadata::{decode_profile_first_frame, decode_profile_image};
 pub use server::{Server, save_json};
