@@ -713,6 +713,8 @@ pub async fn reject(
             epoch,
             device: encode(&actor.device),
         }));
+        // The slot reopened, so other readers must recheck to learn they can wrap it.
+        app.signal(Change::Keys);
     }
     Ok(StatusCode::NO_CONTENT)
 }

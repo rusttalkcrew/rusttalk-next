@@ -82,12 +82,13 @@ async fn stream(
     let mut notices = Vec::new();
     let mut lagged = false;
     let mut recheck = Recheck::Access;
+    let device = rusttalk_core::auth::encode(&actor.device);
     loop {
         // Bound the drain to the broadcast backlog so a busy stream still makes progress.
         for _ in 0..=app.changes.len() {
             use broadcast::error::TryRecvError;
             match changes.try_recv() {
-                Ok(change) => recheck = recheck.max(queue(&mut notices, change)),
+                Ok(change) => recheck = recheck.max(queue(&mut notices, change, &device)),
                 Err(TryRecvError::Lagged(_)) => lagged = true,
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Closed) => return Ok("server_closed"),
@@ -147,18 +148,19 @@ async fn stream(
             rotations.clear();
             lagged = false;
         }
-        let device = rusttalk_core::auth::encode(&actor.device);
         for update in notices.drain(..) {
             let Update::Event(notice) = update else {
                 send(socket, update).await?;
                 continue;
             };
             if let Event::KeysNeeded(need) = &notice {
+                // This slot changed without a recheck here, so forget it: if it reopens,
+                // a later recheck announces it again.
+                pending.remove(need);
                 // A rejected slot can reopen within this batch and still need a wrap.
                 if let Some((next_pending, _)) = &next
                     && next_pending.contains(need)
                 {
-                    pending.remove(need);
                     continue;
                 }
                 // A completed wrap only wakes its recipient.
@@ -217,7 +219,7 @@ async fn stream(
                 },
                 update = changes.recv() => {
                     match update {
-                        Ok(change) => recheck = recheck.max(queue(&mut notices, change)),
+                        Ok(change) => recheck = recheck.max(queue(&mut notices, change, &device)),
                         Err(broadcast::error::RecvError::Lagged(_)) => lagged = true,
                         Err(broadcast::error::RecvError::Closed) => return Ok("server_closed"),
                     }
@@ -237,7 +239,8 @@ enum Recheck {
 }
 
 /// Queue a client notice and report what it can change: nothing, sessions, or access and keys.
-fn queue(notices: &mut Vec<Update>, change: Change) -> Recheck {
+/// `device` is this socket's device.
+fn queue(notices: &mut Vec<Update>, change: Change, device: &str) -> Recheck {
     match change {
         Change::Session => Recheck::Session,
         Change::Keys => Recheck::Access,
@@ -251,6 +254,8 @@ fn queue(notices: &mut Vec<Update>, change: Change) -> Recheck {
                     | Event::VoiceMoved { .. }
                     | Event::LiveFileAccepted { .. },
                 ) => Recheck::None,
+                // A wrap changes only its recipient's keys; a rejection also signals `Keys`.
+                Update::Event(Event::KeysNeeded(need)) if need.device != device => Recheck::None,
                 Update::Event(_) => Recheck::Access,
             };
             notices.push(update);
@@ -321,25 +326,44 @@ mod tests {
     #[test]
     fn sign_ins_recheck_only_sessions() {
         let mut notices = Vec::new();
-        assert!(queue(&mut notices, Change::Session) == Recheck::Session);
-        assert!(queue(&mut notices, Change::Keys) == Recheck::Access);
+        assert!(queue(&mut notices, Change::Session, "d") == Recheck::Session);
+        assert!(queue(&mut notices, Change::Keys, "d") == Recheck::Access);
         let message = Event::MessageCreated {
             channel: "c".into(),
             id: "m".into(),
         };
-        assert!(queue(&mut notices, Change::Update(Update::Event(message))) == Recheck::None);
+        assert!(queue(&mut notices, Change::Update(Update::Event(message)), "d") == Recheck::None);
         let member = Event::MemberChanged {
             person: "p".into(),
             device: None,
         };
-        assert!(queue(&mut notices, Change::Update(Update::Event(member))) == Recheck::Access);
+        assert!(queue(&mut notices, Change::Update(Update::Event(member)), "d") == Recheck::Access);
         assert!(
             queue(
                 &mut notices,
-                Change::Update(Update::Event(Event::ChannelChanged))
+                Change::Update(Update::Event(Event::ChannelChanged)),
+                "d"
             ) == Recheck::Access
         );
         // Only client updates are forwarded.
         assert_eq!(notices.len(), 3);
+    }
+
+    #[test]
+    fn key_wraps_recheck_only_their_recipient() {
+        let mut notices = Vec::new();
+        let need = |device: &str| {
+            Change::Update(Update::Event(Event::KeysNeeded(KeyNeed {
+                scope: Scope {
+                    kind: Kind::Channel,
+                    id: [0; 32],
+                },
+                epoch: 1,
+                device: device.into(),
+            })))
+        };
+        assert!(queue(&mut notices, need("other"), "d") == Recheck::None);
+        assert!(queue(&mut notices, need("d"), "d") == Recheck::Access);
+        assert_eq!(notices.len(), 2);
     }
 }
