@@ -38,6 +38,7 @@ Unreleased under the new version and date.
 - Pictures, files and messages still uploading or downloading when the connection drops or the network changes are tried again once it is back, instead of failing as offline.
 - Reading a busy channel no longer stutters: read marks are saved every few seconds in the background instead of after every new message.
 - Voice calls use less CPU and battery: the app no longer redraws ten times a second for the whole call, only when someone starts or stops speaking.
+- Big servers answer key and membership checks faster: the server now keeps its database statistics up to date.
 
 ## v0.3.0 - 2026-11-24
 
