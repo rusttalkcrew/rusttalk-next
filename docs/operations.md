@@ -198,6 +198,8 @@ The named `api-data` volume holds `/data/rusttalk.sqlite3` in WAL mode and
 in `/data/files/`. Set `RUSTTALK_DATA_DIR` to use another data directory than
 `/data`; the index honors it too. Keep this volume and `.dev/tls/` across
 normal restarts.
+The database uses `synchronous=NORMAL` for faster writes: a power loss or OS
+crash may drop the last few commits, but cannot corrupt the database.
 Stop the API and back up the whole volume, including any SQLite WAL files
 and `files/`, plus the TLS certificate and key. Restrict access to these
 backups and restore the database and blob directory from the same backup.

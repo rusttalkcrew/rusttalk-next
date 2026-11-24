@@ -13,7 +13,7 @@ use sqlx::{
     Sqlite, SqliteConnection, SqlitePool, Transaction,
     migrate::Migrate,
     query, query_scalar,
-    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
+    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
 };
 use zeroize::Zeroizing;
 
@@ -29,6 +29,9 @@ pub async fn open(dir: &Path) -> Result<SqlitePool> {
         .create_if_missing(true)
         .foreign_keys(true)
         .journal_mode(SqliteJournalMode::Wal)
+        // In WAL mode NORMAL cannot corrupt the database; a power loss may drop the last commits.
+        // FULL would fsync every commit while the global WRITER lock is held.
+        .synchronous(SqliteSynchronous::Normal)
         .busy_timeout(Duration::from_secs(5));
     let pool = SqlitePoolOptions::new()
         .max_connections(MAX_CONNECTIONS)
@@ -621,6 +624,26 @@ mod tests {
             .fetch_one(&pool)
             .await?;
         assert_eq!(rows, 1, "the cancelled commit still completes");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn every_connection_uses_wal_with_normal_sync() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let pool = open(dir.path()).await?;
+        // Hold two connections at once so the check covers more than the first one.
+        let mut first = pool.acquire().await?;
+        let mut second = pool.acquire().await?;
+        for conn in [&mut first, &mut second] {
+            let journal: String = query_scalar("PRAGMA journal_mode")
+                .fetch_one(&mut **conn)
+                .await?;
+            assert_eq!(journal, "wal");
+            let sync: i64 = query_scalar("PRAGMA synchronous")
+                .fetch_one(&mut **conn)
+                .await?;
+            assert_eq!(sync, 1, "synchronous=NORMAL");
+        }
         Ok(())
     }
 }
