@@ -97,10 +97,14 @@ async fn set_muted(
         )
         .await?;
     }
+    let profile = match before != on {
+        true => Some(crate::metadata::profile(&mut tx, &person).await?),
+        false => None,
+    };
     tx.commit().await?;
-    if before != on {
-        // Member lists show the mute.
-        keys::changed(app, &person, None);
+    // Member lists show the mute.
+    if let Some(profile) = profile {
+        keys::profile_changed(app, &person, profile);
     }
     // LiveKit takes or gives back the sources now, also for devices already in a room.
     // Setting it again reapplies it, should an earlier attempt have failed.

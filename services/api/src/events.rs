@@ -251,6 +251,8 @@ fn queue(notices: &mut Vec<Update>, change: Change) -> Recheck {
                     | Event::VoiceMoved { .. }
                     | Event::LiveFileAccepted { .. },
                 ) => Recheck::None,
+                // Profile and listing edits change no keys or access.
+                Update::Event(event) if event.keeps_access() => Recheck::None,
                 Update::Event(_) => Recheck::Access,
             };
             notices.push(update);
@@ -317,6 +319,7 @@ async fn session(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusttalk_core::keys::{MemberProfile, Part};
 
     #[test]
     fn sign_ins_recheck_only_sessions() {
@@ -331,15 +334,26 @@ mod tests {
         let member = Event::MemberChanged {
             person: "p".into(),
             device: None,
+            profile: None,
         };
         assert!(queue(&mut notices, Change::Update(Update::Event(member))) == Recheck::Access);
-        assert!(
-            queue(
-                &mut notices,
-                Change::Update(Update::Event(Event::ChannelChanged))
-            ) == Recheck::Access
-        );
+        let channels = |part| Change::Update(Update::Event(Event::ChannelChanged { part }));
+        assert!(queue(&mut notices, channels(None)) == Recheck::Access);
+        assert!(queue(&mut notices, channels(Some(Part::Emoji))) == Recheck::None);
+        let profile = Event::MemberChanged {
+            person: "p".into(),
+            device: None,
+            profile: Some(Box::new(MemberProfile {
+                display_name_ct: Some("ct".into()),
+                avatar_hash: None,
+                bio_ct: None,
+                hide_offline: false,
+                avatar_initialized: true,
+                voice_muted: false,
+            })),
+        };
+        assert!(queue(&mut notices, Change::Update(Update::Event(profile))) == Recheck::None);
         // Only client updates are forwarded.
-        assert_eq!(notices.len(), 3);
+        assert_eq!(notices.len(), 5);
     }
 }

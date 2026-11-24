@@ -452,7 +452,7 @@ pub async fn edit(
     .await?;
     tx.commit().await?;
     // Clients reload roles and their own permissions with the directory.
-    app.notify(rusttalk_core::keys::Event::ChannelChanged);
+    app.notify(rusttalk_core::keys::Event::ChannelChanged { part: None });
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -731,7 +731,7 @@ mod tests {
         assert_eq!(audited, 1);
         assert!(matches!(
             events.try_recv(),
-            Ok(Change::Update(Update::Event(Event::ChannelChanged)))
+            Ok(Change::Update(Update::Event(Event::ChannelChanged { .. })))
         ));
         Ok(())
     }

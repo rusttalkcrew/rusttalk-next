@@ -13,7 +13,7 @@ use rusttalk_core::{
         AnswerContext, AnswerRecord, Calendar, CalendarSetting, EventContext, EventRecord, GRACE,
         HORIZON, NewAnswer, NewEvent, REMIND_EVERY,
     },
-    keys::Event,
+    keys::{Event, Part},
 };
 use sqlx::{FromRow, SqliteConnection, query, query_as, query_scalar};
 
@@ -161,7 +161,9 @@ pub async fn set_enabled(
     }
     tx.commit().await?;
     if changed {
-        app.notify(Event::ChannelChanged);
+        app.notify(Event::ChannelChanged {
+            part: Some(Part::Calendar),
+        });
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -269,7 +271,9 @@ pub async fn create(
         .await?;
     }
     tx.commit().await?;
-    app.notify(Event::ChannelChanged);
+    app.notify(Event::ChannelChanged {
+        part: Some(Part::Calendar),
+    });
     Ok((
         StatusCode::CREATED,
         Json(EventRecord {
@@ -326,7 +330,9 @@ pub async fn approve(
     )
     .await?;
     tx.commit().await?;
-    app.notify(Event::ChannelChanged);
+    app.notify(Event::ChannelChanged {
+        part: Some(Part::Calendar),
+    });
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -371,7 +377,9 @@ pub async fn remove(
         audit(&mut tx, &actor.person, action, target, Some(&id), actor.at).await?;
     }
     tx.commit().await?;
-    app.notify(Event::ChannelChanged);
+    app.notify(Event::ChannelChanged {
+        part: Some(Part::Calendar),
+    });
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -388,7 +396,9 @@ pub async fn expire(app: &App) -> ApiResult<()> {
         tracing::info!(id, "event expired");
     }
     if !gone.is_empty() {
-        app.notify(Event::ChannelChanged);
+        app.notify(Event::ChannelChanged {
+            part: Some(Part::Calendar),
+        });
     }
     Ok(())
 }
@@ -471,7 +481,9 @@ pub async fn answer(
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
-    app.notify(Event::ChannelChanged);
+    app.notify(Event::ChannelChanged {
+        part: Some(Part::Calendar),
+    });
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -505,6 +517,8 @@ pub async fn remind(
         return Err(keys::conflict("remind_too_soon"));
     }
     tx.commit().await?;
-    app.notify(Event::ChannelChanged);
+    app.notify(Event::ChannelChanged {
+        part: Some(Part::Calendar),
+    });
     Ok(StatusCode::NO_CONTENT)
 }

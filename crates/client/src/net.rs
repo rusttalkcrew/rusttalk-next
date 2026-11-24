@@ -821,6 +821,8 @@ struct State {
     // True when this record arrived live, so only those asks may ring after key recovery.
     waiting: HashMap<Id, HashMap<Id, bool>>,
     last: Option<Directory>,
+    /// What `last` was built from, so a notice can refetch only the part it changed.
+    raw: Option<directory::Sources>,
     order_unavailable: bool,
     /// Whether `last` was built with the space key.
     named: bool,
@@ -1469,6 +1471,7 @@ async fn serve(
             }
             event = client.next_update() => match event {
                 Ok(Some(Pushed::Presence(PresenceEvent::PresenceChanged { person_id, status }))) => {
+                    directory::presence_changed(state, &person_id, status);
                     match decode(&person_id) {
                         Ok(person) => ctx.send(Update::Presence(url.clone(), person, status)),
                         Err(error) => tracing::warn!(%error, "presence for a bad person ID"),
@@ -1520,7 +1523,7 @@ async fn serve(
                 }
             }
             _ = avatar_retry.tick(), if state.avatar_uninitialized && client.has_space_key() => {
-                repair_default_avatar(ctx, url, client, state).await;
+                repair_default_avatar(ctx, client, state).await;
             }
             next = next_voice(&mut state.voice) => voice_next(ctx, url, Some(client), state, next).await,
             _ = stats.tick(), if state.voice.is_some() => {
@@ -2078,9 +2081,9 @@ async fn reload_pages(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, state: &
     for channel in state.loaded.clone() {
         page(ctx, url, client, state, channel, None).await;
     }
-    set_display_name(ctx, url, client, state).await;
-    publish_selected_avatar(ctx, url, client, state).await;
-    repair_default_avatar(ctx, url, client, state).await;
+    set_display_name(ctx, client, state).await;
+    publish_selected_avatar(ctx, client, state).await;
+    repair_default_avatar(ctx, client, state).await;
     latest(ctx, url, client, state).await;
     let voice: Vec<Id> = state
         .last
@@ -2169,9 +2172,10 @@ async fn on_event(
         event,
         Event::KeysNeeded(_)
             | Event::MemberChanged { .. }
-            | Event::ChannelChanged
+            | Event::ChannelChanged { .. }
             | Event::RotateNeeded { .. }
-    ) {
+    ) && !event.keeps_access()
+    {
         let records = rusttalk_core::client::revocations::Revocations::in_profile(&ctx.data);
         state.revalidate(ctx, url, &records, Some(client));
     }
@@ -2235,13 +2239,27 @@ async fn on_event(
             state.deleted(ctx, url, channel, id);
         }
         Event::Resync => resume(ctx, url, client, state).await?,
+        Event::MemberChanged {
+            ref person,
+            profile: Some(ref profile),
+            ..
+        } => {
+            // Another device may have changed the name, bio or picture it syncs.
+            if person == &encode(ctx.identity.certificate.person_id()) {
+                sync(ctx, Vec::new()).await;
+            }
+            directory::profile(ctx, url, client, state, person, profile).await?;
+        }
         Event::MemberChanged { ref person, .. }
             if person == &encode(ctx.identity.certificate.person_id()) =>
         {
             sync(ctx, Vec::new()).await;
             directory(ctx, url, client, state).await?;
         }
-        Event::MemberChanged { .. } | Event::ChannelChanged | Event::DmCreated { .. } => {
+        Event::ChannelChanged { part: Some(part) } if part != rusttalk_core::keys::Part::Other => {
+            directory::reload(ctx, url, client, state, part).await?;
+        }
+        Event::MemberChanged { .. } | Event::ChannelChanged { .. } | Event::DmCreated { .. } => {
             directory(ctx, url, client, state).await?;
         }
         Event::KeysNeeded(_) => {
@@ -2252,9 +2270,9 @@ async fn on_event(
                 directory(ctx, url, client, state).await?;
             }
             retry_messages(ctx, url, client, state).await?;
-            set_display_name(ctx, url, client, state).await;
-            publish_selected_avatar(ctx, url, client, state).await;
-            repair_default_avatar(ctx, url, client, state).await;
+            set_display_name(ctx, client, state).await;
+            publish_selected_avatar(ctx, client, state).await;
+            repair_default_avatar(ctx, client, state).await;
         }
         Event::VoiceChanged { channel } => {
             room_changed(ctx, url, client, state, decode(&channel)?).await?;
@@ -2492,7 +2510,6 @@ async fn on_command(
         }
         Command::CreateCategory(name) => {
             client.create_category(name.as_bytes()).await?;
-            directory(ctx, url, client, state).await?;
         }
         Command::RenameChannel {
             id,
@@ -2503,11 +2520,9 @@ async fn on_command(
         } => {
             let topic = topic.as_deref();
             directory::rename_channel(client, &id, &name, topic, audio_kbps, member_limit).await?;
-            directory(ctx, url, client, state).await?;
         }
         Command::RenameCategory(id, name) => {
             directory::rename_category(client, &id, &name).await?;
-            directory(ctx, url, client, state).await?;
         }
         Command::DeleteChannel(id) => {
             // The setting is encrypted, so only a client can tell that its channel is gone:
@@ -2573,27 +2588,27 @@ async fn on_command(
         }
         Command::SetServerName(name) => {
             client.set_server_name(name.as_bytes()).await?;
-            directory(ctx, url, client, state).await?;
         }
         Command::SetDisplayName(name) => {
             state.display_name = Some(name);
-            set_display_name(ctx, url, client, state).await;
+            set_display_name(ctx, client, state).await;
         }
         // Without the space key yet, the bio waits: it stays pending and is sent on a later load.
         Command::SetBio(bio) if client.has_space_key() => {
             if let Err(error) = client.set_bio(&bio).await {
                 tracing::warn!(error = %format_args!("{error:#}"), "setting bio failed");
                 ctx.send(Update::Failed(t!("net.bio_failed").into()));
-                return Ok(());
             }
-            directory(ctx, url, client, state).await?;
         }
         Command::SetBio(_) => {}
         Command::SetAvatar(bytes) => {
             state.pending_avatar = Some(bytes);
-            publish_selected_avatar(ctx, url, client, state).await;
+            publish_selected_avatar(ctx, client, state).await;
         }
-        Command::SetStatus(choice) => client.set_status(choice).await?,
+        Command::SetStatus(choice) => {
+            client.set_status(choice).await?;
+            directory::status_changed(state, choice);
+        }
         Command::SetHideOffline(hide) => client.set_hide_offline(hide).await?,
         Command::Leave => {
             let reply = client
@@ -3019,12 +3034,7 @@ async fn cache_own_avatar(ctx: &Ctx, client: &KeyClient<'_>, state: &State) {
 }
 
 /// Publish an explicit selection once this server's encryption key arrives.
-async fn publish_selected_avatar(
-    ctx: &Ctx,
-    url: &Url,
-    client: &mut KeyClient<'_>,
-    state: &mut State,
-) {
+async fn publish_selected_avatar(ctx: &Ctx, client: &mut KeyClient<'_>, state: &mut State) {
     if !client.has_space_key() {
         return;
     }
@@ -3042,9 +3052,6 @@ async fn publish_selected_avatar(
         {
             client.set_avatar(&bytes).await?;
             state.avatar_uninitialized = false;
-            if let Err(error) = directory(ctx, url, client, state).await {
-                tracing::warn!(error = %format_args!("{error:#}"), "reloading directory after picture change failed");
-            }
         }
         Ok::<_, anyhow::Error>(())
     }
@@ -3057,12 +3064,7 @@ async fn publish_selected_avatar(
 
 /// Fill an uninitialized membership with this account's cached default picture once
 /// keys are available. Best-effort: errors are logged and never disconnect the server.
-async fn repair_default_avatar(
-    ctx: &Ctx,
-    url: &Url,
-    client: &mut KeyClient<'_>,
-    state: &mut State,
-) {
+async fn repair_default_avatar(ctx: &Ctx, client: &mut KeyClient<'_>, state: &mut State) {
     if !state.avatar_uninitialized || !client.has_space_key() {
         return;
     }
@@ -3090,16 +3092,9 @@ async fn repair_default_avatar(
         }
     };
     match client.publish_default_avatar(&bytes).await {
-        Ok(true) => {
-            state.avatar_uninitialized = false;
-            if let Err(error) = directory(ctx, url, client, state).await {
-                tracing::warn!(error = %format_args!("{error:#}"), "reloading directory after default picture failed");
-            }
-        }
-        Ok(false) => {
-            // 412 Precondition Failed: already initialized or cleared on this server.
-            state.avatar_uninitialized = false;
-        }
+        // Published (the notice updates the member list), or 412 Precondition Failed:
+        // already initialized or cleared on this server.
+        Ok(_) => state.avatar_uninitialized = false,
         Err(error) => {
             tracing::warn!(error = %format_args!("{error:#}"), "publishing default account picture failed");
         }
@@ -3107,7 +3102,7 @@ async fn repair_default_avatar(
 }
 
 /// Set a display name chosen before the space key arrived, once it has.
-async fn set_display_name(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, state: &mut State) {
+async fn set_display_name(ctx: &Ctx, client: &mut KeyClient<'_>, state: &mut State) {
     let Some(name) = &state.display_name else {
         return;
     };
@@ -3115,12 +3110,7 @@ async fn set_display_name(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, stat
         return;
     }
     match client.set_display_name(name.as_bytes()).await {
-        Ok(()) => {
-            state.display_name = None;
-            if let Err(error) = directory(ctx, url, client, state).await {
-                tracing::warn!(error = %format_args!("{error:#}"), "reloading members failed");
-            }
-        }
+        Ok(()) => state.display_name = None,
         Err(error) => {
             tracing::warn!(error = %format_args!("{error:#}"), "setting display name failed");
             state.display_name = None;

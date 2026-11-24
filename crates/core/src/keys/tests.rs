@@ -228,3 +228,58 @@ fn dropping_an_exclusion_or_changing_the_dm_pair_invalidates_the_commitment() {
     assert!(dm.open(&receiver, &sender.certificate, &wrap).is_err());
     assert!(bound.open(&receiver, &sender.certificate, &wrap).unwrap() == key);
 }
+
+#[test]
+fn profile_and_part_notices_stay_readable_by_older_apps() {
+    // The two variants as apps before `profile` and `part` read them.
+    #[derive(Deserialize)]
+    #[serde(tag = "type", rename_all = "snake_case")]
+    #[allow(dead_code)]
+    enum Old {
+        MemberChanged {
+            person: String,
+            device: Option<String>,
+        },
+        ChannelChanged,
+    }
+    let profile = Event::MemberChanged {
+        person: "p".into(),
+        device: None,
+        profile: Some(Box::new(MemberProfile {
+            display_name_ct: Some("ct".into()),
+            avatar_hash: None,
+            bio_ct: None,
+            hide_offline: true,
+            avatar_initialized: true,
+            voice_muted: false,
+        })),
+    };
+    let part = Event::ChannelChanged {
+        part: Some(Part::Emoji),
+    };
+    for event in [&profile, &part] {
+        let json = serde_json::to_string(event).unwrap();
+        assert!(serde_json::from_str::<Old>(&json).is_ok(), "{json}");
+        assert!(event.keeps_access());
+    }
+    // Without the new fields the wire format is unchanged.
+    let plain = Event::ChannelChanged { part: None };
+    assert_eq!(
+        serde_json::to_string(&plain).unwrap(),
+        r#"{"type":"channel_changed"}"#
+    );
+    assert!(!plain.keeps_access());
+    let member: Event =
+        serde_json::from_str(r#"{"type":"member_changed","person":"p","device":null}"#).unwrap();
+    assert!(!member.keeps_access());
+    // A part from a newer server reloads everything.
+    let newer: Event =
+        serde_json::from_str(r#"{"type":"channel_changed","part":"stars"}"#).unwrap();
+    assert!(matches!(
+        newer,
+        Event::ChannelChanged {
+            part: Some(Part::Other)
+        }
+    ));
+    assert!(!newer.keeps_access());
+}

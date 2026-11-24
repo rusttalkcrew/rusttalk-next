@@ -10,7 +10,8 @@ use rusttalk_core::{
     auth::{decode, encode},
     client::{Catalog, Channel as WireChannel, KeyClient, decode_profile_image},
     identity::fingerprint,
-    keys::Metadata,
+    keys::{MemberProfile, Metadata, Part},
+    presence::{Presence, Status},
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -20,8 +21,8 @@ use rusttalk_core::client::voice::DEFAULT_AUDIO_KBPS;
 
 use super::{Ctx, State, Update, leave_voice, now};
 use crate::server::{
-    Body, Category, Channel, CustomEmoji, Device, Directory, Dm, EmojiPack, Id, Member, Msg, Perms,
-    Picture, Role, SystemMessages, member_name, parse_role_display,
+    Body, Calendar, Category, Channel, CustomEmoji, Device, Directory, Dm, EmojiPack, Id, Member,
+    Msg, Perms, Picture, Role, SystemMessages, member_name, parse_role_display,
 };
 
 pub(super) async fn get(client: &KeyClient<'_>, path: &str) -> Result<Value> {
@@ -171,6 +172,17 @@ async fn managed_categories(
         .await?)
 }
 
+/// The server replies a directory is built from, kept so a notice can refetch only its part.
+pub(super) struct Sources {
+    /// With every category for channel managers, who see empty ones too.
+    catalog: Catalog,
+    members: Value,
+    me: Value,
+    roles: Value,
+    space: Value,
+    emoji: Value,
+}
+
 /// Fetch and decrypt names, channels, members and permissions, and report member changes.
 pub(super) async fn directory(
     ctx: &Ctx,
@@ -178,7 +190,119 @@ pub(super) async fn directory(
     client: &mut KeyClient<'_>,
     state: &mut State,
 ) -> Result<()> {
-    let catalog = client.catalog().await?;
+    let mut catalog = client.catalog().await?;
+    discard_unreadable(ctx, url, state, &catalog);
+    let members = get(client, "/v1/members").await?;
+    let me = get(client, "/v1/me").await?;
+    let roles = get(client, "/v1/roles").await?;
+    let space = get(client, "/v1/space").await?;
+    let emoji = emoji_list(client).await?;
+    if manages_channels(&me, &roles) {
+        catalog.categories = managed_categories(client).await?;
+    }
+    let sources = Sources {
+        catalog,
+        members,
+        me,
+        roles,
+        space,
+        emoji,
+    };
+    let calendar = super::calendar::load(client).await?;
+    rebuild(ctx, url, client, state, sources, calendar).await
+}
+
+/// Refetch only what a `channel_changed` notice says changed, then rebuild the directory.
+pub(super) async fn reload(
+    ctx: &Ctx,
+    url: &Url,
+    client: &mut KeyClient<'_>,
+    state: &mut State,
+    part: Part,
+) -> Result<()> {
+    // Taken while loading, so a failed load leaves none and the next notice loads it all.
+    let Some(mut sources) = state.raw.take() else {
+        return directory(ctx, url, client, state).await;
+    };
+    let mut calendar = state.last.as_ref().and_then(|dir| dir.calendar.clone());
+    match part {
+        Part::Channels => {
+            sources.catalog = client.catalog().await?;
+            discard_unreadable(ctx, url, state, &sources.catalog);
+            if manages_channels(&sources.me, &sources.roles) {
+                sources.catalog.categories = managed_categories(client).await?;
+            }
+        }
+        Part::Space => sources.space = get(client, "/v1/space").await?,
+        Part::Emoji => sources.emoji = emoji_list(client).await?,
+        Part::Calendar => calendar = super::calendar::load(client).await?,
+        Part::Other => return directory(ctx, url, client, state).await,
+    }
+    rebuild(ctx, url, client, state, sources, calendar).await
+}
+
+/// Apply one member's new profile from a `member_changed` notice, fetching at most their
+/// picture.
+pub(super) async fn profile(
+    ctx: &Ctx,
+    url: &Url,
+    client: &mut KeyClient<'_>,
+    state: &mut State,
+    person: &str,
+    profile: &MemberProfile,
+) -> Result<()> {
+    let own = encode(ctx.identity.certificate.person_id()) == person;
+    let Some(mut sources) = state.raw.take() else {
+        return directory(ctx, url, client, state).await;
+    };
+    if !patch_profile(&mut sources, person, profile, own) {
+        // Not listed yet: a member this directory doesn't know, so load it all.
+        return directory(ctx, url, client, state).await;
+    }
+    let calendar = state.last.as_ref().and_then(|dir| dir.calendar.clone());
+    rebuild(ctx, url, client, state, sources, calendar).await
+}
+
+/// Write a profile into the member's row (and the own `/v1/me` reply), as a fresh
+/// `/v1/members` would list it. False when the member isn't listed.
+fn patch_profile(sources: &mut Sources, person: &str, profile: &MemberProfile, own: bool) -> bool {
+    let Some(row) = member_row(&mut sources.members, person) else {
+        return false;
+    };
+    row["display_name_ct"] = json!(profile.display_name_ct);
+    row["avatar_hash"] = json!(profile.avatar_hash);
+    row["bio_ct"] = json!(profile.bio_ct);
+    row["hide_offline"] = json!(profile.hide_offline);
+    row["avatar_initialized"] = json!(profile.avatar_initialized);
+    row["voice_muted"] = json!(profile.voice_muted);
+    if own {
+        sources.me["hide_offline"] = json!(profile.hide_offline);
+    }
+    true
+}
+
+fn member_row<'a>(members: &'a mut Value, person: &str) -> Option<&'a mut Value> {
+    (members.as_array_mut()?.iter_mut()).find(|row| row["person_id"].as_str() == Some(person))
+}
+
+/// Keep the kept member list's presence current, so a rebuild without a fresh member
+/// list doesn't show an old one.
+pub(super) fn presence_changed(state: &mut State, person: &str, presence: Presence) {
+    if let Some(row) = (state.raw.as_mut()).and_then(|s| member_row(&mut s.members, person)) {
+        row["presence"] = json!(presence);
+    }
+}
+
+/// Keep the kept own status current after setting it.
+pub(super) fn status_changed(state: &mut State, status: Status) {
+    if let Some(sources) = &mut state.raw {
+        sources.me["status"] = json!(status);
+    }
+}
+
+/// Forget channels and DMs the catalog no longer lists for us. A successful catalog is
+/// authoritative, also when a later request of the same load fails.
+fn discard_unreadable(ctx: &Ctx, url: &Url, state: &mut State, catalog: &Catalog) {
     if let Some(before) = &state.last {
         let readable: HashMap<_, _> = catalog.channels.iter().map(|c| (c.id, c)).collect();
         let channels = before
@@ -199,27 +323,50 @@ pub(super) async fn directory(
             .map(|dm| dm.channel);
         state.discard_channels(ctx, url, channels.chain(dms).collect());
     }
+}
+
+/// Whether this member's roles grant `manage_channels`, as the directory's permissions read.
+fn manages_channels(me: &Value, roles: &Value) -> bool {
+    let mine = me["role_ids"].as_array();
+    (roles["roles"].as_array().into_iter().flatten()).any(|role| {
+        mine.is_some_and(|mine| mine.contains(&role["id"]))
+            && (role["permissions"].as_array())
+                .is_some_and(|flags| flags.contains(&json!("manage_channels")))
+    })
+}
+
+/// Decrypt the sources into a directory, show it and report member changes.
+async fn rebuild(
+    ctx: &Ctx,
+    url: &Url,
+    client: &mut KeyClient<'_>,
+    state: &mut State,
+    sources: Sources,
+    calendar: Option<Calendar>,
+) -> Result<()> {
+    let Sources {
+        catalog,
+        members,
+        me,
+        roles,
+        space,
+        emoji,
+    } = &sources;
     let joined_kbps = state.voice.as_ref().and_then(|live| {
         let channel = catalog.channels.iter().find(|c| c.id == live.channel)?;
         channel.audio_kbps
     });
-    let members = get(client, "/v1/members").await?;
-    let me = get(client, "/v1/me").await?;
-    let roles = get(client, "/v1/roles").await?;
-    let space = get(client, "/v1/space").await?;
-    let emoji = emoji_list(client).await?;
-    let pictures = pictures(client, &members, &space, &emoji, &state.pictures).await?;
+    let pictures = pictures(client, members, space, emoji, &state.pictures).await?;
     let mut dir = build(
         client,
         catalog,
-        &members,
-        &me,
-        &roles,
-        &space,
-        &emoji,
+        members,
+        me,
+        roles,
+        space,
+        emoji,
         &|id: &Id, hash: Option<&str>| pictures.get(&picture_key(id, hash?)).cloned(),
-    )
-    .await?;
+    )?;
     // A DM channel stays with the person it was first listed with. One the server
     // now lists with someone else is not shown, so nothing is sent there.
     dir.dms.retain(|dm| {
@@ -237,7 +384,7 @@ pub(super) async fn directory(
         }
         kept
     });
-    dir.calendar = super::calendar::load(client).await?;
+    dir.calendar = calendar;
     super::save_pins(ctx, url, client, state);
     state.pictures = pictures;
     if let Some(before) = &state.last
@@ -287,9 +434,10 @@ pub(super) async fn directory(
             .any(|channel| channel.id == *joined)
     });
     state.prune_history(&dir);
-    super::recent::Listing::save(state, &dir, &members, &space);
+    super::recent::Listing::save(state, &dir, members, space);
     state.avatar_uninitialized =
-        own_avatar_uninitialized(&members, ctx.identity.certificate.person_id());
+        own_avatar_uninitialized(members, ctx.identity.certificate.person_id());
+    state.raw = Some(sources);
     state.last = Some(dir.clone());
     state.named = client.has_space_key();
     ctx.send(Update::Directory(url.clone(), Box::new(dir)));
@@ -325,9 +473,9 @@ async fn emoji_list(client: &KeyClient<'_>) -> Result<Value> {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn build(
+fn build(
     client: &KeyClient<'_>,
-    mut catalog: Catalog,
+    catalog: &Catalog,
     members: &Value,
     me: &Value,
     roles: &Value,
@@ -419,10 +567,6 @@ async fn build(
     // Highest rank first, as the server lists them.
     role_list.sort_by_key(|role| -role.rank);
 
-    // The readable catalog omits categories with no readable channels, including empty ones.
-    if perms.manage_channels {
-        catalog.categories = managed_categories(client).await?;
-    }
     let mut categories: Vec<Category> = (catalog.categories.iter())
         .map(|category| Category {
             id: Some(category.id),
@@ -774,6 +918,61 @@ fn changes(before: &Directory, after: &Directory) -> Vec<(Id, &'static str, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_profile_notice_updates_only_that_member() {
+        let row = |id: &str, name: &str| {
+            json!({"person_id": id, "presence": "online", "display_name_ct": name,
+                "avatar_hash": "h1", "avatar_initialized": true, "bio_ct": null,
+                "role_ids": ["member"], "hide_offline": false})
+        };
+        let mut sources = Sources {
+            catalog: Catalog {
+                channels: Vec::new(),
+                categories: Vec::new(),
+            },
+            members: json!([row("a", "old"), row("b", "other")]),
+            me: json!({"hide_offline": false, "role_ids": ["member"]}),
+            roles: Value::Null,
+            space: Value::Null,
+            emoji: Value::Null,
+        };
+        let mut profile = MemberProfile {
+            display_name_ct: Some("new".into()),
+            avatar_hash: Some("h1".into()),
+            bio_ct: Some("bio".into()),
+            hide_offline: true,
+            avatar_initialized: true,
+            voice_muted: true,
+        };
+        assert!(patch_profile(&mut sources, "a", &profile, true));
+        let mut expected = row("a", "new");
+        expected["bio_ct"] = json!("bio");
+        expected["hide_offline"] = json!(true);
+        expected["voice_muted"] = json!(true);
+        assert_eq!(sources.members[0], expected);
+        assert_eq!(sources.members[1], row("b", "other"));
+        assert_eq!(sources.me["hide_offline"], true);
+        profile.avatar_hash = None;
+        assert!(patch_profile(&mut sources, "a", &profile, false));
+        assert!(sources.members[0]["avatar_hash"].is_null());
+        // Someone this directory doesn't list yet needs a full load.
+        assert!(!patch_profile(&mut sources, "c", &profile, false));
+    }
+
+    #[test]
+    fn only_a_role_with_the_flag_manages_channels() {
+        let roles = json!({"roles": [
+            {"id": "member", "permissions": ["invite"]},
+            {"id": "mods", "permissions": ["manage_channels"]},
+        ]});
+        assert!(!manages_channels(&json!({"role_ids": ["member"]}), &roles));
+        assert!(manages_channels(
+            &json!({"role_ids": ["member", "mods"]}),
+            &roles
+        ));
+        assert!(!manages_channels(&Value::Null, &roles));
+    }
 
     #[test]
     fn channel_update_keeps_order_and_encrypts_name_and_topic() {

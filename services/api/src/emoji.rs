@@ -14,7 +14,7 @@ use axum::{
 };
 use rusttalk_core::{
     auth::{decode, decode_bytes, encode},
-    keys::{Event, IMAGE_CIPHERTEXT, Metadata},
+    keys::{Event, IMAGE_CIPHERTEXT, Metadata, Part},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -325,7 +325,9 @@ pub async fn add(
     .map_err(disk_error)?;
     tx.commit().await?;
     tracing::info!(id, kind = kind_name, "emoji added");
-    app.notify(Event::ChannelChanged);
+    app.notify(Event::ChannelChanged {
+        part: Some(Part::Emoji),
+    });
     Ok(StatusCode::CREATED)
 }
 
@@ -367,7 +369,9 @@ pub async fn rename(
     )
     .await?;
     tx.commit().await?;
-    app.notify(Event::ChannelChanged);
+    app.notify(Event::ChannelChanged {
+        part: Some(Part::Emoji),
+    });
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -408,7 +412,9 @@ pub async fn delete(
         }
     }
     tracing::info!(id, "emoji deleted");
-    app.notify(Event::ChannelChanged);
+    app.notify(Event::ChannelChanged {
+        part: Some(Part::Emoji),
+    });
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -475,7 +481,9 @@ pub async fn add_pack(
     )
     .await?;
     tx.commit().await?;
-    app.notify(Event::ChannelChanged);
+    app.notify(Event::ChannelChanged {
+        part: Some(Part::Emoji),
+    });
     Ok(StatusCode::CREATED)
 }
 
@@ -512,7 +520,9 @@ pub async fn rename_pack(
     )
     .await?;
     tx.commit().await?;
-    app.notify(Event::ChannelChanged);
+    app.notify(Event::ChannelChanged {
+        part: Some(Part::Emoji),
+    });
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -554,7 +564,9 @@ pub async fn order_packs(
     }
     store::audit(&mut tx, &actor.person, PACK_CHANGED, None, None, actor.at).await?;
     tx.commit().await?;
-    app.notify(Event::ChannelChanged);
+    app.notify(Event::ChannelChanged {
+        part: Some(Part::Emoji),
+    });
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -620,7 +632,9 @@ pub async fn delete_pack(
             }
         }
     }
-    app.notify(Event::ChannelChanged);
+    app.notify(Event::ChannelChanged {
+        part: Some(Part::Emoji),
+    });
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -662,7 +676,9 @@ pub async fn move_to_pack(
     )
     .await?;
     tx.commit().await?;
-    app.notify(Event::ChannelChanged);
+    app.notify(Event::ChannelChanged {
+        part: Some(Part::Emoji),
+    });
     Ok(StatusCode::NO_CONTENT)
 }
 

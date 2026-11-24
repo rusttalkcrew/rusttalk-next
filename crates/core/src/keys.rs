@@ -140,8 +140,17 @@ pub enum Event {
     MemberChanged {
         person: String,
         device: Option<String>,
+        /// Set when only this member's profile changed: clients update that one member
+        /// instead of reloading keys and the directory. Older servers leave it out.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile: Option<Box<MemberProfile>>,
     },
-    ChannelChanged,
+    ChannelChanged {
+        /// Set when only this part of the server changed, so clients reload just that.
+        /// Without it, reload everything.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part: Option<Part>,
+    },
     VoiceChanged {
         channel: String,
     },
@@ -170,6 +179,48 @@ pub enum Event {
         data: bool,
     },
     Resync,
+}
+
+impl Event {
+    /// A profile or listing edit that changes no keys and no access: receivers skip the key
+    /// sync and the server skips its access recheck.
+    pub fn keeps_access(&self) -> bool {
+        match self {
+            Self::MemberChanged { profile, .. } => profile.is_some(),
+            Self::ChannelChanged { part } => part.is_some_and(|part| part != Part::Other),
+            _ => false,
+        }
+    }
+}
+
+/// Upper bound for a notice older apps can read: they cap event frames at 4 KiB.
+pub const MAX_INLINE_EVENT_BYTES: usize = 3800;
+
+/// A member's profile as `GET /v1/members` lists it, without presence and roles.
+/// Names and bios stay ciphertext; the picture is fetched by its hash.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemberProfile {
+    pub display_name_ct: Option<String>,
+    pub avatar_hash: Option<String>,
+    pub bio_ct: Option<String>,
+    pub hide_offline: bool,
+    pub avatar_initialized: bool,
+    pub voice_muted: bool,
+}
+
+/// The part of the server a `channel_changed` notice touched.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Part {
+    /// Channel and category names, topics, order, settings and focus mode: the catalog.
+    Channels,
+    /// Server name, description, icon and system messages setting.
+    Space,
+    Emoji,
+    Calendar,
+    /// A part this app doesn't know yet, from a newer server: reload everything.
+    #[serde(other)]
+    Other,
 }
 
 #[derive(Serialize, Deserialize)]
