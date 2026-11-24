@@ -829,16 +829,16 @@ pub fn nav_row_trailing(
     accessible: &str,
     trailing: f32,
 ) -> Response {
-    nav_row_marked(ui, icon, label, selected, role, accessible, trailing, None)
+    nav_row_locked(ui, icon, label, selected, role, accessible, trailing, false)
 }
 
-/// Room `nav_row_marked` keeps at the right for its mark.
-pub const NAV_MARK_WIDTH: f32 = 24.0;
+/// Room `nav_row_locked` keeps at the right for its lock.
+pub const NAV_LOCK_WIDTH: f32 = 24.0;
 
-/// `nav_row_trailing` with a small glyph at the right end, like the lock
-/// of a channel only some roles can see.
+/// `nav_row_trailing` with a lock at the right end when `locked`, for a channel
+/// only some roles can see.
 #[allow(clippy::too_many_arguments)]
-pub fn nav_row_marked(
+pub fn nav_row_locked(
     ui: &mut Ui,
     icon: &str,
     label: &str,
@@ -846,7 +846,7 @@ pub fn nav_row_marked(
     role: Role,
     accessible: &str,
     trailing: f32,
-    mark: Option<&str>,
+    locked: bool,
 ) -> Response {
     let (rect, response) = ui.allocate_exact_size(
         Vec2::new(ui.available_width().max(0.0), super::ROW_HEIGHT),
@@ -885,26 +885,24 @@ pub fn nav_row_marked(
         label.to_owned(),
         label_font,
         text,
-        (rect.width() - 44.0 - trailing - mark.map_or(0.0, |_| NAV_MARK_WIDTH)).max(0.0),
+        (rect.width() - 44.0 - trailing - if locked { NAV_LOCK_WIDTH } else { 0.0 }).max(0.0),
     );
     job.wrap.max_rows = 1;
     job.wrap.break_anywhere = true;
     let galley = painter.layout_job(job);
     let at = egui::pos2(rect.left() + 34.0, rect.center().y - galley.size().y / 2.0);
     painter.with_clip_rect(rect).galley(at, galley, text);
-    if let Some(mark) = mark {
+    if locked {
         // At the very end, moving over only while the button in `trailing` shows (hovered
-        // or open), so marks line up down the list.
+        // or open), so locks line up down the list.
         let shift = if selected || ui.rect_contains_pointer(rect) {
             trailing
         } else {
             0.0
         };
-        painter.text(
-            egui::pos2(rect.right() - shift - 8.0, rect.center().y),
-            Align2::RIGHT_CENTER,
-            mark,
-            FontId::proportional(TEXT_ICON),
+        lock_icon(
+            painter,
+            egui::pos2(rect.right() - shift - 13.0, rect.center().y),
             text,
         );
     }
@@ -1408,4 +1406,27 @@ pub fn mention_highlight(ui: &Ui, background: egui::layers::ShapeIdx, rect: Rect
     let accent_bar = Rect::from_min_size(rect.min, Vec2::new(2.0, rect.height()));
     ui.painter()
         .rect_filled(accent_bar, RADIUS_S, accent.text(ui.visuals().dark_mode));
+}
+
+/// A small filled padlock centred on `at`, drawn rather than taken from a font so it
+/// stays crisp and takes the colour of the text next to it.
+pub fn lock_icon(painter: &egui::Painter, at: Pos2, color: Color32) {
+    let body = Rect::from_center_size(at + Vec2::new(0.0, 2.5), Vec2::new(10.0, 8.0));
+    let radius = 3.0;
+    // The shackle: a half ring standing on the body.
+    let steps = 16;
+    let mut points = vec![egui::pos2(at.x - radius, body.top())];
+    points.extend((0..=steps).map(|step| {
+        let angle = std::f32::consts::PI * (1.0 + step as f32 / steps as f32);
+        egui::pos2(
+            at.x + radius * angle.cos(),
+            body.top() - 1.0 + radius * angle.sin(),
+        )
+    }));
+    points.push(egui::pos2(at.x + radius, body.top()));
+    painter.add(egui::epaint::PathShape::line(
+        points,
+        Stroke::new(1.6, color),
+    ));
+    painter.rect_filled(body, 2, color);
 }

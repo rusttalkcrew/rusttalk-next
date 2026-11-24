@@ -3009,17 +3009,16 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
                         (true, false) => call::JOIN_SLOT,
                         _ => 0.0,
                     };
-                    let mark = locked.then_some("🔒");
                     let row = ui
                         .add_enabled_ui(online || !channel.voice, |ui| {
                             let (name, role) = (&channel.name, Role::Button);
-                            ui::nav_row_marked(
-                                ui, icon, name, selected, role, &label, trailing, mark,
+                            ui::nav_row_locked(
+                                ui, icon, name, selected, role, &label, trailing, locked,
                             )
                         })
                         .inner;
                     let chats = [(&server.address, channel.id)];
-                    let lock = if locked { ui::NAV_MARK_WIDTH } else { 0.0 };
+                    let lock = if locked { ui::NAV_LOCK_WIDTH } else { 0.0 };
                     let marks = row.rect.with_max_x(row.rect.right() - trailing - lock);
                     chat_marks(ui, home, &chats, false, marks);
                     if limited {
