@@ -15,6 +15,7 @@ android {
         require(major in 0..2099 && minor in 0..999 && patch in 0..999)
         versionCode = major * 1_000_000 + minor * 1_000 + patch + 1
         versionName = version
+        manifestPlaceholders["appLabel"] = "RustTalk"
     }
     // R8 strips GameTextInput logging in both release and test packages.
     buildTypes.getByName("release") {
@@ -22,6 +23,12 @@ android {
         proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         if (providers.gradleProperty("rusttalkTestSigning").isPresent) {
             signingConfig = signingConfigs.getByName("debug")
+            // Each runner has its own debug key. A test install under the release
+            // package name blocks the release APK ("App not installed", #508), even
+            // when it only remains in another profile, so test builds get their own.
+            applicationIdSuffix = ".test"
+            versionNameSuffix = "-test"
+            manifestPlaceholders["appLabel"] = "RustTalk Test"
         }
     }
     // build.sh already stripped the debug info; function names stay for panic backtraces.
