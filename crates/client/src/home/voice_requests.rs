@@ -425,7 +425,7 @@ mod tests {
             bio: None,
             voice_muted: false,
         };
-        server.dir.members = vec![member(ME, "Alex"), member(ANN, "Ann")];
+        server.dir.members = vec![member(ME, "Alex"), member(ANN, "Ann")].into();
         server.dir.dms = vec![crate::server::Dm {
             channel: DM,
             peer: ANN,

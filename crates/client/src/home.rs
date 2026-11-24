@@ -697,7 +697,7 @@ impl Home {
     ) -> anyhow::Result<()> {
         self.net.remove_device(record)?;
         for server in &mut self.servers {
-            for member in &mut server.dir.members {
+            for member in server.dir.members.edit().iter_mut() {
                 if &member.person == record.person_id() {
                     member
                         .devices
@@ -1384,11 +1384,11 @@ impl Home {
                 }
             }
             Update::Presence(address, person, presence) => {
-                if let Some(index) = self.index(&address)
-                    && let Some(member) =
-                        (self.servers[index].dir.members.iter_mut()).find(|m| m.person == person)
-                {
-                    member.presence = presence;
+                if let Some(index) = self.index(&address) {
+                    let mut members = self.servers[index].dir.members.edit();
+                    if let Some(member) = members.iter_mut().find(|m| m.person == person) {
+                        member.presence = presence;
+                    }
                 }
             }
             Update::SaveProgress(id, done) => self.files.progress(id, done),
@@ -3303,7 +3303,7 @@ pub fn face_speaking(
     dot: bool,
     speaking: bool,
 ) -> Response {
-    let member = dir.members.iter().find(|m| m.person == *person);
+    let member = dir.members.get(person);
     member_face_speaking(ui, member, person, name, size, dot, speaking)
 }
 
@@ -6961,7 +6961,8 @@ mod tests {
                         hide_offline: false,
                         bio: None,
                         voice_muted: false,
-                    }],
+                    }]
+                    .into(),
                     ..Default::default()
                 };
                 let mut harness = egui_kittest::Harness::builder()
@@ -7081,7 +7082,7 @@ mod tests {
             bio: None,
             voice_muted: false,
         };
-        server.dir.members = vec![member(ME, "Me"), member(ANN, "Ann")];
+        server.dir.members = vec![member(ME, "Me"), member(ANN, "Ann")].into();
         server.dir.categories = vec![crate::server::Category {
             id: None,
             name: "Text".into(),
@@ -7520,7 +7521,8 @@ mod tests {
             hide_offline: false,
             bio: None,
             voice_muted: false,
-        }];
+        }]
+        .into();
         home.servers.push(server);
         let mut settings = home.voice.audio.settings();
         settings.display_name = "Ann".into();

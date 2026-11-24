@@ -170,7 +170,7 @@ impl Server {
 
     pub fn member_name(&self, person: &Id) -> String {
         match self.names.get(person) {
-            Some(name) if !self.dir.members.iter().any(|m| m.person == *person) => name.clone(),
+            Some(name) if self.dir.members.get(person).is_none() => name.clone(),
             _ => member_name(&self.dir, person),
         }
     }
@@ -180,7 +180,7 @@ impl Server {
     }
 
     pub fn member(&self, person: &Id) -> Option<&Member> {
-        self.dir.members.iter().find(|m| m.person == *person)
+        self.dir.members.get(person)
     }
 
     pub fn send(&self, command: Command) {
@@ -227,7 +227,7 @@ impl Server {
 }
 
 pub fn member_name(dir: &Directory, person: &Id) -> String {
-    match dir.members.iter().find(|member| member.person == *person) {
+    match dir.members.get(person) {
         Some(member) => member.display_name(),
         None => t!("server.member_unnamed", id = &fingerprint(person)[..4]),
     }
@@ -260,7 +260,7 @@ pub struct Directory {
     pub me: Id,
     pub perms: Perms,
     pub categories: Vec<Category>,
-    pub members: Vec<Member>,
+    pub members: Members,
     pub dms: Vec<Dm>,
     /// Highest rank first.
     pub roles: Vec<Role>,
@@ -502,6 +502,89 @@ impl Channel {
     /// When focus mode ends, if it is on at `now` (unix seconds). Only voice channels have it.
     pub fn focus(&self, now: i64) -> Option<i64> {
         self.focus_until.filter(|until| self.voice && *until > now)
+    }
+}
+
+/// The member list, with an index by person so a painted row's lookup doesn't scan it.
+/// Reads go through the list (`Deref`); changes go through `edit`, which reindexes.
+#[derive(Clone, Default)]
+pub struct Members {
+    list: Vec<Member>,
+    /// Each person's first row, as a scan would find it.
+    index: HashMap<Id, usize>,
+}
+
+impl Members {
+    pub fn get(&self, person: &Id) -> Option<&Member> {
+        self.index.get(person).map(|&at| &self.list[at])
+    }
+
+    /// Change the list; the index is rebuilt when the returned guard drops.
+    pub fn edit(&mut self) -> MembersEdit<'_> {
+        MembersEdit(self)
+    }
+
+    fn reindex(&mut self) {
+        self.index.clear();
+        for (at, member) in self.list.iter().enumerate() {
+            self.index.entry(member.person).or_insert(at);
+        }
+    }
+}
+
+impl From<Vec<Member>> for Members {
+    fn from(list: Vec<Member>) -> Self {
+        let mut members = Members {
+            list,
+            index: HashMap::new(),
+        };
+        members.reindex();
+        members
+    }
+}
+
+impl FromIterator<Member> for Members {
+    fn from_iter<I: IntoIterator<Item = Member>>(iter: I) -> Self {
+        Vec::from_iter(iter).into()
+    }
+}
+
+impl std::ops::Deref for Members {
+    type Target = [Member];
+
+    fn deref(&self) -> &[Member] {
+        &self.list
+    }
+}
+
+impl<'a> IntoIterator for &'a Members {
+    type Item = &'a Member;
+    type IntoIter = std::slice::Iter<'a, Member>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.list.iter()
+    }
+}
+
+pub struct MembersEdit<'a>(&'a mut Members);
+
+impl std::ops::Deref for MembersEdit<'_> {
+    type Target = Vec<Member>;
+
+    fn deref(&self) -> &Vec<Member> {
+        &self.0.list
+    }
+}
+
+impl std::ops::DerefMut for MembersEdit<'_> {
+    fn deref_mut(&mut self) -> &mut Vec<Member> {
+        &mut self.0.list
+    }
+}
+
+impl Drop for MembersEdit<'_> {
+    fn drop(&mut self) {
+        self.0.reindex();
     }
 }
 
@@ -900,6 +983,24 @@ impl Chat {
 
     /// Add records from a page or a live event, applying edits to their originals.
     pub fn merge(&mut self, items: Vec<Msg>, older: bool) {
+        // A live message that belongs at the end: skip the dedup and the sort. The
+        // list is always sorted here, since every other path through merge sorts it.
+        if let [msg] = items.as_slice()
+            && !older
+            && msg.edit_of.is_none()
+            && !matches!(msg.body, Body::PollPart(_))
+            && self.messages.last().is_none_or(|last| last.at <= msg.at)
+            && !(self.messages.iter().rev()).any(|old| old.id == msg.id && old.person == msg.person)
+        {
+            self.messages.extend(items);
+            self.settle(Vec::new());
+            return;
+        }
+        self.merge_all(items, older);
+    }
+
+    /// `merge` for any batch: deduplicate, sort, then settle.
+    fn merge_all(&mut self, items: Vec<Msg>, older: bool) {
         let (parts, items): (Vec<_>, Vec<_>) = (items.into_iter())
             .partition(|msg| matches!(msg.body, Body::PollPart(_)) && msg.edit_of.is_none());
         // A retried vote replaces its "couldn't be opened" placeholder.
@@ -982,6 +1083,11 @@ impl Chat {
         }
         // Stable, so records from the same second keep the server's order.
         self.messages.sort_by_key(|msg| msg.at);
+        self.settle(edits);
+    }
+
+    /// After new records are in place: drop what they replace and apply edits.
+    fn settle(&mut self, edits: Vec<Msg>) {
         // The server's record replaces the one shown while sending, whether it came
         // with the send's answer or as a live event first.
         let messages = &self.messages;
@@ -1501,5 +1607,162 @@ mod tests {
         );
         assert!(chat.tally(&poll).unwrap().ended);
         assert_eq!(chat.messages.len(), 1);
+    }
+
+    fn person(id: u8, name: &str) -> Member {
+        Member {
+            person: [id; 32],
+            name: Some(name.into()),
+            devices: Vec::new(),
+            roles: Vec::new(),
+            avatar: None,
+            presence: Presence::Online,
+            hide_offline: false,
+            bio: None,
+            voice_muted: false,
+        }
+    }
+
+    /// Every lookup, including people not listed, finds what a scan finds.
+    fn assert_index_matches_scan(members: &Members) {
+        for id in 0..8 {
+            let scanned = members.iter().find(|m| m.person == [id; 32]);
+            let indexed = members.get(&[id; 32]);
+            assert_eq!(
+                scanned.map(|m| m as *const Member),
+                indexed.map(|m| m as *const Member),
+                "person {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn member_index_matches_a_scan_after_changes() {
+        // A duplicate row: the first one wins, as with a scan.
+        let mut members: Members = vec![person(1, "a"), person(2, "b"), person(1, "dup")].into();
+        assert_index_matches_scan(&members);
+        assert_eq!(members.get(&[1; 32]).unwrap().display_name(), "a");
+        members.edit().push(person(3, "c"));
+        assert_index_matches_scan(&members);
+        members
+            .edit()
+            .retain(|m| m.person != [1; 32] || m.name.as_deref() == Some("dup"));
+        assert_index_matches_scan(&members);
+        assert_eq!(members.get(&[1; 32]).unwrap().display_name(), "dup");
+        members.edit()[0].person = [4; 32];
+        assert_index_matches_scan(&members);
+        assert!(members.get(&[2; 32]).is_none());
+        members.edit().insert(0, person(5, "e"));
+        assert_index_matches_scan(&members);
+        members = [person(6, "f")].into_iter().collect();
+        assert_index_matches_scan(&members);
+        let copy = members.clone();
+        assert_index_matches_scan(&copy);
+        assert_index_matches_scan(&Members::default());
+    }
+
+    #[test]
+    fn member_lookups_use_the_index() {
+        let dir = Directory {
+            members: vec![person(1, "Ann"), person(2, "Bob")].into(),
+            ..Directory::default()
+        };
+        assert_eq!(member_name(&dir, &[2; 32]), "Bob");
+        assert!(member_name(&dir, &[3; 32]).contains(&fingerprint(&[3; 32])[..4]));
+    }
+
+    /// What a chat shows and keeps, to compare two of them.
+    fn snapshot(chat: &Chat) -> impl PartialEq + std::fmt::Debug {
+        let messages: Vec<_> = (chat.messages.iter())
+            .map(|msg| {
+                let body = match &msg.body {
+                    Body::Text(text) => text.clone(),
+                    Body::Unreadable => "unreadable".into(),
+                    _ => "?".into(),
+                };
+                let replicas: Vec<_> = msg.replicas.iter().map(Url::to_string).collect();
+                (
+                    msg.id[0],
+                    msg.person[0],
+                    msg.at,
+                    msg.backfilled,
+                    body,
+                    replicas,
+                )
+            })
+            .collect();
+        let outbox: Vec<_> = chat.outbox.iter().map(|out| out.draft.id[0]).collect();
+        let mut edited: Vec<_> = (chat.edited.iter())
+            .map(|(key, rank)| (key.0[0], key.1[0], *rank))
+            .collect();
+        edited.sort();
+        let mut pending: Vec<_> = chat
+            .pending_edits
+            .keys()
+            .map(|k| (k.0[0], k.1[0]))
+            .collect();
+        pending.sort();
+        (messages, outbox, edited, pending)
+    }
+
+    #[test]
+    fn live_append_fast_path_matches_the_full_merge() {
+        let other = |id: u8, at: i64, text: &str| Msg {
+            person: [8; 32],
+            ..msg(id, at, text, None)
+        };
+        let unreadable = |id: u8, at: i64| Msg {
+            body: Body::Unreadable,
+            ..msg(id, at, "", None)
+        };
+        let copy = |id: u8, at: i64, text: &str, on: u8| Msg {
+            replicas: vec![server(on)],
+            ..msg(id, at, text, None)
+        };
+        let steps = [
+            // In order, including the same second and an edit of a loaded message.
+            msg(1, 10, "a", None),
+            msg(2, 20, "b", None),
+            msg(3, 20, "c", None),
+            msg(10, 21, "b2", Some(2)),
+            // An edit whose original comes later, then the original, in order.
+            msg(11, 22, "d2", Some(4)),
+            msg(4, 23, "d", None),
+            // Out of order.
+            msg(5, 15, "e", None),
+            // Duplicates: same time, a later time, and a later DM copy elsewhere.
+            msg(4, 23, "d", None),
+            msg(2, 30, "b", None),
+            copy(3, 31, "c", 2),
+            // Another person's record with an ID of mine is a separate message.
+            other(1, 32, "theirs"),
+            // A placeholder, then its readable retry later on.
+            unreadable(6, 33),
+            msg(6, 34, "f", None),
+            // My pending message, confirmed once, then again.
+            msg(7, 35, "sent", None),
+            msg(7, 36, "sent", None),
+            msg(8, 37, "later", None),
+        ];
+        let (mut fast, mut full) = (Chat::default(), Chat::default());
+        for chat in [&mut fast, &mut full] {
+            chat.outgoing([9; 32], &draft(7, "sent"));
+            chat.outgoing([9; 32], &draft(8, "later"));
+        }
+        for (step, item) in steps.into_iter().enumerate() {
+            fast.merge(vec![item.clone()], false);
+            full.merge_all(vec![item], false);
+            assert_eq!(snapshot(&fast), snapshot(&full), "after step {step}");
+        }
+        assert_eq!(
+            texts(&fast),
+            ["a", "e", "b2", "c", "d2", "theirs", "f", "sent", "later"]
+        );
+        assert!(fast.outbox.is_empty());
+        // Older pages never take the fast path, also when a record sorts last.
+        for chat in [&mut fast, &mut full] {
+            chat.merge(vec![msg(9, 40, "old", None)], true);
+        }
+        assert_eq!(snapshot(&fast), snapshot(&full));
     }
 }

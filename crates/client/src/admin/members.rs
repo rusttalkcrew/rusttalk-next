@@ -385,7 +385,8 @@ mod tests {
                 member(2, "Bob", &["mod", "member"]),
                 member(3, "alice", &["owner", "member"]),
                 member(4, "Dan", &[]),
-            ],
+            ]
+            .into(),
             ..Directory::default()
         }
     }
@@ -463,7 +464,7 @@ mod tests {
     #[test]
     fn people_hiding_while_offline_are_still_listed() {
         let mut dir = directory();
-        dir.members[0].hide_offline = true;
+        dir.members.edit()[0].hide_offline = true;
         assert_eq!(visible(&dir, &View::default()).len(), 4);
     }
 
@@ -524,7 +525,7 @@ mod tests {
             let mut crowd = member(10, &format!("Person {at}"), &["member"]);
             crowd.person[1] = (at / 200) as u8;
             crowd.person[2] = (at % 200) as u8;
-            dir.members.push(crowd);
+            dir.members.edit().push(crowd);
         }
         harness.state_mut().0.servers[0].dir = dir;
         harness.run_steps(3);

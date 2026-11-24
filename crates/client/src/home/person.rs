@@ -433,7 +433,7 @@ mod tests {
         server.dir.roles = vec![role("owner", 1000), role("admin", 900), role("mod", 500)];
         let mut ann = member(ANN, "Ann");
         ann.roles = case.ann_roles.iter().map(|id| id.to_string()).collect();
-        server.dir.members = vec![member(ME, "Me"), ann];
+        server.dir.members = vec![member(ME, "Me"), ann].into();
         if case.in_voice {
             let peer = Peer {
                 person: ANN,
@@ -475,7 +475,7 @@ mod tests {
             ann_roles: &[],
         });
         let mut home = fixture.state_mut().take().unwrap();
-        home.servers[0].dir.members.push(member(BOB, "Bob"));
+        home.servers[0].dir.members.edit().push(member(BOB, "Bob"));
         let (commands, sent) = tokio::sync::mpsc::unbounded_channel();
         home.servers[0].commands = commands;
         let (commands, other_sent) = tokio::sync::mpsc::unbounded_channel();
@@ -564,6 +564,7 @@ mod tests {
             harness.state_mut().as_mut().unwrap().servers[0]
                 .dir
                 .members
+                .edit()
                 .reverse();
             harness.run_steps(4);
             harness.get_by_label(t!("common.cancel")).click();
@@ -589,10 +590,11 @@ mod tests {
             let server = &mut harness.state_mut().as_mut().unwrap().servers[0];
             match change {
                 0 => server.dir.perms.kick = false,
-                1 => server.dir.members.retain(|m| m.person != ANN),
+                1 => server.dir.members.edit().retain(|m| m.person != ANN),
                 2 => server
                     .dir
                     .members
+                    .edit()
                     .iter_mut()
                     .find(|m| m.person == ANN)
                     .unwrap()
@@ -604,7 +606,7 @@ mod tests {
                     let (commands, _) = tokio::sync::mpsc::unbounded_channel();
                     server.commands = commands;
                 }
-                _ => server.dir.members.retain(|m| m.person != ME),
+                _ => server.dir.members.edit().retain(|m| m.person != ME),
             }
             harness.run_steps(4);
             assert!(harness.state().as_ref().unwrap().kick.is_none());
@@ -646,6 +648,7 @@ mod tests {
         harness.state_mut().as_mut().unwrap().servers[0]
             .dir
             .members
+            .edit()
             .reverse();
         harness.run_steps(4);
         // A positional widget can disappear when reordered; it may close, never retarget.

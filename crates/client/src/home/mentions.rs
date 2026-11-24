@@ -508,7 +508,8 @@ mod tests {
                 member(ADA, "Ada Lovelace", "admin"),
                 member(BOB, "Bob", "member"),
                 member(ME, "Jamie", "member"),
-            ],
+            ]
+            .into(),
             roles: vec![
                 role("admin", "Admins", vec![MENTION_EVERYONE.into()]),
                 role("member", "Game Night", vec![]),
@@ -567,7 +568,7 @@ mod tests {
     #[test]
     fn rendering_resolves_current_names_and_unknowns() {
         let mut dir = directory();
-        dir.members[0].name = Some("Ada Byron".into());
+        dir.members.edit()[0].name = Some("Ada Byron".into());
         dir.roles[1].name = "Friday Games".into();
         let msg = msg(
             ADA,
@@ -736,7 +737,8 @@ mod tests {
     #[test]
     fn composer_keeps_selected_ids_with_duplicate_names_and_edits() {
         let mut dir = directory();
-        dir.members[1].name = dir.members[0].name.clone();
+        let name = dir.members[0].name.clone();
+        dir.members.edit()[1].name = name;
         let mut aliases = DraftMentions::default();
         let query = CompletionQuery {
             word: "@ada",

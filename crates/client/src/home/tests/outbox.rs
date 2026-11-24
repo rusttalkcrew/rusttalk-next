@@ -17,7 +17,7 @@ fn sent_message_shows_at_once_then_fails_retries_and_is_confirmed_once() {
             let me = *home.identity.certificate.person_id();
             let server = &mut home.servers[0];
             server.dir.me = me;
-            server.dir.members[0].person = me;
+            server.dir.members.edit()[0].person = me;
             let address = server.address.clone();
             let chat = server.chats.get_mut(&PROJECTS).unwrap();
             chat.at_start = true;
