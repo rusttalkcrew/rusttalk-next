@@ -434,7 +434,11 @@ mod tests {
 
     #[tokio::test]
     async fn enforcement_takes_and_gives_back_the_muted_sources() -> anyhow::Result<()> {
-        use super::super::{Action, Participant, decide};
+        use super::super::{Action, Participant, decide, reader_identities};
+        let readers = async |app: &App| {
+            let mut db = app.db.acquire().await?;
+            reader_identities(app, &mut db, &channel(1)).await
+        };
         let dir = tempfile::tempdir()?;
         let app = server(dir.path()).await?;
         query(
@@ -463,7 +467,14 @@ mod tests {
             _ => None,
         };
         assert!(matches!(
-            decide(&app, &channel(1), false, &participant).await?,
+            decide(
+                &app,
+                &channel(1),
+                false,
+                &participant,
+                &readers(&app).await?,
+            )
+            .await?,
             Action::Keep
         ));
 
@@ -471,7 +482,17 @@ mod tests {
             .bind(person(3))
             .execute(&app.db)
             .await?;
-        let muted = sources(decide(&app, &channel(1), false, &participant).await?).unwrap();
+        let muted = sources(
+            decide(
+                &app,
+                &channel(1),
+                false,
+                &participant,
+                &readers(&app).await?,
+            )
+            .await?,
+        )
+        .unwrap();
         let mut expected = vec![TrackSource::Camera as i32, TrackSource::ScreenShare as i32];
         expected.sort_unstable();
         assert_eq!(muted, expected);
@@ -482,7 +503,17 @@ mod tests {
             .bind(person(3))
             .execute(&app.db)
             .await?;
-        let mut restored = sources(decide(&app, &channel(1), false, &participant).await?).unwrap();
+        let mut restored = sources(
+            decide(
+                &app,
+                &channel(1),
+                false,
+                &participant,
+                &readers(&app).await?,
+            )
+            .await?,
+        )
+        .unwrap();
         restored.sort_unstable();
         let mut expected: Vec<_> = all.iter().map(|s| *s as i32).collect();
         expected.sort_unstable();

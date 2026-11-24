@@ -14,7 +14,7 @@ use serde_json::json;
 use sqlx::query_scalar;
 use tokio::{sync::Notify, time::Instant};
 
-use super::{Action, DATA_PREFIX, LiveKit, decide, room_channel};
+use super::{Action, DATA_PREFIX, LiveKit, decide, reader_identities, room_channel};
 use crate::{ApiResult, App};
 
 /// How long a failed check waits before it is tried again; other work goes on meanwhile.
@@ -241,14 +241,23 @@ async fn run(app: &App, livekit: &LiveKit, job: &Job) -> ApiResult<bool> {
                 continue;
             }
         };
+        // Read once per room, not per participant: this hashes every reader device.
+        let mut readers = None;
         for participant in participants {
             let device = (participant.identity.split_once('.'))
                 .map_or(participant.identity.as_str(), |(device, _)| device);
             if only.as_ref().is_some_and(|only| !only.contains(device)) {
                 continue;
             }
+            let readers = match readers {
+                Some(ref readers) => readers,
+                None => {
+                    let mut db = app.db.acquire().await?;
+                    &*readers.insert(reader_identities(app, &mut db, channel).await?)
+                }
+            };
             // Decided right before each change, without holding a connection across it.
-            let body = match decide(app, channel, data, &participant).await? {
+            let body = match decide(app, channel, data, &participant, readers).await? {
                 Action::Keep => continue,
                 Action::Remove => {
                     let body = json!({ "room": room, "identity": participant.identity });

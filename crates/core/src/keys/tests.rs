@@ -228,3 +228,27 @@ fn dropping_an_exclusion_or_changing_the_dm_pair_invalidates_the_commitment() {
     assert!(dm.open(&receiver, &sender.certificate, &wrap).is_err());
     assert!(bound.open(&receiver, &sender.certificate, &wrap).unwrap() == key);
 }
+
+#[test]
+fn voice_notices_parse_with_and_without_a_roster() {
+    let roster = |json: &str| match serde_json::from_str(json).unwrap() {
+        Event::VoiceChanged {
+            channel,
+            people,
+            unknown,
+        } => (channel, people, unknown),
+        _ => panic!("not a voice notice"),
+    };
+    // From an older server: the client asks for the roster.
+    let old = r#"{"type":"voice_changed","channel":"c"}"#;
+    assert_eq!(roster(old), ("c".into(), None, None));
+    let new = r#"{"type":"voice_changed","channel":"c","people":["p"],"unknown":2}"#;
+    assert_eq!(roster(new), ("c".into(), Some(vec!["p".into()]), Some(2)));
+    // Without a roster the notice keeps the older shape.
+    let bare = Event::VoiceChanged {
+        channel: "c".into(),
+        people: None,
+        unknown: None,
+    };
+    assert_eq!(serde_json::to_string(&bare).unwrap(), old);
+}

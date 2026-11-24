@@ -265,14 +265,28 @@ pub async fn exercise(
             room_a.set_microphone_muted(muted);
             wait_for_microphone(&mut room_b, &a_id, muted).await?;
         }
+        let mut inline = false;
         let people = timeout(hang_guard(), async {
             loop {
                 let event = a
                     .next_event()
                     .await?
                     .context("missing voice_changed notice")?;
-                if matches!(event, Event::VoiceChanged { channel: id } if id == channel) {
-                    let roster = a.voice_participants(&voice.id).await?;
+                if let Event::VoiceChanged {
+                    channel: id,
+                    people,
+                    unknown,
+                } = event
+                    && id == channel
+                {
+                    // The notice carries the roster; asking stays the fallback.
+                    let roster = match VoiceRoster::from_notice(people.as_deref(), unknown)? {
+                        Some(roster) => {
+                            inline = true;
+                            roster
+                        }
+                        None => a.voice_participants(&voice.id).await?,
+                    };
                     if roster.people.len() == 3 {
                         return Ok::<_, anyhow::Error>(roster.people);
                     }
@@ -281,6 +295,7 @@ pub async fn exercise(
         })
         .await
         .context("waiting for voice presence")??;
+        ensure!(inline, "voice_changed notices came without a roster");
         for peer in [a.identity, &b_device, &c_device] {
             assert!(people.contains(peer.certificate.person_id()));
         }
@@ -506,7 +521,7 @@ async fn switch(
     timeout(hang_guard(), async {
         loop {
             let event = a.next_event().await?.context("event stream closed")?;
-            if matches!(event, Event::VoiceChanged { channel } if channel == left) {
+            if matches!(event, Event::VoiceChanged { channel, .. } if channel == left) {
                 return Ok::<_, anyhow::Error>(());
             }
         }

@@ -178,7 +178,7 @@ async fn stream(
             }
             let channel = match &notice {
                 Event::DmCreated { channel }
-                | Event::VoiceChanged { channel }
+                | Event::VoiceChanged { channel, .. }
                 | Event::LiveFileAccepted { channel, .. }
                 | Event::MessageCreated { channel, .. }
                 | Event::MessageDeleted { channel, .. } => Some(channel.clone()),
