@@ -5,7 +5,7 @@ use axum::{
 };
 use rusttalk_core::{
     auth::{decode, decode_bytes, encode},
-    identity::DeviceCertificate,
+    identity::{DeviceCertificate, PersonId},
     keys::{
         EnvelopeContext, Event, Excluded, KeyNeed, KeyState, Kind, MAX_INLINE_EVENT_BYTES,
         MemberDevice, MemberProfile, Scope, ScopeState, WrappedKey,
@@ -393,7 +393,8 @@ pub async fn start_channel(
         epoch: 1,
         commitment,
     };
-    start_epoch(db, actor, context, envelope, &Rotation::default()).await
+    start_epoch(db, actor, context, envelope, &Rotation::default()).await?;
+    Ok(())
 }
 
 #[derive(Default, Deserialize)]
@@ -491,7 +492,7 @@ async fn start_epoch(
     context: EnvelopeContext,
     envelope: &str,
     rotation: &Rotation,
-) -> ApiResult<()> {
+) -> ApiResult<Option<[PersonId; 2]>> {
     let EnvelopeContext {
         scope,
         epoch,
@@ -503,13 +504,17 @@ async fn start_epoch(
         return Err(conflict("epoch_changed"));
     }
     // read_epoch already checked that the actor reads this scope, so for a DM they are one of its two people.
-    let dm = scope.kind == Kind::Channel
-        && query_scalar::<_, bool>(
-            "SELECT EXISTS (SELECT 1 FROM channels WHERE id = ? AND kind = 'dm')",
-        )
-        .bind(encode(&scope.id))
-        .fetch_one(&mut *db)
-        .await?;
+    let dm: Option<(Vec<u8>, Vec<u8>)> = if scope.kind == Kind::Channel {
+        query_as("SELECT dm_first, dm_second FROM channels WHERE id = ? AND kind = 'dm'")
+            .bind(encode(&scope.id))
+            .fetch_optional(&mut *db)
+            .await?
+    } else {
+        None
+    };
+    let dm = dm
+        .map(|(first, second)| Ok::<_, ApiError>([person(first)?, person(second)?]))
+        .transpose()?;
     if rotation
         .excluded
         .contains(&rusttalk_core::keys::exclusion_id(
@@ -520,7 +525,7 @@ async fn start_epoch(
         return Err(ApiError::forbidden("device_revoked"));
     }
     let removing = check_rotation(db, scope, current, rotation).await?;
-    if !may_start_epoch(current, epoch, rotate || removing, dm) {
+    if !may_start_epoch(current, epoch, rotate || removing, dm.is_some()) {
         return Err(conflict("epoch_changed"));
     }
     if scope.kind == Kind::Space && current == 0 {
@@ -562,7 +567,14 @@ async fn start_epoch(
         .bind(id)
         .execute(db)
         .await?;
-    Ok(())
+    Ok(dm)
+}
+
+/// A stored person ID.
+fn person(bytes: Vec<u8>) -> ApiResult<PersonId> {
+    bytes
+        .try_into()
+        .map_err(|_| ApiError::internal("invalid_stored_person"))
 }
 
 /// The next epoch can start when the scope has none yet or needs a rotation. Either
@@ -601,9 +613,10 @@ pub async fn new_epoch(
         commitment: decode(&commitment)?,
     };
     let (mut tx, actor) = authenticate(&app, &headers).await?;
-    start_epoch(&mut tx, &actor, context, &envelope, &rotation).await?;
+    let dm = start_epoch(&mut tx, &actor, context, &envelope, &rotation).await?;
     tx.commit().await?;
-    app.signal(Change::Keys);
+    // A DM's new epoch only gives its two people something to wrap or read.
+    app.signal(dm.map_or(Change::Keys, Change::Access));
     Ok(StatusCode::CREATED)
 }
 

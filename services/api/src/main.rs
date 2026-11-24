@@ -84,6 +84,9 @@ enum Change {
     Session(rusttalk_core::identity::PersonId),
     /// A new key epoch or a reopened wrap, so each socket recomputes pending wraps and scopes.
     Keys,
+    /// Like `Keys`, but only these people's scopes or wraps changed (a DM's two people), so
+    /// only their sockets recheck.
+    Access([rusttalk_core::identity::PersonId; 2]),
 }
 
 impl App {

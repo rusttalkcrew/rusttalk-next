@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::{query, query_scalar};
 
-use crate::{ApiError, ApiResult, App, auth::authenticate, keys, payload};
+use crate::{ApiError, ApiResult, App, Change, auth::authenticate, keys, payload};
 
 #[derive(Deserialize)]
 pub struct NewDm {
@@ -86,6 +86,8 @@ pub async fn create(
     )
     .await?;
     tx.commit().await?;
+    // Only the two people gain a scope; the notice reaches only sockets that can read it.
+    app.signal(Change::Access(pair));
     app.notify(Event::DmCreated {
         channel: id.clone(),
     });
