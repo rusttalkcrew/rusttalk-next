@@ -15,8 +15,8 @@ use rusttalk_core::{
         Event, KeyClient, MessageError, MessageRecord,
         voice::{
             ConnectionState, DataLiveFiles, LiveDownload, LiveFileEvent, NativeAudioSource,
-            NativeVideoSource, RemoteParticipant, RoomEvent, TrackSid, TrackSource, VoiceRoom,
-            VoiceState, VoiceStatus,
+            NativeVideoSource, PendingVoice, RemoteParticipant, RoomEvent, TrackSid, TrackSource,
+            VoiceRoom, VoiceState, VoiceStatus,
         },
     },
     control::{Guest, Host},
@@ -700,23 +700,62 @@ pub(super) async fn share_screen(
     }
 }
 
-/// Connect to a voice channel and publish the microphone when allowed to talk.
-pub(super) async fn join_voice(
-    ctx: &Ctx,
-    client: &mut KeyClient<'_>,
-    channel: &Id,
-) -> Result<VoiceRoom> {
-    let room = client.join_voice(channel).await?;
-    if room.can_publish() {
-        if let Err(error) = room.publish_audio(ctx.audio.source()).await {
-            leave_room(room).await;
-            return Err(error);
+/// A voice join still connecting, off the server loop so chat and leaving keep working.
+/// Dropping it cancels the join; the task then leaves the room as soon as it connects,
+/// since a LiveKit connect dropped halfway could leave us listed in the room.
+pub(super) struct Joining {
+    pub(super) channel: Id,
+    room: tokio::sync::oneshot::Receiver<Result<VoiceRoom>>,
+    /// Call commands sent while connecting, run once the join ends, as before.
+    pub(super) deferred: Vec<Command>,
+}
+
+/// Connect and publish the microphone when allowed to talk.
+fn spawn_join(ctx: &Ctx, pending: PendingVoice, channel: Id) -> Joining {
+    let (done, room) = tokio::sync::oneshot::channel();
+    let ctx = ctx.clone();
+    tokio::spawn(async move {
+        let joined = async {
+            let room = pending.connect().await?;
+            // Cancelled meanwhile: never publish the microphone.
+            if room.can_publish() && !done.is_closed() {
+                if let Err(error) = room.publish_audio(ctx.audio.source()).await {
+                    leave_room(room).await;
+                    return Err(error);
+                }
+                room.set_microphone_muted(ctx.audio.muted() || ctx.audio.deafened());
+            }
+            Ok(room)
         }
-    } else {
-        ctx.send(Update::Failed(t!("voice.listen_only").into()));
+        .await;
+        if let Err(Ok(room)) = done.send(joined) {
+            leave_room(room).await;
+        }
+    });
+    Joining {
+        channel,
+        room,
+        deferred: Vec::new(),
     }
-    room.set_microphone_muted(ctx.audio.muted() || ctx.audio.deafened());
-    Ok(room)
+}
+
+/// The result of the join in `joining`, once it is done.
+pub(super) async fn next_join(joining: &mut Option<Joining>) -> Result<VoiceRoom> {
+    match joining {
+        Some(joining) => (&mut joining.room)
+            .await
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("voice join task ended"))),
+        None => std::future::pending().await,
+    }
+}
+
+/// Commands that need the call, so they wait while it is still connecting.
+pub(super) fn waits_for_call(command: &Command) -> bool {
+    !matches!(command, Command::LeaveVoice) && voice_only(command)
+        || matches!(
+            command,
+            Command::ShareApp(_) | Command::ShareScreen(..) | Command::ShareCamera(..)
+        )
 }
 
 /// Replace only the transport, retaining the user's current capture choices.
@@ -852,7 +891,11 @@ pub(super) fn leave_voice(ctx: &Ctx, url: &Url, client: &KeyClient<'_>, state: &
 /// Leave a call: stop showing its videos, close a system picker that is still open,
 /// and close the room. Returns the call's channel.
 pub(super) fn close(ctx: &Ctx, state: &mut State) -> Option<Id> {
-    let mut live = state.voice.take()?;
+    // Dropping a join still connecting cancels it.
+    let joining = state.joining.take().map(|joining| joining.channel);
+    let Some(mut live) = state.voice.take() else {
+        return joining;
+    };
     control::leave(&mut live);
     left_room(state, &live.channel, ctx.identity.certificate.person_id());
     // The call's live files go with it.
@@ -1862,7 +1905,28 @@ pub(super) async fn start_call(
     channel: Id,
 ) -> Result<()> {
     leave_voice(ctx, url, client, state);
-    let room = match join_voice(ctx, client, &channel).await {
+    match client.prepare_voice(&channel).await {
+        Ok(pending) => {
+            state.joining = Some(spawn_join(ctx, pending, channel));
+            Ok(())
+        }
+        Err(error) => {
+            ctx.send(Update::Call(url.clone(), channel, None));
+            Err(error)
+        }
+    }
+}
+
+/// The join `start_call` began is done: show the call, or that it failed.
+pub(super) async fn finish_call(
+    ctx: &Ctx,
+    url: &Url,
+    client: &KeyClient<'_>,
+    state: &mut State,
+    channel: Id,
+    joined: Result<VoiceRoom>,
+) -> Result<()> {
+    let room = match joined {
         Ok(room) => room,
         Err(error) => {
             ctx.send(Update::Call(url.clone(), channel, None));
@@ -1871,6 +1935,11 @@ pub(super) async fn start_call(
     };
     tracing::info!(server = %fingerprint(&state.server_id), "joined voice");
     let listening = !room.can_publish();
+    if listening {
+        ctx.send(Update::Failed(t!("voice.listen_only").into()));
+    }
+    // Mute or deafen may have changed while publishing.
+    room.set_microphone_muted(ctx.audio.muted() || ctx.audio.deafened());
     let no_video = !room.can_use_camera();
     state.voice = Some(Live {
         recovery: None,
@@ -1915,6 +1984,8 @@ pub(super) async fn start_call(
     if no_video {
         ctx.send(Update::NoVideo(url.clone(), channel));
     }
+    // Key events handled while connecting may have rotated the channel key since the token.
+    sync_voice_key(ctx, client, state);
     send_room(ctx, url, client, state, channel);
     sync_voice_status(ctx, state).await;
     Ok(())
@@ -2129,6 +2200,23 @@ mod tests {
                 .map(|seconds| seconds.map(Duration::from_secs))
         );
         assert_eq!(recovery_delay(u32::MAX), None);
+    }
+
+    #[tokio::test]
+    async fn a_connecting_join_holds_call_commands_and_reports_a_lost_task() {
+        assert!(waits_for_call(&Command::StopScreen));
+        assert!(waits_for_call(&Command::ShareApp(share::system())));
+        assert!(!waits_for_call(&Command::LeaveVoice));
+        assert!(!waits_for_call(&Command::JoinVoice([2; 32])));
+
+        let (done, room) = tokio::sync::oneshot::channel();
+        let mut joining = Some(Joining {
+            channel: [1; 32],
+            room,
+            deferred: Vec::new(),
+        });
+        drop(done);
+        assert!(next_join(&mut joining).await.is_err());
     }
 
     #[test]
