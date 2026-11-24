@@ -512,6 +512,8 @@ pub struct Members {
     list: Vec<Member>,
     /// Each person's first row, as a scan would find it.
     index: HashMap<Id, usize>,
+    /// Unique to this content: new on every change, so views can cache what they derive.
+    generation: u64,
 }
 
 impl Members {
@@ -524,7 +526,14 @@ impl Members {
         MembersEdit(self)
     }
 
+    /// Changes whenever the list may have changed; equal generations mean equal lists.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
     fn reindex(&mut self) {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        self.generation = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.index.clear();
         for (at, member) in self.list.iter().enumerate() {
             self.index.entry(member.person).or_insert(at);
@@ -537,6 +546,7 @@ impl From<Vec<Member>> for Members {
         let mut members = Members {
             list,
             index: HashMap::new(),
+            generation: 0,
         };
         members.reindex();
         members

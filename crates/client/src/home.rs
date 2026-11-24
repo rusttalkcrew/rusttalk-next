@@ -3351,38 +3351,94 @@ fn member_face_speaking(
     response
 }
 
+/// The member list's grouping: who is listed, under which heading, in display order.
+/// Kept between frames and rebuilt only when the members, the separately listed roles
+/// or who this is change, so a big server isn't regrouped every frame.
+struct MemberGroups {
+    generation: u64,
+    me: Id,
+    separate: Vec<String>,
+    listed: usize,
+    /// Each heading's role (`None` for everyone else) and its members' places in the list.
+    groups: Vec<(Option<String>, Vec<usize>)>,
+}
+
+impl MemberGroups {
+    fn of(dir: &Directory) -> Self {
+        let separate: Vec<String> = (dir.roles.iter())
+            .filter(|role| role.separate)
+            .map(|role| role.id.clone())
+            .collect();
+        // Roles shown separately get their own heading, highest first; everyone else after.
+        let mut groups: Vec<(Option<String>, Vec<usize>)> = (separate.iter())
+            .map(|id| (Some(id.clone()), Vec::new()))
+            .chain([(None, Vec::new())])
+            .collect();
+        let mut listed = 0;
+        for (at, member) in dir.members.iter().enumerate() {
+            // You always see yourself, also while invisible.
+            if !member.listed() && member.person != dir.me {
+                continue;
+            }
+            listed += 1;
+            let group = dir
+                .heading_role(&member.roles)
+                .and_then(|role| separate.iter().position(|id| *id == role.id))
+                .unwrap_or(separate.len());
+            groups[group].1.push(at);
+        }
+        MemberGroups {
+            generation: dir.members.generation(),
+            me: dir.me,
+            separate,
+            listed,
+            groups,
+        }
+    }
+
+    fn current(&self, dir: &Directory) -> bool {
+        self.generation == dir.members.generation()
+            && self.me == dir.me
+            && (self.separate.iter()).eq((dir.roles.iter()).filter(|r| r.separate).map(|r| &r.id))
+    }
+
+    /// The cached grouping for `dir`, regrouped first if it changed.
+    fn cached(ctx: &egui::Context, dir: &Directory) -> Arc<Self> {
+        let id = UiId::unique("member groups");
+        let cached = ctx.data(|d| d.get_temp::<Arc<Self>>(id));
+        match cached {
+            Some(groups) if groups.current(dir) => groups,
+            _ => {
+                let groups = Arc::new(Self::of(dir));
+                ctx.data_mut(|d| d.insert_temp(id, groups.clone()));
+                groups
+            }
+        }
+    }
+}
+
 fn member_list(ui: &mut Ui, home: &mut Home, index: usize) {
+    const ROW: f32 = 40.0;
     let server = &home.servers[index];
-    // You always see yourself, also while invisible.
-    let listed: Vec<&Member> = (server.dir.members.iter())
-        .filter(|m| m.listed() || m.person == server.dir.me)
-        .collect();
+    let dir = &server.dir;
+    let grouped = MemberGroups::cached(ui.ctx(), dir);
     ui.add_space(6.0);
     ui.horizontal(|ui| {
         ui.add_space(ui::SPACE_XS);
-        ui::caption_label(ui, &t!("home.members_count", count = listed.len()));
+        ui::caption_label(ui, &t!("home.members_count", count = grouped.listed));
     });
     let mut pick = None;
-    // Roles shown separately get their own heading, highest first; everyone else after.
-    let dir = &server.dir;
-    let mut groups: Vec<(Option<&str>, Vec<&Member>)> = (dir.roles.iter())
-        .filter(|role| role.separate)
-        .map(|role| (Some(role.id.as_str()), Vec::new()))
-        .collect();
-    groups.push((None, Vec::new()));
-    for member in listed {
-        let heading = dir.heading_role(&member.roles).map(|role| role.id.as_str());
-        if let Some((_, list)) = groups.iter_mut().find(|(id, _)| *id == heading) {
-            list.push(member);
-        }
-    }
-    let headings = groups.len() > 1;
-    ScrollArea::vertical().show(ui, |ui| {
+    let headings = grouped.groups.len() > 1;
+    ScrollArea::vertical().show_viewport(ui, |ui, viewport| {
         ui.spacing_mut().item_spacing.y = 2.0;
-        for (id, list) in groups.iter().filter(|(_, list)| !list.is_empty()) {
+        let origin = ui.max_rect().top();
+        // Rows are all the same height, so only those in view are built; the rest is space.
+        let step = ROW + ui.spacing().item_spacing.y;
+        for (id, list) in grouped.groups.iter().filter(|(_, list)| !list.is_empty()) {
             if headings {
                 let caption = id
-                    .and_then(|id| dir.roles.iter().find(|role| role.id == id))
+                    .as_ref()
+                    .and_then(|id| dir.roles.iter().find(|role| role.id == *id))
                     .map_or_else(
                         || t!("home.members_count", count = list.len()),
                         |role| t!("home.role_count", name = role.name, count = list.len()),
@@ -3392,15 +3448,20 @@ fn member_list(ui: &mut Ui, home: &mut Home, index: usize) {
                     ui::section(ui, &caption);
                 });
             }
-            for member in list.iter().copied() {
+            let top = ui.cursor().top() - origin;
+            let first = (((viewport.min.y - top) / step).floor().max(0.0) as usize).min(list.len());
+            let last =
+                (((viewport.max.y - top) / step).ceil().max(0.0) as usize).clamp(first, list.len());
+            ui.add_space(first as f32 * step);
+            for member in list[first..last].iter().map(|&at| &dir.members[at]) {
                 let name = member.display_name();
-                let me = member.person == server.dir.me;
+                let me = member.person == dir.me;
                 let label = if me {
                     t!("home.name_you", name = name)
                 } else {
                     name.clone()
                 };
-                let row = ui::row_button(ui, 40.0, &label, |ui| {
+                let row = ui::row_button(ui, ROW, &label, |ui| {
                     member_face(ui, Some(member), &member.person, &name, 30.0, true);
                     let text = if member.presence == Presence::Offline {
                         emoji::text(&label).color(ui::colors(ui).muted)
@@ -3416,6 +3477,7 @@ fn member_list(ui: &mut Ui, home: &mut Home, index: usize) {
                     pick = Some((member.person, picked));
                 }
             }
+            ui.add_space((list.len() - last) as f32 * step);
         }
     });
     if let Some((person, picked)) = pick {
@@ -7032,6 +7094,7 @@ mod tests {
     mod avatars;
     mod emoji;
     mod image_reload;
+    mod member_list;
     mod outbox;
     mod rail;
     mod streams;
