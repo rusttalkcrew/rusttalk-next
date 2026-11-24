@@ -182,7 +182,7 @@ impl Drop for Socket {
 }
 
 fn changed(app: &App, person_id: &str, status: Presence) {
-    let _ = app.changes.send(Change::Update(Update::Presence(
+    let _ = app.changes.send(Change::update(Update::Presence(
         PresenceEvent::PresenceChanged {
             person_id: person_id.to_owned(),
             status,

@@ -73,7 +73,8 @@ struct App {
 /// What event sockets hear: an update for clients, or a server-side change to recheck.
 #[derive(Clone)]
 enum Change {
-    Update(rusttalk_core::presence::Update),
+    /// Shared, so each update is cloned and encoded once however many sockets listen.
+    Update(Arc<events::Notice>),
     /// Sessions were replaced, so each socket rechecks only its own session.
     Session,
     /// A new key epoch, so each socket also recomputes pending wraps and scopes.
@@ -84,7 +85,7 @@ impl App {
     fn notify(&self, event: Event) {
         let _ = self
             .changes
-            .send(Change::Update(rusttalk_core::presence::Update::Event(
+            .send(Change::update(rusttalk_core::presence::Update::Event(
                 event,
             )));
     }
@@ -592,9 +593,9 @@ mod tests {
 
         timeout(Duration::from_secs(30), async {
             loop {
-                if let Change::Update(rusttalk_core::presence::Update::Event(
-                    Event::MemberChanged { .. },
-                )) = changes.recv().await?
+                if let Change::Update(notice) = changes.recv().await?
+                    && let rusttalk_core::presence::Update::Event(Event::MemberChanged { .. }) =
+                        notice.update
                 {
                     return anyhow::Ok(());
                 }

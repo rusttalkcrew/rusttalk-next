@@ -1,9 +1,9 @@
-use std::{collections::HashSet, time::Duration};
+use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use axum::{
     extract::{
         State, WebSocketUpgrade,
-        ws::{CloseFrame, Message, WebSocket, close_code},
+        ws::{CloseFrame, Message, Utf8Bytes, WebSocket, close_code},
     },
     http::{HeaderMap, Uri},
     response::Response,
@@ -26,6 +26,26 @@ use crate::{
     keys, presence,
     store::now,
 };
+
+/// A client update and its JSON, encoded once when broadcast and shared by every socket.
+pub struct Notice {
+    pub update: Update,
+    /// `None` only if encoding failed; each socket then closes as it did before.
+    text: Option<Utf8Bytes>,
+}
+
+impl Change {
+    pub fn update(update: Update) -> Self {
+        let text = match serde_json::to_string(&update) {
+            Ok(text) => Some(text.into()),
+            Err(error) => {
+                tracing::error!(%error, "event encoding failed");
+                None
+            }
+        };
+        Change::Update(Arc::new(Notice { update, text }))
+    }
+}
 
 pub async fn upgrade(
     State(app): State<App>,
@@ -149,8 +169,8 @@ async fn stream(
         }
         let device = rusttalk_core::auth::encode(&actor.device);
         for update in notices.drain(..) {
-            let Update::Event(notice) = update else {
-                send(socket, update).await?;
+            let Update::Event(notice) = &update.update else {
+                forward(socket, &update).await?;
                 continue;
             };
             if let Event::KeysNeeded(need) = &notice {
@@ -188,7 +208,7 @@ async fn stream(
                 _ => None,
             };
             if channel.is_none_or(|id| readable.contains(&id)) {
-                send(socket, Update::Event(notice)).await?;
+                forward(socket, &update).await?;
             }
         }
         if let Some((next_pending, next_rotations)) = next {
@@ -237,12 +257,12 @@ enum Recheck {
 }
 
 /// Queue a client notice and report what it can change: nothing, sessions, or access and keys.
-fn queue(notices: &mut Vec<Update>, change: Change) -> Recheck {
+fn queue(notices: &mut Vec<Arc<Notice>>, change: Change) -> Recheck {
     match change {
         Change::Session => Recheck::Session,
         Change::Keys => Recheck::Access,
         Change::Update(update) => {
-            let recheck = match &update {
+            let recheck = match &update.update {
                 Update::Presence(_)
                 | Update::Event(
                     Event::MessageCreated { .. }
@@ -259,15 +279,23 @@ fn queue(notices: &mut Vec<Update>, change: Change) -> Recheck {
     }
 }
 
+/// Send a notice built for this socket alone.
 async fn send(socket: &mut WebSocket, notice: Update) -> ApiResult<()> {
     let text = serde_json::to_string(&notice).map_err(|_| ApiError::internal("event_encoding"))?;
-    timeout(
-        Duration::from_secs(5),
-        socket.send(Message::Text(text.into())),
-    )
-    .await
-    .map_err(|_| ApiError::internal("event_timeout"))?
-    .map_err(|_| ApiError::internal("socket_io_error"))
+    send_text(socket, text.into()).await
+}
+
+/// Send a broadcast notice's shared JSON, the same bytes `send` would encode.
+async fn forward(socket: &mut WebSocket, notice: &Notice) -> ApiResult<()> {
+    let text = (notice.text.clone()).ok_or_else(|| ApiError::internal("event_encoding"))?;
+    send_text(socket, text).await
+}
+
+async fn send_text(socket: &mut WebSocket, text: Utf8Bytes) -> ApiResult<()> {
+    timeout(Duration::from_secs(5), socket.send(Message::Text(text)))
+        .await
+        .map_err(|_| ApiError::internal("event_timeout"))?
+        .map_err(|_| ApiError::internal("socket_io_error"))
 }
 
 /// The session's current expiry, or why this socket must close. The bearer changes on
@@ -319,6 +347,92 @@ mod tests {
     use super::*;
 
     #[test]
+    fn shared_text_matches_per_socket_encoding() {
+        use rusttalk_core::{
+            messages::LiveFileAcceptance,
+            presence::{Presence, PresenceEvent},
+        };
+        let scope = Scope {
+            kind: Kind::Channel,
+            id: [7; 32],
+        };
+        let events = [
+            Event::KeysNeeded(KeyNeed {
+                scope,
+                epoch: 3,
+                device: "d".into(),
+            }),
+            Event::RotateNeeded { scope },
+            Event::MemberChanged {
+                person: "p".into(),
+                device: Some("d".into()),
+            },
+            Event::ChannelChanged,
+            Event::VoiceChanged {
+                channel: "c".into(),
+            },
+            Event::VoiceMoved {
+                devices: vec!["d".into()],
+                from: "a".into(),
+                to: "b".into(),
+            },
+            Event::DmCreated {
+                channel: "c".into(),
+            },
+            Event::MessageCreated {
+                channel: "c".into(),
+                id: "m".into(),
+            },
+            Event::MessageDeleted {
+                channel: "c".into(),
+                id: "m".into(),
+            },
+            Event::LiveFileAccepted {
+                channel: "c".into(),
+                device: "d".into(),
+                acceptance: LiveFileAcceptance {
+                    recipient: "r".into(),
+                    transfer: "t".into(),
+                    nonce: "n".into(),
+                    cancel: false,
+                    signature: "s".into(),
+                },
+                data: true,
+            },
+            Event::Resync,
+        ];
+        // Fails to build when an event kind is added, so the list above stays complete.
+        for event in &events {
+            match event {
+                Event::KeysNeeded(_)
+                | Event::RotateNeeded { .. }
+                | Event::MemberChanged { .. }
+                | Event::ChannelChanged
+                | Event::VoiceChanged { .. }
+                | Event::VoiceMoved { .. }
+                | Event::DmCreated { .. }
+                | Event::MessageCreated { .. }
+                | Event::MessageDeleted { .. }
+                | Event::LiveFileAccepted { .. }
+                | Event::Resync => {}
+            }
+        }
+        let presence = Update::Presence(PresenceEvent::PresenceChanged {
+            person_id: "p".into(),
+            status: Presence::Away,
+        });
+        let updates = events.into_iter().map(Update::Event).chain([presence]);
+        for update in updates {
+            // What `send` encoded for every socket before.
+            let per_socket = serde_json::to_string(&update).unwrap();
+            let Change::Update(notice) = Change::update(update) else {
+                unreachable!()
+            };
+            assert_eq!(notice.text.as_deref(), Some(per_socket.as_str()));
+        }
+    }
+
+    #[test]
     fn sign_ins_recheck_only_sessions() {
         let mut notices = Vec::new();
         assert!(queue(&mut notices, Change::Session) == Recheck::Session);
@@ -327,16 +441,16 @@ mod tests {
             channel: "c".into(),
             id: "m".into(),
         };
-        assert!(queue(&mut notices, Change::Update(Update::Event(message))) == Recheck::None);
+        assert!(queue(&mut notices, Change::update(Update::Event(message))) == Recheck::None);
         let member = Event::MemberChanged {
             person: "p".into(),
             device: None,
         };
-        assert!(queue(&mut notices, Change::Update(Update::Event(member))) == Recheck::Access);
+        assert!(queue(&mut notices, Change::update(Update::Event(member))) == Recheck::Access);
         assert!(
             queue(
                 &mut notices,
-                Change::Update(Update::Event(Event::ChannelChanged))
+                Change::update(Update::Event(Event::ChannelChanged))
             ) == Recheck::Access
         );
         // Only client updates are forwarded.
