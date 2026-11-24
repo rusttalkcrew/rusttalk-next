@@ -2424,8 +2424,9 @@ async fn on_event(
         let records = rusttalk_core::client::revocations::Revocations::in_profile(&ctx.data);
         state.revalidate(ctx, url, &records, Some(client));
     }
+    // Sync in the background: awaiting it would stall this server's events on every server.
     if client.take_own_revocations_changed() {
-        sync(ctx, Vec::new()).await;
+        sync_later(ctx);
     }
     match event {
         Event::MessageCreated {
@@ -2494,8 +2495,9 @@ async fn on_event(
             ..
         } => {
             // Another device may have changed the name, bio or picture it syncs.
+            // The notice carries the profile, so the directory needs no finished sync.
             if person == &encode(ctx.identity.certificate.person_id()) {
-                sync(ctx, Vec::new()).await;
+                sync_later(ctx);
             }
             directory::profile(ctx, url, client, state, person, profile).await?;
         }
