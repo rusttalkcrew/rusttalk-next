@@ -145,10 +145,11 @@ file ciphertext, including expired files that cleanup has yet to remove.
 
 A role has `{id, kind, rank, permissions, name_ct}`. A member's permissions
 are the union of their role flags, and their highest rank is used for
-hierarchy. Owner (1000) and Admin (100) have all fifteen flags. Moderator (50)
+hierarchy. Owner (1000) and Admin (100) have all sixteen flags. Moderator (50)
 has `kick`, `ban`, `delete_messages`, `mute_members`, `move_members`, `suggest_events`,
-`create_events` and `manage_events`. Member (0) has `suggest_events`
-and starts as the default. The other flags are `invite`, `manage_roles`,
+`create_events`, `manage_events` and `start_focus`. Member (0) has `suggest_events`
+and `start_focus` and starts as the default. Every new role gets `start_focus`
+when its creator has it. The other flags are `invite`, `manage_roles`,
 `view_audit_log`, `manage_channels`, `manage_server`, `mention_everyone`, and
 `manage_emoji`. Built-in role IDs match their kinds. Custom roles have opaque IDs and ranks
 from 1 to 999, strictly below their creator. They can only receive flags that the creator
@@ -216,7 +217,7 @@ errors may have an empty body. The API logs a request ID, status and reason.
 
 | Status | Codes |
 | --- | --- |
-| 400 | `invalid_json`, `invalid_encoding`, `invalid_query`, `invalid_forwarded_ip`, `invalid_revocation`, `invalid_invite_limits`, `invalid_role_rank`, `invalid_role_count`, `role_id_required`, `already_owner`, `unexpected_invite`, `invite_name_required`, `invalid_member_cap`, `invalid_certificate`, `invalid_metadata`, `invalid_envelope`, `invalid_channel_flags`, `invalid_audio_kbps`, `invalid_member_limit`, `invalid_order`, `invalid_dm_peer`, `not_a_voice_channel`, `invalid_message`, `invalid_keep`, `invalid_file_body`, `invalid_file_acceptance`, `invalid_event_query`, `invalid_sync_blob`, `invalid_event`, `invalid_answer`, `invalid_event_time`, `invalid_listing`, `invalid_listing_settings`, `invalid_index_url`, `invalid_index_tls_fingerprint` |
+| 400 | `invalid_json`, `invalid_encoding`, `invalid_query`, `invalid_forwarded_ip`, `invalid_revocation`, `invalid_invite_limits`, `invalid_role_rank`, `invalid_role_count`, `role_id_required`, `already_owner`, `unexpected_invite`, `invite_name_required`, `invalid_member_cap`, `invalid_certificate`, `invalid_metadata`, `invalid_envelope`, `invalid_channel_flags`, `invalid_audio_kbps`, `invalid_member_limit`, `invalid_focus_time`, `invalid_order`, `invalid_dm_peer`, `not_a_voice_channel`, `invalid_message`, `invalid_keep`, `invalid_file_body`, `invalid_file_acceptance`, `invalid_event_query`, `invalid_sync_blob`, `invalid_event`, `invalid_answer`, `invalid_event_time`, `invalid_listing`, `invalid_listing_settings`, `invalid_index_url`, `invalid_index_tls_fingerprint` |
 | 401 | `invalid_challenge`, `invalid_certificate`, `invalid_device_signature`, `invalid_session`, `token_expired`, `invalid_livekit_webhook` |
 | 403 | `invite_required`, `invalid_invite`, `person_banned`, `ip_banned`, `device_revoked`, `device_certificate_required`, `permission_denied`, `role_hierarchy`, `cannot_grant_permission`, `built_in_role`, `owner_required`, `open_joining_disabled`, `scope_read_denied`, `recipient_read_denied`, `channel_read_denied`, `channel_write_denied`, `live_file_peer_not_in_room`, `voice_channel_full` |
 | 404 | `invite_not_found`, `member_not_found`, `ban_not_found`, `role_not_found`, `category_not_found`, `channel_not_found`, `message_not_found`, `message_device_not_found`, `file_not_found`, `avatar_not_found`, `icon_not_found`, `emoji_not_found`, `pack_not_found`, `event_not_found` |
@@ -452,6 +453,7 @@ any category; the body may be up to 64 KiB. A repeated ID returns
 | PUT `/v1/channels/{id}` | `{category_id, position, name_ct, topic_ct?, audio_kbps?, member_limit?}` | `manage_channels`. 204. `audio_kbps` (voice channels only, 8 to 128, default 64) is the Opus bitrate everyone publishing in the call uses; when absent it stays as it was. The catalog and channel list return it as `audio_kbps` for voice channels, and `POST /v1/voice/{channel}/token` returns it too. A change sends `channel_changed`, and clients in the call republish their audio at the new bitrate. `member_limit` (voice channels only, 0 to 99, 0 = no limit, default 0) is the most people in the call at once; when absent it stays as it was. The catalog and channel list return it as `member_limit` for voice channels that have one |
 | DELETE `/v1/channels/{id}` | Empty | `manage_channels`. 204 |
 | PUT `/v1/channels/{id}/permissions/{role}` | `{flags}` | `manage_channels` and a lower-ranked target role. The Owner can also change the Owner role. 204 |
+| PUT `/v1/channels/{id}/focus` | `{seconds}` | `start_focus` and read access to a voice channel (other channels it can read: `400 not_a_voice_channel`). 204. Turns focus mode on until `seconds` (1 to 86,400) from now, or off with 0; anything else is `400 invalid_focus_time`. The catalog and channel list return the end as `focus_until` (Unix seconds) while it is in the future. A change sends `channel_changed`; the end itself sends nothing, clients compare it with their clock |
 | GET `/v1/categories` | Empty | `manage_channels`. 200, category list |
 | POST `/v1/categories` | `{id, position, name_ct}` | `manage_channels`. 201 |
 | PUT `/v1/categories/{id}` | `{position, name_ct}` | `manage_channels`. 204 |

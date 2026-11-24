@@ -79,7 +79,8 @@ async fn upgrade_preserves_only_existing_role_operations() -> anyhow::Result<()>
     let app = testing::app(dir.path(), 1).await?;
     let db = &app.db;
     let permissions: std::collections::HashMap<String, i64> =
-        query_as::<_, (String, i64)>("SELECT id, permissions FROM roles")
+        // Without `start_focus` (32768), which a later migration gives every role.
+        query_as::<_, (String, i64)>("SELECT id, permissions & ~32768 FROM roles")
             .fetch_all(db)
             .await?
             .into_iter()

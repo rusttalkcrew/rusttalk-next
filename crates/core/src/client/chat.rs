@@ -100,6 +100,9 @@ pub struct Channel {
     /// Voice channels only: the most people in the call; missing means no limit.
     #[serde(default)]
     pub member_limit: Option<u32>,
+    /// While focus mode is on: when it ends, in unix seconds (server time).
+    #[serde(default)]
+    pub focus_until: Option<i64>,
     pub flags: Vec<RoleFlags>,
 }
 

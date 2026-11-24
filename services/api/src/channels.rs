@@ -15,7 +15,7 @@ use crate::{
     auth::{Actor, authenticate, authenticate_read},
     keys, metadata, payload,
     roles::{self, Permission},
-    store::audit,
+    store::{self, audit},
 };
 
 #[derive(Deserialize)]
@@ -69,6 +69,7 @@ struct ChannelRow {
     peer: Option<Vec<u8>>,
     audio_kbps: i64,
     member_limit: i64,
+    focus_until: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -85,6 +86,9 @@ pub struct Channel {
     audio_kbps: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     member_limit: Option<i64>,
+    /// While focus mode is on: when it ends, in unix seconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    focus_until: Option<i64>,
     flags: Vec<RoleFlags>,
 }
 
@@ -172,13 +176,14 @@ async fn channels(db: &mut SqliteConnection, person: Option<&[u8]>) -> ApiResult
     let rows: Vec<ChannelRow> = query_as(
         "SELECT id, CASE WHEN page THEN 'page' WHEN forum THEN 'forum' ELSE kind END AS kind, category_id, position, name_ct, topic_ct,
                 CASE WHEN dm_first = ? THEN dm_second ELSE dm_first END AS peer,
-                audio_kbps, member_limit
+                audio_kbps, member_limit, CASE WHEN focus_until > ? THEN focus_until END AS focus_until
          FROM channels c
          WHERE (? IS NULL AND kind <> 'dm') OR EXISTS
              (SELECT 1 FROM channel_readers r WHERE r.channel_id = c.id AND r.person_id = ?)
          ORDER BY position, id",
     )
     .bind(person)
+    .bind(store::now()?)
     .bind(person)
     .bind(person)
     .fetch_all(&mut *db)
@@ -204,6 +209,7 @@ async fn channels(db: &mut SqliteConnection, person: Option<&[u8]>) -> ApiResult
             topic_ct: metadata::encoded(row.topic_ct),
             audio_kbps,
             member_limit,
+            focus_until: row.focus_until,
             flags,
         });
     }
@@ -497,6 +503,68 @@ pub async fn permissions(
     .await?;
     tx.commit().await?;
     crate::voice::enforce(&app, Some(id));
+    app.notify(Event::ChannelChanged);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Focus mode lasts at most a day.
+const FOCUS_SECONDS: i64 = 24 * 60 * 60;
+
+#[derive(Deserialize)]
+pub struct FocusFields {
+    /// How long from now focus mode lasts; 0 ends it.
+    seconds: i64,
+}
+
+/// Start or end focus mode in a channel this person can read.
+pub async fn focus(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: Result<Json<FocusFields>, JsonRejection>,
+) -> ApiResult<StatusCode> {
+    decode::<32>(&id)?;
+    let seconds = payload(body)?.seconds;
+    if !(0..=FOCUS_SECONDS).contains(&seconds) {
+        return Err(ApiError::bad_request("invalid_focus_time"));
+    }
+    let (mut tx, actor) = authenticate(&app, &headers).await?;
+    roles::authority(&mut tx, &actor.person)
+        .await?
+        .require(Permission::StartFocus)?;
+    let until = (seconds > 0).then_some(actor.at + seconds);
+    let changed = query(
+        "UPDATE channels SET focus_until = ? WHERE id = ? AND kind = 'voice' AND EXISTS
+             (SELECT 1 FROM channel_readers r WHERE r.channel_id = channels.id AND r.person_id = ?)",
+    )
+    .bind(until)
+    .bind(&id)
+    .bind(actor.person.as_slice())
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if changed == 0 {
+        // Only voice channels have focus mode; others they can read get a clear refusal.
+        let readable: bool = query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM channel_readers WHERE channel_id = ? AND person_id = ?)",
+        )
+        .bind(&id)
+        .bind(actor.person.as_slice())
+        .fetch_one(&mut *tx)
+        .await?;
+        return Err(if readable {
+            ApiError::bad_request("not_a_voice_channel")
+        } else {
+            ApiError::not_found("channel_not_found")
+        });
+    }
+    let action = if until.is_some() {
+        "focus_started"
+    } else {
+        "focus_ended"
+    };
+    audit(&mut tx, &actor.person, action, None, Some(&id), actor.at).await?;
+    tx.commit().await?;
     app.notify(Event::ChannelChanged);
     Ok(StatusCode::NO_CONTENT)
 }
@@ -977,6 +1045,116 @@ mod tests {
             ]
         );
         drop(tx);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn focus_needs_its_permission_and_the_channel_and_lasts_up_to_a_day() -> anyhow::Result<()>
+    {
+        let dir = tempfile::tempdir()?;
+        let db = store::open(dir.path()).await?;
+        let app = App {
+            emoji: crate::emoji::Emoji::open(dir.path(), &db).await?.into(),
+            files: crate::files::Files::open(dir.path(), &db).await?.into(),
+            db,
+            key: std::sync::Arc::new(ed25519_dalek::SigningKey::from_bytes(&[7; 32])),
+            changes: tokio::sync::broadcast::channel(128).0,
+            presence: Default::default(),
+            voice: None,
+            session_ttl: 3600,
+            listing_changed: tokio::sync::watch::channel(()).0,
+        };
+        // Person 1 is a Member; person 2 has no role and so no `start_focus`.
+        let person = |byte: u8| vec![byte; 32];
+        query("INSERT INTO members (person_id, joined_at) VALUES (?, 0), (?, 0)")
+            .bind(person(1))
+            .bind(person(2))
+            .execute(&app.db)
+            .await?;
+        query("INSERT INTO member_roles (person_id, role_id) VALUES (?, 'member')")
+            .bind(person(1))
+            .execute(&app.db)
+            .await?;
+        for byte in [1_u8, 2] {
+            query("INSERT INTO sessions (token_hash, person_id, device_id, ip, expires_at, session_id) VALUES (?, ?, ?, '192.0.2.1', ?, ?)")
+                .bind(store::hash(&[byte; 32]).as_slice()).bind(person(byte)).bind(vec![byte])
+                .bind(i64::MAX).bind(vec![byte]).execute(&app.db).await?;
+        }
+        query("INSERT INTO categories (id, position, name_ct) VALUES (?, 0, x'00')")
+            .bind(id(10))
+            .execute(&app.db)
+            .await?;
+        // Members read voice channel 20 and text channel 22, but not voice channel 21.
+        for (channel, kind) in [(20_u8, "voice"), (21, "voice"), (22, "text")] {
+            query("INSERT INTO channels (id, kind, category_id, position, name_ct) VALUES (?, ?, ?, 0, x'00')")
+                .bind(id(channel)).bind(kind).bind(id(10)).execute(&app.db).await?;
+        }
+        for channel in [20_u8, 22] {
+            query("INSERT INTO channel_permissions (channel_id, role_id, flags) VALUES (?, 'member', 15)")
+                .bind(id(channel)).execute(&app.db).await?;
+        }
+        let as_person = |person: u8| {
+            let mut headers = HeaderMap::new();
+            let token = format!("Bearer {}", encode(&[person; 32]));
+            headers.insert("authorization", token.parse().unwrap());
+            headers.insert("x-forwarded-for", "192.0.2.1".parse().unwrap());
+            headers
+        };
+        let set = |person: u8, channel: u8, seconds: i64| {
+            focus(
+                State(app.clone()),
+                as_person(person),
+                Path(id(channel)),
+                Ok(Json(FocusFields { seconds })),
+            )
+        };
+        let refused = |result: ApiResult<StatusCode>| result.unwrap_err().code;
+        let until = || async {
+            let mut db = app.db.acquire().await?;
+            let shown = channels(&mut db, Some(&person(1))).await?;
+            anyhow::Ok(
+                shown
+                    .into_iter()
+                    .find(|c| c.id == id(20))
+                    .unwrap()
+                    .focus_until,
+            )
+        };
+
+        assert_eq!(refused(set(2, 20, 600).await), "permission_denied");
+        assert_eq!(refused(set(1, 21, 600).await), "channel_not_found");
+        assert_eq!(refused(set(1, 22, 600).await), "not_a_voice_channel");
+        for seconds in [-1, FOCUS_SECONDS + 1] {
+            assert_eq!(refused(set(1, 20, seconds).await), "invalid_focus_time");
+        }
+        let mut events = app.changes.subscribe();
+        assert_eq!(
+            set(1, 20, FOCUS_SECONDS).await.unwrap(),
+            StatusCode::NO_CONTENT
+        );
+        let end = until().await?.expect("focus mode is on");
+        assert!((end - store::now()? - FOCUS_SECONDS).abs() <= 5);
+        assert!(matches!(
+            events.try_recv(),
+            Ok(Change::Update(Update::Event(Event::ChannelChanged)))
+        ));
+        // Once the end has passed, the catalog no longer shows it.
+        query("UPDATE channels SET focus_until = ? WHERE id = ?")
+            .bind(store::now()? - 1)
+            .bind(id(20))
+            .execute(&app.db)
+            .await?;
+        assert_eq!(until().await?, None);
+        assert_eq!(set(1, 20, 600).await.unwrap(), StatusCode::NO_CONTENT);
+        assert!(until().await?.is_some());
+        assert_eq!(set(1, 20, 0).await.unwrap(), StatusCode::NO_CONTENT);
+        assert_eq!(until().await?, None);
+        let audited: i64 = query_scalar(
+            "SELECT COUNT(*) FROM audit_log WHERE action IN ('focus_started', 'focus_ended')",
+        )
+        .fetch_one(&app.db)
+        .await?;
+        assert_eq!(audited, 3);
         Ok(())
     }
 }

@@ -439,6 +439,7 @@ mod tests {
             forum: false,
             audio_kbps: 64,
             member_limit: 0,
+            focus_until: None,
             flags: Vec::new(),
         };
         server.dir.categories = vec![Category {

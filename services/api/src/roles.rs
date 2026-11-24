@@ -41,9 +41,11 @@ pub enum Permission {
     CreateEvents = 8192,
     /// Approve, decline and cancel anyone's events.
     ManageEvents = 16384,
+    /// Put a channel into focus mode for a while.
+    StartFocus = 32768,
 }
 
-const PERMISSIONS: [Permission; 15] = [
+const PERMISSIONS: [Permission; 16] = [
     Permission::Invite,
     Permission::Kick,
     Permission::Ban,
@@ -59,6 +61,7 @@ const PERMISSIONS: [Permission; 15] = [
     Permission::SuggestEvents,
     Permission::CreateEvents,
     Permission::ManageEvents,
+    Permission::StartFocus,
 ];
 
 #[derive(FromRow)]
@@ -258,6 +261,12 @@ pub async fn create(
     let (mut tx, actor) = authenticate(&app, &headers).await?;
     let auth = authority(&mut tx, &actor.person).await?;
     auth.require(Permission::ManageRoles)?;
+    // Like the built-in roles, a new role may start focus mode until someone takes it away.
+    let permissions = if auth.has(Permission::StartFocus) {
+        permissions | Permission::StartFocus as i64
+    } else {
+        permissions
+    };
     auth.can_grant(rank, permissions)?;
     let count: i64 = query_scalar("SELECT COUNT(*) FROM roles")
         .fetch_one(&mut *tx)
