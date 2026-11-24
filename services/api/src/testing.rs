@@ -15,7 +15,7 @@ pub async fn app(dir: &std::path::Path, people: u8) -> anyhow::Result<App> {
         files: crate::files::Files::open(dir, &db).await?.into(),
         db,
         key: std::sync::Arc::new(ed25519_dalek::SigningKey::from_bytes(&[7; 32])),
-        changes: tokio::sync::broadcast::channel(128).0,
+        changes: tokio::sync::broadcast::channel(crate::CHANGE_BACKLOG).0,
         presence: Default::default(),
         voice: None,
         session_ttl: 3600,
