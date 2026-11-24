@@ -109,6 +109,14 @@ async fn stream(
             expires
                 .as_mut()
                 .reset(Instant::now() + Duration::from_secs((expires_at - now()?).max(0) as u64));
+            // Announce the member once the session is confirmed, in its own short
+            // transaction, so others see them online before the heavier key queries run.
+            if presence.is_none() {
+                let status = presence::stored(&mut db, &actor.person).await?;
+                db.commit().await?;
+                presence = Some(presence::open(app, encode(&actor.person), status));
+                db = app.db.begin().await?;
+            }
             tx = Some(db);
         }
         let next = if let Some(mut tx) = tx
@@ -127,15 +135,7 @@ async fn stream(
                 .filter(|state| state.rotate)
                 .map(|state| (state.scope, state.epoch))
                 .collect();
-            let status = if presence.is_none() {
-                Some(presence::stored(&mut tx, &actor.person).await?)
-            } else {
-                None
-            };
             tx.commit().await?;
-            if let Some(status) = status {
-                presence = Some(presence::open(app, encode(&actor.person), status));
-            }
             Some((next_pending, next_rotations))
         } else {
             None
@@ -341,5 +341,66 @@ mod tests {
         );
         // Only client updates are forwarded.
         assert_eq!(notices.len(), 3);
+    }
+
+    /// Others hear a socket is online before its key queries finish, and offline again
+    /// when those queries fail and the socket closes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn presence_opens_before_key_queries() -> anyhow::Result<()> {
+        use axum::{Router, routing::get};
+        use rusttalk_core::presence::{Presence, PresenceEvent};
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::{TcpListener, TcpStream},
+        };
+
+        use crate::testing;
+
+        let dir = tempfile::tempdir()?;
+        let app = testing::app(dir.path(), 1).await?;
+        let mut changes = app.changes.subscribe();
+        // Makes `keys::pending` fail after the session check has passed.
+        sqlx::query("DROP TABLE key_epochs")
+            .execute(&app.db)
+            .await?;
+        let router = Router::new()
+            .route("/v1/events", get(upgrade))
+            .with_state(app.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        tokio::spawn(async move { axum::serve(listener, router).await });
+
+        let mut client = TcpStream::connect(address).await?;
+        let request = format!(
+            "GET /v1/events HTTP/1.1\r\nHost: test\r\nConnection: Upgrade\r\n\
+             Upgrade: websocket\r\nSec-WebSocket-Version: 13\r\n\
+             Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+             Authorization: Bearer {}\r\nX-Forwarded-For: 192.0.2.1\r\n\r\n",
+            encode(&[1; 32]),
+        );
+        client.write_all(request.as_bytes()).await?;
+        let mut head = [0; 12];
+        client.read_exact(&mut head).await?;
+        assert_eq!(&head[9..12], b"101");
+
+        let person = encode(&testing::person(1));
+        let mut seen = Vec::new();
+        timeout(Duration::from_secs(30), async {
+            while seen.last() != Some(&Presence::Offline) {
+                if let Change::Update(Update::Presence(PresenceEvent::PresenceChanged {
+                    person_id,
+                    status,
+                })) = changes.recv().await?
+                    && person_id == person
+                {
+                    seen.push(status);
+                }
+            }
+            anyhow::Ok(())
+        })
+        .await??;
+        assert_eq!(seen, [Presence::Online, Presence::Offline]);
+        assert!(app.presence.snapshot().is_empty());
+        Ok(())
     }
 }
