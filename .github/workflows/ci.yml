@@ -1,5 +1,6 @@
 name: CI
 
+# The macOS run lives in macos.yml: hosted Mac runners are often not available (#479).
 on:
   push:
     branches: [main]
@@ -38,16 +39,3 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo test -p rusttalk-client --locked
-
-  macos:
-    runs-on: macos-latest
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@v4
-      - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      # The updater tests sign with Ed25519, which the system LibreSSL lacks.
-      - run: brew list openssl@3 >/dev/null 2>&1 || brew install openssl@3
-      - run: make lint test CARGO_SCOPE='--workspace --exclude rusttalk-bot --features rusttalk-core/client,rusttalk-core/livekit-tls'

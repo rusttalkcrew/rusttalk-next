@@ -1,0 +1,54 @@
+name: macOS CI
+
+# The full lint and test run on macOS. Hosted Mac runners are scarce and often never
+# pick up a job (#479), so this runs on main, nightly, by hand, and on pull requests
+# only when they touch macOS code, dependencies, build files or packaging.
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['docs/**', '**/*.md']
+  pull_request:
+    paths:
+      - '**/*macos*'
+      - crates/core/src/capture.rs
+      - crates/core/src/capture/**
+      - crates/core/src/camera.rs
+      - crates/core/src/screen.rs
+      - crates/core/src/screen/**
+      - crates/client/src/notify.rs
+      - crates/client/src/notify/**
+      - crates/client/src/update.rs
+      - crates/client/src/keystore.rs
+      - crates/*/Cargo.toml
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - Makefile
+      - deploy/release/**
+      - .github/workflows/macos.yml
+      - '!docs/**'
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-ci-${{ github.ref }}
+  # A newer push replaces a pull request's run; main and nightly runs finish.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # The updater tests sign with Ed25519, which the system LibreSSL lacks.
+      - run: brew list openssl@3 >/dev/null 2>&1 || brew install openssl@3
+      - run: make lint test CARGO_SCOPE='--workspace --exclude rusttalk-bot --features rusttalk-core/client,rusttalk-core/livekit-tls'
