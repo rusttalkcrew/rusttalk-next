@@ -116,7 +116,8 @@ fn demo_window(size: Vec2, dark: bool) -> Harness<'static, Option<Screen>> {
                 bio: None,
                 voice_muted: false,
             },
-        ];
+        ]
+        .into();
         server.dir.categories = vec![Category {
             id: None,
             name: String::new(),
@@ -336,9 +337,9 @@ fn canonical_local_speaking_state_covers_voice_modes_and_call_transitions() {
     assert!(home.voice.local_speaking(&home.servers));
 
     // Moderator voice mute suppresses speaking.
-    home.servers[0].dir.members[0].voice_muted = true;
+    home.servers[0].dir.members.edit()[0].voice_muted = true;
     assert!(!home.voice.local_speaking(&home.servers));
-    home.servers[0].dir.members[0].voice_muted = false;
+    home.servers[0].dir.members.edit()[0].voice_muted = false;
     assert!(home.voice.local_speaking(&home.servers));
 
     // Local mute and deafen suppress speaking immediately.

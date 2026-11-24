@@ -1270,7 +1270,7 @@ mod tests {
             bio: None,
             voice_muted: false,
         };
-        server.dir.members = vec![member(ME), member(ANN), member(BOB), member(CID)];
+        server.dir.members = vec![member(ME), member(ANN), member(BOB), member(CID)].into();
         server.dir.categories = vec![Category {
             id: None,
             name: String::new(),

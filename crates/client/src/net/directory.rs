@@ -611,7 +611,7 @@ async fn build(
         me: *client.identity.certificate.person_id(),
         perms,
         categories,
-        members: list,
+        members: list.into(),
         dms,
         roles: role_list,
         default_role: roles["default_role_id"].as_str().unwrap_or_default().into(),
@@ -871,8 +871,8 @@ mod tests {
 
     #[test]
     fn reports_joins_and_leaves_but_skips_device_changes() {
-        let dir = |members| Directory {
-            members,
+        let dir = |members: Vec<Member>| Directory {
+            members: members.into(),
             ..Directory::default()
         };
         let before = dir(vec![member(1, &["a"]), member(2, &[]), member(3, &["c"])]);

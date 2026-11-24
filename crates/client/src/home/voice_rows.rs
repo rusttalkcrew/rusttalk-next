@@ -71,7 +71,8 @@ fn window() -> (Harness<'static, Option<Home>>, UnboundedReceiver<Command>) {
         hide_offline: false,
         bio: None,
         voice_muted: false,
-    }];
+    }]
+    .into();
     let ann = Peer {
         person: ANN,
         connecting: false,

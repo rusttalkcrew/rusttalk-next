@@ -13,7 +13,7 @@ fn server_rail_marks_only_unavailable_servers() {
         let (mut fixture, _sent) = files_harness(dark);
         let mut home = fixture.state_mut().take().unwrap();
         home.view = View::Server(0);
-        home.servers[0].dir.members[1].presence = Presence::Offline;
+        home.servers[0].dir.members.edit()[1].presence = Presence::Offline;
         let known = KnownServer {
             address: "https://camp.example.org/".parse().unwrap(),
             server_id: [4; 32],

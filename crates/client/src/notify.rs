@@ -743,7 +743,8 @@ mod tests {
                 member(ada, "admin"),
                 member(bob, "member"),
                 member(me, "member"),
-            ],
+            ]
+            .into(),
             roles: vec![
                 role("admin", vec![MENTION_EVERYONE.into()]),
                 role("member", vec![]),
