@@ -3327,7 +3327,7 @@ fn send_messages(
 }
 
 /// Cache this account's decrypted own picture if present. Best-effort: never fails `directory`.
-async fn cache_own_avatar(ctx: &Ctx, client: &KeyClient<'_>, state: &State) {
+fn cache_own_avatar(ctx: &Ctx, client: &KeyClient<'_>, state: &State) {
     if !client.has_space_key() {
         return;
     }
@@ -3337,13 +3337,64 @@ async fn cache_own_avatar(ctx: &Ctx, client: &KeyClient<'_>, state: &State) {
         .as_ref()
         .and_then(|dir| dir.members.iter().find(|member| &member.person == person))
         .and_then(|member| member.avatar.as_ref())
-        .map(|picture| picture.bytes.as_slice());
-    if let Err(error) = ctx.sync.avatar(&ctx.data, person, candidate).await {
-        tracing::warn!(error = %format_args!("{error:#}"), "caching account picture failed");
-        return;
-    }
-    if candidate.is_some() && ctx.sync.has_pending().await {
-        sync_later(ctx);
+        .map(|picture| picture.bytes.clone());
+    cache_avatar_later(ctx, candidate);
+}
+
+/// In its own task: the cache waits for any device sync in progress, which must not
+/// hold up the directory and so the server going online.
+fn cache_avatar_later(ctx: &Ctx, candidate: Option<Arc<Vec<u8>>>) -> tokio::task::JoinHandle<()> {
+    let ctx = ctx.clone();
+    tokio::spawn(async move {
+        let person = ctx.identity.certificate.person_id();
+        let result = (ctx.sync)
+            .avatar(
+                &ctx.data,
+                person,
+                candidate.as_ref().map(|bytes| bytes.as_slice()),
+            )
+            .await;
+        if let Err(error) = result {
+            tracing::warn!(error = %format_args!("{error:#}"), "caching account picture failed");
+            return;
+        }
+        if candidate.is_some() && ctx.sync.has_pending().await {
+            sync_later(&ctx);
+        }
+    })
+}
+
+#[cfg(test)]
+mod avatar_cache_tests {
+    use super::*;
+
+    #[test]
+    fn caching_the_own_picture_does_not_wait_for_a_device_sync() -> Result<()> {
+        let data = tempfile::tempdir()?;
+        let (_, device) = DeviceIdentity::create("Avatar cache test")?;
+        let egui = egui::Context::default();
+        let net = Net::new(
+            egui.clone(),
+            Arc::new(device),
+            data.path().into(),
+            Audio::new(data.path())?,
+            Video::new(egui),
+        )?;
+        let ctx = net.ctx.clone();
+        let person = *ctx.identity.certificate.person_id();
+        let picture = Arc::new(b"synthetic avatar".to_vec());
+        net.runtime.as_ref().context("runtime")?.block_on(async {
+            let running_sync = ctx.sync.hold().await;
+            // Returns at once although a sync holds the state.
+            let cached = cache_avatar_later(&ctx, Some(picture.clone()));
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert!(!cached.is_finished());
+            drop(running_sync);
+            tokio::time::timeout(Duration::from_secs(5), cached).await??;
+            let saved = ctx.sync.avatar(&ctx.data, &person, None).await?;
+            assert_eq!(saved.as_deref(), Some(picture.as_slice()));
+            Ok(())
+        })
     }
 }
 
