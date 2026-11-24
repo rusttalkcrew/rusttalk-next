@@ -3,19 +3,15 @@
 <!--
 One source for the in-app "What's new" page and the website roadmap's Shipped timeline.
 Format (parsed by crates/client/src/whats_new.rs, keep it strict):
-  - `## Unreleased` first, then `## vX.Y.Z - YYYY-MM-DD`, newest first.
-  - Under each heading only `- ` bullets, one line each, short and user-facing.
-Every user-visible change adds one line under Unreleased in the same PR. A release moves
-Unreleased under the new version and date.
--->
+  - `## Unreleased
 
-## Unreleased
+## v0.3.0 - 2026-11-24
 
 - Put a voice channel into focus mode for up to 24 hours: it gets a Focus badge, a countdown banner and a short notice before anyone joins.
 - Channels only some roles can see show a lock, and their permissions are easier to set.
 - Voice channels can have a member limit; the channel list shows how full they are, like 3/5.
 - The stream badge shows a compact viewer count and leaves the video stats visible.
-- Choose Direct, SOCKS5, app-only WireGuard, or Tor during onboarding and in Settings → Network on desktop and mobile, with fail-closed routing and secure credential storage.
+- Choose Direct, SOCKS5, app-only WireGuard, or Tor during onboarding and in Settings → Network on desktop and mobile, with per-device settings and secure credential storage.
 - Open a profile from a message author’s name or picture.
 - A temporary error syncing your account picture no longer disconnects the server.
 - The bottom-left account picture now lines up with your name and status.
@@ -29,6 +25,9 @@ Unreleased under the new version and date.
 - Reopen the last chat picture instantly, even if the connection drops after it loads.
 - Unavailable servers show an exclamation mark in the server sidebar until they reconnect.
 - Recover voice calls and watched video after a server restart, keeping mute settings and asking again before shared audio plays.
+- Phone calls sound clearer with HD voice (G.722) when your provider supports it, and fall back to normal phone quality otherwise.
+- "Always allow" shares your microphone with every phone call without asking; turn it off again in Settings > Privacy.
+- Others in the channel see a phone number you typed only as its last two digits; contacts show their name.
 
 ## v0.2.1 - 2026-11-23
 
@@ -50,9 +49,6 @@ Unreleased under the new version and date.
 - Desktop: call a phone number into your voice channel with your own SIP account, contacts and a keypad. Phone calls use unencrypted SIP/RTP; the provider and network path can hear them.
 - Listen to phone audio separately from sharing your microphone with the phone. The caller shares their own microphone; other members must consent; stopping sharing pauses the channel microphone until exclusion is confirmed or the call ends.
 - Phone calls end on reconnect or lost permission; hold and one-way audio are not supported.
-- Phone calls sound clearer with HD voice (G.722) when your provider supports it, and fall back to normal phone quality otherwise.
-- "Always allow" shares your microphone with every phone call without asking; turn it off again in Settings > Privacy.
-- Others in the channel see a phone number you typed only as its last two digits; contacts show their name.
 
 ## v0.2.0 - 2026-11-23
 
