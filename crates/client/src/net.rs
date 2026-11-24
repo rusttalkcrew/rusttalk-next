@@ -895,7 +895,7 @@ async fn run(
     {
         tracing::warn!(%error, "could not restore recent server view");
     }
-    let mut delay = 1;
+    let mut backoff = Backoff::default();
     // Verified once, then reused: each verification spends one of the server's rate-limited challenges.
     let mut api = None;
     let mut api_generation = 0u64;
@@ -931,7 +931,7 @@ async fn run(
             {
                 return;
             }
-            delay = 1;
+            backoff.reset();
             continue;
         }
         if api_generation != route_snap.generation {
@@ -992,7 +992,7 @@ async fn run(
                 }
                 state.chat_files.clear();
                 state.transfers.clear();
-                delay = 1;
+                backoff.reset();
                 continue;
             }
             ConnectStep::Done(connected) => connected,
@@ -1005,7 +1005,7 @@ async fn run(
                 state.pins_saved = pins.unwrap_or_default();
                 match connected {
                     Ok(mut client) => {
-                        delay = 1;
+                        backoff.reset();
                         state.order_unavailable = false;
                         tracing::info!(server = %fingerprint(&server.server_id), "connected to server");
                         let end = serve(
@@ -1077,13 +1077,13 @@ async fn run(
             return;
         }
         if route_changed {
-            delay = 1;
+            backoff.reset();
             continue;
         }
         ctx.send(Update::Status(url.clone(), Status::Offline));
         let wait = async {
             tokio::select! {
-                _ = tokio::time::sleep(Duration::from_secs(delay)) => false,
+                _ = tokio::time::sleep(backoff.next_wait(random_u16())) => false,
                 _ = route_rx.changed() => true,
             }
         };
@@ -1102,11 +1102,56 @@ async fn run(
         };
         if woke_for_route {
             api = None;
-            delay = 1;
-        } else {
-            delay = (delay * 2).min(30);
+            backoff.reset();
         }
     }
+}
+
+/// Reconnect waits double from 1 s up to this, so a restart or Wi-Fi blip recovers in
+/// seconds. Under ~16 sign-ins a minute, half the server's 32 challenges per address.
+const RECONNECT_CAP_SECS: u64 = 10;
+
+/// How long to stay offline before the next reconnect attempt. Reset after a connect
+/// or a network route change.
+struct Backoff {
+    secs: u64,
+}
+
+impl Default for Backoff {
+    fn default() -> Self {
+        Self { secs: 1 }
+    }
+}
+
+impl Backoff {
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    /// The wait before this attempt; the next one is twice as long, up to the cap.
+    fn next_wait(&mut self, random: u16) -> Duration {
+        let wait = reconnect_wait(self.secs, random);
+        self.secs = next_reconnect_delay(self.secs);
+        wait
+    }
+}
+
+fn next_reconnect_delay(delay: u64) -> u64 {
+    (delay * 2).min(RECONNECT_CAP_SECS)
+}
+
+/// Between half and all of `delay`, so clients a server restart dropped together
+/// don't all come back in the same instant.
+fn reconnect_wait(delay: u64, random: u16) -> Duration {
+    let half = Duration::from_secs(delay) / 2;
+    half + half * u32::from(random) / u32::from(u16::MAX)
+}
+
+fn random_u16() -> u16 {
+    let mut bytes = [0; 2];
+    // Without randomness, waiting half is still a valid wait.
+    let _ = rusttalk_core::identity::random_bytes(&mut bytes);
+    u16::from_le_bytes(bytes)
 }
 
 fn revoked(
@@ -3138,6 +3183,35 @@ fn now() -> i64 {
 #[cfg(test)]
 mod protocol_tests {
     use super::*;
+
+    #[test]
+    fn reconnect_waits_double_to_ten_seconds_with_jitter() {
+        // The longest waits (`u16::MAX`) are the un-jittered delays.
+        let mut backoff = Backoff::default();
+        let longest: Vec<_> = (0..7)
+            .map(|_| backoff.next_wait(u16::MAX).as_secs())
+            .collect();
+        assert_eq!(longest, [1, 2, 4, 8, 10, 10, 10]);
+
+        // Jitter stays between half and all of the delay.
+        assert_eq!(reconnect_wait(10, 0), Duration::from_secs(5));
+        assert_eq!(reconnect_wait(10, u16::MAX), Duration::from_secs(10));
+        assert_eq!(reconnect_wait(1, 0), Duration::from_millis(500));
+        for random in [1, 1000, u16::MAX / 2, u16::MAX - 1] {
+            let wait = reconnect_wait(4, random);
+            assert!(wait > Duration::from_secs(2) && wait < Duration::from_secs(4));
+        }
+        let mut backoff = Backoff::default();
+        for _ in 0..10 {
+            let wait = backoff.next_wait(random_u16());
+            assert!(wait >= Duration::from_millis(500) && wait <= Duration::from_secs(10));
+        }
+
+        // After a connect the next wait starts over at 1 s.
+        backoff.reset();
+        assert_eq!(backoff.next_wait(u16::MAX), Duration::from_secs(1));
+        assert_eq!(backoff.next_wait(u16::MAX), Duration::from_secs(2));
+    }
 
     #[test]
     fn a_move_counts_only_for_this_devices_call_or_its_fresh_removal() {
