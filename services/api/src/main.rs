@@ -76,7 +76,7 @@ enum Change {
     Update(rusttalk_core::presence::Update),
     /// Sessions were replaced, so each socket rechecks only its own session.
     Session,
-    /// A new key epoch, so each socket also recomputes pending wraps and scopes.
+    /// A new key epoch or a reopened wrap, so each socket recomputes pending wraps and scopes.
     Keys,
 }
 
