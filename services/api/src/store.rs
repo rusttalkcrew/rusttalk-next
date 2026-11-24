@@ -172,7 +172,18 @@ impl std::ops::DerefMut for WriteTx {
 /// Start a transaction that may write. Read-only work uses a deferred `begin()` instead: in WAL
 /// mode it reads a snapshot and never waits for a writer.
 pub async fn write(pool: &SqlitePool) -> ApiResult<WriteTx> {
-    let turn = WRITER.lock().await;
+    begin_write(pool, WRITER.lock().await).await
+}
+
+/// Like [`write`], but only if the writer turn is free right now; `None` if it would queue.
+pub async fn try_write(pool: &SqlitePool) -> ApiResult<Option<WriteTx>> {
+    match WRITER.try_lock() {
+        Ok(turn) => Ok(Some(begin_write(pool, turn).await?)),
+        Err(_) => Ok(None),
+    }
+}
+
+async fn begin_write(pool: &SqlitePool, turn: Turn) -> ApiResult<WriteTx> {
     // IMMEDIATE takes the write lock up front, so it serializes authorization and mutation with
     // owner-invite CLI executions too, and never fails the later upgrade from read to write.
     Ok(WriteTx(Some((
