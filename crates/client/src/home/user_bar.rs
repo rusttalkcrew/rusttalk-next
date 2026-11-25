@@ -214,6 +214,7 @@ fn set_mic(audio: &crate::audio::Audio, on: bool) {
 
 /// Mic on or off; deafened counts as off, so turning it on also undeafens. Also for
 /// the Android call notification's Mute button (`call::notice`).
+#[cfg(any(target_os = "android", test))]
 pub fn toggle_mic(audio: &crate::audio::Audio) {
     set_mic(audio, !(audio.muted() || audio.deafened()));
 }
