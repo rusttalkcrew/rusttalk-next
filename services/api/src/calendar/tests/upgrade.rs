@@ -149,7 +149,9 @@ async fn upgrade_preserves_only_existing_role_operations() -> anyhow::Result<()>
 
     // Later assignments, a newly lowered peer, and an unrelated edited role confer no exemption.
     check(assign(1, 3, &["manager", "staff"]), ok, "").await?;
-    check(assign(3, 4, &[LEAD]), denied, missing).await?;
+    // Person 4 keeps LEAD unchanged, so only taking it away is checked.
+    check(assign(3, 4, &[LEAD]), ok, "").await?;
+    check(assign(3, 4, &["low-manager"]), denied, missing).await?;
     check(rename(3, "moderator"), denied, missing).await?;
     let flags = ["suggest_events", "create_events", "manage_events"];
     let lower =

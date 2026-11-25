@@ -22,6 +22,7 @@ Unreleased under the new version and date.
 - Invite links stop working when the person who made them leaves, is kicked or banned, or loses the right to invite.
 - Pressing Escape in a settings field or clicking outside Settings no longer throws away what you typed: unsaved changes ask before they are discarded.
 - In a DM, only the person who wrote a message or sent a file can delete it, also when the other person is a moderator.
+- Role managers can give someone a new role without losing roles above their reach, and can no longer take those roles away.
 
 ## v0.4.0 - 2026-11-24
 

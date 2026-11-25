@@ -551,7 +551,15 @@ pub async fn assign(
         return Err(ApiError::not_found("member_not_found"));
     }
     auth.outrank(&target)?;
-    for id in &ids {
+    let current: Vec<String> = query_scalar("SELECT role_id FROM member_roles WHERE person_id = ?")
+        .bind(person.as_slice())
+        .fetch_all(&mut *tx)
+        .await?;
+    // Taking a role away needs the same right as giving it; roles kept as they
+    // are pass, so you can change someone's other roles.
+    let added = ids.iter().filter(|id| !current.contains(id));
+    let removed = current.iter().filter(|id| !ids.contains(id));
+    for id in added.chain(removed) {
         let role = by_id(&mut tx, id).await?;
         retained_permissions(&mut tx, &actor.person, &auth, &role).await?;
     }
@@ -778,6 +786,80 @@ mod tests {
             .fetch_one(&app.db)
             .await?;
         assert_eq!(rank, 49);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn assigning_checks_only_the_roles_that_change() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let app = app(dir.path(), 3).await?;
+        // Person 2 is a role manager at rank 60 who can't grant Moderator;
+        // person 3 is a moderator.
+        for (id, rank, permissions) in [
+            ("manager", 60, 8),
+            ("cosmetic", 10, 0),
+            ("helper", 20, 8),
+            ("inviter", 20, 1),
+        ] {
+            query("INSERT INTO roles (id, kind, rank, permissions) VALUES (?, 'custom', ?, ?)")
+                .bind(id)
+                .bind(rank)
+                .bind(permissions)
+                .execute(&app.db)
+                .await?;
+        }
+        for (who, role) in [(2, "manager"), (3, "moderator")] {
+            query("INSERT INTO member_roles (person_id, role_id) VALUES (?, ?)")
+                .bind(person(who))
+                .bind(role)
+                .execute(&app.db)
+                .await?;
+        }
+        let assign_as = |who: u8, roles: &[&str]| {
+            assign(
+                State(app.clone()),
+                as_person(who),
+                Path(encode(&person(3))),
+                Ok(Json(Assignment {
+                    role_ids: roles.iter().map(|id| (*id).to_owned()).collect(),
+                })),
+            )
+        };
+        let held = || {
+            query_scalar::<_, String>(
+                "SELECT role_id FROM member_roles WHERE person_id = ? ORDER BY role_id",
+            )
+            .bind(person(3))
+            .fetch_all(&app.db)
+        };
+        for (roles, code) in [
+            // Taking away a role you couldn't give.
+            (&["cosmetic"][..], "cannot_grant_permission"),
+            (&["member"][..], "cannot_grant_permission"),
+            // Giving a role you couldn't give.
+            (&["moderator", "inviter"][..], "cannot_grant_permission"),
+            (&["moderator", "manager"][..], "role_hierarchy"),
+            (&["moderator", "missing"][..], "role_not_found"),
+        ] {
+            let refused = assign_as(2, roles).await.unwrap_err();
+            assert_eq!(refused.code, code, "{roles:?}");
+            assert_eq!(held().await?, ["moderator"], "{roles:?}");
+        }
+        // Moderator stays as it is, so it passes; the others can come and go.
+        for roles in [
+            &["moderator"][..],
+            &["moderator", "cosmetic", "helper"],
+            &["helper", "moderator"],
+        ] {
+            assert_eq!(assign_as(2, roles).await?, StatusCode::NO_CONTENT);
+            let mut sorted = roles.to_vec();
+            sorted.sort_unstable();
+            assert_eq!(held().await?, sorted);
+        }
+        // The owner can still change all of it.
+        let saved = assign_as(1, &["member", "inviter"]).await?;
+        assert_eq!(saved, StatusCode::NO_CONTENT);
+        assert_eq!(held().await?, ["inviter", "member"]);
         Ok(())
     }
 

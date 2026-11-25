@@ -305,7 +305,7 @@ fn groups(events: bool, focus: bool) -> Vec<(&'static str, Vec<Permission>)> {
 }
 
 /// Whether you hold a permission yourself; only those can be given or taken away.
-fn holds(dir: &Directory, permission: &str) -> bool {
+pub(super) fn holds(dir: &Directory, permission: &str) -> bool {
     (dir.roles.iter())
         .filter(|role| {
             (dir.members.iter()).any(|m| m.person == dir.me && m.roles.contains(&role.id))
@@ -785,10 +785,13 @@ fn members_tab(ui: &mut Ui, server: &Server, role: &Role, page: &mut RolesPage) 
         Some((_, add)) => *add,
         None => member.roles.contains(&role.id),
     };
-    // You can change people ranked below you, and only for roles below yours.
+    // You can change people ranked below you, and only for roles below yours
+    // whose permissions you hold.
+    let grantable = (role.permissions.iter()).all(|p| holds(dir, p));
     let changeable = |member: &Member| {
         role.id != "owner"
             && role.rank < dir.perms.rank
+            && grantable
             && member_rank(dir, member) < dir.perms.rank
     };
     let mut flip = None;
