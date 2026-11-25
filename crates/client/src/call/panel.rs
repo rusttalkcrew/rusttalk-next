@@ -398,6 +398,12 @@ pub fn phone_controls(ui: &mut Ui, home: &mut Home) {
     apply(ui, home, picked);
 }
 
+/// How many buttons `phone_controls` shows, to size a row for them elsewhere.
+pub fn phone_control_count(home: &mut Home) -> usize {
+    let app_audio = home.voice.supported;
+    3 + Extras::of(&mut home.voice, app_audio).count()
+}
+
 fn leave_button(ui: &mut Ui, size: Vec2) -> Response {
     ui::icon_button(ui, "📞", t!("call.leave"), Look::Danger, size)
 }

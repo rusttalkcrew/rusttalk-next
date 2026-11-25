@@ -866,7 +866,9 @@ impl Home {
     /// closes, then a phone goes from what is open to the list, like its Back bar.
     /// False at the list.
     pub fn go_back(&mut self) -> bool {
-        if self.members_over_chat() {
+        if self.voice.stage.full.is_some() {
+            self.voice.stage.full = None;
+        } else if self.members_over_chat() {
             self.layout.toggle_members();
         } else if self.layout.phone && !self.layout.list {
             self.layout.list = true;
@@ -878,7 +880,9 @@ impl Home {
 
     /// Whether `go_back` has anywhere to go.
     pub fn can_go_back(&self) -> bool {
-        self.members_over_chat() || (self.layout.phone && !self.layout.list)
+        self.voice.stage.full.is_some()
+            || self.members_over_chat()
+            || (self.layout.phone && !self.layout.list)
     }
 
     fn members_over_chat(&self) -> bool {
@@ -2200,6 +2204,11 @@ pub fn show(
         CentralPanel::default()
             .frame(panel_frame(colors.main))
             .show(ui, |ui| call::full_view(ui, home));
+        // What the call's buttons there open.
+        call::screen_dialog(ui.ctx(), home);
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        call::phone::windows(ui.ctx(), home);
+        call::terminal::dialog(ui.ctx(), home);
         call::frame(ui.ctx(), home);
         return None;
     }
@@ -7454,6 +7463,7 @@ mod tests {
     mod dialogs;
     mod emoji;
     mod file_limits;
+    mod full_screen;
     mod image_reload;
     mod joining;
     mod long_chat;

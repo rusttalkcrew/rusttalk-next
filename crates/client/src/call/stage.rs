@@ -4,8 +4,8 @@
 use std::ops::RangeInclusive;
 
 use eframe::egui::{
-    self, Align, Align2, CursorIcon, FontId, Id as UiId, Image, Key, Layout, Rect, Role, Sense,
-    Stroke, StrokeKind, TextureId, Ui, UiBuilder, Vec2, WidgetInfo, pos2,
+    self, Align, Align2, CursorIcon, FontId, Id as UiId, Image, Key, Layout, Popup, Rect, Role,
+    Sense, Stroke, StrokeKind, TextureId, Ui, UiBuilder, Vec2, WidgetInfo, pos2,
     text::{LayoutJob, TextWrapping},
     vec2,
 };
@@ -75,6 +75,46 @@ pub struct Stage {
     presenting: bool,
     /// Covers the whole window.
     pub full: Option<Tile>,
+    /// When full screen shows its controls.
+    chrome: Chrome,
+}
+
+/// Seconds the full-screen controls stay after the pointer last moved.
+const IDLE: f64 = 2.5;
+
+/// When full screen shows its controls, like a video player: on entering, when the
+/// pointer moves and while they are in use; gone after `IDLE` quiet seconds. A tap
+/// (phones) shows or hides them.
+#[derive(Default)]
+struct Chrome {
+    until: Option<f64>,
+    /// Where the controls were last drawn; the pointer resting there keeps them.
+    panels: Vec<Rect>,
+}
+
+impl Chrome {
+    /// Whether the controls show now. `held`: one of their menus or dialogs is open.
+    fn update(&mut self, now: f64, moved: bool, tapped: bool, held: bool) -> bool {
+        let shown = now < *self.until.get_or_insert(now + IDLE);
+        if held || moved || (tapped && !shown) {
+            self.until = Some(now + IDLE);
+            true
+        } else if tapped {
+            self.until = Some(now);
+            false
+        } else {
+            shown
+        }
+    }
+
+    fn over(&self, pointer: Option<egui::Pos2>) -> bool {
+        pointer.is_some_and(|at| self.panels.iter().any(|panel| panel.contains(at)))
+    }
+
+    /// Seconds until the controls hide.
+    fn left(&self, now: f64) -> f64 {
+        self.until.map_or(IDLE, |until| until - now).max(0.0)
+    }
 }
 
 impl Stage {
@@ -105,6 +145,9 @@ impl Stage {
         self.presenting = false;
         if matches!(self.focus, Some(Tile::Screen(_))) {
             self.focus = None;
+        }
+        if matches!(self.full, Some(Tile::Screen(_))) {
+            self.full = None;
         }
     }
 }
@@ -901,7 +944,16 @@ fn tile(
             video: (!entry.me && entry.peer.camera.is_some()).then_some(entry.camera_visible),
         });
         let menu = ui::context_menu(&response, |m| {
-            screen_menu(m, entry, state, audio, sharer.as_ref(), overlay, acts)
+            screen_menu(
+                m,
+                entry,
+                state,
+                audio,
+                sharer.as_ref(),
+                overlay,
+                false,
+                acts,
+            )
         });
         if let Some(Some(picked)) = menu {
             acts.push(Act::Person(person, picked));
@@ -969,6 +1021,8 @@ fn screen_choices(m: &mut ui::Menu, entry: &Entry, acts: &mut Vec<Act>) {
 
 /// The right-click menu of a screen tile; the same actions as its hover buttons, its
 /// stream sound and the overlays. Returns what was picked in the sharer's submenu.
+/// In full screen (`full`) it has no layout rows and keeps to the screen shown.
+#[allow(clippy::too_many_arguments)]
 fn screen_menu(
     m: &mut ui::Menu,
     entry: &Entry,
@@ -976,10 +1030,13 @@ fn screen_menu(
     audio: &crate::audio::Audio,
     sharer: Option<&Person>,
     overlay: &Overlay,
+    full: bool,
     acts: &mut Vec<Act>,
 ) -> Option<Pick> {
     let mut picked = None;
-    screen_choices(m, entry, acts);
+    if !full {
+        screen_choices(m, entry, acts);
+    }
     if let Some(sharer) = sharer {
         picked = m
             .submenu("👤", &entry.peer.name(sharer.server), |m| sharer.menu(m))
@@ -995,7 +1052,8 @@ fn screen_menu(
         sound,
     );
     let person = entry.peer.person;
-    for row in rows {
+    let layout = |row: &Row| matches!(row, Row::Focus | Row::Unfocus | Row::FullScreen);
+    for row in rows.into_iter().filter(|row| !(full && layout(row))) {
         match row {
             Row::Focus if m.item("🗖", t!("call.focus")).clicked() => {
                 acts.push(Act::Focus(entry.tile.clone()));
@@ -1333,55 +1391,11 @@ fn tools(
     {
         acts.push(Act::Full(entry.tile.clone()));
     }
-    if remote && terminal && room() {
-        let on = Look::On(ui::accent(ui).base);
-        let (tip, look) = match state.typing {
-            Typing::Idle => (t!("terminal.ask_to_type"), Look::Plain),
-            Typing::Asking(_) => (t!("call.cancel_request"), on),
-            Typing::On => (t!("terminal.stop_typing"), on),
-        };
-        if ui::icon_button(ui, "⌨", tip, look, tool).clicked() {
-            acts.push(Act::AskToType);
-        }
-    } else if remote && room() {
-        let on = Look::On(ui::accent(ui).base);
-        let (tip, look) = match state.remote {
-            None => (t!("call.request_control"), Look::Plain),
-            Some(false) => (t!("call.cancel_request"), on),
-            Some(true) => (t!("call.stop_control"), on),
-        };
-        // The sharer says it won't take requests: say why instead of being refused.
-        let closed = match (&entry.tile, state.remote) {
-            (Tile::Screen(sid), None) => entry
-                .peer
-                .screens
-                .iter()
-                .find(|screen| screen.sid == *sid)
-                .and_then(|screen| control_closed(screen.control)),
-            _ => None,
-        };
-        let button = ui
-            .add_enabled_ui(closed.is_none(), |ui| {
-                ui::icon_button(ui, "🖱", tip, look, tool)
-            })
-            .inner;
-        if let Some(why) = closed {
-            button.on_disabled_hover_text(why);
-        } else if button.clicked() {
-            acts.push(match (&entry.tile, state.remote) {
-                (Tile::Screen(sid), None) => Act::RequestControl(sid.clone()),
-                _ => Act::ReleaseControl,
-            });
-        }
+    if remote && room() {
+        control_button(ui, entry, state, tool, acts);
     }
     if volume && room() {
-        let button = ui::icon_button(ui, "🔊", t!("call.volume"), Look::Plain, tool);
-        ui::menu(&button, |m| {
-            mixer::show(m, audio, person, is_person, &entry.peer.apps, |sid, on| {
-                acts.push(Act::Listen(sid, on))
-            })
-        });
-        let open = ui::menu_open(&button);
+        let open = volume_button(ui, entry, audio, tool, acts);
         ui.data_mut(|data| data.insert_temp(menu_id, open));
     }
     let (tip, act) = if terminal {
@@ -1392,6 +1406,70 @@ fn tools(
     if stop && room() && ui::icon_button(ui, "⏹", tip, Look::Plain, tool).clicked() {
         acts.push(act);
     }
+}
+
+/// Ask to type in a watched terminal, or ask for control of a watched screen; while
+/// asking or in control, cancel or stop.
+fn control_button(ui: &mut Ui, entry: &Entry, state: TileState, tool: Vec2, acts: &mut Vec<Act>) {
+    let on = Look::On(ui::accent(ui).base);
+    if let Tile::Terminal(_) = entry.tile {
+        let (tip, look) = match state.typing {
+            Typing::Idle => (t!("terminal.ask_to_type"), Look::Plain),
+            Typing::Asking(_) => (t!("call.cancel_request"), on),
+            Typing::On => (t!("terminal.stop_typing"), on),
+        };
+        if ui::icon_button(ui, "⌨", tip, look, tool).clicked() {
+            acts.push(Act::AskToType);
+        }
+        return;
+    }
+    let (tip, look) = match state.remote {
+        None => (t!("call.request_control"), Look::Plain),
+        Some(false) => (t!("call.cancel_request"), on),
+        Some(true) => (t!("call.stop_control"), on),
+    };
+    // The sharer says it won't take requests: say why instead of being refused.
+    let closed = match (&entry.tile, state.remote) {
+        (Tile::Screen(sid), None) => entry
+            .peer
+            .screens
+            .iter()
+            .find(|screen| screen.sid == *sid)
+            .and_then(|screen| control_closed(screen.control)),
+        _ => None,
+    };
+    let button = ui
+        .add_enabled_ui(closed.is_none(), |ui| {
+            ui::icon_button(ui, "🖱", tip, look, tool)
+        })
+        .inner;
+    if let Some(why) = closed {
+        button.on_disabled_hover_text(why);
+    } else if button.clicked() {
+        acts.push(match (&entry.tile, state.remote) {
+            (Tile::Screen(sid), None) => Act::RequestControl(sid.clone()),
+            _ => Act::ReleaseControl,
+        });
+    }
+}
+
+/// A person's voice and apps, or the sound of a screen. True while its menu is open.
+fn volume_button(
+    ui: &mut Ui,
+    entry: &Entry,
+    audio: &crate::audio::Audio,
+    tool: Vec2,
+    acts: &mut Vec<Act>,
+) -> bool {
+    let is_person = matches!(entry.tile, Tile::Person(_));
+    let button = ui::icon_button(ui, "🔊", t!("call.volume"), Look::Plain, tool);
+    ui::menu(&button, |m| {
+        let apps = &entry.peer.apps;
+        mixer::show(m, audio, entry.peer.person, is_person, apps, |sid, on| {
+            acts.push(Act::Listen(sid, on))
+        })
+    });
+    ui::menu_open(&button)
 }
 
 fn apply(home: &mut Home, index: usize, now: f64, acts: Vec<Act>) {
@@ -1413,7 +1491,10 @@ fn apply(home: &mut Home, index: usize, now: f64, acts: Vec<Act>) {
                     }
                 }
             }
-            Act::Full(tile) => stage.full = Some(tile),
+            Act::Full(tile) => {
+                stage.full = Some(tile);
+                stage.chrome = Chrome::default();
+            }
             Act::Listen(sid, on) => send(home, Command::Listen(sid, on)),
             Act::Watch(screen) => watch(home, &screen),
             Act::StopWatching => {
@@ -1440,6 +1521,9 @@ fn apply(home: &mut Home, index: usize, now: f64, acts: Vec<Act>) {
                 if matches!(stage.focus, Some(Tile::Terminal(_))) {
                     stage.focus = None;
                 }
+                if matches!(stage.full, Some(Tile::Terminal(_))) {
+                    stage.full = None;
+                }
                 terminal::stop_watching(home);
             }
         }
@@ -1452,180 +1536,376 @@ fn send(home: &Home, command: Command) {
     }
 }
 
-/// A camera or screen covering the whole window, with its name and t!("call.exit_full_screen").
+/// The full-screen buttons: finger sized, like the call bar on phones.
+const FULL_TOOL: Vec2 = Vec2::splat(ui::TOUCH_TARGET);
+
+/// How wide a panel of `count` full-screen buttons is, with its margins.
+fn panel_width(count: usize) -> f32 {
+    let count = count as f32;
+    count * FULL_TOOL.x + (count - 1.0).max(0.0) * ui::SPACE_XS + 2.0 * ui::SPACE_XS
+}
+
+/// A raised panel at `rect` for the full-screen controls, with `add` laid out in it
+/// left to right.
+fn panel<R>(ui: &mut Ui, rect: Rect, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let c = ui::colors(ui);
+    ui.painter().rect_filled(rect, ui::RADIUS, c.side);
+    ui.painter().rect_stroke(
+        rect,
+        ui::RADIUS,
+        Stroke::new(1.0, c.border),
+        StrokeKind::Inside,
+    );
+    let inner = rect.shrink(ui::SPACE_XS);
+    let mut child = ui.new_child(
+        UiBuilder::new()
+            .max_rect(inner)
+            .layout(Layout::left_to_right(Align::Min)),
+    );
+    child.spacing_mut().item_spacing.x = ui::SPACE_XS;
+    add(&mut child)
+}
+
+/// A camera, screen or terminal covering the whole window. Its name, its own buttons
+/// and menus, t!("call.exit_full_screen") and the call's buttons float over it while
+/// the pointer moves (a tap on phones), and fade when idle. Escape leaves.
 pub fn full_view(ui: &mut Ui, home: &mut Home) {
     let Some(tile) = home.voice.stage.full.clone() else {
         return;
     };
     let ctx = ui.ctx().clone();
-    let found = super::call_server(home)
-        .zip(home.voice.call.as_ref())
-        .and_then(|(server, call)| {
-            let peers = server.voice.get(&call.channel)?;
-            let me = server.dir.me;
-            match &tile {
-                Tile::Person(person) => {
-                    let peer = peers.iter().find(|p| p.person == *person)?.clone();
-                    Some((peer.name(server), Some(peer), *person == me))
-                }
-                Tile::Screen(sid) => {
-                    let peer = peers
-                        .iter()
-                        .find(|p| p.screens.iter().any(|s| s.sid == *sid))?;
-                    Some((
-                        t!("call.someones_screen", name = peer.name(server)),
-                        None,
-                        false,
-                    ))
-                }
-                Tile::Preview => previewing(&home.voice)
-                    .then(|| (t!("call.your_screen_preview").to_owned(), None, true)),
-                Tile::Terminal(person) => {
-                    let peer = peers.iter().find(|p| p.person == *person)?;
-                    if *person == me {
-                        (home.voice.terminals.local.is_some())
-                            .then(|| (t!("call.your_terminal").to_owned(), None, true))
-                    } else {
-                        let name = t!("call.someones_terminal", name = peer.name(server));
-                        let watched = home.voice.terminals.watched() == peer.terminal.as_deref();
-                        (peer.terminal.is_some() && watched).then_some((name, None, false))
-                    }
-                }
-            }
-        });
-    let Some((name, peer, me)) = found else {
-        // A replacement publication may still be arriving after a restart.
-        if matches!(&tile, Tile::Screen(sid) if home.voice.retaining_watch(sid)) {
-            if ui.input(|input| input.key_pressed(Key::Escape))
-                || ui::secondary(ui, t!("call.exit_full_screen")).clicked()
-            {
-                home.voice.stage.full = None;
-            }
-            return;
-        }
+    let now = ui.input(|input| input.time);
+    // A menu or dialog over the picture closes first on Escape.
+    let covered = Popup::is_any_open(&ctx) || ctx.memory(|m| m.top_modal_layer().is_some());
+    let escape = !covered && ui.input(|input| input.key_pressed(Key::Escape));
+    let found = home.voice.call.as_ref().and_then(|call| {
+        let index = (home.servers.iter()).position(|s| s.address == call.server)?;
+        let server = &home.servers[index];
+        let me = server.dir.me;
+        let peer = server
+            .voice
+            .get(&call.channel)?
+            .iter()
+            .find(|peer| match &tile {
+                Tile::Person(person) | Tile::Terminal(person) => peer.person == *person,
+                Tile::Screen(sid) => peer.screens.iter().any(|s| s.sid == *sid),
+                Tile::Preview => peer.person == me,
+            });
+        Some((index, peer.cloned(), me))
+    });
+    let Some((index, peer, me)) = found else {
         home.voice.stage.full = None;
         return;
     };
-    if let Tile::Terminal(_) = tile {
-        // Escape belongs to our own shell.
-        let mut exit = !me && ui.input(|input| input.key_pressed(Key::Escape));
-        ui.horizontal(|ui| {
-            ui.label(ui::bold(&name));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                exit |= ui::secondary(ui, t!("call.exit_full_screen")).clicked();
-            });
-        });
-        ui.add_space(ui::SPACE_S);
-        let (rect, _) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
-        // Field by field, so the terminals stay writable.
-        let server = home
-            .voice
-            .call
-            .as_ref()
-            .and_then(|call| (home.servers.iter()).find(|s| s.address == call.server));
-        let terms = &mut home.voice.terminals;
-        let (mut typed, mut refused) = (Vec::new(), false);
-        if let (true, Some(local)) = (me, &mut terms.local) {
-            terminal::ours(ui, rect, local, (&terms.guests, server), true, &name);
-        } else {
-            let typing = terms.typing == Typing::On;
-            let screen = terms
-                .watching
-                .as_mut()
-                .and_then(|(_, screen)| screen.as_mut());
-            (typed, refused) = terminal::theirs(ui, rect, screen, (true, typing), &name);
-        }
-        terminal::send_typed(home, typed);
-        if refused {
-            terminal::paste_refused(home, ui.input(|input| input.time));
-        }
-        if exit {
-            home.voice.stage.full = None;
-        }
-        return;
-    }
-    let split = home.layout.split;
-    let stats = home.voice.call.as_ref().map(|call| &call.stats);
-    let overlay = Overlay::new(&tile, split.show_fps, split.nerd_stats, stats);
     let voice = &mut home.voice;
-    let picture = match (&tile, &peer) {
-        (Tile::Person(_), Some(peer)) => person_picture(&ctx, voice, peer, me),
-        (Tile::Screen(sid), _) => screen_picture(&ctx, voice, sid),
-        (Tile::Preview, _) => preview_picture(&ctx, voice),
-        _ => None,
+    let server = &home.servers[index];
+    // What is shown, while it still can be.
+    let shown = peer.as_ref().and_then(|peer| {
+        let name = peer.name(server);
+        let mine = peer.person == me;
+        match &tile {
+            // Camera turned off: nothing left to show big.
+            Tile::Person(_) => peer.camera.is_some().then_some(name),
+            Tile::Screen(_) => Some(t!("call.someones_screen", name = name)),
+            Tile::Preview => previewing(voice).then(|| t!("call.your_screen_preview").to_owned()),
+            Tile::Terminal(_) if mine => {
+                (voice.terminals.local.is_some()).then(|| t!("call.your_terminal").to_owned())
+            }
+            Tile::Terminal(_) => (peer.terminal.is_some()
+                && voice.terminals.watched() == peer.terminal.as_deref())
+            .then(|| t!("call.someones_terminal", name = name)),
+        }
+    });
+    // A replacement publication may still be arriving after a restart.
+    let waiting = matches!(&tile, Tile::Screen(sid) if voice.retaining_watch(sid));
+    let (peer, name) = match (peer, shown) {
+        (Some(peer), Some(name)) => (Some(peer), name),
+        _ if waiting => (None, String::new()),
+        _ => {
+            voice.stage.full = None;
+            return;
+        }
     };
-    // Camera turned off or hidden: nothing left to show big.
-    if peer.as_ref().is_some_and(|p| p.camera.is_none()) {
-        voice.stage.full = None;
-        return;
-    }
+    let mine = peer.as_ref().is_some_and(|peer| peer.person == me);
+    let terminal = matches!(tile, Tile::Terminal(_));
     let controlling = match &tile {
         Tile::Screen(sid) => voice.control.screen(sid) == Some(true),
         Tile::Person(_) | Tile::Preview | Tile::Terminal(_) => false,
     };
-    // While controlling, Escape belongs to the shared screen.
-    let mut exit = !controlling && ui.input(|input| input.key_pressed(Key::Escape));
-    let heading = if controlling {
-        t!("call.controlling", name = name)
-    } else {
-        name
+    let typing = match tile {
+        Tile::Terminal(_) if !mine => voice.terminals.typing,
+        _ => Typing::Idle,
     };
-    ui.horizontal(|ui| {
-        ui.label(ui::bold(&heading));
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            exit |= ui::secondary(ui, t!("call.exit_full_screen")).clicked();
-        });
-    });
-    ui.add_space(ui::SPACE_S);
-    let sense = if controlling {
-        Sense::click()
-    } else {
-        Sense::hover()
+    // Escape belongs to our own shell, one we type in and a screen we control.
+    let keys_taken = controlling || (terminal && (mine || typing == Typing::On));
+    let mut exit = escape && !keys_taken;
+
+    let rect = ui.available_rect_before_wrap();
+    let response = ui.allocate_rect(rect, Sense::click());
+    let picture = match (&tile, &peer) {
+        _ if peer.is_none() => None,
+        (Tile::Person(_), Some(peer)) => person_picture(&ctx, voice, peer, mine),
+        (Tile::Screen(sid), _) => screen_picture(&ctx, voice, sid),
+        (Tile::Preview, _) => preview_picture(&ctx, voice),
+        _ => None,
     };
-    let (rect, response) = ui.allocate_exact_size(ui.available_size(), sense);
-    match picture {
-        Some(mut picture) => {
-            // Whole, not cropped, now that it has the room.
-            picture.cover = false;
-            paint_picture(ui, rect, picture);
-            overlay.paint(ui, rect, None);
-            if controlling {
-                let (inputs, stop) =
-                    voice
-                        .control
-                        .capture(ui, &response, fitted(rect, picture.size));
-                let accent = ui::accent(ui).base;
-                ui.painter().rect_stroke(
-                    fitted(rect, picture.size),
-                    0.0,
-                    Stroke::new(2.0, accent),
-                    StrokeKind::Outside,
-                );
-                if !inputs.is_empty() {
-                    send(home, Command::ControlInput(inputs));
-                }
-                if stop {
-                    send(home, Command::ReleaseControl);
-                }
-                if exit {
-                    home.voice.stage.full = None;
-                }
-                return;
+    let mut acts = Vec::new();
+    if terminal {
+        // Field by field, so the terminals stay writable.
+        let terms = &mut voice.terminals;
+        if let (true, Some(local)) = (mine, &mut terms.local) {
+            terminal::ours(ui, rect, local, (&terms.guests, Some(server)), true, &name);
+        } else {
+            let typing = typing == Typing::On;
+            let screen = terms
+                .watching
+                .as_mut()
+                .and_then(|(_, screen)| screen.as_mut());
+            let (typed, refused) = terminal::theirs(ui, rect, screen, (true, typing), &name);
+            if !typed.is_empty() {
+                acts.push(Act::TypeInTerminal(typed));
+            }
+            if refused {
+                acts.push(Act::PasteRefused);
             }
         }
-        None => {
-            ui.painter().text(
-                rect.center(),
-                Align2::CENTER_CENTER,
-                t!("call.waiting_picture"),
-                FontId::proportional(ui::TEXT_BODY),
-                ui::colors(ui).muted,
+    } else if let Some(mut picture) = picture {
+        // Whole, not cropped, now that it has the room.
+        picture.cover = false;
+        paint_picture(ui, rect, picture);
+        if controlling {
+            let shown = fitted(rect, picture.size);
+            let (inputs, stop) = voice.control.capture(ui, &response, shown);
+            let accent = ui::accent(ui).base;
+            ui.painter()
+                .rect_stroke(shown, 0.0, Stroke::new(2.0, accent), StrokeKind::Outside);
+            if !inputs.is_empty() {
+                acts.push(Act::Control(inputs));
+            }
+            if stop {
+                acts.push(Act::ReleaseControl);
+            }
+        }
+    } else {
+        ui.painter().text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            t!("call.waiting_picture"),
+            FontId::proportional(ui::TEXT_BODY),
+            ui::colors(ui).muted,
+        );
+    }
+
+    // The controls: on mouse movement or a tap on the picture (phones toggle them).
+    let (touch, moved, pointer) = ui.input(|input| {
+        let touch = input.any_touches()
+            || (input.events.iter()).any(|event| matches!(event, egui::Event::Touch { .. }));
+        let moved = !touch && input.pointer.delta() != Vec2::ZERO;
+        (touch, moved, input.pointer.hover_pos())
+    });
+    let keyboard = ui.input(|input| input.key_pressed(Key::Tab));
+    // A terminal takes the taps itself, so touching it shows the controls.
+    let touched = terminal && touch && ui.input(|input| input.pointer.any_pressed());
+    let tapped = touch && response.clicked();
+    let chrome = &mut voice.stage.chrome;
+    let held = covered || chrome.over(pointer);
+    let visible = chrome.update(now, moved || keyboard || touched, tapped, held);
+    if visible {
+        let left = chrome.left(now);
+        ctx.request_repaint_after(std::time::Duration::from_secs_f64(left));
+    }
+    let fade = ctx.animate_bool_with_time(
+        UiId::unique("full screen controls"),
+        visible,
+        ui::STATE_SECONDS,
+    );
+    if fade == 0.0 && !controlling && response.hovered() {
+        ctx.set_cursor_icon(CursorIcon::None);
+    }
+
+    let audio = voice.audio.clone();
+    let split = home.layout.split;
+    let stats = voice.call.as_ref().map(|call| &call.stats);
+    let overlay = Overlay::new(&tile, split.show_fps, split.nerd_stats, stats);
+    let watched = match &tile {
+        Tile::Screen(sid) => voice.watching.as_ref().is_some_and(|w| w.sid == *sid),
+        Tile::Terminal(_) => !mine,
+        Tile::Person(_) | Tile::Preview => false,
+    };
+    let entry = peer.as_ref().map(|peer| Entry {
+        tile: tile.clone(),
+        peer,
+        name: name.clone(),
+        me: mine,
+        picture,
+        video: true,
+        watched,
+        camera_visible: peer.camera.is_some() && !voice.hidden.contains(&peer.person),
+        speaking: false,
+    });
+    let state = TileState {
+        relation: (peer.as_ref()).map_or(Relation::None, |p| home.friends.relation(&p.person)),
+        can_ask: false,
+        joined: true,
+        big: true,
+        spotlight: false,
+        focused: false,
+        remote: match &tile {
+            Tile::Screen(sid) if !mine => voice.control.screen(sid),
+            _ => None,
+        },
+        typing,
+    };
+    let sharer = |entry: &Entry| {
+        (!entry.peer.unknown).then(|| Person {
+            server,
+            person: entry.peer.person,
+            relation: state.relation,
+            can_ask: false,
+            audio: (!entry.me).then_some(&audio),
+            video: (!entry.me && entry.peer.camera.is_some()).then_some(entry.camera_visible),
+        })
+    };
+    // Right-click or a long press on the picture: the screen's menu, as on its tile.
+    let mut picked = None;
+    if let Some(entry) = &entry
+        && matches!(tile, Tile::Screen(_) | Tile::Preview)
+        && !controlling
+    {
+        let sharer = sharer(entry);
+        let menu = ui::context_menu(&response, |m| {
+            screen_menu(
+                m,
+                entry,
+                state,
+                &audio,
+                sharer.as_ref(),
+                &overlay,
+                true,
+                &mut acts,
+            )
+        });
+        picked = picked.take().or(menu.flatten());
+    }
+
+    let mut name_tag = None;
+    let mut panels = Vec::new();
+    let mut overlay_ui = ui.new_child(UiBuilder::new().max_rect(rect));
+    overlay_ui.multiply_opacity(fade);
+    if fade > 0.0 {
+        let ui = &mut overlay_ui;
+        let is_person = matches!(tile, Tile::Person(_));
+        let tools = entry.as_ref().map(|entry| {
+            let control = !is_person && !mine && watched && (entry.picture.is_some() || terminal);
+            let sound = is_person || (!terminal && !entry.peer.apps.is_empty());
+            let volume = sound && !mine && !entry.peer.unknown;
+            let menu = matches!(tile, Tile::Screen(_) | Tile::Preview);
+            (control, volume, menu, watched)
+        });
+        let (control, volume, menu, stop) = tools.unwrap_or_default();
+        let count = 1 + [control, volume, menu, stop]
+            .iter()
+            .filter(|on| **on)
+            .count();
+        let width = panel_width(count).min(rect.width() - 2.0 * GAP);
+        let height = FULL_TOOL.y + 2.0 * ui::SPACE_XS;
+        let top = Rect::from_min_size(
+            pos2(rect.right() - GAP - width, rect.top() + GAP),
+            vec2(width, height),
+        );
+        panels.push(top);
+        panel(ui, top, |ui| {
+            if let Some(entry) = &entry {
+                if control {
+                    control_button(ui, entry, state, FULL_TOOL, &mut acts);
+                }
+                if volume {
+                    volume_button(ui, entry, &audio, FULL_TOOL, &mut acts);
+                }
+                if menu {
+                    let sharer = sharer(entry);
+                    let button =
+                        ui::icon_button(ui, "…", t!("call.stream_options"), Look::Plain, FULL_TOOL);
+                    let menu = ui::menu(&button, |m| {
+                        screen_menu(
+                            m,
+                            entry,
+                            state,
+                            &audio,
+                            sharer.as_ref(),
+                            &overlay,
+                            true,
+                            &mut acts,
+                        )
+                    });
+                    picked = picked.take().or(menu.flatten());
+                }
+                if stop {
+                    let tip = t!("call.stop_watching");
+                    if ui::icon_button(ui, "⏹", tip, Look::Plain, FULL_TOOL).clicked() {
+                        acts.push(if terminal {
+                            Act::StopWatchingTerminal
+                        } else {
+                            Act::StopWatching
+                        });
+                    }
+                }
+            }
+            let tip = t!("call.exit_full_screen");
+            exit |= ui::icon_button(ui, "⛶", tip, Look::Plain, FULL_TOOL).clicked();
+        });
+        // The name, in the room left of the buttons.
+        let heading = if controlling {
+            t!("call.controlling", name = name)
+        } else {
+            name.clone()
+        };
+        let room = top.left() - rect.left() - 3.0 * GAP;
+        if !heading.is_empty() && room > FULL_TOOL.x {
+            let mut job = LayoutJob::simple_singleline(
+                heading,
+                FontId::new(ui::TEXT_BODY, ui::bold_family()),
+                ui::colors(ui).strong,
             );
+            job.wrap = TextWrapping::truncate_at_width(room - 2.0 * ui::SPACE_M);
+            let galley = ui.painter().layout_job(job);
+            let size = vec2(galley.size().x + 2.0 * ui::SPACE_M, height);
+            let tag = Rect::from_min_size(rect.min + Vec2::splat(GAP), size);
+            panel(ui, tag, |ui| {
+                let at = pos2(
+                    tag.left() + ui::SPACE_M,
+                    tag.center().y - galley.size().y / 2.0,
+                );
+                ui.painter().galley(at, galley, ui::colors(ui).strong);
+            });
+            panels.push(tag);
+            name_tag = Some(tag);
         }
     }
-    if exit {
-        voice.stage.full = None;
+    overlay.paint(ui, rect, name_tag);
+    if fade > 0.0 {
+        // The call's buttons along the bottom.
+        let count = super::panel::phone_control_count(home);
+        let width = panel_width(count).min(rect.width() - 2.0 * GAP);
+        let height = FULL_TOOL.y + 2.0 * ui::SPACE_XS;
+        let bottom = Rect::from_center_size(
+            pos2(rect.center().x, rect.bottom() - GAP - height / 2.0),
+            vec2(width, height),
+        );
+        panels.push(bottom);
+        panel(&mut overlay_ui, bottom, |ui| {
+            super::panel::phone_controls(ui, home)
+        });
     }
+    home.voice.stage.chrome.panels = panels;
+    if let (Some(picked), Some(peer)) = (picked, &peer) {
+        acts.push(Act::Person(peer.person, picked));
+    }
+    if exit {
+        ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, Key::Escape));
+        home.voice.stage.full = None;
+    }
+    apply(home, index, now, acts);
 }
 
 #[cfg(test)]
@@ -1793,6 +2073,54 @@ mod tests {
         stage.replace_video("old", "new");
         assert_eq!(stage.focus, Some(Tile::Screen("new".into())));
         assert_eq!(stage.full, stage.focus);
+    }
+
+    #[test]
+    fn full_screen_controls_show_while_used_and_hide_when_idle() {
+        let mut chrome = Chrome::default();
+        // Shown on entering, so the way out is seen, then gone after a quiet spell.
+        assert!(chrome.update(10.0, false, false, false));
+        assert!(chrome.update(10.0 + IDLE - 0.1, false, false, false));
+        assert!(!chrome.update(10.0 + IDLE, false, false, false));
+        // Moving the pointer brings them back for another spell.
+        assert!(chrome.update(20.0, true, false, false));
+        assert!(chrome.update(20.0 + IDLE - 0.1, false, false, false));
+        assert!(!chrome.update(20.0 + IDLE, false, false, false));
+        // An open menu, or the pointer on them, keeps them however long it takes.
+        assert!(chrome.update(30.0, false, false, true));
+        assert!(chrome.update(60.0, false, false, true));
+        assert!(chrome.update(60.0 + IDLE - 0.1, false, false, false));
+        assert!(!chrome.update(60.0 + IDLE, false, false, false));
+        chrome.panels = vec![Rect::from_min_size(pos2(0.0, 0.0), vec2(50.0, 50.0))];
+        assert!(chrome.over(Some(pos2(10.0, 10.0))));
+        assert!(!chrome.over(Some(pos2(60.0, 10.0))) && !chrome.over(None));
+    }
+
+    #[test]
+    fn a_tap_toggles_the_full_screen_controls() {
+        let mut chrome = Chrome::default();
+        assert!(chrome.update(0.0, false, false, false));
+        // Shown: a tap hides them at once, the next one shows them again.
+        assert!(!chrome.update(0.5, false, true, false));
+        assert!(!chrome.update(1.0, false, false, false));
+        assert!(chrome.update(1.5, false, true, false));
+        assert!((chrome.left(1.5) - IDLE).abs() < 1e-9);
+        // And they still hide by themselves.
+        assert!(!chrome.update(1.5 + IDLE, false, false, false));
+    }
+
+    #[test]
+    fn stopping_the_full_screen_stream_leaves_full_screen() {
+        let mut stage = Stage {
+            full: Some(Tile::Screen("s".into())),
+            ..Stage::default()
+        };
+        stage.stop_watching();
+        assert_eq!(stage.full, None);
+        // A camera in full screen stays.
+        stage.full = Some(Tile::Person([0; 32]));
+        stage.stop_watching();
+        assert!(stage.full.is_some());
     }
 
     #[test]
