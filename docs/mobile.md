@@ -299,6 +299,26 @@ device; it does not open a second hardware microphone. After leaving, the audio
 worker releases the session when the leave sound finishes. The IPA declares
 background audio for calls with the screen locked.
 
+**CallKit** (`src/call/callkit.rs`, `src/ios/callkit.rs`). A voice call is also an
+outgoing CallKit call, so iOS shows it like a phone call: the green pill or
+Dynamic Island, the lock screen and Control Center, with mute and end. Joining
+asks for a `CXStartCallAction` with a generic handle, "channel / server" (shown
+only on this phone); the call is reported connected when the room connects,
+and leaving, switching rooms or the server ending the call asks for a
+`CXEndCallAction`. Muting in the app (or a moderator's mute) is sent as
+`CXSetMutedCallAction`. The other way round, End and Mute from the system leave
+the room or mute the microphone. With the screen locked the app draws no frames,
+so the provider's delegate leaves (or mutes) right away and the next frame brings
+the rest of the app in line; unmuting waits for that frame, which respects a
+moderator's mute. The provider allows one call, no holding or grouping (another
+phone call offers "End & Accept", which leaves the room), video when the camera
+is on, and keeps calls out of the Phone app's Recents (and so out of its iCloud
+sync). The app still configures and activates its own PlayAndRecord/VoiceChat
+session at join, before CallKit's start; CallKit then reports that session
+active (logged as `CallKit activated the audio session`). If CallKit refuses a
+call (some regions do not allow it), the voice call goes on without it. Incoming
+ringing (PushKit) is not part of this.
+
 Turning on video asks for camera access. The front camera is the default;
 The call panel shows a local preview from the same capture frames, mirrored only
 for the front camera. Flip camera switches front/back without republishing the
@@ -323,7 +343,8 @@ or camera behavior. Device checks remain pending while Agent device access is of
 Joining a call on iOS is still untested.
 On an iPhone, check the device log for permission, the active category/mode and
 input route type, then five one-second capture counts. Verify a peer can hear
-speech, including after an interruption, a headset switch and locking the screen.
+speech, including after an interruption, a headset switch and locking the screen,
+and that the lock screen's End and Mute leave and mute the call.
 
 ## Build tools
 

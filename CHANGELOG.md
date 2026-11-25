@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- iPhone: voice calls show as calls on the lock screen, in the Dynamic Island and in Control Center, with mute and hang up; they stay out of the Phone app's Recents.
+
 ## v0.7.0 - 2026-11-25
 
 - Voice channels can now be set to audio quality up to 320 kbps, for listening to music together.

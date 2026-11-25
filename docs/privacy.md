@@ -336,7 +336,11 @@ encrypted sync blob. Desktop notifications show the sender, channel and a short
 preview decrypted on this device; they go only to the operating system's
 notification service (D-Bus on Linux, toasts on Windows, the notification center on macOS). During a call, Android shows an ongoing local "In a voice call"
 notification so the microphone keeps working in the background; it names no
-server, channel or person and makes no connection. Decrypted names, messages and pictures stay in
+server, channel or person and makes no connection. On iOS a call is a CallKit
+call named "channel / server", shown on the lock screen, in the Dynamic Island and
+Control Center (and on a paired Apple Watch or CarPlay); it is kept out of the
+Phone app's Recents, so the name is not stored or synced to iCloud by the
+system, and CallKit makes no connection. Decrypted names, messages and pictures stay in
 memory only; the log never contains them, file names or invite links. A
 downloaded file is written only where the person picks in the save dialog,
 through a temporary file in that folder that is removed if the download fails.

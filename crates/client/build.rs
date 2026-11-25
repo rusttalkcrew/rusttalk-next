@@ -20,7 +20,7 @@ fn main() {
             .file(camera)
             .flag("-fobjc-arc")
             .compile("call_camera");
-        for framework in ["AVFoundation", "CoreMedia", "CoreVideo", "UIKit"] {
+        for framework in ["AVFoundation", "CallKit", "CoreMedia", "CoreVideo", "UIKit"] {
             println!("cargo:rustc-link-lib=framework={framework}");
         }
     }
