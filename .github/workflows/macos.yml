@@ -42,7 +42,7 @@ concurrency:
 jobs:
   macos:
     runs-on: macos-latest
-    timeout-minutes: 25
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install
