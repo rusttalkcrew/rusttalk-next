@@ -6,7 +6,7 @@ use eframe::egui::{
 };
 use rusttalk_core::presence::{Presence, Status as Choice};
 
-use super::{Directory, Home, Tab, View, face, presence_color};
+use super::{Directory, Home, Tab, View, face_speaking, presence_color};
 use crate::{
     call::call_server,
     net::Command,
@@ -108,10 +108,7 @@ fn identity(ui: &mut Ui, home: &Home, status: Choice) -> eframe::egui::Response 
         &t!("status.button", name = name, status = label),
         |ui| {
             ui.spacing_mut().item_spacing.x = ui::SPACE_S;
-            let avatar = face(ui, dir, me, &name, AVATAR_SIZE, false);
-            if speaking {
-                ui::speaking_outline(ui, avatar.rect);
-            }
+            let avatar = face_speaking(ui, dir, me, &name, AVATAR_SIZE, false, speaking);
             ui::presence_dot(ui, avatar.rect, 5.0, color, c.side, status == Choice::Dnd);
             let width = ui.available_width().max(0.0);
             let [name, status] = [ui::bold(&name), ui::caption(label)].map(|text| {

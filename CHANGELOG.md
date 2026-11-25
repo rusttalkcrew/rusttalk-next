@@ -29,6 +29,7 @@ Unreleased under the new version and date.
 - The audit log now records server setting, file limit and public listing changes, and shows which roles and channel permissions changed.
 - In chat, the name lines up with the top of the avatar and the message sits right under it, also when it starts with a mention; a reply's quote now sits above the name.
 - Reactions light up when you point at them, and "who reacted" shows the real emoji picture.
+- Animated profile pictures now play while the person is speaking in a call, and stop on the first frame when they go quiet.
 
 ## v0.5.0 - 2026-11-25
 

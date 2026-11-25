@@ -980,10 +980,6 @@ fn sound_mark(ui: &mut Ui, glyph: &str, tip: &str) {
     response.widget_info(|| WidgetInfo::labeled(Role::Image, true, tip));
 }
 
-fn ring(ui: &Ui, rect: egui::Rect) {
-    ui::speaking_outline(ui, rect);
-}
-
 /// Each file offered in the call with what can be done with it.
 fn live_files(ui: &mut Ui, list: &[LiveFile], server: Option<&Server>) -> Option<LiveAction> {
     let mut action = None;

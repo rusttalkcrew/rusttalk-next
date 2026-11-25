@@ -2892,7 +2892,14 @@ pub fn frame_at(delays: impl Iterator<Item = u32> + Clone, now: u64) -> Option<(
 /// Paint a profile picture or server icon in `rect`: its first frame, and it plays
 /// only while the pointer is over it, so lists of them cost nothing at rest.
 pub fn paint_hovered(ui: &Ui, rect: Rect, picture: &Picture, radius: f32) {
-    let play = ui.rect_contains_pointer(rect);
+    paint_face(ui, rect, picture, radius, false);
+}
+
+/// `paint_hovered` that also plays while the person speaks in a call, like Discord,
+/// unless animations are set to play only on hover.
+fn paint_face(ui: &Ui, rect: Rect, picture: &Picture, radius: f32, speaking: bool) {
+    let play = ui.rect_contains_pointer(rect)
+        || (speaking && ui.is_rect_visible(rect) && !emoji::hover_only(ui.ctx()));
     egui::Image::new(&frame_when(ui, picture, play))
         .corner_radius(radius)
         .paint_at(ui, rect);
@@ -3551,7 +3558,7 @@ fn member_face_speaking(
     let response = match member.and_then(|m| m.avatar.as_ref()) {
         Some(picture) => {
             let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
-            paint_hovered(ui, rect, picture, ui::avatar_radius(size));
+            paint_face(ui, rect, picture, ui::avatar_radius(size), speaking);
             response
         }
         None => avatar(ui, person, name, size),
@@ -7591,6 +7598,88 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn animated_picture_plays_only_while_its_person_speaks() {
+        let frame = |color| (egui::ColorImage::new([2, 2], vec![color; 4]), 100);
+        let picture = Picture::new(
+            [92; 32],
+            vec![
+                frame(Color32::RED),
+                frame(Color32::BLUE),
+                frame(Color32::GREEN),
+            ],
+            Default::default(),
+        );
+        let dir = Directory {
+            members: vec![Member {
+                person: ME,
+                name: Some("Synthetic member".into()),
+                devices: Vec::new(),
+                roles: Vec::new(),
+                avatar: Some(picture),
+                presence: Presence::Online,
+                hide_offline: false,
+                bio: None,
+                voice_muted: false,
+            }]
+            .into(),
+            ..Default::default()
+        };
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(200.0, 200.0))
+            .build_ui_state(
+                move |ui, speaking: &mut bool| {
+                    face_speaking(ui, &dir, &ME, "Synthetic member", 64.0, true, *speaking);
+                },
+                false,
+            );
+        ui::install(&h.ctx);
+        h.run();
+        // The pointer stays away, so only speaking can play it. The three frames last
+        // 100 ms each and loop on the clock, so each time below lands on a later frame.
+        let at = |h: &mut egui_kittest::Harness<bool>, seconds: f64| {
+            h.input_mut().time = Some(seconds);
+            h.step();
+            let texture = (h.output().shapes.iter())
+                .find_map(|shape| match &shape.shape {
+                    egui::epaint::Shape::Rect(rect) => {
+                        rect.brush.as_ref().map(|brush| brush.fill_texture_id)
+                    }
+                    _ => None,
+                })
+                .expect("the picture is painted");
+            let delay = h.output().viewport_output[&egui::ViewportId::ROOT].repaint_delay;
+            (texture, delay)
+        };
+        let (first, _) = at(&mut h, 0.0);
+        for seconds in [0.15, 0.25] {
+            assert_eq!(
+                at(&mut h, seconds),
+                (first, Duration::MAX),
+                "silent stays still"
+            );
+        }
+        *h.state_mut() = true;
+        let (second, delay) = at(&mut h, 0.45);
+        assert_ne!(second, first, "speaking plays the next frame");
+        assert!(
+            delay <= Duration::from_millis(100),
+            "and asks for the one after"
+        );
+        let (third, _) = at(&mut h, 0.55);
+        assert!(third != first && third != second);
+        *h.state_mut() = false;
+        assert_eq!(
+            at(&mut h, 0.75),
+            (first, Duration::MAX),
+            "back to the first frame"
+        );
+        // "Animated emoji: On hover" keeps pictures still while people speak too.
+        crate::emoji::set_hover_only(&h.ctx, true);
+        *h.state_mut() = true;
+        assert_eq!(at(&mut h, 0.85), (first, Duration::MAX));
     }
 
     const ME: Id = [1; 32];
