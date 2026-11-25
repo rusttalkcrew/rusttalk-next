@@ -7,6 +7,7 @@ use eframe::egui::{
     self, Align, FontId, Label, Layout, Rect, RichText, Sense, Shape, Stroke, Ui, UiBuilder, Vec2,
     accesskit::Role as Access, pos2, text::LayoutJob, vec2,
 };
+use rusttalk_core::presence::Presence;
 
 use crate::{
     home::{
@@ -323,6 +324,7 @@ fn row(
             radius,
             presence_color(c, member.presence),
             c.main,
+            member.presence == Presence::Dnd,
         );
         let status = status_text(member.presence);
         face.widget_info(|| egui::WidgetInfo::labeled(Access::Image, true, status));
@@ -340,7 +342,8 @@ fn row(
 
         let child = &mut cell(ui, status_area);
         child.spacing_mut().item_spacing.x = ui::SPACE_S;
-        ui::dot(child, presence_color(c, member.presence));
+        let barred = member.presence == Presence::Dnd;
+        ui::status_dot(child, presence_color(c, member.presence), barred);
         child.add(
             Label::new(ui::caption(status_text(member.presence)).color(c.text)).selectable(false),
         );
@@ -434,7 +437,6 @@ fn role_chips(ui: &mut Ui, dir: &Directory, member: &Member) {
 #[cfg(test)]
 mod tests {
     use egui_kittest::{Harness, kittest::Queryable};
-    use rusttalk_core::presence::Presence;
 
     use super::*;
     use crate::home::Home;

@@ -11,7 +11,7 @@ use axum::{
 };
 use rusttalk_core::{
     auth::encode,
-    presence::{Presence, PresenceEvent, Status, Update},
+    presence::{FEATURES_HEADER, Presence, PresenceEvent, Status, Update},
 };
 use serde::Deserialize;
 use sqlx::{SqliteConnection, query, query_scalar};
@@ -61,8 +61,49 @@ fn visible(member: &Member, idle: &HashSet<String>) -> Presence {
         }
         Status::Online => Presence::Online,
         Status::Away => Presence::Away,
+        Status::Dnd => Presence::Dnd,
         Status::Invisible => Presence::Offline,
     }
+}
+
+/// Whether the request's app understands `dnd` (see [`FEATURES_HEADER`]).
+pub fn knows_dnd(headers: &HeaderMap) -> bool {
+    (headers
+        .get(FEATURES_HEADER)
+        .and_then(|value| value.to_str().ok()))
+    .is_some_and(|features| features.split(',').any(|feature| feature.trim() == "dnd"))
+}
+
+/// Apps up to v0.5.0 fail on an unknown presence: they are told "away" for "dnd".
+pub fn presence_for(presence: Presence, knows_dnd: bool) -> Presence {
+    match presence {
+        Presence::Dnd if !knows_dnd => Presence::Away,
+        presence => presence,
+    }
+}
+
+/// Like [`presence_for`], for a member's own stored choice.
+pub fn status_for(status: Status, knows_dnd: bool) -> Status {
+    match status {
+        Status::Dnd if !knows_dnd => Status::Away,
+        status => status,
+    }
+}
+
+/// The notice for apps that don't know "dnd", or `None` when it has none.
+pub fn for_older(event: &PresenceEvent) -> Option<PresenceEvent> {
+    let PresenceEvent::PresenceChanged {
+        person_id,
+        status,
+        chosen,
+    } = event;
+    (*status == Presence::Dnd || *chosen == Some(Status::Dnd)).then(|| {
+        PresenceEvent::PresenceChanged {
+            person_id: person_id.clone(),
+            status: presence_for(*status, false),
+            chosen: chosen.map(|chosen| status_for(chosen, false)),
+        }
+    })
 }
 
 #[derive(Debug, PartialEq)]
@@ -130,6 +171,7 @@ fn status_name(status: Status) -> &'static str {
     match status {
         Status::Online => "online",
         Status::Away => "away",
+        Status::Dnd => "dnd",
         Status::Invisible => "invisible",
     }
 }
@@ -143,6 +185,7 @@ pub async fn stored(db: &mut SqliteConnection, person: &[u8]) -> ApiResult<Statu
             .await?;
     Ok(match name.as_deref() {
         Some("away") => Status::Away,
+        Some("dnd") => Status::Dnd,
         Some("invisible") => Status::Invisible,
         _ => Status::Online,
     })
@@ -269,6 +312,13 @@ pub async fn set(
         set_idle(&app, &person, device, true);
         return Ok(StatusCode::NO_CONTENT);
     }
+    // Their "online" after that can't be told apart from a pick, and they can't show
+    // Do not disturb: it only ends their idle, and a newer app ends Do not disturb.
+    if !picked && status == Status::Online && stored(&mut tx, &actor.person).await? == Status::Dnd {
+        drop(tx);
+        set_idle(&app, &person, device, false);
+        return Ok(StatusCode::NO_CONTENT);
+    }
     // Kept so a reconnect, restart or another device starts from the same choice.
     query("UPDATE members SET presence_status = ? WHERE person_id = ?")
         .bind(status_name(status))
@@ -388,8 +438,10 @@ mod tests {
         assert_eq!(visible(&both, &phone), Presence::Online);
         assert_eq!(visible(&both, &all), Presence::Away);
         // A picked status is the same on every device, idle or not.
+        // Do not disturb included: idle never overrides it.
         for (status, shown) in [
             (Status::Away, Presence::Away),
+            (Status::Dnd, Presence::Dnd),
             (Status::Invisible, Presence::Offline),
         ] {
             both.status = status;
@@ -497,6 +549,7 @@ mod tests {
         set_idle(&app, "p", "phone".into(), true);
         for (status, presence) in [
             (Status::Away, Presence::Away),
+            (Status::Dnd, Presence::Dnd),
             (Status::Invisible, Presence::Offline),
             (Status::Online, Presence::Online),
         ] {
@@ -515,7 +568,10 @@ mod tests {
                 chosen.push(status);
             }
         }
-        assert_eq!(chosen, [Status::Away, Status::Invisible, Status::Online]);
+        assert_eq!(
+            chosen,
+            [Status::Away, Status::Dnd, Status::Invisible, Status::Online]
+        );
     }
 
     #[tokio::test]
@@ -580,6 +636,68 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(choice().await, Status::Away);
+    }
+
+    #[tokio::test]
+    async fn do_not_disturb_is_stored_and_kept_through_an_older_apps_activity() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app(dir.path()).await;
+        let person = encode(&crate::testing::person(1));
+        // The test session's device runs an older app; the newer one picks.
+        let _old = open(&app, person.clone(), encode(&[1]), Status::Online);
+        let _new = open(&app, person.clone(), "new".into(), Status::Online);
+        let put = |json| {
+            let choice = serde_json::from_value(json).unwrap();
+            set(
+                State(app.clone()),
+                crate::testing::as_person(1),
+                Ok(Json(choice)),
+            )
+        };
+        let choice = async || {
+            let mut db = app.db.acquire().await.unwrap();
+            stored(&mut db, &crate::testing::person(1)).await.unwrap()
+        };
+
+        put(serde_json::json!({"status": "dnd", "picked": true}))
+            .await
+            .unwrap();
+        assert_eq!(choice().await, Status::Dnd);
+        later().await;
+        assert_eq!(shown(&app, &person), Presence::Dnd);
+        // The older app goes idle and comes back by itself: still Do not disturb.
+        put(serde_json::json!({"status": "away"})).await.unwrap();
+        set_idle(&app, &person, "new".into(), true);
+        later().await;
+        assert_eq!(shown(&app, &person), Presence::Dnd);
+        put(serde_json::json!({"status": "online"})).await.unwrap();
+        assert_eq!(choice().await, Status::Dnd);
+        assert!(!app.presence.0.lock().unwrap().idle.contains(&encode(&[1])));
+        assert!(serde_json::from_value::<Choice>(serde_json::json!({"status": "busy"})).is_err());
+    }
+
+    #[test]
+    fn older_apps_are_told_away_for_do_not_disturb() {
+        let mut headers = HeaderMap::new();
+        assert!(!knows_dnd(&headers));
+        headers.insert(FEATURES_HEADER, "other, dnd".parse().unwrap());
+        assert!(knows_dnd(&headers));
+        assert_eq!(presence_for(Presence::Dnd, false), Presence::Away);
+        assert_eq!(presence_for(Presence::Dnd, true), Presence::Dnd);
+        assert_eq!(status_for(Status::Dnd, false), Status::Away);
+        assert_eq!(status_for(Status::Invisible, false), Status::Invisible);
+
+        let event = |status, chosen| PresenceEvent::PresenceChanged {
+            person_id: "p".into(),
+            status,
+            chosen,
+        };
+        assert!(for_older(&event(Presence::Online, Some(Status::Online))).is_none());
+        // What a v0.5.0 app reads: no "dnd" anywhere in the notice.
+        let older = for_older(&event(Presence::Dnd, Some(Status::Dnd))).unwrap();
+        let json = serde_json::to_value(Update::Presence(older)).unwrap();
+        assert_eq!(json["status"], "away");
+        assert_eq!(json["chosen"], "away");
     }
 
     #[test]

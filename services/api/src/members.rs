@@ -117,6 +117,7 @@ pub async fn me(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Me
         .map(|role| role.id)
         .collect();
     let status = crate::presence::stored(&mut tx, &actor.person).await?;
+    let status = crate::presence::status_for(status, crate::presence::knows_dnd(&headers));
     tx.commit().await?;
     Ok(Json(Me {
         person_id: encode(&actor.person),

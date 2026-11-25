@@ -111,13 +111,22 @@ pub async fn presence<'a>(
     presence_is(a, &person, Presence::Away).await?;
     b.set_idle(false).await?;
     presence_is(a, &person, Presence::Online).await?;
+    // Do not disturb is stored and shown; an idle device doesn't turn it into away.
+    b.set_status(Status::Dnd).await?;
+    presence_is(a, &person, Presence::Dnd).await?;
+    b.set_idle(true).await?;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(member(a, &person).await?["presence"], "dnd");
+    b.set_idle(false).await?;
+    b.set_status(Status::Online).await?;
+    presence_is(a, &person, Presence::Online).await?;
     assert_eq!(me["hide_offline"], false);
     b.set_hide_offline(true).await?;
     assert_eq!(member(a, &person).await?["hide_offline"], true);
     b.set_hide_offline(false).await?;
     assert_eq!(member(a, &person).await?["hide_offline"], false);
     println!(
-        "B2 bot saw online, away, invisible as offline, offline on the last socket closing, the stored choice on reconnect, no notice for an invisible reconnect, away while its device is idle, and the hide-offline flag"
+        "B2 bot saw online, away, invisible as offline, offline on the last socket closing, the stored choice on reconnect, no notice for an invisible reconnect, away while its device is idle, do not disturb even while idle, and the hide-offline flag"
     );
     Ok(b)
 }

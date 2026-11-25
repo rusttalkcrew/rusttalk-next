@@ -34,7 +34,8 @@ pub struct Menu<'u> {
 
 enum Leading<'a> {
     Glyph(&'a str),
-    Dot(Color32),
+    /// A coloured dot, barred for Do not disturb when `true`.
+    Dot(Color32, bool),
 }
 
 enum Trailing {
@@ -70,9 +71,17 @@ impl<'a> Item<'a> {
     /// A row led by a coloured dot instead of an icon, like a status.
     pub fn dot(color: Color32, label: &'a str) -> Self {
         Self {
-            leading: Leading::Dot(color),
+            leading: Leading::Dot(color, false),
             ..Self::new("", label)
         }
+    }
+
+    /// A bar across the leading dot, the mark of Do not disturb.
+    pub fn barred(mut self) -> Self {
+        if let Leading::Dot(_, barred) = &mut self.leading {
+            *barred = true;
+        }
+        self
     }
 
     /// A second, smaller line under the label.
@@ -232,11 +241,13 @@ fn row(ui: &mut Ui, item: &Item) -> Response {
                 color,
             );
         }
-        Leading::Dot(color) => {
-            painter.circle_filled(
+        Leading::Dot(color, barred) => {
+            super::paint_dot(
+                painter,
                 egui::pos2(left + ICON_X, mid),
                 5.0,
                 color.gamma_multiply(dim),
+                barred,
             );
         }
     }

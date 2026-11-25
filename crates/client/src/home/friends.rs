@@ -111,15 +111,17 @@ impl Home {
         }
     }
 
-    /// The person's presence over every shared server: online wins, then away.
+    /// The person's presence over every shared server: online wins, then do not
+    /// disturb, then away.
     fn presence(&self, person: &Id) -> Presence {
         let seen = (self.servers.iter())
             .filter_map(|server| server.member(person))
             .map(|member| member.presence);
         seen.min_by_key(|presence| match presence {
             Presence::Online => 0,
-            Presence::Away => 1,
-            Presence::Offline => 2,
+            Presence::Dnd => 1,
+            Presence::Away => 2,
+            Presence::Offline => 3,
         })
         .unwrap_or(Presence::Offline)
     }
@@ -212,6 +214,7 @@ pub fn view(ui: &mut Ui, home: &mut Home) {
                 _ => match presence {
                     Presence::Online => t!("status.online"),
                     Presence::Away => t!("status.away"),
+                    Presence::Dnd => t!("status.dnd"),
                     Presence::Offline => t!("friends.offline"),
                 },
             };

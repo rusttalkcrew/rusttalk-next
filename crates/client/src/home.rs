@@ -448,6 +448,12 @@ impl Home {
         })
     }
 
+    /// Do not disturb, picked on this or another of my devices: no notifications or
+    /// message sounds here. Unread marks still count, and a call keeps its sounds.
+    pub fn dnd(&self) -> bool {
+        self.status == Some(Choice::Dnd)
+    }
+
     /// Choose a status on every server, for all my devices.
     fn set_status(&mut self, choice: Choice) {
         self.status = Some(choice);
@@ -912,7 +918,11 @@ impl Home {
         self.notify.expire_reminders(now);
         let prefs = self.notify.prefs();
         let rule = prefs.server(&server.address);
-        if !prefs.desktop || rule.muted(now) || rule.level == Some(notify::Level::Nothing) {
+        if !prefs.desktop
+            || self.dnd()
+            || rule.muted(now)
+            || rule.level == Some(notify::Level::Nothing)
+        {
             return;
         }
         let due = events::reminders(server, now);
@@ -992,9 +1002,10 @@ impl Home {
         let rule = prefs.effective(&server.address, &channel, dm, notify::unix_now());
         let viewing = self.viewing().contains(&(index, channel));
         let mention = !(viewing && self.focused) && notify::counts(rule, arrival);
+        let alert = !self.dnd();
         // Our own chime is heard even when the system keeps its notifications quiet.
-        let chimed = mention && prefs.sound && self.voice.audio.message();
-        if notify::should_notify(prefs, rule, arrival, self.focused, viewing) {
+        let chimed = alert && mention && prefs.sound && self.voice.audio.message();
+        if alert && notify::should_notify(prefs, rule, arrival, self.focused, viewing) {
             let sender = server.member_name(&msg.person);
             let title = match server.channel(&channel) {
                 Some(found) if !dm => t!(
@@ -1987,11 +1998,12 @@ pub fn initials(name: &str) -> String {
     }
 }
 
-/// The presence colour: green, yellow or grey.
+/// The presence colour: green, yellow, red (with a bar, see [`ui::presence_dot`]) or grey.
 pub fn presence_color(c: &Palette, presence: Presence) -> Color32 {
     match presence {
         Presence::Online => c.success,
         Presence::Away => c.warning,
+        Presence::Dnd => c.danger,
         Presence::Offline => c.offline,
     }
 }
@@ -3448,9 +3460,11 @@ fn member_face_speaking(
     }
     if dot {
         let c = ui::colors(ui);
-        let color = presence_color(c, member.map_or(Presence::Offline, |m| m.presence));
+        let presence = member.map_or(Presence::Offline, |m| m.presence);
         let radius = (size * 0.16).max(4.0);
-        ui::presence_dot(ui, response.rect, radius, color, c.side);
+        let color = presence_color(c, presence);
+        let barred = presence == Presence::Dnd;
+        ui::presence_dot(ui, response.rect, radius, color, c.side, barred);
     }
     response
 }

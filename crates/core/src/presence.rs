@@ -9,6 +9,9 @@ use crate::keys::Event;
 pub enum Status {
     Online,
     Away,
+    /// Do not disturb: shown to others, and no notifications or message sounds on any
+    /// of the member's devices.
+    Dnd,
     Invisible,
 }
 
@@ -17,9 +20,18 @@ pub enum Status {
 pub enum Presence {
     Online,
     Away,
+    /// Do not disturb. Servers send it only to apps that announce [`FEATURES`].
+    Dnd,
     #[default]
     Offline,
 }
+
+/// Request header in which apps name the protocol additions they understand, comma
+/// separated. Older servers ignore it; older apps don't send it, so they are told
+/// `away` instead of `dnd`, which they cannot read.
+pub const FEATURES_HEADER: &str = "rusttalk-features";
+/// What this app understands: the `dnd` status and presence.
+pub const FEATURES: &str = "dnd";
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

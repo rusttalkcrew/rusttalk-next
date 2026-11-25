@@ -149,6 +149,11 @@ impl Home {
             dm: true,
             mention: Mention::Me,
         };
+        // Do not disturb: the request still shows in the app, without a sound.
+        if self.dnd() {
+            ctx.request_repaint();
+            return;
+        }
         if notify::should_notify(prefs, rule, arrival, self.focused, false) {
             self.notify.show_silent(ctx, &title, &body, target);
         }

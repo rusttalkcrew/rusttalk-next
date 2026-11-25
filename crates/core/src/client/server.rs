@@ -172,11 +172,13 @@ impl Server {
 
     /// Build a request confined to the pinned origin.
     pub fn request(&self, method: reqwest::Method, path: &str) -> RequestBuilder {
+        use crate::presence::{FEATURES, FEATURES_HEADER};
         self.http
             .request(
                 method,
                 format!("{}{}", self.server.address, path.trim_start_matches('/')),
             )
+            .header(FEATURES_HEADER, FEATURES)
             .timeout(Duration::from_secs(10))
     }
 
