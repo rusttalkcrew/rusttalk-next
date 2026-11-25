@@ -111,6 +111,7 @@ pub mod person;
 mod pokes;
 pub mod polls;
 pub(crate) mod rows;
+mod switcher;
 pub(crate) mod user_bar;
 pub(crate) mod view_as;
 pub mod voice_requests;
@@ -160,6 +161,8 @@ pub struct Home {
     /// chat, so they still go out in order.
     sending: VecDeque<Outgoing>,
     emoji_picker: Picker,
+    /// The quick switcher (Ctrl+K).
+    switcher: switcher::Switcher,
     pub confirm_sign_out: bool,
     pub remove_device: Option<crate::settings::RemoveDevice>,
     pub error: Option<String>,
@@ -443,6 +446,7 @@ impl Home {
             previews: Previews::new(ctx, &data_dir),
             sending: VecDeque::new(),
             emoji_picker: Picker::new(&data_dir),
+            switcher: switcher::Switcher::default(),
             confirm_sign_out: false,
             remove_device: None,
             error: None,
@@ -595,11 +599,42 @@ impl Home {
             .collect()
     }
 
+    /// Everyone with a DM, once each however many servers hold a copy.
+    fn dm_peers(&self) -> Vec<Id> {
+        let mut peers: Vec<Id> = Vec::new();
+        let known = (self.servers.iter())
+            .flat_map(|server| server.dir.dms.iter().map(|dm| dm.peer))
+            .chain(self.threads.keys().copied());
+        for peer in known {
+            if !peers.contains(&peer) {
+                peers.push(peer);
+            }
+        }
+        peers
+    }
+
     /// Servers this person is a member of too, where a DM with them can go.
     fn shared(&self, peer: &Id) -> Vec<usize> {
         (0..self.servers.len())
             .filter(|index| self.servers[*index].member(peer).is_some())
             .collect()
+    }
+
+    /// The names of the servers this person shares with them, for under their name.
+    fn shared_names(&self, peer: &Id) -> String {
+        // A server saved twice, or two with one name, reads as one.
+        let mut shared: Vec<&str> = Vec::new();
+        for index in self.shared(peer) {
+            let server = self.servers[index].name();
+            if !shared.contains(&server) {
+                shared.push(server);
+            }
+        }
+        if shared.is_empty() {
+            t!("home.no_shared_server").to_owned()
+        } else {
+            shared.join(", ")
+        }
     }
 
     /// The server whose names and pictures a DM shows: a shared one holding a copy,
@@ -2109,6 +2144,7 @@ pub fn show(
     if welcome::show(ui, home) {
         return None;
     }
+    switcher::shortcut(ui.ctx(), home);
     for (ask, paths) in home.files.answers() {
         if let Ask::Picture = ask {
             if let Some(path) = paths.into_iter().next() {
@@ -2429,6 +2465,7 @@ pub fn show(
     updates.dialog(ui.ctx());
     crop_dialog(ui.ctx(), home);
     admin::kick_dialog(ui.ctx(), home);
+    switcher::show(ui.ctx(), home);
     action
 }
 
@@ -2683,6 +2720,13 @@ fn server_rail(ui: &mut Ui, home: &mut Home) {
         rail_marks(ui, &button, dms, home.dm_marks());
         if button.clicked() {
             home.view = View::Direct(None);
+        }
+        // Phones have no Ctrl+K: the quick switcher opens from here.
+        if home.layout.phone || ui::TOUCH {
+            let search = rail_label(rail_button(ui, "🔍", false), t!("switcher.title"), false);
+            if search.clicked() {
+                home.switcher.open();
+            }
         }
         ui.separator();
         for index in 0..home.servers.len() {
@@ -2943,17 +2987,7 @@ fn dm_list(ui: &mut Ui, home: &mut Home) {
     }
     pokes::nav_row(ui, home);
     ui.add_space(ui::SPACE_XS);
-    // One row per person, however many servers hold a copy.
-    let mut peers: Vec<Id> = Vec::new();
-    let known = (home.servers.iter())
-        .flat_map(|server| server.dir.dms.iter().map(|dm| dm.peer))
-        .chain(home.threads.keys().copied());
-    for peer in known {
-        if !peers.contains(&peer) {
-            peers.push(peer);
-        }
-    }
-    let (shown, requests) = home.friends.split(&peers, home.friends_only());
+    let (shown, requests) = home.friends.split(&home.dm_peers(), home.friends_only());
     ScrollArea::vertical().show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 2.0;
         for peer in &shown {
@@ -2982,19 +3016,7 @@ fn dm_row(ui: &mut Ui, home: &mut Home, peer: &Id, request: bool) {
     let selected = home.view == View::Direct(Some(*peer));
     let name = home.peer_name(peer);
     let dir = home.dm_server(peer).map_or(&none, |i| &home.servers[i].dir);
-    // A server saved twice, or two with one name, reads as one.
-    let mut shared: Vec<&str> = Vec::new();
-    for index in home.shared(peer) {
-        let server = home.servers[index].name();
-        if !shared.contains(&server) {
-            shared.push(server);
-        }
-    }
-    let caption = if shared.is_empty() {
-        t!("home.no_shared_server").to_owned()
-    } else {
-        shared.join(", ")
-    };
+    let caption = home.shared_names(peer);
     if selected {
         let rect = Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), 44.0));
         ui.painter()
@@ -7561,6 +7583,7 @@ mod tests {
     mod server_emoji;
     mod settings_close;
     mod streams;
+    mod switcher;
     mod touch;
     mod uploads;
     mod voice_limit;

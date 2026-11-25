@@ -536,24 +536,9 @@ pub fn sidebar_header(ui: &mut Ui, name: &str, line: &str, picture: impl FnOnce(
     .clicked()
 }
 
-/// The Settings window, and the sign-out question it can ask.
-pub fn show(
-    ctx: &egui::Context,
-    home: &mut Home,
-    updates: &mut crate::update::Updater,
-    keystore: &mut crate::keystore::Keystore,
-) -> Option<Action> {
-    if home.settings != Some(Tab::Privacy) {
-        crate::key_storage::leave(ctx, &mut home.key_storage);
-    }
-    if home.settings != Some(Tab::Network) {
-        crate::route::forget(ctx);
-    }
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    if home.settings != Some(Tab::Phone) {
-        call::phone::leave_settings(&mut home.voice);
-    }
-    let mut tab = home.settings?;
+/// The pages of Settings by group, as this device lists them; `updates_new` marks
+/// Updates when a newer app is out.
+pub fn groups(updates_new: bool) -> [Group<Tab>; 3] {
     let page = |id, icon, label| Page { id, icon, label };
     let mut groups = [
         Group {
@@ -580,7 +565,7 @@ pub fn show(
                 page(
                     Tab::Updates,
                     "🔄",
-                    if updates.available() {
+                    if updates_new {
                         t!("settings.updates_new")
                     } else {
                         t!("settings.updates")
@@ -599,6 +584,28 @@ pub fn show(
     for group in &mut groups {
         group.pages.retain(|page| listed(page.id, PHONE));
     }
+    groups
+}
+
+/// The Settings window, and the sign-out question it can ask.
+pub fn show(
+    ctx: &egui::Context,
+    home: &mut Home,
+    updates: &mut crate::update::Updater,
+    keystore: &mut crate::keystore::Keystore,
+) -> Option<Action> {
+    if home.settings != Some(Tab::Privacy) {
+        crate::key_storage::leave(ctx, &mut home.key_storage);
+    }
+    if home.settings != Some(Tab::Network) {
+        crate::route::forget(ctx);
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    if home.settings != Some(Tab::Phone) {
+        call::phone::leave_settings(&mut home.voice);
+    }
+    let mut tab = home.settings?;
+    let groups = groups(updates.available());
     let before = tab;
     let mut open_news = false;
     let ((), close) = window(

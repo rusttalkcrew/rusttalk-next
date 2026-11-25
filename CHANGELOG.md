@@ -25,6 +25,7 @@ Unreleased under the new version and date.
 - The emoji or sticker name you typed in Server settings now stays when you cancel picking a picture or the upload fails.
 - Saving roles is faster, and if part of it fails, the changes that didn't go through stay waiting for Save.
 - Server owners can choose how many messages each channel keeps, or keep them all, in Server settings > Message history (10,000 by default).
+- Press Ctrl+K (Cmd+K on Mac), or the search button on phones, to jump to a person, a channel on any of your servers, or a settings page.
 
 ## v0.5.0 - 2026-11-25
 

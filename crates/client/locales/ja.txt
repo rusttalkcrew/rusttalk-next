@@ -1794,3 +1794,9 @@ view_as.refused = プレビュー中はオフになっています。
 view_as.could_post = これらのロールはここにメッセージを送れます。プレビュー中は送信できません。
 view_as.read_only = これらのロールはこのチャンネルを読むことしかできません。
 view_as.menu_off = プレビュー：ここでは何も使えません。
+# crates/client/src/home/switcher.rs
+switcher.title = 移動先
+switcher.hint = ユーザー、チャンネル、設定を検索
+switcher.people = ユーザー
+switcher.channels = チャンネル
+switcher.recent = 最近

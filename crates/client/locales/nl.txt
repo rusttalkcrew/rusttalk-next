@@ -1794,3 +1794,9 @@ view_as.refused = Dat staat uit tijdens het voorbeeld.
 view_as.could_post = Deze rollen kunnen hier berichten sturen. Versturen staat uit tijdens het voorbeeld.
 view_as.read_only = Deze rollen kunnen dit kanaal alleen lezen.
 view_as.menu_off = Voorbeeld: hier werkt niets.
+# crates/client/src/home/switcher.rs
+switcher.title = Ga naar
+switcher.hint = Zoek mensen, kanalen of instellingen
+switcher.people = Mensen
+switcher.channels = Kanalen
+switcher.recent = Recent

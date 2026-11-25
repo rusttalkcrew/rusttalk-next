@@ -1794,3 +1794,9 @@ view_as.refused = Das ist in der Vorschau ausgeschaltet.
 view_as.could_post = Diese Rollen könnten hier schreiben. Senden ist in der Vorschau aus.
 view_as.read_only = Diese Rollen können diesen Kanal nur lesen.
 view_as.menu_off = Vorschau: Hier lässt sich nichts benutzen.
+# crates/client/src/home/switcher.rs
+switcher.title = Springe zu
+switcher.hint = Personen, Kanäle oder Einstellungen finden
+switcher.people = Personen
+switcher.channels = Kanäle
+switcher.recent = Zuletzt
