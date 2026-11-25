@@ -123,7 +123,7 @@ async fn handshake(stream: &mut TcpStream, auth: Option<&Socks5Auth>) -> Result<
         ));
     }
     if reply[1] == AUTH_NO_ACCEPTABLE {
-        return Err(RouteError::Transport(
+        return Err(RouteError::Auth(
             "SOCKS5 proxy rejected the authentication method".into(),
         ));
     }
@@ -154,7 +154,7 @@ async fn handshake(stream: &mut TcpStream, auth: Option<&Socks5Auth>) -> Result<
             RouteError::Transport(format!("SOCKS5 authentication reply failed: {e}"))
         })?;
         if status[0] != USERPASS_VERSION || status[1] != 0x00 {
-            return Err(RouteError::Transport(
+            return Err(RouteError::Auth(
                 "SOCKS5 proxy rejected the username or password".into(),
             ));
         }

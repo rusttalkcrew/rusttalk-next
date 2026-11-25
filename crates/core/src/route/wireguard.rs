@@ -110,7 +110,7 @@ impl ParsedWireGuard {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .ok_or_else(|| {
-                RouteError::Blocked(
+                RouteError::MissingSecret(
                     "WireGuard private key is missing from secure storage. Re-enter it in Settings or switch to Direct."
                         .into(),
                 )
@@ -119,7 +119,7 @@ impl ParsedWireGuard {
         let preshared_key = match preshared_key.map(str::trim).filter(|s| !s.is_empty()) {
             Some(psk) => Some(Zeroizing::new(decode_key(psk, "preshared key")?)),
             None if cfg.has_preshared_key => {
-                return Err(RouteError::Blocked(
+                return Err(RouteError::MissingSecret(
                     "WireGuard preshared key is missing from secure storage. Re-enter it in Settings or switch to Direct."
                         .into(),
                 ));
@@ -334,7 +334,7 @@ impl WireGuardTunnel {
             }
             Err(_) => {
                 let _ = worker.join();
-                return Err(RouteError::Blocked(
+                return Err(RouteError::Transport(
                     "WireGuard tunnel stopped before handshake completed".into(),
                 ));
             }
@@ -482,14 +482,14 @@ async fn run_tunnel(
     let udp = match UdpSocket::bind(bind_addr).await {
         Ok(sock) => sock,
         Err(e) => {
-            let _ = ready_tx.send(Err(RouteError::Blocked(format!(
+            let _ = ready_tx.send(Err(RouteError::Transport(format!(
                 "opening WireGuard UDP socket failed: {e}"
             ))));
             return;
         }
     };
     if let Err(e) = udp.connect(endpoint_addr).await {
-        let _ = ready_tx.send(Err(RouteError::Blocked(format!(
+        let _ = ready_tx.send(Err(RouteError::Transport(format!(
             "connecting WireGuard UDP socket failed: {e}"
         ))));
         return;
@@ -516,7 +516,7 @@ async fn run_tunnel(
     if let TunnResult::WriteToNetwork(packet) = tunn.format_handshake_initiation(&mut wg_out, false)
         && let Err(e) = udp.send(packet).await
     {
-        let _ = ready_tx.send(Err(RouteError::Blocked(format!(
+        let _ = ready_tx.send(Err(RouteError::Transport(format!(
             "sending WireGuard handshake failed: {e}"
         ))));
         return;
@@ -537,7 +537,7 @@ async fn run_tunnel(
                         let _ = udp.send(packet).await;
                     }
                     TunnResult::Err(WireGuardError::ConnectionExpired) => {
-                        let _ = ready_tx.send(Err(RouteError::Blocked(
+                        let _ = ready_tx.send(Err(RouteError::Transport(
                             "WireGuard handshake expired (peer unreachable or key mismatch)".into(),
                         )));
                         return;
@@ -547,7 +547,7 @@ async fn run_tunnel(
             }
             recv = udp.recv(&mut wg_in) => {
                 let Ok(n) = recv else {
-                    let _ = ready_tx.send(Err(RouteError::Blocked(
+                    let _ = ready_tx.send(Err(RouteError::Transport(
                         "WireGuard UDP socket returned an error during handshake".into(),
                     )));
                     return;
@@ -574,7 +574,7 @@ async fn run_tunnel(
     }
 
     if !handshake_ok {
-        let _ = ready_tx.send(Err(RouteError::Blocked(
+        let _ = ready_tx.send(Err(RouteError::Transport(
             "WireGuard handshake timed out (check endpoint, firewall and keys)".into(),
         )));
         return;
@@ -770,10 +770,10 @@ async fn resolve_endpoint(host: &str, port: u16) -> Result<SocketAddr, RouteErro
     }
     tokio::time::timeout(DNS_TIMEOUT, tokio::net::lookup_host((host, port)))
         .await
-        .map_err(|_| RouteError::Blocked("resolving WireGuard endpoint timed out".into()))?
-        .map_err(|e| RouteError::Blocked(format!("resolving WireGuard endpoint failed: {e}")))?
+        .map_err(|_| RouteError::Transport("resolving WireGuard endpoint timed out".into()))?
+        .map_err(|e| RouteError::Transport(format!("resolving WireGuard endpoint failed: {e}")))?
         .next()
-        .ok_or_else(|| RouteError::Blocked("WireGuard endpoint resolved to no addresses".into()))
+        .ok_or_else(|| RouteError::Transport("WireGuard endpoint resolved to no addresses".into()))
 }
 
 struct ReactorState {
