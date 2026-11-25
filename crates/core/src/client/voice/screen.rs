@@ -14,7 +14,8 @@ pub use livekit::{
 use crate::{camera::CameraOptions, screen::ScreenOptions};
 
 use super::{
-    LocalTrackPublication, ParticipantIdentity, TrackSid, TrackSource, VoiceRoom, track_name,
+    ControlOffer, LocalTrackPublication, ParticipantIdentity, TrackSid, TrackSource, VoiceRoom,
+    control_offer, track_name,
 };
 
 /// A remote video publication. The track becomes available after subscription.
@@ -24,6 +25,8 @@ pub struct RemoteVideo {
     pub source: TrackSource,
     pub name: String,
     pub track: Option<RemoteVideoTrack>,
+    /// Whether a screen takes control requests; `None` when unknown (older apps).
+    pub control: Option<ControlOffer>,
 }
 
 impl VoiceRoom {
@@ -147,12 +150,17 @@ impl VoiceRoom {
                             Some(RemoteTrack::Video(track)) => Some(track),
                             _ => None,
                         };
+                        let sid = publication.sid();
+                        let control = (source == TrackSource::Screenshare)
+                            .then(|| control_offer::offer(&self.watch_keys, &participant, &sid))
+                            .flatten();
                         Some(RemoteVideo {
                             participant: identity.clone(),
-                            sid: publication.sid(),
+                            sid,
                             source,
                             name,
                             track,
+                            control,
                         })
                     })
             })

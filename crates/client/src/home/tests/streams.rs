@@ -1,6 +1,9 @@
 use super::*;
 use crate::server::{Call, CallState, Peer, Screen, Stats, TrackStats};
-use egui_kittest::{Harness, kittest::Queryable};
+use egui_kittest::{
+    Harness,
+    kittest::{NodeT, Queryable},
+};
 use rusttalk_core::client::voice::VideoFormat;
 
 #[test]
@@ -49,6 +52,7 @@ fn stream_cards_keep_people_opt_in_and_preview_follows_focus() {
                     name: "Display".into(),
                     viewers: count,
                     local,
+                    control: None,
                 }],
             };
             home.servers[0]
@@ -315,6 +319,7 @@ fn normal_stop_share_exits_fullscreen_and_camera_remap_avoids_spurious_unwatch()
         name: "Display".into(),
         viewers: 1,
         local: false,
+        control: None,
     }];
     h.run_steps(2);
     h.get_by_label("Watch Ann").click();
@@ -342,6 +347,7 @@ fn normal_stop_share_exits_fullscreen_and_camera_remap_avoids_spurious_unwatch()
         name: "Display".into(),
         viewers: 0,
         local: false,
+        control: None,
     }];
     h.run_steps(2);
     assert!(h.state().voice.watching.is_none());
@@ -386,6 +392,7 @@ fn normal_stop_share_exits_fullscreen_and_camera_remap_avoids_spurious_unwatch()
         name: "Display".into(),
         viewers: 1,
         local: false,
+        control: None,
     }];
     h.run_steps(2);
     assert_eq!(h.state().voice.watching.as_ref().unwrap().sid, "ann-scr-3");
@@ -397,4 +404,144 @@ fn normal_stop_share_exits_fullscreen_and_camera_remap_avoids_spurious_unwatch()
     assert!(h.state().voice.watching.is_none());
     assert!(h.state().voice.stage.full.is_none());
     assert!(!h.state().voice.stage.is_presenting());
+}
+
+#[test]
+fn request_control_follows_what_the_sharer_said() {
+    use rusttalk_core::{client::voice::ControlOffer, control::Refusal};
+    for dark in [true, false] {
+        for (width, height) in [(1100.0, 700.0), (390.0, 844.0)] {
+            let (mut fixture, mut sent) = files_harness(dark);
+            let mut home = fixture.state_mut().take().unwrap();
+            let address = home.servers[0].address.clone();
+            home.voice.call = Some(Call {
+                server: address.clone(),
+                channel: PROJECTS,
+                state: CallState::Connected,
+                stats: Stats::default(),
+                can_talk: true,
+                can_share_video: true,
+            });
+            let peer = |person, screens| Peer {
+                person,
+                connecting: false,
+                unknown: false,
+                status: Default::default(),
+                apps: vec![],
+                camera: None,
+                terminal: None,
+                screens,
+            };
+            let screen = |control| Screen {
+                sid: "ann-scr".into(),
+                name: "Display".into(),
+                viewers: 1,
+                local: false,
+                control,
+            };
+            home.servers[0].voice.insert(
+                PROJECTS,
+                vec![
+                    peer(ME, vec![]),
+                    peer(ANN, vec![screen(Some(ControlOffer::Off))]),
+                ],
+            );
+            let mut h = Harness::builder()
+                .with_context_setup(ui::install)
+                .with_size(Vec2::new(width, height))
+                .build_ui_state(
+                    |ui, home| {
+                        call::frame(ui.ctx(), home);
+                        call::stage(ui, home, 0, PROJECTS);
+                    },
+                    home,
+                );
+            h.ctx.set_theme(if dark {
+                egui::Theme::Dark
+            } else {
+                egui::Theme::Light
+            });
+            h.run_steps(2);
+            h.get_by_label("Watch Ann").click();
+            h.run_steps(2);
+            let picture = egui::ColorImage::filled([1600, 900], egui::Color32::from_gray(70));
+            h.state().voice.video.put("ann-scr", picture);
+            h.run_steps(2);
+            let tile = h.get_by_label("Ann").rect();
+            h.hover_at(tile.center());
+            h.run_steps(2);
+            let button = h.get_by_label("Request control");
+            assert!(button.accesskit_node().is_disabled());
+            let at = button.rect().center();
+            h.hover_at(at);
+            h.run_steps(3);
+            assert!(h.query_by_label("Control requests are off").is_some());
+            if let Ok(dir) = std::env::var("RUSTTALK_CONTROL_SCREENSHOTS") {
+                std::fs::create_dir_all(&dir).unwrap();
+                let theme = if dark { "dark" } else { "light" };
+                h.render()
+                    .unwrap()
+                    .save(format!("{dir}/off-{width}x{height}-{theme}.png"))
+                    .unwrap();
+            }
+            h.get_by_label("Request control").click();
+            h.run_steps(2);
+            let asked = |sent: &mut tokio::sync::mpsc::UnboundedReceiver<Command>| {
+                std::iter::from_fn(|| sent.try_recv().ok())
+                    .any(|command| matches!(command, Command::RequestControl(_)))
+            };
+            assert!(!asked(&mut sent));
+
+            // A system that can't take input says why too.
+            h.state_mut().servers[0].voice.get_mut(&PROJECTS).unwrap()[1].screens =
+                vec![screen(Some(ControlOffer::Unsupported))];
+            h.hover_at(tile.center());
+            h.run_steps(2);
+            assert!(
+                h.get_by_label("Request control")
+                    .accesskit_node()
+                    .is_disabled()
+            );
+
+            // An older app says nothing: ask, as before. A refusal then shows on the tile.
+            for control in [None, Some(ControlOffer::On)] {
+                h.state_mut().servers[0].voice.get_mut(&PROJECTS).unwrap()[1].screens =
+                    vec![screen(control)];
+                h.hover_at(tile.center());
+                h.run_steps(2);
+                let button = h.get_by_label("Request control");
+                assert!(!button.accesskit_node().is_disabled());
+                button.click();
+                h.run_steps(2);
+                assert!(asked(&mut sent));
+                let ctx = h.ctx.clone();
+                h.state_mut().apply(
+                    &ctx,
+                    Update::ControlEnded("ann-scr".into(), Some(Refusal::Unsupported)),
+                    ctx.input(|input| input.time),
+                );
+            }
+            // The sharer turned requests off after we asked: say so, on the tile.
+            h.state_mut().servers[0].voice.get_mut(&PROJECTS).unwrap()[1].screens =
+                vec![screen(Some(ControlOffer::Off))];
+            let ctx = h.ctx.clone();
+            h.state_mut().apply(
+                &ctx,
+                Update::ControlEnded("ann-scr".into(), Some(Refusal::Unsupported)),
+                ctx.input(|input| input.time),
+            );
+            h.remove_cursor();
+            h.run_steps(2);
+            assert!(h.state().toast.is_none());
+            let note = h.get_by_label("Ann turned off control requests for this screen.");
+            assert!(tile.contains_rect(note.rect()));
+            if let Ok(dir) = std::env::var("RUSTTALK_CONTROL_SCREENSHOTS") {
+                let theme = if dark { "dark" } else { "light" };
+                h.render()
+                    .unwrap()
+                    .save(format!("{dir}/refused-{width}x{height}-{theme}.png"))
+                    .unwrap();
+            }
+        }
+    }
 }

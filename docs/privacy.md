@@ -197,7 +197,9 @@ when someone moves the pointer or types. Requests, answers and every input
 event are encrypted and authenticated with a key derived from the room's
 media key and bound to both devices, so LiveKit can't read, forge or
 redirect them, and replayed input is dropped. Nothing about remote control is stored by the API, by
-LiveKit or on either device.
+LiveKit or on either device. Whether a shared screen takes control requests is
+the encrypted `rusttalk.control-offer` participant attribute; LiveKit sees its
+name, update timing, key epoch and ciphertext length, not the answer.
 
 For a shared terminal, LiveKit sees the `rusttalk.terminal` attribute
 (that a device shares a terminal, and when), which devices watch it, and the

@@ -15,9 +15,9 @@ use rusttalk_core::{
     client::{
         Event, KeyClient, MessageError, MessageRecord,
         voice::{
-            ConnectionState, DataLiveFiles, LiveDownload, LiveFileEvent, NativeAudioSource,
-            NativeVideoSource, PendingVoice, RemoteParticipant, RoomEvent, TrackSid, TrackSource,
-            VoiceRoom, VoiceState, VoiceStatus,
+            ConnectionState, ControlOffer, DataLiveFiles, LiveDownload, LiveFileEvent,
+            NativeAudioSource, NativeVideoSource, PendingVoice, RemoteParticipant, RoomEvent,
+            TrackSid, TrackSource, VoiceRoom, VoiceState, VoiceStatus,
         },
     },
     control::{Guest, Host},
@@ -206,7 +206,10 @@ pub(super) struct Live {
     /// The published screen with its capture and quality, which a change keeps.
     pub(super) screen: Option<(TrackSid, screen::Capture, screen::Options)>,
     /// Picking another source for the screen; the old one keeps sharing meanwhile.
-    pub(super) swap: screen::Swap<tokio::task::JoinHandle<Result<screen::Capture>>>,
+    pub(super) swap:
+        screen::Swap<tokio::task::JoinHandle<Result<(screen::Capture, screen::Options)>>>,
+    /// What we last told viewers about control requests: track, offer and key epoch.
+    pub(super) announced_offer: Option<(TrackSid, ControlOffer, i64)>,
     /// The published camera; the UI owns its capture.
     camera: Option<TrackSid>,
     /// Screen and camera tracks this device receives; others are unsubscribed.
@@ -673,6 +676,7 @@ pub(super) async fn share_screen(
         Ok(screen) => {
             tracing::info!("sharing screen");
             live.screen = Some(screen);
+            control::announce_offer(live).await;
             ctx.send(Update::Sharing(true));
             // Live, sound is part of the stream: apps shared on their own stop (the
             // window offered them for the stream instead).
@@ -797,6 +801,7 @@ pub(super) async fn restore_media(ctx: &Ctx, url: &Url, live: &mut Live) -> Resu
     live.recovery = None;
     live.deafened = None;
     live.announced_watches = None;
+    live.announced_offer = None;
     live.apps.clear();
     live.nameless.clear();
     if live.room.can_publish() {
@@ -983,7 +988,7 @@ pub(super) enum Next {
     /// A screen capture finished starting; clear `starting` before polling again.
     Capture(Result<(screen::Capture, screen::Options)>),
     /// The picker for another screen source finished.
-    Swap(Result<screen::Capture>),
+    Swap(Result<(screen::Capture, screen::Options)>),
     /// An app capture finished starting; it's no longer in `pending`.
     App(App, bool, Result<(Capture, NativeAudioSource)>),
     /// Time to send our terminal's output.
@@ -1319,6 +1324,7 @@ fn send_roster(ctx: &Ctx, url: &Url, ids: &HashMap<String, Id>, state: &State, c
                         name: video.name,
                         viewers: 0,
                         local: false,
+                        control: video.control,
                     }),
                     // One per person: a second device's camera shows after the first stops.
                     TrackSource::Camera => {
@@ -1339,6 +1345,7 @@ fn send_roster(ctx: &Ctx, url: &Url, ids: &HashMap<String, Id>, state: &State, c
                     name: t!("call.your_screen").into(),
                     viewers: 0,
                     local: true,
+                    control: None,
                 });
             }
             // Include this device only after an actual video subscription was announced.
@@ -1561,6 +1568,7 @@ pub(super) async fn on_voice(
                 live.phone_announcement = None;
                 live.deafened = None;
                 live.announced_watches = None;
+                live.announced_offer = None;
                 sync_video_watches(live).await;
             }
             ctx.send(Update::Call(
@@ -1733,6 +1741,7 @@ pub(super) async fn stop_finished_shares(
     live.shares = kept;
     let phone_ended = phone::stop_ended(ctx, live).await;
     phone::sync(ctx, url, live).await;
+    control::announce_offer(live).await;
     if live.host.controller().is_some()
         && live
             .screen
@@ -2037,6 +2046,7 @@ pub(super) async fn finish_call(
         starting: None,
         screen: None,
         swap: screen::Swap::Idle,
+        announced_offer: None,
         camera: None,
         watched: HashSet::new(),
         announced_watches: Some(Vec::new()),
@@ -2137,7 +2147,9 @@ fn change_screen(ctx: &Ctx, live: &mut Live, target: screen::Target, remote_cont
     let preview = ctx.video.preview.clone();
     // No restore token, so the shortcut's picker always asks (see `pick_screen`).
     let picker = tokio::spawn(async move {
-        screen::start_into(target, options, &mut None, Some(into), preview).await
+        screen::start_into(target, options, &mut None, Some(into), preview)
+            .await
+            .map(|capture| (capture, options))
     });
     if let Err(picker) = live.swap.begin(picker) {
         picker.abort();
@@ -2146,16 +2158,22 @@ fn change_screen(ctx: &Ctx, live: &mut Live, target: screen::Target, remote_cont
 }
 
 /// The picker for another source finished: switch to it, or keep the old share.
-pub(super) fn screen_changed(ctx: &Ctx, state: &mut State, result: Result<screen::Capture>) {
+pub(super) fn screen_changed(
+    ctx: &Ctx,
+    state: &mut State,
+    result: Result<(screen::Capture, screen::Options)>,
+) {
     let Some(live) = &mut state.voice else {
         return;
     };
     match live.swap.finish(result) {
-        screen::Outcome::Swapped(new) => {
-            if let Some((_, capture, _)) = &mut live.screen {
+        screen::Outcome::Swapped((new, chosen)) => {
+            if let Some((_, capture, options)) = &mut live.screen {
                 tracing::info!("changed the shared screen");
                 // Dropping the old capture stops it; the new one already feeds the track.
                 *capture = new;
+                // The new source's choice of control requests; the next tick tells viewers.
+                *options = chosen;
             }
         }
         screen::Outcome::Cancelled => tracing::info!("screen change cancelled"),

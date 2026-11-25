@@ -7,7 +7,10 @@ use eframe::egui::{
     self, Align, Event, EventFilter, Frame, Key, Layout, Margin, MouseWheelUnit, PointerButton,
     Pos2, Rect, Response, Ui,
 };
-use rusttalk_core::control::{Button, Input, REQUEST_TIMEOUT, Refusal, scan_code};
+use rusttalk_core::{
+    client::voice::ControlOffer,
+    control::{Button, Input, REQUEST_TIMEOUT, Refusal, scan_code},
+};
 
 use super::call_server;
 use crate::{
@@ -24,6 +27,8 @@ const ALLOW_DELAY: f64 = 1.0;
 const ESCAPE_HOLD: f64 = 1.0;
 /// Pixels per wheel notch for smooth (touchpad) scrolling.
 const POINTS_PER_NOTCH: f32 = 40.0;
+/// How long the note on why control ended stays up.
+const NOTE_SECONDS: f64 = 6.0;
 
 /// Remote control as the window sees it.
 #[derive(Default)]
@@ -36,6 +41,8 @@ pub struct Control {
     keys: BTreeSet<String>,
     buttons: BTreeSet<Button>,
     escape_since: Option<f64>,
+    /// Why asking for a screen (track ID) ended, shown on its tile until the time.
+    pub note: Option<(String, String, f64)>,
 }
 
 impl Control {
@@ -219,6 +226,13 @@ fn shortcut_key(name: &str) -> &str {
 pub fn frame(home: &mut Home, now: f64) {
     let timeout = REQUEST_TIMEOUT.as_secs_f64();
     let control = &mut home.voice.control;
+    if control
+        .note
+        .as_ref()
+        .is_some_and(|(.., until)| now >= *until)
+    {
+        control.note = None;
+    }
     let mut commands = Vec::new();
     if let Some((_, request)) = control.view.asked
         && now - control.asked_at > timeout
@@ -246,26 +260,52 @@ pub fn frame(home: &mut Home, now: f64) {
     }
 }
 
-/// Whose screen this is (track ID), in the call.
-fn sharer_name(home: &Home, sid: &str) -> Option<String> {
+/// Whose screen this is (track ID), in the call, and what they said about control.
+fn screen_of(home: &Home, sid: &str) -> Option<(String, Option<ControlOffer>)> {
     let server = call_server(home)?;
     let call = home.voice.call.as_ref()?;
     let peers = server.voice.get(&call.channel)?;
-    let peer = peers
-        .iter()
-        .find(|peer| peer.screens.iter().any(|s| s.sid == sid))?;
-    Some(peer.name(server))
+    peers.iter().find_map(|peer| {
+        let screen = peer.screens.iter().find(|s| s.sid == sid)?;
+        Some((peer.name(server), screen.control))
+    })
 }
 
-/// The note when asking for, or controlling, a screen ended.
-pub fn ended(home: &Home, sid: &str, why: Option<Refusal>) -> String {
-    let name = sharer_name(home, sid).unwrap_or_else(|| t!("remote.the_sharer").into());
-    match why {
+fn sharer_name(home: &Home, sid: &str) -> Option<String> {
+    screen_of(home, sid).map(|(name, _)| name)
+}
+
+/// Asking for, or controlling, a screen ended: say why on its tile, or above the
+/// chat once the screen is gone.
+pub fn ended(home: &mut Home, sid: String, why: Option<Refusal>, now: f64) {
+    let sharer = screen_of(home, &sid);
+    let name = match &sharer {
+        Some((name, _)) => name.clone(),
+        None => t!("remote.the_sharer").into(),
+    };
+    let text = match why {
         Some(Refusal::Denied) => t!("remote.denied", name = name),
         Some(Refusal::Busy) => t!("remote.busy", name = name),
+        // Older apps refuse a share without control requests as unsupported too.
+        Some(Refusal::Unsupported)
+            if sharer.as_ref().and_then(|(_, offer)| *offer) == Some(ControlOffer::Off) =>
+        {
+            t!("remote.turned_off", name = name)
+        }
         Some(Refusal::Unsupported) => t!("remote.unsupported", name = name),
         None => t!("remote.taken_back", name = name),
+    };
+    if sharer.is_some() {
+        home.voice.control.note = Some((sid, text, now + NOTE_SECONDS));
+    } else {
+        home.toast = Some((text, now + NOTE_SECONDS));
     }
+}
+
+/// The note on a screen's tile, while it shows.
+pub fn note<'a>(control: &'a Control, sid: &str, now: f64) -> Option<&'a str> {
+    let (screen, text, until) = control.note.as_ref()?;
+    (screen == sid && now < *until).then_some(text.as_str())
 }
 
 fn person_name(server: &Server, person: &crate::server::Id) -> String {

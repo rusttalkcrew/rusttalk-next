@@ -14,6 +14,7 @@ Unreleased under the new version and date.
 - Android test builds install as a separate "RustTalk Test" app, so they no longer block installing the release app.
 - On phones, mute, sound, camera and leave buttons now sit at the bottom of the call view, and the call opens without the chat (tap the chat button to show it).
 - On phones, your own camera shows only in the call view, and while it is on, tapping the camera button opens a menu to flip it, switch the light or turn it off.
+- "Request control" is greyed out, with the reason, when the sharer turned control requests off or their computer can't be controlled, and a refusal now shows on the shared screen.
 
 ## v0.4.0 - 2026-11-24
 

@@ -154,6 +154,18 @@ impl Video {
         lock(&self.frames).get_mut(sid)?.image.take()
     }
 
+    /// A frame as if it arrived on `sid`, for tests of the stage.
+    #[cfg(test)]
+    pub fn put(&self, sid: &str, image: ColorImage) {
+        lock(&self.frames).insert(
+            sid.to_owned(),
+            Slot {
+                serial: 0,
+                image: Some(image),
+            },
+        );
+    }
+
     /// The newest copy of our own share, while its preview is on. Converted here: the
     /// copy is small, and the capture shouldn't spend the time.
     pub fn take_preview(&self) -> Option<ColorImage> {

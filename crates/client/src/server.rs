@@ -80,6 +80,8 @@ pub struct Screen {
     /// The track, to watch it.
     pub sid: String,
     pub name: String,
+    /// Whether the sharer takes control requests; `None` from older apps.
+    pub control: Option<rusttalk_core::client::voice::ControlOffer>,
 }
 
 impl Peer {

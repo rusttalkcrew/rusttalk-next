@@ -1,6 +1,7 @@
 //! Pinned, end-to-end encrypted voice sessions and caller-owned audio I/O.
 
 mod control;
+mod control_offer;
 mod live_file;
 pub mod phone;
 pub mod ring;
@@ -52,6 +53,7 @@ use crate::{
 };
 
 use super::KeyClient;
+pub use control_offer::ControlOffer;
 pub use live_file::{DataLiveFiles, LiveDownload, LiveFileEvent};
 pub use screen::{NativeVideoSource, NativeVideoStream, RemoteVideo, RemoteVideoTrack};
 pub use stats::{CallTraffic, TrackStats, Traffic, VideoDetail, VideoFormat, VoiceStats};
