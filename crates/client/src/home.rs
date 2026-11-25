@@ -1809,7 +1809,11 @@ impl Home {
             }
             Update::LinkCard(id, card) => self.files.link_card(id, card),
             Update::StickerFile(id, picture) => self.files.sticker_loaded(ctx, id, picture),
-            Update::Saved(id, saved) => self.files.saved(id, saved),
+            Update::Saved(id, saved) => {
+                if let Some(notice) = self.files.saved(id, saved) {
+                    self.toast = Some((notice, now + 6.0));
+                }
+            }
             Update::Synced(synced) => {
                 self.synced_once = true;
                 for known in &synced.servers {

@@ -345,7 +345,11 @@ so "Show in folder" and "Open" work later; it never leaves this device.
 "Open in default app" in the picture viewer, for a picture not saved yet,
 writes it to a `rusttalk-<id>` folder in the system temporary directory and
 hands it to the system's default app; the client deletes these folders when it
-starts and when the person signs out. A picture pasted into the composer
+starts and when the person signs out. Phones have no save dialog: **Save to phone**
+(Android) writes the decrypted file to that folder in the app's cache, copies it into
+Downloads (on Android 9 and older, the app's own Download folder) and deletes the
+temporary copy; **Share…** (iOS) hands it to the system share sheet and deletes it
+when the sheet closes. A picture pasted into the composer
 (Ctrl+V) is written the same way, to a `rusttalk-<random>` folder, so it can be
 sent like a picked file; removing it from the message deletes it, and otherwise
 it goes with the other folders. The client reads the clipboard only when the

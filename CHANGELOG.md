@@ -30,6 +30,7 @@ Unreleased under the new version and date.
 - On phones, a server that needs a newer app now offers "Download the new version", which opens the download page, instead of the desktop updater
 - Deleting a single custom emoji or sticker in server settings now asks first.
 - Server settings > Emoji & stickers fits on a phone: name fields make room for their buttons, warnings wrap, and each emoji's Rename, Move to and Delete sit under "…".
+- Phones: save a file from a message to Downloads on Android, or share it from iOS. The "Open" button that did nothing on phones is gone.
 
 ## v0.4.0 - 2026-11-24
 

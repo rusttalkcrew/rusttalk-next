@@ -36,6 +36,20 @@ use crate::{
 /// Whether this device has a file dialog. Phones need the system's own picker first
 /// (docs/mobile.md); until then the buttons that open one are off there.
 pub const PICKER: bool = !cfg!(any(target_os = "android", target_os = "ios"));
+/// Whether files can be handed to their app (`open`); phones have no backend for it.
+const OPENS: bool = PICKER;
+
+/// Phones: the button that hands a stored file to the system instead of a save
+/// dialog (`Files::export`). Android saves it to Downloads, iOS opens the share sheet.
+fn export_label() -> Option<&'static str> {
+    if cfg!(target_os = "android") {
+        Some(t!("files.save_to_phone"))
+    } else if cfg!(target_os = "ios") {
+        Some(t!("files.share"))
+    } else {
+        None
+    }
+}
 
 /// Whether pictures can be copied: egui's phone clipboards take only text.
 pub const COPY_IMAGE: bool = !cfg!(any(target_os = "android", target_os = "ios"));
@@ -85,6 +99,9 @@ pub struct Files {
     data: PathBuf,
     /// Downloads to open once saved, instead of remembering.
     open_after: HashSet<Id>,
+    /// Phones: downloads to hand to the system once saved, with their media type
+    /// (see `export_label`). The decrypted copy is deleted after.
+    export_after: HashMap<Id, String>,
     viewer: Option<Viewer>,
     /// A file dialog is open; answers arrive on `answers`.
     asking: bool,
@@ -230,6 +247,7 @@ impl Files {
             paths,
             data: data.to_owned(),
             open_after: HashSet::new(),
+            export_after: HashMap::new(),
             viewer: None,
             asking: false,
             answers: None,
@@ -409,11 +427,33 @@ impl Files {
         }
     }
 
-    pub fn saved(&mut self, id: Id, saved: Result<(), bool>) {
+    /// A download finished. Returns a notice to show (phones, see `export_label`).
+    pub fn saved(&mut self, id: Id, saved: Result<(), bool>) -> Option<String> {
         let path = match self.saves.remove(&id) {
             Some(Saving::Busy(_, path)) => Some(path),
             _ => None,
         };
+        if let Some(media_type) = self.export_after.remove(&id) {
+            let (state, notice) = match (saved, path) {
+                (Ok(()), Some(path)) => hand_over(&path, &media_type),
+                (saved, path) => {
+                    if let Some(path) = path {
+                        discard(&path);
+                    }
+                    match saved {
+                        Err(true) => (Some(Saving::Gone), None),
+                        _ => (
+                            Some(Saving::Failed),
+                            Some(t!("files.export_failed").to_owned()),
+                        ),
+                    }
+                }
+            };
+            if let Some(state) = state {
+                self.saves.insert(id, state);
+            }
+            return notice;
+        }
         let state = match saved {
             Ok(()) => {
                 if let Some(path) = path {
@@ -431,6 +471,7 @@ impl Files {
         };
         self.open_after.remove(&id);
         self.saves.insert(id, state);
+        None
     }
 
     fn store(&self) {
@@ -575,6 +616,74 @@ impl Files {
         let name = file.name.replace(['/', '\\'], "_");
         self.save(commands, file, folder.join(name));
     }
+
+    /// Phones: decrypt a stored file into a temporary folder, as a save dialog's
+    /// answer, then hand it to the system once saved (see `saved`).
+    fn export(&mut self, ctx: &egui::Context, address: &Url, file: &Attachment) {
+        if matches!(self.saves.get(&file.file.id), Some(Saving::Busy(..))) {
+            return;
+        }
+        let folder = temp_folder(&file.file.id[..8]);
+        if let Err(error) = fs::create_dir_all(&folder) {
+            tracing::warn!(%error, "making a folder to save a file failed");
+            self.saves.insert(file.file.id, Saving::Failed);
+            return;
+        }
+        let media_type = match file.media_type.as_str() {
+            "" => "application/octet-stream",
+            known => known,
+        };
+        (self.export_after).insert(file.file.id, media_type.to_owned());
+        let path = folder.join(file.name.replace(['/', '\\'], "_"));
+        let answers = self.answers.get_or_insert_with(mpsc::channel).0.clone();
+        let _ = answers.send((Ask::Save(address.clone(), file.clone()), vec![path]));
+        ctx.request_repaint();
+    }
+}
+
+/// Hand a decrypted file to the system: the new state and a notice to show. Its
+/// temporary folder is deleted once the system has its copy.
+#[cfg(target_os = "android")]
+fn hand_over(path: &Path, media_type: &str) -> (Option<Saving>, Option<String>) {
+    let shared = crate::android::save_to_downloads(path, media_type);
+    discard(path);
+    match shared {
+        Ok(true) => (
+            Some(Saving::Done),
+            Some(t!("files.saved_to_downloads").to_owned()),
+        ),
+        Ok(false) => (
+            Some(Saving::Done),
+            Some(t!("files.saved_to_app_folder").to_owned()),
+        ),
+        Err(error) => {
+            tracing::warn!(error = %format_args!("{error:#}"), "saving a file to Downloads failed");
+            (
+                Some(Saving::Failed),
+                Some(t!("files.export_failed").to_owned()),
+            )
+        }
+    }
+}
+
+/// The share sheet deletes the folder when it closes.
+#[cfg(target_os = "ios")]
+fn hand_over(path: &Path, _media_type: &str) -> (Option<Saving>, Option<String>) {
+    if crate::ios::share(path) {
+        return (None, None);
+    }
+    discard(path);
+    (
+        Some(Saving::Failed),
+        Some(t!("files.share_failed").to_owned()),
+    )
+}
+
+/// Desktops never export: they have a save dialog.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn hand_over(path: &Path, _media_type: &str) -> (Option<Saving>, Option<String>) {
+    discard(path);
+    (Some(Saving::Failed), None)
 }
 
 const SAVED: &str = "saved.json";
@@ -1559,6 +1668,11 @@ fn download(ui: &mut Ui, files: &mut Files, address: &Url, file: &Attachment) {
     if PICKER && ui::secondary(ui, t!("files.download")).clicked() {
         files.ask(ui.ctx(), Ask::Save(address.clone(), file.clone()));
     }
+    if let Some(label) = export_label()
+        && ui::secondary(ui, label).clicked()
+    {
+        files.export(ui.ctx(), address, file);
+    }
 }
 
 /// A round toolbar button in the viewer, named for screen readers.
@@ -1597,9 +1711,14 @@ pub fn viewer(ctx: &egui::Context, files: &mut Files) {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         close = tool(ui, "×", t!("common.close")).clicked();
                         ui.add_space(12.0);
-                        open_it = tool(ui, "↗", t!("files.open_default")).clicked();
+                        open_it = OPENS && tool(ui, "↗", t!("files.open_default")).clicked();
                         if PICKER && tool(ui, "⬇", t!("common.save")).clicked() {
                             files.ask(ui.ctx(), Ask::Save(address.clone(), file.clone()));
+                        }
+                        if let Some(label) = export_label()
+                            && tool(ui, "⬇", label).clicked()
+                        {
+                            files.export(ui.ctx(), &address, &file);
                         }
                         let view = files.viewer.as_mut().expect("checked above");
                         if tool(ui, "🔄", t!("files.rotate")).clicked() {
