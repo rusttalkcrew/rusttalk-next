@@ -67,6 +67,14 @@ pub struct Server {
 }
 
 impl Server {
+    /// A test server reached at `address`, with this ID.
+    #[cfg(test)]
+    pub(super) fn at(mut self, address: Url, server_id: [u8; 32]) -> Self {
+        self.server.address = address;
+        self.server.server_id = server_id;
+        self
+    }
+
     #[cfg(test)]
     pub(super) fn for_test(protocol: u32, profile: &Path) -> Self {
         Self {

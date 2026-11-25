@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod reconnect_tests;
 mod rotation;
 
 use std::{
@@ -83,15 +85,31 @@ fn next_devices_generation() -> u64 {
 pub(super) fn device_revoked() {
     REVOKED_AT.fetch_max(next_devices_generation(), Ordering::Release);
 }
-/// A verified epoch key, its envelope, the person who wrapped it, its commitment,
-/// and whether that commitment names the pinned pair (a DM key made for them).
+/// A verified epoch key, its envelope, the person and device that wrapped it, its
+/// commitment, and whether that commitment names the pinned pair (a DM key made for them).
+#[derive(Clone)]
 struct HeldKey {
     key: Key,
     envelope: String,
     sender: PersonId,
+    sender_device: [u8; 32],
     commitment: [u8; 32],
     excluded: Excluded,
     pair_bound: bool,
+}
+
+/// A copy of what one connection verified, for the next connection of the same device
+/// to the same server, so a reconnect doesn't open every envelope and check every
+/// certificate again. Only read: nothing flows back into a live client. A key is
+/// reused only when the new connection's first key sync lists the very same envelope
+/// again (see `carried_key`); certificate checks only for identical bytes and person.
+/// Revocations are never cached.
+#[derive(Default)]
+pub struct Verified {
+    /// The server, person, device signing key and device agreement key this is for.
+    owner: Option<[[u8; 32]; 4]>,
+    keys: HashMap<(Scope, i64), HeldKey>,
+    certificates: HashMap<(PersonId, Vec<u8>), DeviceCertificate>,
 }
 
 /// Wraps between refreshes of the still-missing set.
@@ -115,6 +133,9 @@ pub struct KeyClient<'a> {
     /// Each verified key with its envelope, the person whose device wrapped it, and
     /// its epoch commitment.
     keys: HashMap<(Scope, i64), HeldKey>,
+    /// Keys the previous connection held, until the first key sync has checked
+    /// which of them the server still lists unchanged (see `Verified`).
+    carried: Option<HashMap<(Scope, i64), HeldKey>>,
     /// What this device knows about each DM channel, pinned once seen so the server
     /// can't relabel it. A DM key is only taken from, and wrapped to, those two people.
     pub(super) dms: HashMap<[u8; 32], DmPin>,
@@ -166,12 +187,79 @@ impl<'a> KeyClient<'a> {
         session: &Session,
         dms: Option<HashMap<[u8; 32], DmPin>>,
     ) -> Result<Self> {
+        Self::connect_after(server, identity, session, dms, &Verified::default()).await
+    }
+
+    /// Like `connect_with_dms`, reusing what an earlier connection verified (see
+    /// `Verified`).
+    pub async fn connect_after(
+        server: &'a Server,
+        identity: &'a DeviceIdentity,
+        session: &Session,
+        dms: Option<HashMap<[u8; 32], DmPin>>,
+        earlier: &Verified,
+    ) -> Result<Self> {
         let events = pinned_tls::events_socket(server.known_server(), &session.token)
             .await
             .map_err(anyhow::Error::from_boxed)?;
+        Self::start(server, identity, session, dms, events, earlier).await
+    }
+
+    async fn start(
+        server: &'a Server,
+        identity: &'a DeviceIdentity,
+        session: &Session,
+        dms: Option<HashMap<[u8; 32], DmPin>>,
+        events: EventStream,
+        earlier: &Verified,
+    ) -> Result<Self> {
         let mut client = Self::from_stream(server, identity, session, dms, events)?;
+        if earlier.owner == Some(client.owner()) {
+            client.carried = Some(earlier.keys.clone());
+            client.verified = earlier.certificates.clone();
+        }
         client.sync().await?;
         Ok(client)
+    }
+
+    /// A copy of what this connection verified, for the next one (see `Verified`).
+    pub fn verified(&self) -> Verified {
+        Verified {
+            owner: Some(self.owner()),
+            keys: self.keys.clone(),
+            certificates: self.verified.clone(),
+        }
+    }
+
+    fn owner(&self) -> [[u8; 32]; 4] {
+        let cert = &self.identity.certificate;
+        [
+            self.server.known_server().server_id,
+            *cert.person_id(),
+            cert.signing_key().to_bytes(),
+            *cert.agreement_key(),
+        ]
+    }
+
+    /// The key the previous connection took from this same envelope, sent by the same
+    /// device and person for the same commitment: opening it again gives the same key,
+    /// so that is skipped. The sender must still be listed and not removed, exactly
+    /// as for an envelope opened fresh.
+    fn carried_key(
+        &mut self,
+        slot: (Scope, i64),
+        envelope: &str,
+        commitment: &[u8; 32],
+        sender: &str,
+    ) -> Option<Key> {
+        let sender = self.device(sender)?;
+        let (person, device) = (*sender.person_id(), sender.signing_key().to_bytes());
+        let held = self.carried.as_mut()?.remove(&slot)?;
+        (held.envelope == envelope
+            && held.commitment == *commitment
+            && held.sender == person
+            && held.sender_device == device)
+            .then_some(held.key)
     }
 
     fn from_stream(
@@ -200,6 +288,7 @@ impl<'a> KeyClient<'a> {
             events,
             keepalive: Keepalive::new(),
             keys: HashMap::new(),
+            carried: None,
             pins_lost: dms.is_none(),
             dms: dms.unwrap_or_default(),
             rekeyed: HashMap::new(),
@@ -242,8 +331,19 @@ impl<'a> KeyClient<'a> {
             .error_for_status()?
             .json()
             .await?;
+        let events = pinned_tls::events_socket(self.server.known_server(), &session.token)
+            .await
+            .map_err(anyhow::Error::from_boxed)?;
+        self.resume(&session, events).await
+    }
+
+    /// Replace this client with a new connection on `events`, reusing what this one
+    /// verified. Until that connection's key sync succeeds, this client stays exactly
+    /// as it was, also when the sync fails or this future is dropped.
+    async fn resume(&mut self, session: &Session, events: EventStream) -> Result<()> {
         let pins = (!self.pins_lost).then(|| self.dms.clone());
-        let next = Self::connect_with_dms(self.server, self.identity, &session, pins).await?;
+        let earlier = self.verified();
+        let next = Self::start(self.server, self.identity, session, pins, events, &earlier).await?;
         *self = next;
         Ok(())
     }
@@ -426,9 +526,23 @@ impl<'a> KeyClient<'a> {
                     commitment: wrapped.commitment,
                 };
                 let sender = sender.clone();
-                let mut opened = decode_bytes(&wrapped.envelope)
-                    .map_err(|_| keys::KeyError::Encoding)
-                    .and_then(|bytes| context.open(self.identity, &sender, &bytes))
+                let carried = self.carried_key(
+                    slot,
+                    &wrapped.envelope,
+                    &wrapped.commitment,
+                    &wrapped.sender,
+                );
+                let mut opened = carried
+                    .map_or_else(
+                        || {
+                            #[cfg(test)]
+                            reconnect_tests::OPENS.with(|opens| opens.set(opens.get() + 1));
+                            decode_bytes(&wrapped.envelope)
+                                .map_err(|_| keys::KeyError::Encoding)
+                                .and_then(|bytes| context.open(self.identity, &sender, &bytes))
+                        },
+                        Ok,
+                    )
                     .map(|key| {
                         let bound = self.pair_bound(&context, &key, &wrapped.excluded);
                         (key, bound)
@@ -451,6 +565,7 @@ impl<'a> KeyClient<'a> {
                             key,
                             envelope: wrapped.envelope,
                             sender: person,
+                            sender_device: sender.signing_key().to_bytes(),
                             commitment: wrapped.commitment,
                             excluded: wrapped.excluded,
                             pair_bound: bound,
@@ -488,6 +603,8 @@ impl<'a> KeyClient<'a> {
             }
             let readable: HashSet<_> = state.scopes.iter().map(|state| state.scope).collect();
             self.keys.retain(|(scope, _), _| readable.contains(scope));
+            // Carried keys the server didn't list again unchanged are gone.
+            self.carried = None;
             self.historical_devices.retain(|(id, _, _), _| {
                 readable.contains(&Scope {
                     kind: Kind::Channel,
@@ -1186,7 +1303,11 @@ impl<'a> KeyClient<'a> {
             .error_for_status()?
             .json()
             .await?;
-        self.apply_devices(listed, DeviceCertificate::verify_public)
+        self.apply_devices(listed, |person, bytes| {
+            #[cfg(test)]
+            reconnect_tests::VERIFIES.with(|count| count.set(count.get() + 1));
+            DeviceCertificate::verify_public(person, bytes)
+        })
     }
 
     /// Replace the member devices with `listed`, checking only certificates this
@@ -1516,6 +1637,7 @@ impl<'a> KeyClient<'a> {
                 key,
                 envelope,
                 sender: me,
+                sender_device: self.identity.certificate.signing_key().to_bytes(),
                 commitment: context.commitment,
                 excluded: Default::default(),
                 pair_bound: false,
@@ -2016,6 +2138,7 @@ mod tests {
                 key: key.clone(),
                 envelope: encode(&context.wrap(&key, &identity.certificate, &identity)?),
                 sender: *identity.certificate.person_id(),
+                sender_device: identity.certificate.signing_key().to_bytes(),
                 commitment: context.commitment,
                 excluded: Excluded::new(),
                 pair_bound: false,
@@ -2079,6 +2202,7 @@ mod tests {
                 key: key.clone(),
                 envelope: encode(&context.wrap(&key, &identity.certificate, &identity)?),
                 sender: *identity.certificate.person_id(),
+                sender_device: identity.certificate.signing_key().to_bytes(),
                 commitment: context.commitment,
                 excluded: Excluded::new(),
                 pair_bound: false,
@@ -2212,6 +2336,7 @@ mod tests {
                 key: key.clone(),
                 envelope: encode(&wrap.wrap(&key, &identity.certificate, &identity)?),
                 sender: *identity.certificate.person_id(),
+                sender_device: identity.certificate.signing_key().to_bytes(),
                 commitment: wrap.commitment,
                 excluded: Excluded::new(),
                 pair_bound: false,

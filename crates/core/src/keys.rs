@@ -97,7 +97,7 @@ pub fn certificate_id(cert: &DeviceCertificate) -> String {
     exclusion_id(cert.person_id(), cert.signing_key().as_bytes())
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct WrappedKey {
     #[serde(flatten)]
     pub need: KeyNeed,

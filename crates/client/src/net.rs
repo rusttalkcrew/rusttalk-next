@@ -26,7 +26,7 @@ use rusttalk_core::{
     camera::CameraOptions,
     client::{
         BlobRef, DmPin, Event, FriendSignal, KeyClient, MessageBody, MessageError, MessageRecord,
-        Server as Api, Step, invite_name,
+        Server as Api, Step, Verified, invite_name,
         voice::{DataLiveFiles, LiveFileEvent, NativeVideoSource, RoomEvent, VoiceRoster},
     },
     identity::{DeviceIdentity, fingerprint},
@@ -945,6 +945,8 @@ async fn run(
     // Verified once, then reused: each verification spends one of the server's rate-limited challenges.
     let mut api = None;
     let mut api_generation = 0u64;
+    // Keys and certificates the last connection checked, so a reconnect needn't redo it all.
+    let mut verified = Verified::default();
     // Commands that came while connecting, for when it is done. Not in `State`: some
     // hold Windows handles, and `State` is borrowed across awaits so must stay `Sync`.
     let mut queued = VecDeque::new();
@@ -993,8 +995,14 @@ async fn run(
         let expected_generation = route_snap.generation;
         retries.requeue(&mut queued);
         let connecting = {
-            let (ctx, server, api, admission, route_rx) =
-                (&ctx, &server, &mut api, &mut admission, &mut route_rx);
+            let (ctx, server, api, admission, route_rx, verified) = (
+                &ctx,
+                &server,
+                &mut api,
+                &mut admission,
+                &mut route_rx,
+                &verified,
+            );
             async move {
                 let attempt = async {
                     let (api, session, dm_backfill) =
@@ -1007,9 +1015,14 @@ async fn run(
                         }
                     }
                     let pins = load_pins(&ctx.data, &server.server_id);
-                    let client =
-                        KeyClient::connect_with_dms(api, &ctx.identity, &session, pins.clone())
-                            .await;
+                    let client = KeyClient::connect_after(
+                        api,
+                        &ctx.identity,
+                        &session,
+                        pins.clone(),
+                        verified,
+                    )
+                    .await;
                     Ok::<_, Failure>((client, pins, dm_backfill))
                 };
                 tokio::select! {
@@ -1089,7 +1102,9 @@ async fn run(
                         ctx.sync.set_peer(&url, None);
                         match end {
                             End::Quit => return,
+                            // What this connection verified is kept only when it reconnects.
                             End::RouteChanged => {
+                                verified = client.verified();
                                 api = None;
                                 if let Some(channel) = voice::close(&ctx, &mut state) {
                                     ctx.send(Update::Call(url.clone(), channel, None));
@@ -1117,8 +1132,9 @@ async fn run(
                                     reason = reason.as_deref().unwrap_or("none"),
                                     "event stream closed"
                                 );
+                                verified = client.verified();
                             }
-                            End::Error => {}
+                            End::Error => verified = client.verified(),
                         }
                     }
                     Err(error) => {
