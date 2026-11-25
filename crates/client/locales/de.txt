@@ -877,6 +877,7 @@ call.control_off = Steuerungsanfragen sind aus
 call.control_unsupported = Dieser Bildschirm kann nicht gesteuert werden
 call.stop_watching = Nicht mehr ansehen
 call.exit_full_screen = Vollbild beenden
+call.stream_options = Stream-Optionen
 call.show_fps = FPS anzeigen
 call.stats_for_nerds = Statistiken für Nerds
 call.stat_picture = Bild

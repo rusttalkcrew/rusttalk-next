@@ -877,6 +877,7 @@ call.control_off = 操作リクエストはオフです
 call.control_unsupported = この画面は操作できません
 call.stop_watching = 視聴をやめる
 call.exit_full_screen = 全画面を終了
+call.stream_options = 配信のオプション
 call.show_fps = FPSを表示
 call.stats_for_nerds = 詳細統計
 call.stat_picture = 映像

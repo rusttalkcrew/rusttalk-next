@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Full screen streams keep the call's buttons and the stream's own menus, shown when you move the pointer (tap on phones) and hidden when idle; Escape or the hover button leaves full screen.
+
 ## v0.5.0 - 2026-11-25
 
 - Android test builds install as a separate "RustTalk Test" app, so they no longer block installing the release app.

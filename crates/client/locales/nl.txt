@@ -877,6 +877,7 @@ call.control_off = Bedieningsverzoeken staan uit
 call.control_unsupported = Dit scherm kan niet bestuurd worden
 call.stop_watching = Stoppen met kijken
 call.exit_full_screen = Volledig scherm sluiten
+call.stream_options = Streamopties
 call.show_fps = FPS tonen
 call.stats_for_nerds = Statistieken voor nerds
 call.stat_picture = Beeld

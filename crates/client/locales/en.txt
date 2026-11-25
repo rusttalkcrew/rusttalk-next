@@ -880,6 +880,7 @@ call.control_off = Control requests are off
 call.control_unsupported = This screen can't be controlled
 call.stop_watching = Stop watching
 call.exit_full_screen = Exit full screen
+call.stream_options = Stream options
 call.show_fps = Show FPS
 call.stats_for_nerds = Stats for nerds
 call.stat_picture = Picture
