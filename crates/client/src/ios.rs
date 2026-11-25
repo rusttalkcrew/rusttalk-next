@@ -18,6 +18,7 @@ pub mod voice;
 
 use std::{
     cell::Cell,
+    path::Path,
     sync::{
         OnceLock,
         atomic::{AtomicBool, Ordering},
@@ -25,18 +26,19 @@ use std::{
     time::{Duration, Instant},
 };
 
+use block2::{Block, RcBlock};
 use eframe::egui::{
     self, Color32, Context, Event, Key, Modifiers, Pos2, RawInput, Rect, SafeAreaInsets, Ui,
     UiBuilder, Vec2, accesskit::Affine, epaint::MarginF32,
 };
 use objc2::{
     MainThreadMarker, msg_send,
-    rc::Retained,
-    runtime::{AnyClass, AnyObject, Imp, NSObjectProtocol, Sel},
+    rc::{Allocated, Retained},
+    runtime::{AnyClass, AnyObject, Bool, Imp, NSObjectProtocol, Sel},
     sel,
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
-use objc2_foundation::NSString;
+use objc2_foundation::{NSArray, NSString, NSURL};
 use objc2_quartz_core::{CALayer, CATransaction};
 use objc2_ui_kit::{UIApplication, UIColor, UIView, UIWindow};
 use winit::platform::ios::{StatusBarStyle, WindowExtIOS as _};
@@ -249,6 +251,54 @@ extern "C-unwind" fn insert_text(this: *mut AnyObject, cmd: Sel, text: *const NS
         let winits = unsafe { std::mem::transmute::<Imp, InsertText>(*winits) };
         winits(this, cmd, text);
     }
+}
+
+/// Open the share sheet (Save to Files, AirDrop, other apps) for a decrypted file.
+/// Its temporary folder is deleted when the sheet closes; false if it didn't open.
+pub fn share(path: &Path) -> bool {
+    let Some(root) = key_window().and_then(|window| window.rootViewController()) else {
+        return false;
+    };
+    let (Some(class), Some(text)) = (AnyClass::get(c"UIActivityViewController"), path.to_str())
+    else {
+        return false;
+    };
+    let items = NSArray::from_retained_slice(&[NSURL::fileURLWithPath(&NSString::from_str(text))]);
+    let file = path.to_owned();
+    let closed = RcBlock::new(
+        move |_: *mut AnyObject, _: Bool, _: *mut AnyObject, _: *mut AnyObject| {
+            crate::files::discard(&file);
+        },
+    );
+    let none: Option<&AnyObject> = None;
+    let presented: Option<&Block<dyn Fn()>> = None;
+    // SAFETY: UIKit's documented initializer, properties and presentation, on the main
+    // thread (`key_window` checked it), with the argument types they take. The sheet
+    // copies the block.
+    unsafe {
+        let sheet: Allocated<AnyObject> = msg_send![class, alloc];
+        let sheet: Option<Retained<AnyObject>> =
+            msg_send![sheet, initWithActivityItems: &*items, applicationActivities: none];
+        let Some(sheet) = sheet else { return false };
+        let _: () = msg_send![&*sheet, setCompletionWithItemsHandler: &*closed];
+        // iPads show it as a popover, which needs a place to point from.
+        let popover: Option<Retained<AnyObject>> =
+            msg_send![&*sheet, popoverPresentationController];
+        if let (Some(popover), Some(view)) = (popover, root.view()) {
+            let bounds = view.bounds();
+            let middle = CGPoint::new(bounds.size.width / 2.0, bounds.size.height / 2.0);
+            let _: () = msg_send![&*popover, setSourceView: &*view];
+            let _: () = msg_send![&*popover, setSourceRect: CGRect::new(middle, CGSize::ZERO)];
+            let _: () = msg_send![&*popover, setPermittedArrowDirections: 0usize];
+        }
+        let _: () = msg_send![
+            &*root,
+            presentViewController: &*sheet,
+            animated: true,
+            completion: presented
+        ];
+    }
+    true
 }
 
 fn root_view(window: &UIWindow) -> Option<Retained<UIView>> {

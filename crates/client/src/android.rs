@@ -837,6 +837,30 @@ mod activity {
         }
     }
 
+    /// Copy a decrypted file into Downloads (`MainActivity.saveToDownloads`): true
+    /// for the shared Downloads, false for the app's own folder (before Android 10).
+    pub fn save_to_downloads(path: &std::path::Path, media_type: &str) -> Result<bool> {
+        let app = APP.get().context("no Android activity")?;
+        let name = path.file_name().context("no file name")?.to_string_lossy();
+        let path = path.to_str().context("path is not UTF-8")?;
+        java(app, |env, activity| {
+            let (path, name) = (env.new_string(path)?, env.new_string(&*name)?);
+            let media_type = env.new_string(media_type)?;
+            env.call_method(
+                activity,
+                jni_str!("saveToDownloads"),
+                jni_sig!("(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Z"),
+                &[
+                    JValue::Object(&path),
+                    JValue::Object(&name),
+                    JValue::Object(&media_type),
+                ],
+            )?
+            .z()
+        })
+        .context("MainActivity.saveToDownloads")
+    }
+
     pub fn init(app: AndroidApp) {
         let _ = APP.set(app);
     }

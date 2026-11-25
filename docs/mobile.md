@@ -202,6 +202,7 @@ use yet is allowed to be unused there (`allow(dead_code)` on phones only).
 | Audio (cpal 0.18) | AAudio (`libaaudio.so`, Android 8.0+) | Core Audio | Android uses communication mode during calls; iOS needs its audio session |
 | Key storage (keyring 4) | Android Keystore wraps the identity in private app storage | Data-protection Keychain, file with password as fallback | Both default to system key storage with password fallback |
 | File picker (rfd) | No backend | No backend | Gated: the buttons that open it are off (`files::PICKER`) |
+| Saving and opening files | **Save to phone** copies the file into Downloads (`MediaStore`, Android 10+; the app's own Download folder before) | **Share…** opens the share sheet | Decrypted into the temp folder, deleted once handed over; "Open in default app" is off (no `open` backend) |
 | Notifications (notify-rust) | Builds, no notification service | Builds, no notification service | Fail and are logged |
 | Call camera | Camera2 session, rotated I420 frames | AVFoundation, oriented BGRA frames | Both feed the existing encrypted LiveKit camera track |
 | Screen share, app and system audio | Not offered (`screen` already says unavailable) | Same | App audio gated to `Unsupported` |
@@ -351,7 +352,7 @@ Rough effort for one person who knows the code base.
 
 | Phase | What | Effort |
 | --- | --- | --- |
-| 2 | Usable chat on Android. Done: typed text, safe areas and the keyboard, `onDestroy`, recovery words, Android Keystore. Left: phone temp folder (`temp_dir()` is not writable on Android), file picker (Storage Access Framework), local notifications, hide Updates and Shortcuts on phones, `rusttalk://` links, the layout list above | 3 to 4 weeks |
+| 2 | Usable chat on Android. Done: typed text, safe areas and the keyboard, `onDestroy`, recovery words, Android Keystore, temp folder (`MainActivity` points `TMPDIR` at the app cache), **Save to phone** (Downloads). Left: file picker (Storage Access Framework), local notifications, hide Updates and Shortcuts on phones, `rusttalk://` links, the layout list above | 3 to 4 weeks |
 | 3 | Foreground voice on Android and iOS; iOS requests microphone access and supports background audio. Left: iPhone device verification, Android Bluetooth routing and foreground service | 2 weeks |
 | 4 | iOS on a device. Done: Keychain, safe area and taps. Left: notifications (reuse `notify/macos.rs`), document picker, status bar colours, background rules | 1 to 2 weeks |
 | 5 | Foreground call camera and front/back selection. Left: verify capture and interruptions on a real iPhone | Device verification |

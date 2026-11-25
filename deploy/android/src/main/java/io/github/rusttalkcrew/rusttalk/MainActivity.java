@@ -1,14 +1,26 @@
 package io.github.rusttalkcrew.rusttalk;
 
 import android.Manifest;
+import android.content.ContentResolver;
+import android.content.ContentValues;
 import android.content.Context;
 import android.content.pm.PackageManager;
 import android.media.AudioManager;
 import android.os.Build;
+import android.net.Uri;
 import android.os.Bundle;
+import android.os.Environment;
+import android.provider.MediaStore;
+import android.system.Os;
 import android.security.keystore.KeyGenParameterSpec;
 import android.security.keystore.KeyProperties;
 import android.security.keystore.StrongBoxUnavailableException;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.security.GeneralSecurityException;
 import java.security.KeyStore;
 import java.util.Arrays;
@@ -108,6 +120,13 @@ public class MainActivity extends GameActivity {
 
     @Override
     protected void onCreate(Bundle state) {
+        // Rust's temp_dir() reads TMPDIR, else /data/local/tmp, which apps can't write.
+        // Set before super.onCreate starts the app's native thread.
+        try {
+            Os.setenv("TMPDIR", getCacheDir().getAbsolutePath(), true);
+        } catch (Exception error) {
+            Log.e("RustTalk", "Setting TMPDIR failed", error);
+        }
         super.onCreate(state);
         voiceReady = initializeVoice(getApplicationContext());
         if (!voiceReady) Log.e("RustTalk", "WebRTC initialization failed; voice disabled");
@@ -212,6 +231,48 @@ public class MainActivity extends GameActivity {
             communicationMode(false);
         }
         super.onDestroy();
+    }
+
+    // Copies a decrypted file the app wrote to its cache into Downloads; the app deletes
+    // its copy after. Android 10+ puts it in the shared Downloads collection, which needs
+    // no storage permission. Older versions get the app's own Download folder (also no
+    // permission; removed with the app). Returns whether it went to the shared Downloads.
+    public boolean saveToDownloads(String path, String name, String type) throws Exception {
+        if (Build.VERSION.SDK_INT < 29) {
+            File folder = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
+            if (folder == null) throw new IOException("No shared storage");
+            File target = new File(folder, name);
+            for (int i = 1; target.exists(); i++) target = new File(folder, "(" + i + ") " + name);
+            try (InputStream in = new FileInputStream(path);
+                 OutputStream out = new FileOutputStream(target)) {
+                copy(in, out);
+            }
+            return false;
+        }
+        ContentResolver resolver = getContentResolver();
+        ContentValues values = new ContentValues();
+        values.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
+        values.put(MediaStore.MediaColumns.MIME_TYPE, type);
+        values.put(MediaStore.MediaColumns.IS_PENDING, 1);
+        Uri uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
+        if (uri == null) throw new IOException("Downloads refused the file");
+        try (InputStream in = new FileInputStream(path);
+             OutputStream out = resolver.openOutputStream(uri)) {
+            if (out == null) throw new IOException("Downloads gave no stream");
+            copy(in, out);
+        } catch (Exception error) {
+            resolver.delete(uri, null, null);
+            throw error;
+        }
+        values.clear();
+        values.put(MediaStore.MediaColumns.IS_PENDING, 0);
+        resolver.update(uri, values, null, null);
+        return true;
+    }
+
+    private static void copy(InputStream in, OutputStream out) throws IOException {
+        byte[] buffer = new byte[64 * 1024];
+        for (int read; (read = in.read(buffer)) > 0; ) out.write(buffer, 0, read);
     }
 
     @Override
