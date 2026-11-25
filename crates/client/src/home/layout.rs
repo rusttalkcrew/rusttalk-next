@@ -201,6 +201,11 @@ impl Layout {
         }
     }
 
+    /// The member list opened by hand over a narrow window's chat.
+    pub fn peeking(&self) -> bool {
+        self.narrow && self.peek
+    }
+
     pub fn toggle_members(&mut self) {
         if self.narrow {
             self.peek = !self.peek;

@@ -821,6 +821,31 @@ impl Home {
         }
     }
 
+    /// Back after menus and dialogs (`crate::back`): the member list over the chat
+    /// closes, then a phone goes from what is open to the list, like its Back bar.
+    /// False at the list.
+    pub fn go_back(&mut self) -> bool {
+        if self.members_over_chat() {
+            self.layout.toggle_members();
+        } else if self.layout.phone && !self.layout.list {
+            self.layout.list = true;
+        } else {
+            return false;
+        }
+        true
+    }
+
+    /// Whether `go_back` has anywhere to go.
+    pub fn can_go_back(&self) -> bool {
+        self.members_over_chat() || (self.layout.phone && !self.layout.list)
+    }
+
+    fn members_over_chat(&self) -> bool {
+        !(self.layout.phone && self.layout.list)
+            && self.member_server().is_some()
+            && self.layout.peeking()
+    }
+
     /// Phones: what is open is behind the list or the member list, so nobody reads
     /// it. From the navigation as it is now, so a message right after Back counts.
     fn covered(&self) -> bool {
@@ -7687,6 +7712,99 @@ mod tests {
         let (home, ..) = phone.state().as_ref().unwrap();
         assert!(home.layout.list);
         assert!(home.notify.unread(&address, &PROJECTS));
+    }
+
+    /// Android's Back on a phone closes what is on top, one thing a press: a
+    /// settings page goes back to the page list, a dialog closes, the open pane goes
+    /// back to the channel list, and at the list nothing is left to close.
+    #[test]
+    fn back_on_a_phone_closes_the_top_thing_first() {
+        use egui_kittest::kittest::Queryable;
+        let (mut files, _sent) = files_harness(true);
+        let mut home = files.state_mut().take().unwrap();
+        home.view = View::Server(0);
+        home.servers[0].open = Some(PROJECTS);
+        home.servers[0].dir.perms.manage_channels = true;
+        home.layout.list = false;
+        home.find.opened = false;
+        let mut prefs = home.notify.prefs().clone();
+        prefs.desktop = false;
+        home.notify.set_prefs(prefs);
+        let data = tempfile::tempdir().unwrap();
+        let mut phone = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(390.0, 844.0))
+            .build_ui_state(
+                |ui, screen: &mut Option<Screen>| {
+                    if let Some((home, updates, keystore)) = screen {
+                        show(ui, home, updates, keystore);
+                        let open = crate::back::frame_end(ui.ctx(), home.can_go_back());
+                        ui.data_mut(|data| {
+                            data.insert_temp(egui::Id::unique("back-test-open"), open)
+                        });
+                    }
+                },
+                None,
+            );
+        ui::install(&phone.ctx);
+        *phone.state_mut() = Some((
+            home,
+            crate::update::Updater::new(data.path()),
+            crate::keystore::without_keychain(data.path()),
+        ));
+        let back = |phone: &mut egui_kittest::Harness<'_, Option<Screen>>| {
+            let ctx = phone.ctx.clone();
+            let mut raw = egui::RawInput::default();
+            crate::back::press(&mut raw.events);
+            let (home, ..) = phone.state_mut().as_mut().unwrap();
+            let handled = crate::back::input(&ctx, &mut raw, || home.go_back());
+            phone.input_mut().events.extend(raw.events);
+            phone.run_steps(4);
+            handled.expect("a press")
+        };
+        let open = |phone: &egui_kittest::Harness<'_, Option<Screen>>| {
+            phone
+                .ctx
+                .data(|data| data.get_temp::<bool>(egui::Id::unique("back-test-open")))
+        };
+        let home = |phone: &egui_kittest::Harness<'_, Option<Screen>>| {
+            let (home, ..) = phone.state().as_ref().unwrap();
+            (
+                home.settings.is_some(),
+                home.dialog.is_some(),
+                home.layout.list,
+            )
+        };
+        phone.run_steps(4);
+        phone.state_mut().as_mut().unwrap().0.settings = Some(Tab::Profile);
+        phone.run_steps(4);
+        phone.get_by_label("My account").click_accesskit();
+        phone.run_steps(4);
+        assert!(back(&mut phone));
+        assert_eq!(home(&phone), (true, false, false), "page list");
+        assert!(phone.query_by_label("My account").is_some());
+        assert!(back(&mut phone));
+        assert_eq!(home(&phone), (false, false, false), "settings closed");
+
+        phone
+            .state_mut()
+            .as_mut()
+            .unwrap()
+            .0
+            .edit_channel(0, PROJECTS, ChannelEdit::Rename);
+        phone.run_steps(4);
+        assert_eq!(home(&phone), (false, true, false));
+        assert_eq!(open(&phone), Some(true));
+        assert!(back(&mut phone));
+        assert_eq!(home(&phone), (false, false, false), "dialog closed");
+        assert!(back(&mut phone));
+        assert_eq!(home(&phone), (false, false, true), "channel list");
+        assert_eq!(
+            open(&phone),
+            Some(false),
+            "Android handles Back at the root"
+        );
+        assert!(!back(&mut phone));
+        assert_eq!(home(&phone), (false, false, true));
     }
 
     #[test]

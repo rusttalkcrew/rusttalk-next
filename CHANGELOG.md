@@ -18,6 +18,7 @@ Unreleased under the new version and date.
 - React to any message with an emoji, end-to-end encrypted: click a reaction to add or remove yours, hover to see who reacted.
 - Right-click or long-press a picture, GIF or sticker in chat to copy it, save it or open it in the viewer; messages can also copy their ID.
 - Android calls keep working when you switch apps or lock the screen, with an "In a voice call" notification that takes you back.
+- On Android, Back now closes menus, dialogs and settings pages and returns to the channel list before leaving the app.
 
 ## v0.4.0 - 2026-11-24
 
