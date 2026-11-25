@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+## v0.7.0 - 2026-11-25
+
 - Voice channels can now be set to audio quality up to 320 kbps, for listening to music together.
 - People who manage channels see empty categories again, so a new or emptied category no longer disappears; members still don't see them.
 - The call connection panel has a cleaner look, with easier-to-read numbers and graphs, and shows the voice channel's audio quality.
