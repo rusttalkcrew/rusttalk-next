@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Android: attach files and photos, change your profile picture or server icon, add emoji and stickers and import emoji packs, using the phone's own file and photo picker.
+
 ## v0.7.0 - 2026-11-25
 
 - Voice channels can now be set to audio quality up to 320 kbps, for listening to music together.

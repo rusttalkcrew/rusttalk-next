@@ -1,11 +1,14 @@
 package io.github.rusttalkcrew.rusttalk;
 
 import android.Manifest;
+import android.content.ActivityNotFoundException;
+import android.content.ClipData;
 import android.content.ContentResolver;
 import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.database.Cursor;
 import android.media.AudioAttributes;
 import android.media.AudioFocusRequest;
 import android.media.AudioManager;
@@ -14,6 +17,7 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.os.Environment;
 import android.provider.MediaStore;
+import android.provider.OpenableColumns;
 import android.system.Os;
 import android.security.keystore.KeyGenParameterSpec;
 import android.security.keystore.KeyProperties;
@@ -26,7 +30,9 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.security.GeneralSecurityException;
 import java.security.KeyStore;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 import javax.crypto.Cipher;
 import javax.crypto.KeyGenerator;
 import javax.crypto.SecretKey;
@@ -35,6 +41,8 @@ import android.util.Log;
 import android.view.KeyEvent;
 import android.view.inputmethod.EditorInfo;
 import androidx.activity.OnBackPressedCallback;
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 import com.google.androidgamesdk.GameActivity;
 
 /**
@@ -348,6 +356,86 @@ public class MainActivity extends GameActivity {
     private static void copy(InputStream in, OutputStream out) throws IOException {
         byte[] buffer = new byte[64 * 1024];
         for (int read; (read = in.read(buffer)) > 0; ) out.write(buffer, 0, read);
+    }
+
+    /**
+     * The system picker for uploads (crates/client/src/android.rs, pick). The app's
+     * picker thread calls pick, waits for pickDone, then copies each picked file into
+     * its cache with copyPicked, off the UI thread. Kinds: 0 any file, 1 pictures,
+     * 2 a .zip. Neither needs a storage permission: the picker grants each file.
+     */
+    private static native void pickDone();
+
+    private final List<Uri> picked = new ArrayList<>();
+
+    private final ActivityResultLauncher<Intent> picker = registerForActivityResult(
+            new ActivityResultContracts.StartActivityForResult(), result -> {
+                Intent data = result.getData();
+                synchronized (picked) {
+                    picked.clear();
+                    if (result.getResultCode() == RESULT_OK && data != null) {
+                        ClipData clip = data.getClipData();
+                        if (clip != null) {
+                            for (int i = 0; i < clip.getItemCount(); i++) picked.add(clip.getItemAt(i).getUri());
+                        } else if (data.getData() != null) {
+                            picked.add(data.getData());
+                        }
+                    }
+                }
+                pickDone();
+            });
+
+    public void pick(int kind, boolean multiple) {
+        Intent intent;
+        if (kind == 1 && Build.VERSION.SDK_INT >= 33) {
+            intent = new Intent(MediaStore.ACTION_PICK_IMAGES).setType("image/*");
+            if (multiple) intent.putExtra(MediaStore.EXTRA_PICK_IMAGES_MAX, MediaStore.getPickImagesMaxLimit());
+        } else {
+            intent = new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
+                    .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, multiple);
+            if (kind == 1) {
+                intent.setType("image/*").putExtra(Intent.EXTRA_MIME_TYPES,
+                        new String[]{"image/png", "image/jpeg", "image/gif", "image/webp"});
+            } else if (kind == 2) {
+                // Providers name .zip files differently.
+                intent.setType("*/*").putExtra(Intent.EXTRA_MIME_TYPES, new String[]{
+                        "application/zip", "application/x-zip-compressed", "application/x-zip"});
+            } else {
+                intent.setType("*/*");
+            }
+        }
+        runOnUiThread(() -> {
+            synchronized (picked) { picked.clear(); }
+            try {
+                picker.launch(intent);
+            } catch (ActivityNotFoundException error) {
+                Log.e("RustTalk", "No file picker", error);
+                pickDone();
+            }
+        });
+    }
+
+    public int pickedCount() {
+        synchronized (picked) { return picked.size(); }
+    }
+
+    // Copies picked file `index` into `folder` under its own name; returns that name.
+    public String copyPicked(int index, String folder) throws IOException {
+        Uri uri;
+        synchronized (picked) { uri = picked.get(index); }
+        ContentResolver resolver = getContentResolver();
+        String name = null;
+        try (Cursor cursor = resolver.query(uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) name = cursor.getString(0);
+        }
+        if (name != null) name = name.replace('/', '_').replace('\\', '_').replace('\0', '_');
+        if (name == null || name.isEmpty() || name.equals(".") || name.equals("..")) name = "file";
+        try (InputStream in = resolver.openInputStream(uri);
+             OutputStream out = new FileOutputStream(new File(folder, name))) {
+            if (in == null) throw new IOException("The picker gave no stream");
+            copy(in, out);
+        }
+        return name;
     }
 
     @Override

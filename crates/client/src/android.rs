@@ -586,6 +586,7 @@ mod activity {
         sync::{
             LazyLock, Mutex, MutexGuard, OnceLock,
             atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, Ordering},
+            mpsc,
         },
         time::{Duration, Instant},
     };
@@ -595,7 +596,10 @@ mod activity {
         UserEvent,
         egui::{self, IMEPurpose, Id, SafeAreaInsets, epaint::MarginF32, text::CCursorRange},
     };
-    use jni::{JValue, JavaVM, jni_sig, jni_str, objects::JObject};
+    use jni::{
+        JValue, JavaVM, jni_sig, jni_str,
+        objects::{JObject, JString},
+    };
     use winit::{
         application::ApplicationHandler,
         event::{DeviceEvent, DeviceId, StartCause, WindowEvent},
@@ -979,6 +983,108 @@ mod activity {
             .z()
         })
         .context("MainActivity.saveToDownloads")
+    }
+
+    /// What the system picker offers (`MainActivity.pick`).
+    #[derive(Clone, Copy)]
+    pub enum Pick {
+        Any = 0,
+        /// The Photo Picker on Android 13 and newer.
+        Pictures = 1,
+        Zip = 2,
+    }
+
+    /// Wakes the thread waiting in `pick` once `MainActivity` has the answer.
+    static PICKED: Mutex<Option<mpsc::Sender<()>>> = Mutex::new(None);
+
+    #[unsafe(no_mangle)]
+    extern "system" fn Java_io_github_rusttalkcrew_rusttalk_MainActivity_pickDone(
+        _: *mut c_void,
+        _: *mut c_void,
+    ) {
+        if let Some(done) = lock(&PICKED).take() {
+            let _ = done.send(());
+        }
+    }
+
+    /// Open the system picker and wait for it, off the UI thread (`files::Files::ask`).
+    /// Returns copies of the picked files in the app's cache, each under its own name
+    /// in its own `files::temp_folder`, so `files::discard` removes only that one.
+    /// Empty when cancelled or on failure.
+    pub fn pick(kind: Pick, multiple: bool) -> Vec<PathBuf> {
+        let Some(app) = APP.get() else {
+            return Vec::new();
+        };
+        let (done, wait) = mpsc::channel();
+        *lock(&PICKED) = Some(done);
+        if let Err(error) = java(app, |env, activity| {
+            env.call_method(
+                activity,
+                jni_str!("pick"),
+                jni_sig!("(IZ)V"),
+                &[JValue::Int(kind as i32), JValue::Bool(multiple)],
+            )?
+            .v()
+        }) {
+            tracing::warn!(%error, "opening the file picker failed");
+            return Vec::new();
+        }
+        if wait.recv().is_err() {
+            return Vec::new();
+        }
+        let count = java(app, |env, activity| {
+            env.call_method(activity, jni_str!("pickedCount"), jni_sig!("()I"), &[])?
+                .i()
+        })
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "reading the picked files failed");
+            0
+        });
+        (0..count)
+            .filter_map(|index| copy_picked(app, index))
+            .collect()
+    }
+
+    /// Copy picked file `index` into a fresh temporary folder (`MainActivity.copyPicked`).
+    fn copy_picked(app: &AndroidApp, index: i32) -> Option<PathBuf> {
+        let folder = match rusttalk_core::keys::random_key() {
+            Ok(id) => crate::files::temp_folder(&id[..8]),
+            Err(error) => {
+                tracing::warn!(error = %format_args!("{error:#}"), "naming a picked file's folder failed");
+                return None;
+            }
+        };
+        if let Err(error) = std::fs::create_dir(&folder) {
+            tracing::warn!(%error, "making a folder for a picked file failed");
+            return None;
+        }
+        let name = folder
+            .to_str()
+            .context("the cache folder is not UTF-8")
+            .and_then(|path| {
+                java(app, |env, activity| {
+                    let path = env.new_string(path)?;
+                    let name = env
+                        .call_method(
+                            activity,
+                            jni_str!("copyPicked"),
+                            jni_sig!("(ILjava/lang/String;)Ljava/lang/String;"),
+                            &[JValue::Int(index), JValue::Object(&path)],
+                        )?
+                        .l()?;
+                    let name = env.cast_local::<JString>(name)?;
+                    name.try_to_string(env)
+                })
+                .context("MainActivity.copyPicked")
+            });
+        match name {
+            Ok(name) => Some(folder.join(name)),
+            Err(error) => {
+                tracing::warn!(error = %format_args!("{error:#}"), "copying a picked file failed");
+                let _ = std::fs::remove_dir_all(&folder);
+                None
+            }
+        }
     }
 
     pub fn init(app: AndroidApp) {
