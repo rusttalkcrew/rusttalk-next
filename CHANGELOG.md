@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+## v0.8.0 - 2026-11-26
+
 - Reconnecting after a network drop is quicker on busy servers: the app keeps the keys and devices it already checked instead of checking them all again.
 - Android: attach files and photos, change your profile picture or server icon, add emoji and stickers and import emoji packs, using the phone's own file and photo picker.
 - On iPhone you can now upload files and photos: attachments, profile picture, server icon, emoji, stickers and page pictures.
