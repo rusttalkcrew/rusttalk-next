@@ -553,6 +553,8 @@ pub async fn bans(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<
 pub struct AuditQuery {
     #[serde(default)]
     after: i64,
+    /// Newest first, below this ID; without it, oldest first as older apps expect.
+    before: Option<i64>,
     action: Option<String>,
     limit: Option<i64>,
 }
@@ -584,26 +586,29 @@ pub async fn audit_log(
 ) -> ApiResult<Json<Vec<AuditEvent>>> {
     let AuditQuery {
         after,
+        before,
         action,
         limit,
     } = query.map_err(|_| ApiError::bad_request("invalid_query"))?.0;
     let limit = limit.unwrap_or(100);
-    if after < 0 || !(1..=100).contains(&limit) {
+    if after < 0 || before.is_some_and(|id| id < 1) || !(1..=100).contains(&limit) {
         return Err(ApiError::bad_request("invalid_query"));
     }
+    let order = if before.is_some() { "DESC" } else { "ASC" };
     let (mut tx, actor) = authenticate_read(&app, &headers).await?;
     roles::authority(&mut tx, &actor.person)
         .await?
         .require(Permission::ViewAuditLog)?;
-    let rows = query_as::<_, AuditRow>(
+    let rows = query_as::<_, AuditRow>(&format!(
         "SELECT id, actor_person_id, action, target_person_id, target_id, at
-                                       FROM audit_log WHERE id > ? AND (? IS NULL OR action = ?)
+                                       FROM audit_log WHERE id > ? AND id < ? AND (? IS NULL OR action = ?)
                                        AND (dm_channel_id IS NULL OR EXISTS (
                                            SELECT 1 FROM channel_readers r
                                            WHERE r.channel_id = dm_channel_id AND r.person_id = ?
-                                       )) ORDER BY id LIMIT ?",
-    )
+                                       )) ORDER BY id {order} LIMIT ?"
+    ))
     .bind(after)
+    .bind(before.unwrap_or(i64::MAX))
     .bind(&action)
     .bind(&action)
     .bind(actor.person.as_slice())
@@ -741,5 +746,84 @@ mod tests {
                 })
             );
         }
+    }
+
+    #[tokio::test]
+    async fn audit_pages_newest_first_with_before() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let app = app(dir.path(), 2).await?;
+        query("DELETE FROM audit_log").execute(&app.db).await?;
+        // 1 to 120, every third one a ban.
+        for id in 1..=120_i64 {
+            let action = if id % 3 == 0 {
+                "member_banned"
+            } else {
+                "joined"
+            };
+            query("INSERT INTO audit_log (id, actor_person_id, action, at) VALUES (?, ?, ?, ?)")
+                .bind(id)
+                .bind(person(1))
+                .bind(action)
+                .bind(id)
+                .execute(&app.db)
+                .await?;
+        }
+        let page = |after, before, action: Option<&str>, limit| {
+            audit_log(
+                State(app.clone()),
+                as_person(1),
+                Ok(Query(AuditQuery {
+                    after,
+                    before,
+                    action: action.map(str::to_owned),
+                    limit,
+                })),
+            )
+        };
+        let ids = |rows: Vec<AuditEvent>| rows.into_iter().map(|row| row.id).collect::<Vec<_>>();
+        // Older apps: oldest first from `after`, unchanged.
+        assert_eq!(
+            ids(page(0, None, None, Some(3)).await.unwrap().0),
+            [1, 2, 3]
+        );
+        assert_eq!(
+            ids(page(117, None, None, None).await.unwrap().0),
+            [118, 119, 120]
+        );
+        // Newest first, then older from the last ID seen, until the start.
+        let newest = ids(page(0, Some(i64::MAX), None, Some(50)).await.unwrap().0);
+        assert_eq!(newest, (71..=120).rev().collect::<Vec<_>>());
+        let older = ids(page(0, Some(71), None, Some(50)).await.unwrap().0);
+        assert_eq!(older, (21..=70).rev().collect::<Vec<_>>());
+        let last = ids(page(0, Some(21), None, Some(50)).await.unwrap().0);
+        assert_eq!(last, (1..=20).rev().collect::<Vec<_>>());
+        // The action filter applies before paging.
+        let bans = ids(page(0, Some(100), Some("member_banned"), Some(3))
+            .await
+            .unwrap()
+            .0);
+        assert_eq!(bans, [99, 96, 93]);
+        assert_eq!(
+            page(0, Some(0), None, None).await.err().unwrap().code,
+            "invalid_query"
+        );
+        assert_eq!(
+            audit_log(
+                State(app.clone()),
+                as_person(2),
+                Ok(Query(AuditQuery {
+                    after: 0,
+                    before: Some(i64::MAX),
+                    action: None,
+                    limit: None,
+                }))
+            )
+            .await
+            .err()
+            .unwrap()
+            .code,
+            "permission_denied"
+        );
+        Ok(())
     }
 }

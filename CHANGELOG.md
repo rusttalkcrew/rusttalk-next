@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Server settings open faster: the audit log loads only on its own page, newest 50 first, with Show older for more
+
 ## v0.4.0 - 2026-11-24
 
 - Changing your name, picture or bio no longer pauses chat and voice on every server while your devices sync.
