@@ -239,6 +239,17 @@ enum Join {
 const AUDIO_KBPS: std::ops::RangeInclusive<u32> = 8..=128;
 /// Voice channel member limits a manager can pick; 0 is no limit.
 const MEMBER_LIMIT: std::ops::RangeInclusive<u32> = 0..=99;
+
+/// A member limit typed into its field. An emptied field (or "No limit") means no
+/// limit, so clearing it removes the limit instead of quietly keeping the old one.
+fn no_limit_parser(text: &str) -> Option<f64> {
+    let text = text.trim();
+    if text.is_empty() || text.eq_ignore_ascii_case(t!("home.no_limit")) {
+        return Some(0.0);
+    }
+    text.parse::<u32>().ok().map(f64::from)
+}
+
 /// The height of both Edit channel tabs; the list of roles scrolls inside it.
 const CHANNEL_TAB_HEIGHT: f32 = 350.0;
 
@@ -6946,13 +6957,15 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
                     if let Some((most, changed)) = limit {
                         let title = t!("home.member_limit");
                         let spin = ui::setting_row(ui, title, t!("home.member_limit_help"), |ui| {
-                            let spin =
-                                ui.add(DragValue::new(most).range(MEMBER_LIMIT).custom_formatter(
-                                    |value, _| match value as u32 {
+                            let spin = ui.add(
+                                DragValue::new(most)
+                                    .range(MEMBER_LIMIT)
+                                    .custom_formatter(|value, _| match value as u32 {
                                         0 => t!("home.no_limit").into(),
                                         value => value.to_string(),
-                                    },
-                                ));
+                                    })
+                                    .custom_parser(no_limit_parser),
+                            );
                             spin.widget_info(|| WidgetInfo::labeled(Role::SpinButton, true, title));
                             spin
                         });
@@ -7389,6 +7402,7 @@ mod tests {
     mod streams;
     mod touch;
     mod uploads;
+    mod voice_limit;
 
     /// A server with a text channel this person can write in, showing its files: one
     /// from Ann and one of their own. Also returns the commands the view sends.

@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- A voice channel's member limit can be removed again by clearing the field, and the "2/8" count in the channel list now has a people icon and says "Member limit: 8" on hover (or a tap on phones).
+
 ## v0.5.0 - 2026-11-25
 
 - Android test builds install as a separate "RustTalk Test" app, so they no longer block installing the release app.
