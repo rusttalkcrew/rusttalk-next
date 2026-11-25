@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- On Android, the voice call notification has Mute and Hang up buttons that work with the app in the background, and on Android 12 and newer it shows as a real ongoing call in the status bar; tapping it opens the call.
+
 ## v0.7.0 - 2026-11-25
 
 - Voice channels can now be set to audio quality up to 320 kbps, for listening to music together.

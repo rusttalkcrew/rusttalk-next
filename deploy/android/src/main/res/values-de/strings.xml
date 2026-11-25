@@ -4,4 +4,7 @@
     <string name="call_channel">Anrufe</string>
     <string name="call_title">Im Sprachanruf</string>
     <string name="call_text">Tippe, um zu RustTalk zurückzukehren</string>
+    <string name="call_mute">Stummschalten</string>
+    <string name="call_unmute">Stummschaltung aufheben</string>
+    <string name="call_hang_up">Anruf verlassen</string>
 </resources>

@@ -44,6 +44,8 @@ pub const MAX_LIVE_FILE: u64 = rusttalk_core::messages::MAX_LIVE_FILE_SIZE;
 const OFFER_SECONDS: i64 = 10 * 60;
 
 pub mod mixer;
+#[cfg(any(target_os = "android", test))]
+pub(crate) mod notice;
 mod overlay;
 mod panel;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -511,6 +513,10 @@ fn tick(
 
 /// Once per frame: push-to-talk, the settings meter, and repaints for live indicators.
 pub fn frame(ctx: &egui::Context, home: &mut Home) {
+    #[cfg(target_os = "android")]
+    if let Some(shown) = notice::frame(home) {
+        crate::android::call_notice(&shown);
+    }
     #[cfg(target_os = "ios")]
     if home.voice.call.is_some() && crate::ios::voice::needs_rejoin() {
         leave(home);

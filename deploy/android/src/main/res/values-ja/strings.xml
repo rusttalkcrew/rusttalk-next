@@ -4,4 +4,7 @@
     <string name="call_channel">通話</string>
     <string name="call_title">ボイス通話中</string>
     <string name="call_text">タップしてRustTalkに戻る</string>
+    <string name="call_mute">ミュート</string>
+    <string name="call_unmute">ミュート解除</string>
+    <string name="call_hang_up">通話から退出</string>
 </resources>

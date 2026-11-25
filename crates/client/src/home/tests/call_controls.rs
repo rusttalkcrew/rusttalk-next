@@ -361,3 +361,69 @@ fn connection_popup_shows_audio_quality_and_fits() {
         capture(&mut h, size, dark, "connection-details");
     }
 }
+
+/// Android's call notification (#619): its buttons act without a frame (no window in
+/// the background), and the next frame catches up without leaving twice.
+#[test]
+fn call_notification_buttons_work_without_a_frame() {
+    use crate::call::notice::{self, Button, Shown};
+    let (mut base, mut sent) = files_harness(true);
+    let mut sent = move || std::iter::from_fn(|| sent.try_recv().ok()).collect::<Vec<_>>();
+    let mut home = base.state_mut().take().unwrap();
+    home.voice.call = Some(Call {
+        server: home.servers[0].address.clone(),
+        channel: PROJECTS,
+        state: CallState::Connected,
+        stats: Stats::default(),
+        can_talk: true,
+        can_share_video: true,
+    });
+    let shown = Shown {
+        name: "projects".into(),
+        server: "Friends".into(),
+        muted: false,
+        can_mute: true,
+    };
+    assert_eq!(notice::frame(&mut home), Some(shown.clone()));
+    assert_eq!(notice::frame(&mut home), None, "unchanged: nothing to send");
+    sent();
+
+    assert!(notice::press(Button::Mute as i32));
+    assert!(home.voice.audio.muted());
+    assert!(matches!(sent()[..], [Command::SyncVoiceStatus]));
+    let muted = notice::frame(&mut home).expect("the button changed");
+    assert!(muted.muted);
+    // Deafened counts as muted, and unmuting undeafens, like the app's mic button.
+    home.voice.audio.set_muted(false);
+    home.voice.audio.set_deafened(true);
+    assert!(!notice::press(Button::Mute as i32));
+    assert!(!home.voice.audio.deafened());
+    assert!(matches!(sent()[..], [Command::SyncVoiceStatus]));
+    assert_eq!(notice::frame(&mut home), Some(shown));
+    assert!(!notice::press(7), "unknown buttons do nothing");
+    assert!(sent().is_empty());
+
+    // A moderator's mute: no Mute button, and a stale one does nothing.
+    home.servers[0].dir.members.edit()[0].voice_muted = true;
+    assert!(notice::frame(&mut home).is_some_and(|shown| !shown.can_mute));
+    assert!(!notice::press(Button::Mute as i32));
+    assert!(!home.voice.audio.muted());
+    assert!(sent().is_empty());
+
+    // Tapping it shows the call.
+    home.view = View::Pokes;
+    notice::open();
+    assert_eq!(notice::frame(&mut home), None);
+    assert!(matches!(home.view, View::Server(0)));
+    assert_eq!(home.servers[0].open, Some(PROJECTS));
+    sent();
+
+    notice::press(Button::HangUp as i32);
+    assert!(matches!(sent()[..], [Command::LeaveVoice]));
+    assert!(home.voice.call.is_some(), "no frame ran yet");
+    assert_eq!(notice::frame(&mut home), None);
+    assert!(home.voice.call.is_none());
+    assert!(sent().is_empty(), "left once");
+    assert!(!notice::press(Button::HangUp as i32), "out of a call");
+    assert!(sent().is_empty());
+}
