@@ -667,10 +667,12 @@ fn stop_watching(home: &mut Home) {
 
 /// Room the Join button takes at a voice row's right edge, so the name is cut short first.
 pub const JOIN_SLOT: f32 = 30.0;
-/// Room for "3/5" before the Join button, on voice rows with a member limit.
-pub const COUNT_SLOT: f32 = 34.0;
+/// Room for "👥 3/5" before the Join button, on voice rows with a member limit.
+pub const COUNT_SLOT: f32 = 50.0;
 
-/// How full a voice channel with a member limit is, like "3/5", just before the Join slot.
+/// How full a voice channel with a member limit is, like "👥 3/5", just before the Join
+/// slot. Hovering says it is a limit; on touch screens, where nothing hovers, a tap on
+/// it shows the same tip until the next tap.
 pub fn member_count(ui: &mut Ui, server: &Server, channel: &Id, limit: u32, row: &Response) {
     let people = server.voice.get(channel).map_or(0, Vec::len);
     let right = row.rect.right() - JOIN_SLOT;
@@ -680,9 +682,37 @@ pub fn member_count(ui: &mut Ui, server: &Server, channel: &Id, limit: u32, row:
             .max_rect(slot)
             .layout(Layout::right_to_left(Align::Center)),
     );
+    at.spacing_mut().item_spacing.x = ui::SPACE_XS;
     let text = t!("call.member_count", people = people, limit = limit);
-    at.add(Label::new(ui::caption(text)).selectable(false))
-        .on_hover_text(t!("call.member_count_tip", people = people, limit = limit));
+    let count = at.add(Label::new(ui::caption(text)).selectable(false));
+    let icon = at.add(Label::new(ui::caption("👥")).selectable(false));
+    let touch = ui::TOUCH || ui.input(|i| i.has_touch_screen());
+    let sense = if touch {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let id = egui::Id::unique(("member limit", channel));
+    let tip = t!("call.member_limit_tip", limit = limit);
+    let hit = at.interact(count.rect.union(icon.rect), id, sense);
+    let (tapped, elsewhere) = (
+        hit.clicked(),
+        ui.input(|i| i.pointer.any_pressed()) && !hit.contains_pointer(),
+    );
+    let open = ui.data_mut(|data| {
+        let open = data.get_temp_mut_or_default::<bool>(id);
+        if tapped {
+            *open = !*open;
+        } else if elsewhere {
+            *open = false;
+        }
+        *open
+    });
+    // While hovered, the hover tip already shows; one tip at a time.
+    if open && !hit.hovered() {
+        hit.show_tooltip_text(&tip);
+    }
+    hit.on_hover_text(tip);
 }
 
 /// The Join button on a voice channel's row: shown while the row is hovered or open,
