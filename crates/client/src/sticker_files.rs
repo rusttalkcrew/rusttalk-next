@@ -140,10 +140,7 @@ pub fn decode(bytes: &[u8], kind: Kind) -> Result<Vec<Frame>> {
 
 /// What a loaded picture holds in memory, to keep the total within a budget.
 pub fn decoded_bytes(picture: &Picture) -> usize {
-    picture
-        .decoded()
-        .map(|(image, _)| image.pixels.len() * 4)
-        .sum()
+    picture.held_bytes()
 }
 
 /// Whether the sender's app may attach this server picture: only what receivers accept.

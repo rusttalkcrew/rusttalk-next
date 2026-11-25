@@ -1287,28 +1287,59 @@ mod tests {
     }
 
     #[test]
-    fn animated_picture_loads_one_frame_and_decodes_the_rest_once_on_play() {
+    fn animated_picture_loads_one_frame_and_decodes_the_rest_on_play() {
         let loaded = picture(&gif(3)).unwrap();
-        assert_eq!(loaded.decoded().count(), 1);
-        // Every clone and every play before the decode ends shares one decode.
+        let one_frame = 4 * 4 * 4;
+        assert_eq!(loaded.held_bytes(), one_frame);
         let (tx, rx) = std::sync::mpsc::channel();
-        let copy = loaded.clone();
-        for shown in [&loaded, &copy, &loaded] {
-            let tx = tx.clone();
-            if let Some(rest) = shown.rest(move || tx.send(()).unwrap()) {
-                assert_eq!(rest.len(), 2);
-            }
-        }
-        drop(tx);
+        let again = tx.clone();
+        assert!(loaded.rest(move || tx.send(()).unwrap()).is_none());
         rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
-        assert!(rx.recv().is_err(), "the frames were decoded more than once");
+        // Every clone shares the decode; the frames are handed over, not kept.
+        let copy = loaded.clone();
         let rest = copy.rest(|| panic!("decoded again")).unwrap();
         assert_eq!(rest.len(), 2);
         assert_eq!(
             rest[1].0.pixels[0],
             eframe::egui::Color32::from_rgb(80, 30, 60)
         );
-        assert_eq!(loaded.decoded().count(), 3);
+        assert_eq!(loaded.held_bytes(), one_frame);
+        // Asked again (textures dropped), they are decoded again from the file.
+        assert!(loaded.rest(move || again.send(()).unwrap()).is_none());
+        rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        assert_eq!(loaded.rest(|| panic!("decoded again")).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn many_animated_pictures_share_a_few_decoding_threads() {
+        let file = gif(3);
+        let pictures: Vec<_> = (0..300).map(|_| picture(&file).unwrap()).collect();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut threads = std::collections::HashSet::new();
+        let mut waiting: Vec<_> = pictures.iter().collect();
+        // A full queue leaves a picture for a later repaint; every decode that ends is one.
+        loop {
+            waiting.retain(|shown| {
+                let tx = tx.clone();
+                let done = move || tx.send(std::thread::current().id()).unwrap();
+                match shown.rest(done) {
+                    Some(rest) => {
+                        assert_eq!(rest.len(), 2);
+                        false
+                    }
+                    None => true,
+                }
+            });
+            if waiting.is_empty() {
+                break;
+            }
+            threads.insert(rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap());
+        }
+        threads.extend(rx.try_iter());
+        assert!(
+            threads.len() <= crate::server::PICTURE_WORKERS,
+            "{threads:?}"
+        );
     }
 
     #[test]
@@ -1325,6 +1356,6 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        assert_eq!(still.decoded().count(), 1);
+        assert_eq!(still.held_bytes(), 4 * 4 * 4);
     }
 }
