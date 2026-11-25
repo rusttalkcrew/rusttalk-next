@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- You no longer turn "Away" while you use other apps: on computers, any keyboard or mouse use counts, not just input in RustTalk.
+
 ## v0.5.0 - 2026-11-25
 
 - Android test builds install as a separate "RustTalk Test" app, so they no longer block installing the release app.

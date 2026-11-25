@@ -28,6 +28,7 @@ mod files;
 mod friends;
 mod home;
 mod hotkeys;
+mod idle;
 #[cfg(target_os = "ios")]
 mod ios;
 mod key_storage;

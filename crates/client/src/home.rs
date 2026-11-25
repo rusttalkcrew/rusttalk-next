@@ -83,6 +83,28 @@ pub(crate) const STICKER_SIZE: f32 = 160.0;
 /// picture or a link preview.
 const MAX_FOREIGN: usize = 3;
 
+/// The status to switch to by itself, if any. `input` is input in the app or a call
+/// right now, `in_app` the seconds since the last one, `system` the seconds since
+/// the last input anywhere on the computer when the system tells.
+fn auto_status(
+    status: Option<Choice>,
+    auto_away: bool,
+    input: bool,
+    in_app: f64,
+    system: Option<f64>,
+) -> Option<Choice> {
+    // Without the system's idle time only input in the app brings the person back.
+    let back = input || system.is_some_and(|idle| idle < AWAY_AFTER);
+    let idle = system.map_or(in_app, |idle| idle.min(in_app));
+    if auto_away && back {
+        Some(Choice::Online)
+    } else if status == Some(Choice::Online) && idle > AWAY_AFTER {
+        Some(Choice::Away)
+    } else {
+        None
+    }
+}
+
 /// What the cards under messages need: joined servers for invites, and link previews.
 struct Embeds<'a> {
     servers: &'a [Server],
@@ -180,6 +202,8 @@ pub struct Home {
     auto_away: bool,
     /// When the person last used the window, in egui time.
     active_at: f64,
+    /// How long the whole computer has been without input, so using other apps counts.
+    system_idle: crate::idle::SystemIdle,
     pub layout: layout::Layout,
     pub notify: Notify,
     /// The window has focus: the open channel counts as read.
@@ -437,6 +461,7 @@ impl Home {
             status: None,
             auto_away: false,
             active_at: 0.0,
+            system_idle: crate::idle::SystemIdle::start(),
             layout,
             notify: Notify::open(&data_dir, notify::unix_now()),
             focused: true,
@@ -459,13 +484,24 @@ impl Home {
         let active = input || self.voice.call.is_some();
         if active {
             self.active_at = now;
-            if self.auto_away {
+        }
+        let system = self.system_idle.seconds();
+        match auto_status(
+            self.status,
+            self.auto_away,
+            active,
+            now - self.active_at,
+            system,
+        ) {
+            Some(Choice::Online) => {
                 self.auto_away = false;
                 self.set_status(Choice::Online);
             }
-        } else if self.status == Some(Choice::Online) && now - self.active_at > AWAY_AFTER {
-            self.auto_away = true;
-            self.set_status(Choice::Away);
+            Some(choice) => {
+                self.auto_away = true;
+                self.set_status(choice);
+            }
+            None => {}
         }
         // Without input egui stops drawing; wake up to notice the time passing.
         ui.ctx().request_repaint_after(Duration::from_secs(30));
@@ -7258,6 +7294,52 @@ fn text_footer(ui: &mut Ui, confirm: &str, mut done: bool, close: &mut bool) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn using_other_apps_keeps_you_online() {
+        let online = Some(Choice::Online);
+        let long = AWAY_AFTER + 1.0;
+        // No input in the app for long, but some elsewhere a minute ago.
+        assert_eq!(auto_status(online, false, false, long, Some(60.0)), None);
+        // No input anywhere for long.
+        assert_eq!(
+            auto_status(online, false, false, long, Some(long)),
+            Some(Choice::Away)
+        );
+        // The system reading can lag behind input in the app.
+        assert_eq!(auto_status(online, false, false, 5.0, Some(long)), None);
+        // Without the system's idle time only the app's input counts, as before.
+        assert_eq!(
+            auto_status(online, false, false, long, None),
+            Some(Choice::Away)
+        );
+        assert_eq!(auto_status(online, false, false, 60.0, None), None);
+    }
+
+    #[test]
+    fn input_anywhere_ends_automatic_away_only() {
+        let away = Some(Choice::Away);
+        let long = AWAY_AFTER + 1.0;
+        // Back in another app, with the RustTalk window untouched.
+        assert_eq!(
+            auto_status(away, true, false, long, Some(3.0)),
+            Some(Choice::Online)
+        );
+        // Still gone.
+        assert_eq!(auto_status(away, true, false, long, Some(long)), None);
+        // Without the system's idle time, input in the app or a call brings you back.
+        assert_eq!(auto_status(away, true, false, long, None), None);
+        assert_eq!(
+            auto_status(away, true, true, 0.0, None),
+            Some(Choice::Online)
+        );
+        // A picked "Away" or "Invisible" never changes by itself.
+        assert_eq!(auto_status(away, false, true, 0.0, Some(0.0)), None);
+        let invisible = Some(Choice::Invisible);
+        assert_eq!(auto_status(invisible, false, false, long, Some(long)), None);
+        // No status known yet.
+        assert_eq!(auto_status(None, false, false, long, Some(long)), None);
+    }
 
     #[test]
     fn only_its_own_toast_uses_up_the_unsent_notice() {
