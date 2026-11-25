@@ -31,9 +31,6 @@ use crate::{
 const ICON_SIZE: f32 = 80.0;
 const HEADER_ICON: f32 = 40.0;
 
-/// Audit log entries shown per t!("admin.show_older").
-const AUDIT_PAGE: usize = 50;
-
 /// Audit log filters: API action and label.
 fn filters() -> [(&'static str, &'static str); 9] {
     [
@@ -78,8 +75,14 @@ pub struct Settings {
     pub server: usize,
     tab: Tab,
     bans: Vec<Ban>,
-    audit: Vec<AuditEntry>,
-    audit_shown: usize,
+    /// The first ban and invite lists arrived.
+    bans_loaded: bool,
+    invites_loaded: bool,
+    /// Newest first; `None` while the first page loads.
+    audit: Option<Vec<AuditEntry>>,
+    /// Where t!("admin.show_older") continues, when there may be more.
+    audit_next: Option<i64>,
+    audit_error: Option<String>,
     audit_filter: Option<&'static str>,
     /// Open joining and member limit, once loaded (owners and admins).
     joining: Option<(bool, u32)>,
@@ -131,12 +134,23 @@ enum Saving {
 impl Settings {
     pub fn apply(&mut self, update: AdminUpdate) {
         match update {
-            AdminUpdate::Bans(bans) => self.bans = bans,
-            AdminUpdate::Audit(entries) => {
-                self.audit = entries;
-                self.audit_shown = AUDIT_PAGE;
+            AdminUpdate::Bans(bans) => (self.bans, self.bans_loaded) = (bans, true),
+            AdminUpdate::Audit {
+                entries,
+                older,
+                next,
+            } => {
+                match &mut self.audit {
+                    Some(shown) if older => shown.extend(entries),
+                    // An older page for a filter that has since changed.
+                    None if older => return,
+                    audit => *audit = Some(entries),
+                }
+                self.audit_next = next;
+                self.audit_error = None;
             }
-            AdminUpdate::Invites(invites) => self.invites = invites,
+            AdminUpdate::AuditFailed(text) => self.audit_error = Some(text),
+            AdminUpdate::Invites(invites) => (self.invites, self.invites_loaded) = (invites, true),
             AdminUpdate::Joining(open, cap) => {
                 if !self.joining_unsaved() {
                     self.joining = Some((open, cap));
@@ -245,9 +259,14 @@ pub fn open(home: &mut Home, index: usize, mut tab: Tab) {
     }
     server.send(Command::Admin(Admin::Load {
         joining: perms.admin,
-        audit: perms.audit,
         bans: perms.ban,
     }));
+    if tab == Tab::Audit {
+        server.send(Command::Admin(Admin::Audit {
+            action: None,
+            before: None,
+        }));
+    }
     if tab == Tab::Overview && perms.owner {
         server.send(Command::Admin(Admin::LoadUpdates));
     }
@@ -261,8 +280,11 @@ pub fn open(home: &mut Home, index: usize, mut tab: Tab) {
         server: index,
         tab,
         bans: Vec::new(),
-        audit: Vec::new(),
-        audit_shown: AUDIT_PAGE,
+        bans_loaded: false,
+        invites_loaded: false,
+        audit: None,
+        audit_next: None,
+        audit_error: None,
         audit_filter: None,
         joining: None,
         files: None,
@@ -547,10 +569,12 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
             settings.message = None;
             // Show what changed since the window opened.
             request = match settings.tab {
-                Tab::Audit => Some(Admin::Audit(settings.audit_filter.map(str::to_owned))),
+                Tab::Audit => Some(Admin::Audit {
+                    action: settings.audit_filter.map(str::to_owned),
+                    before: None,
+                }),
                 Tab::Bans => Some(Admin::Load {
                     joining: false,
-                    audit: false,
                     bans: true,
                 }),
                 Tab::Listing => Some(Admin::LoadListing),
@@ -620,6 +644,13 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
         }
         let now = ctx.input(|input| input.time);
         person::apply(home, index, person, pick, now);
+    }
+}
+
+/// A spinner until the page's list arrives, unless loading it failed.
+fn loading(ui: &mut Ui, settings: &Settings) {
+    if settings.message.is_none() {
+        ui.spinner();
     }
 }
 
@@ -1289,6 +1320,10 @@ fn members_tab<'a>(
 /// Active invites with who made them, uses left and expiry, each with t!("admin.revoke").
 fn invites_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Option<Admin> {
     ui::page_section(ui, t!("admin.active_invites"));
+    if !settings.invites_loaded {
+        loading(ui, settings);
+        return None;
+    }
     if settings.invites.is_empty() {
         ui.weak(t!("admin.no_invites"));
         return None;
@@ -1341,6 +1376,10 @@ fn revoke_dialog(ctx: &egui::Context, settings: &mut Settings) -> Option<Admin> 
 
 fn bans_tab(ui: &mut Ui, server: &Server, settings: &Settings) -> Option<Admin> {
     ui::page_section(ui, t!("admin.bans"));
+    if !settings.bans_loaded {
+        loading(ui, settings);
+        return None;
+    }
     if settings.bans.is_empty() {
         ui.weak(t!("admin.no_bans"));
         return None;
@@ -1386,18 +1425,31 @@ fn audit_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Option<Ad
                 }
                 if filter != settings.audit_filter {
                     settings.audit_filter = filter;
-                    request = Some(Admin::Audit(filter.map(str::to_owned)));
+                    (settings.audit, settings.audit_next) = (None, None);
+                    request = Some(Admin::Audit {
+                        action: filter.map(str::to_owned),
+                        before: None,
+                    });
                 }
             });
         combo
             .response
             .widget_info(|| egui::WidgetInfo::labeled(Role::ComboBox, true, t!("admin.show")));
     });
-    if settings.audit.is_empty() {
+    if let Some(text) = &settings.audit_error {
+        error_text(ui, Some(text));
+    }
+    let Some(audit) = &settings.audit else {
+        if settings.audit_error.is_none() {
+            ui.spinner();
+        }
+        return request;
+    };
+    if audit.is_empty() {
         ui.weak(t!("admin.nothing_yet"));
         return request;
     }
-    for entry in settings.audit.iter().take(settings.audit_shown) {
+    for entry in audit {
         ui.horizontal_wrapped(|ui| {
             ui.label(sentence(server, entry));
             if matches!(entry.action.as_str(), "device_added" | "device_revoked")
@@ -1411,10 +1463,15 @@ fn audit_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Option<Ad
             ui.weak(date(entry.at));
         });
     }
-    if settings.audit.len() > settings.audit_shown
+    if let Some(before) = settings.audit_next
         && ui::secondary(ui, t!("admin.show_older")).clicked()
     {
-        settings.audit_shown += AUDIT_PAGE;
+        // Hidden until the page arrives, so a second click can't fetch it twice.
+        settings.audit_next = None;
+        request = Some(Admin::Audit {
+            action: settings.audit_filter.map(str::to_owned),
+            before: Some(before),
+        });
     }
     request
 }

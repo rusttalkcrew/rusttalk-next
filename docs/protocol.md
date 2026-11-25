@@ -137,7 +137,7 @@ All endpoints below require `Authorization: Bearer <token>`.
 | PUT `/v1/settings/open-joining` | `{open_joining, member_cap}` | Owner or Admin. 204 |
 | GET `/v1/settings/files` | Empty | Any member. 200, `{limits, ceilings, used_bytes}` |
 | PUT `/v1/settings/files` | `{max_file_bytes, member_storage_bytes, server_storage_bytes, retention_secs, max_stickers}` | `manage_server`. 200, updated `{limits, ceilings, used_bytes}` |
-| GET `/v1/audit?after=0&limit=100&action=member_banned` | Empty | `view_audit_log`. 200, matching audit entries in ascending ID order |
+| GET `/v1/audit?after=0&before=?&limit=100&action=member_banned` | Empty | `view_audit_log`. 200, matching audit entries in ascending ID order, or descending with `before` |
 
 `limits` and `ceilings` each contain the five fields accepted by PUT. Every
 field must be a positive integer, or PUT returns `400 invalid_file_limits`.
@@ -220,6 +220,9 @@ An existing member registering a new device records `device_added`. Revocation r
 Each audit entry has `{id, actor_person_id, action, target_person_id, target_id, at}`.
 A target field is null if the action has no target of that type. Use the
 last returned ID as the next `after` cursor. Omit `after` to start at zero.
+The optional `before` (a positive ID) pages newest first instead: entries
+below it, in descending ID order. Start with `9223372036854775807` and use the
+last returned ID as the next `before`. Servers before it ignore `before`.
 The optional `limit` is 1–100 and defaults to 100. The optional `action`
 matches the action name exactly and applies before paging. Settings changes
 record `open_joining_changed`. Open admissions record `joined` with a null

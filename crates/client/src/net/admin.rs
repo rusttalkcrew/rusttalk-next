@@ -18,7 +18,6 @@ pub enum Admin {
     /// What the window shows, as far as this person may see it.
     Load {
         joining: bool,
-        audit: bool,
         bans: bool,
     },
     SystemMessages(crate::server::SystemMessages),
@@ -57,8 +56,11 @@ pub enum Admin {
     DefaultRole(String),
     /// Channel, role and its read/write/speak/video flags there.
     ChannelFlags(Id, String, u8),
-    /// The whole audit log, or only one action.
-    Audit(Option<String>),
+    /// A page of the audit log, or of only one action: the newest, or (`before`) older.
+    Audit {
+        action: Option<String>,
+        before: Option<i64>,
+    },
     /// Open joining on or off, with a member limit.
     Joining(bool, u32),
     LoadFiles,
@@ -147,8 +149,14 @@ pub struct AuditEntry {
 
 pub enum AdminUpdate {
     Bans(Vec<Ban>),
-    /// Newest first.
-    Audit(Vec<AuditEntry>),
+    /// Newest first; `older` continues the list. `next` asks for the page after it.
+    Audit {
+        entries: Vec<AuditEntry>,
+        older: bool,
+        next: Option<i64>,
+    },
+    /// Only the Audit page shows it.
+    AuditFailed(String),
     /// Soonest to expire first.
     Invites(Vec<Invite>),
     Joining(bool, u32),
@@ -174,14 +182,24 @@ pub(super) async fn run(
     let bans_changed = matches!(request, Admin::Ban(..) | Admin::Unban(_));
     let invites_changed = matches!(request, Admin::RevokeInvite(_));
     let result = match request {
+        // Each on its own, so one failing doesn't hide the other.
         Admin::Load {
             joining,
-            audit,
-            bans,
+            bans: banned,
         } => {
-            match load(client, joining, audit, bans).await {
-                Ok(updates) => updates.into_iter().for_each(send),
-                Err(text) => send(AdminUpdate::Failed(text)),
+            if joining {
+                send(
+                    open_joining(client)
+                        .await
+                        .unwrap_or_else(AdminUpdate::Failed),
+                );
+            }
+            if banned {
+                send(
+                    bans(client)
+                        .await
+                        .map_or_else(AdminUpdate::Failed, AdminUpdate::Bans),
+                );
             }
             return;
         }
@@ -227,11 +245,15 @@ pub(super) async fn run(
             }
             return;
         }
-        Admin::Audit(action) => {
-            match audit_log(client, action.as_deref()).await {
-                Ok(entries) => send(AdminUpdate::Audit(entries)),
-                Err(text) => send(AdminUpdate::Failed(text)),
-            }
+        Admin::Audit { action, before } => {
+            send(match audit_page(client, action.as_deref(), before).await {
+                Ok((entries, next)) => AdminUpdate::Audit {
+                    entries,
+                    older: before.is_some(),
+                    next,
+                },
+                Err(text) => AdminUpdate::AuditFailed(text),
+            });
             return;
         }
         Admin::SystemMessages(choice) => save_system_messages(client, choice)
@@ -495,29 +517,14 @@ fn listing(value: &Value) -> AdminUpdate {
     AdminUpdate::Listing(value["enabled"].as_bool().unwrap_or_default(), saved)
 }
 
-async fn load(
-    client: &KeyClient<'_>,
-    joining: bool,
-    audit: bool,
-    banned: bool,
-) -> Result<Vec<AdminUpdate>, String> {
-    let mut out = Vec::new();
-    if joining {
-        let settings = get(client, "/v1/settings/open-joining")
-            .await
-            .map_err(|error| failed(&error))?;
-        out.push(AdminUpdate::Joining(
-            settings["open_joining"].as_bool().unwrap_or_default(),
-            settings["member_cap"].as_u64().unwrap_or(100) as u32,
-        ));
-    }
-    if audit {
-        out.push(AdminUpdate::Audit(audit_log(client, None).await?));
-    }
-    if banned {
-        out.push(AdminUpdate::Bans(bans(client).await?));
-    }
-    Ok(out)
+async fn open_joining(client: &KeyClient<'_>) -> Result<AdminUpdate, String> {
+    let settings = get(client, "/v1/settings/open-joining")
+        .await
+        .map_err(|error| failed(&error))?;
+    Ok(AdminUpdate::Joining(
+        settings["open_joining"].as_bool().unwrap_or_default(),
+        settings["member_cap"].as_u64().unwrap_or(100) as u32,
+    ))
 }
 
 async fn bans(client: &KeyClient<'_>) -> Result<Vec<Ban>, String> {
@@ -558,9 +565,54 @@ async fn invites(client: &KeyClient<'_>) -> Result<Vec<Invite>, String> {
         .collect())
 }
 
-/// The API pages oldest first; read it all and return it newest first.
-// shortcut: loads the whole log each time, fine for small communities; ask the API for a
-// newest-first cursor if logs grow to many thousands of entries.
+/// Audit log entries per page.
+const AUDIT_PAGE: usize = 50;
+
+fn audit_path(action: Option<&str>, before: Option<i64>) -> String {
+    let before = before.unwrap_or(i64::MAX);
+    let mut path = format!("/v1/audit?before={before}&limit={AUDIT_PAGE}");
+    if let Some(action) = action {
+        path.push_str(&format!("&action={action}"));
+    }
+    path
+}
+
+/// The newest page below `before`, and the cursor for the next when there may be more.
+async fn audit_page(
+    client: &KeyClient<'_>,
+    action: Option<&str>,
+    before: Option<i64>,
+) -> Result<(Vec<AuditEntry>, Option<i64>), String> {
+    let page = get(client, &audit_path(action, before))
+        .await
+        .map_err(|error| failed(&error))?;
+    let rows = page.as_array().cloned().unwrap_or_default();
+    let ids: Vec<i64> = rows.iter().filter_map(|row| row["id"].as_i64()).collect();
+    // Servers before `before` ignore it and answer oldest first: read it all, as then.
+    let newest_first = ids.len() == rows.len()
+        && ids.windows(2).all(|pair| pair[0] > pair[1])
+        && ids
+            .first()
+            .is_none_or(|&id| id < before.unwrap_or(i64::MAX));
+    if !newest_first {
+        return Ok((audit_log(client, action).await?, None));
+    }
+    let next = ids.last().copied().filter(|_| rows.len() == AUDIT_PAGE);
+    Ok((rows.iter().filter_map(audit_entry).collect(), next))
+}
+
+fn audit_entry(row: &Value) -> Option<AuditEntry> {
+    let person = |key: &str| row[key].as_str().and_then(|id| decode(id).ok());
+    Some(AuditEntry {
+        actor: person("actor_person_id")?,
+        action: row["action"].as_str().unwrap_or_default().to_owned(),
+        target: person("target_person_id"),
+        target_id: person("target_id"),
+        at: row["at"].as_i64().unwrap_or_else(now),
+    })
+}
+
+/// For servers that only page oldest first: read it all and return it newest first.
 async fn audit_log(
     client: &KeyClient<'_>,
     action: Option<&str>,
@@ -581,17 +633,7 @@ async fn audit_log(
                 Some(id) if id > after => after = id,
                 _ => stuck = true,
             }
-            let person = |key: &str| row[key].as_str().and_then(|id| decode(id).ok());
-            let Some(actor) = person("actor_person_id") else {
-                continue;
-            };
-            entries.push(AuditEntry {
-                actor,
-                action: row["action"].as_str().unwrap_or_default().to_owned(),
-                target: person("target_person_id"),
-                target_id: person("target_id"),
-                at: row["at"].as_i64().unwrap_or_else(now),
-            });
+            entries.extend(audit_entry(row));
         }
         if stuck || rows.len() < 100 {
             break;
@@ -899,5 +941,22 @@ fn problem(code: &str) -> &'static str {
             t!("admin.key_changing")
         }
         _ => t!("admin.failed"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::audit_path;
+
+    #[test]
+    fn audit_pages_are_fifty_newest_first() {
+        assert_eq!(
+            audit_path(None, None),
+            "/v1/audit?before=9223372036854775807&limit=50"
+        );
+        assert_eq!(
+            audit_path(Some("member_banned"), Some(71)),
+            "/v1/audit?before=71&limit=50&action=member_banned"
+        );
     }
 }

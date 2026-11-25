@@ -7371,6 +7371,7 @@ mod tests {
     const ANN: Id = [7; 32];
     const PROJECTS: Id = [3; 32];
 
+    mod audit_log;
     mod avatars;
     mod call_controls;
     mod emoji;
