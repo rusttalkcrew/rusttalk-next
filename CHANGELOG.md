@@ -20,6 +20,7 @@ Unreleased under the new version and date.
 - Animated profile pictures and emoji use less memory, and many of them playing at once no longer slow the app down.
 - Draw a diagram together in a call: start one from the call's … menu, everyone sees it on the stage, and others can ask to edit. On desktop, save it as a draw.io file or start from one.
 - A Gallery button in channels and DMs shows every picture and video shared there as a grid, with the viewer stepping through them and a jump back to the message.
+- Security: a direct message's key is now only accepted and passed on when it comes from one of the two people in it, also when the app first learns about that direct message.
 
 ## v0.7.0 - 2026-11-25
 

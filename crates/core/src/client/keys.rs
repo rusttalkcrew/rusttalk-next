@@ -558,6 +558,14 @@ impl<'a> KeyClient<'a> {
                     let bound = self.pair_bound(&context, &key, &wrapped.excluded);
                     opened = Ok((key, bound));
                 }
+                // The DM may only have been learned just now: check the sender again.
+                if !self.dm_allows(slot.0, sender.person_id()) {
+                    tracing::warn!(
+                        device = %fingerprint(sender.signing_key().as_bytes()),
+                        "ignored a DM key from someone outside the DM"
+                    );
+                    continue;
+                }
                 match opened {
                     Ok((key, Some(bound))) => {
                         let person = *sender.person_id();
@@ -693,13 +701,7 @@ impl<'a> KeyClient<'a> {
                     if held.excluded.contains(&keys::certificate_id(device)) {
                         continue;
                     }
-                    if !may_wrap(
-                        &self.dms,
-                        me,
-                        need.scope,
-                        device.person_id(),
-                        held.pair_bound,
-                    ) {
+                    if !may_wrap(&self.dms, me, need.scope, device.person_id(), held) {
                         tracing::warn!(
                             person = %fingerprint(device.person_id()),
                             device = %fingerprint(device.signing_key().as_bytes()),
@@ -1747,16 +1749,18 @@ pub enum DmPin {
 }
 
 /// Whether this device may wrap a key of this scope for this person's device: a
-/// pinned DM's key only for one of the two, and only if it was made for them.
+/// pinned DM's key only for one of the two, only if it was made for them, and only
+/// if one of the two wrapped it for this device.
 fn may_wrap(
     dms: &HashMap<[u8; 32], DmPin>,
     me: &PersonId,
     scope: Scope,
     person: &PersonId,
-    pair_bound: bool,
+    held: &HeldKey,
 ) -> bool {
     let dm = scope.kind == Kind::Channel && dms.contains_key(&scope.id);
-    dm_allows(dms, me, scope, person) && (!dm || pair_bound)
+    dm_allows(dms, me, scope, person)
+        && (!dm || (held.pair_bound && dm_allows(dms, me, scope, &held.sender)))
 }
 
 /// How to recover a DM epoch that doesn't chain to a trusted one.
@@ -2480,15 +2484,27 @@ mod tests {
                 anchor: None,
             },
         )]);
-        assert!(!may_wrap(&dms, &alice, scope, &carol, false));
-        assert!(may_wrap(&dms, &alice, scope, &carol, true));
-        assert!(!may_wrap(&dms, &alice, scope, &bob, true));
+        let held = |sender, pair_bound| HeldKey {
+            key: key.clone(),
+            envelope: String::new(),
+            sender,
+            commitment: made.commitment,
+            excluded: Excluded::new(),
+            pair_bound,
+        };
+        assert!(!may_wrap(&dms, &alice, scope, &carol, &held(alice, false)));
+        assert!(may_wrap(&dms, &alice, scope, &carol, &held(alice, true)));
+        assert!(may_wrap(&dms, &alice, scope, &carol, &held(carol, true)));
+        assert!(!may_wrap(&dms, &alice, scope, &bob, &held(alice, true)));
+        // Nor a pair key that someone outside the pair wrapped for this device.
+        assert!(!may_wrap(&dms, &alice, scope, &carol, &held(bob, true)));
+        assert!(!may_wrap(&dms, &alice, scope, &alice, &held(bob, true)));
         // Ordinary channels are unchanged.
         let channel = Scope {
             id: [8; 32],
             ..scope
         };
-        assert!(may_wrap(&dms, &alice, channel, &bob, false));
+        assert!(may_wrap(&dms, &alice, channel, &bob, &held(carol, false)));
     }
 
     #[test]
@@ -2781,6 +2797,152 @@ mod tests {
                 .check(&newcomer, &made_up_device(2))
                 .is_ok()
         );
+        Ok(())
+    }
+
+    /// A minimal HTTP API that answers each request listed in `routes` ("METHOD
+    /// path"), 404 otherwise, and records every request it sees.
+    async fn fake_api(
+        routes: Vec<(&'static str, String)>,
+    ) -> Result<(url::Url, std::sync::Arc<std::sync::Mutex<Vec<String>>>)> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = format!("http://{}/", listener.local_addr()?).parse()?;
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = seen.clone();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut request = Vec::new();
+                let mut buf = [0; 4096];
+                let head = loop {
+                    let Ok(n @ 1..) = socket.read(&mut buf).await else {
+                        break None;
+                    };
+                    request.extend_from_slice(&buf[..n]);
+                    if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break Some(end + 4);
+                    }
+                };
+                let Some(head) = head else { continue };
+                let text = String::from_utf8_lossy(&request[..head]).to_string();
+                let length = (text.lines())
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())?
+                    })
+                    .unwrap_or(0);
+                while request.len() < head + length {
+                    let Ok(n @ 1..) = socket.read(&mut buf).await else {
+                        break;
+                    };
+                    request.extend_from_slice(&buf[..n]);
+                }
+                let mut line = text.lines().next().unwrap_or("").split(' ');
+                let (method, path) = (line.next().unwrap_or(""), line.next().unwrap_or(""));
+                let seen = format!("{method} {path}");
+                let body = (routes.iter())
+                    .find(|(route, _)| *route == seen)
+                    .map(|(_, body)| body.as_str());
+                log.lock().unwrap().push(seen);
+                let reply = match body {
+                    Some(body) => format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    ),
+                    None => {
+                        "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                            .to_string()
+                    }
+                };
+                let _ = socket.write_all(reply.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+        Ok((address, seen))
+    }
+
+    /// The server lists a DM's key, committed to this device's person and the peer,
+    /// before the catalog shows this device that the channel is a DM, and asks it to
+    /// wrap the key for the peer's device. `wrapper` wrapped the key for this device.
+    /// Returns what this device then holds for the DM (pair-bound, sender) and the
+    /// requests it made.
+    async fn sync_a_dm_key_learned_late(
+        wrapper: &DeviceIdentity,
+        me: &DeviceIdentity,
+        peer: &DeviceIdentity,
+    ) -> Result<(Option<(bool, PersonId)>, Vec<String>)> {
+        let profile = tempfile::tempdir()?;
+        let channel = [9; 32];
+        let scope = Scope {
+            kind: Kind::Channel,
+            id: channel,
+        };
+        let key = keys::random_key()?;
+        let (me_id, peer_id) = (*me.certificate.person_id(), *peer.certificate.person_id());
+        // Anyone who knows both person IDs can make a key that commits to the pair.
+        let context =
+            EnvelopeContext::new_dm([1; 32], scope, 1, &key, keys::dm_pair(me_id, peer_id));
+        let envelope = context.wrap(&key, &me.certificate, wrapper)?;
+        let device_id =
+            |identity: &DeviceIdentity| encode(identity.certificate.signing_key().as_bytes());
+        let devices: Vec<_> = [me, peer, wrapper]
+            .iter()
+            .map(|identity| {
+                listed(
+                    identity.certificate.person_id(),
+                    identity.certificate.public_bytes().unwrap(),
+                )
+            })
+            .collect();
+        let state = json!({
+            "scopes": [{"scope": scope, "epoch": 1, "rotate": false}],
+            "envelopes": [{
+                "scope": scope, "epoch": 1, "device": device_id(me),
+                "sender": device_id(wrapper), "commitment": encode(&context.commitment),
+                "envelope": encode(&envelope),
+            }],
+            "pending": [{"scope": scope, "epoch": 1, "device": device_id(peer)}],
+        });
+        let catalog = json!({
+            "channels": [{
+                "id": encode(&channel), "kind": "dm", "category_id": null, "position": 0,
+                "name_ct": null, "topic_ct": null, "peer": encode(&peer_id), "flags": [],
+            }],
+            "categories": [],
+        });
+        let (address, seen) = fake_api(vec![
+            ("GET /v1/keys", state.to_string()),
+            ("GET /v1/member-devices", serde_json::to_string(&devices)?),
+            ("GET /v1/catalog", catalog.to_string()),
+            ("POST /v1/keys", "{}".into()),
+        ])
+        .await?;
+        let server = Server::for_test(2, profile.path()).at(address);
+        let mut client = test_client(&server, me).await?;
+        // The saved pins were read (none yet), so a new DM is trusted on first use.
+        client.pins_lost = false;
+        client.sync().await?;
+        let held = (client.keys.get(&(scope, 1))).map(|held| (held.pair_bound, held.sender));
+        let seen = seen.lock().unwrap().clone();
+        Ok((held, seen))
+    }
+
+    #[tokio::test]
+    async fn a_dm_key_from_outside_the_dm_is_refused_when_the_dm_is_learned_late() -> Result<()> {
+        let (_, me) = DeviceIdentity::create("me")?;
+        let (_, peer) = DeviceIdentity::create("peer")?;
+        let (_, outsider) = DeviceIdentity::create("outsider")?;
+        let wrapped_onward =
+            |seen: &[String]| (seen.iter()).any(|request| request == "POST /v1/keys");
+        let (held, seen) = sync_a_dm_key_learned_late(&outsider, &me, &peer).await?;
+        assert!(!wrapped_onward(&seen), "{seen:?}");
+        assert_eq!(held, None, "kept a DM key from outside the DM");
+
+        // The same kind of key from the peer is the pair's own: kept and wrapped onward.
+        let (held, seen) = sync_a_dm_key_learned_late(&peer, &me, &peer).await?;
+        assert_eq!(held, Some((true, *peer.certificate.person_id())));
+        assert!(wrapped_onward(&seen), "{seen:?}");
         Ok(())
     }
 }
