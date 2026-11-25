@@ -42,6 +42,7 @@ fn limited_home(dark: bool) -> (Home, Sent) {
         screens: Vec::new(),
         camera: None,
         terminal: None,
+        diagram: None,
     };
     server.voice.insert(LOUNGE, vec![peer(ME), peer(ANN)]);
     (home, sent)

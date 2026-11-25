@@ -27,8 +27,8 @@ pub use menu::{
 pub use page::*;
 pub use start::{onboarding, step_title};
 pub use theme::{
-    ACCENTS, Accent, Appearance, DARK_THEMES, LIGHT_THEMES, Mode, Palette, ROLE_COLORS,
-    TERMINAL_DARK, TERMINAL_LIGHT, contrast,
+    ACCENTS, Accent, Appearance, DARK_THEMES, DIAGRAM, DIAGRAM_TEXT, LIGHT_THEMES, Mode, Palette,
+    ROLE_COLORS, TERMINAL_DARK, TERMINAL_LIGHT, contrast,
 };
 pub use widgets::*;
 

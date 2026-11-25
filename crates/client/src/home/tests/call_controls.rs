@@ -31,6 +31,7 @@ fn in_call(dark: bool, size: Vec2, data: &std::path::Path) -> Harness<'static, O
         apps: vec![],
         camera: None,
         terminal: None,
+        diagram: None,
         screens: vec![],
     };
     home.servers[0]

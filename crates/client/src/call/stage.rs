@@ -12,7 +12,9 @@ use eframe::egui::{
 use rusttalk_core::client::voice::{ControlOffer, VoiceStatus};
 
 use super::{
-    Sharing, Voice, call_server, join, mixer,
+    Sharing, Voice, call_server,
+    diagram::{self, Diagrams, TileAct},
+    join, mixer,
     overlay::{self, Overlay, Row},
     pip::{self, Pip},
     remote::{self, Control},
@@ -51,19 +53,23 @@ const TOOL: Vec2 = Vec2::splat(28.0);
 const BADGE: f32 = 22.0;
 
 /// What a tile shows: a person (their camera or picture), a shared screen, the
-/// preview of our own, or a person's shared terminal.
+/// preview of our own, or a person's shared terminal or diagram.
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub enum Tile {
     Person(Id),
     Screen(String),
     Preview,
     Terminal(Id),
+    Diagram(Id),
 }
 
 impl Tile {
     /// Shared rather than a person: what presentation mode shows big.
     fn shared(&self) -> bool {
-        matches!(self, Tile::Screen(_) | Tile::Preview | Tile::Terminal(_))
+        matches!(
+            self,
+            Tile::Screen(_) | Tile::Preview | Tile::Terminal(_) | Tile::Diagram(_)
+        )
     }
 }
 
@@ -133,6 +139,23 @@ impl Stage {
     #[cfg(test)]
     pub(crate) fn is_presenting(&self) -> bool {
         self.presenting
+    }
+
+    /// Present the stage: a new diagram session takes it, for everyone in the call.
+    pub(super) fn present(&mut self) {
+        self.presenting = true;
+        self.focus = None;
+    }
+
+    /// Leaving or ending a diagram drops its big tile, which would join it again.
+    pub(super) fn unpresent_diagram(&mut self) {
+        self.presenting = false;
+        if matches!(self.focus, Some(Tile::Diagram(_))) {
+            self.focus = None;
+        }
+        if matches!(self.full, Some(Tile::Diagram(_))) {
+            self.full = None;
+        }
     }
 
     pub(super) fn replace_video(&mut self, old: &str, new: &str) {
@@ -439,6 +462,12 @@ enum Act {
     PasteRefused,
     /// Moved, popped out, put back, minimized or restored a camera on a screen.
     Pip(Id, pip::Change),
+    /// Follow the diagram this device hosts.
+    JoinDiagram(String),
+    LeaveDiagram,
+    EndDiagram,
+    /// Ask to edit the diagram we follow, or stop asking or editing.
+    AskToEdit,
 }
 
 fn selected_screen<'a>(peer: &'a Peer, watched: Option<&str>) -> Option<&'a Screen> {
@@ -458,11 +487,39 @@ fn entries<'p>(
     peers: &'p [Peer],
     joined: bool,
 ) -> Vec<Entry<'p>> {
+    let mut diagrams = Vec::new();
     let mut screens = Vec::new();
     let mut people = Vec::new();
     for peer in peers {
         let name = peer.name(server);
         let me = peer.person == server.dir.me;
+        let hosting = if me {
+            voice.diagrams.hosting
+        } else {
+            peer.diagram.is_some()
+        };
+        if joined && hosting {
+            // Ours counts as watched, so presenting shows it big.
+            let watched = me
+                || (voice.diagrams.following.is_some() && voice.diagrams.following == peer.diagram);
+            diagrams.push(Entry {
+                tile: Tile::Diagram(peer.person),
+                peer,
+                name: if me {
+                    t!("diagram.yours").to_owned()
+                } else {
+                    t!("diagram.someones", name = name)
+                },
+                me,
+                picture: None,
+                video: true,
+                watched,
+                camera_visible: false,
+                speaking: false,
+                camera: None,
+                popped: false,
+            });
+        }
         let speaking = voice.speaking(server, channel, &peer.person);
         let camera = joined && peer.camera.is_some();
         let video = camera && (me || !voice.hidden.contains(&peer.person));
@@ -553,8 +610,10 @@ fn entries<'p>(
         });
         people.extend(popped);
     }
-    screens.extend(people);
-    screens
+    // Diagrams first: presenting shows the first watched tile big.
+    diagrams.extend(screens);
+    diagrams.extend(people);
+    diagrams
 }
 
 /// The stage for a voice channel, filling `ui`: tiles, bubbles, its toolbar and,
@@ -627,7 +686,7 @@ pub fn stage(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
         .iter()
         .filter(|e| match e.tile {
             Tile::Person(person) => !stage.minimized.contains(&person),
-            Tile::Screen(_) | Tile::Preview | Tile::Terminal(_) => true,
+            Tile::Screen(_) | Tile::Preview | Tile::Terminal(_) | Tile::Diagram(_) => true,
         })
         .filter(|e| !*video_only || e.video)
         .collect();
@@ -673,6 +732,16 @@ pub fn stage(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
     {
         acts.push(Act::WatchTerminal(sharer.clone()));
     }
+    // And a big diagram is worth following.
+    if let Some(entry) = big.map(|at| shown[at])
+        && let Tile::Diagram(_) = entry.tile
+        && !entry.watched
+        && !entry.me
+        && joined
+        && let Some(host) = &entry.peer.diagram
+    {
+        acts.push(Act::JoinDiagram(host.clone()));
+    }
     if !stage.presenting
         && big.is_none()
         && !matches!(&stage.focus, Some(Tile::Screen(sid)) if voice.watching.as_ref().is_some_and(|watch| watch.sid == *sid))
@@ -717,6 +786,7 @@ pub fn stage(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
     let voice = &mut home.voice;
     let stats = voice.call.as_ref().map(|call| &call.stats);
     let (stage, control, terms) = (&voice.stage, &mut voice.control, &mut voice.terminals);
+    let diagrams = &mut voice.diagrams;
     for (at, (entry, target)) in shown.iter().zip(&targets).enumerate() {
         let rect = animate(&ctx, &entry.tile, *target, rect);
         let is_big = big == Some(at);
@@ -740,7 +810,7 @@ pub fn stage(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
             typing,
         };
         let overlay = Overlay::new(&entry.tile, split.show_fps, split.nerd_stats, stats);
-        let tools = (&mut *control, &mut *terms);
+        let tools = (&mut *control, &mut *terms, &mut *diagrams);
         tile(
             ui, rect, entry, state, server, &audio, tools, &overlay, &mut acts,
         );
@@ -843,7 +913,7 @@ fn tile(
     state: TileState,
     server: &Server,
     audio: &crate::audio::Audio,
-    (control, terms): (&mut Control, &mut Terminals),
+    (control, terms, diagrams): (&mut Control, &mut Terminals, &mut Diagrams),
     overlay: &Overlay,
     acts: &mut Vec<Act>,
 ) {
@@ -860,8 +930,8 @@ fn tile(
             face_speaking(&mut child, dir, &person, name, size, false, entry.speaking);
         }
         // Drawn below, above the tile's own clicks: selecting text takes the pointer.
-        (None, Tile::Terminal(_)) if entry.me || entry.watched => {}
-        (None, Tile::Screen(_) | Tile::Preview | Tile::Terminal(_)) => {
+        (None, Tile::Terminal(_) | Tile::Diagram(_)) if entry.me || entry.watched => {}
+        (None, Tile::Screen(_) | Tile::Preview | Tile::Terminal(_) | Tile::Diagram(_)) => {
             let text = if entry.watched || entry.tile == Tile::Preview {
                 t!("call.waiting_picture")
             } else if rect.height() > 90.0 {
@@ -896,9 +966,15 @@ fn tile(
     let (tapped, reveal) = ui::touch_tools(&response);
     let screen = match &entry.tile {
         Tile::Screen(sid) => entry.peer.screens.iter().find(|s| s.sid == *sid),
-        Tile::Person(_) | Tile::Preview | Tile::Terminal(_) => None,
+        Tile::Person(_) | Tile::Preview | Tile::Terminal(_) | Tile::Diagram(_) => None,
     };
     let watch_click = screen.filter(|_| !entry.watched && state.joined);
+    let diagram_click = match &entry.tile {
+        Tile::Diagram(_) if !entry.watched && !entry.me && state.joined => {
+            entry.peer.diagram.as_ref()
+        }
+        _ => None,
+    };
     let terminal_click = match &entry.tile {
         Tile::Terminal(_) if !entry.watched && !entry.me && state.joined => {
             entry.peer.terminal.as_ref()
@@ -937,10 +1013,16 @@ fn tile(
         if response.clicked() && !reveal {
             acts.push(Act::WatchTerminal(sharer.clone()));
         }
+    } else if let Some(host) = diagram_click {
+        let label = t!("diagram.open_name", name = entry.name);
+        response.widget_info(|| WidgetInfo::labeled(Role::Button, true, &label));
+        if response.clicked() && !reveal {
+            acts.push(Act::JoinDiagram(host.clone()));
+        }
     } else {
         let role = match entry.tile {
             Tile::Person(_) => Role::Button,
-            Tile::Screen(_) | Tile::Preview | Tile::Terminal(_) => Role::Group,
+            Tile::Screen(_) | Tile::Preview | Tile::Terminal(_) | Tile::Diagram(_) => Role::Group,
         };
         response.widget_info(|| WidgetInfo::labeled(role, true, &entry.name));
     }
@@ -1027,6 +1109,18 @@ fn tile(
             }
         }
     }
+    if let Tile::Diagram(_) = entry.tile
+        && entry.watched
+    {
+        // In the strip a click focuses the tile instead.
+        let active = !state.spotlight || state.big;
+        match diagram::tile(ui, rect, diagrams, server, active, &entry.name) {
+            Some(TileAct::AskToEdit) => acts.push(Act::AskToEdit),
+            Some(TileAct::Leave) => acts.push(Act::LeaveDiagram),
+            Some(TileAct::End) => acts.push(Act::EndDiagram),
+            None => {}
+        }
+    }
     if let Some(on) = state.remote {
         let sharer = entry.peer.name(server);
         remote_tag(ui, rect, entry, on, response.has_focus(), &sharer);
@@ -1039,7 +1133,10 @@ fn tile(
     }
     let badge = name_tag(ui, rect, entry, audio);
     overlay.paint(ui, rect, badge);
-    tools(ui, rect, entry, state, audio, acts, tapped);
+    // An open diagram has its own toolbar, which these would cover on a narrow tile.
+    if !(matches!(entry.tile, Tile::Diagram(_)) && entry.watched) {
+        tools(ui, rect, entry, state, audio, acts, tapped);
+    }
     if let Some(camera) = entry.camera {
         // Clear of the hover buttons at the top and the name at the bottom.
         let tools = if ui.input(|i| i.has_touch_screen()) {
@@ -1287,7 +1384,7 @@ fn avatar_spot(rect: Rect) -> Rect {
 fn name_tag(ui: &mut Ui, rect: Rect, entry: &Entry, audio: &crate::audio::Audio) -> Option<Rect> {
     let c = ui::colors(ui);
     let person = entry.peer.person;
-    let is_person = !matches!(entry.tile, Tile::Terminal(_));
+    let is_person = !matches!(entry.tile, Tile::Terminal(_) | Tile::Diagram(_));
     let status = match () {
         _ if !is_person => VoiceStatus::default(),
         _ if entry.me => VoiceStatus {
@@ -1365,7 +1462,10 @@ fn name_tag(ui: &mut Ui, rect: Rect, entry: &Entry, audio: &crate::audio::Audio)
         Tile::Preview => entry.peer.screens.iter().find(|s| s.local),
         _ => selected_screen(entry.peer, None),
     };
-    let live = is_person && (!entry.peer.screens.is_empty() || entry.peer.terminal.is_some());
+    let live = is_person
+        && (!entry.peer.screens.is_empty()
+            || entry.peer.terminal.is_some()
+            || entry.peer.diagram.is_some());
     (live && rect.height() > height + 2.0 * GAP)
         .then(|| stream_badge(ui, rect, &entry.tile, stream.map(|s| s.viewers)))
 }
@@ -1432,11 +1532,13 @@ fn tools(
         return;
     }
     let terminal = matches!(entry.tile, Tile::Terminal(_));
+    // A diagram has its own buttons on its canvas.
+    let diagram = matches!(entry.tile, Tile::Diagram(_));
     // A person's voice and apps, or the sound of a screen.
-    let sound = is_person || (!terminal && !entry.peer.apps.is_empty());
+    let sound = is_person || (!terminal && !diagram && !entry.peer.apps.is_empty());
     let volume = sound && !entry.me && !entry.peer.unknown && state.joined;
     let full = entry.picture.is_some() || terminal && (entry.me || entry.watched);
-    let stop = entry.watched;
+    let stop = entry.watched && !diagram;
     // You need to see a screen to control it.
     let remote = !is_person && !entry.me && state.joined && entry.watched && full;
     // In order of importance; the first ones win on a small tile.
@@ -1635,6 +1737,16 @@ fn apply(home: &mut Home, index: usize, now: f64, acts: Vec<Act>) {
                 }
                 home.voice.pips.entry(person).or_default().apply(change);
             }
+            Act::JoinDiagram(host) => diagram::join(home, &host),
+            Act::LeaveDiagram => {
+                stage.unpresent_diagram();
+                diagram::leave(home);
+            }
+            Act::EndDiagram => {
+                stage.unpresent_diagram();
+                diagram::stop(home);
+            }
+            Act::AskToEdit => diagram::ask(home, now),
             Act::WatchTerminal(sharer) => terminal::watch(home, &sharer),
             Act::StopWatchingTerminal => {
                 // Like a screen: a big terminal would be watched again at once.
@@ -1708,7 +1820,9 @@ pub fn full_view(ui: &mut Ui, home: &mut Home) {
             .get(&call.channel)?
             .iter()
             .find(|peer| match &tile {
-                Tile::Person(person) | Tile::Terminal(person) => peer.person == *person,
+                Tile::Person(person) | Tile::Terminal(person) | Tile::Diagram(person) => {
+                    peer.person == *person
+                }
                 Tile::Screen(sid) => peer.screens.iter().any(|s| s.sid == *sid),
                 Tile::Preview => peer.person == me,
             });
@@ -1735,6 +1849,8 @@ pub fn full_view(ui: &mut Ui, home: &mut Home) {
             Tile::Terminal(_) => (peer.terminal.is_some()
                 && voice.terminals.watched() == peer.terminal.as_deref())
             .then(|| t!("call.someones_terminal", name = name)),
+            // Diagrams have no full screen; presenting shows them big.
+            Tile::Diagram(_) => None,
         }
     });
     // A replacement publication may still be arriving after a restart.
@@ -1751,7 +1867,7 @@ pub fn full_view(ui: &mut Ui, home: &mut Home) {
     let terminal = matches!(tile, Tile::Terminal(_));
     let controlling = match &tile {
         Tile::Screen(sid) => voice.control.screen(sid) == Some(true),
-        Tile::Person(_) | Tile::Preview | Tile::Terminal(_) => false,
+        Tile::Person(_) | Tile::Preview | Tile::Terminal(_) | Tile::Diagram(_) => false,
     };
     let typing = match tile {
         Tile::Terminal(_) if !mine => voice.terminals.typing,
@@ -1884,7 +2000,7 @@ pub fn full_view(ui: &mut Ui, home: &mut Home) {
     let watched = match &tile {
         Tile::Screen(sid) => voice.watching.as_ref().is_some_and(|w| w.sid == *sid),
         Tile::Terminal(_) => !mine,
-        Tile::Person(_) | Tile::Preview => false,
+        Tile::Person(_) | Tile::Preview | Tile::Diagram(_) => false,
     };
     let entry = peer.as_ref().map(|peer| Entry {
         tile: tile.clone(),
@@ -2094,6 +2210,7 @@ mod tests {
             apps: vec![],
             camera: None,
             terminal: None,
+            diagram: None,
             screens: vec![
                 Screen {
                     sid: "a".into(),

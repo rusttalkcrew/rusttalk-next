@@ -52,6 +52,7 @@ mod admin;
 mod backfill;
 mod calendar;
 mod control;
+pub mod diagram;
 mod directory;
 mod files;
 mod find;
@@ -284,6 +285,20 @@ pub enum Command {
     StopTyping,
     /// Bytes typed into the terminal we watch.
     TypeInTerminal(Vec<u8>),
+    /// Start a diagram session in the call with this diagram.
+    StartDiagram(Box<rusttalk_core::diagram::Doc>),
+    StopDiagram,
+    /// Follow the diagram this device (LiveKit identity) hosts, or stop following.
+    JoinDiagram(Option<String>),
+    /// Allow (`true`) or deny this device's request to edit our diagram.
+    AnswerEdit(String, bool),
+    /// Take editing our diagram back from this device.
+    RevokeEdit(String),
+    /// Ask to edit the diagram we follow, or stop asking or editing.
+    AskToEdit,
+    StopEditing,
+    /// Edits to our diagram, or to the one we may edit, already shown in the window.
+    EditDiagram(Vec<rusttalk_core::diagram::Op>),
 }
 
 /// A message to send, and what goes back to the composer when sending fails.
@@ -470,6 +485,12 @@ pub enum Update {
     TerminalStopped,
     /// Who asks to type in our terminal, and who may.
     TerminalGuests(terminal::Guests),
+    /// What to show of the diagram we host or follow.
+    Diagram(rusttalk_core::diagram::Feed),
+    /// Our diagram session couldn't start, or ended without us.
+    DiagramStopped,
+    /// Who asks to edit our diagram, and who may.
+    DiagramGuests(diagram::Guests),
     Stats(Url, Stats),
     /// A file upload in a channel started or went on (what to show, and how far), or ended.
     Uploading(Url, Id, Option<(String, f32)>),
@@ -1895,10 +1916,15 @@ async fn recover_voice(
         live.control = Default::default();
         live.terminal = None;
         live.viewing = None;
+        live.diagram = None;
+        live.diagram_view = None;
         ctx.send(Update::Control(live.control.clone()));
         ctx.send(Update::TerminalStopped);
         ctx.send(Update::TerminalGuests(Default::default()));
         ctx.send(Update::Terminal(rusttalk_core::terminal::Feed::Ended));
+        ctx.send(Update::DiagramStopped);
+        ctx.send(Update::DiagramGuests(Default::default()));
+        ctx.send(Update::Diagram(rusttalk_core::diagram::Feed::Ended));
         ctx.send(Update::ExternalPhones(url.clone(), channel, Vec::new()));
     }
     ctx.audio.pause_phone_withdrawal(false);
@@ -2218,6 +2244,8 @@ async fn voice_next(
                 voice::ring_received(ctx, url, client, state, &participant, &payload);
             } else if topic.as_deref() == Some(rusttalk_core::client::voice::terminal::TOPIC) {
                 voice::terminal_received(ctx, client, state, &participant, &payload).await;
+            } else if topic.as_deref() == Some(rusttalk_core::client::voice::diagram::TOPIC) {
+                voice::diagram_received(ctx, client, state, &participant, &payload).await;
             } else {
                 voice::control_received(ctx, client, state, &participant, &payload).await;
             }
@@ -2225,6 +2253,11 @@ async fn voice_next(
         Next::Flush => {
             if let Some(live) = &mut state.voice {
                 terminal::flush(live).await;
+            }
+        }
+        Next::DiagramFlush => {
+            if let Some(live) = &mut state.voice {
+                diagram::flush(live).await;
             }
         }
         Next::Event(event) => {
@@ -3056,7 +3089,15 @@ async fn on_command(
         | Command::RevokeTyping(_)
         | Command::AskToType
         | Command::StopTyping
-        | Command::TypeInTerminal(_) => unreachable!("handled by voice_command"),
+        | Command::TypeInTerminal(_)
+        | Command::StartDiagram(_)
+        | Command::StopDiagram
+        | Command::JoinDiagram(_)
+        | Command::AnswerEdit(..)
+        | Command::RevokeEdit(_)
+        | Command::AskToEdit
+        | Command::StopEditing
+        | Command::EditDiagram(_) => unreachable!("handled by voice_command"),
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         Command::PhoneCall(_) => unreachable!("handled by voice_command"),
     }

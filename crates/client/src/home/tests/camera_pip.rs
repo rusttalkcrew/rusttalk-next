@@ -47,6 +47,7 @@ fn sharing(dark: bool, size: Vec2, data: &std::path::Path) -> Harness<'static, O
         apps: vec![],
         camera: camera.map(Into::into),
         terminal: None,
+        diagram: None,
         screens,
     };
     let screen = Shared {

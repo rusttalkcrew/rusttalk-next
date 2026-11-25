@@ -1823,6 +1823,9 @@ impl Home {
             Update::Terminal(feed) => self.voice.terminals.feed(feed),
             Update::TerminalGuests(guests) => self.voice.terminals.guests = guests,
             Update::TerminalStopped => self.voice.terminals.local = None,
+            Update::Diagram(feed) => call::diagram::feed(self, feed, now),
+            Update::DiagramGuests(guests) => self.voice.diagrams.guests = guests,
+            Update::DiagramStopped => call::diagram::stopped(self),
             Update::ControlEnded(sid, why) => call::remote::ended(self, sid, why, now),
             Update::CallVideoStopped(address, channel, sid) => {
                 if self
@@ -2266,6 +2269,7 @@ pub fn show(
     // Above everything, full screen too: who controls this screen, and the prompt.
     call::remote::sharer(ui, home);
     call::terminal::prompt(ui.ctx(), home);
+    call::diagram::prompt(ui.ctx(), home);
     if home.voice.stage.full.is_some() {
         CentralPanel::default()
             .frame(panel_frame(colors.main))
@@ -7714,6 +7718,7 @@ mod tests {
     mod avatars;
     mod call_controls;
     mod camera_pip;
+    mod diagram;
     mod dialogs;
     mod emoji;
     mod empty_categories;

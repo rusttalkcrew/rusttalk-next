@@ -72,6 +72,8 @@ pub struct Peer {
     pub camera: Option<String>,
     /// The device (LiveKit identity) sharing a terminal, only known inside the room.
     pub terminal: Option<String>,
+    /// The device (LiveKit identity) hosting a diagram, only known inside the room.
+    pub diagram: Option<String>,
 }
 
 #[derive(Clone, PartialEq)]

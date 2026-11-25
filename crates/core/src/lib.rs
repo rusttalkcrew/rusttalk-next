@@ -16,6 +16,8 @@ pub mod capture;
 pub mod client;
 #[cfg(feature = "voice")]
 pub mod control;
+#[cfg(feature = "voice")]
+pub mod diagram;
 pub mod identity;
 pub mod index;
 pub mod keys;

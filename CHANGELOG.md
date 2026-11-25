@@ -18,6 +18,7 @@ Unreleased under the new version and date.
 - On Android, the voice call notification has Mute and Hang up buttons that work with the app in the background, and on Android 12 and newer it shows as a real ongoing call in the status bar; tapping it opens the call.
 - Reconnecting after a network drop is faster when you have many chats and DMs open: their newest messages now reload side by side instead of one by one.
 - Animated profile pictures and emoji use less memory, and many of them playing at once no longer slow the app down.
+- Draw a diagram together in a call: start one from the call's … menu, everyone sees it on the stage, and others can ask to edit. On desktop, save it as a draw.io file or start from one.
 
 ## v0.7.0 - 2026-11-25
 

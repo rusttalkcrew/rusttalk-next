@@ -138,6 +138,23 @@ pub const TERMINAL_LIGHT: [Color32; 16] = [
     rgb(0xc8c9ce),
 ];
 
+/// The colours a shared diagram's shapes can have, as (fill, outline): draw.io's
+/// own light fills, so a diagram looks the same there. They are part of the diagram,
+/// not of the theme; the first, "Default", follows the theme instead (see
+/// `diagram::colors`) and is white with a black outline in draw.io.
+pub const DIAGRAM: [(Color32, Color32); 8] = [
+    (rgb(0xffffff), rgb(0x000000)),
+    (rgb(0xdae8fc), rgb(0x6c8ebf)),
+    (rgb(0xd5e8d4), rgb(0x82b366)),
+    (rgb(0xfff2cc), rgb(0xd6b656)),
+    (rgb(0xffe6cc), rgb(0xd79b00)),
+    (rgb(0xf8cecc), rgb(0xb85450)),
+    (rgb(0xe1d5e7), rgb(0x9673a6)),
+    (rgb(0xf5f5f5), rgb(0x666666)),
+];
+/// Text on a coloured diagram shape: its fills are all light.
+pub const DIAGRAM_TEXT: Color32 = rgb(0x1f1f1f);
+
 const DARK_STATUS: (Color32, Color32, Color32, Color32) =
     (rgb(0x23a55a), rgb(0xf0b232), rgb(0xda373c), rgb(0xf6787c));
 const LIGHT_STATUS: (Color32, Color32, Color32, Color32) =

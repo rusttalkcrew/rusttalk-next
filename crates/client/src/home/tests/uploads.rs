@@ -72,6 +72,7 @@ fn oversized_stored_picker_feedback() {
                         screens: vec![],
                         camera: None,
                         terminal: None,
+                        diagram: None,
                     }],
                 );
             }
