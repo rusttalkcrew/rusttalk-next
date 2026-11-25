@@ -220,6 +220,7 @@ home.edited = (edited)
 home.message_unreadable = This message couldn't be opened.
 home.add_reaction = Add reaction
 home.reacted_with = {names} reacted with {emoji}
+home.reacted = {names} reacted
 common.reply = Reply
 common.edit = Edit
 home.invite_card = Server invite

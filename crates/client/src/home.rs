@@ -6549,22 +6549,48 @@ fn reaction_chips(ui: &mut Ui, chat: &Chat, msg: &Msg, dir: &Directory) -> Optio
                     ui::reaction_chip(ui, mine, (image, count))
                 }
             };
-            let names: Vec<String> = people.iter().map(|p| member_name(dir, p)).collect();
-            let who = t!(
-                "home.reacted_with",
-                names = names.join(", "),
-                emoji = shown.name()
-            );
+            let names = (people.iter().map(|p| member_name(dir, p)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let who = t!("home.reacted_with", names = &names, emoji = shown.name());
             response.widget_info(|| WidgetInfo::selected(Role::Button, true, mine, &who));
-            let response = response.on_hover_text(&who);
+            let response = response.on_hover_ui(|ui| who_reacted(ui, shown, &names));
             if response.clicked() {
                 let part = reaction_vote(&msg.id, key, polls::now_ms(), !mine);
                 pick = Some(Pick::Poll(part));
             }
-            ui::context_menu(&response, |m| m.caption(&who));
+            ui::context_menu(&response, |m| {
+                m.ui().horizontal(|ui| {
+                    ui.add_space(10.0);
+                    who_reacted(ui, shown, &names);
+                });
+            });
         }
     });
     pick
+}
+
+/// Who reacted, led by the emoji drawn as in the chip (a text glyph would fall back
+/// to the font's plain look), for the hover tip and the right-click or long-press card.
+fn who_reacted(ui: &mut Ui, shown: emoji::Reacted, names: &str) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = ui::SPACE_S;
+        let size = ui::TEXT_BODY + 4.0;
+        match shown {
+            emoji::Reacted::Unicode(sequence) => {
+                ui.label(emoji::text(sequence).size(size));
+            }
+            emoji::Reacted::Custom(custom) => match &custom.picture {
+                Some(picture) => {
+                    emoji_image(ui, picture, size, &shown.name());
+                }
+                None => {
+                    ui.label(ui::caption(shown.name()));
+                }
+            },
+        }
+        ui.add(egui::Label::new(t!("home.reacted", names = names)).wrap());
+    });
 }
 
 /// A RustTalk invite under a message. Shows only what the link carries, or what this
