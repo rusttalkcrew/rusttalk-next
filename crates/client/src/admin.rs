@@ -83,6 +83,8 @@ pub struct Settings {
     audit_filter: Option<&'static str>,
     /// Open joining and member limit, once loaded (owners and admins).
     joining: Option<(bool, u32)>,
+    /// What the server has for `joining`, to tell unsaved edits apart.
+    saved_joining: Option<(bool, u32)>,
     files: Option<file_limits::Form>,
     /// Whether the server is listed and the details, once loaded (owner).
     listing: Option<(bool, PublicListing)>,
@@ -125,7 +127,12 @@ impl Settings {
                 self.audit_shown = AUDIT_PAGE;
             }
             AdminUpdate::Invites(invites) => self.invites = invites,
-            AdminUpdate::Joining(open, cap) => self.joining = Some((open, cap)),
+            AdminUpdate::Joining(open, cap) => {
+                if !self.joining_unsaved() {
+                    self.joining = Some((open, cap));
+                }
+                self.saved_joining = Some((open, cap));
+            }
             AdminUpdate::Files(settings) => self.files = Some(file_limits::Form::new(settings)),
             AdminUpdate::Listing(on, saved) => {
                 self.listing = Some((on, saved.unwrap_or_default()));
@@ -154,6 +161,10 @@ impl Settings {
                 self.message = Some((text, true));
             }
         }
+    }
+
+    fn joining_unsaved(&self) -> bool {
+        self.joining.is_some() && self.joining != self.saved_joining
     }
 }
 
@@ -208,6 +219,7 @@ pub fn open(home: &mut Home, index: usize, mut tab: Tab) {
         audit_shown: AUDIT_PAGE,
         audit_filter: None,
         joining: None,
+        saved_joining: None,
         files: None,
         listing: None,
         updates: ServerUpdates::default(),
@@ -490,6 +502,12 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
                     joining: false,
                     audit: false,
                     bans: true,
+                }),
+                // Unsaved edits stay; only what's saved refreshes.
+                Tab::Joining => Some(Admin::Load {
+                    joining: true,
+                    audit: false,
+                    bans: false,
                 }),
                 Tab::Listing => Some(Admin::LoadListing),
                 Tab::Files => Some(Admin::LoadFiles),
@@ -1315,15 +1333,19 @@ fn joining_tab(ui: &mut Ui, settings: &mut Settings) -> Option<Admin> {
         t!("admin.member_limit"),
         t!("admin.member_limit_help"),
         |ui| {
-            ui.add(DragValue::new(cap).range(1..=100_000))
+            // The server takes any limit from 1 up; u32 is what the app can send.
+            ui.add(DragValue::new(cap).range(1..=u32::MAX))
                 .widget_info(|| {
                     egui::WidgetInfo::labeled(Role::SpinButton, true, t!("admin.member_limit"))
                 });
         },
     );
-    ui::primary(ui, t!("common.save"))
+    let request = Admin::Joining(*open, *cap);
+    let unsaved = settings.joining_unsaved();
+    ui.add_enabled_ui(unsaved, |ui| ui::primary(ui, t!("common.save")))
+        .inner
         .clicked()
-        .then_some(Admin::Joining(*open, *cap))
+        .then_some(request)
 }
 
 fn listing_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Option<Admin> {

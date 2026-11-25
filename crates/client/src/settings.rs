@@ -51,6 +51,13 @@ const HEADER_HEIGHT: f32 = 56.0;
 /// Room under the last section, so it can scroll up past the bottom edge a little.
 const CONTENT_BOTTOM: f32 = 48.0;
 const REPOSITORY: &str = "https://github.com/rusttalkcrew/rusttalk-next";
+/// Android and iOS: no keyboard shortcuts to set.
+pub const PHONE: bool = cfg!(any(target_os = "android", target_os = "ios"));
+
+/// Whether Settings lists this page: phones have no Shortcuts page.
+fn listed(tab: Tab, phone: bool) -> bool {
+    !(phone && tab == Tab::Shortcuts)
+}
 
 pub struct Page<T> {
     pub id: T,
@@ -482,7 +489,7 @@ pub fn show(
     }
     let mut tab = home.settings?;
     let page = |id, icon, label| Page { id, icon, label };
-    let groups = [
+    let mut groups = [
         Group {
             title: t!("settings.group_user"),
             pages: vec![
@@ -523,6 +530,9 @@ pub fn show(
             ],
         },
     ];
+    for group in &mut groups {
+        group.pages.retain(|page| listed(page.id, PHONE));
+    }
     let before = tab;
     let mut open_news = false;
     let ((), close) = window(
@@ -932,7 +942,11 @@ fn devices_page(ui: &mut Ui, home: &mut Home) {
         home.identity.certificate.name(),
         &format!(
             "{} · {}",
-            t!("settings.this_computer"),
+            if PHONE {
+                t!("settings.this_device")
+            } else {
+                t!("settings.this_computer")
+            },
             fingerprint(home.identity.certificate.signing_key().as_bytes())
         ),
         |_| {},
@@ -1104,5 +1118,19 @@ fn appearance_page(ui: &mut Ui, home: &mut Home) {
         crate::i18n::set(&settings.language);
         settings.set_appearance(look);
         audio.set_settings(settings);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn phones_list_no_shortcuts_page() {
+        assert!(!listed(Tab::Shortcuts, true));
+        assert!(listed(Tab::Shortcuts, false));
+        for tab in [Tab::Profile, Tab::Voice, Tab::Network, Tab::About] {
+            assert!(listed(tab, true) && listed(tab, false));
+        }
     }
 }

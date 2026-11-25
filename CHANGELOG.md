@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Server settings > Joining: Save lights up only after a change, and the page shows fresh values when you come back. Phones no longer list Shortcuts and call themselves "This device".
+
 ## v0.4.0 - 2026-11-24
 
 - Changing your name, picture or bio no longer pauses chat and voice on every server while your devices sync.

@@ -7145,6 +7145,7 @@ mod tests {
     mod avatars;
     mod emoji;
     mod image_reload;
+    mod joining;
     mod long_chat;
     mod member_list;
     mod outbox;
