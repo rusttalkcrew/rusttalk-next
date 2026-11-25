@@ -174,7 +174,7 @@ pub async fn set(
         return Err(ApiError::bad_request("invalid_file_limits"));
     }
     let ceilings = app.files.ceilings;
-    let before = effective(&mut tx, ceilings).await?;
+    let before = effective(&mut tx, &app.files).await?;
     let limits = FileLimits {
         max_file_bytes: requested.max_file_bytes.min(ceilings.max_file_bytes),
         member_storage_bytes: requested

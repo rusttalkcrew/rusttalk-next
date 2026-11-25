@@ -3145,7 +3145,10 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
     let mut focus_pick = None;
     let now = notify::unix_now();
     let all = &server.dir.categories;
-    let shown = reorder::shown(all, perms.manage_channels && server.show_empty && !perms.preview);
+    let shown = reorder::shown(
+        all,
+        perms.manage_channels && server.show_empty && !perms.preview,
+    );
     let categories = &*shown;
     let can_manage = perms.manage_channels && online && !perms.preview;
     let can_move = can_manage && !server.order_unavailable && reorder::order(all).is_some();

@@ -330,7 +330,7 @@ async fn change(
                 Ok(history) => send(AdminUpdate::History(history)),
                 Err(text) => send(AdminUpdate::Failed(text)),
             }
-            return;
+            return None;
         }
         Admin::SaveHistory(keep) => {
             message_history(client, Method::PUT, Some(json!({ "keep": keep })))
