@@ -130,11 +130,20 @@ impl Revocations {
             record.device_signing_key() != current.signing_key().as_bytes(),
             "cannot remove current device"
         );
-        self.remember(record)?;
+        self.remember_own(record)?;
         Ok(())
     }
 
     pub(super) fn remember(&self, record: &Revocation) -> Result<bool> {
+        self.save(record, false)
+    }
+
+    /// Other people filling the store must never stop this account removing its own devices.
+    pub(super) fn remember_own(&self, record: &Revocation) -> Result<bool> {
+        self.save(record, true)
+    }
+
+    fn save(&self, record: &Revocation, own: bool) -> Result<bool> {
         let dir = self.0.join(filename(record.person_id()));
         let file = dir.join(filename(record.device_signing_key()));
         if file.try_exists()? && read_record(record.person_id(), &file).is_ok() {
@@ -152,7 +161,7 @@ impl Revocations {
         }
         if !dir.try_exists()? {
             ensure!(
-                count_keys(&self.0)? < MAX_PEOPLE,
+                own || count_keys(&self.0)? < MAX_PEOPLE,
                 "device revocation profile limit reached"
             );
             fs::create_dir(&dir)?;
@@ -209,7 +218,10 @@ impl Revocations {
                 "oversized sync revocation list"
             );
             for encoded in &snapshot.state.revocations {
-                self.observe(person, encoded)?;
+                match verify(person, encoded) {
+                    Ok(record) => _ = self.remember_own(&record)?,
+                    Err(_) => tracing::warn!("ignored invalid device revocation"),
+                }
             }
         }
         let mut verified = BTreeSet::new();

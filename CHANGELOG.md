@@ -38,6 +38,7 @@ Unreleased under the new version and date.
 - Network route problems (proxy, Tor or WireGuard) now show short, translated messages like "Couldn't reach the proxy", with the technical text under Details.
 - Security: people who manage channels can only see, edit, move, delete or change access to channels they can read themselves
 - Security: slow or stalled uploads can no longer make a server refuse everyone else's changes.
+- Security: device removals from other members can no longer stop the app from syncing keys, and you can always remove your own devices.
 
 ## v0.4.0 - 2026-11-24
 

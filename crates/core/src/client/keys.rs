@@ -629,10 +629,6 @@ impl<'a> KeyClient<'a> {
             .error_for_status()?
             .json()
             .await?;
-        ensure!(
-            state.revocations.len() <= super::revocations::MAX_PER_REPLY,
-            "oversized key-state revocation list"
-        );
         for excluded in state
             .scopes
             .iter()
@@ -652,6 +648,14 @@ impl<'a> KeyClient<'a> {
             );
         }
         self.sync_devices().await?;
+        self.apply_revocations(&state.revocations);
+        Ok(state)
+    }
+
+    /// Take the listed people's removals. Any member can sign removals for made-up devices,
+    /// so a long or unsavable list is cut short instead of failing key sync; this account's
+    /// own removals come first, so they are always kept.
+    fn apply_revocations(&mut self, listed: &[(String, String)]) {
         let me = self.identity.certificate.person_id();
         let mut people: HashSet<_> = self
             .devices
@@ -663,25 +667,47 @@ impl<'a> KeyClient<'a> {
             DmPin::Blocked => None,
         }));
         people.insert(*me);
-        for (person, record) in &state.revocations {
-            let Ok(person) = decode(person) else {
-                tracing::warn!("ignored invalid device revocation owner");
-                continue;
-            };
-            if !people.contains(&person) {
-                continue;
-            }
+        let mut relevant: Vec<_> = listed
+            .iter()
+            .filter_map(|(person, record)| {
+                let Ok(person) = decode::<32>(person) else {
+                    tracing::warn!("ignored invalid device revocation owner");
+                    return None;
+                };
+                people.contains(&person).then_some((person, record))
+            })
+            .collect();
+        relevant.sort_by_key(|(person, _)| person != me);
+        let limit = super::revocations::MAX_PER_REPLY;
+        if relevant.len() > limit {
+            tracing::warn!(
+                skipped = relevant.len() - limit,
+                "too many device revocations; skipped the rest"
+            );
+            relevant.truncate(limit);
+        }
+        for (person, record) in relevant {
             let Ok(record) = super::revocations::verify(&person, record) else {
                 tracing::warn!("ignored invalid device revocation");
                 continue;
             };
-            let added = self.revocations.remember(&record)?;
+            let saved = if &person == me {
+                self.revocations.remember_own(&record)
+            } else {
+                self.revocations.remember(&record)
+            };
+            let added = match saved {
+                Ok(added) => added,
+                Err(error) => {
+                    tracing::warn!(%error, "could not save device revocation");
+                    continue;
+                }
+            };
             if &person == me {
                 self.server.note_revocation(&record);
                 self.own_revocations_changed |= added;
             }
         }
-        Ok(state)
     }
 
     /// Keep a locally issued revocation before contacting any server, so sync can retry it.
@@ -690,7 +716,7 @@ impl<'a> KeyClient<'a> {
             record.person_id() == self.identity.certificate.person_id(),
             "wrong revocation owner"
         );
-        self.revocations.remember(record)?;
+        self.revocations.remember_own(record)?;
         self.own_revocations_changed = true;
         self.server.publish_revocation(&self.session, record).await
     }
@@ -2501,6 +2527,121 @@ mod tests {
         assert_eq!(calls.get(), 1);
         assert!(client.device(&id).is_none());
         assert_eq!(client.devices().count(), 0);
+        Ok(())
+    }
+
+    fn made_up_device(seed: u8) -> [u8; 32] {
+        ed25519_dalek::SigningKey::from_bytes(&[seed; 32])
+            .verifying_key()
+            .to_bytes()
+    }
+
+    fn signed(words: &str, person: &PersonId, device: [u8; 32]) -> Result<(String, String)> {
+        let record = crate::identity::revoke_device(words, person, device)?;
+        Ok((encode(person), encode(&record.to_bytes())))
+    }
+
+    #[tokio::test]
+    async fn a_flood_of_revocations_does_not_stop_key_sync() -> Result<()> {
+        let profile = tempfile::tempdir()?;
+        let server = Server::for_test(3, profile.path());
+        let (words, identity) = DeviceIdentity::create("reader")?;
+        let sibling = DeviceIdentity::add_device(&words, "sibling")?;
+        let (member_words, member) = DeviceIdentity::create("member")?;
+        let member_device = DeviceIdentity::add_device(&member_words, "member device")?;
+        let (stranger_words, stranger) = DeviceIdentity::create("stranger")?;
+        let mut client = test_client(&server, &identity).await?;
+        let me = *identity.certificate.person_id();
+        let them = *member.certificate.person_id();
+        let outsider = *stranger.certificate.person_id();
+        client.apply_devices(
+            vec![
+                listed(&me, identity.certificate.public_bytes()?),
+                listed(&them, member.certificate.public_bytes()?),
+                listed(&them, member_device.certificate.public_bytes()?),
+            ],
+            DeviceCertificate::verify_public,
+        )?;
+        let cap = super::super::revocations::MAX_PER_REPLY;
+        // More non-member records than a reply may hold: ignored, not an error.
+        let mut flood = vec![signed(&stranger_words, &outsider, made_up_device(1))?; cap + 1];
+        flood.push(signed(
+            &member_words,
+            &them,
+            member_device.certificate.signing_key().to_bytes(),
+        )?);
+        // A member's made-up devices past the cap, then this account's own removal last.
+        flood.extend(vec![
+            signed(&member_words, &them, made_up_device(2))?;
+            cap + 1
+        ]);
+        flood.push(signed(
+            &words,
+            &me,
+            sibling.certificate.signing_key().to_bytes(),
+        )?);
+        client.apply_revocations(&flood);
+        assert!(!client.revocations.allows(&sibling.certificate));
+        assert!(client.take_own_revocations_changed());
+        assert!(!client.revocations.allows(&member_device.certificate));
+        assert!(
+            client
+                .revocations
+                .check(&outsider, &made_up_device(1))
+                .is_ok()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_full_revocation_store_still_takes_own_removals() -> Result<()> {
+        let profile = tempfile::tempdir()?;
+        let server = Server::for_test(3, profile.path());
+        let (words, identity) = DeviceIdentity::create("reader")?;
+        let sibling = DeviceIdentity::add_device(&words, "sibling")?;
+        let (known_words, known) = DeviceIdentity::create("known")?;
+        let (new_words, newcomer) = DeviceIdentity::create("newcomer")?;
+        let mut client = test_client(&server, &identity).await?;
+        let me = *identity.certificate.person_id();
+        client.apply_devices(
+            [&identity, &known, &newcomer]
+                .into_iter()
+                .map(|device| {
+                    let cert = &device.certificate;
+                    listed(cert.person_id(), cert.public_bytes().unwrap())
+                })
+                .collect(),
+            DeviceCertificate::verify_public,
+        )?;
+        let (known, newcomer) = (
+            *known.certificate.person_id(),
+            *newcomer.certificate.person_id(),
+        );
+        let first = signed(&known_words, &known, made_up_device(1))?;
+        client.apply_revocations(std::slice::from_ref(&first));
+        // Other people's records filled the profile's store.
+        let store = profile.path().join("revocations");
+        for i in 1..1024u32 {
+            std::fs::create_dir(store.join(format!("{i:064x}")))?;
+        }
+        client.apply_revocations(&[
+            signed(&new_words, &newcomer, made_up_device(2))?,
+            signed(&known_words, &known, made_up_device(3))?,
+            signed(&words, &me, sibling.certificate.signing_key().to_bytes())?,
+        ]);
+        assert!(!client.revocations.allows(&sibling.certificate));
+        assert!(
+            client
+                .revocations
+                .check(&known, &made_up_device(3))
+                .is_err()
+        );
+        assert!(
+            client
+                .revocations
+                .check(&newcomer, &made_up_device(2))
+                .is_ok()
+        );
         Ok(())
     }
 }
