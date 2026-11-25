@@ -53,6 +53,11 @@ pub const RATE: u32 = 48_000;
 pub const FRAME: usize = 480;
 /// Quieter than this counts as silence for the meter and speaking rings.
 pub const SILENT_DB: f32 = -50.0;
+/// A shared app counts as playing from this level: music is often shared much
+/// quieter than people talk.
+const APP_SILENT_DB: f32 = -70.0;
+/// A shared app this loud fills its sound bars.
+const APP_FULL_DB: f32 = -20.0;
 /// Voice activation stays open this long after the last loud frame.
 const HOLD_FRAMES: u32 = 40;
 /// Once open, the gate closes only this far below its threshold, so it doesn't chatter.
@@ -988,8 +993,7 @@ impl Audio {
         let now = self.shared().now();
         let mixer = lock(&self.shared().mixer);
         let track = (mixer.tracks.get(sid)).filter(|t| t.stream.1.is_some())?;
-        (track.loud != 0 && now < track.loud + SPEAKING_MS)
-            .then(|| ((track.level - SILENT_DB) / -SILENT_DB).clamp(0.0, 1.0))
+        (track.loud != 0 && now < track.loud + SPEAKING_MS).then(|| app_bar_level(track.level))
     }
 
     /// A shared app playing at `level` dBFS right now, as if its track had a loud frame.
@@ -1064,12 +1068,17 @@ impl Audio {
             let mut stream = NativeAudioStream::new(track, RATE as i32, 1);
             while let Some(frame) = stream.next().await {
                 let level = level_db(&frame.data);
-                let loud = level > SILENT_DB;
                 let now = shared.now();
                 let mut mixer = lock(&shared.mixer);
                 let Some(track) = mixer.tracks.get_mut(&sid).filter(|t| t.serial == serial) else {
                     return;
                 };
+                let silent = if track.stream.1.is_some() {
+                    APP_SILENT_DB
+                } else {
+                    SILENT_DB
+                };
+                let loud = level > silent;
                 track.queue.extend(frame.data.iter());
                 // Backstop after a stall; `mix` corrects normal clock drift.
                 if track.queue.len() > CAP {
@@ -1210,6 +1219,14 @@ pub fn calibrate(quiet: &[f32], speech: &[f32]) -> Option<f32> {
     let noise = percentile(quiet, 0.9)?;
     let voice = percentile(speech, 0.75)?;
     (voice - noise >= 10.0).then(|| noise + (voice - noise) / 3.0)
+}
+
+/// How full a shared app's sound bars are for a frame at `db` dBFS: quiet music
+/// still moves them visibly (square root), loud music fills them.
+fn app_bar_level(db: f32) -> f32 {
+    ((db - APP_SILENT_DB) / (APP_FULL_DB - APP_SILENT_DB))
+        .clamp(0.0, 1.0)
+        .sqrt()
 }
 
 /// A slow estimate of the background noise from 10 ms frame levels.
@@ -2444,6 +2461,16 @@ mod tests {
     }
 
     #[test]
+    fn quiet_shared_apps_still_move_their_bars() {
+        // Music shared at -50 dBFS, where voices count as silent, fills over half.
+        assert!(app_bar_level(-50.0) > 0.6);
+        assert!(app_bar_level(-65.0) > 0.25);
+        assert_eq!(app_bar_level(APP_SILENT_DB), 0.0);
+        assert_eq!(app_bar_level(-10.0), 1.0);
+        assert!(app_bar_level(-40.0) < app_bar_level(-30.0));
+    }
+
+    #[test]
     fn an_apps_level_shows_only_while_it_plays() {
         let data = tempfile::tempdir().unwrap();
         let audio = Audio::new(data.path()).unwrap();
@@ -2471,7 +2498,7 @@ mod tests {
             .insert("TR_mic".into(), track(([1; 32], None), now, -10.0));
         drop(mixer);
         let level = audio.app_level("TR_app").expect("playing");
-        assert!((level - 0.5).abs() < 1e-5);
+        assert!((level - app_bar_level(-25.0)).abs() < 1e-5);
         assert_eq!(audio.app_level("TR_quiet"), None);
         assert_eq!(audio.app_level("TR_mic"), None, "voices aren't apps");
         // Silent for longer than a speaking ring: the bars stop.
