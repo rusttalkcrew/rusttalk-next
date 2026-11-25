@@ -425,10 +425,13 @@ pub async fn ban(
     auth.require(Permission::Ban)?;
     auth.outrank(&roles::authority(&mut tx, &person).await?)?;
     let added = query(
-        "INSERT INTO bans (person_id, banned_at) VALUES (?, ?) ON CONFLICT (person_id) DO NOTHING",
+        "INSERT INTO bans (person_id, banned_at, banned_by, banned_by_rank) VALUES (?, ?, ?, ?)
+         ON CONFLICT (person_id) DO NOTHING",
     )
     .bind(person.as_slice())
     .bind(actor.at)
+    .bind(actor.person.as_slice())
+    .bind(auth.rank())
     .execute(&mut *tx)
     .await?;
     if added.rows_affected() == 0 {
@@ -495,16 +498,22 @@ pub async fn unban(
 ) -> ApiResult<StatusCode> {
     let person = decode::<32>(&person)?;
     let (mut tx, actor) = authenticate(&app, &headers).await?;
-    roles::authority(&mut tx, &actor.person)
-        .await?
-        .require(Permission::Ban)?;
-    let result = query("DELETE FROM bans WHERE person_id = ?")
+    let auth = roles::authority(&mut tx, &actor.person).await?;
+    auth.require(Permission::Ban)?;
+    let (placer, placer_rank): (Option<Vec<u8>>, Option<i64>) =
+        query_as("SELECT banned_by, banned_by_rank FROM bans WHERE person_id = ?")
+            .bind(person.as_slice())
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or(ApiError::not_found("ban_not_found"))?;
+    if !auth.may_lift(&actor.person, placer.as_deref(), placer_rank) {
+        return Err(ApiError::forbidden("role_hierarchy"));
+    }
+    // Linked IP bans go with it (ON DELETE CASCADE).
+    query("DELETE FROM bans WHERE person_id = ?")
         .bind(person.as_slice())
         .execute(&mut *tx)
         .await?;
-    if result.rows_affected() == 0 {
-        return Err(ApiError::not_found("ban_not_found"));
-    }
     audit(
         &mut tx,
         &actor.person,
@@ -523,16 +532,20 @@ pub struct Ban {
     person_id: String,
     banned_at: i64,
     ban_ip: bool,
+    /// Whether the caller may lift it; older servers leave it out.
+    can_lift: bool,
 }
+
+type BanRow = (Vec<u8>, i64, bool, Option<Vec<u8>>, Option<i64>);
 
 pub async fn bans(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Vec<Ban>>> {
     let (mut tx, actor) = authenticate_read(&app, &headers).await?;
-    roles::authority(&mut tx, &actor.person)
-        .await?
-        .require(Permission::Ban)?;
-    let rows: Vec<(Vec<u8>, i64, bool)> = query_as(
+    let auth = roles::authority(&mut tx, &actor.person).await?;
+    auth.require(Permission::Ban)?;
+    let rows: Vec<BanRow> = query_as(
         "SELECT b.person_id, b.banned_at,
-                EXISTS (SELECT 1 FROM ban_ips WHERE person_id = b.person_id)
+                EXISTS (SELECT 1 FROM ban_ips WHERE person_id = b.person_id),
+                b.banned_by, b.banned_by_rank
          FROM bans b ORDER BY b.banned_at DESC, b.person_id",
     )
     .fetch_all(&mut *tx)
@@ -540,10 +553,11 @@ pub async fn bans(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<
     tx.commit().await?;
     Ok(Json(
         rows.into_iter()
-            .map(|(person, banned_at, ban_ip)| Ban {
+            .map(|(person, banned_at, ban_ip, placer, placer_rank)| Ban {
                 person_id: encode(&person),
                 banned_at,
                 ban_ip,
+                can_lift: auth.may_lift(&actor.person, placer.as_deref(), placer_rank),
             })
             .collect(),
     ))
@@ -695,6 +709,101 @@ mod tests {
                 .fetch_one(&app.db)
                 .await?;
         assert_eq!(audited, 3);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn bans_lift_only_by_owner_placer_or_higher_rank() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let app = app(dir.path(), 7).await?;
+        // 1 owner, 2 admin, 3 and 4 moderators, 5 a junior role that may ban, 6 and 7 members.
+        query("INSERT INTO roles (id, kind, rank, permissions) VALUES ('junior', 'custom', 20, 4)")
+            .execute(&app.db)
+            .await?;
+        for (who, role) in [
+            (2, "admin"),
+            (3, "moderator"),
+            (4, "moderator"),
+            (5, "junior"),
+        ] {
+            query("INSERT INTO member_roles (person_id, role_id) VALUES (?, ?)")
+                .bind(person(who))
+                .bind(role)
+                .execute(&app.db)
+                .await?;
+        }
+        // Banned person, placer and rank; 24 predates recording the placer.
+        for (target, placer, rank) in [
+            (20, Some(1), Some(1000)),
+            (21, Some(3), Some(50)),
+            (22, Some(5), Some(20)),
+            (23, Some(2), Some(100)),
+            (24, None, None),
+            (25, Some(4), Some(50)),
+        ] {
+            query("INSERT INTO bans (person_id, banned_at, banned_by, banned_by_rank) VALUES (?, ?, ?, ?)")
+                .bind(person(target)).bind(i64::from(target)).bind(placer.map(person)).bind(rank)
+                .execute(&app.db).await?;
+            query("INSERT INTO ban_ips (person_id, ip) VALUES (?, ?)")
+                .bind(person(target))
+                .bind(format!("198.51.100.{target}"))
+                .execute(&app.db)
+                .await?;
+        }
+        let placed = ban(
+            State(app.clone()),
+            as_person(3),
+            Path(encode(&person(6))),
+            Ok(Json(BanRequest { ban_ip: false })),
+        )
+        .await;
+        assert_eq!(placed.unwrap(), StatusCode::NO_CONTENT);
+        let (placer, rank): (Vec<u8>, i64) =
+            query_as("SELECT banned_by, banned_by_rank FROM bans WHERE person_id = ?")
+                .bind(person(6))
+                .fetch_one(&app.db)
+                .await?;
+        assert_eq!((placer, rank), (person(3), 50));
+
+        let listed = bans(State(app.clone()), as_person(3)).await.unwrap().0;
+        let liftable: Vec<(String, bool)> = listed
+            .into_iter()
+            .map(|ban| (ban.person_id, ban.can_lift))
+            .collect();
+        let expected: Vec<(String, bool)> = [6, 25, 24, 23, 22, 21, 20]
+            .into_iter()
+            .map(|target| (encode(&person(target)), matches!(target, 6 | 21 | 22 | 24)))
+            .collect();
+        assert_eq!(liftable, expected);
+
+        let lift = |who: u8, target: u8| {
+            unban(
+                State(app.clone()),
+                as_person(who),
+                Path(encode(&person(target))),
+            )
+        };
+        let linked = |target: u8| {
+            query_scalar::<_, i64>("SELECT COUNT(*) FROM ban_ips WHERE person_id = ?")
+                .bind(person(target))
+                .fetch_one(&app.db)
+        };
+        // A moderator can't lift the owner's, an admin's or a peer's ban; IPs stay banned.
+        for target in [20, 23, 25] {
+            assert_eq!(lift(3, target).await.unwrap_err().code, "role_hierarchy");
+            assert_eq!(linked(target).await?, 1);
+        }
+        assert_eq!(lift(7, 21).await.unwrap_err().code, "permission_denied");
+        // Their own, a lower rank's, and a ban with no recorded placer.
+        for target in [6, 21, 22, 24] {
+            assert_eq!(lift(3, target).await.unwrap(), StatusCode::NO_CONTENT);
+            assert_eq!(linked(target).await?, 0);
+        }
+        // The owner lifts anyone's, and the IP ban goes with it.
+        for target in [20, 23, 25] {
+            assert_eq!(lift(1, target).await.unwrap(), StatusCode::NO_CONTENT);
+            assert_eq!(linked(target).await?, 0);
+        }
         Ok(())
     }
 

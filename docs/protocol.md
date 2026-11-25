@@ -122,9 +122,9 @@ All endpoints below require `Authorization: Bearer <token>`.
 | DELETE `/v1/members/{person}` | Empty | `kick`. 204 |
 | PUT `/v1/members/{person}/voice-mute` | Empty | `mute_members`. 204, mutes them in every voice channel until lifted |
 | DELETE `/v1/members/{person}/voice-mute` | Empty | `mute_members`. 204, lifts the mute |
-| GET `/v1/bans` | Empty | `ban`. 200, active bans as `{person_id, banned_at, ban_ip}`, newest first |
+| GET `/v1/bans` | Empty | `ban`. 200, active bans as `{person_id, banned_at, ban_ip, can_lift}`, newest first |
 | PUT `/v1/bans/{person}` | `{ban_ip?}`, default false | `ban`. 204 |
-| DELETE `/v1/bans/{person}` | Empty | `ban`. 204 |
+| DELETE `/v1/bans/{person}` | Empty | `ban` and may lift it (see below). 204 |
 | GET `/v1/roles` | Empty | Any member. 200, `{default_role_id, roles}` |
 | POST `/v1/roles` | `{id?, rank, permissions, name_ct?}` | `manage_roles`. 201, the created role |
 | PUT `/v1/roles/{id}` | `{permissions, name_ct?, rank?}` | `manage_roles`. 204, replaces a custom role's flags and, when given, its name and rank (1 to 999, below the caller's) |
@@ -200,6 +200,13 @@ address or IPv6 /64 is shared with the actor or an equal or higher-ranked
 active member. The
 owner retains access from a banned IP so an IP ban cannot lock them out.
 The ban list returns whether each ban has linked IPs.
+The server records who placed each ban and their rank at that moment. Only the
+owner, the person who placed it, or someone who outranks that recorded rank can
+lift it; anyone else gets 403 `role_hierarchy` and the ban and its IPs stay.
+Bans from before the placer was recorded are matched to their `member_banned`
+audit entry, using the placer's rank at upgrade time; when the placer is unknown
+or no longer a member, anyone with `ban` can lift it, as before. The ban list's
+`can_lift` says whether the caller may lift each ban; older servers omit it.
 
 An existing member registering a new device records `device_added`. Revocation records
 `device_revoked`. Both identify the device in `target_id`.

@@ -461,6 +461,7 @@ admin.revoke_title = Diese Einladung widerrufen?
 admin.revoke_help = Der Link funktioniert sofort nicht mehr. Wer schon beigetreten ist, bleibt.
 admin.no_bans = Niemand ist gesperrt.
 admin.unban = Entsperren
+admin.unban_outranked = Jemand mit der gleichen oder einer höheren Rolle hat diese Sperre verhängt.
 admin.everything = Alles
 admin.show = Anzeigen
 admin.audit_help = Was die Admins des Servers getan haben, neueste zuerst.

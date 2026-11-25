@@ -124,6 +124,27 @@ impl Authority {
         Ok(())
     }
 
+    pub fn rank(&self) -> i64 {
+        self.rank
+    }
+
+    /// Lifting a ban needs the owner, the person who placed it, or someone who outranks
+    /// the placer's rank at that time. Old bans with no known placer rank stay open to
+    /// anyone with the ban permission.
+    pub fn may_lift(&self, actor: &[u8], placer: Option<&[u8]>, placer_rank: Option<i64>) -> bool {
+        let Some(placer_rank) = placer_rank else {
+            return true;
+        };
+        self.rank >= OWNER_RANK
+            || placer == Some(actor)
+            || self
+                .outrank(&Authority {
+                    rank: placer_rank,
+                    permissions: 0,
+                })
+                .is_ok()
+    }
+
     pub fn can_set_channel_flags(&self, role: Role) -> ApiResult<()> {
         if self.rank == OWNER_RANK && role.rank == OWNER_RANK {
             return Ok(());

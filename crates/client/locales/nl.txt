@@ -461,6 +461,7 @@ admin.revoke_title = Deze uitnodiging intrekken?
 admin.revoke_help = De link werkt meteen niet meer. Wie al deelnam, blijft.
 admin.no_bans = Niemand is verbannen.
 admin.unban = Verbanning opheffen
+admin.unban_outranked = Iemand met dezelfde of een hogere rol heeft deze verbanning ingesteld.
 admin.everything = Alles
 admin.show = Tonen
 admin.audit_help = Wat de beheerders van de server deden, nieuwste eerst.

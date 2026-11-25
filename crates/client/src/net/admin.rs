@@ -125,6 +125,8 @@ pub struct Ban {
     pub at: i64,
     /// Their networks are blocked too.
     pub network: bool,
+    /// Placed by someone the viewer outranks or themselves; older servers don't say.
+    pub can_lift: bool,
 }
 
 pub struct Invite {
@@ -531,6 +533,7 @@ async fn bans(client: &KeyClient<'_>) -> Result<Vec<Ban>, String> {
                 person: decode(row["person_id"].as_str()?).ok()?,
                 at: row["banned_at"].as_i64()?,
                 network: row["ban_ip"].as_bool().unwrap_or_default(),
+                can_lift: row["can_lift"].as_bool().unwrap_or(true),
             })
         })
         .collect())
