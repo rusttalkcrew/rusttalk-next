@@ -2,6 +2,7 @@
 //! the connection panel and Settings → Voice.
 
 use std::{
+    borrow::Cow,
     collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
     thread,
@@ -574,7 +575,9 @@ pub fn frame(ctx: &egui::Context, home: &mut Home) {
     home.voice.update_preview(ctx);
     let recording = home.hotkeys.recording();
     let voice = &mut home.voice;
-    let mut settings = voice.audio.settings();
+    let snapshot = voice.audio.snapshot();
+    // Copied only if the camera changes it (phones), so a frame normally copies nothing.
+    let mut settings = Cow::Borrowed(&*snapshot);
     let key = Key::from_name(&settings.key);
     // While another app is in front, the global shortcut (see `hotkeys`) talks instead.
     let down = settings.push_to_talk
@@ -631,7 +634,9 @@ pub fn frame(ctx: &egui::Context, home: &mut Home) {
         .camera
         .update(ctx, &mut settings, can_video, preview);
     #[cfg(any(target_os = "android", target_os = "ios"))]
-    home.voice.audio.set_settings(settings.clone());
+    if let Cow::Owned(settings) = settings {
+        home.voice.audio.set_settings(settings);
+    }
     if let Some(text) = home.voice.camera.problem.take() {
         home.toast = Some((text, ctx.input(|input| input.time) + 6.0));
     }

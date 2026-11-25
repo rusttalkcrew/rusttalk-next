@@ -2,6 +2,7 @@
 //! Capture runs while the call has the camera on or the Video tab is open.
 
 use std::{
+    borrow::Cow,
     sync::{Arc, Mutex},
     thread,
 };
@@ -132,7 +133,7 @@ impl Camera {
     pub fn update(
         &mut self,
         ctx: &egui::Context,
-        settings: &mut Settings,
+        settings: &mut Cow<'_, Settings>,
         in_call: bool,
         preview: bool,
     ) -> Option<Change> {
@@ -169,19 +170,19 @@ impl Camera {
                         && running.config.0 == settings.camera
                         && self.published != Some(running.serial)
                     {
-                        settings.camera = Some(capture.name().into());
+                        settings.to_mut().camera = Some(capture.name().into());
                         running.config.0 = settings.camera.clone();
                     }
                     if let Some(ok) = capture.poll() {
                         if !ok {
                             self.problem = Some(t!("camera.switch_failed").into());
                         }
-                        settings.camera = Some(capture.name().into());
+                        settings.to_mut().camera = Some(capture.name().into());
                         running.config.0 = settings.camera.clone();
                         self.texture = None;
                     }
                     if capture.busy() {
-                        settings.camera = running.config.0.clone();
+                        settings.to_mut().camera = running.config.0.clone();
                     }
                     if !capture.busy() && running.config.0 != settings.camera {
                         capture.select(settings.camera.as_deref());
