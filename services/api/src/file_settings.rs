@@ -10,22 +10,84 @@ use sqlx::{SqliteConnection, query, query_as, query_scalar};
 use crate::{
     ApiError, ApiResult, App,
     auth::{authenticate, authenticate_read},
-    files::setting,
+    files::{Files, optional_setting},
     payload,
     roles::{self, Permission},
 };
 
-pub fn ceilings() -> Result<FileLimits> {
-    Ok(FileLimits {
-        max_file_bytes: setting("RUSTTALK_FILE_MAX_BYTES", 32 * 1024 * 1024)?,
-        member_storage_bytes: setting("RUSTTALK_FILE_MEMBER_BYTES", 500 * 1024 * 1024)?,
-        server_storage_bytes: setting("RUSTTALK_FILE_SERVER_BYTES", 5 * 1024 * 1024 * 1024)?,
-        retention_secs: setting("RUSTTALK_FILE_TTL_SECS", 30 * 24 * 60 * 60)?,
-        max_stickers: setting("RUSTTALK_STICKER_MAX", 50)?,
-    })
+/// Limits that apply until someone with Manage Server saves their own.
+const DEFAULTS: FileLimits = FileLimits {
+    max_file_bytes: 32 * 1024 * 1024,
+    member_storage_bytes: 500 * 1024 * 1024,
+    server_storage_bytes: 5 * 1024 * 1024 * 1024,
+    retention_secs: 30 * 24 * 60 * 60,
+    max_stickers: 50,
+};
+
+/// The host's ceilings and the defaults. A ceiling exists only when the operator set
+/// its variable, which is then also the default (as it always was). Without one the
+/// owner may choose anything up to `FileLimits::MAX`.
+pub fn host() -> Result<(FileLimits, FileLimits)> {
+    host_from(optional_setting)
 }
 
-pub async fn effective(db: &mut SqliteConnection, ceilings: FileLimits) -> ApiResult<FileLimits> {
+fn host_from(setting: impl Fn(&str) -> Result<Option<i64>>) -> Result<(FileLimits, FileLimits)> {
+    let pick = |name: &str, default: i64, max: i64| -> Result<(i64, i64)> {
+        Ok(match setting(name)? {
+            Some(value) => {
+                if value > max {
+                    tracing::warn!(
+                        name,
+                        max,
+                        "file limit above what RustTalk supports; using the maximum"
+                    );
+                }
+                let value = value.min(max);
+                (value, value)
+            }
+            None => (max, default),
+        })
+    };
+    let (max, defaults) = (FileLimits::MAX, DEFAULTS);
+    let file = pick(
+        "RUSTTALK_FILE_MAX_BYTES",
+        defaults.max_file_bytes,
+        max.max_file_bytes,
+    )?;
+    let member = pick(
+        "RUSTTALK_FILE_MEMBER_BYTES",
+        defaults.member_storage_bytes,
+        max.member_storage_bytes,
+    )?;
+    let server = pick(
+        "RUSTTALK_FILE_SERVER_BYTES",
+        defaults.server_storage_bytes,
+        max.server_storage_bytes,
+    )?;
+    let retention = pick(
+        "RUSTTALK_FILE_TTL_SECS",
+        defaults.retention_secs,
+        max.retention_secs,
+    )?;
+    let stickers = pick(
+        "RUSTTALK_STICKER_MAX",
+        defaults.max_stickers,
+        max.max_stickers,
+    )?;
+    let limits = |pick: fn((i64, i64)) -> i64| FileLimits {
+        max_file_bytes: pick(file),
+        member_storage_bytes: pick(member),
+        server_storage_bytes: pick(server),
+        retention_secs: pick(retention),
+        max_stickers: pick(stickers),
+    };
+    Ok((
+        limits(|(ceiling, _)| ceiling),
+        limits(|(_, default)| default),
+    ))
+}
+
+pub async fn effective(db: &mut SqliteConnection, files: &Files) -> ApiResult<FileLimits> {
     let (max_file_bytes, member_storage_bytes, server_storage_bytes, retention_secs, max_stickers) =
         query_as::<
             _,
@@ -42,13 +104,30 @@ pub async fn effective(db: &mut SqliteConnection, ceilings: FileLimits) -> ApiRe
         )
         .fetch_one(db)
         .await?;
-    let limit = |saved: Option<i64>, ceiling| saved.unwrap_or(ceiling).min(ceiling);
+    let (ceilings, defaults) = (files.ceilings, files.defaults);
+    let limit = |saved: Option<i64>, default: i64, ceiling| saved.unwrap_or(default).min(ceiling);
     Ok(FileLimits {
-        max_file_bytes: limit(max_file_bytes, ceilings.max_file_bytes),
-        member_storage_bytes: limit(member_storage_bytes, ceilings.member_storage_bytes),
-        server_storage_bytes: limit(server_storage_bytes, ceilings.server_storage_bytes),
-        retention_secs: limit(retention_secs, ceilings.retention_secs),
-        max_stickers: limit(max_stickers, ceilings.max_stickers),
+        max_file_bytes: limit(
+            max_file_bytes,
+            defaults.max_file_bytes,
+            ceilings.max_file_bytes,
+        ),
+        member_storage_bytes: limit(
+            member_storage_bytes,
+            defaults.member_storage_bytes,
+            ceilings.member_storage_bytes,
+        ),
+        server_storage_bytes: limit(
+            server_storage_bytes,
+            defaults.server_storage_bytes,
+            ceilings.server_storage_bytes,
+        ),
+        retention_secs: limit(
+            retention_secs,
+            defaults.retention_secs,
+            ceilings.retention_secs,
+        ),
+        max_stickers: limit(max_stickers, defaults.max_stickers, ceilings.max_stickers),
     })
 }
 
@@ -61,7 +140,7 @@ pub async fn used_bytes(db: &mut SqliteConnection) -> ApiResult<i64> {
 pub async fn get(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<FileSettings>> {
     let (mut tx, _) = authenticate_read(&app, &headers).await?;
     let ceilings = app.files.ceilings;
-    let limits = effective(&mut tx, ceilings).await?;
+    let limits = effective(&mut tx, &app.files).await?;
     let used_bytes = used_bytes(&mut tx).await?;
     tx.commit().await?;
     Ok(Json(FileSettings {
@@ -130,6 +209,71 @@ mod tests {
     use super::*;
     use crate::testing::{app, as_person, person};
 
+    /// What the host sets through the environment: ceilings that are also the defaults.
+    fn set_host(app: &mut App, limits: FileLimits) {
+        let files = std::sync::Arc::get_mut(&mut app.files).unwrap();
+        files.ceilings = limits;
+        files.defaults = limits;
+    }
+
+    #[test]
+    fn host_ceilings_exist_only_when_the_operator_sets_them() -> anyhow::Result<()> {
+        assert_eq!(host_from(|_| Ok(None))?, (FileLimits::MAX, DEFAULTS));
+        let (ceilings, defaults) = host_from(|name| {
+            Ok(match name {
+                "RUSTTALK_FILE_SERVER_BYTES" => Some(10 << 30),
+                // More than one attachment can hold: the technical maximum applies.
+                "RUSTTALK_FILE_MAX_BYTES" => Some(64 << 20),
+                _ => None,
+            })
+        })?;
+        let expected = FileLimits {
+            server_storage_bytes: 10 << 30,
+            ..FileLimits::MAX
+        };
+        assert_eq!(ceilings, expected);
+        assert_eq!(
+            defaults,
+            FileLimits {
+                server_storage_bytes: 10 << 30,
+                max_file_bytes: FileLimits::MAX.max_file_bytes,
+                ..DEFAULTS
+            }
+        );
+        assert!(host_from(|_| Err(anyhow::anyhow!("invalid"))).is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn without_host_ceilings_owners_choose_any_limit() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let app = app(dir.path(), 1).await?;
+        let Json(initial) = get(State(app.clone()), as_person(1)).await?;
+        assert_eq!(initial.limits, DEFAULTS);
+        assert_eq!(initial.ceilings, FileLimits::MAX);
+
+        let generous = FileLimits {
+            max_file_bytes: 64 << 20,
+            member_storage_bytes: 50 << 30,
+            server_storage_bytes: 2 << 40,
+            retention_secs: 3650 * 86_400,
+            max_stickers: 5000,
+        };
+        let Json(saved) = set(State(app.clone()), as_person(1), Ok(Json(generous))).await?;
+        assert_eq!(
+            saved.limits,
+            FileLimits {
+                max_file_bytes: FileLimits::MAX.max_file_bytes,
+                ..generous
+            }
+        );
+        let Json(saved) = set(State(app.clone()), as_person(1), Ok(Json(FileLimits::MAX))).await?;
+        assert_eq!(saved.limits, FileLimits::MAX);
+        // The largest values still work in the expiry sweep without overflowing.
+        crate::files::expire_batch(&app).await?;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn members_can_read_but_only_managers_can_save_and_ceilings_apply_twice()
     -> anyhow::Result<()> {
@@ -142,7 +286,7 @@ mod tests {
             retention_secs: 60,
             max_stickers: 8,
         };
-        std::sync::Arc::get_mut(&mut app.files).unwrap().ceilings = host;
+        set_host(&mut app, host);
         assert_eq!(
             get(State(app.clone()), HeaderMap::new())
                 .await
@@ -202,7 +346,7 @@ mod tests {
             retention_secs: 30,
             max_stickers: 3,
         };
-        std::sync::Arc::get_mut(&mut app.files).unwrap().ceilings = lowered_host;
+        set_host(&mut app, lowered_host);
         let Json(after) = get(State(app), as_person(2)).await?;
         assert_eq!(after.limits, lowered_host);
         assert_eq!(after.ceilings, lowered_host);

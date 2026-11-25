@@ -234,7 +234,12 @@ impl Form {
         for (index, (label, field)) in labels.into_iter().zip(&mut self.fields).enumerate() {
             let ceiling = ceilings[index];
             let value = saved[index];
-            let help = t!("admin.host_ceiling", limit = field.unit.display(ceiling));
+            let limit = field.unit.display(ceiling);
+            let help = match Ceiling::of(index, ceiling) {
+                Ceiling::Host => t!("admin.host_ceiling", limit = limit),
+                Ceiling::FileFormat => t!("admin.app_ceiling", limit = limit),
+                Ceiling::None => String::new(),
+            };
             ui::setting_row(ui, label, &help, |ui| {
                 if !editable {
                     ui.label(field.unit.display(value));
@@ -264,14 +269,24 @@ impl Form {
                     });
                     match field.proposed(value, ceiling) {
                         Ok(value) => proposed[index] = Some(value),
-                        Err(error) => ui::error_text(
+                        Err(Invalid::Ceiling) => {
+                            let error = match Ceiling::of(index, ceiling) {
+                                Ceiling::Host => t!(
+                                    "admin.limit_above_host",
+                                    limit = &limit,
+                                    setting = HOST_SETTINGS[index]
+                                ),
+                                Ceiling::FileFormat => t!("admin.limit_above_app", limit = &limit),
+                                Ceiling::None => t!("admin.limit_too_big").into(),
+                            };
+                            ui::error_text(ui, Some(&error));
+                        }
+                        Err(Invalid::Number) => ui::error_text(
                             ui,
-                            Some(match error {
-                                Invalid::Ceiling => t!("admin.limit_above_ceiling"),
-                                Invalid::Number if field.unit == Unit::Stickers => {
-                                    t!("admin.limit_positive_whole")
-                                }
-                                Invalid::Number => t!("admin.limit_positive"),
+                            Some(if field.unit == Unit::Stickers {
+                                t!("admin.limit_positive_whole")
+                            } else {
+                                t!("admin.limit_positive")
                             }),
                         ),
                     }
@@ -304,6 +319,38 @@ impl Form {
         .inner
         .then_some(next)
         .flatten()
+    }
+}
+
+/// The server variables behind each ceiling, in `values` order.
+const HOST_SETTINGS: [&str; 5] = [
+    "RUSTTALK_FILE_MAX_BYTES",
+    "RUSTTALK_FILE_MEMBER_BYTES",
+    "RUSTTALK_FILE_SERVER_BYTES",
+    "RUSTTALK_FILE_TTL_SECS",
+    "RUSTTALK_STICKER_MAX",
+];
+
+/// Where a limit's ceiling comes from. Servers without a host ceiling report the most
+/// RustTalk supports; for most limits that is far beyond anything worth mentioning.
+#[derive(Debug, PartialEq, Eq)]
+enum Ceiling {
+    /// The server's host set it.
+    Host,
+    /// What one attachment can hold.
+    FileFormat,
+    None,
+}
+
+impl Ceiling {
+    fn of(index: usize, ceiling: i64) -> Self {
+        if ceiling < values(FileLimits::MAX)[index] {
+            Self::Host
+        } else if index == 0 {
+            Self::FileFormat
+        } else {
+            Self::None
+        }
     }
 }
 
@@ -341,6 +388,36 @@ mod tests {
         };
         assert_eq!(field.proposed(86_400, 172_800), Ok(129_600));
         assert_eq!(field.proposed(86_400, 129_599), Err(Invalid::Ceiling));
+    }
+
+    #[test]
+    fn only_a_host_set_ceiling_is_called_the_host_limit() {
+        let max = values(FileLimits::MAX);
+        assert_eq!(Ceiling::of(0, max[0]), Ceiling::FileFormat);
+        assert_eq!(Ceiling::of(0, 16 * 1024 * 1024), Ceiling::Host);
+        for (index, &max) in max.iter().enumerate().skip(1) {
+            assert_eq!(Ceiling::of(index, max), Ceiling::None);
+            assert_eq!(Ceiling::of(index, max - 1), Ceiling::Host);
+        }
+        // An older server always reports its host's ceilings.
+        assert_eq!(Ceiling::of(2, 5_368_709_120), Ceiling::Host);
+
+        // Without a host ceiling, sizes far beyond the old defaults are fine.
+        let field = Field {
+            text: "2048".into(),
+            unit: Unit::Gb,
+        };
+        assert_eq!(field.proposed(1, max[2]), Ok(2048 * files::GIB as i64));
+        let field = Field {
+            text: "99999999999999999999".into(),
+            unit: Unit::Gb,
+        };
+        assert_eq!(field.proposed(1, max[2]), Err(Invalid::Ceiling));
+        let field = Field {
+            text: "3650".into(),
+            unit: Unit::Days,
+        };
+        assert_eq!(field.proposed(1, max[3]), Ok(3650 * 86_400));
     }
 
     #[test]

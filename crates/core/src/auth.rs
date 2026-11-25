@@ -100,6 +100,20 @@ pub struct FileLimits {
     pub max_stickers: i64,
 }
 
+impl FileLimits {
+    /// The highest limits RustTalk can work with; the server reports them as its
+    /// ceilings when its host set none. A file stays within one attachment's
+    /// ciphertext, and retention stays far below where `created_at + retention`
+    /// overflows or reaches the never-expires marker (about 2,700 years).
+    pub const MAX: Self = Self {
+        max_file_bytes: 32 * 1024 * 1024,
+        member_storage_bytes: i64::MAX,
+        server_storage_bytes: i64::MAX,
+        retention_secs: 1_000_000 * 86_400,
+        max_stickers: i64::MAX,
+    };
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FileSettings {
     pub limits: FileLimits,

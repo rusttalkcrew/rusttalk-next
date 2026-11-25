@@ -214,25 +214,36 @@ Keep the API behind this trusted edge.
 
 ## Stored file limits
 
-Set these positive integer environment variables on the API to set the host
-ceilings. They are also the defaults until a member with Manage Server saves
-limits in **Server settings → Files**. The server clamps saved limits to the
-current ceilings when saving and when using them. The dev Compose file passes
-the variables through, and `make e2e` applies smaller quota and lifetime values
-to its disposable stack.
+A member with Manage Server sets these limits in **Server settings → Files**,
+as high as they like. Until they save their own, the defaults below apply.
 
-| Variable | Default |
+To cap what owners can choose, set the matching positive integer variable on
+the API. A set variable is a host ceiling: it is also the default, and the
+server clamps saved limits to it when saving and when using them. Unset (or
+empty) means no host ceiling, only what RustTalk supports: 32 MiB per file,
+the most one attachment holds, and 1,000,000 days of retention. A higher
+variable is lowered to these with a warning in the log. The Compose
+files pass the variables through only when set, and `make e2e` sets smaller
+quota and lifetime values for its first disposable stack and none for the
+second.
+
+| Variable | Default when no limit is saved |
 | --- | --- |
-| `RUSTTALK_FILE_MAX_BYTES` | 33,554,432 (32 MiB per blob) |
+| `RUSTTALK_FILE_MAX_BYTES` | 33,554,432 (32 MiB per blob, also the maximum) |
 | `RUSTTALK_FILE_MEMBER_BYTES` | 524,288,000 (500 MiB per uploader) |
 | `RUSTTALK_FILE_SERVER_BYTES` | 5,368,709,120 (5 GiB per server) |
 | `RUSTTALK_FILE_TTL_SECS` | 2,592,000 (30 days from successful upload) |
 
+Existing servers keep their old ceilings while these variables are set. Up to
+v0.5.0, `docker-compose.yml` set all five (to the defaults above) even when
+`.env` did not, and the automatic updater does not replace your Compose file.
+To let owners go higher, use the current `docker-compose.yml`, remove the
+variables from `.env`, then run `docker compose up -d`. Without a ceiling,
+owners can fill the disk, so keep an eye on free space.
+
 Quotas count committed ciphertext, including tags and thumbnails. At the
 default upload limit, 64 KiB chunks leave up to 32 MiB minus 8 KiB for file
-plaintext. The current client enforces a 32 MiB ciphertext limit even on a
-server configured to accept more. Allow disk space for the database, WAL and
-up to four concurrent staging blobs in addition to the quota. The API refuses
+plaintext. Allow disk space for the database, WAL and up to four concurrent staging blobs in addition to the quota. The API refuses
 downloads at expiry and sweeps eligible blobs and their rows at least every
 30 seconds while idle, in batches of 64. Expired blobs count toward quotas
 until swept. Lowering a size or quota limit keeps existing files and limits
@@ -250,8 +261,9 @@ uncommitted blobs.
 | `RUSTTALK_EMOJI_MAX_BYTES` | 262,144 (256 KiB per encrypted picture, also the maximum) |
 | `RUSTTALK_EMOJI_PACKS_MAX` | 20 packs |
 
-`RUSTTALK_STICKER_MAX` is the host ceiling for the sticker limit in
-**Server settings → Files** and the default until a limit is saved. Pictures
+`RUSTTALK_STICKER_MAX`, when set, is the host ceiling for the sticker limit in
+**Server settings → Files** and the default until a limit is saved. Unset, the
+default is 50 and owners may choose any number. Pictures
 live in `emoji/` on the API volume. Lowering a count keeps existing pictures
 and stops new uploads of that kind until the count is below the limit. On
 startup the API removes pictures without a database row.

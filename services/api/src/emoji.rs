@@ -139,7 +139,7 @@ pub struct List {
 
 pub async fn list(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<List>> {
     let (mut tx, _) = authenticate_read(&app, &headers).await?;
-    let max_stickers = file_settings::effective(&mut tx, app.files.ceilings)
+    let max_stickers = file_settings::effective(&mut tx, &app.files)
         .await?
         .max_stickers;
     let rows: Vec<Row> = query_as(
@@ -257,7 +257,7 @@ pub async fn add(
         Kind::Emoji => ("emoji", limits.max_emoji, "emoji_limit"),
         Kind::Sticker => (
             "sticker",
-            file_settings::effective(&mut tx, app.files.ceilings)
+            file_settings::effective(&mut tx, &app.files)
                 .await?
                 .max_stickers,
             "sticker_limit",
@@ -721,7 +721,7 @@ mod tests {
             as_person(1),
             Ok(Json(rusttalk_core::auth::FileLimits {
                 max_stickers: 1,
-                ..app.files.ceilings
+                ..app.files.defaults
             })),
         )
         .await?;

@@ -45,6 +45,7 @@ use crate::{
 pub struct Files {
     dir: PathBuf,
     pub(crate) ceilings: FileLimits,
+    pub(crate) defaults: FileLimits,
     uploads: Semaphore,
     uploaders: Mutex<HashMap<[u8; 32], usize>>,
 }
@@ -81,9 +82,11 @@ impl Drop for UploadSlot<'_> {
 
 impl Files {
     pub async fn open(data: &Path, db: &SqlitePool) -> Result<Self> {
+        let (ceilings, defaults) = file_settings::host()?;
         let files = Self {
             dir: data.join("files"),
-            ceilings: file_settings::ceilings()?,
+            ceilings,
+            defaults,
             uploads: Semaphore::new(4),
             uploaders: Mutex::default(),
         };
@@ -131,15 +134,21 @@ impl Files {
 }
 
 pub(crate) fn setting(name: &str, default: i64) -> Result<i64> {
+    Ok(optional_setting(name)?.unwrap_or(default))
+}
+
+/// A positive integer variable; unset or empty (as Compose passes `${NAME:-}`) is `None`.
+pub(crate) fn optional_setting(name: &str) -> Result<Option<i64>> {
     let value = match env::var(name) {
+        Ok(value) if value.is_empty() => return Ok(None),
         Ok(value) => value
             .parse::<i64>()
             .with_context(|| format!("invalid {name}"))?,
-        Err(env::VarError::NotPresent) => default,
+        Err(env::VarError::NotPresent) => return Ok(None),
         Err(error) => return Err(error).with_context(|| format!("invalid {name}")),
     };
     ensure!(value > 0, "{name} must be positive");
-    Ok(value)
+    Ok(Some(value))
 }
 
 #[derive(Deserialize)]
@@ -159,7 +168,7 @@ pub async fn upload(
     let (mut tx, actor) = authenticate(&app, &headers).await?;
     messages::require_write(&mut tx, &actor, &channel).await?;
     let files = &app.files;
-    let max_file = file_settings::effective(&mut tx, files.ceilings)
+    let max_file = file_settings::effective(&mut tx, files)
         .await?
         .max_file_bytes;
     tx.commit().await?;
@@ -217,7 +226,7 @@ pub async fn upload(
     // Reauthorize and include quota checks, ID reservation and file installation in one write transaction.
     let (mut tx, actor) = authenticate(&app, &headers).await?;
     messages::require_write(&mut tx, &actor, &channel).await?;
-    let limits = file_settings::effective(&mut tx, files.ceilings).await?;
+    let limits = file_settings::effective(&mut tx, files).await?;
     if size > limits.max_file_bytes {
         return Err(too_large());
     }
@@ -510,7 +519,7 @@ pub(crate) async fn unshare_from(
     person: &[u8],
     device: Option<&[u8]>,
 ) -> ApiResult<()> {
-    let retention = file_settings::effective(&mut *db, app.files.ceilings)
+    let retention = file_settings::effective(&mut *db, &app.files)
         .await?
         .retention_secs;
     let ids: Vec<String> = query_scalar(
@@ -615,7 +624,7 @@ pub async fn expire(app: App) {
 
 pub(crate) async fn expire_batch(app: &App) -> ApiResult<()> {
     let mut tx = store::write(&app.db).await?;
-    let limits = file_settings::effective(&mut tx, app.files.ceilings).await?;
+    let limits = file_settings::effective(&mut tx, &app.files).await?;
     let now = store::now()?;
     // Shorter retention also applies to files uploaded before the setting changed.
     // Kept files (shared ones and a page's pictures) never expire; they stay until
@@ -889,7 +898,7 @@ mod tests {
             .fetch_one(&app.db)
             .await?;
         assert_eq!(shared, 0);
-        let retention = app.files.ceilings.retention_secs;
+        let retention = app.files.defaults.retention_secs;
         assert_eq!(kept("seed2-1").await?, 100 + retention);
 
         // A revoked device's shared files go back to normal expiry; another device's stay.

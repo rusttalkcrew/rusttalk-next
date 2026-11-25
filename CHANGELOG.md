@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Server owners can set file limits (storage, how long files are kept, stickers, and file size up to 32 MB) as high as they like in Server settings, unless the server's host set a cap; the settings now say what that cap is and how the host can raise it.
+
 ## v0.5.0 - 2026-11-25
 
 - Android test builds install as a separate "RustTalk Test" app, so they no longer block installing the release app.

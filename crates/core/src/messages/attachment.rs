@@ -8,6 +8,7 @@ pub(crate) const TAG_BYTES: usize = 16;
 #[cfg(any(feature = "client", test))]
 pub(crate) const CHUNK_BYTES: u32 = 64 * 1024;
 pub(crate) const MAX_CIPHERTEXT: usize = 32 * 1024 * 1024;
+const _: () = assert!(crate::auth::FileLimits::MAX.max_file_bytes as usize == MAX_CIPHERTEXT);
 pub(crate) const MAX_THUMBNAIL_BYTES: usize = 512 * 1024;
 
 type Result<T> = std::result::Result<T, MessageError>;
