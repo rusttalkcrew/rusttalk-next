@@ -456,6 +456,10 @@ pub async fn delete(
             .await?
             .ok_or(ApiError::not_found("message_not_found"))?;
     if sender != actor.person {
+        // DMs are private to their two people: only the author deletes there.
+        if kind == "dm" {
+            return Err(ApiError::forbidden("permission_denied"));
+        }
         roles::authority(&mut tx, &actor.person)
             .await?
             .require(Permission::DeleteMessages)?;

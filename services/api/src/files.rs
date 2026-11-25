@@ -377,15 +377,15 @@ pub async fn delete(
     let (mut tx, actor) = authenticate(&app, &headers).await?;
     let row = lookup(&mut tx, &id, actor.at).await?;
     let moderated = row.uploader != actor.person;
-    let mut dm = None;
     if moderated {
         // A moderator removes files of the message being deleted, named by its sender, so a
         // message that references someone else's file cannot get that file removed.
         if uploader.is_none_or(|person| row.uploader != person) {
             return Err(missing());
         }
+        // DMs are private to their two people: only the uploader deletes there.
         if messages::chat_kind(&mut tx, &actor, &row.channel_id).await? == "dm" {
-            dm = Some(row.channel_id.clone());
+            return Err(ApiError::forbidden("permission_denied"));
         }
         roles::authority(&mut tx, &actor.person)
             .await?
@@ -396,7 +396,7 @@ pub async fn delete(
             app.files.remove(&mut tx, &id).await?;
             // Moderator deletes are audited like message deletes; the audit holds ids only.
             if moderated {
-                let audit_id = store::audit(
+                store::audit(
                     &mut tx,
                     &actor.person,
                     "file_deleted",
@@ -405,13 +405,6 @@ pub async fn delete(
                     actor.at,
                 )
                 .await?;
-                if let Some(channel) = dm {
-                    query("UPDATE audit_log SET dm_channel_id = ? WHERE id = ?")
-                        .bind(channel)
-                        .bind(audit_id)
-                        .execute(&mut *tx)
-                        .await?;
-                }
             }
             tx.commit().await?;
             tracing::info!(id, size = row.size, "file deleted");

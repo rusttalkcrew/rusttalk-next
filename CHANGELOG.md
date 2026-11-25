@@ -21,6 +21,7 @@ Unreleased under the new version and date.
 - On Android, Back now closes menus, dialogs and settings pages and returns to the channel list before leaving the app.
 - Invite links stop working when the person who made them leaves, is kicked or banned, or loses the right to invite.
 - Pressing Escape in a settings field or clicking outside Settings no longer throws away what you typed: unsaved changes ask before they are discarded.
+- In a DM, only the person who wrote a message or sent a file can delete it, also when the other person is a moderator.
 
 ## v0.4.0 - 2026-11-24
 
