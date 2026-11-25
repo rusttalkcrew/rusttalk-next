@@ -7374,6 +7374,7 @@ mod tests {
     mod audit_log;
     mod avatars;
     mod call_controls;
+    mod dialogs;
     mod emoji;
     mod image_reload;
     mod long_chat;

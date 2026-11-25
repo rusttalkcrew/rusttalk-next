@@ -33,6 +33,7 @@ Unreleased under the new version and date.
 - Phones: save a file from a message to Downloads on Android, or share it from iOS. The "Open" button that did nothing on phones is gone.
 - Server settings open faster: the audit log loads only on its own page, newest 50 first, with Show older for more
 - The Members list in server settings is readable on phones: names get the row, roles sit under them and the presence dot moves onto the picture.
+- Dialogs no longer get cut off on short windows: they scroll, phones held sideways show them full screen, and the close button is easier to tap on tablets.
 
 ## v0.4.0 - 2026-11-24
 

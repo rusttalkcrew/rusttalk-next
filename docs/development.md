@@ -85,9 +85,10 @@ most of it:
 - `ui::Width::of(ctx)` is the window's class: `Phone` below 600 points (one
   column at a time, see [mobile.md](mobile.md#phone-layout)), `Tablet` below
   900 (one sidebar at a time), `Desktop` above. `ui::is_phone` is the same test.
-- `ui::dialog` is a centred dialog on wide windows and a full-screen sheet with
-  a top bar (title, ×) on phones; `ui::sheet`, `ui::sheet_bar` and
-  `ui::sheet_page` build the same for other screens. Settings windows show the
+- `ui::dialog` is a centred dialog on wide windows that scrolls when the window
+  is short, and a full-screen sheet with a top bar (title, ×) on phones and on
+  touch screens under 600 points tall (a phone held sideways); `ui::sheet`,
+  `ui::sheet_bar` and `ui::sheet_page` build the same for other screens. Settings windows show the
   page list first on phones, then the page with Back.
 - `ui::setting_row` puts its control under the label and help when the row is
   narrow, or when the control would squeeze the text.
