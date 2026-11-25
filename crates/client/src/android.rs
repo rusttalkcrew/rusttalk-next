@@ -11,7 +11,10 @@
 #[cfg(target_os = "android")]
 pub use activity::*;
 
-use std::fmt::{self, Write as _};
+use std::{
+    fmt::{self, Write as _},
+    time::Duration,
+};
 
 use eframe::egui::{
     Context, Event, Id, Key, Modifiers,
@@ -531,6 +534,49 @@ impl Focus {
     }
 }
 
+/// How often a frame reads the keyboard's buffer while the keyboard is up:
+/// nothing tells the app that it changed.
+const TYPING_POLL: Duration = Duration::from_millis(40);
+/// While a field has focus but the keyboard is down, how often the insets are
+/// read to see it come up (it can open late, or not at all with a hardware
+/// keyboard, whose keys wake the app themselves).
+const KEYBOARD_CHECK: Duration = Duration::from_millis(500);
+
+/// What a frame does about the on-screen keyboard.
+#[derive(Debug, PartialEq)]
+pub struct KeyboardPlan {
+    /// The keyboard was seen up for the focused field.
+    pub shown: bool,
+    /// Closed without the app hearing of it (Back): end the field's focus, so
+    /// the app stops polling and a tap on the field opens the keyboard again.
+    pub surrender: bool,
+    /// When the next frame is due, if anything here needs one.
+    pub poll: Option<Duration>,
+}
+
+/// `ime`: a field wants text. `shown`: its keyboard was seen up since it got
+/// focus. `inset`: the keyboard's height now, in pixels. `settling`: insets
+/// changed a moment ago and are read every frame (the keyboard slides).
+pub fn keyboard_plan(ime: bool, shown: bool, inset: i32, settling: bool) -> KeyboardPlan {
+    let up = ime && inset > 0;
+    let shown = ime && (shown || up);
+    // Only once the insets settled: a keyboard hidden and shown again (a quick
+    // second tap) passes through 0 on the way.
+    let surrender = shown && !up && !settling;
+    let poll = if settling || up {
+        Some(TYPING_POLL)
+    } else if ime && !surrender {
+        Some(KEYBOARD_CHECK)
+    } else {
+        None
+    };
+    KeyboardPlan {
+        shown: shown && !surrender,
+        surrender,
+        poll,
+    }
+}
+
 #[cfg(target_os = "android")]
 mod activity {
     use std::{
@@ -539,7 +585,7 @@ mod activity {
         slice,
         sync::{
             LazyLock, Mutex, MutexGuard, OnceLock,
-            atomic::{AtomicBool, Ordering},
+            atomic::{AtomicBool, AtomicI32, Ordering},
         },
         time::{Duration, Instant},
     };
@@ -565,8 +611,9 @@ mod activity {
     };
 
     use super::{
-        Bridge, Buffer, Focus, Kind, MAX_TYPED, NATIVE_BUFFER, Step, copied, cursor, forget_shared,
-        has_shared, set_cursor, start, whole_chars, wipe_text,
+        Bridge, Buffer, Focus, KEYBOARD_CHECK, Kind, MAX_TYPED, NATIVE_BUFFER, Step, copied,
+        cursor, forget_shared, has_shared, keyboard_plan, set_cursor, start, whole_chars,
+        wipe_text,
     };
 
     /// The keyboard's action key (Done): Enter for egui.
@@ -596,19 +643,17 @@ mod activity {
     static INSETS: Mutex<[i32; 4]> = Mutex::new([0; 4]);
     /// The window or the keyboard changed: follow the insets for a moment.
     static INSETS_STALE: AtomicBool = AtomicBool::new(true);
+    /// The keyboard's height (its bottom inset), in pixels.
+    static KEYBOARD_INSET: AtomicI32 = AtomicI32::new(0);
     /// `WindowInsetsCompat.Type`: status bars 1, navigation bars 2, caption bar 4,
     /// keyboard 8, display cutout 128.
-    const COVERED: i32 = 1 | 2 | 4 | 8 | 128;
+    const COVERED: i32 = 1 | 2 | 4 | KEYBOARD_TYPE | 128;
+    const KEYBOARD_TYPE: i32 = 8;
     /// `EditorInfo.IME_ACTION_DONE`, in `imeOptions`: the keyboard shows Done, which
     /// is Enter.
     const ACTION_DONE: i32 = 6;
     /// How long insets are read every frame after a change (the keyboard slides).
     const INSETS_SETTLE: Duration = Duration::from_millis(600);
-    /// While the keyboard is up it can be closed with Back, which tells the app nothing.
-    const KEYBOARD_CHECK: Duration = Duration::from_millis(500);
-    /// How often a frame reads the keyboard's buffer while a field is focused:
-    /// nothing tells the app that it changed.
-    const TYPING_POLL: Duration = Duration::from_millis(40);
     /// A start-over the Java thread hasn't confirmed by then is sent again.
     const RESTART_RETRY: Duration = Duration::from_millis(300);
     /// Frames a newly focused field gets to share its text before the buffer
@@ -644,6 +689,8 @@ mod activity {
         focus_moves: u64,
         actions: Option<i32>,
         ime: bool,
+        /// The keyboard was seen up for the focused field (`keyboard_plan`).
+        shown: bool,
         insets_until: Instant,
         insets_next: Instant,
         /// Insets at the last frame start, to bring the field back into view.
@@ -664,6 +711,7 @@ mod activity {
                 focus_moves: 0,
                 actions: None,
                 ime: false,
+                shown: false,
                 insets_until: Instant::now(),
                 insets_next: Instant::now(),
                 insets: [0; 4],
@@ -1107,30 +1155,38 @@ mod activity {
         let (main, ctx) = (app.clone(), ctx.clone());
         app.run_on_java_main_thread(Box::new(move || {
             let insets = java(&main, |env, activity| {
-                let insets = env
-                    .call_method(
-                        activity,
-                        jni_str!("getWindowInsets"),
-                        jni_sig!("(I)Landroidx/core/graphics/Insets;"),
-                        &[JValue::Int(COVERED)],
-                    )?
-                    .l()?;
-                if insets.is_null() {
-                    return Ok([0; 4]);
-                }
-                let mut side =
-                    |name: &jni::strings::JNIStr| env.get_field(&insets, name, jni_sig!("I"))?.i();
-                Ok([
-                    side(jni_str!("left"))?,
-                    side(jni_str!("top"))?,
-                    side(jni_str!("right"))?,
-                    side(jni_str!("bottom"))?,
-                ])
+                let mut read = |types: i32| -> jni::errors::Result<[i32; 4]> {
+                    let insets = env
+                        .call_method(
+                            activity,
+                            jni_str!("getWindowInsets"),
+                            jni_sig!("(I)Landroidx/core/graphics/Insets;"),
+                            &[JValue::Int(types)],
+                        )?
+                        .l()?;
+                    if insets.is_null() {
+                        return Ok([0; 4]);
+                    }
+                    let mut side = |name: &jni::strings::JNIStr| {
+                        env.get_field(&insets, name, jni_sig!("I"))?.i()
+                    };
+                    Ok([
+                        side(jni_str!("left"))?,
+                        side(jni_str!("top"))?,
+                        side(jni_str!("right"))?,
+                        side(jni_str!("bottom"))?,
+                    ])
+                };
+                let covered = read(COVERED)?;
+                let [.., keyboard] = read(KEYBOARD_TYPE)?;
+                Ok((covered, keyboard))
             });
             match insets {
-                Ok(insets) => {
+                Ok((insets, keyboard)) => {
                     let mut current = lock(&INSETS);
-                    if *current != insets {
+                    let keyboard_moved =
+                        KEYBOARD_INSET.swap(keyboard, Ordering::Relaxed) != keyboard;
+                    if keyboard_moved || *current != insets {
                         *current = insets;
                         INSETS_STALE.store(true, Ordering::Relaxed);
                         ctx.request_repaint();
@@ -1284,9 +1340,6 @@ mod activity {
                 app.hide_soft_input(false);
             }
         }
-        if Instant::now() < keyboard.insets_until || ime.is_some() {
-            ctx.request_repaint_after(TYPING_POLL);
-        }
         // Focus and the keyboard type, decided together: leaving a secret field
         // wipes the buffer before the next field's keyboard type is set.
         let focused = ctx.memory(|memory| memory.focused());
@@ -1302,6 +1355,26 @@ mod activity {
         }
         if !steps.is_empty() {
             run_steps(app, steps, keyboard.focus_moves);
+        }
+        // Back closes the keyboard without telling the app: seeing it gone ends
+        // the field's focus, so the 40 ms typing poll stops.
+        let settling =
+            Instant::now() < keyboard.insets_until || INSETS_STALE.load(Ordering::Relaxed);
+        let plan = keyboard_plan(
+            ime.is_some(),
+            keyboard.shown && !moved,
+            KEYBOARD_INSET.load(Ordering::Relaxed),
+            settling,
+        );
+        keyboard.shown = plan.shown;
+        if plan.surrender
+            && let Some(field) = focused
+        {
+            ctx.memory_mut(|memory| memory.surrender_focus(field));
+            ctx.request_repaint();
+        }
+        if let Some(poll) = plan.poll {
+            ctx.request_repaint_after(poll);
         }
     }
 }
@@ -1556,6 +1629,54 @@ mod tests {
         assert!(!buffer.text.contains('\u{fffd}'));
         assert_eq!(buffer.text.chars().count(), 10_922);
         assert_eq!(whole_chars(b"ab"), b"ab");
+    }
+
+    #[test]
+    fn keyboard_closed_by_back_ends_focus_and_polling() {
+        let plan = |shown, surrender, poll| KeyboardPlan {
+            shown,
+            surrender,
+            poll,
+        };
+        let (typing, check) = (Some(TYPING_POLL), Some(KEYBOARD_CHECK));
+        // Focus taken, keyboard still sliding in: nothing surrendered.
+        assert_eq!(
+            keyboard_plan(true, false, 0, true),
+            plan(false, false, typing)
+        );
+        // Keyboard up: typing is read every 40 ms, settled or not.
+        assert_eq!(
+            keyboard_plan(true, false, 800, true),
+            plan(true, false, typing)
+        );
+        assert_eq!(
+            keyboard_plan(true, true, 800, false),
+            plan(true, false, typing)
+        );
+        // Back hid it: wait for the insets to settle, then end focus and stop.
+        assert_eq!(
+            keyboard_plan(true, true, 0, true),
+            plan(true, false, typing)
+        );
+        assert_eq!(keyboard_plan(true, true, 0, false), plan(false, true, None));
+        // Focus but the keyboard never came up (hardware keyboard): 500 ms checks.
+        assert_eq!(
+            keyboard_plan(true, false, 0, false),
+            plan(false, false, check)
+        );
+        // No field wants text: no frames, unless the insets are still moving.
+        assert_eq!(
+            keyboard_plan(false, true, 0, false),
+            plan(false, false, None)
+        );
+        assert_eq!(
+            keyboard_plan(false, false, 800, true),
+            plan(false, false, typing)
+        );
+        assert_eq!(
+            keyboard_plan(false, false, 800, false),
+            plan(false, false, None)
+        );
     }
 
     #[test]

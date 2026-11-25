@@ -99,8 +99,12 @@ messages and reading them again after a restart.
   counts only once the Java thread reads back exactly what was set; until then
   the field ignores the buffer, and the start-over is sent again every 300 ms.
   A composed word shows as plain text (egui can't mark a range from outside).
-  While a field is focused the app paints every 40 ms to read the buffer, since
-  nothing else wakes it.
+  While the keyboard is up the app paints every 40 ms to read the buffer, since
+  nothing else wakes it. Back closes the keyboard without telling the app, so
+  every 500 ms it reads the keyboard's height: once that is 0 and settled after
+  the keyboard was up, the field loses focus and the painting stops; a tap on
+  the field opens the keyboard again. A focused field whose keyboard never came
+  up (a hardware keyboard) is checked every 500 ms.
 - **Enter**: winit drops the keyboard's action key, so `MainActivity` (the only
   Java in the app) counts presses of Done (not Next or Search) and the app turns
   each into one Enter for the field that had focus when it came. The key shows
