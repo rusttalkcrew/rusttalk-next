@@ -85,6 +85,8 @@ pub enum Fetch {
     Full,
     /// Every frame shrunk to thumbnail size, to play in the chat.
     Inline,
+    /// The first frame at full size, for the clipboard.
+    Copy,
 }
 
 /// Messages handed to the network that it hasn't sent or given back yet, so a

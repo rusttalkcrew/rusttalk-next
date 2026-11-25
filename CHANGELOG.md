@@ -16,6 +16,7 @@ Unreleased under the new version and date.
 - On phones, your own camera shows only in the call view, and while it is on, tapping the camera button opens a menu to flip it, switch the light or turn it off.
 - "Request control" is greyed out, with the reason, when the sharer turned control requests off or their computer can't be controlled, and a refusal now shows on the shared screen.
 - React to any message with an emoji, end-to-end encrypted: click a reaction to add or remove yours, hover to see who reacted.
+- Right-click or long-press a picture, GIF or sticker in chat to copy it, save it or open it in the viewer; messages can also copy their ID.
 
 ## v0.4.0 - 2026-11-24
 

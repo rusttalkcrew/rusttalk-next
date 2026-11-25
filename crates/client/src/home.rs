@@ -5005,6 +5005,7 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
                 message_channel,
                 profile,
                 |ui| {
+                    let mut shown = Vec::new();
                     if let Some(server) = held_on.map(|i| &servers[i]) {
                         // A link preview must be about one of the message's own links.
                         let links: Vec<String> = match &msg.body {
@@ -5015,7 +5016,7 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
                             _ => Vec::new(),
                         };
                         let server = (&server.address, &server.commands);
-                        files::attachments(ui, files, server, &msg.files, &links);
+                        shown = files::shown_attachments(ui, files, server, &msg.files, &links);
                     }
                     // The server isn't borrowed whole here, so look the offer up by its parts.
                     if msg.live.is_some() {
@@ -5024,6 +5025,7 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
                             .map(|action| (action, msg.replicas.first().cloned()))
                             .or(live.take());
                     }
+                    shown
                 },
             );
             if let Some(chosen) = shown {
@@ -5181,6 +5183,7 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
             follow_invite(servers, view, (joining, invite_text, net), text);
         }
         Some(Pick::Profile(index, author, pick)) => person::apply(home, index, author, pick, now),
+        Some(Pick::Media(action, media)) => files.media_action(ui.ctx(), action, &media),
         None => {}
     }
     act
@@ -5474,6 +5477,8 @@ enum Pick {
     AddReaction(Id),
     /// Add another server's emoji or sticker to this server: name, kind and picture file.
     AddPicture(String, Kind, std::sync::Arc<Vec<u8>>),
+    /// Something picked in a picture's menu.
+    Media(files::MediaAction, Box<files::Media>),
 }
 
 fn composer_id(channel: Id) -> UiId {
@@ -6064,7 +6069,7 @@ fn message(
     embeds: &Embeds,
     channel: Id,
     profile: Option<(usize, person::Person<'_>)>,
-    attachments: impl FnOnce(&mut Ui),
+    attachments: impl FnOnce(&mut Ui) -> Vec<files::Shown>,
 ) -> Option<Pick> {
     let names = |person: &Id| member_name(dir, person);
     let me = dir.me;
@@ -6123,6 +6128,7 @@ fn message(
         .scope_id(ui.make_persistent_id((channel, msg.person, msg.id)))
         .sense(Sense::CLICK);
     let mut trigger = None;
+    let mut media = Vec::new();
     let row = ui.scope_builder(builder, |ui| {
         ui.horizontal_top(|ui| {
             if start {
@@ -6222,7 +6228,7 @@ fn message(
                                 }
                             });
                         }
-                        attachments(ui);
+                        media = attachments(ui);
                     }
                     _ => {
                         ui.label(
@@ -6284,8 +6290,26 @@ fn message(
     } else {
         Vec::new()
     };
-    let menu = trigger.map_or_else(|| row.response.clone(), |button| row.response.union(button));
-    ui::context_menu(&menu, |m| {
+    // This server's sticker is the whole message; its picture is here already.
+    let sticker_picture = (msg.sticker.as_ref())
+        .filter(|_| matches!(msg.body, Body::Text(_)) && files::COPY_IMAGE)
+        .and_then(|id| dir.emoji_by_id(id))
+        .and_then(|emoji| emoji.picture.as_ref());
+    // The menu of the message, and of each picture in it with the picture's items on
+    // top. Quick reactions would go first, above both.
+    let menu = |m: &mut ui::Menu, media: Option<&files::Media>| {
+        let mut pick = None;
+        if let Some(media) = media {
+            if let Some(action) = files::media_items(m, media) {
+                pick = Some(Pick::Media(action, Box::new(media.clone())));
+            }
+            m.separator();
+        } else if let Some(picture) = sticker_picture {
+            if m.item("🖼", t!("files.copy_image")).clicked() {
+                m.ui().ctx().copy_image(picture.first.0.clone());
+            }
+            m.separator();
+        }
         if can_reply && m.item("↩", t!("common.reply")).clicked() {
             pick = Some(Pick::Reply(msg.person, msg.id));
         }
@@ -6315,13 +6339,29 @@ fn message(
                 pick = Some(Pick::AddPicture(name.clone(), *kind, picture.bytes));
             }
         }
+        if m.item("🆔", t!("home.copy_message_id")).clicked() {
+            m.ui().ctx().copy_text(hex::encode(msg.id));
+        }
         if can_delete {
             m.separator();
             if m.danger("🗑", t!("common.delete")).clicked() {
                 pick = Some(Pick::Delete(msg.id));
             }
         }
-    });
+        pick
+    };
+    // Pictures first: on a long press the first menu to ask opens.
+    for shown in &media {
+        if let Some(Some(chosen)) =
+            ui::context_menu(&shown.response, |m| menu(m, Some(&shown.media)))
+        {
+            pick = Some(chosen);
+        }
+    }
+    let anchor = trigger.map_or_else(|| row.response.clone(), |button| row.response.union(button));
+    if let Some(Some(chosen)) = ui::context_menu(&anchor, |m| menu(m, None)) {
+        pick = Some(chosen);
+    }
     let hovered = ui.rect_contains_pointer(rect);
     if pinged {
         ui::mention_highlight(ui, background, rect.expand(2.0), hovered);
@@ -7262,6 +7302,7 @@ mod tests {
     mod image_reload;
     mod long_chat;
     mod member_list;
+    mod menus;
     mod outbox;
     mod rail;
     mod reactions;

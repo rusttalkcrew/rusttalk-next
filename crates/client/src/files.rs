@@ -37,6 +37,9 @@ use crate::{
 /// (docs/mobile.md); until then the buttons that open one are off there.
 pub const PICKER: bool = !cfg!(any(target_os = "android", target_os = "ios"));
 
+/// Whether pictures can be copied: egui's phone clipboards take only text.
+pub const COPY_IMAGE: bool = !cfg!(any(target_os = "android", target_os = "ios"));
+
 /// Files per message, as the message format allows.
 pub const MAX_FILES: usize = 4;
 pub(crate) const THUMBNAIL: f32 = 320.0;
@@ -251,6 +254,12 @@ impl Files {
         fetch: Fetch,
         frames: Result<Vec<(egui::ColorImage, u32)>, bool>,
     ) {
+        if fetch == Fetch::Copy {
+            if let Some((image, _)) = frames.ok().and_then(|frames| frames.into_iter().next()) {
+                ctx.copy_image(image);
+            }
+            return;
+        }
         let slot = match fetch {
             Fetch::Inline => self
                 .inline
@@ -270,6 +279,7 @@ impl Files {
                     })
                     .map(|full| &mut full.picture)
             }
+            Fetch::Copy => None,
         };
         let Some(slot) = slot else {
             return;
@@ -653,6 +663,91 @@ fn show_in_folder(path: &Path) -> io::Result<()> {
 #[cfg(not(any(windows, target_os = "macos")))]
 fn show_in_folder(path: &Path) -> io::Result<()> {
     open::that_detached(path.parent().unwrap_or(path))
+}
+
+/// A picture drawn in a message, for its menu.
+pub struct Shown {
+    pub response: Response,
+    pub media: Media,
+}
+
+/// A stored picture a menu acts on: where it is stored, the file, and where this
+/// device saved it.
+#[derive(Clone)]
+pub struct Media {
+    address: Url,
+    commands: UnboundedSender<Command>,
+    file: Attachment,
+    saved: Option<PathBuf>,
+}
+
+/// What a picture's menu asks for.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum MediaAction {
+    Copy,
+    SaveAs,
+    View,
+    ShowInFolder,
+    Open,
+}
+
+/// A picture's own items, above the message's in its menu.
+pub fn media_items(m: &mut ui::Menu, media: &Media) -> Option<MediaAction> {
+    let mut action = None;
+    if COPY_IMAGE && m.item("🖼", t!("files.copy_image")).clicked() {
+        action = Some(MediaAction::Copy);
+    }
+    if PICKER && m.item("⬇", t!("files.save_as")).clicked() {
+        action = Some(MediaAction::SaveAs);
+    }
+    if m.item("🔍", t!("files.open_viewer")).clicked() {
+        action = Some(MediaAction::View);
+    }
+    if media.saved.is_some() && m.item("🗁", t!("files.show_in_folder")).clicked() {
+        action = Some(MediaAction::ShowInFolder);
+    }
+    if m.item("↗", t!("files.open_default")).clicked() {
+        action = Some(MediaAction::Open);
+    }
+    action
+}
+
+impl Files {
+    pub fn media_action(&mut self, ctx: &egui::Context, action: MediaAction, media: &Media) {
+        let Media {
+            address,
+            commands,
+            file,
+            saved,
+        } = media;
+        match action {
+            // Another server's sticker is decoded already.
+            MediaAction::Copy => match sticker_files::picture(ctx, &file.file.id) {
+                Some(sticker) => ctx.copy_image(sticker.first.0.clone()),
+                None => {
+                    let _ = commands.send(Command::Image(file.file.clone(), Fetch::Copy));
+                }
+            },
+            MediaAction::SaveAs => self.ask(ctx, Ask::Save(address.clone(), file.clone())),
+            MediaAction::View => self.open_viewer(address, commands, file),
+            MediaAction::ShowInFolder => {
+                if let Some(path) = saved {
+                    open(path, true);
+                }
+            }
+            MediaAction::Open => self.open_file(commands, file),
+        }
+    }
+}
+
+/// Menus with only the pictures' own items, outside chat messages.
+fn media_menus(files: &mut Files, shown: Vec<Shown>) {
+    for Shown { response, media } in shown {
+        let action = ui::context_menu(&response, |m| media_items(m, &media)).flatten();
+        if let Some(action) = action {
+            files.media_action(&response.ctx, action, &media);
+        }
+    }
 }
 
 /// t!("files.show_in_folder") and "Open" for a file saved on this device.
@@ -1052,10 +1147,29 @@ fn plays_inline(name: &str, media_type: &str, size: u64) -> bool {
 pub fn attachments(
     ui: &mut Ui,
     files: &mut Files,
-    (address, commands): (&Url, &UnboundedSender<Command>),
+    holder: (&Url, &UnboundedSender<Command>),
     list: &[Attachment],
     links: &[String],
 ) {
+    let shown = shown_attachments(ui, files, holder, list, links);
+    media_menus(files, shown);
+}
+
+/// `attachments`, leaving the pictures' menus to the caller, which adds its own items.
+pub fn shown_attachments(
+    ui: &mut Ui,
+    files: &mut Files,
+    (address, commands): (&Url, &UnboundedSender<Command>),
+    list: &[Attachment],
+    links: &[String],
+) -> Vec<Shown> {
+    let mut shown_pictures = Vec::new();
+    let media = |file: &Attachment, saved: Option<&PathBuf>| Media {
+        address: address.clone(),
+        commands: commands.clone(),
+        file: file.clone(),
+        saved: saved.cloned(),
+    };
     let (cards, list): (Vec<&Attachment>, Vec<&Attachment>) =
         list.iter().partition(|file| is_card(file));
     // Emoji and stickers from other servers are drawn inline, not as files.
@@ -1063,7 +1177,12 @@ pub fn attachments(
         .into_iter()
         .partition(|file| sticker_files::of(file).is_some());
     for file in pictures {
-        sticker_file(ui, files, (address, commands), file);
+        if let Some(response) = sticker_file(ui, files, (address, commands), file) {
+            shown_pictures.push(Shown {
+                response,
+                media: media(file, files.saved_at(file)),
+            });
+        }
     }
     for file in list {
         let play = plays_inline(&file.name, &file.media_type, file.file.size.into());
@@ -1126,9 +1245,10 @@ pub fn attachments(
                     });
                 }
                 show = shown.clicked();
-                if let Some(path) = files.saved_at(file) {
-                    saved_menu(&shown, path);
-                }
+                shown_pictures.push(Shown {
+                    response: shown,
+                    media: media(file, files.saved_at(file)),
+                });
             }
             Some(Picture::Gone) => gone(ui, file),
             Some(Picture::Failed) => {
@@ -1149,20 +1269,19 @@ pub fn attachments(
     if let Some(card) = cards.first() {
         link_card(ui, files, commands, card, links);
     }
+    shown_pictures
 }
 
 /// An emoji or sticker file of another server: loaded when on screen. A sticker is drawn
 /// here; an emoji is drawn by the message text that uses it. A file that fails the checks
-/// shows as an ordinary file.
+/// shows as an ordinary file. Returns a drawn sticker, for its menu.
 fn sticker_file(
     ui: &mut Ui,
     files: &mut Files,
     (address, commands): (&Url, &UnboundedSender<Command>),
     file: &Attachment,
-) {
-    let Some((kind, name)) = sticker_files::of(file) else {
-        return;
-    };
+) -> Option<Response> {
+    let (kind, name) = sticker_files::of(file)?;
     let id = file.file.id;
     let area = Rect::from_min_size(ui.cursor().min, Vec2::splat(crate::home::STICKER_SIZE));
     let visible = match kind {
@@ -1184,19 +1303,21 @@ fn sticker_file(
         Some(sticker_files::State::Failed) => card(ui, files, address, file),
         Some(sticker_files::State::Ready(picture)) if kind == sticker_files::Kind::Sticker => {
             let code = format!(":{name}:");
-            crate::home::emoji_image(
+            let sticker = crate::home::emoji_image(
                 ui,
                 &picture,
                 crate::home::STICKER_SIZE,
                 &t!("home.sticker", code = code),
             )
             .on_hover_text(code);
+            return Some(sticker.interact(Sense::click()));
         }
         Some(sticker_files::State::Loading) if kind == sticker_files::Kind::Sticker => {
             ui.allocate_ui(Vec2::splat(64.0), |ui| ui.spinner());
         }
         _ => {}
     }
+    None
 }
 
 /// A link preview the sender's app made: loaded when on screen, then drawn as a card
