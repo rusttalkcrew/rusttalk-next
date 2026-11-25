@@ -5,7 +5,7 @@
 use std::{collections::VecDeque, sync::Mutex};
 
 use eframe::egui::{
-    self, Align, Color32, CursorIcon, Frame, Grid, Label, Layout, Margin, Response, RichText, Role,
+    self, Align, Color32, CursorIcon, Frame, Label, Layout, Margin, Response, RichText, Role,
     Sense, Ui, Vec2, WidgetInfo,
 };
 use rusttalk_core::client::voice::{CallTraffic, TrackSource, Traffic};
@@ -23,7 +23,7 @@ use crate::{
     server::{CallState, Id, Server, Stats},
     share::{self, App},
     terminal::Shell,
-    ui::{self, HOVER_SECONDS, ICON_BUTTON, Look, Palette, RADIUS, SPACE_XS},
+    ui::{self, HOVER_SECONDS, ICON_BUTTON, Look, Palette, RADIUS, SPACE_S, SPACE_XS},
 };
 
 /// Samples kept for the charts: five minutes at one every two seconds.
@@ -34,8 +34,8 @@ const FAIR_PING_MS: f64 = 300.0;
 const GOOD_LOSS_PERCENT: f64 = 2.0;
 const FAIR_LOSS_PERCENT: f64 = 8.0;
 const SIGNAL_SIZE: Vec2 = Vec2::splat(ICON_BUTTON);
-const CHART_HEIGHT: f32 = 56.0;
-const TRAFFIC_CHART_HEIGHT: f32 = 40.0;
+const CHART_HEIGHT: f32 = 64.0;
+const TRAFFIC_CHART_HEIGHT: f32 = 52.0;
 const STOP_SIZE: Vec2 = Vec2::splat(24.0);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -781,139 +781,241 @@ fn connection_contents(
     server: Option<&Server>,
     channel: &Id,
 ) -> bool {
-    let ms = |value: Option<f64>| value.map_or("—".into(), |v| format!("{v:.0} ms"));
-    let color = quality.color(ui::colors(ui));
+    let c = ui::colors(ui);
+    let color = quality.color(c);
+    ui.spacing_mut().item_spacing.y = SPACE_XS;
     ui.horizontal(|ui| {
-        ui.label(ui::bold(t!("call.connection")));
+        ui.label(ui::title(t!("call.connection")));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.label(RichText::new(quality.label()).color(color));
-            ui::dot(ui, color);
+            quality_pill(ui, quality);
         });
     });
-    Grid::new("connection").num_columns(2).show(ui, |ui| {
-        ui.label(t!("call.ping"));
-        ui.label(ms(stats.ping_ms));
-        ui.end_row();
-        ui.label(t!("call.average"));
-        ui.label(ms(link.average()));
-        ui.end_row();
-        ui.label(t!("call.packet_loss"));
-        ui.label(
-            link.loss
-                .map_or("—".into(), |v| format!("{} %", crate::i18n::number(v, 1))),
-        );
-        ui.end_row();
+    if let Some(kbps) = server
+        .and_then(|server| server.channel(channel))
+        .filter(|channel| channel.voice && channel.audio_kbps > 0)
+        .map(|channel| channel.audio_kbps)
+    {
+        ui.label(ui::caption(format!(
+            "🎵  {} · {kbps} kbps",
+            t!("home.audio_quality_label")
+        )));
+    }
+    ui.add_space(SPACE_S);
+    card(ui, |ui| {
+        let loss = link
+            .loss
+            .map_or("—".into(), |v| format!("{} %", crate::i18n::number(v, 1)));
+        let tiles = [
+            (t!("call.ping"), ms(stats.ping_ms)),
+            (t!("call.average"), ms(link.average())),
+            (t!("call.packet_loss"), loss),
+        ];
+        ui.columns(tiles.len(), |columns| {
+            for (ui, (label, value)) in columns.iter_mut().zip(tiles) {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                ui.add(Label::new(ui::title(value).color(c.strong)).truncate());
+                ui.add(Label::new(ui::caption(label)).truncate());
+            }
+        });
+        ui.add_space(SPACE_S);
+        let pings: Vec<f64> = link.pings.iter().copied().collect();
+        let size = Vec2::new(ui.available_width(), CHART_HEIGHT);
+        ui::line_chart(ui, &pings, HISTORY, size, color, 50.0, |v| ms(Some(v)));
+        time_axis(ui);
     });
-    ui.add_space(4.0);
-    let pings: Vec<f64> = link.pings.iter().copied().collect();
-    let size = Vec2::new(ui.available_width(), CHART_HEIGHT);
-    ui::line_chart(ui, &pings, HISTORY, size, color);
+    traffic(ui, &stats.traffic, link);
+    ui.add_space(SPACE_XS);
+    if let Some(server) = server
+        && let Some(peers) = server.voice.get(channel)
+        && peers.iter().any(|peer| peer.person != server.dir.me)
+    {
+        let others = peers.iter().filter(|peer| peer.person != server.dir.me);
+        let title = format!("{} · {}", t!("call.people_in_call"), others.clone().count());
+        egui::CollapsingHeader::new(title)
+            .id_salt("people in call")
+            .show(ui, |ui| {
+                for peer in others {
+                    let muted = server.voice_muted(&peer.person);
+                    ui.horizontal(|ui| status_name(ui, &peer.name(server), peer.status, muted));
+                }
+            });
+    }
+    egui::CollapsingHeader::new(t!("common.details"))
+        .id_salt("connection details")
+        .show(ui, |ui| card(ui, |ui| details(ui, stats, server)));
+    ui.separator();
+    ui.add(Label::new(ui::caption(format!("🔒  {}", t!("call.e2ee")))).wrap())
+        .on_hover_text(t!("call.e2ee_help"));
+    ui.add_space(SPACE_XS);
+    ui.vertical_centered_justified(|ui| {
+        ui::secondary(ui, &format!("⚙  {}", t!("call.voice_settings"))).clicked()
+    })
+    .inner
+}
+
+fn ms(value: Option<f64>) -> String {
+    value.map_or("—".into(), |v| format!("{v:.0} ms"))
+}
+
+/// A bit rate as people read it: kbps, or Mbps from one million bits a second.
+fn rate(bps: f64) -> String {
+    if bps >= 1_000_000.0 {
+        format!("{} Mbps", crate::i18n::number(bps / 1_000_000.0, 1))
+    } else {
+        format!("{:.0} kbps", bps / 1000.0)
+    }
+}
+
+/// The popup's group of related numbers, set apart on a softer surface.
+fn card<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
+    ui::card_frame(ui)
+        .inner_margin(Margin::same(ui::SPACE_M as i8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            add(ui)
+        })
+        .inner
+}
+
+/// The quality in its colour, as a soft pill with a dot.
+fn quality_pill(ui: &mut Ui, quality: Quality) {
+    let color = quality.color(ui::colors(ui));
+    Frame::new()
+        .fill(color.gamma_multiply(0.15))
+        .corner_radius(RADIUS)
+        .inner_margin(Margin::symmetric(ui::SPACE_S as i8, 2))
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.x = SPACE_XS + 2.0;
+            ui::dot(ui, color);
+            ui.label(ui::bold(quality.label()).color(color));
+        });
+}
+
+/// "5 min ago" and "now" under a chart's left and right ends.
+fn time_axis(ui: &mut Ui) {
     ui.horizontal(|ui| {
         ui.label(ui::caption(t!("call.five_min_ago")));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.label(ui::caption(t!("call.now")));
         });
     });
-    ui.separator();
-    if let Some(server) = server
-        && let Some(peers) = server.voice.get(channel)
-        && peers.iter().any(|peer| peer.person != server.dir.me)
-    {
-        egui::CollapsingHeader::new(t!("call.people_in_call")).show(ui, |ui| {
-            for peer in peers.iter().filter(|peer| peer.person != server.dir.me) {
-                let muted = server.voice_muted(&peer.person);
-                ui.horizontal(|ui| status_name(ui, &peer.name(server), peer.status, muted));
-            }
-        });
-    }
-    traffic(ui, &stats.traffic, link);
-    egui::CollapsingHeader::new(t!("common.details"))
-        .id_salt("connection details")
-        .show(ui, |ui| details(ui, stats, server));
-    ui.separator();
-    ui.label(format!("🔒  {}", t!("call.e2ee")))
-        .on_hover_text(t!("call.e2ee_help"));
-    ui::secondary(ui, &format!("⚙  {}", t!("call.voice_settings"))).clicked()
 }
 
+/// One row of the traffic table: `label`, then `cells` right-aligned in two equal
+/// columns over two thirds of the width, so numbers line up from row to row.
+fn table_row(ui: &mut Ui, label: RichText, cells: Vec<Vec<RichText>>) {
+    let width = ui.available_width();
+    let column = width / 3.0;
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::ZERO;
+        let first = width - column * cells.len() as f32;
+        ui.allocate_ui_with_layout(Vec2::new(first, 0.0), Layout::top_down(Align::Min), |ui| {
+            ui.set_width(first);
+            ui.add(Label::new(label).truncate());
+        });
+        for lines in cells {
+            let layout = Layout::top_down(Align::Max);
+            ui.allocate_ui_with_layout(Vec2::new(column, 0.0), layout, |ui| {
+                ui.set_width(column);
+                for line in lines {
+                    ui.add(Label::new(line).truncate());
+                }
+            });
+        }
+    });
+}
+
+/// Upload and download per kind of track, then the total over the last minutes.
+/// Kinds that sent nothing either way are left out.
 fn traffic(ui: &mut Ui, traffic: &CallTraffic, link: &Link) {
     let c = ui::colors(ui);
-    Grid::new("call traffic")
-        .num_columns(3)
-        .min_row_height(ui::TEXT_BODY)
-        .spacing(Vec2::new(ui::SPACE_S, SPACE_XS))
-        .show(ui, |ui| {
-            ui.label(ui::bold(t!("call.traffic")).size(ui::TEXT_CAPTION));
-            ui.label(ui::caption(t!("call.upload")));
-            ui.label(ui::caption(t!("call.download_traffic")));
-            ui.end_row();
-            let mut row = |label: &str, pair: [Traffic; 2]| {
-                ui.label(ui::caption(label).color(c.text));
-                for value in pair {
-                    let rate = if value.bps >= 1_000_000.0 {
-                        format!("{} Mbps", crate::i18n::number(value.bps / 1_000_000.0, 1))
-                    } else {
-                        format!("{:.0} kbps", value.bps / 1000.0)
-                    };
+    ui::section(ui, t!("call.traffic"));
+    card(ui, |ui| {
+        let head = |text| vec![ui::caption(text)];
+        table_row(
+            ui,
+            RichText::new(""),
+            vec![head(t!("call.upload")), head(t!("call.download_traffic"))],
+        );
+        ui.add_space(SPACE_XS);
+        let row = |ui: &mut Ui, label: &str, pair: [Traffic; 2]| {
+            let cells = pair
+                .iter()
+                .map(|value| {
                     let mb = value.bytes as f64 / 1_000_000.0;
-                    ui.label(
-                        ui::caption(format!("{rate} · {} MB", crate::i18n::number(mb, 2)))
-                            .color(c.text),
-                    );
-                }
-                ui.end_row();
-            };
-            row(t!("call.total"), traffic.total());
-            for (label, source) in [
-                (t!("call.track_voice"), TrackSource::Microphone),
-                (t!("call.track_camera"), TrackSource::Camera),
-                (t!("call.track_screen"), TrackSource::Screenshare),
-                (t!("call.track_app_audio"), TrackSource::ScreenshareAudio),
-            ] {
-                row(label, traffic.for_source(source));
+                    vec![
+                        RichText::new(rate(value.bps)).color(c.strong),
+                        ui::caption(format!("{} MB", crate::i18n::number(mb, 2))),
+                    ]
+                })
+                .collect();
+            table_row(ui, RichText::new(label).color(c.text), cells);
+            ui.add_space(SPACE_XS);
+        };
+        row(ui, t!("call.total"), traffic.total());
+        for (label, source) in [
+            (t!("call.track_voice"), TrackSource::Microphone),
+            (t!("call.track_camera"), TrackSource::Camera),
+            (t!("call.track_screen"), TrackSource::Screenshare),
+            (t!("call.track_app_audio"), TrackSource::ScreenshareAudio),
+        ] {
+            let pair = traffic.for_source(source);
+            if pair.iter().any(|value| value.bytes > 0 || value.bps > 0.0) {
+                row(ui, label, pair);
             }
+        }
+        ui.add_space(SPACE_XS);
+        ui.label(ui::caption(t!("call.traffic_caption")));
+        let rates: Vec<_> = link.traffic_kbps.iter().copied().collect();
+        let size = Vec2::new(ui.available_width(), TRAFFIC_CHART_HEIGHT);
+        let color = ui::accent(ui).text(c.dark);
+        ui::line_chart(ui, &rates, HISTORY, size, color, 50.0, |kbps| {
+            rate(kbps * 1000.0)
         });
-    ui.label(ui::caption(t!("call.traffic_caption")));
-    let rates: Vec<_> = link.traffic_kbps.iter().copied().collect();
-    let size = Vec2::new(ui.available_width(), TRAFFIC_CHART_HEIGHT);
-    ui::line_chart(ui, &rates, HISTORY, size, ui::accent(ui).text(c.dark));
+        time_axis(ui);
+    });
 }
 
 /// Jitter, lost packets and bitrates: what the connection window used to show.
 fn details(ui: &mut Ui, stats: &Stats, server: Option<&Server>) {
-    let ms = |value: Option<f64>| value.map_or("—".into(), |v| format!("{v:.0} ms"));
     let count = |value: Option<i64>| value.map_or("—".into(), |v| v.to_string());
-    Grid::new("connection details")
-        .num_columns(2)
-        .show(ui, |ui| {
-            ui.label(t!("call.jitter"));
-            ui.label(ms(stats.jitter_ms));
-            ui.end_row();
-            ui.label(t!("call.lost_in"));
-            ui.label(count(stats.lost_in));
-            ui.end_row();
-            ui.label(t!("call.lost_out"));
-            ui.label(count(stats.lost_out));
-            ui.end_row();
-            for track in &stats.tracks {
-                let name = match (track.mine, server) {
-                    (true, _) => t!("common.you").to_owned(),
-                    (false, Some(server)) => server.member_name(&track.person),
-                    (false, None) => String::new(),
-                };
-                match &track.app {
-                    Some(app) => ui.label(format!("{name} · {app}")),
-                    None => ui.label(name),
-                };
-                let rate = format!("{:.0} kbps", track.kbps);
-                ui.label(match track.video {
-                    // What a video really runs at: a share set to 60 fps may arrive slower.
-                    Some(v) => format!("{}×{} · {:.0} fps · {rate}", v.width, v.height, v.fps),
-                    None => rate,
-                });
-                ui.end_row();
-            }
+    let c = ui::colors(ui);
+    // The name takes up to half the width; the value fills the rest from the right
+    // and wraps when long, like a video's size, frame rate and bit rate.
+    let row = |ui: &mut Ui, label: String, value: String| {
+        ui.horizontal_top(|ui| {
+            let width = ui.available_width();
+            ui.allocate_ui(Vec2::new(width / 2.0, ui::TEXT_SMALL), |ui| {
+                let label = RichText::new(label).size(ui::TEXT_SMALL).color(c.text);
+                ui.add(Label::new(label).truncate());
+            });
+            ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                let value = RichText::new(value).size(ui::TEXT_SMALL).color(c.strong);
+                ui.add(Label::new(value).wrap());
+            });
         });
+    };
+    row(ui, t!("call.jitter").into(), ms(stats.jitter_ms));
+    row(ui, t!("call.lost_in").into(), count(stats.lost_in));
+    row(ui, t!("call.lost_out").into(), count(stats.lost_out));
+    for track in &stats.tracks {
+        let name = match (track.mine, server) {
+            (true, _) => t!("common.you").to_owned(),
+            (false, Some(server)) => server.member_name(&track.person),
+            (false, None) => String::new(),
+        };
+        let name = match &track.app {
+            Some(app) => format!("{name} · {app}"),
+            None => name,
+        };
+        let kbps = format!("{:.0} kbps", track.kbps);
+        let value = match track.video {
+            // What a video really runs at: a share set to 60 fps may arrive slower.
+            Some(v) => format!("{}×{} · {:.0} fps · {kbps}", v.width, v.height, v.fps),
+            None => kbps,
+        };
+        row(ui, name, value);
+    }
 }
 
 /// The app audio button and its picker: each app playing sound with a check, a

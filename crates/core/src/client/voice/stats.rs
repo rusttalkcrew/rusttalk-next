@@ -80,6 +80,12 @@ impl CallTraffic {
         total
     }
 
+    /// Upload and download per source (microphone, camera, screen, screen audio,
+    /// other), for showing known numbers without a room.
+    pub fn from_sources(sources: [[Traffic; 2]; 5]) -> Self {
+        Self { sources }
+    }
+
     /// Upload and download for one publication source.
     pub fn for_source(&self, source: TrackSource) -> [Traffic; 2] {
         self.sources[Self::index(source)]

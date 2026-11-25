@@ -265,3 +265,99 @@ fn camera_button_opens_a_menu_while_on() {
         }
     }
 }
+
+/// The connection popup from the voice panel's signal bars: the channel's audio
+/// quality by the connection state, and everything inside the window on a phone
+/// (in the sidebar drawer) and on a desktop.
+#[test]
+fn connection_popup_shows_audio_quality_and_fits() {
+    use crate::server::TrackStats;
+    use rusttalk_core::client::voice::{CallTraffic, Traffic, VideoFormat};
+    let data = tempfile::tempdir().unwrap();
+    for (size, dark) in [Vec2::new(390.0, 844.0), Vec2::new(1100.0, 700.0)]
+        .into_iter()
+        .flat_map(|size| [(size, true), (size, false)])
+    {
+        let mut h = in_call(dark, size, data.path());
+        let home = &mut h.state_mut().as_mut().unwrap().0;
+        home.layout.list = true;
+        home.servers[0].dir.categories[0].channels[0].audio_kbps = 96;
+        let pair = |up: f64, down: f64, sent: u64, got: u64| {
+            [
+                Traffic {
+                    bytes: sent,
+                    bps: up * 1000.0,
+                },
+                Traffic {
+                    bytes: got,
+                    bps: down * 1000.0,
+                },
+            ]
+        };
+        let none = pair(0.0, 0.0, 0, 0);
+        let track = |person, mine, kbps, video: Option<(u32, u32, f64)>| TrackStats {
+            person,
+            sid: format!("{mine}"),
+            mine,
+            screen: false,
+            app: None,
+            kbps,
+            video: video.map(|(width, height, fps)| VideoFormat { width, height, fps }),
+            detail: None,
+            jitter_ms: None,
+            lost: None,
+            received: None,
+        };
+        let traffic = CallTraffic::from_sources([
+            pair(95.0, 1.0, 1_090_000, 800_000),
+            none,
+            pair(0.0, 2_800.0, 0, 34_880_000),
+            none,
+            none,
+        ]);
+        for at in 0..120u32 {
+            let spike = if at % 40 == 0 { 30.0 } else { 0.0 };
+            let stats = Stats {
+                ping_ms: Some(14.0 + f64::from(at % 7) + spike),
+                lost_in: Some(i64::from(at / 30)),
+                received_in: Some(u64::from(at) * 50),
+                jitter_ms: Some(2.0),
+                lost_out: Some(0),
+                traffic,
+                tracks: vec![
+                    track(ME, true, 95.0, None),
+                    track(ANN, false, 2_800.0, Some((1920, 1080, 30.0))),
+                ],
+            };
+            home.voice.link.push(&stats);
+            home.voice.call.as_mut().unwrap().stats = stats;
+        }
+        h.run_steps(3);
+        h.get_by_label(t!("call.connection_info")).click();
+        h.run_steps(4);
+        let quality = format!("🎵  {} · 96 kbps", t!("home.audio_quality_label"));
+        let settings = format!("⚙  {}", t!("call.voice_settings"));
+        for label in [
+            t!("call.connection"),
+            &quality,
+            t!("call.track_screen"),
+            &settings,
+        ] {
+            let rect = h.get_by_label(label).rect();
+            assert!(
+                rect.min.x >= 0.0 && rect.max.x <= size.x && rect.max.y <= size.y,
+                "{label} inside {size:?}: {rect:?}"
+            );
+        }
+        // Kinds of traffic that never ran are left out of the table.
+        assert!(h.query_by_label(t!("call.track_camera")).is_none());
+        capture(&mut h, size, dark, "connection");
+        h.get_by_label(t!("common.details")).click();
+        h.run_steps(4);
+        h.get_by_label(t!("call.jitter")).scroll_to_me();
+        h.run_steps(4);
+        let rect = h.get_by_label("1920×1080 · 30 fps · 2800 kbps").rect();
+        assert!(rect.max.x <= size.x, "{rect:?}");
+        capture(&mut h, size, dark, "connection-details");
+    }
+}
