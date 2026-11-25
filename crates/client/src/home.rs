@@ -6242,11 +6242,12 @@ fn outgoing(
             } else {
                 ui.add_space(MESSAGE_AVATAR + ui.spacing().item_spacing.x);
             }
-            ui.add_space(4.0);
+            ui.add_space(ui::SPACE_XS);
             ui.vertical(|ui| {
                 ui.set_width(ui.available_width());
+                ui.spacing_mut().item_spacing.y = ui::SPACE_XS;
                 if start {
-                    ui.label(ui::bold(&name));
+                    ui::text_row(ui, false, |ui| ui.label(ui::bold(&name)));
                 }
                 ui.scope(|ui| {
                     if !out.failed {
@@ -6318,7 +6319,7 @@ fn message(
         let name = (dir.members.get(&msg.person))
             .and_then(|member| member.name.as_deref())
             .unwrap_or(name);
-        ui.add_space(4.0);
+        ui.add_space(ui::SPACE_XS);
         ui.horizontal(|ui| {
             ui.weak("•");
             ui.label(emoji::text(notice(name, action)).weak().italics());
@@ -6334,18 +6335,18 @@ fn message(
             )
             .on_hover_text(detail);
         });
-        ui.add_space(4.0);
+        ui.add_space(ui::SPACE_XS);
         return None;
     }
     if let Body::Friend(signal, _) = msg.body {
-        ui.add_space(4.0);
+        ui.add_space(ui::SPACE_XS);
         ui.horizontal(|ui| {
             ui.weak("•");
             let line = friends::line(signal, &names(&msg.person));
             ui.label(emoji::text(line).weak().italics());
             message_time(ui, msg);
         });
-        ui.add_space(4.0);
+        ui.add_space(ui::SPACE_XS);
         return None;
     }
     let mention = mentions::Message::cached(ui, msg, dir, channel);
@@ -6365,6 +6366,40 @@ fn message(
     let mut trigger = None;
     let mut media = Vec::new();
     let row = ui.scope_builder(builder, |ui| {
+        ui.spacing_mut().item_spacing.y = ui::SPACE_XS;
+        // Above the avatar, as in Discord, so the avatar lines up with the name.
+        if let Some(reply) = msg.reply_to {
+            ui::text_row(ui, false, |ui| {
+                ui.add_space(MESSAGE_AVATAR + ui.spacing().item_spacing.x + ui::SPACE_XS);
+                let quoted = chat.quoted(&reply, msg.quoted_author);
+                let line = match quoted {
+                    Some(quoted) if quoted.sticker.is_some() => {
+                        format!(
+                            "↪ {}",
+                            t!("home.quote_sticker", name = names(&quoted.person))
+                        )
+                    }
+                    Some(quoted) if matches!(quoted.body, Body::Text(_)) => {
+                        let text = mentions::Message::cached(ui, quoted, dir, channel).plain(dir);
+                        let person = quoted.person;
+                        let snippet: String = text.chars().take(80).collect();
+                        let snippet = if snippet.is_empty() {
+                            t!("home.a_file").into()
+                        } else {
+                            snippet
+                        };
+                        format!("↪ {}: {}", names(&person), snippet.replace('\n', " "))
+                    }
+                    _ => match msg.quoted_author {
+                        Some(person) => {
+                            format!("↪ {}: {}", names(&person), t!("home.earlier_message"))
+                        }
+                        None => format!("↪ {}", t!("home.earlier_message")),
+                    },
+                };
+                ui.add(Label::new(emoji::text(line).size(ui::TEXT_CAPTION).weak()).truncate());
+            });
+        }
         ui.horizontal_top(|ui| {
             if start {
                 let avatar = face(ui, dir, &msg.person, &name, MESSAGE_AVATAR, false);
@@ -6375,41 +6410,12 @@ fn message(
             } else {
                 ui.add_space(MESSAGE_AVATAR + ui.spacing().item_spacing.x);
             }
-            ui.add_space(4.0);
+            ui.add_space(ui::SPACE_XS);
             ui.vertical(|ui| {
                 ui.set_width(ui.available_width());
-                if let Some(reply) = msg.reply_to {
-                    let quoted = chat.quoted(&reply, msg.quoted_author);
-                    let line = match quoted {
-                        Some(quoted) if quoted.sticker.is_some() => {
-                            format!(
-                                "↪ {}",
-                                t!("home.quote_sticker", name = names(&quoted.person))
-                            )
-                        }
-                        Some(quoted) if matches!(quoted.body, Body::Text(_)) => {
-                            let text =
-                                mentions::Message::cached(ui, quoted, dir, channel).plain(dir);
-                            let person = quoted.person;
-                            let snippet: String = text.chars().take(80).collect();
-                            let snippet = if snippet.is_empty() {
-                                t!("home.a_file").into()
-                            } else {
-                                snippet
-                            };
-                            format!("↪ {}: {}", names(&person), snippet.replace('\n', " "))
-                        }
-                        _ => match msg.quoted_author {
-                            Some(person) => {
-                                format!("↪ {}: {}", names(&person), t!("home.earlier_message"))
-                            }
-                            None => format!("↪ {}", t!("home.earlier_message")),
-                        },
-                    };
-                    ui.label(emoji::text(line).size(ui::TEXT_CAPTION).weak());
-                }
                 if start || msg.backfilled {
-                    ui.horizontal(|ui| {
+                    // At the avatar's top edge, the text right below.
+                    ui::text_row(ui, false, |ui| {
                         if start {
                             if let Some(avatar) = trigger.take() {
                                 trigger = Some(avatar.union(person::profile_name(ui, &name)));
@@ -7579,6 +7585,7 @@ mod tests {
     mod member_list;
     mod menus;
     mod message_history;
+    mod message_spacing;
     mod outbox;
     mod presence;
     mod rail;

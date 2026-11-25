@@ -894,6 +894,16 @@ pub fn trailing_row<R>(
     .inner
 }
 
+/// A left-to-right row exactly as tall as what is in it, items centred on the
+/// tallest. `ui.horizontal` pads a row to a control's height and sinks text to its
+/// bottom, so a line of text under another would sit lower than it should.
+/// `wrap` lets the row run on below, like `ui.horizontal_wrapped`.
+pub fn text_row<R>(ui: &mut Ui, wrap: bool, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let layout = Layout::left_to_right(Align::Center).with_main_wrap(wrap);
+    let size = Vec2::new(ui.available_size_before_wrap().x, 0.0);
+    ui.allocate_ui_with_layout(size, layout, add).inner
+}
+
 /// A list row with an icon and a label: a channel or a settings page. Muted until
 /// hovered or `selected`; the open one gets the selected fill.
 pub fn nav_row(

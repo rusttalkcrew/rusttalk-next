@@ -27,6 +27,7 @@ Unreleased under the new version and date.
 - Server owners can choose how many messages each channel keeps, or keep them all, in Server settings > Message history (10,000 by default).
 - Press Ctrl+K (Cmd+K on Mac), or the search button on phones, to jump to a person, a channel on any of your servers, or a settings page.
 - The audit log now records server setting, file limit and public listing changes, and shows which roles and channel permissions changed.
+- In chat, the name lines up with the top of the avatar and the message sits right under it, also when it starts with a mention; a reply's quote now sits above the name.
 
 ## v0.5.0 - 2026-11-25
 
