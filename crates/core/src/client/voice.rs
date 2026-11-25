@@ -164,6 +164,10 @@ struct Token {
 
 /// The bitrate for channels and servers that set none.
 pub const DEFAULT_AUDIO_KBPS: u32 = 64;
+/// The highest channel bitrate this app offers, sent with a change so the server knows.
+pub const MAX_AUDIO_KBPS: u32 = 320;
+/// Above this a channel is for music: discontinuous transmission would cut quiet passages.
+const MUSIC_AUDIO_KBPS: u32 = 128;
 
 /// The server refused a join because the voice channel reached its member limit.
 #[derive(Debug, thiserror::Error)]
@@ -813,6 +817,7 @@ impl VoiceRoom {
                     audio_encoding: Some(AudioEncoding {
                         max_bitrate: u64::from(self.audio_kbps) * 1000,
                     }),
+                    dtx: self.audio_kbps <= MUSIC_AUDIO_KBPS,
                     ..Default::default()
                 },
             )

@@ -342,6 +342,7 @@ home.channel_name = チャンネル名
 home.topic_optional = トピック (任意)
 home.audio_quality = 音質: {kbps} kbps
 home.audio_quality_label = 音質
+home.audio_quality_help = 高いほど音質が良くなり、特に音楽に向いていますが、通信量が増えます。約256 kbpsを超えると違いは聞き取れません。
 home.member_limit = 人数制限
 home.member_limit_help = このボイスチャンネルに同時に入れる最大人数です。チャンネル管理者はいつでも参加できます。
 home.no_limit = 制限なし

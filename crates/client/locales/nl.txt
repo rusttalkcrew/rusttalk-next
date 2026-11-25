@@ -342,6 +342,7 @@ home.channel_name = Kanaalnaam
 home.topic_optional = Onderwerp (optioneel)
 home.audio_quality = Audiokwaliteit: {kbps} kbps
 home.audio_quality_label = Audiokwaliteit
+home.audio_quality_help = Hoger klinkt beter, vooral voor muziek, maar gebruikt meer data. Boven ongeveer 256 kbps hoor je geen verschil meer.
 home.member_limit = Ledenlimiet
 home.member_limit_help = Het maximale aantal mensen tegelijk in dit spraakkanaal. Kanaalbeheerders kunnen altijd meedoen.
 home.no_limit = Geen limiet

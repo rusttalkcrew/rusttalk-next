@@ -11,6 +11,7 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Voice channels can now be set to audio quality up to 320 kbps, for listening to music together.
 - People who manage channels see empty categories again, so a new or emptied category no longer disappears; members still don't see them.
 - The server menu's "Change name on this server" is now "Change my nickname", so it isn't mistaken for renaming the server.
 - The sound bars next to a shared app now move clearly even when it plays quietly.
