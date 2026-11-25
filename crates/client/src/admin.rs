@@ -110,6 +110,8 @@ pub struct Settings {
     pack_renaming: Option<(Id, String)>,
     /// The pack waiting for its delete to be confirmed.
     pack_deleting: Option<Id>,
+    /// The emoji or sticker waiting for its delete to be confirmed.
+    emoji_deleting: Option<Id>,
     /// "Import pack from .zip", while its dialog is open.
     import: Option<import::Import>,
     /// The last result: text and whether it went wrong.
@@ -143,6 +145,7 @@ impl Settings {
                 self.emoji_renaming = None;
                 self.pack_renaming = None;
                 self.pack_deleting = None;
+                self.emoji_deleting = None;
                 self.import = None;
                 self.message = Some((text.into(), false));
             }
@@ -225,6 +228,7 @@ pub fn open(home: &mut Home, index: usize, mut tab: Tab) {
         new_pack: String::new(),
         pack_renaming: None,
         pack_deleting: None,
+        emoji_deleting: None,
         import: None,
         message: None,
     });
@@ -977,6 +981,7 @@ fn pack_block(
     }
     for item in items {
         ui.push_id(item.id, |ui| {
+            let mut asked = false;
             ui.horizontal(|ui| {
                 let (rect, _) =
                     ui.allocate_exact_size(egui::Vec2::splat(32.0), egui::Sense::hover());
@@ -1011,7 +1016,8 @@ fn pack_block(
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if danger(ui, t!("common.delete")).clicked() {
-                                ask.request = Some(Admin::DeleteEmoji(item.id));
+                                settings.emoji_deleting = Some(item.id);
+                                asked = true;
                             }
                             if ui::secondary(ui, t!("common.rename")).clicked() {
                                 settings.emoji_renaming = Some((item.id, item.name.clone()));
@@ -1040,6 +1046,23 @@ fn pack_block(
                     }
                 }
             });
+            if settings.emoji_deleting == Some(item.id) {
+                ui::card(ui, |ui| {
+                    ui.label(t!("admin.emoji_delete_help", name = item.name));
+                    ui.horizontal(|ui| {
+                        if danger(ui, t!("common.delete")).clicked() {
+                            ask.request = Some(Admin::DeleteEmoji(item.id));
+                        }
+                        if ui::secondary(ui, t!("common.cancel")).clicked() {
+                            settings.emoji_deleting = None;
+                        }
+                    });
+                    // The last row's question opens below the fold: bring it into view.
+                    if asked {
+                        ui.scroll_to_cursor(None);
+                    }
+                });
+            }
         });
     }
 }
