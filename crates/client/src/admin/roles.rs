@@ -26,6 +26,16 @@ const MATCHES: usize = 8;
 /// How long the unsaved-changes bar stays red after leaving was refused.
 const NUDGE_SECONDS: f64 = 0.8;
 
+/// The edit a saved request carries, to keep it when that request fails.
+enum Part {
+    /// The open role's name, colour and grouping.
+    Style,
+    /// A role's new rank, the open role's permissions, or both.
+    Role { rank: bool, permissions: bool },
+    /// Someone gaining or losing the open role.
+    Member(Id),
+}
+
 #[derive(Clone, Copy, PartialEq, Default)]
 pub enum RoleTab {
     #[default]
@@ -51,6 +61,8 @@ pub struct RolesPage {
     search: String,
     /// Save was clicked; the next result ends it, keeping the changes if it failed.
     saving: bool,
+    /// What each request of the saving batch carries, in the order sent.
+    sent: Vec<Part>,
     /// The role IDs there were when Create role was clicked, to open the new one.
     creating: Option<Vec<String>>,
     /// The delete confirmation is open.
@@ -70,12 +82,38 @@ impl RolesPage {
             self.reset();
         }
         self.saving = false;
+        self.sent.clear();
         self.deleting = false;
     }
 
     pub fn failed(&mut self) {
         self.saving = false;
+        self.sent.clear();
         self.creating = None;
+    }
+
+    /// Save went through only in part: drop the edits that are now on the server and
+    /// keep the failed ones waiting for Save.
+    pub fn partly_saved(&mut self, failed: &[usize]) {
+        self.saving = false;
+        let mut ranks_saved = true;
+        for (index, part) in std::mem::take(&mut self.sent).into_iter().enumerate() {
+            let saved = !failed.contains(&index);
+            match part {
+                Part::Style if saved => (self.name, self.color, self.separate) = (None, None, None),
+                Part::Role { rank, permissions } => {
+                    ranks_saved &= saved || !rank;
+                    if saved && permissions {
+                        self.permissions = None;
+                    }
+                }
+                Part::Member(person) if saved => self.members.retain(|(p, _)| *p != person),
+                _ => {}
+            }
+        }
+        if ranks_saved {
+            self.order = None;
+        }
     }
 
     fn reset(&mut self) {
@@ -400,7 +438,9 @@ pub fn tab(
             page.reset();
         }
         if save {
-            requests.extend(save_requests(dir, page));
+            let (sent, batch) = save_requests(dir, page).into_iter().unzip();
+            page.sent = sent;
+            requests.push(Admin::Batch(batch));
             page.saving = true;
             *message = None;
         }
@@ -888,8 +928,9 @@ fn members_tab(ui: &mut Ui, server: &Server, role: &Role, page: &mut RolesPage) 
 }
 
 /// What Save sends: the open role's look, its permissions and every rank that moved,
-/// then each member who gains or loses it.
-fn save_requests(dir: &Directory, page: &RolesPage) -> Vec<Admin> {
+/// then each member who gains or loses it. Ranks go before people, so they're sent as one
+/// batch in this order.
+fn save_requests(dir: &Directory, page: &RolesPage) -> Vec<(Part, Admin)> {
     let mut out = Vec::new();
     let role = page.role(dir);
     if let Some(role) = role {
@@ -899,12 +940,15 @@ fn save_requests(dir: &Directory, page: &RolesPage) -> Vec<Admin> {
         let color = page.color.unwrap_or(role.color);
         let separate = page.separate.unwrap_or(role.separate);
         if name.is_some() || color != role.color || separate != role.separate {
-            out.push(Admin::StyleRole {
-                id: role.id.clone(),
-                name: name.map(str::to_owned),
-                color,
-                separate,
-            });
+            out.push((
+                Part::Style,
+                Admin::StyleRole {
+                    id: role.id.clone(),
+                    name: name.map(str::to_owned),
+                    color,
+                    separate,
+                },
+            ));
         }
     }
     let moved = page.order.as_ref().and_then(|order| {
@@ -924,15 +968,22 @@ fn save_requests(dir: &Directory, page: &RolesPage) -> Vec<Admin> {
         edits.push((role, None));
     }
     for (edited, rank) in edits {
-        let permissions = match (role, &page.permissions) {
-            (Some(open), Some(chosen)) if open.id == edited.id => chosen.clone(),
-            _ => edited.permissions.clone(),
+        let (permissions, chosen) = match (role, &page.permissions) {
+            (Some(open), Some(chosen)) if open.id == edited.id => (chosen.clone(), true),
+            _ => (edited.permissions.clone(), false),
         };
-        out.push(Admin::EditRole {
-            id: edited.id.clone(),
-            permissions,
-            rank,
-        });
+        let part = Part::Role {
+            rank: rank.is_some(),
+            permissions: chosen,
+        };
+        out.push((
+            part,
+            Admin::EditRole {
+                id: edited.id.clone(),
+                permissions,
+                rank,
+            },
+        ));
     }
     if let Some(role) = role {
         for (person, add) in &page.members {
@@ -947,7 +998,7 @@ fn save_requests(dir: &Directory, page: &RolesPage) -> Vec<Admin> {
             if *add {
                 roles.push(role.id.clone());
             }
-            out.push(Admin::SetRoles(*person, roles));
+            out.push((Part::Member(*person), Admin::SetRoles(*person, roles)));
         }
     }
     out
@@ -1065,15 +1116,76 @@ mod tests {
         let requests = save_requests(&dir, &page);
         assert!(matches!(
             requests.as_slice(),
-            [Admin::StyleRole {
-                name: None,
-                color: Some(_),
-                separate: false,
-                ..
-            }]
+            [(
+                Part::Style,
+                Admin::StyleRole {
+                    name: None,
+                    color: Some(_),
+                    separate: false,
+                    ..
+                }
+            )]
         ));
         page.saving = true;
         page.done();
+        assert!(!page.dirty(&dir));
+    }
+
+    #[test]
+    fn a_partly_failed_save_keeps_only_what_failed() {
+        let member = |person| Member {
+            person,
+            name: None,
+            roles: vec!["member".into()],
+            devices: vec![],
+            avatar: None,
+            presence: Default::default(),
+            hide_offline: false,
+            bio: None,
+            voice_muted: false,
+        };
+        let (ann, bob) = ([1; 32], [2; 32]);
+        let dir = Directory {
+            roles: vec![role("a", 10, true), role("b", 20, true)],
+            members: vec![member(ann), member(bob)].into(),
+            ..Directory::default()
+        };
+        let edited = || {
+            let mut page = RolesPage {
+                selected: Some("a".into()),
+                color: Some(Some(ui::ROLE_COLORS[0])),
+                permissions: Some(vec!["kick".into()]),
+                members: vec![(ann, true), (bob, true)],
+                ..RolesPage::default()
+            };
+            let (sent, batch): (_, Vec<_>) = save_requests(&dir, &page).into_iter().unzip();
+            page.sent = sent;
+            page.saving = true;
+            (page, batch)
+        };
+
+        let (mut page, batch) = edited();
+        // Look first, then the role itself, then the people, in one batch.
+        assert!(matches!(
+            batch.as_slice(),
+            [
+                Admin::StyleRole { .. },
+                Admin::EditRole { rank: None, .. },
+                Admin::SetRoles(..),
+                Admin::SetRoles(..),
+            ]
+        ));
+        // Adding Bob was refused: the rest is saved, Bob still waits for Save.
+        page.partly_saved(&[3]);
+        assert!(!page.saving);
+        assert_eq!((page.color, &page.permissions), (None, &None));
+        assert_eq!(page.members, [(bob, true)]);
+        assert!(page.dirty(&dir));
+
+        // All of it went through: one Done clears everything.
+        let (mut page, _) = edited();
+        page.done();
+        assert!(!page.saving && page.sent.is_empty());
         assert!(!page.dirty(&dir));
     }
 }

@@ -101,6 +101,9 @@ pub enum Admin {
     LoadUpdates,
     /// List the server publicly with these details, or stop (`None`).
     SaveListing(Option<PublicListing>),
+    /// Changes saved together, one after another in this order. The server reloads once
+    /// after the last, and one reply says how it went.
+    Batch(Vec<Admin>),
 }
 
 /// One picture of an imported pack, as read from the file.
@@ -171,6 +174,11 @@ pub enum AdminUpdate {
     /// A change went through; the text says what happened.
     Done(&'static str),
     Failed(String),
+    /// Some changes of a batch failed: their places in it, and what to show.
+    PartlySaved {
+        failed: Vec<usize>,
+        text: String,
+    },
 }
 
 pub(super) async fn run(
@@ -181,8 +189,93 @@ pub(super) async fn run(
     request: Admin,
 ) {
     let send = |update| ctx.send(Update::Admin(url.clone(), update));
+    if let Admin::Batch(requests) = request {
+        let mut results = Vec::with_capacity(requests.len());
+        for request in requests {
+            results.push(change(ctx, url, client, request).await);
+        }
+        let (changed, update) = batch(results);
+        // Once for the whole batch, also when part of it failed.
+        if changed {
+            reload(ctx, url, client, state).await;
+        }
+        send(update);
+        return;
+    }
     let bans_changed = matches!(request, Admin::Ban(..) | Admin::Unban(_));
     let invites_changed = matches!(request, Admin::RevokeInvite(_));
+    let Some(result) = change(ctx, url, client, request).await else {
+        return;
+    };
+    match result {
+        Ok(done) => {
+            send(AdminUpdate::Done(done));
+            reload(ctx, url, client, state).await;
+            if bans_changed {
+                match bans(client).await {
+                    Ok(list) => send(AdminUpdate::Bans(list)),
+                    Err(text) => send(AdminUpdate::Failed(text)),
+                }
+            }
+            if invites_changed {
+                match invites(client).await {
+                    Ok(list) => send(AdminUpdate::Invites(list)),
+                    Err(text) => send(AdminUpdate::Failed(text)),
+                }
+            }
+        }
+        Err(text) => send(AdminUpdate::Failed(text)),
+    }
+}
+
+/// How a batch went, from each request's result in order: whether anything changed
+/// (so the server reloads, once), and Done when all went through, otherwise which
+/// failed and the first reason.
+fn batch(results: Vec<Option<Result<&'static str, String>>>) -> (bool, AdminUpdate) {
+    let total = results.len();
+    let mut done = t!("admin.done_role_saved");
+    let mut failed = Vec::new();
+    let mut reason = None;
+    for (index, result) in results.into_iter().enumerate() {
+        match result {
+            Some(Ok(text)) => done = text,
+            Some(Err(text)) => {
+                reason.get_or_insert(text);
+                failed.push(index);
+            }
+            None => {}
+        }
+    }
+    let changed = failed.len() < total;
+    let update = match reason {
+        None => AdminUpdate::Done(done),
+        Some(reason) => AdminUpdate::PartlySaved {
+            text: t!(
+                "admin.batch_failed",
+                failed = failed.len(),
+                total = total,
+                reason = reason
+            ),
+            failed,
+        },
+    };
+    (changed, update)
+}
+
+async fn reload(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, state: &mut State) {
+    if let Err(error) = directory(ctx, url, client, state).await {
+        tracing::warn!(error = %format_args!("{error:#}"), "reloading after a settings change failed");
+    }
+}
+
+/// Send one request. A change answers with what to show; loading (`None`) answers itself.
+async fn change(
+    ctx: &Ctx,
+    url: &Url,
+    client: &mut KeyClient<'_>,
+    request: Admin,
+) -> Option<Result<&'static str, String>> {
+    let send = |update| ctx.send(Update::Admin(url.clone(), update));
     let result = match request {
         // Each on its own, so one failing doesn't hide the other.
         Admin::Load {
@@ -203,21 +296,21 @@ pub(super) async fn run(
                         .map_or_else(AdminUpdate::Failed, AdminUpdate::Bans),
                 );
             }
-            return;
+            return None;
         }
         Admin::LoadListing => {
             match get(client, "/v1/settings/public-listing").await {
                 Ok(value) => send(listing(&value)),
                 Err(error) => send(AdminUpdate::Failed(failed(&error))),
             }
-            return;
+            return None;
         }
         Admin::LoadFiles => {
             match file_settings(client, Method::GET, None).await {
                 Ok(settings) => send(AdminUpdate::Files(settings)),
                 Err(text) => send(AdminUpdate::Failed(text)),
             }
-            return;
+            return None;
         }
         Admin::SaveFiles(limits) => file_settings(client, Method::PUT, Some(json!(limits)))
             .await
@@ -238,14 +331,14 @@ pub(super) async fn run(
                         == Some(reqwest::StatusCode::NOT_FOUND) => {}
                 Err(error) => send(AdminUpdate::Failed(failed(&error))),
             }
-            return;
+            return None;
         }
         Admin::Invites => {
             match invites(client).await {
                 Ok(list) => send(AdminUpdate::Invites(list)),
                 Err(text) => send(AdminUpdate::Failed(text)),
             }
-            return;
+            return None;
         }
         Admin::Audit { action, before } => {
             send(match audit_page(client, action.as_deref(), before).await {
@@ -256,7 +349,7 @@ pub(super) async fn run(
                 },
                 Err(text) => AdminUpdate::AuditFailed(text),
             });
-            return;
+            return None;
         }
         Admin::SystemMessages(choice) => save_system_messages(client, choice)
             .await
@@ -488,28 +581,11 @@ pub(super) async fn run(
         Admin::RevokeInvite(id) => call(client, Method::DELETE, &format!("/v1/invites/{id}"), None)
             .await
             .map(|()| t!("admin.done_revoked")),
+
+        // `run` takes batches apart; nothing puts one inside another.
+        Admin::Batch(_) => Err(t!("admin.failed").into()),
     };
-    match result {
-        Ok(done) => {
-            send(AdminUpdate::Done(done));
-            if let Err(error) = directory(ctx, url, client, state).await {
-                tracing::warn!(error = %format_args!("{error:#}"), "reloading after a settings change failed");
-            }
-            if bans_changed {
-                match bans(client).await {
-                    Ok(list) => send(AdminUpdate::Bans(list)),
-                    Err(text) => send(AdminUpdate::Failed(text)),
-                }
-            }
-            if invites_changed {
-                match invites(client).await {
-                    Ok(list) => send(AdminUpdate::Invites(list)),
-                    Err(text) => send(AdminUpdate::Failed(text)),
-                }
-            }
-        }
-        Err(text) => send(AdminUpdate::Failed(text)),
-    }
+    Some(result)
 }
 
 fn listing(value: &Value) -> AdminUpdate {
@@ -958,7 +1034,32 @@ fn problem(code: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::audit_path;
+    use super::{AdminUpdate, audit_path, batch};
+
+    /// Three changes; the ones at `failing` are refused.
+    fn save(failing: &[usize]) -> (bool, AdminUpdate) {
+        batch(
+            (0..3)
+                .map(|index| match failing.contains(&index) {
+                    true => Some(Err("refused".to_owned())),
+                    false => Some(Ok("saved")),
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn a_batch_reloads_when_anything_changed_and_says_which_failed() {
+        let (reload, update) = save(&[]);
+        assert!(reload);
+        assert!(matches!(update, AdminUpdate::Done("saved")));
+        let (reload, update) = save(&[1]);
+        assert!(reload, "what went through still shows");
+        assert!(matches!(update, AdminUpdate::PartlySaved { failed, .. } if failed == [1]));
+        let (reload, update) = save(&[0, 1, 2]);
+        assert!(!reload, "nothing changed");
+        assert!(matches!(update, AdminUpdate::PartlySaved { failed, .. } if failed == [0, 1, 2]));
+    }
 
     #[test]
     fn audit_pages_are_fifty_newest_first() {

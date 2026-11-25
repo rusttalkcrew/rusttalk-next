@@ -198,6 +198,11 @@ impl Settings {
                 self.import = None;
                 self.message = Some((text.into(), false));
             }
+            // Only Roles saves in batches.
+            AdminUpdate::PartlySaved { failed, text } => {
+                self.roles.partly_saved(&failed);
+                self.message = Some((text, true));
+            }
             AdminUpdate::Failed(text) => {
                 self.saving = None;
                 self.roles.failed();

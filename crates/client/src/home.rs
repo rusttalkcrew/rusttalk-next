@@ -1675,7 +1675,9 @@ impl Home {
                     settings.apply(update);
                 }
                 _ => {
-                    if let AdminUpdate::Failed(text) = update {
+                    if let AdminUpdate::Failed(text) | AdminUpdate::PartlySaved { text, .. } =
+                        update
+                    {
                         self.toast = Some((text, now + 6.0));
                     }
                 }

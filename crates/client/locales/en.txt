@@ -566,6 +566,7 @@ admin.ban_network_conflict = Can't block their network: you or someone with a ro
 admin.done_unbanned = Unbanned. They can join again with an invite.
 admin.done_roles = Roles saved.
 admin.done_role_saved = Role saved.
+admin.batch_failed = {failed} of {total} changes didn't save. {reason}
 admin.done_role_deleted = Role deleted.
 admin.done_default_role = New members now get this role.
 admin.done_channel_permissions = Channel permissions saved.
