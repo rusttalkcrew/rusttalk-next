@@ -187,3 +187,35 @@ fn a_voice_channel_with_a_member_limit_shows_how_full_it_is() {
     assert!(harness.query_by_label("1/5").is_some());
     assert!(harness.query_by_label("Join voice").is_some());
 }
+
+#[test]
+fn clicking_a_shared_app_listens_and_shows_its_volume() {
+    let (mut harness, mut sent) = window();
+    let sid = |s: &str| s.to_owned().try_into().unwrap();
+    let state = harness.state_mut().as_mut().unwrap();
+    state.servers[0].voice.get_mut(&LOUNGE).unwrap()[0].apps = vec![
+        (sid("TR_a"), "Spotify".into()),
+        (sid("TR_b"), "YouTube Music".into()),
+    ];
+    harness.run_steps(4);
+    // Outside the call there is nothing to hear yet.
+    assert!(harness.query_by_label("Listen: Spotify").is_none());
+    harness.get_by_label("🔊  Lounge").hover();
+    harness.run_steps(4);
+    harness.get_by_label("Join voice").click();
+    harness.run_steps(4);
+    while sent.try_recv().is_ok() {}
+
+    harness.get_by_label("Listen: Spotify").click();
+    harness.run_steps(4);
+    assert!(matches!(sent.try_recv(), Ok(Command::Listen(sid, true)) if sid == "TR_a"));
+    assert!(harness.query_by_label("Volume: Spotify").is_none());
+    // The room confirms; now a click stops listening, and the volume shows meanwhile.
+    home(&harness).voice.audio.set_listening("TR_a", true);
+    harness.run_steps(4);
+    assert!(harness.query_by_label("Volume: Spotify").is_some());
+    assert!(harness.query_by_label("Volume: YouTube Music").is_none());
+    harness.get_by_label("Listen: Spotify").click();
+    harness.run_steps(4);
+    assert!(matches!(sent.try_recv(), Ok(Command::Listen(sid, false)) if sid == "TR_a"));
+}

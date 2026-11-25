@@ -783,6 +783,47 @@ pub fn speaking_outline(ui: &Ui, rect: Rect) {
     );
 }
 
+/// Frames per second of the sound bars while they move.
+const BARS_TICK: std::time::Duration = std::time::Duration::from_millis(66);
+
+/// Three small bars that move with a sound's `level` (0 to 1) and lie still at
+/// `None`. Only moving bars ask for another frame, so silence costs no redraws.
+pub fn sound_bars(ui: &mut Ui, level: Option<f32>) -> Response {
+    let size = Vec2::splat(TEXT_SMALL);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
+    let c = colors(ui);
+    let color = if level.is_some() { c.success } else { c.muted };
+    let width = 3.0;
+    let gap = (size.x - 3.0 * width) / 2.0;
+    let heights = bar_heights(level, ui.input(|input| input.time));
+    for (i, height) in heights.into_iter().enumerate() {
+        let left = rect.left() + i as f32 * (width + gap);
+        let bar = Rect::from_min_max(
+            egui::pos2(left, rect.bottom() - height * size.y),
+            egui::pos2(left + width, rect.bottom()),
+        );
+        ui.painter().rect_filled(bar, 1.0, color);
+    }
+    if level.is_some() {
+        ui.ctx().request_repaint_after(BARS_TICK);
+    }
+    response
+}
+
+/// Each bar's height from 0 to 1 at `time` seconds: low and level in silence, else
+/// the sound's level with its own wobble per bar.
+fn bar_heights(level: Option<f32>, time: f64) -> [f32; 3] {
+    const LOW: f32 = 0.25;
+    let Some(level) = level else {
+        return [LOW; 3];
+    };
+    std::array::from_fn(|i| {
+        let i = i as f64;
+        let wobble = (time * (6.0 + 2.5 * i) + 1.7 * i).sin().abs() as f32;
+        LOW + (1.0 - LOW) * level.clamp(0.0, 1.0) * (0.35 + 0.65 * wobble)
+    })
+}
+
 /// A presence dot on the bottom right of a picture, ringed in `ring` so it stands out;
 /// `barred` marks Do not disturb.
 pub fn presence_dot(
@@ -1673,5 +1714,19 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn sound_bars_lie_still_in_silence_and_move_with_the_level() {
+        let still = bar_heights(None, 0.0);
+        assert_eq!(still, bar_heights(None, 1.3));
+        let loud: Vec<_> = (0..20)
+            .map(|i| bar_heights(Some(1.0), i as f64 * 0.07))
+            .collect();
+        assert!(loud.iter().flatten().all(|h| (still[0]..=1.0).contains(h)));
+        assert!(loud.windows(2).any(|w| w[0] != w[1]), "they move over time");
+        let quiet = bar_heights(Some(0.1), 0.5);
+        let full = bar_heights(Some(1.0), 0.5);
+        assert!(quiet.iter().zip(full).all(|(q, f)| *q <= f));
     }
 }

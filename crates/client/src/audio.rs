@@ -466,6 +466,8 @@ struct Track {
     queue: VecDeque<i16>,
     primed: bool,
     loud: u64,
+    /// Its last frame's level in dBFS, for a shared app's sound bars.
+    level: f32,
 }
 
 /// Fixed-size messages, so audio callbacks never allocate.
@@ -980,6 +982,34 @@ impl Audio {
             .any(|track| track.stream == (*person, None) && now < track.loud + SPEAKING_MS)
     }
 
+    /// How loud a shared app you listen to plays, from 0 to 1, while it makes sound;
+    /// `None` while it is silent or not heard. Its start wakes the UI like speaking does.
+    pub fn app_level(&self, sid: &str) -> Option<f32> {
+        let now = self.shared().now();
+        let mixer = lock(&self.shared().mixer);
+        let track = (mixer.tracks.get(sid)).filter(|t| t.stream.1.is_some())?;
+        (track.loud != 0 && now < track.loud + SPEAKING_MS)
+            .then(|| ((track.level - SILENT_DB) / -SILENT_DB).clamp(0.0, 1.0))
+    }
+
+    /// A shared app playing at `level` dBFS right now, as if its track had a loud frame.
+    #[cfg(test)]
+    pub(crate) fn play_app_for_test(&self, sid: &str, stream: StreamId, level: f32) {
+        let loud = self.shared().now() + 1;
+        lock(&self.shared().mixer).tracks.insert(
+            sid.to_owned(),
+            Track {
+                serial: 0,
+                stream,
+                gain: 1.0,
+                queue: VecDeque::new(),
+                primed: false,
+                loud,
+                level,
+            },
+        );
+    }
+
     /// Muted on this device, in the mixer.
     pub fn stream_muted(&self, stream: &StreamId) -> bool {
         lock(&self.shared().settings).mix.level(stream).muted
@@ -1021,6 +1051,7 @@ impl Audio {
                     queue: VecDeque::with_capacity(CAP + FRAME),
                     primed: false,
                     loud: 0,
+                    level: SILENT_DB,
                 },
             );
             serial
@@ -1032,7 +1063,8 @@ impl Audio {
         runtime.spawn(async move {
             let mut stream = NativeAudioStream::new(track, RATE as i32, 1);
             while let Some(frame) = stream.next().await {
-                let loud = level_db(&frame.data) > SILENT_DB;
+                let level = level_db(&frame.data);
+                let loud = level > SILENT_DB;
                 let now = shared.now();
                 let mut mixer = lock(&shared.mixer);
                 let Some(track) = mixer.tracks.get_mut(&sid).filter(|t| t.serial == serial) else {
@@ -1045,6 +1077,7 @@ impl Audio {
                     track.queue.drain(..extra);
                 }
                 let started = loud && now >= track.loud + SPEAKING_MS;
+                track.level = level;
                 if loud {
                     track.loud = now;
                 }
@@ -1145,6 +1178,7 @@ impl Audio {
                 queue: VecDeque::with_capacity(CAP + FRAME),
                 primed: false,
                 loud: 0,
+                level: SILENT_DB,
             },
         );
         *lock(&self.shared().phone) = Some(PhoneTap::default());
@@ -2101,6 +2135,7 @@ mod tests {
             queue: VecDeque::new(),
             primed: false,
             loud: 0,
+            level: SILENT_DB,
         };
         let app = "Spotify".to_owned();
         mixer.tracks.insert("voice".into(), track(([0; 32], None)));
@@ -2392,6 +2427,7 @@ mod tests {
                 queue: VecDeque::from([1000; FRAME]),
                 primed: true,
                 loud: 0,
+                level: SILENT_DB,
             },
         );
         drop(mixer);
@@ -2405,6 +2441,42 @@ mod tests {
                 .iter()
                 .all(|&sample| sample == 0)
         );
+    }
+
+    #[test]
+    fn an_apps_level_shows_only_while_it_plays() {
+        let data = tempfile::tempdir().unwrap();
+        let audio = Audio::new(data.path()).unwrap();
+        assert_eq!(audio.app_level("TR_app"), None);
+        let now = audio.shared().now() + 1;
+        let track = |stream, loud, level| Track {
+            serial: 1,
+            gain: 1.0,
+            stream,
+            queue: VecDeque::new(),
+            primed: false,
+            loud,
+            level,
+        };
+        let mut mixer = lock(&audio.shared().mixer);
+        let app = ([1; 32], Some("Music".to_owned()));
+        mixer
+            .tracks
+            .insert("TR_app".into(), track(app.clone(), now, -25.0));
+        mixer
+            .tracks
+            .insert("TR_quiet".into(), track(app, 0, SILENT_DB));
+        mixer
+            .tracks
+            .insert("TR_mic".into(), track(([1; 32], None), now, -10.0));
+        drop(mixer);
+        let level = audio.app_level("TR_app").expect("playing");
+        assert!((level - 0.5).abs() < 1e-5);
+        assert_eq!(audio.app_level("TR_quiet"), None);
+        assert_eq!(audio.app_level("TR_mic"), None, "voices aren't apps");
+        // Silent for longer than a speaking ring: the bars stop.
+        std::thread::sleep(Duration::from_millis(SPEAKING_MS + 20));
+        assert_eq!(audio.app_level("TR_app"), None);
     }
 
     #[test]
@@ -2493,6 +2565,7 @@ mod tests {
             queue: VecDeque::from(vec![sample; PRIME]),
             primed: false,
             loud: 0,
+            level: SILENT_DB,
         };
         mixer.tracks.insert("a".into(), track(loud.clone(), 8000));
         let alone = mix_tracks(&mut mixer, false, None);
@@ -2610,6 +2683,7 @@ mod tests {
             queue: VecDeque::from(vec![1000; PRIME * 4]),
             primed: false,
             loud: 0,
+            level: SILENT_DB,
         };
         let mut mixer = Mixer::default();
         mixer.tracks.insert("voice".into(), track(None));
@@ -2637,6 +2711,7 @@ mod tests {
             queue: VecDeque::from(vec![sample; PRIME]),
             primed: false,
             loud: 0,
+            level: SILENT_DB,
         };
         let mut mixer = Mixer::default();
         // Turned down here, but the phone hears it at full volume.
