@@ -51,7 +51,7 @@ pub mod phone;
 pub mod remote;
 mod stage;
 pub mod terminal;
-pub use panel::{Link, call_bar};
+pub use panel::{Link, call_bar, phone_controls};
 pub use stage::{Stage, full_view, stage};
 
 pub struct Voice {

@@ -150,18 +150,31 @@ fn status_picker(m: &mut ui::Menu, current: Choice) -> Option<Choice> {
 
 /// Mic and sound on or off; only shown in a call.
 fn sound_buttons(ui: &mut Ui, home: &Home) {
-    let audio = &home.voice.audio;
-    let deafened = audio.deafened();
-    let muted = audio.muted() || deafened;
-    let look = |off: bool| if off { Look::Struck } else { Look::Plain };
-    if ui::icon_button(ui, "🎧", deafen_tip(deafened), look(deafened), BUTTON_SIZE).clicked() {
+    deafen_button(ui, home, BUTTON_SIZE);
+    mic_button(ui, home, BUTTON_SIZE);
+}
+
+fn struck(off: bool) -> Look {
+    if off { Look::Struck } else { Look::Plain }
+}
+
+/// Sound on or off, also in the call view's controls on phones.
+pub fn deafen_button(ui: &mut Ui, home: &Home, size: Vec2) {
+    let deafened = home.voice.audio.deafened();
+    if ui::icon_button(ui, "🎧", deafen_tip(deafened), struck(deafened), size).clicked() {
         toggle_deafen(home);
     }
+}
+
+/// Mic on or off, also in the call view's controls on phones.
+pub fn mic_button(ui: &mut Ui, home: &Home, size: Vec2) {
+    let audio = &home.voice.audio;
+    let muted = audio.muted() || audio.deafened();
     let server_muted = server_muted(home);
     let mic = ui
         .add_enabled_ui(!server_muted, |ui| {
             let off = muted || server_muted;
-            ui::icon_button(ui, "🎤", mute_tip(off), look(off), BUTTON_SIZE)
+            ui::icon_button(ui, "🎤", mute_tip(off), struck(off), size)
         })
         .inner
         .on_disabled_hover_text(t!("call.server_muted"));

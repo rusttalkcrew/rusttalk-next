@@ -12,6 +12,7 @@ Unreleased under the new version and date.
 ## Unreleased
 
 - Android test builds install as a separate "RustTalk Test" app, so they no longer block installing the release app.
+- On phones, mute, sound, camera and leave buttons now sit at the bottom of the call view, and the call opens without the chat (tap the chat button to show it).
 
 ## v0.4.0 - 2026-11-24
 
