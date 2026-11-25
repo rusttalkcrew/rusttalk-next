@@ -20,7 +20,15 @@ const RECONNECT_GRACE: Duration = Duration::from_secs(1);
 const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Default)]
-pub struct Sessions(Mutex<HashMap<String, Member>>);
+pub struct Sessions(Mutex<Known>);
+
+#[derive(Default)]
+struct Known {
+    members: HashMap<String, Member>,
+    /// Choices made since start. A socket that read the stored choice just before a
+    /// change was saved would otherwise announce the old one until the next change.
+    chosen: HashMap<String, Status>,
+}
 
 struct Member {
     count: usize,
@@ -78,7 +86,7 @@ fn announce(app: &App, person_id: &str, member: &mut Member) {
             tokio::spawn(async move {
                 sleep_until(at).await;
                 let mut state = app.presence.0.lock().expect("presence sessions");
-                if let Some(member) = state.get_mut(&person_id) {
+                if let Some(member) = state.members.get_mut(&person_id) {
                     member.flush_pending = false;
                     announce(&app, &person_id, member);
                 }
@@ -92,6 +100,7 @@ impl Sessions {
         self.0
             .lock()
             .expect("presence sessions")
+            .members
             .iter()
             .map(|(id, member)| (id.clone(), member.announced))
             .collect()
@@ -129,7 +138,8 @@ pub struct Socket {
 /// invisible member is never announced online on connect.
 pub fn open(app: &App, person_id: String, status: Status) -> Socket {
     let mut state = app.presence.0.lock().expect("presence sessions");
-    let member = state.entry(person_id.clone()).or_insert_with(|| {
+    let status = state.chosen.get(&person_id).copied().unwrap_or(status);
+    let member = state.members.entry(person_id.clone()).or_insert_with(|| {
         let announced = visible(true, status);
         if announced != Presence::Offline {
             changed(app, &person_id, announced);
@@ -156,7 +166,7 @@ impl Drop for Socket {
         let app = self.app.clone();
         let person_id = self.person_id.clone();
         let mut state = app.presence.0.lock().expect("presence sessions");
-        let Some(member) = state.get_mut(&person_id) else {
+        let Some(member) = state.members.get_mut(&person_id) else {
             return;
         };
         member.count -= 1;
@@ -170,9 +180,10 @@ impl Drop for Socket {
             sleep_until(closes_at).await;
             let mut state = app.presence.0.lock().expect("presence sessions");
             if state
+                .members
                 .get(&person_id)
                 .is_some_and(|member| member.closes_at == Some(closes_at))
-                && let Some(member) = state.remove(&person_id)
+                && let Some(member) = state.members.remove(&person_id)
                 && member.announced != Presence::Offline
             {
                 changed(&app, &person_id, Presence::Offline);
@@ -239,10 +250,11 @@ pub async fn set_hide_offline(
 }
 
 /// Apply a choice to a connected member, including one within the reconnect grace,
-/// so the reconnected sockets keep the new choice.
+/// so the reconnected sockets keep the new choice, and remember it for the next socket.
 fn apply(app: &App, person_id: &str, status: Status) {
     let mut state = app.presence.0.lock().expect("presence sessions");
-    if let Some(member) = state.get_mut(person_id) {
+    state.chosen.insert(person_id.to_owned(), status);
+    if let Some(member) = state.members.get_mut(person_id) {
         member.status = status;
         announce(app, person_id, member);
     }
@@ -293,19 +305,11 @@ mod tests {
         assert_eq!(announcement(&back, soon), Announce::Nothing);
     }
 
-    #[tokio::test]
-    async fn a_choice_during_the_reconnect_grace_applies() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = crate::store::open(dir.path()).await.unwrap();
-        let app = App {
-            emoji: crate::emoji::Emoji::open(dir.path(), &db)
-                .await
-                .unwrap()
-                .into(),
-            files: crate::files::Files::open(dir.path(), &db)
-                .await
-                .unwrap()
-                .into(),
+    async fn app(dir: &std::path::Path) -> App {
+        let db = crate::store::open(dir).await.unwrap();
+        App {
+            emoji: crate::emoji::Emoji::open(dir, &db).await.unwrap().into(),
+            files: crate::files::Files::open(dir, &db).await.unwrap().into(),
             db,
             key: std::sync::Arc::new(ed25519_dalek::SigningKey::from_bytes(&[7; 32])),
             changes: tokio::sync::broadcast::channel(128).0,
@@ -313,13 +317,30 @@ mod tests {
             voice: None,
             session_ttl: crate::auth::SESSION_TTL,
             listing_changed: tokio::sync::watch::channel(()).0,
-        };
+        }
+    }
+
+    #[tokio::test]
+    async fn a_choice_during_the_reconnect_grace_applies() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app(dir.path()).await;
         drop(open(&app, "p".into(), Status::Online));
         apply(&app, "p", Status::Away);
         let _socket = open(&app, "p".into(), Status::Online);
         let state = app.presence.0.lock().unwrap();
-        assert_eq!(state["p"].count, 1);
-        assert_eq!(status_name(state["p"].status), "away");
+        assert_eq!(state.members["p"].count, 1);
+        assert_eq!(status_name(state.members["p"].status), "away");
+    }
+
+    #[tokio::test]
+    async fn a_choice_saved_while_a_socket_opens_wins_over_the_stale_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app(dir.path()).await;
+        // The socket read "away" from the database, then "online" was saved and
+        // applied before the socket was counted.
+        apply(&app, "p", Status::Online);
+        let _socket = open(&app, "p".into(), Status::Away);
+        assert_eq!(app.presence.snapshot()["p"], Presence::Online);
     }
 
     #[test]
