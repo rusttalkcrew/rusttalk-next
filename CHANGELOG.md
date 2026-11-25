@@ -24,6 +24,7 @@ Unreleased under the new version and date.
 - Admins can preview the server as one or more of their own roles ("View server as this role" in Roles): channels, categories and buttons show as those roles would see them, and nothing can be changed while previewing.
 - The emoji or sticker name you typed in Server settings now stays when you cancel picking a picture or the upload fails.
 - Saving roles is faster, and if part of it fails, the changes that didn't go through stay waiting for Save.
+- Server owners can choose how many messages each channel keeps, or keep them all, in Server settings > Message history (10,000 by default).
 
 ## v0.5.0 - 2026-11-25
 

@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use reqwest::{Method, StatusCode};
 use rustls_pki_types::{CertificateDer, pem::PemObject};
 use rusttalk_core::{
-    auth::{FileLimits, FileSettings, KnownServer, decode, encode},
+    auth::{FileLimits, FileSettings, KnownServer, MessageHistory, decode, encode},
     client::{KeyClient, Server},
     identity::DeviceIdentity,
     pinned_tls::fingerprint,
@@ -636,6 +636,9 @@ pub async fn exercise(
     )
     .await
     .context("W70 DM after leaving server B")?;
+    message_history(&mut owner_b, &category_b)
+        .await
+        .context("#518 message history on server B")?;
     Ok(())
 }
 
@@ -722,5 +725,70 @@ async fn tone(
     .await??;
     tones.shutdown().await;
     tokio::try_join!(listener.leave(), sender.leave())?;
+    Ok(())
+}
+
+/// Server B's host sets no cap: its owner keeps everything, then lowers the limit, which
+/// deletes older messages at once. Last on B, since it trims every channel there.
+async fn message_history(owner: &mut KeyClient<'_>, category: &[u8; 32]) -> Result<()> {
+    const PATH: &str = "/v1/settings/message-history";
+    let get = |owner: &KeyClient<'_>| owner.request(Method::GET, PATH).send();
+    let initial: MessageHistory = get(owner).await?.error_for_status()?.json().await?;
+    assert_eq!(
+        initial,
+        MessageHistory {
+            keep: 10_000,
+            ceiling: None
+        }
+    );
+    let save = |owner: &KeyClient<'_>, keep: i64| {
+        owner
+            .request(Method::PUT, PATH)
+            .json(&json!({ "keep": keep }))
+            .send()
+    };
+    let all: MessageHistory = save(owner, 0).await?.error_for_status()?.json().await?;
+    assert_eq!(all.keep, 0);
+
+    // The peer left B, so the space key rotates before a new channel can be made.
+    owner.sync().await?;
+    let channel = owner
+        .create_channel(category, "text", b"#518 history", b"")
+        .await?;
+    owner.sync().await?;
+    let mut sent = Vec::new();
+    for text in ["#518 one", "#518 two", "#518 three"] {
+        let body = rusttalk_core::client::MessageBody {
+            text: text.into(),
+            ..Default::default()
+        };
+        sent.push(owner.send_message(&channel.id, &body).await?.id);
+    }
+    let kept: MessageHistory = save(owner, 2).await?.error_for_status()?.json().await?;
+    assert_eq!(kept.keep, 2);
+    let status = |id: &[u8; 32]| {
+        owner
+            .request(
+                Method::GET,
+                &format!(
+                    "/v1/channels/{}/messages/{}",
+                    encode(&channel.id),
+                    encode(id)
+                ),
+            )
+            .send()
+    };
+    assert_eq!(status(&sent[0]).await?.status(), StatusCode::NOT_FOUND);
+    assert_eq!(status(&sent[1]).await?.status(), StatusCode::OK);
+    assert_eq!(
+        get(owner)
+            .await?
+            .error_for_status()?
+            .json::<MessageHistory>()
+            .await?
+            .keep,
+        2
+    );
+    println!("#518 owner kept every message, then a lower limit removed the oldest at once");
     Ok(())
 }

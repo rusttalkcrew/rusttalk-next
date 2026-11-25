@@ -252,6 +252,23 @@ cleanup. Files keep their original expiry if retention increases. Run one
 API instance per volume. On startup it removes leftover staging blobs and
 uncommitted blobs.
 
+## Message history
+
+Each channel and direct message keeps its newest 10,000 messages by default.
+A member with Manage Server changes this in **Server settings → Message
+history**, to any number or to keep everything. Lowering it deletes the older
+messages in every channel right away (the app asks first); the next message in
+a channel also trims it. Raising it brings nothing back.
+
+To cap what owners can choose, set `RUSTTALK_MESSAGE_RETAIN` on the API. A set
+value is both the cap and the default, and the server clamps saved numbers to
+it; on startup it trims channels over the cap. `0` caps nothing and keeps
+everything by default. Unset or empty means no cap. Messages are small
+(at most about 10 KiB of ciphertext each, usually far less), and attachments
+are stored and expire separately, so 10,000 messages in a channel take at most
+about 100 MiB of database space. With everything kept, keep an eye on free
+disk space.
+
 ## Server emoji limits
 
 | Variable | Default |

@@ -6,6 +6,7 @@ mod emoji;
 mod events;
 mod file_settings;
 mod files;
+mod history;
 mod index;
 mod keys;
 mod members;
@@ -240,6 +241,7 @@ async fn run() -> Result<()> {
                     "Claim ownership with docker compose exec api rusttalk-api owner-invite"
                 );
             }
+            history::init()?;
             let files = Arc::new(files::Files::open(&dir, &db).await?);
             let emoji = Arc::new(emoji::Emoji::open(&dir, &db).await?);
             serve(App {
@@ -281,6 +283,13 @@ async fn serve(app: App) -> io::Result<()> {
     voice::start_enforcer(&app);
     let publisher = tokio::spawn(index::refresh(app.clone(), app.listing_changed.subscribe()));
     let file_expiry = tokio::spawn(files::expire(app.clone()));
+    // A host that lowered RUSTTALK_MESSAGE_RETAIN gets its channels trimmed now.
+    let trim = app.clone();
+    tokio::spawn(async move {
+        if let Err(error) = history::trim_all(&trim).await {
+            tracing::error!(reason = error.code, "trimming message history failed");
+        }
+    });
     let app = routes(app)
         .layer(middleware::from_fn(finish_changes))
         .layer(middleware::from_fn(log_request))
@@ -308,6 +317,10 @@ fn routes(app: App) -> Router {
         .route(
             "/v1/settings/files",
             get(file_settings::get).put(file_settings::set),
+        )
+        .route(
+            "/v1/settings/message-history",
+            get(history::get).put(history::set),
         )
         .route(
             "/v1/settings/open-joining",

@@ -23,6 +23,7 @@ services:
       RUSTTALK_EMOJI_MAX: "${RUSTTALK_EMOJI_MAX:-100}"
       RUSTTALK_STICKER_MAX: "${RUSTTALK_STICKER_MAX:-}"
       RUSTTALK_EMOJI_MAX_BYTES: "${RUSTTALK_EMOJI_MAX_BYTES:-262144}"
+      RUSTTALK_MESSAGE_RETAIN: "${RUSTTALK_MESSAGE_RETAIN:-}"
     volumes:
       - api-data:/data
       - update-status:/update-status:ro

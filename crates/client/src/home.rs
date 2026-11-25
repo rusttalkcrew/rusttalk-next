@@ -7553,6 +7553,7 @@ mod tests {
     mod long_chat;
     mod member_list;
     mod menus;
+    mod message_history;
     mod outbox;
     mod presence;
     mod rail;

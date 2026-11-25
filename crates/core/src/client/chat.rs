@@ -19,7 +19,8 @@ use crate::{
 use super::{KeyClient, keys::DmPin};
 pub use crate::messages::{MAX_POKE_CHARS, MAX_TEXT_CHARS, MessageBody, MessageRecord};
 
-// shortcut: replay protection forgets the oldest IDs past this cap, same as server retention; persist with W14 sync.
+// shortcut: replay protection forgets the oldest IDs past this cap (a server keeps 10,000 by
+// default, owners may keep more); persist with W14 sync.
 const OPENED_PER_CHANNEL: usize = 10_000;
 
 /// Opened records of one channel, oldest first, and the edits seen for each original.
