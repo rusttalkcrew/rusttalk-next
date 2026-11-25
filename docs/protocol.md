@@ -117,7 +117,7 @@ All endpoints below require `Authorization: Bearer <token>`.
 | DELETE `/v1/me/membership` | Empty | Any member except the owner. 204, leaves the server like a kick: sessions close, keys rotate, audit `left`. The owner gets `409 owner_cannot_leave` |
 | POST `/v1/me/revocations` | `{record}`, a W04 root-signed revocation for the caller's person | Any member. 204, affected device loses its token |
 | POST `/v1/invites` | `{uses, ttl_seconds, space_key_ct, name_ct?}` | `invite`. 201, `{id, code, expires_at}` |
-| GET `/v1/invites` | Empty | `invite`. 200, active invites as `{id, created_by, remaining_uses, expires_at}`, soonest expiry first: the caller's own, or everyone's with `manage_server` |
+| GET `/v1/invites` | Empty | `invite`. 200, active invites as `{id, created_by, remaining_uses, expires_at}`, soonest expiry first: the caller's own, or everyone's with `manage_server`. Invites whose maker no longer holds `invite` are left out |
 | DELETE `/v1/invites/{id}` | Empty | `invite` for the caller's own invite, also `manage_server` for anyone else's. 204 |
 | DELETE `/v1/members/{person}` | Empty | `kick`. 204 |
 | PUT `/v1/members/{person}/voice-mute` | Empty | `mute_members`. 204, mutes them in every voice channel until lifted |
@@ -181,7 +181,11 @@ the transfer endpoint. The prior owner keeps their assigned roles.
 
 Invite uses may be 1–1000, with lifetimes from 1 second to 30 days.
 The server records who made each invite. Invites made before that have a
-null `created_by` and need `manage_server` to stop. The invite list never
+null `created_by` and need `manage_server` to stop. An invite works only while
+its maker is the owner or a member whose roles grant `invite`: leaving, a kick
+or a ban deletes their invites, and losing `invite` makes them unusable (and
+unlisted) until it is granted again. Sign-in then answers `invalid_invite` and
+preview 404, as for an unknown code. The invite list never
 contains codes: the server stores only their hashes. The bootstrap owner
 invite is never listed. The
 bootstrap invite is single-use and expires after a day. For a regular

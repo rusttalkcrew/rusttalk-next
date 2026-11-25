@@ -49,6 +49,7 @@ session so a moderator can choose an IP ban. Termination removes the session
 row. An explicitly banned IP stays linked to its person ban until unban.
 Challenge issuance prunes expired nonces, and sign-in deletes a consumed nonce.
 Invite creation prunes expired invites, and redemption deletes spent ones.
+Leaving, a kick or a ban deletes the invites that person made.
 Preview requests prune expired rate-limit rows. An open admission stores a
 source address bucket without a person ID for one hour. A cleanup task
 prunes expired admission rows every 30 seconds, and new admissions also

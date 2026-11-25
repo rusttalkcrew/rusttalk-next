@@ -13,8 +13,8 @@ use sqlx::{FromRow, SqliteConnection, query, query_as, query_scalar};
 use crate::{
     ApiError, ApiResult, App,
     auth::{
-        PublicLimit, authenticate, authenticate_read, check_public_limit, client_ip, create_invite,
-        limit_key,
+        CREATOR_CAN_INVITE, PublicLimit, authenticate, authenticate_read, check_public_limit,
+        client_ip, create_invite, limit_key,
     },
     keys, metadata, payload,
     roles::{self, Permission},
@@ -230,10 +230,10 @@ pub async fn preview(
         .bind(at + 60)
         .execute(&mut *tx)
         .await?;
-    let result: Option<(Vec<u8>, Option<Vec<u8>>)> = query_as(
+    let result: Option<(Vec<u8>, Option<Vec<u8>>)> = query_as(&format!(
         "SELECT space_key_ct, name_ct FROM invites WHERE code_hash = ? AND expires_at > ?
-           AND space_key_ct IS NOT NULL",
-    )
+           AND space_key_ct IS NOT NULL AND {CREATOR_CAN_INVITE}"
+    ))
     .bind(hash(&code).as_slice())
     .bind(at)
     .fetch_optional(&mut *tx)
@@ -256,7 +256,8 @@ pub struct ActiveInvite {
 }
 
 /// Active invites: your own, or everyone's with Manage server. Codes are stored hashed and
-/// never leave the server again.
+/// never leave the server again. Invites whose maker lost `invite` are left out: they no
+/// longer work.
 pub async fn invites(
     State(app): State<App>,
     headers: HeaderMap,
@@ -265,11 +266,11 @@ pub async fn invites(
     let auth = roles::authority(&mut tx, &actor.person).await?;
     auth.require(Permission::Invite)?;
     let everyone = auth.require(Permission::ManageServer).is_ok();
-    let rows: Vec<(String, Option<Vec<u8>>, i64, i64)> = query_as(
+    let rows: Vec<(String, Option<Vec<u8>>, i64, i64)> = query_as(&format!(
         "SELECT id, created_by, remaining_uses, expires_at FROM invites
          WHERE is_owner = FALSE AND expires_at > ? AND (? OR created_by = ?)
-         ORDER BY expires_at, id",
-    )
+         AND {CREATOR_CAN_INVITE} ORDER BY expires_at, id"
+    ))
     .bind(actor.at)
     .bind(everyone)
     .bind(actor.person.as_slice())
@@ -341,6 +342,11 @@ async fn remove_member(app: &App, db: &mut SqliteConnection, person: &[u8]) -> A
         crate::files::unshare_from(app, db, person, None).await?;
         crate::page_files::release_from(app, db, person, None).await?;
     }
+    // Their invite links go with them, so a ban can't be undone through one.
+    query("DELETE FROM invites WHERE created_by = ?")
+        .bind(person)
+        .execute(&mut *db)
+        .await?;
     let closed = query_scalar("DELETE FROM sessions WHERE person_id = ? RETURNING expires_at")
         .bind(person)
         .fetch_all(&mut *db)
@@ -695,6 +701,118 @@ mod tests {
                 .fetch_one(&app.db)
                 .await?;
         assert_eq!(audited, 3);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn invites_stop_when_their_creator_may_no_longer_invite() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let app = app(dir.path(), 6).await?;
+        query(
+            "INSERT INTO roles (id, kind, rank, permissions) VALUES ('inviter', 'custom', 10, 1)",
+        )
+        .execute(&app.db)
+        .await?;
+        for who in 2..=6 {
+            query("INSERT INTO member_roles (person_id, role_id) VALUES (?, 'inviter')")
+                .bind(person(who))
+                .execute(&app.db)
+                .await?;
+        }
+        // Invite `n` is made by person `n`; invite 7 predates recorded creators.
+        let id = |byte: u8| encode(&[byte; 16]);
+        let code = |byte: u8| encode(&[byte; 16]);
+        for byte in 1..=7u8 {
+            query("INSERT INTO invites (id, code_hash, is_owner, remaining_uses, expires_at, created_by, space_key_ct)
+                   VALUES (?, ?, FALSE, 5, ?, ?, ?)")
+                .bind(id(byte)).bind(hash(&[byte; 16]).as_slice()).bind(now()? + 600)
+                .bind((byte < 7).then(|| person(byte))).bind(vec![0u8; 8])
+                .execute(&app.db).await?;
+        }
+        // 2 is kicked, 3 banned, 4 leaves and 5 loses `invite`; 1 (the owner) and 6 keep it.
+        kick(State(app.clone()), as_person(1), Path(encode(&person(2)))).await?;
+        ban(
+            State(app.clone()),
+            as_person(1),
+            Path(encode(&person(3))),
+            Ok(Json(BanRequest { ban_ip: false })),
+        )
+        .await?;
+        leave(State(app.clone()), as_person(4)).await?;
+        query("DELETE FROM member_roles WHERE person_id = ?")
+            .bind(person(5))
+            .execute(&app.db)
+            .await?;
+
+        let left: Vec<String> = query_scalar("SELECT id FROM invites ORDER BY id")
+            .fetch_all(&app.db)
+            .await?;
+        let mut kept = vec![id(1), id(5), id(6), id(7)];
+        kept.sort();
+        assert_eq!(left, kept, "removed members' invites are deleted");
+        let listed: Vec<String> = invites(State(app.clone()), as_person(1))
+            .await?
+            .0
+            .into_iter()
+            .map(|invite| invite.id)
+            .collect();
+        assert_eq!(listed, [id(1), id(6), id(7)]);
+
+        let preview = |byte: u8| {
+            super::preview(
+                State(app.clone()),
+                as_person(1),
+                Ok(Json(PreviewRequest { code: code(byte) })),
+            )
+        };
+        assert_eq!(
+            preview(5).await.err().map(|e| e.code),
+            Some("invite_not_found")
+        );
+        assert!(preview(6).await.is_ok());
+
+        for (byte, works) in [
+            (1, true),
+            (2, false),
+            (3, false),
+            (4, false),
+            (5, false),
+            (6, true),
+            (7, true),
+        ] {
+            let mut tx = app.db.begin().await?;
+            let result =
+                crate::auth::redeem(&mut tx, &person(100 + byte), &code(byte), now()?).await;
+            match result {
+                Ok(()) => assert!(works, "invite {byte} should be refused"),
+                Err(error) => {
+                    assert!(!works, "invite {byte}: {}", error.code);
+                    assert_eq!(error.code, "invalid_invite");
+                }
+            }
+        }
+
+        // Restoring `invite` makes 5's link work again.
+        query("INSERT INTO member_roles (person_id, role_id) VALUES (?, 'inviter')")
+            .bind(person(5))
+            .execute(&app.db)
+            .await?;
+        let mut tx = app.db.begin().await?;
+        crate::auth::redeem(&mut tx, &person(105), &code(5), now()?).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn owner_bootstrap_invite_still_works() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let db = crate::store::open(dir.path()).await?;
+        let code = crate::auth::owner_invite(&db)
+            .await?
+            .expect("owner pending");
+        let mut tx = db.begin().await?;
+        crate::auth::redeem(&mut tx, &person(1), &code, now()?).await?;
+        tx.commit().await?;
+        assert!(!crate::auth::owner_pending(&db).await?);
         Ok(())
     }
 

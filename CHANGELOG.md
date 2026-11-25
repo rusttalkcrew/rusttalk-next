@@ -19,6 +19,7 @@ Unreleased under the new version and date.
 - Right-click or long-press a picture, GIF or sticker in chat to copy it, save it or open it in the viewer; messages can also copy their ID.
 - Android calls keep working when you switch apps or lock the screen, with an "In a voice call" notification that takes you back.
 - On Android, Back now closes menus, dialogs and settings pages and returns to the channel list before leaving the app.
+- Invite links stop working when the person who made them leaves, is kicked or banned, or loses the right to invite.
 
 ## v0.4.0 - 2026-11-24
 
