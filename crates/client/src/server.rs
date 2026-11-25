@@ -19,7 +19,7 @@ use rusttalk_core::{
         voice::{CallTraffic, TrackSid},
     },
     identity::fingerprint,
-    messages::{Ballot, Poll, PollPart, Tally},
+    messages::{Ballot, Poll, PollPart, Reaction, Tally},
     presence::{Presence, Status as Choice},
 };
 use serde::{Deserialize, Serialize};
@@ -897,6 +897,8 @@ pub struct Chat {
     pending_edits: HashMap<(Id, Id), Msg>,
     /// Votes and ends by poll ID, kept out of `messages` so they never show as lines.
     polls: HashMap<Id, PollEvents>,
+    /// Reactions by the first half of their message's ID; they travel as votes.
+    reactions: HashMap<[u8; 16], Vec<Reaction>>,
     /// The poll being written in place of the composer.
     pub poll_editor: Option<crate::home::polls::Editor>,
     /// The channel view has requested its initial history and live updates.
@@ -911,6 +913,8 @@ pub struct Chat {
     pub reply_to: Option<(Id, Id)>,
     /// One of this person's own messages.
     pub editing: Option<Id>,
+    /// The message the emoji picker is open to react to, instead of typing.
+    pub reacting: Option<Id>,
     /// Files picked or dropped, sent with the next message.
     pub staged: Vec<Staged>,
     /// Emoji of other servers picked for the draft; they go along as small files.
@@ -942,6 +946,7 @@ impl Chat {
         self.edited.clear();
         self.pending_edits.clear();
         self.polls.clear();
+        self.reactions.clear();
         self.at_start = false;
         self.oldest = None;
     }
@@ -1038,6 +1043,7 @@ impl Chat {
             let Body::PollPart(part) = msg.body else {
                 continue;
             };
+            let reaction = Reaction::from_vote(&part, msg.person, msg.at, msg.id);
             let (poll, event) = match part {
                 PollPart::Vote {
                     poll,
@@ -1053,6 +1059,9 @@ impl Chat {
                 continue;
             }
             events.seen.push((msg.person, msg.id));
+            if let Some((target, reaction)) = reaction {
+                self.reactions.entry(target).or_default().push(reaction);
+            }
             match event {
                 Ok((sent, choices)) => events.ballots.push(Ballot {
                     person: msg.person,
@@ -1191,6 +1200,21 @@ impl Chat {
         let events = self.polls.get(&msg.id);
         let ballots = events.map_or(&[][..], |events| &events.ballots);
         rusttalk_core::messages::tally(&both, &msg.person, ballots, &[])
+    }
+
+    /// A message's reactions: each emoji (by key) and who reacted with it, for the
+    /// emoji `known` says this app can show.
+    pub fn reactions(
+        &self,
+        msg: &Id,
+        known: impl Fn(&[u8; 16]) -> bool,
+    ) -> Vec<([u8; 16], Vec<Id>)> {
+        let half: [u8; 16] = msg[..16].try_into().expect("16 bytes");
+        self.reactions
+            .get(&half)
+            .map_or_else(Vec::new, |reactions| {
+                rusttalk_core::messages::tally_reactions(reactions, known)
+            })
     }
 
     /// A verified sender wins over the reply's display hint. For colliding IDs,

@@ -6,7 +6,10 @@ use eframe::egui::{
     self, ColorImage, FontFamily, FontId, FontPriority, GlyphBitmap, GlyphRasterizer,
     GlyphRasterizerRequest, RasterizedGlyph, RichText, vec2,
 };
-use rusttalk_core::auth::{decode, encode};
+use rusttalk_core::{
+    auth::{decode, encode},
+    messages::ReactionEmoji,
+};
 use unicode_segmentation::UnicodeSegmentation as _;
 
 use crate::server::{CustomEmoji, Id};
@@ -351,6 +354,65 @@ pub fn plain(text: &str) -> Cow<'_, str> {
             })
             .collect(),
     )
+}
+
+/// What a reaction shows: a Unicode emoji the picker has, or one of this server's.
+#[derive(Clone, Copy)]
+pub enum Reacted<'a> {
+    Unicode(&'static str),
+    Custom(&'a CustomEmoji),
+}
+
+impl Reacted<'_> {
+    /// How the emoji is named, for screen readers and the "who reacted" list.
+    pub fn name(&self) -> String {
+        match self {
+            Self::Unicode(sequence) => (*sequence).to_owned(),
+            Self::Custom(emoji) => format!(":{}:", emoji.name),
+        }
+    }
+}
+
+/// Every Unicode emoji (and skin tone) in the picker, by reaction key. Reactions with
+/// other emoji aren't shown, so everyone sees the same set as far as their app knows it.
+static REACTION_KEYS: LazyLock<HashMap<[u8; 16], &'static str>> = LazyLock::new(|| {
+    (PICKER.iter())
+        .flat_map(|entry| std::iter::once(entry.sequence).chain(entry.tones))
+        .filter(|sequence| !sequence.is_empty())
+        .map(|sequence| (ReactionEmoji::Unicode(sequence.into()).key(), sequence))
+        .collect()
+});
+
+/// A server emoji's reaction key, hashed once per emoji.
+fn custom_key(id: &Id) -> [u8; 16] {
+    static KEYS: LazyLock<std::sync::Mutex<HashMap<Id, [u8; 16]>>> =
+        LazyLock::new(Default::default);
+    let mut keys = KEYS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    *keys
+        .entry(*id)
+        .or_insert_with(|| ReactionEmoji::Custom(*id).key())
+}
+
+/// The emoji a reaction key stands for, if this app can show it.
+pub fn reacted<'a>(key: &[u8; 16], custom: &'a [CustomEmoji]) -> Option<Reacted<'a>> {
+    if let Some(sequence) = REACTION_KEYS.get(key) {
+        return Some(Reacted::Unicode(sequence));
+    }
+    (custom.iter())
+        .find(|emoji| !emoji.sticker && custom_key(&emoji.id) == *key)
+        .map(Reacted::Custom)
+}
+
+/// The reaction key for what the picker gave: a Unicode emoji, or `:name:` of one of
+/// this server's emoji.
+pub fn reaction_key(picked: &str, custom: &[CustomEmoji]) -> Option<[u8; 16]> {
+    if let Some(name) = picked.strip_prefix(':').and_then(|s| s.strip_suffix(':')) {
+        return (custom.iter())
+            .find(|emoji| !emoji.sticker && emoji.name == name)
+            .map(|emoji| custom_key(&emoji.id));
+    }
+    let key = ReactionEmoji::Unicode(picked.into()).key();
+    REACTION_KEYS.contains_key(&key).then_some(key)
 }
 
 pub struct Entry {

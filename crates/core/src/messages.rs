@@ -218,6 +218,10 @@ pub use poll::{
     Tally, tally, valid_poll,
 };
 #[cfg(any(feature = "client", test))]
+mod reaction;
+#[cfg(any(feature = "client", test))]
+pub use reaction::{MAX_REACTION_EMOJI, Reaction, ReactionEmoji, reaction_vote, tally_reactions};
+#[cfg(any(feature = "client", test))]
 mod voice_request;
 #[cfg(any(feature = "client", test))]
 pub use voice_request::{VoiceAnswer, VoiceRequest};

@@ -204,6 +204,24 @@ pub fn choice_button<'a>(
     ui.add(Button::selectable(selected, label).min_size(size))
 }
 
+/// A reaction under a message: an emoji and its count. One of mine gets a faint accent
+/// tint and an accent outline rather than a solid fill, so every emoji keeps its colour.
+pub fn reaction_chip<'a>(ui: &mut Ui, mine: bool, label: impl egui::IntoAtoms<'a>) -> Response {
+    let c = colors(ui);
+    let (fill, stroke) = if mine {
+        let accent = accent(ui).base;
+        (accent.gamma_multiply(0.18), Stroke::new(1.0, accent))
+    } else {
+        (c.button.gamma_multiply(0.45), Stroke::new(1.0, c.border))
+    };
+    ui.add(
+        Button::new(label)
+            .fill(fill)
+            .stroke(stroke)
+            .corner_radius(RADIUS),
+    )
+}
+
 /// Something that can't be undone, like Delete, Kick or Leave.
 pub fn danger(ui: &mut Ui, text: &str) -> Response {
     button(ui, text, Kind::Danger, NORMAL, TEXT_BODY)

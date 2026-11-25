@@ -261,6 +261,8 @@ pub struct Picker {
     focus_search: bool,
     pressed_cursor: Option<CCursorRange>,
     insert_at: Option<CCursorRange>,
+    /// Opened to pick a reaction: emoji only.
+    reaction: bool,
 }
 
 fn load(path: &Path) -> Vec<String> {
@@ -291,6 +293,7 @@ impl Picker {
             focus_search: false,
             pressed_cursor: None,
             insert_at: None,
+            reaction: false,
         }
     }
 
@@ -349,10 +352,27 @@ impl Picker {
             cursor()
         };
         self.open = true;
+        self.reaction = false;
         self.tab = tab;
         self.query.clear();
         self.hover = None;
         self.focus_search = true;
+    }
+
+    /// Open for a reaction, and not since reopened from the composer.
+    pub fn is_reacting(&self) -> bool {
+        self.open && self.reaction
+    }
+
+    /// Open the emoji tab without a composer button, to pick a reaction.
+    pub fn open_for_reaction(&mut self) {
+        self.open = true;
+        self.reaction = true;
+        self.tab = Tab::Emoji;
+        self.query.clear();
+        self.hover = None;
+        self.focus_search = true;
+        self.insert_at = None;
     }
 
     /// The panel above `anchor` while open. Returns whether it was open before this
@@ -381,7 +401,13 @@ impl Picker {
             })
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    for tab in [Tab::Stickers, Tab::Emoji] {
+                    // A reaction is an emoji, so picking one shows no sticker tab.
+                    let tabs: &[Tab] = if self.reaction {
+                        &[Tab::Emoji]
+                    } else {
+                        &[Tab::Stickers, Tab::Emoji]
+                    };
+                    for &tab in tabs {
                         if ui::choice_button(ui, self.tab == tab, tab.label(), Vec2::ZERO).clicked()
                             && self.tab != tab
                         {

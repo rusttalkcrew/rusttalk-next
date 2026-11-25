@@ -418,7 +418,9 @@ Unicode scalar values, not blank. A vote has empty text; its fields are the
 poll's 32-byte message ID, an eight-byte big-endian sender clock in
 milliseconds, and a one-byte count of 0–10 option indexes, each one byte below
 10, strictly ascending. An end has empty text; its field is the poll's message
-ID. Format 2 can't carry a poll part.
+ID. Format 2 can't carry a poll part. A reaction is a vote with 0 or 1
+choices whose poll ID names the message and emoji (see
+[Protocol](protocol.md#reactions)).
 Apps before this format show any of these as a message they can't open.
 
 A voice request (kind 4) has no flags, empty text and no stored files (46
