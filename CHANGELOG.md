@@ -13,6 +13,7 @@ Unreleased under the new version and date.
 
 - Android: attach files and photos, change your profile picture or server icon, add emoji and stickers and import emoji packs, using the phone's own file and photo picker.
 - On iPhone you can now upload files and photos: attachments, profile picture, server icon, emoji, stickers and page pictures.
+- iPhone: voice calls show as calls on the lock screen, in the Dynamic Island and in Control Center, with mute and hang up; they stay out of the Phone app's Recents.
 
 ## v0.7.0 - 2026-11-25
 

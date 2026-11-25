@@ -191,13 +191,18 @@ pub fn server_muted(home: &Home) -> bool {
 
 /// The mic button, also for the global shortcut. Unmuting also undeafens.
 pub fn toggle_mute(home: &Home) {
+    let audio = &home.voice.audio;
+    set_mute(home, !(audio.muted() || audio.deafened()));
+}
+
+/// Mute or unmute, also from the phone's call controls (`call::callkit`).
+pub fn set_mute(home: &Home, on: bool) {
     if server_muted(home) {
         return;
     }
     let audio = &home.voice.audio;
-    let muted = audio.muted() || audio.deafened();
-    audio.set_muted(!muted);
-    if muted {
+    audio.set_muted(on);
+    if !on {
         audio.set_deafened(false);
     }
     sync_voice_status(home);
