@@ -11,8 +11,8 @@ use eframe::egui::{
 use super::{
     Accent, CARD_SECONDS, CARD_SLIDE, CONTROL_HEIGHT, DIALOG_PADDING, DIALOG_WIDTH, HOVER_GROW,
     HOVER_SECONDS, LARGE_CONTROL, ON_FILL, POPUP_WIDTH, PRESS_SHRINK, Palette, RADIUS, RADIUS_ROW,
-    RADIUS_S, RADIUS_WINDOW, SPACE_L, SPACE_M, SPACE_S, STATE_SECONDS, TEXT_BODY, TEXT_CAPTION,
-    TEXT_ICON, TEXT_SMALL, accent, bold, bold_family, colors, heading,
+    RADIUS_S, RADIUS_WINDOW, SPACE_L, SPACE_M, SPACE_S, SPACE_XL, STATE_SECONDS, TEXT_BODY,
+    TEXT_CAPTION, TEXT_ICON, TEXT_SMALL, accent, bold, bold_family, colors, heading,
 };
 
 /// Latch one toolbar after a completed touch tap. A swipe never clicks.
@@ -956,16 +956,29 @@ pub fn close_button(ui: &mut Ui, size: f32) -> Response {
 }
 
 /// A dialog over the window: a heading with a ×, then `add`. Returns what `add`
-/// returned and whether it should close (×, Escape or a click outside). Phones show
-/// it as a full-screen sheet with a top bar, smaller windows narrower.
+/// returned and whether it should close (×, Escape or a click outside). Phones, and
+/// touch screens too short for a centred dialog (a phone held sideways), show it as
+/// a full-screen sheet with a top bar; elsewhere it is centred and scrolls when the
+/// window is too short for it.
 pub fn dialog<R>(
     ctx: &Context,
     id: &str,
     title: &str,
     add: impl FnOnce(&mut Ui) -> R,
 ) -> (R, bool) {
+    touch_dialog(ctx, id, title, super::TOUCH, add)
+}
+
+/// `dialog`, as on a touch screen or not.
+fn touch_dialog<R>(
+    ctx: &Context,
+    id: &str,
+    title: &str,
+    touch: bool,
+    add: impl FnOnce(&mut Ui) -> R,
+) -> (R, bool) {
     let id = Id::unique(("dialog", id));
-    if super::is_phone(ctx) {
+    if dialog_as_sheet(ctx, touch) {
         let modal = sheet(ctx, id, |ui| {
             let (_, close) = sheet_bar(ui, title, None);
             let inner = sheet_page(ui, id, add);
@@ -977,20 +990,38 @@ pub fn dialog<R>(
     }
     let mut close = false;
     // Leave the window's edge visible around it.
-    let room = ctx.content_rect().width() - 2.0 * (SPACE_L + f32::from(DIALOG_PADDING));
+    let margin = 2.0 * (SPACE_L + f32::from(DIALOG_PADDING));
+    let room = ctx.content_rect().size() - Vec2::splat(margin);
     let modal = Modal::new(id).frame(dialog_frame(ctx)).show(ctx, |ui| {
-        ui.set_width(DIALOG_WIDTH.min(room));
+        ui.set_width(DIALOG_WIDTH.min(room.x));
+        // The area offers last frame's size; offer the whole window instead, so the
+        // body below can grow when its content does (a tab switch, say).
+        ui.set_max_height(room.y.max(SPACE_XL * 4.0));
         ui.horizontal(|ui| {
             ui.add(egui::Label::new(heading(title)).wrap());
             ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-                close = close_button(ui, 28.0).clicked();
+                let size = if touch { super::TOUCH_TARGET } else { 28.0 };
+                close = close_button(ui, size).clicked();
             });
         });
         ui.add_space(2.0);
-        add(ui)
+        // `add` holds the buttons too, so the whole body scrolls when the window is
+        // short; it shrinks to fit, so roomy windows look the same as without it.
+        egui::ScrollArea::vertical()
+            .id_salt(id.with("body"))
+            .auto_shrink([false, true])
+            .show(ui, add)
+            .inner
     });
     let close = close || modal.should_close();
     (modal.inner, close)
+}
+
+/// Whether `dialog` shows as a full-screen sheet: on phones, and on touch screens
+/// shorter than a phone is wide. The full window height counts, not the part above
+/// the on-screen keyboard, so a dialog doesn't change shape while typing.
+fn dialog_as_sheet(ctx: &Context, touch: bool) -> bool {
+    super::is_phone(ctx) || (touch && ctx.viewport_rect().height() < super::PHONE_WIDTH)
 }
 
 /// A modal that covers the whole window, for dialogs and settings on phones.
@@ -1429,4 +1460,170 @@ pub fn lock_icon(painter: &egui::Painter, at: Pos2, color: Color32) {
         Stroke::new(1.6, color),
     ));
     painter.rect_filled(body, 2, color);
+}
+
+#[cfg(test)]
+mod tests {
+    use eframe::egui::{RawInput, SafeAreaInsets, Theme, epaint::MarginF32};
+    use egui_kittest::{Harness, kittest::Queryable};
+
+    use super::*;
+
+    fn harness<S>(
+        size: Vec2,
+        dark: bool,
+        state: S,
+        mut show: impl FnMut(&Context, &mut S) + 'static,
+    ) -> Harness<'static, S> {
+        let theme = if dark { Theme::Dark } else { Theme::Light };
+        let mut harness = Harness::builder()
+            .with_size(size)
+            .with_theme(theme)
+            .with_context_setup(super::super::install)
+            .build_ui_state(move |ui, state| show(ui.ctx(), state), state);
+        harness.run_steps(3);
+        harness
+    }
+
+    /// A dialog taller than a short window: many lines, then its button.
+    fn tall(size: Vec2, dark: bool, touch: bool) -> Harness<'static, bool> {
+        harness(size, dark, false, move |ctx, saved| {
+            touch_dialog(ctx, "tall", "Tall", touch, |ui| {
+                for line in 0..30 {
+                    ui.label(format!("Line {line}"));
+                }
+                footer(ui, |ui| *saved |= primary(ui, "Save").clicked());
+            });
+        })
+    }
+
+    /// A small confirmation, like Sign out.
+    fn short(size: Vec2, dark: bool, touch: bool) -> Harness<'static, ()> {
+        harness(size, dark, (), move |ctx, ()| {
+            touch_dialog(ctx, "short", "Sign out?", touch, |ui| {
+                ui.label("You'll need your recovery words to sign in again.");
+                footer(ui, |ui| {
+                    danger(ui, "Sign out");
+                    secondary(ui, "Cancel");
+                });
+            });
+        })
+    }
+
+    #[test]
+    fn short_touch_windows_get_the_sheet() {
+        let ctx = Context::default();
+        let sized = |width: f32, height: f32, keyboard: f32| {
+            let input = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(width, height))),
+                safe_area_insets: Some(SafeAreaInsets(MarginF32 {
+                    bottom: keyboard,
+                    ..Default::default()
+                })),
+                ..Default::default()
+            };
+            ctx.run_ui(input, |_| {}).textures_delta.clear();
+        };
+        // A phone held sideways: a sheet on touch, a centred dialog with a mouse.
+        sized(844.0, 390.0, 0.0);
+        assert!(dialog_as_sheet(&ctx, true));
+        assert!(!dialog_as_sheet(&ctx, false));
+        // Phones upright always; tablets and desktops never, even with a keyboard up.
+        sized(390.0, 844.0, 0.0);
+        assert!(dialog_as_sheet(&ctx, false));
+        sized(1180.0, 820.0, 400.0);
+        assert!(!dialog_as_sheet(&ctx, true));
+        sized(1100.0, 700.0, 0.0);
+        assert!(!dialog_as_sheet(&ctx, false));
+    }
+
+    #[test]
+    fn tall_dialogs_scroll_to_their_button_on_short_windows() {
+        // A short desktop window, and a phone held sideways (a sheet there).
+        for (width, height, touch) in [(1100.0, 500.0, false), (844.0, 390.0, true)] {
+            let mut harness = tall(Vec2::new(width, height), true, touch);
+            let title = harness.get_by_label("Tall").rect();
+            assert!(title.top() >= 0.0, "the title stays on screen: {title:?}");
+            let save = harness.get_by_label("Save").rect();
+            assert!(save.bottom() > height, "the button starts below the fold");
+            harness.get_by_label("Save").scroll_to_me();
+            harness.run_steps(3);
+            let save = harness.get_by_label("Save").rect();
+            assert!(
+                save.top() >= 0.0 && save.bottom() <= height,
+                "scrolled into view: {save:?}"
+            );
+            harness.get_by_label("Save").click();
+            harness.run_steps(2);
+            assert!(*harness.state(), "the button is reachable");
+        }
+    }
+
+    #[test]
+    fn roomy_windows_show_the_whole_dialog() {
+        let height = 700.0;
+        let harness = short(Vec2::new(1100.0, height), true, false);
+        let title = harness.get_by_label("Sign out?").rect();
+        let button = harness.get_by_label("Cancel").rect();
+        // Centred and only as tall as its content: nothing scrolls or is cut off.
+        let middle = (title.top() + button.bottom()) / 2.0;
+        assert!((middle - height / 2.0).abs() < 20.0, "centred: {middle}");
+        assert!(button.bottom() - title.top() < 200.0, "no extra height");
+        let close = harness.get_by_label(t!("common.close")).rect();
+        assert_eq!(close.width(), 28.0);
+        // A tablet held sideways keeps the centred dialog, with a full-size ×.
+        let harness = short(Vec2::new(1180.0, 820.0), true, true);
+        let close = harness.get_by_label(t!("common.close")).rect();
+        assert_eq!(close.width(), super::super::TOUCH_TARGET);
+    }
+
+    #[test]
+    fn dialogs_grow_with_their_content() {
+        // (grown, saved): a tab switch, say, makes the body taller after it showed.
+        let mut harness = harness(
+            Vec2::new(1100.0, 700.0),
+            true,
+            (false, false),
+            |ctx, (grown, saved)| {
+                dialog(ctx, "grow", "Grow", |ui| {
+                    let lines = if *grown { 12 } else { 1 };
+                    for line in 0..lines {
+                        ui.label(format!("Line {line}"));
+                    }
+                    footer(ui, |ui| *saved |= primary(ui, "Save").clicked());
+                });
+            },
+        );
+        harness.state_mut().0 = true;
+        harness.run_steps(3);
+        harness.get_by_label("Save").click();
+        harness.run_steps(2);
+        assert!(harness.state().1, "the grown dialog shows its button");
+    }
+
+    /// Set RUSTTALK_TEST_SCREENSHOTS to a folder to save how dialogs look.
+    #[test]
+    fn dialog_screenshots() {
+        let Ok(dir) = std::env::var("RUSTTALK_TEST_SCREENSHOTS") else {
+            return;
+        };
+        std::fs::create_dir_all(&dir).unwrap();
+        let sizes = [
+            (1100.0, 700.0, false),
+            (1100.0, 500.0, false),
+            (844.0, 390.0, true),
+        ];
+        for (width, height, touch) in sizes {
+            for dark in [true, false] {
+                let theme = if dark { "dark" } else { "light" };
+                let size = Vec2::new(width, height);
+                let mut short = short(size, dark, touch);
+                let mut tall = tall(size, dark, touch);
+                for (name, image) in [("short", short.render()), ("tall", tall.render())] {
+                    let path = format!("{dir}/dialog-{name}-{width}x{height}-{theme}.png");
+                    image.unwrap().save(path).unwrap();
+                }
+            }
+        }
+    }
 }

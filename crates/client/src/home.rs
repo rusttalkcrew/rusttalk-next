@@ -7143,6 +7143,7 @@ mod tests {
     const PROJECTS: Id = [3; 32];
 
     mod avatars;
+    mod dialogs;
     mod emoji;
     mod image_reload;
     mod long_chat;

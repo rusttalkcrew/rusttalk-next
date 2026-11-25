@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Dialogs no longer get cut off on short windows: they scroll, phones held sideways show them full screen, and the close button is easier to tap on tablets.
+
 ## v0.4.0 - 2026-11-24
 
 - Changing your name, picture or bio no longer pauses chat and voice on every server while your devices sync.
