@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+## v0.5.0 - 2026-11-25
+
 - Android test builds install as a separate "RustTalk Test" app, so they no longer block installing the release app.
 - On phones, mute, sound, camera and leave buttons now sit at the bottom of the call view, and the call opens without the chat (tap the chat button to show it).
 - On phones, your own camera shows only in the call view, and while it is on, tapping the camera button opens a menu to flip it, switch the light or turn it off.
