@@ -351,6 +351,53 @@ pub(super) async fn scenario(
             && row["target_person_id"].is_null()),
         "missing moderator delete audit"
     );
+    // #525: DMs are private to their two people, so `delete_messages` doesn't reach into them.
+    // Neither B, now a moderator, nor A, the owner, can delete the other's DM message or file.
+    for (client, message) in [(&*b, first.id), (&*a, reply.id)] {
+        let suffix = format!("/{}", encode(&message));
+        rejected(
+            client
+                .request(Method::DELETE, &path(dm, &suffix))
+                .send()
+                .await?,
+            StatusCode::FORBIDDEN,
+            "permission_denied",
+        )
+        .await?;
+        let kept = b.message(&dm.id, &message).await?;
+        assert_eq!(kept.id, message);
+    }
+    let attachment = a
+        .upload_file(
+            &dm.id,
+            "w07-dm.bin",
+            "application/octet-stream",
+            &[7; 64],
+            None,
+        )
+        .await?;
+    let file = encode(&attachment.file.id);
+    rejected(
+        b.request(Method::DELETE, &format!("/v1/files/{file}"))
+            .query(&[("uploader", encode(&a_person))])
+            .send()
+            .await?,
+        StatusCode::FORBIDDEN,
+        "permission_denied",
+    )
+    .await?;
+    b.download_file(&attachment.file, None).await?;
+    a.delete_message_file(&attachment.file.id, &a_person)
+        .await?;
+    rejected(
+        b.request(Method::GET, &format!("/v1/files/{file}"))
+            .send()
+            .await?,
+        StatusCode::NOT_FOUND,
+        "file_not_found",
+    )
+    .await?;
+    println!("#525 verified only the author deletes their DM messages and files");
     println!("W07 verified two-way text and DMs, paging, edits, replays and audited moderation");
 
     // A voice channel has the same chat as a text channel, under its own channel key.

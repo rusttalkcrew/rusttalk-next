@@ -514,6 +514,8 @@ random ID and an epoch 1 envelope addressed to their device. The normal channel
 key flow wraps keys for both people's devices, including their later devices.
 Both people can read and write regardless of role. DMs are visible only to the
 two participants, including when an Owner, Admin or Moderator requests access.
+Only its author deletes a DM message or file: `delete_messages` does not apply
+in DMs, so the other person gets `403 permission_denied`.
 
 The catalog includes DMs with `kind: "dm"`, `peer` set to the other person ID,
 `category_id`, `name_ct` and `topic_ct` set to null, `position: 0`, and
@@ -753,7 +755,7 @@ and the client can restart from the newest page.
 | GET `/v1/channels/{channel}/messages?before={id}&limit={n}` | Optional cursor and limit, 1–100, default 50 | `read`. 200, array of message records |
 | POST `/v1/channels/{channel}/messages` | `{id, epoch, envelope}`, and a page version's optional `keep` (file IDs) | `write`. 201, the stored message record |
 | GET `/v1/channels/{channel}/messages/{id}` | Empty | `read`. 200, one message record |
-| DELETE `/v1/channels/{channel}/messages/{id}` | Empty | The author or a reader with `delete_messages`. 204 |
+| DELETE `/v1/channels/{channel}/messages/{id}` | Empty | The author, or in a non-DM channel a reader with `delete_messages`. 204, else `403 permission_denied` |
 | GET `/v1/channels/{channel}/message-devices/{device}/{person}` | Empty | `read`. 200, the public device certificate as a base64url JSON string, when the device authored a retained message here |
 
 A message record has `{id, epoch, person, sender_device, at, size, envelope}`.
@@ -1290,7 +1292,7 @@ quota charge and expiry. DMs grant read and write to both participants.
 | --- | --- | --- |
 | POST `/v1/files?channel={channel}&id={id}` | Stream of raw ciphertext with `application/octet-stream` | Channel `write`. 201, `{id}` |
 | GET `/v1/files/{id}` | Empty | Channel `read`. 200, streamed ciphertext with `Content-Type: application/octet-stream` and `Content-Length` |
-| DELETE `/v1/files/{id}?uploader={person}` | Empty | Uploader, or a channel reader with `delete_messages` when `uploader` names the file's uploader. 204 |
+| DELETE `/v1/files/{id}?uploader={person}` | Empty | Uploader, or a reader of a non-DM channel with `delete_messages` when `uploader` names the file's uploader. 204; in a DM only the uploader (`403 permission_denied`) |
 | POST `/v1/channels/{channel}/files` | `{id, epoch, envelope}` | Channel `write`, for the caller's own unexpired file stored in that channel. 204 |
 | GET `/v1/channels/{channel}/files` | Empty | Channel `read`. 200, all of its (at most 500) shared files newest first, each a message record |
 
