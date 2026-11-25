@@ -1596,7 +1596,7 @@ async fn serve(
                 state.revalidate(ctx, url, &records, Some(client));
                 apply_keys(ctx, url, client, state);
                 save_pins(ctx, url, client, state);
-                for channel in state.loaded.clone() { page(ctx,url,client,state,channel,None).await; }
+                reload_loaded(ctx, url, client, state).await;
             }
             // `next_step`, not `next_update`: other arms win every 2 s in a call, and the
             // key sync it asks for runs here, where that can't cancel it.
@@ -2350,9 +2350,7 @@ async fn resume(
 
 async fn reload_pages(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, state: &mut State) {
     ctx.send(Update::Status(url.clone(), Status::Online));
-    for channel in state.loaded.clone() {
-        page(ctx, url, client, state, channel, None).await;
-    }
+    reload_loaded(ctx, url, client, state).await;
     set_display_name(ctx, client, state).await;
     publish_selected_avatar(ctx, client, state).await;
     repair_default_avatar(ctx, client, state).await;
@@ -3198,13 +3196,73 @@ async fn page(
     {
         return;
     }
-    let revocations = rusttalk_core::client::revocations::Revocations::in_profile(&ctx.data);
-    let changes = revocations.changes();
-    let records = match client.message_page(&channel, before.as_ref(), PAGE).await {
+    let changes = revocation_changes(ctx);
+    let records = client.message_page(&channel, before.as_ref(), PAGE).await;
+    show_page(
+        ctx,
+        url,
+        client,
+        state,
+        (channel, before),
+        records,
+        &changes,
+    )
+    .await;
+}
+
+/// Reload the newest page of every opened channel after (re)connecting or a device
+/// removal. Opening needs the client mutably, so only the requests run side by side;
+/// one at a time, someone with many opened channels and DMs waited for each in turn.
+async fn reload_loaded(ctx: &Ctx, url: &Url, client: &mut KeyClient<'_>, state: &mut State) {
+    let Some(dir) = &state.last else {
+        return;
+    };
+    let channels = (state.loaded.iter())
+        .filter(|channel| recent::visible(dir, channel))
+        .copied()
+        .collect::<Vec<_>>();
+    let changes = revocation_changes(ctx);
+    let shared = &*client;
+    let pages = bounded(
+        (channels.into_iter())
+            .map(
+                |channel| async move { (channel, shared.message_page(&channel, None, PAGE).await) },
+            )
+            .collect(),
+    )
+    .await;
+    for (channel, records) in pages {
+        // Access lost while the others were fetched or opened.
+        if !state.loaded.contains(&channel) {
+            continue;
+        }
+        // A removal learned meanwhile wakes the removals arm, which reloads them all again.
+        if !show_page(ctx, url, client, state, (channel, None), records, &changes).await {
+            return;
+        }
+    }
+}
+
+fn revocation_changes(ctx: &Ctx) -> tokio::sync::watch::Receiver<()> {
+    rusttalk_core::client::revocations::Revocations::in_profile(&ctx.data).changes()
+}
+
+/// Open a fetched page and send it; false when a device removal arrived meanwhile and
+/// the page was dropped.
+async fn show_page(
+    ctx: &Ctx,
+    url: &Url,
+    client: &mut KeyClient<'_>,
+    state: &mut State,
+    (channel, before): (Id, Option<Id>),
+    records: Result<Vec<MessageRecord>>,
+    changes: &tokio::sync::watch::Receiver<()>,
+) -> bool {
+    let records = match records {
         Ok(records) => records,
         Err(error) => {
             page_failed(ctx, url, state, channel, before, &error);
-            return;
+            return true;
         }
     };
     let at_start = records.len() < PAGE as usize;
@@ -3215,15 +3273,16 @@ async fn page(
             Ok(opened) => opened,
             Err(error) => {
                 page_failed(ctx, url, state, channel, before, &error);
-                return;
+                return true;
             }
         };
         items.extend(msg);
         cached.extend(recent);
     }
     if changes.has_changed().unwrap_or(true) {
+        let revocations = rusttalk_core::client::revocations::Revocations::in_profile(&ctx.data);
         state.revalidate(ctx, url, &revocations, Some(client));
-        return;
+        return false;
     }
     if before.is_none() {
         state
@@ -3239,6 +3298,7 @@ async fn page(
         before.is_some(),
         Some((at_start, records.last().map(|r| r.id))),
     );
+    true
 }
 
 async fn open(
