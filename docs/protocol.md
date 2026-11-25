@@ -170,8 +170,10 @@ Deleting a custom role requires clearing its assignments and replacing it
 as the default first. Changing the default affects future joins.
 
 Kick, ban, role assignment and voice moderation require the actor to outrank the target
-strictly. Granting a role or choosing it as the default also requires the
-actor to outrank that role and hold every permission it grants. When upgrading from before events,
+strictly. Granting or removing a role, or choosing it as the default, also requires the
+actor to outrank that role and hold every permission it grants. Assignment checks only
+the roles it adds or removes: roles the member keeps pass, even ones the actor could
+not grant. When upgrading from before events,
 a member who could already manage a particular role can keep assigning, renaming,
 editing or deleting it, or setting it as the default. The server checks both the
 original and current rank and permissions. Only the event flags added by the

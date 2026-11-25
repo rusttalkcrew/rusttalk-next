@@ -1078,8 +1078,10 @@ fn members_tab<'a>(
                     ui.label(ui::bold(t!("admin.roles_for", name = name)));
                     for role in server.dir.roles.iter().filter(|r| r.id != "owner") {
                         let mut on = chosen.contains(&role.id);
-                        // Only roles below your own can be given or taken away.
-                        let allowed = role.rank < perms.rank;
+                        // Only roles below your own, with permissions you hold,
+                        // can be given or taken away.
+                        let allowed = role.rank < perms.rank
+                            && (role.permissions.iter()).all(|p| roles::holds(&server.dir, p));
                         if ui
                             .add_enabled(allowed, ui::Checkbox::new(&mut on, &role.name))
                             .changed()

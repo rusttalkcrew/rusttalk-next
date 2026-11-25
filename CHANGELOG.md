@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Role managers can give someone a new role without losing roles above their reach, and can no longer take those roles away.
+
 ## v0.4.0 - 2026-11-24
 
 - Changing your name, picture or bio no longer pauses chat and voice on every server while your devices sync.
