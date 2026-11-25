@@ -12,6 +12,7 @@ Unreleased under the new version and date.
 ## Unreleased
 
 - Deleting a single custom emoji or sticker in server settings now asks first.
+- Server settings > Emoji & stickers fits on a phone: name fields make room for their buttons, warnings wrap, and each emoji's Rename, Move to and Delete sit under "…".
 
 ## v0.4.0 - 2026-11-24
 

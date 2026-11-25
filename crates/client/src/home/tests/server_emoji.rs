@@ -1,16 +1,23 @@
-//! Server settings > Emoji & stickers: deleting one emoji or sticker asks first.
+//! Server settings > Emoji & stickers: deleting one emoji or sticker asks first, and
+//! the page fits a phone.
 
 use super::*;
 use crate::net::Admin;
 use egui_kittest::{Harness, kittest::Queryable};
 
 const PACK: Id = [7; 32];
+const OTHER_PACK: Id = [9; 32];
 const PARROT: Id = [8; 32];
 
+const SIZES: [(f32, f32); 2] = [(390.0, 844.0), (1100.0, 700.0)];
+
+/// The page with one emoji in "Party"; `full` also adds a second pack and fills
+/// every limit, so the upload and add-pack rows show their warnings.
 fn harness(
     width: f32,
     height: f32,
     dark: bool,
+    full: bool,
 ) -> (
     Harness<'static, Home>,
     tokio::sync::mpsc::UnboundedReceiver<Command>,
@@ -19,12 +26,18 @@ fn harness(
     let mut home = fixture.state_mut().take().unwrap();
     let dir = &mut home.servers[0].dir;
     dir.perms.manage_emoji = true;
-    dir.emoji_max = (50, 50);
-    dir.packs_max = 5;
+    dir.emoji_max = if full { (1, 1) } else { (50, 50) };
     dir.packs = vec![crate::server::EmojiPack {
         id: PACK,
         name: Some("Party".into()),
     }];
+    if full {
+        dir.packs.push(crate::server::EmojiPack {
+            id: OTHER_PACK,
+            name: Some("Animals".into()),
+        });
+    }
+    dir.packs_max = if full { 2 } else { 5 };
     dir.emoji = vec![CustomEmoji {
         id: PARROT,
         name: "party_parrot".into(),
@@ -62,25 +75,41 @@ fn deletes(sent: &mut tokio::sync::mpsc::UnboundedReceiver<Command>) -> usize {
         .count()
 }
 
+/// The emoji's own actions: under "…" on a phone, beside it on wider windows.
+fn more_label() -> String {
+    t!("admin.member_actions", name = ":party_parrot:")
+}
+
+/// Press the emoji's own Delete.
+fn ask_delete(h: &mut Harness<'static, Home>) {
+    if ui::is_phone(&h.ctx) {
+        h.get_by_label(&more_label()).click();
+        h.run();
+    }
+    h.query_all_by_label(t!("common.delete"))
+        .last()
+        .unwrap()
+        .click_accesskit();
+    h.run();
+}
+
 #[test]
 fn deleting_an_emoji_asks_first() {
     let question = t!("admin.emoji_delete_help", name = "party_parrot");
-    for ((width, height), dark) in [(390.0, 844.0), (1100.0, 700.0)]
+    for ((width, height), dark) in SIZES
         .into_iter()
         .flat_map(|size| [(size, true), (size, false)])
     {
-        let (mut h, mut sent) = harness(width, height, dark);
+        let (mut h, mut sent) = harness(width, height, dark, false);
+        let phone = ui::is_phone(&h.ctx);
         assert!(h.query_by_label(&question).is_none());
 
-        // The pack's Delete comes first, then the emoji's.
-        assert_eq!(h.query_all_by_label(t!("common.delete")).count(), 2);
+        // The pack's Delete comes first, then the emoji's (in its "…" menu on phones).
+        let shown = if phone { 1 } else { 2 };
+        assert_eq!(h.query_all_by_label(t!("common.delete")).count(), shown);
 
         // Delete only asks; Cancel takes the question away and sends nothing.
-        h.query_all_by_label(t!("common.delete"))
-            .last()
-            .unwrap()
-            .click_accesskit();
-        h.run();
+        ask_delete(&mut h);
         assert!(h.query_by_label(&question).is_some());
         assert_eq!(deletes(&mut sent), 0);
         h.get_by_label(t!("common.cancel")).click();
@@ -89,11 +118,7 @@ fn deleting_an_emoji_asks_first() {
         assert_eq!(deletes(&mut sent), 0);
 
         // Asked again, Delete in the question sends it once.
-        h.query_all_by_label(t!("common.delete"))
-            .last()
-            .unwrap()
-            .click_accesskit();
-        h.run();
+        ask_delete(&mut h);
         assert_eq!(deletes(&mut sent), 0);
         if let Some(dir) = std::env::var_os("RUSTTALK_EMOJI_DELETE_SCREENSHOTS") {
             let theme = if dark { "dark" } else { "light" };
@@ -102,14 +127,94 @@ fn deleting_an_emoji_asks_first() {
                 .save(PathBuf::from(dir).join(format!("{theme}-{width}x{height}.png")))
                 .unwrap();
         }
+        let window = h.ctx.content_rect();
+        let card = h.get_by_label(&question).rect();
+        assert!(card.max.x <= window.max.x, "the question fits: {card:?}");
         let buttons: Vec<_> = h.query_all_by_label(t!("common.delete")).collect();
         assert_eq!(
             buttons.len(),
-            3,
+            shown + 1,
             "the pack's, the row's and the question's Delete"
         );
-        buttons[2].click();
+        let confirm = buttons.last().unwrap();
+        assert!(confirm.rect().max.x <= window.max.x);
+        confirm.click();
         h.run_steps(2);
         assert_eq!(deletes(&mut sent), 1);
+    }
+}
+
+#[test]
+fn the_page_fits_the_window() {
+    for ((width, height), dark) in SIZES
+        .into_iter()
+        .flat_map(|size| [(size, true), (size, false)])
+    {
+        let (mut h, mut sent) = harness(width, height, dark, true);
+        let phone = ui::is_phone(&h.ctx);
+        if let Some(dir) = std::env::var_os("RUSTTALK_EMOJI_PAGE_SCREENSHOTS") {
+            let theme = if dark { "dark" } else { "light" };
+            h.render()
+                .unwrap()
+                .save(PathBuf::from(dir).join(format!("{theme}-{width}x{height}.png")))
+                .unwrap();
+        }
+        let window = h.ctx.content_rect();
+        // Within the window's width; long pages scroll down.
+        let inside = |h: &Harness<'static, Home>, label: &str| {
+            let rects: Vec<_> = h.query_all_by_label(label).map(|n| n.rect()).collect();
+            assert!(!rects.is_empty(), "{label} at {width}x{height} is missing");
+            for rect in rects {
+                assert!(
+                    window.x_range().contains(rect.min.x) && window.x_range().contains(rect.max.x),
+                    "{label} at {width}x{height}: {rect:?} outside {window:?}"
+                );
+            }
+        };
+        for label in [
+            t!("admin.pick_picture"),
+            t!("admin.emoji_full"),
+            t!("admin.pack_add"),
+            t!("admin.pack_limit"),
+        ] {
+            inside(&h, label);
+        }
+        if phone {
+            // Rename, Move to and Delete are under "…", and the menu fits too.
+            assert!(h.query_by_label(t!("admin.move_to")).is_none());
+            inside(&h, &more_label());
+            h.get_by_label(&more_label()).click();
+            h.run();
+            for label in [t!("common.rename"), "Animals"] {
+                inside(&h, label);
+            }
+            // The menu's Delete comes after the pack's.
+            inside(&h, t!("common.delete"));
+            if let Some(dir) = std::env::var_os("RUSTTALK_EMOJI_PAGE_SCREENSHOTS") {
+                let theme = if dark { "dark" } else { "light" };
+                h.render()
+                    .unwrap()
+                    .save(PathBuf::from(dir).join(format!("{theme}-{width}x{height}-menu.png")))
+                    .unwrap();
+            }
+            // The menu opens under the "Animals" pack's title.
+            h.query_all_by_label("Animals")
+                .max_by(|a, b| a.rect().min.y.total_cmp(&b.rect().min.y))
+                .unwrap()
+                .click();
+            h.run();
+            assert!(
+                std::iter::from_fn(|| sent.try_recv().ok())
+                    .any(|cmd| matches!(cmd, Command::Admin(Admin::MoveEmoji(PARROT, OTHER_PACK))))
+            );
+        } else {
+            // Wider windows keep the buttons beside the emoji.
+            assert!(h.query_by_label(&more_label()).is_none());
+            for label in [t!("common.rename"), t!("admin.move_to")] {
+                inside(&h, label);
+            }
+            // Both packs' Delete and the emoji's.
+            assert_eq!(h.query_all_by_label(t!("common.delete")).count(), 3);
+        }
     }
 }
