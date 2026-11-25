@@ -7377,6 +7377,7 @@ mod tests {
     mod dialogs;
     mod emoji;
     mod image_reload;
+    mod joining;
     mod long_chat;
     mod member_list;
     mod menus;

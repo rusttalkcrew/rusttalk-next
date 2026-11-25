@@ -355,7 +355,11 @@ pub(super) async fn run(
             let body = json!({"open_joining": open, "member_cap": cap});
             call(client, Method::PUT, "/v1/settings/open-joining", Some(body))
                 .await
-                .map(|()| t!("admin.done_joining"))
+                .map(|()| {
+                    // Now saved: Save waits for the next change.
+                    send(AdminUpdate::Joining(open, cap));
+                    t!("admin.done_joining")
+                })
         }
         Admin::SaveListing(listing) => {
             let body = match listing {
@@ -523,7 +527,7 @@ async fn open_joining(client: &KeyClient<'_>) -> Result<AdminUpdate, String> {
         .map_err(|error| failed(&error))?;
     Ok(AdminUpdate::Joining(
         settings["open_joining"].as_bool().unwrap_or_default(),
-        settings["member_cap"].as_u64().unwrap_or(100) as u32,
+        (settings["member_cap"].as_u64()).map_or(100, |cap| cap.try_into().unwrap_or(u32::MAX)),
     ))
 }
 

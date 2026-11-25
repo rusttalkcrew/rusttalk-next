@@ -53,12 +53,13 @@ const CONTENT_BOTTOM: f32 = 48.0;
 const REPOSITORY: &str = "https://github.com/rusttalkcrew/rusttalk-next";
 /// Where a phone gets a newer app: it has no in-app updater.
 pub const DOWNLOAD_PAGE: &str = "https://github.com/rusttalkcrew/rusttalk-next/releases/latest";
-/// Phones update through their download page or app store, never in the app.
+/// Phones update through their download page or app store, never in the app, and
+/// have no keyboard shortcuts to set.
 pub const PHONE: bool = cfg!(any(target_os = "android", target_os = "ios"));
 
-/// Whether Settings lists this page: phones have no Updates page.
+/// Whether Settings lists this page: phones have no Updates or Shortcuts page.
 fn listed(tab: Tab, phone: bool) -> bool {
-    !(phone && tab == Tab::Updates)
+    !(phone && matches!(tab, Tab::Updates | Tab::Shortcuts))
 }
 
 pub struct Page<T> {
@@ -1018,7 +1019,11 @@ fn devices_page(ui: &mut Ui, home: &mut Home) {
         home.identity.certificate.name(),
         &format!(
             "{} · {}",
-            t!("settings.this_computer"),
+            if PHONE {
+                t!("settings.this_device")
+            } else {
+                t!("settings.this_computer")
+            },
             fingerprint(home.identity.certificate.signing_key().as_bytes())
         ),
         |_| {},
@@ -1198,10 +1203,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn phones_list_no_updates_page() {
-        assert!(!listed(Tab::Updates, true));
-        assert!(listed(Tab::Updates, false));
-        for tab in [Tab::Profile, Tab::Network, Tab::About, Tab::WhatsNew] {
+    fn phones_list_no_updates_or_shortcuts_page() {
+        for tab in [Tab::Updates, Tab::Shortcuts] {
+            assert!(!listed(tab, true));
+            assert!(listed(tab, false));
+        }
+        for tab in [Tab::Profile, Tab::Voice, Tab::Network, Tab::About, Tab::WhatsNew] {
             assert!(listed(tab, true) && listed(tab, false));
         }
     }

@@ -577,6 +577,11 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
                     joining: false,
                     bans: true,
                 }),
+                // Unsaved edits stay; only what's saved refreshes.
+                Tab::Joining => Some(Admin::Load {
+                    joining: true,
+                    bans: false,
+                }),
                 Tab::Listing => Some(Admin::LoadListing),
                 Tab::Files => Some(Admin::LoadFiles),
                 Tab::Overview if perms.owner => Some(Admin::LoadUpdates),
@@ -1554,15 +1559,19 @@ fn joining_tab(ui: &mut Ui, settings: &mut Settings) -> Option<Admin> {
         t!("admin.member_limit"),
         t!("admin.member_limit_help"),
         |ui| {
-            ui.add(DragValue::new(cap).range(1..=100_000))
+            // The server takes any limit from 1 up; u32 is what the app can send.
+            ui.add(DragValue::new(cap).range(1..=u32::MAX))
                 .widget_info(|| {
                     egui::WidgetInfo::labeled(Role::SpinButton, true, t!("admin.member_limit"))
                 });
         },
     );
-    ui::primary(ui, t!("common.save"))
+    let request = Admin::Joining(*open, *cap);
+    let unsaved = settings.joining_unsaved();
+    ui.add_enabled_ui(unsaved, |ui| ui::primary(ui, t!("common.save")))
+        .inner
         .clicked()
-        .then_some(Admin::Joining(*open, *cap))
+        .then_some(request)
 }
 
 fn listing_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Option<Admin> {

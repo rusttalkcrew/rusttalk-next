@@ -34,6 +34,7 @@ Unreleased under the new version and date.
 - Server settings open faster: the audit log loads only on its own page, newest 50 first, with Show older for more
 - The Members list in server settings is readable on phones: names get the row, roles sit under them and the presence dot moves onto the picture.
 - Dialogs no longer get cut off on short windows: they scroll, phones held sideways show them full screen, and the close button is easier to tap on tablets.
+- Server settings > Joining: Save lights up only after a change, and the page shows fresh values when you come back. Phones no longer list Shortcuts and call themselves "This device".
 
 ## v0.4.0 - 2026-11-24
 
