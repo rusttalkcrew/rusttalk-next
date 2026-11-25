@@ -51,9 +51,12 @@ verify each signature against the full person ID and persist the record in
 their profile, indexed by person and device. All server connections consult
 that same append-only set. Reordering, omitting or replaying records cannot
 undo a revocation, including after a restart. Only the local person, pinned DM peers and people with verified member
-certificates qualify. Key sync rejects replies above 4,096 records. The
-profile stores at most 64 device records per person and 1,024 people. Reaching
-a storage limit fails the sync that would exceed it; earlier records remain.
+certificates qualify. Key sync takes at most 4,096 of those records per reply,
+the person's own first, and skips the rest. The profile stores at most 64 device
+records per person and 1,024 other people; the person's own records are always
+kept. A record over a storage limit is skipped without failing the sync; earlier
+records remain. The API returns at most 4,096 records: the reader's own first, then
+removals of devices it registered or saw send, then the rest.
 No clock or list version is
 needed because enrollment always generates fresh device keys.
 

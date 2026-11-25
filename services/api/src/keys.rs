@@ -261,11 +261,7 @@ pub async fn state(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json
             })
         })
         .collect::<ApiResult<_>>()?;
-    let records: Vec<(Vec<u8>, Vec<u8>)> = query_as(
-        "SELECT r.person_id, r.record FROM revocations r JOIN members m ON m.person_id = r.person_id",
-    )
-    .fetch_all(&mut *tx)
-    .await?;
+    let records = served_revocations(&mut tx, &actor.person).await?;
     let state = KeyState {
         supports_exclusions: true,
         revocations: records
@@ -286,6 +282,25 @@ pub async fn state(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json
     };
     tx.commit().await?;
     Ok(Json(state))
+}
+
+/// Older apps reject a reply above 4,096 records, and any root key can sign removals for
+/// made-up device keys. Removals of devices registered elsewhere must still reach members, so
+/// the reader's own come first, then devices this server knew, then the rest.
+async fn served_revocations(
+    db: &mut SqliteConnection,
+    reader: &[u8; 32],
+) -> ApiResult<Vec<(Vec<u8>, Vec<u8>)>> {
+    Ok(query_as(
+        "SELECT r.person_id, r.record FROM revocations r JOIN members m ON m.person_id = r.person_id
+         ORDER BY r.person_id = ?1 DESC,
+             r.was_registered OR EXISTS (SELECT 1 FROM message_senders s
+                 WHERE s.device_id = r.device_id AND s.person_id = r.person_id) DESC
+         LIMIT 4096",
+    )
+    .bind(reader.as_slice())
+    .fetch_all(db)
+    .await?)
 }
 
 #[derive(Deserialize)]
@@ -972,6 +987,40 @@ mod tests {
         assert_eq!(expected.len(), 4 * 5 + 2 * 4);
         let Json(state) = state(State(app), as_person(1)).await?;
         assert_eq!(state.pending, expected);
+        Ok(())
+    }
+
+    /// A flood of made-up removals is cut to what older apps accept, keeping the reader's
+    /// own and those of devices this server knew.
+    #[tokio::test]
+    async fn served_revocations_stay_within_older_apps_limit() -> anyhow::Result<()> {
+        use crate::testing::{app, person};
+        let dir = tempfile::tempdir()?;
+        let app = app(dir.path(), 3).await?;
+        let mut tx = crate::store::write(&app.db).await?;
+        let insert = |owner: u8, device: Vec<u8>, record: &'static [u8]| {
+            query("INSERT INTO revocations (person_id, device_id, record) VALUES (?, ?, ?)")
+                .bind(person(owner))
+                .bind(device)
+                .bind(record)
+        };
+        for i in 0..4200u32 {
+            let device = [i.to_be_bytes().as_slice(), &[0; 28]].concat();
+            insert(2, device, b"made up").execute(&mut *tx).await?;
+        }
+        insert(3, vec![3; 32], b"known here")
+            .execute(&mut *tx)
+            .await?;
+        query("INSERT INTO message_senders VALUES (?, ?, x'03')")
+            .bind(vec![3; 32])
+            .bind(person(3))
+            .execute(&mut *tx)
+            .await?;
+        insert(1, vec![1; 32], b"own").execute(&mut *tx).await?;
+        let served = served_revocations(&mut tx, &[1; 32]).await?;
+        assert_eq!(served.len(), 4096);
+        assert_eq!(served[0], (person(1), b"own".to_vec()));
+        assert_eq!(served[1], (person(3), b"known here".to_vec()));
         Ok(())
     }
 }

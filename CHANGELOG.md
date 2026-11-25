@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Security: device removals from other members can no longer stop the app from syncing keys, and you can always remove your own devices.
+
 ## v0.4.0 - 2026-11-24
 
 - Changing your name, picture or bio no longer pauses chat and voice on every server while your devices sync.
