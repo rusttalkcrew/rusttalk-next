@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- The Members list in server settings is readable on phones: names get the row, roles sit under them and the presence dot moves onto the picture.
+
 ## v0.4.0 - 2026-11-24
 
 - Changing your name, picture or bio no longer pauses chat and voice on every server while your devices sync.
