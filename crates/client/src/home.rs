@@ -7453,6 +7453,7 @@ mod tests {
     mod call_controls;
     mod dialogs;
     mod emoji;
+    mod file_limits;
     mod image_reload;
     mod joining;
     mod long_chat;

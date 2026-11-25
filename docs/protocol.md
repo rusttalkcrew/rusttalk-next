@@ -148,8 +148,13 @@ wherever `dnd` would appear: `GET /v1/me`, `GET /v1/members` and
 
 `limits` and `ceilings` each contain the five fields accepted by PUT. Every
 field must be a positive integer, or PUT returns `400 invalid_file_limits`.
-Host ceilings are also the defaults for unset limits. The server clamps
-limits to host ceilings on save and on read. `used_bytes` counts all committed
+A host ceiling exists only when the operator sets its `RUSTTALK_FILE_*` or
+`RUSTTALK_STICKER_MAX` variable; it is then also the default for an unset
+limit. Without one, `ceilings` reports the most the server supports
+(`FileLimits::MAX`: 32 MiB per file, the attachment format's limit; 1,000,000
+days of retention; `i64::MAX` for storage and stickers) and unset limits default
+to 32 MiB, 500 MiB, 5 GiB, 30 days and 50 stickers. The server clamps limits to
+the ceilings on save and on read. `used_bytes` counts all committed
 file ciphertext, including expired files that cleanup has yet to remove.
 
 A role has `{id, kind, rank, permissions, name_ct}`. A member's permissions
@@ -384,8 +389,8 @@ current space epoch, so the server knows only the ID, kind, ciphertext size,
 picture hash and the person who added it. Clients upload PNG or animated GIF
 pictures and names of 2–32 lowercase letters, digits and `_`; the server cannot
 check either. The server allows `RUSTTALK_EMOJI_MAX` emoji (default 100) and
-uses the effective sticker limit from `GET /v1/settings/files`, capped by
-`RUSTTALK_STICKER_MAX` (default 50). It returns `409 emoji_limit` or
+uses the effective sticker limit from `GET /v1/settings/files` (default 50,
+capped by `RUSTTALK_STICKER_MAX` when set). It returns `409 emoji_limit` or
 `409 sticker_limit` past them. A picture ciphertext larger than
 `RUSTTALK_EMOJI_MAX_BYTES` (default and maximum 262,144) returns
 `413 emoji_too_large`. POST allows a 356 KiB JSON body. Pictures are stored as

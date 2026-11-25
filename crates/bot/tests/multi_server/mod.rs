@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use reqwest::{Method, StatusCode};
 use rustls_pki_types::{CertificateDer, pem::PemObject};
 use rusttalk_core::{
-    auth::{KnownServer, decode, encode},
+    auth::{FileLimits, FileSettings, KnownServer, decode, encode},
     client::{KeyClient, Server},
     identity::DeviceIdentity,
     pinned_tls::fingerprint,
@@ -200,6 +200,7 @@ pub async fn exercise(
     .await?;
     secrets.push(owner_code);
     let mut owner_b = KeyClient::connect(&server_b, owner_a.identity, &owner_token).await?;
+    file_limits(owner_a, &owner_b).await?;
 
     let (peer_words, peer) = DeviceIdentity::create("W15 peer")?;
     assert!(!server_b.info().await?.open_joining);
@@ -635,6 +636,50 @@ pub async fn exercise(
     )
     .await
     .context("W70 DM after leaving server B")?;
+    Ok(())
+}
+
+/// Server A's host sets file ceilings (see `make e2e`); server B's sets none, so its
+/// owner may go past A's ceilings, up to what RustTalk supports.
+async fn file_limits(owner_a: &KeyClient<'_>, owner_b: &KeyClient<'_>) -> Result<()> {
+    const PATH: &str = "/v1/settings/files";
+    let get = |owner: &KeyClient<'_>| owner.request(Method::GET, PATH).send();
+    let put = |owner: &KeyClient<'_>, limits: &FileLimits| {
+        owner.request(Method::PUT, PATH).json(limits).send()
+    };
+    let generous = FileLimits {
+        max_file_bytes: 64 << 20,
+        member_storage_bytes: 50 << 30,
+        server_storage_bytes: 2 << 40,
+        retention_secs: 3650 * 86_400,
+        max_stickers: 5000,
+    };
+
+    let a: FileSettings = get(owner_a).await?.error_for_status()?.json().await?;
+    assert!(a.ceilings.member_storage_bytes < FileLimits::MAX.member_storage_bytes);
+    let saved: FileSettings = put(owner_a, &generous)
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(saved.limits, a.ceilings);
+    put(owner_a, &a.limits).await?.error_for_status()?;
+
+    let b: FileSettings = get(owner_b).await?.error_for_status()?.json().await?;
+    assert_eq!(b.ceilings, FileLimits::MAX);
+    assert_eq!(b.limits.server_storage_bytes, 5 << 30);
+    let saved: FileSettings = put(owner_b, &generous)
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(
+        saved.limits,
+        FileLimits {
+            max_file_bytes: FileLimits::MAX.max_file_bytes,
+            ..generous
+        }
+    );
     Ok(())
 }
 

@@ -82,7 +82,7 @@ pub(crate) async fn record(
 /// After a page channel's newest version changed: keep the files it lists, and give
 /// files no longer listed their normal expiry from upload again. Shared files stay kept.
 pub(crate) async fn refresh(app: &App, db: &mut SqliteConnection, channel: &str) -> ApiResult<()> {
-    let retention = file_settings::effective(&mut *db, app.files.ceilings)
+    let retention = file_settings::effective(&mut *db, &app.files)
         .await?
         .retention_secs;
     let now = crate::store::now()?;
@@ -243,7 +243,7 @@ mod tests {
 
         // A newer version without the second picture: it expires from its upload time.
         save(&app, "v2", &[one]).await?;
-        let retention = file_settings::effective(&mut *app.db.acquire().await?, app.files.ceilings)
+        let retention = file_settings::effective(&mut *app.db.acquire().await?, &app.files)
             .await?
             .retention_secs;
         assert_eq!(expiry(&app, two).await?, Some(100 + retention));
