@@ -137,6 +137,8 @@ All endpoints below require `Authorization: Bearer <token>`.
 | PUT `/v1/settings/open-joining` | `{open_joining, member_cap}` | Owner or Admin. 204 |
 | GET `/v1/settings/files` | Empty | Any member. 200, `{limits, ceilings, used_bytes}` |
 | PUT `/v1/settings/files` | `{max_file_bytes, member_storage_bytes, server_storage_bytes, retention_secs, max_stickers}` | `manage_server`. 200, updated `{limits, ceilings, used_bytes}` |
+| GET `/v1/settings/message-history` | Empty | Any member. 200, `{keep, ceiling?}` |
+| PUT `/v1/settings/message-history` | `{keep}` | `manage_server`. 200, the saved `{keep, ceiling?}` |
 | GET `/v1/audit?after=0&before=?&limit=100&action=member_banned` | Empty | `view_audit_log`. 200, matching audit entries in ascending ID order, or descending with `before` |
 
 `limits` and `ceilings` each contain the five fields accepted by PUT. Every
@@ -144,6 +146,14 @@ field must be a positive integer, or PUT returns `400 invalid_file_limits`.
 Host ceilings are also the defaults for unset limits. The server clamps
 limits to host ceilings on save and on read. `used_bytes` counts all committed
 file ciphertext, including expired files that cleanup has yet to remove.
+
+`keep` is how many of the newest messages each channel (DMs included) keeps;
+`0` keeps all. A negative number returns `400 invalid_message_history`. Until
+someone saves one it is 10,000. `ceiling` is present only when the host set
+`RUSTTALK_MESSAGE_RETAIN`; that value is then also the default, and the server
+lowers a saved `keep` (including `0`) to it. A lower `keep` deletes older
+messages in every channel before PUT returns, one channel per transaction,
+with a `message_deleted` event per message. Older servers answer 404.
 
 A role has `{id, kind, rank, permissions, name_ct}`. A member's permissions
 are the union of their role flags, and their highest rank is used for
@@ -427,7 +437,7 @@ post's text with `reply_to` set to that poll by the same author and the encrypte
 carries is a post of its own. Up and down votes on a post are poll votes whose `poll`
 is the post's ID, option 0 up and 1 down, so they change and are taken back like
 any vote. The grouping and the votes are inside the encrypted messages, so the server
-does not know which messages belong together. The 10,000-message limit applies to
+does not know which messages belong together. The message history limit applies to
 the whole forum.
 A `page` channel works exactly like a text channel on the server (same messages,
 keys and flags); clients show only its newest message, as one Markdown page, and
@@ -564,7 +574,7 @@ current time. Servers advertise support with `dm_backfill: true` in server info.
 Historical copies have `backfilled: true` in POST, page and lookup responses and
 get a new local sequence number. Pagination and retention still use local
 insertion order. A full DM refuses
-a historical insert with `409 history_full` so live history is preserved.
+a historical insert with `409 history_full` (never when it keeps all messages) so live history is preserved.
 After interruption the next scan uses the IDs already stored as its checkpoint.
 Deleted or pruned IDs remain reserved. Epoch links and live transfers stay
 local to their channel. The background scan skips records with attachments
@@ -827,7 +837,8 @@ flag but cannot inspect ciphertext or enforce the mention rule. A modified
 client can send the tokens without permission. Changes to role assignments
 or permissions can change how clients display retained messages.
 
-The API keeps the newest 10,000 records per channel. Explicit deletes remove
+The API keeps the newest `keep` records per channel (10,000 unless changed, see
+`/v1/settings/message-history`). Explicit deletes remove
 the ciphertext and add a `message_deleted` audit entry with actor, message ID
 and time. DM audit entries are visible to participants with audit access. When the DM
 closes, its entries become visible to everyone with audit access.

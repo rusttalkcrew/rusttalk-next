@@ -3,7 +3,7 @@
 
 use reqwest::Method;
 use rusttalk_core::{
-    auth::{FileLimits, FileSettings, ServerUpdates, decode, encode},
+    auth::{FileLimits, FileSettings, MessageHistory, ServerUpdates, decode, encode},
     client::KeyClient,
     keys::{Metadata, random_key},
 };
@@ -65,6 +65,9 @@ pub enum Admin {
     Joining(bool, u32),
     LoadFiles,
     SaveFiles(FileLimits),
+    LoadHistory,
+    /// How many messages each channel keeps; 0 keeps them all.
+    SaveHistory(i64),
     /// Active invites, as far as this person may see them.
     Invites,
     RevokeInvite(String),
@@ -161,6 +164,8 @@ pub enum AdminUpdate {
     Invites(Vec<Invite>),
     Joining(bool, u32),
     Files(FileSettings),
+    /// `None` from a server too old to change it.
+    History(Option<MessageHistory>),
     /// Whether the server is listed, and the saved details.
     Listing(bool, Option<PublicListing>),
     ServerUpdates(ServerUpdates),
@@ -223,6 +228,21 @@ pub(super) async fn run(
                 send(AdminUpdate::Files(settings));
                 t!("admin.done_file_limits")
             }),
+        Admin::LoadHistory => {
+            match message_history(client, Method::GET, None).await {
+                Ok(history) => send(AdminUpdate::History(history)),
+                Err(text) => send(AdminUpdate::Failed(text)),
+            }
+            return;
+        }
+        Admin::SaveHistory(keep) => {
+            message_history(client, Method::PUT, Some(json!({ "keep": keep })))
+                .await
+                .map(|history| {
+                    send(AdminUpdate::History(history));
+                    t!("admin.done_history")
+                })
+        }
         Admin::LoadUpdates => {
             match get(client, "/v1/settings/updates").await {
                 Ok(value) => match serde_json::from_value(value) {
@@ -876,6 +896,30 @@ async fn file_settings(
         .map_err(|error| failed(&error.into()))
 }
 
+/// `None` when the server predates the setting.
+async fn message_history(
+    client: &KeyClient<'_>,
+    method: Method,
+    body: Option<Value>,
+) -> Result<Option<MessageHistory>, String> {
+    const PATH: &str = "/v1/settings/message-history";
+    let reply = if method == Method::GET {
+        match client.request(Method::GET, PATH).send().await {
+            Ok(reply) if reply.status() == reqwest::StatusCode::NOT_FOUND => return Ok(None),
+            Ok(reply) if reply.status().is_success() => reply,
+            // Ask again through `request`, which puts the problem into words.
+            _ => request(client, method, PATH, body).await?,
+        }
+    } else {
+        request(client, method, PATH, body).await?
+    };
+    reply
+        .json()
+        .await
+        .map(Some)
+        .map_err(|error| failed(&error.into()))
+}
+
 async fn request(
     client: &KeyClient<'_>,
     method: Method,
@@ -927,6 +971,7 @@ fn problem(code: &str) -> &'static str {
         "invite_not_found" => t!("admin.invite_not_found"),
         "invalid_member_cap" => t!("admin.invalid_member_cap"),
         "invalid_file_limits" => t!("admin.invalid_file_limits"),
+        "invalid_message_history" => t!("admin.invalid_message_history"),
         "invalid_listing" | "invalid_listing_settings" => {
             t!("admin.invalid_listing")
         }

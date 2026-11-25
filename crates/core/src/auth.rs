@@ -107,6 +107,16 @@ pub struct FileSettings {
     pub used_bytes: i64,
 }
 
+/// How many of the newest messages each channel keeps (`/v1/settings/message-history`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageHistory {
+    /// 0 keeps every message.
+    pub keep: i64,
+    /// The most the server's host allows, when it set a cap (`RUSTTALK_MESSAGE_RETAIN`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ceiling: Option<i64>,
+}
+
 /// Operational update status visible to the server owner.
 #[derive(Default, Serialize, Deserialize)]
 pub struct ServerUpdates {

@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Server owners can choose how many messages each channel keeps, or keep them all, in Server settings > Message history (10,000 by default).
+
 ## v0.5.0 - 2026-11-25
 
 - Android test builds install as a separate "RustTalk Test" app, so they no longer block installing the release app.

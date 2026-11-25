@@ -2,6 +2,8 @@
 
 mod file_limits;
 
+mod history;
+
 mod import;
 
 mod members;
@@ -60,6 +62,8 @@ pub enum Tab {
     Audit,
     Joining,
     Files,
+    /// How many messages each channel keeps.
+    History,
     /// The owner's public listing.
     Listing,
     /// Server emoji and stickers.
@@ -87,6 +91,7 @@ pub struct Settings {
     /// Open joining and member limit, once loaded (owners and admins).
     joining: Option<(bool, u32)>,
     files: Option<file_limits::Form>,
+    history: Option<history::Form>,
     /// Whether the server is listed and the details, once loaded (owner).
     listing: Option<(bool, PublicListing)>,
     /// What the server has for `joining` and `listing`, to tell unsaved edits apart.
@@ -163,6 +168,10 @@ impl Settings {
                 Some(form) if form.unsaved() => form.saved(settings),
                 files => *files = Some(file_limits::Form::new(settings)),
             },
+            AdminUpdate::History(saved) => match &mut self.history {
+                Some(form) if form.unsaved() => form.saved(saved),
+                history => *history = Some(history::Form::new(saved)),
+            },
             AdminUpdate::Listing(on, saved) => {
                 let saved = (on, saved.unwrap_or_default());
                 if !self.listing_unsaved() {
@@ -223,6 +232,7 @@ impl Settings {
         self.roles.dirty(&server.dir)
             || (self.server_name.as_deref()).is_some_and(|typed| typed.trim() != name)
             || self.files.as_ref().is_some_and(file_limits::Form::unsaved)
+            || self.history.as_ref().is_some_and(history::Form::unsaved)
             || self.joining_unsaved()
             || self.listing_unsaved()
     }
@@ -276,6 +286,9 @@ pub fn open(home: &mut Home, index: usize, mut tab: Tab) {
     if tab == Tab::Files {
         server.send(Command::Admin(Admin::LoadFiles));
     }
+    if tab == Tab::History {
+        server.send(Command::Admin(Admin::LoadHistory));
+    }
     home.server_settings = Some(Settings {
         server: index,
         tab,
@@ -288,6 +301,7 @@ pub fn open(home: &mut Home, index: usize, mut tab: Tab) {
         audit_filter: None,
         joining: None,
         files: None,
+        history: None,
         listing: None,
         saved_joining: None,
         saved_listing: None,
@@ -475,6 +489,7 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
                     ),
                     page(Tab::Joining, "🚪", t!("admin.joining"), perms.admin),
                     page(Tab::Files, "📎", t!("admin.files"), true),
+                    page(Tab::History, "💬", t!("admin.history"), true),
                     page(
                         Tab::Emoji,
                         "😀",
@@ -552,6 +567,14 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
                             None
                         }
                     }
+                    Tab::History => {
+                        if let Some(form) = &mut settings.history {
+                            form.show(ui, perms.manage_server).map(Admin::SaveHistory)
+                        } else {
+                            loading(ui, settings);
+                            None
+                        }
+                    }
                     Tab::Listing => listing_tab(ui, server, settings),
                     Tab::Emoji => {
                         let asked = emoji_tab(ui, server, settings);
@@ -584,6 +607,7 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
                 }),
                 Tab::Listing => Some(Admin::LoadListing),
                 Tab::Files => Some(Admin::LoadFiles),
+                Tab::History => Some(Admin::LoadHistory),
                 Tab::Overview if perms.owner => Some(Admin::LoadUpdates),
                 Tab::Invites => Some(Admin::Invites),
                 _ => None,
@@ -596,6 +620,11 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
     // Confirmations over the settings window.
     if let Some(asked) = roles::delete_dialog(ctx, server, &mut settings.roles, &settings.message)
         .or_else(|| revoke_dialog(ctx, settings))
+        .or_else(|| {
+            (settings.history.as_mut())
+                .and_then(|form| form.confirm(ctx))
+                .map(Admin::SaveHistory)
+        })
     {
         request = Some(asked);
     }

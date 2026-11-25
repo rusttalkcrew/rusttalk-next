@@ -18,7 +18,7 @@ use sqlx::{FromRow, SqliteConnection, query, query_as, query_scalar};
 use crate::{
     ApiError, ApiResult, App,
     auth::{Actor, authenticate, authenticate_read},
-    channels, keys, page_files, payload,
+    channels, history, keys, page_files, payload,
     roles::{self, Permission},
     store::audit,
 };
@@ -26,7 +26,6 @@ use crate::{
 /// JSON for the largest envelope (unpadded base64url) plus 512 bytes for the ID, epoch and keys,
 /// and 512 for a page's kept files.
 pub const BODY_LIMIT: usize = (MAX_MESSAGE_BYTES * 4).div_ceil(3) + 1024;
-const RETAIN: i64 = 10_000;
 const PAGE_LIMIT: i64 = 100;
 
 #[derive(Deserialize)]
@@ -161,8 +160,9 @@ pub async fn create(
         Some(_) => return Err(ApiError::bad_request("invalid_backfill")),
         None => actor.at,
     };
+    let retain = history::keep(&mut tx).await?;
     // Historical inserts must not evict live history from a full replica.
-    if backfill_at.is_some() && history_full(&mut tx, &channel).await? {
+    if backfill_at.is_some() && history_full(&mut tx, &channel, retain).await? {
         return Err(keys::conflict("history_full"));
     }
     let device = verify_signed(
@@ -192,7 +192,7 @@ pub async fn create(
     .bind(backfill_at.is_some())
     .execute(&mut *tx)
     .await?;
-    let dropped = prune(&mut tx, &channel).await?;
+    let dropped = prune(&mut tx, &channel, retain).await?;
     if page {
         page_files::record(&mut tx, &channel, &id, &keep).await?;
         page_files::refresh(&app, &mut tx, &channel).await?;
@@ -294,25 +294,39 @@ fn historical_time(requested: i64, now: i64) -> i64 {
 }
 
 /// Read the count `prune` and `uncount` keep, so a backfill burst never walks the channel's index.
-async fn history_full(db: &mut SqliteConnection, channel: &str) -> ApiResult<bool> {
+/// A channel that keeps everything (`keep` 0) is never full.
+async fn history_full(db: &mut SqliteConnection, channel: &str, keep: i64) -> ApiResult<bool> {
+    if keep == 0 {
+        return Ok(false);
+    }
     let full: Option<bool> = query_scalar("SELECT message_count >= ? FROM channels WHERE id = ?")
-        .bind(RETAIN)
+        .bind(keep)
         .bind(channel)
         .fetch_optional(db)
         .await?;
     Ok(full.unwrap_or(false))
 }
 
-/// Count the message just inserted and drop the channel's oldest beyond `RETAIN`. The count lets
-/// a full channel trim from its oldest end instead of walking past its newest 10,000 rows.
-async fn prune(db: &mut SqliteConnection, channel: &str) -> ApiResult<Vec<String>> {
+/// Count the message just inserted and drop the channel's oldest beyond `keep`.
+async fn prune(db: &mut SqliteConnection, channel: &str, keep: i64) -> ApiResult<Vec<String>> {
     let count: i64 = query_scalar(
         "UPDATE channels SET message_count = message_count + 1 WHERE id = ? RETURNING message_count",
     )
     .bind(channel)
     .fetch_one(&mut *db)
     .await?;
-    if count <= RETAIN {
+    trim(db, channel, count, keep).await
+}
+
+/// Drop the oldest of a channel's `count` messages beyond `keep` (0 keeps all). The count lets
+/// a full channel trim from its oldest end instead of walking past the rows it keeps.
+pub(crate) async fn trim(
+    db: &mut SqliteConnection,
+    channel: &str,
+    count: i64,
+    keep: i64,
+) -> ApiResult<Vec<String>> {
+    if keep == 0 || count <= keep {
         return Ok(Vec::new());
     }
     let dropped: Vec<String> = query_scalar(
@@ -322,7 +336,7 @@ async fn prune(db: &mut SqliteConnection, channel: &str) -> ApiResult<Vec<String
     )
     .bind(channel)
     .bind(channel)
-    .bind(count - RETAIN - 1)
+    .bind(count - keep - 1)
     .fetch_all(&mut *db)
     .await?;
     uncount(db, channel, dropped.len() as u64).await?;
@@ -500,6 +514,7 @@ const _: () = assert!(BODY_LIMIT == 15_360);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::history::DEFAULT as RETAIN;
 
     #[test]
     fn body_limit_holds_the_largest_message() {
@@ -672,7 +687,7 @@ mod tests {
             .bind(RETAIN - 1)
             .fetch_one(&mut *db)
             .await?;
-            assert_eq!(history_full(&mut db, &dm).await?, old);
+            assert_eq!(history_full(&mut db, &dm, RETAIN).await?, old);
             anyhow::Ok(old)
         };
 
@@ -765,7 +780,7 @@ mod tests {
             .bind(RETAIN)
             .fetch_all(&mut *tx)
             .await?;
-            let dropped = prune(tx, A).await?;
+            let dropped = prune(tx, A, RETAIN).await?;
             assert_eq!(dropped, before);
             Ok(dropped)
         }
@@ -778,11 +793,11 @@ mod tests {
             .await?)
         }
 
-        assert!(!history_full(&mut tx, A).await?);
+        assert!(!history_full(&mut tx, A, RETAIN).await?);
         let newest = encode(&[1; 32]);
         assert!(post(&mut tx, &newest).await?.is_empty());
-        assert!(history_full(&mut tx, A).await?);
-        assert!(!history_full(&mut tx, B).await?);
+        assert!(history_full(&mut tx, A, RETAIN).await?);
+        assert!(!history_full(&mut tx, B, RETAIN).await?);
         assert_eq!(post(&mut tx, "10001").await?, ["1"]);
         assert_eq!(post(&mut tx, "10002").await?, ["2"]);
         assert_eq!(
