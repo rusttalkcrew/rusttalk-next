@@ -71,12 +71,11 @@ pub(super) fn show(ui: &mut Ui, home: &mut Home, update_available: bool) {
             sound_buttons(ui, home);
         }
         ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-            let me = identity(ui, home, status);
+            let me = identity(ui, home, home.shown_status());
             ui::menu_wide(&me, |m| picked = status_picker(m, status));
         });
     });
     if let Some(choice) = picked {
-        home.auto_away = false;
         home.set_status(choice);
     }
 }

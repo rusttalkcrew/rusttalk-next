@@ -24,7 +24,14 @@ pub enum Presence {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PresenceEvent {
-    PresenceChanged { person_id: String, status: Presence },
+    PresenceChanged {
+        person_id: String,
+        status: Presence,
+        /// The member's own status choice, sent only to that member's own devices when
+        /// it changes, so every device shows the latest. Older servers leave it out.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        chosen: Option<Status>,
+    },
 }
 
 /// Events returned by the presence-aware client API.

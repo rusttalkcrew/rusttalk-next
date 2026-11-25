@@ -484,8 +484,9 @@ mod tests {
                 } else {
                     "online"
                 };
-                let choice = serde_json::from_value(serde_json::json!({ "status": status }))
-                    .expect("valid status");
+                let choice =
+                    serde_json::from_value(serde_json::json!({ "status": status, "picked": true }))
+                        .expect("valid status");
                 presence::set(state, headers, Ok(Json(choice)))
                     .await
                     .map(drop)

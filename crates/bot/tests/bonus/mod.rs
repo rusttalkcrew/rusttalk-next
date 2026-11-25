@@ -106,13 +106,18 @@ pub async fn presence<'a>(
     assert_eq!(me["status"], "invisible");
     b.set_status(Status::Online).await?;
     presence_is(a, &person, Presence::Online).await?;
+    // Its only device idle: away until it is used again. The choice stays online.
+    b.set_idle(true).await?;
+    presence_is(a, &person, Presence::Away).await?;
+    b.set_idle(false).await?;
+    presence_is(a, &person, Presence::Online).await?;
     assert_eq!(me["hide_offline"], false);
     b.set_hide_offline(true).await?;
     assert_eq!(member(a, &person).await?["hide_offline"], true);
     b.set_hide_offline(false).await?;
     assert_eq!(member(a, &person).await?["hide_offline"], false);
     println!(
-        "B2 bot saw online, away, invisible as offline, offline on the last socket closing, the stored choice on reconnect, no notice for an invisible reconnect, and the hide-offline flag"
+        "B2 bot saw online, away, invisible as offline, offline on the last socket closing, the stored choice on reconnect, no notice for an invisible reconnect, away while its device is idle, and the hide-offline flag"
     );
     Ok(b)
 }

@@ -12,7 +12,7 @@ use rusttalk_core::{
     auth::encode,
     keys::{Event, KeyNeed, Kind, Scope},
     messages::MessageRecord,
-    presence::Update,
+    presence::{PresenceEvent, Update},
 };
 use sqlx::{SqliteConnection, query_scalar};
 use tokio::{
@@ -123,6 +123,7 @@ async fn stream(
     let mut lagged = false;
     let mut recheck = Recheck::Access;
     let device = rusttalk_core::auth::encode(&actor.device);
+    let person = encode(&actor.person);
     loop {
         // Bound the drain to the broadcast backlog so a busy stream still makes progress.
         for _ in 0..=app.changes.len() {
@@ -155,7 +156,7 @@ async fn stream(
             if presence.is_none() {
                 let status = presence::stored(&mut db, &actor.person).await?;
                 db.commit().await?;
-                presence = Some(presence::open(app, encode(&actor.person), status));
+                presence = Some(presence::open(app, person.clone(), device.clone(), status));
                 db = app.db.begin().await?;
             }
             tx = Some(db);
@@ -190,6 +191,16 @@ async fn stream(
         }
         for update in notices.drain(..) {
             let Update::Event(notice) = &update.update else {
+                // A status choice reaches only the chooser's own devices.
+                if let Update::Presence(PresenceEvent::PresenceChanged {
+                    person_id,
+                    chosen: Some(_),
+                    ..
+                }) = &update.update
+                    && *person_id != person
+                {
+                    continue;
+                }
                 forward(socket, &update).await?;
                 continue;
             };
@@ -468,6 +479,7 @@ mod tests {
         let presence = Update::Presence(PresenceEvent::PresenceChanged {
             person_id: "p".into(),
             status: Presence::Away,
+            chosen: None,
         });
         let updates = events.into_iter().map(Update::Event).chain([presence]);
         for update in updates {
@@ -641,8 +653,11 @@ mod tests {
         timeout(Duration::from_secs(30), async {
             while seen.last() != Some(&Presence::Offline) {
                 if let Change::Update(notice) = changes.recv().await?
-                    && let Update::Presence(PresenceEvent::PresenceChanged { person_id, status }) =
-                        &notice.update
+                    && let Update::Presence(PresenceEvent::PresenceChanged {
+                        person_id,
+                        status,
+                        ..
+                    }) = &notice.update
                     && *person_id == person
                 {
                     seen.push(*status);

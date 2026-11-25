@@ -1395,13 +1395,27 @@ impl<'a> KeyClient<'a> {
         Ok(())
     }
 
-    /// Set the presence choice for this member’s open event sockets.
+    /// Set the presence choice the person picked, for all their devices.
     pub async fn set_status(&self, status: Status) -> Result<()> {
         self.request(Method::PUT, "/v1/me/status")
-            .json(&json!({"status": status}))
+            .json(&json!({"status": status, "picked": true}))
             .send()
             .await?
             .error_for_status()?;
+        Ok(())
+    }
+
+    /// Report whether this device has had no input for a while. Older servers don't know
+    /// idle devices (404) and keep showing the picked status.
+    pub async fn set_idle(&self, idle: bool) -> Result<()> {
+        let reply = self
+            .request(Method::PUT, "/v1/me/idle")
+            .json(&json!({"idle": idle}))
+            .send()
+            .await?;
+        if reply.status() != StatusCode::NOT_FOUND {
+            reply.error_for_status()?;
+        }
         Ok(())
     }
 

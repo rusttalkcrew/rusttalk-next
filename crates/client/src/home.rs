@@ -176,8 +176,11 @@ pub struct Home {
     left: HashSet<url::Url>,
     /// This person's status on every server; `None` until a server reports it.
     pub status: Option<Choice>,
-    /// "Away" was set by itself after no input, so input sets "Online" again.
-    auto_away: bool,
+    /// No input or call on this device for a while. Servers show an "Online" choice as
+    /// away only while all my devices are idle.
+    idle: bool,
+    /// Servers that were offline when I last picked a status: they get it once back.
+    status_unsent: HashSet<url::Url>,
     /// When the person last used the window, in egui time.
     active_at: f64,
     pub layout: layout::Layout,
@@ -435,7 +438,8 @@ impl Home {
             synced,
             left: HashSet::new(),
             status: None,
-            auto_away: false,
+            idle: false,
+            status_unsent: HashSet::new(),
             active_at: 0.0,
             layout,
             notify: Notify::open(&data_dir, notify::unix_now()),
@@ -444,28 +448,50 @@ impl Home {
         })
     }
 
-    /// Choose a status on every server.
+    /// Choose a status on every server, for all my devices.
     fn set_status(&mut self, choice: Choice) {
         self.status = Some(choice);
+        self.status_unsent.clear();
         for server in &self.servers {
+            if server.status != Status::Online {
+                self.status_unsent.insert(server.address.clone());
+            }
             server.send(Command::SetStatus(choice));
         }
     }
 
-    /// Turn "Online" into "Away" after a while without input or call, and back once used again.
+    /// The status others see: an "Online" choice shows as away while every one of my
+    /// devices is idle, as the servers combine them.
+    pub fn shown_status(&self) -> Choice {
+        let choice = self.status.unwrap_or(Choice::Online);
+        let away = (self.servers.iter())
+            .filter(|server| server.status == Status::Online)
+            .filter_map(|server| server.member(&server.dir.me))
+            .any(|member| member.presence == Presence::Away);
+        if choice == Choice::Online && away {
+            Choice::Away
+        } else {
+            choice
+        }
+    }
+
+    /// Tell the servers when this device goes idle after a while without input or call,
+    /// and when it is used again.
     fn track_activity(&mut self, ui: &Ui) {
         let (now, input) = ui.input(|input| (input.time, !input.events.is_empty()));
         // In a call people talk while another app has the focus, so the call counts as activity.
         let active = input || self.voice.call.is_some();
-        if active {
+        let idle = if active {
             self.active_at = now;
-            if self.auto_away {
-                self.auto_away = false;
-                self.set_status(Choice::Online);
+            false
+        } else {
+            self.idle || now - self.active_at > AWAY_AFTER
+        };
+        if idle != self.idle {
+            self.idle = idle;
+            for server in &self.servers {
+                server.send(Command::SetIdle(idle));
             }
-        } else if self.status == Some(Choice::Online) && now - self.active_at > AWAY_AFTER {
-            self.auto_away = true;
-            self.set_status(Choice::Away);
         }
         // Without input egui stops drawing; wake up to notice the time passing.
         ui.ctx().request_repaint_after(Duration::from_secs(30));
@@ -1324,19 +1350,19 @@ impl Home {
                             server.names.insert(member.person, name.clone());
                         }
                     }
-                    // Every server gets the same status; one that differs is told the current one.
+                    // The latest pick wins: one made here while this server was offline is
+                    // sent now; otherwise a different stored one was picked on another device.
+                    let unsent = self.status_unsent.remove(&address);
                     match (self.status, dir.status) {
-                        (None, Some(Choice::Away)) => {
-                            // shortcut: a stored "Away" counts as automatic and ends with input,
-                            // since whether it was picked isn't stored; keep the pick locally if missed.
-                            self.status = Some(Choice::Away);
-                            self.auto_away = true;
-                        }
-                        (None, stored) => self.status = stored,
-                        (Some(mine), Some(theirs)) if mine != theirs => {
+                        (Some(mine), Some(theirs)) if mine != theirs && unsent => {
                             server.send(Command::SetStatus(mine));
                         }
+                        (_, Some(theirs)) => self.status = Some(theirs),
                         _ => {}
+                    }
+                    // A reconnect starts this device active on the server.
+                    if self.idle {
+                        server.send(Command::SetIdle(true));
                     }
                     if let Some(theirs) = dir.hide_offline {
                         let mut settings = self.voice.audio.settings();
@@ -1410,6 +1436,10 @@ impl Home {
                 if let Some(index) = self.index(&address) {
                     self.leave_server(index);
                 }
+            }
+            Update::Chosen(address, choice) => {
+                self.status = Some(choice);
+                self.status_unsent.remove(&address);
             }
             Update::Presence(address, person, presence) => {
                 if let Some(index) = self.index(&address) {
@@ -7382,6 +7412,7 @@ mod tests {
     mod member_list;
     mod menus;
     mod outbox;
+    mod presence;
     mod rail;
     mod reactions;
     mod server_emoji;

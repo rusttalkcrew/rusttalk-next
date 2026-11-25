@@ -220,6 +220,8 @@ pub enum Command {
     SetAvatar(Vec<u8>),
     /// Online, away or invisible.
     SetStatus(Choice),
+    /// This device had no input for a while (true), or is used again.
+    SetIdle(bool),
     /// Leave this person out of others' member lists while they appear offline.
     SetHideOffline(bool),
     /// Leave this server for good, on the server too.
@@ -424,6 +426,8 @@ pub enum Update {
     Left(Url),
     /// A member came online, went away or offline.
     Presence(Url, Id, Presence),
+    /// My status choice changed on this server, picked on this or another device.
+    Chosen(Url, Choice),
     Notice(Url, Id, Msg),
     DmReady(Url, Id),
     /// A new invite: its ID (to revoke it) and link.
@@ -1341,6 +1345,8 @@ fn refuse(ctx: &Ctx, url: &Url, command: Command) {
             ctx.send(Update::VoiceDestination(url.clone(), request, false))
         }
         Command::SetStatus(_)
+        // Sent again after connecting while idle.
+        | Command::SetIdle(_)
         | Command::SetHideOffline(_)
         | Command::SetBio(_)
         | Command::CheckGone(..)
@@ -1602,8 +1608,13 @@ async fn serve(
                         return End::Error;
                     }
                 }
-                Ok(Some(Step::Update(Pushed::Presence(PresenceEvent::PresenceChanged { person_id, status })))) => {
+                Ok(Some(Step::Update(Pushed::Presence(PresenceEvent::PresenceChanged { person_id, status, chosen })))) => {
                     directory::presence_changed(state, &person_id, status);
+                    // Picked here or on another of my devices.
+                    if let Some(choice) = chosen {
+                        directory::status_changed(state, choice);
+                        ctx.send(Update::Chosen(url.clone(), choice));
+                    }
                     match decode(&person_id) {
                         Ok(person) => ctx.send(Update::Presence(url.clone(), person, status)),
                         Err(error) => tracing::warn!(%error, "presence for a bad person ID"),
@@ -2961,6 +2972,7 @@ async fn on_command(
             client.set_status(choice).await?;
             directory::status_changed(state, choice);
         }
+        Command::SetIdle(idle) => client.set_idle(idle).await?,
         Command::SetHideOffline(hide) => client.set_hide_offline(hide).await?,
         Command::Leave => {
             let reply = client

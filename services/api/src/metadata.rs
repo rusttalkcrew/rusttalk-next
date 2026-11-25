@@ -627,7 +627,7 @@ mod tests {
         assert_eq!(listed().await, (json!(true), json!("offline")));
 
         let person = encode(&crate::testing::person(2));
-        let _socket = crate::presence::open(&app, person, Status::Online);
+        let _socket = crate::presence::open(&app, person, "d".into(), Status::Online);
         assert_eq!(listed().await, (json!(true), json!("online")));
 
         hide(false).await?;
