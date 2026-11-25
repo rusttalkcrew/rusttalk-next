@@ -81,6 +81,37 @@ fn capture(h: &mut Harness<'_, Option<Screen>>, size: Vec2, dark: bool, state: &
 }
 
 #[test]
+fn shared_apps_show_under_their_sharer_with_bars_and_volume() {
+    let data = tempfile::tempdir().unwrap();
+    for (size, dark) in [Vec2::new(390.0, 844.0), Vec2::new(1100.0, 700.0)]
+        .into_iter()
+        .flat_map(|size| [(size, true), (size, false)])
+    {
+        let mut h = in_call(dark, size, data.path());
+        let home = &mut h.state_mut().as_mut().unwrap().0;
+        home.layout.list = true;
+        let sid = |s: &str| s.to_owned().try_into().unwrap();
+        home.servers[0].voice.get_mut(&PROJECTS).unwrap()[1].apps = vec![
+            (sid("TR_a"), "Spotify".into()),
+            (sid("TR_b"), "YouTube Music".into()),
+        ];
+        let audio = &home.voice.audio;
+        audio.set_listening("TR_a", true);
+        audio.play_app_for_test("TR_a", (ANN, Some("Spotify".into())), -18.0);
+        h.run_steps(4);
+        let label = |name| format!("{}: {name}", t!("call.listen"));
+        let row = h.get_by_label(&label("Spotify")).rect();
+        assert!(row.right() <= size.x, "fits the window");
+        assert!(h.query_by_label(&label("YouTube Music")).is_some());
+        assert!(
+            h.query_by_label(&format!("{}: Spotify", t!("call.volume")))
+                .is_some()
+        );
+        capture(&mut h, size, dark, "shared-apps");
+    }
+}
+
+#[test]
 fn phones_show_call_controls_and_hide_the_chat_at_first() {
     let data = tempfile::tempdir().unwrap();
     for dark in [true, false] {

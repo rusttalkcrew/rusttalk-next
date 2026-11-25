@@ -781,18 +781,46 @@ pub fn room_list(ui: &mut Ui, home: &Home, server: &Server, channel: &Id) -> Opt
             pick = Some((peer.person, picked));
         }
         let listening = peer.person != server.dir.me && home.voice.in_call(server, channel);
+        let audio = &home.voice.audio;
         for shared in &peer.apps {
-            let app = &shared.1;
+            let (sid, app) = shared;
             let stream = (peer.person, Some(app.clone()));
+            let on = listening && audio.is_listening(sid.as_str());
             let row = ui.horizontal(|ui| {
                 ui.add_space(52.0);
-                ui.label(RichText::new(format!("🎵 {app}")).size(ui::TEXT_SMALL));
-                if listening && home.voice.audio.stream_muted(&stream) {
-                    ui.label(ui::caption(t!("call.muted")));
-                }
+                ui::sound_bars(ui, on.then(|| audio.app_level(sid.as_str())).flatten());
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.add_space(ui::SPACE_S);
+                    if listening && audio.stream_muted(&stream) {
+                        ui.label(ui::caption(t!("call.muted")));
+                    }
+                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                        let text = RichText::new(app).size(ui::TEXT_SMALL);
+                        let text = if on { text.strong() } else { text.weak() };
+                        ui.add(Label::new(text).truncate().selectable(false));
+                    });
+                });
             });
             if listening {
-                let row = row.response.interact(Sense::click());
+                // A click (a tap on phones) listens or stops; the volume shows while on.
+                let row = (row.response.interact(Sense::click()))
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text(if on {
+                        t!("call.stop_listening")
+                    } else {
+                        t!("call.listen")
+                    });
+                let label = format!("{}: {app}", t!("call.listen"));
+                row.widget_info(|| WidgetInfo::selected(Role::CheckBox, true, on, &label));
+                if row.clicked() {
+                    server.send(Command::Listen(sid.to_string(), !on));
+                }
+                if on {
+                    ui.horizontal(|ui| {
+                        ui.add_space(52.0);
+                        mixer::app_slider(ui, audio, peer.person, app);
+                    });
+                }
                 let apps = std::slice::from_ref(shared);
                 ui::context_menu(&row, |m| {
                     mixer::show(m, &home.voice.audio, peer.person, false, apps, |sid, on| {

@@ -65,6 +65,15 @@ impl PersonMix {
         }
     }
 
+    /// What one app's own slider moves: the link while linked, as in the mixer, so the
+    /// apps keep their balance; else that app's volume.
+    pub fn app_volume(&mut self, app: &str) -> &mut f32 {
+        match &mut self.link {
+            Some(link) => link,
+            None => &mut self.apps.entry(app.to_owned()).or_default().volume,
+        }
+    }
+
     fn prune(&mut self) {
         self.apps.retain(|_, level| *level != Level::default());
     }
@@ -211,6 +220,25 @@ pub fn show(
     }
 }
 
+/// One app's volume as a slider, for its row under the person in the channel list.
+/// It is the same per-person mix the menu shows, so both always agree.
+pub fn app_slider(ui: &mut Ui, audio: &Audio, person: Id, app: &str) {
+    let mut all = audio.mix();
+    let mut mix = all.person(&person);
+    let before = mix.clone();
+    let off = mix.apps.get(app).is_some_and(|level| level.muted);
+    let label = format!("{}: {app}", t!("call.volume"));
+    // Room for the "100%" box and the sidebar's edge, so nothing is cut off.
+    ui.spacing_mut().slider_width = (ui.available_width() - 80.0).max(40.0);
+    let slider = ui.add_enabled(!off, percent(mix.app_volume(app), MAX));
+    slider.widget_info(|| WidgetInfo::labeled(Role::Slider, !off, &label));
+    mix.prune();
+    if mix != before {
+        all.set_person(&person, mix);
+        audio.set_mix(all);
+    }
+}
+
 /// A name with its mute button, and the volume under it.
 fn row(ui: &mut Ui, label: &str, volume: Option<&mut f32>, muted: Option<&mut bool>) {
     let off = muted.as_deref().copied().unwrap_or(false);
@@ -289,6 +317,28 @@ mod tests {
 
     fn close(a: f32, b: f32) -> bool {
         (a - b).abs() < 1e-5
+    }
+
+    #[test]
+    fn an_apps_own_slider_moves_the_link_while_linked() {
+        let mut mix = Mix::default();
+        let mut ann = PersonMix::default();
+        *ann.app_volume("Spotify") = 0.5;
+        assert!(close(ann.apps["Spotify"].volume, 0.5));
+        ann.set_link(true, &["Spotify", "YouTube Music"]);
+        *ann.app_volume("YouTube Music") = 1.5;
+        assert_eq!(ann.link, Some(1.5));
+        mix.set_person(&ANN, ann);
+        assert!(close(mix.gain(&app("Spotify")), 0.75));
+        assert!(close(mix.gain(&app("YouTube Music")), 1.5));
+        // Moving the sliders back to normal leaves nothing saved for them.
+        let mut ann = mix.person(&ANN);
+        ann.link = None;
+        for name in ["Spotify", "YouTube Music"] {
+            *ann.app_volume(name) = 1.0;
+        }
+        mix.set_person(&ANN, ann);
+        assert!(mix.people.is_empty());
     }
 
     #[test]
