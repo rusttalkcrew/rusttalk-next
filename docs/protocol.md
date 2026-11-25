@@ -450,17 +450,17 @@ any category; the body may be up to 64 KiB. A repeated ID returns
 | Method and path | Body | Permission and success |
 | --- | --- | --- |
 | GET `/v1/catalog` | Empty | Any member. 200, `{channels, categories}` filtered to channels they can read and their categories |
-| GET `/v1/channels` | Empty | `manage_channels`. 200, channel list |
+| GET `/v1/channels` | Empty | `manage_channels`. 200, the channels the caller can read (the Owner reads all) |
 | POST `/v1/channels` | `{id, kind, category_id, position, name_ct, topic_ct?, commitment, envelope}` | `manage_channels`. 201. Envelope initializes epoch 1 for the caller |
-| PUT `/v1/channels/{id}` | `{category_id, position, name_ct, topic_ct?, audio_kbps?, member_limit?}` | `manage_channels`. 204. `audio_kbps` (voice channels only, 8 to 128, default 64) is the Opus bitrate everyone publishing in the call uses; when absent it stays as it was. The catalog and channel list return it as `audio_kbps` for voice channels, and `POST /v1/voice/{channel}/token` returns it too. A change sends `channel_changed`, and clients in the call republish their audio at the new bitrate. `member_limit` (voice channels only, 0 to 99, 0 = no limit, default 0) is the most people in the call at once; when absent it stays as it was. The catalog and channel list return it as `member_limit` for voice channels that have one |
-| DELETE `/v1/channels/{id}` | Empty | `manage_channels`. 204 |
-| PUT `/v1/channels/{id}/permissions/{role}` | `{flags}` | `manage_channels` and a lower-ranked target role. The Owner can also change the Owner role. 204 |
+| PUT `/v1/channels/{id}` | `{category_id, position, name_ct, topic_ct?, audio_kbps?, member_limit?}` | `manage_channels` and read access to the channel (otherwise `404 channel_not_found`). 204. `audio_kbps` (voice channels only, 8 to 128, default 64) is the Opus bitrate everyone publishing in the call uses; when absent it stays as it was. The catalog and channel list return it as `audio_kbps` for voice channels, and `POST /v1/voice/{channel}/token` returns it too. A change sends `channel_changed`, and clients in the call republish their audio at the new bitrate. `member_limit` (voice channels only, 0 to 99, 0 = no limit, default 0) is the most people in the call at once; when absent it stays as it was. The catalog and channel list return it as `member_limit` for voice channels that have one |
+| DELETE `/v1/channels/{id}` | Empty | `manage_channels` and read access to the channel (otherwise `404 channel_not_found`). 204 |
+| PUT `/v1/channels/{id}/permissions/{role}` | `{flags}` | `manage_channels`, read access to the channel (otherwise `404 channel_not_found`) and a lower-ranked target role. The Owner can also change the Owner role. 204 |
 | PUT `/v1/channels/{id}/focus` | `{seconds}` | `start_focus` and read access to a voice channel (other channels it can read: `400 not_a_voice_channel`). 204. Turns focus mode on until `seconds` (1 to 86,400) from now, or off with 0; anything else is `400 invalid_focus_time`. The catalog and channel list return the end as `focus_until` (Unix seconds) while it is in the future. A change sends `channel_changed`; the end itself sends nothing, clients compare it with their clock |
 | GET `/v1/categories` | Empty | `manage_channels`. 200, category list |
 | POST `/v1/categories` | `{id, position, name_ct}` | `manage_channels`. 201 |
 | PUT `/v1/categories/{id}` | `{position, name_ct}` | `manage_channels`. 204 |
 | DELETE `/v1/categories/{id}` | Empty | `manage_channels`. 204 if empty, 409 if in use |
-| PUT `/v1/channels/order` | `{categories: [{id, channels: [id]}]}` | `manage_channels`. 204. Sets every category's and text or voice channel's `position` and `category_id` in one transaction, audited as `channels_reordered`, then sends `channel_changed` |
+| PUT `/v1/channels/order` | `{categories: [{id, channels: [id]}]}` | `manage_channels`. 204. Lists every category and exactly the channels the caller can read (otherwise `409 order_changed`). Sets their `position` and `category_id` in one transaction; channels the caller can't read keep their category and their place among the others, audited as `channels_reordered`, then sends `channel_changed` |
 
 Channel responses have `{id, kind, category_id, position, name_ct, topic_ct, flags}`.
 A category has `{id, position, name_ct}`. Each channel's flags are
