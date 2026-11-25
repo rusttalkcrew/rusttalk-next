@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Android calls keep working when you switch apps or lock the screen, with an "In a voice call" notification that takes you back.
+
 ## v0.4.0 - 2026-11-24
 
 - Changing your name, picture or bio no longer pauses chat and voice on every server while your devices sync.

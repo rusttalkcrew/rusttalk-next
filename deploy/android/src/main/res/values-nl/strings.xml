@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The call notification (CallService). Keep in step with crates/client/locales. -->
+<resources>
+    <string name="call_channel">Gesprekken</string>
+    <string name="call_title">In een spraakgesprek</string>
+    <string name="call_text">Tik om terug te gaan naar RustTalk</string>
+</resources>

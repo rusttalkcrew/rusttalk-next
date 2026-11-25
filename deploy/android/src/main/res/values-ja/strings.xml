@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The call notification (CallService). Keep in step with crates/client/locales. -->
+<resources>
+    <string name="call_channel">通話</string>
+    <string name="call_title">ボイス通話中</string>
+    <string name="call_text">タップしてRustTalkに戻る</string>
+</resources>
