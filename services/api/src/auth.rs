@@ -352,11 +352,28 @@ pub async fn create_invite(
     Ok((id, encode(&code)))
 }
 
-async fn redeem(db: &mut SqliteConnection, person: &[u8], invite: &str, at: i64) -> ApiResult<()> {
+/// SQL condition: an invite admits people only while its maker may still invite, so kicking,
+/// banning or demoting them stops their links. The owner always may. Owner bootstrap invites
+/// and invites made before the server recorded creators have no creator and stay valid.
+pub const CREATOR_CAN_INVITE: &str = "(invites.created_by IS NULL
+    OR invites.created_by = (SELECT owner_person_id FROM server_settings WHERE id = 1)
+    OR EXISTS (SELECT 1 FROM member_roles JOIN roles ON roles.id = member_roles.role_id
+               WHERE member_roles.person_id = invites.created_by
+               AND (roles.permissions & 1) <> 0))";
+const _: () = assert!(crate::roles::Permission::Invite as i64 == 1);
+
+pub(crate) async fn redeem(
+    db: &mut SqliteConnection,
+    person: &[u8],
+    invite: &str,
+    at: i64,
+) -> ApiResult<()> {
     let code = decode::<16>(invite)?;
-    let (id, owner, remaining): (String, bool, i64) = query_as(
-        "SELECT id, is_owner, remaining_uses FROM invites WHERE code_hash = ? AND expires_at > ?",
-    )
+    // A creator who lost the right gets the same answer as an unknown code.
+    let (id, owner, remaining): (String, bool, i64) = query_as(&format!(
+        "SELECT id, is_owner, remaining_uses FROM invites
+         WHERE code_hash = ? AND expires_at > ? AND {CREATOR_CAN_INVITE}"
+    ))
     .bind(hash(&code).as_slice())
     .bind(at)
     .fetch_optional(&mut *db)
