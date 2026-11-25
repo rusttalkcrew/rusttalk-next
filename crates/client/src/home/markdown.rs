@@ -406,7 +406,8 @@ fn show_line(
     jumbo: bool,
     edited: bool,
 ) {
-    ui.horizontal_wrapped(|ui| {
+    // As tall as its text, so it sits right under the line above.
+    ui::text_row(ui, true, |ui| {
         ui.spacing_mut().item_spacing.x = 0.;
         let mut job = LayoutJob::default();
         let flush = |ui: &mut Ui, job: &mut LayoutJob| {

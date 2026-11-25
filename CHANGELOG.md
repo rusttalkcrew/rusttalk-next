@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- In chat, the name lines up with the top of the avatar and the message sits right under it, also when it starts with a mention; a reply's quote now sits above the name.
+
 ## v0.5.0 - 2026-11-25
 
 - Android test builds install as a separate "RustTalk Test" app, so they no longer block installing the release app.
