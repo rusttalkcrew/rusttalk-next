@@ -27,6 +27,7 @@ Unreleased under the new version and date.
 - On phones, screenshots and the recent apps view no longer show your recovery words.
 - Moderators can no longer lift a ban placed by the owner or by someone with the same or a higher role.
 - Android: hiding the keyboard with Back no longer keeps the app redrawing in the background, saving battery.
+- On phones, a server that needs a newer app now offers "Download the new version", which opens the download page, instead of the desktop updater
 
 ## v0.4.0 - 2026-11-24
 

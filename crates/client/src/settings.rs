@@ -51,6 +51,15 @@ const HEADER_HEIGHT: f32 = 56.0;
 /// Room under the last section, so it can scroll up past the bottom edge a little.
 const CONTENT_BOTTOM: f32 = 48.0;
 const REPOSITORY: &str = "https://github.com/rusttalkcrew/rusttalk-next";
+/// Where a phone gets a newer app: it has no in-app updater.
+pub const DOWNLOAD_PAGE: &str = "https://github.com/rusttalkcrew/rusttalk-next/releases/latest";
+/// Phones update through their download page or app store, never in the app.
+pub const PHONE: bool = cfg!(any(target_os = "android", target_os = "ios"));
+
+/// Whether Settings lists this page: phones have no Updates page.
+fn listed(tab: Tab, phone: bool) -> bool {
+    !(phone && tab == Tab::Updates)
+}
 
 pub struct Page<T> {
     pub id: T,
@@ -545,7 +554,7 @@ pub fn show(
     }
     let mut tab = home.settings?;
     let page = |id, icon, label| Page { id, icon, label };
-    let groups = [
+    let mut groups = [
         Group {
             title: t!("settings.group_user"),
             pages: vec![
@@ -586,6 +595,9 @@ pub fn show(
             ],
         },
     ];
+    for group in &mut groups {
+        group.pages.retain(|page| listed(page.id, PHONE));
+    }
     let before = tab;
     let mut open_news = false;
     let ((), close) = window(
@@ -1178,5 +1190,19 @@ fn appearance_page(ui: &mut Ui, home: &mut Home) {
         crate::i18n::set(&settings.language);
         settings.set_appearance(look);
         audio.set_settings(settings);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn phones_list_no_updates_page() {
+        assert!(!listed(Tab::Updates, true));
+        assert!(listed(Tab::Updates, false));
+        for tab in [Tab::Profile, Tab::Network, Tab::About, Tab::WhatsNew] {
+            assert!(listed(tab, true) && listed(tab, false));
+        }
     }
 }
