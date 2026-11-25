@@ -13,6 +13,7 @@ Unreleased under the new version and date.
 
 - The sound bars next to a shared app now move clearly even when it plays quietly.
 - Someone sharing their camera and screen at once no longer loses their camera: it shows as a small picture on their screen that you can drag to any corner, pop out into its own tile or shrink to a small button.
+- Popping a camera out of a screen in full screen now leaves full screen and shows the camera as its own tile, instead of hiding it.
 
 ## v0.6.0 - 2026-11-25
 

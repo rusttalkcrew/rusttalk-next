@@ -260,12 +260,11 @@ fn the_camera_keeps_its_corner_in_full_screen_clear_of_the_controls() {
     }
 }
 
-#[test]
-fn your_own_camera_shows_on_your_screen_preview() {
-    let data = tempfile::tempdir().unwrap();
-    let mut h = sharing(true, Vec2::new(1100.0, 700.0), data.path());
+/// We share our camera and screen too, previewing the screen. The self view is the
+/// fake camera's picture (`Camera::fake`): the real one needs a device.
+fn share_own(h: &mut Harness<'static, Option<Screen>>) {
     let ctx = h.ctx.clone();
-    let home = home_mut(&mut h);
+    let home = home_mut(h);
     let me = &mut home.servers[0].voice.get_mut(&PROJECTS).unwrap()[0];
     me.camera = Some("my camera".into());
     me.screens = vec![Shared {
@@ -282,8 +281,77 @@ fn your_own_camera_shows_on_your_screen_preview() {
     camera.fake = Some(Default::default());
     camera.on = true;
     h.run_steps(6);
-    assert!(
-        h.query_by_label(&t!("call.someones_camera", name = "Me"))
-            .is_some()
-    );
+}
+
+fn my_camera() -> String {
+    t!("call.someones_camera", name = "Me")
+}
+
+fn my_pip(h: &Harness<'_, Option<Screen>>) -> Pip {
+    home(h).voice.pips.get(&ME).copied().unwrap_or_default()
+}
+
+/// Pop our camera out of its picture on our screen, as a person does: hover, click.
+fn pop_out_mine(h: &mut Harness<'static, Option<Screen>>) {
+    let at = h.get_by_label(&my_camera()).rect().center();
+    h.hover_at(at);
+    h.run_steps(2);
+    h.get_by_role_and_label(egui::Role::Button, t!("call.pop_out_camera"))
+        .click();
+    h.run_steps(6);
+}
+
+/// Our popped-out camera is a stage tile drawn with the self view (the warm test
+/// picture, not an avatar), and "Put back on the screen" returns it.
+fn my_tile_shows_and_goes_back(h: &mut Harness<'static, Option<Screen>>) {
+    assert!(my_pip(h).popped);
+    assert!(h.query_by_label(&my_camera()).is_none());
+    // The largest of my buttons: the side list has one too.
+    let tile = h
+        .get_all_by_role_and_label(egui::Role::Button, "Me")
+        .map(|node| node.rect())
+        .max_by(|a, b| a.area().total_cmp(&b.area()))
+        .expect("a tile for my popped-out camera");
+    assert!(tile.height() > 40.0, "{tile:?}");
+    let image = h.render().unwrap();
+    let ppp = h.ctx.pixels_per_point();
+    let spot = tile.center();
+    let pixel = image.get_pixel((spot.x * ppp) as u32, (spot.y * ppp) as u32);
+    assert!(pixel[0] > 150 && pixel[0] > pixel[2], "{pixel:?}");
+    h.hover_at(tile.center());
+    h.run_steps(2);
+    h.get_by_role_and_label(egui::Role::Button, t!("call.camera_on_screen"))
+        .click();
+    h.run_steps(6);
+    assert!(!my_pip(h).popped);
+    assert!(h.query_by_label(&my_camera()).is_some());
+}
+
+#[test]
+fn your_own_camera_pops_out_of_your_screen_preview_and_back() {
+    let data = tempfile::tempdir().unwrap();
+    let mut h = sharing(true, Vec2::new(1100.0, 700.0), data.path());
+    share_own(&mut h);
+    pop_out_mine(&mut h);
+    my_tile_shows_and_goes_back(&mut h);
+}
+
+/// Full screen has no room beside the screen: popping out leaves it, so the camera
+/// shows as its own tile instead of vanishing (#604).
+#[test]
+fn popping_out_your_camera_in_full_screen_shows_its_tile() {
+    let data = tempfile::tempdir().unwrap();
+    for dark in [true, false] {
+        for size in [Vec2::new(1100.0, 700.0), Vec2::new(390.0, 844.0)] {
+            let mut h = sharing(dark, size, data.path());
+            share_own(&mut h);
+            home_mut(&mut h).voice.stage.set_full_screen_preview();
+            h.run_steps(6);
+            capture(&mut h, size, dark, "own-full-screen");
+            pop_out_mine(&mut h);
+            assert!(home(&h).voice.stage.full.is_none());
+            capture(&mut h, size, dark, "own-popped");
+            my_tile_shows_and_goes_back(&mut h);
+        }
+    }
 }

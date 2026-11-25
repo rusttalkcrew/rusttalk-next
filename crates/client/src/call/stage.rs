@@ -126,6 +126,11 @@ impl Stage {
     }
 
     #[cfg(test)]
+    pub(crate) fn set_full_screen_preview(&mut self) {
+        self.full = Some(Tile::Preview);
+    }
+
+    #[cfg(test)]
     pub(crate) fn is_presenting(&self) -> bool {
         self.presenting
     }
@@ -1621,6 +1626,10 @@ fn apply(home: &mut Home, index: usize, now: f64, acts: Vec<Act>) {
             Act::TypeInTerminal(bytes) => terminal::send_typed(home, bytes),
             Act::PasteRefused => terminal::paste_refused(home, now),
             Act::Pip(person, change) => {
+                // Full screen has no room for the camera's own tile: show the stage.
+                if change == pip::Change::PopOut {
+                    stage.full = None;
+                }
                 if change == pip::Change::PutBack && stage.focus == Some(Tile::Person(person)) {
                     stage.focus = None;
                 }
