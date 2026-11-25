@@ -28,6 +28,7 @@ Unreleased under the new version and date.
 - Press Ctrl+K (Cmd+K on Mac), or the search button on phones, to jump to a person, a channel on any of your servers, or a settings page.
 - The audit log now records server setting, file limit and public listing changes, and shows which roles and channel permissions changed.
 - In chat, the name lines up with the top of the avatar and the message sits right under it, also when it starts with a mention; a reply's quote now sits above the name.
+- Reactions light up when you point at them, and "who reacted" shows the real emoji picture.
 
 ## v0.5.0 - 2026-11-25
 

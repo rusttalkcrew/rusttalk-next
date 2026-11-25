@@ -206,20 +206,38 @@ pub fn choice_button<'a>(
 
 /// A reaction under a message: an emoji and its count. One of mine gets a faint accent
 /// tint and an accent outline rather than a solid fill, so every emoji keeps its colour.
+/// Hovering deepens the fill and outline, mine staying accent-tinted.
 pub fn reaction_chip<'a>(ui: &mut Ui, mine: bool, label: impl egui::IntoAtoms<'a>) -> Response {
     let c = colors(ui);
-    let (fill, stroke) = if mine {
+    let states = if mine {
         let accent = accent(ui).base;
-        (accent.gamma_multiply(0.18), Stroke::new(1.0, accent))
+        [0.18, 0.30, 0.40].map(|tint| (accent.gamma_multiply(tint), accent))
     } else {
-        (c.button.gamma_multiply(0.45), Stroke::new(1.0, c.border))
+        [
+            (c.button.gamma_multiply(0.45), c.border),
+            (c.button_hover, c.muted),
+            (c.button_pressed, c.muted),
+        ]
     };
-    ui.add(
-        Button::new(label)
-            .fill(fill)
-            .stroke(stroke)
-            .corner_radius(RADIUS),
-    )
+    // Not `ui.scope`: a child ui would stop the chips wrapping onto the next line.
+    let saved = ui.visuals().widgets.clone();
+    let widgets = &mut ui.visuals_mut().widgets;
+    for (state, (fill, stroke)) in [
+        &mut widgets.inactive,
+        &mut widgets.hovered,
+        &mut widgets.active,
+    ]
+    .into_iter()
+    .zip(states)
+    {
+        state.weak_bg_fill = fill;
+        state.bg_stroke = Stroke::new(1.0, stroke);
+        // The chip stays put: only its colours change.
+        state.expansion = 0.0;
+    }
+    let response = ui.add(Button::new(label).corner_radius(RADIUS));
+    ui.visuals_mut().widgets = saved;
+    response.on_hover_cursor(CursorIcon::PointingHand)
 }
 
 /// Something that can't be undone, like Delete, Kick or Leave.

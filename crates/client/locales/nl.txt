@@ -218,6 +218,7 @@ home.edited = (bewerkt)
 home.message_unreadable = Dit bericht kon niet worden geopend.
 home.add_reaction = Reactie toevoegen
 home.reacted_with = {names} reageerde met {emoji}
+home.reacted = {names} reageerde
 common.reply = Beantwoorden
 common.edit = Bewerken
 home.invite_card = Serveruitnodiging
