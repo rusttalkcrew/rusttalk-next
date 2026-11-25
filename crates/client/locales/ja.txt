@@ -562,6 +562,7 @@ admin.ban_network_conflict = ネットワークをブロックできません。
 admin.done_unbanned = BAN を解除しました。招待があれば再び参加できます。
 admin.done_roles = ロールを保存しました。
 admin.done_role_saved = ロールを保存しました。
+admin.batch_failed = {total} 件中 {failed} 件の変更を保存できませんでした。{reason}
 admin.done_role_deleted = ロールを削除しました。
 admin.done_default_role = 新しいメンバーにはこのロールが付与されます。
 admin.done_channel_permissions = チャンネルの権限を保存しました。

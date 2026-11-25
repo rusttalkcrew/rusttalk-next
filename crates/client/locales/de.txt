@@ -562,6 +562,7 @@ admin.ban_network_conflict = Ihr Netzwerk lässt sich nicht blockieren: Du oder 
 admin.done_unbanned = Entsperrt. Mit einer Einladung kann die Person wieder beitreten.
 admin.done_roles = Rollen gespeichert.
 admin.done_role_saved = Rolle gespeichert.
+admin.batch_failed = {failed} von {total} Änderungen wurden nicht gespeichert. {reason}
 admin.done_role_deleted = Rolle gelöscht.
 admin.done_default_role = Neue Mitglieder erhalten jetzt diese Rolle.
 admin.done_channel_permissions = Kanalberechtigungen gespeichert.

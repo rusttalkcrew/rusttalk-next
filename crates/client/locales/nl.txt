@@ -562,6 +562,7 @@ admin.ban_network_conflict = Hun netwerk kan niet worden geblokkeerd: jij of iem
 admin.done_unbanned = Verbanning opgeheven. Met een uitnodiging kunnen ze weer deelnemen.
 admin.done_roles = Rollen opgeslagen.
 admin.done_role_saved = Rol opgeslagen.
+admin.batch_failed = {failed} van de {total} wijzigingen zijn niet opgeslagen. {reason}
 admin.done_role_deleted = Rol verwijderd.
 admin.done_default_role = Nieuwe leden krijgen nu deze rol.
 admin.done_channel_permissions = Kanaalrechten opgeslagen.
