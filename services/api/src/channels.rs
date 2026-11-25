@@ -139,6 +139,23 @@ async fn manage(db: &mut SqliteConnection, actor: &Actor) -> ApiResult<()> {
         .require(Permission::ManageChannels)
 }
 
+/// Refuse a channel this person can't read as if it didn't exist, so managing channels
+/// never reveals or opens up a channel hidden from the manager. The owner reads every channel.
+async fn readable(db: &mut SqliteConnection, id: &str, actor: &Actor) -> ApiResult<()> {
+    let readable: bool = query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM channel_readers r JOIN channels c ON c.id = r.channel_id
+                        WHERE r.channel_id = ? AND r.person_id = ? AND c.kind <> 'dm')",
+    )
+    .bind(id)
+    .bind(actor.person.as_slice())
+    .fetch_one(db)
+    .await?;
+    if !readable {
+        return Err(ApiError::not_found("channel_not_found"));
+    }
+    Ok(())
+}
+
 const READ: u8 = 1;
 pub const WRITE: u8 = 2;
 pub const SPEAK: u8 = 4;
@@ -260,7 +277,9 @@ pub async fn list_channels(
 ) -> ApiResult<Json<Vec<Channel>>> {
     let (mut tx, actor) = authenticate_read(&app, &headers).await?;
     manage(&mut tx, &actor).await?;
-    let list = channels(&mut tx, None).await?;
+    // Only the channels this manager can read, like the catalog.
+    let list = channels(&mut tx, Some(actor.person.as_slice())).await?;
+    let list = list.into_iter().filter(|c| c.kind != "dm").collect();
     tx.commit().await?;
     Ok(Json(list))
 }
@@ -391,6 +410,7 @@ pub async fn update_channel(
     let fields = payload(body)?;
     let (mut tx, actor) = authenticate(&app, &headers).await?;
     manage(&mut tx, &actor).await?;
+    readable(&mut tx, &id, &actor).await?;
     if let Some(kbps) = fields.audio_kbps {
         if !AUDIO_KBPS.contains(&kbps) {
             return Err(ApiError::bad_request("invalid_audio_kbps"));
@@ -473,14 +493,9 @@ pub async fn permissions(
     let (mut tx, actor) = authenticate(&app, &headers).await?;
     let authority = roles::authority(&mut tx, &actor.person).await?;
     authority.require(Permission::ManageChannels)?;
-    let exists: bool =
-        query_scalar("SELECT EXISTS (SELECT 1 FROM channels WHERE id = ? AND kind <> 'dm')")
-            .bind(&id)
-            .fetch_one(&mut *tx)
-            .await?;
-    if !exists {
-        return Err(ApiError::not_found("channel_not_found"));
-    }
+    // Without this, a manager could give a role they hold read access to a hidden channel,
+    // and with it every past key of that channel.
+    readable(&mut tx, &id, &actor).await?;
     authority.can_set_channel_flags(roles::by_id(&mut tx, &role).await?)?;
     let before = readers(&mut tx, &id).await?;
     if flags == 0 {
@@ -608,6 +623,7 @@ pub async fn delete_channel(
     decode::<32>(&id)?;
     let (mut tx, actor) = authenticate(&app, &headers).await?;
     manage(&mut tx, &actor).await?;
+    readable(&mut tx, &id, &actor).await?;
     let kind: String =
         query_scalar("DELETE FROM channels WHERE id = ? AND kind <> 'dm' RETURNING kind")
             .bind(&id)
@@ -758,7 +774,7 @@ pub struct Order {
     categories: Vec<OrderedCategory>,
 }
 
-/// Apply a full new order of every category and text or voice channel at once.
+/// Apply a full new order of every category and every channel this manager can read at once.
 pub async fn reorder(
     State(app): State<App>,
     headers: HeaderMap,
@@ -784,10 +800,21 @@ pub async fn reorder(
     let known_categories: Vec<String> = query_scalar("SELECT id FROM categories ORDER BY id")
         .fetch_all(&mut *tx)
         .await?;
-    let known_channels: Vec<String> =
-        query_scalar("SELECT id FROM channels WHERE kind <> 'dm' ORDER BY id")
-            .fetch_all(&mut *tx)
-            .await?;
+    // Every channel with whether this manager can read it, in its current order.
+    let current: Vec<(String, Option<String>, bool)> = query_as(
+        "SELECT id, category_id, EXISTS (SELECT 1 FROM channel_readers r
+                                         WHERE r.channel_id = c.id AND r.person_id = ?)
+         FROM channels c WHERE kind <> 'dm' ORDER BY position, id",
+    )
+    .bind(actor.person.as_slice())
+    .fetch_all(&mut *tx)
+    .await?;
+    // The order names exactly the channels this manager can read, as the channel list shows.
+    let mut known_channels: Vec<String> = (current.iter())
+        .filter(|(_, _, visible)| *visible)
+        .map(|(id, _, _)| id.clone())
+        .collect();
+    known_channels.sort();
     // Both sides are sorted, so equal lists mean exactly the current IDs.
     let same = |given: &std::collections::BTreeSet<&str>, known: &[String]| {
         given.iter().copied().eq(known.iter().map(String::as_str))
@@ -801,7 +828,15 @@ pub async fn reorder(
             .bind(&category.id)
             .execute(&mut *tx)
             .await?;
-        for (position, channel) in (0_i64..).zip(&category.channels) {
+        // Channels this manager can't see keep their category and their place among the
+        // others; each place of a visible channel takes the next wanted one, the rest go last.
+        let mut wanted = category.channels.iter();
+        let mut list: Vec<&String> = (current.iter())
+            .filter(|(_, at, _)| at.as_deref() == Some(category.id.as_str()))
+            .filter_map(|(id, _, visible)| if *visible { wanted.next() } else { Some(id) })
+            .collect();
+        list.extend(wanted);
+        for (position, channel) in (0_i64..).zip(list) {
             query("UPDATE channels SET category_id = ?, position = ? WHERE id = ?")
                 .bind(&category.id)
                 .bind(position)
@@ -1254,6 +1289,157 @@ mod tests {
                 .collect();
             assert_eq!(shown, expected, "person {who}");
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn managers_only_manage_channels_they_can_read() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let db = store::open(dir.path()).await?;
+        let app = App {
+            emoji: crate::emoji::Emoji::open(dir.path(), &db).await?.into(),
+            files: crate::files::Files::open(dir.path(), &db).await?.into(),
+            db,
+            key: std::sync::Arc::new(ed25519_dalek::SigningKey::from_bytes(&[7; 32])),
+            changes: tokio::sync::broadcast::channel(128).0,
+            presence: Default::default(),
+            voice: None,
+            session_ttl: 3600,
+            listing_changed: tokio::sync::watch::channel(()).0,
+        };
+        // Person 1 owns the server; person 2 holds a custom role with Manage channels,
+        // ranked above Member and below Admin.
+        let person = |byte: u8| vec![byte; 32];
+        query("INSERT INTO members (person_id, joined_at) VALUES (?, 0), (?, 0)")
+            .bind(person(1))
+            .bind(person(2))
+            .execute(&app.db)
+            .await?;
+        query("UPDATE server_settings SET owner_person_id = ?")
+            .bind(person(1))
+            .execute(&app.db)
+            .await?;
+        query(
+            "INSERT INTO roles (id, kind, rank, permissions) VALUES ('manager', 'custom', 60, 64)",
+        )
+        .execute(&app.db)
+        .await?;
+        query("INSERT INTO member_roles (person_id, role_id) VALUES (?, 'manager')")
+            .bind(person(2))
+            .execute(&app.db)
+            .await?;
+        for byte in [1_u8, 2] {
+            query("INSERT INTO sessions (token_hash, person_id, device_id, ip, expires_at, session_id) VALUES (?, ?, ?, '192.0.2.1', ?, ?)")
+                .bind(store::hash(&[byte; 32]).as_slice()).bind(person(byte)).bind(vec![byte])
+                .bind(i64::MAX).bind(vec![byte]).execute(&app.db).await?;
+        }
+        query("INSERT INTO categories (id, position, name_ct) VALUES (?, 0, x'00')")
+            .bind(id(10))
+            .execute(&app.db)
+            .await?;
+        // Channels 20 and 22 are open to the manager's role; 21 only to Admins.
+        for (channel, at) in [(20_u8, 0), (21, 1), (22, 2)] {
+            query("INSERT INTO channels (id, kind, category_id, position, name_ct) VALUES (?, 'text', ?, ?, x'00')")
+                .bind(id(channel)).bind(id(10)).bind(at).execute(&app.db).await?;
+            query("INSERT INTO channel_permissions (channel_id, role_id, flags) VALUES (?, 'admin', 15)")
+                .bind(id(channel))
+                .execute(&app.db)
+                .await?;
+        }
+        for channel in [20_u8, 22] {
+            query("INSERT INTO channel_permissions (channel_id, role_id, flags) VALUES (?, 'manager', 15)")
+                .bind(id(channel))
+                .execute(&app.db)
+                .await?;
+        }
+        let as_person = |person: u8| {
+            let mut headers = HeaderMap::new();
+            let token = format!("Bearer {}", encode(&[person; 32]));
+            headers.insert("authorization", token.parse().unwrap());
+            headers.insert("x-forwarded-for", "192.0.2.1".parse().unwrap());
+            headers
+        };
+        let code = |result: ApiResult<StatusCode>| result.unwrap_err().code;
+        let listed = |who: u8| {
+            let app = app.clone();
+            async move {
+                let Json(list) = list_channels(State(app), as_person(who)).await.unwrap();
+                list.into_iter().map(|c| c.id).collect::<Vec<_>>()
+            }
+        };
+        let flags = |channel: u8| {
+            let app = app.clone();
+            async move {
+                query_scalar::<_, u8>(
+                    "SELECT flags FROM channel_permissions WHERE channel_id = ? AND role_id = 'member'",
+                )
+                .bind(id(channel))
+                .fetch_optional(&app.db)
+                .await
+                .unwrap()
+            }
+        };
+        let set = |who: u8, channel: u8, value: u8| {
+            permissions(
+                State(app.clone()),
+                as_person(who),
+                Path((id(channel), "member".to_owned())),
+                Ok(Json(PermissionFields { flags: value })),
+            )
+        };
+
+        // The list shows the manager only what they can read; the owner sees everything.
+        assert_eq!(listed(2).await, [id(20), id(22)]);
+        assert_eq!(listed(1).await, [id(20), id(21), id(22)]);
+
+        // A hidden channel can't be opened up, as if it didn't exist; a readable one can.
+        assert_eq!(code(set(2, 21, 1).await), "channel_not_found");
+        assert_eq!(flags(21).await, None);
+        assert_eq!(set(2, 20, 1).await?, StatusCode::NO_CONTENT);
+        assert_eq!(flags(20).await, Some(1));
+        assert_eq!(set(1, 21, 1).await?, StatusCode::NO_CONTENT);
+        assert_eq!(flags(21).await, Some(1));
+        assert_eq!(set(1, 21, 0).await?, StatusCode::NO_CONTENT);
+
+        // Renaming: the hidden channel is refused before anything else; a readable one
+        // gets as far as the space key, which this test server has none of.
+        let rename = |who: u8, channel: u8| {
+            update_channel(
+                State(app.clone()),
+                as_person(who),
+                Path(id(channel)),
+                Ok(Json(ChannelFields {
+                    category_id: id(10),
+                    position: 0,
+                    name_ct: String::new(),
+                    topic_ct: None,
+                    audio_kbps: None,
+                    member_limit: None,
+                })),
+            )
+        };
+        assert_eq!(code(rename(2, 21).await), "channel_not_found");
+        assert_eq!(code(rename(2, 20).await), "space_key_unavailable");
+        assert_eq!(code(rename(1, 21).await), "space_key_unavailable");
+
+        // Reordering names only readable channels; hidden ones keep their place.
+        let hidden_too: &[(u8, &[u8])] = &[(10, &[22, 21, 20])];
+        let result = reorder(State(app.clone()), as_person(2), order(hidden_too)).await;
+        assert_eq!(code(result), "order_changed");
+        let visible: &[(u8, &[u8])] = &[(10, &[22, 20])];
+        let saved = reorder(State(app.clone()), as_person(2), order(visible)).await;
+        assert_eq!(saved?, StatusCode::NO_CONTENT);
+        assert_eq!(listed(1).await, [id(22), id(21), id(20)]);
+
+        // Deleting: refused for the hidden channel, allowed for a readable one and the owner.
+        let delete = |who: u8, channel: u8| {
+            delete_channel(State(app.clone()), as_person(who), Path(id(channel)))
+        };
+        assert_eq!(code(delete(2, 21).await), "channel_not_found");
+        assert_eq!(listed(1).await.len(), 3);
+        assert_eq!(delete(2, 20).await?, StatusCode::NO_CONTENT);
+        assert_eq!(delete(1, 21).await?, StatusCode::NO_CONTENT);
+        assert_eq!(listed(1).await, [id(22)]);
         Ok(())
     }
 }
