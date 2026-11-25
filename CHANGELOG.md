@@ -11,6 +11,7 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Security: a direct message's key is now only accepted and passed on when it comes from one of the two people in it, also when the app first learns about that direct message.
 - Android: attach files and photos, change your profile picture or server icon, add emoji and stickers and import emoji packs, using the phone's own file and photo picker.
 - On iPhone you can now upload files and photos: attachments, profile picture, server icon, emoji, stickers and page pictures.
 - iPhone: voice calls show as calls on the lock screen, in the Dynamic Island and in Control Center, with mute and hang up; they stay out of the Phone app's Recents.
