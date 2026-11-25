@@ -7149,6 +7149,7 @@ mod tests {
     mod member_list;
     mod outbox;
     mod rail;
+    mod settings_close;
     mod streams;
     mod touch;
     mod uploads;

@@ -195,6 +195,18 @@ impl Form {
         }
     }
 
+    /// A limit typed and not saved yet (or not a valid number).
+    pub(super) fn unsaved(&self) -> bool {
+        let saved = values(self.settings.limits);
+        (self.fields.iter().zip(saved))
+            .any(|(field, saved)| field.proposed(saved, i64::MAX) != Ok(saved))
+    }
+
+    /// Take `settings` as what's saved, keeping the typed limits.
+    pub(super) fn saved(&mut self, settings: FileSettings) {
+        self.settings = settings;
+    }
+
     pub(super) fn show(&mut self, ui: &mut Ui, editable: bool) -> Option<FileLimits> {
         let FileSettings {
             limits,

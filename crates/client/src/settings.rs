@@ -76,6 +76,10 @@ struct Nav {
     frame: u64,
     /// Phones: the open page shows instead of the page list.
     phone_page: bool,
+    /// A text field had focus at the end of the last frame.
+    typing: bool,
+    /// Closing waits for "Discard changes?" to be answered.
+    discarding: bool,
 }
 
 /// Show a settings window named `name`: `header` (true when clicked, to open the
@@ -84,7 +88,8 @@ struct Nav {
 /// which scrolls to them. Phones show it full screen: the page list, then the page
 /// with Back, like a phone's own settings. Returns what `content` returned (the
 /// default while only the list shows) and whether the window should close (×,
-/// Escape or a click outside).
+/// Escape or a click outside). While `unsaved` says changes wait for Save, closing
+/// asks "Discard changes?" first.
 #[allow(clippy::too_many_arguments)]
 pub fn window<T: Copy + PartialEq, S, R: Default>(
     ctx: &egui::Context,
@@ -95,12 +100,12 @@ pub fn window<T: Copy + PartialEq, S, R: Default>(
     state: &mut S,
     header: impl FnOnce(&mut Ui, &mut S) -> bool,
     content: impl FnOnce(&mut Ui, &mut S) -> R,
+    unsaved: impl FnOnce(&S) -> bool,
 ) -> (R, bool) {
     let screen = ctx.content_rect().size();
     let size = (screen - Vec2::splat(2.0 * WINDOW_MARGIN))
         .min(MAX_SIZE)
         .max(MIN_SIZE);
-    let narrow = size.x < NARROW;
     let nav_id = UiId::unique((id, "nav"));
     let mut nav: Nav = ctx.data(|data| data.get_temp(nav_id)).unwrap_or_default();
     let title = (groups.iter().flat_map(|group| &group.pages))
@@ -125,13 +130,71 @@ pub fn window<T: Copy + PartialEq, S, R: Default>(
             ..Nav::default()
         };
     }
-    if ui::is_phone(ctx) {
-        let shown = phone(
-            ctx, id, name, title, groups, open, &mut nav, state, header, content,
-        );
-        ctx.data_mut(|data| data.insert_temp(nav_id, nav));
-        return shown;
+    // Escape in a text field only leaves the field: egui already took its focus away
+    // this frame, so the window must not also close.
+    if nav.typing {
+        ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, Key::Escape));
     }
+    let (inner, close) = if ui::is_phone(ctx) {
+        phone(
+            ctx, id, name, title, groups, open, &mut nav, state, header, content,
+        )
+    } else {
+        desktop(
+            ctx, id, size, title, groups, open, &mut nav, state, header, content,
+        )
+    };
+    nav.typing = ctx.text_edit_focused();
+    let close = close_or_ask(ctx, id, close && unsaved(state), close, &mut nav);
+    ctx.data_mut(|data| data.insert_temp(nav_id, nav));
+    (inner, close)
+}
+
+/// Whether to close now: at once when nothing is `unsaved`, else after "Discard
+/// changes?" (which stays up across frames) is answered with Discard.
+fn close_or_ask(ctx: &egui::Context, id: &str, unsaved: bool, close: bool, nav: &mut Nav) -> bool {
+    if close && !unsaved {
+        return true;
+    }
+    nav.discarding |= close;
+    if !nav.discarding {
+        return false;
+    }
+    let mut discard = false;
+    let mut keep = false;
+    let ((), dismissed) = ui::dialog(
+        ctx,
+        &format!("{id}-discard"),
+        t!("settings.discard_title"),
+        |ui| {
+            ui.label(t!("settings.discard_text"));
+            ui::footer(ui, |ui| {
+                discard = ui::danger(ui, t!("settings.discard")).clicked();
+                keep = ui::secondary(ui, t!("settings.keep_editing")).clicked();
+            });
+        },
+    );
+    if discard || keep || dismissed {
+        nav.discarding = false;
+    }
+    discard && !keep && !dismissed
+}
+
+/// The settings window on a tablet or desktop: a centred panel with the sidebar.
+#[allow(clippy::too_many_arguments)]
+fn desktop<T: Copy + PartialEq, S, R: Default>(
+    ctx: &egui::Context,
+    id: &str,
+    size: Vec2,
+    title: &str,
+    groups: &[Group<T>],
+    open: &mut T,
+    nav: &mut Nav,
+    state: &mut S,
+    header: impl FnOnce(&mut Ui, &mut S) -> bool,
+    content: impl FnOnce(&mut Ui, &mut S) -> R,
+) -> (R, bool) {
+    let narrow = size.x < NARROW;
     let mut close = false;
     let modal = egui::Modal::new(UiId::unique(id))
         .frame(
@@ -172,7 +235,7 @@ pub fn window<T: Copy + PartialEq, S, R: Default>(
             {
                 *open = first.id;
             }
-            let (jump, _) = sidebar(side_ui, id, groups, open, &mut nav, false);
+            let (jump, _) = sidebar(side_ui, id, groups, open, nav, false);
 
             let close_rect = Rect::from_min_size(
                 egui::pos2(rect.right() - close_width, rect.top() + CLOSE_TOP),
@@ -198,11 +261,10 @@ pub fn window<T: Copy + PartialEq, S, R: Default>(
                 Some(title),
                 colors.side,
                 jump,
-                &mut nav,
+                nav,
                 |ui| content(ui, state),
             )
         });
-    ctx.data_mut(|data| data.insert_temp(nav_id, nav));
     let close = close || modal.should_close();
     (modal.inner, close)
 }
@@ -603,6 +665,7 @@ pub fn show(
             }
             error_text(ui, home.error.as_deref());
         },
+        unsaved_profile,
     );
     home.settings = Some(if open_news { Tab::WhatsNew } else { tab });
     if close && !home.confirm_sign_out && home.remove_device.is_none() {
@@ -716,6 +779,16 @@ fn account_page(ui: &mut Ui, home: &mut Home) {
     ui::card(ui, |ui| {
         ui.monospace(fingerprint(home.identity.certificate.person_id()));
     });
+}
+
+/// A name or bio typed in My account and not saved yet.
+fn unsaved_profile(home: &Home) -> bool {
+    let settings = home.voice.audio.settings();
+    let name =
+        (home.name_draft.as_deref()).is_some_and(|name| name.trim() != settings.display_name);
+    let bio = (home.bio_draft.as_deref())
+        .is_some_and(|bio| crate::profile::clean_bio(bio) != settings.bio);
+    name || bio
 }
 
 /// The default name: shown with an edit button, or a field while editing.

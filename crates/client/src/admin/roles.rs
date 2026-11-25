@@ -85,7 +85,7 @@ impl RolesPage {
         self.members.clear();
     }
 
-    fn dirty(&self, dir: &Directory) -> bool {
+    pub(super) fn dirty(&self, dir: &Directory) -> bool {
         let Some(role) = self.role(dir) else {
             return self.order.is_some();
         };

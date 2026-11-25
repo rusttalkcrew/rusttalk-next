@@ -86,6 +86,11 @@ pub struct Settings {
     files: Option<file_limits::Form>,
     /// Whether the server is listed and the details, once loaded (owner).
     listing: Option<(bool, PublicListing)>,
+    /// What the server has for `joining` and `listing`, to tell unsaved edits apart.
+    saved_joining: Option<(bool, u32)>,
+    saved_listing: Option<(bool, PublicListing)>,
+    /// A Joining or Listing save on its way; it counts as saved once it went through.
+    saving: Option<Saving>,
     updates: ServerUpdates,
     member: Option<(Id, MemberAction)>,
     /// The kick, ban or roles question was already on screen last frame.
@@ -116,6 +121,11 @@ pub struct Settings {
     message: Option<(String, bool)>,
 }
 
+enum Saving {
+    Joining((bool, u32)),
+    Listing((bool, PublicListing)),
+}
+
 impl Settings {
     pub fn apply(&mut self, update: AdminUpdate) {
         match update {
@@ -125,10 +135,24 @@ impl Settings {
                 self.audit_shown = AUDIT_PAGE;
             }
             AdminUpdate::Invites(invites) => self.invites = invites,
-            AdminUpdate::Joining(open, cap) => self.joining = Some((open, cap)),
-            AdminUpdate::Files(settings) => self.files = Some(file_limits::Form::new(settings)),
+            AdminUpdate::Joining(open, cap) => {
+                if !self.joining_unsaved() {
+                    self.joining = Some((open, cap));
+                }
+                self.saved_joining = Some((open, cap));
+            }
+            // Edits waiting for Save stay when the page loads again; only what's saved
+            // refreshes.
+            AdminUpdate::Files(settings) => match &mut self.files {
+                Some(form) if form.unsaved() => form.saved(settings),
+                files => *files = Some(file_limits::Form::new(settings)),
+            },
             AdminUpdate::Listing(on, saved) => {
-                self.listing = Some((on, saved.unwrap_or_default()));
+                let saved = (on, saved.unwrap_or_default());
+                if !self.listing_unsaved() {
+                    self.listing = Some(saved.clone());
+                }
+                self.saved_listing = Some(saved);
             }
             AdminUpdate::ServerUpdates(updates) => self.updates = updates,
             AdminUpdate::Progress(done, total) => {
@@ -137,6 +161,11 @@ impl Settings {
                 }
             }
             AdminUpdate::Done(text) => {
+                match self.saving.take() {
+                    Some(Saving::Joining(saved)) => self.saved_joining = Some(saved),
+                    Some(Saving::Listing(saved)) => self.saved_listing = Some(saved),
+                    None => {}
+                }
                 self.member = None;
                 self.roles.done();
                 self.revoking = None;
@@ -147,6 +176,7 @@ impl Settings {
                 self.message = Some((text.into(), false));
             }
             AdminUpdate::Failed(text) => {
+                self.saving = None;
                 self.roles.failed();
                 if let Some(import) = &mut self.import {
                     import.failed();
@@ -154,6 +184,30 @@ impl Settings {
                 self.message = Some((text, true));
             }
         }
+    }
+
+    fn joining_unsaved(&self) -> bool {
+        self.joining.is_some() && self.joining != self.saved_joining
+    }
+
+    /// Details count only while listed: switched off, they aren't saved.
+    fn listing_unsaved(&self) -> bool {
+        match (&self.listing, &self.saved_listing) {
+            (Some((on, listing)), Some((saved_on, saved))) => {
+                on != saved_on || (*on && listing != saved)
+            }
+            _ => false,
+        }
+    }
+
+    /// Changes on any page that wait for Save, which closing would throw away.
+    fn unsaved(&self, server: &Server) -> bool {
+        let name = server.dir.name.as_deref().unwrap_or_default();
+        self.roles.dirty(&server.dir)
+            || (self.server_name.as_deref()).is_some_and(|typed| typed.trim() != name)
+            || self.files.as_ref().is_some_and(file_limits::Form::unsaved)
+            || self.joining_unsaved()
+            || self.listing_unsaved()
     }
 }
 
@@ -210,6 +264,9 @@ pub fn open(home: &mut Home, index: usize, mut tab: Tab) {
         joining: None,
         files: None,
         listing: None,
+        saved_joining: None,
+        saved_listing: None,
+        saving: None,
         updates: ServerUpdates::default(),
         member: None,
         member_shown: false,
@@ -479,6 +536,7 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
                 message(ui, settings);
                 changed
             },
+            |settings| settings.unsaved(server),
         );
         if tab != before {
             settings.tab = tab;
@@ -517,6 +575,11 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
     }
     if let Some(request) = request {
         settings.message = None;
+        settings.saving = match &request {
+            Admin::Joining(open, cap) => Some(Saving::Joining((*open, *cap))),
+            Admin::SaveListing(_) => settings.listing.clone().map(Saving::Listing),
+            _ => settings.saving.take(),
+        };
         server.send(Command::Admin(request));
     }
     for request in batch {
