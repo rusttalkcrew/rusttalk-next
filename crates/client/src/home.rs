@@ -2342,13 +2342,23 @@ fn header_back(ui: &mut Ui) {
 
 fn show_compatibility(ui: &mut Ui, home: &mut Home, index: usize) -> bool {
     let compatibility = home.servers[index].compatibility;
-    if compatibility_banner(ui, compatibility) {
-        home.settings = Some(Tab::Updates);
+    if compatibility_banner(ui, compatibility, crate::settings::PHONE) {
+        get_new_app(ui.ctx(), &mut home.settings, crate::settings::PHONE);
     }
     compatibility != Compatibility::AppTooOld
 }
 
-fn compatibility_banner(ui: &mut Ui, compatibility: Compatibility) -> bool {
+/// The "needs a newer app" button: desktops open the updater; phones have none,
+/// so they open the download page in the browser.
+fn get_new_app(ctx: &egui::Context, page: &mut Option<Tab>, phone: bool) {
+    if phone {
+        ctx.open_url(egui::OpenUrl::new_tab(crate::settings::DOWNLOAD_PAGE));
+    } else {
+        *page = Some(Tab::Updates);
+    }
+}
+
+fn compatibility_banner(ui: &mut Ui, compatibility: Compatibility, phone: bool) -> bool {
     let text = match compatibility {
         Compatibility::Supported => return false,
         Compatibility::ServerTooOld => {
@@ -2356,10 +2366,14 @@ fn compatibility_banner(ui: &mut Ui, compatibility: Compatibility) -> bool {
         }
         Compatibility::AppTooOld => t!("home.app_too_old"),
     };
+    let action = if phone {
+        t!("home.download_new_app")
+    } else {
+        t!("home.open_updates")
+    };
     ui::card(ui, |ui| {
         ui.add(Label::new(text).wrap());
-        compatibility == Compatibility::AppTooOld
-            && ui::primary(ui, t!("home.open_updates")).clicked()
+        compatibility == Compatibility::AppTooOld && ui::primary(ui, action).clicked()
     })
 }
 
@@ -3543,8 +3557,8 @@ fn join(ui: &mut Ui, home: &mut Home) {
                 ui.label(t!("home.checking_server"));
             }
             Join::UpdateRequired => {
-                if compatibility_banner(ui, Compatibility::AppTooOld) {
-                    home.settings = Some(Tab::Updates);
+                if compatibility_banner(ui, Compatibility::AppTooOld, crate::settings::PHONE) {
+                    get_new_app(ui.ctx(), &mut home.settings, crate::settings::PHONE);
                 }
                 if ui::secondary_large(ui, t!("common.back")).clicked() {
                     home.join = Join::Idle(None);
@@ -7749,5 +7763,70 @@ mod tests {
         assert_eq!(find.auto_page(), None);
         find.open();
         assert_eq!(find.auto_page(), Some(1));
+    }
+
+    #[test]
+    fn new_app_button_opens_download_page_on_phones() {
+        use egui_kittest::{Harness, kittest::Queryable};
+        let save =
+            std::env::var_os("RUSTTALK_SAVE_UPDATE_SCREENSHOTS").map(std::path::PathBuf::from);
+        for (phone, size, name) in [
+            (true, Vec2::new(390.0, 844.0), "phone"),
+            (false, Vec2::new(1100.0, 700.0), "desktop"),
+        ] {
+            for (mode, theme) in [(ui::Mode::Dark, "dark"), (ui::Mode::Light, "light")] {
+                let mut harness = Harness::builder().with_size(size).build_ui_state(
+                    |ui, (page, urls): &mut (Option<Tab>, Vec<String>)| {
+                        ui::install(ui.ctx());
+                        ui::apply(
+                            ui.ctx(),
+                            ui::Appearance {
+                                mode,
+                                ..Default::default()
+                            },
+                        );
+                        let c = ui::colors(ui);
+                        CentralPanel::default()
+                            .frame(Frame::new().fill(c.main).inner_margin(Margin::same(16)))
+                            .show(ui, |ui| {
+                                if compatibility_banner(ui, Compatibility::AppTooOld, phone) {
+                                    get_new_app(ui.ctx(), page, phone);
+                                }
+                            });
+                        ui.ctx().output(|output| {
+                            urls.extend(output.commands.iter().filter_map(
+                                |command| match command {
+                                    egui::OutputCommand::OpenUrl(open) => Some(open.url.clone()),
+                                    _ => None,
+                                },
+                            ))
+                        });
+                    },
+                    (None, Vec::new()),
+                );
+                harness.run_steps(3);
+                if let Some(dir) = &save {
+                    let image = harness.render().expect("render banner");
+                    image
+                        .save(dir.join(format!("app-too-old-{name}-{theme}.png")))
+                        .expect("save banner screenshot");
+                }
+                let label = if phone {
+                    t!("home.download_new_app")
+                } else {
+                    t!("home.open_updates")
+                };
+                harness.get_by_label(label).click();
+                harness.run_steps(2);
+                let (page, urls) = harness.state();
+                if phone {
+                    assert_eq!(urls, &[crate::settings::DOWNLOAD_PAGE]);
+                    assert!(page.is_none());
+                } else {
+                    assert!(urls.is_empty());
+                    assert!(*page == Some(Tab::Updates));
+                }
+            }
+        }
     }
 }

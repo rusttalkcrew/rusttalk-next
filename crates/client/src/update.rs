@@ -1314,7 +1314,11 @@ impl Updater {
             }
         });
         if let Err(error) = &self.target {
-            ui.weak(error.to_string());
+            if crate::settings::PHONE {
+                ui.weak(t!("update.phone_download"));
+            } else {
+                ui.weak(error.to_string());
+            }
         }
         match &self.state {
             State::Idle => {}
