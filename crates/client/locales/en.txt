@@ -345,6 +345,7 @@ home.channel_name = Channel name
 home.topic_optional = Topic (optional)
 home.audio_quality = Audio quality: {kbps} kbps
 home.audio_quality_label = Audio quality
+home.audio_quality_help = Higher sounds better, especially for music, but uses more data. Above about 256 kbps you won't hear a difference.
 home.member_limit = Member limit
 home.member_limit_help = The most people in this voice channel at once. Channel managers can always join.
 home.no_limit = No limit

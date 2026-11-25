@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use url::Url;
 
-use rusttalk_core::client::voice::DEFAULT_AUDIO_KBPS;
+use rusttalk_core::client::voice::{DEFAULT_AUDIO_KBPS, MAX_AUDIO_KBPS};
 
 use super::{Ctx, State, Update, leave_voice, now, recent::Store};
 use crate::server::{
@@ -106,6 +106,7 @@ pub(super) async fn rename_channel(
     })?;
     if let Some(kbps) = audio_kbps {
         body["audio_kbps"] = kbps.into();
+        body["audio_kbps_max"] = MAX_AUDIO_KBPS.into();
     }
     if let Some(limit) = member_limit {
         body["member_limit"] = limit.into();

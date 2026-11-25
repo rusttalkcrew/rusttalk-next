@@ -156,12 +156,46 @@ pub async fn exercise(
             )
             .send()
     };
-    rejected(
-        update(7).await?,
-        StatusCode::BAD_REQUEST,
-        "invalid_audio_kbps",
-    )
-    .await?;
+    for value in [7, 321] {
+        rejected(
+            update(value).await?,
+            StatusCode::BAD_REQUEST,
+            "invalid_audio_kbps",
+        )
+        .await?;
+    }
+    // Up to 320 kbps for music. Apps up to v0.6.0 send no `audio_kbps_max`: their slider stops
+    // at 128 and clamps a higher bitrate there, which they resend when saving another field.
+    let name_ct = a.encrypt_metadata(Metadata::ChannelName, &voice.id, b"Duplex")?;
+    let save = |value: u32, max: Option<u32>| {
+        let mut body = json!({ "category_id": encode(&category), "position": 0,
+                               "name_ct": name_ct, "audio_kbps": value });
+        if let Some(max) = max {
+            body["audio_kbps_max"] = max.into();
+        }
+        a.request(Method::PUT, &format!("/v1/channels/{channel}"))
+            .json(&body)
+            .send()
+    };
+    for (value, max, stored) in [
+        (320, Some(320), 320),
+        (128, None, 320),
+        (96, None, 96),
+        (128, None, 128),
+        (320, Some(320), 320),
+        (128, Some(320), 128),
+        (64, Some(320), 64),
+    ] {
+        save(value, max).await?.error_for_status()?;
+        let catalog = a.catalog().await?;
+        let kbps = catalog.channels.iter().find(|c| c.id == voice.id);
+        assert_eq!(
+            kbps.and_then(|c| c.audio_kbps),
+            Some(stored),
+            "{value} {max:?}"
+        );
+    }
+    println!("W08 a voice channel takes up to 320 kbps and an older app's slider keeps it");
 
     let (_, b_invite) = invite(a, secrets).await?;
     let (_, b_device) = DeviceIdentity::create("Voice B")?;

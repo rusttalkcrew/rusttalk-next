@@ -253,7 +253,7 @@ enum Join {
 }
 
 /// Voice channel bitrates a manager can pick, in kbps.
-const AUDIO_KBPS: std::ops::RangeInclusive<u32> = 8..=128;
+const AUDIO_KBPS: std::ops::RangeInclusive<u32> = 8..=rusttalk_core::client::voice::MAX_AUDIO_KBPS;
 /// Voice channel member limits a manager can pick; 0 is no limit.
 const MEMBER_LIMIT: std::ops::RangeInclusive<u32> = 0..=99;
 
@@ -7132,6 +7132,7 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
                             )
                         });
                         *changed |= slider.changed();
+                        ui.label(ui::caption(t!("home.audio_quality_help")));
                     }
                     if let Some((most, changed)) = limit {
                         let title = t!("home.member_limit");

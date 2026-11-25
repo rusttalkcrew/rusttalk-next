@@ -40,13 +40,18 @@ pub struct ChannelFields {
     /// Voice channels only; left as it is when missing, so older clients keep working.
     #[serde(default)]
     audio_kbps: Option<i64>,
+    /// The highest bitrate the sender's app offers. Apps up to v0.6.0 send none and stop at 128.
+    #[serde(default)]
+    audio_kbps_max: Option<i64>,
     /// Voice channels only: the most people in the call, 0 for none. Kept when missing.
     #[serde(default)]
     member_limit: Option<i64>,
 }
 
 /// Voice bitrate limits in kbps, enforced here and again by the table.
-const AUDIO_KBPS: std::ops::RangeInclusive<i64> = 8..=128;
+const AUDIO_KBPS: std::ops::RangeInclusive<i64> = 8..=320;
+/// The top of the bitrate slider in apps that don't send `audio_kbps_max`.
+const OLD_AUDIO_KBPS_MAX: i64 = 128;
 /// Voice member limits, 0 for none, enforced here and again by the table.
 const MEMBER_LIMIT: std::ops::RangeInclusive<i64> = 0..=99;
 
@@ -415,9 +420,18 @@ pub async fn update_channel(
         if !AUDIO_KBPS.contains(&kbps) {
             return Err(ApiError::bad_request("invalid_audio_kbps"));
         }
-        let voice = query("UPDATE channels SET audio_kbps = ? WHERE id = ? AND kind = 'voice'")
-            .bind(kbps)
-            .bind(&id)
+        // An app whose slider stops below the stored bitrate clamps it there and sends that on
+        // save, so its slider maximum keeps the higher bitrate instead of lowering it.
+        let max = fields.audio_kbps_max.unwrap_or(OLD_AUDIO_KBPS_MAX);
+        let voice = query(
+            "UPDATE channels SET audio_kbps = CASE WHEN ? = ? AND audio_kbps > ? THEN audio_kbps ELSE ? END
+             WHERE id = ? AND kind = 'voice'",
+        )
+        .bind(kbps)
+        .bind(max)
+        .bind(max)
+        .bind(kbps)
+        .bind(&id)
             .execute(&mut *tx)
             .await?
             .rows_affected();
@@ -994,6 +1008,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn widening_the_bitrate_keeps_channels_and_what_hangs_off_them() -> anyhow::Result<()> {
+        use sqlx::{Connection, migrate::Migrate};
+        let dir = tempfile::tempdir()?;
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(dir.path().join("rusttalk.sqlite3"))
+            .create_if_missing(true)
+            .foreign_keys(true);
+        let mut old = sqlx::SqliteConnection::connect_with(&options).await?;
+        old.ensure_migrations_table().await?;
+        for migration in sqlx::migrate!().iter().take_while(|m| m.version < 47) {
+            old.apply(migration).await?;
+        }
+        // A voice channel with its key scope and a role's permissions, which cascade from it.
+        query("INSERT INTO categories (id, position, name_ct) VALUES ('c', 0, x'00')")
+            .execute(&mut old)
+            .await?;
+        query("INSERT INTO roles (id, kind, rank, permissions) VALUES ('r', 'custom', 5, 1)")
+            .execute(&mut old)
+            .await?;
+        query("INSERT INTO channels (id, kind, category_id, position, name_ct, audio_kbps, member_limit) VALUES ('v', 'voice', 'c', 3, x'01', 128, 5)")
+            .execute(&mut old)
+            .await?;
+        query("INSERT INTO key_scopes (id, kind, channel_id) VALUES ('v', 'channel', 'v')")
+            .execute(&mut old)
+            .await?;
+        query("INSERT INTO channel_permissions (channel_id, role_id, flags) VALUES ('v', 'r', 3)")
+            .execute(&mut old)
+            .await?;
+        assert!(
+            query("UPDATE channels SET audio_kbps = 320")
+                .execute(&mut old)
+                .await
+                .is_err()
+        );
+        old.close().await?;
+
+        let db = store::open(dir.path()).await?;
+        let channel: (i64, i64, i64) =
+            query_as("SELECT audio_kbps, member_limit, position FROM channels WHERE id = 'v'")
+                .fetch_one(&db)
+                .await?;
+        assert_eq!(channel, (128, 5, 3));
+        let kept: (i64, i64) = query_as(
+            "SELECT (SELECT COUNT(*) FROM key_scopes), (SELECT COUNT(*) FROM channel_permissions)",
+        )
+        .fetch_one(&db)
+        .await?;
+        assert_eq!(kept, (1, 1));
+        query("UPDATE channels SET audio_kbps = 320")
+            .execute(&db)
+            .await?;
+        for refused in [7, 321] {
+            let update = query("UPDATE channels SET audio_kbps = ?").bind(refused);
+            assert!(update.execute(&db).await.is_err(), "{refused}");
+        }
+        query("INSERT INTO channels (id, kind, category_id, position, name_ct) VALUES ('w', 'voice', 'c', 4, x'02')")
+            .execute(&db)
+            .await?;
+        let fresh: i64 = query_scalar("SELECT audio_kbps FROM channels WHERE id = 'w'")
+            .fetch_one(&db)
+            .await?;
+        assert_eq!(fresh, 64);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn audio_bitrate_is_a_managers_voice_only_setting_in_range() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;
         let db = store::open(dir.path()).await?;
@@ -1052,6 +1132,7 @@ mod tests {
                 name_ct: String::new(),
                 topic_ct: None,
                 audio_kbps: value,
+                audio_kbps_max: None,
                 member_limit: None,
             }))
         };
@@ -1079,7 +1160,7 @@ mod tests {
         // Out-of-range values and text channels are refused before anything changes.
         for (channel, value, code) in [
             (21_u8, 7, "invalid_audio_kbps"),
-            (21, 129, "invalid_audio_kbps"),
+            (21, 321, "invalid_audio_kbps"),
             (20, 96, "not_a_voice_channel"),
         ] {
             let result = update_channel(
@@ -1434,6 +1515,7 @@ mod tests {
                     name_ct: String::new(),
                     topic_ct: None,
                     audio_kbps: None,
+                    audio_kbps_max: None,
                     member_limit: None,
                 })),
             )

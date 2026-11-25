@@ -1,5 +1,6 @@
-//! A voice channel's member limit: clearing the field removes it, and the channel list
-//! says that "2/8" is a limit. Set RUSTTALK_TEST_SCREENSHOTS to save how they look.
+//! A voice channel's member limit and bitrate: clearing the limit removes it, the channel list
+//! says that "2/8" is a limit, and music channels keep up to 320 kbps. Set
+//! RUSTTALK_TEST_SCREENSHOTS to save how they look.
 
 use super::*;
 use egui_kittest::{
@@ -201,4 +202,74 @@ fn typed_limits_and_no_limit_parse() {
     // Anything else keeps the old value, as before.
     assert_eq!(no_limit_parser("lots"), None);
     assert_eq!(no_limit_parser("-3"), None);
+}
+
+fn slider<'a>(h: &'a Harness<'static, Home>) -> egui_kittest::Node<'a> {
+    h.get(
+        by().role(Role::Slider)
+            .label(t!("home.audio_quality_label")),
+    )
+}
+
+/// The Edit channel dialog of the voice channel set to `kbps`.
+fn bitrate_harness(kbps: u32, size: Vec2, dark: bool) -> (Harness<'static, Home>, Sent) {
+    let (mut home, sent) = limited_home(dark);
+    let lounge = home.servers[0].dir.categories[0]
+        .channels
+        .last_mut()
+        .unwrap();
+    lounge.audio_kbps = kbps;
+    home.edit_channel(0, LOUNGE, ChannelEdit::Rename);
+    let mut h = Harness::builder()
+        .with_size(size)
+        .with_context_setup(ui::install)
+        .with_theme(theme(dark))
+        .with_accessibility_check(false)
+        .build_ui_state(|ui, home| dialogs(ui.ctx(), home), home);
+    h.run_steps(3);
+    (h, sent)
+}
+
+/// Save, and the bitrate the dialog sent: None when it sent no change.
+fn saved_kbps(h: &mut Harness<'static, Home>, sent: &mut Sent) -> Option<u32> {
+    h.get_by_label(t!("common.save")).click();
+    h.run_steps(3);
+    std::iter::from_fn(|| sent.try_recv().ok()).find_map(|command| match command {
+        Command::RenameChannel { audio_kbps, .. } => audio_kbps,
+        _ => None,
+    })
+}
+
+#[test]
+fn a_music_channel_keeps_its_bitrate_when_other_fields_are_saved() {
+    for size in [Vec2::new(390.0, 844.0), Vec2::new(1100.0, 700.0)] {
+        for dark in [true, false] {
+            let (mut h, mut sent) = bitrate_harness(320, size, dark);
+            assert_eq!(slider(&h).accesskit_node().numeric_value(), Some(320.0));
+            assert!(
+                h.query_by_label(&t!("home.audio_quality", kbps = 320))
+                    .is_some()
+            );
+            assert!(h.query_by_label(t!("home.audio_quality_help")).is_some());
+            screenshot(&mut h, "audio-quality-320", size, dark);
+            // Change only the member limit.
+            spin(&h).click();
+            h.run_steps(2);
+            h.key_press(egui::Key::Backspace);
+            h.key_press(egui::Key::Enter);
+            h.run_steps(3);
+            assert_eq!(saved_kbps(&mut h, &mut sent), None);
+        }
+    }
+}
+
+#[test]
+fn the_bitrate_slider_goes_past_128() {
+    let (mut h, mut sent) = bitrate_harness(128, Vec2::new(1100.0, 700.0), true);
+    slider(&h).focus();
+    h.run_steps(2);
+    h.key_press(egui::Key::ArrowRight);
+    h.run_steps(2);
+    assert_eq!(slider(&h).accesskit_node().numeric_value(), Some(129.0));
+    assert_eq!(saved_kbps(&mut h, &mut sent), Some(129));
 }
