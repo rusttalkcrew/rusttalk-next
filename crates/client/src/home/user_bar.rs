@@ -24,6 +24,7 @@ fn status_text(choice: Choice) -> (&'static str, &'static str) {
     match choice {
         Choice::Online => (t!("status.online"), t!("status.online_help")),
         Choice::Away => (t!("status.away"), t!("status.away_help")),
+        Choice::Dnd => (t!("status.dnd"), t!("status.dnd_help")),
         Choice::Invisible => (t!("status.invisible"), t!("status.invisible_help")),
     }
 }
@@ -34,6 +35,7 @@ fn status_color(c: &Palette, choice: Choice) -> Color32 {
         match choice {
             Choice::Online => Presence::Online,
             Choice::Away => Presence::Away,
+            Choice::Dnd => Presence::Dnd,
             Choice::Invisible => Presence::Offline,
         },
     )
@@ -110,7 +112,7 @@ fn identity(ui: &mut Ui, home: &Home, status: Choice) -> eframe::egui::Response 
             if speaking {
                 ui::speaking_outline(ui, avatar.rect);
             }
-            ui::presence_dot(ui, avatar.rect, 5.0, color, c.side);
+            ui::presence_dot(ui, avatar.rect, 5.0, color, c.side, status == Choice::Dnd);
             let width = ui.available_width().max(0.0);
             let [name, status] = [ui::bold(&name), ui::caption(label)].map(|text| {
                 WidgetText::from(text).into_galley(
@@ -135,11 +137,14 @@ fn status_picker(m: &mut ui::Menu, current: Choice) -> Option<Choice> {
     let mut picked = None;
     m.caption(t!("status.set"));
     let c = ui::colors(m.ui());
-    for choice in [Choice::Online, Choice::Away, Choice::Invisible] {
+    for choice in [Choice::Online, Choice::Away, Choice::Dnd, Choice::Invisible] {
         let (label, hint) = status_text(choice);
-        let item = Item::dot(status_color(c, choice), label)
+        let mut item = Item::dot(status_color(c, choice), label)
             .hint(hint)
             .picked(choice == current);
+        if choice == Choice::Dnd {
+            item = item.barred();
+        }
         if m.add(item).clicked() {
             picked = Some(choice);
         }

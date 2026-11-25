@@ -742,8 +742,27 @@ pub fn line_chart(ui: &mut Ui, values: &[f64], slots: usize, size: Vec2, color: 
 
 /// A coloured dot, for status and connection quality.
 pub fn dot(ui: &mut Ui, color: Color32) {
+    status_dot(ui, color, false);
+}
+
+/// A status dot; `barred` adds the bar across it that marks Do not disturb.
+pub fn status_dot(ui: &mut Ui, color: Color32, barred: bool) {
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
-    ui.painter().circle_filled(rect.center(), 5.0, color);
+    paint_dot(ui.painter(), rect.center(), 5.0, color, barred);
+}
+
+/// A filled dot, with the Do not disturb bar across it when `barred`.
+pub fn paint_dot(painter: &egui::Painter, center: Pos2, radius: f32, color: Color32, barred: bool) {
+    painter.circle_filled(center, radius, color);
+    if barred {
+        dnd_bar(painter, center, radius);
+    }
+}
+
+/// The light bar across a Do not disturb dot, like Discord's.
+fn dnd_bar(painter: &egui::Painter, center: Pos2, radius: f32) {
+    let bar = Vec2::new(radius * 1.2, (radius * 0.4).max(1.5));
+    painter.rect_filled(Rect::from_center_size(center, bar), bar.y / 2.0, ON_FILL);
 }
 
 /// Corner radius of a rounded-square avatar or server icon of `size` points.
@@ -764,10 +783,21 @@ pub fn speaking_outline(ui: &Ui, rect: Rect) {
     );
 }
 
-/// A presence dot on the bottom right of a picture, ringed in `ring` so it stands out.
-pub fn presence_dot(ui: &Ui, picture: Rect, radius: f32, color: Color32, ring: Color32) {
+/// A presence dot on the bottom right of a picture, ringed in `ring` so it stands out;
+/// `barred` marks Do not disturb.
+pub fn presence_dot(
+    ui: &Ui,
+    picture: Rect,
+    radius: f32,
+    color: Color32,
+    ring: Color32,
+    barred: bool,
+) {
     let center = picture.right_bottom() - Vec2::splat(radius * 0.8);
     ui.painter().circle(center, radius, color, (2.0, ring));
+    if barred {
+        dnd_bar(ui.painter(), center, radius);
+    }
 }
 
 /// A full-width clickable row `height` tall holding `add`, with a fading hover and

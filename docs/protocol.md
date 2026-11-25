@@ -109,11 +109,17 @@ or the fingerprint supplied by the operator.
 
 All endpoints below require `Authorization: Bearer <token>`.
 
+Apps send `RustTalk-Features: dnd` on every request and on the event socket to
+say they understand the `dnd` (Do not disturb) status and presence. Apps that
+don't send it (v0.5.0 and older) fail on unknown values, so they get `away`
+wherever `dnd` would appear: `GET /v1/me`, `GET /v1/members` and
+`presence_changed`. Older servers ignore the header.
+
 | Method and path | Body | Permission and success |
 | --- | --- | --- |
 | GET `/v1/me` | Empty | Any member. 200, `{person_id, device_id, joined_at, role_ids, status, hide_offline}`; `status` is the caller’s own presence choice |
 | PUT `/v1/me/hide-offline` | `{hide_offline}` | Any member. 204. Stores whether member lists leave the caller out while their visible presence is `offline`, and sends `member_changed` |
-| PUT `/v1/me/status` | `{status, picked?}`, `status` one of `online`, `away`, `invisible` | Any member. 204. With `picked: true` (apps that report idle separately), stored as the member's choice for all their devices and sent to their own sockets as `presence_changed` with `chosen`. Without `picked` (older apps, which also send `away` by themselves after a while without input): `away` marks the calling device idle and is not stored; `online` and `invisible` are stored, and `online` also ends the device's idle |
+| PUT `/v1/me/status` | `{status, picked?}`, `status` one of `online`, `away`, `dnd`, `invisible` | Any member. 204. With `picked: true` (apps that report idle separately), stored as the member's choice for all their devices and sent to their own sockets as `presence_changed` with `chosen`. Without `picked` (older apps, which also send `away` by themselves after a while without input): `away` marks the calling device idle and is not stored; `online` and `invisible` are stored, and `online` also ends the device's idle; while the stored choice is `dnd`, their `online` only ends the device's idle |
 | PUT `/v1/me/idle` | `{idle}`, a boolean | Any member. 204. Whether the calling device has had no input for a while. Kept in memory only, never stored; dropped once the device has been disconnected for the reconnect grace. Older servers answer 404 |
 | DELETE `/v1/me/membership` | Empty | Any member except the owner. 204, leaves the server like a kick: sessions close, keys rotate, audit `left`. The owner gets `409 owner_cannot_leave` |
 | POST `/v1/me/revocations` | `{record}`, a W04 root-signed revocation for the caller's person | Any member. 204, affected device loses its token |
@@ -266,7 +272,7 @@ in a state response indicating that the first epoch is still pending.
 | GET `/v1/space` | Empty | Any member. 200, `{name_ct, description_ct, icon_hash, system_messages_ct, first_text_channel}` |
 | GET `/v1/space/icon` | Empty | Any member. 200, `{icon_ct}`, or `404 icon_not_found` |
 | PUT `/v1/space` | `{name_ct?, description_ct?, icon_ct?, system_messages_ct?}` | `manage_server`. 204 |
-| GET `/v1/members` | Empty | Any member. 200, `[{person_id, display_name_ct, avatar_hash, avatar_initialized, bio_ct, role_ids, presence, hide_offline, voice_muted?}]`. `bio_ct` is always present (null without a bio), so clients know the server stores bios. Clients keep members with `hide_offline` out of the member list while their presence is `offline`, but still use their name and picture elsewhere. `voice_muted` is present and true while a moderator mutes them |
+| GET `/v1/members` | Empty | Any member. 200, `[{person_id, display_name_ct, avatar_hash, avatar_initialized, bio_ct, role_ids, presence, hide_offline, voice_muted?}]`. `bio_ct` is always present (null without a bio), so clients know the server stores bios. Clients keep members with `hide_offline` out of the member list while their presence is `offline`, but still use their name and picture elsewhere. `voice_muted` is present and true while a moderator mutes them. `presence` is `online`, `away`, `dnd` or `offline` |
 | GET `/v1/members/{person}/avatar` | Empty | Any member. 200, `{avatar_ct}`, or `404 avatar_not_found` |
 | PUT `/v1/me/profile` | `{display_name_ct?, avatar_ct?, bio_ct?, avatar_if_unset?}` | Updates the authenticated member's own profile. 204; conditional avatar publication returns 412 if already set or cleared |
 | POST `/v1/invite-preview` | `{code}` | No bearer. 200, `{space_key_ct, name_ct}`. Missing, expired, spent or unpreviewable invite returns 404 |
@@ -1328,7 +1334,9 @@ sockets and devices and survives reconnects and server restarts. The directory
 and notices use `offline` for invisibility and for disconnected members. Idle
 is per device: with the choice `online`, visible presence is `away` only while
 every connected device of the member is idle, and `online` again as soon as one
-is not; a choice of `away` or `invisible` applies whatever the devices do. The
+is not; a choice of `away`, `dnd` or `invisible` applies whatever the devices do.
+While the choice is `dnd`, apps on all the member's devices show no notifications
+and play no message or mention sounds; unread marks still count. The
 last socket closing starts a one-second reconnect grace period before visible
 presence goes offline. Notices for one member are coalesced to at most one per
 second; the latest choice wins, and a choice reverted within that second sends

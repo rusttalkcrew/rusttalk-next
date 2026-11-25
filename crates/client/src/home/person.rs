@@ -251,6 +251,7 @@ pub fn status_text(presence: Presence) -> &'static str {
     match presence {
         Presence::Online => t!("status.online"),
         Presence::Away => t!("status.away"),
+        Presence::Dnd => t!("status.dnd"),
         Presence::Offline => t!("friends.offline"),
     }
 }

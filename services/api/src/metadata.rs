@@ -353,6 +353,7 @@ pub async fn members(State(app): State<App>, headers: HeaderMap) -> ApiResult<Js
     }
     tx.commit().await?;
     let presence = app.presence.snapshot();
+    let knows_dnd = crate::presence::knows_dnd(&headers);
     Ok(Json(
         rows.into_iter()
             .map(
@@ -367,7 +368,10 @@ pub async fn members(State(app): State<App>, headers: HeaderMap) -> ApiResult<Js
                 )| {
                     let person_id = encode(&person);
                     Member {
-                        presence: presence.get(&person_id).copied().unwrap_or_default(),
+                        presence: crate::presence::presence_for(
+                            presence.get(&person_id).copied().unwrap_or_default(),
+                            knows_dnd,
+                        ),
                         person_id,
                         display_name_ct: encoded(display_name),
                         avatar_hash,
@@ -632,6 +636,38 @@ mod tests {
 
         hide(false).await?;
         assert_eq!(listed().await.0, json!(false));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn older_apps_read_do_not_disturb_as_away() -> anyhow::Result<()> {
+        use crate::testing::{app, as_person};
+        use rusttalk_core::presence::{FEATURES, FEATURES_HEADER, Status};
+        let dir = tempfile::tempdir()?;
+        let app = app(dir.path(), 2).await?;
+        let newer = |byte| {
+            let mut headers = as_person(byte);
+            headers.insert(FEATURES_HEADER, FEATURES.parse().unwrap());
+            headers
+        };
+        let pick = serde_json::from_value(json!({"status": "dnd", "picked": true}))?;
+        crate::presence::set(State(app.clone()), newer(2), Ok(Json(pick))).await?;
+        let person = encode(&crate::testing::person(2));
+        let _socket = crate::presence::open(&app, person, "d".into(), Status::Dnd);
+        let listed = |headers| async {
+            let Json(rows) = members(State(app.clone()), headers).await.unwrap();
+            serde_json::to_value(&rows[1]).unwrap()["presence"].clone()
+        };
+        assert_eq!(listed(as_person(1)).await, "away");
+        assert_eq!(listed(newer(1)).await, "dnd");
+        let me = async |headers| {
+            let Json(me) = crate::members::me(State(app.clone()), headers)
+                .await
+                .unwrap();
+            serde_json::to_value(me).unwrap()["status"].clone()
+        };
+        assert_eq!(me(as_person(2)).await, "away");
+        assert_eq!(me(newer(2)).await, "dnd");
         Ok(())
     }
 }

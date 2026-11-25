@@ -76,6 +76,10 @@ pub(crate) async fn events_socket(
     request
         .headers_mut()
         .insert("authorization", format!("Bearer {token}").parse()?);
+    request.headers_mut().insert(
+        crate::presence::FEATURES_HEADER,
+        crate::presence::FEATURES.parse()?,
+    );
     let connector = server
         .tls_fingerprint
         .map(pinned_config)

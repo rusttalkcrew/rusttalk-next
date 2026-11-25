@@ -124,7 +124,7 @@ impl Home {
             dm: true,
             mention: Mention::Me,
         };
-        if notify::should_notify(prefs, rule, arrival, self.focused, false) {
+        if !self.dnd() && notify::should_notify(prefs, rule, arrival, self.focused, false) {
             let body = match text.trim() {
                 "" => t!("pokes.no_note"),
                 note => note,

@@ -562,6 +562,9 @@ pub struct Notify {
     clicks: (Sender<Target>, Receiver<Target>),
     /// The system's notification service failed once; logged once.
     failed: bool,
+    /// Notifications shown; tests count them instead of showing any.
+    #[cfg(test)]
+    pub shown: usize,
 }
 
 impl Notify {
@@ -589,6 +592,8 @@ impl Notify {
             activity: HashMap::new(),
             clicks: channel(),
             failed: false,
+            #[cfg(test)]
+            shown: 0,
         };
         notify.expire_reminders(now);
         notify
@@ -782,6 +787,13 @@ impl Notify {
         target: Target,
         sound: bool,
     ) {
+        #[cfg(test)]
+        {
+            self.shown += 1;
+        }
+        if cfg!(test) {
+            return;
+        }
         let body: String = match body.chars().count() > PREVIEW_CHARS {
             true => body.chars().take(PREVIEW_CHARS).chain(['…']).collect(),
             false => body.to_owned(),

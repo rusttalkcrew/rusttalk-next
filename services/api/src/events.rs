@@ -61,10 +61,11 @@ pub async fn upgrade(
     let changes = app.changes.subscribe();
     let (tx, actor) = authenticate_read(&app, &headers).await?;
     tx.commit().await?;
+    let knows_dnd = presence::knows_dnd(&headers);
     Ok(ws
         .max_message_size(4096)
         .max_frame_size(4096)
-        .on_upgrade(move |socket| serve(app, socket, actor, changes).instrument(span)))
+        .on_upgrade(move |socket| serve(app, socket, actor, knows_dnd, changes).instrument(span)))
 }
 
 /// Largest event that carries an inline record. Clients up to v0.3.0 drop the socket on
@@ -90,9 +91,10 @@ async fn serve(
     app: App,
     mut socket: WebSocket,
     actor: Actor,
+    knows_dnd: bool,
     mut changes: broadcast::Receiver<Change>,
 ) {
-    let result = stream(&app, &mut socket, &actor, &mut changes).await;
+    let result = stream(&app, &mut socket, &actor, knows_dnd, &mut changes).await;
     let reason = result.unwrap_or_else(|error| error.code);
     tracing::info!(reason, "event socket closed");
     let _ = timeout(
@@ -109,6 +111,7 @@ async fn stream(
     app: &App,
     socket: &mut WebSocket,
     actor: &Actor,
+    knows_dnd: bool,
     changes: &mut broadcast::Receiver<Change>,
 ) -> ApiResult<&'static str> {
     let mut expires_at = actor.expires_at;
@@ -199,6 +202,13 @@ async fn stream(
                 }) = &update.update
                     && *person_id != person
                 {
+                    continue;
+                }
+                if let Update::Presence(event) = &update.update
+                    && !knows_dnd
+                    && let Some(older) = presence::for_older(event)
+                {
+                    send(socket, Update::Presence(older)).await?;
                     continue;
                 }
                 forward(socket, &update).await?;

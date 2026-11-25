@@ -790,3 +790,50 @@ fn avatar_surfaces_capture_screenshots() {
         }
     }
 }
+
+/// Do not disturb on me and on Ann: the bar, member list, voice row, status menu and
+/// profile card.
+#[test]
+fn do_not_disturb_captures_screenshots() {
+    let Ok(dir) = std::env::var("RUSTTALK_DND_SCREENSHOTS") else {
+        return;
+    };
+    std::fs::create_dir_all(&dir).unwrap();
+    for (theme, dark) in [("dark", true), ("light", false)] {
+        for (tag, size) in [
+            ("desktop-1100x700", Vec2::new(1100.0, 700.0)),
+            ("phone-390x844", Vec2::new(390.0, 844.0)),
+        ] {
+            let mut h = demo_window(size, dark);
+            let home = home_mut(&mut h);
+            home.status = Some(Choice::Dnd);
+            for server in &mut home.servers {
+                let mut members = server.dir.members.edit();
+                for member in members.iter_mut() {
+                    member.presence = Presence::Dnd;
+                }
+            }
+            h.run_steps(3);
+            let save = |h: &mut Harness<'static, Option<Screen>>, part: &str| {
+                h.render()
+                    .unwrap()
+                    .save(format!("{dir}/{tag}-{theme}{part}.png"))
+                    .unwrap();
+            };
+            save(&mut h, "");
+            let me = t!("status.button", name = "Alex", status = t!("status.dnd"));
+            h.get_by_label(&me).click();
+            h.run_steps(4);
+            save(&mut h, "-menu");
+            h.key_press(Key::Escape);
+            h.run_steps(3);
+            // Her picture in the chat, or her voice row on a phone's channel list.
+            h.query_all_by_role_and_label(egui::Role::Button, "Ann")
+                .min_by(|a, b| a.rect().width().total_cmp(&b.rect().width()))
+                .expect("Ann")
+                .click();
+            h.run_steps(4);
+            save(&mut h, "-card");
+        }
+    }
+}
