@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- The sound bars next to a shared app now move clearly even when it plays quietly.
+
 ## v0.6.0 - 2026-11-25
 
 - Your status no longer gets stuck on Away for others (while your own bar says Online) when you change it just as the app reconnects.
