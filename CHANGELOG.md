@@ -15,6 +15,7 @@ Unreleased under the new version and date.
 - On iPhone you can now upload files and photos: attachments, profile picture, server icon, emoji, stickers and page pictures.
 - iPhone: voice calls show as calls on the lock screen, in the Dynamic Island and in Control Center, with mute and hang up; they stay out of the Phone app's Recents.
 - On Android, the voice call notification has Mute and Hang up buttons that work with the app in the background, and on Android 12 and newer it shows as a real ongoing call in the status bar; tapping it opens the call.
+- Animated profile pictures and emoji use less memory, and many of them playing at once no longer slow the app down.
 
 ## v0.7.0 - 2026-11-25
 

@@ -2902,55 +2902,63 @@ pub fn emoji_image(ui: &mut Ui, picture: &Picture, size: f32, label: &str) -> Re
     response
 }
 
+/// A picture's frames on the GPU and how long each shows, in ms.
+type Frames = Arc<(Vec<TextureHandle>, Vec<u32>)>;
+
 /// Drop the textures of a picture, for one that is no longer kept.
 pub fn forget_textures(ctx: &egui::Context, key: &[u8; 32]) {
     ctx.data_mut(|data| {
         data.remove::<TextureHandle>(UiId::unique(("picture", *key)));
-        data.remove::<Arc<Vec<TextureHandle>>>(UiId::unique(("picture frames", *key)));
+        data.remove::<Frames>(UiId::unique(("picture frames", *key)));
     });
 }
 
 /// The texture for a picture's current frame, or its first with `play` false (and no
 /// repaints). Textures are shared by every use of the same image file; the other
-/// frames only go to the GPU once something plays.
+/// frames only go to the GPU once something plays, and only their delays stay in RAM.
 // shortcut: textures stay in egui's memory until restart; evict them if people change pictures often.
 fn frame_when(ui: &Ui, picture: &Picture, play: bool) -> TextureHandle {
-    let load = |image: &ColorImage| {
+    let load = |image: ColorImage| {
         ui.ctx()
-            .load_texture("picture", image.clone(), TextureOptions::LINEAR)
+            .load_texture("picture", image, TextureOptions::LINEAR)
     };
     let first_id = UiId::unique(("picture", picture.key));
     let first = ui.data(|data| data.get_temp::<TextureHandle>(first_id));
     let first = first.unwrap_or_else(|| {
-        let made = load(&picture.first.0);
+        let made = load(picture.first.0.clone());
         ui.data_mut(|data| data.insert_temp(first_id, made.clone()));
         made
     });
     if !play {
         return first;
     }
-    // The first frame shows while the others decode in the background.
-    let repaint = ui.ctx().clone();
-    let Some(rest) = picture.rest(move || repaint.request_repaint()) else {
-        return first;
-    };
-    if rest.is_empty() {
-        return first;
-    }
     let all_id = UiId::unique(("picture frames", picture.key));
-    let all = ui.data(|data| data.get_temp::<Arc<Vec<TextureHandle>>>(all_id));
-    let all = all.unwrap_or_else(|| {
-        let rest = rest.iter().map(|(image, _)| load(image));
-        let made: Arc<Vec<_>> = Arc::new(std::iter::once(first.clone()).chain(rest).collect());
-        ui.data_mut(|data| data.insert_temp(all_id, made.clone()));
-        made
-    });
+    let all = match ui.data(|data| data.get_temp::<Frames>(all_id)) {
+        Some(all) => all,
+        None => {
+            // The first frame shows while the others decode in the background.
+            let repaint = ui.ctx().clone();
+            let Some(rest) = picture.rest(move || repaint.request_repaint()) else {
+                return first;
+            };
+            if rest.is_empty() {
+                return first;
+            }
+            let delays = std::iter::once(picture.first.1)
+                .chain(rest.iter().map(|(_, ms)| *ms))
+                .collect();
+            let rest = rest.into_iter().map(|(image, _)| load(image));
+            let made: Frames =
+                Arc::new((std::iter::once(first.clone()).chain(rest).collect(), delays));
+            ui.data_mut(|data| data.insert_temp(all_id, made.clone()));
+            made
+        }
+    };
     let now = (ui.input(|input| input.time) * 1000.0) as u64;
-    let delays = std::iter::once(picture.first.1).chain(rest.iter().map(|(_, ms)| *ms));
-    match frame_at(delays, now) {
+    match frame_at(all.1.iter().copied(), now) {
         Some((at, left)) => {
             ui.ctx().request_repaint_after(Duration::from_millis(left));
-            all[at].clone()
+            all.0[at].clone()
         }
         None => first,
     }
@@ -7649,6 +7657,53 @@ mod tests {
         crate::emoji::set_hover_only(&h.ctx, true);
         *h.state_mut() = true;
         assert_eq!(at(&mut h, 0.85), (first, Duration::MAX));
+    }
+
+    #[test]
+    fn lazy_gif_plays_and_keeps_only_its_first_frame_in_ram() {
+        use image::{Delay, Frame, Rgba, RgbaImage, codecs::gif::GifEncoder};
+        let mut file = Vec::new();
+        let mut encoder = GifEncoder::new(&mut file);
+        (encoder.encode_frames((0..3u8).map(|index| {
+            let image = RgbaImage::from_pixel(4, 4, Rgba([index * 80, 30, 60, 255]));
+            Frame::from_parts(image, 0, 0, Delay::from_numer_denom_ms(100, 1))
+        })))
+        .unwrap();
+        drop(encoder);
+        let picture = crate::net::picture(&file).unwrap();
+        let shown = picture.clone();
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(Vec2::new(100.0, 100.0))
+            .build_ui(move |ui| {
+                let rect = Rect::from_min_size(ui.min_rect().min, Vec2::splat(64.0));
+                paint_playing(ui, rect, &shown, 0.0, true);
+            });
+        let mut textures = std::collections::HashSet::new();
+        for step in 0..2000 {
+            h.input_mut().time = Some(f64::from(step) * 0.05);
+            h.step();
+            textures.extend(
+                h.output()
+                    .shapes
+                    .iter()
+                    .filter_map(|shape| match &shape.shape {
+                        egui::epaint::Shape::Rect(rect) => {
+                            rect.brush.as_ref().map(|b| b.fill_texture_id)
+                        }
+                        _ => None,
+                    }),
+            );
+            if textures.len() == 3 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(textures.len(), 3, "every frame plays");
+        assert_eq!(
+            picture.held_bytes(),
+            4 * 4 * 4,
+            "the other frames live on the GPU only"
+        );
     }
 
     const ME: Id = [1; 32];

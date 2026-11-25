@@ -5,8 +5,8 @@ use std::{
     collections::{BTreeMap, HashMap},
     path::PathBuf,
     sync::{
-        Arc, OnceLock,
-        atomic::{AtomicBool, Ordering},
+        Arc, LazyLock, Mutex, PoisonError,
+        mpsc::{self, TrySendError},
     },
 };
 
@@ -701,35 +701,68 @@ impl HideOffline {
 
 /// A decoded profile picture, server icon, emoji or sticker: each frame and how long it
 /// shows, in ms. An animated GIF loads with only its first frame; the others are decoded
-/// once, on a background thread, the first time it plays (see `Picture::rest`).
+/// on the shared picture workers the first time it plays (see `Picture::rest`).
 #[derive(Clone)]
 pub struct Picture {
     /// A hash of the image file, to keep its textures.
     pub key: [u8; 32],
     pub first: Arc<(ColorImage, u32)>,
     /// The frames after the first, shared by every clone.
-    rest: Arc<Rest>,
+    rest: Arc<Mutex<Rest>>,
     /// The image file as received, so an emoji or sticker can be sent to another server.
     pub bytes: Arc<Vec<u8>>,
 }
 
-#[derive(Default)]
-struct Rest {
-    started: AtomicBool,
-    frames: OnceLock<Vec<(ColorImage, u32)>>,
+enum Rest {
+    /// Decoded up front and kept: what the textures are made from again.
+    Kept(Vec<(ColorImage, u32)>),
+    /// A lazy GIF not (or no longer) decoded.
+    Idle,
+    Decoding,
+    /// Decoded, until the textures are made from them.
+    Ready(Vec<(ColorImage, u32)>),
+    /// A GIF that failed to decode in full: it stays on its first frame.
+    Failed,
 }
+
+type Job = Box<dyn FnOnce() + Send>;
+
+/// Threads decoding animated pictures, however many play at once.
+pub(crate) const PICTURE_WORKERS: usize = 2;
+
+/// The decode queue: each picture waits in it at most once, and a full queue only
+/// delays a picture to a later repaint.
+static DECODER: LazyLock<mpsc::SyncSender<Job>> = LazyLock::new(|| {
+    let (sender, jobs) = mpsc::sync_channel::<Job>(64);
+    let jobs = Arc::new(Mutex::new(jobs));
+    for _ in 0..PICTURE_WORKERS {
+        let jobs = jobs.clone();
+        let spawned = std::thread::Builder::new()
+            .name("picture frames".into())
+            .spawn(move || {
+                loop {
+                    let job = jobs.lock().unwrap_or_else(PoisonError::into_inner).recv();
+                    match job {
+                        Ok(job) => job(),
+                        Err(_) => break,
+                    }
+                }
+            });
+        if let Err(error) = spawned {
+            tracing::warn!(%error, "could not start a picture decoding thread");
+        }
+    }
+    sender
+});
 
 impl Picture {
     /// A picture with all its frames decoded already.
     pub fn new(key: [u8; 32], mut frames: Vec<(ColorImage, u32)>, bytes: Arc<Vec<u8>>) -> Self {
         let first = frames.remove(0);
-        let rest = Rest::default();
-        let _ = rest.frames.set(frames);
-        rest.started.store(true, Ordering::Relaxed);
         Self {
             key,
             first: Arc::new(first),
-            rest: Arc::new(rest),
+            rest: Arc::new(Mutex::new(Rest::Kept(frames))),
             bytes,
         }
     }
@@ -739,45 +772,65 @@ impl Picture {
         Self {
             key,
             first: Arc::new(first),
-            rest: Arc::default(),
+            rest: Arc::new(Mutex::new(Rest::Idle)),
             bytes,
         }
     }
 
-    /// The frames after the first, or `None` while they are decoded. The first call
-    /// starts decoding them on a background thread, which calls `done` when they are
-    /// ready; later calls only wait for that one decode. A file that fails to decode
-    /// in full stays on its first frame.
-    pub fn rest(&self, done: impl FnOnce() + Send + 'static) -> Option<&[(ColorImage, u32)]> {
-        if let Some(frames) = self.rest.frames.get() {
-            return Some(frames);
-        }
-        if !self.rest.started.swap(true, Ordering::AcqRel) {
-            let (rest, bytes) = (self.rest.clone(), self.bytes.clone());
-            let spawned = std::thread::Builder::new()
-                .name("picture frames".into())
-                .spawn(move || {
-                    let frames = match rusttalk_core::client::decode_profile_image(&bytes) {
-                        Ok(frames) => frames.into_iter().skip(1).map(frame_image).collect(),
-                        Err(error) => {
-                            tracing::warn!(error = %format_args!("{error:#}"), "animated picture could not be decoded");
-                            Vec::new()
-                        }
-                    };
-                    let _ = rest.frames.set(frames);
-                    done();
-                });
-            if let Err(error) = spawned {
-                tracing::warn!(%error, "could not start decoding an animated picture");
-                let _ = self.rest.frames.set(Vec::new());
+    /// The frames after the first, to make textures of, or `None` while they are
+    /// decoded. The first call queues decoding them, which calls `done` when they are
+    /// ready; later calls only wait for that one decode. A lazy GIF's frames are handed
+    /// over and not kept, so asking again decodes them again. A file that fails to
+    /// decode in full stays on its first frame.
+    pub fn rest(&self, done: impl FnOnce() + Send + 'static) -> Option<Vec<(ColorImage, u32)>> {
+        let mut rest = self.rest.lock().unwrap_or_else(PoisonError::into_inner);
+        match &mut *rest {
+            Rest::Kept(frames) => return Some(frames.clone()),
+            Rest::Failed => return Some(Vec::new()),
+            Rest::Decoding => return None,
+            Rest::Ready(frames) => {
+                let frames = std::mem::take(frames);
+                *rest = Rest::Idle;
+                return Some(frames);
             }
+            Rest::Idle => {}
         }
+        let (shared, bytes) = (self.rest.clone(), self.bytes.clone());
+        let job = Box::new(move || {
+            let decoded = match rusttalk_core::client::decode_profile_image(&bytes) {
+                Ok(frames) => Rest::Ready(frames.into_iter().skip(1).map(frame_image).collect()),
+                Err(error) => {
+                    tracing::warn!(error = %format_args!("{error:#}"), "animated picture could not be decoded");
+                    Rest::Failed
+                }
+            };
+            *shared.lock().unwrap_or_else(PoisonError::into_inner) = decoded;
+            done();
+        });
+        *rest = match DECODER.try_send(job) {
+            Ok(()) => Rest::Decoding,
+            // Tried again at a later repaint; every decode that ends asks for one.
+            Err(TrySendError::Full(_)) => Rest::Idle,
+            Err(TrySendError::Disconnected(_)) => {
+                tracing::warn!("no thread to decode an animated picture");
+                Rest::Failed
+            }
+        };
         None
     }
 
-    /// The frames decoded so far: the first, and the rest once they are.
-    pub fn decoded(&self) -> impl Iterator<Item = &(ColorImage, u32)> {
-        std::iter::once(&*self.first).chain(self.rest.frames.get().into_iter().flatten())
+    /// The bytes of the frames held in memory: the first, and any decoded but not yet
+    /// handed over or kept.
+    pub fn held_bytes(&self) -> usize {
+        let rest = self.rest.lock().unwrap_or_else(PoisonError::into_inner);
+        let rest = match &*rest {
+            Rest::Kept(frames) | Rest::Ready(frames) => frames.as_slice(),
+            _ => &[],
+        };
+        std::iter::once(&*self.first)
+            .chain(rest)
+            .map(|(image, _)| image.pixels.len() * 4)
+            .sum()
     }
 }
 
