@@ -156,7 +156,11 @@ messages and reading them again after a restart.
   what is left, so the focused field sits above the keyboard and is scrolled
   into view when the keyboard opens. The keyboard hides when focus leaves a
   field (egui and winit already did that).
-- **Recovery words** show in two columns on phones.
+- **Recovery words** show in two columns on phones. While they show (writing them
+  down, the word check, typing them to restore), Android sets `FLAG_SECURE`
+  (`MainActivity.secureWindow`): screenshots and recordings are blank and so is the
+  recents thumbnail. iOS covers the window with the theme's background when the app
+  stops being active, so the app switcher shows that instead (`ios::secure_window`).
 - **Destroy**: the app runs eframe on its own winit loop and ends it once
   android-activity has handled `onDestroy`, waits up to 4 seconds for messages
   still being sent (a new activity's window waits too, and Android reports it as

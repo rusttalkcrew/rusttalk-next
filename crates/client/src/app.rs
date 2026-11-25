@@ -575,6 +575,10 @@ impl eframe::App for App<'_> {
         if let Screen::Home(home) = &mut self.screen {
             crate::hotkeys::frame(home);
         }
+        secure_screen(matches!(
+            self.screen,
+            Screen::Words { .. } | Screen::Confirm { .. } | Screen::Restore { .. }
+        ));
     }
 
     fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
@@ -685,6 +689,16 @@ fn step(
 ) -> Option<Action> {
     let (pressed, action) = ui::onboarding(ui, id, back.then(|| t!("common.back")), add);
     if pressed { Some(Action::Back) } else { action }
+}
+
+/// While recovery words show on a phone: no screenshots, recordings or recents
+/// thumbnail on Android, a cover for the app switcher on iOS. Desktop is unchanged.
+fn secure_screen(on: bool) {
+    #[cfg(target_os = "android")]
+    crate::android::secure_window(on);
+    #[cfg(target_os = "ios")]
+    crate::ios::secure_window(on);
+    let _ = on;
 }
 
 /// Plain Enter in a single-line field. Screens that focus a field when nothing has

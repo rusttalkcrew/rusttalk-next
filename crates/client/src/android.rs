@@ -821,6 +821,27 @@ mod activity {
         })
     }
 
+    /// Screenshots, recordings and the recents thumbnail blank while `on`
+    /// (`MainActivity.secureWindow`); Java is called only when it changes.
+    pub fn secure_window(on: bool) {
+        static SECURE: AtomicBool = AtomicBool::new(false);
+        let Some(app) = APP.get() else { return };
+        if SECURE.swap(on, Ordering::Relaxed) == on {
+            return;
+        }
+        if let Err(error) = java(app, |env, activity| {
+            env.call_method(
+                activity,
+                jni_str!("secureWindow"),
+                jni_sig!("(Z)V"),
+                &[JValue::Bool(on)],
+            )?
+            .v()
+        }) {
+            tracing::warn!(%error, "setting the secure window failed");
+        }
+    }
+
     pub fn communication_mode(on: bool) {
         if let Some(app) = APP.get()
             && let Err(error) = java(app, |env, activity| {

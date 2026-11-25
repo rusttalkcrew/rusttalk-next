@@ -12,33 +12,39 @@
 //! The on-screen keyboard covers the bottom of the safe area: its overlap becomes
 //! egui's bottom safe-area inset, and `frame` draws the app above it, as Android
 //! does with its insets. The strips outside the safe area show the theme's
-//! background, and the keyboard's Return reaches egui as Enter.
+//! background, and the keyboard's Return reaches egui as Enter. While the recovery
+//! words show, the app switcher's snapshot shows that background instead.
 
 pub mod voice;
 
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
+    ptr::NonNull,
     sync::{
-        OnceLock,
+        Once, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
 };
 
+use block2::RcBlock;
 use eframe::egui::{
     self, Color32, Context, Event, Key, Modifiers, Pos2, RawInput, Rect, SafeAreaInsets, Ui,
     UiBuilder, Vec2, accesskit::Affine, epaint::MarginF32,
 };
 use objc2::{
-    MainThreadMarker, msg_send,
+    MainThreadMarker, MainThreadOnly as _, msg_send,
     rc::Retained,
     runtime::{AnyClass, AnyObject, Imp, NSObjectProtocol, Sel},
     sel,
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
-use objc2_foundation::NSString;
+use objc2_foundation::{NSNotification, NSNotificationCenter, NSOperationQueue, NSString};
 use objc2_quartz_core::{CALayer, CATransaction};
-use objc2_ui_kit::{UIApplication, UIColor, UIView, UIWindow};
+use objc2_ui_kit::{
+    UIApplication, UIApplicationDidBecomeActiveNotification,
+    UIApplicationWillResignActiveNotification, UIColor, UIView, UIViewAutoresizing, UIWindow,
+};
 use winit::platform::ios::{StatusBarStyle, WindowExtIOS as _};
 
 /// How long frames keep coming after the keyboard moved, while it slides.
@@ -54,6 +60,10 @@ thread_local! {
     static KEYBOARD: Cell<(f32, Option<Instant>)> = const { Cell::new((0.0, None)) };
     /// The background last given to the window, and whether it was dark.
     static BACKGROUND: Cell<Option<(Color32, bool)>> = const { Cell::new(None) };
+    /// The recovery words show (`secure_window`).
+    static SECURE: Cell<bool> = const { Cell::new(false) };
+    /// What covers the window while the app is inactive and `SECURE`.
+    static COVER: RefCell<Option<Retained<UIView>>> = const { RefCell::new(None) };
 }
 
 /// The keyboard's Return was typed (see `watch_return`).
@@ -212,6 +222,63 @@ fn background(fill: Color32) {
     if let Some(view) = root_view(&window) {
         view.setBackgroundColor(Some(&color));
     }
+}
+
+/// While `on`, the window is covered with the theme's background whenever the app
+/// stops being active (app switcher, Control Center, a call), so iOS's snapshot of it
+/// never shows the recovery words. Becoming active removes the cover.
+pub fn secure_window(on: bool) {
+    SECURE.set(on);
+    if !on {
+        cover(false);
+        return;
+    }
+    static OBSERVE: Once = Once::new();
+    OBSERVE.call_once(|| {
+        let center = NSNotificationCenter::defaultCenter();
+        let main = NSOperationQueue::mainQueue();
+        let hide = RcBlock::new(|_: NonNull<NSNotification>| cover(true));
+        let show = RcBlock::new(|_: NonNull<NSNotification>| cover(false));
+        // SAFETY: UIKit's notification names; the blocks run on the main queue (the
+        // main thread, where the thread-locals live). The center keeps the observers.
+        unsafe {
+            let _ = center.addObserverForName_object_queue_usingBlock(
+                Some(UIApplicationWillResignActiveNotification),
+                None,
+                Some(&main),
+                &hide,
+            );
+            let _ = center.addObserverForName_object_queue_usingBlock(
+                Some(UIApplicationDidBecomeActiveNotification),
+                None,
+                Some(&main),
+                &show,
+            );
+        }
+    });
+}
+
+/// Puts the cover over the window (when `SECURE`) or takes it away.
+fn cover(on: bool) {
+    COVER.with_borrow_mut(|cover| {
+        if let Some(view) = cover.take() {
+            view.removeFromSuperview();
+        }
+        if !on || !SECURE.get() {
+            return;
+        }
+        let (Some(mtm), Some(window)) = (MainThreadMarker::new(), key_window()) else {
+            return;
+        };
+        let view = UIView::initWithFrame(UIView::alloc(mtm), window.bounds());
+        let color = window.backgroundColor().unwrap_or_else(UIColor::blackColor);
+        view.setBackgroundColor(Some(&color));
+        view.setAutoresizingMask(
+            UIViewAutoresizing::FlexibleWidth | UIViewAutoresizing::FlexibleHeight,
+        );
+        window.addSubview(&view);
+        *cover = Some(view);
+    });
 }
 
 /// winit turns the keyboard's Return into the text "\n", which egui-winit drops as
