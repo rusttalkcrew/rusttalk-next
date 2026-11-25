@@ -131,6 +131,7 @@ home.invite_people = Invite people
 home.server_settings = Server settings
 home.create_channel = Create channel
 home.create_category = Create category
+home.show_empty_categories = Show empty categories
 home.rename_server = Rename server
 home.change_my_name = Change name on this server
 home.leave_server = Leave server

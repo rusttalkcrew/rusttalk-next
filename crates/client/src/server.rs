@@ -40,6 +40,8 @@ pub struct Server {
     pub status: Status,
     pub compatibility: Compatibility,
     pub order_unavailable: bool,
+    /// A channel manager asked to list categories they see no channel in, for this session.
+    pub show_empty: bool,
     pub dir: Directory,
     pub chats: HashMap<Id, Chat>,
     /// The channel shown when this server is picked.

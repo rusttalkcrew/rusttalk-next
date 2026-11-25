@@ -20,6 +20,7 @@ Unreleased under the new version and date.
 - Full screen streams keep the call's buttons and the stream's own menus, shown when you move the pointer (tap on phones) and hidden when idle; Escape or the hover button leaves full screen.
 - A voice channel's member limit can be removed again by clearing the field, and the "2/8" count in the channel list now has a people icon and says "Member limit: 8" on hover (or a tap on phones).
 - Right-clicking (or long-pressing) a message's words or links now opens the message menu, like the rest of the message.
+- Channel managers no longer see empty categories in the channel list; "Show empty categories" in the server menu brings them back for editing.
 
 ## v0.5.0 - 2026-11-25
 
