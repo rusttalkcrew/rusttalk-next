@@ -166,6 +166,8 @@ pub enum AdminUpdate {
     ServerUpdates(ServerUpdates),
     /// An import is under way: pictures added so far, and in all.
     Progress(usize, usize),
+    /// This emoji or sticker name was added; comes just before its `Done`.
+    EmojiAdded(String),
     /// A change went through; the text says what happened.
     Done(&'static str),
     Failed(String),
@@ -400,7 +402,13 @@ pub(super) async fn run(
             sticker,
             bytes,
             pack,
-        } => add_emoji(client, &name, sticker, &bytes, pack.as_ref()).await,
+        } => {
+            let done = add_emoji(client, &name, sticker, &bytes, pack.as_ref()).await;
+            if done.is_ok() {
+                send(AdminUpdate::EmojiAdded(name));
+            }
+            done
+        }
         Admin::AddPack(name) => add_pack(client, &name)
             .await
             .map(|_| t!("admin.done_pack_added")),

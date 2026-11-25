@@ -106,7 +106,7 @@ pub struct Settings {
     /// The server name being typed in Overview; `None` until edited.
     server_name: Option<String>,
     /// The name for the next emoji or (`emoji_sticker`) sticker upload.
-    emoji_name: String,
+    pub(crate) emoji_name: String,
     emoji_sticker: bool,
     /// An emoji or sticker being renamed, and the new name.
     emoji_renaming: Option<(Id, String)>,
@@ -174,6 +174,12 @@ impl Settings {
             AdminUpdate::Progress(done, total) => {
                 if let Some(import) = &mut self.import {
                     import.progress(done, total);
+                }
+            }
+            // Only now: a cancelled pick or a refused upload keeps the typed name.
+            AdminUpdate::EmojiAdded(name) => {
+                if self.emoji_name == name {
+                    self.emoji_name.clear();
                 }
             }
             AdminUpdate::Done(text) => {
@@ -628,7 +634,6 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
     }
     if let Some((name, sticker, pack)) = upload {
         settings.message = None;
-        settings.emoji_name.clear();
         home.files
             .ask(ctx, Ask::Emoji(server.address.clone(), name, sticker, pack));
     }

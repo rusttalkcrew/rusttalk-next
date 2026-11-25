@@ -218,3 +218,64 @@ fn the_page_fits_the_window() {
         }
     }
 }
+
+/// The typed name stays until the upload went through, so a cancelled pick or a
+/// refused upload doesn't lose it (#533).
+#[test]
+fn emoji_name_stays_until_the_upload_went_through() {
+    use crate::net::AdminUpdate;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static ASKED: AtomicBool = AtomicBool::new(false);
+    let _picker = super::uploads::PICKER_TEST
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _reset = super::uploads::ResetPicker;
+    ASKED.store(false, Ordering::SeqCst);
+    // The picker is cancelled: no file comes back.
+    *files::TEST_ANSWER.lock().unwrap() = Some(|_| {
+        ASKED.store(true, Ordering::SeqCst);
+        Vec::new()
+    });
+    let (mut h, _sent) = harness(1100.0, 700.0, true, false);
+    let name = |h: &Harness<'static, Home>| {
+        h.state()
+            .server_settings
+            .as_ref()
+            .unwrap()
+            .emoji_name
+            .clone()
+    };
+    let apply = |h: &mut Harness<'static, Home>, update| {
+        h.state_mut()
+            .server_settings
+            .as_mut()
+            .unwrap()
+            .apply(update);
+        h.run();
+    };
+    h.state_mut().server_settings.as_mut().unwrap().emoji_name = "cat_wave".into();
+    h.run();
+    h.get_by_label(t!("admin.pick_picture")).click();
+    h.run();
+    let start = std::time::Instant::now();
+    while !ASKED.load(Ordering::SeqCst) {
+        assert!(
+            start.elapsed().as_secs() < 10,
+            "Pick picture asked for no file"
+        );
+        std::thread::yield_now();
+    }
+    h.run();
+    assert_eq!(name(&h), "cat_wave", "cancelling the pick keeps the name");
+
+    apply(&mut h, AdminUpdate::Failed("too large".into()));
+    assert_eq!(name(&h), "cat_wave", "a refused upload keeps the name");
+    // Another change finishing, or another emoji added, leaves it alone too.
+    apply(&mut h, AdminUpdate::EmojiAdded("party_cat".into()));
+    apply(&mut h, AdminUpdate::Done("done"));
+    assert_eq!(name(&h), "cat_wave");
+
+    apply(&mut h, AdminUpdate::EmojiAdded("cat_wave".into()));
+    apply(&mut h, AdminUpdate::Done("done"));
+    assert_eq!(name(&h), "", "the name clears once it was added");
+}
