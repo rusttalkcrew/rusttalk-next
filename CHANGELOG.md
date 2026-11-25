@@ -24,6 +24,7 @@ Unreleased under the new version and date.
 - In a DM, only the person who wrote a message or sent a file can delete it, also when the other person is a moderator.
 - Role managers can give someone a new role without losing roles above their reach, and can no longer take those roles away.
 - On phones, swipe in from the left edge to open the server and channel list, and swipe it away or tap beside it to close it.
+- On phones, screenshots and the recent apps view no longer show your recovery words.
 
 ## v0.4.0 - 2026-11-24
 

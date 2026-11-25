@@ -96,6 +96,16 @@ public class MainActivity extends GameActivity {
         }
     }
 
+    // FLAG_SECURE while the recovery words show: screenshots, screen recordings and the
+    // recents thumbnail get a blank window (crates/client/src/app.rs, secure_screen).
+    public void secureWindow(boolean on) {
+        int flag = android.view.WindowManager.LayoutParams.FLAG_SECURE;
+        runOnUiThread(() -> {
+            if (on) getWindow().addFlags(flag);
+            else getWindow().clearFlags(flag);
+        });
+    }
+
     public void probeIdentityKey(String identityAlias) throws Exception {
         String alias = identityAlias + "/probe";
         deleteIdentityKey(alias);
