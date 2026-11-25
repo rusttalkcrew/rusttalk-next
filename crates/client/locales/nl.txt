@@ -1759,3 +1759,10 @@ perm.start_focus = Focusmodus starten
 perm.start_focus_help = Een spraakkanaal tot 24 uur in focusmodus zetten.
 audit.focus_started = {actor} heeft de focusmodus in een kanaal gestart
 audit.focus_ended = {actor} heeft de focusmodus in een kanaal beëindigd
+
+# crates/client/src/home/switcher.rs
+switcher.title = Ga naar
+switcher.hint = Zoek mensen, kanalen of instellingen
+switcher.people = Mensen
+switcher.channels = Kanalen
+switcher.recent = Recent

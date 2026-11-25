@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Press Ctrl+K (Cmd+K on Mac), or the search button on phones, to jump to a person, a channel on any of your servers, or a settings page.
+
 ## v0.5.0 - 2026-11-25
 
 - Android test builds install as a separate "RustTalk Test" app, so they no longer block installing the release app.

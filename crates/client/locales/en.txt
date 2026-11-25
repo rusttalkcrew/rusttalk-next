@@ -1762,3 +1762,10 @@ perm.start_focus = Start focus mode
 perm.start_focus_help = Put a voice channel into focus mode for up to 24 hours.
 audit.focus_started = {actor} started focus mode in a channel
 audit.focus_ended = {actor} ended focus mode in a channel
+
+# crates/client/src/home/switcher.rs
+switcher.title = Jump to
+switcher.hint = Find people, channels or settings
+switcher.people = People
+switcher.channels = Channels
+switcher.recent = Recent

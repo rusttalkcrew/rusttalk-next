@@ -1759,3 +1759,10 @@ perm.start_focus = Fokus-Modus starten
 perm.start_focus_help = Einen Sprachkanal bis zu 24 Stunden in den Fokus-Modus versetzen.
 audit.focus_started = {actor} hat in einem Kanal den Fokus-Modus gestartet
 audit.focus_ended = {actor} hat in einem Kanal den Fokus-Modus beendet
+
+# crates/client/src/home/switcher.rs
+switcher.title = Springe zu
+switcher.hint = Personen, Kanäle oder Einstellungen finden
+switcher.people = Personen
+switcher.channels = Kanäle
+switcher.recent = Zuletzt
