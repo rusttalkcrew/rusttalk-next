@@ -5,7 +5,10 @@ use rusttalk_core::{
     auth::encode,
     client::{Event, KeyClient, MessageBody, MessageError},
     keys::{self, KeyState, Scope},
-    messages::{Ballot, MessageContext, Poll, PollPart, tally},
+    messages::{
+        Ballot, MessageContext, Poll, PollPart, Reaction, ReactionEmoji, reaction_vote, tally,
+        tally_reactions,
+    },
     presence::Update,
 };
 use serde_json::{Value, json};
@@ -23,11 +26,12 @@ const VOICE_B: &str = "W61 Onyx Voice Chat from B";
 const POLL_QUESTION: &str = "W204 Malachite Poll Question";
 const POLL_FIRST: &str = "W204 Beryl Poll Answer";
 const POLL_SECOND: &str = "W204 Zircon Poll Answer";
+const REACTED: &str = "#511 Peridot Message With Reactions";
 
 const PAGE: &str = "#210 Malachite Page by a moderator";
 const POST: &str = "# #211 Topaz Forum Post\nby a member";
 const REPLY: &str = "#211 Beryl Forum Reply";
-pub(super) const TEXTS: [&str; 16] = [
+pub(super) const TEXTS: [&str; 17] = [
     TEXT_A,
     TEXT_B,
     DM_A,
@@ -41,6 +45,7 @@ pub(super) const TEXTS: [&str; 16] = [
     POLL_QUESTION,
     POLL_FIRST,
     POLL_SECOND,
+    REACTED,
     PAGE,
     POST,
     REPLY,
@@ -367,6 +372,7 @@ pub(super) async fn scenario(
     .error_for_status()?;
     println!("W61 verified two-way chat, replies and paging in a voice channel");
     poll(a, b, c, text).await?;
+    reactions(a, b, c, text).await?;
     page(a, b, c, &category).await?;
     forum(a, b, c, &category).await?;
     Ok((dm, b_message))
@@ -444,6 +450,55 @@ async fn poll(
     );
     ensure!(result.ended, "the creator's end did not count");
     println!("W204 verified an encrypted poll: two votes, a changed vote and the creator's end");
+    Ok(())
+}
+
+/// #511: B and C react to A's message (C takes one back), and A tallies what it reads.
+async fn reactions(
+    a: &mut KeyClient<'_>,
+    b: &mut KeyClient<'_>,
+    c: &mut KeyClient<'_>,
+    text: Scope,
+) -> Result<()> {
+    let posted = a.send_message(&text.id, &body(REACTED)).await?;
+    wait_event(b, text, &posted.id, false).await?;
+    wait_event(c, text, &posted.id, false).await?;
+    let heart = ReactionEmoji::Unicode("❤️".into()).key();
+    let thumbs = ReactionEmoji::Unicode("👍".into()).key();
+    let react = |emoji, sent, on| MessageBody {
+        poll: Some(reaction_vote(&posted.id, &emoji, sent, on)),
+        ..Default::default()
+    };
+    b.send_message(&text.id, &react(heart, 1, true)).await?;
+    c.send_message(&text.id, &react(heart, 1, true)).await?;
+    c.send_message(&text.id, &react(heart, 2, false)).await?;
+    let last = c.send_message(&text.id, &react(thumbs, 3, true)).await?;
+    wait_event(a, text, &last.id, false).await?;
+
+    // A finds them by the message ID's first half, as the app does.
+    let mut found = Vec::new();
+    for record in a.message_page(&text.id, None, 5).await? {
+        let Some(part) = a.open_message(&text.id, &record).await?.poll else {
+            continue;
+        };
+        if let Some((target, reaction)) =
+            Reaction::from_vote(&part, record.person, record.at, record.id)
+            && target == posted.id[..16]
+        {
+            found.push(reaction);
+        }
+    }
+    // Records from the same second are ordered by their random IDs, so sort.
+    let mut result = tally_reactions(&found, |emoji| [heart, thumbs].contains(emoji));
+    result.sort();
+    let (b_id, c_id) = (
+        *b.identity.certificate.person_id(),
+        *c.identity.certificate.person_id(),
+    );
+    let mut expected = [(heart, vec![b_id]), (thumbs, vec![c_id])];
+    expected.sort();
+    ensure!(result == expected, "unexpected reactions {result:?}");
+    println!("#511 verified encrypted reactions: two people, one taken back");
     Ok(())
 }
 

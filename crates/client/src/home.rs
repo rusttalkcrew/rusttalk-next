@@ -20,7 +20,7 @@ use rusttalk_core::{
     client::{Attachment, FriendSignal, MAX_TEXT_CHARS, voice::LiveFileEvent},
     identity::{DeviceIdentity, fingerprint},
     index::https_url,
-    messages::PollPart,
+    messages::{PollPart, reaction_vote},
     presence::{Presence, Status as Choice},
     terminal::Feed,
 };
@@ -5159,6 +5159,10 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
                 At::Dm(peer) => Dialog::DeleteDm(peer, id),
             });
         }
+        Some(Pick::AddReaction(id)) => {
+            chat.reacting = Some(id);
+            emoji_picker.open_for_reaction();
+        }
         Some(Pick::Poll(part)) => {
             if let Some(draft) = poll_draft(key, String::new(), part) {
                 match at {
@@ -5464,8 +5468,10 @@ enum Pick {
     Profile(usize, Id, person::Pick),
     /// Allow (or not) link previews from a site, by its ID.
     Previews(&'static str, bool),
-    /// A vote or a poll's end to send.
+    /// A vote, a poll's end or a reaction to send.
     Poll(PollPart),
+    /// Open the emoji picker to react to this message.
+    AddReaction(Id),
     /// Add another server's emoji or sticker to this server: name, kind and picture file.
     AddPicture(String, Kind, std::sync::Arc<Vec<u8>>),
 }
@@ -5660,9 +5666,39 @@ fn composer(
             .inner
         });
     let field = bar.inner;
-    let (was_open, picked) = emoji_picker.show(ui, bar.response.rect, scope);
+    // Picking a reaction: only this server's emoji and Unicode ones can be reactions.
+    let reaction_scope = picker::Scope {
+        local: scope.local,
+        others: Vec::new(),
+    };
+    let reacting = chat.reacting.filter(|_| emoji_picker.is_reacting());
+    let shown_scope = if reacting.is_some() {
+        &reaction_scope
+    } else {
+        scope
+    };
+    let (was_open, picked) = emoji_picker.show(ui, bar.response.rect, shown_scope);
     for (response, tab) in &tabs {
         emoji_picker.button(response, *tab, editor, was_open);
+    }
+    if chat.reacting.is_some() && (picked.is_some() || !emoji_picker.is_reacting()) {
+        chat.reacting = None;
+    }
+    if let Some(target) = reacting
+        && let Some(picked) = picked
+    {
+        // The picker offers only emoji for a reaction, all of which have a key.
+        let custom = scope.local.map_or(&[][..], |dir| &dir.emoji[..]);
+        let Picked::Text(sequence) = &picked else {
+            return (None, None);
+        };
+        let Some(key) = emoji::reaction_key(sequence, custom) else {
+            tracing::warn!("picked a reaction emoji without a key");
+            return (None, None);
+        };
+        let part = reaction_vote(&target, &key, polls::now_ms(), true);
+        let draft = poll_draft(channel, String::new(), part);
+        return (draft.map(Command::Send), None);
     }
     // A sticker to send now: of this server by ID, or of another as a file.
     let mut sticker: Option<(Option<Id>, String, Vec<Inline>)> = None;
@@ -6196,6 +6232,11 @@ fn message(
                         );
                     }
                 }
+                if matches!(msg.body, Body::Text(_) | Body::Poll(..))
+                    && let Some(chosen) = reaction_chips(ui, chat, msg, dir)
+                {
+                    invite = Some(chosen);
+                }
             });
         });
     });
@@ -6211,6 +6252,8 @@ fn message(
             .map_source(text, |s| emoji::plain(s).into_owned())
     };
     let can_reply = text.is_some();
+    let can_react =
+        matches!(msg.body, Body::Text(_) | Body::Poll(..)) && chat.poll_editor.is_none();
     let can_end_poll = mine
         && matches!(msg.body, Body::Poll(..))
         && chat
@@ -6245,6 +6288,9 @@ fn message(
     ui::context_menu(&menu, |m| {
         if can_reply && m.item("↩", t!("common.reply")).clicked() {
             pick = Some(Pick::Reply(msg.person, msg.id));
+        }
+        if can_react && m.item("☺", t!("home.add_reaction")).clicked() {
+            pick = Some(Pick::AddReaction(msg.id));
         }
         if can_edit
             && let Some(text) = &text
@@ -6292,7 +6338,7 @@ fn message(
         return pick;
     }
     // Give touch controls their own space below the text; hover controls float above it.
-    let buttons = [can_reply, can_edit, can_delete]
+    let buttons = [can_react, can_reply, can_edit, can_delete]
         .into_iter()
         .filter(|on| *on)
         .count() as f32;
@@ -6330,6 +6376,11 @@ fn message(
             .layout(Layout::left_to_right(Align::Center)),
     );
     ui.spacing_mut().item_spacing.x = 2.0;
+    if can_react
+        && ui::icon_button(&mut ui, "☺", t!("home.add_reaction"), Look::Ghost, button).clicked()
+    {
+        pick = Some(Pick::AddReaction(msg.id));
+    }
     if can_reply && ui::icon_button(&mut ui, "↩", t!("common.reply"), Look::Ghost, button).clicked()
     {
         pick = Some(Pick::Reply(msg.person, msg.id));
@@ -6345,6 +6396,59 @@ fn message(
     {
         pick = Some(Pick::Delete(msg.id));
     }
+    pick
+}
+
+/// The reactions under a message: each emoji and how many, lit when one is mine. A click
+/// adds or takes back mine; hovering, a right-click or a long press shows who reacted.
+fn reaction_chips(ui: &mut Ui, chat: &Chat, msg: &Msg, dir: &Directory) -> Option<Pick> {
+    let reactions = chat.reactions(&msg.id, |key| emoji::reacted(key, &dir.emoji).is_some());
+    if reactions.is_empty() {
+        return None;
+    }
+    let mut pick = None;
+    ui.add_space(ui::SPACE_XS);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::splat(ui::SPACE_XS);
+        for (key, people) in &reactions {
+            let Some(shown) = emoji::reacted(key, &dir.emoji) else {
+                continue;
+            };
+            let mine = people.contains(&dir.me);
+            let c = ui::colors(ui);
+            let count = RichText::new(people.len().to_string())
+                .size(ui::TEXT_CAPTION)
+                .color(if mine { c.strong } else { c.text });
+            let response = match shown {
+                emoji::Reacted::Unicode(sequence) => {
+                    ui::reaction_chip(ui, mine, (emoji::text(sequence), count))
+                }
+                emoji::Reacted::Custom(custom) => {
+                    let size = Vec2::splat(ui::TEXT_BODY + 4.0);
+                    let image = match custom.picture.clone() {
+                        Some(picture) => egui::Atom::paint(size, move |ui, args| {
+                            paint_hovered(ui, args.rect, &picture, 0.0);
+                        }),
+                        None => ui::caption(&custom.name).into(),
+                    };
+                    ui::reaction_chip(ui, mine, (image, count))
+                }
+            };
+            let names: Vec<String> = people.iter().map(|p| member_name(dir, p)).collect();
+            let who = t!(
+                "home.reacted_with",
+                names = names.join(", "),
+                emoji = shown.name()
+            );
+            response.widget_info(|| WidgetInfo::selected(Role::Button, true, mine, &who));
+            let response = response.on_hover_text(&who);
+            if response.clicked() {
+                let part = reaction_vote(&msg.id, key, polls::now_ms(), !mine);
+                pick = Some(Pick::Poll(part));
+            }
+            ui::context_menu(&response, |m| m.caption(&who));
+        }
+    });
     pick
 }
 
@@ -7160,6 +7264,7 @@ mod tests {
     mod member_list;
     mod outbox;
     mod rail;
+    mod reactions;
     mod streams;
     mod touch;
     mod uploads;

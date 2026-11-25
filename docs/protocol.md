@@ -737,6 +737,27 @@ ignored. Apps before polls show a poll, vote or end as a message they can't
 open. Polls need format 3, so they can't be sent to a server below protocol
 version 2.
 
+### Reactions
+
+A reaction is an emoji under a message: a Unicode emoji, or in a channel one
+of the server's own emoji. It travels as a poll vote (see
+[Crypto](crypto.md#messages)) whose poll ID is the first 16 bytes of the
+message's ID followed by the emoji's 16-byte key, with one choice (index 0)
+to add it or none to take it back. So the server sees only ciphertext, there
+are no reaction routes, and apps with polls but without reactions count it
+under a poll that doesn't exist: it never shows, marks a chat unread or
+notifies there. Apps before polls show it as a message they can't open.
+
+The emoji's key is the first 16 bytes of SHA-256 over
+`"rusttalk-reaction-v1"`, then `0` and the UTF-8 emoji with U+FE0F removed,
+or `1` and the server emoji's 32-byte ID. Apps show a reaction only under a
+readable message they have loaded whose ID starts with those 16 bytes, and
+only for an emoji they know: the Unicode emoji in their picker or an emoji of
+the message's server. Each person's reaction with the highest sender clock
+(then server time, then record ID) per message and emoji counts, like a
+vote. A message shows at most 20 distinct emoji, the first to arrive by
+server time. Reactions don't mark a chat unread or notify.
+
 ## Messages
 
 These routes require a bearer header and apply to text channels, voice channels and DMs.

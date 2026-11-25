@@ -1026,6 +1026,14 @@ pub(super) fn view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat
         Some(Asked::Pick(_, Pick::Delete(id)) | Asked::Delete(id)) => {
             home.dialog = Some(Dialog::Delete(index, channel, id));
         }
+        // The picker shows over the post's answer box, so that opens with it.
+        Some(Asked::Pick(post, Pick::AddReaction(id))) if can_post => {
+            folds.open.insert(post);
+            folds.answering = Some(post);
+            chat.reacting = Some(id);
+            home.emoji_picker.open_for_reaction();
+        }
+        Some(Asked::Pick(_, Pick::AddReaction(_))) => {}
         Some(Asked::Pick(_, Pick::Poll(part))) => {
             outgoing.extend(poll_draft(channel, String::new(), part))
         }
