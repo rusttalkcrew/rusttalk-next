@@ -145,6 +145,8 @@ pub struct AuditEntry {
     pub action: String,
     pub target: Option<Id>,
     pub at: i64,
+    /// What changed (opaque IDs, flags, numbers); `Null` on older servers and most actions.
+    pub details: Value,
 }
 
 pub enum AdminUpdate {
@@ -613,6 +615,7 @@ fn audit_entry(row: &Value) -> Option<AuditEntry> {
         target: person("target_person_id"),
         target_id: person("target_id"),
         at: row["at"].as_i64().unwrap_or_else(now),
+        details: row["details"].clone(),
     })
 }
 

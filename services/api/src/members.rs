@@ -586,6 +586,7 @@ struct AuditRow {
     action: String,
     target_person_id: Option<Vec<u8>>,
     target_id: Option<String>,
+    details: Option<String>,
     at: i64,
 }
 
@@ -596,6 +597,9 @@ pub struct AuditEvent {
     action: String,
     target_person_id: Option<String>,
     target_id: Option<String>,
+    /// What changed: opaque IDs, flags and numbers. Older servers and most actions omit it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    details: Option<serde_json::Value>,
     at: i64,
 }
 
@@ -620,7 +624,7 @@ pub async fn audit_log(
         .await?
         .require(Permission::ViewAuditLog)?;
     let rows = query_as::<_, AuditRow>(&format!(
-        "SELECT id, actor_person_id, action, target_person_id, target_id, at
+        "SELECT id, actor_person_id, action, target_person_id, target_id, details, at
                                        FROM audit_log WHERE id > ? AND id < ? AND (? IS NULL OR action = ?)
                                        AND (dm_channel_id IS NULL OR EXISTS (
                                            SELECT 1 FROM channel_readers r
@@ -644,6 +648,9 @@ pub async fn audit_log(
                 action: row.action,
                 target_person_id: row.target_person_id.map(|id| encode(&id)),
                 target_id: row.target_id,
+                details: row
+                    .details
+                    .and_then(|text| serde_json::from_str(&text).ok()),
                 at: row.at,
             })
             .collect(),
@@ -972,6 +979,44 @@ mod tests {
             assert_eq!(lift(1, target).await.unwrap(), StatusCode::NO_CONTENT);
             assert_eq!(linked(target).await?, 0);
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn audit_details_are_listed_only_when_recorded() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let app = app(dir.path(), 1).await?;
+        query("DELETE FROM audit_log").execute(&app.db).await?;
+        let mut conn = app.db.acquire().await?;
+        crate::store::audit(&mut conn, &person(1), "joined", None, None, 1).await?;
+        let details = serde_json::json!({ "role_id": "member", "before": 0, "after": 3 });
+        crate::store::audit_details(
+            &mut conn,
+            &person(1),
+            "channel_permissions_changed",
+            None,
+            Some("c"),
+            Some(details.clone()),
+            2,
+        )
+        .await?;
+        drop(conn);
+        let Json(rows) = audit_log(
+            State(app.clone()),
+            as_person(1),
+            Ok(Query(AuditQuery {
+                after: 0,
+                before: None,
+                action: None,
+                limit: None,
+            })),
+        )
+        .await?;
+        let rows = serde_json::to_value(rows)?;
+        // Older apps read the same fields as before; `details` is left out when empty.
+        assert!(rows[0].get("details").is_none());
+        assert_eq!(rows[1]["details"], details);
+        assert_eq!(rows[1]["target_id"], "c");
         Ok(())
     }
 

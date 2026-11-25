@@ -217,7 +217,22 @@ or no longer a member, anyone with `ban` can lift it, as before. The ban list's
 An existing member registering a new device records `device_added`. Revocation records
 `device_revoked`. Both identify the device in `target_id`.
 
-Each audit entry has `{id, actor_person_id, action, target_person_id, target_id, at}`.
+Each audit entry has `{id, actor_person_id, action, target_person_id, target_id, at}`,
+plus an optional `details` object for actions that record what changed (older
+servers and other actions omit it):
+
+| Action | `details` |
+| --- | --- |
+| `member_roles_changed` | `{added: [role_id], removed: [role_id]}` |
+| `channel_permissions_changed` | `{role_id, before, after}` (channel flags; the channel is `target_id`) |
+| `server_updated` | `{changed: ["name" \| "description" \| "icon" \| "system_messages"]}` |
+| `file_limits_changed` | `{before, after}`, each the file limits object |
+| `listing_changed` | `{enabled}` |
+
+`server_updated` is recorded by `PUT /v1/space` when it changes anything,
+`file_limits_changed` by `PUT /v1/settings/files` when a limit changes, and
+`listing_changed` by every `PUT /v1/settings/public-listing`. Details hold only opaque
+IDs, flags and numbers, never names or other content.
 A target field is null if the action has no target of that type. Use the
 last returned ID as the next `after` cursor. Omit `after` to start at zero.
 The optional `before` (a positive ID) pages newest first instead: entries

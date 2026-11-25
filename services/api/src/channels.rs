@@ -17,7 +17,7 @@ use crate::{
     auth::{Actor, authenticate, authenticate_read},
     keys, metadata, payload,
     roles::{self, Permission},
-    store::{self, audit},
+    store::{self, audit, audit_details},
 };
 
 #[derive(Deserialize)]
@@ -498,6 +498,13 @@ pub async fn permissions(
     readable(&mut tx, &id, &actor).await?;
     authority.can_set_channel_flags(roles::by_id(&mut tx, &role).await?)?;
     let before = readers(&mut tx, &id).await?;
+    let old_flags: i64 =
+        query_scalar("SELECT flags FROM channel_permissions WHERE channel_id = ? AND role_id = ?")
+            .bind(&id)
+            .bind(&role)
+            .fetch_optional(&mut *tx)
+            .await?
+            .unwrap_or(0);
     if flags == 0 {
         query("DELETE FROM channel_permissions WHERE channel_id = ? AND role_id = ?")
             .bind(&id)
@@ -519,12 +526,13 @@ pub async fn permissions(
     if !before.is_subset(&after) {
         keys::mark(&mut tx, &id).await?;
     }
-    audit(
+    audit_details(
         &mut tx,
         &actor.person,
         "channel_permissions_changed",
         None,
         Some(&id),
+        Some(serde_json::json!({ "role_id": role, "before": old_flags, "after": flags })),
         actor.at,
     )
     .await?;
@@ -1400,6 +1408,18 @@ mod tests {
         assert_eq!(set(1, 21, 1).await?, StatusCode::NO_CONTENT);
         assert_eq!(flags(21).await, Some(1));
         assert_eq!(set(1, 21, 0).await?, StatusCode::NO_CONTENT);
+        let audited: Vec<(String, String)> = query_as(
+            "SELECT target_id, details FROM audit_log
+             WHERE action = 'channel_permissions_changed' ORDER BY id",
+        )
+        .fetch_all(&app.db)
+        .await?;
+        let entry = |channel: u8, before: u8, after: u8| {
+            let details =
+                serde_json::json!({ "role_id": "member", "before": before, "after": after });
+            (id(channel), details.to_string())
+        };
+        assert_eq!(audited, [entry(20, 0, 1), entry(21, 0, 1), entry(21, 1, 0)]);
 
         // Renaming: the hidden channel is refused before anything else; a readable one
         // gets as far as the space key, which this test server has none of.

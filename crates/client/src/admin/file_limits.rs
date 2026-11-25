@@ -220,13 +220,7 @@ impl Form {
                 total = self.fields[2].unit.display(limits.server_storage_bytes)
             ));
         });
-        let labels = [
-            t!("admin.max_file_size"),
-            t!("admin.member_storage"),
-            t!("admin.server_storage"),
-            t!("admin.file_retention"),
-            t!("admin.max_stickers"),
-        ];
+        let labels = labels();
         let width = (ui.available_width() * 0.53).min(196.0);
         let saved = values(limits);
         let ceilings = values(ceilings);
@@ -305,6 +299,41 @@ impl Form {
         .then_some(next)
         .flatten()
     }
+}
+
+fn labels() -> [&'static str; 5] {
+    [
+        t!("admin.max_file_size"),
+        t!("admin.member_storage"),
+        t!("admin.server_storage"),
+        t!("admin.file_retention"),
+        t!("admin.max_stickers"),
+    ]
+}
+
+/// Each limit that changed, as "Label: before → after", for the audit log.
+pub(super) fn changes(before: FileLimits, after: FileLimits) -> Vec<String> {
+    let shown = |index: usize, value: i64| match index {
+        3 => Unit::Days.display(value),
+        4 => value.to_string(),
+        _ => files::size(value.max(0) as u64),
+    };
+    let after = values(after);
+    values(before)
+        .into_iter()
+        .zip(after)
+        .zip(labels())
+        .enumerate()
+        .filter(|(_, ((before, after), _))| before != after)
+        .map(|(index, ((before, after), label))| {
+            t!(
+                "audit.changed_value",
+                label = label,
+                before = shown(index, before),
+                after = shown(index, after)
+            )
+        })
+        .collect()
 }
 
 fn values(limits: FileLimits) -> [i64; 5] {

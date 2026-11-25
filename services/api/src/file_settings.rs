@@ -13,6 +13,7 @@ use crate::{
     files::setting,
     payload,
     roles::{self, Permission},
+    store::audit_details,
 };
 
 pub fn ceilings() -> Result<FileLimits> {
@@ -94,6 +95,7 @@ pub async fn set(
         return Err(ApiError::bad_request("invalid_file_limits"));
     }
     let ceilings = app.files.ceilings;
+    let before = effective(&mut tx, ceilings).await?;
     let limits = FileLimits {
         max_file_bytes: requested.max_file_bytes.min(ceilings.max_file_bytes),
         member_storage_bytes: requested
@@ -116,6 +118,18 @@ pub async fn set(
     .bind(limits.max_stickers)
     .execute(&mut *tx)
     .await?;
+    if limits != before {
+        audit_details(
+            &mut tx,
+            &actor.person,
+            "file_limits_changed",
+            None,
+            None,
+            Some(serde_json::json!({ "before": before, "after": limits })),
+            actor.at,
+        )
+        .await?;
+    }
     let used_bytes = used_bytes(&mut tx).await?;
     tx.commit().await?;
     Ok(Json(FileSettings {
@@ -194,6 +208,19 @@ mod tests {
             .fetch_one(&app.db)
             .await?;
         assert_eq!(stored, 32);
+        // The audit log keeps the limits before and after, and nothing for an unchanged save.
+        let _ = set(State(app.clone()), as_person(2), Ok(Json(requested))).await?;
+        let details: Vec<String> = query_scalar(
+            "SELECT details FROM audit_log WHERE action = 'file_limits_changed' AND actor_person_id = ?",
+        )
+        .bind(person(2))
+        .fetch_all(&app.db)
+        .await?;
+        assert_eq!(details.len(), 1);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&details[0])?,
+            serde_json::json!({ "before": host, "after": saved.limits })
+        );
 
         let lowered_host = FileLimits {
             max_file_bytes: 24,

@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{SqliteConnection, query, query_scalar};
 use tokio::sync::watch;
 
-use crate::{ApiError, ApiResult, App, auth, payload};
+use crate::{ApiError, ApiResult, App, auth, payload, store::audit_details};
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -74,6 +74,17 @@ pub async fn update(
         .bind(ciphertext)
         .execute(&mut *tx)
         .await?;
+    // The public name and address are left out: only whether it is listed.
+    audit_details(
+        &mut tx,
+        &actor.person,
+        "listing_changed",
+        None,
+        None,
+        Some(serde_json::json!({ "enabled": enabled })),
+        actor.at,
+    )
+    .await?;
     tx.commit().await?;
     app.listing_changed.send_replace(());
     Ok(StatusCode::NO_CONTENT)
@@ -217,7 +228,29 @@ fn index_error(body: &[u8]) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::index_error;
+    use super::*;
+    use crate::testing::{app, as_person};
+
+    #[tokio::test]
+    async fn only_the_owner_changes_the_listing_and_it_is_audited() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let app = app(dir.path(), 2).await?;
+        let off = || {
+            Ok(Json(Publication {
+                enabled: false,
+                listing: None,
+            }))
+        };
+        let refused = update(State(app.clone()), as_person(2), off()).await;
+        assert_eq!(refused.unwrap_err().status, StatusCode::FORBIDDEN);
+        update(State(app.clone()), as_person(1), off()).await?;
+        let details: Vec<String> =
+            query_scalar("SELECT details FROM audit_log WHERE action = 'listing_changed'")
+                .fetch_all(&app.db)
+                .await?;
+        assert_eq!(details, [r#"{"enabled":false}"#]);
+        Ok(())
+    }
 
     #[test]
     fn index_error_codes_are_short_plain_codes() {

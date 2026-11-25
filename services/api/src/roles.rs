@@ -14,7 +14,7 @@ use crate::{
     ApiError, ApiResult, App,
     auth::{authenticate, authenticate_read},
     keys, metadata, payload,
-    store::{audit, random},
+    store::{audit, audit_details, random},
 };
 
 const OWNER_RANK: i64 = 1000;
@@ -572,15 +572,16 @@ pub async fn assign(
         return Err(ApiError::not_found("member_not_found"));
     }
     auth.outrank(&target)?;
-    let current: Vec<String> = query_scalar("SELECT role_id FROM member_roles WHERE person_id = ?")
-        .bind(person.as_slice())
-        .fetch_all(&mut *tx)
-        .await?;
+    let current: Vec<String> =
+        query_scalar("SELECT role_id FROM member_roles WHERE person_id = ? ORDER BY role_id")
+            .bind(person.as_slice())
+            .fetch_all(&mut *tx)
+            .await?;
     // Taking a role away needs the same right as giving it; roles kept as they
     // are pass, so you can change someone's other roles.
-    let added = ids.iter().filter(|id| !current.contains(id));
-    let removed = current.iter().filter(|id| !ids.contains(id));
-    for id in added.chain(removed) {
+    let added: Vec<&String> = ids.iter().filter(|id| !current.contains(id)).collect();
+    let removed: Vec<&String> = current.iter().filter(|id| !ids.contains(id)).collect();
+    for id in added.iter().chain(&removed) {
         let role = by_id(&mut tx, id).await?;
         retained_permissions(&mut tx, &actor.person, &auth, &role).await?;
     }
@@ -597,12 +598,13 @@ pub async fn assign(
             .await?;
     }
     keys::lost_channels(&mut tx, &person, before).await?;
-    audit(
+    audit_details(
         &mut tx,
         &actor.person,
         "member_roles_changed",
         Some(&person),
         None,
+        Some(serde_json::json!({ "added": added, "removed": removed })),
         actor.at,
     )
     .await?;
@@ -881,6 +883,15 @@ mod tests {
         let saved = assign_as(1, &["member", "inviter"]).await?;
         assert_eq!(saved, StatusCode::NO_CONTENT);
         assert_eq!(held().await?, ["inviter", "member"]);
+        let details: String = query_scalar(
+            "SELECT details FROM audit_log WHERE action = 'member_roles_changed' ORDER BY id DESC",
+        )
+        .fetch_one(&app.db)
+        .await?;
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&details)?,
+            serde_json::json!({ "added": ["inviter", "member"], "removed": ["helper", "moderator"] })
+        );
         Ok(())
     }
 
