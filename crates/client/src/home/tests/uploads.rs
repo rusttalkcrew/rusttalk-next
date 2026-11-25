@@ -16,7 +16,7 @@ impl egui::DroppedFile for DropPath {
     }
 }
 
-struct ResetPicker;
+pub(super) struct ResetPicker;
 impl Drop for ResetPicker {
     fn drop(&mut self) {
         *files::TEST_ANSWER.lock().unwrap() = None;
@@ -24,7 +24,7 @@ impl Drop for ResetPicker {
 }
 
 static PICKED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
-static PICKER_TEST: Mutex<()> = Mutex::new(());
+pub(super) static PICKER_TEST: Mutex<()> = Mutex::new(());
 
 #[test]
 fn oversized_stored_picker_feedback() {

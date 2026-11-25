@@ -22,6 +22,7 @@ Unreleased under the new version and date.
 - Right-clicking (or long-pressing) a message's words or links now opens the message menu, like the rest of the message.
 - Channel managers no longer see empty categories in the channel list; "Show empty categories" in the server menu brings them back for editing.
 - Admins can preview the server as one or more of their own roles ("View server as this role" in Roles): channels, categories and buttons show as those roles would see them, and nothing can be changed while previewing.
+- The emoji or sticker name you typed in Server settings now stays when you cancel picking a picture or the upload fails.
 
 ## v0.5.0 - 2026-11-25
 
