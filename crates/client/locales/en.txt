@@ -471,6 +471,7 @@ admin.revoke_title = Revoke this invite?
 admin.revoke_help = The link stops working right away. People who already joined stay.
 admin.no_bans = Nobody is banned.
 admin.unban = Unban
+admin.unban_outranked = Someone with the same or a higher role placed this ban.
 admin.everything = Everything
 admin.show = Show
 admin.audit_help = What the server's admins did, newest first.

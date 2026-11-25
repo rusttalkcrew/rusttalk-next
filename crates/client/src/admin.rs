@@ -1242,7 +1242,11 @@ fn bans_tab(ui: &mut Ui, server: &Server, settings: &Settings) -> Option<Admin> 
         let name = server.member_name(&ban.person);
         ui.push_id(ban.person, |ui| {
             ui::setting_row(ui, &name, &when, |ui| {
-                if ui::secondary(ui, t!("admin.unban")).clicked() {
+                let unban = ui
+                    .add_enabled_ui(ban.can_lift, |ui| ui::secondary(ui, t!("admin.unban")))
+                    .inner
+                    .on_disabled_hover_text(t!("admin.unban_outranked"));
+                if unban.clicked() {
                     request = Some(Admin::Unban(ban.person));
                 }
             });

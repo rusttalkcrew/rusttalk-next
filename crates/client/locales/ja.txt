@@ -468,6 +468,7 @@ admin.revoke_title = この招待を取り消しますか?
 admin.revoke_help = リンクはすぐに使えなくなります。すでに参加した人はそのまま残ります。
 admin.no_bans = BAN されている人はいません。
 admin.unban = BAN を解除
+admin.unban_outranked = 同じかより上位のロールのメンバーがこの BAN を設定しました。
 admin.everything = すべて
 admin.show = 表示
 admin.audit_help = サーバーの管理者が行った操作です。新しい順に表示されます。
