@@ -15,6 +15,7 @@ Unreleased under the new version and date.
 - Using RustTalk on several devices: an idle phone no longer sets you Away while you use your computer. You show as Away only when all your devices are idle, and a status you pick on one device applies on all of them.
 - New status: Do not disturb. Others see a red dot with a bar, and none of your devices show notifications or play message sounds while it is on (unread counts still update).
 - Apps someone shares sound from show under them in the voice channel: click (or tap) one to listen and set its volume, and small bars move while it plays.
+- You no longer turn "Away" while you use other apps: on computers, any keyboard or mouse use counts, not just input in RustTalk.
 
 ## v0.5.0 - 2026-11-25
 

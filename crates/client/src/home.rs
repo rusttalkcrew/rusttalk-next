@@ -83,6 +83,14 @@ pub(crate) const STICKER_SIZE: f32 = 160.0;
 /// picture or a link preview.
 const MAX_FOREIGN: usize = 3;
 
+/// Whether this device counts as idle: no input in the app or a call (`active`) and
+/// none anywhere on the computer for a while. `in_app` is the seconds since the last
+/// input in the app, `system` the seconds since the last input anywhere when the
+/// system tells; without it only the app's input counts.
+fn device_idle(active: bool, in_app: f64, system: Option<f64>) -> bool {
+    !active && system.map_or(in_app, |idle| idle.min(in_app)) > AWAY_AFTER
+}
+
 /// What the cards under messages need: joined servers for invites, and link previews.
 struct Embeds<'a> {
     servers: &'a [Server],
@@ -183,6 +191,8 @@ pub struct Home {
     status_unsent: HashSet<url::Url>,
     /// When the person last used the window, in egui time.
     active_at: f64,
+    /// How long the whole computer has been without input, so using other apps counts.
+    system_idle: crate::idle::SystemIdle,
     pub layout: layout::Layout,
     pub notify: Notify,
     /// The window has focus: the open channel counts as read.
@@ -441,6 +451,7 @@ impl Home {
             idle: false,
             status_unsent: HashSet::new(),
             active_at: 0.0,
+            system_idle: crate::idle::SystemIdle::start(),
             layout,
             notify: Notify::open(&data_dir, notify::unix_now()),
             focused: true,
@@ -487,12 +498,10 @@ impl Home {
         let (now, input) = ui.input(|input| (input.time, !input.events.is_empty()));
         // In a call people talk while another app has the focus, so the call counts as activity.
         let active = input || self.voice.call.is_some();
-        let idle = if active {
+        if active {
             self.active_at = now;
-            false
-        } else {
-            self.idle || now - self.active_at > AWAY_AFTER
-        };
+        }
+        let idle = device_idle(active, now - self.active_at, self.system_idle.seconds());
         if idle != self.idle {
             self.idle = idle;
             for server in &self.servers {
@@ -7302,6 +7311,30 @@ fn text_footer(ui: &mut Ui, confirm: &str, mut done: bool, close: &mut bool) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn using_other_apps_keeps_this_device_active() {
+        let long = AWAY_AFTER + 1.0;
+        // No input in the app for long, but some elsewhere a minute ago.
+        assert!(!device_idle(false, long, Some(60.0)));
+        // No input anywhere for long.
+        assert!(device_idle(false, long, Some(long)));
+        // The system reading can lag behind input in the app.
+        assert!(!device_idle(false, 5.0, Some(long)));
+        // Without the system's idle time only the app's input counts, as before.
+        assert!(device_idle(false, long, None));
+        assert!(!device_idle(false, 60.0, None));
+    }
+
+    #[test]
+    fn input_anywhere_ends_idle() {
+        let long = AWAY_AFTER + 1.0;
+        // Back in another app, with the RustTalk window untouched.
+        assert!(!device_idle(false, long, Some(3.0)));
+        // Input in the app or a call always counts.
+        assert!(!device_idle(true, long, Some(long)));
+        assert!(!device_idle(true, long, None));
+    }
 
     #[test]
     fn only_its_own_toast_uses_up_the_unsent_notice() {

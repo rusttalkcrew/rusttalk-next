@@ -6854,6 +6854,7 @@ dependencies = [
  "objc2-app-kit 0.3.2",
  "objc2-avf-audio",
  "objc2-core-foundation",
+ "objc2-core-graphics",
  "objc2-foundation 0.3.2",
  "objc2-quartz-core 0.3.2",
  "objc2-ui-kit 0.3.2",
@@ -6889,6 +6890,7 @@ dependencies = [
  "wl-clipboard-rs",
  "x11-clipboard",
  "x11rb",
+ "zbus 5.19.0",
  "zeroize",
  "zip",
 ]

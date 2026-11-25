@@ -95,7 +95,11 @@ smithay-clipboard = "0.7"
 # Pasting: the window reads only text, these read any format the copying app offers.
 wl-clipboard-rs = "0.9"
 x11-clipboard = "0.9"
-x11rb = "0.13"
+# The screen saver extension: how long X11 has had no input, for "Away" (src/idle.rs).
+x11rb = { version = "0.13", features = ["screensaver"] }
+# The session bus, for the desktop's idle time under Wayland (src/idle.rs). Already
+# built for AccessKit and the secret service.
+zbus = "5"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Pasting: the pasteboard's picture formats and copied files, and TIFF as PNG.
@@ -104,6 +108,8 @@ objc2-app-kit = { version = "0.3", default-features = false, features = ["std", 
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSBundle", "NSData", "NSDictionary", "NSError", "NSString"] }
 # Notifications whose click opens the chat (see src/notify/macos.rs).
 block2 = "0.6"
+# How long the computer has had no input, for "Away" (src/idle.rs).
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGEventSource", "CGEventTypes"] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSound", "UNNotificationTrigger", "UNUserNotificationCenter"] }
 
 # Desktop-only: phones have none of these, or need their own (see docs/mobile.md).
@@ -154,8 +160,9 @@ arboard = { version = "3.7", default-features = false, features = ["wayland-data
 # Pasting: registered picture formats and copied files, and bitmaps as a last resort.
 arboard = { version = "3.7", default-features = false, features = ["image-data"] }
 clipboard-win = "5.4"
-# A job object, so a shared shell's processes end with the share.
-windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+# A job object, so a shared shell's processes end with the share; the time of the
+# last input, for "Away" (src/idle.rs).
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse"] }
 
 [dev-dependencies]
 # Drives the window off-screen, to click rows and buttons in tests.
