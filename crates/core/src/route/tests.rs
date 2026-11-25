@@ -382,11 +382,12 @@ fn missing_credentials_fail_closed_and_block_traffic() {
         ..Default::default()
     };
     let err = apply(cfg, RouteSecrets::default()).unwrap_err();
-    assert!(matches!(err, RouteError::Blocked(_)));
+    assert!(matches!(err, RouteError::MissingSecret(_)));
     assert!(matches!(
         snapshot().status,
         RouteStatus::Blocked {
             kind: RouteKind::Socks5,
+            problem: RouteProblem::SecretMissing,
             ..
         }
     ));
@@ -394,6 +395,55 @@ fn missing_credentials_fail_closed_and_block_traffic() {
     assert!(allow_realtime_media("Voice calls").is_err());
     assert!(allow_sip().is_err());
     reset_direct();
+}
+
+#[test]
+fn route_errors_map_to_problems() {
+    let cases = [
+        (RouteError::Blocked("x".into()), RouteProblem::Blocked),
+        (
+            RouteError::MissingSecret("x".into()),
+            RouteProblem::SecretMissing,
+        ),
+        (RouteError::Auth("x".into()), RouteProblem::SignInRefused),
+        (
+            RouteError::Config("x".into()),
+            RouteProblem::InvalidSettings,
+        ),
+        (RouteError::Transport("x".into()), RouteProblem::Unreachable),
+        (
+            RouteError::Unsupported {
+                feature: "Voice calls",
+                kind: RouteKind::Tor,
+                reason: "x".into(),
+            },
+            RouteProblem::Unsupported,
+        ),
+    ];
+    for (err, problem) in cases {
+        assert_eq!(err.problem(), problem, "{err}");
+    }
+}
+
+#[test]
+fn unreachable_proxy_is_a_transport_error() {
+    // Bind then drop a listener so the port is closed and connecting is refused.
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let cfg = RouteConfig {
+        kind: RouteKind::Tor,
+        tor: TorConfig {
+            host: "127.0.0.1".into(),
+            port,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let err = test_route(&cfg, &RouteSecrets::default()).unwrap_err();
+    assert_eq!(err.problem(), RouteProblem::Unreachable, "{err}");
 }
 
 #[test]
@@ -430,11 +480,15 @@ async fn socks5h_routes_https_ws_remote_dns_pins_and_blocks_on_failure_without_d
         socks5_password: Some(Zeroizing::new("wrong-password".into())),
         ..Default::default()
     };
-    assert!(apply(bad_cfg.clone(), bad_sec).is_err());
+    assert!(matches!(
+        apply(bad_cfg.clone(), bad_sec),
+        Err(RouteError::Auth(_))
+    ));
     assert!(matches!(
         snapshot().status,
         RouteStatus::Blocked {
             kind: RouteKind::Socks5,
+            problem: RouteProblem::SignInRefused,
             ..
         }
     ));

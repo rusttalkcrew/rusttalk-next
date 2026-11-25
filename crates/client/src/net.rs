@@ -2826,21 +2826,21 @@ async fn on_command(
         }
         Command::SendLive(channel, path) => {
             if let Err(error) = rusttalk_core::route::allow_realtime_media("Live file transfers") {
-                ctx.send(Update::Failed(error.to_string()));
+                ctx.send(Update::Failed(crate::route::media_error(&error)));
                 return Ok(());
             }
             voice::offer_chat_file(ctx, url, client, state, channel, path).await?;
         }
         Command::AcceptFile(id, path) if state.transfers.get(&id).is_some_and(|t| t.chat) => {
             if let Err(error) = rusttalk_core::route::allow_realtime_media("Live file transfers") {
-                ctx.send(Update::Failed(error.to_string()));
+                ctx.send(Update::Failed(crate::route::media_error(&error)));
                 return Ok(());
             }
             voice::accept_chat_file(ctx, client, state, id, path).await?;
         }
         Command::AcceptFile(id, path) => {
             if let Err(error) = rusttalk_core::route::allow_realtime_media("Live file transfers") {
-                ctx.send(Update::Failed(error.to_string()));
+                ctx.send(Update::Failed(crate::route::media_error(&error)));
                 return Ok(());
             }
             voice::accept_file(ctx, client, state, id, path).await?;
@@ -2989,7 +2989,7 @@ async fn on_command(
         Command::JoinVoice(channel) => {
             if let Err(error) = rusttalk_core::route::allow_realtime_media("Voice calls") {
                 ctx.send(Update::Call(url.clone(), channel, None));
-                ctx.send(Update::Failed(error.to_string()));
+                ctx.send(Update::Failed(crate::route::media_error(&error)));
                 return Ok(());
             }
             voice::start_call(ctx, url, client, state, channel).await?;

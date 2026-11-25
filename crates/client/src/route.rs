@@ -17,8 +17,8 @@ use eframe::egui::{
 use rusttalk_core::{
     client::save_json,
     route::{
-        self, RouteConfig, RouteError, RouteKind, RouteSecrets, RouteSnapshot, RouteStatus,
-        WireGuardConfig,
+        self, RouteConfig, RouteError, RouteKind, RouteProblem, RouteSecrets, RouteSnapshot,
+        RouteStatus, WireGuardConfig,
     },
 };
 use zeroize::Zeroizing;
@@ -105,7 +105,7 @@ pub fn init(data: &Path, service: &str) -> InitState {
                 Ok(secrets) => secrets,
                 Err(error) => {
                     tracing::warn!(error = %format_args!("{error:#}"), "loading route secrets failed");
-                    route::set_blocked(config, t!("route.secrets_unavailable"));
+                    route::set_blocked(config, RouteProblem::SecretMissing, format!("{error:#}"));
                     return InitState::Ready;
                 }
             };
@@ -121,7 +121,11 @@ pub fn init(data: &Path, service: &str) -> InitState {
         }
         Err(error) => {
             tracing::error!(error = %format_args!("{error:#}"), "reading route.json failed");
-            route::set_blocked(RouteConfig::default(), t!("route.config_unreadable"));
+            route::set_blocked(
+                RouteConfig::default(),
+                RouteProblem::InvalidSettings,
+                format!("{error:#}"),
+            );
             InitState::Ready
         }
     }
@@ -149,7 +153,11 @@ pub fn init_blocking(data: &Path, service: &str) -> Result<()> {
         Ok(config) => config,
         Err(error) => {
             tracing::error!(error = %format_args!("{error:#}"), "reading route.json failed");
-            route::set_blocked(RouteConfig::default(), t!("route.config_unreadable"));
+            route::set_blocked(
+                RouteConfig::default(),
+                RouteProblem::InvalidSettings,
+                format!("{error:#}"),
+            );
             return Err(error.context("read saved network route"));
         }
     };
@@ -161,7 +169,7 @@ pub fn init_blocking(data: &Path, service: &str) -> Result<()> {
         Ok(secrets) => secrets,
         Err(error) => {
             tracing::warn!(error = %format_args!("{error:#}"), "loading route secrets failed");
-            route::set_blocked(config, t!("route.secrets_unavailable"));
+            route::set_blocked(config, RouteProblem::SecretMissing, format!("{error:#}"));
             return Err(error.context("load saved network route credentials"));
         }
     };
@@ -483,11 +491,68 @@ pub fn forget(ctx: &egui::Context) {
     });
 }
 
+/// A short, friendly message plus the technical text behind a "Details" expander.
+#[derive(Debug, PartialEq)]
+struct Failure {
+    message: String,
+    details: Option<String>,
+}
+
+impl Failure {
+    fn plain(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            details: None,
+        }
+    }
+
+    fn route(err: &RouteError, kind: RouteKind) -> Self {
+        Self {
+            message: error_message(err, kind),
+            details: Some(err.to_string()),
+        }
+    }
+}
+
+/// Short, translated message for a route problem. The technical text stays in logs
+/// and behind "Details" so people never see raw OS errors in English.
+pub fn problem_message(problem: RouteProblem, kind: RouteKind) -> String {
+    match problem {
+        RouteProblem::Unreachable => match kind {
+            RouteKind::Tor => t!("route.err_tor_unreachable"),
+            RouteKind::WireGuard => t!("route.err_wireguard_unreachable"),
+            RouteKind::Socks5 | RouteKind::Direct => t!("route.err_proxy_unreachable"),
+        }
+        .to_owned(),
+        RouteProblem::SignInRefused => t!("route.err_sign_in").to_owned(),
+        RouteProblem::SecretMissing => t!("route.err_secret_missing").to_owned(),
+        RouteProblem::InvalidSettings => t!("route.err_settings").to_owned(),
+        RouteProblem::Unsupported => t!("route.err_unsupported", route = kind_label(kind)),
+        RouteProblem::Blocked => t!("route.err_blocked").to_owned(),
+    }
+}
+
+/// Friendly message for a route error, using the error's own route for unsupported features.
+pub fn error_message(err: &RouteError, kind: RouteKind) -> String {
+    let kind = match err {
+        RouteError::Unsupported { kind, .. } => *kind,
+        _ => kind,
+    };
+    problem_message(err.problem(), kind)
+}
+
+/// Message for a call or live transfer that the active route does not allow, logged with
+/// the technical reason.
+pub fn media_error(err: &RouteError) -> String {
+    tracing::warn!(error = %err, "blocked by the network route");
+    error_message(err, route::snapshot().config.kind)
+}
+
 enum JobOutcome {
-    Test(Result<String, String>),
+    Test(Result<(), Failure>),
     Apply {
         config: Box<RouteConfig>,
-        result: Result<String, String>,
+        result: Result<String, Failure>,
         save_error: Option<String>,
         notice: Option<String>,
     },
@@ -517,7 +582,7 @@ pub struct RouteEditor {
     clear_wg_preshared_key: bool,
     job: Option<PendingJob>,
     test_ok: Option<String>,
-    error: Option<String>,
+    error: Option<Failure>,
     notice: Option<String>,
     synced_generation: u64,
 }
@@ -566,7 +631,7 @@ impl RouteEditor {
         }
     }
 
-    fn build_candidate(&self) -> Result<(RouteConfig, RouteSecrets), String> {
+    fn build_candidate(&self) -> Result<(RouteConfig, RouteSecrets), Failure> {
         let mut cfg = self.draft.clone();
         cfg.socks5.host = cfg.socks5.host.trim().to_owned();
         cfg.socks5.username = cfg.socks5.username.trim().to_owned();
@@ -582,7 +647,7 @@ impl RouteEditor {
                 .parse::<u16>()
                 .ok()
                 .filter(|&p| p > 0)
-                .ok_or_else(|| t!("route.bad_port").to_owned())?;
+                .ok_or_else(|| Failure::plain(t!("route.bad_port")))?;
         }
         if cfg.kind == RouteKind::Tor {
             cfg.tor.port = self
@@ -591,7 +656,7 @@ impl RouteEditor {
                 .parse::<u16>()
                 .ok()
                 .filter(|&p| p > 0)
-                .ok_or_else(|| t!("route.bad_port").to_owned())?;
+                .ok_or_else(|| Failure::plain(t!("route.bad_port")))?;
         }
         if cfg.kind == RouteKind::WireGuard {
             cfg.wireguard.addresses = split_csv(&self.wg_addresses);
@@ -603,7 +668,7 @@ impl RouteEditor {
                 self.wg_mtu
                     .trim()
                     .parse::<u16>()
-                    .map_err(|_| t!("route.bad_mtu").to_owned())?
+                    .map_err(|_| Failure::plain(t!("route.bad_mtu")))?
                     .clamp(576, 1500)
             };
             cfg.wireguard.persistent_keepalive = if self.wg_keepalive.trim().is_empty() {
@@ -613,7 +678,7 @@ impl RouteEditor {
                     .wg_keepalive
                     .trim()
                     .parse::<u16>()
-                    .map_err(|_| t!("route.bad_keepalive").to_owned())?;
+                    .map_err(|_| Failure::plain(t!("route.bad_keepalive")))?;
                 (secs > 0).then_some(secs)
             };
         }
@@ -674,7 +739,10 @@ impl RouteEditor {
                 .is_some_and(|s| !s.is_empty());
         }
 
-        route::validate(&cfg, &secrets).map_err(|e| e.to_string())?;
+        route::validate(&cfg, &secrets).map_err(|err| {
+            tracing::info!(route = cfg.kind.label(), error = %err, "network route settings rejected");
+            Failure::route(&err, cfg.kind)
+        })?;
         Ok((cfg, secrets))
     }
 
@@ -694,7 +762,10 @@ impl RouteEditor {
         let _ = std::thread::Builder::new()
             .name("rusttalk-route-test".into())
             .spawn(move || {
-                let res = route::test_route(&cfg, &secrets).map_err(|e| e.to_string());
+                let res = route::test_route(&cfg, &secrets).map_err(|err| {
+                    tracing::warn!(route = cfg.kind.label(), error = %err, "network route test failed");
+                    Failure::route(&err, cfg.kind)
+                });
                 let _ = tx.send(JobOutcome::Test(res));
                 egui.request_repaint();
             });
@@ -705,6 +776,7 @@ impl RouteEditor {
         self.error = None;
         self.test_ok = None;
         self.notice = None;
+        let kind = cfg.kind;
         let cfg_bg = cfg.clone();
         let secrets_bg = secrets.clone();
         let store = store_ctx();
@@ -739,7 +811,7 @@ impl RouteEditor {
                 }
                 let res = route::apply(cfg_bg, secrets_bg)
                     .map(|snap| snap.config.endpoint_summary())
-                    .map_err(|e| e.to_string());
+                    .map_err(|err| Failure::route(&err, kind));
                 let _ = tx.send(JobOutcome::Apply {
                     config: Box::new(cfg),
                     result: res,
@@ -761,7 +833,10 @@ impl RouteEditor {
                 self.job = None;
                 match outcome {
                     JobOutcome::Test(result) => match result {
-                        Ok(msg) => self.test_ok = Some(msg),
+                        Ok(()) => {
+                            let route = kind_label(self.draft.kind);
+                            self.test_ok = Some(t!("route.test_ok", route = route));
+                        }
                         Err(err) => self.error = Some(err),
                     },
                     JobOutcome::Apply {
@@ -787,7 +862,7 @@ impl RouteEditor {
                         match result {
                             Ok(_) => {
                                 if let Some(err) = save_error {
-                                    self.error = Some(err);
+                                    self.error = Some(Failure::plain(err));
                                 } else {
                                     self.test_ok = Some(t!("route.applied").to_owned());
                                 }
@@ -806,7 +881,8 @@ impl RouteEditor {
             }
             Err(mpsc::TryRecvError::Disconnected) => {
                 self.job = None;
-                self.error = Some(t!("route.worker_stopped").to_owned());
+                tracing::error!("network route worker stopped unexpectedly");
+                self.error = Some(Failure::plain(t!("route.worker_stopped")));
             }
         }
         false
@@ -835,7 +911,8 @@ impl RouteEditor {
                 self.notice = Some(t!("route.wg_imported").to_owned());
             }
             Err(err) => {
-                self.error = Some(err.to_string());
+                tracing::info!(error = %err, "WireGuard .conf import rejected");
+                self.error = Some(Failure::route(&err, RouteKind::WireGuard));
             }
         }
     }
@@ -1030,7 +1107,9 @@ impl RouteEditor {
         if let Some(notice) = &self.notice {
             ui.label(RichText::new(notice).color(c.warning));
         }
-        error_text(ui, self.error.as_deref());
+        if let Some(err) = &self.error {
+            failure(ui, "route-feedback-details", err);
+        }
     }
 }
 
@@ -1092,9 +1171,21 @@ pub fn settings_page(ui: &mut Ui, editor: &mut RouteEditor) -> bool {
                 ui.label(RichText::new(detail).color(c.muted));
             }
         });
-        if let RouteStatus::Blocked { reason, .. } = &snap.status {
+        if let RouteStatus::Blocked {
+            kind,
+            problem,
+            reason,
+        } = &snap.status
+        {
             ui.add_space(SPACE_XS);
-            ui.label(RichText::new(reason).color(c.danger_text));
+            failure(
+                ui,
+                "route-status-details",
+                &Failure {
+                    message: problem_message(*problem, *kind),
+                    details: Some(reason.clone()),
+                },
+            );
             ui.add_space(SPACE_S);
             ui.horizontal(|ui| {
                 if ui::secondary(ui, t!("route.retry")).clicked() && editor.job.is_none() {
@@ -1170,13 +1261,13 @@ pub fn status_banner(ui: &mut Ui) -> bool {
                 c.strong,
             )
         }
-        RouteStatus::Blocked { kind, reason } => {
+        RouteStatus::Blocked { kind, problem, .. } => {
             let c = ui::colors(ui);
             (
                 t!(
                     "route.banner_blocked",
                     route = kind_label(*kind),
-                    reason = reason
+                    reason = problem_message(*problem, *kind)
                 ),
                 c.main.lerp_to_gamma(c.danger, 0.2),
                 c.danger_text,
@@ -1214,6 +1305,17 @@ pub fn status_banner(ui: &mut Ui) -> bool {
     ui.painter()
         .hline(rect.x_range(), rect.bottom(), Stroke::new(1.0, c.border));
     open_settings
+}
+
+/// Friendly error text with the raw technical text in a collapsed "Details" section.
+fn failure(ui: &mut Ui, id: &str, failure: &Failure) {
+    error_text(ui, Some(&failure.message));
+    if let Some(details) = &failure.details {
+        CollapsingHeader::new(t!("common.details"))
+            .id_salt(id)
+            .default_open(false)
+            .show(ui, |ui| ui.label(ui::caption(details)));
+    }
 }
 
 pub fn kind_label(kind: RouteKind) -> &'static str {
@@ -1437,7 +1539,8 @@ mod tests {
                         .expect("save onboarding screenshot");
                 }
 
-                route::set_blocked(cfg.clone(), "WireGuard handshake timed out");
+                let raw = "network route transport failed: WireGuard handshake timed out (check endpoint, firewall and keys)";
+                route::set_blocked(cfg.clone(), RouteProblem::Unreachable, raw);
                 let mut settings_editor =
                     RouteEditor::from_config(cfg.clone(), route::generation());
                 let mut harness = Harness::builder().with_size(size).build_ui(|ui| {
@@ -1462,6 +1565,14 @@ mod tests {
                 harness.step();
                 assert!(harness.query_by_label(t!("route.apply")).is_some());
                 assert!(harness.query_by_label(t!("route.switch_direct")).is_some());
+                // Friendly text shows; the raw reason waits behind a collapsed "Details".
+                assert!(
+                    harness
+                        .query_by_label(t!("route.err_wireguard_unreachable"))
+                        .is_some()
+                );
+                assert!(harness.query_by_label(t!("common.details")).is_some());
+                assert!(harness.query_by_label(raw).is_none());
                 if save_shot && let Some(out) = &save_dir {
                     let img = harness.render().expect("render settings");
                     img.save(out.join(format!("route-settings-{size_name}-{suffix}.png")))
@@ -1680,6 +1791,150 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
 
+        reset();
+    }
+
+    #[test]
+    fn route_problems_map_to_friendly_messages() {
+        let cases = [
+            (
+                RouteError::Transport("connecting to SOCKS5 proxy failed: refused".into()),
+                RouteKind::Socks5,
+                t!("route.err_proxy_unreachable").to_owned(),
+            ),
+            (
+                RouteError::Transport("connecting to SOCKS5 proxy failed: refused".into()),
+                RouteKind::Tor,
+                t!("route.err_tor_unreachable").to_owned(),
+            ),
+            (
+                RouteError::Transport("WireGuard handshake timed out".into()),
+                RouteKind::WireGuard,
+                t!("route.err_wireguard_unreachable").to_owned(),
+            ),
+            (
+                RouteError::Auth("SOCKS5 proxy rejected the username or password".into()),
+                RouteKind::Socks5,
+                t!("route.err_sign_in").to_owned(),
+            ),
+            (
+                RouteError::MissingSecret("SOCKS5 password is missing".into()),
+                RouteKind::Socks5,
+                t!("route.err_secret_missing").to_owned(),
+            ),
+            (
+                RouteError::Config("SOCKS5 host is required".into()),
+                RouteKind::Socks5,
+                t!("route.err_settings").to_owned(),
+            ),
+            (
+                RouteError::Blocked("waiting for the selected network route to connect".into()),
+                RouteKind::Tor,
+                t!("route.err_blocked").to_owned(),
+            ),
+            (
+                // The unsupported route comes from the error, not the caller.
+                RouteError::Unsupported {
+                    feature: "Voice calls",
+                    kind: RouteKind::Tor,
+                    reason: "Tor supports TCP only".into(),
+                },
+                RouteKind::Direct,
+                t!("route.err_unsupported", route = t!("route.tor")),
+            ),
+        ];
+        for (err, kind, message) in cases {
+            assert_eq!(error_message(&err, kind), message, "{err}");
+            let failure = Failure::route(&err, kind);
+            assert_eq!(failure.details, Some(err.to_string()));
+        }
+    }
+
+    #[test]
+    fn failed_test_shows_friendly_message_with_details_collapsed() {
+        let _guard = ROUTE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset();
+        // A port nobody listens on, so the proxy refuses the connection.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let mut cfg = RouteConfig {
+            kind: RouteKind::Socks5,
+            ..Default::default()
+        };
+        cfg.socks5.host = "127.0.0.1".into();
+        cfg.socks5.port = port;
+
+        use egui_kittest::{Harness, kittest::Queryable};
+        let save_dir = std::env::var_os("RUSTTALK_SAVE_ROUTE_SCREENSHOTS").map(PathBuf::from);
+        for (size, size_name) in [
+            (egui::vec2(1100.0, 700.0), "desktop"),
+            (egui::vec2(390.0, 844.0), "phone"),
+        ] {
+            for (mode, suffix) in [(ui::Mode::Dark, "dark"), (ui::Mode::Light, "light")] {
+                let mut editor = RouteEditor::from_config(cfg.clone(), route::generation());
+                let egui_ctx = egui::Context::default();
+                editor.start_test(&egui_ctx);
+                let started = std::time::Instant::now();
+                while editor.job.is_some() {
+                    assert!(started.elapsed() < Duration::from_secs(20), "test hung");
+                    editor.poll(&egui_ctx);
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                let failure = editor.error.as_ref().expect("test should fail");
+                assert_eq!(failure.message, t!("route.err_proxy_unreachable"));
+                let raw = failure.details.clone().expect("raw error kept for Details");
+                assert!(raw.contains("SOCKS5"), "{raw}");
+                let mut scroll_down = true;
+
+                let mut harness = Harness::builder().with_size(size).build_ui(|ui| {
+                    ui::install(ui.ctx());
+                    ui::apply(
+                        ui.ctx(),
+                        ui::Appearance {
+                            mode,
+                            ..Default::default()
+                        },
+                    );
+                    let c = ui::colors(ui);
+                    egui::CentralPanel::default()
+                        .frame(Frame::new().fill(c.main).inner_margin(Margin::same(16)))
+                        .show(ui, |ui| {
+                            // The feedback sits below the form: scroll down once (egui clamps
+                            // the offset on the next frame) so it is in view.
+                            let mut area = egui::ScrollArea::vertical();
+                            if std::mem::take(&mut scroll_down) {
+                                area = area.vertical_scroll_offset(10_000.0);
+                            }
+                            area.show(ui, |ui| {
+                                let _ = settings_page(ui, &mut editor);
+                            });
+                        });
+                });
+                harness.run_steps(4);
+                assert!(
+                    harness
+                        .query_by_label(t!("route.err_proxy_unreachable"))
+                        .is_some()
+                );
+                assert!(harness.query_by_label(&raw).is_none());
+                if let Some(out) = &save_dir {
+                    let img = harness.render().expect("render failed test");
+                    img.save(out.join(format!("route-test-failed-{size_name}-{suffix}.png")))
+                        .expect("save failed-test screenshot");
+                }
+                harness.get_by_label(t!("common.details")).click();
+                harness.run_steps(3);
+                assert!(harness.query_by_label(&raw).is_some());
+                if let Some(out) = &save_dir {
+                    let img = harness.render().expect("render failed test details");
+                    img.save(out.join(format!("route-test-details-{size_name}-{suffix}.png")))
+                        .expect("save details screenshot");
+                }
+            }
+        }
         reset();
     }
 }

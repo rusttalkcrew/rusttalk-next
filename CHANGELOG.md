@@ -35,6 +35,7 @@ Unreleased under the new version and date.
 - The Members list in server settings is readable on phones: names get the row, roles sit under them and the presence dot moves onto the picture.
 - Dialogs no longer get cut off on short windows: they scroll, phones held sideways show them full screen, and the close button is easier to tap on tablets.
 - Server settings > Joining: Save lights up only after a change, and the page shows fresh values when you come back. Phones no longer list Shortcuts and call themselves "This device".
+- Network route problems (proxy, Tor or WireGuard) now show short, translated messages like "Couldn't reach the proxy", with the technical text under Details.
 
 ## v0.4.0 - 2026-11-24
 

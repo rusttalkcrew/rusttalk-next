@@ -401,7 +401,12 @@ pub enum RouteStatus {
     /// Route is active and carrying RustTalk traffic.
     Active { kind: RouteKind, detail: String },
     /// Route failed or is missing credentials; all outbound app traffic is blocked.
-    Blocked { kind: RouteKind, reason: String },
+    /// `reason` is the technical detail (logs, Details); `problem` drives the friendly message.
+    Blocked {
+        kind: RouteKind,
+        problem: RouteProblem,
+        reason: String,
+    },
 }
 
 impl RouteStatus {
@@ -427,11 +432,33 @@ pub struct RouteSnapshot {
     pub status: RouteStatus,
 }
 
+/// What went wrong with a route, in coarse terms an app can turn into a short,
+/// translated message. The technical detail stays in [`RouteError`]'s text.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RouteProblem {
+    /// The proxy, Tor or WireGuard server could not be reached or stopped answering.
+    Unreachable,
+    /// The proxy rejected the username or password.
+    SignInRefused,
+    /// A saved password or key is missing from secure storage.
+    SecretMissing,
+    /// The route settings are invalid or could not be read.
+    InvalidSettings,
+    /// The feature cannot run over the active app-only route (voice, video, SIP).
+    Unsupported,
+    /// Traffic is held: no route chosen yet, still connecting, or the route is down.
+    Blocked,
+}
+
 /// Errors returned when a route blocks traffic, is misconfigured, or does not support a feature.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum RouteError {
     #[error("network route is blocked: {0}")]
     Blocked(String),
+    #[error("network route is blocked: {0}")]
+    MissingSecret(String),
+    #[error("network route sign-in failed: {0}")]
+    Auth(String),
     #[error("{feature} is unavailable while routing through {}: {reason}", kind.label())]
     Unsupported {
         feature: &'static str,
@@ -442,6 +469,19 @@ pub enum RouteError {
     Config(String),
     #[error("network route transport failed: {0}")]
     Transport(String),
+}
+
+impl RouteError {
+    pub fn problem(&self) -> RouteProblem {
+        match self {
+            Self::Blocked(_) => RouteProblem::Blocked,
+            Self::MissingSecret(_) => RouteProblem::SecretMissing,
+            Self::Auth(_) => RouteProblem::SignInRefused,
+            Self::Unsupported { .. } => RouteProblem::Unsupported,
+            Self::Config(_) => RouteProblem::InvalidSettings,
+            Self::Transport(_) => RouteProblem::Unreachable,
+        }
+    }
 }
 
 /// A TCP byte stream established through the active route.
@@ -639,13 +679,18 @@ pub fn set_connecting(config: RouteConfig) -> u64 {
 }
 
 /// Mark the selected route as blocked with a clear reason (never falling back to Direct).
-pub fn set_blocked(config: RouteConfig, reason: impl Into<String>) -> RouteSnapshot {
+pub fn set_blocked(
+    config: RouteConfig,
+    problem: RouteProblem,
+    reason: impl Into<String>,
+) -> RouteSnapshot {
     let reason = reason.into();
     let (snap, old_backend) = {
         let mut guard = CONTROLLER.inner.lock().expect("route lock");
         guard.generation += 1;
         guard.status = RouteStatus::Blocked {
             kind: config.kind,
+            problem,
             reason: reason.clone(),
         };
         guard.config = config;
@@ -676,6 +721,7 @@ pub fn fail_active(expected_generation: u64, reason: impl Into<String>) {
         guard.generation += 1;
         guard.status = RouteStatus::Blocked {
             kind: guard.config.kind,
+            problem: RouteProblem::Unreachable,
             reason: reason.clone(),
         };
         let old = std::mem::replace(&mut guard.backend, ActiveBackend::Blocked(reason));
@@ -721,11 +767,11 @@ pub fn validate(config: &RouteConfig, secrets: &RouteSecrets) -> Result<(), Rout
 }
 
 /// Test a candidate route without disturbing the currently active route.
-/// Returns a short status detail on success.
-pub fn test_route(config: &RouteConfig, secrets: &RouteSecrets) -> Result<String, RouteError> {
+/// Apps show their own translated "it works" message.
+pub fn test_route(config: &RouteConfig, secrets: &RouteSecrets) -> Result<(), RouteError> {
     validate(config, secrets)?;
     match config.kind {
-        RouteKind::Direct => Ok("Direct connection ready".into()),
+        RouteKind::Direct => {}
         RouteKind::Socks5 => {
             let auth = build_socks_auth(
                 &config.socks5.username,
@@ -738,10 +784,6 @@ pub fn test_route(config: &RouteConfig, secrets: &RouteSecrets) -> Result<String
             run_one_shot(
                 async move { probe_socks5(&host, port, auth.as_ref(), PROBE_TIMEOUT).await },
             )?;
-            Ok(format!(
-                "SOCKS5 proxy reachable at {}",
-                format_host_port(&config.socks5.host, config.socks5.port)
-            ))
         }
         RouteKind::Tor => {
             let auth = build_socks_auth(
@@ -755,10 +797,6 @@ pub fn test_route(config: &RouteConfig, secrets: &RouteSecrets) -> Result<String
             run_one_shot(
                 async move { probe_socks5(&host, port, auth.as_ref(), PROBE_TIMEOUT).await },
             )?;
-            Ok(format!(
-                "Tor SOCKS5 proxy reachable at {}",
-                format_host_port(&config.tor.host, config.tor.port)
-            ))
         }
         RouteKind::WireGuard => {
             let parsed = ParsedWireGuard::from_config(
@@ -766,12 +804,12 @@ pub fn test_route(config: &RouteConfig, secrets: &RouteSecrets) -> Result<String
                 secrets.wg_private_key.as_deref().map(String::as_str),
                 secrets.wg_preshared_key.as_deref().map(String::as_str),
             )?;
-            let endpoint = format_host_port(&parsed.endpoint_host, parsed.endpoint_port);
             let tunnel = WireGuardTunnel::start(parsed, Arc::new(|_| {}))?;
             drop(tunnel);
-            Ok(format!("WireGuard handshake succeeded with {endpoint}"))
         }
     }
+    tracing::info!(route = config.kind.label(), "network route test succeeded");
+    Ok(())
 }
 
 /// Apply a route configuration and secrets, tearing down any previous tunnel and
@@ -917,6 +955,7 @@ pub fn apply(config: RouteConfig, secrets: RouteSecrets) -> Result<RouteSnapshot
                     guard.config = config;
                     guard.status = RouteStatus::Blocked {
                         kind,
+                        problem: err.problem(),
                         reason: reason.clone(),
                     };
                     let old = std::mem::replace(&mut guard.backend, ActiveBackend::Blocked(reason));
@@ -1258,14 +1297,14 @@ fn build_socks_auth(
     let pass = password.map(|p| p.as_str()).filter(|p| !p.is_empty());
     if user.is_empty() && pass.is_none() {
         if has_password {
-            return Err(RouteError::Blocked(format!(
+            return Err(RouteError::MissingSecret(format!(
                 "{label} password is missing from secure storage. Re-enter it in Settings or switch to Direct."
             )));
         }
         return Ok(None);
     }
     if has_password && pass.is_none() {
-        return Err(RouteError::Blocked(format!(
+        return Err(RouteError::MissingSecret(format!(
             "{label} password is missing from secure storage. Re-enter it in Settings or switch to Direct."
         )));
     }
