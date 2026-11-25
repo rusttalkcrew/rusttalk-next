@@ -2488,6 +2488,7 @@ mod tests {
             key: key.clone(),
             envelope: String::new(),
             sender,
+            sender_device: [0; 32],
             commitment: made.commitment,
             excluded: Excluded::new(),
             pair_bound,
