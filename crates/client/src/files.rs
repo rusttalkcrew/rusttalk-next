@@ -218,9 +218,8 @@ pub enum Ask {
     Picture,
     /// A new server icon.
     Icon(Url),
-    /// A new server emoji or (`true`) sticker with this name, for this pack (the first
-    /// when `None`).
-    Emoji(Url, String, bool, Option<Id>),
+    /// Pictures for new server emoji or (`true`) stickers, to check before uploading.
+    Emoji(Url, bool),
     /// A .zip of pictures to import as an emoji pack.
     EmojiZip(Url),
 }
@@ -512,7 +511,11 @@ impl Files {
             };
             let single = !matches!(
                 ask,
-                Ask::Attach(..) | Ask::AttachDm(_) | Ask::PagePictures(..) | Ask::Share(..)
+                Ask::Attach(..)
+                    | Ask::AttachDm(_)
+                    | Ask::PagePictures(..)
+                    | Ask::Share(..)
+                    | Ask::Emoji(..)
             );
             let pictures = matches!(
                 ask,

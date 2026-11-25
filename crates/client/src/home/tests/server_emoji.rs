@@ -1,23 +1,53 @@
-//! Server settings > Emoji & stickers: deleting one emoji or sticker asks first, and
-//! the page fits a phone.
+//! Server settings > Emoji and > Stickers: separate pages, picked pictures checked
+//! before Upload, the editor and the pack menu, on a phone and a desktop.
 
 use super::*;
-use crate::net::Admin;
-use egui_kittest::{Harness, kittest::Queryable};
+use crate::net::{Admin, AdminUpdate};
+use egui_kittest::{
+    Harness,
+    kittest::{NodeT, Queryable, by},
+};
 
 const PACK: Id = [7; 32];
 const OTHER_PACK: Id = [9; 32];
 const PARROT: Id = [8; 32];
+const HUG: Id = [6; 32];
 
-const SIZES: [(f32, f32); 2] = [(390.0, 844.0), (1100.0, 700.0)];
+const PHONE: (f32, f32) = (390.0, 844.0);
+const DESKTOP: (f32, f32) = (1100.0, 700.0);
 
-/// The page with one emoji in "Party"; `full` also adds a second pack and fills
-/// every limit, so the upload and add-pack rows show their warnings.
+/// Where screenshots go, when asked for.
+fn shots() -> Option<PathBuf> {
+    std::env::var_os("RUSTTALK_EMOJI_SCREENSHOTS").map(PathBuf::from)
+}
+
+fn shoot(h: &mut Harness<'static, Home>, name: &str, dark: bool) {
+    if let Some(dir) = shots() {
+        let theme = if dark { "dark" } else { "light" };
+        let size = h.ctx.content_rect().size();
+        h.render()
+            .unwrap()
+            .save(dir.join(format!("{name}-{theme}-{}x{}.png", size.x, size.y)))
+            .unwrap();
+    }
+}
+
+fn picture(key: u8, side: u32, rgba: [u8; 4]) -> Picture {
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image::RgbaImage::from_pixel(side, side, image::Rgba(rgba))
+        .write_to(&mut bytes, image::ImageFormat::Png)
+        .unwrap();
+    let pixels = [rgba; 1].concat().repeat((side * side) as usize);
+    let image = ColorImage::from_rgba_unmultiplied([side as usize; 2], &pixels);
+    Picture::new([key; 32], vec![(image, 0)], Arc::new(bytes.into_inner()))
+}
+
+/// Server settings on the Emoji page (or `sticker`, Stickers) with ":party_parrot:"
+/// and the sticker ":big_hug:" in "Party", and an empty "Animals" pack.
 fn harness(
-    width: f32,
-    height: f32,
+    (width, height): (f32, f32),
     dark: bool,
-    full: bool,
+    sticker: bool,
 ) -> (
     Harness<'static, Home>,
     tokio::sync::mpsc::UnboundedReceiver<Command>,
@@ -26,26 +56,40 @@ fn harness(
     let mut home = fixture.state_mut().take().unwrap();
     let dir = &mut home.servers[0].dir;
     dir.perms.manage_emoji = true;
-    dir.emoji_max = if full { (1, 1) } else { (50, 50) };
-    dir.packs = vec![crate::server::EmojiPack {
-        id: PACK,
-        name: Some("Party".into()),
-    }];
-    if full {
-        dir.packs.push(crate::server::EmojiPack {
+    dir.emoji_max = (50, 20);
+    dir.packs = vec![
+        crate::server::EmojiPack {
+            id: PACK,
+            name: Some("Party".into()),
+        },
+        crate::server::EmojiPack {
             id: OTHER_PACK,
             name: Some("Animals".into()),
-        });
-    }
-    dir.packs_max = if full { 2 } else { 5 };
-    dir.emoji = vec![CustomEmoji {
-        id: PARROT,
-        name: "party_parrot".into(),
-        sticker: false,
-        pack: PACK,
-        picture: None,
-    }];
-    crate::admin::open(&mut home, 0, crate::admin::Tab::Emoji);
+        },
+    ];
+    dir.packs_max = 5;
+    dir.emoji = vec![
+        CustomEmoji {
+            id: PARROT,
+            name: "party_parrot".into(),
+            sticker: false,
+            pack: PACK,
+            picture: Some(picture(1, 48, [40, 180, 90, 255])),
+        },
+        CustomEmoji {
+            id: HUG,
+            name: "big_hug".into(),
+            sticker: true,
+            pack: PACK,
+            picture: Some(picture(2, 120, [220, 120, 40, 255])),
+        },
+    ];
+    let tab = if sticker {
+        crate::admin::Tab::Stickers
+    } else {
+        crate::admin::Tab::Emoji
+    };
+    crate::admin::open(&mut home, 0, tab);
     let theme = if dark {
         egui::Theme::Dark
     } else {
@@ -56,226 +100,379 @@ fn harness(
         .with_context_setup(ui::install)
         .with_theme(theme)
         .build_ui_state(
-            |ui, home: &mut Home| crate::admin::window(ui.ctx(), home),
+            |ui, home: &mut Home| {
+                crate::admin::take_drops(ui.ctx(), home);
+                crate::admin::window(ui.ctx(), home);
+            },
             home,
         );
     h.run_steps(4);
     if ui::is_phone(&h.ctx) {
         // Phones list the pages first.
-        h.get_by_label(t!("admin.emoji_stickers")).click();
+        let page = if sticker {
+            t!("admin.stickers")
+        } else {
+            t!("admin.emoji")
+        };
+        h.get_by_label(page).click();
         h.run_steps(4);
     }
     while sent.try_recv().is_ok() {}
     (h, sent)
 }
 
-fn deletes(sent: &mut tokio::sync::mpsc::UnboundedReceiver<Command>) -> usize {
+fn sent_now(sent: &mut tokio::sync::mpsc::UnboundedReceiver<Command>) -> Vec<Admin> {
     std::iter::from_fn(|| sent.try_recv().ok())
-        .filter(|cmd| matches!(cmd, Command::Admin(Admin::DeleteEmoji(PARROT))))
-        .count()
+        .filter_map(|cmd| match cmd {
+            Command::Admin(admin) => Some(admin),
+            _ => None,
+        })
+        .collect()
 }
 
-/// The emoji's own actions: under "…" on a phone, beside it on wider windows.
-fn more_label() -> String {
-    t!("admin.member_actions", name = ":party_parrot:")
+fn edit_label(name: &str) -> String {
+    t!("admin.edit_item", name = format!(":{name}:"))
 }
 
-/// Press the emoji's own Delete.
-fn ask_delete(h: &mut Harness<'static, Home>) {
-    if ui::is_phone(&h.ctx) {
-        h.get_by_label(&more_label()).click();
-        h.run();
+fn enabled(h: &Harness<'static, Home>, label: &str) -> bool {
+    !h.get(by().role(egui::accesskit::Role::Button).label(label))
+        .accesskit_node()
+        .is_disabled()
+}
+
+#[test]
+fn emoji_and_stickers_have_their_own_pages() {
+    for size in [DESKTOP, PHONE] {
+        for dark in [true, false] {
+            let (mut h, _sent) = harness(size, dark, false);
+            assert!(h.query_by_label(&edit_label("party_parrot")).is_some());
+            assert!(h.query_by_label(&edit_label("big_hug")).is_none());
+            h.get_by_label(&t!("admin.emoji_used", count = 1, max = 50));
+            shoot(&mut h, "emoji", dark);
+
+            let (mut h, _sent) = harness(size, dark, true);
+            assert!(h.query_by_label(&edit_label("big_hug")).is_some());
+            assert!(h.query_by_label(&edit_label("party_parrot")).is_none());
+            h.get_by_label(&t!("admin.stickers_used", count = 1, max = 20));
+            // Every tile and button fits the window.
+            let window = h.ctx.content_rect();
+            for label in [edit_label("big_hug"), t!("admin.pack_new").into()] {
+                let rect = h.get_by_label(&label).rect();
+                assert!(window.x_range().contains(rect.max.x), "{label}: {rect:?}");
+            }
+            shoot(&mut h, "stickers", dark);
+        }
     }
-    h.query_all_by_label(t!("common.delete"))
-        .last()
+    // Desktop: the sidebar switches between the two.
+    let (mut h, _sent) = harness(DESKTOP, true, false);
+    h.query_all_by_label(t!("admin.stickers"))
+        .next()
         .unwrap()
-        .click_accesskit();
-    h.run();
+        .click();
+    h.run_steps(4);
+    assert!(h.query_by_label(&edit_label("big_hug")).is_some());
+    assert!(h.query_by_label(&edit_label("party_parrot")).is_none());
 }
 
-#[test]
-fn deleting_an_emoji_asks_first() {
-    let question = t!("admin.emoji_delete_help", name = "party_parrot");
-    for ((width, height), dark) in SIZES
-        .into_iter()
-        .flat_map(|size| [(size, true), (size, false)])
-    {
-        let (mut h, mut sent) = harness(width, height, dark, false);
-        let phone = ui::is_phone(&h.ctx);
-        assert!(h.query_by_label(&question).is_none());
+#[derive(Debug)]
+struct DropPath(PathBuf);
 
-        // The pack's Delete comes first, then the emoji's (in its "…" menu on phones).
-        let shown = if phone { 1 } else { 2 };
-        assert_eq!(h.query_all_by_label(t!("common.delete")).count(), shown);
+impl egui::DroppedFile for DropPath {
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+    fn bytes(&self) -> Result<Vec<u8>, String> {
+        Err("read from the path".into())
+    }
+}
 
-        // Delete only asks; Cancel takes the question away and sends nothing.
-        ask_delete(&mut h);
-        assert!(h.query_by_label(&question).is_some());
-        assert_eq!(deletes(&mut sent), 0);
-        h.get_by_label(t!("common.cancel")).click();
+/// Run frames until no picked picture is still being made ready.
+fn settle(h: &mut Harness<'static, Home>) {
+    let start = std::time::Instant::now();
+    loop {
         h.run_steps(2);
-        assert!(h.query_by_label(&question).is_none());
-        assert_eq!(deletes(&mut sent), 0);
-
-        // Asked again, Delete in the question sends it once.
-        ask_delete(&mut h);
-        assert_eq!(deletes(&mut sent), 0);
-        if let Some(dir) = std::env::var_os("RUSTTALK_EMOJI_DELETE_SCREENSHOTS") {
-            let theme = if dark { "dark" } else { "light" };
-            h.render()
-                .unwrap()
-                .save(PathBuf::from(dir).join(format!("{theme}-{width}x{height}.png")))
-                .unwrap();
+        if h.query_all_by_label(t!("admin.upload_preparing"))
+            .next()
+            .is_none()
+        {
+            return;
         }
-        let window = h.ctx.content_rect();
-        let card = h.get_by_label(&question).rect();
-        assert!(card.max.x <= window.max.x, "the question fits: {card:?}");
-        let buttons: Vec<_> = h.query_all_by_label(t!("common.delete")).collect();
-        assert_eq!(
-            buttons.len(),
-            shown + 1,
-            "the pack's, the row's and the question's Delete"
-        );
-        let confirm = buttons.last().unwrap();
-        assert!(confirm.rect().max.x <= window.max.x);
-        confirm.click();
-        h.run_steps(2);
-        assert_eq!(deletes(&mut sent), 1);
+        assert!(start.elapsed().as_secs() < 20, "pictures never got ready");
+        std::thread::sleep(std::time::Duration::from_millis(20));
     }
 }
 
 #[test]
-fn the_page_fits_the_window() {
-    for ((width, height), dark) in SIZES
-        .into_iter()
-        .flat_map(|size| [(size, true), (size, false)])
-    {
-        let (mut h, mut sent) = harness(width, height, dark, true);
-        let phone = ui::is_phone(&h.ctx);
-        if let Some(dir) = std::env::var_os("RUSTTALK_EMOJI_PAGE_SCREENSHOTS") {
-            let theme = if dark { "dark" } else { "light" };
-            h.render()
+fn several_pictures_are_checked_before_one_upload() {
+    let files = tempfile::tempdir().unwrap();
+    let png = |name: &str, rgba: [u8; 4]| {
+        let path = files.path().join(name);
+        image::RgbaImage::from_pixel(200, 160, image::Rgba(rgba))
+            .save(&path)
+            .unwrap();
+        path
+    };
+    let cat = png("party_cat.png", [200, 60, 60, 255]);
+    let wave = png("Wave-Hello.png", [60, 60, 200, 255]);
+    let taken = png("party parrot.png", [60, 200, 60, 255]);
+    let text = files.path().join("notes.png");
+    std::fs::write(&text, "not a picture").unwrap();
+    let huge = files.path().join("huge.gif");
+    std::fs::File::create(&huge)
+        .unwrap()
+        .set_len(9 * 1024 * 1024)
+        .unwrap();
+    for size in [DESKTOP, PHONE] {
+        for dark in [true, false] {
+            let (mut h, mut sent) = harness(size, dark, false);
+            h.input_mut().dropped_files = [&cat, &wave, &taken, &text, &huge]
+                .into_iter()
+                .map(|path| Arc::new(DropPath(path.clone())) as egui::DroppedFileHandle)
+                .collect();
+            settle(&mut h);
+            // Names come from the file names.
+            let name = |h: &Harness<'static, Home>, file: &str| {
+                h.get(
+                    by().role(egui::accesskit::Role::TextInput)
+                        .label(&t!("admin.upload_name", file = file)),
+                )
+                .value()
+            };
+            assert_eq!(name(&h, "Wave-Hello.png").as_deref(), Some("wave_hello"));
+            assert_eq!(
+                name(&h, "party parrot.png").as_deref(),
+                Some("party_parrot")
+            );
+            // What is wrong shows beside each picture, and Upload waits.
+            for problem in [
+                t!("admin.name_taken"),
+                t!("admin.upload_wrong_type"),
+                t!("admin.upload_too_big"),
+            ] {
+                h.get_by_label(problem);
+            }
+            h.get_by_label(&t!("admin.upload_fix", count = 3));
+            let upload = t!("admin.upload_emoji", count = 5);
+            assert!(!enabled(&h, &upload));
+            shoot(&mut h, "upload-checks", dark);
+
+            // A new name fixes the taken one; the others are removed.
+            h.get(
+                by().role(egui::accesskit::Role::TextInput)
+                    .label(&t!("admin.upload_name", file = "party parrot.png")),
+            )
+            .focus();
+            h.run_steps(2);
+            h.get(
+                by().role(egui::accesskit::Role::TextInput)
+                    .label(&t!("admin.upload_name", file = "party parrot.png")),
+            )
+            .type_text("_2");
+            h.run_steps(2);
+            for file in ["notes.png", "huge.gif"] {
+                h.get_by_label(&t!("admin.upload_remove", file = file))
+                    .click();
+                h.run_steps(2);
+            }
+            assert!(h.query_by_label(t!("admin.name_taken")).is_none());
+            let upload = t!("admin.upload_emoji", count = 3);
+            assert!(enabled(&h, &upload));
+            shoot(&mut h, "upload-ready", dark);
+            h.get_by_label(&upload).click();
+            h.run_steps(2);
+            let sent = sent_now(&mut sent);
+            let [Admin::Batch(adds)] = sent.as_slice() else {
+                panic!("one batch of uploads: {}", sent.len());
+            };
+            let names: Vec<_> = adds
+                .iter()
+                .map(|add| match add {
+                    Admin::AddEmoji {
+                        name,
+                        sticker: false,
+                        pack: Some(PACK),
+                        bytes,
+                    } if !bytes.is_empty() => name.as_str(),
+                    _ => panic!("not an emoji upload to the first pack"),
+                })
+                .collect();
+            assert_eq!(names, ["party_cat", "wave_hello", "party_parrot_2"]);
+
+            // What went through leaves the list; what was refused stays to try again.
+            let settings = h.state_mut().server_settings.as_mut().unwrap();
+            settings.apply(AdminUpdate::EmojiAdded("party_cat".into()));
+            settings.apply(AdminUpdate::EmojiAdded("wave_hello".into()));
+            settings.apply(AdminUpdate::PartlySaved {
+                failed: vec![2],
+                text: "busy".into(),
+            });
+            h.run_steps(2);
+            assert!(
+                h.query_by_label(&t!("admin.upload_name", file = "party_cat.png"))
+                    .is_none()
+            );
+            assert!(enabled(&h, &t!("admin.upload_emoji", count = 1)));
+        }
+    }
+}
+
+#[test]
+fn the_editor_renames_moves_and_deletes() {
+    for size in [DESKTOP, PHONE] {
+        for dark in [true, false] {
+            let (mut h, mut sent) = harness(size, dark, false);
+            h.get_by_label(&edit_label("party_parrot")).click();
+            h.run_steps(4);
+            h.get_by_label(t!("admin.edit_emoji"));
+            assert!(!enabled(&h, t!("common.save")), "nothing changed yet");
+            shoot(&mut h, "editor", dark);
+
+            // A new name and another pack are saved together.
+            let field = by()
+                .role(egui::accesskit::Role::TextInput)
+                .label(t!("common.name"));
+            h.get(field.clone()).focus();
+            h.run_steps(2);
+            h.get(field).type_text("_2");
+            h.run_steps(2);
+            h.get(by().role(egui::accesskit::Role::ComboBox)).click();
+            h.run_steps(2);
+            h.query_all_by_label("Animals").last().unwrap().click();
+            h.run_steps(2);
+            h.get_by_label(t!("common.save")).click();
+            h.run_steps(2);
+            let sent_list = sent_now(&mut sent);
+            let [Admin::Batch(changes)] = sent_list.as_slice() else {
+                panic!("rename and move together");
+            };
+            assert!(matches!(
+                changes.as_slice(),
+                [Admin::RenameEmoji(PARROT, name), Admin::MoveEmoji(PARROT, OTHER_PACK)]
+                    if name == "party_parrot_2"
+            ));
+            // Done closes it.
+            let settings = h.state_mut().server_settings.as_mut().unwrap();
+            settings.apply(AdminUpdate::Done("Renamed."));
+            h.run_steps(4);
+            assert!(h.query_by_label(t!("admin.edit_emoji")).is_none());
+
+            // Delete asks first; Cancel goes back to the editor.
+            h.get_by_label(&edit_label("party_parrot")).click();
+            h.run_steps(4);
+            // The dialog changes size: let it settle where it is drawn before each click.
+            h.get_by_label(t!("common.delete")).click();
+            h.run_steps(6);
+            let question = t!("admin.emoji_delete_help", name = "party_parrot");
+            h.get_by_label(&question);
+            assert!(sent_now(&mut sent).is_empty());
+            shoot(&mut h, "editor-delete", dark);
+            h.get_by_label(t!("common.cancel")).click();
+            h.run_steps(6);
+            assert!(h.query_by_label(&question).is_none());
+            h.get_by_label(t!("admin.edit_emoji"));
+            h.get_by_label(t!("common.delete")).click();
+            h.run_steps(6);
+            h.get_by_label(t!("common.delete")).click();
+            h.run_steps(2);
+            assert!(matches!(
+                sent_now(&mut sent).as_slice(),
+                [Admin::DeleteEmoji(PARROT)]
+            ));
+        }
+    }
+}
+
+/// Open the "…" menu of a pack and pick `item`.
+fn pack_menu(h: &mut Harness<'static, Home>, pack: &str, item: &str) {
+    h.get_by_label(&t!("admin.pack_actions", name = pack))
+        .click();
+    h.run_steps(2);
+    h.get_by_label(item).click();
+    h.run_steps(2);
+}
+
+#[test]
+fn packs_fold_and_their_menu_renames_moves_and_deletes() {
+    for size in [DESKTOP, PHONE] {
+        for dark in [true, false] {
+            let (mut h, mut sent) = harness(size, dark, false);
+            // Folding hides the pack's emoji.
+            let fold = t!("admin.pack_fold", name = "Party", count = 1);
+            h.get_by_label(&fold).click();
+            h.run_steps(4);
+            assert!(h.query_by_label(&edit_label("party_parrot")).is_none());
+            h.get_by_label(&fold).click();
+            h.run_steps(4);
+            assert!(h.query_by_label(&edit_label("party_parrot")).is_some());
+
+            h.get_by_label(&t!("admin.pack_actions", name = "Party"))
+                .click();
+            h.run_steps(2);
+            // The first pack can't move up.
+            assert!(
+                h.get_by_label(t!("admin.move_up"))
+                    .accesskit_node()
+                    .is_disabled()
+            );
+            shoot(&mut h, "pack-menu", dark);
+            h.get_by_label(t!("admin.move_down")).click();
+            h.run_steps(2);
+            assert!(matches!(
+                sent_now(&mut sent).as_slice(),
+                [Admin::OrderPacks(ids)] if ids == &[OTHER_PACK, PACK]
+            ));
+
+            pack_menu(&mut h, "Party", t!("admin.pack_rename"));
+            let field = by()
+                .role(egui::accesskit::Role::TextInput)
+                .label(t!("admin.pack_name"));
+            h.get(field.clone()).type_text(" time");
+            h.run_steps(2);
+            h.get_by_label(t!("common.save")).click();
+            h.run_steps(2);
+            assert!(matches!(
+                sent_now(&mut sent).as_slice(),
+                [Admin::RenamePack(PACK, name)] if name == "Party time"
+            ));
+            h.state_mut()
+                .server_settings
+                .as_mut()
                 .unwrap()
-                .save(PathBuf::from(dir).join(format!("{theme}-{width}x{height}.png")))
-                .unwrap();
-        }
-        let window = h.ctx.content_rect();
-        // Within the window's width; long pages scroll down.
-        let inside = |h: &Harness<'static, Home>, label: &str| {
-            let rects: Vec<_> = h.query_all_by_label(label).map(|n| n.rect()).collect();
-            assert!(!rects.is_empty(), "{label} at {width}x{height} is missing");
-            for rect in rects {
-                assert!(
-                    window.x_range().contains(rect.min.x) && window.x_range().contains(rect.max.x),
-                    "{label} at {width}x{height}: {rect:?} outside {window:?}"
-                );
-            }
-        };
-        for label in [
-            t!("admin.pick_picture"),
-            t!("admin.emoji_full"),
-            t!("admin.pack_add"),
-            t!("admin.pack_limit"),
-        ] {
-            inside(&h, label);
-        }
-        if phone {
-            // Rename, Move to and Delete are under "…", and the menu fits too.
-            assert!(h.query_by_label(t!("admin.move_to")).is_none());
-            inside(&h, &more_label());
-            h.get_by_label(&more_label()).click();
-            h.run();
-            for label in [t!("common.rename"), "Animals"] {
-                inside(&h, label);
-            }
-            // The menu's Delete comes after the pack's.
-            inside(&h, t!("common.delete"));
-            if let Some(dir) = std::env::var_os("RUSTTALK_EMOJI_PAGE_SCREENSHOTS") {
-                let theme = if dark { "dark" } else { "light" };
-                h.render()
-                    .unwrap()
-                    .save(PathBuf::from(dir).join(format!("{theme}-{width}x{height}-menu.png")))
-                    .unwrap();
-            }
-            // The menu opens under the "Animals" pack's title.
-            h.query_all_by_label("Animals")
-                .max_by(|a, b| a.rect().min.y.total_cmp(&b.rect().min.y))
+                .apply(AdminUpdate::Done("Renamed."));
+            h.run_steps(4);
+
+            // Deleting a pack asks first and says what goes with it.
+            pack_menu(&mut h, "Party", t!("admin.pack_delete"));
+            h.get_by_label(&t!("admin.pack_delete_what", count = 2));
+            assert!(sent_now(&mut sent).is_empty());
+            shoot(&mut h, "pack-delete", dark);
+            h.query_all_by_label(t!("admin.pack_delete"))
+                .last()
                 .unwrap()
                 .click();
-            h.run();
-            assert!(
-                std::iter::from_fn(|| sent.try_recv().ok())
-                    .any(|cmd| matches!(cmd, Command::Admin(Admin::MoveEmoji(PARROT, OTHER_PACK))))
-            );
-        } else {
-            // Wider windows keep the buttons beside the emoji.
-            assert!(h.query_by_label(&more_label()).is_none());
-            for label in [t!("common.rename"), t!("admin.move_to")] {
-                inside(&h, label);
-            }
-            // Both packs' Delete and the emoji's.
-            assert_eq!(h.query_all_by_label(t!("common.delete")).count(), 3);
+            h.run_steps(2);
+            assert!(matches!(
+                sent_now(&mut sent).as_slice(),
+                [Admin::DeletePack(PACK)]
+            ));
+            h.state_mut()
+                .server_settings
+                .as_mut()
+                .unwrap()
+                .apply(AdminUpdate::Done("Deleted."));
+            h.run_steps(4);
+
+            // New pack.
+            h.get_by_label(t!("admin.pack_new")).click();
+            h.run_steps(2);
+            h.get(field).type_text("Cats");
+            h.run_steps(2);
+            h.get_by_label(t!("admin.pack_create")).click();
+            h.run_steps(2);
+            assert!(matches!(
+                sent_now(&mut sent).as_slice(),
+                [Admin::AddPack(name)] if name == "Cats"
+            ));
         }
     }
-}
-
-/// The typed name stays until the upload went through, so a cancelled pick or a
-/// refused upload doesn't lose it (#533).
-#[test]
-fn emoji_name_stays_until_the_upload_went_through() {
-    use crate::net::AdminUpdate;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    static ASKED: AtomicBool = AtomicBool::new(false);
-    let _picker = super::uploads::PICKER_TEST
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let _reset = super::uploads::ResetPicker;
-    ASKED.store(false, Ordering::SeqCst);
-    // The picker is cancelled: no file comes back.
-    *files::TEST_ANSWER.lock().unwrap() = Some(|_| {
-        ASKED.store(true, Ordering::SeqCst);
-        Vec::new()
-    });
-    let (mut h, _sent) = harness(1100.0, 700.0, true, false);
-    let name = |h: &Harness<'static, Home>| {
-        h.state()
-            .server_settings
-            .as_ref()
-            .unwrap()
-            .emoji_name
-            .clone()
-    };
-    let apply = |h: &mut Harness<'static, Home>, update| {
-        h.state_mut()
-            .server_settings
-            .as_mut()
-            .unwrap()
-            .apply(update);
-        h.run();
-    };
-    h.state_mut().server_settings.as_mut().unwrap().emoji_name = "cat_wave".into();
-    h.run();
-    h.get_by_label(t!("admin.pick_picture")).click();
-    h.run();
-    let start = std::time::Instant::now();
-    while !ASKED.load(Ordering::SeqCst) {
-        assert!(
-            start.elapsed().as_secs() < 10,
-            "Pick picture asked for no file"
-        );
-        std::thread::yield_now();
-    }
-    h.run();
-    assert_eq!(name(&h), "cat_wave", "cancelling the pick keeps the name");
-
-    apply(&mut h, AdminUpdate::Failed("too large".into()));
-    assert_eq!(name(&h), "cat_wave", "a refused upload keeps the name");
-    // Another change finishing, or another emoji added, leaves it alone too.
-    apply(&mut h, AdminUpdate::EmojiAdded("party_cat".into()));
-    apply(&mut h, AdminUpdate::Done("done"));
-    assert_eq!(name(&h), "cat_wave");
-
-    apply(&mut h, AdminUpdate::EmojiAdded("cat_wave".into()));
-    apply(&mut h, AdminUpdate::Done("done"));
-    assert_eq!(name(&h), "", "the name clears once it was added");
 }
