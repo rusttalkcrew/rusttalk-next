@@ -7331,6 +7331,7 @@ mod tests {
     mod outbox;
     mod rail;
     mod reactions;
+    mod settings_close;
     mod streams;
     mod touch;
     mod uploads;

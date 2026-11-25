@@ -109,7 +109,7 @@ pub struct ImportItem {
 }
 
 /// What the owner publishes in a server directory. Unlike everything else, in plain text.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq)]
 pub struct PublicListing {
     pub name: String,
     pub description: String,
