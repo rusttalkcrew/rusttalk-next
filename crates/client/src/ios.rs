@@ -15,7 +15,10 @@
 //! background, and the keyboard's Return reaches egui as Enter. While the recovery
 //! words show, the app switcher's snapshot shows that background instead.
 
+pub mod picker;
 pub mod voice;
+
+pub use picker::{Pick, pick};
 
 use std::{
     cell::{Cell, RefCell},

@@ -12,6 +12,7 @@ Unreleased under the new version and date.
 ## Unreleased
 
 - Android: attach files and photos, change your profile picture or server icon, add emoji and stickers and import emoji packs, using the phone's own file and photo picker.
+- On iPhone you can now upload files and photos: attachments, profile picture, server icon, emoji, stickers and page pictures.
 
 ## v0.7.0 - 2026-11-25
 

@@ -33,11 +33,11 @@ use crate::{
     ui::{self, ON_FILL, OVERLAY, OVERLAY_BUTTON, OVERLAY_TEXT},
 };
 
-/// Whether this device can pick files to upload: the desktop file dialog, or
-/// Android's system picker (docs/mobile.md). iOS needs its own picker first; until
-/// then the buttons that open one are off there.
-pub const PICKER: bool = !cfg!(target_os = "ios");
-/// Whether this device has a save dialog. Phones save through `export_label` instead.
+/// Whether this device can pick files to upload: the desktop file dialog, or the
+/// phone's own picker (docs/mobile.md).
+pub const PICKER: bool = true;
+/// Whether files can be saved through a save dialog. Phones hand stored files to the
+/// system instead (`export_label`), and can't save live files yet.
 pub const SAVE_DIALOG: bool = !cfg!(any(target_os = "android", target_os = "ios"));
 /// Whether files can be handed to their app (`open`); phones have no backend for it.
 const OPENS: bool = SAVE_DIALOG;
@@ -546,13 +546,21 @@ impl Files {
                     };
                     crate::android::pick(kind, !single)
                 }
-                // shortcut: iOS needs the system file picker (docs/mobile.md); until
-                // then a pick finds nothing.
+                // The save buttons are off (`SAVE_DIALOG`); stored files are shared.
                 #[cfg(target_os = "ios")]
-                (None, _) => {
-                    tracing::warn!("no file picker on this device yet");
-                    let _ = (single, pictures, zip);
+                (None, Some(_)) => {
+                    tracing::warn!("no save dialog on this device");
                     Vec::new()
+                }
+                #[cfg(target_os = "ios")]
+                (None, None) => {
+                    use crate::ios::Pick;
+                    let what = match (pictures, zip) {
+                        (true, _) => Pick::Pictures,
+                        (false, true) => Pick::Zip,
+                        (false, false) => Pick::Any,
+                    };
+                    crate::ios::pick(what, !single)
                 }
                 #[cfg(not(any(target_os = "android", target_os = "ios")))]
                 (None, Some(name)) => rfd::FileDialog::new()
@@ -740,6 +748,26 @@ pub fn clear_opened() {
             tracing::warn!(%error, "removing an opened file failed");
         }
     }
+}
+
+/// Copy a file a phone's picker handed over (and may delete) into a fresh
+/// `rusttalk-<id>` temporary folder under `name`, as a pasted picture: `discard` and
+/// `clear_opened` remove it later.
+#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+pub fn keep_picked(from: &Path, name: &str) -> io::Result<PathBuf> {
+    let name = match name.replace(['/', '\\'], "_").trim() {
+        "" | "." | ".." => "file".to_owned(),
+        name => name.to_owned(),
+    };
+    let id = rusttalk_core::keys::random_key().map_err(io::Error::other)?;
+    let folder = temp_folder(&id[..8]);
+    fs::create_dir(&folder)?;
+    let path = folder.join(name);
+    if let Err(error) = fs::copy(from, &path) {
+        let _ = fs::remove_dir_all(&folder);
+        return Err(error);
+    }
+    Ok(path)
 }
 
 /// Remove a pasted picture that is no longer staged. Other files stay.
@@ -2257,5 +2285,21 @@ mod tests {
         assert_eq!(animated_kind("a.gif", ""), Some("GIF"));
         assert_eq!(animated_kind("a.webp", ""), Some("WebP"));
         assert_eq!(animated_kind("a.png", "image/png"), None);
+    }
+
+    #[test]
+    fn picked_files_keep_a_safe_version_of_their_name() {
+        let data = tempfile::tempdir().unwrap();
+        let from = data.path().join("picked");
+        fs::write(&from, b"synthetic").unwrap();
+        for (name, kept) in [("a/b\\c.png", "a_b_c.png"), (" ", "file"), ("..", "file")] {
+            let path = keep_picked(&from, name).unwrap();
+            assert_eq!(path.file_name().unwrap(), kept);
+            let folder = path.parent().unwrap();
+            assert!(is_temp_folder(folder.file_name().unwrap()));
+            discard(&path);
+            assert!(!folder.exists());
+        }
+        assert!(keep_picked(&data.path().join("gone"), "gone.png").is_err());
     }
 }

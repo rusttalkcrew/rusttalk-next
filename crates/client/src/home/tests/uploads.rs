@@ -590,3 +590,41 @@ fn every_upload_takes_the_picked_files() {
     ask(&mut h, Ask::EmojiZip(address));
     shows(&mut h, t!("admin.import_title"));
 }
+
+/// iOS's picker hands over a copy under the file's own name (`files::keep_picked`):
+/// it is attached under that name, and removing it deletes the copy, not the original.
+#[test]
+fn picked_copies_attach_under_their_name_and_go_when_removed() {
+    let _picker = PICKER_TEST.lock().unwrap();
+    let _reset = ResetPicker;
+    let data = tempfile::tempdir().unwrap();
+    let original = data.path().join("Holiday photo.jpg");
+    std::fs::write(&original, b"synthetic picture").unwrap();
+    let kept = files::keep_picked(&original, "Holiday photo.jpg").unwrap();
+    assert_eq!(kept.file_name(), original.file_name());
+    assert_eq!(std::fs::read(&kept).unwrap(), b"synthetic picture");
+    *PICKED.lock().unwrap() = vec![kept.clone()];
+    *files::TEST_ANSWER.lock().unwrap() = Some(|name| {
+        assert_eq!(name, None);
+        PICKED.lock().unwrap().clone()
+    });
+    let ctx = egui::Context::default();
+    let mut picker = files::Files::new(data.path());
+    let address: url::Url = "https://example.invalid".parse().unwrap();
+    picker.ask(&ctx, Ask::Attach(address, PROJECTS));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut answers = Vec::new();
+    while answers.is_empty() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+        answers = picker.answers();
+    }
+    let [(Ask::Attach(_, PROJECTS), paths)] = answers.as_slice() else {
+        panic!("the pick wasn't answered");
+    };
+    let mut chat = crate::server::Chat::default();
+    assert_eq!(files::stage(&mut chat, paths.clone()), None);
+    assert_eq!(chat.staged[0].name, "Holiday photo.jpg");
+    files::discard(&chat.staged.remove(0).path);
+    assert!(!kept.parent().unwrap().exists());
+    assert!(original.exists());
+}
