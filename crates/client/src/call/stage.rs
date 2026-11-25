@@ -9,12 +9,12 @@ use eframe::egui::{
     text::{LayoutJob, TextWrapping},
     vec2,
 };
-use rusttalk_core::client::voice::VoiceStatus;
+use rusttalk_core::client::voice::{ControlOffer, VoiceStatus};
 
 use super::{
     Sharing, Voice, call_server, join, mixer,
     overlay::{self, Overlay, Row},
-    remote::Control,
+    remote::{self, Control},
     ring, sound_badges, stop_watching,
     terminal::{self, Terminals, Typing},
     upload, watch,
@@ -935,6 +935,12 @@ fn tile(
         let sharer = entry.peer.name(server);
         remote_tag(ui, rect, entry, on, response.has_focus(), &sharer);
     }
+    let now = ui.input(|input| input.time);
+    if let (None, Tile::Screen(sid)) = (state.remote, &entry.tile)
+        && let Some(text) = remote::note(control, sid, now)
+    {
+        note_tag(ui, rect, text);
+    }
     let badge = name_tag(ui, rect, entry, audio);
     overlay.paint(ui, rect, badge);
     tools(ui, rect, entry, state, audio, acts, tapped);
@@ -1025,6 +1031,42 @@ fn screen_menu(
         }
     }
     picked
+}
+
+/// Why asking for control of this screen ended, where the person clicked, above
+/// the name tag like the "asking" tag it replaces.
+fn note_tag(ui: &mut Ui, rect: Rect, text: &str) {
+    let room = rect.width() - 2.0 * GAP - 16.0;
+    if room < ui::TEXT_SMALL || rect.height() < 2.0 * TOOL.y + 2.0 * GAP {
+        return;
+    }
+    let font = FontId::proportional(ui::TEXT_SMALL);
+    let mut job = LayoutJob::simple(text.to_owned(), font.clone(), ui::ON_FILL, room);
+    job.wrap.max_rows = 3;
+    let galley = ui.painter().layout_job(job);
+    let pad = vec2(8.0, 3.0);
+    let size = galley.size() + 2.0 * pad;
+    // The name tag below is one line of the same size.
+    let line = ui.fonts_mut(|fonts| fonts.row_height(&font)) + 2.0 * pad.y;
+    let at = pos2(rect.left() + GAP, rect.bottom() - GAP - line - 4.0 - size.y);
+    let tag = Rect::from_min_size(at, size);
+    let painter = ui.painter();
+    painter.rect_filled(tag, ui::RADIUS_S, ui::colors(ui).danger);
+    painter.galley(tag.min + pad, galley, ui::ON_FILL);
+    let response = ui.interact(tag, UiId::unique(("control note", text)), Sense::hover());
+    response.widget_info(|| WidgetInfo::labeled(Role::Label, true, text));
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_millis(500));
+}
+
+/// Why a screen can't be asked for control, when its sharer said so. Unknown (an
+/// older app) can be asked, as before.
+fn control_closed(offer: Option<ControlOffer>) -> Option<String> {
+    match offer? {
+        ControlOffer::On => None,
+        ControlOffer::Off => Some(t!("call.control_off").into()),
+        ControlOffer::Unsupported => Some(t!("call.control_unsupported").into()),
+    }
 }
 
 /// While asking for or having control of a screen: an outline, and what is going on.
@@ -1308,7 +1350,24 @@ fn tools(
             Some(false) => (t!("call.cancel_request"), on),
             Some(true) => (t!("call.stop_control"), on),
         };
-        if ui::icon_button(ui, "🖱", tip, look, tool).clicked() {
+        // The sharer says it won't take requests: say why instead of being refused.
+        let closed = match (&entry.tile, state.remote) {
+            (Tile::Screen(sid), None) => entry
+                .peer
+                .screens
+                .iter()
+                .find(|screen| screen.sid == *sid)
+                .and_then(|screen| control_closed(screen.control)),
+            _ => None,
+        };
+        let button = ui
+            .add_enabled_ui(closed.is_none(), |ui| {
+                ui::icon_button(ui, "🖱", tip, look, tool)
+            })
+            .inner;
+        if let Some(why) = closed {
+            button.on_disabled_hover_text(why);
+        } else if button.clicked() {
             acts.push(match (&entry.tile, state.remote) {
                 (Tile::Screen(sid), None) => Act::RequestControl(sid.clone()),
                 _ => Act::ReleaseControl,
@@ -1605,12 +1664,14 @@ mod tests {
                     name: "A".into(),
                     viewers: 2,
                     local: false,
+                    control: None,
                 },
                 Screen {
                     sid: "b".into(),
                     name: "B".into(),
                     viewers: 0,
                     local: true,
+                    control: None,
                 },
             ],
         };

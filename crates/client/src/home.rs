@@ -1671,9 +1671,7 @@ impl Home {
             Update::Terminal(feed) => self.voice.terminals.feed(feed),
             Update::TerminalGuests(guests) => self.voice.terminals.guests = guests,
             Update::TerminalStopped => self.voice.terminals.local = None,
-            Update::ControlEnded(sid, why) => {
-                self.toast = Some((call::remote::ended(self, &sid, why), now + 6.0));
-            }
+            Update::ControlEnded(sid, why) => call::remote::ended(self, sid, why, now),
             Update::CallVideoStopped(address, channel, sid) => {
                 if self
                     .voice

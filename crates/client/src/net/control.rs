@@ -4,7 +4,7 @@
 use std::time::Instant;
 
 use rusttalk_core::{
-    client::voice::ParticipantIdentity,
+    client::voice::{ConnectionState, ControlOffer, ParticipantIdentity},
     control::{Answer, Input, Message, Nonce, Refusal, Step},
 };
 
@@ -63,6 +63,44 @@ fn end_input(live: &Live, releases: &[Input]) {
     // Linux drops its virtual devices; macOS also lets go of whatever it still holds.
     if let Some((_, capture, _)) = &live.screen {
         capture.set_control_active(false);
+    }
+}
+
+/// What viewers should know about control requests for our screen: `supported` is
+/// whether the capture can take input, `chosen` whether the sharer allowed requests.
+fn offer(supported: bool, chosen: bool) -> ControlOffer {
+    let offered = rusttalk_core::screen::linux_remote_control()
+        || rusttalk_core::screen::mac_remote_control();
+    if supported {
+        ControlOffer::On
+    } else if offered && !chosen {
+        ControlOffer::Off
+    } else {
+        ControlOffer::Unsupported
+    }
+}
+
+/// Tell viewers whether our screen takes control requests, when that changed, so
+/// "Request control" is off for them rather than refused.
+pub(super) async fn announce_offer(live: &mut Live) {
+    if live.transport_closed || live.room.connection_state() != ConnectionState::Connected {
+        return;
+    }
+    let Some((sid, capture, options)) = &live.screen else {
+        return;
+    };
+    let offer = offer(capture.supports_control(), options.remote_control);
+    let state = (sid.clone(), offer, live.room.epoch());
+    if live.announced_offer.as_ref() == Some(&state) {
+        return;
+    }
+    let announce = live.room.announce_control_offer(sid, offer);
+    match tokio::time::timeout(std::time::Duration::from_secs(2), announce).await {
+        Ok(Ok(())) => live.announced_offer = Some(state),
+        Ok(Err(error)) => {
+            tracing::warn!(error = %format_args!("{error:#}"), "announcing control requests failed")
+        }
+        Err(_) => tracing::warn!("announcing control requests timed out"),
     }
 }
 
@@ -247,3 +285,23 @@ pub(super) fn leave(live: &mut Live) {
 
 /// Why asking for control ended, for a note in the window; `None` when control was taken back.
 pub type Ended = Option<Refusal>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn offer_says_off_only_when_the_sharer_could_have_allowed_it() {
+        assert_eq!(offer(true, true), ControlOffer::On);
+        // An allowed share that can't take input is unsupported, not off.
+        assert_eq!(offer(false, true), ControlOffer::Unsupported);
+        let opt_in = rusttalk_core::screen::linux_remote_control()
+            || rusttalk_core::screen::mac_remote_control();
+        let off = if opt_in {
+            ControlOffer::Off
+        } else {
+            ControlOffer::Unsupported
+        };
+        assert_eq!(offer(false, false), off);
+    }
+}

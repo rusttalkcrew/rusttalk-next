@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- "Request control" is greyed out, with the reason, when the sharer turned control requests off or their computer can't be controlled, and a refusal now shows on the shared screen.
+
 ## v0.4.0 - 2026-11-24
 
 - Changing your name, picture or bio no longer pauses chat and voice on every server while your devices sync.

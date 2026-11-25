@@ -982,6 +982,19 @@ modifiers, navigation and editing keys) are valid, so the sharer's own
 layout picks the character. The Windows key, media keys, Print Screen and
 Pause are never sent.
 
+Before anyone asks, the sharer says whether its screen takes requests in the
+participant attribute `rusttalk.control-offer`, updated when that changes
+(for example after switching the shared source). Its plaintext is `{track:
+screen_track_sid, offer}`, `offer` being `on`, `off` (the sharer turned
+requests off) or `unsupported` (this system can't inject input). It is sealed
+like the phone consent attribute: the channel's video-watch-derived key, AAD
+`rusttalk-control-offer-v1`, epoch (big-endian i64), sender identity, a zero
+separator and sender session ID, wire form `epoch.base64url(ciphertext)`, at
+most 1 KiB. Viewers disable "Request control" for `off` and `unsupported`. A
+missing value, one for another track, an unknown `offer` or one that doesn't
+open means unknown, and viewers may ask as before. It only saves a refused
+request: the sharer still decides every request itself.
+
 The sharer denies a request for a screen it isn't sharing, from a device it
 can't match to a member, or while another request is open or someone is in
 control (`busy`). A system that can't inject input answers `unsupported`
