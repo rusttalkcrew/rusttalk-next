@@ -537,7 +537,7 @@ pub(super) fn view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat
     let server = &home.servers[index];
     let name = (server.channel(&channel)).map_or_else(String::new, |c| c.name.clone());
     let title_text = format!("💬 {name}");
-    let can_post = server.can_write(&channel);
+    let can_post = server.can_write(&channel) && !server.dir.perms.preview;
     let online = server.status == Status::Online;
     let to = To::Channel(server.address.clone(), channel);
     let now = ui.input(|input| input.time);

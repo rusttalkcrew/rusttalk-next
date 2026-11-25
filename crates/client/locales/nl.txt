@@ -1766,3 +1766,17 @@ perm.start_focus = Focusmodus starten
 perm.start_focus_help = Een spraakkanaal tot 24 uur in focusmodus zetten.
 audit.focus_started = {actor} heeft de focusmodus in een kanaal gestart
 audit.focus_ended = {actor} heeft de focusmodus in een kanaal beëindigd
+
+# crates/client/src/home/view_as.rs
+view_as.open = Server bekijken als deze rol
+view_as.only_yours = Je kunt alleen rollen bekijken die je zelf hebt.
+view_as.save_first = Sla je wijzigingen eerst op of zet ze terug.
+view_as.title = Server bekijken als
+view_as.exit = Voorbeeld sluiten
+view_as.add_role = Rol toevoegen
+view_as.remove = {role} verwijderen
+view_as.note = Alleen een voorbeeld: het verbergt wat deze rollen niet zien, toont nooit meer dan je zelf ziet, en niets kan worden gewijzigd.
+view_as.refused = Dat staat uit tijdens het voorbeeld.
+view_as.could_post = Deze rollen kunnen hier berichten sturen. Versturen staat uit tijdens het voorbeeld.
+view_as.read_only = Deze rollen kunnen dit kanaal alleen lezen.
+view_as.menu_off = Voorbeeld: hier werkt niets.

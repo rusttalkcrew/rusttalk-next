@@ -1766,3 +1766,17 @@ perm.start_focus = Fokus-Modus starten
 perm.start_focus_help = Einen Sprachkanal bis zu 24 Stunden in den Fokus-Modus versetzen.
 audit.focus_started = {actor} hat in einem Kanal den Fokus-Modus gestartet
 audit.focus_ended = {actor} hat in einem Kanal den Fokus-Modus beendet
+
+# crates/client/src/home/view_as.rs
+view_as.open = Server als diese Rolle ansehen
+view_as.only_yours = Du kannst nur Rollen ansehen, die du selbst hast.
+view_as.save_first = Speichere oder verwirf zuerst deine Änderungen.
+view_as.title = Server ansehen als
+view_as.exit = Vorschau beenden
+view_as.add_role = Rolle hinzufügen
+view_as.remove = {role} entfernen
+view_as.note = Nur eine Vorschau: Sie blendet aus, was diese Rollen nicht sehen, zeigt nie mehr, als du selbst siehst, und nichts kann geändert werden.
+view_as.refused = Das ist in der Vorschau ausgeschaltet.
+view_as.could_post = Diese Rollen könnten hier schreiben. Senden ist in der Vorschau aus.
+view_as.read_only = Diese Rollen können diesen Kanal nur lesen.
+view_as.menu_off = Vorschau: Hier lässt sich nichts benutzen.

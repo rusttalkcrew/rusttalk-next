@@ -1769,3 +1769,17 @@ perm.start_focus = Start focus mode
 perm.start_focus_help = Put a voice channel into focus mode for up to 24 hours.
 audit.focus_started = {actor} started focus mode in a channel
 audit.focus_ended = {actor} ended focus mode in a channel
+
+# crates/client/src/home/view_as.rs
+view_as.open = View server as this role
+view_as.only_yours = You can only preview roles you have yourself.
+view_as.save_first = Save or reset your changes first.
+view_as.title = Viewing the server as
+view_as.exit = Exit preview
+view_as.add_role = Add role
+view_as.remove = Remove {role}
+view_as.note = Preview only: it hides what these roles can't see, never shows more than you can see yourself, and nothing can be changed.
+view_as.refused = That's turned off while previewing.
+view_as.could_post = These roles could send messages here. Sending is off while previewing.
+view_as.read_only = These roles can only read this channel.
+view_as.menu_off = Preview: nothing here can be used.

@@ -384,6 +384,13 @@ impl Voice {
 /// Join a voice channel, leaving any other room first, and show it. A channel in focus
 /// mode shows its notice first.
 pub fn join(home: &mut Home, index: usize, channel: Id) {
+    // Previewing the server as other roles: joining would change something.
+    if !home.voice.in_call(&home.servers[index], &channel)
+        && let Some(view) = &home.servers[index].view_as
+    {
+        view.refuse();
+        return;
+    }
     if !home.voice.in_call(&home.servers[index], &channel)
         && crate::home::focus::ask_first(home, index, channel)
     {
@@ -394,6 +401,13 @@ pub fn join(home: &mut Home, index: usize, channel: Id) {
 
 /// `join` without the focus mode notice, once it was accepted.
 pub fn join_now(home: &mut Home, index: usize, channel: Id) {
+    // Previewing the server as other roles: joining would change something.
+    if !home.voice.in_call(&home.servers[index], &channel)
+        && let Some(view) = &home.servers[index].view_as
+    {
+        view.refuse();
+        return;
+    }
     cancel_invitation_join(home);
     home.servers[index].open = Some(channel);
     if home.voice.in_call(&home.servers[index], &channel) {
@@ -726,7 +740,11 @@ pub fn join_button(
     selected: bool,
 ) -> bool {
     let shown = selected || ui.rect_contains_pointer(row.rect);
-    if !shown || server.status != Status::Online || home.voice.in_call(server, channel) {
+    if !shown
+        || server.status != Status::Online
+        || server.view_as.is_some()
+        || home.voice.in_call(server, channel)
+    {
         return false;
     }
     let size = Vec2::splat(ui::SPACE_XL);

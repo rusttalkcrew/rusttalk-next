@@ -112,6 +112,7 @@ mod pokes;
 pub mod polls;
 pub(crate) mod rows;
 pub(crate) mod user_bar;
+pub(crate) mod view_as;
 pub mod voice_requests;
 #[cfg(test)]
 mod voice_rows;
@@ -751,8 +752,8 @@ impl Home {
         record: &rusttalk_core::identity::Revocation,
     ) -> anyhow::Result<()> {
         self.net.remove_device(record)?;
-        for server in &mut self.servers {
-            for member in server.dir.members.edit().iter_mut() {
+        for dir in self.servers.iter_mut().flat_map(Server::dirs_mut) {
+            for member in dir.members.edit().iter_mut() {
                 if &member.person == record.person_id() {
                     member
                         .devices
@@ -1196,6 +1197,28 @@ impl Home {
     }
 
     fn apply(&mut self, ctx: &egui::Context, update: Update, now: f64) {
+        // While a server is previewed, what replaces its directory lands on the real one,
+        // and the preview is made again from it.
+        let lifted = match &update {
+            Update::Directory(address, _)
+            | Update::Cached(address, ..)
+            | Update::Inaccessible(address, _)
+            | Update::Status(address, _) => self.index(address).and_then(|index| {
+                let roles = view_as::exit(&mut self.servers[index])?;
+                Some((address.clone(), roles))
+            }),
+            _ => None,
+        };
+        self.apply_update(ctx, update, now);
+        if let Some((address, roles)) = lifted
+            && let Some(index) = self.index(&address)
+            && !matches!(self.servers[index].status, Status::Stopped(_))
+        {
+            view_as::show_as(&mut self.servers[index], roles);
+        }
+    }
+
+    fn apply_update(&mut self, ctx: &egui::Context, update: Update, now: f64) {
         match update {
             Update::Preview(result) => {
                 self.join = match result {
@@ -1478,9 +1501,11 @@ impl Home {
             }
             Update::Presence(address, person, presence) => {
                 if let Some(index) = self.index(&address) {
-                    let mut members = self.servers[index].dir.members.edit();
-                    if let Some(member) = members.iter_mut().find(|m| m.person == person) {
-                        member.presence = presence;
+                    for dir in self.servers[index].dirs_mut() {
+                        let mut members = dir.members.edit();
+                        if let Some(member) = members.iter_mut().find(|m| m.person == person) {
+                            member.presence = presence;
+                        }
                     }
                 }
             }
@@ -2230,6 +2255,7 @@ pub fn show(
     }
     // Joining or leaving a call counts: a restart must never cut one off.
     updates.banner(ui, home.voice.call.is_some());
+    view_as::bar(ui, home);
     // Phones: the list is a drawer over what is open. A pick, Back, a swipe from the
     // left edge or a tap beside it moves it.
     let phone = home.layout.phone;
@@ -3095,9 +3121,9 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
     let mut focus_pick = None;
     let now = notify::unix_now();
     let all = &server.dir.categories;
-    let shown = reorder::shown(all, perms.manage_channels && server.show_empty);
+    let shown = reorder::shown(all, perms.manage_channels && server.show_empty && !perms.preview);
     let categories = &*shown;
-    let can_manage = perms.manage_channels && online;
+    let can_manage = perms.manage_channels && online && !perms.preview;
     let can_move = can_manage && !server.order_unavailable && reorder::order(all).is_some();
     let mut show_events = false;
     if events::enabled(server) {
@@ -3120,7 +3146,7 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
                     ui.horizontal(|ui| {
                         ui.add_space(ui::SPACE_XS);
                         let label = ui::caption_label(ui, &category.name);
-                        if perms.manage_channels {
+                        if perms.manage_channels && !perms.preview {
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 let plus = ui::icon_button(
                                     ui,
@@ -3224,7 +3250,7 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
                     if let Some(rule) = notify::rule_menu(m, &rule, true, notify::unix_now()) {
                         rule_change = Some((channel.id, rule));
                     }
-                    if perms.start_focus && online && channel.voice {
+                    if perms.start_focus && online && channel.voice && !perms.preview {
                         m.separator();
                         if let Some(start) = focus::menu(m, channel) {
                             focus_pick = Some((channel.id, start));
@@ -3296,6 +3322,11 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
 /// The server header menu, with only what this person may do.
 fn server_menu(m: &mut ui::Menu, home: &mut Home, index: usize) {
     let perms = home.servers[index].dir.perms;
+    // Previewing: what those roles would find here, but none of it works.
+    if perms.preview {
+        m.caption(t!("view_as.menu_off"));
+        m.ui().disable();
+    }
     if perms.invite && m.item("👤", t!("home.invite_people")).clicked() {
         home.dialog = Some(Dialog::Invite(Invite {
             server: index,
@@ -4141,6 +4172,7 @@ pub(crate) fn new_server(
         voice: HashMap::new(),
         names: HashMap::new(),
         commands,
+        view_as: None,
     }
 }
 
@@ -4438,7 +4470,8 @@ fn files_view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat: &mu
     toast_line(ui, &mut home.toast);
     let server = &home.servers[index];
     let online = server.status == Status::Online;
-    let can_upload = online && server.can_write(&channel) && files::PICKER;
+    let can_upload =
+        online && server.can_write(&channel) && !server.dir.perms.preview && files::PICKER;
     if !chat.shared_asked {
         chat.shared_asked = true;
         server.send(Command::SharedFiles(channel));
@@ -4520,7 +4553,7 @@ fn page_view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat: &mut
     let title = server
         .channel(&channel)
         .map_or_else(String::new, |c| format!("{} {}", channel_icon(c), c.name));
-    let can_edit = server.can_write(&channel);
+    let can_edit = server.can_write(&channel) && !server.dir.perms.preview;
     let online = server.status == Status::Online;
     pane_title(
         ui,
@@ -4973,6 +5006,18 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
             toast_line(ui, toast);
             if read_only {
                 ui.weak(t!("home.dm_read_only", name = name));
+                return None;
+            }
+            // Previewing: say whether those roles could post here, without a composer.
+            if let At::Channel(index, channel) = at
+                && servers[index].view_as.is_some()
+            {
+                let could = servers[index].can_write(&channel);
+                ui.weak(if could {
+                    t!("view_as.could_post")
+                } else {
+                    t!("view_as.read_only")
+                });
                 return None;
             }
             let hint = if dm {
@@ -6420,21 +6465,25 @@ fn message(
             .doc
             .map_source(text, |s| emoji::plain(s).into_owned())
     };
-    let can_reply = text.is_some();
+    // Previewing the server as other roles: nothing to change.
+    let live = !dir.perms.preview;
+    let can_reply = live && text.is_some();
     let can_react =
-        matches!(msg.body, Body::Text(_) | Body::Poll(..)) && chat.poll_editor.is_none();
-    let can_end_poll = mine
+        live && matches!(msg.body, Body::Text(_) | Body::Poll(..)) && chat.poll_editor.is_none();
+    let can_end_poll = live
+        && mine
         && matches!(msg.body, Body::Poll(..))
         && chat
             .tally(msg)
             .is_some_and(|tally| tally.open(polls::now()));
-    let can_edit = mine && text.is_some() && msg.sticker.is_none();
+    let can_edit = live && mine && text.is_some() && msg.sticker.is_none();
     // A DM copy that didn't open proves nothing about who wrote it, and deleting a
     // DM message reaches every server, so only a readable copy of mine can be deleted.
     let dm_copy = !msg.replicas.is_empty();
     let authored = mine && !(dm_copy && msg.body == Body::Unreadable);
-    let can_delete =
-        authored || (dir.perms.delete_messages && !dir.dms.iter().any(|dm| dm.channel == channel));
+    let can_delete = live
+        && (authored
+            || (dir.perms.delete_messages && !dir.dms.iter().any(|dm| dm.channel == channel)));
     let mut pick = invite;
     if let (Some(trigger), Some((index, profile))) = (&trigger, profile)
         && let Some(action) = person::profile(ui, trigger, &profile, false)
@@ -7829,6 +7878,146 @@ mod tests {
                     outside.is_empty(),
                     "{name} at {size:?} runs off the window: {outside:?}"
                 );
+            }
+        }
+    }
+
+    /// Previewing as Member: the staff channel and its category go, the composer
+    /// says posting is off, and the bar shows the role. Set
+    /// `RUSTTALK_VIEW_AS_SCREENSHOTS` to a folder to save it at phone and desktop size.
+    #[test]
+    fn view_as_shows_less_and_turns_actions_off() {
+        use egui_kittest::kittest::Queryable;
+        let save = std::env::var_os("RUSTTALK_VIEW_AS_SCREENSHOTS").map(PathBuf::from);
+        let role = |id: &str, name: &str, rank, color| crate::server::Role {
+            id: id.into(),
+            name: name.into(),
+            name_known: true,
+            rank,
+            permissions: Vec::new(),
+            custom: false,
+            color,
+            separate: false,
+        };
+        let channel = |id, name: &str, voice, readers: &[&str]| crate::server::Channel {
+            id,
+            name: name.into(),
+            topic: String::new(),
+            voice,
+            page: false,
+            forum: false,
+            audio_kbps: 64,
+            member_limit: 0,
+            focus_until: None,
+            flags: readers.iter().map(|r| (r.to_string(), 15)).collect(),
+        };
+        for size in [Vec2::new(390.0, 844.0), Vec2::new(1100.0, 700.0)] {
+            for dark in [true, false] {
+                let (mut files, _sent) = files_harness(dark);
+                let mut home = files.state_mut().take().unwrap();
+                files
+                    .ctx
+                    .data_mut(|d| d.insert_temp(files_id(PROJECTS), false));
+                let mut settings = home.voice.audio.settings();
+                let mode = if dark {
+                    ui::Mode::Dark
+                } else {
+                    ui::Mode::Light
+                };
+                settings.set_appearance(ui::Appearance {
+                    mode,
+                    ..Default::default()
+                });
+                home.voice.audio.set_settings(settings);
+                let server = &mut home.servers[0];
+                server.dir.default_role = "member".into();
+                server.dir.roles = vec![
+                    role(
+                        "moderator",
+                        "Moderator",
+                        50,
+                        Some(egui::Color32::from_rgb(0x3b, 0xa5, 0x5d)),
+                    ),
+                    role(
+                        "helpers",
+                        "Helpers",
+                        30,
+                        Some(egui::Color32::from_rgb(0xe6, 0x7e, 0x22)),
+                    ),
+                    role("member", "Member", 0, None),
+                ];
+                server.dir.members.edit()[0].roles = vec!["moderator".into(), "member".into()];
+                server.dir.perms.manage_channels = true;
+                server.dir.perms.rank = 50;
+                server.dir.categories = vec![
+                    crate::server::Category {
+                        id: Some([20; 32]),
+                        name: "Staff room".into(),
+                        channels: vec![channel([21; 32], "mod-chat", false, &["moderator"])],
+                    },
+                    crate::server::Category {
+                        id: Some([22; 32]),
+                        name: "Community".into(),
+                        channels: vec![
+                            channel(PROJECTS, "projects", false, &["member", "moderator"]),
+                            channel([23; 32], "Lounge", true, &["member", "moderator"]),
+                        ],
+                    },
+                ];
+                server.dir.categories[1].channels[0].flags =
+                    vec![("member".into(), 1), ("moderator".into(), 3)];
+                view_as::show_as(server, vec!["member".into()]);
+                assert!(!server.dir.perms.manage_channels && server.dir.perms.preview);
+                home.view = View::Server(0);
+                home.servers[0].open = Some(PROJECTS);
+                home.layout.list = size.x < ui::PHONE_WIDTH;
+                let data = tempfile::tempdir().unwrap();
+                let mut harness = egui_kittest::Harness::builder()
+                    .with_size(size)
+                    .build_ui_state(
+                        |ui, screen: &mut Option<Screen>| {
+                            if let Some((home, updates, keystore)) = screen {
+                                show(ui, home, updates, keystore);
+                            }
+                        },
+                        None,
+                    );
+                ui::install(&harness.ctx);
+                *harness.state_mut() = Some((
+                    home,
+                    crate::update::Updater::new(data.path()),
+                    crate::keystore::without_keychain(data.path()),
+                ));
+                harness.run_steps(8);
+                assert!(harness.query_by_label_contains("mod-chat").is_none());
+                assert!(harness.query_by_label_contains("Staff room").is_none());
+                assert!(harness.query_by_label_contains("Lounge").is_some());
+                assert!(harness.query_by_label(t!("view_as.exit")).is_some());
+                if let Some(out) = &save {
+                    let theme = if dark { "dark" } else { "light" };
+                    let name = format!("view-as-{}x{}-{theme}", size.x, size.y);
+                    let image = harness.render().expect("render");
+                    image.save(out.join(format!("{name}.png"))).unwrap();
+                    if size.x < ui::PHONE_WIDTH {
+                        // Then the chat, with its composer turned off.
+                        harness.state_mut().as_mut().unwrap().0.layout.list = false;
+                        harness.run_steps(8);
+                        let image = harness.render().expect("render");
+                        image.save(out.join(format!("{name}-chat.png"))).unwrap();
+                    }
+                }
+                if size.x >= ui::PHONE_WIDTH {
+                    assert!(
+                        harness
+                            .query_by_label_contains(t!("view_as.read_only"))
+                            .is_some()
+                    );
+                }
+                harness.get_by_label(t!("view_as.exit")).click_accesskit();
+                harness.run_steps(4);
+                let home = &harness.state().as_ref().unwrap().0;
+                assert!(home.servers[0].view_as.is_none());
+                assert!(home.servers[0].dir.perms.manage_channels);
             }
         }
     }

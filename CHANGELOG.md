@@ -21,6 +21,7 @@ Unreleased under the new version and date.
 - A voice channel's member limit can be removed again by clearing the field, and the "2/8" count in the channel list now has a people icon and says "Member limit: 8" on hover (or a tap on phones).
 - Right-clicking (or long-pressing) a message's words or links now opens the message menu, like the rest of the message.
 - Channel managers no longer see empty categories in the channel list; "Show empty categories" in the server menu brings them back for editing.
+- Admins can preview the server as one or more of their own roles ("View server as this role" in Roles): channels, categories and buttons show as those roles would see them, and nothing can be changed while previewing.
 
 ## v0.5.0 - 2026-11-25
 

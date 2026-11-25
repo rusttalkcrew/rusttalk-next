@@ -54,6 +54,8 @@ pub struct Server {
     /// Every member name seen this session, for people who have left (bans, audit log).
     pub names: HashMap<Id, String>,
     pub commands: UnboundedSender<Command>,
+    /// "View server as": `dir` shows the preview, this keeps what the server sent.
+    pub view_as: Option<crate::home::view_as::ViewAs>,
 }
 
 #[derive(Clone)]
@@ -183,11 +185,24 @@ impl Server {
         self.member(person).is_some_and(|member| member.voice_muted)
     }
 
+    /// The directory shown and, while previewing, the real one, for changes that
+    /// belong in both.
+    pub fn dirs_mut(&mut self) -> impl Iterator<Item = &mut Directory> {
+        let real = self.view_as.as_mut().map(|view| view.real_mut());
+        std::iter::once(&mut self.dir).chain(real)
+    }
+
     pub fn member(&self, person: &Id) -> Option<&Member> {
         self.dir.members.get(person)
     }
 
     pub fn send(&self, command: Command) {
+        if let Some(view) = &self.view_as
+            && !crate::home::view_as::allowed(&command)
+        {
+            view.refuse();
+            return;
+        }
         Self::send_to(&self.commands, command);
     }
 
@@ -386,6 +401,8 @@ pub struct Perms {
     pub start_focus: bool,
     /// This person's highest role rank; they can only manage people and roles below it.
     pub rank: i64,
+    /// "View server as" is on: these are a preview, and nothing may be changed.
+    pub preview: bool,
 }
 
 pub const MENTION_EVERYONE: &str = "mention_everyone";
