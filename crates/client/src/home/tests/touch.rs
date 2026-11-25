@@ -124,6 +124,7 @@ fn tapping_a_participant_reveals_working_tile_controls() {
             screens: vec![],
             camera: None,
             terminal: None,
+            diagram: None,
         }],
     );
     let mut h = Harness::builder()

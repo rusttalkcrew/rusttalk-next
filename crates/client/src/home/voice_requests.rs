@@ -461,6 +461,7 @@ mod tests {
             screens: Vec::new(),
             camera: None,
             terminal: None,
+            diagram: None,
         };
         server.voice.insert(LOUNGE, vec![me]);
         server.open = Some([1; 32]);

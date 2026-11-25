@@ -145,6 +145,7 @@ fn demo_window(size: Vec2, dark: bool) -> Harness<'static, Option<Screen>> {
                 screens: Vec::new(),
                 camera: None,
                 terminal: None,
+                diagram: None,
             },
             Peer {
                 person: ANN,
@@ -155,6 +156,7 @@ fn demo_window(size: Vec2, dark: bool) -> Harness<'static, Option<Screen>> {
                 screens: Vec::new(),
                 camera: None,
                 terminal: None,
+                diagram: None,
             },
         ],
     );

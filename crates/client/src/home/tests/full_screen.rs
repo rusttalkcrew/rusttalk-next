@@ -32,6 +32,7 @@ fn full_screen(dark: bool, size: Vec2, data: &std::path::Path) -> Harness<'stati
         apps: vec![],
         camera: None,
         terminal: None,
+        diagram: None,
         screens,
     };
     let screen = Shared {

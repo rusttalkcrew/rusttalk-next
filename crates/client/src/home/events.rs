@@ -1296,6 +1296,7 @@ mod tests {
             screens: Vec::new(),
             camera: None,
             terminal: None,
+            diagram: None,
         };
         server.voice.insert(LOUNGE, vec![peer(ANN)]);
 

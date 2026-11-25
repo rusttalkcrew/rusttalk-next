@@ -2,6 +2,7 @@
 
 mod control;
 mod control_offer;
+pub mod diagram;
 mod live_file;
 pub mod phone;
 pub mod ring;
@@ -211,6 +212,8 @@ pub struct PendingVoice {
     control_keys: HashMap<i64, Key>,
     terminal_keys: HashMap<i64, Key>,
     terminal_share_keys: HashMap<i64, Key>,
+    diagram_keys: HashMap<i64, Key>,
+    diagram_share_keys: HashMap<i64, Key>,
     ring_keys: HashMap<i64, Key>,
     watch_keys: HashMap<i64, Key>,
 }
@@ -269,6 +272,8 @@ impl PendingVoice {
             control_keys: self.control_keys,
             terminal_keys: self.terminal_keys,
             terminal_share_keys: self.terminal_share_keys,
+            diagram_keys: self.diagram_keys,
+            diagram_share_keys: self.diagram_share_keys,
             ring_keys: self.ring_keys,
             watch_keys: self.watch_keys,
             phone_consent: Default::default(),
@@ -327,6 +332,8 @@ impl KeyClient<'_> {
             control_keys: self.name_keys(channel, control::LABEL),
             terminal_keys: self.name_keys(channel, terminal::LABEL),
             terminal_share_keys: self.name_keys(channel, terminal::SHARE_LABEL),
+            diagram_keys: self.name_keys(channel, diagram::LABEL),
+            diagram_share_keys: self.name_keys(channel, diagram::SHARE_LABEL),
             ring_keys: self.name_keys(channel, ring::LABEL),
             watch_keys: self.name_keys(channel, watch::LABEL),
         })
@@ -402,6 +409,9 @@ pub struct VoiceRoom {
     /// Seal terminal messages (current epoch only) and open shares (any held epoch).
     terminal_keys: HashMap<i64, Key>,
     terminal_share_keys: HashMap<i64, Key>,
+    /// Seal diagram messages (current epoch only) and open sessions (any held epoch).
+    diagram_keys: HashMap<i64, Key>,
+    diagram_share_keys: HashMap<i64, Key>,
     /// Seal the ring for a voice request; only the current epoch's is used.
     ring_keys: HashMap<i64, Key>,
     watch_keys: HashMap<i64, Key>,
@@ -457,6 +467,8 @@ impl VoiceRoom {
         self.control_keys = keys.name_keys(&self.channel, control::LABEL);
         self.terminal_keys = keys.name_keys(&self.channel, terminal::LABEL);
         self.terminal_share_keys = keys.name_keys(&self.channel, terminal::SHARE_LABEL);
+        self.diagram_keys = keys.name_keys(&self.channel, diagram::LABEL);
+        self.diagram_share_keys = keys.name_keys(&self.channel, diagram::SHARE_LABEL);
         self.ring_keys = keys.name_keys(&self.channel, ring::LABEL);
         self.watch_keys = keys.name_keys(&self.channel, watch::LABEL);
         // Tracks published under the new epoch's names could not be told apart before,
@@ -518,14 +530,16 @@ impl VoiceRoom {
                     continue;
                 }
                 RoomEvent::Disconnected { .. } => self.files.disconnect(),
-                // Sealed remote control and terminal messages and rings; open them with
-                // `open_control`, `open_terminal` and `open_ring`.
+                // Sealed remote control, terminal and diagram messages and rings; open
+                // them with `open_control`, `open_terminal`, `open_diagram` and `open_ring`.
                 RoomEvent::DataReceived {
                     topic: Some(topic),
                     participant: Some(_),
                     ..
-                } if [control::TOPIC, terminal::TOPIC, ring::TOPIC].contains(&topic.as_str()) => {}
-                // Only the file, control, terminal and ring protocols authenticate their data.
+                } if [control::TOPIC, terminal::TOPIC, diagram::TOPIC, ring::TOPIC]
+                    .contains(&topic.as_str()) => {}
+                // Only the file, control, terminal, diagram and ring protocols authenticate
+                // their data. Older apps drop diagram packets here.
                 RoomEvent::DataReceived { .. }
                 | RoomEvent::ChatMessage { .. }
                 | RoomEvent::TranscriptionReceived { .. }

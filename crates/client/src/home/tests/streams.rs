@@ -47,6 +47,7 @@ fn stream_cards_keep_people_opt_in_and_preview_follows_focus() {
                 apps: vec![],
                 camera: (!local).then(|| "ann-camera".into()),
                 terminal: None,
+                diagram: None,
                 screens: vec![Screen {
                     sid: if local { "local" } else { "remote" }.into(),
                     name: "Display".into(),
@@ -252,6 +253,7 @@ fn normal_stop_share_exits_fullscreen_and_camera_remap_avoids_spurious_unwatch()
                 apps: vec![],
                 camera: None,
                 terminal: None,
+                diagram: None,
                 screens: vec![],
             },
             Peer {
@@ -262,6 +264,7 @@ fn normal_stop_share_exits_fullscreen_and_camera_remap_avoids_spurious_unwatch()
                 apps: vec![],
                 camera: Some("ann-cam-1".into()),
                 terminal: None,
+                diagram: None,
                 screens: vec![],
             },
         ],
@@ -432,6 +435,7 @@ fn request_control_follows_what_the_sharer_said() {
                 apps: vec![],
                 camera: None,
                 terminal: None,
+                diagram: None,
                 screens,
             };
             let screen = |control| Screen {

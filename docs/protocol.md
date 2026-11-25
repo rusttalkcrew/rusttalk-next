@@ -979,8 +979,9 @@ device_signing_public_key`, with each ID as 32 raw bytes. It carries
 no display name or metadata. It permits subscription. Data publication
 requires channel `write`. Clients consume byte streams only through the
 independently authenticated live file protocol, and data packets only
-on the remote control and terminal topics (see below), and drop other data
-events.
+on the remote control, terminal and diagram topics (see below), and drop other data
+events. So an app that doesn't know a topic, like an older app and diagrams,
+ignores its packets.
 Track publication requires
 the relevant flag from at least one assigned role. The `speak` grant
 allows `microphone` and `screen_share_audio`. The independent `video`
@@ -1330,6 +1331,61 @@ lets output read or write the clipboard. A viewer takes at most 4 MiB at once
 from a share, refilled at 2 MiB per second, and asks for a fresh screen past
 that; it keeps at most 8 combining marks in a row. A snapshot that would be
 bigger than 2 MiB loses history first, then its colours.
+
+### Diagram sessions
+
+A member of a call can start a diagram that everyone in the call sees and that
+people the host allows can edit. The host's device holds the diagram that
+counts; nothing about it is stored by the API or LiveKit.
+
+The host announces the session as the participant attribute
+`rusttalk.diagram`, sealed exactly like `rusttalk.terminal` with HKDF info
+`rusttalk-diagram-share-v1`. An empty value ends the announcement. Apps that
+don't know diagrams ignore the attribute.
+
+Messages are LiveKit data packets with topic `rusttalk.diagram`, always
+reliable and sent to one device, sealed exactly like terminal messages with
+HKDF info `rusttalk-diagram-v1`, up to 15 KiB on the wire. Every message
+carries the session's `id`; others are dropped.
+
+| Message (`t`) | From | Fields |
+| --- | --- | --- |
+| `join` | Viewer | Send me the diagram and every edit from then on; also sent after a gap |
+| `leave` | Viewer | Stop sending |
+| `snapshot` | Host | `seq`, `data` (at most 8 KiB of the diagram's JSON), `more` |
+| `ops` | Host | `seq`, `ops`: applied edits |
+| `end` | Host | The session ended |
+| `request`, `withdraw`, `grant`, `deny`, `revoke` | | As for terminals, about editing |
+| `edit` | Editor | `session`, `seq` (u64), `ops`: edits to apply |
+
+A diagram is `{"shapes": [...], "edges": [...]}`. A shape has a random u64
+`id`, a `kind` (`rect`, `rounded`, `ellipse`, `diamond` or `text`), `x`, `y`,
+`w`, `h`, `text` (at most 1000 bytes, no control characters but line breaks)
+and `color` (0 to 7). An edge has `id`, `from` and `to` (shape IDs) and
+`color`. Coordinates stay within ±100,000 and sizes from 4; a diagram holds at
+most 2,000 items. An edit (`o`) is `put` with an `item` (`k`: `shape` or
+`edge`), which adds it or replaces the item with its ID, or `delete` with an
+`id`, which also removes the shape's edges. Invalid edits are dropped.
+
+The host applies its own and editors' edits in the order it gets them, numbers
+them with one rising `seq` and sends them to everyone who joined. A snapshot is
+the diagram as of `seq`, split over messages with the same `seq`, the last with
+`more` false; a viewer assembles at most 4 MiB. A viewer applies edits whose
+`seq` follows the last one it has, ignores older ones, and on a gap joins
+again. Each device gets at most one snapshot every 500 ms. An editor shows its
+own edits at once and gets them back in the host's order, so everyone ends with
+the host's diagram; when the host drops part of an edit, it sends that editor
+a fresh snapshot.
+
+Anyone in the call may join; apps join a session they see on their own and show
+it on the stage. Editing follows the same rules as typing in a terminal: the
+host must allow each person, Allow waits a second with the window in front, a
+request lapses after 30 seconds, denials cool down for 30 seconds and after three
+for the rest of the session, and only joined devices may ask, only while the
+host's server connection is up. The host takes `edit` only from a device it
+allowed, with that grant's `session`, a `seq` higher than the last one seen and
+within a budget of 400 edits at once refilled at 50 per second. Ending the
+session or leaving the call sends `end` to everyone who joined.
 
 ## Live events
 

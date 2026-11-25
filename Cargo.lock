@@ -6880,6 +6880,7 @@ dependencies = [
  "regex",
  "reqwest",
  "rfd",
+ "roxmltree",
  "rsipstack",
  "rtrb",
  "rusttalk-core",

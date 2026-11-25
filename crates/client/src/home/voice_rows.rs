@@ -82,6 +82,7 @@ fn window() -> (Harness<'static, Option<Home>>, UnboundedReceiver<Command>) {
         screens: Vec::new(),
         camera: None,
         terminal: None,
+        diagram: None,
     };
     server.voice.insert(LOUNGE, vec![ann]);
     home.servers.push(server);

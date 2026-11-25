@@ -21,6 +21,7 @@ mod camera;
 mod crop;
 mod denoise;
 mod device_sync;
+mod diagram;
 mod dm;
 mod emoji;
 mod emoji_zip;

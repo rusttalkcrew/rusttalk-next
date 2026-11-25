@@ -240,6 +240,7 @@ struct Picked {
     stop_screen: bool,
     change_screen: bool,
     terminal: Option<Shell>,
+    diagram: Option<super::diagram::Pick>,
     live: Option<LiveAction>,
     voice_settings: bool,
 }
@@ -267,10 +268,8 @@ impl Extras {
     }
 
     fn count(&self) -> usize {
-        // The camera, plus whatever else this device can share.
-        1 + usize::from(self.screen)
-            + usize::from(self.app_audio)
-            + usize::from(self.terminal || self.phone)
+        // The camera and "More" (diagrams), plus whatever else this device can share.
+        2 + usize::from(self.screen) + usize::from(self.app_audio)
     }
 }
 
@@ -518,10 +517,9 @@ fn share_buttons(
     if extras.app_audio {
         picked.share = app_button(ui, voice, talk, can.blocked, size);
     }
-    if extras.terminal || extras.phone {
-        let can_call = extras.phone && talk;
-        picked.terminal = more_button(ui, voice, extras.terminal, can_call, can.connected, size);
-    }
+    let can_call = extras.phone && talk;
+    let more = more_button(ui, voice, extras.terminal, can_call, can.connected, size);
+    (picked.terminal, picked.diagram) = more;
 }
 
 /// Carry out what the call's buttons asked for.
@@ -578,6 +576,9 @@ fn apply(ui: &Ui, home: &mut Home, picked: Picked) {
     if let Some(shell) = picked.terminal {
         super::terminal::toggle(ui.ctx(), home, shell);
     }
+    if let Some(pick) = picked.diagram {
+        super::diagram::apply(ui.ctx(), home, pick);
+    }
     if picked.voice_settings {
         home.settings = Some(Tab::Voice);
     }
@@ -591,8 +592,8 @@ fn apply(ui: &Ui, home: &mut Home, picked: Picked) {
 }
 
 /// The "More" button: a menu for the less common shares, so the row stays short. Starts or
-/// stops a terminal share (on Windows also Command Prompt), and calls a phone when an
-/// account is set up. Lights up while a phone call runs.
+/// stops a terminal share (on Windows also Command Prompt) and a diagram, and calls a
+/// phone when an account is set up. Lights up while a phone call runs.
 fn more_button(
     ui: &mut Ui,
     voice: &mut Voice,
@@ -600,7 +601,7 @@ fn more_button(
     can_call: bool,
     connected: bool,
     size: Vec2,
-) -> Option<Shell> {
+) -> (Option<Shell>, Option<super::diagram::Pick>) {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     let calling = super::phone::calling(voice);
     #[cfg(any(target_os = "android", target_os = "ios"))]
@@ -619,17 +620,19 @@ fn more_button(
         })
         .inner;
     let mut picked = None;
+    let mut diagram = None;
     ui::menu_wide(&button, |m| {
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         if can_call || calling {
             super::phone::menu_rows(m, &mut voice.phone, can_call);
-            if terminal {
-                m.separator();
-            }
+            m.separator();
         }
+        // Available even where hosting a terminal is not.
+        diagram = super::diagram::menu_rows(m, &voice.diagrams);
         if !terminal {
             return;
         }
+        m.separator();
         if on {
             if m.danger("⏹", t!("call.stop_terminal")).clicked() {
                 picked = Some(Shell::Default);
@@ -648,7 +651,7 @@ fn more_button(
             picked = Some(Shell::Cmd);
         }
     });
-    picked
+    (picked, diagram)
 }
 
 /// A gentle hint above the panel when the microphone is noisy or too loud. Never while

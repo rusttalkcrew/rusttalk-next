@@ -218,6 +218,16 @@ shares one. Nothing about a shared terminal is stored by
 the API or LiveKit; the output lives only in each device's memory while it
 is shown.
 
+For a shared diagram, LiveKit sees the `rusttalk.diagram` attribute (that a
+device hosts a diagram, and when), and the sizes and timing of the sealed data
+packets, which reveal roughly how big the diagram is and when people change it.
+The shapes, their text, who asks to edit and the answers are sealed the same way
+as a shared terminal, with the same limit: a member of the channel who also
+controls the media server could read the diagram or pose as another device in
+the call. The diagram lives only in the memory of the devices in the session.
+Nothing is sent to draw.io or any other service; saving it as a draw.io file
+writes a file on the device only.
+
 On Linux, RustTalk shares video through the ScreenCast portal. Hyprland
 monitor shares can opt into control requests for that share, and the sharer
 must still approve each request in RustTalk. The portal grants screen
@@ -662,7 +672,7 @@ and platform constraints.
 - **Calls, live file transfers, and SIP:** Because `livekit`/`libwebrtc` and
   `rsipstack` open direct OS UDP/TCP sockets and gather local host ICE candidates
   without a routed socket-factory hook, voice/video calls, screen sharing, shared
-  terminals, remote control, LiveKit live file transfers, and desktop SIP phone
+  terminals and diagrams, remote control, LiveKit live file transfers, and desktop SIP phone
   calls are blocked whenever SOCKS5, app-only WireGuard, or Tor is active.
   Server-stored encrypted file transfers (up to 32 MiB) remain available over HTTPS.
 - **What operators can observe:**

@@ -45,6 +45,7 @@ const OFFER_SECONDS: i64 = 10 * 60;
 
 #[cfg(any(target_os = "ios", test))]
 pub(crate) mod callkit;
+pub mod diagram;
 pub mod mixer;
 #[cfg(any(target_os = "android", test))]
 pub(crate) mod notice;
@@ -111,6 +112,8 @@ pub struct Voice {
     pub control: remote::Control,
     /// Our shared terminal, and the one we watch.
     pub terminals: terminal::Terminals,
+    /// The diagram we host or follow.
+    pub diagrams: diagram::Diagrams,
     /// A hint about the microphone, once per call, until answered.
     pub mic_hint: Option<Verdict>,
     /// A phone call into the room, and the dialer.
@@ -280,6 +283,7 @@ impl Voice {
             pips: HashMap::new(),
             control: remote::Control::default(),
             terminals: terminal::Terminals::default(),
+            diagrams: diagram::Diagrams::default(),
             mic_hint: None,
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             phone: phone::Phone::default(),
@@ -307,6 +311,8 @@ impl Voice {
         self.control = remote::Control::default();
         // Leaving the call ends our shared shell.
         self.terminals = terminal::Terminals::default();
+        // And our diagram session; one we follow is left.
+        self.diagrams = diagram::Diagrams::default();
         self.mic_hint = None;
         let _ = self.audio.take_trouble();
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -600,6 +606,7 @@ pub fn frame(ctx: &egui::Context, home: &mut Home) {
     }
     remote::frame(home, ctx.input(|input| input.time));
     terminal::frame(home, ctx.input(|input| input.time));
+    diagram::frame(home, ctx.input(|input| input.time));
     // Keep watch intent through a bounded outage while the owner republishes.
     if let Some(watching) = &home.voice.watching {
         let reconnecting = home

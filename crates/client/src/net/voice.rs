@@ -28,7 +28,7 @@ use url::Url;
 use super::{
     Command, Ctx, LiveOffer, State, Update,
     control::{self, ControlView},
-    phone,
+    diagram, phone,
     terminal::{self, Hosting},
 };
 use crate::{
@@ -225,6 +225,10 @@ pub(super) struct Live {
     pub(super) terminal: Option<Hosting>,
     /// The terminal we watch.
     pub(super) viewing: Option<rusttalk_core::terminal::Viewer>,
+    /// Our diagram session.
+    pub(super) diagram: Option<diagram::Hosting>,
+    /// The diagram we follow.
+    pub(super) diagram_view: Option<rusttalk_core::diagram::Viewer>,
     /// When the call last rang here.
     rang: Option<std::time::Instant>,
 }
@@ -289,6 +293,7 @@ pub(super) fn voice_only(command: &Command) -> bool {
             | Command::CancelFile(_)
     ) || control::is_control(command)
         || terminal::is_terminal(command)
+        || diagram::is_diagram(command)
         || phone::is_phone(command)
 }
 
@@ -319,6 +324,10 @@ pub(super) async fn voice_command(
     }
     if terminal::is_terminal(&command) {
         let changed = terminal::command(ctx, live, command).await;
+        return Ok(changed.then_some(live.channel));
+    }
+    if diagram::is_diagram(&command) {
+        let changed = diagram::command(ctx, live, command).await;
         return Ok(changed.then_some(live.channel));
     }
     if let Command::Ring = command {
@@ -993,6 +1002,8 @@ pub(super) enum Next {
     App(App, bool, Result<(Capture, NativeAudioSource)>),
     /// Time to send our terminal's output.
     Flush,
+    /// Time to send our diagram to whoever is owed it.
+    DiagramFlush,
 }
 
 pub(super) async fn next_voice(voice: &mut Option<Live>) -> Next {
@@ -1030,9 +1041,16 @@ pub(super) async fn next_voice(voice: &mut Option<Live>) -> Next {
             None => std::future::pending().await,
         }
     };
+    let diagram_flush = async {
+        match live.diagram.as_mut() {
+            Some(hosting) => hosting.tick.tick().await,
+            None => std::future::pending().await,
+        }
+    };
     tokio::select! {
         event = live.room.next_event() => Next::Event(event),
         _ = flush => Next::Flush,
+        _ = diagram_flush => Next::DiagramFlush,
         capture = starting => Next::Capture(capture.map_err(anyhow::Error::from).and_then(|c| c)),
         capture = swapping => Next::Swap(capture.map_err(anyhow::Error::from).and_then(|c| c)),
         next = app => next,
@@ -1113,6 +1131,27 @@ pub(super) async fn terminal_received(
     });
     if let Some(live) = &mut state.voice {
         terminal::received(ctx, live, &from, person, wire).await;
+    }
+}
+
+/// A sealed diagram message from someone in the call; `client` as for `control_received`.
+pub(super) async fn diagram_received(
+    ctx: &Ctx,
+    client: Option<&KeyClient<'_>>,
+    state: &mut State,
+    from: &RemoteParticipant,
+    wire: &[u8],
+) {
+    let from = from.identity();
+    let person = client.and_then(|client| {
+        state
+            .identities
+            .get(client, &state.server_id)
+            .get(from.as_str())
+            .copied()
+    });
+    if let Some(live) = &mut state.voice {
+        diagram::received(ctx, live, &from, person, wire).await;
     }
 }
 
@@ -1235,6 +1274,7 @@ fn send_roster(ctx: &Ctx, url: &Url, ids: &HashMap<String, Id>, state: &State, c
             screens: Vec::new(),
             camera: None,
             terminal: None,
+            diagram: None,
         })),
         Some(live) => {
             let mut live_people: HashMap<Id, bool> = HashMap::new();
@@ -1243,6 +1283,7 @@ fn send_roster(ctx: &Ctx, url: &Url, ids: &HashMap<String, Id>, state: &State, c
             let mut screens: HashMap<Id, Vec<Screen>> = HashMap::new();
             let mut cameras: HashMap<Id, String> = HashMap::new();
             let mut terminals: HashMap<Id, String> = HashMap::new();
+            let mut diagrams: HashMap<Id, String> = HashMap::new();
             let mut watches: HashSet<(Id, String)> = HashSet::new();
             let mut sounds = Snapshot {
                 camera: live.camera.clone(),
@@ -1261,6 +1302,13 @@ fn send_roster(ctx: &Ctx, url: &Url, ids: &HashMap<String, Id>, state: &State, c
                         && live.room.terminal_share(&participant).is_some()
                     {
                         terminals
+                            .entry(*person)
+                            .or_insert_with(|| participant.identity().to_string());
+                    }
+                    if voice != VoiceState::Disconnected
+                        && live.room.diagram_share(&participant).is_some()
+                    {
+                        diagrams
                             .entry(*person)
                             .or_insert_with(|| participant.identity().to_string());
                     }
@@ -1339,6 +1387,9 @@ fn send_roster(ctx: &Ctx, url: &Url, ids: &HashMap<String, Id>, state: &State, c
             if live.terminal.is_some() {
                 terminals.insert(me, live.room.identity().to_string());
             }
+            if live.diagram.is_some() {
+                diagrams.insert(me, live.room.identity().to_string());
+            }
             if let Some((sid, ..)) = &live.screen {
                 screens.entry(me).or_default().push(Screen {
                     sid: sid.to_string(),
@@ -1384,6 +1435,7 @@ fn send_roster(ctx: &Ctx, url: &Url, ids: &HashMap<String, Id>, state: &State, c
                     screens: screens.remove(&person).unwrap_or_default(),
                     camera: cameras.remove(&person),
                     terminal: terminals.remove(&person),
+                    diagram: diagrams.remove(&person),
                 });
             }
         }
@@ -1398,6 +1450,7 @@ fn send_roster(ctx: &Ctx, url: &Url, ids: &HashMap<String, Id>, state: &State, c
         screens: Vec::new(),
         camera: None,
         terminal: None,
+        diagram: None,
     }));
     ctx.send(Update::Room(url.clone(), channel, peers, call_sounds));
 }
@@ -1616,6 +1669,7 @@ pub(super) async fn on_voice(
                 }
                 control::left(ctx, live, participant.identity().as_str());
                 terminal::left(ctx, live, participant.identity().as_str());
+                diagram::left(ctx, live, participant.identity().as_str());
             }
         }
         RoomEvent::TrackUnpublished { publication, .. } => {
@@ -2055,6 +2109,8 @@ pub(super) async fn finish_call(
         control: ControlView::default(),
         terminal: None,
         viewing: None,
+        diagram: None,
+        diagram_view: None,
         rang: None,
     });
     ctx.send(Update::Call(
