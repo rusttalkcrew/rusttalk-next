@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+## v0.6.0 - 2026-11-25
+
 - Your status no longer gets stuck on Away for others (while your own bar says Online) when you change it just as the app reconnects.
 - Using RustTalk on several devices: an idle phone no longer sets you Away while you use your computer. You show as Away only when all your devices are idle, and a status you pick on one device applies on all of them.
 - New status: Do not disturb. Others see a red dot with a bar, and none of your devices show notifications or play message sounds while it is on (unread counts still update).
