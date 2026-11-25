@@ -19,6 +19,7 @@ Unreleased under the new version and date.
 - Reconnecting after a network drop is faster when you have many chats and DMs open: their newest messages now reload side by side instead of one by one.
 - Animated profile pictures and emoji use less memory, and many of them playing at once no longer slow the app down.
 - Draw a diagram together in a call: start one from the call's … menu, everyone sees it on the stage, and others can ask to edit. On desktop, save it as a draw.io file or start from one.
+- A Gallery button in channels and DMs shows every picture and video shared there as a grid, with the viewer stepping through them and a jump back to the message.
 
 ## v0.7.0 - 2026-11-25
 

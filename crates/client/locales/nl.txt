@@ -1210,6 +1210,14 @@ files.rotate = Draaien
 files.zoom_out = Uitzoomen
 files.zoom_in = Inzoomen
 files.picture_failed = Kon deze afbeelding niet openen. Je kunt hem nog wel opslaan.
+gallery.show = Galerie tonen
+gallery.hide = Galerie verbergen
+gallery.title = Galerie
+gallery.empty = Nog geen foto's of video's hier.
+gallery.shared_by = {name} · {time}
+gallery.jump = Naar bericht
+gallery.previous = Vorige
+gallery.next = Volgende
 
 # crates/client/src/crop.rs
 crop.open_failed = Kon dat bestand niet openen.

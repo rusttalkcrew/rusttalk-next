@@ -1210,6 +1210,14 @@ files.rotate = Drehen
 files.zoom_out = Verkleinern
 files.zoom_in = Vergrößern
 files.picture_failed = Dieses Bild konnte nicht geöffnet werden. Du kannst es trotzdem speichern.
+gallery.show = Galerie anzeigen
+gallery.hide = Galerie ausblenden
+gallery.title = Galerie
+gallery.empty = Hier gibt es noch keine Bilder oder Videos.
+gallery.shared_by = {name} · {time}
+gallery.jump = Zur Nachricht
+gallery.previous = Zurück
+gallery.next = Weiter
 
 # crates/client/src/crop.rs
 crop.open_failed = Diese Datei konnte nicht geöffnet werden.
