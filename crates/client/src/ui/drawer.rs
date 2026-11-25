@@ -7,7 +7,7 @@
 //! over from whatever widget had it.
 
 use eframe::egui::{
-    Align2, Area, AreaState, Context, Id, LayerId, Order, Pos2, Rect, Sense, Ui, UiBuilder,
+    Align2, Area, AreaState, Context, Id, LayerId, Order, Pos2, Rangef, Rect, Sense, Ui, UiBuilder,
     emath::easing, lerp,
 };
 
@@ -15,6 +15,10 @@ use super::SCRIM;
 
 /// How close to the left edge a drag must start to pull the drawer in.
 pub const EDGE: f32 = 24.0;
+/// Android leaves the app at most this many dp of each screen edge (system gesture
+/// exclusion); the rest of the left edge stays its Back gesture. There the drawer
+/// starts only in a centred band this tall, the part the app asks Android for.
+const ANDROID_BAND_DP: f32 = 200.0;
 /// The strip of dimmed content left beside the open drawer, to tap or drag it shut.
 pub const PEEK: f32 = 56.0;
 /// How far a finger moves before the gesture counts as a drag, not a tap.
@@ -71,6 +75,13 @@ impl Drawer {
             });
         let phase = id.with("phase");
         let width = width(area);
+        let max_band = if cfg!(target_os = "android") {
+            // egui points are dp unless the app zooms.
+            ANDROID_BAND_DP / ctx.zoom_factor()
+        } else {
+            f32::INFINITY
+        };
+        let band = edge_band(area, max_band);
         let settle = |state: &mut State, open: bool| {
             state.open = open;
             state.from = state.progress;
@@ -110,7 +121,7 @@ impl Drawer {
                 let start = if *open {
                     area.contains(origin)
                 } else {
-                    origin.x <= area.left() + EDGE
+                    origin.x <= area.left() + EDGE && band.contains(origin.y)
                 };
                 state.drag = start.then_some(Drag {
                     origin,
@@ -164,7 +175,14 @@ impl Drawer {
                 state.progress = lerp(state.from..=target(state.open), easing::cubic_out(t));
             }
         }
-        ctx.data_mut(|data| data.insert_temp(id, state));
+        // Where an edge drag may start this frame, for Android to keep its Back
+        // gesture out of; nothing once it is fully open.
+        let edge = (enabled && state.progress < 1.0)
+            .then(|| Rect::from_x_y_ranges(area.left()..=area.left() + EDGE, band));
+        ctx.data_mut(|data| {
+            data.insert_temp(id, state);
+            data.insert_temp(edge_id(), edge);
+        });
         Self {
             id,
             area,
@@ -218,6 +236,26 @@ impl Drawer {
             })
             .inner
     }
+}
+
+fn edge_id() -> Id {
+    Id::unique("drawer edge")
+}
+
+/// The strip a drawer took edge drags in during this frame, if any, forgotten on
+/// read: a frame without a drawer (another screen, a wide window) gives `None`.
+#[cfg(any(target_os = "android", test))]
+pub fn take_edge(ctx: &Context) -> Option<Rect> {
+    ctx.data_mut(|data| data.remove_temp::<Option<Rect>>(edge_id()))
+        .flatten()
+}
+
+/// The part of `area`'s height where an edge drag may start: all of it, or a
+/// centred band at most `max` tall.
+fn edge_band(area: Rect, max: f32) -> Rangef {
+    let half = area.height().min(max) / 2.0;
+    let middle = area.center().y;
+    Rangef::new(middle - half, middle + half)
 }
 
 /// How wide the open drawer is in `area`.
@@ -384,6 +422,27 @@ mod tests {
         press(&mut h, at, false);
         h.run();
         assert_eq!(h.state().taps, 1);
+    }
+
+    #[test]
+    fn the_edge_band_is_centred_and_capped() {
+        let area = Rect::from_min_size(pos2(0.0, 40.0), SIZE);
+        assert_eq!(edge_band(area, f32::INFINITY), area.y_range());
+        let band = edge_band(area, 200.0);
+        assert_eq!(band.span(), 200.0);
+        assert_eq!(band.center(), area.center().y);
+    }
+
+    #[test]
+    fn the_edge_is_reported_until_fully_open() {
+        let mut h = harness(false);
+        h.run();
+        let edge = take_edge(&h.ctx).expect("closed: the edge takes drags");
+        assert_eq!(edge.width(), EDGE);
+        assert_eq!(take_edge(&h.ctx), None, "forgotten once read");
+        h.state_mut().open = true;
+        h.run();
+        assert_eq!(take_edge(&h.ctx), None);
     }
 
     #[test]
