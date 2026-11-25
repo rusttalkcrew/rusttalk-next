@@ -26,6 +26,7 @@ Unreleased under the new version and date.
 - On phones, swipe in from the left edge to open the server and channel list, and swipe it away or tap beside it to close it.
 - On phones, screenshots and the recent apps view no longer show your recovery words.
 - Moderators can no longer lift a ban placed by the owner or by someone with the same or a higher role.
+- Android: hiding the keyboard with Back no longer keeps the app redrawing in the background, saving battery.
 
 ## v0.4.0 - 2026-11-24
 
