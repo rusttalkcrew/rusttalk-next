@@ -37,6 +37,7 @@ Unreleased under the new version and date.
 - Server settings > Joining: Save lights up only after a change, and the page shows fresh values when you come back. Phones no longer list Shortcuts and call themselves "This device".
 - Network route problems (proxy, Tor or WireGuard) now show short, translated messages like "Couldn't reach the proxy", with the technical text under Details.
 - Security: people who manage channels can only see, edit, move, delete or change access to channels they can read themselves
+- Security: slow or stalled uploads can no longer make a server refuse everyone else's changes.
 
 ## v0.4.0 - 2026-11-24
 
