@@ -128,7 +128,6 @@ home.invite_people = Mensen uitnodigen
 home.server_settings = Serverinstellingen
 home.create_channel = Kanaal maken
 home.create_category = Categorie maken
-home.show_empty_categories = Lege categorieën tonen
 home.rename_server = Server hernoemen
 home.change_my_name = Mijn bijnaam wijzigen
 home.leave_server = Server verlaten
