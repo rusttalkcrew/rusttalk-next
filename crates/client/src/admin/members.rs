@@ -583,6 +583,7 @@ mod tests {
             voice: Default::default(),
             names: Default::default(),
             commands,
+            view_as: None,
         });
         home
     }

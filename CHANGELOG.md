@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Admins can preview the server as one or more of their own roles ("View server as this role" in Roles): channels, categories and buttons show as those roles would see them, and nothing can be changed while previewing.
+
 ## v0.5.0 - 2026-11-25
 
 - Android test builds install as a separate "RustTalk Test" app, so they no longer block installing the release app.

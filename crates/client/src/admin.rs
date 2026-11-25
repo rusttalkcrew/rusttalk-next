@@ -446,6 +446,11 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
         home.server_settings = None;
         return;
     };
+    // Nothing here may change while the server is previewed as other roles.
+    if server.view_as.is_some() {
+        home.server_settings = None;
+        return;
+    }
     let index = settings.server;
     // `Person` reads these two parts of `home` while `settings` borrows another.
     let (friends, voice) = (&home.friends, &home.voice);
@@ -636,8 +641,16 @@ pub fn window(ctx: &egui::Context, home: &mut Home) {
         settings.message = None;
         home.files.ask(ctx, Ask::EmojiZip(server.address.clone()));
     }
+    let view_as = settings.roles.view_as.take();
     if close {
         home.server_settings = None;
+    }
+    if let Some(role) = view_as {
+        home.server_settings = None;
+        let server = &mut home.servers[index];
+        crate::home::view_as::show_as(server, vec![role]);
+        // Phones: the channel list first, where most of the difference shows.
+        home.layout.list = true;
     }
     if let Some((person, pick)) = person_pick {
         // Their card, a poke or a chat belongs on top of the page, not under it.

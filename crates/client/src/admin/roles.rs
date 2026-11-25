@@ -8,7 +8,7 @@ use eframe::egui::{
 };
 
 use crate::{
-    home::face,
+    home::{face, view_as},
     net::Admin,
     server::{Directory, Id, Member, Role, Server},
     ui,
@@ -59,6 +59,8 @@ pub struct RolesPage {
     nudged: f64,
     /// The role being dragged in the list.
     dragging: Option<String>,
+    /// "View server as" was clicked for this role.
+    pub(super) view_as: Option<String>,
 }
 
 impl RolesPage {
@@ -645,6 +647,21 @@ fn editor(ui: &mut Ui, server: &Server, page: &mut RolesPage) {
     });
     if !editable {
         ui.label(ui::caption(t!("admin.role_above_you")));
+    }
+    ui.add_space(ui::SPACE_XS);
+    // Only roles you have yourself can be previewed, so it never shows more than you see.
+    let yours = (view_as::choosable(dir).iter()).any(|r| r.id == role.id);
+    let dirty = page.dirty(dir);
+    let button = ui
+        .add_enabled_ui(yours && !dirty, |ui| ui::secondary(ui, t!("view_as.open")))
+        .inner
+        .on_disabled_hover_text(if dirty {
+            t!("view_as.save_first")
+        } else {
+            t!("view_as.only_yours")
+        });
+    if button.clicked() {
+        page.view_as = Some(role.id.clone());
     }
     ui.add_space(ui::SPACE_S);
     let before = page.tab;
