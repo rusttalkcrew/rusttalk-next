@@ -113,7 +113,8 @@ All endpoints below require `Authorization: Bearer <token>`.
 | --- | --- | --- |
 | GET `/v1/me` | Empty | Any member. 200, `{person_id, device_id, joined_at, role_ids, status, hide_offline}`; `status` is the caller’s own presence choice |
 | PUT `/v1/me/hide-offline` | `{hide_offline}` | Any member. 204. Stores whether member lists leave the caller out while their visible presence is `offline`, and sends `member_changed` |
-| PUT `/v1/me/status` | `{status}`, one of `online`, `away`, `invisible` | Any member. 204. Stored and applied to the member’s event sockets |
+| PUT `/v1/me/status` | `{status, picked?}`, `status` one of `online`, `away`, `invisible` | Any member. 204. With `picked: true` (apps that report idle separately), stored as the member's choice for all their devices and sent to their own sockets as `presence_changed` with `chosen`. Without `picked` (older apps, which also send `away` by themselves after a while without input): `away` marks the calling device idle and is not stored; `online` and `invisible` are stored, and `online` also ends the device's idle |
+| PUT `/v1/me/idle` | `{idle}`, a boolean | Any member. 204. Whether the calling device has had no input for a while. Kept in memory only, never stored; dropped once the device has been disconnected for the reconnect grace. Older servers answer 404 |
 | DELETE `/v1/me/membership` | Empty | Any member except the owner. 204, leaves the server like a kick: sessions close, keys rotate, audit `left`. The owner gets `409 owner_cannot_leave` |
 | POST `/v1/me/revocations` | `{record}`, a W04 root-signed revocation for the caller's person | Any member. 204, affected device loses its token |
 | POST `/v1/invites` | `{uses, ttl_seconds, space_key_ct, name_ct?}` | `invite`. 201, `{id, code, expires_at}` |
@@ -1306,7 +1307,7 @@ pushing updates.
 | `keys_needed` | `scope`, `epoch`, `device`. Reconcile pending wraps and delivered keys. Completion also wakes the recipient |
 | `rotate_needed` | `scope`. Fetch the current epoch and try to publish its successor |
 | `member_changed` | `person`, optional `device`, optional `profile`. Refresh the member and device directory and catalog. With `profile` (`display_name_ct`, `avatar_hash`, `bio_ct`, `hide_offline`, `avatar_initialized`, `voice_muted`, as `GET /v1/members` lists them) only that member's profile changed: update that member, no key or directory reload needed. Left out when the notice would exceed 3,800 bytes |
-| `presence_changed` | `person_id`, `status`. Sent to members when visible presence changes |
+| `presence_changed` | `person_id`, `status`, optional `chosen`. Sent to members when visible presence changes. With `chosen` (the member's new status choice), sent only to that member's own sockets when the choice changes, with `status` as others were last told |
 | `channel_changed` | Optional `part`. Refresh the catalog, server metadata, server emoji and server events. With `part`, only that changed, and no keys or access: `channels` (the catalog: channel and category names, topics, order, settings, focus mode), `space` (`GET /v1/space`), `emoji` or `calendar`. Treat an unknown `part` like none |
 | `voice_changed` | `channel`, optional `people` and `unknown` as from GET `/v1/voice/{channel}/participants`. Without them (older servers, or a roster too big for one frame), fetch current voice participants. Sent to current channel readers on signed LiveKit join, leave and room-end notices |
 | `voice_moved` | `devices`, `from`, `to`. A moderator moved these devices' call; join `to`. Sent only to those devices |
@@ -1324,7 +1325,10 @@ Fetch the roster when loading a channel list and after `resync`.
 A member’s first event socket announces their stored choice, which starts as
 `online`; an `invisible` member is not announced. The choice applies across
 sockets and devices and survives reconnects and server restarts. The directory
-and notices use `offline` for invisibility and for disconnected members. The
+and notices use `offline` for invisibility and for disconnected members. Idle
+is per device: with the choice `online`, visible presence is `away` only while
+every connected device of the member is idle, and `online` again as soon as one
+is not; a choice of `away` or `invisible` applies whatever the devices do. The
 last socket closing starts a one-second reconnect grace period before visible
 presence goes offline. Notices for one member are coalesced to at most one per
 second; the latest choice wins, and a choice reverted within that second sends
