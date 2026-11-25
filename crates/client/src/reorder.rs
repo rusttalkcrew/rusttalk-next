@@ -4,7 +4,10 @@
 //! rows slide aside to show where the dragged one would land. The dragged row follows
 //! the pointer as a floating copy while its own place stays empty.
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    borrow::Cow,
+    collections::{HashMap, HashSet},
+};
 
 use eframe::egui::{CursorIcon, Id as UiId, Key, Rect, Response, Sense, Ui, UiBuilder, vec2};
 
@@ -41,6 +44,45 @@ pub fn order(categories: &[Category]) -> Option<Vec<(Id, Vec<Id>)>> {
     (categories.iter())
         .map(|c| Some((c.id?, c.channels.iter().map(|ch| ch.id).collect())))
         .collect()
+}
+
+/// The categories the channel list shows: only those with a channel this person can
+/// see, as members see them, or every one when `empty` (a manager who asked to).
+pub fn shown(categories: &[Category], empty: bool) -> Cow<'_, [Category]> {
+    if empty || categories.iter().all(|c| !c.channels.is_empty()) {
+        return Cow::Borrowed(categories);
+    }
+    Cow::Owned(
+        (categories.iter())
+            .filter(|c| !c.channels.is_empty())
+            .cloned()
+            .collect(),
+    )
+}
+
+/// `slot`, picked in the `shown` list, as the slot in the full list `all`; a
+/// category dropped after the last shown one goes last.
+pub fn widen(shown: &[Category], all: &[Category], item: Item, slot: Slot) -> Slot {
+    match slot {
+        Slot::Channel(c, at) => {
+            let id = shown.get(c).map(|category| category.id);
+            let c = all.iter().position(|category| Some(category.id) == id);
+            // Out of range, so `place` ignores a slot it can't map.
+            Slot::Channel(c.unwrap_or(usize::MAX), at)
+        }
+        Slot::Category(to) => {
+            let rest = |list: &[Category]| -> Vec<Option<Id>> {
+                (list.iter().map(|c| c.id))
+                    .filter(|id| id.map(Item::Category) != Some(item))
+                    .collect()
+            };
+            let all = rest(all);
+            let to = (rest(shown).get(to))
+                .and_then(|id| all.iter().position(|other| other == id))
+                .unwrap_or(all.len());
+            Slot::Category(to)
+        }
+    }
 }
 
 fn find(categories: &[Category], channel: Id) -> Option<(usize, usize)> {
@@ -640,6 +682,38 @@ mod tests {
         let mut loose = category(1, &[11]);
         loose.id = None;
         assert!(order(&[loose]).is_none());
+    }
+
+    #[test]
+    fn empty_categories_hide_unless_asked_and_moves_keep_them_in_place() {
+        // Category 3 is empty here: its only channel is for roles this manager lacks.
+        let all = vec![category(1, &[11]), category(3, &[]), category(2, &[21])];
+        assert!(matches!(shown(&all, true), Cow::Borrowed(_)));
+        let list = shown(&all, false);
+        assert_eq!(ids(&list), [(1, vec![11]), (2, vec![21])]);
+        let apply = |item, slot| {
+            let mut saved = all.clone();
+            place(&mut saved, item, widen(&list, &all, item, slot));
+            ids(&saved)
+        };
+        // Category 2 moved up past 1 lands before 1, leaving 3 where it was.
+        let up = step(&list, Item::Category([2; 32]), true).unwrap();
+        assert_eq!(
+            apply(Item::Category([2; 32]), up),
+            [(2, vec![21]), (1, vec![11]), (3, vec![])]
+        );
+        // Category 1 moved down past 2 goes last.
+        let down = step(&list, Item::Category([1; 32]), false).unwrap();
+        assert_eq!(
+            apply(Item::Category([1; 32]), down),
+            [(3, vec![]), (2, vec![21]), (1, vec![11])]
+        );
+        // A channel moved down into the next shown category skips the hidden one.
+        let next = step(&list, Item::Channel([11; 32]), false).unwrap();
+        assert_eq!(
+            apply(Item::Channel([11; 32]), next),
+            [(1, vec![]), (3, vec![]), (2, vec![11, 21])]
+        );
     }
 
     #[test]

@@ -575,6 +575,7 @@ mod tests {
             status: crate::server::Status::Online,
             compatibility: Default::default(),
             order_unavailable: false,
+            show_empty: false,
             dir: Directory::default(),
             chats: Default::default(),
             open: None,

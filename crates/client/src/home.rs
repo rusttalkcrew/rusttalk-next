@@ -3023,9 +3023,11 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
     let mut rule_change = None;
     let mut focus_pick = None;
     let now = notify::unix_now();
-    let categories = &server.dir.categories;
+    let all = &server.dir.categories;
+    let shown = reorder::shown(all, perms.manage_channels && server.show_empty);
+    let categories = &*shown;
     let can_manage = perms.manage_channels && online;
-    let can_move = can_manage && !server.order_unavailable && reorder::order(categories).is_some();
+    let can_move = can_manage && !server.order_unavailable && reorder::order(all).is_some();
     let mut show_events = false;
     if events::enabled(server) {
         let selected = server.open.is_none() && server.events_open;
@@ -3175,6 +3177,7 @@ fn channel_list(ui: &mut Ui, home: &mut Home, index: usize) {
         }
         moved = moved.or(list.end(ui, categories, viewport));
     });
+    let moved = moved.map(|(item, slot)| (item, reorder::widen(categories, all, item, slot)));
     if let Some((item, slot)) = moved {
         let server = &mut home.servers[index];
         if reorder::place(&mut server.dir.categories, item, slot)
@@ -3242,6 +3245,17 @@ fn server_menu(m: &mut ui::Menu, home: &mut Home, index: usize) {
             }
             if m.item("🗀", t!("home.create_category")).clicked() {
                 home.dialog = Some(Dialog::Category(index, String::new()));
+            }
+            // Only offered while it changes something, so it doesn't clutter the menu.
+            let server = &mut home.servers[index];
+            let empty =
+                (server.dir.categories.iter()).any(|c| c.id.is_some() && c.channels.is_empty());
+            if empty || server.show_empty {
+                let item =
+                    ui::Item::new("👁", t!("home.show_empty_categories")).checked(server.show_empty);
+                if m.add(item).clicked() {
+                    server.show_empty = !server.show_empty;
+                }
             }
         }
         if perms.manage_server && m.item("✏", t!("home.rename_server")).clicked() {
@@ -4045,6 +4059,7 @@ pub(crate) fn new_server(
         status: Status::Connecting,
         compatibility: Compatibility::default(),
         order_unavailable: false,
+        show_empty: false,
         dir: Directory::default(),
         chats: HashMap::new(),
         open: None,
@@ -7205,6 +7220,10 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
         command = name.map(|name| (index, Command::SetDisplayName(name)));
     }
     if let Some((index, command)) = command {
+        // A new category has no channels yet; keep it in view so it can be filled.
+        if matches!(command, Command::CreateCategory(_)) {
+            home.servers[index].show_empty = true;
+        }
         home.servers[index].send(command);
         close = true;
     }
@@ -7376,6 +7395,7 @@ mod tests {
     mod call_controls;
     mod dialogs;
     mod emoji;
+    mod empty_categories;
     mod image_reload;
     mod joining;
     mod long_chat;
