@@ -1,0 +1,289 @@
+//! Someone sharing camera and screen at once: the camera stays visible as a small
+//! picture on the screen, which snaps to a corner, pops out and minimizes (#600).
+
+use super::*;
+use crate::call::pip::{Corner, Pip};
+use crate::server::{Call, CallState, Peer, Screen as Shared, Stats};
+use egui_kittest::{Harness, kittest::Queryable};
+
+type Screen = (Home, crate::update::Updater, crate::keystore::Keystore);
+
+fn gradient(w: usize, h: usize, warm: bool) -> egui::ColorImage {
+    let pixels = (0..w * h)
+        .map(|at| {
+            let (x, y) = (at % w, at / w);
+            if warm {
+                egui::Color32::from_rgb(180 + (x * 60 / w) as u8, 120, 80 + (y * 60 / h) as u8)
+            } else {
+                egui::Color32::from_rgb(40 + (x * 120 / w) as u8, 60, 90 + (y * 120 / h) as u8)
+            }
+        })
+        .collect();
+    egui::ColorImage::new([w, h], pixels)
+}
+
+/// In a call with Ann, who shares her camera and her screen; we watch the screen.
+fn sharing(dark: bool, size: Vec2, data: &std::path::Path) -> Harness<'static, Option<Screen>> {
+    let (mut base, _sent) = files_harness(dark);
+    let mut home = base.state_mut().take().unwrap();
+    home.view = View::Server(0);
+    home.layout.list = false;
+    home.servers[0].open = Some(PROJECTS);
+    home.servers[0].dir.categories[0].channels[0].voice = true;
+    home.find.opened = false;
+    home.voice.call = Some(Call {
+        server: home.servers[0].address.clone(),
+        channel: PROJECTS,
+        state: CallState::Connected,
+        stats: Stats::default(),
+        can_talk: true,
+        can_share_video: true,
+    });
+    let peer = |person, camera: Option<&str>, screens| Peer {
+        person,
+        connecting: false,
+        unknown: false,
+        status: Default::default(),
+        apps: vec![],
+        camera: camera.map(Into::into),
+        terminal: None,
+        screens,
+    };
+    let screen = Shared {
+        sid: "remote".into(),
+        name: "Display".into(),
+        viewers: 1,
+        local: false,
+        control: None,
+    };
+    home.servers[0].voice.insert(
+        PROJECTS,
+        vec![
+            peer(ME, None, vec![]),
+            peer(ANN, Some("ann-camera"), vec![screen]),
+        ],
+    );
+    let mut prefs = home.notify.prefs().clone();
+    prefs.desktop = false;
+    home.notify.set_prefs(prefs);
+    let mut settings = home.voice.audio.settings();
+    settings.set_appearance(ui::Appearance {
+        mode: if dark {
+            ui::Mode::Dark
+        } else {
+            ui::Mode::Light
+        },
+        ..Default::default()
+    });
+    home.voice.audio.set_settings(settings);
+    let mut h = Harness::builder().with_size(size).build_ui_state(
+        |ui, screen: &mut Option<Screen>| {
+            if let Some((home, updates, keys)) = screen {
+                show(ui, home, updates, keys);
+            }
+        },
+        None,
+    );
+    ui::install(&h.ctx);
+    *h.state_mut() = Some((
+        home,
+        crate::update::Updater::new(data),
+        crate::keystore::without_keychain(data),
+    ));
+    h.run_steps(4);
+    h.get_by_label("Watch Ann").click();
+    h.run_steps(2);
+    pictures(&mut h);
+    h
+}
+
+/// New frames from Ann's screen and camera.
+fn pictures(h: &mut Harness<'static, Option<Screen>>) {
+    let video = &home(h).voice.video;
+    video.put("remote", gradient(320, 180, false));
+    video.put("ann-camera", gradient(160, 120, true));
+    h.run_steps(20);
+}
+
+fn home<'a>(h: &'a Harness<'_, Option<Screen>>) -> &'a Home {
+    &h.state().as_ref().unwrap().0
+}
+
+fn home_mut<'a>(h: &'a mut Harness<'_, Option<Screen>>) -> &'a mut Home {
+    &mut h.state_mut().as_mut().unwrap().0
+}
+
+fn pip(h: &Harness<'_, Option<Screen>>) -> Pip {
+    home(h).voice.pips.get(&ANN).copied().unwrap_or_default()
+}
+
+fn camera() -> String {
+    t!("call.someones_camera", name = "Ann")
+}
+
+fn capture(h: &mut Harness<'_, Option<Screen>>, size: Vec2, dark: bool, state: &str) {
+    if let Ok(dir) = std::env::var("RUSTTALK_PIP_SCREENSHOTS") {
+        std::fs::create_dir_all(&dir).unwrap();
+        let theme = if dark { "dark" } else { "light" };
+        let name = format!("{dir}/{}x{}-{theme}-{state}.png", size.x, size.y);
+        h.render().unwrap().save(name).unwrap();
+    }
+}
+
+fn drag(h: &mut Harness<'static, Option<Screen>>, from: egui::Pos2, to: egui::Pos2) {
+    h.hover_at(from);
+    h.step();
+    h.drag_at(from);
+    h.step();
+    for step in 1..=4 {
+        h.hover_at(from + (to - from) * step as f32 / 4.0);
+        h.step();
+    }
+    h.drop_at(to);
+    h.run_steps(20);
+}
+
+#[test]
+fn the_camera_shows_on_the_shared_screen_and_snaps_to_corners() {
+    let data = tempfile::tempdir().unwrap();
+    for dark in [true, false] {
+        for size in [Vec2::new(1100.0, 700.0), Vec2::new(390.0, 844.0)] {
+            let mut h = sharing(dark, size, data.path());
+            // Both: the screen is watched and the camera is drawn on it, received.
+            assert!(home(&h).voice.watching.is_some());
+            capture(&mut h, size, dark, "stage");
+            let start = h.get_by_label(&camera()).rect();
+            assert!(home(&h).voice.cameras.contains_key("ann-camera"));
+            assert_eq!(pip(&h).corner, Corner::BottomRight);
+
+            // Dragged towards the top left, it lands in that corner.
+            let to = start.center() - Vec2::new(size.x * 0.6, size.y * 0.3);
+            drag(&mut h, start.center(), to);
+            assert_eq!(pip(&h).corner, Corner::TopLeft);
+            let moved = h.get_by_label(&camera()).rect();
+            assert!(moved.left() < start.left() && moved.top() < start.top());
+            // Clear of the tile's own buttons, which show while the pointer is over it.
+            h.hover_at(moved.center());
+            h.run_steps(2);
+            let stop = h.get_by_label(t!("call.stop_watching")).rect();
+            assert!(!stop.intersects(moved));
+            capture(&mut h, size, dark, "hover");
+
+            // Minimized: a pill in its corner, and the camera is no longer received.
+            h.get_by_role_and_label(egui::Role::Button, t!("call.minimize_camera"))
+                .click();
+            h.run_steps(4);
+            assert!(pip(&h).minimized);
+            assert!(h.query_by_label(&camera()).is_none());
+            assert!(!home(&h).voice.cameras.contains_key("ann-camera"));
+            let pill = t!("call.show_camera", name = "Ann");
+            // In the corner it was dragged to.
+            let at = h.get_by_label(&pill).rect();
+            assert!((at.min - moved.min).length() < 1.0, "{at:?} {moved:?}");
+            capture(&mut h, size, dark, "minimized");
+            h.get_by_label(&pill).click();
+            h.run_steps(4);
+            assert!(!pip(&h).minimized);
+            pictures(&mut h);
+            assert!(h.query_by_label(&camera()).is_some());
+
+            // Popped out: its own tile beside the screen, with a way back.
+            let at = h.get_by_label(&camera()).rect().center();
+            h.hover_at(at);
+            h.run_steps(2);
+            h.get_by_role_and_label(egui::Role::Button, t!("call.pop_out_camera"))
+                .click();
+            h.run_steps(4);
+            pictures(&mut h);
+            assert!(pip(&h).popped);
+            assert!(h.query_by_label(&camera()).is_none());
+            // Her camera tile, the largest of her buttons (the side list has one too).
+            let tile = h
+                .get_all_by_role_and_label(egui::Role::Button, "Ann")
+                .map(|node| node.rect())
+                .max_by(|a, b| a.area().total_cmp(&b.area()))
+                .unwrap();
+            assert!(tile.height() > 40.0);
+            h.hover_at(tile.center());
+            h.run_steps(2);
+            capture(&mut h, size, dark, "popped");
+            h.get_by_role_and_label(egui::Role::Button, t!("call.camera_on_screen"))
+                .click();
+            h.run_steps(4);
+            pictures(&mut h);
+            assert_eq!(
+                pip(&h),
+                Pip {
+                    corner: Corner::TopLeft,
+                    popped: false,
+                    minimized: false
+                }
+            );
+            assert!(h.query_by_label(&camera()).is_some());
+        }
+    }
+}
+
+#[test]
+fn the_camera_keeps_its_corner_in_full_screen_clear_of_the_controls() {
+    let data = tempfile::tempdir().unwrap();
+    for dark in [true, false] {
+        for size in [Vec2::new(1100.0, 700.0), Vec2::new(390.0, 844.0)] {
+            let mut h = sharing(dark, size, data.path());
+            home_mut(&mut h).voice.pips.insert(
+                ANN,
+                Pip {
+                    corner: Corner::TopRight,
+                    ..Pip::default()
+                },
+            );
+            home_mut(&mut h)
+                .voice
+                .stage
+                .set_presenting_and_full_screen("remote");
+            pictures(&mut h);
+            h.hover_at(egui::pos2(size.x / 2.0, size.y / 2.0));
+            h.run_steps(2);
+            let pip = h.get_by_label(&camera()).rect();
+            assert!(pip.center().x > size.x / 2.0 && pip.center().y < size.y / 2.0);
+            let controls = [
+                t!("call.exit_full_screen"),
+                t!("call.stream_options"),
+                t!("call.mute"),
+                t!("call.leave"),
+            ];
+            for label in controls {
+                assert!(!h.get_by_label(label).rect().intersects(pip), "{label}");
+            }
+            capture(&mut h, size, dark, "full-screen");
+        }
+    }
+}
+
+#[test]
+fn your_own_camera_shows_on_your_screen_preview() {
+    let data = tempfile::tempdir().unwrap();
+    let mut h = sharing(true, Vec2::new(1100.0, 700.0), data.path());
+    let ctx = h.ctx.clone();
+    let home = home_mut(&mut h);
+    let me = &mut home.servers[0].voice.get_mut(&PROJECTS).unwrap()[0];
+    me.camera = Some("my camera".into());
+    me.screens = vec![Shared {
+        sid: "local".into(),
+        name: "Display".into(),
+        viewers: 0,
+        local: true,
+        control: None,
+    }];
+    home.voice.sharing = call::Sharing::On;
+    let camera = &mut home.voice.camera;
+    let picture = gradient(160, 120, true);
+    camera.fake_picture(ctx.load_texture("fake camera", picture, Default::default()));
+    camera.fake = Some(Default::default());
+    camera.on = true;
+    h.run_steps(6);
+    assert!(
+        h.query_by_label(&t!("call.someones_camera", name = "Me"))
+            .is_some()
+    );
+}

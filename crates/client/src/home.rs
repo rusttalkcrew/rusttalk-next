@@ -7689,6 +7689,7 @@ mod tests {
     mod audit_log;
     mod avatars;
     mod call_controls;
+    mod camera_pip;
     mod dialogs;
     mod emoji;
     mod empty_categories;

@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Someone sharing their camera and screen at once no longer loses their camera: it shows as a small picture on their screen that you can drag to any corner, pop out into its own tile or shrink to a small button.
+
 ## v0.6.0 - 2026-11-25
 
 - Your status no longer gets stuck on Away for others (while your own bar says Online) when you change it just as the app reconnects.
