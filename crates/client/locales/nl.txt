@@ -607,6 +607,7 @@ admin.last_pack = Het laatste pakket kan niet worden verwijderd.
 admin.pack_not_found = Dat pakket bestaat niet meer.
 admin.pack_delete = Pakket verwijderen
 admin.pack_delete_help = Dit verwijdert ook de {count} emoji en stickers erin.
+admin.emoji_delete_help = :{name}: verwijderen? Berichten waarin het staat, tonen dan de naam.
 admin.move_to = Verplaats naar
 admin.move_up = Omhoog
 admin.move_down = Omlaag

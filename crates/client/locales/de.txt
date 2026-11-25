@@ -607,6 +607,7 @@ admin.last_pack = Das letzte Paket kann nicht gelöscht werden.
 admin.pack_not_found = Dieses Paket gibt es nicht mehr.
 admin.pack_delete = Paket löschen
 admin.pack_delete_help = Dabei werden auch die {count} Emoji und Sticker darin gelöscht.
+admin.emoji_delete_help = :{name}: löschen? Nachrichten, in denen es vorkommt, zeigen dann seinen Namen.
 admin.move_to = Verschieben nach
 admin.move_up = Nach oben
 admin.move_down = Nach unten

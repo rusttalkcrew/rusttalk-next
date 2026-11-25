@@ -7377,6 +7377,7 @@ mod tests {
     mod outbox;
     mod rail;
     mod reactions;
+    mod server_emoji;
     mod settings_close;
     mod streams;
     mod touch;

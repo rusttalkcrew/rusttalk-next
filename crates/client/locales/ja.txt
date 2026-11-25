@@ -607,6 +607,7 @@ admin.last_pack = 最後のパックは削除できません。
 admin.pack_not_found = そのパックはもうありません。
 admin.pack_delete = パックを削除
 admin.pack_delete_help = パック内の {count} 個の絵文字とスタンプも削除されます。
+admin.emoji_delete_help = :{name}: を削除しますか？使われていたメッセージには名前が表示されます。
 admin.move_to = 移動先
 admin.move_up = 上へ
 admin.move_down = 下へ

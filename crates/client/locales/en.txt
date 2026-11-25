@@ -610,6 +610,7 @@ admin.last_pack = The last pack can't be deleted.
 admin.pack_not_found = That pack is gone.
 admin.pack_delete = Delete pack
 admin.pack_delete_help = This also deletes the {count} emoji and stickers in it.
+admin.emoji_delete_help = Delete :{name}:? Messages that used it will show its name instead.
 admin.move_to = Move to
 admin.move_up = Move up
 admin.move_down = Move down
