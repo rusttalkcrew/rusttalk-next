@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The call notification (CallService). Keep in step with crates/client/locales. -->
+<resources>
+    <string name="call_channel">Anrufe</string>
+    <string name="call_title">Im Sprachanruf</string>
+    <string name="call_text">Tippe, um zu RustTalk zurückzukehren</string>
+</resources>

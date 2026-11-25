@@ -2,7 +2,10 @@ package io.github.rusttalkcrew.rusttalk;
 
 import android.Manifest;
 import android.content.Context;
+import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.media.AudioAttributes;
+import android.media.AudioFocusRequest;
 import android.media.AudioManager;
 import android.os.Build;
 import android.os.Bundle;
@@ -30,6 +33,7 @@ public class MainActivity extends GameActivity {
 
     private static final int MICROPHONE = 1;
     private static final int CAMERA = 2;
+    private static final int NOTIFICATIONS = 3;
     private volatile boolean voiceReady;
     private volatile int permission;
     private boolean communicationMode;
@@ -202,8 +206,40 @@ public class MainActivity extends GameActivity {
         AudioManager audio = getSystemService(AudioManager.class);
         // MODE_NORMAL releases this app's mode request and restores system routing.
         audio.setMode(on ? AudioManager.MODE_IN_COMMUNICATION : AudioManager.MODE_NORMAL);
+        if (on) {
+            if (audio.requestAudioFocus(focus) != AudioManager.AUDIOFOCUS_REQUEST_GRANTED)
+                Log.w("RustTalk", "Call audio focus denied");
+        } else {
+            audio.abandonAudioFocusRequest(focus);
+        }
+        Intent service = new Intent(this, CallService.class);
+        if (on) {
+            // Without the permission (Android 13+) the service still runs; only its
+            // notification is hidden. The system stops asking after two denials.
+            if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                    != PackageManager.PERMISSION_GRANTED)
+                runOnUiThread(() -> requestPermissions(
+                        new String[]{Manifest.permission.POST_NOTIFICATIONS}, NOTIFICATIONS));
+            // A plain start: joining happens on screen, and the service then moves
+            // itself to the foreground (a startForegroundService that fails there
+            // would crash the app).
+            try {
+                startService(service);
+            } catch (IllegalStateException | SecurityException error) {
+                Log.w("RustTalk", "Call service not started", error);
+            }
+        } else {
+            stopService(service);
+        }
         communicationMode = on;
     }
+
+    private final AudioFocusRequest focus = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+            .setAudioAttributes(new AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build())
+            .build();
 
     @Override
     protected void onDestroy() {

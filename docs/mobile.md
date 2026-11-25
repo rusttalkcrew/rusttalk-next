@@ -268,8 +268,18 @@ Cargo linked. R8 keeps the WebRTC classes and JNI Zero's native initializer.
 The native library exports WebRTC's Java callbacks alongside GameActivity's.
 
 Android requests `RECORD_AUDIO` at join. After permission is granted the app
-sets `MODE_IN_COMMUNICATION` before opening the microphone and releases the
-mode when the call ends. Bluetooth routing and background calls are still open.
+sets `MODE_IN_COMMUNICATION` and takes audio focus before opening the
+microphone, and releases both when the call ends. During a call `CallService`, a
+microphone foreground service, keeps the microphone and the connection alive
+with the app in the background or the screen locked. It shows an ongoing,
+quiet "In a voice call" notification (Android resources in en, de, nl and ja,
+following the phone's language) that opens the app. Joining asks for
+notification permission on Android 13+; without it the service still runs and
+only the notification is hidden. The service starts at join, while the app is
+on screen, as Android 14+ requires; if Android refuses, the refusal is logged
+and the call keeps working on screen. The camera stays foreground-only, so the
+service declares no camera type. Background calls still need a device test.
+Bluetooth routing is still open.
 
 On iOS, joining asks for microphone access. With permission, RustTalk activates
 a play-and-record voice chat session with speaker fallback and Bluetooth HFP.
@@ -320,8 +330,9 @@ cargo-ndk automates), builds the client library as a `cdylib` with
   add Android libraries (AARs).
 - **Gradle** is needed anyway: GameActivity ships as an AAR, and later phases
   need Java or Kotlin glue (notifications, Android Keystore, the file picker,
-  `libwebrtc.jar`). Its only Java so far is `MainActivity`, a GameActivity that
-  handles the keyboard's action key, microphone permission and call audio mode.
+  `libwebrtc.jar`). Its Java is `MainActivity`, a GameActivity that handles the
+  keyboard's action key, microphone permission and call audio mode, the camera
+  glue, and `CallService`, which keeps calls going in the background.
 
 cargo-ndk can replace the few lines of environment in `build.sh` when more
 ABIs (32-bit ARM, x86_64) are added.
@@ -381,7 +392,7 @@ Rough effort for one person who knows the code base.
 | Phase | What | Effort |
 | --- | --- | --- |
 | 2 | Usable chat on Android. Done: typed text, safe areas and the keyboard, `onDestroy`, recovery words, Android Keystore. Left: phone temp folder (`temp_dir()` is not writable on Android), file picker (Storage Access Framework), local notifications, hide Updates and Shortcuts on phones, `rusttalk://` links, the layout list above | 3 to 4 weeks |
-| 3 | Foreground voice on Android and iOS; iOS requests microphone access and supports background audio. Left: iPhone device verification, Android Bluetooth routing and foreground service | 2 weeks |
+| 3 | Foreground voice on Android and iOS; iOS requests microphone access and supports background audio. Left: iPhone device verification, Android Bluetooth routing, background-call device test | 2 weeks |
 | 4 | iOS on a device. Done: Keychain, safe area and taps. Left: notifications (reuse `notify/macos.rs`), document picker, status bar colours, background rules | 1 to 2 weeks |
 | 5 | Foreground call camera and front/back selection. Left: verify capture and interruptions on a real iPhone | Device verification |
 | 6 | Release downloads and signing are in place. Left: store listings and store updates | 1 week plus store review |
@@ -411,8 +422,9 @@ certificate.
   Local notifications while the app runs need neither.
 - **Android permissions:** `INTERNET`, `MODIFY_AUDIO_SETTINGS` for call routing,
   `RECORD_AUDIO` when joining voice, and `CAMERA` when turning on video.
-  Cameras are optional. Planned: `POST_NOTIFICATIONS` (Android 13+, turning
-  notifications on), foreground service for calls, `BLUETOOTH_CONNECT` for
+  Cameras are optional. `FOREGROUND_SERVICE` and `FOREGROUND_SERVICE_MICROPHONE`
+  keep calls going in the background; `POST_NOTIFICATIONS` (asked at join on
+  Android 13+) shows the call notification. Planned: `BLUETOOTH_CONNECT` for
   headsets. Never location, contacts or phone state.
 - **iOS:** the bundle states why it uses the microphone and camera; iOS asks
   the person on first use.
