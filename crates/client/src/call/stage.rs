@@ -14,6 +14,7 @@ use rusttalk_core::client::voice::{ControlOffer, VoiceStatus};
 use super::{
     Sharing, Voice, call_server, join, mixer,
     overlay::{self, Overlay, Row},
+    pip::{self, Pip},
     remote::{self, Control},
     sound_badges, stop_watching,
     terminal::{self, Terminals, Typing},
@@ -392,6 +393,18 @@ struct Entry<'p> {
     watched: bool,
     camera_visible: bool,
     speaking: bool,
+    /// The sharer's camera, on top of their screen.
+    camera: Option<OnScreen>,
+    /// A camera tile popped out of its sharer's screen.
+    popped: bool,
+}
+
+/// A camera shown on its sharer's screen.
+#[derive(Clone, Copy)]
+struct OnScreen {
+    pip: Pip,
+    /// None while minimized, or until the first picture arrives.
+    picture: Option<Picture>,
 }
 
 /// What a tile asked for this frame.
@@ -419,6 +432,8 @@ enum Act {
     AskToType,
     TypeInTerminal(Vec<u8>),
     PasteRefused,
+    /// Moved, popped out, put back, minimized or restored a camera on a screen.
+    Pip(Id, pip::Change),
 }
 
 fn selected_screen<'a>(peer: &'a Peer, watched: Option<&str>) -> Option<&'a Screen> {
@@ -467,6 +482,8 @@ fn entries<'p>(
                 watched,
                 camera_visible: video,
                 speaking: false,
+                camera: None,
+                popped: false,
             });
         }
         let screen = joined
@@ -493,6 +510,29 @@ fn entries<'p>(
                 (Tile::Person(peer.person), picture, video, false)
             }
         };
+        // A screen covers its sharer's tile, so their camera goes on top of it, or
+        // beside it when popped out. Minimized, it is neither received nor drawn.
+        let on_screen = matches!(tile, Tile::Screen(_) | Tile::Preview) && camera_visible;
+        let pip = voice.pips.get(&peer.person).copied().unwrap_or_default();
+        let camera = (on_screen && !pip.popped).then(|| OnScreen {
+            pip,
+            picture: (!pip.minimized)
+                .then(|| person_picture(ctx, voice, peer, me))
+                .flatten(),
+        });
+        let popped = (on_screen && pip.popped).then(|| Entry {
+            tile: Tile::Person(peer.person),
+            peer,
+            name: name.clone(),
+            me,
+            picture: person_picture(ctx, voice, peer, me),
+            video: true,
+            watched: false,
+            camera_visible,
+            speaking,
+            camera: None,
+            popped: true,
+        });
         people.push(Entry {
             tile,
             peer,
@@ -503,7 +543,10 @@ fn entries<'p>(
             watched,
             camera_visible,
             speaking,
+            camera,
+            popped: false,
         });
+        people.extend(popped);
     }
     screens.extend(people);
     screens
@@ -992,6 +1035,67 @@ fn tile(
     let badge = name_tag(ui, rect, entry, audio);
     overlay.paint(ui, rect, badge);
     tools(ui, rect, entry, state, audio, acts, tapped);
+    if let Some(camera) = entry.camera {
+        // Clear of the hover buttons at the top and the name at the bottom.
+        let tools = if ui.input(|i| i.has_touch_screen()) {
+            ui::TOUCH_TARGET
+        } else {
+            TOOL.y
+        };
+        let mut clear = rect;
+        clear.min.y += GAP + tools;
+        clear.max.y -= GAP + BADGE;
+        let stream = entry.picture.map_or(rect, |p| fitted(rect, p.size));
+        camera_pip(ui, stream, clear, entry, camera, server, acts);
+    }
+}
+
+/// The sharer's camera on their stream, in its part `clear` of the controls.
+fn camera_pip(
+    ui: &mut Ui,
+    stream: Rect,
+    clear: Rect,
+    entry: &Entry,
+    camera: OnScreen,
+    server: &Server,
+    acts: &mut Vec<Act>,
+) {
+    let person = entry.peer.person;
+    let picture = camera.picture;
+    let aspect = picture.map(|p| p.size.x / p.size.y);
+    let area = stream.intersect(clear);
+    let changed = pip::show(
+        ui,
+        stream,
+        area,
+        person,
+        &entry.name,
+        camera.pip,
+        aspect,
+        |ui, rect| {
+            match picture {
+                Some(picture) => paint_picture(ui, rect, picture),
+                // Until its first picture arrives.
+                None => {
+                    let size = (rect.height() * 0.5).min(rect.width() * 0.5);
+                    let spot = Rect::from_center_size(rect.center(), Vec2::splat(size));
+                    let mut child = ui.new_child(UiBuilder::new().max_rect(spot));
+                    face_speaking(
+                        &mut child,
+                        &server.dir,
+                        &person,
+                        &entry.name,
+                        size,
+                        false,
+                        false,
+                    );
+                }
+            }
+        },
+    );
+    if let Some(change) = changed {
+        acts.push(Act::Pip(person, change));
+    }
 }
 
 fn screen_choices(m: &mut ui::Menu, entry: &Entry, acts: &mut Vec<Act>) {
@@ -1331,7 +1435,7 @@ fn tools(
     // You need to see a screen to control it.
     let remote = !is_person && !entry.me && state.joined && entry.watched && full;
     // In order of importance; the first ones win on a small tile.
-    let wanted = [true, is_person, full, remote, volume, stop];
+    let wanted = [true, entry.popped, is_person, full, remote, volume, stop];
     let count = wanted.iter().filter(|on| **on).count().min(fits);
     // Enlarge touch targets when there is room for the same set of actions.
     let tool = if tapped {
@@ -1374,6 +1478,12 @@ fn tools(
                 Act::Focus(entry.tile.clone())
             });
         }
+    }
+    if entry.popped
+        && room()
+        && ui::icon_button(ui, "↙", t!("call.camera_on_screen"), Look::Plain, tool).clicked()
+    {
+        acts.push(Act::Pip(person, pip::Change::PutBack));
     }
     if is_person
         && room()
@@ -1510,6 +1620,12 @@ fn apply(home: &mut Home, index: usize, now: f64, acts: Vec<Act>) {
             Act::AskToType => terminal::ask(home, now),
             Act::TypeInTerminal(bytes) => terminal::send_typed(home, bytes),
             Act::PasteRefused => terminal::paste_refused(home, now),
+            Act::Pip(person, change) => {
+                if change == pip::Change::PutBack && stage.focus == Some(Tile::Person(person)) {
+                    stage.focus = None;
+                }
+                home.voice.pips.entry(person).or_default().apply(change);
+            }
             Act::WatchTerminal(sharer) => terminal::watch(home, &sharer),
             Act::StopWatchingTerminal => {
                 // Like a screen: a big terminal would be watched again at once.
@@ -1646,6 +1762,7 @@ pub fn full_view(ui: &mut Ui, home: &mut Home) {
         _ => None,
     };
     let mut acts = Vec::new();
+    let mut picture_rect = None;
     if terminal {
         // Field by field, so the terminals stay writable.
         let terms = &mut voice.terminals;
@@ -1669,6 +1786,7 @@ pub fn full_view(ui: &mut Ui, home: &mut Home) {
         // Whole, not cropped, now that it has the room.
         picture.cover = false;
         paint_picture(ui, rect, picture);
+        picture_rect = Some(fitted(rect, picture.size));
         if controlling {
             let shown = fitted(rect, picture.size);
             let (inputs, stop) = voice.control.capture(ui, &response, shown);
@@ -1690,6 +1808,37 @@ pub fn full_view(ui: &mut Ui, home: &mut Home) {
             FontId::proportional(ui::TEXT_BODY),
             ui::colors(ui).muted,
         );
+    }
+    // The sharer's camera, clear of the controls at the top and bottom.
+    let camera = peer.as_ref().filter(|peer| {
+        matches!(tile, Tile::Screen(_) | Tile::Preview)
+            && peer.camera.is_some()
+            && (mine || !voice.hidden.contains(&peer.person))
+    });
+    if let Some(peer) = camera {
+        let pip = voice.pips.get(&peer.person).copied().unwrap_or_default();
+        if !pip.popped {
+            let picture = (!pip.minimized)
+                .then(|| person_picture(&ctx, voice, peer, mine))
+                .flatten();
+            let entry = Entry {
+                tile: Tile::Person(peer.person),
+                peer,
+                name: peer.name(server),
+                me: mine,
+                picture: None,
+                video: true,
+                watched: false,
+                camera_visible: true,
+                speaking: false,
+                camera: None,
+                popped: false,
+            };
+            let stream = picture_rect.unwrap_or(rect);
+            let clear = rect.shrink2(vec2(0.0, 2.0 * GAP + FULL_TOOL.y + 2.0 * ui::SPACE_XS));
+            let camera = OnScreen { pip, picture };
+            camera_pip(ui, stream, clear, &entry, camera, server, &mut acts);
+        }
     }
 
     // The controls: on mouse movement or a tap on the picture (phones toggle them).
@@ -1738,6 +1887,8 @@ pub fn full_view(ui: &mut Ui, home: &mut Home) {
         watched,
         camera_visible: peer.camera.is_some() && !voice.hidden.contains(&peer.person),
         speaking: false,
+        camera: None,
+        popped: false,
     });
     let state = TileState {
         relation: (peer.as_ref()).map_or(Relation::None, |p| home.friends.relation(&p.person)),

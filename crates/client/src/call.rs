@@ -48,6 +48,7 @@ mod overlay;
 mod panel;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub mod phone;
+pub(crate) mod pip;
 pub mod remote;
 mod stage;
 pub mod terminal;
@@ -93,13 +94,15 @@ pub struct Voice {
     /// People whose camera this device chose not to receive.
     pub(crate) hidden: HashSet<Id>,
     /// Camera tracks this device receives, with their newest picture.
-    cameras: HashMap<String, Option<TextureHandle>>,
+    pub(crate) cameras: HashMap<String, Option<TextureHandle>>,
     /// Camera tracks drawn this frame; only these stay subscribed.
     shown: HashSet<String>,
     /// Files sent through the call, newest last.
     pub live_files: Vec<LiveFile>,
     /// Focus, minimized people and presentation mode, for this call only.
     pub stage: Stage,
+    /// How each person's camera shows on their shared screen, for the app's session.
+    pub(crate) pips: HashMap<Id, pip::Pip>,
     /// Remote control of our screen, or of one we watch.
     pub control: remote::Control,
     /// Our shared terminal, and the one we watch.
@@ -270,6 +273,7 @@ impl Voice {
             shown: HashSet::new(),
             live_files: Vec::new(),
             stage: Stage::default(),
+            pips: HashMap::new(),
             control: remote::Control::default(),
             terminals: terminal::Terminals::default(),
             mic_hint: None,

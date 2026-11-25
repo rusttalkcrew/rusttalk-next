@@ -168,7 +168,9 @@ fn stream_cards_keep_people_opt_in_and_preview_follows_focus() {
                     })
                     .collect::<Vec<_>>()
             };
-            assert!(camera_changes().is_empty());
+            // Her camera shows on her screen (#600), so it is received from the start
+            // and stays received while the screen drops out and comes back.
+            assert_eq!(camera_changes(), [true]);
             let mut screens = std::mem::take(
                 &mut h.state_mut().servers[0].voice.get_mut(&PROJECTS).unwrap()[1].screens,
             );
@@ -184,7 +186,7 @@ fn stream_cards_keep_people_opt_in_and_preview_follows_focus() {
             assert_eq!(h.state().voice.watching.as_ref().unwrap().sid, "remote");
             assert!(h.query_by_label("Streaming · 1 watching").is_none());
             assert!(h.query_by_label("Ann").is_some());
-            assert_eq!(camera_changes(), [true]);
+            assert!(camera_changes().is_empty());
             screens[0].sid = "replacement".into();
             h.state_mut().apply(
                 &ctx,
@@ -203,7 +205,7 @@ fn stream_cards_keep_people_opt_in_and_preview_follows_focus() {
                 0.0,
             );
             h.run_steps(3);
-            assert_eq!(camera_changes(), [false]);
+            assert!(camera_changes().is_empty());
             assert_eq!(
                 h.state().voice.watching.as_ref().unwrap().sid,
                 "replacement"
