@@ -4,4 +4,7 @@
     <string name="call_channel">Gesprekken</string>
     <string name="call_title">In een spraakgesprek</string>
     <string name="call_text">Tik om terug te gaan naar RustTalk</string>
+    <string name="call_mute">Dempen</string>
+    <string name="call_unmute">Dempen opheffen</string>
+    <string name="call_hang_up">Gesprek verlaten</string>
 </resources>

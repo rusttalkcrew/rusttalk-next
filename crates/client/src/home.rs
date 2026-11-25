@@ -946,7 +946,7 @@ impl Home {
     }
 
     /// Show a chat, like after a click on its notification.
-    fn open_chat(&mut self, address: &url::Url, channel: Id) {
+    pub(crate) fn open_chat(&mut self, address: &url::Url, channel: Id) {
         let Some(index) = self.index(address) else {
             return;
         };

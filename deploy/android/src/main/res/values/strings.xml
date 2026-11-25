@@ -4,4 +4,7 @@
     <string name="call_channel">Calls</string>
     <string name="call_title">In a voice call</string>
     <string name="call_text">Tap to return to RustTalk</string>
+    <string name="call_mute">Mute</string>
+    <string name="call_unmute">Unmute</string>
+    <string name="call_hang_up">Leave call</string>
 </resources>

@@ -200,12 +200,22 @@ pub fn set_mute(home: &Home, on: bool) {
     if server_muted(home) {
         return;
     }
-    let audio = &home.voice.audio;
+    set_mic(&home.voice.audio, on);
+    sync_voice_status(home);
+}
+
+/// Mic off (`on`) or on; turning it on also undeafens.
+fn set_mic(audio: &crate::audio::Audio, on: bool) {
     audio.set_muted(on);
     if !on {
         audio.set_deafened(false);
     }
-    sync_voice_status(home);
+}
+
+/// Mic on or off; deafened counts as off, so turning it on also undeafens. Also for
+/// the Android call notification's Mute button (`call::notice`).
+pub fn toggle_mic(audio: &crate::audio::Audio) {
+    set_mic(audio, !(audio.muted() || audio.deafened()));
 }
 
 pub fn toggle_deafen(home: &Home) {

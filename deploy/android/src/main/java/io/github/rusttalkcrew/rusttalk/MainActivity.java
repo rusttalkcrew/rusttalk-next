@@ -438,6 +438,13 @@ public class MainActivity extends GameActivity {
         return name;
     }
 
+    // A tap on the call notification (CallService) brings this activity back.
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        CallService.opened(intent);
+    }
+
     @Override
     public void onEditorAction(int action) {
         if (action == EditorInfo.IME_ACTION_DONE) {

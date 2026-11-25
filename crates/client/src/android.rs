@@ -916,6 +916,81 @@ mod activity {
         }
     }
 
+    /// What the call notification shows: an intent to the running `CallService`
+    /// (this thread can't look up the app's own Java classes).
+    pub fn call_notice(shown: &crate::call::notice::Shown) {
+        let Some(app) = APP.get() else { return };
+        if let Err(error) = java(app, |env, activity| {
+            let action = env.new_string("io.github.rusttalkcrew.rusttalk.SHOW_CALL")?;
+            let intent = env.new_object(
+                jni_str!("android/content/Intent"),
+                jni_sig!("(Ljava/lang/String;)V"),
+                &[JValue::Object(&action)],
+            )?;
+            let class = env.new_string("io.github.rusttalkcrew.rusttalk.CallService")?;
+            env.call_method(
+                &intent,
+                jni_str!("setClassName"),
+                jni_sig!("(Landroid/content/Context;Ljava/lang/String;)Landroid/content/Intent;"),
+                &[JValue::Object(activity), JValue::Object(&class)],
+            )?;
+            for (key, text) in [("name", &shown.name), ("server", &shown.server)] {
+                let (key, text) = (env.new_string(key)?, env.new_string(text)?);
+                env.call_method(
+                    &intent,
+                    jni_str!("putExtra"),
+                    jni_sig!("(Ljava/lang/String;Ljava/lang/String;)Landroid/content/Intent;"),
+                    &[JValue::Object(&key), JValue::Object(&text)],
+                )?;
+            }
+            for (key, on) in [("muted", shown.muted), ("canMute", shown.can_mute)] {
+                let key = env.new_string(key)?;
+                env.call_method(
+                    &intent,
+                    jni_str!("putExtra"),
+                    jni_sig!("(Ljava/lang/String;Z)Landroid/content/Intent;"),
+                    &[JValue::Object(&key), JValue::Bool(on)],
+                )?;
+            }
+            env.call_method(
+                activity,
+                jni_str!("startService"),
+                jni_sig!("(Landroid/content/Intent;)Landroid/content/ComponentName;"),
+                &[JValue::Object(&intent)],
+            )?;
+            Ok(())
+        }) {
+            tracing::warn!(%error, "updating the call notification failed");
+        }
+    }
+
+    /// A call notification button (`CallService`), on the Java main thread, also
+    /// with no window and so no frames. Returns whether the mic is off now.
+    #[unsafe(no_mangle)]
+    extern "system" fn Java_io_github_rusttalkcrew_rusttalk_CallService_press(
+        _: *mut c_void,
+        _: *mut c_void,
+        button: i32,
+    ) -> u8 {
+        let muted = crate::call::notice::press(button);
+        if let Some(ctx) = CTX.get() {
+            ctx.request_repaint();
+        }
+        muted.into()
+    }
+
+    /// The call notification was tapped: the app shows the call.
+    #[unsafe(no_mangle)]
+    extern "system" fn Java_io_github_rusttalkcrew_rusttalk_CallService_openCall(
+        _: *mut c_void,
+        _: *mut c_void,
+    ) {
+        crate::call::notice::open();
+        if let Some(ctx) = CTX.get() {
+            ctx.request_repaint();
+        }
+    }
+
     /// MainActivity's Back callback and the Back key (which GameActivity would give
     /// winit) both end here, on the Java main thread.
     #[unsafe(no_mangle)]

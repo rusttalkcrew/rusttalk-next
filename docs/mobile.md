@@ -325,15 +325,46 @@ Android requests `RECORD_AUDIO` at join. After permission is granted the app
 sets `MODE_IN_COMMUNICATION` and takes audio focus before opening the
 microphone, and releases both when the call ends. During a call `CallService`, a
 microphone foreground service, keeps the microphone and the connection alive
-with the app in the background or the screen locked. It shows an ongoing,
-quiet "In a voice call" notification (Android resources in en, de, nl and ja,
-following the phone's language) that opens the app. Joining asks for
-notification permission on Android 13+; without it the service still runs and
-only the notification is hidden. The service starts at join, while the app is
-on screen, as Android 14+ requires; if Android refuses, the refusal is logged
-and the call keeps working on screen. The camera stays foreground-only, so the
-service declares no camera type. Background calls still need a device test.
-Bluetooth routing is still open.
+with the app in the background or the screen locked. Its quiet, ongoing
+notification shows the call (Android resources in en, de, nl and ja, following
+the phone's language):
+
+- **Android 12 and newer:** an ongoing call (`Notification.CallStyle`) with the
+  channel, or the other person in a DM call, as the caller and the server
+  underneath, plus **Hang up** and **Mute**/**Unmute**. Android also shows the
+  status bar's call chip for it.
+- **Android 8 to 11:** "In a voice call" with the channel's name and the same
+  two buttons.
+- A lock screen that hides private notification content shows only "In a voice
+  call", without names.
+
+The buttons act at once (`call/notice.rs`), also in the background, where
+Android takes the window away and the app draws no frames: Mute works like the
+app's mic button (unmuting also undeafens; no button while a moderator muted
+you), and Hang up leaves the call on the server, stops the call audio with the
+leave sound and stops the service. The app catches up at its next frame. Tapping
+the notification brings the app back and opens the call's channel
+(`MainActivity.onNewIntent`). The app sends what the notification shows to
+`CallService` in an intent when it changes.
+
+Joining asks for notification permission on Android 13+; without it the
+service still runs and only the notification is hidden. The service starts at
+join, while the app is on screen, as Android 14+ requires; if Android refuses,
+the refusal is logged and the call keeps working on screen. Its only type is
+`microphone`. `phoneCall` needs `MANAGE_OWN_CALLS` and is for calls that
+Android's Telecom knows about (a `ConnectionService` or the default phone app).
+The camera stays foreground-only, so the service declares no camera type.
+
+RustTalk doesn't register its calls with Telecom (a self-managed
+`ConnectionService`). Telecom would let Android hold a RustTalk call when a phone
+call comes in, take hang up from Bluetooth headsets, cars and watches, and route
+the call audio itself. It would also bring a second call state machine to keep in step with the app's
+(hold, unhold, abort, disconnect, Telecom ending a call by itself), and audio
+routing would move from `MainActivity.communicationMode` to Telecom's endpoint
+APIs, which differ between Android 8, 12 and 14. None of that can be checked
+without phones, headsets and a car, so it waits until it can be tested there.
+Background calls and the notification still need a device test. Bluetooth
+routing is still open.
 
 On iOS, joining asks for microphone access. With permission, RustTalk activates
 a play-and-record voice chat session with speaker fallback and Bluetooth HFP.

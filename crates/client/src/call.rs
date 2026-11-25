@@ -46,6 +46,8 @@ const OFFER_SECONDS: i64 = 10 * 60;
 #[cfg(any(target_os = "ios", test))]
 pub(crate) mod callkit;
 pub mod mixer;
+#[cfg(any(target_os = "android", test))]
+pub(crate) mod notice;
 mod overlay;
 mod panel;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -513,6 +515,10 @@ fn tick(
 
 /// Once per frame: push-to-talk, the settings meter, and repaints for live indicators.
 pub fn frame(ctx: &egui::Context, home: &mut Home) {
+    #[cfg(target_os = "android")]
+    if let Some(shown) = notice::frame(home) {
+        crate::android::call_notice(&shown);
+    }
     #[cfg(target_os = "ios")]
     crate::ios::callkit::frame(ctx, home);
     #[cfg(target_os = "ios")]
