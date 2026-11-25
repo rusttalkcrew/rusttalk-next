@@ -257,3 +257,70 @@ fn holding_a_picture_on_a_phone_opens_its_menu() {
     assert!(shows(&h, t!("files.open_viewer")));
     assert!(shows(&h, t!("home.copy_message_id")));
 }
+
+/// Right-clicking the words or a link opens the message menu, like the blank part
+/// of the row, while a left click on the link still follows it.
+#[test]
+fn right_clicking_text_or_a_link_opens_the_message_menu() {
+    let (mut h, _, _, _sent) = chat(true, Vec2::new(1100.0, 700.0));
+    let home = h.state_mut().as_mut().unwrap();
+    let messages = &mut home.servers[0].chats.get_mut(&PROJECTS).unwrap().messages;
+    messages.push(msg(4, ANN, "Notes at https://example.com/notes", vec![]));
+    h.run_steps(4);
+    let url = "https://example.com/notes";
+    let opened = |h: &Harness<'_, Option<Home>>| {
+        (h.output().platform_output.commands.iter())
+            .any(|command| matches!(command, egui::OutputCommand::OpenUrl(open) if open.url == url))
+    };
+
+    let words = h.get_by_label("See you tomorrow").rect().center();
+    right_click(&mut h, words);
+    assert!(shows(&h, t!("common.edit")), "menu of my message");
+    assert!(shows(&h, t!("home.copy_message_id")));
+    for dark in [true, false] {
+        let theme = if dark { "dark" } else { "light" };
+        h.ctx.set_theme(if dark {
+            egui::Theme::Dark
+        } else {
+            egui::Theme::Light
+        });
+        h.run_steps(2);
+        assert!(shows(&h, t!("home.copy_message_id")));
+        screenshot(&mut h, &format!("text-menu-{theme}-1100x700"));
+    }
+    close_menu(&mut h);
+    assert!(!shows(&h, t!("home.copy_message_id")));
+
+    let link = h.get_by_label(url).rect().center();
+    right_click(&mut h, link);
+    assert!(shows(&h, t!("home.copy_message_id")), "menu over a link");
+    assert!(!shows(&h, t!("common.edit")), "Ann's message");
+    assert!(!opened(&h), "a right click doesn't follow the link");
+    close_menu(&mut h);
+
+    let blank = h.get_by_label("Sounds good").rect().center() + egui::vec2(250.0, 0.0);
+    right_click(&mut h, blank);
+    assert!(
+        shows(&h, t!("home.copy_message_id")),
+        "menu on the blank part"
+    );
+    close_menu(&mut h);
+
+    h.get_by_label(url).click();
+    h.step();
+    assert!(opened(&h), "a left click still follows the link");
+    assert!(!shows(&h, t!("home.copy_message_id")));
+}
+
+#[test]
+fn holding_message_text_on_a_phone_opens_the_message_menu() {
+    use super::touch::finger;
+    use eframe::egui::TouchPhase;
+    let (mut h, _, _, _sent) = chat(false, Vec2::new(390.0, 844.0));
+    let pos = h.get_by_label("Sounds good").rect().center();
+    finger(&mut h, TouchPhase::Start, pos);
+    h.run_steps(8);
+    finger(&mut h, TouchPhase::End, pos);
+    h.step();
+    assert!(shows(&h, t!("home.copy_message_id")));
+}
