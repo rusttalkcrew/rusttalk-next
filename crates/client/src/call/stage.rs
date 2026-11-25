@@ -15,14 +15,14 @@ use super::{
     Sharing, Voice, call_server, join, mixer,
     overlay::{self, Overlay, Row},
     remote::{self, Control},
-    ring, sound_badges, stop_watching,
+    sound_badges, stop_watching,
     terminal::{self, Terminals, Typing},
     upload, watch,
 };
 use crate::{
     friends::Relation,
     home::{
-        Home, face,
+        Home, face_speaking,
         person::{self, Person, Pick},
     },
     net::Command,
@@ -657,17 +657,15 @@ pub fn stage(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
     for (at, entry) in bubbles.iter().enumerate() {
         let spot = bubble(at, rect, GAP);
         let mut child = ui.new_child(UiBuilder::new().max_rect(spot));
-        let picture = face(
+        face_speaking(
             &mut child,
             &server.dir,
             &entry.peer.person,
             &entry.name,
             BUBBLE,
             false,
+            entry.speaking,
         );
-        if entry.speaking {
-            ring(ui, picture.rect);
-        }
         let label = t!("call.show_name", name = entry.name);
         let response = ui
             .interact(
@@ -767,10 +765,8 @@ fn tile(
             let spot = avatar_spot(rect);
             let size = spot.width();
             let mut child = ui.new_child(UiBuilder::new().max_rect(spot));
-            let picture = face(&mut child, &server.dir, &person, &entry.name, size, false);
-            if entry.speaking {
-                ring(ui, picture.rect);
-            }
+            let (dir, name) = (&server.dir, &entry.name);
+            face_speaking(&mut child, dir, &person, name, size, false, entry.speaking);
         }
         // Drawn below, above the tile's own clicks: selecting text takes the pointer.
         (None, Tile::Terminal(_)) if entry.me || entry.watched => {}
