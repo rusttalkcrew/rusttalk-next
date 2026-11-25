@@ -33,11 +33,14 @@ use crate::{
     ui::{self, ON_FILL, OVERLAY, OVERLAY_BUTTON, OVERLAY_TEXT},
 };
 
-/// Whether this device has a file dialog. Phones need the system's own picker first
-/// (docs/mobile.md); until then the buttons that open one are off there.
-pub const PICKER: bool = !cfg!(any(target_os = "android", target_os = "ios"));
+/// Whether this device can pick files to upload: the desktop file dialog, or
+/// Android's system picker (docs/mobile.md). iOS needs its own picker first; until
+/// then the buttons that open one are off there.
+pub const PICKER: bool = !cfg!(target_os = "ios");
+/// Whether this device has a save dialog. Phones save through `export_label` instead.
+pub const SAVE_DIALOG: bool = !cfg!(any(target_os = "android", target_os = "ios"));
 /// Whether files can be handed to their app (`open`); phones have no backend for it.
-const OPENS: bool = PICKER;
+const OPENS: bool = SAVE_DIALOG;
 
 /// Phones: the button that hands a stored file to the system instead of a save
 /// dialog (`Files::export`). Android saves it to Downloads, iOS opens the share sheet.
@@ -525,9 +528,27 @@ impl Files {
             let test = *TEST_ANSWER.lock().unwrap_or_else(|e| e.into_inner());
             let paths = match (test, name) {
                 (Some(answer), name) => answer(name.as_deref()),
-                // shortcut: phones need the system file picker (docs/mobile.md); until
+                // Phones save through `export_label`; their save buttons are off.
+                #[cfg(target_os = "android")]
+                (None, Some(_)) => {
+                    tracing::warn!("no save dialog on this device");
+                    Vec::new()
+                }
+                #[cfg(target_os = "android")]
+                (None, None) => {
+                    use crate::android::Pick;
+                    let kind = if pictures {
+                        Pick::Pictures
+                    } else if zip {
+                        Pick::Zip
+                    } else {
+                        Pick::Any
+                    };
+                    crate::android::pick(kind, !single)
+                }
+                // shortcut: iOS needs the system file picker (docs/mobile.md); until
                 // then a pick finds nothing.
-                #[cfg(any(target_os = "android", target_os = "ios"))]
+                #[cfg(target_os = "ios")]
                 (None, _) => {
                     tracing::warn!("no file picker on this device yet");
                     let _ = (single, pictures, zip);
@@ -809,7 +830,7 @@ pub fn media_items(m: &mut ui::Menu, media: &Media) -> Option<MediaAction> {
     if COPY_IMAGE && m.item("🖼", t!("files.copy_image")).clicked() {
         action = Some(MediaAction::Copy);
     }
-    if PICKER && m.item("⬇", t!("files.save_as")).clicked() {
+    if SAVE_DIALOG && m.item("⬇", t!("files.save_as")).clicked() {
         action = Some(MediaAction::SaveAs);
     }
     if m.item("🔍", t!("files.open_viewer")).clicked() {
@@ -1668,7 +1689,7 @@ fn download(ui: &mut Ui, files: &mut Files, address: &Url, file: &Attachment) {
         }
         None => {}
     }
-    if PICKER && ui::secondary(ui, t!("files.download")).clicked() {
+    if SAVE_DIALOG && ui::secondary(ui, t!("files.download")).clicked() {
         files.ask(ui.ctx(), Ask::Save(address.clone(), file.clone()));
     }
     if let Some(label) = export_label()
@@ -1715,7 +1736,7 @@ pub fn viewer(ctx: &egui::Context, files: &mut Files) {
                         close = tool(ui, "×", t!("common.close")).clicked();
                         ui.add_space(12.0);
                         open_it = OPENS && tool(ui, "↗", t!("files.open_default")).clicked();
-                        if PICKER && tool(ui, "⬇", t!("common.save")).clicked() {
+                        if SAVE_DIALOG && tool(ui, "⬇", t!("common.save")).clicked() {
                             files.ask(ui.ctx(), Ask::Save(address.clone(), file.clone()));
                         }
                         if let Some(label) = export_label()

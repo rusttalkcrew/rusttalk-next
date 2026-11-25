@@ -352,7 +352,8 @@ temporary copy; **Share…** (iOS) hands it to the system share sheet and delete
 when the sheet closes. A picture pasted into the composer
 (Ctrl+V) is written the same way, to a `rusttalk-<random>` folder, so it can be
 sent like a picked file; removing it from the message deletes it, and otherwise
-it goes with the other folders. The client reads the clipboard only when the
+it goes with the other folders. On Android a file picked for an upload is copied
+from the system picker into such a folder in the app's cache the same way. The client reads the clipboard only when the
 person pastes, and on desktops once more two minutes after copying the recovery
 words: it empties the clipboard only if it still holds them (read, compared by
 hash and emptied in one step; nothing is kept), and a newer copy in the app

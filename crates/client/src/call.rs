@@ -1051,7 +1051,9 @@ fn sending(ui: &mut Ui, file: &LiveFile, name: impl Fn(&Id) -> String) -> Option
 fn receiving(ui: &mut Ui, id: Id, name: &str, size: u64, saved: Option<u64>) -> Option<LiveAction> {
     match saved {
         None => ui
-            .add_enabled_ui(files::PICKER, |ui| ui::primary(ui, t!("files.download")))
+            .add_enabled_ui(files::SAVE_DIALOG, |ui| {
+                ui::primary(ui, t!("files.download"))
+            })
             .inner
             .clicked()
             .then(|| LiveAction::Save(id, name.to_owned())),

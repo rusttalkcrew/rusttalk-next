@@ -452,3 +452,141 @@ fn live_offers_wait_for_download_in_every_layout() {
         }
     }
 }
+
+/// Every upload takes what the picker returns (`TEST_ANSWER` here, the system picker
+/// on Android): files to open, never a place to save.
+#[test]
+fn every_upload_takes_the_picked_files() {
+    /// Draw frames until `done`; the picker answers on another thread.
+    fn until(
+        h: &mut Harness<'_, Option<Screen>>,
+        what: &str,
+        mut done: impl FnMut(&mut Home) -> bool,
+    ) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+            h.run_steps(1);
+            if done(&mut h.state_mut().as_mut().unwrap().0) {
+                return;
+            }
+        }
+        panic!("{what} never got the picked file");
+    }
+    fn ask(h: &mut Harness<'_, Option<Screen>>, ask: Ask) {
+        let ctx = h.ctx.clone();
+        h.state_mut().as_mut().unwrap().0.files.ask(&ctx, ask);
+    }
+    /// Draw frames until `label` shows.
+    fn shows(h: &mut Harness<'_, Option<Screen>>, label: &str) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while h.query_by_label(label).is_none() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+            h.run_steps(1);
+        }
+        h.get_by_label(label);
+    }
+
+    let _route = crate::route::test_lock();
+    let _picker = PICKER_TEST.lock().unwrap();
+    let _reset = ResetPicker;
+    let data = tempfile::tempdir().unwrap();
+    let picture = data.path().join("photo.png");
+    image::RgbaImage::from_pixel(64, 64, image::Rgba([40, 180, 90, 255]))
+        .save(&picture)
+        .unwrap();
+    let zip = data.path().join("pack.zip");
+    std::fs::write(&zip, b"PK").unwrap();
+    *PICKED.lock().unwrap() = vec![picture.clone()];
+    *files::TEST_ANSWER.lock().unwrap() = Some(|name| {
+        assert_eq!(name, None, "uploads open files");
+        PICKED.lock().unwrap().clone()
+    });
+    let (mut base, mut sent) = files_harness(true);
+    let mut home = base.state_mut().take().unwrap();
+    home.view = View::Server(0);
+    home.servers[0].open = Some(PROJECTS);
+    home.servers[0].dir.perms.manage_emoji = true;
+    home.servers[0].dir.emoji_max = (50, 20);
+    home.servers[0].dir.dms.push(crate::server::Dm {
+        channel: PROJECTS,
+        peer: ANN,
+    });
+    let address = home.servers[0].address.clone();
+    let mut h = Harness::builder()
+        .with_size(Vec2::new(1100.0, 700.0))
+        .build_ui_state(
+            |ui, screen: &mut Option<Screen>| {
+                if let Some((home, updates, keys)) = screen {
+                    show(ui, home, updates, keys);
+                }
+            },
+            None,
+        );
+    ui::install(&h.ctx);
+    *h.state_mut() = Some((
+        home,
+        crate::update::Updater::new(data.path()),
+        crate::keystore::without_keychain(data.path()),
+    ));
+    h.run_steps(4);
+
+    let staged = |chat: &Chat| chat.staged.iter().any(|file| file.path == picture);
+    for page in [false, true] {
+        let next = if page {
+            Ask::PagePictures(address.clone(), PROJECTS)
+        } else {
+            Ask::Attach(address.clone(), PROJECTS)
+        };
+        ask(&mut h, next);
+        until(&mut h, "a channel message", |home| {
+            let chat = home.servers[0].chats.get_mut(&PROJECTS).unwrap();
+            let done = staged(chat);
+            chat.staged.clear();
+            done
+        });
+    }
+    ask(&mut h, Ask::AttachDm(ANN));
+    until(&mut h, "a DM", |home| {
+        (home.threads.get(&ANN)).is_some_and(|thread| staged(&thread.chat))
+    });
+    while sent.try_recv().is_ok() {}
+    for live in [false, true] {
+        let next = if live {
+            Ask::Live(address.clone(), PROJECTS)
+        } else {
+            Ask::Share(address.clone(), PROJECTS)
+        };
+        ask(&mut h, next);
+        until(&mut h, "sharing", |_| {
+            std::iter::from_fn(|| sent.try_recv().ok()).any(|command| match command {
+                Command::ShareFiles(PROJECTS, paths) => !live && paths == [picture.clone()],
+                Command::SendLive(PROJECTS, path) => live && path == picture,
+                _ => false,
+            })
+        });
+    }
+    for icon in [false, true] {
+        let next = if icon {
+            Ask::Icon(address.clone())
+        } else {
+            Ask::Picture
+        };
+        ask(&mut h, next);
+        until(&mut h, "the crop dialog", |home| {
+            (home.crop.take()).is_some_and(|crop| match crop.target {
+                crate::crop::Target::Icon(at) => icon && at == address,
+                crate::crop::Target::Avatar => !icon,
+                crate::crop::Target::Emoji { .. } => false,
+            })
+        });
+    }
+    let home = &mut h.state_mut().as_mut().unwrap().0;
+    crate::admin::open(home, 0, crate::admin::Tab::Emoji);
+    h.run_steps(2);
+    ask(&mut h, Ask::Emoji(address.clone(), false));
+    shows(&mut h, &t!("admin.upload_remove", file = "photo.png"));
+    *PICKED.lock().unwrap() = vec![zip];
+    ask(&mut h, Ask::EmojiZip(address));
+    shows(&mut h, t!("admin.import_title"));
+}

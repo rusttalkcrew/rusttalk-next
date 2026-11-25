@@ -238,8 +238,8 @@ use yet is allowed to be unused there (`allow(dead_code)` on phones only).
 | Voice and video (LiveKit, webrtc-sys) | Builds and links (prebuilt WebRTC for Android) | Prebuilt WebRTC for iOS; CI builds it | Android and iOS voice in phase 3; see Voice |
 | Audio (cpal 0.18) | AAudio (`libaaudio.so`, Android 8.0+) | Core Audio | Android uses communication mode during calls; iOS needs its audio session |
 | Key storage (keyring 4) | Android Keystore wraps the identity in private app storage | Data-protection Keychain, file with password as fallback | Both default to system key storage with password fallback |
-| File picker (rfd) | No backend | No backend | Gated: the buttons that open it are off (`files::PICKER`) |
-| Saving and opening files | **Save to phone** copies the file into Downloads (`MediaStore`, Android 10+; the app's own Download folder before) | **Share…** opens the share sheet | Decrypted into the temp folder, deleted once handed over; "Open in default app" is off (no `open` backend) |
+| File picker (rfd) | System picker (`MainActivity.pick`, see File picker) | No backend | Android works; on iOS the buttons that open it are off (`files::PICKER`) |
+| Saving and opening files | **Save to phone** copies the file into Downloads (`MediaStore`, Android 10+; the app's own Download folder before) | **Share…** opens the share sheet | Decrypted into the temp folder, deleted once handed over; "Open in default app", **Save as** and downloading a live file are off (no save dialog, `files::SAVE_DIALOG`) |
 | Notifications (notify-rust) | Builds, no notification service | Builds, no notification service | Fail and are logged |
 | Call camera | Camera2 session, rotated I420 frames | AVFoundation, oriented BGRA frames | Both feed the existing encrypted LiveKit camera track |
 | Screen share, app and system audio | Not offered (`screen` already says unavailable) | Same | App audio gated to `Unsupported` |
@@ -249,6 +249,33 @@ use yet is allowed to be unused there (`allow(dead_code)` on phones only).
 | Clipboard | Text through `ClipboardManager` on the Java thread | Text through `UIPasteboard` | Press and hold a field: Paste, Copy, Cut, Select all (`src/phone_clipboard.rs`); picture and file paste gated off |
 | Deep links (`rusttalk://`) | Not registered | Not registered | Not started (desktop has none either) |
 | Settings folder | `AndroidApp::internal_data_path()`, no backup or transfer | Application Support, excluded from backups | Done |
+
+### File picker (Android)
+
+Every upload goes through `files::Files::ask`, which runs the picker on its own
+thread: message attachments in channels, DMs and forum posts, page pictures,
+channel files, sending a file live, the profile picture and server icon (then
+the crop dialog), server emoji and stickers, and the emoji .zip import. On
+Android that thread calls `android::pick`, which asks `MainActivity.pick` to open
+the system picker and waits until its result comes back (`pickDone`):
+
+- Pictures (profile picture, server icon, emoji and stickers, page pictures):
+  the Photo Picker (`ACTION_PICK_IMAGES`) on Android 13 and newer, otherwise the
+  document picker (`ACTION_OPEN_DOCUMENT`) showing PNG, JPEG, GIF and WebP.
+- The emoji .zip import: the document picker showing .zip files.
+- Everything else: the document picker for any file.
+- Several files at once where the desktop dialog allows it (attachments, page
+  pictures, channel files, emoji and stickers).
+
+Neither needs a storage permission: the picker grants the app the files picked.
+The picker thread then copies each one (`MainActivity.copyPicked`) from its
+`content://` address into its own `rusttalk-<random>` folder in the app cache
+(the temp folder), under the file's own name, so the rest of the app gets a
+normal path, as for a pasted picture. Removing a file from the message deletes
+its folder; the rest go when the app starts or the person signs out. Cancelling
+picks nothing. Saving has no picker yet: **Save to phone** stays the way to keep
+a file (`ACTION_CREATE_DOCUMENT` would also need the finished download copied to
+the chosen place).
 
 ### Android lifecycle
 
@@ -341,7 +368,7 @@ cargo-ndk automates), builds the client library as a `cdylib` with
   need Java or Kotlin glue (notifications, Android Keystore, the file picker,
   `libwebrtc.jar`). Its Java is `MainActivity`, a GameActivity that handles the
   keyboard's action key, microphone permission and call audio mode, the camera
-  glue, and `CallService`, which keeps calls going in the background.
+  glue, the file picker, and `CallService`, which keeps calls going in the background.
 
 cargo-ndk can replace the few lines of environment in `build.sh` when more
 ABIs (32-bit ARM, x86_64) are added.
@@ -409,7 +436,7 @@ Rough effort for one person who knows the code base.
 
 | Phase | What | Effort |
 | --- | --- | --- |
-| 2 | Usable chat on Android. Done: typed text, safe areas and the keyboard, `onDestroy`, recovery words, Android Keystore, temp folder (`MainActivity` points `TMPDIR` at the app cache), **Save to phone** (Downloads). Left: file picker (Storage Access Framework), local notifications, hide Updates and Shortcuts on phones, `rusttalk://` links, the layout list above | 3 to 4 weeks |
+| 2 | Usable chat on Android. Done: typed text, safe areas and the keyboard, `onDestroy`, recovery words, Android Keystore, temp folder (`MainActivity` points `TMPDIR` at the app cache), **Save to phone** (Downloads), file picker. Left: local notifications, hide Updates and Shortcuts on phones, `rusttalk://` links, the layout list above | 3 to 4 weeks |
 | 3 | Foreground voice on Android and iOS; iOS requests microphone access and supports background audio. Left: iPhone device verification, Android Bluetooth routing, background-call device test | 2 weeks |
 | 4 | iOS on a device. Done: Keychain, safe area and taps. Left: notifications (reuse `notify/macos.rs`), document picker, status bar colours, background rules | 1 to 2 weeks |
 | 5 | Foreground call camera and front/back selection. Left: verify capture and interruptions on a real iPhone | Device verification |
