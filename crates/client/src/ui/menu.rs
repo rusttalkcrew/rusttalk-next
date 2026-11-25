@@ -438,12 +438,12 @@ pub fn context_menu_with_id<R>(
 ) -> Option<R> {
     let ctx = &anchor.ctx;
     let mut popup = Popup::context_menu(anchor).id(id);
-    // A selectable label or link can own the hold inside a row. Nested menus
-    // (e.g. a saved file inside a message) get first choice as children draw first.
-    if anchor.enabled()
-        && ctx.interaction_snapshot(|s| s.long_touched.is_some())
-        && anchor.container_contains_pointer()
-    {
+    // A selectable label or link can own the hold or right click inside a row.
+    // Nested menus (e.g. a saved file inside a message) get first choice as
+    // children draw first.
+    let asked = ctx.interaction_snapshot(|s| s.long_touched.is_some())
+        || ctx.input(|i| i.pointer.secondary_clicked());
+    if anchor.enabled() && asked && anchor.container_contains_pointer() {
         let key = egui::Id::unique("handled context hold");
         let pass = ctx.cumulative_pass_nr();
         let first = ctx.data_mut(|data| {
@@ -451,7 +451,10 @@ pub fn context_menu_with_id<R>(
             data.insert_temp(key, pass);
             first
         });
-        popup = popup.open_memory(first.then_some(egui::SetOpenCommand::Bool(true)));
+        // An anchor that took the click itself opens anyway.
+        if first && !anchor.secondary_clicked() {
+            popup = popup.open_memory(Some(egui::SetOpenCommand::Bool(true)));
+        }
     }
     show(popup, MENU_WIDTH, add)
 }

@@ -19,6 +19,7 @@ Unreleased under the new version and date.
 - Server owners can set file limits (storage, how long files are kept, stickers, and file size up to 32 MB) as high as they like in Server settings, unless the server's host set a cap; the settings now say what that cap is and how the host can raise it.
 - Full screen streams keep the call's buttons and the stream's own menus, shown when you move the pointer (tap on phones) and hidden when idle; Escape or the hover button leaves full screen.
 - A voice channel's member limit can be removed again by clearing the field, and the "2/8" count in the channel list now has a people icon and says "Member limit: 8" on hover (or a tap on phones).
+- Right-clicking (or long-pressing) a message's words or links now opens the message menu, like the rest of the message.
 
 ## v0.5.0 - 2026-11-25
 
