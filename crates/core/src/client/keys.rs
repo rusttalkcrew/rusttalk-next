@@ -2918,7 +2918,7 @@ mod tests {
             ("POST /v1/keys", "{}".into()),
         ])
         .await?;
-        let server = Server::for_test(2, profile.path()).at(address);
+        let server = Server::for_test(2, profile.path()).at(address, [1; 32]);
         let mut client = test_client(&server, me).await?;
         // The saved pins were read (none yet), so a new DM is trusted on first use.
         client.pins_lost = false;

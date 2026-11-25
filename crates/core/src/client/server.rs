@@ -91,13 +91,6 @@ impl Server {
         }
     }
 
-    /// A test server whose requests go to `address`, such as a local fake API.
-    #[cfg(test)]
-    pub(super) fn at(mut self, address: Url) -> Self {
-        self.server.address = address;
-        self
-    }
-
     /// Verify the origin against saved and supplied pins, then persist the verified pins.
     pub async fn connect(
         address: Url,
