@@ -1208,7 +1208,13 @@ mod tests {
             assert!(!listed(tab, true));
             assert!(listed(tab, false));
         }
-        for tab in [Tab::Profile, Tab::Voice, Tab::Network, Tab::About, Tab::WhatsNew] {
+        for tab in [
+            Tab::Profile,
+            Tab::Voice,
+            Tab::Network,
+            Tab::About,
+            Tab::WhatsNew,
+        ] {
             assert!(listed(tab, true) && listed(tab, false));
         }
     }
