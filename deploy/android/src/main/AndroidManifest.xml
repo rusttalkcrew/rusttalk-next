@@ -13,7 +13,7 @@
         android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:icon="@mipmap/ic_launcher"
-        android:label="RustTalk"
+        android:label="${appLabel}"
         android:theme="@style/Theme.AppCompat.NoActionBar">
         <!-- AppCompat's EmojiCompat would ask Google Play services for an emoji font
              at start: an outbound connection docs/privacy.md doesn't list. -->

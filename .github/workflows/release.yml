@@ -147,6 +147,27 @@ jobs:
           test -s "dist/rusttalk-$VERSION-ios-unsigned.ipa"
           bash deploy/android/sign.sh "dist/rusttalk-$VERSION-android-arm64-unsigned.apk" "dist/rusttalk-$VERSION-android-arm64.apk"
           rm "dist/rusttalk-$VERSION-android-arm64-unsigned.apk"
+      # Phones only install over an existing copy signed with the same key, at the same
+      # or a higher versionCode, so a key change or a broken APK must stop the release.
+      - name: Verify Android APK
+        env:
+          # SHA-256 of the release certificate every published APK has used since v0.2.0.
+          ANDROID_CERT_SHA256: 5771700e14339a882376f4c3ae474e8c4c1ce608259318d80ec3e7da96e37848
+        run: |
+          set -o pipefail
+          tools="$ANDROID_HOME/build-tools/36.0.0"
+          apk="dist/rusttalk-$VERSION-android-arm64.apk"
+          "$tools/zipalign" -c -P 16 4 "$apk"
+          "$tools/apksigner" verify --verbose --print-certs --min-sdk-version 26 "$apk" | tee apksigner.txt
+          grep -qx 'Verified using v2 scheme (APK Signature Scheme v2): true' apksigner.txt
+          grep -qx "Signer #1 certificate SHA-256 digest: $ANDROID_CERT_SHA256" apksigner.txt
+          grep -qx 'Number of signers: 1' apksigner.txt
+          "$tools/aapt2" dump badging "$apk" | tee badging.txt
+          IFS=. read -r major minor patch <<<"$VERSION"
+          code=$((10#$major * 1000000 + 10#$minor * 1000 + 10#$patch + 1))
+          grep -q "^package: name='io.github.rusttalkcrew.rusttalk' versionCode='$code' " badging.txt
+          if grep -qE "^application-debuggable|testOnly=" badging.txt; then exit 1; fi
+          rm apksigner.txt badging.txt
       - name: Multi-arch images
         run: |
           echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin

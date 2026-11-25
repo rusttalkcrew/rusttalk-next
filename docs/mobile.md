@@ -9,8 +9,35 @@ client is a library with a small `main.rs`, so Android can load it as
 
 Download the experimental phone packages from [RustTalk releases](https://github.com/rusttalkcrew/rusttalk-next/releases).
 
-- **Android 8 or newer, ARM64:** open `RustTalk-android-arm64.apk` and allow installation from that source. Install later releases over the existing app. An Actions test APK has a different signer. Before removing a test install, check that you have your recovery words. Uninstalling clears the app's local data.
+- **Android 8 or newer, ARM64:** open `RustTalk-android-arm64.apk` and allow installation from that source. Install later releases over the existing app. Actions test APKs now install next to it as "RustTalk Test"; older test APKs used the release package name with a different signer and block the release APK. Before removing a test install, check that you have your recovery words. Uninstalling clears the app's local data.
 - **iOS 16 or newer:** sign `RustTalk-ios-unsigned.ipa` with your Apple account using a sideloading tool such as AltStore or xtool. Use the same signing team for updates so the app can still read your keys in Keychain.
+
+### "App not installed" on Android
+
+Android shows only "App not installed". To see the reason, turn on USB
+debugging, connect the phone and run `adb install -r RustTalk-android-arm64.apk`
+([adb](https://developer.android.com/tools/releases/platform-tools)):
+
+- `INSTALL_FAILED_UPDATE_INCOMPATIBLE: Existing package
+  io.github.rusttalkcrew.rusttalk signatures do not match newer version`:
+  another copy with a different signer is installed. Usually it is a test
+  APK from a pull request's CI run: test builds are signed with a different
+  key and can never be upgraded to a release. The copy can be hidden: missing
+  from the launcher, in a work profile, Private Space or Secure Folder, or
+  uninstalled with "keep data". `adb shell dumpsys package io.github.rusttalkcrew.rusttalk`
+  shows which users have it (`User <id>: ... installed=true`). After saving
+  your recovery words, remove it with `adb uninstall io.github.rusttalkcrew.rusttalk`
+  (all users) or `adb uninstall --user <id> io.github.rusttalkcrew.rusttalk`,
+  then install again. Every release so far is signed with the same key, so
+  releases always update each other.
+- `INSTALL_FAILED_VERSION_DOWNGRADE`: a newer RustTalk is installed.
+- `INSTALL_FAILED_NO_MATCHING_ABIS`: the phone is not 64-bit ARM.
+- `INSTALL_FAILED_OLDER_SDK`: the phone runs Android older than 8.
+- `INSTALL_FAILED_INSUFFICIENT_STORAGE`: free up space; the APK is over 100 MB.
+- Succeeds over adb but not from the file manager: Play Protect or the
+  file manager blocked it; allow the install when Play Protect asks.
+
+Check that the APK is genuine with [these steps](install/verify.md).
 
 Phone updates are manual. Microphone audio and camera capture still need verification on a physical iPhone.
 
@@ -165,7 +192,9 @@ messages and reading them again after a restart.
   text); the next start says so in a chat and deletes the note once that showed. Drafts in the message box are lost, as
   on a desktop quit: no platform saves them yet.
 - **Test build**: `deploy/android/build.sh` makes a release APK signed with the
-  local debug key (`rusttalk-<version>-android-arm64-test.apk`): not
+  local debug key (`rusttalk-<version>-android-arm64-test.apk`), installed as
+  `io.github.rusttalkcrew.rusttalk.test` ("RustTalk Test"), so it never
+  blocks the release app: not
   debuggable, so a USB cable no longer opens the app's files, and R8 can strip
   logging. Published releases use the production signing key.
 
