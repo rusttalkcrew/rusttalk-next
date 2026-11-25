@@ -27,18 +27,24 @@ use std::{
     path::PathBuf,
     process::ExitCode,
     sync::Arc,
+    time::Duration,
 };
 
 use anyhow::{Result, bail};
 use axum::{
     Json, Router,
+    body::Body,
     extract::{MatchedPath, Request, rejection::JsonRejection},
-    http::{Method, StatusCode, header::CACHE_CONTROL},
+    http::{
+        HeaderMap, Method, StatusCode,
+        header::{CACHE_CONTROL, CONTENT_LENGTH},
+    },
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{delete, get, post, put},
 };
 use ed25519_dalek::SigningKey;
+use futures_util::TryStreamExt;
 use rusttalk_core::keys::Event;
 use rusttalk_core::{
     auth::{ProtocolError, encode},
@@ -49,6 +55,7 @@ use sqlx::SqlitePool;
 use tokio::{
     net::TcpListener,
     sync::{broadcast, watch},
+    time,
 };
 use tower_http::{
     limit::RequestBodyLimitLayer,
@@ -461,6 +468,33 @@ fn routes(app: App) -> Router {
 const CHANGE_LIMIT: usize = 256;
 static CHANGES: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(CHANGE_LIMIT);
 
+/// How long a change's body may take to arrive. It is read before the change takes a slot,
+/// so a slow or stalled sender only ties up its own connection.
+const BODY_READ_LIMIT: Duration = Duration::from_secs(30);
+
+const fn max(a: usize, b: usize) -> usize {
+    if a > b { a } else { b }
+}
+
+/// The largest body any buffered route accepts; each route still applies its own limit.
+const BUFFERED_BODY_LIMIT: usize = max(
+    max(
+        max(4096, rusttalk_core::index::BODY_LIMIT),
+        max(
+            rusttalk_core::calendar::BODY_LIMIT,
+            channels::ORDER_BODY_LIMIT,
+        ),
+    ),
+    max(
+        max(files::SHARE_BODY_LIMIT, rusttalk_core::sync::MAX_BODY),
+        max(metadata::IMAGE_BODY_LIMIT, messages::BODY_LIMIT),
+    ),
+);
+
+/// File uploads stream to disk with their own idle and total limits, and read their body
+/// only while holding one of the few upload slots.
+const STREAMED_ROUTES: &[&str] = &["/v1/files"];
+
 /// Run every change to completion even if the client leaves. Otherwise a cancelled request
 /// can commit and then skip what follows, such as notifying members or voice enforcement.
 async fn finish_changes(request: Request, next: Next) -> Response {
@@ -470,6 +504,20 @@ async fn finish_changes(request: Request, next: Next) -> Response {
     ) {
         return next.run(request).await;
     }
+    let streamed = request
+        .extensions()
+        .get::<MatchedPath>()
+        .is_some_and(|path| STREAMED_ROUTES.contains(&path.as_str()));
+    // Read the body first, so a slow sender cannot hold a slot that every change shares.
+    let request = if streamed {
+        request
+    } else {
+        let (parts, body) = request.into_parts();
+        match buffer_body(&parts.headers, body).await {
+            Ok(body) => Request::from_parts(parts, body),
+            Err(error) => return error.into_response(),
+        }
+    };
     let Ok(permit) = CHANGES.try_acquire() else {
         return ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "server_busy").into_response();
     };
@@ -484,6 +532,40 @@ async fn finish_changes(request: Request, next: Next) -> Response {
     )
     .await
     .unwrap_or_else(|_| ApiError::internal("request_task_failed").into_response())
+}
+
+/// Reads a change's whole body within `BODY_READ_LIMIT`. A larger body is read to its end
+/// (within the same time) before the 413, so the proxy does not report a reset stream as 502.
+async fn buffer_body(headers: &HeaderMap, body: Body) -> ApiResult<Body> {
+    let mut oversized = headers
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_some_and(|length| length > BUFFERED_BODY_LIMIT as u64);
+    let mut bytes = Vec::new();
+    let read = time::timeout(BODY_READ_LIMIT, async {
+        let mut stream = body.into_data_stream();
+        while let Some(chunk) = stream.try_next().await? {
+            if oversized || chunk.len() > BUFFERED_BODY_LIMIT - bytes.len() {
+                oversized = true;
+                continue;
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok::<_, axum::Error>(())
+    })
+    .await;
+    if oversized {
+        return Err(ApiError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "body_too_large",
+        ));
+    }
+    match read {
+        Err(_) => Err(ApiError::new(StatusCode::REQUEST_TIMEOUT, "body_timeout")),
+        Ok(Err(_)) => Err(ApiError::bad_request("invalid_body")),
+        Ok(Ok(())) => Ok(Body::from(bytes)),
+    }
 }
 
 async fn log_request(request: Request, next: Next) -> Response {
@@ -524,6 +606,7 @@ async fn log_request(request: Request, next: Next) -> Response {
 mod tests {
     use std::{net::SocketAddr, time::Duration};
 
+    use futures_util::StreamExt;
     use sqlx::query_scalar;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
@@ -580,6 +663,76 @@ mod tests {
         })
         .await?;
         Ok(())
+    }
+
+    /// A change route that reads its whole body, like the JSON routes.
+    async fn serve_echo() -> anyhow::Result<SocketAddr> {
+        let router = Router::new()
+            .route("/echo", post(|body: String| async move { body }))
+            .layer(middleware::from_fn(finish_changes));
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        tokio::spawn(async move { axum::serve(listener, router).await });
+        Ok(address)
+    }
+
+    /// Announce `length` body bytes but send only `sent` of them.
+    async fn send_echo(
+        address: SocketAddr,
+        length: usize,
+        sent: &str,
+    ) -> anyhow::Result<TcpStream> {
+        let mut client = TcpStream::connect(address).await?;
+        let request =
+            format!("POST /echo HTTP/1.1\r\nHost: test\r\nContent-Length: {length}\r\n\r\n{sent}");
+        client.write_all(request.as_bytes()).await?;
+        Ok(client)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stalled_bodies_hold_no_change_slots() -> anyhow::Result<()> {
+        let _serial = SERIAL.lock().await;
+        let address = serve_echo().await?;
+        let mut stalled = Vec::new();
+        for _ in 0..CHANGE_LIMIT + 8 {
+            stalled.push(send_echo(address, 4000, "x").await?);
+        }
+        // Let the server read every stalled request's head and first byte.
+        sleep(Duration::from_millis(500)).await;
+        assert_eq!(CHANGES.available_permits(), CHANGE_LIMIT);
+
+        let client = send_echo(address, 2, "ok").await?;
+        assert_eq!(
+            status_within(client, Duration::from_secs(5)).await,
+            Some(200)
+        );
+        drop(stalled);
+        permits_reach(CHANGE_LIMIT).await
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_body_times_out() {
+        let stalled = futures_util::stream::once(async {
+            Ok::<_, io::Error>(axum::body::Bytes::from_static(b"x"))
+        })
+        .chain(futures_util::stream::pending());
+        let error = buffer_body(&HeaderMap::new(), Body::from_stream(stalled))
+            .await
+            .expect_err("a stalled body is refused");
+        assert_eq!(error.status, StatusCode::REQUEST_TIMEOUT);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_oversized_body_is_refused_after_it_ends() {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_LENGTH, (BUFFERED_BODY_LIMIT + 1).into());
+        let body = Body::from(vec![0; BUFFERED_BODY_LIMIT + 1]);
+        let error = buffer_body(&headers, body)
+            .await
+            .expect_err("an oversized body is refused");
+        assert_eq!(error.status, StatusCode::PAYLOAD_TOO_LARGE);
+        let body = buffer_body(&HeaderMap::new(), Body::from("{}")).await;
+        assert!(body.is_ok());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

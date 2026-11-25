@@ -50,7 +50,7 @@ pub struct Files {
 }
 
 /// An upload fails when no bytes arrive for this long, so slow links still finish.
-const UPLOAD_IDLE: Duration = Duration::from_secs(30);
+pub(crate) const UPLOAD_IDLE: Duration = Duration::from_secs(30);
 /// The longest an upload may hold a staging slot.
 const UPLOAD_LIMIT: Duration = Duration::from_secs(15 * 60);
 
@@ -164,6 +164,9 @@ pub async fn upload(
         .max_file_bytes;
     tx.commit().await?;
 
+    // Every body read, the drain of a refused one too, holds an upload slot, so slow senders
+    // can only ever hold a few of the change slots that all writes share.
+    let _slot = files.upload_slot(actor.person)?;
     if headers
         .get(header::CONTENT_LENGTH)
         .and_then(|h| h.to_str().ok())
@@ -173,7 +176,6 @@ pub async fn upload(
         drain(&mut body.into_data_stream()).await;
         return Err(too_large());
     }
-    let _slot = files.upload_slot(actor.person)?;
     let temp = tempfile::Builder::new()
         .prefix(".upload-")
         .tempfile_in(&files.dir)

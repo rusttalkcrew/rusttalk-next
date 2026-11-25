@@ -7,6 +7,7 @@ use axum::{
 use futures_util::TryStreamExt;
 use rusttalk_core::sync::{MAX_BODY, split_blob};
 use sqlx::{query, query_as, query_scalar};
+use tokio::time;
 
 use crate::{
     ApiError, ApiResult, App,
@@ -36,9 +37,9 @@ pub async fn get(State(app): State<App>, headers: HeaderMap) -> ApiResult<Respon
 async fn read_body(body: Body) -> ApiResult<Vec<u8>> {
     let mut stream = body.into_data_stream();
     let mut bytes = Vec::new();
-    while let Some(chunk) = stream
-        .try_next()
+    while let Some(chunk) = time::timeout(files::UPLOAD_IDLE, stream.try_next())
         .await
+        .map_err(|_| ApiError::new(StatusCode::REQUEST_TIMEOUT, "body_timeout"))?
         .map_err(|_| ApiError::bad_request("invalid_sync_blob"))?
     {
         if chunk.len() > MAX_BODY - bytes.len() {
@@ -54,6 +55,8 @@ async fn read_body(body: Body) -> ApiResult<Vec<u8>> {
 }
 
 pub async fn put(State(app): State<App>, headers: HeaderMap, body: Body) -> ApiResult<Response> {
+    // Refuse unknown sessions before reading anything they send.
+    drop(authenticate_read(&app, &headers).await?);
     let body = read_body(body).await?;
     let (mut tx, actor) = authenticate(&app, &headers).await?;
     let (version, ciphertext) =
@@ -85,4 +88,30 @@ pub async fn put(State(app): State<App>, headers: HeaderMap, body: Body) -> ApiR
 
 fn binary(status: StatusCode, body: Vec<u8>) -> Response {
     (status, [(CONTENT_TYPE, "application/octet-stream")], body).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::testing;
+
+    #[tokio::test]
+    async fn unknown_sessions_are_refused_before_the_body_is_read() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let app = testing::app(dir.path(), 1).await?;
+        let stalled =
+            Body::from_stream(futures_util::stream::pending::<std::io::Result<Vec<u8>>>());
+        let answer = time::timeout(
+            Duration::from_secs(5),
+            put(State(app), testing::as_person(9), stalled),
+        )
+        .await?;
+        assert_eq!(
+            answer.expect_err("unknown session").status,
+            StatusCode::UNAUTHORIZED
+        );
+        Ok(())
+    }
 }
