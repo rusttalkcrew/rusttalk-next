@@ -32,6 +32,7 @@ Unreleased under the new version and date.
 - Server settings > Emoji & stickers fits on a phone: name fields make room for their buttons, warnings wrap, and each emoji's Rename, Move to and Delete sit under "…".
 - Phones: save a file from a message to Downloads on Android, or share it from iOS. The "Open" button that did nothing on phones is gone.
 - Server settings open faster: the audit log loads only on its own page, newest 50 first, with Show older for more
+- The Members list in server settings is readable on phones: names get the row, roles sit under them and the presence dot moves onto the picture.
 
 ## v0.4.0 - 2026-11-24
 

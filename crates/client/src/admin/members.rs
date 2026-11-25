@@ -4,8 +4,8 @@
 use std::cmp::Reverse;
 
 use eframe::egui::{
-    self, Align, FontId, Label, Layout, Rect, Sense, Shape, Stroke, Ui, UiBuilder, Vec2,
-    accesskit::Role as Access, pos2, vec2,
+    self, Align, FontId, Label, Layout, Rect, RichText, Sense, Shape, Stroke, Ui, UiBuilder, Vec2,
+    accesskit::Role as Access, pos2, text::LayoutJob, vec2,
 };
 
 use crate::{
@@ -18,6 +18,11 @@ use crate::{
 };
 
 const ROW: f32 = 52.0;
+/// A narrow table's row: the name with the roles under it, two lines at most.
+const ROW_NARROW: f32 = 64.0;
+/// Tables narrower than this (phones) drop the Status column, show presence on the
+/// face and put the roles under the name, so the name gets most of the row.
+const NARROW: f32 = 480.0;
 const HEADER: f32 = 28.0;
 const FACE: f32 = 32.0;
 const STATUS_WIDTH: f32 = 96.0;
@@ -84,12 +89,21 @@ fn visible<'a>(dir: &'a Directory, view: &View) -> Vec<&'a Member> {
 }
 
 /// The table's columns inside `row`: member, roles, status and the actions button.
-fn columns(row: Rect) -> [Rect; 4] {
+/// A narrow table has only member and actions; roles and status are empty.
+fn columns(row: Rect, narrow: bool) -> [Rect; 4] {
     let inner = row.shrink2(vec2(ui::SPACE_S, 0.0));
     let actions = Rect::from_min_max(
         pos2(inner.right() - ui::ICON_BUTTON, inner.top()),
         inner.max,
     );
+    if narrow {
+        let member = Rect::from_min_max(
+            inner.min,
+            pos2(actions.left() - ui::SPACE_M, inner.bottom()),
+        );
+        let none = Rect::from_min_max(member.right_top(), member.right_bottom());
+        return [member, none, none, actions];
+    }
     let status = Rect::from_min_max(
         pos2(actions.left() - ui::SPACE_M - STATUS_WIDTH, inner.top()),
         pos2(actions.left() - ui::SPACE_M, inner.bottom()),
@@ -127,6 +141,8 @@ pub fn show<'a>(
     if (view.role.as_ref()).is_some_and(|id| !dir.roles.iter().any(|role| role.id == *id)) {
         view.role = None;
     }
+    let narrow = ui.available_width() < NARROW;
+    let height = if narrow { ROW_NARROW } else { ROW };
     ui::right_row(ui, ui::CONTROL_HEIGHT, |ui| {
         role_filter(ui, dir, view);
         let search = ui.add(
@@ -148,7 +164,7 @@ pub fn show<'a>(
     };
     ui.label(ui::caption(count));
     ui.add_space(ui::SPACE_S);
-    header(ui, view);
+    header(ui, view, narrow);
     if list.is_empty() {
         ui.add_space(ui::SPACE_M);
         ui.weak(t!("admin.members_none"));
@@ -157,17 +173,17 @@ pub fn show<'a>(
     // Only the rows in view are drawn, so thousands of members stay smooth.
     let top = ui.cursor().top();
     let clip = ui.clip_rect();
-    let first = (((clip.top() - top) / ROW).floor().max(0.0) as usize).min(list.len());
-    let last = ((((clip.bottom() - top) / ROW).ceil().max(0.0) as usize) + 1).min(list.len());
+    let first = (((clip.top() - top) / height).floor().max(0.0) as usize).min(list.len());
+    let last = ((((clip.bottom() - top) / height).ceil().max(0.0) as usize) + 1).min(list.len());
     let mut pick = None;
     ui.spacing_mut().item_spacing.y = 0.0;
-    ui.add_space(first as f32 * ROW);
+    ui.add_space(first as f32 * height);
     for member in &list[first..last] {
-        if let Some(picked) = row(ui, dir, member, &target(member.person)) {
+        if let Some(picked) = row(ui, dir, member, &target(member.person), narrow) {
             pick = Some((member.person, picked));
         }
     }
-    ui.add_space((list.len() - last) as f32 * ROW);
+    ui.add_space((list.len() - last) as f32 * height);
     pick
 }
 
@@ -176,8 +192,10 @@ fn role_filter(ui: &mut Ui, dir: &Directory, view: &mut View) {
     let shown = (view.role.as_ref())
         .and_then(|id| dir.roles.iter().find(|role| role.id == *id))
         .map_or(t!("admin.all_roles"), |role| role.name.as_str());
+    // Never more than 40% of the row, so the search keeps room on a phone.
+    let width = ROLE_FILTER_WIDTH.min(ui.available_width() * 0.4);
     let button = ui.add_sized(
-        vec2(ROLE_FILTER_WIDTH, ui::CONTROL_HEIGHT),
+        vec2(width, ui::CONTROL_HEIGHT),
         egui::Button::new(shown).truncate(),
     );
     button.widget_info(|| egui::WidgetInfo::labeled(Access::ComboBox, true, t!("admin.roles")));
@@ -197,10 +215,16 @@ fn role_filter(ui: &mut Ui, dir: &Directory, view: &mut View) {
     });
 }
 
-/// Column titles; Member and Roles sort when clicked.
-fn header(ui: &mut Ui, view: &mut View) {
+/// Column titles; Member and Roles sort when clicked. A narrow table shows both
+/// over the member column and no Status.
+fn header(ui: &mut Ui, view: &mut View, narrow: bool) {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), HEADER), Sense::hover());
-    let [member, roles, status, _] = columns(rect);
+    let [mut member, mut roles, status, _] = columns(rect, narrow);
+    if narrow {
+        let middle = member.center().x;
+        roles = Rect::from_min_max(pos2(middle, member.top()), member.max);
+        member.max.x = middle - ui::SPACE_M;
+    }
     let sortable = |ui: &mut Ui, view: &mut View, area: Rect, sort, label: &str| {
         let response = ui.interact(area, ui.scope_id().with(("sort", label)), Sense::click());
         let on = view.sort == sort;
@@ -243,21 +267,30 @@ fn header(ui: &mut Ui, view: &mut View) {
     sortable(ui, view, member, Sort::Name, t!("admin.col_member"));
     sortable(ui, view, roles, Sort::Role, t!("admin.roles"));
     let c = ui::colors(ui);
-    let font = FontId::new(ui::TEXT_CAPTION, ui::bold_family());
-    ui.painter().text(
-        pos2(status.left(), status.center().y),
-        egui::Align2::LEFT_CENTER,
-        t!("admin.col_status"),
-        font,
-        c.muted,
-    );
+    if !narrow {
+        let font = FontId::new(ui::TEXT_CAPTION, ui::bold_family());
+        ui.painter().text(
+            pos2(status.left(), status.center().y),
+            egui::Align2::LEFT_CENTER,
+            t!("admin.col_status"),
+            font,
+            c.muted,
+        );
+    }
     ui.painter()
         .hline(rect.x_range(), rect.bottom(), Stroke::new(1.0, c.border));
 }
 
-fn row(ui: &mut Ui, dir: &Directory, member: &Member, person: &Person) -> Option<Pick> {
+fn row(
+    ui: &mut Ui,
+    dir: &Directory,
+    member: &Member,
+    person: &Person,
+    narrow: bool,
+) -> Option<Pick> {
     let name = member.display_name();
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), ROW), Sense::hover());
+    let height = if narrow { ROW_NARROW } else { ROW };
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
     // Before the contents, so the actions button on top of it takes its own clicks.
     let row = ui.interact(
         rect,
@@ -272,26 +305,46 @@ fn row(ui: &mut Ui, dir: &Directory, member: &Member, person: &Person) -> Option
     let fill = egui::Color32::TRANSPARENT.lerp_to_gamma(c.hover, hover);
     ui.painter()
         .rect_filled(rect.shrink2(vec2(0.0, 1.0)), ui::RADIUS_ROW, fill);
-    let [member_area, roles_area, status_area, actions_area] = columns(rect);
+    let [member_area, roles_area, status_area, actions_area] = columns(rect, narrow);
 
     let child = &mut cell(ui, member_area);
     child.spacing_mut().item_spacing.x = ui::SPACE_M;
-    crate::home::face(child, dir, &member.person, &name, FACE, false);
+    let face = crate::home::face(child, dir, &member.person, &name, FACE, false);
     let mut text = ui::bold(&name);
     if let Some(color) = dir.name_color(&member.roles) {
         text = text.color(color);
     }
-    child.add(Label::new(text).truncate().selectable(false));
+    if narrow {
+        // The dot on the face stands in for the Status column; ringed in the page's colour.
+        let radius = (FACE * 0.16).max(4.0);
+        ui::presence_dot(
+            ui,
+            face.rect,
+            radius,
+            presence_color(c, member.presence),
+            c.main,
+        );
+        let status = status_text(member.presence);
+        face.widget_info(|| egui::WidgetInfo::labeled(Access::Image, true, status));
+        let text_area = Rect::from_min_max(
+            pos2(face.rect.right() + ui::SPACE_M, member_area.top()),
+            member_area.max,
+        );
+        name_and_roles(ui, dir, member, text, text_area);
+    } else {
+        child.add(Label::new(text).truncate().selectable(false));
 
-    let child = &mut cell(ui, roles_area);
-    child.spacing_mut().item_spacing.x = ui::SPACE_XS;
-    role_chips(child, dir, member);
+        let child = &mut cell(ui, roles_area);
+        child.spacing_mut().item_spacing.x = ui::SPACE_XS;
+        role_chips(child, dir, member);
 
-    let child = &mut cell(ui, status_area);
-    child.spacing_mut().item_spacing.x = ui::SPACE_S;
-    ui::dot(child, presence_color(c, member.presence));
-    child
-        .add(Label::new(ui::caption(status_text(member.presence)).color(c.text)).selectable(false));
+        let child = &mut cell(ui, status_area);
+        child.spacing_mut().item_spacing.x = ui::SPACE_S;
+        ui::dot(child, presence_color(c, member.presence));
+        child.add(
+            Label::new(ui::caption(status_text(member.presence)).color(c.text)).selectable(false),
+        );
+    }
 
     let child = &mut cell(ui, actions_area);
     let more = ui::icon_button(
@@ -304,6 +357,42 @@ fn row(ui: &mut Ui, dir: &Directory, member: &Member, person: &Person) -> Option
     let id = crate::home::person::popup_id(&more, person);
     let menu = ui::menu_with_id(&more, id, |m| person.menu(m)).flatten();
     interact(ui, &row, person, false).or(menu)
+}
+
+/// The name on one line and the roles as a caption under it, wrapping onto a second
+/// line, centred in `area`: a narrow table's member column.
+fn name_and_roles(ui: &mut Ui, dir: &Directory, member: &Member, name: RichText, area: Rect) {
+    let roles: Vec<&str> = (dir.roles.iter())
+        .filter(|role| member.roles.contains(&role.id))
+        .map(|role| role.name.as_str())
+        .collect();
+    let roles = if roles.is_empty() {
+        t!("admin.no_role").to_owned()
+    } else {
+        roles.join(", ")
+    };
+    let font = FontId::new(ui::TEXT_CAPTION, egui::FontFamily::Proportional);
+    let mut job = LayoutJob::simple(
+        roles,
+        font,
+        ui.visuals().weak_text_color(),
+        area.width().max(0.0),
+    );
+    job.wrap.max_rows = 2;
+    let roles = ui.painter().layout_job(job);
+    let gap = 2.0;
+    let height = ui.text_style_height(&egui::TextStyle::Body) + gap + roles.size().y;
+    let top = (area.center().y - height / 2.0).max(area.top());
+    let rect = Rect::from_min_max(pos2(area.left(), top), area.max);
+    let mut child = ui.new_child(
+        UiBuilder::new()
+            .max_rect(rect)
+            .layout(Layout::top_down(Align::Min)),
+    );
+    child.set_clip_rect(area.intersect(ui.clip_rect()));
+    child.spacing_mut().item_spacing.y = gap;
+    child.add(Label::new(name).truncate().selectable(false));
+    child.add(Label::new(roles).selectable(false));
 }
 
 fn role_chips(ui: &mut Ui, dir: &Directory, member: &Member) {
@@ -500,24 +589,48 @@ mod tests {
 
     /// The table on a server where you hold `perms`, with `extra` more people.
     fn table(perms: crate::server::Perms, extra: usize) -> Harness<'static, (Home, View)> {
-        let mut harness = Harness::builder()
-            .with_size(Vec2::new(700.0, 500.0))
-            .build_ui_state(
-                |ui, (home, view): &mut (Home, View)| {
-                    // Fonts come after the first frame, which has no members yet.
-                    if home.servers[0].dir.members.is_empty() {
-                        return;
-                    }
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        let server = &home.servers[0];
-                        let target =
-                            |person| Person::with(&home.friends, &home.voice, server, person);
-                        show(ui, &server.dir, view, target);
-                    });
-                },
-                (placeholder_home(), View::default()),
-            );
+        table_at(perms, extra, Vec2::new(700.0, 500.0), true)
+    }
+
+    const LONG_NAME: &str = "Alexandra Montgomery-Whitfield";
+
+    /// `table` in a `size` window, in a dark or light theme.
+    fn table_at(
+        perms: crate::server::Perms,
+        extra: usize,
+        size: Vec2,
+        dark: bool,
+    ) -> Harness<'static, (Home, View)> {
+        let mut harness = Harness::builder().with_size(size).build_ui_state(
+            |ui, (home, view): &mut (Home, View)| {
+                // Fonts come after the first frame, which has no members yet.
+                if home.servers[0].dir.members.is_empty() {
+                    return;
+                }
+                // The page's background, as in server settings.
+                ui.painter()
+                    .rect_filled(ui.max_rect(), 0, ui::colors(ui).main);
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    let server = &home.servers[0];
+                    let target = |person| Person::with(&home.friends, &home.voice, server, person);
+                    show(ui, &server.dir, view, target);
+                });
+            },
+            (placeholder_home(), View::default()),
+        );
         ui::install(&harness.ctx);
+        let mode = if dark {
+            ui::Mode::Dark
+        } else {
+            ui::Mode::Light
+        };
+        ui::apply(
+            &harness.ctx,
+            ui::Appearance {
+                mode,
+                ..Default::default()
+            },
+        );
         let mut dir = directory();
         dir.perms = perms;
         dir.me = [1; 32];
@@ -575,6 +688,94 @@ mod tests {
         harness.run_steps(4);
         assert!(harness.query_by_label(t!("home.message")).is_some());
         assert!(harness.query_by_label(t!("admin.kick")).is_none());
+    }
+
+    /// The table at `size` with a long-named, online owner, saved as a screenshot
+    /// when RUSTTALK_MEMBERS_SCREENSHOTS names a folder.
+    fn long_named(size: Vec2, dark: bool) -> Harness<'static, (Home, View)> {
+        let mut harness = table_at(crate::server::Perms::default(), 0, size, dark);
+        let mut long = member(5, LONG_NAME, &["owner", "mod"]);
+        long.presence = Presence::Online;
+        harness.state_mut().0.servers[0]
+            .dir
+            .members
+            .edit()
+            .push(long);
+        harness.run_steps(3);
+        if let Ok(folder) = std::env::var("RUSTTALK_MEMBERS_SCREENSHOTS") {
+            std::fs::create_dir_all(&folder).unwrap();
+            let theme = if dark { "dark" } else { "light" };
+            let file = format!("{folder}/members-{theme}-{}x{}.png", size.x, size.y);
+            harness.render().unwrap().save(file).unwrap();
+        }
+        harness
+    }
+
+    #[test]
+    fn on_a_phone_names_get_the_row_and_roles_sit_under_them() {
+        for dark in [true, false] {
+            let mut harness = long_named(Vec2::new(390.0, 844.0), dark);
+            // Room for about 25 characters; the old layout left about 44 points.
+            let name = harness
+                .get_by_role_and_label(Access::Label, LONG_NAME)
+                .rect();
+            assert!(name.width() >= 200.0, "{name:?}");
+            assert!(name.right() <= 390.0);
+            // Roles are one caption under the name; no Status column.
+            let roles = harness
+                .get_by_role_and_label(Access::Label, "owner, mod")
+                .rect();
+            assert!(roles.top() >= name.bottom() && roles.left() == name.left());
+            assert!(
+                (harness.query_all_by_role_and_label(Access::Label, status_text(Presence::Online)))
+                    .next()
+                    .is_none()
+            );
+            // Presence is on the face instead.
+            assert!(
+                harness
+                    .query_by_role_and_label(Access::Image, status_text(Presence::Online))
+                    .is_some()
+            );
+            // The role filter leaves the search room.
+            let filter = harness.get_by_role_and_label(Access::ComboBox, t!("admin.roles"));
+            assert!(filter.rect().width() < ROLE_FILTER_WIDTH);
+            let label = format!("Actions for {LONG_NAME}");
+            let actions = harness.get_by_label(&label);
+            assert!(actions.rect().right() <= 390.0);
+            actions.click();
+            harness.run_steps(4);
+            assert!(harness.query_by_label(t!("home.message")).is_some());
+        }
+    }
+
+    #[test]
+    fn on_a_desktop_the_table_keeps_its_columns() {
+        for dark in [true, false] {
+            let harness = long_named(Vec2::new(1100.0, 700.0), dark);
+            // A chip per role and a Status column with the presence spelled out.
+            assert!(
+                harness
+                    .query_by_role_and_label(Access::Label, "owner, mod")
+                    .is_none()
+            );
+            assert!(
+                harness
+                    .query_all_by_role_and_label(Access::Label, "mod")
+                    .count()
+                    > 0
+            );
+            let status = harness
+                .get_by_role_and_label(Access::Label, status_text(Presence::Online))
+                .rect();
+            let actions = harness
+                .get_by_label(&format!("Actions for {LONG_NAME}"))
+                .rect();
+            assert!(status.left() < actions.left());
+            assert!(actions.right() - status.left() < STATUS_WIDTH + 2.0 * ui::SPACE_M + 44.0);
+            let filter = harness.get_by_role_and_label(Access::ComboBox, t!("admin.roles"));
+            assert_eq!(filter.rect().width(), ROLE_FILTER_WIDTH);
+        }
     }
 
     #[test]
