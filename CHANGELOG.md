@@ -11,6 +11,7 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- People who manage channels see empty categories again, so a new or emptied category no longer disappears; members still don't see them.
 - The server menu's "Change name on this server" is now "Change my nickname", so it isn't mistaken for renaming the server.
 - The sound bars next to a shared app now move clearly even when it plays quietly.
 - Someone sharing their camera and screen at once no longer loses their camera: it shows as a small picture on their screen that you can drag to any corner, pop out into its own tile or shrink to a small button.

@@ -128,7 +128,6 @@ home.invite_people = メンバーを招待
 home.server_settings = サーバー設定
 home.create_channel = チャンネルを作成
 home.create_category = カテゴリーを作成
-home.show_empty_categories = 空のカテゴリーを表示
 home.rename_server = サーバーの名前を変更
 home.change_my_name = ニックネームを変更
 home.leave_server = サーバーから退出

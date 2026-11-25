@@ -128,7 +128,6 @@ home.invite_people = Leute einladen
 home.server_settings = Servereinstellungen
 home.create_channel = Kanal erstellen
 home.create_category = Kategorie erstellen
-home.show_empty_categories = Leere Kategorien anzeigen
 home.rename_server = Server umbenennen
 home.change_my_name = Meinen Spitznamen ändern
 home.leave_server = Server verlassen
