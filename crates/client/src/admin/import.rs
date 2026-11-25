@@ -1,5 +1,5 @@
-//! "Import pack from .zip" in Server settings → Emoji & stickers: the archive is read on
-//! its own thread, a preview lists every picture to rename, switch between emoji and
+//! "Import .zip" in Server settings → Emoji or → Stickers: the archive is read on its
+//! own thread, a preview lists every picture to rename, switch between emoji and
 //! sticker or skip, and then the app uploads them into a new pack.
 
 use std::{
@@ -18,8 +18,6 @@ use crate::{
     ui,
 };
 
-/// Pictures up to this size on a side start out as emoji, bigger ones as stickers.
-const EMOJI_SIDE: u32 = 160;
 /// A pack name is short, like the other names in the app.
 const MAX_PACK_NAME: usize = 32;
 /// Rows beyond this are not drawn each frame; the list scrolls.
@@ -86,12 +84,13 @@ pub enum Outcome {
 
 impl Import {
     /// Read `path` on its own thread; the most pictures allowed is the larger of the
-    /// server's two limits (each kind is checked again before uploading).
-    pub fn start(path: &Path, max: usize, ctx: &Context) -> Self {
+    /// server's two limits (each kind is checked again before uploading). Every
+    /// picture starts out as a sticker on the Stickers page, else as an emoji.
+    pub fn start(path: &Path, max: usize, sticker: bool, ctx: &Context) -> Self {
         let (sender, receiver) = mpsc::channel();
         let (path, ctx) = (path.to_owned(), ctx.clone());
         std::thread::spawn(move || {
-            let _ = sender.send(load(&path, max));
+            let _ = sender.send(load(&path, max, sticker));
             ctx.request_repaint();
         });
         Self {
@@ -358,7 +357,7 @@ fn check(rows: &[Row], dir: &Directory) -> Vec<Problem2> {
         let twice = kept[..at]
             .iter()
             .any(|other| (other.kind == Kind::Sticker) == sticker && other.name == row.name);
-        if !super::emoji_name_ok(&row.name) || used || twice {
+        if !crate::emoji::name_ok(&row.name) || used || twice {
             problems.push(Problem2::Taken(row.name.clone()));
         }
     }
@@ -367,7 +366,7 @@ fn check(rows: &[Row], dir: &Directory) -> Vec<Problem2> {
 
 /// Unpack and preview `path`; the error is for people. Also the suggested pack name,
 /// from the file's name.
-fn load(path: &PathBuf, max: usize) -> Loaded {
+fn load(path: &PathBuf, max: usize, sticker: bool) -> Loaded {
     let metadata = std::fs::metadata(path).map_err(|_| t!("admin.import_unreadable"))?;
     if metadata.len() > emoji_zip::MAX_ARCHIVE {
         return Err(t!("admin.import_too_big"));
@@ -381,19 +380,12 @@ fn load(path: &PathBuf, max: usize) -> Loaded {
     })?;
     let rows = pictures
         .into_iter()
-        .map(|picture| {
-            let preview = crate::crop::preview(&picture.bytes);
-            let kind = match preview {
-                Some((_, side)) if side > EMOJI_SIDE => Kind::Sticker,
-                _ => Kind::Emoji,
-            };
-            Row {
-                name: picture.name,
-                kind,
-                thumb: preview.map(|(image, _)| image),
-                texture: None,
-                bytes: picture.bytes,
-            }
+        .map(|picture| Row {
+            name: picture.name,
+            kind: if sticker { Kind::Sticker } else { Kind::Emoji },
+            thumb: crate::crop::preview(&picture.bytes),
+            texture: None,
+            bytes: picture.bytes,
         })
         .collect();
     let name = path

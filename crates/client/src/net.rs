@@ -64,8 +64,8 @@ mod voice;
 pub use admin::{Admin, AdminUpdate, AuditEntry, Ban, ImportItem, Invite, PublicListing};
 pub use calendar::Change;
 pub use control::{ControlView, Ended};
-pub(crate) use directory::frame_image;
 use directory::{directory, get};
+pub(crate) use directory::{frame_image, picture};
 pub use files::{MAX_FILE, file_name};
 pub use find::{Listed, PAGE_SIZE};
 use voice::{

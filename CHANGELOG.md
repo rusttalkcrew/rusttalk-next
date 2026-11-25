@@ -14,6 +14,7 @@ Unreleased under the new version and date.
 - Voice channels can now be set to audio quality up to 320 kbps, for listening to music together.
 - People who manage channels see empty categories again, so a new or emptied category no longer disappears; members still don't see them.
 - The call connection panel has a cleaner look, with easier-to-read numbers and graphs, and shows the voice channel's audio quality.
+- Server settings now have separate Emoji and Stickers pages: pick or drag in several pictures at once, see them large with their names before uploading, and click any emoji or sticker to rename, move or delete it.
 - The server menu's "Change name on this server" is now "Change my nickname", so it isn't mistaken for renaming the server.
 - The sound bars next to a shared app now move clearly even when it plays quietly.
 - Someone sharing their camera and screen at once no longer loses their camera: it shows as a small picture on their screen that you can drag to any corner, pop out into its own tile or shrink to a small button.

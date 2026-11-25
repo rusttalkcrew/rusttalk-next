@@ -973,7 +973,7 @@ pub(crate) fn frame_image(frame: image::Frame) -> (ColorImage, u32) {
 
 /// Decode a profile picture, server icon, emoji or sticker. Of a GIF only the first frame
 /// is decoded here; the rest wait until it plays, as most never do.
-pub(super) fn picture(bytes: &[u8]) -> Option<Picture> {
+pub(crate) fn picture(bytes: &[u8]) -> Option<Picture> {
     let key: [u8; 32] = Sha256::digest(bytes).into();
     let first = match decode_profile_first_frame(bytes) {
         Ok(first) => frame_image(first),

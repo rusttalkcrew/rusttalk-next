@@ -172,7 +172,7 @@ pub struct Home {
     pub server_settings: Option<admin::Settings>,
     pub kick: Option<admin::Kick>,
     /// The crop step for a picked profile picture or server icon.
-    crop: Option<crate::crop::Crop>,
+    pub(crate) crop: Option<crate::crop::Crop>,
     /// My account: the default name being edited, and the bio as typed, unsaved.
     pub name_draft: Option<String>,
     pub bio_draft: Option<String>,
@@ -2145,6 +2145,7 @@ pub fn show(
         return None;
     }
     switcher::shortcut(ui.ctx(), home);
+    admin::take_drops(ui.ctx(), home);
     for (ask, paths) in home.files.answers() {
         if let Ask::Picture = ask {
             if let Some(path) = paths.into_iter().next() {
@@ -2195,21 +2196,12 @@ pub fn show(
                     home.files.save(&server.commands, &file, path);
                 }
             }
-            Ask::Icon(_) | Ask::Emoji(..) => {
+            Ask::Emoji(_, sticker) => admin::stage(home, paths, sticker, ui.ctx()),
+            Ask::Icon(address) => {
                 let Some(path) = paths.into_iter().next() else {
                     continue;
                 };
-                let target = match ask {
-                    Ask::Emoji(address, name, sticker, pack) => Target::Emoji {
-                        address,
-                        name,
-                        sticker,
-                        pack,
-                    },
-                    Ask::Icon(address) => Target::Icon(address),
-                    _ => unreachable!("matched above"),
-                };
-                match Crop::open(target, &path) {
+                match Crop::open(Target::Icon(address), &path) {
                     Ok(crop) => home.crop = Some(crop),
                     Err(problem) => {
                         if let Some(settings) = &mut home.server_settings {
@@ -2855,22 +2847,8 @@ fn crop_dialog(ctx: &egui::Context, home: &mut Home) {
                 home.servers[index].send(Command::Admin(Admin::SetIcon(bytes)));
             }
         }
-        Target::Emoji {
-            address,
-            name,
-            sticker,
-            pack,
-        } => {
-            if let Some(index) = home.index(&address) {
-                let add = Admin::AddEmoji {
-                    name,
-                    sticker,
-                    bytes,
-                    pack,
-                };
-                home.servers[index].send(Command::Admin(add));
-            }
-        }
+        // Back to the list of picked pictures, to upload with the others.
+        Target::Emoji { slot, .. } => admin::cropped(home, slot, bytes),
     }
 }
 
@@ -2893,6 +2871,13 @@ pub fn frame_at(delays: impl Iterator<Item = u32> + Clone, now: u64) -> Option<(
 /// only while the pointer is over it, so lists of them cost nothing at rest.
 pub fn paint_hovered(ui: &Ui, rect: Rect, picture: &Picture, radius: f32) {
     paint_face(ui, rect, picture, radius, false);
+}
+
+/// Paint a picture in `rect`, playing while `play` (a hovered tile, say).
+pub fn paint_playing(ui: &Ui, rect: Rect, picture: &Picture, radius: f32, play: bool) {
+    egui::Image::new(&frame_when(ui, picture, play))
+        .corner_radius(radius)
+        .paint_at(ui, rect);
 }
 
 /// `paint_hovered` that also plays while the person speaks in a call, like Discord,

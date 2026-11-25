@@ -54,13 +54,11 @@ const STICKER_EDGE: u32 = 320;
 pub enum Target {
     Avatar,
     Icon(url::Url),
-    /// A new server emoji or (`sticker`) sticker with this name.
+    /// A picture picked for a server emoji or (`sticker`) sticker, cropped again
+    /// before it is uploaded: `slot` is its place in the upload list.
     Emoji {
-        address: url::Url,
-        name: String,
         sticker: bool,
-        /// The pack it goes to; the server's first when `None`.
-        pack: Option<crate::server::Id>,
+        slot: u64,
     },
 }
 
@@ -299,18 +297,14 @@ pub fn fit(bytes: &[u8], sticker: bool) -> Result<Vec<u8>> {
     encode(crop, still_edge(sticker), false)
 }
 
-/// A small preview of a picture file for lists (its first frame), and its longer side.
-pub fn preview(bytes: &[u8]) -> Option<(ColorImage, u32)> {
+/// A small preview of a picture file for lists: its first frame.
+pub fn preview(bytes: &[u8]) -> Option<ColorImage> {
     let (image, _) = decode(bytes).ok()?;
-    let side = image.width().max(image.height());
     let small = DynamicImage::ImageRgba8(image)
         .thumbnail(64, 64)
         .into_rgba8();
     let size = [small.width() as usize, small.height() as usize];
-    Some((
-        ColorImage::from_rgba_unmultiplied(size, small.as_raw()),
-        side,
-    ))
+    Some(ColorImage::from_rgba_unmultiplied(size, small.as_raw()))
 }
 
 /// The largest side of a still emoji or sticker.
@@ -598,12 +592,7 @@ mod tests {
     }
 
     fn emoji(sticker: bool) -> Target {
-        Target::Emoji {
-            address: "https://example.com".parse().unwrap(),
-            name: "party".into(),
-            sticker,
-            pack: None,
-        }
+        Target::Emoji { sticker, slot: 0 }
     }
 
     #[test]

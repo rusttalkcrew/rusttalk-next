@@ -518,7 +518,7 @@ async fn change(
             bytes,
             pack,
         } => {
-            let done = add_emoji(client, &name, sticker, &bytes, pack.as_ref()).await;
+            let done = add_emoji_retrying(client, &name, sticker, &bytes, pack.as_ref()).await;
             if done.is_ok() {
                 send(AdminUpdate::EmojiAdded(name));
             }
@@ -839,7 +839,9 @@ async fn import_pack(
         let fitted =
             tokio::task::spawn_blocking(move || crate::crop::fit(&item.bytes, sticker)).await;
         let added = match fitted {
-            Ok(Ok(bytes)) => add_emoji_retrying(client, &item.name, sticker, &bytes, &pack).await,
+            Ok(Ok(bytes)) => {
+                add_emoji_retrying(client, &item.name, sticker, &bytes, Some(&pack)).await
+            }
             _ => Err(t!("admin.failed").to_owned()),
         };
         if added.is_err() {
@@ -856,16 +858,17 @@ async fn import_pack(
     }
 }
 
-/// `add_emoji`, waiting and trying again while the server says it is busy.
+/// `add_emoji`, waiting and trying again while the server says it is busy: an import
+/// or several picked pictures go up one after another.
 async fn add_emoji_retrying(
     client: &KeyClient<'_>,
     name: &str,
     sticker: bool,
     bytes: &[u8],
-    pack: &Id,
+    pack: Option<&Id>,
 ) -> Result<&'static str, String> {
     for attempt in 0..4 {
-        match add_emoji(client, name, sticker, bytes, Some(pack)).await {
+        match add_emoji(client, name, sticker, bytes, pack).await {
             Err(text) if text == t!("admin.busy") && attempt < 3 => {
                 tokio::time::sleep(std::time::Duration::from_secs(2 << attempt)).await;
             }
