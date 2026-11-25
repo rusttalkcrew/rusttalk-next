@@ -165,6 +165,32 @@ public class MainActivity extends GameActivity {
         return mask;
     }
 
+    /**
+     * Keep a strip along the left edge for the app's own swipe (the channel list
+     * drawer on phones) instead of the system Back gesture; an empty rect gives it
+     * back. Window pixels. Android honours at most 200 dp of exclusions per edge
+     * and drops the rest, so the band is clamped to a centred 200 dp here too (the
+     * app already asks for no more); the rest of the edge stays Back.
+     */
+    public void excludeLeftEdge(int left, int top, int right, int bottom) {
+        if (Build.VERSION.SDK_INT < 29) return;
+        runOnUiThread(() -> {
+            android.view.View view = findViewById(android.R.id.content);
+            if (view == null) return;
+            java.util.List<android.graphics.Rect> rects = new java.util.ArrayList<>();
+            if (right > left && bottom > top) {
+                int cap = (int) (200 * getResources().getDisplayMetrics().density);
+                int middle = (top + bottom) / 2;
+                int half = Math.min(bottom - top, cap) / 2;
+                int[] at = new int[2];
+                view.getLocationInWindow(at);
+                rects.add(new android.graphics.Rect(left - at[0], middle - half - at[1],
+                        right - at[0], middle + half - at[1]));
+            }
+            view.setSystemGestureExclusionRects(rects);
+        });
+    }
+
     public boolean startCamera(boolean front, int w, int h, int fps, long generation) {
         CallCamera next = new CallCamera(this, w, h, fps, generation);
         synchronized (this) {

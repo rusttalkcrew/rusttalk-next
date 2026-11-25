@@ -1315,6 +1315,44 @@ mod activity {
         frame_end(&ctx);
     }
 
+    /// Keep the system Back gesture off the strip where this frame's drawer takes
+    /// edge drags (`ui::drawer`), and give the edge back when there is none. Sent
+    /// only when it changes.
+    fn exclude_left_edge(app: &AndroidApp, ctx: &egui::Context) {
+        static SENT: Mutex<[i32; 4]> = Mutex::new([0; 4]);
+        let ppp = ctx.pixels_per_point();
+        let wanted = crate::ui::drawer::take_edge(ctx).map_or([0; 4], |edge| {
+            [
+                (edge.left() * ppp).floor() as i32,
+                (edge.top() * ppp).ceil() as i32,
+                (edge.right() * ppp).ceil() as i32,
+                (edge.bottom() * ppp).floor() as i32,
+            ]
+        });
+        let mut sent = lock(&SENT);
+        if *sent == wanted {
+            return;
+        }
+        *sent = wanted;
+        let [left, top, right, bottom] = wanted;
+        if let Err(error) = java(app, |env, activity| {
+            env.call_method(
+                activity,
+                jni_str!("excludeLeftEdge"),
+                jni_sig!("(IIII)V"),
+                &[
+                    JValue::Int(left),
+                    JValue::Int(top),
+                    JValue::Int(right),
+                    JValue::Int(bottom),
+                ],
+            )?
+            .v()
+        }) {
+            tracing::warn!(%error, "excluding the left edge from Back failed");
+        }
+    }
+
     /// Bring the focused field back into view when the keyboard covers it.
     fn keep_field_visible(ctx: &egui::Context) {
         let mut keyboard = lock(&KEYBOARD);
@@ -1335,6 +1373,7 @@ mod activity {
             wipe_text(&mut input.raw.events);
         });
         let Some(app) = APP.get() else { return };
+        exclude_left_edge(app, ctx);
         let mut keyboard = lock(&KEYBOARD);
         let ime = ctx.output(|output| output.ime);
         if ime.is_some() != keyboard.ime {
