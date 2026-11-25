@@ -820,6 +820,36 @@ fn clean_emoji_name(name: &mut String) {
     *name = crate::emoji::clean_name(name);
 }
 
+/// Width for a field with buttons after it on its row: egui's usual width, or less
+/// on a narrow window so the buttons still fit beside it. The buttons are measured
+/// by [`after_field`] the frame before.
+fn field_width(ui: &Ui, salt: &str) -> f32 {
+    let after: f32 = ui
+        .data(|d| d.get_temp(ui.make_persistent_id(salt)))
+        .unwrap_or_default();
+    let room = ui.available_width() - after - ui.spacing().item_spacing.x;
+    ui.spacing().text_edit_width.min(room)
+}
+
+/// The buttons after a field sized by [`field_width`], kept together on one row.
+fn after_field<R>(ui: &mut Ui, salt: &str, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let after = ui.horizontal(add);
+    let id = ui.make_persistent_id(salt);
+    let width = after.response.rect.width();
+    if ui.data(|d| d.get_temp::<f32>(id)) != Some(width) {
+        ui.data_mut(|d| d.insert_temp(id, width));
+        ui.ctx().request_repaint();
+    }
+    after.inner
+}
+
+/// A warning for the row above, on its own line so it wraps to the window instead of
+/// running past the buttons.
+fn row_warning(ui: &mut Ui, text: &str) {
+    ui.end_row();
+    ui.label(RichText::new(text).color(ui::colors(ui).danger_text));
+}
+
 /// What the Emoji & stickers tab asks for this frame.
 #[derive(Default)]
 struct EmojiAsk {
@@ -856,9 +886,14 @@ fn emoji_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> EmojiAsk 
         .filter(|id| dir.packs.iter().any(|pack| pack.id == *id))
         .or_else(|| dir.packs.first().map(|pack| pack.id));
     let label = ui.label(ui::bold(t!("common.name")));
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
+        let width = field_width(ui, "emoji-name");
         let field = ui
-            .add(ui::field(&mut settings.emoji_name).hint_text("party_parrot"))
+            .add(
+                ui::field(&mut settings.emoji_name)
+                    .hint_text("party_parrot")
+                    .desired_width(width),
+            )
             .labelled_by(label.id);
         if field.changed() {
             clean_emoji_name(&mut settings.emoji_name);
@@ -875,17 +910,18 @@ fn emoji_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> EmojiAsk 
         };
         let full = count(sticker) >= max;
         let ready = emoji_name_ok(name) && !taken && !full && crate::files::PICKER;
-        let pick = ui
-            .add_enabled_ui(ready, |ui| ui::primary(ui, t!("admin.pick_picture")))
-            .inner
-            .clicked();
+        let pick = after_field(ui, "emoji-name", |ui| {
+            ui.add_enabled_ui(ready, |ui| ui::primary(ui, t!("admin.pick_picture")))
+                .inner
+                .clicked()
+        });
         if pick || (ready && crate::app::submitted(ui, &field)) {
             ask.upload = Some((name.to_owned(), sticker, pack));
         }
         if taken {
-            ui.label(RichText::new(t!("admin.name_taken")).color(ui::colors(ui).danger_text));
+            row_warning(ui, t!("admin.name_taken"));
         } else if full {
-            ui.label(RichText::new(t!("admin.emoji_full")).color(ui::colors(ui).danger_text));
+            row_warning(ui, t!("admin.emoji_full"));
         }
     });
     if dir.packs.len() > 1 {
@@ -936,23 +972,26 @@ fn emoji_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> EmojiAsk 
         count = count(true),
         max = dir.emoji_max.1
     ));
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
+        let width = field_width(ui, "new-pack");
         let field = ui.add(
             ui::field(&mut settings.new_pack)
                 .char_limit(32)
-                .hint_text(t!("admin.pack_name_hint")),
+                .hint_text(t!("admin.pack_name_hint"))
+                .desired_width(width),
         );
         let ready = !settings.new_pack.trim().is_empty() && dir.packs.len() < dir.packs_max;
-        let add = ui
-            .add_enabled_ui(ready, |ui| ui::primary(ui, t!("admin.pack_add")))
-            .inner
-            .clicked();
+        let add = after_field(ui, "new-pack", |ui| {
+            ui.add_enabled_ui(ready, |ui| ui::primary(ui, t!("admin.pack_add")))
+                .inner
+                .clicked()
+        });
         if add || (ready && crate::app::submitted(ui, &field)) {
             ask.request = Some(Admin::AddPack(settings.new_pack.trim().to_owned()));
             settings.new_pack.clear();
         }
         if dir.packs.len() >= dir.packs_max {
-            ui.label(RichText::new(t!("admin.pack_limit")).color(ui::colors(ui).danger_text));
+            row_warning(ui, t!("admin.pack_limit"));
         }
     });
     for (at, pack) in dir.packs.iter().enumerate() {
@@ -975,16 +1014,20 @@ fn pack_block(
     ui.add_space(ui::SPACE_S);
     ui.horizontal(|ui| match &mut settings.pack_renaming {
         Some((id, name)) if *id == pack.id => {
-            ui.add(ui::field(name).char_limit(32));
+            let width = field_width(ui, "pack-name");
+            ui.add(ui::field(name).char_limit(32).desired_width(width));
             let ok = !name.trim().is_empty();
-            if ui
-                .add_enabled_ui(ok, |ui| ui::primary(ui, t!("common.save")))
-                .inner
-                .clicked()
-            {
+            let (save, cancel) = after_field(ui, "pack-name", |ui| {
+                let save = ui
+                    .add_enabled_ui(ok, |ui| ui::primary(ui, t!("common.save")))
+                    .inner
+                    .clicked();
+                (save, ui::secondary(ui, t!("common.cancel")).clicked())
+            });
+            if save {
                 ask.request = Some(Admin::RenamePack(*id, name.trim().to_owned()));
             }
-            if ui::secondary(ui, t!("common.cancel")).clicked() {
+            if cancel {
                 settings.pack_renaming = None;
             }
         }
@@ -1053,7 +1096,11 @@ fn pack_block(
                 }
                 match &mut settings.emoji_renaming {
                     Some((id, name)) if *id == item.id => {
-                        if ui.add(ui::field(name).char_limit(32)).changed() {
+                        let width = field_width(ui, "emoji-rename");
+                        if ui
+                            .add(ui::field(name).char_limit(32).desired_width(width))
+                            .changed()
+                        {
                             clean_emoji_name(name);
                         }
                         let taken = dir
@@ -1061,16 +1108,60 @@ fn pack_block(
                             .iter()
                             .any(|e| e.sticker == item.sticker && e.name == *name && e.id != *id);
                         let ok = emoji_name_ok(name) && !taken;
-                        if ui
-                            .add_enabled_ui(ok, |ui| ui::primary(ui, t!("common.save")))
-                            .inner
-                            .clicked()
-                        {
+                        let (save, cancel) = after_field(ui, "emoji-rename", |ui| {
+                            let save = ui
+                                .add_enabled_ui(ok, |ui| ui::primary(ui, t!("common.save")))
+                                .inner
+                                .clicked();
+                            (save, ui::secondary(ui, t!("common.cancel")).clicked())
+                        });
+                        if save {
                             ask.request = Some(Admin::RenameEmoji(*id, name.clone()));
                         }
-                        if ui::secondary(ui, t!("common.cancel")).clicked() {
+                        if cancel {
                             settings.emoji_renaming = None;
                         }
+                    }
+                    _ if ui::is_phone(ui.ctx()) => {
+                        let shown = format!(":{}:", item.name);
+                        ui::trailing_row(
+                            ui,
+                            |ui| {
+                                let more = ui::icon_button(
+                                    ui,
+                                    "…",
+                                    &t!("admin.member_actions", name = shown),
+                                    ui::Look::Ghost,
+                                    egui::Vec2::splat(ui::ICON_BUTTON),
+                                );
+                                ui::menu(&more, |m| {
+                                    if m.item("✏", t!("common.rename")).clicked() {
+                                        settings.emoji_renaming =
+                                            Some((item.id, item.name.clone()));
+                                    }
+                                    if dir.packs.len() > 1 {
+                                        m.caption(t!("admin.move_to"));
+                                        for other in dir.packs.iter().filter(|p| p.id != pack.id) {
+                                            if m.item("", &other.title()).clicked() {
+                                                ask.request =
+                                                    Some(Admin::MoveEmoji(item.id, other.id));
+                                            }
+                                        }
+                                        m.separator();
+                                    }
+                                    if m.danger("🗑", t!("common.delete")).clicked() {
+                                        settings.emoji_deleting = Some(item.id);
+                                        asked = true;
+                                    }
+                                });
+                            },
+                            |ui| {
+                                ui.label(&shown);
+                                if item.sticker {
+                                    ui.label(ui::caption(t!("admin.sticker")));
+                                }
+                            },
+                        );
                     }
                     _ => {
                         ui.label(format!(":{}:", item.name));
@@ -1088,7 +1179,6 @@ fn pack_block(
                             if dir.packs.len() > 1 {
                                 let combo = ComboBox::from_id_salt("move-emoji")
                                     .selected_text(t!("admin.move_to"))
-                                    .width(90.0)
                                     .show_ui(ui, |ui| {
                                         for other in dir.packs.iter().filter(|p| p.id != pack.id) {
                                             if ui.selectable_label(false, other.title()).clicked() {
@@ -1112,7 +1202,7 @@ fn pack_block(
             if settings.emoji_deleting == Some(item.id) {
                 ui::card(ui, |ui| {
                     ui.label(t!("admin.emoji_delete_help", name = item.name));
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         if danger(ui, t!("common.delete")).clicked() {
                             ask.request = Some(Admin::DeleteEmoji(item.id));
                         }
