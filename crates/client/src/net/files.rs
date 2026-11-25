@@ -757,6 +757,11 @@ async fn image_frames(
                 .into_iter()
                 .map(frame_image)
                 .collect(),
+            Fetch::Copy => decode_frames(&bytes, None, FULL_BUDGET)?
+                .into_iter()
+                .take(1)
+                .map(frame_image)
+                .collect(),
             Fetch::Inline => {
                 decode_frames(&bytes, Some(crate::files::THUMBNAIL as u32), INLINE_BUDGET)?
                     .into_iter()

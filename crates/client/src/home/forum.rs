@@ -858,7 +858,7 @@ pub(super) fn view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat
                                             _ => Vec::new(),
                                         };
                                         let at = (&server.address, &server.commands);
-                                        files::attachments(
+                                        let shown = files::shown_attachments(
                                             ui,
                                             &mut home.files,
                                             at,
@@ -873,6 +873,7 @@ pub(super) fn view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat
                                         ) {
                                             live = Some(action);
                                         }
+                                        shown
                                     },
                                 )
                             };
@@ -1046,6 +1047,9 @@ pub(super) fn view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat
         }
         Some(Asked::Pick(_, Pick::Profile(index, author, pick))) => {
             person::apply(home, index, author, pick, now);
+        }
+        Some(Asked::Pick(_, Pick::Media(action, media))) => {
+            home.files.media_action(ui.ctx(), action, &media);
         }
         Some(Asked::Pick(_, Pick::Invite(text))) => {
             let joining = (&mut home.join, &mut home.invite, &home.net);

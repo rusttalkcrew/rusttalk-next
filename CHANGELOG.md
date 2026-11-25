@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Right-click or long-press a picture, GIF or sticker in chat to copy it, save it or open it in the viewer; messages can also copy their ID.
+
 ## v0.4.0 - 2026-11-24
 
 - Changing your name, picture or bio no longer pauses chat and voice on every server while your devices sync.
