@@ -104,6 +104,7 @@ pub(crate) mod events;
 pub(crate) mod focus;
 pub(crate) mod forum;
 mod friends;
+mod gallery;
 pub mod layout;
 mod markdown;
 pub mod mentions;
@@ -4393,9 +4394,38 @@ fn preview_status(ui: &mut Ui, voice: &Voice, out: &mut Outgoing) {
     }
 }
 
+/// Ask for the page before the oldest loaded message, as scrolling up the chat does.
+/// A DM asks each copy on its own, so one slow server doesn't hold up the others.
+fn load_older(servers: &[Server], threads: &mut HashMap<Id, Thread>, at: At, chat: &mut Chat) {
+    match at {
+        At::Channel(index, channel) => {
+            if let Some(oldest) = chat.oldest {
+                chat.loading = true;
+                servers[index].send(Command::Older(channel, oldest));
+            }
+        }
+        At::Dm(peer) => {
+            let online = |url: &url::Url| {
+                (servers.iter()).any(|s| s.address == *url && s.status == Status::Online)
+            };
+            let thread = threads.entry(peer).or_default();
+            for (url, channel, before) in thread.older(online) {
+                if let Some(server) = servers.iter().find(|s| s.address == url) {
+                    chat.loading = true;
+                    server.send(match before {
+                        Some(before) => Command::Older(channel, before),
+                        // Its cursor was gone from that server: start over there.
+                        None => Command::Open(channel),
+                    });
+                }
+            }
+        }
+    }
+}
+
 /// Which chat a pane shows.
 #[derive(Clone, Copy)]
-enum At {
+pub(crate) enum At {
     /// A text or voice channel: server index and channel.
     Channel(usize, Id),
     /// A DM, by the other person, over every server holding a copy.
@@ -4415,12 +4445,20 @@ fn chat_pane(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
         server.send(Command::Open(channel));
         chat.loading = true;
     }
+    let kind = home.servers[index].channel(&channel).map(ChannelKind::of);
     if files_shown(ui.ctx(), channel) {
         files_view(ui, home, index, channel, &mut chat);
+    } else if gallery::shown(ui.ctx(), channel) {
+        chat.shared_asked = false;
+        channel_title(ui, home, index, channel);
+        toast_line(ui, &mut home.toast);
+        // Pages and forums have no chat to scroll to a message in.
+        let jumps = !matches!(kind, Some(ChannelKind::Page | ChannelKind::Forum));
+        gallery::view(ui, home, At::Channel(index, channel), &mut chat, jumps);
     } else {
         // Reopening the files loads them again, with what others added meanwhile.
         chat.shared_asked = false;
-        match home.servers[index].channel(&channel).map(ChannelKind::of) {
+        match kind {
             Some(ChannelKind::Page) => page_view(ui, home, index, channel, &mut chat),
             Some(ChannelKind::Forum) => forum::view(ui, home, index, channel, &mut chat),
             _ => {
@@ -4455,14 +4493,16 @@ fn files_button(ui: &mut Ui, channel: Id) {
         ui::Look::Ghost
     };
     if ui::icon_button(ui, "🗀", tip, look, Vec2::new(30.0, 26.0)).clicked() {
+        if !shown {
+            gallery::set_shown(ui.ctx(), channel, false);
+        }
         ui.ctx()
             .data_mut(|d| d.insert_temp(files_id(channel), !shown));
     }
 }
 
-/// A channel's shared files, like a small drive: everyone who can read the channel
-/// downloads them, people who can write upload, and the uploader or a moderator removes.
-fn files_view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat: &mut Chat) {
+/// A channel pane's title with its buttons, for the views in place of its chat.
+fn channel_title(ui: &mut Ui, home: &mut Home, index: usize, channel: Id) {
     let server = &home.servers[index];
     // A voice channel's call above already shows the title.
     if !server.is_voice(&channel) {
@@ -4473,6 +4513,12 @@ fn files_view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat: &mu
         let layout = in_server.then_some(&mut home.layout);
         pane_title(ui, "chat-title", &title, layout, Some(channel));
     }
+}
+
+/// A channel's shared files, like a small drive: everyone who can read the channel
+/// downloads them, people who can write upload, and the uploader or a moderator removes.
+fn files_view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat: &mut Chat) {
+    channel_title(ui, home, index, channel);
     toast_line(ui, &mut home.toast);
     let server = &home.servers[index];
     let online = server.status == Status::Online;
@@ -4815,7 +4861,13 @@ fn dm_pane(ui: &mut Ui, home: &mut Home, peer: Id) {
         person::apply(home, index, peer, pick, ui.input(|input| input.time));
     }
     let mut chat = std::mem::take(&mut home.threads.entry(peer).or_default().chat);
-    let act = chat_view(ui, home, At::Dm(peer), &mut chat);
+    let act = if gallery::shown(ui.ctx(), peer) {
+        toast_line(ui, &mut home.toast);
+        gallery::view(ui, home, At::Dm(peer), &mut chat, true);
+        None
+    } else {
+        chat_view(ui, home, At::Dm(peer), &mut chat)
+    };
     let thread = home.threads.entry(peer).or_default();
     thread.chat = chat;
     thread.refresh();
@@ -5133,6 +5185,21 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
     let mut rows = std::mem::take(&mut chat.rows);
     // The view stays in place as rows are measured or arrive (see `rows`).
     let (heights, keep) = rows.plan(&keys, chat.scroll_offset);
+    // A message picked in the gallery: its top, a little below the view's, again for
+    // a few frames as the rows around it are measured.
+    if let Some((person, id, frames)) = chat.jump_to.take() {
+        let at = (keys.iter()).position(|key| key.0 == person && key.1 == id);
+        if let Some(at) = at {
+            let top = rows.header + heights[..at].iter().sum::<f32>() - ui::SPACE_XL;
+            if (top.max(0.0) - keep.unwrap_or(chat.scroll_offset)).abs() > 0.5 {
+                chat.scroll_to = Some(top.max(0.0));
+            }
+            if frames > 0 {
+                chat.jump_to = Some((person, id, frames - 1));
+                ui.ctx().request_repaint();
+            }
+        }
+    }
     let scroll_to = chat.scroll_to.take();
     let before_offset = scroll_to.or(keep).unwrap_or(chat.scroll_offset);
     let mut area = ScrollArea::vertical()
@@ -5315,30 +5382,7 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
         && !chat.at_start
         && chat.keep_scroll.is_none()
     {
-        match at {
-            At::Channel(index, channel) => {
-                if let Some(oldest) = chat.oldest {
-                    chat.loading = true;
-                    servers[index].send(Command::Older(channel, oldest));
-                }
-            }
-            At::Dm(peer) => {
-                let online = |url: &url::Url| {
-                    (servers.iter()).any(|s| s.address == *url && s.status == Status::Online)
-                };
-                let thread = threads.entry(peer).or_default();
-                for (url, channel, before) in thread.older(online) {
-                    if let Some(server) = servers.iter().find(|s| s.address == url) {
-                        chat.loading = true;
-                        server.send(match before {
-                            Some(before) => Command::Older(channel, before),
-                            // Its cursor was gone from that server: start over there.
-                            None => Command::Open(channel),
-                        });
-                    }
-                }
-            }
-        }
+        load_older(servers, threads, at, chat);
     }
     // A live file's offer lives on one server: in a DM, the one its message came from.
     let live_server = |url: Option<url::Url>| match at {
@@ -5618,6 +5662,7 @@ fn pane_title_with(
                     controls(ui);
                     if let Some(channel) = files {
                         files_button(ui, channel);
+                        gallery::button(ui, channel);
                     }
                     ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                         ui.add(Label::new(ui::title(title)).truncate());
@@ -5669,6 +5714,7 @@ fn dm_title(ui: &mut Ui, home: &Home, peer: Id) -> Option<(usize, person::Pick)>
                         |ui| target.card(ui),
                     );
                     pick = pick.take().or(card.flatten());
+                    gallery::button(ui, peer);
                 });
             });
         });
@@ -7664,6 +7710,7 @@ mod tests {
     mod empty_categories;
     mod file_limits;
     mod full_screen;
+    mod gallery;
     mod image_reload;
     mod joining;
     mod long_chat;

@@ -1213,6 +1213,14 @@ files.rotate = Rotate
 files.zoom_out = Zoom out
 files.zoom_in = Zoom in
 files.picture_failed = Couldn't open this picture. You can still save it.
+gallery.show = Show gallery
+gallery.hide = Hide gallery
+gallery.title = Gallery
+gallery.empty = No pictures or videos here yet.
+gallery.shared_by = {name} · {time}
+gallery.jump = Jump to message
+gallery.previous = Previous
+gallery.next = Next
 
 # crates/client/src/crop.rs
 crop.open_failed = Couldn't open that file.

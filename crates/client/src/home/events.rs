@@ -366,7 +366,7 @@ fn listed(list: &'static str, at: usize) -> &'static str {
     list.split('|').nth(at).unwrap_or_default()
 }
 
-fn month_title(first: NaiveDate) -> String {
+pub(super) fn month_title(first: NaiveDate) -> String {
     let name = listed(t!("events.months"), first.month0() as usize);
     t!("events.month_year", month = name, year = first.year())
 }

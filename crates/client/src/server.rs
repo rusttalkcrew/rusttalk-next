@@ -951,6 +951,9 @@ pub struct Chat {
     pub keep_scroll: Option<f32>,
     /// A scroll offset to go to next frame, as if scrolled there by hand.
     pub scroll_to: Option<f32>,
+    /// A message to bring into view (from the gallery), by author and ID, and the
+    /// frames left to settle on it while rows near it are measured.
+    pub jump_to: Option<(Id, Id, u8)>,
     /// Row heights and the row in view, so only rows near the view are laid out.
     pub rows: crate::home::rows::Rows,
     /// Where each ID is in `messages`, for reply quotes; rebuilt after changes.

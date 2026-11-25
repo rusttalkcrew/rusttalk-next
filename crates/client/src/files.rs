@@ -106,6 +106,8 @@ pub struct Files {
     /// (see `export_label`). The decrypted copy is deleted after.
     export_after: HashMap<Id, String>,
     viewer: Option<Viewer>,
+    /// "Jump to message" was picked in the viewer: the gallery's key, author and ID.
+    jump: Option<(Id, Id, Id)>,
     /// A file dialog is open; answers arrive on `answers`.
     asking: bool,
     answers: Option<(mpsc::Sender<Answer>, mpsc::Receiver<Answer>)>,
@@ -199,6 +201,20 @@ struct Viewer {
     zoom: f32,
     /// Quarter turns clockwise.
     turns: u8,
+    /// Opened from a gallery: its pictures, newest first, and which one shows.
+    album: Option<(Vec<Shot>, usize)>,
+}
+
+/// A picture in a gallery the viewer can step through.
+#[derive(Clone)]
+pub struct Shot {
+    pub address: Url,
+    pub commands: UnboundedSender<Command>,
+    pub file: Attachment,
+    /// Who shared it and when.
+    pub caption: String,
+    /// The gallery's key with the message's author and ID, when the chat can jump there.
+    pub jump: Option<(Id, Id, Id)>,
 }
 
 /// Why a file dialog was opened.
@@ -251,6 +267,7 @@ impl Files {
             open_after: HashSet::new(),
             export_after: HashMap::new(),
             viewer: None,
+            jump: None,
             asking: false,
             answers: None,
             pastes: mpsc::channel(),
@@ -352,7 +369,56 @@ impl Files {
             commands: commands.clone(),
             zoom: 1.0,
             turns: 0,
+            album: None,
         });
+    }
+
+    /// Open the viewer on a gallery's picture `at`, with next and previous.
+    pub fn open_album(&mut self, album: Vec<Shot>, at: usize) {
+        let Some(shot) = album.get(at) else {
+            return;
+        };
+        let (address, commands, file) = (
+            shot.address.clone(),
+            shot.commands.clone(),
+            shot.file.clone(),
+        );
+        self.open_viewer(&address, &commands, &file);
+        if let Some(view) = &mut self.viewer {
+            view.album = Some((album, at));
+        }
+    }
+
+    /// The message "Jump to message" in the viewer asked for: author and ID, if it was
+    /// for the gallery `key`.
+    pub fn take_jump(&mut self, key: Id) -> Option<(Id, Id)> {
+        let (_, person, id) = self.jump.filter(|jump| jump.0 == key)?;
+        self.jump = None;
+        Some((person, id))
+    }
+
+    /// Hand a file the app can't show to its app (desktop) or the system (phones).
+    pub fn open_elsewhere(
+        &mut self,
+        ctx: &egui::Context,
+        (address, commands): (&Url, &UnboundedSender<Command>),
+        file: &Attachment,
+    ) {
+        if OPENS {
+            self.open_file(commands, file);
+        } else if export_label().is_some() {
+            self.export(ctx, address, file);
+        } else if SAVE_DIALOG {
+            self.ask(ctx, Ask::Save(address.clone(), file.clone()));
+        }
+    }
+
+    /// How far a download is (0 to 1), while it runs.
+    fn busy(&self, id: &Id) -> Option<f32> {
+        match self.saves.get(id) {
+            Some(Saving::Busy(done, _)) => Some(*done),
+            _ => None,
+        }
     }
 
     pub fn forget_full_pictures(&mut self, address: &Url) {
@@ -380,7 +446,11 @@ impl Files {
         if !ui.is_rect_visible(area) {
             return;
         }
-        let now = ui.input(|input| input.time);
+        self.want_inline_at(ui.input(|input| input.time), commands, file);
+    }
+
+    /// Start loading the playing copy of an animated file that is on screen at `now`.
+    fn want_inline_at(&mut self, now: f64, commands: &UnboundedSender<Command>, file: &Attachment) {
         if self.inline.len() >= MAX_INLINE && !self.inline.contains_key(&file.file.id) {
             self.inline.retain(|_, inline| {
                 matches!(inline.picture, Picture::Loading) || now - inline.seen < INLINE_IDLE
@@ -1300,6 +1370,191 @@ fn plays_inline(name: &str, media_type: &str, size: u64) -> bool {
     size <= INLINE_MAX && animated_kind(name, media_type).is_some()
 }
 
+/// Whether a file is a small animation that plays by itself where it shows.
+pub fn animates(file: &Attachment) -> bool {
+    plays_inline(&file.name, &file.media_type, file.file.size.into())
+}
+
+/// What a file is in a channel's gallery.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum MediaKind {
+    /// A picture the viewer can show: it has a thumbnail or the app decodes its type.
+    Picture,
+    /// A video. The app doesn't play videos: it opens them in their own app.
+    Video,
+    /// Another kind of picture the app can't decode yet, such as SVG or HEIC.
+    Other,
+}
+
+const VIDEOS: [&str; 8] = ["mp4", "m4v", "webm", "mov", "mkv", "avi", "ogv", "3gp"];
+const OTHER_PICTURES: [&str; 8] = ["svg", "heic", "heif", "avif", "bmp", "tif", "tiff", "ico"];
+
+/// Whether a message's file goes in the gallery, and as what: by its thumbnail, or else
+/// its name and type, which only the sender's app chose.
+pub fn media_kind(file: &Attachment) -> Option<MediaKind> {
+    if is_card(file) || sticker_files::of(file).is_some() {
+        return None;
+    }
+    let name = file.name.to_ascii_lowercase();
+    let extension = name.rsplit_once('.').map_or("", |(_, ext)| ext);
+    let kind = file.media_type.split('/').next().unwrap_or_default();
+    if file.thumbnail.is_some() || is_picture(&name) {
+        Some(MediaKind::Picture)
+    } else if kind == "video" || VIDEOS.contains(&extension) {
+        Some(MediaKind::Video)
+    } else if kind == "image" || OTHER_PICTURES.contains(&extension) {
+        Some(MediaKind::Other)
+    } else {
+        None
+    }
+}
+
+/// A square tile in a gallery: the thumbnail cut to a square (playing when `play`, for
+/// a small animation), with a badge for a GIF, a video or another type. Clicking it is
+/// the caller's; this adds the file's menu, with "Jump to message" when the shot has
+/// one. Returns the tile and whether "Jump to message" was picked.
+pub fn gallery_tile(
+    ui: &mut Ui,
+    files: &mut Files,
+    shot: &Shot,
+    kind: MediaKind,
+    rect: Rect,
+    play: bool,
+) -> (Response, bool) {
+    let file = &shot.file;
+    let commands = &shot.commands;
+    let c = ui::colors(ui);
+    let response = ui.interact(
+        rect,
+        UiId::unique(("gallery-tile", file.file.id)),
+        Sense::click(),
+    );
+    let label = format!("{} · {}", file.name, shot.caption);
+    response.widget_info(|| WidgetInfo::labeled(Role::Button, true, &label));
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 0.0, c.side);
+    let now = ui.input(|input| input.time);
+    let play = play && plays_inline(&file.name, &file.media_type, file.file.size.into());
+    if play {
+        files.want_inline_at(now, commands, file);
+    }
+    let playing = match files.inline.get(&file.file.id) {
+        Some(Inline {
+            picture: Picture::Ready(anim),
+            ..
+        }) if play => Some(anim.current(ui, true)),
+        _ => None,
+    };
+    if playing.is_none()
+        && let Some(thumb) = &file.thumbnail
+    {
+        want_thumbnail(&mut files.images, now, commands, thumb);
+    }
+    let still = (file.thumbnail.as_ref())
+        .and_then(|thumb| files.images.get(&thumb.id))
+        .and_then(|thumb| match &thumb.picture {
+            Picture::Ready(anim) => anim.frames.first(),
+            _ => None,
+        });
+    let shown = playing.or(still);
+    if let Some(texture) = shown {
+        let uv = square_uv(texture.size_vec2());
+        painter.image(texture.id(), rect, uv, egui::Color32::WHITE);
+    }
+    match kind {
+        MediaKind::Video => {
+            let center = rect.center();
+            let radius = (rect.width() * 0.16).clamp(12.0, 22.0);
+            painter.circle_filled(center, radius, OVERLAY_BUTTON);
+            painter.text(
+                center + Vec2::new(radius * 0.12, 0.0),
+                egui::Align2::CENTER_CENTER,
+                "▶",
+                egui::FontId::proportional(radius),
+                ON_FILL,
+            );
+        }
+        _ if shown.is_none() => {
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "🖼",
+                egui::FontId::proportional(ui::TEXT_ICON_LARGE),
+                c.muted,
+            );
+        }
+        _ => {}
+    }
+    // What it is when the picture doesn't show it: GIF until it plays, or the type.
+    let tag = match kind {
+        MediaKind::Picture if shown.is_some() => animated_kind(&file.name, &file.media_type)
+            .filter(|_| playing.is_none())
+            .map(str::to_owned),
+        _ => (file.name.rsplit_once('.'))
+            .map(|(_, ext)| ext.to_ascii_uppercase())
+            .filter(|ext| (1..=5).contains(&ext.len())),
+    };
+    if let Some(tag) = tag {
+        let corner = rect.left_bottom() + Vec2::new(4.0, -20.0);
+        let corner = Rect::from_min_size(corner, Vec2::new(rect.width() - 8.0, 18.0));
+        ui.scope_builder(UiBuilder::new().max_rect(corner), |ui| {
+            ui::badge(ui, &tag, OVERLAY_BUTTON);
+        });
+    }
+    if let Some(done) = files.busy(&file.file.id) {
+        let bar = Rect::from_min_max(
+            rect.left_bottom() - Vec2::new(0.0, 4.0),
+            rect.right_bottom(),
+        );
+        painter.rect_filled(bar, 0.0, OVERLAY_BUTTON);
+        let fill = Rect::from_min_size(bar.min, Vec2::new(bar.width() * done, bar.height()));
+        painter.rect_filled(fill, 0.0, ui::accent(ui).base);
+    }
+    if response.hovered() {
+        painter.rect_filled(rect, 0.0, egui::Color32::from_white_alpha(20));
+    }
+    let response = response
+        .on_hover_text(&label)
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    let media = Media {
+        address: shot.address.clone(),
+        commands: commands.clone(),
+        file: file.clone(),
+        saved: files.saved_at(file).cloned(),
+    };
+    let picked = ui::context_menu(&response, |m| {
+        let action = if kind == MediaKind::Picture {
+            media_items(m, &media)
+        } else {
+            m.item("↗", t!("files.open_default"))
+                .clicked()
+                .then_some(MediaAction::Open)
+        };
+        let jump = shot.jump.is_some() && m.item("💬", t!("gallery.jump")).clicked();
+        (action, jump)
+    });
+    let (action, jump) = picked.unwrap_or_default();
+    match action {
+        Some(MediaAction::Open) if kind != MediaKind::Picture => {
+            files.open_elsewhere(ui.ctx(), (&shot.address, commands), file);
+        }
+        Some(action) => files.media_action(ui.ctx(), action, &media),
+        None => {}
+    }
+    (response, jump)
+}
+
+/// The middle square of a picture of `size`, in texture coordinates.
+fn square_uv(size: Vec2) -> Rect {
+    let size = size.max(Vec2::splat(1.0));
+    let side = size.x.min(size.y);
+    let margin = (size - Vec2::splat(side)) / 2.0;
+    Rect::from_min_max(
+        (margin / size).to_pos2(),
+        ((margin + Vec2::splat(side)) / size).to_pos2(),
+    )
+}
+
 /// A message's files: a preview for pictures, a card with Download for the rest.
 /// Small animated GIFs and WebPs play right in the message, loaded by themselves;
 /// bigger ones show their first frame with a badge and play in the viewer.
@@ -1748,7 +2003,20 @@ pub fn viewer(ctx: &egui::Context, files: &mut Files) {
     };
     let (address, file) = (view.address.clone(), view.file.clone());
     let commands = view.commands.clone();
-    let (mut close, mut open_it) = (false, false);
+    // From a gallery: where this picture is in it, its caption and message.
+    let album = (view.album.as_ref()).map(|(album, at)| (*at, album.len(), album[*at].clone()));
+    let (mut close, mut open_it, mut jump) = (false, false, false);
+    let mut step = 0isize;
+    if album.is_some() {
+        ctx.input_mut(|input| {
+            if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft) {
+                step = -1;
+            }
+            if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight) {
+                step = 1;
+            }
+        });
+    }
     let modal = Modal::new(UiId::unique("viewer"))
         .frame(Frame::NONE)
         .backdrop_color(OVERLAY)
@@ -1758,11 +2026,21 @@ pub fn viewer(ctx: &egui::Context, files: &mut Files) {
             ui.set_max_size(screen.size());
             let backdrop = ui.interact(screen, ui.scope_id().with("dismiss"), Sense::click());
             Frame::new().inner_margin(Margin::same(12)).show(ui, |ui| {
+                // On a phone the tools take the whole row: the name goes below them.
+                let narrow = ui::is_phone(ctx);
                 ui.horizontal(|ui| {
-                    ui.label(ui::bold(&file.name).color(ON_FILL));
+                    if !narrow {
+                        ui.label(ui::bold(&file.name).color(ON_FILL));
+                    }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         close = tool(ui, "×", t!("common.close")).clicked();
                         ui.add_space(12.0);
+                        if album
+                            .as_ref()
+                            .is_some_and(|(_, _, shot)| shot.jump.is_some())
+                        {
+                            jump = tool(ui, "💬", t!("gallery.jump")).clicked();
+                        }
                         open_it = OPENS && tool(ui, "↗", t!("files.open_default")).clicked();
                         if SAVE_DIALOG && tool(ui, "⬇", t!("common.save")).clicked() {
                             files.ask(ui.ctx(), Ask::Save(address.clone(), file.clone()));
@@ -1796,8 +2074,16 @@ pub fn viewer(ctx: &egui::Context, files: &mut Files) {
                         }
                     });
                 });
+                if narrow {
+                    ui.add_space(8.0);
+                    ui.add(egui::Label::new(ui::bold(&file.name).color(ON_FILL)).truncate());
+                }
+                if let Some((_, _, shot)) = &album {
+                    ui.label(ui::caption(&shot.caption).color(OVERLAY_TEXT));
+                }
                 ui.add_space(8.0);
                 let room = ui.available_size();
+                let stage = ui.available_rect_before_wrap();
                 let view = files.viewer.as_ref().expect("checked above");
                 match files.full.as_ref().map(|full| &full.picture) {
                     Some(Picture::Ready(anim)) => {
@@ -1833,14 +2119,51 @@ pub fn viewer(ctx: &egui::Context, files: &mut Files) {
                         ui.centered_and_justified(|ui| ui.spinner());
                     }
                 }
+                // Previous and next through the gallery, over the picture's sides.
+                if let Some((at, count, _)) = &album {
+                    let side = Vec2::splat(36.0);
+                    let middle = stage.center().y - side.y / 2.0;
+                    let arrows = [
+                        (*at > 0, stage.left(), "⏴", t!("gallery.previous"), -1),
+                        (
+                            at + 1 < *count,
+                            stage.right() - side.x,
+                            "⏵",
+                            t!("gallery.next"),
+                            1,
+                        ),
+                    ];
+                    for (shown, x, icon, label, by) in arrows {
+                        let rect = Rect::from_min_size(egui::pos2(x, middle), side);
+                        if shown
+                            && ui
+                                .scope_builder(UiBuilder::new().max_rect(rect), |ui| {
+                                    tool(ui, icon, label)
+                                })
+                                .inner
+                                .clicked()
+                        {
+                            step = by;
+                        }
+                    }
+                }
             });
             close |= backdrop.clicked();
         });
     if open_it {
         files.open_file(&commands, &file);
     }
+    if jump && let Some((_, _, shot)) = &album {
+        files.jump = shot.jump;
+        close = true;
+    }
     if close || modal.should_close() {
         files.viewer = None;
+    } else if step != 0
+        && let Some((album, at)) = files.viewer.as_mut().and_then(|view| view.album.take())
+    {
+        let next = at.saturating_add_signed(step).min(album.len() - 1);
+        files.open_album(album, next);
     }
 }
 

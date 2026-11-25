@@ -1210,6 +1210,14 @@ files.rotate = 回転
 files.zoom_out = 縮小
 files.zoom_in = 拡大
 files.picture_failed = この画像を開けませんでした。保存することはできます。
+gallery.show = ギャラリーを表示
+gallery.hide = ギャラリーを隠す
+gallery.title = ギャラリー
+gallery.empty = まだ画像や動画はありません。
+gallery.shared_by = {name} · {time}
+gallery.jump = メッセージへ移動
+gallery.previous = 前へ
+gallery.next = 次へ
 
 # crates/client/src/crop.rs
 crop.open_failed = そのファイルを開けませんでした。
