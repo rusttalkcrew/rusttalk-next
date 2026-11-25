@@ -315,7 +315,8 @@ enum Control {
 
 struct Shared {
     file: Mutex<Option<PathBuf>>,
-    settings: Mutex<Settings>,
+    /// Swapped whole on change, so readers copy a pointer under the lock, not ~50 fields.
+    settings: Mutex<Arc<Settings>>,
     /// Bumped when the processing toggles change, so the mic thread rebuilds its module.
     processing: AtomicU64,
     /// Each call or AI switch gets a fresh recovery budget, even while capture is idle.
@@ -499,7 +500,7 @@ impl Shared {
         self.start.elapsed().as_millis() as u64
     }
 
-    fn settings(&self) -> Settings {
+    fn settings(&self) -> Arc<Settings> {
         lock(&self.settings).clone()
     }
 
@@ -534,7 +535,7 @@ impl Audio {
         };
         let shared = Arc::new(Shared {
             file: Mutex::new(Some(file)),
-            settings: Mutex::new(settings),
+            settings: Mutex::new(Arc::new(settings)),
             processing: AtomicU64::new(0),
             ai_session: AtomicU64::new(0),
             voice: AtomicBool::new(false),
@@ -618,7 +619,13 @@ impl Audio {
                 && lock(&self.shared().settings).android_terminal_hosting)
     }
 
+    /// An editable copy, made after the lock is released.
     pub fn settings(&self) -> Settings {
+        Settings::clone(&self.shared().settings())
+    }
+
+    /// The current settings without copying them, for reading every frame.
+    pub fn snapshot(&self) -> Arc<Settings> {
         self.shared().settings()
     }
 
@@ -629,7 +636,7 @@ impl Audio {
 
     pub fn set_settings(&self, settings: Settings) {
         let mut current = lock(&self.shared().settings);
-        if *current == settings {
+        if **current == settings {
             return;
         }
         let toggles = |s: &Settings| (s.echo_cancellation, s.noise_suppression, s.ai_noise);
@@ -649,7 +656,7 @@ impl Audio {
                 track.gain = settings.mix.gain(&track.stream);
             }
         }
-        *current = settings;
+        *current = Arc::new(settings);
         drop(current);
         self.refresh();
     }
@@ -1389,7 +1396,7 @@ fn devices(
             }
             want_input && permitted
         };
-        let want_input = want_input.then_some(settings.input);
+        let want_input = want_input.then(|| settings.input.clone());
         if want_input.as_ref() != input.as_ref().map(|(id, _)| id) {
             input = None;
             if let Some(id) = want_input {
@@ -1413,7 +1420,7 @@ fn devices(
             .cue_until
             .filter(|until| *until > Instant::now());
         close_output_at = if voice { None } else { playing_cue };
-        let want_output = (voice || playing_cue.is_some()).then_some(settings.output);
+        let want_output = (voice || playing_cue.is_some()).then(|| settings.output.clone());
         #[cfg(target_os = "ios")]
         let want_output = want_output.filter(|_| !crate::ios::voice::needs_rejoin());
         if want_output.as_ref() != output.as_ref().map(|(id, _)| id) {
@@ -1447,7 +1454,7 @@ fn save(shared: &Shared) {
     let file = lock(&shared.file);
     let Some(path) = file.as_ref() else { return };
     let dir = path.parent().unwrap_or(Path::new("."));
-    if let Err(error) = save_json(dir, path, &shared.settings()) {
+    if let Err(error) = save_json(dir, path, &*shared.settings()) {
         tracing::error!(error = %format_args!("{error:#}"), "saving voice settings failed");
     }
 }
@@ -2631,6 +2638,29 @@ mod tests {
         audio.end_voice(None);
         assert!(!audio.channel_mic_paused());
         assert_eq!(channel_microphone(audio.shared(), &speech), speech);
+    }
+
+    #[test]
+    fn snapshot_shares_settings_until_they_change() {
+        let data = tempfile::tempdir().unwrap();
+        let audio = Audio::new(data.path()).unwrap();
+        let before = audio.snapshot();
+        // Reading every frame copies a pointer, never the settings themselves.
+        assert!(Arc::ptr_eq(&before, &audio.snapshot()));
+        assert!(audio.settings() == *before);
+
+        // Setting the same values keeps the shared copy.
+        audio.set_settings(audio.settings());
+        assert!(Arc::ptr_eq(&before, &audio.snapshot()));
+
+        let mut changed = audio.settings();
+        changed.push_to_talk = !before.push_to_talk;
+        audio.set_settings(changed.clone());
+        let after = audio.snapshot();
+        assert!(!Arc::ptr_eq(&before, &after));
+        assert!(*after == changed);
+        // An older snapshot keeps what it saw.
+        assert_ne!(before.push_to_talk, after.push_to_talk);
     }
 
     #[test]

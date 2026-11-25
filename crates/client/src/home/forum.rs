@@ -604,7 +604,7 @@ pub(super) fn view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat
     {
         home.toast = Some((problem, now + 6.0));
     }
-    let settings = home.voice.audio.settings();
+    let settings = home.voice.audio.snapshot();
     let mut asked = None;
     let mut live = None;
     ui.add(

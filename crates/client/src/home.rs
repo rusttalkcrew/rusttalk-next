@@ -1172,7 +1172,7 @@ impl Home {
     /// Send queued messages whose preview is done, failed or removed, in order per chat.
     fn send_queued(&mut self, ctx: &egui::Context, now: f64) {
         // Turned off meanwhile: stop what is being made, and don't ask.
-        if self.voice.audio.settings().create_link_previews == Some(false) {
+        if self.voice.audio.snapshot().create_link_previews == Some(false) {
             for out in &mut self.sending {
                 out.preview = None;
             }
@@ -2137,7 +2137,7 @@ pub fn show(
         }
     }
     home.track_activity(ui);
-    let settings = home.voice.audio.settings();
+    let settings = home.voice.audio.snapshot();
     ui::apply(ui.ctx(), settings.appearance());
     emoji::set_hover_only(ui.ctx(), settings.emoji_on_hover);
     crate::i18n::set(&settings.language);
@@ -4058,7 +4058,7 @@ fn find(ui: &mut Ui, home: &mut Home) {
         if ui.link(t!("home.join_with_invite")).clicked() {
             home.view = View::Join;
         }
-        let settings = home.voice.audio.settings();
+        let settings = home.voice.audio.snapshot();
         let find = &mut home.find;
         let mut page = find.auto_page();
         ui.horizontal(|ui| {
@@ -4657,7 +4657,7 @@ fn page_view(ui: &mut Ui, home: &mut Home, index: usize, channel: Id, chat: &mut
     if let Some(out) = (sending.iter_mut()).find(|o| o.to == to && o.preview.is_some()) {
         preview_status(ui, voice, out);
     }
-    let settings = voice.audio.settings();
+    let settings = voice.audio.snapshot();
     let embeds = Embeds {
         servers,
         previews,
@@ -5147,7 +5147,7 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
         ui.spacing_mut().scroll.kinetic.rubber_band = false;
     }
     chat.index_ids();
-    let settings = voice.audio.settings();
+    let settings = voice.audio.snapshot();
     let embeds = Embeds {
         servers,
         previews,

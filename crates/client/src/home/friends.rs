@@ -141,7 +141,7 @@ impl Home {
 
     /// Whether the person allows DMs from friends only.
     pub(super) fn friends_only(&self) -> bool {
-        self.voice.audio.settings().friends_only
+        self.voice.audio.snapshot().friends_only
     }
 }
 

@@ -146,7 +146,7 @@ pub fn menu_rows(m: &mut ui::Menu, phone: &mut Phone, enabled: bool) {
 
 /// Whether the phone shows in the call bar's "…" menu.
 pub fn shows(voice: &mut Voice) -> bool {
-    let settings = voice.audio.settings();
+    let settings = voice.audio.snapshot();
     voice.phone.ready(&settings)
 }
 

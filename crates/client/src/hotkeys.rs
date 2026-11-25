@@ -475,7 +475,7 @@ pub fn frame(home: &mut Home) {
     let wanted = if hotkeys.recording.is_some() && !hotkeys.wayland {
         Bindings::new()
     } else {
-        home.voice.audio.settings().hotkeys
+        home.voice.audio.snapshot().hotkeys.clone()
     };
     hotkeys.apply(wanted);
     let pressed: Vec<_> = hotkeys.actions.try_iter().collect();
