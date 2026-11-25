@@ -2132,38 +2132,24 @@ pub fn show(
     }
     // Joining or leaving a call counts: a restart must never cut one off.
     updates.banner(ui, home.voice.call.is_some());
-    // Phones show the list or what is open, never both; picking something opens it.
+    // Phones: the list is a drawer over what is open. A pick, Back, a swipe from the
+    // left edge or a tap beside it moves it.
     let phone = home.layout.phone;
+    let area = ui.available_rect_before_wrap();
+    let drawer = ui::drawer::Drawer::new(
+        ui.ctx(),
+        UiId::unique("sidebar drawer"),
+        area,
+        phone,
+        &mut home.layout.list,
+    );
     let list = phone && home.layout.list;
-    let channels_width = if list {
-        ui.available_width() - RAIL_WIDTH
-    } else {
-        home.layout.channels
-    };
-    // One column for rail and channel list, so the bottom panel spans both like Discord.
-    let channels = (!phone || list).then(|| {
-        Panel::left("sidebar")
-            .resizable(false)
-            .exact_size(RAIL_WIDTH + channels_width)
-            .frame(Frame::new())
-            .show(ui, |ui| {
-                Panel::bottom("you")
-                    .frame(panel_frame(colors.side))
-                    .show(ui, |ui| bottom_panel(ui, home, updates));
-                Panel::left("servers")
-                    .resizable(false)
-                    .exact_size(RAIL_WIDTH)
-                    .frame(panel_frame(colors.rail))
-                    .show(ui, |ui| server_rail(ui, home));
-                Panel::left("channels")
-                    .resizable(false)
-                    .exact_size(channels_width)
-                    .frame(panel_frame(colors.side))
-                    .show(ui, |ui| sidebar(ui, home))
-                    .response
-                    .rect
-            })
-            .inner
+    // Fully open: what is open stays unpainted (and unread by screen readers) until
+    // the list moves again.
+    let covered = phone && drawer.progress >= 1.0;
+    let channels = (!phone).then(|| {
+        let width = home.layout.channels;
+        sidebar_column(ui, home, updates, width)
     });
     let member_server = home.member_server().filter(|_| !list);
     // On phones the member list covers the column, and Back closes it first.
@@ -2172,7 +2158,8 @@ pub fn show(
     // a bar of its own; which one is known from the last frame.
     let back_id = phone_back_id();
     let last: PhoneBack = ui.data(|data| data.get_temp(back_id)).unwrap_or_default();
-    let wants_back = phone && !list;
+    // Also while the list slides: it stays put under the dimmed edge.
+    let wants_back = phone && !covered;
     let in_header = wants_back && !members_cover;
     ui.data_mut(|data| {
         data.insert_temp(
@@ -2204,7 +2191,11 @@ pub fn show(
             .show_collapsible(ui, &mut shown, |ui| member_list(ui, home, index))
             .map(|panel| panel.response.rect);
     }
-    if !list && !members_cover {
+    if covered {
+        CentralPanel::default()
+            .frame(Frame::new().fill(colors.main))
+            .show(ui, |_| {});
+    } else if !members_cover {
         CentralPanel::default()
             .frame(
                 Frame::new()
@@ -2248,6 +2239,14 @@ pub fn show(
                     }
                 }
             });
+    }
+    let width = ui::drawer::width(area) - RAIL_WIDTH;
+    if phone
+        && drawer.show(ui.ctx(), |ui| {
+            sidebar_column(ui, home, updates, width);
+        })
+    {
+        home.layout.list = false;
     }
     let header: PhoneBack = ui.data(|data| data.get_temp(back_id)).unwrap_or_default();
     if header.in_header != last.in_header {
@@ -2305,6 +2304,39 @@ pub fn show(
     crop_dialog(ui.ctx(), home);
     admin::kick_dialog(ui.ctx(), home);
     action
+}
+
+/// One column for rail and channel list, so the bottom panel spans both like
+/// Discord. Returns where the channel list went.
+fn sidebar_column(
+    ui: &mut Ui,
+    home: &mut Home,
+    updates: &mut crate::update::Updater,
+    channels_width: f32,
+) -> Rect {
+    let colors = ui::colors(ui);
+    Panel::left("sidebar")
+        .resizable(false)
+        .exact_size(RAIL_WIDTH + channels_width)
+        .frame(Frame::new())
+        .show(ui, |ui| {
+            Panel::bottom("you")
+                .frame(panel_frame(colors.side))
+                .show(ui, |ui| bottom_panel(ui, home, updates));
+            Panel::left("servers")
+                .resizable(false)
+                .exact_size(RAIL_WIDTH)
+                .frame(panel_frame(colors.rail))
+                .show(ui, |ui| server_rail(ui, home));
+            Panel::left("channels")
+                .resizable(false)
+                .exact_size(channels_width)
+                .frame(panel_frame(colors.side))
+                .show(ui, |ui| sidebar(ui, home))
+                .response
+                .rect
+        })
+        .inner
 }
 
 /// Back on a phone: in the open pane's header, or in a bar of its own.
@@ -7470,6 +7502,101 @@ mod tests {
                     "{name} at {size:?} runs off the window: {outside:?}"
                 );
             }
+        }
+    }
+
+    /// On a phone the channel list follows a finger in from the left edge, opens
+    /// past half way, and closes with a drag to the left. Set
+    /// `RUSTTALK_DRAWER_SCREENSHOTS` to a folder to save it mid-drag and open.
+    #[test]
+    fn the_phone_channel_list_swipes_in_from_the_edge() {
+        use egui::{Event, Modifiers, PointerButton, Pos2, pos2};
+        fn pointer(h: &mut egui_kittest::Harness<'_, Option<Screen>>, pos: Pos2, down: bool) {
+            h.input_mut().events.push(Event::PointerMoved(pos));
+            h.input_mut().events.push(Event::PointerButton {
+                pos,
+                button: PointerButton::Primary,
+                pressed: down,
+                modifiers: Modifiers::NONE,
+            });
+            h.step();
+        }
+        fn slide(h: &mut egui_kittest::Harness<'_, Option<Screen>>, from: Pos2, to: Pos2) {
+            for i in 1..=12 {
+                let at = from + (to - from) * (i as f32 / 12.0);
+                h.input_mut().events.push(Event::PointerMoved(at));
+                h.step();
+            }
+            // Hold still: no fling on release.
+            h.run_steps(10);
+        }
+        let list = |h: &egui_kittest::Harness<'_, Option<Screen>>| {
+            h.state().as_ref().unwrap().0.layout.list
+        };
+        for dark in [true, false] {
+            let (mut files, _sent) = files_harness(dark);
+            let mut home = files.state_mut().take().unwrap();
+            home.view = View::Server(0);
+            home.servers[0].open = Some(PROJECTS);
+            home.layout.list = false;
+            let mut prefs = home.notify.prefs().clone();
+            prefs.desktop = false;
+            home.notify.set_prefs(prefs);
+            let data = tempfile::tempdir().unwrap();
+            let mut h = egui_kittest::Harness::builder()
+                .with_size(Vec2::new(390.0, 844.0))
+                .build_ui_state(
+                    |ui, screen: &mut Option<Screen>| {
+                        if let Some((home, updates, keystore)) = screen {
+                            show(ui, home, updates, keystore);
+                        }
+                    },
+                    None,
+                );
+            ui::install(&h.ctx);
+            h.ctx.set_theme(if dark {
+                egui::Theme::Dark
+            } else {
+                egui::Theme::Light
+            });
+            *h.state_mut() = Some((
+                home,
+                crate::update::Updater::new(data.path()),
+                crate::keystore::without_keychain(data.path()),
+            ));
+            h.run_steps(6);
+            let capture = |h: &mut egui_kittest::Harness<'_, Option<Screen>>, phase: &str| {
+                if let Some(dir) = std::env::var_os("RUSTTALK_DRAWER_SCREENSHOTS") {
+                    let dir = std::path::PathBuf::from(dir);
+                    std::fs::create_dir_all(&dir).unwrap();
+                    let theme = if dark { "dark" } else { "light" };
+                    h.render()
+                        .unwrap()
+                        .save(dir.join(format!("drawer-{phase}-390-{theme}.png")))
+                        .unwrap();
+                }
+            };
+            // A drag from the middle of the chat leaves the list shut.
+            pointer(&mut h, pos2(150.0, 400.0), true);
+            slide(&mut h, pos2(150.0, 400.0), pos2(380.0, 400.0));
+            pointer(&mut h, pos2(380.0, 400.0), false);
+            h.run();
+            assert!(!list(&h));
+            // From the edge it follows the finger, and opens past half way.
+            pointer(&mut h, pos2(6.0, 400.0), true);
+            slide(&mut h, pos2(6.0, 400.0), pos2(170.0, 400.0));
+            capture(&mut h, "mid-drag");
+            slide(&mut h, pos2(170.0, 400.0), pos2(260.0, 400.0));
+            pointer(&mut h, pos2(260.0, 400.0), false);
+            h.run();
+            assert!(list(&h));
+            capture(&mut h, "open");
+            // A drag to the left across the list closes it.
+            pointer(&mut h, pos2(300.0, 500.0), true);
+            slide(&mut h, pos2(300.0, 500.0), pos2(60.0, 500.0));
+            pointer(&mut h, pos2(60.0, 500.0), false);
+            h.run();
+            assert!(!list(&h));
         }
     }
 

@@ -10,6 +10,7 @@ use eframe::egui::{
 };
 
 mod completion;
+pub mod drawer;
 mod menu;
 mod page;
 mod start;
@@ -160,6 +161,8 @@ pub const ON_FILL: Color32 = Color32::WHITE;
 /// The dark backdrop behind the picture viewer, its buttons and text on it.
 pub const OVERLAY: Color32 = Color32::from_black_alpha(225);
 pub const OVERLAY_BUTTON: Color32 = Color32::from_black_alpha(160);
+/// Dims the content behind a drawer at full open.
+pub const SCRIM: Color32 = Color32::from_black_alpha(120);
 pub const OVERLAY_TEXT: Color32 = Color32::from_gray(0xd0);
 
 fn appearance_id() -> Id {
