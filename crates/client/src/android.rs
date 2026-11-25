@@ -539,7 +539,7 @@ mod activity {
         slice,
         sync::{
             LazyLock, Mutex, MutexGuard, OnceLock,
-            atomic::{AtomicBool, Ordering},
+            atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering},
         },
         time::{Duration, Instant},
     };
@@ -596,6 +596,12 @@ mod activity {
     static INSETS: Mutex<[i32; 4]> = Mutex::new([0; 4]);
     /// The window or the keyboard changed: follow the insets for a moment.
     static INSETS_STALE: AtomicBool = AtomicBool::new(true);
+    /// Back presses MainActivity passed on, not yet handled (`crate::back`).
+    static BACK_PRESSES: AtomicU32 = AtomicU32::new(0);
+    /// Whether MainActivity takes Back: 0 no, 1 yes, 2 not told yet.
+    static BACK_ENABLED: AtomicU8 = AtomicU8::new(2);
+    /// For a Back press to wake the app.
+    static CTX: OnceLock<egui::Context> = OnceLock::new();
     /// `WindowInsetsCompat.Type`: status bars 1, navigation bars 2, caption bar 4,
     /// keyboard 8, display cutout 128.
     const COVERED: i32 = 1 | 2 | 4 | 8 | 128;
@@ -834,6 +840,51 @@ mod activity {
             })
         {
             tracing::warn!(%error, "setting call audio mode failed");
+        }
+    }
+
+    /// MainActivity's Back callback and the Back key (which GameActivity would give
+    /// winit) both end here, on the Java main thread.
+    #[unsafe(no_mangle)]
+    extern "system" fn Java_io_github_rusttalkcrew_rusttalk_MainActivity_backPressed(
+        _: *mut c_void,
+        _: *mut c_void,
+    ) {
+        BACK_PRESSES.fetch_add(1, Ordering::Relaxed);
+        if let Some(ctx) = CTX.get() {
+            ctx.request_repaint();
+        }
+    }
+
+    /// Whether the app takes Back: while something is open to close. At the root
+    /// Android handles it, with the predictive back animation on Android 13 and newer.
+    pub fn back_enabled(on: bool) {
+        if BACK_ENABLED.swap(u8::from(on), Ordering::Relaxed) == u8::from(on) {
+            return;
+        }
+        let Some(app) = APP.get() else { return };
+        if let Err(error) = java(app, |env, activity| {
+            env.call_method(
+                activity,
+                jni_str!("backEnabled"),
+                jni_sig!("(Z)V"),
+                &[JValue::Bool(on)],
+            )?
+            .v()
+        }) {
+            tracing::warn!(%error, "setting Back handling failed");
+        }
+    }
+
+    /// Back at the root: to the background like other apps, not finished.
+    pub fn to_background() {
+        if let Some(app) = APP.get()
+            && let Err(error) = java(app, |env, activity| {
+                env.call_method(activity, jni_str!("toBackground"), jni_sig!("()V"), &[])?
+                    .v()
+            })
+        {
+            tracing::warn!(%error, "moving to the background failed");
         }
     }
 
@@ -1144,6 +1195,17 @@ mod activity {
     /// Before the frame: typed text, and the space the system leaves for the app.
     pub fn input(ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         let Some(app) = APP.get() else { return };
+        let _ = CTX.set(ctx.clone());
+        // One press a frame: each goes to what the frame before showed on top.
+        if BACK_PRESSES
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            crate::back::press(&mut raw_input.events);
+            if BACK_PRESSES.load(Ordering::Relaxed) > 0 {
+                ctx.request_repaint();
+            }
+        }
         let mut keyboard = lock(&KEYBOARD);
         let now = Instant::now();
         if INSETS_STALE.swap(false, Ordering::Relaxed) {

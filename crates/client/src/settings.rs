@@ -226,7 +226,8 @@ fn phone<T: Copy + PartialEq, S, R: Default>(
         let colors = ui::colors(ui);
         if nav.phone_page {
             let (back, close) = ui::sheet_bar(ui, title, Some(t!("common.back")));
-            nav.phone_page = !back;
+            // Android's Back too, before the sheet's Escape closes it all.
+            nav.phone_page = !(back || crate::back::take(ui));
             let body = ui
                 .available_rect_before_wrap()
                 .shrink2(Vec2::new(ui::SPACE_L, 0.0));

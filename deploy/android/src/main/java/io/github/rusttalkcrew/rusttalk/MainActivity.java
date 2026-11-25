@@ -17,7 +17,9 @@ import javax.crypto.KeyGenerator;
 import javax.crypto.SecretKey;
 import javax.crypto.spec.GCMParameterSpec;
 import android.util.Log;
+import android.view.KeyEvent;
 import android.view.inputmethod.EditorInfo;
+import androidx.activity.OnBackPressedCallback;
 import com.google.androidgamesdk.GameActivity;
 
 /**
@@ -111,6 +113,7 @@ public class MainActivity extends GameActivity {
         super.onCreate(state);
         voiceReady = initializeVoice(getApplicationContext());
         if (!voiceReady) Log.e("RustTalk", "WebRTC initialization failed; voice disabled");
+        getOnBackPressedDispatcher().addCallback(this, back);
     }
 
     // 0 while the system prompt is open, 1 to join, -1 for denial, -2 for init failure.
@@ -220,5 +223,45 @@ public class MainActivity extends GameActivity {
             editorActions++;
         }
         super.onEditorAction(action);
+    }
+
+    /**
+     * Back goes to the app (crates/client/src/back.rs) while it has something to
+     * close, which it says through backEnabled. At its root the callback is off and
+     * Android handles Back: with predictive back (Android 13+, the manifest's
+     * enableOnBackInvokedCallback) it shows the home screen behind the app.
+     */
+    private static native void backPressed();
+
+    private final OnBackPressedCallback back = new OnBackPressedCallback(false) {
+        @Override
+        public void handleOnBackPressed() {
+            backPressed();
+        }
+    };
+
+    public void backEnabled(boolean on) {
+        runOnUiThread(() -> back.setEnabled(on));
+    }
+
+    public void toBackground() {
+        runOnUiThread(() -> moveTaskToBack(true));
+    }
+
+    // Without predictive back, GameActivity hands the Back key to native code and
+    // never reaches onBackPressed. Send it to the app instead, on release like
+    // Activity, so the app decides (and moves itself to the background at its root).
+    @Override
+    public boolean onKeyDown(int code, KeyEvent event) {
+        if (code != KeyEvent.KEYCODE_BACK) return super.onKeyDown(code, event);
+        event.startTracking();
+        return true;
+    }
+
+    @Override
+    public boolean onKeyUp(int code, KeyEvent event) {
+        if (code != KeyEvent.KEYCODE_BACK) return super.onKeyUp(code, event);
+        if (event.isTracking() && !event.isCanceled()) backPressed();
+        return true;
     }
 }

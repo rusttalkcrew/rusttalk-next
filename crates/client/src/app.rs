@@ -564,6 +564,23 @@ impl eframe::App for App<'_> {
         crate::phone_clipboard::input(ctx, raw_input);
         #[cfg(target_os = "linux")]
         crate::wayland_drops::input(raw_input);
+        let back = crate::back::input(ctx, raw_input, || {
+            if let Screen::Home(home) = &mut self.screen {
+                return home.go_back();
+            }
+            let back = self.has_back();
+            if back {
+                self.apply(Action::Back);
+            }
+            back
+        });
+        // At the root Back leaves the app, as on any Android home screen.
+        #[cfg(target_os = "android")]
+        if back == Some(false) {
+            crate::android::to_background();
+        }
+        #[cfg(not(target_os = "android"))]
+        let _ = back;
     }
 
     fn logic(&mut self, _ctx: &egui::Context, frame: &mut eframe::Frame) {
@@ -594,10 +611,31 @@ impl eframe::App for App<'_> {
         crate::phone_clipboard::frame_end(ui.ctx());
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         crate::words::frame(ui.ctx());
+        let screen = match &self.screen {
+            Screen::Home(home) => home.can_go_back(),
+            _ => self.has_back(),
+        };
+        let back = crate::back::frame_end(ui.ctx(), screen);
+        #[cfg(target_os = "android")]
+        crate::android::back_enabled(back);
+        #[cfg(not(target_os = "android"))]
+        let _ = back;
     }
 }
 
 impl App<'_> {
+    /// Whether this onboarding step shows Back.
+    fn has_back(&self) -> bool {
+        match &self.screen {
+            Screen::Welcome => self.chose_storage || self.chose_network,
+            Screen::Words { .. } | Screen::Confirm { .. } | Screen::Restore { .. } => true,
+            Screen::Storage { restore, busy, .. } => {
+                (*restore || self.chose_network) && busy.is_none()
+            }
+            _ => false,
+        }
+    }
+
     fn screens(&mut self, ui: &mut Ui) {
         // Never make automatic update requests before onboarding chooses a route or
         // while the selected route is connecting/blocked.
@@ -605,8 +643,7 @@ impl App<'_> {
             self.updates.poll(ui.ctx());
         }
         self.poll();
-        let chose_storage = self.chose_storage;
-        let chose_network = self.chose_network;
+        let back = self.has_back();
         let action = match &mut self.screen {
             Screen::Problem(details) => step(ui, "problem", false, |ui| {
                 ui::step_title(ui, t!("app.problem_title"), t!("app.problem_help"));
@@ -617,26 +654,25 @@ impl App<'_> {
             Screen::Network(editor) => step(ui, "network", false, |ui| {
                 crate::route::onboarding(ui, editor).then_some(Action::NetworkDone)
             }),
-            Screen::Welcome => step(ui, "welcome", chose_storage || chose_network, welcome),
-            Screen::Words { words, .. } => step(ui, "words", true, |ui| show_words(ui, words)),
+            Screen::Welcome => step(ui, "welcome", back, welcome),
+            Screen::Words { words, .. } => step(ui, "words", back, |ui| show_words(ui, words)),
             Screen::Confirm {
                 check,
                 answers,
                 error,
                 ..
-            } => step(ui, "check", true, |ui| {
+            } => step(ui, "check", back, |ui| {
                 confirm(ui, check, answers, error.as_deref())
             }),
-            Screen::Restore { words, error } => step(ui, "restore", true, |ui| {
+            Screen::Restore { words, error } => step(ui, "restore", back, |ui| {
                 restore(ui, words, error.as_deref())
             }),
             Screen::Storage {
                 password,
                 error,
                 busy,
-                restore,
+                ..
             } => {
-                let back = (*restore || chose_network) && busy.is_none();
                 let busy = busy.is_some();
                 let keychain = self.keystore.keychain_works();
                 step(ui, "storage", back, |ui| {

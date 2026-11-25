@@ -339,11 +339,20 @@ list their pages first, then show the picked page with Back. Touch builds
 make buttons, rows and menu rows at least 44 points tall and widen every
 widget's tap area by 12 points.
 
+Android's Back button and gesture (`src/back.rs`) close what is on top, one
+thing a press: a menu or popup, then a dialog or settings window (a settings
+page goes back to its list first), then the member list over a chat, then the
+open pane goes back to the list, like the Back bar. `MainActivity` turns on its
+`OnBackPressedCallback` only while there is something to close; at the list,
+Android handles Back and moves the app to the background (with the predictive
+back animation, `enableOnBackInvokedCallback`). Without predictive back,
+GameActivity would give the Back key to native code, so `MainActivity` sends it
+to the app instead, which moves itself to the background at the list.
+
 Still to do:
 
 - **Call panel and voice channel:** controls in a bottom bar, the participant
   list as a cover like the member list.
-- **Back:** Android's back gesture should do what the Back bar does.
 
 ## Later phases
 
