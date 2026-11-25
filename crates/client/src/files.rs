@@ -33,11 +33,14 @@ use crate::{
     ui::{self, ON_FILL, OVERLAY, OVERLAY_BUTTON, OVERLAY_TEXT},
 };
 
-/// Whether this device has a file dialog. Phones need the system's own picker first
-/// (docs/mobile.md); until then the buttons that open one are off there.
-pub const PICKER: bool = !cfg!(any(target_os = "android", target_os = "ios"));
+/// Whether this device can pick files to upload. Android needs the system's own
+/// picker first (docs/mobile.md); until then the buttons that open one are off there.
+pub const PICKER: bool = !cfg!(target_os = "android");
+/// Whether files can be saved through a save dialog. Phones hand stored files to the
+/// system instead (`export_label`), and can't save live files yet.
+pub const SAVE_DIALOG: bool = !cfg!(any(target_os = "android", target_os = "ios"));
 /// Whether files can be handed to their app (`open`); phones have no backend for it.
-const OPENS: bool = PICKER;
+const OPENS: bool = SAVE_DIALOG;
 
 /// Phones: the button that hands a stored file to the system instead of a save
 /// dialog (`Files::export`). Android saves it to Downloads, iOS opens the share sheet.
@@ -525,13 +528,29 @@ impl Files {
             let test = *TEST_ANSWER.lock().unwrap_or_else(|e| e.into_inner());
             let paths = match (test, name) {
                 (Some(answer), name) => answer(name.as_deref()),
-                // shortcut: phones need the system file picker (docs/mobile.md); until
+                // shortcut: Android needs the system file picker (docs/mobile.md); until
                 // then a pick finds nothing.
-                #[cfg(any(target_os = "android", target_os = "ios"))]
+                #[cfg(target_os = "android")]
                 (None, _) => {
                     tracing::warn!("no file picker on this device yet");
                     let _ = (single, pictures, zip);
                     Vec::new()
+                }
+                // The save buttons are off (`SAVE_DIALOG`); stored files are shared.
+                #[cfg(target_os = "ios")]
+                (None, Some(_)) => {
+                    tracing::warn!("no save dialog on this device");
+                    Vec::new()
+                }
+                #[cfg(target_os = "ios")]
+                (None, None) => {
+                    use crate::ios::Pick;
+                    let what = match (pictures, zip) {
+                        (true, _) => Pick::Pictures,
+                        (false, true) => Pick::Zip,
+                        (false, false) => Pick::Any,
+                    };
+                    crate::ios::pick(what, !single)
                 }
                 #[cfg(not(any(target_os = "android", target_os = "ios")))]
                 (None, Some(name)) => rfd::FileDialog::new()
@@ -721,6 +740,26 @@ pub fn clear_opened() {
     }
 }
 
+/// Copy a file a phone's picker handed over (and may delete) into a fresh
+/// `rusttalk-<id>` temporary folder under `name`, as a pasted picture: `discard` and
+/// `clear_opened` remove it later.
+#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+pub fn keep_picked(from: &Path, name: &str) -> io::Result<PathBuf> {
+    let name = match name.replace(['/', '\\'], "_").trim() {
+        "" | "." | ".." => "file".to_owned(),
+        name => name.to_owned(),
+    };
+    let id = rusttalk_core::keys::random_key().map_err(io::Error::other)?;
+    let folder = temp_folder(&id[..8]);
+    fs::create_dir(&folder)?;
+    let path = folder.join(name);
+    if let Err(error) = fs::copy(from, &path) {
+        let _ = fs::remove_dir_all(&folder);
+        return Err(error);
+    }
+    Ok(path)
+}
+
 /// Remove a pasted picture that is no longer staged. Other files stay.
 pub fn discard(path: &Path) {
     let Some(folder) = path.parent() else {
@@ -809,7 +848,7 @@ pub fn media_items(m: &mut ui::Menu, media: &Media) -> Option<MediaAction> {
     if COPY_IMAGE && m.item("🖼", t!("files.copy_image")).clicked() {
         action = Some(MediaAction::Copy);
     }
-    if PICKER && m.item("⬇", t!("files.save_as")).clicked() {
+    if SAVE_DIALOG && m.item("⬇", t!("files.save_as")).clicked() {
         action = Some(MediaAction::SaveAs);
     }
     if m.item("🔍", t!("files.open_viewer")).clicked() {
@@ -1668,7 +1707,7 @@ fn download(ui: &mut Ui, files: &mut Files, address: &Url, file: &Attachment) {
         }
         None => {}
     }
-    if PICKER && ui::secondary(ui, t!("files.download")).clicked() {
+    if SAVE_DIALOG && ui::secondary(ui, t!("files.download")).clicked() {
         files.ask(ui.ctx(), Ask::Save(address.clone(), file.clone()));
     }
     if let Some(label) = export_label()
@@ -1715,7 +1754,7 @@ pub fn viewer(ctx: &egui::Context, files: &mut Files) {
                         close = tool(ui, "×", t!("common.close")).clicked();
                         ui.add_space(12.0);
                         open_it = OPENS && tool(ui, "↗", t!("files.open_default")).clicked();
-                        if PICKER && tool(ui, "⬇", t!("common.save")).clicked() {
+                        if SAVE_DIALOG && tool(ui, "⬇", t!("common.save")).clicked() {
                             files.ask(ui.ctx(), Ask::Save(address.clone(), file.clone()));
                         }
                         if let Some(label) = export_label()
@@ -2236,5 +2275,21 @@ mod tests {
         assert_eq!(animated_kind("a.gif", ""), Some("GIF"));
         assert_eq!(animated_kind("a.webp", ""), Some("WebP"));
         assert_eq!(animated_kind("a.png", "image/png"), None);
+    }
+
+    #[test]
+    fn picked_files_keep_a_safe_version_of_their_name() {
+        let data = tempfile::tempdir().unwrap();
+        let from = data.path().join("picked");
+        fs::write(&from, b"synthetic").unwrap();
+        for (name, kept) in [("a/b\\c.png", "a_b_c.png"), (" ", "file"), ("..", "file")] {
+            let path = keep_picked(&from, name).unwrap();
+            assert_eq!(path.file_name().unwrap(), kept);
+            let folder = path.parent().unwrap();
+            assert!(is_temp_folder(folder.file_name().unwrap()));
+            discard(&path);
+            assert!(!folder.exists());
+        }
+        assert!(keep_picked(&data.path().join("gone"), "gone.png").is_err());
     }
 }

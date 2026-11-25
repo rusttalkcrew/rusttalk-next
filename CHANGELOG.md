@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- On iPhone you can now upload files and photos: attachments, profile picture, server icon, emoji, stickers and page pictures.
+
 ## v0.7.0 - 2026-11-25
 
 - Voice channels can now be set to audio quality up to 320 kbps, for listening to music together.

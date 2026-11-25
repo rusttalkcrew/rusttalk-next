@@ -91,6 +91,24 @@ The unsigned IPA, signed and installed with xtool, starts on a real iPhone.
   no account or key files) first deletes a RustTalk item an earlier install
   left, and starts with sign-up or the recovery words like a new phone; a
   damaged `keystore.json` is not a fresh install and keeps its keys.
+- **Picking files** (`src/ios/picker.rs`). Every upload (attachments in channels,
+  DMs and forum posts, live files, a channel's shared files, page pictures, the
+  profile picture, the server icon, emoji and stickers) first asks **Photos** or
+  **Files**; a .zip import opens Files right away. Photos is
+  `PHPickerViewController` (pictures only where only pictures fit; HEIC photos
+  come as JPEG), which runs outside the app and needs no photo library
+  permission, so the bundle declares none. Files is
+  `UIDocumentPickerViewController` with copies (`asCopy`), filtered to PNG, JPEG,
+  GIF and WebP, to .zip, or to any file. Both show over whatever is on screen,
+  can't be swiped away (Cancel answers with nothing), and take several files
+  where the desktop dialog does. Each picked file is copied into its own
+  `rusttalk-<id>` temporary folder under its own name (a photo's name is the one
+  Photos suggests), removed when it is taken off a message and at the next start.
+  `files::Files::ask` runs the picker on its own thread: the picker shows on the
+  main thread and that thread waits for the answer. Saving a stored file still
+  opens the share sheet (it has **Save to Files**): the document picker's export
+  needs the file first, while the save dialog picks a place before decrypting.
+  Live files can't be received on iPhone yet (no save dialog, `files::SAVE_DIALOG`).
 
 ## State after phase 3
 
@@ -238,7 +256,7 @@ use yet is allowed to be unused there (`allow(dead_code)` on phones only).
 | Voice and video (LiveKit, webrtc-sys) | Builds and links (prebuilt WebRTC for Android) | Prebuilt WebRTC for iOS; CI builds it | Android and iOS voice in phase 3; see Voice |
 | Audio (cpal 0.18) | AAudio (`libaaudio.so`, Android 8.0+) | Core Audio | Android uses communication mode during calls; iOS needs its audio session |
 | Key storage (keyring 4) | Android Keystore wraps the identity in private app storage | Data-protection Keychain, file with password as fallback | Both default to system key storage with password fallback |
-| File picker (rfd) | No backend | No backend | Gated: the buttons that open it are off (`files::PICKER`) |
+| File picker (rfd) | No backend | Photos (`PHPickerViewController`) or Files (`UIDocumentPickerViewController`), `src/ios/picker.rs` | Android gated: the buttons that open it are off (`files::PICKER`); no save dialog on phones (`files::SAVE_DIALOG`) |
 | Saving and opening files | **Save to phone** copies the file into Downloads (`MediaStore`, Android 10+; the app's own Download folder before) | **Share…** opens the share sheet | Decrypted into the temp folder, deleted once handed over; "Open in default app" is off (no `open` backend) |
 | Notifications (notify-rust) | Builds, no notification service | Builds, no notification service | Fail and are logged |
 | Call camera | Camera2 session, rotated I420 frames | AVFoundation, oriented BGRA frames | Both feed the existing encrypted LiveKit camera track |
@@ -411,7 +429,7 @@ Rough effort for one person who knows the code base.
 | --- | --- | --- |
 | 2 | Usable chat on Android. Done: typed text, safe areas and the keyboard, `onDestroy`, recovery words, Android Keystore, temp folder (`MainActivity` points `TMPDIR` at the app cache), **Save to phone** (Downloads). Left: file picker (Storage Access Framework), local notifications, hide Updates and Shortcuts on phones, `rusttalk://` links, the layout list above | 3 to 4 weeks |
 | 3 | Foreground voice on Android and iOS; iOS requests microphone access and supports background audio. Left: iPhone device verification, Android Bluetooth routing, background-call device test | 2 weeks |
-| 4 | iOS on a device. Done: Keychain, safe area and taps. Left: notifications (reuse `notify/macos.rs`), document picker, status bar colours, background rules | 1 to 2 weeks |
+| 4 | iOS on a device. Done: Keychain, safe area and taps. Photo and file picker. Left: notifications (reuse `notify/macos.rs`), status bar colours, background rules | 1 to 2 weeks |
 | 5 | Foreground call camera and front/back selection. Left: verify capture and interruptions on a real iPhone | Device verification |
 | 6 | Release downloads and signing are in place. Left: store listings and store updates | 1 week plus store review |
 | Later | Screen share (MediaProjection; ReplayKit broadcast extension), push notifications | 2 to 4 weeks each |
@@ -445,7 +463,9 @@ certificate.
   Android 13+) shows the call notification. Planned: `BLUETOOTH_CONNECT` for
   headsets. Never location, contacts or phone state.
 - **iOS:** the bundle states why it uses the microphone and camera; iOS asks
-  the person on first use.
+  the person on first use. Picking photos needs no permission (the system's
+  photo picker hands over only what was picked), so there is no photo library
+  usage description.
 - **Storage:** settings and the key file live in the app's private storage.
   Android: `allowBackup="false"` and data extraction rules that exclude
   everything, so nothing goes to Google's cloud or to a new phone. iOS: the
