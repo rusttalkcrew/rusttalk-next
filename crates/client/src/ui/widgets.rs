@@ -735,27 +735,79 @@ pub fn panel_popup<R>(
 }
 
 /// A small line chart of `values`, oldest first, filling `size` from the right
-/// with `slots` points across. The top is the highest value plus some room.
-pub fn line_chart(ui: &mut Ui, values: &[f64], slots: usize, size: Vec2, color: Color32) {
+/// with `slots` points across, over a soft fill. The scale runs from zero to a round
+/// number above the highest value (at least `floor`); `label` names it on two faint
+/// grid lines, the top and the middle.
+pub fn line_chart(
+    ui: &mut Ui,
+    values: &[f64],
+    slots: usize,
+    size: Vec2,
+    color: Color32,
+    floor: f64,
+    label: impl Fn(f64) -> String,
+) {
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    let c = colors(ui);
     let painter = ui.painter();
-    painter.rect_filled(rect, RADIUS_S, colors(ui).field);
-    let top = values.iter().copied().fold(50.0, f64::max) * 1.2;
-    let step = rect.width() / slots.saturating_sub(1).max(1) as f32;
+    let top = round_up(values.iter().copied().fold(floor, f64::max) * 1.1);
+    // Room for the top line's label above the plot.
+    let plot = Rect::from_min_max(Pos2::new(rect.left(), rect.top() + 14.0), rect.max);
+    let font = FontId::proportional(TEXT_CAPTION - 2.0);
+    for (share, value) in [(1.0, top), (0.5, top / 2.0)] {
+        let y = plot.bottom() - share * plot.height();
+        painter.hline(
+            rect.x_range(),
+            y,
+            Stroke::new(1.0, c.border.gamma_multiply(0.6)),
+        );
+        painter.text(
+            Pos2::new(rect.left(), y - 1.0),
+            Align2::LEFT_BOTTOM,
+            label(value),
+            font.clone(),
+            c.muted,
+        );
+    }
+    painter.hline(rect.x_range(), plot.bottom(), Stroke::new(1.0, c.border));
+    let step = plot.width() / slots.saturating_sub(1).max(1) as f32;
     let start = slots.saturating_sub(values.len()) as f32;
     let points: Vec<Pos2> = values
         .iter()
         .enumerate()
         .map(|(at, value)| {
-            let y = rect.bottom() - (*value / top) as f32 * rect.height();
-            Pos2::new(rect.left() + (start + at as f32) * step, y)
+            let y = plot.bottom() - (*value / top) as f32 * plot.height();
+            Pos2::new(plot.left() + (start + at as f32) * step, y)
         })
         .collect();
-    if let [only] = points[..] {
-        painter.circle_filled(only, 2.0, color);
-    } else if points.len() > 1 {
-        painter.add(Shape::line(points, Stroke::new(1.5, color)));
+    if points.len() > 1 {
+        // The fill fades from the line down to nothing at the base.
+        let mut fill = egui::Mesh::default();
+        for (at, point) in points.iter().enumerate() {
+            fill.colored_vertex(*point, color.gamma_multiply(0.25));
+            fill.colored_vertex(Pos2::new(point.x, plot.bottom()), Color32::TRANSPARENT);
+            if at > 0 {
+                let i = 2 * at as u32;
+                fill.add_triangle(i - 2, i - 1, i);
+                fill.add_triangle(i - 1, i, i + 1);
+            }
+        }
+        painter.add(fill);
+        painter.add(Shape::line(points.clone(), Stroke::new(1.5, color)));
     }
+    if let Some(last) = points.last() {
+        painter.circle_filled(*last, 2.5, color);
+    }
+}
+
+/// The smallest of 1, 2 and 5 times a power of ten that is at least `value`.
+fn round_up(value: f64) -> f64 {
+    let power = 10f64.powf(value.max(1.0).log10().floor());
+    [1.0, 2.0, 5.0, 10.0]
+        .into_iter()
+        .map(|step| step * power)
+        .find(|round| *round >= value)
+        .unwrap_or(10.0 * power)
 }
 
 /// A coloured dot, for status and connection quality.
