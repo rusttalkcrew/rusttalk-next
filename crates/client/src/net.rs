@@ -1051,9 +1051,9 @@ async fn run(
                 state.pins_saved = pins.unwrap_or_default();
                 match connected {
                     Ok(mut client) => {
-                        backoff.reset();
                         state.order_unavailable = false;
                         tracing::info!(server = %fingerprint(&server.server_id), "connected to server");
+                        let mut resumed = false;
                         let end = serve(
                             &ctx,
                             &url,
@@ -1064,8 +1064,10 @@ async fn run(
                             &mut removals,
                             &mut route_rx,
                             expected_generation,
+                            &mut resumed,
                         )
                         .await;
+                        backoff.after_session(resumed);
                         state.identities.get(&client, &state.server_id);
                         // A join needs the API connection to finish, so it ends with it.
                         if let Some(mut joining) = state.joining.take() {
@@ -1173,8 +1175,8 @@ async fn run(
 /// seconds. Under ~16 sign-ins a minute, half the server's 32 challenges per address.
 const RECONNECT_CAP_SECS: u64 = 10;
 
-/// How long to stay offline before the next reconnect attempt. Reset after a connect
-/// or a network route change.
+/// How long to stay offline before the next reconnect attempt. Reset after a session
+/// that loaded the server state, or a network route change.
 struct Backoff {
     secs: u64,
 }
@@ -1188,6 +1190,15 @@ impl Default for Backoff {
 impl Backoff {
     fn reset(&mut self) {
         *self = Self::default();
+    }
+
+    /// Start over only if the session got as far as loading the server state. A server
+    /// whose event stream opens but whose state fails to load keeps backing off, rather
+    /// than costing a full sign-in every second.
+    fn after_session(&mut self, resumed: bool) {
+        if resumed {
+            self.reset();
+        }
     }
 
     /// The wait before this attempt; the next one is twice as long, up to the cap.
@@ -1506,6 +1517,7 @@ async fn serve(
     removals: &mut tokio::sync::watch::Receiver<()>,
     route_rx: &mut tokio::sync::watch::Receiver<rusttalk_core::route::RouteSnapshot>,
     expected_generation: u64,
+    resumed: &mut bool,
 ) -> End {
     {
         let current = route_rx.borrow();
@@ -1517,7 +1529,7 @@ async fn serve(
             return End::RouteChanged;
         }
     }
-    let resumed = tokio::select! {
+    let loaded = tokio::select! {
         biased;
         _ = route_rx.changed() => {
             tracing::info!("network route changed during resume; closing server session");
@@ -1525,10 +1537,11 @@ async fn serve(
         }
         res = resume(ctx, url, client, state, true) => res,
     };
-    if let Err(error) = resumed {
+    if let Err(error) = loaded {
         tracing::warn!(error = %format_args!("{error:#}"), "loading server state failed");
         return End::Error;
     }
+    *resumed = true;
     apply_keys(ctx, url, client, state);
     voice::name_audio(ctx, client, state);
     // What was asked while connecting. Never drain commands over a stale route.
@@ -3546,6 +3559,23 @@ mod protocol_tests {
         backoff.reset();
         assert_eq!(backoff.next_wait(u16::MAX), Duration::from_secs(1));
         assert_eq!(backoff.next_wait(u16::MAX), Duration::from_secs(2));
+    }
+
+    #[test]
+    fn backoff_starts_over_only_after_a_session_that_resumed() {
+        // The stream opens each time but loading the server state fails: waits keep growing.
+        let mut backoff = Backoff::default();
+        let waits: Vec<_> = (0..5)
+            .map(|_| {
+                backoff.after_session(false);
+                backoff.next_wait(u16::MAX).as_secs()
+            })
+            .collect();
+        assert_eq!(waits, [1, 2, 4, 8, 10]);
+
+        // A session that resumed starts the waits over.
+        backoff.after_session(true);
+        assert_eq!(backoff.next_wait(u16::MAX), Duration::from_secs(1));
     }
 
     #[test]
