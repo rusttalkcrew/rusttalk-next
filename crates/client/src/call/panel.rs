@@ -15,6 +15,7 @@ use super::{
     leave, live_files, open_screen_dialog, screen, status_name,
 };
 use crate::{
+    camera::{Controls, Pick},
     files::Ask,
     home::{Home, Tab, user_bar},
     mic_check::Verdict,
@@ -363,12 +364,6 @@ pub fn call_bar(ui: &mut Ui, home: &mut Home) {
                 });
             });
             ui.add_space(6.0);
-            #[cfg(any(target_os = "android", target_os = "ios"))]
-            {
-                let mut settings = home.voice.audio.settings();
-                home.voice.camera.mobile_controls(ui, &mut settings);
-                home.voice.audio.set_settings(settings);
-            }
             let extras = Extras::of(&mut home.voice, true);
             let size = even(ui, extras.count(), ICON_BUTTON);
             ui.horizontal(|ui| {
@@ -407,26 +402,69 @@ fn leave_button(ui: &mut Ui, size: Vec2) -> Response {
     ui::icon_button(ui, "📞", t!("call.leave"), Look::Danger, size)
 }
 
-/// Camera on or off. Returned so a caller can hang more choices off it.
+/// Camera on or off. On phones, while it is on, a tap opens a menu to flip the
+/// camera, switch its light or turn it off. Returned so a caller can hang more
+/// choices off it.
 fn camera_button(ui: &mut Ui, voice: &mut Voice, can: &Can, size: Vec2) -> Response {
     let camera = &mut voice.camera;
+    let controls = camera.controls();
     let look = if camera.on {
         Look::On(ui::colors(ui).success)
     } else {
         Look::Plain
     };
+    let tip = if controls.is_some() {
+        t!("camera.camera")
+    } else {
+        camera_tip(camera.on)
+    };
     let button = ui
         .add_enabled_ui(can.connected && can.share_video, |ui| {
-            ui::icon_button(ui, "📷", camera_tip(camera.on), look, size)
+            ui::icon_button(ui, "📷", tip, look, size)
         })
         .inner;
     if !can.share_video {
         return button.on_disabled_hover_text(t!("call.no_video_here"));
     }
-    if button.clicked() {
-        camera.on ^= true;
+    let Some(controls) = controls else {
+        if button.clicked() {
+            camera.on ^= true;
+        }
+        return button;
+    };
+    if let Some(pick) = ui::menu(&button, |m| camera_menu(m, controls)).flatten() {
+        let mut settings = voice.audio.settings();
+        voice.camera.pick(pick, &mut settings);
+        voice.audio.set_settings(settings);
     }
     button
+}
+
+/// The camera button's menu while the camera is on.
+fn camera_menu(m: &mut ui::Menu, controls: Controls) -> Option<Pick> {
+    let mut pick = None;
+    if controls.flip
+        && m.add(ui::Item::new("🔄", t!("camera.flip")).enabled(!controls.busy))
+            .clicked()
+    {
+        pick = Some(Pick::Flip);
+    }
+    if let Some(on) = controls.torch {
+        let label = if on {
+            t!("camera.torch_off")
+        } else {
+            t!("camera.torch_on")
+        };
+        if m.add(ui::Item::new("💡", label).enabled(!controls.busy))
+            .clicked()
+        {
+            pick = Some(Pick::Torch(!on));
+        }
+    }
+    if m.danger("⏹", t!("call.camera_off")).clicked() {
+        pick = Some(Pick::Stop);
+    }
+    pick
 }
 
 /// Camera, screen, app audio and "More", as far as `extras` has them.
