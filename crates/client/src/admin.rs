@@ -1509,6 +1509,9 @@ fn audit_tab(ui: &mut Ui, server: &Server, settings: &mut Settings) -> Option<Ad
     for entry in audit {
         ui.horizontal_wrapped(|ui| {
             ui.label(sentence(server, entry));
+            if let Some(details) = details(server, entry) {
+                ui.weak(details);
+            }
             if matches!(entry.action.as_str(), "device_added" | "device_revoked")
                 && let Some(id) = entry.target_id
             {
@@ -1550,6 +1553,10 @@ fn sentence(server: &Server, entry: &AuditEntry) -> String {
         "voice_moved" => t!("audit.voice_moved", actor = actor, target = target),
         "left" => t!("audit.left", actor = actor),
         "member_roles_changed" => t!("audit.member_roles_changed", actor = actor, target = target),
+        "server_updated" => t!("audit.server_updated", actor = actor),
+        "file_limits_changed" => t!("audit.file_limits_changed", actor = actor),
+        "listing_changed" if entry.details["enabled"] == true => t!("audit.listed", actor = actor),
+        "listing_changed" => t!("audit.unlisted", actor = actor),
         "ownership_transferred" => t!(
             "audit.ownership_transferred",
             actor = actor,
@@ -1566,7 +1573,18 @@ fn sentence(server: &Server, entry: &AuditEntry) -> String {
         "channel_created" => t!("audit.channel_created", actor = actor),
         "channel_updated" => t!("audit.channel_updated", actor = actor),
         "channel_deleted" => t!("audit.channel_deleted", actor = actor),
-        "channel_permissions_changed" => t!("audit.channel_permissions_changed", actor = actor),
+        "channel_permissions_changed" => match entry.details["role_id"].as_str() {
+            Some(role) => t!(
+                "audit.channel_role_permissions",
+                actor = actor,
+                role = role_name(server, role),
+                channel = entry
+                    .target_id
+                    .and_then(|id| server.channel(&id))
+                    .map_or_else(|| t!("audit.a_channel").into(), |c| format!("#{}", c.name))
+            ),
+            None => t!("audit.channel_permissions_changed", actor = actor),
+        },
         "category_created" => t!("audit.category_created", actor = actor),
         "category_updated" => t!("audit.category_updated", actor = actor),
         "category_deleted" => t!("audit.category_deleted", actor = actor),
@@ -1592,6 +1610,87 @@ fn sentence(server: &Server, entry: &AuditEntry) -> String {
         "owner_claimed" => t!("audit.owner_claimed", actor = actor),
         other => format!("{actor}: {}", other.replace('_', " ")),
     }
+}
+
+/// What an entry changed, from the IDs, flags and numbers the server recorded with it.
+fn details(server: &Server, entry: &AuditEntry) -> Option<String> {
+    let details = &entry.details;
+    let roles = |key: &str| -> Vec<String> {
+        details[key]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|id| id.as_str())
+            .map(|id| role_name(server, id))
+            .collect()
+    };
+    let parts: Vec<String> = match entry.action.as_str() {
+        "member_roles_changed" => changed(roles("added"), roles("removed")),
+        "channel_permissions_changed" => {
+            let flags = |key: &str| details[key].as_u64().map(|flags| flags as u8);
+            let (before, after) = (flags("before")?, flags("after")?);
+            let page = entry
+                .target_id
+                .and_then(|id| server.channel(&id))
+                .is_some_and(|channel| channel.page);
+            let names = |flags: u8| -> Vec<String> {
+                [
+                    (1, t!("admin.flag_read")),
+                    (
+                        2,
+                        if page {
+                            t!("admin.flag_edit")
+                        } else {
+                            t!("admin.flag_write")
+                        },
+                    ),
+                    (4, t!("admin.flag_speak")),
+                    (8, t!("admin.flag_video")),
+                ]
+                .into_iter()
+                .filter(|(bit, _)| flags & bit != 0)
+                .map(|(_, name)| name.to_owned())
+                .collect()
+            };
+            changed(names(after & !before), names(before & !after))
+        }
+        "server_updated" => details["changed"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|part| match part.as_str()? {
+                "name" => Some(t!("home.server_name")),
+                "description" => Some(t!("audit.part_description")),
+                "icon" => Some(t!("audit.part_icon")),
+                "system_messages" => Some(t!("admin.system_messages")),
+                _ => None,
+            })
+            .map(str::to_owned)
+            .collect(),
+        "file_limits_changed" => {
+            let limits = |key: &str| serde_json::from_value(details[key].clone()).ok();
+            file_limits::changes(limits("before")?, limits("after")?)
+        }
+        _ => Vec::new(),
+    };
+    (!parts.is_empty()).then(|| parts.join(", "))
+}
+
+/// "+ added, − removed".
+fn changed(added: Vec<String>, removed: Vec<String>) -> Vec<String> {
+    let added = added.into_iter().map(|name| format!("+ {name}"));
+    added
+        .chain(removed.into_iter().map(|name| format!("− {name}")))
+        .collect()
+}
+
+fn role_name(server: &Server, id: &str) -> String {
+    server
+        .dir
+        .roles
+        .iter()
+        .find(|role| role.id == id && role.name_known)
+        .map_or_else(|| t!("audit.unknown_role").into(), |role| role.name.clone())
 }
 
 fn joining_tab(ui: &mut Ui, settings: &mut Settings) -> Option<Admin> {

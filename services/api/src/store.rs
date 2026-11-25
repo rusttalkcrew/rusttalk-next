@@ -230,14 +230,29 @@ pub async fn audit(
     id: Option<&str>,
     at: i64,
 ) -> ApiResult<i64> {
+    audit_details(db, actor, action, person, id, None, at).await
+}
+
+/// Like [`audit`], with what changed. Only opaque IDs, flags and numbers go in
+/// `details`, never anything a person wrote or named.
+pub async fn audit_details(
+    db: &mut SqliteConnection,
+    actor: &[u8],
+    action: &str,
+    person: Option<&[u8]>,
+    id: Option<&str>,
+    details: Option<serde_json::Value>,
+    at: i64,
+) -> ApiResult<i64> {
     Ok(query_scalar(
-        "INSERT INTO audit_log (id, actor_person_id, action, target_person_id, target_id, at)
-           SELECT COALESCE(MAX(id), 0) + 1, ?, ?, ?, ?, ? FROM audit_log RETURNING id",
+        "INSERT INTO audit_log (id, actor_person_id, action, target_person_id, target_id, details, at)
+           SELECT COALESCE(MAX(id), 0) + 1, ?, ?, ?, ?, ?, ? FROM audit_log RETURNING id",
     )
     .bind(actor)
     .bind(action)
     .bind(person)
     .bind(id)
+    .bind(details.map(|details| details.to_string()))
     .bind(at)
     .fetch_one(db)
     .await?)

@@ -20,7 +20,7 @@ their expiry) are kept only in memory for at most 60 seconds.
 | `revocations` | `person_id`, `device_id`, `record` (W04 signature, device public key and revocation timestamp) |
 | `bans` | `person_id`, `banned_at` (Unix seconds), nullable `banned_by` (person ID of the member who placed it, also in the audit log) and `banned_by_rank` (their highest role rank then, so only the owner, they or someone who outranks them can lift it) |
 | `ban_ips` | `person_id`, `ip` (IPv4 address or IPv6 /64; only for an explicitly requested IP ban) |
-| `audit_log` | `id` (sequence), `actor_person_id`, `action` (fixed event kind), nullable `target_person_id`, nullable `target_id` (opaque object ID), `at` (Unix seconds), nullable `dm_channel_id` (audit visibility) |
+| `audit_log` | `id` (sequence), `actor_person_id`, `action` (fixed event kind), nullable `target_person_id`, nullable `target_id` (opaque object ID), `at` (Unix seconds), nullable `dm_channel_id` (audit visibility), nullable `details` (JSON of what changed: role IDs, permission flags, file-limit numbers, the names of changed server fields and whether the server is listed; never names or other content) |
 | `invite_previews` | `ip` (IPv4 address or IPv6 /64), `expires_at` (60-second rate limit) |
 | `open_joins` | `ip` (IPv4 address or IPv6 /64), `expires_at` (one-hour admission limit) |
 | `member_devices` | `device_id` (Ed25519 public key), `person_id`, `certificate` (public keys, timestamp, salted name commitment, root signature and format prefix) |

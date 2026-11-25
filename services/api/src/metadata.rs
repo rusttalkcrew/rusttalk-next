@@ -20,6 +20,7 @@ use crate::{
     auth::{authenticate, authenticate_read},
     keys, payload,
     roles::{self, Permission},
+    store::audit_details,
 };
 
 pub const IMAGE_BODY_LIMIT: usize = 356 * 1024;
@@ -178,6 +179,16 @@ pub async fn update_space(
     roles::authority(&mut tx, &actor.person)
         .await?
         .require(Permission::ManageServer)?;
+    // Which parts changed, never their (encrypted) contents.
+    let changed: Vec<&str> = [
+        ("name", name_ct.is_some()),
+        ("description", description_ct.is_some()),
+        ("icon", icon_ct.is_some()),
+        ("system_messages", system_messages_ct.is_some()),
+    ]
+    .into_iter()
+    .filter_map(|(part, set)| set.then_some(part))
+    .collect();
     let epoch = keys::space_epoch(&mut tx, &app).await?;
     let icon = optional(Metadata::ServerIcon, epoch, icon_ct.clone().flatten())?;
     sqlx::query(
@@ -209,6 +220,18 @@ pub async fn update_space(
     .bind(icon.as_deref().map(picture_hash))
     .execute(&mut *tx)
     .await?;
+    if !changed.is_empty() {
+        audit_details(
+            &mut tx,
+            &actor.person,
+            "server_updated",
+            None,
+            None,
+            Some(json!({ "changed": changed })),
+            actor.at,
+        )
+        .await?;
+    }
     tx.commit().await?;
     app.notify(Event::ChannelChanged {
         part: Some(Part::Space),
@@ -529,6 +552,20 @@ mod tests {
         }
         write(1, json!({"system_messages_ct": null})).await?;
         assert!(read(1).await?.0.system_messages_ct.is_none());
+        // Each change is audited by which part changed, never its contents.
+        write(1, json!({})).await?;
+        let audited: Vec<String> = query_scalar(
+            "SELECT details FROM audit_log WHERE action = 'server_updated' ORDER BY id",
+        )
+        .fetch_all(&app.db)
+        .await?;
+        let parts = |part: &str| json!({ "changed": [part] }).to_string();
+        let system = parts("system_messages");
+        let description = parts("description");
+        assert_eq!(
+            audited,
+            [&system, &description, &system, &description, &system].map(String::as_str)
+        );
         Ok(())
     }
 
