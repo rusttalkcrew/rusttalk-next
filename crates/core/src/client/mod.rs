@@ -19,7 +19,7 @@ pub use crate::messages::{
 pub use calendar::EventRefused;
 pub use chat::{
     Catalog, Category, Channel, MAX_POKE_CHARS, MAX_TEXT_CHARS, MessageBody, MessageRecord,
-    RoleFlags, SharedFile,
+    RoleFlags, SharedFile, SlowMode,
 };
 pub use files::{
     FileClient, Progress, UploadRejected, decode_frames, decode_frames_until, decode_image,

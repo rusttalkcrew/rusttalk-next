@@ -1913,3 +1913,16 @@ diagram.color_orange = オレンジ
 diagram.color_red = 赤
 diagram.color_purple = 紫
 diagram.color_gray = 灰色
+
+# crates/client/src/home/slow_mode.rs
+slow_mode.title = 低速モード
+slow_mode.help = 各メンバーがメッセージを送る間隔です。低速モードを無視できる人は待ちません。
+slow_mode.off = オフ
+slow_mode.seconds = {seconds}秒
+slow_mode.minutes = {minutes}分
+slow_mode.hours = {hours}時間
+slow_mode.wait = あと{seconds}秒で送信できます
+slow_mode.header_tip = 低速モード中：{time}ごとに1件
+perm.bypass_slow_mode = 低速モードを無視
+perm.bypass_slow_mode_help = 低速モードのチャンネルで待たずにメッセージを送れます。
+audit.slow_mode_changed = {actor} が {channel} の低速モードを変更しました

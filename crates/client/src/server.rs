@@ -401,6 +401,8 @@ pub struct Perms {
     pub manage_events: bool,
     /// Put a channel into focus mode for a while.
     pub start_focus: bool,
+    /// Post in a slow mode channel without waiting.
+    pub bypass_slow_mode: bool,
     /// This person's highest role rank; they can only manage people and roles below it.
     pub rank: i64,
     /// "View server as" is on: these are a preview, and nothing may be changed.
@@ -517,6 +519,9 @@ pub struct Channel {
     /// While focus mode is on: when it ends, in unix seconds.
     #[serde(default)]
     pub focus_until: Option<i64>,
+    /// Seconds between one member's messages, 0 when slow mode is off.
+    #[serde(default)]
+    pub slow_mode_secs: u32,
     /// Per role: read (1), write (2), speak (4) and video (8).
     pub flags: Vec<(String, u8)>,
 }
@@ -975,6 +980,8 @@ pub struct Chat {
     polls: HashMap<Id, PollEvents>,
     /// Reactions by the first half of their message's ID; they travel as votes.
     reactions: HashMap<[u8; 16], Vec<Reaction>>,
+    /// When slow mode lets this person send here again, in egui time.
+    pub slow_until: Option<f64>,
     /// The poll being written in place of the composer.
     pub poll_editor: Option<crate::home::polls::Editor>,
     /// The channel view has requested its initial history and live updates.

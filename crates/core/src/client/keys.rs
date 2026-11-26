@@ -139,6 +139,9 @@ pub struct KeyClient<'a> {
     /// What this device knows about each DM channel, pinned once seen so the server
     /// can't relabel it. A DM key is only taken from, and wrapped to, those two people.
     pub(super) dms: HashMap<[u8; 32], DmPin>,
+    /// Channels with slow mode on, from the app's last catalog: messages there say
+    /// whether they are follow-ups (see `chat::follow_up`).
+    pub slow_mode: HashSet<[u8; 32]>,
     /// The saved pins were lost: DMs not pinned yet are blocked, not trusted on first use.
     pins_lost: bool,
     /// DM epochs not yet trusted that this session tried to recover: attempts and
@@ -291,6 +294,7 @@ impl<'a> KeyClient<'a> {
             carried: None,
             pins_lost: dms.is_none(),
             dms: dms.unwrap_or_default(),
+            slow_mode: HashSet::new(),
             rekeyed: HashMap::new(),
             rekey_failures: 0,
             links: HashMap::new(),

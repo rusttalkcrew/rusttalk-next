@@ -110,6 +110,29 @@ fn digest(record: &MessageRecord) -> [u8; 32] {
         .into()
 }
 
+/// The server refused a message because slow mode has this person waiting.
+#[derive(Debug, thiserror::Error)]
+#[error("slow mode: wait {0} s")]
+pub struct SlowMode(pub u64);
+
+#[derive(Deserialize)]
+struct Wait {
+    error: String,
+    retry_after: u64,
+}
+
+/// Whether slow mode lets this through without a wait: an edit, vote, reaction, poll end
+/// or a post's text after its poll (marked by an all-zero quoted author).
+fn follow_up(body: &MessageBody) -> bool {
+    use crate::messages::PollPart;
+    body.edit_of.is_some()
+        || matches!(
+            body.poll,
+            Some(PollPart::Vote { .. } | PollPart::End { .. })
+        )
+        || body.quoted_author == Some([0; 32])
+}
+
 /// A file kept in a channel's file list, checked and opened like a message.
 #[derive(Clone)]
 pub struct SharedFile {
@@ -139,6 +162,9 @@ pub struct Channel {
     /// While focus mode is on: when it ends, in unix seconds (server time).
     #[serde(default)]
     pub focus_until: Option<i64>,
+    /// While slow mode is on: the seconds between one member's messages.
+    #[serde(default)]
+    pub slow_mode_secs: Option<u32>,
     pub flags: Vec<RoleFlags>,
 }
 
@@ -384,6 +410,10 @@ impl KeyClient<'_> {
         if posting == Posting::Page {
             post["keep"] = kept_files(&body).into();
         }
+        // Only where it matters, so elsewhere the server can't tell edits and reactions apart.
+        if self.slow_mode.contains(channel) && follow_up(&body) {
+            post["follow_up"] = true.into();
+        }
         let response = self
             .request(Method::POST, &message_path(channel))
             .json(&post)
@@ -391,6 +421,14 @@ impl KeyClient<'_> {
             .await?;
         if let Err(error) = response.error_for_status_ref() {
             let status = response.status();
+            if status == StatusCode::TOO_MANY_REQUESTS {
+                if let Ok(wait) = response.json::<Wait>().await
+                    && wait.error == "slow_mode"
+                {
+                    return Err(SlowMode(wait.retry_after).into());
+                }
+                return Err(error.into());
+            }
             if backfill_at.is_some() {
                 let body = response.json::<serde_json::Value>().await.ok();
                 let code = body.as_ref().and_then(|v| v["error"].as_str());

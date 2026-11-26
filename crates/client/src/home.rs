@@ -118,6 +118,7 @@ pub mod person;
 mod pokes;
 pub mod polls;
 pub(crate) mod rows;
+pub(crate) mod slow_mode;
 mod switcher;
 pub(crate) mod user_bar;
 pub(crate) mod view_as;
@@ -299,6 +300,8 @@ enum Dialog {
         audio: Option<(u32, bool)>,
         /// Voice channels only: the member limit (0 for none), and whether it was changed.
         limit: Option<(u32, bool)>,
+        /// Text and forum channels only: slow mode seconds (0 for off), and whether changed.
+        slow: Option<(u32, bool)>,
         /// Role flags changed on the Permissions tab, sent with Save.
         flags: Vec<(String, u8)>,
     },
@@ -1179,6 +1182,8 @@ impl Home {
                     topic_changed: false,
                     audio: channel.voice.then_some((channel.audio_kbps, false)),
                     limit: channel.voice.then_some((channel.member_limit, false)),
+                    slow: (!channel.voice && !channel.page)
+                        .then_some((channel.slow_mode_secs, false)),
                     flags: Vec::new(),
                 },
                 ChannelEdit::Delete => {
@@ -2028,6 +2033,12 @@ impl Home {
                     if let Some(value) = synced.settings.get(key) {
                         self.synced.insert(key.into(), value.clone());
                     }
+                }
+            }
+            Update::SlowMode(address, channel, secs) => {
+                if let Some(index) = self.index(&address) {
+                    let chat = self.servers[index].chats.entry(channel).or_default();
+                    chat.slow_until = Some(now + secs as f64);
                 }
             }
             Update::ForumSent(address, channel, id) => {
@@ -5090,7 +5101,18 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
             At::Channel(_, channel) => Some(channel),
             At::Dm(_) => None,
         };
-        pane_title(ui, "chat-title", &title, in_server.then_some(layout), files);
+        let slow = match at {
+            At::Channel(index, channel) => servers[index].channel(&channel),
+            At::Dm(_) => None,
+        }
+        .map_or(0, |channel| channel.slow_mode_secs);
+        let members = in_server.then_some(&mut *layout);
+        pane_title_with(ui, "chat-title", &title, files, |ui| {
+            if let Some(layout) = members {
+                layout::members_button(ui, layout);
+            }
+            slow_mode::header_icon(ui, slow);
+        });
     }
     let act = friends::dm_card(ui, relation, request, &name);
     let (hovered, dropped) = ui.input(|input| {
@@ -5903,12 +5925,21 @@ fn composer(
     (emoji_picker, scope): (&mut Picker, &picker::Scope),
     (toast, now): (&mut Option<(String, f64)>, f64),
 ) -> (Option<Command>, Option<bool>) {
+    // Slow mode: after a new message here, the next waits (edits and reactions don't).
+    let slow = slow_mode::wait(dir, &channel);
+    let waiting = slow_mode::left(chat, now);
+    if let Some(seconds) = waiting {
+        slow_mode::countdown(ui, seconds);
+    }
     if let Some(editor) = &mut chat.poll_editor {
         match polls::editor(ui, editor, false) {
             Some(polls::Action::Cancel) => chat.poll_editor = None,
-            Some(polls::Action::Post) if online => {
+            Some(polls::Action::Post) if online && waiting.is_none() => {
                 let (question, part) = editor.poll(polls::now());
                 chat.poll_editor = None;
+                if slow > 0 {
+                    chat.slow_until = Some(now + f64::from(slow));
+                }
                 let draft = poll_draft(channel, question, part);
                 return (draft.map(Command::Send), None);
             }
@@ -5946,6 +5977,8 @@ fn composer(
     let ready = !chat.draft.trim().is_empty()
         || (chat.editing.is_none() && !chat.staged.is_empty())
         || emoji_picker.has_preview();
+    // While slow mode has this person waiting, only an edit can go.
+    let ready = ready && (waiting.is_none() || chat.editing.is_some());
     let mut attach = None;
     let mut send = false;
     let mut tabs = Vec::new();
@@ -6158,7 +6191,7 @@ fn composer(
         }
     }
     // A sticker goes out on its own, leaving the draft as it is.
-    if let Some((id, name, inline)) = sticker {
+    if let Some((id, name, inline)) = sticker.filter(|_| waiting.is_none()) {
         let Ok(message) = rusttalk_core::keys::random_key() else {
             tracing::warn!("no randomness for a message ID");
             return (None, attach);
@@ -6186,6 +6219,9 @@ fn composer(
         // Docked, the panel stays up for the next one, without the keyboard.
         if !picker::docked(ui.ctx()) {
             field.request_focus();
+        }
+        if slow > 0 {
+            chat.slow_until = Some(now + f64::from(slow));
         }
         return (Some(command), attach);
     }
@@ -6218,6 +6254,9 @@ fn composer(
     let editing = chat.editing.is_some();
     let nothing = text.is_empty() && (editing || chat.staged.is_empty());
     if !((focused && enter) || send) || nothing || count > MAX_TEXT_CHARS {
+        return (None, attach);
+    }
+    if waiting.is_some() && !editing {
         return (None, attach);
     }
     if !allowed {
@@ -6274,6 +6313,9 @@ fn composer(
     });
     chat.clear_draft();
     field.request_focus();
+    if slow > 0 && !editing {
+        chat.slow_until = Some(now + f64::from(slow));
+    }
     (Some(command), attach)
 }
 
@@ -7295,6 +7337,7 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
             topic_changed,
             audio,
             limit,
+            slow,
             flags,
         } => {
             let data = &home.servers[*server];
@@ -7363,6 +7406,9 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
                         });
                         *changed |= spin.changed();
                     }
+                    if let Some((secs, changed)) = slow {
+                        *changed |= slow_mode::picker(ui, secs);
+                    }
                     entered = name_entered || submitted(ui, &field);
                 }
                 ChannelTab::Permissions => {
@@ -7387,8 +7433,10 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
                 // Only what changed, so saving permissions doesn't log a rename too.
                 let audio_kbps = audio.and_then(|(kbps, changed)| changed.then_some(kbps));
                 let member_limit = limit.and_then(|(most, changed)| changed.then_some(most));
+                let slow_mode_secs = slow.and_then(|(secs, changed)| changed.then_some(secs));
                 let voice_changed = audio_kbps.is_some() || member_limit.is_some();
-                if name.trim() != channel.name || *topic_changed || voice_changed {
+                let settings_changed = voice_changed || slow_mode_secs.is_some();
+                if name.trim() != channel.name || *topic_changed || settings_changed {
                     command = Some((
                         *server,
                         Command::RenameChannel {
@@ -7397,6 +7445,7 @@ fn dialogs(ctx: &egui::Context, home: &mut Home) {
                             topic: topic_changed.then(|| topic.trim().to_owned()),
                             audio_kbps,
                             member_limit,
+                            slow_mode_secs,
                         },
                     ));
                 }
@@ -7955,6 +8004,7 @@ mod tests {
     mod reply_jump;
     mod server_emoji;
     mod settings_close;
+    mod slow_mode;
     mod sticker_picker;
     mod streams;
     mod switcher;
@@ -8022,6 +8072,7 @@ mod tests {
                 forum: false,
                 audio_kbps: 0,
                 member_limit: 0,
+                slow_mode_secs: 0,
                 focus_until: None,
                 flags: vec![("member".into(), 3)],
             }],
@@ -8308,6 +8359,7 @@ mod tests {
             forum: false,
             audio_kbps: 64,
             member_limit: 0,
+            slow_mode_secs: 0,
             focus_until: None,
             flags: readers.iter().map(|r| (r.to_string(), 15)).collect(),
         };

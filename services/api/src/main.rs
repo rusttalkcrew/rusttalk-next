@@ -15,6 +15,7 @@ mod metadata;
 mod page_files;
 mod presence;
 mod roles;
+mod slow_mode;
 mod store;
 mod sync;
 #[cfg(test)]
@@ -38,7 +39,7 @@ use axum::{
     extract::{MatchedPath, Request, rejection::JsonRejection},
     http::{
         HeaderMap, Method, StatusCode,
-        header::{CACHE_CONTROL, CONTENT_LENGTH},
+        header::{CACHE_CONTROL, CONTENT_LENGTH, RETRY_AFTER},
     },
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -119,6 +120,9 @@ struct ApiError {
     code: &'static str,
     /// The underlying error for the server log only, such as SQLite's message.
     detail: Option<String>,
+    /// For 429s: the seconds until the request may succeed, sent as `Retry-After` and
+    /// `retry_after`.
+    retry_after: Option<i64>,
 }
 
 impl ApiError {
@@ -127,6 +131,7 @@ impl ApiError {
             status,
             code,
             detail: None,
+            retry_after: None,
         }
     }
     fn bad_request(code: &'static str) -> Self {
@@ -143,6 +148,12 @@ impl ApiError {
     }
     fn internal(code: &'static str) -> Self {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, code)
+    }
+    fn too_many(code: &'static str, retry_after: i64) -> Self {
+        Self {
+            retry_after: Some(retry_after),
+            ..Self::new(StatusCode::TOO_MANY_REQUESTS, code)
+        }
     }
 }
 
@@ -184,7 +195,15 @@ impl IntoResponse for ApiError {
         } else {
             tracing::warn!(reason = self.code, "request rejected");
         }
-        (self.status, Json(json!({ "error": self.code }))).into_response()
+        match self.retry_after {
+            Some(secs) => (
+                self.status,
+                [(RETRY_AFTER, secs.to_string())],
+                Json(json!({ "error": self.code, "retry_after": secs })),
+            )
+                .into_response(),
+            None => (self.status, Json(json!({ "error": self.code }))).into_response(),
+        }
     }
 }
 

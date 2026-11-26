@@ -1913,3 +1913,16 @@ diagram.color_orange = Oranje
 diagram.color_red = Rood
 diagram.color_purple = Paars
 diagram.color_gray = Grijs
+
+# crates/client/src/home/slow_mode.rs
+slow_mode.title = Langzame modus
+slow_mode.help = Hoe lang elk lid wacht tussen berichten. Wie langzame modus mag omzeilen, wacht nooit.
+slow_mode.off = Uit
+slow_mode.seconds = {seconds} s
+slow_mode.minutes = {minutes} min
+slow_mode.hours = {hours} u
+slow_mode.wait = Je kunt over {seconds} s weer versturen
+slow_mode.header_tip = Langzame modus staat aan: één bericht per {time}
+perm.bypass_slow_mode = Langzame modus omzeilen
+perm.bypass_slow_mode_help = Berichten versturen in kanalen met langzame modus zonder te wachten.
+audit.slow_mode_changed = {actor} heeft de langzame modus in {channel} gewijzigd

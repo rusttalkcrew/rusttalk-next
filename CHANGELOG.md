@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Channel managers can turn on slow mode for a busy channel, from 5 seconds to 6 hours between each member's messages. The message box counts down until you can send again, and moderators can skip the wait.
+
 ## v0.9.1 - 2026-11-26
 
 - On Android, HEIC photos now work as attachments, profile pictures, server icons, emoji, stickers and page pictures; they are turned into JPEG on your phone.

@@ -3,8 +3,8 @@ use anyhow::{Context, Result, ensure};
 use reqwest::{Method, StatusCode};
 use rusttalk_core::{
     auth::encode,
-    client::{Event, KeyClient, MessageBody, MessageError},
-    keys::{self, KeyState, Scope},
+    client::{Event, KeyClient, MessageBody, MessageError, SlowMode},
+    keys::{self, KeyState, Metadata, Scope},
     messages::{
         Ballot, MessageContext, Poll, PollPart, Reaction, ReactionEmoji, reaction_vote, tally,
         tally_reactions,
@@ -31,7 +31,9 @@ const REACTED: &str = "#511 Peridot Message With Reactions";
 const PAGE: &str = "#210 Malachite Page by a moderator";
 const POST: &str = "# #211 Topaz Forum Post\nby a member";
 const REPLY: &str = "#211 Beryl Forum Reply";
-pub(super) const TEXTS: [&str; 17] = [
+const SLOW_FIRST: &str = "#660 Jasper First Slow Message";
+const SLOW_EDIT: &str = "#660 Agate Edited Slow Message";
+pub(super) const TEXTS: [&str; 19] = [
     TEXT_A,
     TEXT_B,
     DM_A,
@@ -49,6 +51,8 @@ pub(super) const TEXTS: [&str; 17] = [
     PAGE,
     POST,
     REPLY,
+    SLOW_FIRST,
+    SLOW_EDIT,
 ];
 
 fn body(text: &str) -> MessageBody {
@@ -422,6 +426,7 @@ pub(super) async fn scenario(
     reactions(a, b, c, text).await?;
     page(a, b, c, &category).await?;
     forum(a, b, c, &category).await?;
+    slow_mode(a, b, c, text).await?;
     Ok((dm, b_message))
 }
 
@@ -546,6 +551,98 @@ async fn reactions(
     expected.sort();
     ensure!(result == expected, "unexpected reactions {result:?}");
     println!("#511 verified encrypted reactions: two people, one taken back");
+    Ok(())
+}
+
+/// #660: only a channel manager turns on slow mode, which is audited. Then C, a member,
+/// waits between messages (but not for an edit), while B, a moderator, doesn't.
+async fn slow_mode(
+    a: &mut KeyClient<'_>,
+    b: &mut KeyClient<'_>,
+    c: &mut KeyClient<'_>,
+    text: Scope,
+) -> Result<()> {
+    let catalog = a.catalog().await?;
+    let channel = (catalog.channels.iter())
+        .find(|channel| channel.id == text.id)
+        .context("text channel missing")?;
+    let name = a.decrypt_metadata(
+        Metadata::ChannelName,
+        &text.id,
+        channel
+            .name_ct
+            .as_deref()
+            .context("channel without a name")?,
+    )?;
+    let update = json!({
+        "category_id": channel.category_id,
+        "position": channel.position,
+        "name_ct": a.encrypt_metadata(Metadata::ChannelName, &text.id, &name)?,
+    });
+    let set = |client: &KeyClient<'_>, secs: u32| {
+        let mut update = update.clone();
+        update["slow_mode_secs"] = secs.into();
+        client
+            .request(Method::PUT, &format!("/v1/channels/{}", encode(&text.id)))
+            .json(&update)
+            .send()
+    };
+    rejected(
+        set(b, 60).await?,
+        StatusCode::FORBIDDEN,
+        "permission_denied",
+    )
+    .await?;
+    rejected(
+        set(a, 7).await?,
+        StatusCode::BAD_REQUEST,
+        "invalid_slow_mode",
+    )
+    .await?;
+    set(a, 60).await?.error_for_status()?;
+    let listed = a
+        .catalog()
+        .await?
+        .channels
+        .into_iter()
+        .find(|c| c.id == text.id);
+    assert_eq!(listed.and_then(|c| c.slow_mode_secs), Some(60));
+    let audit: Vec<Value> = a
+        .request(Method::GET, "/v1/audit")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    ensure!(
+        audit.iter().any(|row| row["action"] == "slow_mode_changed"
+            && row["target_id"] == encode(&text.id)
+            && row["details"]["after"] == 60),
+        "missing slow mode audit"
+    );
+
+    // The app marks follow-ups such as edits in a slow mode channel.
+    c.slow_mode.insert(text.id);
+    let first = c.send_message(&text.id, &body(SLOW_FIRST)).await?;
+    let refused = c.send_message(&text.id, &body(SLOW_FIRST)).await;
+    let wait = refused
+        .err()
+        .and_then(|error| error.downcast::<SlowMode>().ok())
+        .context("a second message went through slow mode")?;
+    ensure!((1..=60).contains(&wait.0), "unexpected wait {}", wait.0);
+    let mut edit = body(SLOW_EDIT);
+    edit.edit_of = Some(first.id);
+    c.send_message(&text.id, &edit).await?;
+    // A moderator bypasses it.
+    for _ in 0..2 {
+        b.send_message(&text.id, &body(SLOW_FIRST)).await?;
+    }
+    set(a, 0).await?.error_for_status()?;
+    c.send_message(&text.id, &body(SLOW_FIRST)).await?;
+    c.slow_mode.clear();
+    println!(
+        "#660 verified slow mode: managed, audited, enforced per member, bypassed by moderators"
+    );
     Ok(())
 }
 

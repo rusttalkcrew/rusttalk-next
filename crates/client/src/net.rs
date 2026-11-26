@@ -205,6 +205,8 @@ pub enum Command {
         audio_kbps: Option<u32>,
         /// Voice channels only: 0 lifts the limit.
         member_limit: Option<u32>,
+        /// Text channels only: 0 turns slow mode off.
+        slow_mode_secs: Option<u32>,
     },
     RenameCategory(Id, String),
     DeleteChannel(Id),
@@ -524,6 +526,8 @@ pub enum Update {
     Synced(Box<Synced>),
     /// Sending this message failed; put it back in the composer.
     Unsent(Url, Draft),
+    /// Slow mode refused a message in this channel: the seconds to wait.
+    SlowMode(Url, Id, u64),
     ForumSent(Url, Id, Id),
     Failed(String),
 }
@@ -2140,6 +2144,11 @@ async fn send(
     leftover: (usize, Vec<rusttalk_core::client::Attachment>),
 ) -> Result<()> {
     let sent = files::post(ctx, url, client, state, target, dm, body, leftover).await;
+    if let Err(error) = &sent
+        && let Some(wait) = error.downcast_ref::<rusttalk_core::client::SlowMode>()
+    {
+        ctx.send(Update::SlowMode(url.clone(), target.0, wait.0));
+    }
     if matches!(sent, Ok(true)) && draft.forum_post {
         ctx.send(Update::ForumSent(url.clone(), target.0, draft.id));
     } else if !matches!(sent, Ok(true)) {
@@ -2224,6 +2233,11 @@ async fn run_command(
 fn report(ctx: &Ctx, error: anyhow::Error) {
     tracing::warn!(error = %format_args!("{error:#}"), "server request failed");
     let full = error.is::<rusttalk_core::client::voice::ChannelFull>();
+    if let Some(wait) = error.downcast_ref::<rusttalk_core::client::SlowMode>() {
+        let text = t!("slow_mode.wait", seconds = wait.0);
+        ctx.send(Update::Failed(text));
+        return;
+    }
     let text = match error.downcast_ref::<MessageError>() {
         Some(MessageError::ServerUpdateRequired) => t!("net.rotation_update"),
         Some(MessageError::TextLimit) => t!("net.text_limit"),
@@ -2937,9 +2951,11 @@ async fn on_command(
             topic,
             audio_kbps,
             member_limit,
+            slow_mode_secs,
         } => {
             let topic = topic.as_deref();
-            directory::rename_channel(client, &id, &name, topic, audio_kbps, member_limit).await?;
+            let (limit, slow) = (member_limit, slow_mode_secs);
+            directory::rename_channel(client, &id, &name, topic, audio_kbps, limit, slow).await?;
         }
         Command::RenameCategory(id, name) => {
             directory::rename_category(client, &id, &name).await?;

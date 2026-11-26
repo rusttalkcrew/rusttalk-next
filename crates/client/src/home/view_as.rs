@@ -80,6 +80,7 @@ pub fn preview(real: &Directory, roles: &[String]) -> Directory {
         create_events: mine.create_events && grants("create_events"),
         manage_events: mine.manage_events && grants("manage_events"),
         start_focus: mine.start_focus && grants("start_focus"),
+        bypass_slow_mode: mine.bypass_slow_mode && grants("bypass_slow_mode"),
         rank: (roles.iter().map(|role| role.rank).max())
             .unwrap_or(-1)
             .min(mine.rank),
@@ -313,6 +314,7 @@ mod tests {
             forum: false,
             audio_kbps: 0,
             member_limit: 0,
+            slow_mode_secs: 0,
             focus_until: None,
             flags: readers.iter().map(|r| (r.to_string(), 3)).collect(),
         }
