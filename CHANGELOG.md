@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Large phone photos sent without a preview now show in albums and the gallery too, and right-clicking (or long-pressing) a picture in the viewer lets you copy or save it.
+
 ## v0.8.1 - 2026-11-26
 
 - Several pictures or videos in one message now show together as one album, and the picture viewer steps through them with the arrow keys, on-screen buttons or a swipe, showing which one you are on.

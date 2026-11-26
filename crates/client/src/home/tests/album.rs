@@ -89,18 +89,27 @@ fn fixture(dark: bool, size: Vec2, albums: &[(&str, usize)]) -> Fixture {
 impl Fixture {
     /// Answer every picture request so far; returns which whole pictures were asked for.
     fn load(&mut self) -> Vec<Id> {
-        let mut full = Vec::new();
+        self.answer()
+            .into_iter()
+            .filter_map(|(id, fetch)| (fetch == Fetch::Full).then_some(id))
+            .collect()
+    }
+
+    /// Answer every picture request so far; returns what was asked for.
+    fn answer(&mut self) -> Vec<(Id, Fetch)> {
+        let mut asked = Vec::new();
         for _ in 0..3 {
             let commands: Vec<_> = std::iter::from_fn(|| self.sent.try_recv().ok()).collect();
             for command in commands {
-                let Command::Image(blob, fetch @ (Fetch::Thumbnail | Fetch::Full)) = command else {
+                let Command::Image(blob, fetch @ (Fetch::Thumbnail | Fetch::Full | Fetch::Inline)) =
+                    command
+                else {
                     continue;
                 };
-                if fetch == Fetch::Full {
-                    full.push(blob.id);
-                }
+                asked.push((blob.id, fetch));
                 let bytes = &self.blobs.iter().find(|(id, _)| *id == blob.id).unwrap().1;
-                let frames = decode_frames(bytes, None, 64 * 1024 * 1024).unwrap();
+                let fit = (fetch == Fetch::Inline).then_some(crate::files::THUMBNAIL as u32);
+                let frames = decode_frames(bytes, fit, 64 * 1024 * 1024).unwrap();
                 let frames = frames.into_iter().map(crate::net::frame_image).collect();
                 let update = Update::Image(self.address.clone(), blob, fetch, Ok(frames));
                 let ctx = self.h.ctx.clone();
@@ -108,7 +117,7 @@ impl Fixture {
             }
             self.h.run_steps(3);
         }
-        full
+        asked
     }
 
     fn cell(&self, label: &str) -> egui::Pos2 {
@@ -332,4 +341,126 @@ fn swipe(h: &mut egui_kittest::Harness<'_, Home>, from: egui::Pos2, to: egui::Po
         modifiers: egui::Modifiers::NONE,
     });
     h.run_steps(3);
+}
+
+fn right_click(h: &mut egui_kittest::Harness<'_, Home>, pos: egui::Pos2) {
+    h.event(egui::Event::PointerMoved(pos));
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.run_steps(1);
+    }
+    h.run_steps(2);
+}
+
+/// Where the texture made last is painted.
+fn newest_painted(h: &egui_kittest::Harness<'_, Home>) -> Option<egui::Rect> {
+    let texture = *h
+        .ctx
+        .tex_manager()
+        .read()
+        .allocated()
+        .max_by_key(|(id, _)| **id)?
+        .0;
+    h.ctx
+        .tessellate(h.output().shapes.clone(), h.output().pixels_per_point)
+        .iter()
+        .find_map(|shape| match &shape.primitive {
+            egui::epaint::Primitive::Mesh(mesh) if mesh.texture_id == texture => {
+                Some(mesh.calc_bounds())
+            }
+            _ => None,
+        })
+}
+
+/// A picture sent without a thumbnail (large phone photos from older apps) loads its
+/// original, decoded small, into its album cell instead of staying a placeholder.
+#[test]
+fn album_picture_without_a_thumbnail_shows_its_original() {
+    let mut f = fixture(true, Vec2::new(1100.0, 700.0), &[("Beach", 2)]);
+    let file = {
+        let chat = f.h.state_mut().servers[0].chats.get_mut(&PROJECTS).unwrap();
+        let file = &mut chat.messages[0].files[0];
+        file.thumbnail = None;
+        file.clone()
+    };
+    f.h.run_steps(3);
+    let asked = f.answer();
+    assert_eq!(asked, [(file.file.id, Fetch::Inline)]);
+    f.h.run_steps(2);
+    let cell = f.h.get_by_label("Beach 1.jpg").rect();
+    let shown = newest_painted(&f.h).expect("the original is painted");
+    assert!(
+        (shown.center() - cell.center()).length() < 1.0 && shown.width() >= cell.width() - 1.0,
+        "{shown:?} fills {cell:?}"
+    );
+    // It stays loaded: no new request while it shows.
+    f.h.run_steps(3);
+    assert!(f.answer().is_empty());
+}
+
+/// Right-clicking the open picture offers "Copy image" and "Save as…", which do what
+/// they do in the chat; the viewer stays open. Set `RUSTTALK_ALBUM_SCREENSHOTS` to a
+/// folder to save the menu.
+#[test]
+fn viewer_menu_copies_and_saves_the_picture() {
+    let _picker = super::uploads::PICKER_TEST.lock().unwrap();
+    let _reset = super::uploads::ResetPicker;
+    *crate::files::TEST_ANSWER.lock().unwrap() =
+        Some(|name| vec![PathBuf::from("/nonexistent/rusttalk-saves").join(name.unwrap())]);
+    for dark in [true, false] {
+        let theme = if dark { "dark" } else { "light" };
+        for size in [Vec2::new(390.0, 844.0), Vec2::new(1100.0, 700.0)] {
+            let at = format!("{}x{}", size.x, size.y);
+            let mut f = fixture(dark, size, &[("Hills", 3)]);
+            let file = f.h.state().servers[0].chats[&PROJECTS].messages[0].files[1].clone();
+            let cell = f.cell("Hills 2.jpg");
+            click(&mut f.h, cell);
+            assert_eq!(f.load(), [file.file.id]);
+            let picture = newest_painted(&f.h).expect("the picture shows");
+            right_click(&mut f.h, picture.center());
+            f.h.get_by_label(t!("files.save_as"));
+            f.h.get_by_label(t!("files.copy_image")).hover();
+            f.h.run_steps(2);
+            f.shot(&format!("{theme}-viewer-menu-{at}"));
+
+            f.h.get_by_label(t!("files.copy_image")).click();
+            f.h.run_steps(3);
+            let asked: Vec<_> = std::iter::from_fn(|| f.sent.try_recv().ok())
+                .filter_map(|command| match command {
+                    Command::Image(blob, fetch) => Some((blob.id, fetch)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(asked, [(file.file.id, Fetch::Copy)]);
+            assert!(f.h.query_by_label(t!("files.copy_image")).is_none());
+            assert_eq!(f.position().as_deref(), Some("2 / 3"));
+
+            right_click(&mut f.h, picture.center());
+            f.h.get_by_label(t!("files.save_as")).click();
+            f.h.run_steps(3);
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            let answers = loop {
+                let answers = f.h.state_mut().files.answers();
+                if !answers.is_empty() || std::time::Instant::now() > deadline {
+                    break answers;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            let [(crate::files::Ask::Save(_, asked), paths)] = &answers[..] else {
+                panic!("no save dialog");
+            };
+            assert_eq!(asked.file.id, file.file.id);
+            assert_eq!(paths[0].file_name().unwrap(), "Hills 2.jpg");
+            assert_eq!(f.position().as_deref(), Some("2 / 3"));
+
+            // The viewer's own gestures still work: Escape closes it.
+            f.key(egui::Key::Escape);
+            assert!(f.position().is_none());
+        }
+    }
 }
