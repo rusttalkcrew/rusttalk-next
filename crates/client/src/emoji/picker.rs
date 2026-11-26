@@ -473,7 +473,11 @@ impl Picker {
     }
 
     /// Open the emoji tab without a composer button, to pick a reaction.
-    pub fn open_for_reaction(&mut self) {
+    pub fn open_for_reaction(&mut self, ctx: &egui::Context, editor: egui::Id) {
+        // Docked, the panel takes the keyboard's place.
+        if docked(ctx) {
+            ctx.memory_mut(|memory| memory.surrender_focus(editor));
+        }
         self.open = true;
         self.reaction = true;
         self.tab = Tab::Emoji;
@@ -485,15 +489,22 @@ impl Picker {
     }
 
     /// The panel while open: above `anchor` on a desktop, or here (under the composer)
-    /// when docked. Returns whether it was open before this frame, for `button`, and
-    /// what was picked.
-    pub fn show(&mut self, ui: &mut Ui, anchor: Rect, scope: &Scope) -> (bool, Option<Picked>) {
+    /// when docked. A click outside it closes it, except in `keep`: the message box on
+    /// a desktop, so typing goes on; the composer when docked, whose box swaps the
+    /// panel for the keyboard instead (see `keyboard_took_over`). Returns whether it was
+    /// open before this frame, for `button`, and what was picked.
+    pub fn show(
+        &mut self,
+        ui: &mut Ui,
+        (anchor, keep): (Rect, Rect),
+        scope: &Scope,
+    ) -> (bool, Option<Picked>) {
         let was_open = self.open;
         let picked = if !docked(ui.ctx()) {
             let metrics = Metrics::new(ui.ctx(), None);
             let mut open = self.open;
             let id = egui::Id::unique("picker");
-            let picked = ui::panel_popup(ui, id, anchor, &mut open, |ui| {
+            let picked = ui::panel_popup(ui, id, (anchor, keep), &mut open, |ui| {
                 ui.set_width(metrics.width);
                 self.panel(ui, scope, &metrics)
             })
@@ -505,14 +516,20 @@ impl Picker {
             // Less the frame's border on each side.
             let metrics = Metrics::new(ui.ctx(), Some(ui.available_width() - 2.0));
             let c = ui::colors(ui);
-            let picked = Frame::new()
+            let panel = Frame::new()
                 .fill(c.raised)
                 .stroke(Stroke::new(1.0, c.border))
                 .corner_radius(ui::RADIUS_WINDOW)
-                .show(ui, |ui| self.panel(ui, scope, &metrics))
-                .inner;
+                .show(ui, |ui| self.panel(ui, scope, &metrics));
+            // A tap on the chat or the header puts it away; a drag (scrolling) does not.
+            let outside = ui.input(|input| {
+                input.pointer.any_click()
+                    && (input.pointer.interact_pos())
+                        .is_some_and(|at| !panel.response.rect.contains(at) && !keep.contains(at))
+            });
+            let picked = panel.inner;
             // It stays open for the next one, as a keyboard would; a reaction is one.
-            if picked.is_some() && self.reaction {
+            if outside || picked.is_some() && self.reaction {
                 self.close();
             }
             picked
@@ -526,6 +543,16 @@ impl Picker {
             self.remember(sequence);
         }
         (was_open, picked)
+    }
+
+    /// Docked, the panel and the keyboard are never up together: the message box
+    /// `editor` taking focus (a tap on it, or Edit) closes the panel, and the panel
+    /// opening (`button`, `open_for_reaction`) takes the focus away, which hides the
+    /// keyboard (egui-winit stops the IME; on Android `android::frame_end` hides it).
+    pub fn keyboard_took_over(&mut self, ctx: &egui::Context, editor: egui::Id) {
+        if self.open && docked(ctx) && ctx.memory(|memory| memory.has_focus(editor)) {
+            self.close();
+        }
     }
 
     /// Docked: whether a sticker waits above the composer, which Send then sends.

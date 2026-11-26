@@ -180,3 +180,82 @@ fn holding_a_nested_file_opens_its_menu_instead_of_the_message_menu() {
     h.get_by_label("Open file");
     assert!(h.query_by_label("Reply").is_none());
 }
+
+/// A short chat between Ann and this person, made up for tests and screenshots.
+pub(super) fn add_chat(h: &mut Harness<'static, Option<Home>>) {
+    let chat = h.state_mut().as_mut().unwrap().servers[0]
+        .chats
+        .get_mut(&PROJECTS)
+        .unwrap();
+    let lines = [
+        (ANN, "Morning! Did the new build land?"),
+        (ME, "Yes, it is on the test phone now"),
+        (ANN, "Great, I will try the stickers after lunch"),
+        (ME, "See you tomorrow"),
+    ];
+    for (i, (person, text)) in lines.into_iter().enumerate() {
+        chat.messages.push(Msg {
+            id: [i as u8 + 1; 32],
+            person,
+            body: Body::Text(text.into()),
+            at: 1_700_000_000 + i as i64 * 60,
+            backfilled: false,
+            reply_to: None,
+            quoted_author: None,
+            edit_of: None,
+            files: vec![],
+            live: None,
+            sticker: None,
+            replicas: vec![],
+            copy_files: vec![],
+        });
+    }
+    h.run_steps(4);
+}
+
+/// Whether the row of `text` has the hover fill behind it.
+fn row_lit(h: &Harness<'static, Option<Home>>, text: &str) -> bool {
+    let at = h.get_by_label(text).rect().center();
+    let dark = h.ctx.global_style().visuals.dark_mode;
+    let fill = ui::appearance(&h.ctx).palette(dark).hover_soft;
+    (h.output().shapes.iter()).any(|clipped| match &clipped.shape {
+        egui::Shape::Rect(rect) => rect.fill == fill && rect.rect.contains(at),
+        _ => false,
+    })
+}
+
+/// A long press keeps the message lit while its menu is open (#653).
+#[test]
+fn long_press_lights_the_row_while_its_menu_is_open() {
+    for dark in [true, false] {
+        let (mut h, _sent) = files_harness(dark);
+        h.set_size(Vec2::new(390.0, 844.0));
+        h.ctx.data_mut(|d| d.insert_temp(files_id(PROJECTS), false));
+        add_chat(&mut h);
+        let text = "Yes, it is on the test phone now";
+        let pos = h.get_by_label(text).rect().center();
+        assert!(!row_lit(&h, text));
+        finger(&mut h, TouchPhase::Start, pos);
+        h.run_steps(8);
+        finger(&mut h, TouchPhase::End, pos);
+        h.run_steps(2);
+        h.get_by_label("Copy text");
+        assert!(row_lit(&h, text), "the pressed message is lit");
+        assert!(!row_lit(&h, "See you tomorrow"), "only that one");
+        if let Some(dir) = std::env::var_os("RUSTTALK_PICKER_KEYBOARD_SCREENSHOTS") {
+            let dir = std::path::PathBuf::from(dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let theme = if dark { "dark" } else { "light" };
+            (h.render().unwrap())
+                .save(dir.join(format!("phone-390x844-{theme}-long-press-menu.png")))
+                .unwrap();
+        }
+        // A tap elsewhere closes the menu and puts the row back.
+        let empty = egui::pos2(380.0, 120.0);
+        finger(&mut h, TouchPhase::Start, empty);
+        finger(&mut h, TouchPhase::End, empty);
+        h.run_steps(3);
+        assert!(h.query_by_label("Copy text").is_none());
+        assert!(!row_lit(&h, text));
+    }
+}

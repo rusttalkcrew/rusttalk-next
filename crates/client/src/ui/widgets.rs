@@ -708,15 +708,24 @@ pub fn card_popup<R>(
 }
 
 /// A larger popup above the right end of `anchor`, open while `open` is set; a click
-/// outside it or Escape clears it. The frame has no padding, so a rail or a bar can
-/// run to its edges.
+/// outside it and `keep` or Escape clears it. The frame has no padding, so a rail or a
+/// bar can run to its edges.
 pub fn panel_popup<R>(
     ui: &Ui,
     id: Id,
-    anchor: Rect,
+    (anchor, keep): (Rect, Rect),
     open: &mut bool,
     add: impl FnOnce(&mut Ui) -> R,
 ) -> Option<R> {
+    let in_keep = ui.input(|input| {
+        input.pointer.any_click()
+            && (input.pointer.interact_pos()).is_some_and(|at| keep.contains(at))
+    });
+    let close = if in_keep {
+        PopupCloseBehavior::IgnoreClicks
+    } else {
+        PopupCloseBehavior::CloseOnClickOutside
+    };
     let c = colors(ui);
     let frame = Frame::new()
         .fill(c.raised)
@@ -726,7 +735,7 @@ pub fn panel_popup<R>(
     Popup::new(id, ui.ctx().clone(), anchor, ui.layer_id())
         .kind(PopupKind::Popup)
         .open_bool(open)
-        .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
+        .close_behavior(close)
         .align(RectAlign::TOP_END)
         .gap(SPACE_S)
         .frame(frame)

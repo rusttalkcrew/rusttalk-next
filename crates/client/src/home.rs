@@ -5516,7 +5516,7 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
         }
         Some(Pick::AddReaction(id)) => {
             chat.reacting = Some(id);
-            emoji_picker.open_for_reaction();
+            emoji_picker.open_for_reaction(ui.ctx(), composer_id(key));
         }
         Some(Pick::Poll(part)) => {
             if let Some(draft) = poll_draft(key, String::new(), part) {
@@ -5951,6 +5951,7 @@ fn composer(
     let mut tabs = Vec::new();
     let button = Vec2::splat(COMPOSER_BUTTON);
     // On a phone, a tapped sticker waits here, above the box, until tapped or sent.
+    let top = ui.cursor().top();
     let previewed = emoji_picker.preview(ui, scope);
     let bar = Frame::new()
         .fill(ui::colors(ui).composer)
@@ -6042,7 +6043,15 @@ fn composer(
     } else {
         scope
     };
-    let (was_open, picked) = emoji_picker.show(ui, bar.response.rect, shown_scope);
+    // Docked, a tap anywhere on the composer (and the sticker above it) leaves the
+    // panel to the buttons and the box; on a desktop only the box keeps it open.
+    let keep = if picker::docked(ui.ctx()) {
+        bar.response.rect.with_min_y(top)
+    } else {
+        field.interact_rect
+    };
+    let anchor = (bar.response.rect, keep);
+    let (was_open, picked) = emoji_picker.show(ui, anchor, shown_scope);
     for (response, tab) in &tabs {
         emoji_picker.button(response, *tab, editor, was_open);
     }
@@ -6050,10 +6059,8 @@ fn composer(
     let picked = picked
         .or(previewed)
         .or_else(|| send.then(|| emoji_picker.send_preview(scope)).flatten());
-    // Docked, tapping the box brings the keyboard back in the panel's place.
-    if picker::docked(ui.ctx()) && field.clicked() {
-        emoji_picker.close();
-    }
+    // Docked, the box taking focus brings the keyboard back in the panel's place.
+    emoji_picker.keyboard_took_over(ui.ctx(), editor);
     if chat.reacting.is_some() && (picked.is_some() || !emoji_picker.is_reacting()) {
         chat.reacting = None;
     }
@@ -6176,7 +6183,10 @@ fn composer(
             preview: None,
             inline,
         });
-        field.request_focus();
+        // Docked, the panel stays up for the next one, without the keyboard.
+        if !picker::docked(ui.ctx()) {
+            field.request_focus();
+        }
         return (Some(command), attach);
     }
     let parser_input = chat.mentions.parser_input(&chat.draft);
@@ -6798,9 +6808,13 @@ fn message(
     // The toolbar is a mouse feature. On a touch screen a tap does nothing here and a
     // long press opens the menu above; egui keeps the finger as a hover after a tap.
     let hovered = !ui::TOUCH && !ui.input(|i| i.any_touches()) && ui.rect_contains_pointer(rect);
+    // While its menu is open the row stays lit, so it is clear which message it is for.
+    let menu_open =
+        ui::menu_open(&anchor) || media.iter().any(|shown| ui::menu_open(&shown.response));
+    let lit = hovered || menu_open;
     if pinged {
-        ui::mention_highlight(ui, background, rect.expand(2.0), hovered);
-    } else if hovered {
+        ui::mention_highlight(ui, background, rect.expand(2.0), lit);
+    } else if lit {
         ui.painter().set(
             background,
             Shape::rect_filled(rect.expand(2.0), ui::RADIUS_S, ui::colors(ui).hover_soft),
@@ -6811,7 +6825,7 @@ fn message(
         let left = 1.0 - (ui.input(|i| i.time) - since) / REPLY_FLASH_SECS;
         if left > 0.0 {
             let c = ui::colors(ui);
-            let surface = if hovered { c.hover_soft } else { c.main };
+            let surface = if lit { c.hover_soft } else { c.main };
             let fill = surface.lerp_to_gamma(ui::accent(ui).base, 0.3 * left.min(1.0) as f32);
             ui.painter().set(
                 background,
