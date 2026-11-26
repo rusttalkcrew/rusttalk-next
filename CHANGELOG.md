@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Several pictures or videos in one message now show together as one album, and the picture viewer steps through them with the arrow keys, on-screen buttons or a swipe, showing which one you are on.
+
 ## v0.8.0 - 2026-11-26
 
 - Reconnecting after a network drop is quicker on busy servers: the app keeps the keys and devices it already checked instead of checking them all again.

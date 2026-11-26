@@ -17,8 +17,9 @@ use std::{
 };
 
 use eframe::egui::{
-    self, Align, Frame, Id as UiId, Image, Layout, Margin, Modal, Rect, Response, RichText, Role,
-    ScrollArea, Sense, TextureHandle, TextureOptions, Ui, UiBuilder, Vec2, WidgetInfo,
+    self, Align, CornerRadius, Frame, Id as UiId, Image, Layout, Margin, Modal, Rect, Response,
+    RichText, Role, ScrollArea, Sense, TextureHandle, TextureOptions, Ui, UiBuilder, Vec2,
+    WidgetInfo,
 };
 use rusttalk_core::client::{Attachment, BlobRef, save_json};
 use tokio::sync::mpsc::UnboundedSender;
@@ -73,6 +74,8 @@ const MAX_PICTURES: usize = 200;
 const PICTURES_SLACK: usize = MAX_PICTURES / 4;
 /// Decoded bytes all received emoji and sticker files may hold together.
 const STICKER_BUDGET: usize = 256 * 1024 * 1024;
+/// How far a finger moves sideways in the viewer to go to the next or previous picture.
+const SWIPE: f32 = 50.0;
 
 /// Tests answer file dialogs here instead of opening one: given the suggested
 /// name when saving (`None` when opening), return the chosen paths.
@@ -1409,30 +1412,23 @@ pub fn media_kind(file: &Attachment) -> Option<MediaKind> {
     }
 }
 
-/// A square tile in a gallery: the thumbnail cut to a square (playing when `play`, for
-/// a small animation), with a badge for a GIF, a video or another type. Clicking it is
-/// the caller's; this adds the file's menu, with "Jump to message" when the shot has
-/// one. Returns the tile and whether "Jump to message" was picked.
-pub fn gallery_tile(
+/// A picture or video cut to fill `rect`: its thumbnail, or its small animation playing
+/// when `play`, with a badge for a GIF, a video or another type and the download's
+/// progress. Shared by the gallery's tiles and a message's album.
+#[allow(clippy::too_many_arguments)]
+fn media_face(
     ui: &mut Ui,
     files: &mut Files,
-    shot: &Shot,
+    commands: &UnboundedSender<Command>,
+    file: &Attachment,
     kind: MediaKind,
     rect: Rect,
     play: bool,
-) -> (Response, bool) {
-    let file = &shot.file;
-    let commands = &shot.commands;
+    radius: CornerRadius,
+) {
     let c = ui::colors(ui);
-    let response = ui.interact(
-        rect,
-        UiId::unique(("gallery-tile", file.file.id)),
-        Sense::click(),
-    );
-    let label = format!("{} · {}", file.name, shot.caption);
-    response.widget_info(|| WidgetInfo::labeled(Role::Button, true, &label));
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 0.0, c.side);
+    painter.rect_filled(rect, radius, c.side);
     let now = ui.input(|input| input.time);
     let play = play && plays_inline(&file.name, &file.media_type, file.file.size.into());
     if play {
@@ -1458,8 +1454,11 @@ pub fn gallery_tile(
         });
     let shown = playing.or(still);
     if let Some(texture) = shown {
-        let uv = square_uv(texture.size_vec2());
-        painter.image(texture.id(), rect, uv, egui::Color32::WHITE);
+        let uv = fill_uv(texture.size_vec2(), rect.size());
+        Image::new(texture)
+            .uv(uv)
+            .corner_radius(radius)
+            .paint_at(ui, rect);
     }
     match kind {
         MediaKind::Video => {
@@ -1510,6 +1509,40 @@ pub fn gallery_tile(
         let fill = Rect::from_min_size(bar.min, Vec2::new(bar.width() * done, bar.height()));
         painter.rect_filled(fill, 0.0, ui::accent(ui).base);
     }
+}
+
+/// A square tile in a gallery: the thumbnail cut to a square (playing when `play`, for
+/// a small animation), with a badge for a GIF, a video or another type. Clicking it is
+/// the caller's; this adds the file's menu, with "Jump to message" when the shot has
+/// one. Returns the tile and whether "Jump to message" was picked.
+pub fn gallery_tile(
+    ui: &mut Ui,
+    files: &mut Files,
+    shot: &Shot,
+    kind: MediaKind,
+    rect: Rect,
+    play: bool,
+) -> (Response, bool) {
+    let file = &shot.file;
+    let commands = &shot.commands;
+    let response = ui.interact(
+        rect,
+        UiId::unique(("gallery-tile", file.file.id)),
+        Sense::click(),
+    );
+    let label = format!("{} · {}", file.name, shot.caption);
+    response.widget_info(|| WidgetInfo::labeled(Role::Button, true, &label));
+    media_face(
+        ui,
+        files,
+        commands,
+        file,
+        kind,
+        rect,
+        play,
+        CornerRadius::ZERO,
+    );
+    let painter = ui.painter_at(rect);
     if response.hovered() {
         painter.rect_filled(rect, 0.0, egui::Color32::from_white_alpha(20));
     }
@@ -1544,14 +1577,174 @@ pub fn gallery_tile(
     (response, jump)
 }
 
-/// The middle square of a picture of `size`, in texture coordinates.
-fn square_uv(size: Vec2) -> Rect {
+/// An album is at most this wide, and as wide as the chat on a phone.
+const ALBUM_WIDTH: f32 = 400.0;
+const ALBUM_GAP: f32 = 2.0;
+/// Cells an album shows; the last one tells how many more there are.
+const ALBUM_CELLS: usize = 4;
+
+/// Where an album of `count` (2 or more) pictures `width` wide puts them, from its top
+/// left, and how tall it is: two side by side, three as a big one and two small ones,
+/// and four or more as two by two. Every cell is square.
+pub(crate) fn album_cells(count: usize, width: f32) -> (Vec<Rect>, f32) {
+    let cell =
+        |x: f32, y: f32, w: f32, h: f32| Rect::from_min_size(egui::pos2(x, y), Vec2::new(w, h));
+    let half = (width - ALBUM_GAP) / 2.0;
+    match count {
+        0..=2 => (
+            vec![
+                cell(0.0, 0.0, half, half),
+                cell(half + ALBUM_GAP, 0.0, half, half),
+            ],
+            half,
+        ),
+        3 => {
+            let small = (width - 2.0 * ALBUM_GAP) / 3.0;
+            let big = 2.0 * small + ALBUM_GAP;
+            let x = big + ALBUM_GAP;
+            let cells = vec![
+                cell(0.0, 0.0, big, big),
+                cell(x, 0.0, small, small),
+                cell(x, small + ALBUM_GAP, small, small),
+            ];
+            (cells, big)
+        }
+        _ => {
+            let far = half + ALBUM_GAP;
+            let cells = vec![
+                cell(0.0, 0.0, half, half),
+                cell(far, 0.0, half, half),
+                cell(0.0, far, half, half),
+                cell(far, far, half, half),
+            ];
+            (cells, width)
+        }
+    }
+}
+
+/// Rounded corners for the corners of `cell` that are the album's (`outer`) own.
+fn outer_corners(cell: Rect, outer: Rect) -> CornerRadius {
+    let at = |a: f32, b: f32| (a - b).abs() < 0.5;
+    let (left, top) = (at(cell.left(), outer.left()), at(cell.top(), outer.top()));
+    let (right, bottom) = (
+        at(cell.right(), outer.right()),
+        at(cell.bottom(), outer.bottom()),
+    );
+    let round = |yes: bool| if yes { ui::RADIUS } else { 0 };
+    CornerRadius {
+        nw: round(left && top),
+        ne: round(right && top),
+        sw: round(left && bottom),
+        se: round(right && bottom),
+    }
+}
+
+/// A message's pictures and videos as one tile with a grid inside. Thumbnails load only
+/// while it is on screen. A picture opens the viewer, which steps through the message's
+/// pictures; a video opens in its own app. Returns the pictures, for their menus.
+fn album(
+    ui: &mut Ui,
+    files: &mut Files,
+    (address, commands): (&Url, &UnboundedSender<Command>),
+    media: &[(&Attachment, MediaKind)],
+) -> Vec<Shown> {
+    let mut shown = Vec::new();
+    let width = ui.available_width().min(ALBUM_WIDTH);
+    let (cells, height) = album_cells(media.len(), width);
+    let (outer, _) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
+    if !ui.is_rect_visible(outer) {
+        return shown;
+    }
+    let more = media.len().saturating_sub(ALBUM_CELLS - 1);
+    let mut open = None;
+    for (n, (cell, (file, kind))) in cells.iter().zip(media).enumerate() {
+        let rect = cell.translate(outer.min.to_vec2());
+        let radius = outer_corners(rect, outer);
+        let response = ui.interact(
+            rect,
+            ui.scope_id().with(("album", n, file.file.id)),
+            Sense::click(),
+        );
+        media_face(ui, files, commands, file, *kind, rect, true, radius);
+        let painter = ui.painter_at(rect);
+        let last = n == ALBUM_CELLS - 1 && media.len() > ALBUM_CELLS;
+        let label = if last {
+            format!("{} · {}", file.name, t!("files.album_more", count = more))
+        } else {
+            file.name.clone()
+        };
+        if last {
+            painter.rect_filled(rect, radius, OVERLAY_BUTTON);
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                format!("+{more}"),
+                egui::FontId::proportional(ui::TEXT_HEADING),
+                ON_FILL,
+            );
+        }
+        if response.hovered() {
+            painter.rect_filled(rect, radius, egui::Color32::from_white_alpha(20));
+        }
+        response.widget_info(|| WidgetInfo::labeled(Role::Button, true, &label));
+        let response = response
+            .on_hover_text(&label)
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        if response.clicked() {
+            open = Some(n);
+        }
+        if *kind == MediaKind::Picture {
+            shown.push(Shown {
+                response,
+                media: Media {
+                    address: address.clone(),
+                    commands: commands.clone(),
+                    file: (*file).clone(),
+                    saved: files.saved_at(file).cloned(),
+                },
+            });
+        }
+    }
+    if let Some(n) = open {
+        let (file, kind) = media[n];
+        if kind != MediaKind::Picture {
+            files.open_elsewhere(ui.ctx(), (address, commands), file);
+            return shown;
+        }
+        let pictures: Vec<&Attachment> = (media.iter())
+            .filter(|(_, kind)| *kind == MediaKind::Picture)
+            .map(|(file, _)| *file)
+            .collect();
+        let at = pictures.iter().position(|p| p.file.id == file.file.id);
+        let album = (pictures.into_iter())
+            .map(|file| Shot {
+                address: address.clone(),
+                commands: commands.clone(),
+                file: file.clone(),
+                // In the chat the message itself says who shared it and when.
+                caption: String::new(),
+                jump: None,
+            })
+            .collect();
+        files.open_album(album, at.unwrap_or_default());
+    }
+    shown
+}
+
+/// The middle of a picture of `size` that fills a cell shaped like `cell`, in texture
+/// coordinates.
+fn fill_uv(size: Vec2, cell: Vec2) -> Rect {
     let size = size.max(Vec2::splat(1.0));
-    let side = size.x.min(size.y);
-    let margin = (size - Vec2::splat(side)) / 2.0;
+    let aspect = cell.x.max(1.0) / cell.y.max(1.0);
+    let shown = if size.x / size.y > aspect {
+        Vec2::new(size.y * aspect, size.y)
+    } else {
+        Vec2::new(size.x, size.x / aspect)
+    };
+    let margin = (size - shown) / 2.0;
     Rect::from_min_max(
         (margin / size).to_pos2(),
-        ((margin + Vec2::splat(side)) / size).to_pos2(),
+        ((margin + shown) / size).to_pos2(),
     )
 }
 
@@ -1600,6 +1793,21 @@ pub fn shown_attachments(
             });
         }
     }
+    // Several pictures or videos show as one album; other files stay rows below it.
+    let in_album = |file: &Attachment| {
+        media_kind(file).filter(|kind| matches!(kind, MediaKind::Picture | MediaKind::Video))
+    };
+    let together: Vec<(&Attachment, MediaKind)> = (list.iter())
+        .filter_map(|file| Some((*file, in_album(file)?)))
+        .collect();
+    let list = if together.len() > 1 {
+        shown_pictures.extend(album(ui, files, (address, commands), &together));
+        list.into_iter()
+            .filter(|file| in_album(file).is_none())
+            .collect()
+    } else {
+        list
+    };
     for file in list {
         let play = plays_inline(&file.name, &file.media_type, file.file.size.into());
         // Files sent before thumbnails existed for GIFs have none; they still play.
@@ -2078,7 +2286,7 @@ pub fn viewer(ctx: &egui::Context, files: &mut Files) {
                     ui.add_space(8.0);
                     ui.add(egui::Label::new(ui::bold(&file.name).color(ON_FILL)).truncate());
                 }
-                if let Some((_, _, shot)) = &album {
+                if let Some((_, _, shot)) = album.as_ref().filter(|(.., s)| !s.caption.is_empty()) {
                     ui.label(ui::caption(&shot.caption).color(OVERLAY_TEXT));
                 }
                 ui.add_space(8.0);
@@ -2119,8 +2327,51 @@ pub fn viewer(ctx: &egui::Context, files: &mut Files) {
                         ui.centered_and_justified(|ui| ui.spinner());
                     }
                 }
-                // Previous and next through the gallery, over the picture's sides.
-                if let Some((at, count, _)) = &album {
+                // Previous and next through the gallery, over the picture's sides: always
+                // on a touch screen, while the pointer is over the window on a desktop.
+                // A swipe sideways steps too, unless zoomed in, where dragging pans.
+                let (touch, pointer, origin, released, latest) = ctx.input(|input| {
+                    (
+                        ui::TOUCH || input.has_touch_screen(),
+                        input.pointer.hover_pos().is_some(),
+                        input.pointer.press_origin(),
+                        input.pointer.primary_released(),
+                        input.pointer.latest_pos(),
+                    )
+                });
+                // egui forgets where a press began on its release, so keep it here.
+                let key = UiId::unique("viewer swipe");
+                let from = ctx.data_mut(|data| match origin {
+                    Some(origin) => {
+                        data.insert_temp(key, origin);
+                        None
+                    }
+                    None => data.remove_temp::<egui::Pos2>(key),
+                });
+                let swipe = (from.filter(|_| released).zip(latest)).map(|(from, to)| to - from);
+                let zoomed = files.viewer.as_ref().is_some_and(|view| view.zoom > 1.0);
+                if let Some(moved) = swipe.filter(|_| album.is_some() && !zoomed)
+                    && moved.x.abs() > SWIPE
+                    && moved.x.abs() > moved.y.abs() * 2.0
+                {
+                    step = if moved.x < 0.0 { 1 } else { -1 };
+                }
+                if let Some((at, count, _)) = album.as_ref().filter(|(_, count, _)| *count > 1) {
+                    let text = t!("gallery.position", at = at + 1, total = count);
+                    let font = egui::FontId::proportional(ui::TEXT_SMALL);
+                    let size = (ui.painter())
+                        .layout_no_wrap(text.clone(), font.clone(), ON_FILL)
+                        .size();
+                    let place = Rect::from_center_size(
+                        egui::pos2(stage.center().x, stage.bottom() - 20.0),
+                        size + Vec2::new(16.0, 6.0),
+                    );
+                    ui.painter()
+                        .rect_filled(place, ui::RADIUS_WINDOW, OVERLAY_BUTTON);
+                    let text = RichText::new(text).font(font).color(ON_FILL);
+                    ui.put(place, egui::Label::new(text).selectable(false));
+                }
+                if let Some((at, count, _)) = album.as_ref().filter(|_| touch || pointer) {
                     let side = Vec2::splat(36.0);
                     let middle = stage.center().y - side.y / 2.0;
                     let arrows = [

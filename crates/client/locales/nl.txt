@@ -1198,6 +1198,8 @@ files.open_default = Openen in standaardapp
 files.copy_image = Afbeelding kopiëren
 files.save_as = Opslaan als…
 files.open_viewer = Openen in viewer
+files.album_more.one = nog {count}
+files.album_more.other = nog {count}
 files.save_to_phone = Opslaan op telefoon
 files.share = Delen…
 files.saved_to_downloads = Opgeslagen in Downloads
@@ -1218,6 +1220,7 @@ gallery.shared_by = {name} · {time}
 gallery.jump = Naar bericht
 gallery.previous = Vorige
 gallery.next = Volgende
+gallery.position = {at} / {total}
 
 # crates/client/src/crop.rs
 crop.open_failed = Kon dat bestand niet openen.

@@ -1198,6 +1198,8 @@ files.open_default = In Standard-App öffnen
 files.copy_image = Bild kopieren
 files.save_as = Speichern unter…
 files.open_viewer = Im Viewer öffnen
+files.album_more.one = {count} weiteres
+files.album_more.other = {count} weitere
 files.save_to_phone = Auf dem Telefon speichern
 files.share = Teilen …
 files.saved_to_downloads = In Downloads gespeichert
@@ -1218,6 +1220,7 @@ gallery.shared_by = {name} · {time}
 gallery.jump = Zur Nachricht
 gallery.previous = Zurück
 gallery.next = Weiter
+gallery.position = {at} / {total}
 
 # crates/client/src/crop.rs
 crop.open_failed = Diese Datei konnte nicht geöffnet werden.

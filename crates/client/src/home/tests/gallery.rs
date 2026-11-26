@@ -4,7 +4,7 @@ use egui_kittest::kittest::{NodeT, Queryable};
 use rusttalk_core::client::{Attachment, decode_frames, prepare_file};
 
 /// A PNG of `w` by `h` with a soft two-colour gradient, so tiles look like photos.
-fn photo(w: u32, h: u32, seed: u8) -> Vec<u8> {
+pub(super) fn photo(w: u32, h: u32, seed: u8) -> Vec<u8> {
     let image = image::RgbaImage::from_fn(w, h, |x, y| {
         let (fx, fy) = (x as f32 / w as f32, y as f32 / h as f32);
         let s = f32::from(seed) * 37.0;
@@ -21,7 +21,7 @@ fn photo(w: u32, h: u32, seed: u8) -> Vec<u8> {
     png.into_inner()
 }
 
-fn msg(id: u8, person: Id, at: i64, files: Vec<Attachment>, address: &url::Url) -> Msg {
+pub(super) fn msg(id: u8, person: Id, at: i64, files: Vec<Attachment>, address: &url::Url) -> Msg {
     Msg {
         id: [id; 32],
         person,
@@ -52,7 +52,7 @@ struct Fixture {
 }
 
 /// November 20, 2026, noon UTC: the newest message.
-const NOW: i64 = 1_795_176_000;
+pub(super) const NOW: i64 = 1_795_176_000;
 const DAY: i64 = 86_400;
 
 /// A channel (or DM) with pictures of several shapes, a GIF, a video, an SVG and a PDF
@@ -406,7 +406,7 @@ fn viewer_steps_through_the_gallery_and_jumps_to_the_message() {
     );
 }
 
-fn click(h: &mut egui_kittest::Harness<'_, Home>, pos: egui::Pos2) {
+pub(super) fn click(h: &mut egui_kittest::Harness<'_, Home>, pos: egui::Pos2) {
     h.event(egui::Event::PointerMoved(pos));
     h.run_steps(1);
     for pressed in [true, false] {

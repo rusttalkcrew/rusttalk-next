@@ -1198,6 +1198,8 @@ files.open_default = 既定のアプリで開く
 files.copy_image = 画像をコピー
 files.save_as = 名前を付けて保存…
 files.open_viewer = ビューアーで開く
+files.album_more.one = 他 {count} 件
+files.album_more.other = 他 {count} 件
 files.save_to_phone = スマホに保存
 files.share = 共有…
 files.saved_to_downloads = ダウンロードに保存しました
@@ -1218,6 +1220,7 @@ gallery.shared_by = {name} · {time}
 gallery.jump = メッセージへ移動
 gallery.previous = 前へ
 gallery.next = 次へ
+gallery.position = {at} / {total}
 
 # crates/client/src/crop.rs
 crop.open_failed = そのファイルを開けませんでした。
