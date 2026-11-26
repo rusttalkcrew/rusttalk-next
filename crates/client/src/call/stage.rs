@@ -1234,7 +1234,10 @@ pub fn phone_self_view(ctx: &egui::Context, home: &mut Home) {
     let changed = egui::Area::new(UiId::unique("phone self view"))
         .order(egui::Order::Foreground)
         .fixed_pos(at.min)
+        // Not the content rect, which can be the stale one from before turning.
+        .constrain_to(screen)
         .show(ctx, |ui| {
+            ui.set_clip_rect(screen);
             let changed = pip::show(
                 ui,
                 screen,
