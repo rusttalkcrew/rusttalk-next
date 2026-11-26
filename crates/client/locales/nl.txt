@@ -1229,6 +1229,7 @@ gallery.position = {at} / {total}
 # crates/client/src/crop.rs
 crop.open_failed = Kon dat bestand niet openen.
 crop.not_picture = Dat bestand is geen afbeelding. Kies een PNG, JPG, GIF of WebP.
+crop.wrong_type = Dit soort afbeelding kan hier niet. Kies een PNG, JPG, GIF of WebP.
 crop.avatar = Foto bijsnijden
 crop.icon = Serverpictogram bijsnijden
 crop.emoji = Emoji bijsnijden

@@ -1229,6 +1229,7 @@ gallery.position = {at} / {total}
 # crates/client/src/crop.rs
 crop.open_failed = Diese Datei konnte nicht geöffnet werden.
 crop.not_picture = Diese Datei ist kein Bild. Wähle ein PNG, JPG, GIF oder WebP.
+crop.wrong_type = Diese Bildart wird hier nicht unterstützt. Wähle ein PNG, JPG, GIF oder WebP.
 crop.avatar = Bild zuschneiden
 crop.icon = Serversymbol zuschneiden
 crop.emoji = Emoji zuschneiden
