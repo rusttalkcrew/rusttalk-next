@@ -398,7 +398,7 @@ Formats 2 and 3 (the envelope's first byte) have this plaintext, in order.
 | Friend kind | One byte, present with bit 4: request (1), accept (2), decline (3), cancel (4), remove (5) | 1 |
 | Friend send time | Eight-byte big-endian sender clock in milliseconds, present with bit 4 | 8 |
 | Key link | Present with bit 5: the next epoch (eight-byte big-endian, positive) and its 32-byte commitment | 40 |
-| Stored files | One-byte count 0–4, then that many [references](protocol.md#files) of at most 529 bytes | 1 + 2,116 |
+| Stored files | One-byte count 0–10, then that many [references](protocol.md#files) of at most 529 bytes | 1 + 5,290 |
 | Live offer | Present with bit 2, [offer fields](protocol.md#live-transfer) | 460 |
 
 A sticker message has no stored files and no live offer; its text is the
@@ -433,8 +433,9 @@ big-endian Unix seconds when the sender asked; 1 (joining), 2 (declined)
 and 3 (coming later) answer and hold the request's message ID. Readers reject
 other actions, and format 2 can't carry one (see
 [Protocol](protocol.md#voice-requests)).
-Nothing may follow the last field. The largest plaintext is 10,645 bytes
-and the largest envelope is 10,752 bytes. Every length is checked against
+Nothing may follow the last field. The largest plaintext is 13,819 bytes
+and the largest envelope is 13,926 bytes. Apps up to 0.8.1 accept at most four
+stored files and show a message with more as one they can't open. Every length is checked against
 its field maximum before reading. Readers reject version 1 envelopes.
 Spaces and line breaks are preserved.
 

@@ -576,6 +576,7 @@ mod tests {
             label: "Friends".into(),
             status: crate::server::Status::Online,
             compatibility: Default::default(),
+            max_files: rusttalk_core::messages::LEGACY_MAX_ATTACHMENTS,
             order_unavailable: false,
             dir: Directory::default(),
             chats: Default::default(),

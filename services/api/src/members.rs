@@ -31,6 +31,7 @@ pub async fn server_info(State(app): State<App>) -> ApiResult<Json<ServerInfo>> 
         open_joining,
         version: Some(env!("CARGO_PKG_VERSION").into()),
         protocol: Some(PROTOCOL_VERSION),
+        max_files: Some(rusttalk_core::messages::MAX_ATTACHMENTS as u8),
     }))
 }
 
@@ -882,7 +883,8 @@ mod tests {
                     "open_joining": open_joining,
                     "dm_backfill": true,
                     "version": env!("CARGO_PKG_VERSION"),
-                    "protocol": PROTOCOL_VERSION
+                    "protocol": PROTOCOL_VERSION,
+                    "max_files": 10
                 })
             );
         }

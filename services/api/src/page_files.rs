@@ -9,8 +9,8 @@ use sqlx::{SqliteConnection, query, query_scalar};
 
 use crate::{ApiError, ApiResult, App, file_settings};
 
-/// Four pictures, each with its thumbnail.
-pub const MAX_KEPT: usize = 8;
+/// A message's pictures, each with its thumbnail.
+pub const MAX_KEPT: usize = 2 * rusttalk_core::messages::MAX_ATTACHMENTS;
 
 /// The files kept by the newest version of any page.
 pub(crate) const KEPT: &str =

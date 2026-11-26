@@ -623,7 +623,7 @@ fn picked_copies_attach_under_their_name_and_go_when_removed() {
         panic!("the pick wasn't answered");
     };
     let mut chat = crate::server::Chat::default();
-    assert_eq!(files::stage(&mut chat, paths.clone()), None);
+    assert_eq!(files::stage(&mut chat, paths.clone(), 4), None);
     assert_eq!(chat.staged[0].name, "Holiday photo.jpg");
     files::discard(&chat.staged.remove(0).path);
     assert!(!kept.parent().unwrap().exists());

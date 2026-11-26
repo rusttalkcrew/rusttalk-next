@@ -39,6 +39,8 @@ pub struct Server {
     pub label: String,
     pub status: Status,
     pub compatibility: Compatibility,
+    /// Stored files per message this server takes; four until it says more.
+    pub max_files: usize,
     pub order_unavailable: bool,
     pub dir: Directory,
     pub chats: HashMap<Id, Chat>,

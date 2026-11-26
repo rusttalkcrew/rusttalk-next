@@ -120,6 +120,32 @@ pub(super) async fn scenario(
         "file_not_found",
     )
     .await?;
+
+    // Ten pictures with the longest names and text: larger than older servers take and
+    // than an inline event, so B reads it by its ID.
+    assert_eq!(server.info().await?.max_files(), 10);
+    let mut album = Vec::new();
+    for index in 0..10 {
+        let name = format!("{index:02} {}.png", "p".repeat(248));
+        album.push(
+            a.upload_file(&channel.id, &name, "image/png", &png, None)
+                .await?,
+        );
+    }
+    let post = a
+        .send_message(
+            &channel.id,
+            &MessageBody {
+                text: "🦀".repeat(rusttalk_core::messages::MAX_TEXT_CHARS),
+                attachments: album.clone(),
+                ..Default::default()
+            },
+        )
+        .await?;
+    let record = b.message(&channel.id, &post.id).await?;
+    assert!(record.size > 10_752);
+    let body = b.open_message(&channel.id, &record).await?;
+    assert!(body.attachments == album);
     rejected(
         c.request(Method::GET, &path).send().await?,
         StatusCode::FORBIDDEN,

@@ -21,7 +21,7 @@ const MIN_PLAINTEXT: usize = 1 + 2 + 1;
 const KIND: usize = 1;
 const MAX_TEXT_BYTES: usize = MAX_TEXT_CHARS * 4;
 /// The kind byte, maximum text, two references (reply ID and quoted author, or
-/// revision and edit ID), four stored files and a live offer.
+/// revision and edit ID), ten stored files and a live offer.
 const MAX_PLAINTEXT: usize = MIN_PLAINTEXT
     + KIND
     + MAX_TEXT_BYTES
@@ -30,15 +30,18 @@ const MAX_PLAINTEXT: usize = MIN_PLAINTEXT
     + live::MAX_ATTACHMENT;
 
 /// Stored files per message.
-const MAX_ATTACHMENTS: usize = 4;
+pub const MAX_ATTACHMENTS: usize = 10;
+/// Stored files per message on servers that don't say how many they take (0.8.1 and older),
+/// whose message limit fits only four.
+pub const LEGACY_MAX_ATTACHMENTS: usize = 4;
 const MAX_ATTACHMENT_BYTES: usize = 529;
 /// File name length in UTF-8 bytes, for stored and live files.
 const MAX_FILE_NAME: usize = 255;
 /// Media type length in ASCII bytes, for stored and live files.
 const MAX_MEDIA_TYPE: usize = 127;
 
-const _: () = assert!(MAX_PLAINTEXT == 10_645);
-const _: () = assert!(MAX_MESSAGE_BYTES == 10_752);
+const _: () = assert!(MAX_PLAINTEXT == 13_819);
+const _: () = assert!(MAX_MESSAGE_BYTES == 13_926);
 
 mod live;
 #[cfg(any(feature = "client", test))]

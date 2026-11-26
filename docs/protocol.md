@@ -34,7 +34,7 @@ tries to connect. Above it the app directs people to Settings → Updates.
 | Method and path | Request | Success |
 | --- | --- | --- |
 | GET `/v1/health` | Empty | 200, `ok` |
-| GET `/v1/server-info` | Empty | 200, `{open_joining, version, protocol, dm_backfill}` |
+| GET `/v1/server-info` | Empty | 200, `{open_joining, version, protocol, dm_backfill, max_files}` |
 | GET `/v1/auth/challenge` | Empty | 200, `{challenge, server_id, signature}` |
 | POST `/v1/auth/sign-in` | `{protocol, person_id, certificate, challenge, signature, invite?}` | 200, `{token, expires_at}` |
 | POST `/v1/auth/join` | `{protocol, person_id, certificate, challenge, signature}` | 200, `{token, expires_at}` |
@@ -471,11 +471,11 @@ keys and flags); clients show only its newest message, as one Markdown page, and
 saving a change posts the whole page as a new message. A new page channel gives
 read and write (3) to Owner, Admin and Moderator and read (1) to Member, so only
 people with write can change the page. Older clients show it as a text channel. The page's pictures are
-that message's stored files (at most four, like any message). Saving a change
+that message's stored files (at most ten, like any message). Saving a change
 sends the references of the pictures it keeps again in the new message, so their
 blobs are not uploaded twice. A version saved with the same link also keeps its
 link preview. The message post of a page version adds `keep`, the IDs of every
-stored file it references (files and thumbnails, at most 8, no repeats). The API
+stored file it references (files and thumbnails, at most 20, no repeats). The API
 keeps only those that are unexpired files stored in that page channel and leaves
 the others out, so a page whose picture is gone still saves; `keep` on any other
 channel, a malformed ID, a repeat or more than 8 IDs is `400 invalid_keep`. An
@@ -839,9 +839,11 @@ ciphertext length, ciphertext including its authentication tag, and 64-byte
 device signature. Protocol 2 accepts versions `2` and `3`. New apps send v3 on
 protocol 2 and later servers for all messages, and v2 on protocol 1 servers. Older apps
 reject v3 envelopes as unreadable and prompt for an update on protocol 2
-servers. The envelope is at most 10,752 bytes
-(see [the plaintext format](crypto.md#messages)). The POST limit is
-14,848 bytes of JSON: the unpadded base64url envelope plus 512 bytes. The API verifies the
+servers. The envelope is at most 13,926 bytes, with up to ten stored files
+(see [the plaintext format](crypto.md#messages)). Servers that accept ten say
+`max_files: 10` in server info; apps send at most four files to servers without
+it, whose envelope limit is 10,751 bytes. The POST limit is
+20,104 bytes of JSON: the unpadded base64url envelope plus 1,536 bytes. The API verifies the
 envelope against the authenticated person and device and requires the current
 channel epoch. Rotation or a stale epoch returns `409 epoch_changed`, a
 duplicate retained ID returns `409 message_exists`, and malformed framing or

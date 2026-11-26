@@ -58,8 +58,6 @@ fn export_label() -> Option<&'static str> {
 /// Whether pictures can be copied: egui's phone clipboards take only text.
 pub const COPY_IMAGE: bool = !cfg!(any(target_os = "android", target_os = "ios"));
 
-/// Files per message, as the message format allows.
-pub const MAX_FILES: usize = 4;
 pub(crate) const THUMBNAIL: f32 = 320.0;
 /// Animated GIFs and WebPs up to this size load by themselves and play in the chat.
 const INLINE_MAX: u64 = 8 * MIB;
@@ -998,8 +996,9 @@ fn saved_menu(response: &Response, path: &Path) {
     });
 }
 
-/// Add picked or dropped files to the composer; returns a problem to show.
-pub fn stage(chat: &mut Chat, paths: Vec<PathBuf>) -> Option<String> {
+/// Add picked or dropped files to the composer, up to `max` (the server's stored files
+/// per message); returns a problem to show.
+pub fn stage(chat: &mut Chat, paths: Vec<PathBuf>, max: usize) -> Option<String> {
     let mut problem = None;
     for path in paths {
         let name = file_name(&path);
@@ -1013,8 +1012,8 @@ pub fn stage(chat: &mut Chat, paths: Vec<PathBuf>) -> Option<String> {
         if size > MAX_FILE {
             problem = Some(too_big(&name, size));
             discard(&path);
-        } else if chat.staged.len() >= MAX_FILES {
-            problem = Some(t!("files.too_many", max = MAX_FILES));
+        } else if chat.staged.len() >= max {
+            problem = Some(t!("files.too_many", max = max));
             discard(&path);
         } else {
             chat.staged.push(Staged { path, name, size });
