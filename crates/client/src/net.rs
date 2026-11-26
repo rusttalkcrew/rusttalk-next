@@ -2224,10 +2224,12 @@ async fn run_command(
 fn report(ctx: &Ctx, error: anyhow::Error) {
     tracing::warn!(error = %format_args!("{error:#}"), "server request failed");
     let full = error.is::<rusttalk_core::client::voice::ChannelFull>();
+    let timed_out = error.is::<rusttalk_core::client::voice::TimedOut>();
     let text = match error.downcast_ref::<MessageError>() {
         Some(MessageError::ServerUpdateRequired) => t!("net.rotation_update"),
         Some(MessageError::TextLimit) => t!("net.text_limit"),
         _ if full => t!("call.channel_full"),
+        _ if timed_out => t!("timeout.voice_refused"),
         _ => t!("admin.failed"),
     };
     ctx.send(Update::Failed(text.into()));

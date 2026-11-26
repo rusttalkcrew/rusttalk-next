@@ -80,6 +80,7 @@ pub fn preview(real: &Directory, roles: &[String]) -> Directory {
         create_events: mine.create_events && grants("create_events"),
         manage_events: mine.manage_events && grants("manage_events"),
         start_focus: mine.start_focus && grants("start_focus"),
+        timeout_members: mine.timeout_members && grants("timeout_members"),
         rank: (roles.iter().map(|role| role.rank).max())
             .unwrap_or(-1)
             .min(mine.rank),
@@ -358,6 +359,7 @@ mod tests {
                 hide_offline: false,
                 bio: None,
                 voice_muted: false,
+                timeout_until: None,
             }]
             .into(),
             ..Directory::default()

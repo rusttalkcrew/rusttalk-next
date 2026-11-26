@@ -538,6 +538,7 @@ mod tests {
                 hide_offline: false,
                 avatar_initialized: true,
                 voice_muted: false,
+                timeout_until: None,
             })),
         };
         assert!(queue(&mut notices, Change::update(Update::Event(profile)), "d") == Recheck::None);

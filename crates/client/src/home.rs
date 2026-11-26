@@ -178,6 +178,7 @@ pub struct Home {
     pub route_generation: u64,
     pub server_settings: Option<admin::Settings>,
     pub kick: Option<admin::Kick>,
+    pub timeout: Option<admin::timeout::Dialog>,
     /// The crop step for a picked profile picture or server icon.
     pub(crate) crop: Option<crate::crop::Crop>,
     /// My account: the default name being edited, and the bio as typed, unsaved.
@@ -462,6 +463,7 @@ impl Home {
             route_generation: rusttalk_core::route::generation(),
             server_settings: None,
             kick: None,
+            timeout: None,
             crop: None,
             name_draft: None,
             bio_draft: None,
@@ -2488,6 +2490,7 @@ pub fn show(
     updates.dialog(ui.ctx());
     crop_dialog(ui.ctx(), home);
     admin::kick_dialog(ui.ctx(), home);
+    admin::timeout::dialog(ui.ctx(), home);
     switcher::show(ui.ctx(), home);
     action
 }
@@ -5055,6 +5058,7 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
                 hide_offline: false,
                 bio: None,
                 voice_muted: false,
+                timeout_until: None,
             })
             .collect(),
         ..Directory::default()
@@ -5140,6 +5144,12 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
                 } else {
                     t!("view_as.read_only")
                 });
+                return None;
+            }
+            // In a timeout: why and until when, in place of the composer.
+            if let At::Channel(index, _) = at
+                && admin::timeout::banner(ui, &servers[index])
+            {
                 return None;
             }
             let hint = if dm {
@@ -7735,6 +7745,7 @@ mod tests {
                         hide_offline: false,
                         bio: None,
                         voice_muted: false,
+                        timeout_until: None,
                     }]
                     .into(),
                     ..Default::default()
@@ -7819,6 +7830,7 @@ mod tests {
                 hide_offline: false,
                 bio: None,
                 voice_muted: false,
+                timeout_until: None,
             }]
             .into(),
             ..Default::default()
@@ -7958,6 +7970,7 @@ mod tests {
     mod sticker_picker;
     mod streams;
     mod switcher;
+    mod timeouts;
     mod touch;
     mod uploads;
     mod voice_limit;
@@ -8008,6 +8021,7 @@ mod tests {
             hide_offline: false,
             bio: None,
             voice_muted: false,
+            timeout_until: None,
         };
         server.dir.members = vec![member(ME, "Me"), member(ANN, "Ann")].into();
         server.dir.categories = vec![crate::server::Category {
@@ -8776,6 +8790,7 @@ mod tests {
             hide_offline: false,
             bio: None,
             voice_muted: false,
+            timeout_until: None,
         }]
         .into();
         home.servers.push(server);

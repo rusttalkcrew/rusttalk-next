@@ -12,6 +12,7 @@ use crate::{
     call,
     friends::{Act, Friends, Relation},
     net::{Admin, Command},
+    notify::unix_now,
     server::{Id, Member, Server},
     ui,
 };
@@ -125,10 +126,11 @@ impl<'a> Person<'a> {
             pick = pick
                 .or(call::moderation_menu(m, self.server, &channel, self.person).map(Pick::Voice));
         }
-        if perms.kick || perms.ban || perms.manage_roles {
+        if perms.kick || perms.ban || perms.manage_roles || perms.timeout_members {
             m.separator();
             let mut choice = None;
-            admin::member_menu(m, &mut choice, perms);
+            let timed_out = (self.member()).is_some_and(|m| m.timeout(unix_now()).is_some());
+            admin::member_menu(m, &mut choice, perms, timed_out);
             pick = pick.or(choice.map(Pick::Moderate));
         }
         pick
@@ -206,6 +208,11 @@ impl<'a> Person<'a> {
                     });
                 }
             });
+        }
+        if let Some(until) = member.and_then(|m| m.timeout(unix_now())) {
+            ui.add_space(ui::SPACE_S);
+            let text = t!("timeout.card", time = admin::timeout::clock(until));
+            ui.label(ui::caption(format!("⏳ {text}")));
         }
         if let Some(bio) = member
             .and_then(|m| m.bio.as_deref())
@@ -375,6 +382,7 @@ mod tests {
             hide_offline: false,
             bio: None,
             voice_muted: false,
+            timeout_until: None,
         }
     }
 

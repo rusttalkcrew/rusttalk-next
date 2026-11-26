@@ -923,6 +923,7 @@ mod tests {
             hide_offline: false,
             bio: None,
             voice_muted: false,
+            timeout_until: None,
         };
         let role = |id: &str, permissions| Role {
             id: id.into(),

@@ -216,6 +216,9 @@ pub struct MemberProfile {
     pub hide_offline: bool,
     pub avatar_initialized: bool,
     pub voice_muted: bool,
+    /// While a moderator has them in a timeout: when it ends, in unix seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_until: Option<i64>,
 }
 
 /// The part of the server a `channel_changed` notice touched.
@@ -457,6 +460,8 @@ pub enum Metadata {
     Bio,
     EmojiPackName,
     SystemMessages,
+    /// Why a moderator timed a member out; the member's person ID is the metadata ID.
+    TimeoutReason,
 }
 
 impl Metadata {

@@ -19,6 +19,7 @@ mod store;
 mod sync;
 #[cfg(test)]
 mod testing;
+mod timeouts;
 mod updates;
 mod voice;
 
@@ -281,6 +282,10 @@ async fn serve(app: App) -> io::Result<()> {
     let expiry = tokio::spawn(store::expire_records(app.clone()));
     // Apply mutes and access changes that a restart or LiveKit outage left unapplied.
     voice::start_enforcer(&app);
+    // Give voice back when the timeouts running now end.
+    if let Err(error) = timeouts::resume(&app).await {
+        tracing::error!(reason = error.code, "scheduling timeout ends failed");
+    }
     let publisher = tokio::spawn(index::refresh(app.clone(), app.listing_changed.subscribe()));
     let file_expiry = tokio::spawn(files::expire(app.clone()));
     // A host that lowered RUSTTALK_MESSAGE_RETAIN gets its channels trimmed now.
@@ -405,6 +410,10 @@ fn routes(app: App) -> Router {
         .route(
             "/v1/members/{person}/voice-mute",
             put(voice::moderation::mute).delete(voice::moderation::unmute),
+        )
+        .route(
+            "/v1/members/{person}/timeout",
+            put(timeouts::set).delete(timeouts::end),
         )
         .route(
             "/v1/bans/{person}",

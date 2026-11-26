@@ -265,9 +265,14 @@ pub(super) async fn profile(
     let Some(mut sources) = state.raw.take() else {
         return directory(ctx, url, client, state).await;
     };
+    // A timeout put on or ended: `/v1/me` has its reason for the banner.
+    let timeout_changed = own && sources.me["timeout_until"].as_i64() != profile.timeout_until;
     if !patch_profile(&mut sources, person, profile, own) {
         // Not listed yet: a member this directory doesn't know, so load it all.
         return directory(ctx, url, client, state).await;
+    }
+    if timeout_changed {
+        sources.me = get(client, "/v1/me").await?;
     }
     let calendar = state.last.as_ref().and_then(|dir| dir.calendar.clone());
     rebuild(ctx, url, client, state, sources, calendar).await
@@ -285,6 +290,10 @@ fn patch_profile(sources: &mut Sources, person: &str, profile: &MemberProfile, o
     row["hide_offline"] = json!(profile.hide_offline);
     row["avatar_initialized"] = json!(profile.avatar_initialized);
     row["voice_muted"] = json!(profile.voice_muted);
+    match profile.timeout_until {
+        Some(until) => row["timeout_until"] = json!(until),
+        None => _ = row.as_object_mut().map(|row| row.remove("timeout_until")),
+    }
     if own {
         sources.me["hide_offline"] = json!(profile.hide_offline);
     }
@@ -544,6 +553,7 @@ fn build(
                     "manage_emoji" => perms.manage_emoji = true,
                     "mute_members" => perms.mute_members = true,
                     "move_members" => perms.move_members = true,
+                    "timeout_members" => perms.timeout_members = true,
                     "suggest_events" => perms.suggest_events = true,
                     "create_events" => perms.create_events = true,
                     "manage_events" => perms.manage_events = true,
@@ -695,6 +705,7 @@ fn build(
             hide_offline: row["hide_offline"].as_bool().unwrap_or_default(),
             bio: received_bio(text(Metadata::Bio, &person, row["bio_ct"].as_str())),
             voice_muted: row["voice_muted"].as_bool().unwrap_or_default(),
+            timeout_until: row["timeout_until"].as_i64(),
         });
     }
     list.sort_by_cached_key(|member| {
@@ -764,6 +775,11 @@ fn build(
         icon: picture(&server_id, space["icon_hash"].as_str()),
         status: serde_json::from_value(me["status"].clone()).ok(),
         hide_offline: me["hide_offline"].as_bool(),
+        timeout_reason: text(
+            Metadata::TimeoutReason,
+            &my_id,
+            me["timeout_reason_ct"].as_str(),
+        ),
         my_name_hidden,
         bios: (members.as_array().into_iter().flatten()).any(|row| row.get("bio_ct").is_some()),
         me: *client.identity.certificate.person_id(),
@@ -1091,6 +1107,7 @@ mod tests {
             hide_offline: true,
             avatar_initialized: true,
             voice_muted: true,
+            timeout_until: None,
         };
         assert!(patch_profile(&mut sources, "a", &profile, true));
         let mut expected = row("a", "new");
@@ -1203,6 +1220,7 @@ mod tests {
             hide_offline: false,
             bio: None,
             voice_muted: false,
+            timeout_until: None,
         }
     }
 

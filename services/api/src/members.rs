@@ -103,6 +103,11 @@ pub struct Me {
     /// This member's own presence choice; never shown to others.
     status: rusttalk_core::presence::Status,
     hide_offline: bool,
+    /// While in a timeout: when it ends, and the moderator's reason as ciphertext.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timeout_until: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timeout_reason_ct: Option<String>,
 }
 
 pub async fn me(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Me>> {
@@ -119,7 +124,9 @@ pub async fn me(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Me
         .collect();
     let status = crate::presence::stored(&mut tx, &actor.person).await?;
     let status = crate::presence::status_for(status, crate::presence::knows_dnd(&headers));
+    let timeout = crate::timeouts::own(&mut tx, &actor.person, actor.at).await?;
     tx.commit().await?;
+    let (timeout_until, reason) = timeout.unzip();
     Ok(Json(Me {
         person_id: encode(&actor.person),
         device_id: encode(&actor.device),
@@ -127,6 +134,8 @@ pub async fn me(State(app): State<App>, headers: HeaderMap) -> ApiResult<Json<Me
         role_ids,
         status,
         hide_offline,
+        timeout_until,
+        timeout_reason_ct: metadata::encoded(reason.flatten()),
     }))
 }
 
@@ -164,6 +173,7 @@ pub async fn invite(
     roles::authority(&mut tx, &actor.person)
         .await?
         .require(Permission::Invite)?;
+    crate::timeouts::refuse(&mut tx, &actor.person).await?;
     let expires_at = actor.at + ttl_seconds;
     query("DELETE FROM invites WHERE expires_at <= ?")
         .bind(actor.at)

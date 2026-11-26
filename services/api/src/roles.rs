@@ -43,9 +43,11 @@ pub enum Permission {
     ManageEvents = 16384,
     /// Put a channel into focus mode for a while.
     StartFocus = 32768,
+    /// Stop a lower-ranked member from writing and talking for a while.
+    TimeoutMembers = 131072,
 }
 
-const PERMISSIONS: [Permission; 16] = [
+const PERMISSIONS: [Permission; 17] = [
     Permission::Invite,
     Permission::Kick,
     Permission::Ban,
@@ -62,6 +64,7 @@ const PERMISSIONS: [Permission; 16] = [
     Permission::CreateEvents,
     Permission::ManageEvents,
     Permission::StartFocus,
+    Permission::TimeoutMembers,
 ];
 
 #[derive(FromRow)]

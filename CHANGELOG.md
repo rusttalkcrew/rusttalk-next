@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- Moderators can time out a member for 60 seconds up to a week, with an optional reason: until it ends they can read but not send messages, react, create invites or join and talk in voice, and they see a banner saying until when. Moderators can end it early.
+
 ## v0.9.1 - 2026-11-26
 
 - On Android, HEIC photos now work as attachments, profile pictures, server icons, emoji, stickers and page pictures; they are turned into JPEG on your phone.

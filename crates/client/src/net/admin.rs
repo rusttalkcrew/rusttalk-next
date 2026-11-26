@@ -22,6 +22,13 @@ pub enum Admin {
     },
     SystemMessages(crate::server::SystemMessages),
     Kick(Id),
+    /// Stop someone from writing and talking for `seconds`, with an optional reason.
+    Timeout {
+        person: Id,
+        seconds: i64,
+        reason: Option<String>,
+    },
+    EndTimeout(Id),
     /// Mute (`true`) or unmute someone in every voice channel.
     VoiceMute(Id, bool),
     /// Disconnect someone from a voice channel, or (`Some`) move them to another.
@@ -384,6 +391,37 @@ async fn change(
         )
         .await
         .map(|()| t!("admin.done_kicked")),
+        Admin::Timeout {
+            person,
+            seconds,
+            reason,
+        } => {
+            let reason_ct = reason
+                .map(|reason| {
+                    client.encrypt_metadata(Metadata::TimeoutReason, &person, reason.as_bytes())
+                })
+                .transpose()
+                .map_err(|error| failed(&error));
+            match reason_ct {
+                Ok(reason_ct) => call(
+                    client,
+                    Method::PUT,
+                    &format!("/v1/members/{}/timeout", encode(&person)),
+                    Some(json!({ "seconds": seconds, "reason_ct": reason_ct })),
+                )
+                .await
+                .map(|()| t!("timeout.done")),
+                Err(text) => Err(text),
+            }
+        }
+        Admin::EndTimeout(person) => call(
+            client,
+            Method::DELETE,
+            &format!("/v1/members/{}/timeout", encode(&person)),
+            None,
+        )
+        .await
+        .map(|()| t!("timeout.done_ended")),
         Admin::VoiceMute(person, on) => {
             let method = if on { Method::PUT } else { Method::DELETE };
             let path = format!("/v1/members/{}/voice-mute", encode(&person));
@@ -1055,6 +1093,7 @@ fn problem(code: &str) -> &'static str {
             t!("admin.no_active_ip")
         }
         "member_not_found" => t!("admin.member_not_found"),
+        "timeout_not_found" => t!("timeout.not_found"),
         "not_in_voice" => t!("admin.not_in_voice"),
         "voice_move_denied" => t!("admin.voice_move_denied"),
         "ban_not_found" => t!("admin.ban_not_found"),

@@ -422,7 +422,168 @@ pub(super) async fn scenario(
     reactions(a, b, c, text).await?;
     page(a, b, c, &category).await?;
     forum(a, b, c, &category).await?;
+    timeouts(a, b, c, text, &category).await?;
     Ok((dm, b_message))
+}
+
+/// #663: moderator B times out member C, who may only read: no message, reaction or voice
+/// join. C's app hears at once; A ends it early; both are audited.
+async fn timeouts(
+    a: &mut KeyClient<'_>,
+    b: &mut KeyClient<'_>,
+    c: &mut KeyClient<'_>,
+    text: Scope,
+    category: &[u8; 32],
+) -> Result<()> {
+    let b_person = *b.identity.certificate.person_id();
+    let c_person = encode(c.identity.certificate.person_id());
+    let path = format!("/v1/members/{c_person}/timeout");
+    let reason = c.encrypt_metadata(
+        keys::Metadata::TimeoutReason,
+        c.identity.certificate.person_id(),
+        b"#663 Obsidian reason",
+    )?;
+    rejected(
+        c.request(
+            Method::PUT,
+            &format!("/v1/members/{}/timeout", encode(&b_person)),
+        )
+        .json(&json!({ "seconds": 60 }))
+        .send()
+        .await?,
+        StatusCode::FORBIDDEN,
+        "permission_denied",
+    )
+    .await?;
+    rejected(
+        b.request(Method::PUT, &path)
+            .json(&json!({ "seconds": 61 }))
+            .send()
+            .await?,
+        StatusCode::BAD_REQUEST,
+        "invalid_timeout",
+    )
+    .await?;
+    b.request(Method::PUT, &path)
+        .json(&json!({ "seconds": 600, "reason_ct": reason }))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    // C's own app learns it from the live event, then reads the reason from /v1/me.
+    let until = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let Some(Event::MemberChanged {
+                person,
+                profile: Some(profile),
+                ..
+            }) = c.next_event().await?
+                && person == c_person
+                && let Some(until) = profile.timeout_until
+            {
+                return Ok::<_, anyhow::Error>(until);
+            }
+        }
+    })
+    .await
+    .context("C's app heard nothing of the timeout")??;
+    let me: Value = c
+        .request(Method::GET, "/v1/me")
+        .send()
+        .await?
+        .json()
+        .await?;
+    assert_eq!(me["timeout_until"], until);
+    let shown = c.decrypt_metadata(
+        keys::Metadata::TimeoutReason,
+        c.identity.certificate.person_id(),
+        me["timeout_reason_ct"].as_str().context("reason missing")?,
+    )?;
+    assert_eq!(shown, b"#663 Obsidian reason");
+
+    let refused = |result: Result<_>| {
+        result
+            .err()
+            .and_then(|error| error.downcast::<reqwest::Error>().ok())
+            .and_then(|error| error.status())
+    };
+    let posted = a.send_message(&text.id, &body(TEXT_A)).await?;
+    let reaction = MessageBody {
+        poll: Some(reaction_vote(
+            &posted.id,
+            &ReactionEmoji::Unicode("👍".into()).key(),
+            1,
+            true,
+        )),
+        ..Default::default()
+    };
+    for message in [body(TEXT_B), reaction] {
+        let result = c.send_message(&text.id, &message).await.map(|_| ());
+        assert_eq!(refused(result), Some(StatusCode::FORBIDDEN));
+    }
+    // C may see a lounge, so only the timeout refuses the join.
+    let voice = a
+        .create_channel(category, "voice", b"#663 Lounge", b"")
+        .await?;
+    let lounge = |flags: u8| {
+        a.request(
+            Method::PUT,
+            &format!("/v1/channels/{}/permissions/member", encode(&voice.id)),
+        )
+        .json(&json!({ "flags": flags }))
+        .send()
+    };
+    lounge(1).await?.error_for_status()?;
+    rejected(
+        c.request(
+            Method::POST,
+            &format!("/v1/voice/{}/token", encode(&voice.id)),
+        )
+        .send()
+        .await?,
+        StatusCode::FORBIDDEN,
+        "timed_out",
+    )
+    .await?;
+    // Later steps expect C to hold no other channel keys.
+    a.request(
+        Method::DELETE,
+        &format!("/v1/channels/{}", encode(&voice.id)),
+    )
+    .send()
+    .await?
+    .error_for_status()?;
+
+    a.request(Method::DELETE, &path)
+        .send()
+        .await?
+        .error_for_status()?;
+    rejected(
+        a.request(Method::DELETE, &path).send().await?,
+        StatusCode::NOT_FOUND,
+        "timeout_not_found",
+    )
+    .await?;
+    c.send_message(&text.id, &body(TEXT_B)).await?;
+    let audit: Vec<Value> = a
+        .request(Method::GET, "/v1/audit")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    for action in ["member_timed_out", "member_timeout_ended"] {
+        ensure!(
+            audit
+                .iter()
+                .any(|row| row["action"] == action && row["target_person_id"] == c_person),
+            "missing {action} audit"
+        );
+    }
+    println!(
+        "#663 verified timeouts: ranked, live, enforced on messages, reactions and voice, ended early, audited"
+    );
+    Ok(())
 }
 
 /// A posts a poll, B and C vote (B changes their mind), and A counts the votes it reads.

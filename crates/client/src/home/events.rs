@@ -1269,6 +1269,7 @@ mod tests {
             hide_offline: false,
             bio: None,
             voice_muted: false,
+            timeout_until: None,
         };
         server.dir.members = vec![member(ME), member(ANN), member(BOB), member(CID)].into();
         server.dir.categories = vec![Category {

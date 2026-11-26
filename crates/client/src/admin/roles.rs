@@ -803,7 +803,16 @@ fn permissions_tab(ui: &mut Ui, dir: &Directory, role: &Role, page: &mut RolesPa
         .get_or_insert_with(|| role.permissions.clone());
     // Servers that know focus mode gave it to the owner role, which keeps every permission.
     let focus = (dir.roles.iter()).any(|role| role.permissions.iter().any(|p| p == "start_focus"));
-    let groups = groups(dir.calendar.is_some(), focus);
+    let mut groups = groups(dir.calendar.is_some(), focus);
+    // Likewise for timeouts, which older servers refuse.
+    if (dir.roles.iter()).any(|role| role.permissions.iter().any(|p| p == "timeout_members")) {
+        groups[2].1.push((
+            "timeout_members",
+            t!("perm.timeout_members"),
+            t!("perm.timeout_members_help"),
+            false,
+        ));
+    }
     for (at, (group, permissions)) in groups.into_iter().enumerate() {
         if at > 0 {
             ui.add_space(ui::SPACE_S);
@@ -1143,6 +1152,7 @@ mod tests {
             hide_offline: false,
             bio: None,
             voice_muted: false,
+            timeout_until: None,
         };
         let (ann, bob) = ([1; 32], [2; 32]);
         let dir = Directory {

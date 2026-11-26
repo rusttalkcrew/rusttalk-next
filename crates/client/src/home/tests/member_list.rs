@@ -53,6 +53,7 @@ fn crowd(dir: &mut Directory) {
             hide_offline: n.is_multiple_of(9),
             bio: None,
             voice_muted: false,
+            timeout_until: None,
         }
     };
     let mut me = member(0);
@@ -159,6 +160,7 @@ fn member_groups_list_online_then_dnd_then_away_then_offline_by_name() {
         hide_offline: false,
         bio: None,
         voice_muted: false,
+        timeout_until: None,
     };
     dir.members = vec![
         member(1, "zoe", Presence::Offline, false),
