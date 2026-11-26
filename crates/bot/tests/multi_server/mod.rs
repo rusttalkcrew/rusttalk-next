@@ -545,9 +545,11 @@ pub async fn exercise(
         .await?;
     assert_eq!(settings, json!({"open_joining": true, "member_cap": 100}));
     session(server_b.join_open(&outsider).await?, secrets).await?;
+    let mut newcomers = Vec::new();
     for _ in 0..3 {
         let (_, newcomer) = DeviceIdentity::create("W15 newcomer")?;
         session(server_b.join_open(&newcomer).await?, secrets).await?;
+        newcomers.push(*newcomer.certificate.person_id());
     }
     let (_, limited) = DeviceIdentity::create("W15 rate-limited")?;
     rejected(
@@ -557,6 +559,7 @@ pub async fn exercise(
     )
     .await?;
     println!("W15 open admission respected the setting, member cap and hourly source limit");
+    new_dm_limit(&mut owner_b, &newcomers).await?;
 
     let ban_path = format!("/v1/bans/{peer_id}");
     owner_b
@@ -644,6 +647,27 @@ pub async fn exercise(
 
 /// Server A's host sets file ceilings (see `make e2e`); server B's sets none, so its
 /// owner may go past A's ceilings, up to what RustTalk supports.
+/// Server B lets a person start two new DMs an hour (`RUSTTALK_DEV_NEW_DMS_PER_HOUR`);
+/// its restart in `dm::replicas` forgot the owner's earlier one.
+async fn new_dm_limit(owner: &mut KeyClient<'_>, people: &[[u8; 32]]) -> Result<()> {
+    let first = owner.create_dm(&people[0]).await?;
+    owner.create_dm(&people[1]).await?;
+    let third = owner.request(Method::POST, "/v1/dms").json(&json!({
+        "id": encode(&*rusttalk_core::keys::random_key()?), "peer": encode(&people[2]),
+        "commitment": encode(&[0; 32]), "envelope": encode(b"unused"),
+    }));
+    rejected(
+        third.send().await?,
+        StatusCode::TOO_MANY_REQUESTS,
+        "new_dm_limit",
+    )
+    .await?;
+    // Reopening a DM that exists is no new conversation.
+    assert_eq!(owner.create_dm(&people[0]).await?, first);
+    println!("W15 starting new DMs was limited per hour; reopening one was not");
+    Ok(())
+}
+
 async fn file_limits(owner_a: &KeyClient<'_>, owner_b: &KeyClient<'_>) -> Result<()> {
     const PATH: &str = "/v1/settings/files";
     let get = |owner: &KeyClient<'_>| owner.request(Method::GET, PATH).send();

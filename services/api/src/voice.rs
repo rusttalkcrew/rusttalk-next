@@ -844,6 +844,7 @@ mod tests {
                 queue: Default::default(),
             })),
             session_ttl: 3600,
+            dm_starts: Default::default(),
             listing_changed: tokio::sync::watch::channel(()).0,
         };
         let channel = encode(&[20; 32]);

@@ -11,6 +11,8 @@ Unreleased under the new version and date.
 
 ## Unreleased
 
+- DMs from people who aren't your friends now wait under Message requests, quietly, until you accept, delete or block them. In Privacy settings you choose who can message you: everyone, server members (as requests) or friends only. Servers limit how many new DMs someone can start per hour.
+
 ## v0.9.1 - 2026-11-26
 
 - On Android, HEIC photos now work as attachments, profile pictures, server icons, emoji, stickers and page pictures; they are turned into JPEG on your phone.

@@ -33,7 +33,7 @@ use crate::{
 /// Voice and video preferences, dismissed official servers, the appearance and language,
 /// and the profile name and bio, that follow the person to their other devices.
 /// The microphone, speakers and camera differ per computer and stay in `voice.json` only.
-const SYNCED: [&str; 19] = [
+const SYNCED: [&str; 20] = [
     "push_to_talk",
     "key",
     "threshold",
@@ -50,6 +50,7 @@ const SYNCED: [&str; 19] = [
     "accent",
     "language",
     "friends_only",
+    "allow_dms",
     "display_name",
     "bio",
     "name_overrides",

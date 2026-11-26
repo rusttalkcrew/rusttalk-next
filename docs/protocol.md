@@ -280,7 +280,7 @@ errors may have an empty body. The API logs a request ID, status and reason.
 | 409 | `owner_cannot_leave`, `already_banned`, `no_active_ip`, `role_exists`, `role_in_use`, `role_limit`, `member_cap_reached`, `device_limit`, `device_certificate_changed`, `revocation_limit`, `epoch_changed`, `space_key_unavailable`, `metadata_epoch_changed`, `category_exists`, `category_in_use`, `channel_exists`, `order_changed`, `message_exists`, `file_exists`, `file_shared`, `shared_limit`, `emoji_exists`, `emoji_limit`, `sticker_limit`, `pack_exists`, `pack_limit`, `last_pack`, `events_disabled`, `event_exists`, `event_approved`, `event_ended`, `event_limit`, `suggestion_limit`, `remind_too_soon` |
 | 413 | `body_too_large` when generated after reading the body, `file_too_large`, `file_member_quota`, `file_server_quota`, `emoji_too_large` |
 | 415 | `expected_json` |
-| 429 | `challenge_limit`, `invite_preview_limit`, `open_join_limit` |
+| 429 | `challenge_limit`, `invite_preview_limit`, `open_join_limit`, `new_dm_limit` |
 | 500 | `database_error`, `database_pool_timeout`, `database_busy`, `clock_error`, `randomness_error`, `invalid_stored_person`, `invalid_stored_certificate`, `invalid_stored_commitment`, `invalid_stored_device`, `invalid_stored_event`, `invalid_stored_message`, `invalid_stored_sender`, `file_storage_error`, `file_task_failed`, `emoji_storage_error`, `emoji_task_failed`, `file_expiry_overflow`, `listing_settings_encode`, `listing_settings_encrypt`, `listing_settings_decrypt`, `listing_settings_decode`, `livekit_token_failed`, `event_encoding`, `event_timeout`, `socket_io_error` |
 | 502 | `livekit_unreachable`, `livekit_rooms_unavailable`, `livekit_roster_unavailable` |
 | 503 | `file_upload_busy`, `voice_unavailable` |
@@ -562,6 +562,10 @@ expiry are audited.
 | --- | --- | --- |
 | POST `/v1/dms` | `{id, peer, commitment, envelope}` | Any member. 201, `{id}`. Returns 200 with the existing ID if the pair already has a DM |
 
+A person can start at most 20 new DMs per hour on a server; more get
+`429 new_dm_limit`. Asking for a pair's existing DM doesn't count. The server
+keeps these times in memory only and forgets them on restart.
+
 `peer` is a different current person. Either person can create the DM, using a
 random ID and an epoch 1 envelope addressed to their device. The normal channel
 key flow wraps keys for both people's devices, including their later devices.
@@ -698,8 +702,17 @@ action twice changes nothing either. The app reads each DM's newest page when
 it connects, so requests sent while it was away show up; one older than that
 page shows when the chat is scrolled back.
 
+Message requests are sorted by the app too. "Allow DMs from" (`allow_dms`)
+is `everyone`, `requests` (the default: people who aren't friends land under
+Message requests, with no sound or unread marks) or `friends` (their DMs stay
+hidden; friend requests still arrive). Friends and people this person asked
+are always shown, blocked people never. Accepting a request, or writing in
+the DM, sets `accepted` on the contact. Deleting one sets `dismissed` to the
+server time of their newest message, and the request stays away until a newer
+one arrives. Nothing is sent to the other person or the server.
+
 The list itself is in the person's sync blob under `contacts`: per hex person
-ID, `{relation, name, changed, since, seen}`. `relation` is `none`,
+ID, `{relation, name, changed, since, seen, accepted?, dismissed?}`. `relation` is `none`,
 `outgoing`, `incoming`, `friend` or `blocked`; `name` is the last name seen;
 `changed` is when the relation last changed, in Unix milliseconds. When two
 devices changed the same person, the later `changed` wins, whichever blob is

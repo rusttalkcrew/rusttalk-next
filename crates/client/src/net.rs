@@ -2224,10 +2224,14 @@ async fn run_command(
 fn report(ctx: &Ctx, error: anyhow::Error) {
     tracing::warn!(error = %format_args!("{error:#}"), "server request failed");
     let full = error.is::<rusttalk_core::client::voice::ChannelFull>();
+    // Such as starting too many new DMs in an hour.
+    let busy = (error.downcast_ref::<reqwest::Error>())
+        .is_some_and(|error| error.status() == Some(StatusCode::TOO_MANY_REQUESTS));
     let text = match error.downcast_ref::<MessageError>() {
         Some(MessageError::ServerUpdateRequired) => t!("net.rotation_update"),
         Some(MessageError::TextLimit) => t!("net.text_limit"),
         _ if full => t!("call.channel_full"),
+        _ if busy => t!("net.slow_down"),
         _ => t!("admin.failed"),
     };
     ctx.send(Update::Failed(text.into()));

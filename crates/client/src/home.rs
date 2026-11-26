@@ -38,7 +38,7 @@ use crate::{
         picker::{self, Picked, Picker, Tab as PickerTab},
     },
     files::{self, Ask, Files},
-    friends::{Act, Friends, Relation},
+    friends::{Act, Friends, Relation, Sort},
     link_cards,
     net::{
         Admin, AdminUpdate, Admission, Command, Compatibility, Draft, Listed, Net, PAGE_SIZE,
@@ -1030,6 +1030,9 @@ impl Home {
             return;
         }
         let me = *self.identity.certificate.person_id();
+        if let Some(peer) = self.dm_peer(index, &channel) {
+            self.wrote_to(peer, &msg);
+        }
         if msg.person == me
             || msg.edit_of.is_some()
             || matches!(msg.body, Body::Notice { .. } | Body::PollPart(_))
@@ -1051,15 +1054,15 @@ impl Home {
         }
         if let Some(peer) = peer {
             self.friend_message(peer, &msg);
-            // Nothing from blocked people; friend answers only change the list. With
-            // "friends only", other people's messages wait quietly under requests.
+            // Nothing from blocked people; friend answers only change the list. Message
+            // requests wait quietly: no sound, no unread marks.
             let relation = self.friends.relation(&peer);
             let quiet = match msg.body {
                 _ if relation == Relation::Blocked => true,
                 Body::Friend(signal, _) => {
                     signal != FriendSignal::Request || relation != Relation::Incoming
                 }
-                _ => self.friends.is_request(&peer, self.friends_only()),
+                _ => self.dm_sort(&peer) != Sort::Shown,
             };
             // A DM arrives once per server holding a copy: count and notify it once, and
             // only for a copy that opened and comes from the other person.
@@ -1145,14 +1148,12 @@ impl Home {
     /// The same for the DMs on every server; blocked people and message requests don't count.
     fn dm_marks(&self) -> (bool, u32) {
         let (prefs, now) = (self.notify.prefs(), notify::unix_now());
-        let friends_only = self.friends_only();
         let dms = (self.servers.iter()).flat_map(|server| {
             (server.dir.dms.iter().map(move |dm| (&server.address, dm))).filter(move |(_, dm)| {
                 !prefs
                     .effective(&server.address, &dm.channel, true, now)
                     .muted
-                    && self.friends.relation(&dm.peer) != Relation::Blocked
-                    && !self.friends.is_request(&dm.peer, friends_only)
+                    && self.dm_sort(&dm.peer) == Sort::Shown
             })
         });
         dms.fold((false, 0), |(unread, mentions), (server, dm)| {
@@ -1589,6 +1590,7 @@ impl Home {
                             self.request_arrived(ctx, (index, channel), peer, msg);
                         }
                         self.friend_message(peer, msg);
+                        self.wrote_to(peer, msg);
                         // The newest page holds pokes sent while this device was away.
                         if !older {
                             self.poke_arrived(ctx, (index, channel), peer, msg, false);
@@ -3027,7 +3029,7 @@ fn dm_list(ui: &mut Ui, home: &mut Home) {
     }
     pokes::nav_row(ui, home);
     ui.add_space(ui::SPACE_XS);
-    let (shown, requests) = home.friends.split(&home.dm_peers(), home.friends_only());
+    let (shown, requests) = home.dm_split();
     ScrollArea::vertical().show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 2.0;
         for peer in &shown {
@@ -3988,7 +3990,9 @@ fn official_servers(ui: &mut Ui, home: &mut Home) {
     }
 }
 
-pub fn privacy_tab(ui: &mut Ui, home: &mut Home, keystore: &mut crate::keystore::Keystore) {
+/// Who may message this person directly: the top of the Privacy tab.
+fn allow_dms(ui: &mut Ui, home: &mut Home) {
+    use crate::friends::AllowDms;
     let audio = home.voice.audio.clone();
     let mut settings = audio.settings();
     ui::page_section(ui, t!("home.direct_messages"));
@@ -3996,24 +4000,36 @@ pub fn privacy_tab(ui: &mut Ui, home: &mut Home, keystore: &mut crate::keystore:
     ui.add_space(ui::SPACE_XS);
     let changed = ui::segmented(
         ui,
-        &mut settings.friends_only,
+        &mut settings.allow_dms,
         &[
             (
-                false,
+                AllowDms::Everyone,
                 t!("home.allow_dms_everyone"),
                 t!("home.allow_dms_everyone_help"),
             ),
             (
-                true,
+                AllowDms::Requests,
+                t!("home.allow_dms_members"),
+                t!("home.allow_dms_members_help"),
+            ),
+            (
+                AllowDms::Friends,
                 t!("home.allow_dms_friends"),
                 t!("home.allow_dms_friends_help"),
             ),
         ],
     );
     if changed {
-        audio.set_settings(settings.clone());
+        settings.friends_only = settings.allow_dms != AllowDms::Everyone;
+        audio.set_settings(settings);
         home.publish_settings();
     }
+}
+
+pub fn privacy_tab(ui: &mut Ui, home: &mut Home, keystore: &mut crate::keystore::Keystore) {
+    allow_dms(ui, home);
+    let audio = home.voice.audio.clone();
+    let mut settings = audio.settings();
     ui::page_section(ui, t!("home.member_lists"));
     let mut hide = settings.hide_offline.on;
     let toggle = ui.add_enabled_ui(!home.servers.is_empty(), |ui| {
@@ -4934,8 +4950,10 @@ fn dm_pane(ui: &mut Ui, home: &mut Home, peer: Id) {
     let thread = home.threads.entry(peer).or_default();
     thread.chat = chat;
     thread.refresh();
-    if let Some(act) = act {
-        home.befriend(peer, act, ui.input(|input| input.time));
+    match act {
+        Some(friends::Card::Friend(act)) => home.befriend(peer, act, ui.input(|input| input.time)),
+        Some(friends::Card::Request(accept)) => home.answer_request(peer, accept),
+        None => {}
     }
 }
 
@@ -4991,7 +5009,7 @@ fn handle_live_file(
 }
 
 /// Shows a chat. In a DM, also returns what the person picked on the friend card.
-fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Act> {
+fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<friends::Card> {
     let (title, dm, in_voice, icon) = match at {
         At::Channel(index, channel) => {
             let server = &home.servers[index];
@@ -5031,7 +5049,7 @@ fn chat_view(ui: &mut Ui, home: &mut Home, at: At, chat: &mut Chat) -> Option<Ac
     let (relation, request) = match at {
         At::Dm(peer) => (
             home.friends.relation(&peer),
-            home.friends.is_request(&peer, home.friends_only()),
+            home.dm_sort(&peer) != Sort::Shown,
         ),
         At::Channel(..) => (Relation::None, false),
     };
@@ -7947,6 +7965,7 @@ mod tests {
     mod member_list;
     mod menus;
     mod message_history;
+    mod message_requests;
     mod message_spacing;
     mod outbox;
     mod presence;
