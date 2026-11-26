@@ -134,7 +134,8 @@ fn share_at(area: Rect, size: Vec2, min: Pos2) -> Vec2 {
 }
 
 /// The camera of `person` on `stream`, inside `area`: the part clear of the stream's
-/// own controls. `paint` draws the camera into the given rect. Returns what was picked.
+/// own controls. `paint` draws the camera into the given rect. `pop_out` offers its own
+/// tile; without it this is our own floating self view. Returns what was picked.
 #[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut Ui,
@@ -144,11 +145,12 @@ pub fn show(
     name: &str,
     pip: Pip,
     aspect: Option<f32>,
+    pop_out: bool,
     paint: impl FnOnce(&mut Ui, Rect),
 ) -> Option<Change> {
     let id = UiId::unique(("camera pip", person));
     if pip.minimized {
-        return pill(ui, area, id, pip.corner, name);
+        return pill(ui, area, id, pip.corner, name, pop_out);
     }
     let size = size(stream, area, aspect.unwrap_or(4.0 / 3.0))?;
     let ctx = ui.ctx().clone();
@@ -196,7 +198,11 @@ pub fn show(
         Stroke::new(1.0, c.border),
         StrokeKind::Inside,
     );
-    let label = t!("call.someones_camera", name = name);
+    let label = if pop_out {
+        t!("call.someones_camera", name = name)
+    } else {
+        t!("call.your_camera").to_owned()
+    };
     response.widget_info(|| WidgetInfo::labeled(Role::Image, true, &label));
     let response = if dragging {
         response.on_hover_cursor(CursorIcon::Grabbing)
@@ -206,24 +212,25 @@ pub fn show(
     let (tapped, _) = ui::touch_tools(&response);
     let hovered = ui.rect_contains_pointer(rect) && !ui.input(|i| i.any_touches());
     if (tapped || hovered) && !dragging {
-        change = buttons(ui, rect, tapped).or(change);
+        change = buttons(ui, rect, tapped, pop_out).or(change);
     }
     change
 }
 
-/// Pop out and minimize, at the picture's top right.
-fn buttons(ui: &mut Ui, rect: Rect, tapped: bool) -> Option<Change> {
+/// Pop out (if offered) and minimize, at the picture's top right.
+fn buttons(ui: &mut Ui, rect: Rect, tapped: bool, pop_out: bool) -> Option<Change> {
     let room = rect.shrink(ui::SPACE_XS);
+    let count = if pop_out { 2.0 } else { 1.0 };
     let tool = if tapped {
         Vec2::splat(
             ui::TOUCH_TARGET
                 .min(room.height())
-                .min((room.width() - ui::SPACE_XS) / 2.0),
+                .min((room.width() - (count - 1.0) * ui::SPACE_XS) / count),
         )
     } else {
         TOOL
     };
-    let width = 2.0 * tool.x + ui::SPACE_XS;
+    let width = count * tool.x + (count - 1.0) * ui::SPACE_XS;
     if width > room.width() || tool.y > room.height() {
         return None;
     }
@@ -238,14 +245,15 @@ fn buttons(ui: &mut Ui, rect: Rect, tapped: bool) -> Option<Change> {
     );
     child.spacing_mut().item_spacing.x = ui::SPACE_XS;
     let mut change = None;
-    if ui::icon_button(
-        &mut child,
-        "↗",
-        t!("call.pop_out_camera"),
-        Look::Plain,
-        tool,
-    )
-    .clicked()
+    if pop_out
+        && ui::icon_button(
+            &mut child,
+            "↗",
+            t!("call.pop_out_camera"),
+            Look::Plain,
+            tool,
+        )
+        .clicked()
     {
         change = Some(Change::PopOut);
     }
@@ -264,7 +272,14 @@ fn buttons(ui: &mut Ui, rect: Rect, tapped: bool) -> Option<Change> {
 }
 
 /// The minimized camera: a pill with the name in its corner; a click brings it back.
-fn pill(ui: &mut Ui, area: Rect, id: UiId, corner: Corner, name: &str) -> Option<Change> {
+fn pill(
+    ui: &mut Ui,
+    area: Rect,
+    id: UiId,
+    corner: Corner,
+    name: &str,
+    theirs: bool,
+) -> Option<Change> {
     let height = ui::ICON_BUTTON;
     let pad = ui::SPACE_M;
     let room = area.width() - 2.0 * (MARGIN + pad);
@@ -283,7 +298,11 @@ fn pill(ui: &mut Ui, area: Rect, id: UiId, corner: Corner, name: &str) -> Option
     let response = ui
         .interact(rect, id.with("pill"), Sense::click())
         .on_hover_cursor(CursorIcon::PointingHand);
-    let label = t!("call.show_camera", name = name);
+    let label = if theirs {
+        t!("call.show_camera", name = name)
+    } else {
+        t!("call.show_your_camera").to_owned()
+    };
     response.widget_info(|| WidgetInfo::labeled(Role::Button, true, &label));
     let response = response.on_hover_text(&label);
     let fill = if response.hovered() {

@@ -34,6 +34,9 @@ use crate::{
 };
 use rusttalk_core::control::Input;
 
+/// Room the phone self view leaves for the title bar and the controls or composer.
+const SELF_VIEW_TOP: f32 = 64.0;
+const SELF_VIEW_BOTTOM: f32 = 200.0;
 /// Tiles keep this shape in the grid and the strip.
 const ASPECT: f32 = 16.0 / 9.0;
 const GAP: f32 = 8.0;
@@ -920,6 +923,9 @@ fn tile(
     let c = ui::colors(ui);
     ui.painter().rect_filled(rect, ui::RADIUS, c.side);
     let person = entry.peer.person;
+    if entry.me && entry.picture.is_some() && matches!(entry.tile, Tile::Person(_)) {
+        saw_self(ui.ctx());
+    }
     match (&entry.picture, &entry.tile) {
         (Some(picture), _) => paint_picture(ui, rect, *picture),
         (None, Tile::Person(_)) => {
@@ -1152,6 +1158,81 @@ fn tile(
     }
 }
 
+/// Marks our own camera as on screen in this pass, so the phone self view stays away.
+fn saw_self(ctx: &egui::Context) {
+    let pass = ctx.cumulative_pass_nr();
+    ctx.data_mut(|data| data.insert_temp(UiId::unique("self camera shown"), pass));
+}
+
+/// On phones, our camera in a corner while our own tile is off screen: a full-screen
+/// stream, or the chat instead of the call. Dragged, it snaps to a corner; it shrinks
+/// to a pill. Draw it after the call view, so that this pass knows what it showed.
+pub fn phone_self_view(ctx: &egui::Context, home: &mut Home) {
+    let pass = ctx.cumulative_pass_nr();
+    // Our id on the call's server, like our tile and our camera on our own screen.
+    let me = (home.voice.call.as_ref())
+        .and_then(|call| home.servers.iter().find(|s| s.address == call.server))
+        .map(|server| server.dir.me);
+    let (Some(me), voice) = (me, &mut home.voice) else {
+        return;
+    };
+    let shown = ctx.data(|data| data.get_temp::<u64>(UiId::unique("self camera shown")));
+    if !ui::is_phone(ctx) || voice.call.is_none() || !voice.camera.on || shown == Some(pass) {
+        return;
+    }
+    let mirrored = voice.camera.mirrored();
+    let Some(texture) = voice.camera.self_texture(ctx) else {
+        return;
+    };
+    let picture = Picture {
+        texture: texture.id(),
+        size: texture.size_vec2(),
+        mirrored,
+        cover: true,
+    };
+    // Clear of the title bar at the top and the call controls or composer below.
+    let screen = ctx.content_rect();
+    let area = Rect::from_min_max(
+        pos2(screen.left(), screen.top() + SELF_VIEW_TOP),
+        pos2(screen.right(), screen.bottom() - SELF_VIEW_BOTTOM),
+    );
+    let pip = Pip {
+        popped: false,
+        ..voice.pips.get(&me).copied().unwrap_or_default()
+    };
+    let aspect = picture.size.x / picture.size.y;
+    let last = UiId::unique(("camera pip", me)).with("rect");
+    let at = ctx.data(|data| data.get_temp::<Rect>(last)).unwrap_or(area);
+    let name = t!("common.you");
+    let changed = egui::Area::new(UiId::unique("phone self view"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(at.min)
+        .show(ctx, |ui| {
+            let changed = pip::show(
+                ui,
+                area,
+                area,
+                me,
+                name,
+                pip,
+                Some(aspect),
+                false,
+                |ui, rect| {
+                    paint_picture(ui, rect, picture);
+                },
+            );
+            // The area takes the touches over the picture only, not over the call below.
+            if let Some(rect) = ui.ctx().data(|data| data.get_temp::<Rect>(last)) {
+                ui.allocate_rect(rect, Sense::hover());
+            }
+            changed
+        })
+        .inner;
+    if let Some(change) = changed {
+        voice.pips.entry(me).or_default().apply(change);
+    }
+}
+
 /// The sharer's camera on their stream, in its part `clear` of the controls.
 fn camera_pip(
     ui: &mut Ui,
@@ -1166,6 +1247,9 @@ fn camera_pip(
     let picture = camera.picture;
     let aspect = picture.map(|p| p.size.x / p.size.y);
     let area = stream.intersect(clear);
+    if entry.me && picture.is_some() {
+        saw_self(ui.ctx());
+    }
     let changed = pip::show(
         ui,
         stream,
@@ -1174,6 +1258,7 @@ fn camera_pip(
         &entry.name,
         camera.pip,
         aspect,
+        true,
         |ui, rect| {
             match picture {
                 Some(picture) => paint_picture(ui, rect, picture),
@@ -1908,6 +1993,9 @@ pub fn full_view(ui: &mut Ui, home: &mut Home) {
             }
         }
     } else if let Some(mut picture) = picture {
+        if mine && matches!(tile, Tile::Person(_)) {
+            saw_self(ui.ctx());
+        }
         // Whole, not cropped, now that it has the room.
         picture.cover = false;
         paint_picture(ui, rect, picture);
