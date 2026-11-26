@@ -1177,7 +1177,11 @@ pub fn phone_self_view(ctx: &egui::Context, home: &mut Home) {
         return;
     };
     let shown = ctx.data(|data| data.get_temp::<u64>(UiId::unique("self camera shown")));
-    if !ui::is_phone(ctx) || voice.call.is_none() || !voice.camera.on || shown == Some(pass) {
+    let screen = ctx.content_rect();
+    // A phone turned sideways, as for a full-screen stream, is wider than a phone.
+    let sideways = ctx.input(|input| input.has_touch_screen()) && screen.height() < ui::PHONE_WIDTH;
+    let phone = ui::is_phone(ctx) || sideways;
+    if !phone || voice.call.is_none() || !voice.camera.on || shown == Some(pass) {
         return;
     }
     let mirrored = voice.camera.mirrored();
@@ -1190,15 +1194,28 @@ pub fn phone_self_view(ctx: &egui::Context, home: &mut Home) {
         mirrored,
         cover: true,
     };
-    // Clear of the title bar at the top and the call controls or composer below.
-    let screen = ctx.content_rect();
+    // Clear of the full-screen buttons, or of the title bar at the top and the call
+    // controls or composer below.
+    let (top, bottom) = if voice.stage.full.is_some() {
+        let tools = 2.0 * GAP + FULL_TOOL.y + 2.0 * ui::SPACE_XS;
+        (tools, tools)
+    } else if sideways {
+        (SELF_VIEW_TOP, SELF_VIEW_TOP)
+    } else {
+        (SELF_VIEW_TOP, SELF_VIEW_BOTTOM)
+    };
     let area = Rect::from_min_max(
-        pos2(screen.left(), screen.top() + SELF_VIEW_TOP),
-        pos2(screen.right(), screen.bottom() - SELF_VIEW_BOTTOM),
+        pos2(screen.left(), screen.top() + top),
+        pos2(screen.right(), screen.bottom() - bottom),
     );
+    // Top right at first: a sharer's camera sits bottom right on their stream.
+    let first = Pip {
+        corner: pip::Corner::TopRight,
+        ..Pip::default()
+    };
     let pip = Pip {
         popped: false,
-        ..voice.pips.get(&me).copied().unwrap_or_default()
+        ..voice.pips.get(&me).copied().unwrap_or(first)
     };
     let aspect = picture.size.x / picture.size.y;
     let last = UiId::unique(("camera pip", me)).with("rect");
@@ -1210,7 +1227,7 @@ pub fn phone_self_view(ctx: &egui::Context, home: &mut Home) {
         .show(ctx, |ui| {
             let changed = pip::show(
                 ui,
-                area,
+                screen,
                 area,
                 me,
                 name,
@@ -1229,7 +1246,7 @@ pub fn phone_self_view(ctx: &egui::Context, home: &mut Home) {
         })
         .inner;
     if let Some(change) = changed {
-        voice.pips.entry(me).or_default().apply(change);
+        voice.pips.entry(me).or_insert(first).apply(change);
     }
 }
 

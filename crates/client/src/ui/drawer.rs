@@ -118,11 +118,16 @@ impl Drawer {
                 && resting
                 && let Some(origin) = pos.filter(|pos| area.y_range().contains(pos.y))
             {
-                let start = if *open {
-                    area.contains(origin)
-                } else {
-                    origin.x <= area.left() + EDGE && band.contains(origin.y)
-                };
+                // Something floating above the drawer, like the phone self view, keeps its drag.
+                let above = ctx
+                    .layer_id_at(origin)
+                    .is_some_and(|layer| layer.order > Order::Middle);
+                let start = !above
+                    && if *open {
+                        area.contains(origin)
+                    } else {
+                        origin.x <= area.left() + EDGE && band.contains(origin.y)
+                    };
                 state.drag = start.then_some(Drag {
                     origin,
                     opening: !*open,
@@ -422,6 +427,47 @@ mod tests {
         press(&mut h, at, false);
         h.run();
         assert_eq!(h.state().taps, 1);
+    }
+
+    /// A floating picture above the open drawer, like the phone self view (#656):
+    /// dragging it left moves it and leaves the drawer open.
+    #[test]
+    fn a_drag_on_something_floating_above_is_left_to_it() {
+        let float = Rect::from_min_size(pos2(250.0, 600.0), vec2(100.0, 120.0));
+        let mut h = Harness::builder()
+            .with_size(SIZE)
+            .with_step_dt(1.0 / 60.0)
+            .with_max_steps(120)
+            .build_ui_state(
+                move |ui, screen: &mut Screen| {
+                    let area = ui.max_rect();
+                    let drawer =
+                        Drawer::new(ui.ctx(), Id::unique("drawer"), area, true, &mut screen.open);
+                    if drawer.show(ui.ctx(), |ui| {
+                        ui.label("Channels");
+                    }) {
+                        screen.open = false;
+                    }
+                    Area::new(Id::unique("float"))
+                        .order(Order::Foreground)
+                        .fixed_pos(float.min)
+                        .show(ui.ctx(), |ui| {
+                            let response = ui.allocate_rect(float, Sense::drag());
+                            if response.dragged() {
+                                screen.taps += 1;
+                            }
+                        });
+                },
+                Screen {
+                    open: true,
+                    taps: 0,
+                },
+            );
+        h.run();
+        drag(&mut h, float.center(), pos2(20.0, float.center().y));
+        assert!(h.state().open, "the drawer stays open");
+        assert_eq!(progress(&h), 1.0);
+        assert!(h.state().taps > 0, "the floating picture got the drag");
     }
 
     #[test]

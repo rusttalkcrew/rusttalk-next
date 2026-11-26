@@ -405,6 +405,12 @@ fn phones_keep_your_camera_in_sight_outside_your_tile() {
         capture(&mut h, phone, dark, "self-view-list");
         assert!(self_view(&h));
 
+        // Dragged up and left, it lands in the top left corner, over the list.
+        let at = h.get_by_label(t!("call.your_camera")).rect().center();
+        drag(&mut h, at, egui::pos2(40.0, 120.0));
+        assert_eq!(my_pip(&h).corner, Corner::TopLeft);
+        capture(&mut h, phone, dark, "self-view-dragged");
+
         // Minimized, it is a pill that brings it back.
         h.get_by_label(t!("call.your_camera")).hover();
         h.run_steps(4);
@@ -434,4 +440,34 @@ fn desktops_have_no_floating_self_view() {
         .set_presenting_and_full_screen("remote");
     h.run_steps(20);
     assert!(!self_view(&h));
+}
+
+/// A phone turned sideways for a full-screen stream still shows the self view (#656).
+#[test]
+fn a_sideways_phone_keeps_your_camera_in_full_screen() {
+    let data = tempfile::tempdir().unwrap();
+    let sideways = Vec2::new(844.0, 390.0);
+    let mut h = sharing(true, sideways, data.path());
+    // A touch screen: one tap where nothing is.
+    for phase in [egui::TouchPhase::Start, egui::TouchPhase::End] {
+        h.input_mut().events.push(egui::Event::Touch {
+            device_id: egui::TouchDeviceId(1),
+            id: egui::TouchId(1),
+            phase,
+            pos: egui::pos2(4.0, 4.0),
+            force: None,
+        });
+        h.step();
+    }
+    camera_on(&mut h);
+    home_mut(&mut h)
+        .voice
+        .stage
+        .set_presenting_and_full_screen("remote");
+    h.run_steps(20);
+    capture(&mut h, sideways, true, "self-view-sideways");
+    assert!(self_view(&h));
+    // Clear of the full-screen buttons at the top and bottom.
+    let rect = h.get_by_label(t!("call.your_camera")).rect();
+    assert!(rect.top() >= ui::TOUCH_TARGET && rect.bottom() <= sideways.y - ui::TOUCH_TARGET);
 }
